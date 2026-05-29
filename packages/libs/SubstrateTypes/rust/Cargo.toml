@@ -1,0 +1,17 @@
+[package]
+name = "substrate-types"
+version = "1.0.0-skeleton"
+edition = "2021"
+rust-version = "1.75"
+description = "Layer 1 of the SubstrateLib three-package split: pure data types, zero compute, zero transcendentals, zero I/O. See cookbook v1.0 §20 and DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md Phase 6."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "substrate_types"
+path = "src/lib.rs"
+
+[features]
+# Mirrors substrate-lib's `serde-support` feature for migrated
+# types that carry serde derives. Off by default.
+serde-support = []

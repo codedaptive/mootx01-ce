@@ -1,0 +1,31 @@
+[package]
+name = "corpus-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rust port of the Swift CorpusKit: Chunk, sentence-aware chunker (fallback path), BM25 inverted index, BundleStore on persistence-kit, hybrid recall (RRF fusion of vector kNN + BM25), CorpusKitSync manifest."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "corpus_kit"
+path = "src/lib.rs"
+
+[dependencies]
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+engram-lib = { path = "../../../libs/EngramLib/rust" }
+eidetic-lib = { path = "../../../libs/EideticLib/rust" }
+persistence-kit = { path = "../../PersistenceKit/rust" }
+convergence-kit = { path = "../../ConvergenceKit/rust" }
+vectorkit = { path = "../../VectorKit/rust" }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Integration tests need a concrete tokenizer; the test-fixture
+# `DeterministicTokenizer` lives in the sibling `corpus-kit-providers`
+# crate (mirrors the Swift `CorpusKitProviders` target). Dev-only so
+# the core kit stays provider-free in normal builds.
+[dev-dependencies]
+corpus-kit-providers = { path = "../rust-providers" }

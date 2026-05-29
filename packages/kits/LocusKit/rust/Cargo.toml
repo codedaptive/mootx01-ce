@@ -1,0 +1,28 @@
+[package]
+name = "locus-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "LocusKit — spatial memory for one estate. Wings, rooms, drawers, typed tunnels, KG facts, bitmap-indexed content, full audit trail."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "locus_kit"
+path = "src/lib.rs"
+
+# Standalone crate. There is no top-level Cargo workspace in this
+# repository; sibling kits (EngramLib/rust, VectorKit/rust, etc.) are
+# each standalone crates. LP-1B added persistence-kit (schema declaration
+# primitives) and uuid (estate_uuid parsing). LP-1C adds substrate-lib
+# for the SimHash / HyperplaneFamily / Fingerprint256 primitives that
+# `drawer_fingerprint` derives drawer fingerprints from.
+[dependencies]
+persistence-kit = { path = "../../PersistenceKit/rust" }
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# JSON parsing for LP-0 conformance vectors. Only used in tests/lp0_vectors.rs.
+serde_json = "1"

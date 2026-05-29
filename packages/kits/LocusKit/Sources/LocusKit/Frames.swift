@@ -1,0 +1,214 @@
+import Foundation
+// ─────────────────────────────────────────────────────────────────
+// DO NOT REIMPLEMENT SUBSTRATE MATH.
+//
+// The substrate publishes conformance-gated, byte-identical
+// Swift+Rust implementations of every primitive listed in
+// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
+// top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
+// NMF, FFT, eigenvalue centrality, or any other substrate primitive,
+// it's already in SubstrateTypes / SubstrateKernel / SubstrateML.
+// CI catches drift four ways. See packages/libs/Substrate{Types,
+// Kernel,ML}/AGENTS.md.
+// ─────────────────────────────────────────────────────────────────
+import SubstrateLib
+import SubstrateTypes
+
+// MARK: - CaptureFrame
+
+/// Slots for the `capture` verb. Per spec § 7.1 and § 7.8.3.
+///
+/// Every slot is named; no raw bitmap value crosses this boundary.
+/// The `capture` verb (in EstateVerbs.swift) translates these slots
+/// into a storage `Drawer` and writes it via `DrawerStore.addDrawer`.
+public struct CaptureFrame: Sendable {
+    /// Verbatim content to store (rung 1 — exact bytes preserved).
+    public var content: String
+    /// How this content was captured. Lives in bits 0–3 of the
+    /// resulting drawer's `operationalBitmap`.
+    public var channel: CaptureChannel
+    /// Adjective sensitivity tier. Defaults to `.normal`.
+    public var sensitivity: AdjectiveSensitivity
+    /// Content kind. Defaults to `.prose`.
+    public var kind: ContentKind
+    /// Provenance Channel (cookbook §2.5, provenance bitmap bits 6–11).
+    /// The capture-time origin axis — UI vs MCP agent vs file import vs
+    /// federation inbound, etc. Distinct from the operational
+    /// `CaptureChannel` above; defaults to `.uiTyped` (raw 0) so existing
+    /// callers continue to produce zero-provenance drawers as before.
+    public var provenanceChannel: Channel
+    /// Provenance SourceType (cookbook §2.5, provenance bitmap bits 0–5).
+    /// Who/what produced this content — user, agent, system,
+    /// derivedAggregate, importedExternal, federationReplica, ambient.
+    /// Defaults to `.user` (raw 0).
+    public var sourceType: SourceType
+    /// Provenance Sensitivity (cookbook §2.5, provenance bitmap bits
+    /// 30–35). The estate-level access posture at capture time, distinct
+    /// from the access-control `sensitivity` adjective above (which is
+    /// mutable post-capture). Defaults to `.normal` (raw 0).
+    public var provenanceSensitivity: Sensitivity
+    /// Lineage identifier shared with any prior version of this
+    /// content. When present and an active predecessor with the
+    /// same lineageID exists, `capture` triggers the supersession
+    /// cascade in `DrawerStore.addDrawerWithCascade`. When nil,
+    /// the verb stamps a fresh `UUID()` so each drawer is its own
+    /// lineage by default (spec § 5.10).
+    public var lineageID: LineageID?
+    /// Room within the estate the drawer is filed under.
+    public var room: RoomID
+    /// Lattice anchor — `udcCode` required per invariant I-5.
+    public var latticeAnchor: LatticeAnchor
+    /// Actor identifier written into the drawer's `addedBy` field
+    /// and into any bitmap-audit row this capture produces.
+    public var addedBy: String
+    /// Embedding model ID for the modelID-tagging contract (I-4).
+    /// Required even before vectors are generated so a future
+    /// model bump cannot accidentally compare across versions.
+    public var embeddingModelID: String
+    /// Optional event time for historical ingestion (ING-01). When
+    /// nil, the `capture` verb uses the capture instant — the
+    /// streaming-capture semantic where event time and ingest time
+    /// coincide. Bulk importers supply the original authorship date.
+    public var eventTime: Date?
+
+    public init(
+        content: String,
+        channel: CaptureChannel,
+        room: RoomID,
+        latticeAnchor: LatticeAnchor,
+        addedBy: String,
+        embeddingModelID: String,
+        sensitivity: AdjectiveSensitivity = .normal,
+        kind: ContentKind = .prose,
+        provenanceChannel: Channel = .uiTyped,
+        sourceType: SourceType = .user,
+        provenanceSensitivity: Sensitivity = .normal,
+        lineageID: LineageID? = nil,
+        eventTime: Date? = nil
+    ) {
+        self.content = content
+        self.channel = channel
+        self.room = room
+        self.latticeAnchor = latticeAnchor
+        self.addedBy = addedBy
+        self.embeddingModelID = embeddingModelID
+        self.sensitivity = sensitivity
+        self.kind = kind
+        self.provenanceChannel = provenanceChannel
+        self.sourceType = sourceType
+        self.provenanceSensitivity = provenanceSensitivity
+        self.lineageID = lineageID
+        self.eventTime = eventTime
+    }
+}
+
+// MARK: - RecallFrame
+
+/// Slots for the `recall` verb. Per spec § 7.8.3.
+public struct RecallFrame: Sendable {
+    /// Filter chain interpreted as implicit conjunction
+    /// (equivalent to `Filter.all(filterChain)`). Per spec § 7.9.1.
+    /// Must contain at least one filter; an empty chain is an
+    /// invalid recall and the evaluator (LOCI_V035_16) throws.
+    public var filterChain: [Filter]
+    /// How much of each row to hydrate. Per spec § 7.3.
+    public var hydrationLevel: HydrationLevel
+    /// Maximum rows per page. nil = implementation default.
+    public var limit: Int?
+    /// Ordering of results.
+    public var ordering: Ordering
+    /// Historical reconstruction — return rows as they were at
+    /// this timestamp. nil = current state. Per spec § 6.8.
+    public var asOf: HLC?
+
+    public init(
+        filterChain: [Filter],
+        hydrationLevel: HydrationLevel = .structured,
+        limit: Int? = nil,
+        ordering: Ordering = .byCaptureTimeDesc,
+        asOf: HLC? = nil
+    ) {
+        self.filterChain = filterChain
+        self.hydrationLevel = hydrationLevel
+        self.limit = limit
+        self.ordering = ordering
+        self.asOf = asOf
+    }
+}
+
+// MARK: - MutationKind
+
+/// Named mutation operations for the `mutate` verb. Per spec § 7.8.3.
+///
+/// Callers express intent in named cases; the evaluator translates
+/// each case into the appropriate bitmap mutation (state field,
+/// confirmation axis, sensitivity tier, trust axis). No caller-facing
+/// raw bit value participates in this enum.
+public enum MutationKind: Sendable {
+    /// Move the row's confirmation axis to `.userConfirmed`.
+    case confirm
+    /// Move the row's state to `.rejected` (terminal cluster).
+    case reject
+    /// Move the row's state to `.contested` (still currently-believed
+    /// cluster, but flagged for resolution).
+    case contest
+    /// Resolve a contested row back to `.active` once the contest is
+    /// settled.
+    case resolve
+    /// Explicit supersession (used when the caller knows the new
+    /// version's lineageID does not match, but the semantic
+    /// supersession relationship should still be recorded).
+    case supersede
+    /// Move a withdrawn / expired row back to `.active`.
+    case revive
+    /// Move the row's state to `.accepted` (terminal cluster — the
+    /// row is canonical and will not move again).
+    case accept
+    /// Set the row's sensitivity axis to the supplied tier.
+    case correctSensitivity(AdjectiveSensitivity)
+    /// Set the row's trust axis to the supplied value.
+    case correctTrust(Trust)
+}
+
+// MARK: - LearnFrame (scaffolded — body in LOCI_V035_19)
+
+/// Slots for the `learn` verb. Scaffold only — full slot set
+/// (`SourceCatalogEntry`, `LearnMode`, `RefreshPolicy`) is declared
+/// in the standing-signals mission LOCI_V035_19.
+public struct LearnFrame: Sendable {
+    /// Caller-supplied handle naming the source to learn.
+    public var handle: String
+
+    public init(handle: String) {
+        self.handle = handle
+    }
+}
+
+// MARK: - HydrationLevel
+
+/// How much of a row to include in a recall response. Per spec § 7.3.
+public enum HydrationLevel: Sendable {
+    /// Bitmap columns + structured-row fields only. No blob reads.
+    case structured
+    /// All rungs hydrated on demand.
+    case full
+    /// Bitmap columns only — the lightest tier.
+    case bitmapOnly
+}
+
+// MARK: - Ordering
+
+/// Result ordering for recall. Per spec § 7.8.3.
+public enum Ordering: Sendable {
+    /// Newest captured first.
+    case byCaptureTimeDesc
+    /// Oldest captured first.
+    case byCaptureTimeAsc
+    /// Evaluator-determined relevance score, descending. Requires
+    /// the vector tier and the embedding model declared at capture
+    /// time; unavailable until VectorKit ships.
+    case byRelevanceDesc
+    /// Lexicographic ascending by `room`.
+    case byRoomAsc
+}

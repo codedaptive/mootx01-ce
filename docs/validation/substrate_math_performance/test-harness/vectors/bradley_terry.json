@@ -1,0 +1,1712 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "lr=0.05, l2=0.001, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x00f04cbcc11901ee5726fae76555a388",
+            "theta": "0x99188da89bede53f"
+          },
+          {
+            "id": "0x2ae3898f55411fcf7f4e3171c595dfc1",
+            "theta": "0x5496f4ba810be2bf"
+          },
+          {
+            "id": "0x4c0574bf470bad03b756a9c38870b9ca",
+            "theta": "0x431108aa1663d4bf"
+          },
+          {
+            "id": "0xefa0f97dbea2fe3d7a0992d4dd0cf60c",
+            "theta": "0x3a43387c99f2e33f"
+          }
+        ]
+      },
+      "id": "case_000",
+      "inputs": {
+        "l2": "0xfca9f1d24d62503f",
+        "learning_rate": "0x9a9999999999a93f",
+        "losers": [
+          "0x00f04cbcc11901ee5726fae76555a388",
+          "0x4c0574bf470bad03b756a9c38870b9ca",
+          "0xefa0f97dbea2fe3d7a0992d4dd0cf60c"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x00f04cbcc11901ee5726fae76555a388",
+            "theta": "0x000000c05436e73f"
+          },
+          {
+            "id": "0x2ae3898f55411fcf7f4e3171c595dfc1",
+            "theta": "0x00000000c083e5bf"
+          },
+          {
+            "id": "0x4c0574bf470bad03b756a9c38870b9ca",
+            "theta": "0x000000802e84d2bf"
+          },
+          {
+            "id": "0xefa0f97dbea2fe3d7a0992d4dd0cf60c",
+            "theta": "0x000000c05532e53f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x2ae3898f55411fcf7f4e3171c595dfc1"
+      }
+    },
+    {
+      "description": "lr=0.1, l2=0.01, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x4e30177a4aaeaf8aa56d4442dd8188e0",
+            "theta": "0xc36a8ef3fbbae9bf"
+          },
+          {
+            "id": "0xafe095800c644aeba1fc60fbe01f2753",
+            "theta": "0xaa831e3b1c38c33f"
+          },
+          {
+            "id": "0xc8b74e3b2e77b8d94553d668d0f7fbba",
+            "theta": "0xedb067b518a3923f"
+          },
+          {
+            "id": "0xe9cd7dcb6c7a273869285ff7a43bce00",
+            "theta": "0x194d403a2c39edbf"
+          }
+        ]
+      },
+      "id": "case_001",
+      "inputs": {
+        "l2": "0x7b14ae47e17a843f",
+        "learning_rate": "0x9a9999999999b93f",
+        "losers": [
+          "0x4e30177a4aaeaf8aa56d4442dd8188e0",
+          "0xe9cd7dcb6c7a273869285ff7a43bce00",
+          "0xafe095800c644aeba1fc60fbe01f2753"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x4e30177a4aaeaf8aa56d4442dd8188e0",
+            "theta": "0x000000c0b0abe8bf"
+          },
+          {
+            "id": "0xafe095800c644aeba1fc60fbe01f2753",
+            "theta": "0x00000000756cca3f"
+          },
+          {
+            "id": "0xc8b74e3b2e77b8d94553d668d0f7fbba",
+            "theta": "0x000000002448babf"
+          },
+          {
+            "id": "0xe9cd7dcb6c7a273869285ff7a43bce00",
+            "theta": "0x000000c00345ecbf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xc8b74e3b2e77b8d94553d668d0f7fbba"
+      }
+    },
+    {
+      "description": "lr=0.025, l2=0.0, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x552380c2fb324f5523300af12019a65b",
+            "theta": "0x00a315a35c73c1bf"
+          },
+          {
+            "id": "0x98e21673d8bc5986ed8316792fbd2c36",
+            "theta": "0xe049b9c044cbea3f"
+          },
+          {
+            "id": "0xc84ca5a1fef2ff5bdf0d472a591ee759",
+            "theta": "0x097f281733fbbabf"
+          },
+          {
+            "id": "0xf41f71730252c4b32fee5e1379040898",
+            "theta": "0xc12ef18a285de23f"
+          }
+        ]
+      },
+      "id": "case_002",
+      "inputs": {
+        "l2": "0x0000000000000000",
+        "learning_rate": "0x9a9999999999993f",
+        "losers": [
+          "0xc84ca5a1fef2ff5bdf0d472a591ee759",
+          "0x98e21673d8bc5986ed8316792fbd2c36",
+          "0x552380c2fb324f5523300af12019a65b"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x552380c2fb324f5523300af12019a65b",
+            "theta": "0x000000005e62c0bf"
+          },
+          {
+            "id": "0x98e21673d8bc5986ed8316792fbd2c36",
+            "theta": "0x00000080f040eb3f"
+          },
+          {
+            "id": "0xc84ca5a1fef2ff5bdf0d472a591ee759",
+            "theta": "0x000000004ac5b8bf"
+          },
+          {
+            "id": "0xf41f71730252c4b32fee5e1379040898",
+            "theta": "0x00000000805ce13f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xf41f71730252c4b32fee5e1379040898"
+      }
+    },
+    {
+      "description": "lr=0.5, l2=0.05, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x1f24068f27f0c540c35bef67bb10b240",
+            "theta": "0x4f4b652a0213d8bf"
+          },
+          {
+            "id": "0x47df07e7cdd63a170bc53bf8caec17bf",
+            "theta": "0x0d871e8d6210b83f"
+          },
+          {
+            "id": "0x51f0dca33c627af90c939237aecd45d8",
+            "theta": "0x8de15c86f28af13f"
+          },
+          {
+            "id": "0x56d3a9332b41558c777fa983947fe003",
+            "theta": "0xff34c2f6fc95c33f"
+          }
+        ]
+      },
+      "id": "case_003",
+      "inputs": {
+        "l2": "0x9a9999999999a93f",
+        "learning_rate": "0x000000000000e03f",
+        "losers": [
+          "0x1f24068f27f0c540c35bef67bb10b240",
+          "0x47df07e7cdd63a170bc53bf8caec17bf",
+          "0x56d3a9332b41558c777fa983947fe003"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x1f24068f27f0c540c35bef67bb10b240",
+            "theta": "0x000000007b13cebf"
+          },
+          {
+            "id": "0x47df07e7cdd63a170bc53bf8caec17bf",
+            "theta": "0x000000806ab9d23f"
+          },
+          {
+            "id": "0x51f0dca33c627af90c939237aecd45d8",
+            "theta": "0x000000007d7ee43f"
+          },
+          {
+            "id": "0x56d3a9332b41558c777fa983947fe003",
+            "theta": "0x0000000008a2d53f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x51f0dca33c627af90c939237aecd45d8"
+      }
+    },
+    {
+      "description": "lr=0.05, l2=0.001, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x3bd886a13ff9158f2930181cde23df25",
+            "theta": "0x481e1dabfdf4e13f"
+          },
+          {
+            "id": "0x4fc73303fd0bfe1ba16fed98dd91ade4",
+            "theta": "0x795acfaff32599bf"
+          },
+          {
+            "id": "0xd24e7287bfc49bfcc06c021c921fe645",
+            "theta": "0x2de88d2b2754c4bf"
+          },
+          {
+            "id": "0xd799776cbbf31de038c29888d782ebbc",
+            "theta": "0x2e422145659dedbf"
+          }
+        ]
+      },
+      "id": "case_004",
+      "inputs": {
+        "l2": "0xfca9f1d24d62503f",
+        "learning_rate": "0x9a9999999999a93f",
+        "losers": [
+          "0x4fc73303fd0bfe1ba16fed98dd91ade4",
+          "0xd799776cbbf31de038c29888d782ebbc",
+          "0xd24e7287bfc49bfcc06c021c921fe645"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x3bd886a13ff9158f2930181cde23df25",
+            "theta": "0x000000c03f86e03f"
+          },
+          {
+            "id": "0x4fc73303fd0bfe1ba16fed98dd91ade4",
+            "theta": "0x00000000805878bf"
+          },
+          {
+            "id": "0xd24e7287bfc49bfcc06c021c921fe645",
+            "theta": "0x00000000d72fc2bf"
+          },
+          {
+            "id": "0xd799776cbbf31de038c29888d782ebbc",
+            "theta": "0x000000400250edbf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x3bd886a13ff9158f2930181cde23df25"
+      }
+    },
+    {
+      "description": "lr=0.1, l2=0.01, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x6b1d140638b1168d005e9be05c87fa81",
+            "theta": "0x89926fed7e92d03f"
+          },
+          {
+            "id": "0xbd2df5c299ab62d2a3c5fabb730df8d5",
+            "theta": "0x58439684cfab943f"
+          },
+          {
+            "id": "0xc4af6df08e160130a1d429263e0defe0",
+            "theta": "0x5b55b03ef7c6ae3f"
+          },
+          {
+            "id": "0xcd055bc935a5e3e7841df3d172aabbcf",
+            "theta": "0xfb26db2252e4c53f"
+          }
+        ]
+      },
+      "id": "case_005",
+      "inputs": {
+        "l2": "0x7b14ae47e17a843f",
+        "learning_rate": "0x9a9999999999b93f",
+        "losers": [
+          "0xcd055bc935a5e3e7841df3d172aabbcf",
+          "0x6b1d140638b1168d005e9be05c87fa81",
+          "0xbd2df5c299ab62d2a3c5fabb730df8d5"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x6b1d140638b1168d005e9be05c87fa81",
+            "theta": "0x000000805e60d43f"
+          },
+          {
+            "id": "0xbd2df5c299ab62d2a3c5fabb730df8d5",
+            "theta": "0x000000002464b23f"
+          },
+          {
+            "id": "0xc4af6df08e160130a1d429263e0defe0",
+            "theta": "0x0000000026f0bbbf"
+          },
+          {
+            "id": "0xcd055bc935a5e3e7841df3d172aabbcf",
+            "theta": "0x000000002765cd3f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xc4af6df08e160130a1d429263e0defe0"
+      }
+    },
+    {
+      "description": "lr=0.025, l2=0.0, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x0ea45d4267040f040bec01f6e0b38894",
+            "theta": "0x389563d88fe0df3f"
+          },
+          {
+            "id": "0x695aecb584ab6a3c481fcfbc4cd45414",
+            "theta": "0xea96dcbe1a3fbcbf"
+          },
+          {
+            "id": "0x7689176aa814e18b24c2cc8cd90d7615",
+            "theta": "0xdd8c43f8e3ffe33f"
+          },
+          {
+            "id": "0xa67d0840f5175f77a7e8c2c4924ec25a",
+            "theta": "0x6e12673206e5cabf"
+          }
+        ]
+      },
+      "id": "case_006",
+      "inputs": {
+        "l2": "0x0000000000000000",
+        "learning_rate": "0x9a9999999999993f",
+        "losers": [
+          "0x7689176aa814e18b24c2cc8cd90d7615",
+          "0x0ea45d4267040f040bec01f6e0b38894",
+          "0x695aecb584ab6a3c481fcfbc4cd45414"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x0ea45d4267040f040bec01f6e0b38894",
+            "theta": "0x000000409f7be03f"
+          },
+          {
+            "id": "0x695aecb584ab6a3c481fcfbc4cd45414",
+            "theta": "0x0000000038d8b8bf"
+          },
+          {
+            "id": "0x7689176aa814e18b24c2cc8cd90d7615",
+            "theta": "0x000000808891e43f"
+          },
+          {
+            "id": "0xa67d0840f5175f77a7e8c2c4924ec25a",
+            "theta": "0x000000803386d0bf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xa67d0840f5175f77a7e8c2c4924ec25a"
+      }
+    },
+    {
+      "description": "lr=0.5, l2=0.05, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x4b01823c0be8e81233e64eb03b65a44d",
+            "theta": "0x61aa3919c5a1dc3f"
+          },
+          {
+            "id": "0xc0155452af6bd46d86efea339b45123c",
+            "theta": "0xa64bf6b39367e13f"
+          },
+          {
+            "id": "0xc1146cfb131f21f3d635ea53a42755d6",
+            "theta": "0x7737aac0f1ade03f"
+          },
+          {
+            "id": "0xff67b0a72021fbc942e5af3a4fbcea84",
+            "theta": "0xedf7978d471af03f"
+          }
+        ]
+      },
+      "id": "case_007",
+      "inputs": {
+        "l2": "0x9a9999999999a93f",
+        "learning_rate": "0x000000000000e03f",
+        "losers": [
+          "0xc1146cfb131f21f3d635ea53a42755d6",
+          "0xc0155452af6bd46d86efea339b45123c",
+          "0x4b01823c0be8e81233e64eb03b65a44d"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x4b01823c0be8e81233e64eb03b65a44d",
+            "theta": "0x00000000e78de63f"
+          },
+          {
+            "id": "0xc0155452af6bd46d86efea339b45123c",
+            "theta": "0x00000080697eeb3f"
+          },
+          {
+            "id": "0xc1146cfb131f21f3d635ea53a42755d6",
+            "theta": "0x00000000cd14ec3f"
+          },
+          {
+            "id": "0xff67b0a72021fbc942e5af3a4fbcea84",
+            "theta": "0x00000000c568c63f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xff67b0a72021fbc942e5af3a4fbcea84"
+      }
+    },
+    {
+      "description": "lr=0.05, l2=0.001, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x016b7a403df1460c9e1447727b5d319a",
+            "theta": "0x76032f7daefcee3f"
+          },
+          {
+            "id": "0x0ab14e07d6e3c463a27b18cba795f202",
+            "theta": "0x0a019cd16dd5eebf"
+          },
+          {
+            "id": "0x1cd8928a4343226ec99c0f6ee3b7452a",
+            "theta": "0x74c8e7b62591d4bf"
+          },
+          {
+            "id": "0x2493872eba0d5a0336826c9fe5609472",
+            "theta": "0xdb1c4524de46e23f"
+          }
+        ]
+      },
+      "id": "case_008",
+      "inputs": {
+        "l2": "0xfca9f1d24d62503f",
+        "learning_rate": "0x9a9999999999a93f",
+        "losers": [
+          "0x1cd8928a4343226ec99c0f6ee3b7452a",
+          "0x0ab14e07d6e3c463a27b18cba795f202",
+          "0x2493872eba0d5a0336826c9fe5609472"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x016b7a403df1460c9e1447727b5d319a",
+            "theta": "0x00000000d7c3ed3f"
+          },
+          {
+            "id": "0x0ab14e07d6e3c463a27b18cba795f202",
+            "theta": "0x0000008074a0eebf"
+          },
+          {
+            "id": "0x1cd8928a4343226ec99c0f6ee3b7452a",
+            "theta": "0x0000008096d9d3bf"
+          },
+          {
+            "id": "0x2493872eba0d5a0336826c9fe5609472",
+            "theta": "0x00000080d5efe23f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x016b7a403df1460c9e1447727b5d319a"
+      }
+    },
+    {
+      "description": "lr=0.1, l2=0.01, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x19b4f67cdad23e9c4857c7e850b8db4e",
+            "theta": "0x0da1698a2557dbbf"
+          },
+          {
+            "id": "0x2906cea5ec01d9a191ad0aab31dc8895",
+            "theta": "0xf9e154c37e32e13f"
+          },
+          {
+            "id": "0x29f6ec7c27d2a385f3a5172b75601065",
+            "theta": "0xfd3789349d57d13f"
+          },
+          {
+            "id": "0x9350f3c96820a9431562a15379268a63",
+            "theta": "0x668697cbd94ee6bf"
+          }
+        ]
+      },
+      "id": "case_009",
+      "inputs": {
+        "l2": "0x7b14ae47e17a843f",
+        "learning_rate": "0x9a9999999999b93f",
+        "losers": [
+          "0x19b4f67cdad23e9c4857c7e850b8db4e",
+          "0x2906cea5ec01d9a191ad0aab31dc8895",
+          "0x29f6ec7c27d2a385f3a5172b75601065"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x19b4f67cdad23e9c4857c7e850b8db4e",
+            "theta": "0x00000000dd4bd7bf"
+          },
+          {
+            "id": "0x2906cea5ec01d9a191ad0aab31dc8895",
+            "theta": "0x000000c03dd2e33f"
+          },
+          {
+            "id": "0x29f6ec7c27d2a385f3a5172b75601065",
+            "theta": "0x00000080a230d63f"
+          },
+          {
+            "id": "0x9350f3c96820a9431562a15379268a63",
+            "theta": "0x00000040b270edbf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x9350f3c96820a9431562a15379268a63"
+      }
+    },
+    {
+      "description": "lr=0.025, l2=0.0, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x2e2333832a47e5d082d9c0f56e42fdf0",
+            "theta": "0xd295ccd6913aed3f"
+          },
+          {
+            "id": "0x8b44f9832ddc92a6fa340992af9cf400",
+            "theta": "0xe24a48d4a5c4e33f"
+          },
+          {
+            "id": "0xd4e44d2408dcbf264d8a87a6069cd187",
+            "theta": "0x93423af79afbc93f"
+          },
+          {
+            "id": "0xfdfaa7495a5ff790d86d6f9815de0e2d",
+            "theta": "0xa78e1cd704fde43f"
+          }
+        ]
+      },
+      "id": "case_010",
+      "inputs": {
+        "l2": "0x0000000000000000",
+        "learning_rate": "0x9a9999999999993f",
+        "losers": [
+          "0x8b44f9832ddc92a6fa340992af9cf400",
+          "0xfdfaa7495a5ff790d86d6f9815de0e2d",
+          "0xd4e44d2408dcbf264d8a87a6069cd187"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x2e2333832a47e5d082d9c0f56e42fdf0",
+            "theta": "0x000000000f42ec3f"
+          },
+          {
+            "id": "0x8b44f9832ddc92a6fa340992af9cf400",
+            "theta": "0x000000c0171ee43f"
+          },
+          {
+            "id": "0xd4e44d2408dcbf264d8a87a6069cd187",
+            "theta": "0x00000000900ccb3f"
+          },
+          {
+            "id": "0xfdfaa7495a5ff790d86d6f9815de0e2d",
+            "theta": "0x00000080d857e53f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x2e2333832a47e5d082d9c0f56e42fdf0"
+      }
+    },
+    {
+      "description": "lr=0.5, l2=0.05, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x13574e9c33028cbf845303f0f8fa0634",
+            "theta": "0xd43452df8455dabf"
+          },
+          {
+            "id": "0x392bff2d418ebf023e61629fa110d573",
+            "theta": "0x2f68ba12ea4df03f"
+          },
+          {
+            "id": "0xb5b26b30dcd76baf2fe288b662a5d622",
+            "theta": "0x212e12ee1a4ce0bf"
+          },
+          {
+            "id": "0xd1b254823250b10541a28a55f12d94ff",
+            "theta": "0xaa5288e2a5dfd23f"
+          }
+        ]
+      },
+      "id": "case_011",
+      "inputs": {
+        "l2": "0x9a9999999999a93f",
+        "learning_rate": "0x000000000000e03f",
+        "losers": [
+          "0x13574e9c33028cbf845303f0f8fa0634",
+          "0xb5b26b30dcd76baf2fe288b662a5d622",
+          "0xd1b254823250b10541a28a55f12d94ff"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x13574e9c33028cbf845303f0f8fa0634",
+            "theta": "0x00000080d33cd1bf"
+          },
+          {
+            "id": "0x392bff2d418ebf023e61629fa110d573",
+            "theta": "0x000000c059d7e23f"
+          },
+          {
+            "id": "0xb5b26b30dcd76baf2fe288b662a5d622",
+            "theta": "0x00000080a759d9bf"
+          },
+          {
+            "id": "0xd1b254823250b10541a28a55f12d94ff",
+            "theta": "0x0000004007a1e03f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x392bff2d418ebf023e61629fa110d573"
+      }
+    },
+    {
+      "description": "lr=0.05, l2=0.001, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x1fcbaa384745225be49825b93617f28a",
+            "theta": "0x6755e75c862fb13f"
+          },
+          {
+            "id": "0x20b7aa16d42234a85114093fb4f06606",
+            "theta": "0x308d8696cbd8d8bf"
+          },
+          {
+            "id": "0x4f5c0466baf474b4a8d6e6f05136e80e",
+            "theta": "0xb0a8100fd665b1bf"
+          },
+          {
+            "id": "0xb551f89ead8bed7b646ad86253bd7140",
+            "theta": "0x9060eaf5d2cfccbf"
+          }
+        ]
+      },
+      "id": "case_012",
+      "inputs": {
+        "l2": "0xfca9f1d24d62503f",
+        "learning_rate": "0x9a9999999999a93f",
+        "losers": [
+          "0x1fcbaa384745225be49825b93617f28a",
+          "0xb551f89ead8bed7b646ad86253bd7140",
+          "0x4f5c0466baf474b4a8d6e6f05136e80e"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x1fcbaa384745225be49825b93617f28a",
+            "theta": "0x000000007062b93f"
+          },
+          {
+            "id": "0x20b7aa16d42234a85114093fb4f06606",
+            "theta": "0x000000805299debf"
+          },
+          {
+            "id": "0x4f5c0466baf474b4a8d6e6f05136e80e",
+            "theta": "0x000000007098a3bf"
+          },
+          {
+            "id": "0xb551f89ead8bed7b646ad86253bd7140",
+            "theta": "0x000000007537c9bf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x20b7aa16d42234a85114093fb4f06606"
+      }
+    },
+    {
+      "description": "lr=0.1, l2=0.01, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x02d6d86090725a7368d98cc835898693",
+            "theta": "0x584edeb45787c63f"
+          },
+          {
+            "id": "0x2c7f6a24236a9e73f89cf7fcde0a416d",
+            "theta": "0xb049a1de9d82d6bf"
+          },
+          {
+            "id": "0x6898788b3f82c2134a41d8bee7da3e6f",
+            "theta": "0xce5c281e0b82953f"
+          },
+          {
+            "id": "0x969e03034872efd6d6c587e48d22d41d",
+            "theta": "0x674664026942d4bf"
+          }
+        ]
+      },
+      "id": "case_013",
+      "inputs": {
+        "l2": "0x7b14ae47e17a843f",
+        "learning_rate": "0x9a9999999999b93f",
+        "losers": [
+          "0x969e03034872efd6d6c587e48d22d41d",
+          "0x02d6d86090725a7368d98cc835898693",
+          "0x6898788b3f82c2134a41d8bee7da3e6f"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x02d6d86090725a7368d98cc835898693",
+            "theta": "0x00000000882fcf3f"
+          },
+          {
+            "id": "0x2c7f6a24236a9e73f89cf7fcde0a416d",
+            "theta": "0x000000801e45e1bf"
+          },
+          {
+            "id": "0x6898788b3f82c2134a41d8bee7da3e6f",
+            "theta": "0x00000000a051b53f"
+          },
+          {
+            "id": "0x969e03034872efd6d6c587e48d22d41d",
+            "theta": "0x0000000098a1d0bf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x2c7f6a24236a9e73f89cf7fcde0a416d"
+      }
+    },
+    {
+      "description": "lr=0.025, l2=0.0, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x16cc9110623a536a1ce53f70a62cc186",
+            "theta": "0x2f0e2764d08cce3f"
+          },
+          {
+            "id": "0x41387ac19d8e617683fad7b9015397ab",
+            "theta": "0x6d91b66d41e2dc3f"
+          },
+          {
+            "id": "0x6c2a31b8c928ab32e6f6f489e45f4000",
+            "theta": "0xe060be94e1e9d1bf"
+          },
+          {
+            "id": "0xfe0732aec0b0966d689023b2fe36d38c",
+            "theta": "0x2e247a7aae0de33f"
+          }
+        ]
+      },
+      "id": "case_014",
+      "inputs": {
+        "l2": "0x0000000000000000",
+        "learning_rate": "0x9a9999999999993f",
+        "losers": [
+          "0xfe0732aec0b0966d689023b2fe36d38c",
+          "0x41387ac19d8e617683fad7b9015397ab",
+          "0x16cc9110623a536a1ce53f70a62cc186"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x16cc9110623a536a1ce53f70a62cc186",
+            "theta": "0x000000002d4ad03f"
+          },
+          {
+            "id": "0x41387ac19d8e617683fad7b9015397ab",
+            "theta": "0x000000003bfbdd3f"
+          },
+          {
+            "id": "0x6c2a31b8c928ab32e6f6f489e45f4000",
+            "theta": "0x00000080862dd5bf"
+          },
+          {
+            "id": "0xfe0732aec0b0966d689023b2fe36d38c",
+            "theta": "0x000000c021a1e33f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x6c2a31b8c928ab32e6f6f489e45f4000"
+      }
+    },
+    {
+      "description": "lr=0.5, l2=0.05, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x3602e6e9f7adf3b7468f234ac2066ccb",
+            "theta": "0xa24215a8a300e43f"
+          },
+          {
+            "id": "0x703e38c1957fa5bb79ecf73758dd8bc6",
+            "theta": "0xfd9b0b2163a3c03f"
+          },
+          {
+            "id": "0xafb65f9221e97014884068a0a81ec569",
+            "theta": "0xa51017b6abd2e1bf"
+          },
+          {
+            "id": "0xf11f29b55975098ba73fbc9b2013eb7e",
+            "theta": "0x2a5b682525fbaebf"
+          }
+        ]
+      },
+      "id": "case_015",
+      "inputs": {
+        "l2": "0x9a9999999999a93f",
+        "learning_rate": "0x000000000000e03f",
+        "losers": [
+          "0xf11f29b55975098ba73fbc9b2013eb7e",
+          "0xafb65f9221e97014884068a0a81ec569",
+          "0x703e38c1957fa5bb79ecf73758dd8bc6"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x3602e6e9f7adf3b7468f234ac2066ccb",
+            "theta": "0x00000000bc1bb4bf"
+          },
+          {
+            "id": "0x703e38c1957fa5bb79ecf73758dd8bc6",
+            "theta": "0x000000008cffd83f"
+          },
+          {
+            "id": "0xafb65f9221e97014884068a0a81ec569",
+            "theta": "0x00000080d8f1d8bf"
+          },
+          {
+            "id": "0xf11f29b55975098ba73fbc9b2013eb7e",
+            "theta": "0x0000000050f7cd3f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x3602e6e9f7adf3b7468f234ac2066ccb"
+      }
+    },
+    {
+      "description": "lr=0.05, l2=0.001, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x1c63cdf1008ebc84a53130ada088c92d",
+            "theta": "0xe9e9cf4610f0e1bf"
+          },
+          {
+            "id": "0x649b4ad5167d61e489f14cccddb12183",
+            "theta": "0xeb0f3ce8eb92dc3f"
+          },
+          {
+            "id": "0xaebb0dabd923d996368c0df8eddd8b61",
+            "theta": "0xc5afd4ee3964d43f"
+          },
+          {
+            "id": "0xdd2032cd1d9e9aed7c1dc3cbdcc1eea5",
+            "theta": "0x77b72e7b44bed8bf"
+          }
+        ]
+      },
+      "id": "case_016",
+      "inputs": {
+        "l2": "0xfca9f1d24d62503f",
+        "learning_rate": "0x9a9999999999a93f",
+        "losers": [
+          "0x649b4ad5167d61e489f14cccddb12183",
+          "0x1c63cdf1008ebc84a53130ada088c92d",
+          "0xdd2032cd1d9e9aed7c1dc3cbdcc1eea5"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x1c63cdf1008ebc84a53130ada088c92d",
+            "theta": "0x000000401674e1bf"
+          },
+          {
+            "id": "0x649b4ad5167d61e489f14cccddb12183",
+            "theta": "0x00000080d358de3f"
+          },
+          {
+            "id": "0xaebb0dabd923d996368c0df8eddd8b61",
+            "theta": "0x00000000f991d03f"
+          },
+          {
+            "id": "0xdd2032cd1d9e9aed7c1dc3cbdcc1eea5",
+            "theta": "0x000000008aa9d7bf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xaebb0dabd923d996368c0df8eddd8b61"
+      }
+    },
+    {
+      "description": "lr=0.1, l2=0.01, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x0c674f9e77ba99db096e24ffa0cf36af",
+            "theta": "0x8ca37d677123f0bf"
+          },
+          {
+            "id": "0x41842ef53357d1d8272d179f2bf3ffb8",
+            "theta": "0xef03eb781ac1db3f"
+          },
+          {
+            "id": "0xb10683b089e10603ace396f10dc3a58e",
+            "theta": "0x0b7a984c95ddddbf"
+          },
+          {
+            "id": "0xb351a8bdf5854308fef6c89d8bf389bb",
+            "theta": "0x4243555679b8d5bf"
+          }
+        ]
+      },
+      "id": "case_017",
+      "inputs": {
+        "l2": "0x7b14ae47e17a843f",
+        "learning_rate": "0x9a9999999999b93f",
+        "losers": [
+          "0x41842ef53357d1d8272d179f2bf3ffb8",
+          "0x0c674f9e77ba99db096e24ffa0cf36af",
+          "0xb351a8bdf5854308fef6c89d8bf389bb"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x0c674f9e77ba99db096e24ffa0cf36af",
+            "theta": "0x000000c03e07efbf"
+          },
+          {
+            "id": "0x41842ef53357d1d8272d179f2bf3ffb8",
+            "theta": "0x000000c0fb52e03f"
+          },
+          {
+            "id": "0xb10683b089e10603ace396f10dc3a58e",
+            "theta": "0x000000402d7de4bf"
+          },
+          {
+            "id": "0xb351a8bdf5854308fef6c89d8bf389bb",
+            "theta": "0x000000805228d2bf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xb10683b089e10603ace396f10dc3a58e"
+      }
+    },
+    {
+      "description": "lr=0.025, l2=0.0, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x77391dadffc5bed92f84cb1a9d7ec548",
+            "theta": "0x67a99fb79f87d3bf"
+          },
+          {
+            "id": "0x7e7f3f03f21c70fd531f1ab85a2fd34c",
+            "theta": "0x0a40838b8b5addbf"
+          },
+          {
+            "id": "0x9d14f471b6c5ade9f1b7f3724a5bd174",
+            "theta": "0x28c4afa74e4ae43f"
+          },
+          {
+            "id": "0xd3b458cfed66a485bd9b2ee08cb9e798",
+            "theta": "0x43c286e71302c33f"
+          }
+        ]
+      },
+      "id": "case_018",
+      "inputs": {
+        "l2": "0x0000000000000000",
+        "learning_rate": "0x9a9999999999993f",
+        "losers": [
+          "0xd3b458cfed66a485bd9b2ee08cb9e798",
+          "0x7e7f3f03f21c70fd531f1ab85a2fd34c",
+          "0x77391dadffc5bed92f84cb1a9d7ec548"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x77391dadffc5bed92f84cb1a9d7ec548",
+            "theta": "0x000000005313d3bf"
+          },
+          {
+            "id": "0x7e7f3f03f21c70fd531f1ab85a2fd34c",
+            "theta": "0x0000000028f2dcbf"
+          },
+          {
+            "id": "0x9d14f471b6c5ade9f1b7f3724a5bd174",
+            "theta": "0x000000005a8ce33f"
+          },
+          {
+            "id": "0xd3b458cfed66a485bd9b2ee08cb9e798",
+            "theta": "0x000000008640c43f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x9d14f471b6c5ade9f1b7f3724a5bd174"
+      }
+    },
+    {
+      "description": "lr=0.5, l2=0.05, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x0296d42fc16be53ba8e60b8bd5fe379a",
+            "theta": "0x102e4c9b7bccd93f"
+          },
+          {
+            "id": "0x679269383ca0129e7eabdf8e8a3b5025",
+            "theta": "0xc107c0875b9bbbbf"
+          },
+          {
+            "id": "0xd313ab7d0e93fe38a501077c694fad9b",
+            "theta": "0x83b6c0e0a050f23f"
+          },
+          {
+            "id": "0xdbde2c580e4cdd351be573a7eafca3bf",
+            "theta": "0x6d419f5aa203d6bf"
+          }
+        ]
+      },
+      "id": "case_019",
+      "inputs": {
+        "l2": "0x9a9999999999a93f",
+        "learning_rate": "0x000000000000e03f",
+        "losers": [
+          "0xdbde2c580e4cdd351be573a7eafca3bf",
+          "0x679269383ca0129e7eabdf8e8a3b5025",
+          "0x0296d42fc16be53ba8e60b8bd5fe379a"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x0296d42fc16be53ba8e60b8bd5fe379a",
+            "theta": "0x00000040bc15e43f"
+          },
+          {
+            "id": "0x679269383ca0129e7eabdf8e8a3b5025",
+            "theta": "0x00000000206faa3f"
+          },
+          {
+            "id": "0xd313ab7d0e93fe38a501077c694fad9b",
+            "theta": "0x00000040723de63f"
+          },
+          {
+            "id": "0xdbde2c580e4cdd351be573a7eafca3bf",
+            "theta": "0x00000000592dcabf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xd313ab7d0e93fe38a501077c694fad9b"
+      }
+    },
+    {
+      "description": "lr=0.05, l2=0.001, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x25cf069bd474a083469503d824fe457f",
+            "theta": "0xa3da2a457a7ed3bf"
+          },
+          {
+            "id": "0x60e4787254f8a64a09c3f6f840158397",
+            "theta": "0xd25f91fbc410db3f"
+          },
+          {
+            "id": "0xd043abf13381d77f15fab2466c2cae6d",
+            "theta": "0x175a37d224e5d1bf"
+          },
+          {
+            "id": "0xf47f89cae78774a08625f467c71f67df",
+            "theta": "0xe9fc9040a6f3ee3f"
+          }
+        ]
+      },
+      "id": "case_020",
+      "inputs": {
+        "l2": "0xfca9f1d24d62503f",
+        "learning_rate": "0x9a9999999999a93f",
+        "losers": [
+          "0xd043abf13381d77f15fab2466c2cae6d",
+          "0xf47f89cae78774a08625f467c71f67df",
+          "0x25cf069bd474a083469503d824fe457f"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x25cf069bd474a083469503d824fe457f",
+            "theta": "0x00000080d76dd2bf"
+          },
+          {
+            "id": "0x60e4787254f8a64a09c3f6f840158397",
+            "theta": "0x000000002bccd63f"
+          },
+          {
+            "id": "0xd043abf13381d77f15fab2466c2cae6d",
+            "theta": "0x0000008081c6d0bf"
+          },
+          {
+            "id": "0xf47f89cae78774a08625f467c71f67df",
+            "theta": "0x00000080f6feef3f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x60e4787254f8a64a09c3f6f840158397"
+      }
+    },
+    {
+      "description": "lr=0.1, l2=0.01, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x232949b662b310e107c893c8134aad12",
+            "theta": "0x9516744fe2e8da3f"
+          },
+          {
+            "id": "0x23f4b9fc130080667245d8541c08deaa",
+            "theta": "0xe302a9fdd5fcea3f"
+          },
+          {
+            "id": "0xb4354e5f2a9f107e5dae92314845b44e",
+            "theta": "0xed98491d4c34b5bf"
+          },
+          {
+            "id": "0xc080a807892cdff3c7a4bdd09c484539",
+            "theta": "0xe2cda9df14c9d63f"
+          }
+        ]
+      },
+      "id": "case_021",
+      "inputs": {
+        "l2": "0x7b14ae47e17a843f",
+        "learning_rate": "0x9a9999999999b93f",
+        "losers": [
+          "0xc080a807892cdff3c7a4bdd09c484539",
+          "0xb4354e5f2a9f107e5dae92314845b44e",
+          "0x232949b662b310e107c893c8134aad12"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x232949b662b310e107c893c8134aad12",
+            "theta": "0x00000000b199dd3f"
+          },
+          {
+            "id": "0x23f4b9fc130080667245d8541c08deaa",
+            "theta": "0x00000000b06be73f"
+          },
+          {
+            "id": "0xb4354e5f2a9f107e5dae92314845b44e",
+            "theta": "0x0000000088d6aabf"
+          },
+          {
+            "id": "0xc080a807892cdff3c7a4bdd09c484539",
+            "theta": "0x000000005c7bd93f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x23f4b9fc130080667245d8541c08deaa"
+      }
+    },
+    {
+      "description": "lr=0.025, l2=0.0, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x253fbed4ef7794b588ef00ef43147e0f",
+            "theta": "0x04fd2e8d66f8e3bf"
+          },
+          {
+            "id": "0x2c04bdd7e9453592a657a6f09792bc87",
+            "theta": "0xc58609dafc00cabf"
+          },
+          {
+            "id": "0x562d08f99d816e4d8f03b7340d4175a7",
+            "theta": "0xbeb5f137a231b83f"
+          },
+          {
+            "id": "0xcdf64fa9e27aa686cf6c8b14489b1b5d",
+            "theta": "0x03d84c035026e1bf"
+          }
+        ]
+      },
+      "id": "case_022",
+      "inputs": {
+        "l2": "0x0000000000000000",
+        "learning_rate": "0x9a9999999999993f",
+        "losers": [
+          "0x562d08f99d816e4d8f03b7340d4175a7",
+          "0x2c04bdd7e9453592a657a6f09792bc87",
+          "0x253fbed4ef7794b588ef00ef43147e0f"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x253fbed4ef7794b588ef00ef43147e0f",
+            "theta": "0x000000004695e3bf"
+          },
+          {
+            "id": "0x2c04bdd7e9453592a657a6f09792bc87",
+            "theta": "0x00000000931bc8bf"
+          },
+          {
+            "id": "0x562d08f99d816e4d8f03b7340d4175a7",
+            "theta": "0x00000000fe74bc3f"
+          },
+          {
+            "id": "0xcdf64fa9e27aa686cf6c8b14489b1b5d",
+            "theta": "0x00000080368be2bf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xcdf64fa9e27aa686cf6c8b14489b1b5d"
+      }
+    },
+    {
+      "description": "lr=0.5, l2=0.05, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x2ad03001ae8c431f7fb8d2899b6eff6c",
+            "theta": "0x914f2b7eddffe03f"
+          },
+          {
+            "id": "0x4d2c8d4965b102007638b67912a1d526",
+            "theta": "0x7823c96b2276c6bf"
+          },
+          {
+            "id": "0x66938089b8a1c9c85ec1f1f12d21cb7e",
+            "theta": "0x54e6dac56b1ceabf"
+          },
+          {
+            "id": "0xa09b717caee7688a7a221c1a92224e4f",
+            "theta": "0xf62d373dcc63e53f"
+          }
+        ]
+      },
+      "id": "case_023",
+      "inputs": {
+        "l2": "0x9a9999999999a93f",
+        "learning_rate": "0x000000000000e03f",
+        "losers": [
+          "0x2ad03001ae8c431f7fb8d2899b6eff6c",
+          "0x66938089b8a1c9c85ec1f1f12d21cb7e",
+          "0x4d2c8d4965b102007638b67912a1d526"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x2ad03001ae8c431f7fb8d2899b6eff6c",
+            "theta": "0x000000805113ed3f"
+          },
+          {
+            "id": "0x4d2c8d4965b102007638b67912a1d526",
+            "theta": "0x00000000607f913f"
+          },
+          {
+            "id": "0x66938089b8a1c9c85ec1f1f12d21cb7e",
+            "theta": "0x00000000c69ce6bf"
+          },
+          {
+            "id": "0xa09b717caee7688a7a221c1a92224e4f",
+            "theta": "0x0000000030ed903f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xa09b717caee7688a7a221c1a92224e4f"
+      }
+    },
+    {
+      "description": "lr=0.05, l2=0.001, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x3722d0d2d90759360aa2de39265f044d",
+            "theta": "0x8073fe3e560ad43f"
+          },
+          {
+            "id": "0xab3acbe9fa56ce9a6b5bd5db186fcfe3",
+            "theta": "0x0947f353f16be63f"
+          },
+          {
+            "id": "0xb0f8f443d434cc5475578279942c95e0",
+            "theta": "0xce74303a4b0ee6bf"
+          },
+          {
+            "id": "0xe6da7447801c2756adbdeff0d00f571e",
+            "theta": "0x313d29ae5c80ebbf"
+          }
+        ]
+      },
+      "id": "case_024",
+      "inputs": {
+        "l2": "0xfca9f1d24d62503f",
+        "learning_rate": "0x9a9999999999a93f",
+        "losers": [
+          "0x3722d0d2d90759360aa2de39265f044d",
+          "0xb0f8f443d434cc5475578279942c95e0",
+          "0xe6da7447801c2756adbdeff0d00f571e"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x3722d0d2d90759360aa2de39265f044d",
+            "theta": "0x00000080e361d53f"
+          },
+          {
+            "id": "0xab3acbe9fa56ce9a6b5bd5db186fcfe3",
+            "theta": "0x000000806025e53f"
+          },
+          {
+            "id": "0xb0f8f443d434cc5475578279942c95e0",
+            "theta": "0x00000000f8bae5bf"
+          },
+          {
+            "id": "0xe6da7447801c2756adbdeff0d00f571e",
+            "theta": "0x000000c08d38ebbf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xab3acbe9fa56ce9a6b5bd5db186fcfe3"
+      }
+    },
+    {
+      "description": "lr=0.1, l2=0.01, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x466aff7bed5ba2b880cd6c675fa7dc8d",
+            "theta": "0xe28164f6bd5edfbf"
+          },
+          {
+            "id": "0x4fcb753d73c6c823d80caaf5955f4df2",
+            "theta": "0x3e975a67c55eb53f"
+          },
+          {
+            "id": "0xb0ed68d7f9417af09f6d9e31244e2286",
+            "theta": "0xdbc9d241dbbec93f"
+          },
+          {
+            "id": "0xce08c91a8a36683c3002c360e630af84",
+            "theta": "0x5e6fb9936d91c6bf"
+          }
+        ]
+      },
+      "id": "case_025",
+      "inputs": {
+        "l2": "0x7b14ae47e17a843f",
+        "learning_rate": "0x9a9999999999b93f",
+        "losers": [
+          "0xce08c91a8a36683c3002c360e630af84",
+          "0xb0ed68d7f9417af09f6d9e31244e2286",
+          "0x466aff7bed5ba2b880cd6c675fa7dc8d"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x466aff7bed5ba2b880cd6c675fa7dc8d",
+            "theta": "0x000000000bfbdcbf"
+          },
+          {
+            "id": "0x4fcb753d73c6c823d80caaf5955f4df2",
+            "theta": "0x00000000945caebf"
+          },
+          {
+            "id": "0xb0ed68d7f9417af09f6d9e31244e2286",
+            "theta": "0x000000806584d03f"
+          },
+          {
+            "id": "0xce08c91a8a36683c3002c360e630af84",
+            "theta": "0x000000009e67c0bf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x4fcb753d73c6c823d80caaf5955f4df2"
+      }
+    },
+    {
+      "description": "lr=0.025, l2=0.0, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x3c9f7f343f98c0bca291813673a2dd9e",
+            "theta": "0xdacdf2fff3b8bd3f"
+          },
+          {
+            "id": "0x56da5c35eb65e35b587f4ac107d82042",
+            "theta": "0x3323fa755989e7bf"
+          },
+          {
+            "id": "0x7a24ced910b5e3950996421a94d80212",
+            "theta": "0x06485243ee92d73f"
+          },
+          {
+            "id": "0xeada188d1d75da2ede23198b4d8480f7",
+            "theta": "0xea4aa5a841d1df3f"
+          }
+        ]
+      },
+      "id": "case_026",
+      "inputs": {
+        "l2": "0x0000000000000000",
+        "learning_rate": "0x9a9999999999993f",
+        "losers": [
+          "0x7a24ced910b5e3950996421a94d80212",
+          "0x56da5c35eb65e35b587f4ac107d82042",
+          "0x3c9f7f343f98c0bca291813673a2dd9e"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x3c9f7f343f98c0bca291813673a2dd9e",
+            "theta": "0x00000000092dc03f"
+          },
+          {
+            "id": "0x56da5c35eb65e35b587f4ac107d82042",
+            "theta": "0x00000000575ae7bf"
+          },
+          {
+            "id": "0x7a24ced910b5e3950996421a94d80212",
+            "theta": "0x00000000a256d83f"
+          },
+          {
+            "id": "0xeada188d1d75da2ede23198b4d8480f7",
+            "theta": "0x000000804107de3f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xeada188d1d75da2ede23198b4d8480f7"
+      }
+    },
+    {
+      "description": "lr=0.5, l2=0.05, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x0cb9b491ad29605efbe3b490e4278685",
+            "theta": "0x972da20373ffe9bf"
+          },
+          {
+            "id": "0x37212104bb04bb0f74515fe0de433d1d",
+            "theta": "0x1172ae726732e8bf"
+          },
+          {
+            "id": "0xce504793fc5e8018038c393a2ac0da5b",
+            "theta": "0xdd7d9f42a235de3f"
+          },
+          {
+            "id": "0xf0d3ae6875d98ef9b792913999bc7beb",
+            "theta": "0x19a6229583c7e73f"
+          }
+        ]
+      },
+      "id": "case_027",
+      "inputs": {
+        "l2": "0x9a9999999999a93f",
+        "learning_rate": "0x000000000000e03f",
+        "losers": [
+          "0xce504793fc5e8018038c393a2ac0da5b",
+          "0x0cb9b491ad29605efbe3b490e4278685",
+          "0x37212104bb04bb0f74515fe0de433d1d"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x0cb9b491ad29605efbe3b490e4278685",
+            "theta": "0x000000c02019e7bf"
+          },
+          {
+            "id": "0x37212104bb04bb0f74515fe0de433d1d",
+            "theta": "0x00000040d35ce5bf"
+          },
+          {
+            "id": "0xce504793fc5e8018038c393a2ac0da5b",
+            "theta": "0x000000c092f3e93f"
+          },
+          {
+            "id": "0xf0d3ae6875d98ef9b792913999bc7beb",
+            "theta": "0x000000003b9ecf3f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xf0d3ae6875d98ef9b792913999bc7beb"
+      }
+    },
+    {
+      "description": "lr=0.05, l2=0.001, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x0665562a7352b8f2cfdb51c5e79d6f90",
+            "theta": "0x9d101ac6d8bde43f"
+          },
+          {
+            "id": "0x33c469ec4a46b54739fa73ce969a7ca3",
+            "theta": "0x0695da973c1bd53f"
+          },
+          {
+            "id": "0x5320933951d517dcf10bfb7f243f27a3",
+            "theta": "0xeb3cd1990ee6edbf"
+          },
+          {
+            "id": "0x8663f6ffeeed33b49d1ce5c59fc94cf6",
+            "theta": "0x94602a0f38a5cc3f"
+          }
+        ]
+      },
+      "id": "case_028",
+      "inputs": {
+        "l2": "0xfca9f1d24d62503f",
+        "learning_rate": "0x9a9999999999a93f",
+        "losers": [
+          "0x0665562a7352b8f2cfdb51c5e79d6f90",
+          "0x5320933951d517dcf10bfb7f243f27a3",
+          "0x33c469ec4a46b54739fa73ce969a7ca3"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x0665562a7352b8f2cfdb51c5e79d6f90",
+            "theta": "0x00000000a5bfe53f"
+          },
+          {
+            "id": "0x33c469ec4a46b54739fa73ce969a7ca3",
+            "theta": "0x00000080d3d5d63f"
+          },
+          {
+            "id": "0x5320933951d517dcf10bfb7f243f27a3",
+            "theta": "0x00000080a080edbf"
+          },
+          {
+            "id": "0x8663f6ffeeed33b49d1ce5c59fc94cf6",
+            "theta": "0x000000003194c33f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x8663f6ffeeed33b49d1ce5c59fc94cf6"
+      }
+    },
+    {
+      "description": "lr=0.1, l2=0.01, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x9831864f33a3c94fab15b12a43296854",
+            "theta": "0xa4f0238c1e21dd3f"
+          },
+          {
+            "id": "0xa6c53026c5d6ef3499bc17ed3fc8cddc",
+            "theta": "0xdfec4114987cd53f"
+          },
+          {
+            "id": "0xc787d6a70d5e80b61434eb418d73fa42",
+            "theta": "0xbfb61da28223a73f"
+          },
+          {
+            "id": "0xd3bdf0040391ab223084f0098044c3ea",
+            "theta": "0xadb0a6c4cf30e1bf"
+          }
+        ]
+      },
+      "id": "case_029",
+      "inputs": {
+        "l2": "0x7b14ae47e17a843f",
+        "learning_rate": "0x9a9999999999b93f",
+        "losers": [
+          "0xc787d6a70d5e80b61434eb418d73fa42",
+          "0xa6c53026c5d6ef3499bc17ed3fc8cddc",
+          "0xd3bdf0040391ab223084f0098044c3ea"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x9831864f33a3c94fab15b12a43296854",
+            "theta": "0x000000805960d53f"
+          },
+          {
+            "id": "0xa6c53026c5d6ef3499bc17ed3fc8cddc",
+            "theta": "0x00000080b5b9d83f"
+          },
+          {
+            "id": "0xc787d6a70d5e80b61434eb418d73fa42",
+            "theta": "0x000000004ad5b63f"
+          },
+          {
+            "id": "0xd3bdf0040391ab223084f0098044c3ea",
+            "theta": "0x000000c05f4ee0bf"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0x9831864f33a3c94fab15b12a43296854"
+      }
+    },
+    {
+      "description": "lr=0.025, l2=0.0, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x2209b1495eb38b6525e590d8f2b7cf1a",
+            "theta": "0x8c69f2e3b594b0bf"
+          },
+          {
+            "id": "0x9b2aac958c4a32f2979a7833c2c20e84",
+            "theta": "0x3679c597189ba53f"
+          },
+          {
+            "id": "0xc00e35593c14f7faaec9435b053f57ef",
+            "theta": "0x829798e71ba1ed3f"
+          },
+          {
+            "id": "0xc6323c2f426e65aab21b502944183201",
+            "theta": "0x1c5e698b22c9e83f"
+          }
+        ]
+      },
+      "id": "case_030",
+      "inputs": {
+        "l2": "0x0000000000000000",
+        "learning_rate": "0x9a9999999999993f",
+        "losers": [
+          "0xc00e35593c14f7faaec9435b053f57ef",
+          "0x9b2aac958c4a32f2979a7833c2c20e84",
+          "0x2209b1495eb38b6525e590d8f2b7cf1a"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x2209b1495eb38b6525e590d8f2b7cf1a",
+            "theta": "0x000000005442adbf"
+          },
+          {
+            "id": "0x9b2aac958c4a32f2979a7833c2c20e84",
+            "theta": "0x0000000068d4a93f"
+          },
+          {
+            "id": "0xc00e35593c14f7faaec9435b053f57ef",
+            "theta": "0x000000c07111ee3f"
+          },
+          {
+            "id": "0xc6323c2f426e65aab21b502944183201",
+            "theta": "0x00000040c6d6e73f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xc6323c2f426e65aab21b502944183201"
+      }
+    },
+    {
+      "description": "lr=0.5, l2=0.05, |losers|=3",
+      "expected_output": {
+        "post_theta": [
+          {
+            "id": "0x5ffa1eb3996005dc7bc35e67d0a9b73d",
+            "theta": "0x92284c4c671dcbbf"
+          },
+          {
+            "id": "0xb59068988ac612843d4faddec8888a98",
+            "theta": "0x952045a91d0edfbf"
+          },
+          {
+            "id": "0xe636aac2fb3dde96f027606aee779d49",
+            "theta": "0x5836083d1e7def3f"
+          },
+          {
+            "id": "0xee0d5e20d06d5104f3da138c0bb7482b",
+            "theta": "0x56f39cfca9bcbb3f"
+          }
+        ]
+      },
+      "id": "case_031",
+      "inputs": {
+        "l2": "0x9a9999999999a93f",
+        "learning_rate": "0x000000000000e03f",
+        "losers": [
+          "0x5ffa1eb3996005dc7bc35e67d0a9b73d",
+          "0xb59068988ac612843d4faddec8888a98",
+          "0xee0d5e20d06d5104f3da138c0bb7482b"
+        ],
+        "pre_theta": [
+          {
+            "id": "0x5ffa1eb3996005dc7bc35e67d0a9b73d",
+            "theta": "0x00000000989ca0bf"
+          },
+          {
+            "id": "0xb59068988ac612843d4faddec8888a98",
+            "theta": "0x000000801880d7bf"
+          },
+          {
+            "id": "0xe636aac2fb3dde96f027606aee779d49",
+            "theta": "0x000000404a51e13f"
+          },
+          {
+            "id": "0xee0d5e20d06d5104f3da138c0bb7482b",
+            "theta": "0x000000007d64d33f"
+          }
+        ],
+        "weight": "0x000000000000f03f",
+        "winner_id": "0xe636aac2fb3dde96f027606aee779d49"
+      }
+    }
+  ],
+  "cookbook_section": "§8.12",
+  "format_version": "1",
+  "generated_at": "2026-05-17T14:54:40Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-BradleyTerry.swift"
+  },
+  "output_crc32": "0x601126c7",
+  "primitive": "bradley_terry",
+  "seed": "0xcafebabedeadbeef"
+}

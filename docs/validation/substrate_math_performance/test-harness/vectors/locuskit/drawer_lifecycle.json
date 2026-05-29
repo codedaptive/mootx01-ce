@@ -1,0 +1,78 @@
+{
+  "format_version": "1",
+  "primitive": "locuskit_drawer_lifecycle",
+  "cookbook_section": "§7.8.1",
+  "generator": {
+    "language": "swift",
+    "harness_version": "1.0.0",
+    "reference_file": "LocusKit/Sources/LocusKit/EstateVerbs.swift"
+  },
+  "seed": "0x0000000000000001",
+  "generated_at": "2026-05-23T00:00:00Z",
+  "case_count": 3,
+  "schema_note": "Stateful operation-sequence. Each case fires `ops` in order against a fresh in-memory Estate and asserts `expected_observations` in order. The runner is the ground truth: outputs are the values the current Swift LocusKit produces. The schema admits operation-sequence vectors per the test-vector-format spec's per-primitive-schema flexibility (each primitive defines its own inputs/expected_output). No output_crc32 because outputs include internally-generated UUIDs that are not byte-stable across runs; per-observation equality is the conformance gate.",
+  "cases": [
+    {
+      "id": "case_000",
+      "description": "capture one drawer, peek by rowID returns it",
+      "inputs": {
+        "ops": [
+          { "op": "capture", "content": "first drawer", "room": "kitchen", "udc": "001", "addedBy": "alice", "embeddingModelID": "test-v1" },
+          { "op": "peek", "drawerIndex": 0 }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "captured", "captureIndex": 0, "expectContent": "first drawer", "expectRoom": "kitchen", "expectUDC": "001", "expectStateActive": true },
+          { "kind": "peeked", "peekIndex": 0, "found": true, "expectContent": "first drawer", "expectStateActive": true }
+        ]
+      }
+    },
+    {
+      "id": "case_001",
+      "description": "capture three drawers, withdraw the middle one, peek confirms state transition to withdrawn",
+      "inputs": {
+        "ops": [
+          { "op": "capture", "content": "alpha", "room": "study", "udc": "5", "addedBy": "bob", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "beta",  "room": "study", "udc": "5", "addedBy": "bob", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "gamma", "room": "study", "udc": "5", "addedBy": "bob", "embeddingModelID": "test-v1" },
+          { "op": "withdraw", "drawerIndex": 1, "reason": "obsolete" },
+          { "op": "peek", "drawerIndex": 1 },
+          { "op": "peek", "drawerIndex": 0 },
+          { "op": "peek", "drawerIndex": 2 }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "captured", "captureIndex": 0, "expectContent": "alpha", "expectRoom": "study", "expectUDC": "5", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 1, "expectContent": "beta",  "expectRoom": "study", "expectUDC": "5", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 2, "expectContent": "gamma", "expectRoom": "study", "expectUDC": "5", "expectStateActive": true },
+          { "kind": "withdrew", "withdrawIndex": 1 },
+          { "kind": "peeked", "peekIndex": 1, "found": true, "expectContent": "beta",  "expectStateActive": false },
+          { "kind": "peeked", "peekIndex": 0, "found": true, "expectContent": "alpha", "expectStateActive": true },
+          { "kind": "peeked", "peekIndex": 2, "found": true, "expectContent": "gamma", "expectStateActive": true }
+        ]
+      }
+    },
+    {
+      "id": "case_002",
+      "description": "capture, withdraw, then recall — withdrawn rows excluded by default state filter",
+      "inputs": {
+        "ops": [
+          { "op": "capture", "content": "live",      "room": "den", "udc": "9", "addedBy": "carol", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "to-remove", "room": "den", "udc": "9", "addedBy": "carol", "embeddingModelID": "test-v1" },
+          { "op": "withdraw", "drawerIndex": 1, "reason": "test" },
+          { "op": "recallAll", "room": "den" }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "captured", "captureIndex": 0, "expectContent": "live",      "expectRoom": "den", "expectUDC": "9", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 1, "expectContent": "to-remove", "expectRoom": "den", "expectUDC": "9", "expectStateActive": true },
+          { "kind": "withdrew", "withdrawIndex": 1 },
+          { "kind": "recalled", "expectCount": 1, "expectFirstContent": "live" }
+        ]
+      }
+    }
+  ]
+}

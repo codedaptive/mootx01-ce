@@ -1,0 +1,12 @@
+[package]
+name = "aria-lexicon-lib"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "The reified ARIA grammar: one noun, nine verbs, four adjectives, and the verb-noun acceptance matrix, as data. Canonical statement in ARIA_LEXICON.md. The Rust port, conformance-gated against the Swift port."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "aria_lexicon_lib"
+path = "src/lib.rs"

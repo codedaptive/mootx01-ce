@@ -1,0 +1,1360 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "n=4",
+      "expected_output": {
+        "spectrum": [
+          "0x18d909beba42e13f",
+          "0x06a4817a026ffe3f",
+          "0xa0f84b39a86be83f",
+          "0x06a4817a026ffe3f"
+        ]
+      },
+      "id": "case_000",
+      "inputs": {
+        "signal": [
+          "0x3c136f704680eb3f",
+          "0x40f4cfcbaa46b13f",
+          "0x0023102ebd14efbf",
+          "0x54ea30225caee23f"
+        ]
+      }
+    },
+    {
+      "description": "n=8",
+      "expected_output": {
+        "spectrum": [
+          "0x883a01c6d57ec23f",
+          "0x181796f4e74c0440",
+          "0x74204d26cdc6f73f",
+          "0xa819a0eb7107dd3f",
+          "0x9471de7324b00640",
+          "0xb219a0eb7107dd3f",
+          "0x72204d26cdc6f73f",
+          "0x191796f4e74c0440"
+        ]
+      },
+      "id": "case_001",
+      "inputs": {
+        "signal": [
+          "0x988160505780e0bf",
+          "0x7edb8ac87cc2ecbf",
+          "0x78e26355d0c7e33f",
+          "0x524c5c71e577e03f",
+          "0x84e9f2c85436e73f",
+          "0xfcea3d1b2e84d2bf",
+          "0x16c086d25532e53f",
+          "0x2e372fcabf83e5bf"
+        ]
+      }
+    },
+    {
+      "description": "n=16",
+      "expected_output": {
+        "spectrum": [
+          "0xc8a9d8fee190c23f",
+          "0xe2c549cdee61f53f",
+          "0xce306ccf9ccf0540",
+          "0x72415e3d0dd71340",
+          "0x74413f9ce25af23f",
+          "0xde9074250285ea3f",
+          "0x2029d265e2720540",
+          "0xd4a03f71e1defe3f",
+          "0xf1232e4170faf33f",
+          "0xd6a03f71e1defe3f",
+          "0x2129d265e2720540",
+          "0xde9074250285ea3f",
+          "0x73413f9ce25af23f",
+          "0x72415e3d0dd71340",
+          "0xcd306ccf9ccf0540",
+          "0xe0c549cdee61f53f"
+        ]
+      },
+      "id": "case_002",
+      "inputs": {
+        "signal": [
+          "0xd0218c232023e13f",
+          "0x602ef4945c5fb53f",
+          "0x1a9150772022e83f",
+          "0x8e20cd6421f6e1bf",
+          "0x3628c21671ccefbf",
+          "0xacd38ecb1d6ee63f",
+          "0x286b34e8fb7ddd3f",
+          "0x7825200399d2ea3f",
+          "0x844f820f706cd6bf",
+          "0x0488f483b0abe8bf",
+          "0x207cd2aa0345ecbf",
+          "0xf0719e332348babf",
+          "0x40ae8de5756cca3f",
+          "0x489fa6d8f8d0e93f",
+          "0x5c2daf800600d2bf",
+          "0x7cdc6ad3700cd3bf"
+        ]
+      }
+    },
+    {
+      "description": "n=32",
+      "expected_output": {
+        "spectrum": [
+          "0x95da8b262042fb3f",
+          "0x85311902a5e9fd3f",
+          "0xe744b6335d92fc3f",
+          "0x24701fbbd0cd1540",
+          "0x1887c99604510140",
+          "0x8bfdff11a591f53f",
+          "0xe8d3941d308e0040",
+          "0x8acba17670a2f73f",
+          "0xcf3ad09065371240",
+          "0xaea2c5410c2f1640",
+          "0x3fa26f18b01be03f",
+          "0x4b30e47189a6fb3f",
+          "0xc7f93cfb31cf1540",
+          "0x6a2ac731f7310440",
+          "0x5a40d7528beb0840",
+          "0x2307056dd51d0740",
+          "0x8aa4f23cd12bed3f",
+          "0x2207056dd51d0740",
+          "0x5c40d7528beb0840",
+          "0x6c2ac731f7310440",
+          "0xc7f93cfb31cf1540",
+          "0x4e30e47189a6fb3f",
+          "0x3da26f18b01be03f",
+          "0xafa2c5410c2f1640",
+          "0xcf3ad09065371240",
+          "0x8dcba17670a2f73f",
+          "0xe7d3941d308e0040",
+          "0x8bfdff11a591f53f",
+          "0x1887c99604510140",
+          "0x23701fbbd0cd1540",
+          "0xe144b6335d92fc3f",
+          "0x81311902a5e9fd3f"
+        ]
+      },
+      "id": "case_003",
+      "inputs": {
+        "signal": [
+          "0x805bcc61f366a93f",
+          "0x60ba21b4d074e2bf",
+          "0xf0bf1e826658d5bf",
+          "0xe87a876ff32cd2bf",
+          "0x8cb8390129e2d93f",
+          "0xe85e13790408c83f",
+          "0x503f8d9e48c5b8bf",
+          "0x92a218b8f040eb3f",
+          "0xf8330a0d5d62c0bf",
+          "0xb053dc08805ce13f",
+          "0x4c2a8f087839d3bf",
+          "0xf07c38ec079ddfbf",
+          "0x54084ca2f7a6dfbf",
+          "0x0a3e864c4a31eabf",
+          "0xe01d7c65f68bdf3f",
+          "0xa053675682aab83f",
+          "0xa215df1ae007efbf",
+          "0x3cf7288f985eee3f",
+          "0xa4e48d6b7311e63f",
+          "0xc00e58ba7a13cebf",
+          "0x387caf9f6ab9d23f",
+          "0x9cbd090708a2d53f",
+          "0xe0f3b13a7d7ee43f",
+          "0xa8ecb4c18bffd0bf",
+          "0x1033bf007d00e9bf",
+          "0x5a3b6677642be93f",
+          "0xb00d437ff22bbe3f",
+          "0xf4f978083788e6bf",
+          "0xe61ddbee7c07e83f",
+          "0x604cc46bc175de3f",
+          "0x92dce12ff126ef3f",
+          "0xccfef136f00cddbf"
+        ]
+      }
+    },
+    {
+      "description": "n=4",
+      "expected_output": {
+        "spectrum": [
+          "0x703292866886e13f",
+          "0x1c6e851911f9f13f",
+          "0x1e4a69bd7ebdf43f",
+          "0x1c6e851911f9f13f"
+        ]
+      },
+      "id": "case_004",
+      "inputs": {
+        "signal": [
+          "0x007a10ad605878bf",
+          "0x421b23ff3f86e03f",
+          "0x6242583f0250edbf",
+          "0x70a90b14d62fc2bf"
+        ]
+      }
+    },
+    {
+      "description": "n=8",
+      "expected_output": {
+        "spectrum": [
+          "0x2c5ec05acc7ffb3f",
+          "0x99c1f8277d71cb3f",
+          "0x88cf03c95a55f03f",
+          "0x967d30fe98880740",
+          "0x70b20257cebdc23f",
+          "0x977d30fe98880740",
+          "0x89cf03c95a55f03f",
+          "0xb0c1f8277d71cb3f"
+        ]
+      },
+      "id": "case_005",
+      "inputs": {
+        "signal": [
+          "0x322696333d81e3bf",
+          "0xc056724de9f8e93f",
+          "0xc67cb49ceaeee33f",
+          "0x96e4435cbaffe3bf",
+          "0x748a894fc33be83f",
+          "0x30280c70622dba3f",
+          "0x80b509ce75a88f3f",
+          "0x4abd70e6aa98e43f"
+        ]
+      }
+    },
+    {
+      "description": "n=16",
+      "expected_output": {
+        "spectrum": [
+          "0x3ca92ed09751f43f",
+          "0xef9887cae5280940",
+          "0x6c5ebc15d000e03f",
+          "0xa1fce5a9b8c3f83f",
+          "0xa9e33a3cee5ee03f",
+          "0xf2420611de9dfb3f",
+          "0xb6c9c3b42ea50d40",
+          "0x461ebff4fc09f43f",
+          "0x6829fc37353cec3f",
+          "0x461ebff4fc09f43f",
+          "0xb5c9c3b42ea50d40",
+          "0xf1420611de9dfb3f",
+          "0xa9e33a3cee5ee03f",
+          "0xa5fce5a9b8c3f83f",
+          "0x6f5ebc15d000e03f",
+          "0xf09887cae5280940"
+        ]
+      },
+      "id": "case_006",
+      "inputs": {
+        "signal": [
+          "0xb0feee5c037ee53f",
+          "0x507a3b6e2765cd3f",
+          "0xc0fd04e825f0bbbf",
+          "0x089ff38a5e60d43f",
+          "0xf0c1e2172464b23f",
+          "0xe835e4efe908dc3f",
+          "0x102fd45029c2b73f",
+          "0xd0cc9c897ca2eabf",
+          "0x10ef7f15d041b1bf",
+          "0x8c9e9db6d89ed2bf",
+          "0x98682fe63efceebf",
+          "0xe801f6e0b388c43f",
+          "0xea84d21e55e5e0bf",
+          "0x3accd0eccaeaeabf",
+          "0xc4197c868891e43f",
+          "0x4c3e51573386d0bf"
+        ]
+      }
+    },
+    {
+      "description": "n=32",
+      "expected_output": {
+        "spectrum": [
+          "0x50aec14f5ccbb33f",
+          "0x97278019fafe0e40",
+          "0x4718505e2ac80840",
+          "0xf44e51cda9a01740",
+          "0xd97adbac610b1140",
+          "0xaaa269fa63290c40",
+          "0xdfdc68e8cea61340",
+          "0x832223a2882a1140",
+          "0x0eb09b39eb020640",
+          "0x0a2457c0ef331140",
+          "0xf351134ea7c10240",
+          "0xae1244e710810640",
+          "0xc8a9c85c4cf9f43f",
+          "0x6204844055210b40",
+          "0x5ed8e386302edf3f",
+          "0x64cdd990dd99d63f",
+          "0x38de3b7d8290ca3f",
+          "0x6bcdd990dd99d63f",
+          "0x80d8e386302edf3f",
+          "0x6404844055210b40",
+          "0xcda9c85c4cf9f43f",
+          "0xb01244e710810640",
+          "0xf351134ea7c10240",
+          "0x0a2457c0ef331140",
+          "0x0eb09b39eb020640",
+          "0x842223a2882a1140",
+          "0xdedc68e8cea61340",
+          "0xaaa269fa63290c40",
+          "0xd97adbac610b1140",
+          "0xf14e51cda9a01740",
+          "0x4618505e2ac80840",
+          "0x93278019fafe0e40"
+        ]
+      },
+      "id": "case_007",
+      "inputs": {
+        "signal": [
+          "0x64f0fe479f7be03f",
+          "0x90edcd3436d8b8bf",
+          "0x886b1bfd8f03c53f",
+          "0x18ec2948c87ee23f",
+          "0x80bfea3cf1aaa33f",
+          "0x04dbfec447c8ec3f",
+          "0x8cfa14e94995e53f",
+          "0xf0abad50942bc2bf",
+          "0x460533996efbe0bf",
+          "0x80df30fdc545ebbf",
+          "0x90d82762cd2dd9bf",
+          "0xb8630186c568c63f",
+          "0xac28b533cd14ec3f",
+          "0x6a91d183697eeb3f",
+          "0x9487881fe78de63f",
+          "0x40240fc241449f3f",
+          "0x66e1afb043eeecbf",
+          "0x1047727b5d31ca3f",
+          "0x286d75bcbcddc1bf",
+          "0x1a7c2407926ee5bf",
+          "0x50b1f8291c3bccbf",
+          "0xe2390d965a43efbf",
+          "0x1c5e74917c29efbf",
+          "0x0027c1343ed7babf",
+          "0xa27ea411d7c3ed3f",
+          "0x18ad6b3396d9d3bf",
+          "0x96eafe5374a0eebf",
+          "0xdae1909ad5efe23f",
+          "0x7067637190b5e73f",
+          "0xb0f67cdad23ecc3f",
+          "0x589c8bd72392d8bf",
+          "0x58069bcb6f2bdebf"
+        ]
+      }
+    },
+    {
+      "description": "n=4",
+      "expected_output": {
+        "spectrum": [
+          "0x7cb3905feb47d03f",
+          "0xdd49a24ea9b3dc3f",
+          "0x740792b4e834d73f",
+          "0xdd49a24ea9b3dc3f"
+        ]
+      },
+      "id": "case_008",
+      "inputs": {
+        "signal": [
+          "0xa05eac86d975ccbf",
+          "0x00e752f680ecd03f",
+          "0xa80aab31dc88c53f",
+          "0xc0b3f39d488fa63f"
+        ]
+      }
+    },
+    {
+      "description": "n=8",
+      "expected_output": {
+        "spectrum": [
+          "0xa07eac3ab041aa3f",
+          "0xbd0f68b9295bf53f",
+          "0x9c340add71aa0640",
+          "0x4e689ab328df0040",
+          "0x74cc06ba10b4d63f",
+          "0x4e689ab328df0040",
+          "0x9c340add71aa0640",
+          "0xbc0f68b9295bf53f"
+        ]
+      },
+      "id": "case_009",
+      "inputs": {
+        "signal": [
+          "0x60e8d48a9fefcabf",
+          "0xe883aab6dc4bd7bf",
+          "0x1a2f5a09b270edbf",
+          "0xd85080eb3dd2e33f",
+          "0x849a84e9a230d63f",
+          "0x0868917b8eecedbf",
+          "0xc8cca0ca5139e43f",
+          "0x3670bd9b503fec3f"
+        ]
+      }
+    },
+    {
+      "description": "n=16",
+      "expected_output": {
+        "spectrum": [
+          "0x2cb7f89072f7df3f",
+          "0xc598bdc088b50140",
+          "0x102e30dc5eb11040",
+          "0x08421533f610f63f",
+          "0x1653670a15d6d93f",
+          "0xad37ecbc98c10940",
+          "0x09bd84f0615e0440",
+          "0xef1e1c894fbff23f",
+          "0x4536cb7dc73df33f",
+          "0xf21e1c894fbff23f",
+          "0x0bbd84f0615e0440",
+          "0xac37ecbc98c10940",
+          "0x1653670a15d6d93f",
+          "0x0b421533f610f63f",
+          "0x0f2e30dc5eb11040",
+          "0xc798bdc088b50140"
+        ]
+      },
+      "id": "case_010",
+      "inputs": {
+        "signal": [
+          "0xa0fcc1166e49d33f",
+          "0xb47d1bd4d8c2efbf",
+          "0xf8a7495a5ff7c03f",
+          "0x26e4997a48bce4bf",
+          "0x88ecf6fd0850e6bf",
+          "0x201e9a1a7046af3f",
+          "0x16ffc8160f42ec3f",
+          "0x14f44be2171ee43f",
+          "0x8495e6b8d857e53f",
+          "0x28e6ded1900ccb3f",
+          "0x48850b03178ecfbf",
+          "0x3680b46f1c50efbf",
+          "0x403bc1bcde55b8bf",
+          "0x2827ce1901c6df3f",
+          "0x2cffc34141fee2bf",
+          "0xd83518eeebb5d73f"
+        ]
+      }
+    },
+    {
+      "description": "n=32",
+      "expected_output": {
+        "spectrum": [
+          "0x70128e0299b11140",
+          "0x4cc118da5039fc3f",
+          "0xc03fc8fc8bd20840",
+          "0xc8aede96cde6ed3f",
+          "0x0a5ff8baaae6bc3f",
+          "0x6e2242cb9a02f73f",
+          "0x17cadfd5be65fa3f",
+          "0x6cdaef10acdc0840",
+          "0xe88f85ceeda01040",
+          "0xb5c550229c2e0840",
+          "0x852499d678860640",
+          "0x649bf573796b0f40",
+          "0x564418fe69390640",
+          "0x7d06090a473f0840",
+          "0x3aea1d717b981040",
+          "0x7d57f653ec830440",
+          "0xff53c25443140640",
+          "0x7f57f653ec830440",
+          "0x3cea1d717b981040",
+          "0x7e06090a473f0840",
+          "0x574418fe69390640",
+          "0x659bf573796b0f40",
+          "0x872499d678860640",
+          "0xb4c550229c2e0840",
+          "0xe88f85ceeda01040",
+          "0x6cdaef10acdc0840",
+          "0x17cadfd5be65fa3f",
+          "0x6a2242cb9a02f73f",
+          "0xff5ef8baaae6bc3f",
+          "0xcfaede96cde6ed3f",
+          "0xbb3fc8fc8bd20840",
+          "0x4dc118da5039fc3f"
+        ]
+      },
+      "id": "case_011",
+      "inputs": {
+        "signal": [
+          "0xc85d52a7564ae7bf",
+          "0xd46a5ff3ab93eebf",
+          "0xa862557c0be5ef3f",
+          "0xee4ee4ec59d7e23f",
+          "0x2c72c067d33cd1bf",
+          "0xa4ce1957a759d9bf",
+          "0x2030565907a1e03f",
+          "0x40f8413cd0c6d33f",
+          "0x9caa635cdd6ed2bf",
+          "0x304b726d2ee4b53f",
+          "0xc01e8449d149a0bf",
+          "0xcc934e5621c7dfbf",
+          "0x58550b6a111ad43f",
+          "0xbc3df0d24366eebf",
+          "0x2c02335d7a3ada3f",
+          "0x4cc6836bf245ecbf",
+          "0x706df9df7062b93f",
+          "0x109cbba87437c9bf",
+          "0x04bc48285299debf",
+          "0x000d9d6c6c98a3bf",
+          "0x18df8f149ebbccbf",
+          "0x102bb7b92bc3b8bf",
+          "0x68080321f5bec2bf",
+          "0xe6c00092dcbbe53f",
+          "0x10de865cf78ae8bf",
+          "0x604e3edf1a4bb9bf",
+          "0xd88cc8358986c33f",
+          "0xda211d705f0febbf",
+          "0xc027411825c1c0bf",
+          "0x7a9e2b621e45e1bf",
+          "0x7086a5c297a1d0bf",
+          "0x4001da01882fcf3f"
+        ]
+      }
+    },
+    {
+      "description": "n=4",
+      "expected_output": {
+        "spectrum": [
+          "0xf09ecb790425e53f",
+          "0x95fffbd2782fe23f",
+          "0xd42b8db04305e93f",
+          "0x95fffbd2782fe23f"
+        ]
+      },
+      "id": "case_012",
+      "inputs": {
+        "signal": [
+          "0x70689da3a151b53f",
+          "0x7edc7f5556e0e33f",
+          "0x00ce513f4f69c2bf",
+          "0x204764fd6da6b93f"
+        ]
+      }
+    },
+    {
+      "description": "n=8",
+      "expected_output": {
+        "spectrum": [
+          "0x9cdbdf5f18c6d73f",
+          "0x23139c2591930340",
+          "0x2c6b211afba0ee3f",
+          "0xf55db8f8b857f33f",
+          "0x702fd490b955b93f",
+          "0xf25db8f8b857f33f",
+          "0x2d6b211afba0ee3f",
+          "0x23139c2591930340"
+        ]
+      },
+      "id": "case_013",
+      "inputs": {
+        "signal": [
+          "0x900b7dc4e23cb3bf",
+          "0xfcebdc80a9cbd53f",
+          "0xb6f391cd3555e3bf",
+          "0xc482dd06e8efefbf",
+          "0x386eef9dc5acc5bf",
+          "0x80ffc099b204ab3f",
+          "0xd83698dc21a1e33f",
+          "0xbc91d03b3bfbdd3f"
+        ]
+      }
+    },
+    {
+      "description": "n=16",
+      "expected_output": {
+        "spectrum": [
+          "0x3cf6df4159b8d33f",
+          "0xcb9f56345ea30840",
+          "0xb5322e73800ff93f",
+          "0x63d7e224c2b8f63f",
+          "0xf415aa65a0d2d63f",
+          "0x528fc4430d050a40",
+          "0xec539a3949ebf23f",
+          "0xc7365e886268f13f",
+          "0x4b2855819b7df13f",
+          "0xca365e886268f13f",
+          "0xec539a3949ebf23f",
+          "0x518fc4430d050a40",
+          "0xf415aa65a0d2d63f",
+          "0x63d7e224c2b8f63f",
+          "0xb6322e73800ff93f",
+          "0xca9f56345ea30840"
+        ]
+      },
+      "id": "case_014",
+      "inputs": {
+        "signal": [
+          "0xbc12aa0b862dd5bf",
+          "0x083022552d4ad03f",
+          "0xf4dbd2b29082ebbf",
+          "0x30526ab3ea12b63f",
+          "0x803c44f6cd4e81bf",
+          "0x14689bb7c5e3eabf",
+          "0xc0975f57e13ac6bf",
+          "0x1c9ce0cabfd2dd3f",
+          "0xfafd0d56f7a2e13f",
+          "0x00f3f4fbd6f9db3f",
+          "0xe28892b001dbe23f",
+          "0x00a165db50f7cd3f",
+          "0x800c2e6bd8f1d8bf",
+          "0x603a432d8cffd83f",
+          "0x1052eee3ba1bb4bf",
+          "0x789c6bc90e58e4bf"
+        ]
+      }
+    },
+    {
+      "description": "n=32",
+      "expected_output": {
+        "spectrum": [
+          "0x01207eb47d80fe3f",
+          "0xec8b7a9734790340",
+          "0x25e5d0b9c1950c40",
+          "0x38e6143bff810640",
+          "0x6df9210e12970640",
+          "0x956219076d410640",
+          "0x6f470f7fc9920a40",
+          "0xd2a62172e04eef3f",
+          "0x34fcf4fc1207ff3f",
+          "0x4f479f90c6e30340",
+          "0x72968e48f3190a40",
+          "0x925f5cf638b1f93f",
+          "0xf7e7e2f357f20040",
+          "0x2487d9880d3b1a40",
+          "0x7f638105df121240",
+          "0xd70d6999aea60940",
+          "0x188e8bf615c30e40",
+          "0xd50d6999aea60940",
+          "0x7e638105df121240",
+          "0x2587d9880d3b1a40",
+          "0xf9e7e2f357f20040",
+          "0x925f5cf638b1f93f",
+          "0x75968e48f3190a40",
+          "0x51479f90c6e30340",
+          "0x34fcf4fc1207ff3f",
+          "0xd1a62172e04eef3f",
+          "0x70470f7fc9920a40",
+          "0x926219076d410640",
+          "0x6bf9210e12970640",
+          "0x3ae6143bff810640",
+          "0x24e5d0b9c1950c40",
+          "0xed8b7a9734790340"
+        ]
+      },
+      "id": "case_015",
+      "inputs": {
+        "signal": [
+          "0xa652b5455f18e93f",
+          "0x806762ee8e0d993f",
+          "0x8035c70338f2a23f",
+          "0xf4b3d4d79d8de4bf",
+          "0x884c7387a766eb3f",
+          "0x8ce165ee60f7d23f",
+          "0xb80dabd923d9c63f",
+          "0x78f207122274cebf",
+          "0x7c5c6ec8d358de3f",
+          "0x485a840d1674e1bf",
+          "0xbc34b5a889a9d7bf",
+          "0xe0bfdf5ff991d03f",
+          "0x38a500c033fbe6bf",
+          "0xa04bfdcc5534e63f",
+          "0x948bcf95f97fdc3f",
+          "0xd893e79d6ee6e63f",
+          "0x34927fd0679bd73f",
+          "0xec9590821eefedbf",
+          "0x78e4cec5f9c4dd3f",
+          "0x40df939d473eefbf",
+          "0xc02de31b864bbd3f",
+          "0x12715de9fb52e03f",
+          "0x74e02ba53e07efbf",
+          "0x4cfae24c5228d2bf",
+          "0xdc31070c2d7de4bf",
+          "0xd4faf9f06479dc3f",
+          "0xc0623db79b91a63f",
+          "0x982ee08cb9e7c83f",
+          "0xdecf803c075cef3f",
+          "0xf4f2a3526896d9bf",
+          "0x047d9c6d716bea3f",
+          "0xa0181a6b495db6bf"
+        ]
+      }
+    },
+    {
+      "description": "n=4",
+      "expected_output": {
+        "spectrum": [
+          "0x806637cb1efc983f",
+          "0x24d7a6a5d362e13f",
+          "0xec2bcbaec3e3fb3f",
+          "0x24d7a6a5d362e13f"
+        ]
+      },
+      "id": "case_016",
+      "inputs": {
+        "signal": [
+          "0x4e47eb7fb16fe63f",
+          "0x409a72b1409ddbbf",
+          "0x101cccce8640c43f",
+          "0xcc787da227f2dcbf"
+        ]
+      }
+    },
+    {
+      "description": "n=8",
+      "expected_output": {
+        "spectrum": [
+          "0xe79056962779f03f",
+          "0xd1cd320b3464ed3f",
+          "0x524cff0ce146e03f",
+          "0x0bc3123a401ef43f",
+          "0x5a37cc9098630b40",
+          "0x0dc3123a401ef43f",
+          "0x524cff0ce146e03f",
+          "0xd4cd320b3464ed3f"
+        ]
+      },
+      "id": "case_017",
+      "inputs": {
+        "signal": [
+          "0x32eeb0305a8ce33f",
+          "0x58dc0ac35213d3bf",
+          "0xb2323572abdfec3f",
+          "0xcaf469fcac88e2bf",
+          "0xf0b95375fed1df3f",
+          "0x3c95603c5bc0e1bf",
+          "0x00077c694fadcb3f",
+          "0x9069383ca012ce3f"
+        ]
+      }
+    },
+    {
+      "description": "n=16",
+      "expected_output": {
+        "spectrum": [
+          "0x648415bdfcc4ee3f",
+          "0x640441c46d740040",
+          "0x130307d39da1ff3f",
+          "0x94947fdbd93ae23f",
+          "0xa521065d70e8fe3f",
+          "0x29968df83cb9f33f",
+          "0x27ca66599ab4ca3f",
+          "0xd110e14028c60440",
+          "0xd0c9459072ded93f",
+          "0xd110e14028c60440",
+          "0x2bca66599ab4ca3f",
+          "0x29968df83cb9f33f",
+          "0xa721065d70e8fe3f",
+          "0x90947fdbd93ae23f",
+          "0x140307d39da1ff3f",
+          "0x650441c46d740040"
+        ]
+      },
+      "id": "case_018",
+      "inputs": {
+        "signal": [
+          "0x16485c1df1abe6bf",
+          "0xdc0ab40fa506e1bf",
+          "0xe00b8bd5fe37ca3f",
+          "0xa093e655582dcabf",
+          "0x4e80e67d723de63f",
+          "0xa02652fd226faa3f",
+          "0x5ecc7c5bbc15e43f",
+          "0xf8d2c7254b79c73f",
+          "0x00602a07663f54bf",
+          "0x084db993d351c2bf",
+          "0xbc44e5f3433ad03f",
+          "0x08fdd9f1c7d9e73f",
+          "0x90c3c6d583acdabf",
+          "0xc0f6f8401583c73f",
+          "0x4036d8a4a6039d3f",
+          "0x008eff643b4077bf"
+        ]
+      }
+    },
+    {
+      "description": "n=32",
+      "expected_output": {
+        "spectrum": [
+          "0x0977999310c8f33f",
+          "0xe54002d6d1b30540",
+          "0x7798ef85b419f43f",
+          "0x7fddeb68e535ff3f",
+          "0x5a592bf91ffe0140",
+          "0xff600e4bec1f0940",
+          "0x5ffa44ec7c540b40",
+          "0xe5a2d6ed14771040",
+          "0x8dc959d7e2980340",
+          "0x1072f79b6b07fb3f",
+          "0x1466cbc338070d40",
+          "0x76f9940b05190040",
+          "0x7fbebdf23dca0140",
+          "0xb936fcd09e340940",
+          "0xafb8d17a3133d93f",
+          "0x725c08ff01051740",
+          "0x37a8282ceee5f03f",
+          "0x735c08ff01051740",
+          "0xb2b8d17a3133d93f",
+          "0xbd36fcd09e340940",
+          "0x80bebdf23dca0140",
+          "0x78f9940b05190040",
+          "0x1766cbc338070d40",
+          "0x0a72f79b6b07fb3f",
+          "0x8dc959d7e2980340",
+          "0xe5a2d6ed14771040",
+          "0x5bfa44ec7c540b40",
+          "0xff600e4bec1f0940",
+          "0x59592bf91ffe0140",
+          "0x7eddeb68e535ff3f",
+          "0x7698ef85b419f43f",
+          "0xdf4002d6d1b30540"
+        ]
+      },
+      "id": "case_019",
+      "inputs": {
+        "signal": [
+          "0x20fcdd1181c6d0bf",
+          "0xbccb5583f6feef3f",
+          "0x5c5577242bccd63f",
+          "0x4c9fdc21d76dd2bf",
+          "0x64d10be0d7cbe9bf",
+          "0x104603ecff7fc9bf",
+          "0x206c2a0e046fd53f",
+          "0x20ea4122cbf7ec3f",
+          "0x98d0cbd8adaee1bf",
+          "0x001d0b5a0df68ebf",
+          "0xac36e75bdda5d8bf",
+          "0x4a92add82c44e83f",
+          "0x0edb0d7bad54ebbf",
+          "0xee77961fb06be73f",
+          "0xbca8856f5c7bd93f",
+          "0xe0832fe787d6aabf",
+          "0x74fc8073b199dd3f",
+          "0x181a139871afc9bf",
+          "0xec7b0331bf48d9bf",
+          "0x805b9a86a0bad33f",
+          "0xc03fa58aeb99aa3f",
+          "0x4cbaf55b3272d1bf",
+          "0x00bdd7e94535c23f",
+          "0x4099c25f4af2ae3f",
+          "0x1c5feaf73bcada3f",
+          "0xc63f04ef7a20ecbf",
+          "0xf07b935cfe74bc3f",
+          "0xfefa4f5e368be2bf",
+          "0xa83b2d55921bc8bf",
+          "0x220ef8f84595e3bf",
+          "0x40cedd6a6afb953f",
+          "0xccb37fd41c2fe8bf"
+        ]
+      }
+    },
+    {
+      "description": "n=4",
+      "expected_output": {
+        "spectrum": [
+          "0x00c253293500bf3f",
+          "0x163cb27f6545e13f",
+          "0x6a402c079fdcf23f",
+          "0x163cb27f6545e13f"
+        ]
+      },
+      "id": "case_020",
+      "inputs": {
+        "signal": [
+          "0x482d76649100c3bf",
+          "0x30e3f85ccfd1b43f",
+          "0xf0f1f2b6ee58d8bf",
+          "0x2460226e6832e23f"
+        ]
+      }
+    },
+    {
+      "description": "n=8",
+      "expected_output": {
+        "spectrum": [
+          "0xa0b185fd3934f93f",
+          "0x2b9008207018ef3f",
+          "0x4f015a38e3d10440",
+          "0x8bd31beed546f83f",
+          "0xb0e065b67a7ecd3f",
+          "0x8bd31beed546f83f",
+          "0x4f015a38e3d10440",
+          "0x2d9008207018ef3f"
+        ]
+      },
+      "id": "case_021",
+      "inputs": {
+        "signal": [
+          "0x00e4e020ed4d83bf",
+          "0xb69cada653ffefbf",
+          "0x729261bb974ae6bf",
+          "0xb66feba55113ed3f",
+          "0x000fd64836ed903f",
+          "0x2c5ed7c8c59ce6bf",
+          "0x0000aedc627f913f",
+          "0x5014c7550cdababf"
+        ]
+      }
+    },
+    {
+      "description": "n=16",
+      "expected_output": {
+        "spectrum": [
+          "0x84c50fdaa2fe0040",
+          "0x7261383af4d0ff3f",
+          "0x0602b7c7f6d80540",
+          "0x853e896f9439fe3f",
+          "0xd83df67c7015e93f",
+          "0xb7f34c40fdd0d33f",
+          "0xbfed8a34df21f53f",
+          "0x8e09cadba9d31040",
+          "0xb47e6405ff7c0540",
+          "0x8d09cadba9d31040",
+          "0xbfed8a34df21f53f",
+          "0xbbf34c40fdd0d33f",
+          "0xd83df67c7015e93f",
+          "0x863e896f9439fe3f",
+          "0x0802b7c7f6d80540",
+          "0x7261383af4d0ff3f"
+        ]
+      },
+      "id": "case_022",
+      "inputs": {
+        "signal": [
+          "0xf84b8b09be69e2bf",
+          "0xb010e36cd07dd9bf",
+          "0x8405de95e599d5bf",
+          "0x94601e254b25e83f",
+          "0x38cbe9fa56ceca3f",
+          "0x56f536c6dbf3e83f",
+          "0x9445dcbf71ecd4bf",
+          "0x12c4c30b3c6ae8bf",
+          "0xece6e48fe361d53f",
+          "0xe8bac1faf7bae5bf",
+          "0xe4a11aab6025e53f",
+          "0xbae69cac8d38ebbf",
+          "0xf455643fdbe7d13f",
+          "0xbe4d795df2e5e0bf",
+          "0x000c8399c3bca23f",
+          "0x8ea23063ce0de7bf"
+        ]
+      }
+    },
+    {
+      "description": "n=32",
+      "expected_output": {
+        "spectrum": [
+          "0xb0754159f9fcff3f",
+          "0x6e48fec56f1c0140",
+          "0xbd391fb13ff60540",
+          "0x0a00a031f837ff3f",
+          "0x2c7158d55e5b1540",
+          "0xf49455989ede0d40",
+          "0x16b7d11152e51440",
+          "0xbd1963973c860940",
+          "0x778f71b71ee3f23f",
+          "0xb93bd08288cd1440",
+          "0xd60d8e4f7d740d40",
+          "0x36ee479e942c0340",
+          "0x444f9ca66ab50540",
+          "0xd449f4e13d950a40",
+          "0x3cf4ac81ef8ef03f",
+          "0x9204b96f21360440",
+          "0x0c8391bdc5f7e73f",
+          "0x9204b96f21360440",
+          "0x3ef4ac81ef8ef03f",
+          "0xd349f4e13d950a40",
+          "0x474f9ca66ab50540",
+          "0x3bee479e942c0340",
+          "0xd80d8e4f7d740d40",
+          "0xba3bd08288cd1440",
+          "0x778f71b71ee3f23f",
+          "0xbd1963973c860940",
+          "0x17b7d11152e51440",
+          "0xf29455989ede0d40",
+          "0x2c7158d55e5b1540",
+          "0x0700a031f837ff3f",
+          "0xb9391fb13ff60540",
+          "0x6c48fec56f1c0140"
+        ]
+      },
+      "id": "case_023",
+      "inputs": {
+        "signal": [
+          "0x826a7de55793ec3f",
+          "0x3ada757e901eec3f",
+          "0xa079c6903889a83f",
+          "0xb4ffbdf62d51dc3f",
+          "0x90d9cebe4eb9bb3f",
+          "0x400919bf9d67c0bf",
+          "0x60c69d0d915caebf",
+          "0x84cb00f86584d03f",
+          "0xd8d0d4e60afbdcbf",
+          "0xb8429791322fcdbf",
+          "0xcab99cb86249e4bf",
+          "0x48c6621321e0ed3f",
+          "0x20ced910b5e3c53f",
+          "0x5c6ff9da497febbf",
+          "0x9451650a4d0ed2bf",
+          "0xc45a1ffc93efdebf",
+          "0xcc3f9a1f4c60de3f",
+          "0x90813673a2ddce3f",
+          "0xb069a0a34107de3f",
+          "0xf87ce460a256d83f",
+          "0x929ee9f2565ae7bf",
+          "0xd0c26921092dc03f",
+          "0xbc4c85a10149e93f",
+          "0x2c2edb40e8dfe9bf",
+          "0x3ce3e2ea9f12d2bf",
+          "0xb42b5a5db663ee3f",
+          "0x64644e26efdeea3f",
+          "0xa4253729ebcfd0bf",
+          "0x80d342929f18a63f",
+          "0xb8f73ed13e11ecbf",
+          "0x2ce84708afb0e8bf",
+          "0x429ec8cf92f3e93f"
+        ]
+      }
+    },
+    {
+      "description": "n=4",
+      "expected_output": {
+        "spectrum": [
+          "0x24eb4e6d38e2eb3f",
+          "0x139dfa9b2899f53f",
+          "0x00eeaf2708f69e3f",
+          "0x149dfa9b2899f53f"
+        ]
+      },
+      "id": "case_024",
+      "inputs": {
+        "signal": [
+          "0x68fdf8ef3b9ecf3f",
+          "0x7436cca22019e7bf",
+          "0x34f50612d35ce5bf",
+          "0x54020c975858d13f"
+        ]
+      }
+    },
+    {
+      "description": "n=8",
+      "expected_output": {
+        "spectrum": [
+          "0xf99e12d499810940",
+          "0x9a89a8faca57fb3f",
+          "0x1d21f625209ff03f",
+          "0x30451a3f800ef53f",
+          "0x80e24a242a37953f",
+          "0x30451a3f800ef53f",
+          "0x1c21f625209ff03f",
+          "0x9a89a8faca57fb3f"
+        ]
+      },
+      "id": "case_025",
+      "inputs": {
+        "signal": [
+          "0x30fb7ff7f619da3f",
+          "0x4679f1673293ed3f",
+          "0x9895ca9c14aeec3f",
+          "0xd851c5e79d6fc03f",
+          "0xc8644e54f505e73f",
+          "0x84fd3f929f93d13f",
+          "0x20cb89da5c25dcbf",
+          "0xfc39674b4dbed13f"
+        ]
+      }
+    },
+    {
+      "description": "n=16",
+      "expected_output": {
+        "spectrum": [
+          "0xfd37dcc72b22f43f",
+          "0x683ac09cb50efc3f",
+          "0xfcb5e0fda456f93f",
+          "0xc31dc88831d9f73f",
+          "0x83eacc0a71261040",
+          "0x261409a445beee3f",
+          "0x917ca48727c8f13f",
+          "0xe946e4b4494b0c40",
+          "0xc21a0ef2d8e6eb3f",
+          "0xe946e4b4494b0c40",
+          "0x927ca48727c8f13f",
+          "0x261409a445beee3f",
+          "0x83eacc0a71261040",
+          "0xc31dc88831d9f73f",
+          "0xfcb5e0fda456f93f",
+          "0x6d3ac09cb50efc3f"
+        ]
+      },
+      "id": "case_026",
+      "inputs": {
+        "signal": [
+          "0x60a338f73194c33f",
+          "0x02009c1ba5bfe53f",
+          "0xbaabae72a080edbf",
+          "0xac68c6c5d3d5d63f",
+          "0x126f3fd26697e63f",
+          "0x40ebd3062f40db3f",
+          "0x680a5f39c682debf",
+          "0xd073b64e0ac4e2bf",
+          "0xee45fb0f7233e73f",
+          "0xe83c58662e1bd8bf",
+          "0x78a76a5eebcbd5bf",
+          "0xd2c33ebf1b55e7bf",
+          "0x207c0220d1b0ea3f",
+          "0x200979344ad5b63f",
+          "0x20e0d6feb5b9d83f",
+          "0x2c6bfc8e5960d53f"
+        ]
+      }
+    },
+    {
+      "description": "n=32",
+      "expected_output": {
+        "spectrum": [
+          "0x8b4cb6ec5167fa3f",
+          "0xbfb5e2657b290240",
+          "0x3c3a52fa66981140",
+          "0x02b5c575663e1440",
+          "0x1c5cdd498b930d40",
+          "0xda59aa89bb1b0740",
+          "0xece76438e5321340",
+          "0x4c26d4e741d2f73f",
+          "0x6b07c064073c0840",
+          "0x12b8c93b5a530240",
+          "0x27ae979106b40940",
+          "0x7379a6f74e63e53f",
+          "0x5c995cee8e8c1240",
+          "0x07b427095101f23f",
+          "0x4df3a7f4a3271140",
+          "0xdd2cd5b3c81c1140",
+          "0x625a917d740deb3f",
+          "0xdf2cd5b3c81c1140",
+          "0x4ff3a7f4a3271140",
+          "0x08b427095101f23f",
+          "0x5d995cee8e8c1240",
+          "0x7479a6f74e63e53f",
+          "0x29ae979106b40940",
+          "0x10b8c93b5a530240",
+          "0x6b07c064073c0840",
+          "0x4926d4e741d2f73f",
+          "0xebe76438e5321340",
+          "0xd959aa89bb1b0740",
+          "0x1a5cdd498b930d40",
+          "0x02b5c575663e1440",
+          "0x3a3a52fa66981140",
+          "0xc0b5e2657b290240"
+        ]
+      },
+      "id": "case_027",
+      "inputs": {
+        "signal": [
+          "0xca277da75f4ee0bf",
+          "0x6210fae59aabeabf",
+          "0x189e1721b732d53f",
+          "0xfaabf5ee79b3efbf",
+          "0x424d160fc5bdee3f",
+          "0xf2d056c1cfd5eb3f",
+          "0x0a6b25a3928cec3f",
+          "0x60e2cd080b3ba03f",
+          "0xf84eb6a14c74cabf",
+          "0xc8db4903124ce9bf",
+          "0xe002fa71c6d6e73f",
+          "0x5257fac67111ee3f",
+          "0x8069017069d4a93f",
+          "0x601ff1de5242adbf",
+          "0x10fccf1315cbc6bf",
+          "0xbec76c265801e73f",
+          "0x5028e68b1592e0bf",
+          "0x40a2612a1a4ba03f",
+          "0x48addec8888ac83f",
+          "0x7ee8f78ba4ebeebf",
+          "0x0afb1c3dd22de5bf",
+          "0x30aac2fb3ddec63f",
+          "0xf0cfca084431dbbf",
+          "0xa0cfc3e4949ca0bf",
+          "0xb09a14271880d7bf",
+          "0x38007c597d64d33f",
+          "0x2ab2664a4a51e13f",
+          "0x0c9b8fa375fdef3f",
+          "0x80a440c3a4d9aebf",
+          "0xf21ac7246691eb3f",
+          "0xe882d9b0598dd8bf",
+          "0x80f44f41fddb90bf"
+        ]
+      }
+    },
+    {
+      "description": "n=4",
+      "expected_output": {
+        "spectrum": [
+          "0x86655967548ce73f",
+          "0x6e41fab84659f93f",
+          "0xb454f4c9d242da3f",
+          "0x6e41fab84659f93f"
+        ]
+      },
+      "id": "case_028",
+      "inputs": {
+        "signal": [
+          "0xb0dc801de1e9e4bf",
+          "0xc8c274d1f2b8d03f",
+          "0x347ea238d768df3f",
+          "0x5429e44e58b3eabf"
+        ]
+      }
+    },
+    {
+      "description": "n=8",
+      "expected_output": {
+        "spectrum": [
+          "0xd0086916f2b2bf3f",
+          "0x5b56026c1b6dcf3f",
+          "0xab112089bddbf03f",
+          "0xcbb5b193e217f73f",
+          "0x7e974fe1e7f8e63f",
+          "0xcab5b193e217f73f",
+          "0xac112089bddbf03f",
+          "0x5756026c1b6dcf3f"
+        ]
+      },
+      "id": "case_029",
+      "inputs": {
+        "signal": [
+          "0x00076acc965f85bf",
+          "0x06a2a69fea53e2bf",
+          "0xc029f1a6e54bc83f",
+          "0x704672baa610cc3f",
+          "0xd0c14a15e5bcc3bf",
+          "0xe000b7bc9124c93f",
+          "0x589c8cb6c98bdcbf",
+          "0xc8163ba2c20fdd3f"
+        ]
+      }
+    },
+    {
+      "description": "n=16",
+      "expected_output": {
+        "spectrum": [
+          "0x0688765206310440",
+          "0x4160628c57bdef3f",
+          "0x435347d0f175f63f",
+          "0x100e19ebb3ca0140",
+          "0xce356233ee24ee3f",
+          "0xd09a1c6ba32adc3f",
+          "0xb05110b6437d0540",
+          "0x19fc12ff12341140",
+          "0xb68a3646c2cde53f",
+          "0x19fc12ff12341140",
+          "0xaf5110b6437d0540",
+          "0xd49a1c6ba32adc3f",
+          "0xcd356233ee24ee3f",
+          "0x110e19ebb3ca0140",
+          "0x425347d0f175f63f",
+          "0x4360628c57bdef3f"
+        ]
+      },
+      "id": "case_030",
+      "inputs": {
+        "signal": [
+          "0x40c84c2286b4b7bf",
+          "0x6cf5a84f2074e2bf",
+          "0xf442ba60b84bd6bf",
+          "0xe0a325ea04a1ce3f",
+          "0x0c5c67b0a544d03f",
+          "0x00a6206ce4748d3f",
+          "0x94f6f415fea4eebf",
+          "0xc0a85ddea266ae3f",
+          "0xf29fa1e74de0efbf",
+          "0x58bf9e425b4ed33f",
+          "0x007b1996faaac5bf",
+          "0xa0b4c789eed4e2bf",
+          "0x64f346fc40a4e53f",
+          "0x765d258983dbecbf",
+          "0xac437741b8cae63f",
+          "0xb8ce85032040c3bf"
+        ]
+      }
+    },
+    {
+      "description": "n=32",
+      "expected_output": {
+        "spectrum": [
+          "0xce18d74d96fb0840",
+          "0xb4b53598582e0340",
+          "0xa6f47e8dc5d00d40",
+          "0xf7e476405e7d0d40",
+          "0x6b249d2e01e4f43f",
+          "0x8e874b9ba401ff3f",
+          "0x3f04580f32df0340",
+          "0xc03b4153df7d0440",
+          "0x46ea0ab292e01240",
+          "0x089e1741337ae13f",
+          "0xcb0eaa05d30e1240",
+          "0x7f4776bdb0e50340",
+          "0x5b9a3f7941a71640",
+          "0xad51a14b430a1940",
+          "0x97914869844e1540",
+          "0xde68cdfd25ff0c40",
+          "0x0a2e0fcaa7781040",
+          "0xdf68cdfd25ff0c40",
+          "0x96914869844e1540",
+          "0xad51a14b430a1940",
+          "0x5b9a3f7941a71640",
+          "0x7f4776bdb0e50340",
+          "0xce0eaa05d30e1240",
+          "0x039e1741337ae13f",
+          "0x46ea0ab292e01240",
+          "0xbe3b4153df7d0440",
+          "0x3c04580f32df0340",
+          "0x90874b9ba401ff3f",
+          "0x70249d2e01e4f43f",
+          "0xf2e476405e7d0d40",
+          "0xa5f47e8dc5d00d40",
+          "0xb4b53598582e0340"
+        ]
+      },
+      "id": "case_031",
+      "inputs": {
+        "signal": [
+          "0x667d19f48391e83f",
+          "0x1646743f6529e8bf",
+          "0xe08900a174ebd73f",
+          "0x8666fa3b02cfe6bf",
+          "0xb4d85108cfa8dd3f",
+          "0xb49cf6b103e3d63f",
+          "0x8052a122f6adaabf",
+          "0xa0b65e5bc26abfbf",
+          "0x7a718a792c60e63f",
+          "0x581dc1696427e3bf",
+          "0x34b20a63814ddf3f",
+          "0x525c357ef11ae4bf",
+          "0xe0f03da2874baebf",
+          "0x924071495b3fef3f",
+          "0x808adf82b796dcbf",
+          "0x2820746e1c19dfbf",
+          "0xd041684d6ddbedbf",
+          "0x32c5604b3af5ec3f",
+          "0xc4bb1b88e778e3bf",
+          "0x68313c129acfeabf",
+          "0xa84dd472f247e2bf",
+          "0x04d7ebc9b2deedbf",
+          "0x60008ae4f0c7adbf",
+          "0x948814b45572dbbf",
+          "0x542620fa9385ef3f",
+          "0x50333dbdaa68d8bf",
+          "0x6ec69c126206ee3f",
+          "0xb08c2c278b64b03f",
+          "0x227b758fe8dee6bf",
+          "0xd8ae439f444bee3f",
+          "0x9ebf2cf073d0e8bf",
+          "0xc28a053b4887efbf"
+        ]
+      }
+    }
+  ],
+  "cookbook_section": "§8.10",
+  "format_version": "1",
+  "generated_at": "2026-05-17T15:26:47Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-FFT.swift"
+  },
+  "output_crc32": "0xeae5c063",
+  "primitive": "fft",
+  "seed": "0xcafebabedeadbeef"
+}

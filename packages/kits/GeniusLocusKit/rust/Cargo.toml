@@ -1,0 +1,24 @@
+[package]
+name = "genius-locus-kit"
+version = "0.35.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rust port scaffold of GeniusLocusKit — the composition layer that coordinates N estates on one device. Parity-gated against the Swift reference."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "genius_locus_kit"
+path = "src/lib.rs"
+
+[dependencies]
+# F18.3 (2026-05-27): GLK now depends on SubstrateLib so the unified
+# audit log can consume the canonical SHA-256 content-hash and HLC
+# rather than hold byte-compatible local mirrors. The GLK-01/03 missions
+# deferred this dependency ("no new dependencies"); the local types were
+# always built byte-compatible anticipating exactly this wiring.
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+# The coordinator, handle, and lattice-overlap fan-out logic remain pure
+# Rust; LocusKit-equivalent recall is mocked through a trait that
+# downstream missions wire to the real Rust port when it exists.

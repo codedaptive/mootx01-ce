@@ -1,0 +1,1 @@
+{"artifacts":[{"type":"commit_hash","value":"abc123"}],"completed_at":{"logical_count":8,"node_id":42,"physical_time":1747526400700},"job_id":"00000000000000000000000000000003","status":"needs_context"}

@@ -1,0 +1,1146 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "case 0: 1x1, half_life 682.90 days, 0.0431 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 17206486,
+        "final_values": [
+          "0xc3176a7d9d544c40"
+        ]
+      },
+      "id": "case_000",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0x18de5f117b228c41",
+        "initial_values": [
+          "0x236e6cf56f304d40"
+        ],
+        "last_decay_time_seconds": 14664791,
+        "now_seconds": 17206486,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 1: 1x1, half_life 222.25 days, 2.4272 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 259971458,
+        "final_values": [
+          "0x5ac0fabafc222340"
+        ]
+      },
+      "id": "case_001",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0xfefcdf0e1f507241",
+        "initial_values": [
+          "0x4037208156bb4940"
+        ],
+        "last_decay_time_seconds": 213362810,
+        "now_seconds": 259971458,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 2: 1x1, half_life 638.00 days, 2.4936 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 421524278,
+        "final_values": [
+          "0xa07781da59e027c0"
+        ]
+      },
+      "id": "case_002",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0x90c91339f0488a41",
+        "initial_values": [
+          "0x1ce3f4d5edce50c0"
+        ],
+        "last_decay_time_seconds": 284068870,
+        "now_seconds": 421524278,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 3: 1x1, half_life 574.41 days, 2.6312 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 328638152,
+        "final_values": [
+          "0xecf9c40e7d1e22c0"
+        ]
+      },
+      "id": "case_003",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0x39e168ed2daa8741",
+        "initial_values": [
+          "0xde82802d94104cc0"
+        ],
+        "last_decay_time_seconds": 198052942,
+        "now_seconds": 328638152,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 4: 2x3, half_life 62.11 days, 2.1912 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 47136835,
+        "final_values": [
+          "0x173ab7b9985a3240",
+          "0x76ad456600b01ec0",
+          "0xa1b802a1a0e130c0",
+          "0xe22c969e0f5833c0",
+          "0xdd700046dafb01c0",
+          "0x5c9be113b5141240"
+        ]
+      },
+      "id": "case_004",
+      "inputs": {
+        "cols": 3,
+        "half_life_seconds": "0xe8767c7065785441",
+        "initial_values": [
+          "0x461d718a87f45440",
+          "0x1fce1d8cb78441c0",
+          "0x430a17e7214653c0",
+          "0xf97074ddea1556c0",
+          "0x04c953805b8824c0",
+          "0x22b0561bbca43440"
+        ],
+        "last_decay_time_seconds": 35378376,
+        "now_seconds": 47136835,
+        "rows": 2
+      }
+    },
+    {
+      "description": "case 5: 3x2, half_life 665.26 days, 1.0535 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 119996052,
+        "final_values": [
+          "0x67d60609511f0340",
+          "0x14713f9587c93bc0",
+          "0x37cdd33a831130c0",
+          "0xc43ac03f555d2bc0",
+          "0x1347900f117c3340",
+          "0xedc96cc023172240"
+        ]
+      },
+      "id": "case_005",
+      "inputs": {
+        "cols": 2,
+        "half_life_seconds": "0x30fcc3c575688b41",
+        "initial_values": [
+          "0x7ca767246ed81340",
+          "0x36b3741986d64cc0",
+          "0xf405a81510ad40c0",
+          "0x0ab0435e3c663cc0",
+          "0x2d18f508b0384440",
+          "0x2522977e43c63240"
+        ],
+        "last_decay_time_seconds": 59439304,
+        "now_seconds": 119996052,
+        "rows": 3
+      }
+    },
+    {
+      "description": "case 6: 2x3, half_life 362.59 days, 1.3080 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 63643237,
+        "final_values": [
+          "0x979f2ad687e93540",
+          "0x1c0347c8864328c0",
+          "0x5206620939f333c0",
+          "0x68062f487ef933c0",
+          "0x80a9121d788740c0",
+          "0x2486ab9573e83340"
+        ]
+      },
+      "id": "case_006",
+      "inputs": {
+        "cols": 3,
+        "half_life_seconds": "0xf138729948e07d41",
+        "initial_values": [
+          "0xc342d80d88204b40",
+          "0x17b25f8dcb093ec0",
+          "0x9c218c30aeb248c0",
+          "0x8266cb7671ba48c0",
+          "0x78e0c80b827654c0",
+          "0x57f7487f58a54840"
+        ],
+        "last_decay_time_seconds": 22667122,
+        "now_seconds": 63643237,
+        "rows": 2
+      }
+    },
+    {
+      "description": "case 7: 3x2, half_life 427.28 days, 2.9236 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 239790526,
+        "final_values": [
+          "0x46a5f1b8c12d2240",
+          "0xbb4843bf79c608c0",
+          "0x137aeeb730d90e40",
+          "0x3f140278f9d11140",
+          "0xcbc3c4c4d0e12040",
+          "0xff92488534010cc0"
+        ]
+      },
+      "id": "case_007",
+      "inputs": {
+        "cols": 2,
+        "half_life_seconds": "0x8ae9642b729a8141",
+        "initial_values": [
+          "0xa0da062ca23d5140",
+          "0x86cb94e1377f37c0",
+          "0x18328299b6413d40",
+          "0x229c7f4596e64040",
+          "0x8706dbd5d1025040",
+          "0xc6b1aa5e4a8f3ac0"
+        ],
+        "last_decay_time_seconds": 131861623,
+        "now_seconds": 239790526,
+        "rows": 3
+      }
+    },
+    {
+      "description": "case 8: 4x4, half_life 133.26 days, 1.6768 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 183076423,
+        "final_values": [
+          "0x506f40760a0636c0",
+          "0xfae36c16aa7c3740",
+          "0x8e981ea2c7c52d40",
+          "0xae5656bef7723e40",
+          "0x4487b7f71a652cc0",
+          "0xb75b4882bacbc7bf",
+          "0xdea78aacc8263040",
+          "0x7d1c1884a9a63cc0",
+          "0x1b02bc06c4c611c0",
+          "0x689354e18d1033c0",
+          "0xec2987b4dc623940",
+          "0xdd067ea7c17b3340",
+          "0x08211c47308c33c0",
+          "0x941d6a75c2af3740",
+          "0x195232b026960940",
+          "0x7eb28d1990f1de3f"
+        ]
+      },
+      "id": "case_008",
+      "inputs": {
+        "cols": 4,
+        "half_life_seconds": "0xaea469d8f5f56541",
+        "initial_values": [
+          "0x47839efe6a9a51c0",
+          "0x5c2f9b9ad9c55240",
+          "0xab5b311cffcb4740",
+          "0x5274686d6c565840",
+          "0x0f0fedaa1bb246c0",
+          "0x50df34870b05e3bf",
+          "0x97daa6fec3d14940",
+          "0xddf37cc181e656c0",
+          "0xbf38527fbe6a2cc0",
+          "0xae9b9aa0ef794ec0",
+          "0xc6538144764a5440",
+          "0xf502da944e254f40",
+          "0x2a152a30933f4fc0",
+          "0x2b742396b0ee5240",
+          "0x667f89e774732440",
+          "0xcc95f7089cbbf83f"
+        ],
+        "last_decay_time_seconds": 163770273,
+        "now_seconds": 183076423,
+        "rows": 4
+      }
+    },
+    {
+      "description": "case 9: 4x4, half_life 610.62 days, 1.8445 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 252616846,
+        "final_values": [
+          "0xdd57e3c9a34f08c0",
+          "0x323622142bbb2140",
+          "0x23edd158eb000040",
+          "0x3e1ff6bd30652840",
+          "0xf375a4ad8fac0440",
+          "0x92eea67f4b2d37c0",
+          "0xad7c89809008febf",
+          "0x6347c4ea003420c0",
+          "0xf60e009f76f63ac0",
+          "0x8346b0f443de1140",
+          "0x375eafa69d672dc0",
+          "0x76c83ed3366c37c0",
+          "0xbdb0bc1ef3e53140",
+          "0x3a09646b0dc21cc0",
+          "0x2d58d16ea4af2c40",
+          "0x6ebcc9b3839e05c0"
+        ]
+      },
+      "id": "case_009",
+      "inputs": {
+        "cols": 4,
+        "half_life_seconds": "0x9ac587ec1c288941",
+        "initial_values": [
+          "0x3ee6439d9dd325c0",
+          "0x7ca81cb993d63f40",
+          "0x074f526578bc1c40",
+          "0x1d4a6ac3f6e64540",
+          "0xc4c42547b08f2240",
+          "0x0280824bf1ce54c0",
+          "0x89e59721d5f61ac0",
+          "0xbb47569d32183dc0",
+          "0xb709d523113558c0",
+          "0x7d31c087cc0a3040",
+          "0xaeef280055664ac0",
+          "0x8d1f03896e0755c0",
+          "0x21f410a9b2115040",
+          "0x57f16e38b0d139c0",
+          "0x9c577ee028c14940",
+          "0x98e14059ea6823c0"
+        ],
+        "last_decay_time_seconds": 155307171,
+        "now_seconds": 252616846,
+        "rows": 4
+      }
+    },
+    {
+      "description": "case 10: 4x4, half_life 450.00 days, 1.5576 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 98795827,
+        "final_values": [
+          "0x7e3ad96e248e3e40",
+          "0x21a15be0a0e93640",
+          "0xf45635f7194a13c0",
+          "0x96d0cd38380732c0",
+          "0xb4d085ead3f33cc0",
+          "0xbfa58fb5d7ba2ac0",
+          "0x7624fc4f23ca1740",
+          "0xfeb30bb59bcf3d40",
+          "0x1655bb90f42f3d40",
+          "0x36d90e6d8ef13740",
+          "0xbedbfb7da598f03f",
+          "0x4b8abc5077b63ec0",
+          "0xb45925cb64ce1b40",
+          "0x7f0ebae976f712c0",
+          "0x069f4b7486c036c0",
+          "0x32e7f6be46f81dc0"
+        ]
+      },
+      "id": "case_010",
+      "inputs": {
+        "cols": 4,
+        "half_life_seconds": "0xa9a5c2dd108a8241",
+        "initial_values": [
+          "0x1b1be711787c5640",
+          "0xbd6318bea1dc5040",
+          "0xa75c0fbe17642cc0",
+          "0x3db85fcfdc884ac0",
+          "0x9c2ecead824e55c0",
+          "0x3021af74c8ab43c0",
+          "0xe815b150da813140",
+          "0xc687655040f05540",
+          "0x9bb9fb6ec27a5540",
+          "0xeca9a290dc9e5140",
+          "0x52d49b5f536d0840",
+          "0x186809e2249a56c0",
+          "0x8447710891763440",
+          "0x8e7a77e676ea2bc0",
+          "0xf480941562be50c0",
+          "0x864aca002e0e36c0"
+        ],
+        "last_decay_time_seconds": 38235903,
+        "now_seconds": 98795827,
+        "rows": 4
+      }
+    },
+    {
+      "description": "case 11: 4x4, half_life 67.71 days, 1.3427 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 167393631,
+        "final_values": [
+          "0xdbb891a039564240",
+          "0x46ba3d9b0d7528c0",
+          "0xac1f3c9c22de42c0",
+          "0x0a88d5a60b553740",
+          "0x4648fa9958363d40",
+          "0xac4ffc0292662140",
+          "0xfb5b3b6b1e462ec0",
+          "0x9f0ea6cc0b9632c0",
+          "0xb341ea25788821c0",
+          "0xde8ea1841ada2440",
+          "0xbf35527c6d881a40",
+          "0x780e25e2c2cbfb3f",
+          "0x3d66e8b2119820c0",
+          "0x2771fa251cb42cc0",
+          "0x6f417deb002342c0",
+          "0x2972afe6006c3840"
+        ]
+      },
+      "id": "case_011",
+      "inputs": {
+        "cols": 4,
+        "half_life_seconds": "0x5f3f314a67515641",
+        "initial_values": [
+          "0xef82c80500415740",
+          "0x763e58b0fa033fc0",
+          "0x45279fe15aed57c0",
+          "0xe56082c1bd964d40",
+          "0xd0a895d8d8855240",
+          "0xbaa0b1ba14113640",
+          "0x251265002c3243c0",
+          "0xf51c1157ef9147c0",
+          "0xeda936f1113c36c0",
+          "0xf088e18089713a40",
+          "0x53a0cd06ecd23040",
+          "0x6e6466bbf09f1140",
+          "0x8b5576a4340b35c0",
+          "0x0d37b56e443342c0",
+          "0xcc744e170b0057c0",
+          "0x527ef8bf80f84e40"
+        ],
+        "last_decay_time_seconds": 159537956,
+        "now_seconds": 167393631,
+        "rows": 4
+      }
+    },
+    {
+      "description": "case 12: 1x8, half_life 511.15 days, 2.4480 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 143766546,
+        "final_values": [
+          "0x6407db7b662d3040",
+          "0x464025475e171640",
+          "0x31c6a8cd903032c0",
+          "0x87e0f52fee6e0340",
+          "0x95177d6625c027c0",
+          "0x7a54ab489b8e29c0",
+          "0x5db245ec50e9f13f",
+          "0x0e390accf82e3040"
+        ]
+      },
+      "id": "case_012",
+      "inputs": {
+        "cols": 8,
+        "half_life_seconds": "0xdd49c7e80a0f8541",
+        "initial_values": [
+          "0xaaffabf976115640",
+          "0xba1a8f03bc223e40",
+          "0x357ab56539d058c0",
+          "0x741613fd84822a40",
+          "0x3e3ac89f183350c0",
+          "0xcae86806876e51c0",
+          "0x8967c894076f1840",
+          "0x4907cdc99b135640"
+        ],
+        "last_decay_time_seconds": 35654689,
+        "now_seconds": 143766546,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 13: 8x1, half_life 605.61 days, 1.8170 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 313105777,
+        "final_values": [
+          "0x0a7f351d9dfc1bc0",
+          "0x696902bea4c53bc0",
+          "0x0f1ed554649505c0",
+          "0x35993d8e342e2c40",
+          "0x41da067b6dd830c0",
+          "0x01d279d187072540",
+          "0xe9d8d1ed1ca834c0",
+          "0x14163753831e3bc0"
+        ]
+      },
+      "id": "case_013",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0x7761d72d3ff38841",
+        "initial_values": [
+          "0x200061fa01a738c0",
+          "0x2a044537967658c0",
+          "0x4af67603160323c0",
+          "0x970e29dcb0d24840",
+          "0xb53ec2f645ad4dc0",
+          "0x11ea025220864240",
+          "0x4459b8b2133252c0",
+          "0x768b22565ee357c0"
+        ],
+        "last_decay_time_seconds": 218033447,
+        "now_seconds": 313105777,
+        "rows": 8
+      }
+    },
+    {
+      "description": "case 14: 5x5, half_life 728.90 days, 1.0960 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 302462722,
+        "final_values": [
+          "0xb20636c3ab8732c0",
+          "0x0df711596d4f3840",
+          "0xcd84ce196be92c40",
+          "0x025bf7ef97f22ac0",
+          "0xebdd7c4d6d001040",
+          "0x28f59a79eecff7bf",
+          "0xe84e5167723a37c0",
+          "0x0f13cb3821632d40",
+          "0x1be8774e843846c0",
+          "0x1ab07a20022c3340",
+          "0xcab57a86a4aa44c0",
+          "0xd8018914188e1240",
+          "0x37330773ac6e22c0",
+          "0xed78492fd65d36c0",
+          "0x09f359a399a5fcbf",
+          "0x68abd3afa70025c0",
+          "0x97871794ac1912c0",
+          "0x5b5122c4ae671bc0",
+          "0x112f5ce5e8c53f40",
+          "0x0ac71d4697f041c0",
+          "0xab123254097d12c0",
+          "0x6fb5c233738b1c40",
+          "0x25b8cd2da0c743c0",
+          "0x08dcd5dd607e18c0",
+          "0x71abb330503f39c0"
+        ]
+      },
+      "id": "case_014",
+      "inputs": {
+        "cols": 5,
+        "half_life_seconds": "0x1fdd49d097078e41",
+        "initial_values": [
+          "0x70290cbc0ace43c0",
+          "0x32ab967b9bfb4940",
+          "0xe413275ea5e63e40",
+          "0x94ba5be039cd3cc0",
+          "0xbe4a8145441a2140",
+          "0x0c70de02577309c0",
+          "0x77636d0b92d348c0",
+          "0x5ab5b135bb683f40",
+          "0x3bb0cbfce4bf57c0",
+          "0xb2d9cf98af7d4440",
+          "0xebf2fe63a51656c0",
+          "0x80ddfa2ee8d42340",
+          "0xec91d22353b333c0",
+          "0xe3d2782fc8e747c0",
+          "0x5064b569299e0ec0",
+          "0x4b661080937236c0",
+          "0xa41917297a5823c0",
+          "0x22bd94035f4a2dc0",
+          "0xb4961052c4fa5040",
+          "0x7c5d4940912c53c0",
+          "0x3bad68feacc223c0",
+          "0x125c096436822e40",
+          "0x72c2968f022455c0",
+          "0x1ccee5f5c92d2ac0",
+          "0x9f276479fffb4ac0"
+        ],
+        "last_decay_time_seconds": 233440585,
+        "now_seconds": 302462722,
+        "rows": 5
+      }
+    },
+    {
+      "description": "case 15: 3x4, half_life 307.95 days, 1.6249 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 332875940,
+        "final_values": [
+          "0xe78ad0e694233440",
+          "0x5915060b99a712c0",
+          "0x2edf6c2735fd0940",
+          "0x2f2a135bf87d03c0",
+          "0x234ef94a66152640",
+          "0xaa1e1aaf9d9633c0",
+          "0x4acbc023fa2d40c0",
+          "0x7c088be619f615c0",
+          "0x1c2e6fc51a60fb3f",
+          "0x53e012998ae33340",
+          "0x62d2b0a1a9602e40",
+          "0x83b87cd42b7525c0"
+        ]
+      },
+      "id": "case_015",
+      "inputs": {
+        "cols": 4,
+        "half_life_seconds": "0xb0301f1ebc5f7941",
+        "initial_values": [
+          "0x85c897e5860e4f40",
+          "0xe0d1efd28bc42cc0",
+          "0x9157f6ed050a2440",
+          "0x11620353220f1ec0",
+          "0x5d98ac6c1c074140",
+          "0xcc0c341124354ec0",
+          "0x290e5d456df358c0",
+          "0x1c0e6363faee30c0",
+          "0x9cc71e88ab1b1540",
+          "0xb2d5ade8c4ab4e40",
+          "0xdbf1ba46466c4740",
+          "0xa3de1cb9908b40c0"
+        ],
+        "last_decay_time_seconds": 289642583,
+        "now_seconds": 332875940,
+        "rows": 3
+      }
+    },
+    {
+      "description": "case 16: 1x1, half_life 480.27 days, 1.6293 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 214352629,
+        "final_values": [
+          "0xb00284339d7bd1bf"
+        ]
+      },
+      "id": "case_016",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0x6f78c40a50c98341",
+        "initial_values": [
+          "0x889ecad0210bebbf"
+        ],
+        "last_decay_time_seconds": 146743130,
+        "now_seconds": 214352629,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 17: 2x2, half_life 113.50 days, 2.1990 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 200282078,
+        "final_values": [
+          "0xf7106e1cc0012840",
+          "0x847642c3540a2340",
+          "0x941423977faa2940",
+          "0xbd6c1e4d14651440"
+        ]
+      },
+      "id": "case_017",
+      "inputs": {
+        "cols": 2,
+        "half_life_seconds": "0x225f9d4233b46241",
+        "initial_values": [
+          "0xd7dc7576a28e4b40",
+          "0xd85dd7f42fdb4540",
+          "0xe1f5e4a332764d40",
+          "0xc865672b37693740"
+        ],
+        "last_decay_time_seconds": 178718344,
+        "now_seconds": 200282078,
+        "rows": 2
+      }
+    },
+    {
+      "description": "case 18: 3x3, half_life 264.43 days, 1.3822 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 344922117,
+        "final_values": [
+          "0x562b7a3acc6338c0",
+          "0x7e475ef700163e40",
+          "0xf5cef5130a09ee3f",
+          "0x418e0e61cbb6f63f",
+          "0x3d26c60902a438c0",
+          "0x0eb9cfa7d66c4040",
+          "0xe0c65dfdfabc2640",
+          "0x63dbf9ad5f641b40",
+          "0xce7af601494122c0"
+        ]
+      },
+      "id": "case_018",
+      "inputs": {
+        "cols": 3,
+        "half_life_seconds": "0xc1fd0639d2c97541",
+        "initial_values": [
+          "0x7c24b81a97c94fc0",
+          "0x92a8756e0a9b5340",
+          "0xdce03caa97920340",
+          "0x9843e785779a0d40",
+          "0x972c9e50a30e50c0",
+          "0xca13d2e132685540",
+          "0x6b307f7487a23d40",
+          "0xb8a20d02a4d93140",
+          "0x6e35169ebaca37c0"
+        ],
+        "last_decay_time_seconds": 313343838,
+        "now_seconds": 344922117,
+        "rows": 3
+      }
+    },
+    {
+      "description": "case 19: 4x4, half_life 553.85 days, 0.9454 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 214152119,
+        "final_values": [
+          "0x69cc7656a9e32a40",
+          "0xa2d62f537ba542c0",
+          "0x35baea4620044240",
+          "0xe046e119c51f3740",
+          "0x314b2423a1944240",
+          "0xf3889b7a77273340",
+          "0x7481af57a94948c0",
+          "0xfa0623a277273840",
+          "0xe042ab319a5949c0",
+          "0xf15b60a4ecc41740",
+          "0x781e20c0717d3a40",
+          "0x05e652c2f22c49c0",
+          "0x761188bc0f772dc0",
+          "0x2fc056abcd9f40c0",
+          "0x568c3b396e1a3740",
+          "0x5221f236ce4f0240"
+        ]
+      },
+      "id": "case_019",
+      "inputs": {
+        "cols": 4,
+        "half_life_seconds": "0x237f40335cd18641",
+        "initial_values": [
+          "0xce9bcda515e43940",
+          "0x1481006e40f451c0",
+          "0x15e32508e3585140",
+          "0x0c250afdfa434640",
+          "0x81eb5c6b06e45140",
+          "0x39aae31a69714240",
+          "0x20f500d6cf6257c0",
+          "0x7ea28922e3414740",
+          "0x6a861bf3a76858c0",
+          "0xbe7bc9c500e32640",
+          "0xac00a29ca9814940",
+          "0x5b470af1a83d58c0",
+          "0x17a72298005f3cc0",
+          "0xf49e6531cb0150c0",
+          "0xf64b43dcd63e4640",
+          "0x26f527a7c1a11140"
+        ],
+        "last_decay_time_seconds": 168911680,
+        "now_seconds": 214152119,
+        "rows": 4
+      }
+    },
+    {
+      "description": "case 20: 2x3, half_life 460.18 days, 0.9003 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 83873030,
+        "final_values": [
+          "0x56d1b20f0a1e4640",
+          "0xfd928f78f1b812c0",
+          "0x729fae345ac84240",
+          "0xc50bb7820c1e37c0",
+          "0xf69ea7773ef42040",
+          "0x6ccdd9ac6f3b38c0"
+        ]
+      },
+      "id": "case_020",
+      "inputs": {
+        "cols": 3,
+        "half_life_seconds": "0x01c59d157af58241",
+        "initial_values": [
+          "0xab41a29df0a35440",
+          "0x3d63ac5be17821c0",
+          "0xb5cfefab42875140",
+          "0x8288a18ada9245c0",
+          "0xd9eb1ea3d2a42f40",
+          "0x5f06f2f62e9d46c0"
+        ],
+        "last_decay_time_seconds": 48077694,
+        "now_seconds": 83873030,
+        "rows": 2
+      }
+    },
+    {
+      "description": "case 21: 3x2, half_life 599.65 days, 2.8535 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 322200906,
+        "final_values": [
+          "0x33406fd7160720c0",
+          "0xdc4d701779841b40",
+          "0xfdca1a11b7b31ec0",
+          "0x255a66ab37ef0740",
+          "0x74a2786199010a40",
+          "0x5b11ac6b1e9b23c0"
+        ]
+      },
+      "id": "case_021",
+      "inputs": {
+        "cols": 2,
+        "half_life_seconds": "0x5a5da28963b48841",
+        "initial_values": [
+          "0x7c8e654a8ef54cc0",
+          "0x4469a9cb0edc4840",
+          "0x2ee9568e8ebc4bc0",
+          "0x78e5680a669f3540",
+          "0x78120c2f8d7e3740",
+          "0x5118f05e54b651c0"
+        ],
+        "last_decay_time_seconds": 174365126,
+        "now_seconds": 322200906,
+        "rows": 3
+      }
+    },
+    {
+      "description": "case 22: 4x4, half_life 216.76 days, 1.1932 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 285277310,
+        "final_values": [
+          "0xcf94e660d1643e40",
+          "0x1ca98f4a13100240",
+          "0xf6dc158dd5723b40",
+          "0x4e4dba203b0a2040",
+          "0x9c40028bc5ababbf",
+          "0xcd623a283e0919c0",
+          "0x883e8aa9542d2640",
+          "0x51c1a283294c4040",
+          "0xdf1def16043a32c0",
+          "0x69a57895eb102040",
+          "0xa30d9fe369d3f33f",
+          "0xe08177e87ac6cfbf",
+          "0x971bcd17fcec26c0",
+          "0xd37bbcb5fedc4540",
+          "0x235ab258dd272f40",
+          "0xb82142ff862f29c0"
+        ]
+      },
+      "id": "case_022",
+      "inputs": {
+        "cols": 4,
+        "half_life_seconds": "0x5911cc6a45dc7141",
+        "initial_values": [
+          "0x3d145c7201605140",
+          "0x2d2ee855d3a61440",
+          "0x53fff24ef6614f40",
+          "0xd21c84b5c2563240",
+          "0x0036326b0fa3bfbf",
+          "0x5c88d196da9f2cc0",
+          "0x663b162d0a5b3940",
+          "0xae4df23424a25240",
+          "0xc84803ffc6d644c0",
+          "0xc680c29a685e3240",
+          "0x62eac830daaa0640",
+          "0xf0a6e7662e2ae2bf",
+          "0xf2d9eaab29363ac0",
+          "0x2b079b9630ff5840",
+          "0xb03a7db481cf4140",
+          "0xe7b8e824a0cb3cc0"
+        ],
+        "last_decay_time_seconds": 262930344,
+        "now_seconds": 285277310,
+        "rows": 4
+      }
+    },
+    {
+      "description": "case 23: 5x5, half_life 124.95 days, 2.0024 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 208213099,
+        "final_values": [
+          "0x00e29a6227983640",
+          "0x240c5df86a952bc0",
+          "0x55506bed2426d8bf",
+          "0xe0d6afd28d3923c0",
+          "0x143d67bd5bed3240",
+          "0x0f195db9405135c0",
+          "0x2d0940cf80443240",
+          "0x7a79ef9013e02340",
+          "0x7dffcf73dceef4bf",
+          "0x9ada12976e162740",
+          "0x23e00622b30814c0",
+          "0xb696413499b823c0",
+          "0x98909adbc0c61e40",
+          "0x3ffd2b0996bff43f",
+          "0x3e98346b11371bc0",
+          "0x5be26ae660670c40",
+          "0x149c86d33523f83f",
+          "0x8d13292245e52440",
+          "0x884f24db36f035c0",
+          "0x789e1b0222320640",
+          "0xae875ea170ed2cc0",
+          "0x88532540b0cd12c0",
+          "0xabe751b37b8c2ec0",
+          "0x67402c4c4225e13f",
+          "0x95654f16eedc32c0"
+        ]
+      },
+      "id": "case_023",
+      "inputs": {
+        "cols": 5,
+        "half_life_seconds": "0x9b6c240b22976441",
+        "initial_values": [
+          "0xe97ec3b296a15640",
+          "0xee75bea2efa04bc0",
+          "0xa8ae586e3a30f8bf",
+          "0xb6a2ccef944143c0",
+          "0x4a9a470943f55240",
+          "0x23d32288275a55c0",
+          "0xb28dad98214c5240",
+          "0xd36b203760e84340",
+          "0x071f9d2c9af714c0",
+          "0x3bc53ca212204740",
+          "0x63eccebe101134c0",
+          "0xd0b84a5ed5c043c0",
+          "0xf82e51d29ad33e40",
+          "0xce19510440c81440",
+          "0x17f3afaf6e423bc0",
+          "0x5017613d3d732c40",
+          "0xba07d01a4a2d1840",
+          "0x4e1aafd9feed4440",
+          "0xd351bb0a60f955c0",
+          "0xd43853b8663b2640",
+          "0x2df85cf384f94cc0",
+          "0x9b568b528ad532c0",
+          "0x159603553d994ec0",
+          "0x22497d236b2c0140",
+          "0x77c40386cee452c0"
+        ],
+        "last_decay_time_seconds": 186597155,
+        "now_seconds": 208213099,
+        "rows": 5
+      }
+    },
+    {
+      "description": "case 24: 1x1, half_life 345.27 days, 0.0000 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 247869344,
+        "final_values": [
+          "0x04cded7e7a0543c0"
+        ]
+      },
+      "id": "case_024",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0xa4126c35fd727c41",
+        "initial_values": [
+          "0x04cded7e7a0543c0"
+        ],
+        "last_decay_time_seconds": 247869344,
+        "now_seconds": 247869344,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 25: 1x1, half_life 585.50 days, -0.0000 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 146300766,
+        "final_values": [
+          "0x6ea2375a79ff58c0"
+        ]
+      },
+      "id": "case_025",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0x3e36a9eb2e1f8841",
+        "initial_values": [
+          "0x6ea2375a79ff58c0"
+        ],
+        "last_decay_time_seconds": 146300766,
+        "now_seconds": 146299766,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 26: 1x1, half_life 161.64 days, 1.0000 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 232714954,
+        "final_values": [
+          "0xcc330fe4a472ea3f"
+        ]
+      },
+      "id": "case_026",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0xc48b851a11a36a41",
+        "initial_values": [
+          "0x7077ced1a472fa3f"
+        ],
+        "last_decay_time_seconds": 218749506,
+        "now_seconds": 232714954,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 27: 1x1, half_life 158.28 days, 2.0000 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 112350193,
+        "final_values": [
+          "0x4c82aba559fa04c0"
+        ]
+      },
+      "id": "case_027",
+      "inputs": {
+        "cols": 1,
+        "half_life_seconds": "0xb3de61524a156a41",
+        "initial_values": [
+          "0xde8703a359fa24c0"
+        ],
+        "last_decay_time_seconds": 85000012,
+        "now_seconds": 112350193,
+        "rows": 1
+      }
+    },
+    {
+      "description": "case 28: 3x3, half_life 202.24 days, 0.9937 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 20465158,
+        "final_values": [
+          "0x4144ad5c31f24240",
+          "0xed71028b94082540",
+          "0xf6ef4a7f46944340",
+          "0xfc20762df86a30c0",
+          "0x906554b0492843c0",
+          "0x806922841fc73040",
+          "0x752d2a27050d41c0",
+          "0xc66be97ba4974040",
+          "0xa9f19de6eb5b45c0"
+        ]
+      },
+      "id": "case_028",
+      "inputs": {
+        "cols": 3,
+        "half_life_seconds": "0x84eabaedf6a97041",
+        "initial_values": [
+          "0x74bbffb422dd5240",
+          "0xc4a606f433f13440",
+          "0xabefdab2837e5340",
+          "0x5c16e4ddb85840c0",
+          "0x2ef130e9fe1253c0",
+          "0x68d46ac879b44040",
+          "0x055ae7bb11fa50c0",
+          "0x7aceac8533855040",
+          "0x4194daae2e4455c0"
+        ],
+        "last_decay_time_seconds": 3101450,
+        "now_seconds": 20465158,
+        "rows": 3
+      }
+    },
+    {
+      "description": "case 29: 4x4, half_life 488.73 days, 1.5549 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 370170486,
+        "final_values": [
+          "0x920a9ec92f8538c0",
+          "0xfee32283a1643e40",
+          "0xce89eea16ce83d40",
+          "0xcbbfbeddbb18fa3f",
+          "0x07b7f040421e2e40",
+          "0x5044f525ba7c0d40",
+          "0xc21c49e1ba7211c0",
+          "0x5e9f61c0772500c0",
+          "0xc6b5d1c057912140",
+          "0x05caab05edd22ec0",
+          "0x1e76c1e9650a1fc0",
+          "0xc482471db59335c0",
+          "0x05f3e15895c63f40",
+          "0x2397939b20481740",
+          "0x2e35d28c043f3dc0",
+          "0x61cf98a04c3423c0"
+        ]
+      },
+      "id": "case_029",
+      "inputs": {
+        "cols": 4,
+        "half_life_seconds": "0x5a9289bf85228441",
+        "initial_values": [
+          "0xfffe7d3dc90252c0",
+          "0x36fb49ab1c535640",
+          "0x7d12cce2e0f75540",
+          "0x050f1b31342b1340",
+          "0xc56fc4e86b1f4640",
+          "0xf8991185c5a82540",
+          "0x741e977ae6a129c0",
+          "0xfb42a35251b817c0",
+          "0xfe3d8153dfce3940",
+          "0x2943568420a446c0",
+          "0x202cbe81dfcc36c0",
+          "0x4ce27440aab24fc0",
+          "0xe82a25d719575740",
+          "0x09292a75e5193140",
+          "0x00df12b3717b55c0",
+          "0x774f3e6058363cc0"
+        ],
+        "last_decay_time_seconds": 304513742,
+        "now_seconds": 370170486,
+        "rows": 4
+      }
+    },
+    {
+      "description": "case 30: 2x5, half_life 233.07 days, 1.8617 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 190568291,
+        "final_values": [
+          "0x444baac5d8d12940",
+          "0x9b9912c160ed2440",
+          "0x19312a98711434c0",
+          "0x1dfcae944bd10b40",
+          "0xb1438fc1c7bd3540",
+          "0x79b2ac17883f36c0",
+          "0x05adc4865b141fc0",
+          "0x7907593358213a40",
+          "0xb83a5cafd01a3740",
+          "0xa97b273e67e91cc0"
+        ]
+      },
+      "id": "case_030",
+      "inputs": {
+        "cols": 5,
+        "half_life_seconds": "0x90a03bd052347341",
+        "initial_values": [
+          "0x9252d547ab754740",
+          "0xa281b2dbae034340",
+          "0xe283c6ed933e52c0",
+          "0x654035445e462940",
+          "0xf323304609c15340",
+          "0x123cab72ed3654c0",
+          "0x0e8302df193d3cc0",
+          "0x2572ee78e6bd5740",
+          "0x6e3eedd52afe5440",
+          "0xd02a6670df443ac0"
+        ],
+        "last_decay_time_seconds": 153078588,
+        "now_seconds": 190568291,
+        "rows": 2
+      }
+    },
+    {
+      "description": "case 31: 5x2, half_life 409.46 days, 0.3426 half-lives elapsed",
+      "expected_output": {
+        "final_last_decay_time_seconds": 68289133,
+        "final_values": [
+          "0x0aec3bad0cfa4f40",
+          "0x04c32556c27a3340",
+          "0x14ff640103764cc0",
+          "0x2d56d36a8d524ac0",
+          "0x5f7cf74b495f3540",
+          "0x28cd5858ad144040",
+          "0x34ea7bb285385240",
+          "0xa78b14cf5dab5140",
+          "0x0ac24fe485402440",
+          "0xa5137a57645e4c40"
+        ]
+      },
+      "id": "case_031",
+      "inputs": {
+        "cols": 2,
+        "half_life_seconds": "0xfbf69a277fde8041",
+        "initial_values": [
+          "0xa4bb54b24a465440",
+          "0xf9857ad39eb33840",
+          "0x8b8a2f7fa10b52c0",
+          "0x916f15e684b050c0",
+          "0xa3c3026c0a1a3b40",
+          "0x3efc5bf148644440",
+          "0xbfa63461ff1a5740",
+          "0xdf447e1a00685640",
+          "0xe24f24ba66ae2940",
+          "0xbc3edda9a7fc5140"
+        ],
+        "last_decay_time_seconds": 56167223,
+        "now_seconds": 68289133,
+        "rows": 5
+      }
+    }
+  ],
+  "cookbook_section": "§6.8",
+  "format_version": "1",
+  "generated_at": "2026-05-28T20:22:43Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-MatrixDecay.swift"
+  },
+  "output_crc32": "0x7b12f93d",
+  "primitive": "matrix_decay",
+  "seed": "0xcafebabedeadbeef"
+}

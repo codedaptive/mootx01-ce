@@ -1,0 +1,23 @@
+[package]
+name = "substrate-kernel"
+version = "1.0.0-skeleton"
+edition = "2021"
+rust-version = "1.75"
+description = "Layer 2 of the SubstrateLib three-package split: bandwidth-bound bit operations, AuditGate, HLCGenerator, SHA-256 seal. See cookbook v1.0 §20 and HARNESS_REFERENCE §2.1."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "substrate_kernel"
+path = "src/lib.rs"
+
+[dependencies]
+substrate-types = { path = "../../SubstrateTypes/rust" }
+
+[features]
+# Opt-in nightly portable-SIMD backend (std::simd::u64x4).
+# When enabled, SimdKernel becomes available; on stable, the
+# whole kernel_simd module is compiled away and ScalarKernel
+# remains the only implementation. Bit-identical output to the
+# scalar reference is conformance-gated for both modes.
+simd-nightly = []

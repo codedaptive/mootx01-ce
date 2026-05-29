@@ -1,0 +1,200 @@
+import Foundation
+import LocusKit
+
+// MARK: - Re-exported LocusKit frames
+//
+// The GLK verb surface accepts the same frame shapes LocusKit defines
+// for its verbs. Re-exporting via typealias gives callers a single
+// import (`import GeniusLocusKit`) and a single namespace while
+// keeping one source of truth for the frame fields. When LocusKit
+// later expands a frame (e.g. LearnFrame slot set lands in LOCI_V035_19),
+// the GLK surface follows without a parallel declaration to maintain.
+
+/// Slots for the `capture` verb at the GLK surface. Identical to
+/// `LocusKit.CaptureFrame`; re-exported so callers do not need to
+/// import LocusKit alongside GeniusLocusKit.
+public typealias CaptureFrame = LocusKit.CaptureFrame
+
+/// Slots for the `recall` verb at the GLK surface. Identical to
+/// `LocusKit.RecallFrame`.
+public typealias RecallFrame = LocusKit.RecallFrame
+
+/// Slots for the `learn` verb at the GLK surface. Identical to
+/// `LocusKit.LearnFrame`. Scaffold today; the full slot set lands in
+/// LOCI_V035_19.
+public typealias LearnFrame = LocusKit.LearnFrame
+
+/// Named mutation operations for the `mutate` verb. Identical to
+/// `LocusKit.MutationKind`.
+public typealias MutationKind = LocusKit.MutationKind
+
+/// Lattice anchor re-export so `ReanchorFrame` and callers can name
+/// the type through the GLK module.
+public typealias LatticeAnchor = LocusKit.LatticeAnchor
+
+/// Row identifier re-export. `LocusKit.RowID` is a `String` alias;
+/// surfacing the name through GLK keeps frame signatures self-documenting.
+public typealias RowID = LocusKit.RowID
+
+/// Room identifier re-export.
+public typealias RoomID = LocusKit.RoomID
+
+/// Drawer re-export so the public `capture` and `recall` return
+/// types are nameable through the GLK module alone. Without this
+/// typealias a caller using only `import GeniusLocusKit` could
+/// invoke the verbs but not bind their results to a named type,
+/// breaking the file's stated "single import" promise.
+public typealias Drawer = LocusKit.Drawer
+
+// MARK: - GLK-native frames
+//
+// Verbs whose LocusKit signature is positional (rowID, kind, payload,
+// reason, etc.) get a named frame at the GLK boundary so every verb
+// reads as "one frame in, one outcome out." This matches the AriaLexicon
+// "one verb applied to a noun" sentence shape and matches the frame
+// shape capture/recall/learn already have in LocusKit.
+
+/// Slots for the `withdraw` verb.
+///
+/// `withdraw` moves a drawer's `State` axis to `.withdrawn`; the
+/// substrate preserves the row for asOf reconstruction (cookbook §10.4).
+public struct WithdrawFrame: Sendable, Equatable {
+    /// The drawer to withdraw.
+    public let rowID: RowID
+    /// Optional free-text justification, written verbatim into the
+    /// bitmap-audit row's `reason` column at the substrate layer.
+    public let reason: String?
+
+    public init(rowID: RowID, reason: String? = nil) {
+        self.rowID = rowID
+        self.reason = reason
+    }
+}
+
+/// Slots for the `mutate` verb.
+///
+/// `mutate` updates the row's adjective bitmap per the supplied
+/// `MutationKind` (confirm, reject, contest, supersede, revive,
+/// accept, correctSensitivity, correctTrust). The substrate writes
+/// a bitmap-audit row atomically with the update (cookbook §10.3).
+public struct MutateFrame: Sendable {
+    /// The drawer to mutate.
+    public let rowID: RowID
+    /// Which named mutation to apply.
+    public let kind: MutationKind
+    /// Optional payload string. Reserved for mutation variants that
+    /// carry a free-text justification or value beyond what `kind`
+    /// captures; today's substrate ignores it but the slot is here
+    /// so a payload-bearing mutation does not require a frame
+    /// signature change later.
+    public let payload: String?
+
+    public init(rowID: RowID, kind: MutationKind, payload: String? = nil) {
+        self.rowID = rowID
+        self.kind = kind
+        self.payload = payload
+    }
+}
+
+/// Slots for the `expunge` verb.
+///
+/// `expunge` tombstones a row and zeroizes its content blob
+/// (cookbook §10.5). Destructive: requires explicit `confirmation`
+/// at the GLK boundary so a wrong-button press cannot tombstone.
+public struct ExpungeFrame: Sendable, Equatable {
+    /// The drawer to expunge.
+    public let rowID: RowID
+    /// Required free-text justification. Written into the audit row
+    /// before content is zeroized so the fact-of-expunge survives.
+    public let reason: String
+    /// Must be `true` for the verb to proceed. False signals "asked
+    /// but did not confirm" and the verb raises
+    /// `VerbError.expungeNotConfirmed`.
+    public let confirmation: Bool
+
+    public init(rowID: RowID, reason: String, confirmation: Bool) {
+        self.rowID = rowID
+        self.reason = reason
+        self.confirmation = confirmation
+    }
+}
+
+/// Slots for the `reanchor` verb.
+///
+/// `reanchor` updates a row's lattice anchor or its room/wing, leaving
+/// content and fingerprint blocks other than Block 1 untouched
+/// (cookbook §10.2). At least one of `toRoom` or `toLattice` must be
+/// non-nil; an empty reanchor is rejected at the GLK boundary as
+/// `VerbError.emptyReanchor`.
+public struct ReanchorFrame: Sendable, Equatable {
+    /// The drawer to reanchor.
+    public let rowID: RowID
+    /// Target room. `nil` keeps the current room.
+    public let toRoom: RoomID?
+    /// Target lattice anchor. `nil` keeps the current anchor.
+    public let toLattice: LatticeAnchor?
+
+    public init(
+        rowID: RowID,
+        toRoom: RoomID? = nil,
+        toLattice: LatticeAnchor? = nil
+    ) {
+        self.rowID = rowID
+        self.toRoom = toRoom
+        self.toLattice = toLattice
+    }
+}
+
+/// Slots for the `propose` verb.
+///
+/// `propose` creates a Proposal row with `state = pending` (cookbook
+/// §10.7). Per AriaLexicon's flow taxonomy, `propose` is
+/// substrate-driven — emitted by the Brain layer's standing signals,
+/// not invoked synchronously by application callers. The GLK verb
+/// surface defines the frame so the nine-verb shape is consistent;
+/// the substrate implementation arrives with the Brain layer in a
+/// later sub-mission, and today's GLK surface raises
+/// `VerbError.notSupportedByEstate` when invoked.
+public struct ProposeFrame: Sendable, Equatable {
+    /// The row this proposal is about (the target). Carried as a
+    /// `RowID` because the substrate's RowReference resolves through
+    /// the proposal table at write time; that resolution is Brain-layer
+    /// work and not part of this scaffold.
+    public let target: RowID
+    /// Typed proposal taxonomy. See `ProposalKind` for the full
+    /// vocabulary including production labels and test cases. The
+    /// rawValue string is what the substrate ultimately persists and
+    /// what the Rust port matches against.
+    public let kind: ProposalKind
+    /// Optional justification for the proposed change.
+    public let justification: String?
+
+    public init(target: RowID, kind: ProposalKind, justification: String? = nil) {
+        self.target = target
+        self.kind = kind
+        self.justification = justification
+    }
+}
+
+/// Slots for the `associate` verb.
+///
+/// `associate` creates or strengthens an Association row between two
+/// rows (cookbook §10.8). Substrate-driven (Brain layer / dreaming
+/// daemon). The GLK surface declares the frame so the nine-verb shape
+/// is consistent; today's surface raises
+/// `VerbError.notSupportedByEstate` when invoked.
+public struct AssociateFrame: Sendable, Equatable {
+    /// One endpoint of the association.
+    public let a: RowID
+    /// The other endpoint.
+    public let b: RowID
+    /// Weight of the association in [0, 1]. The Brain layer interprets
+    /// this; at the GLK boundary it is opaque.
+    public let weight: Double
+
+    public init(a: RowID, b: RowID, weight: Double) {
+        self.a = a
+        self.b = b
+        self.weight = weight
+    }
+}

@@ -1,0 +1,400 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x00a0483c8000002c520092c44504a2080801008f45010d0337462141801099c0"
+      },
+      "id": "case_000",
+      "inputs": {
+        "a": "0x00f04cbcc11901ee5726fae76555a3884c0574bf470bad03b756a9c38870b9ca",
+        "b": "0xefa0f97dbea2fe3d7a0992d4dd0cf60c2ae3898f55411fcf7f4e3171c595dfc1",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0xad5721fbadd35518483e3dfe830d58d0e435445997d641341a805e88bb7ad611"
+      },
+      "id": "case_001",
+      "inputs": {
+        "a": "0xc213a6cb2353d9dc060e2a84c9a3f75a4158001b4a57c9d4f34d2343d700f129",
+        "b": "0x6f4487308e808cc44e30177a4aaeaf8aa56d4442dd8188e0e9cd7dcb6c7a2738",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x212840f3a01b0600c8b14e29203510190503062050f1eb0a2200850004644a62"
+      },
+      "id": "case_002",
+      "inputs": {
+        "a": "0x69285ff7a43bce00c8b74e3b2e77b8d94553d668d0f7fbbaafe095800c644aeb",
+        "b": "0xa1fc60fbe01f2753cef1df2df03d511d1f870fb654f1eb0e620fc73066eedb72",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0xbba0b8fe3dc9351c63a56be34d5e6fd19d6f256305c0b00efc3d4ddb79074102"
+      },
+      "id": "case_003",
+      "inputs": {
+        "a": "0x2342ae8de5756c9a8e267d9a62e343e7c84ca5a1fef2ff5bdf0d472a591ee759",
+        "b": "0x98e21673d8bc5986ed8316792fbd2c36552380c2fb324f5523300af12019a65b",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x240d4071020284232ec24e1121000080074820a1a00b8d511204020220c00140"
+      },
+      "id": "case_004",
+      "inputs": {
+        "a": "0xf41f71730252c4b32fee5e1379040898875e60b9b05b9d73724f8a62e0c203ed",
+        "b": "0x2e0dccf5f2a29d6f7ec34e71230072c56769abe1ee0f8d591f24068f27f0c540",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0xb42446e42f6f5243162fdb44f1b440ee0756a9cf64215267999658946ec4b9ed"
+      },
+      "id": "case_005",
+      "inputs": {
+        "a": "0xc35bef67bb10b24047df07e7cdd63a170bc53bf8caec17bf56d3a9332b41558c",
+        "b": "0x777fa983947fe00351f0dca33c627af90c939237aecd45d8cf45f1a74585ec61",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x074630023d017201212869100c1004a0338086812af01181213000145c200004"
+      },
+      "id": "case_006",
+      "inputs": {
+        "a": "0x9776f85e3fd572a525387b130e1044ab3381cfc7eaf4f9d133b026967ce8005e",
+        "b": "0x4fc73303fd0bfe1ba16fed98dd91ade43bd886a13ff9158f2930181cde23df25",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0xc5a80bfb41cf209ff7ccf5042b7df37e94368419bd3324f636fd54e879363628"
+      },
+      "id": "case_007",
+      "inputs": {
+        "a": "0xd799776cbbf31de038c29888d782ebbcd24e7287bfc49bfcc06c021c921fe645",
+        "b": "0x12317c97fa3c3d7fcf0e6d8cfcff18c24678f69e02f7bf0af69156f4eb29d06d",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x211021263009eb204905100030a10285001c93c05082ba81842d65c088020010"
+      },
+      "id": "case_008",
+      "inputs": {
+        "a": "0x713b67a7310bfb31cd055bc935a5e3e7841df3d172aabbcfc4af6df08e160130",
+        "b": "0xa1d429263e0defe06b1d140638b1168d005e9be05c87fa81bd2df5c299ab62d2",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x783b9a4a781fca5c1e8611f3b1f4742583a89697a3f9e6f99ed0f26bccb0b6bd"
+      },
+      "id": "case_009",
+      "inputs": {
+        "a": "0xa3c5fabb730df8d5d7547a3b6e27659df52181fd0bed0772ba123ee715bdc0a8",
+        "b": "0xdbfe60f10b123289c9d26bc8dfd311b87689176aa814e18b24c2cc8cd90d7615",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x2058080084034a340008c284004440100c04454001000600006c015440918014"
+      },
+      "id": "case_010",
+      "inputs": {
+        "a": "0xa67d0840f5175f77a7e8c2c4924ec25a0ea45d4267040f040bec01f6e0b38894",
+        "b": "0x695aecb584ab6a3c481fcfbc4cd45414ed1567f0192246d2e06e835d5199f35e",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x7c736ec150c104453a2c6562f6fbb28083b9814859a856433f72e4f58f4a2fa4"
+      },
+      "id": "case_011",
+      "inputs": {
+        "a": "0x3e96c1fb1f7deec1fb380999e5e49373558c6b1bfd8f0395ff67b0a72021fbc9",
+        "b": "0x42e5af3a4fbcea84c1146cfb131f21f3d635ea53a42755d6c0155452af6bd46d",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x82a1a2108a041230410100040ba0e80001420e203a0424482888600100806882"
+      },
+      "id": "case_012",
+      "inputs": {
+        "a": "0x86efea339b45123c4b01823c0be8e81233e64eb03b65a44d7ebc630186c56896",
+        "b": "0xf2b1a2d4ce3453f055ad45460fa6f9edc1531e227e9c37da2889e4413888e883",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x0bda3447eb12826f3c6f5fb9dcc8c398384b15a4f94e786dff1e63f106d7d158"
+      },
+      "id": "case_013",
+      "inputs": {
+        "a": "0x016b7a403df1460c9e1447727b5d319a1cd8928a4343226ec99c0f6ee3b7452a",
+        "b": "0x0ab14e07d6e3c463a27b18cba795f2022493872eba0d5a0336826c9fe5609472",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x10849881444006d61194a42898d20c180000450010285a04924083416800a943"
+      },
+      "id": "case_014",
+      "inputs": {
+        "a": "0x548cfa91465c0ff791d4a52899d34c58b4a85504b02e7e059e6c87436a56bfcb",
+        "b": "0x98c59d8dc541d6de19b4f67cdad23e9c4857c7e850b8db4e9350f3c96820a943",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0xe6c7b6780c469a060233360f7e47b1f07c37493cebebb59f8893af7d8925eb4a"
+      },
+      "id": "case_015",
+      "inputs": {
+        "a": "0x1562a15379268a632906cea5ec01d9a191ad0aab31dc889529f6ec7c27d2a385",
+        "b": "0xf3a5172b756010652b35f8aa92466851ed9a4397da373d0aa1654301aef748cf",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x00003101014400a420240992018444002c2223010a47e5908049409004420c20"
+      },
+      "id": "case_016",
+      "inputs": {
+        "a": "0x140a3509d34561ac21e65fba11c64d082e2333832a47e5d082d9c0f56e42fdf0",
+        "b": "0x8b44f9832ddc92a6fa340992af9cf400fdfaa7495a5ff790d86d6f9815de0e2d",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0xf3f01bbeebbee0f383a26178d70cdd1c50e186d7a7d47991cf7d2f02c8d1c7d2"
+      },
+      "id": "case_017",
+      "inputs": {
+        "a": "0xd4e44d2408dcbf264d8a87a6069cd187305dfc235b3c08f1f656d02f895f78d0",
+        "b": "0x2714569ae3625fd5ce28e6ded1900c9b60bc7af4fce87160392bff2d418ebf02",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x2e6000962000d422111244803200800500020250f028043401b22b109047498b"
+      },
+      "id": "case_018",
+      "inputs": {
+        "a": "0x3e61629fa110d57313574e9c33028cbf845303f0f8fa0634b5b26b30dcd76baf",
+        "b": "0x2fe288b662a5d622d1b254823250b10541a28a55f12d94ff49be3b91b3675dcb",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x5667b147771ca4069c26477567a6bec73bd738c6c89669b904ea28e12b1dfce7"
+      },
+      "id": "case_019",
+      "inputs": {
+        "a": "0x49ac1b7f3059865d78be62cc51b14c4d8e86c058651d84c26080f08378a08da7",
+        "b": "0x1fcbaa384745225be49825b93617f28ab551f89ead8bed7b646ad86253bd7140",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x00b1a21444203088501001041480400643580466aa50440088c4a4d04024080a"
+      },
+      "id": "case_020",
+      "inputs": {
+        "a": "0x20b7aa16d42234a85114093fb4f066064f5c0466baf474b4a8d6e6f05136e80e",
+        "b": "0x1bb9b6fc6f38b18c52f06344578bc866f3f8876eaf5bcd42ddc5bcd8e4e4197b",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x402fa7946643907e2ea9b244b318c40090457b34eb83c7fefe067b8877f02dc5"
+      },
+      "id": "case_021",
+      "inputs": {
+        "a": "0x96ea2070eb6144632c7f6a24236a9e73f89cf7fcde0a416d969e03034872efd6",
+        "b": "0xd6c587e48d22d41d02d6d86090725a7368d98cc8358986936898788b3f82c213",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x4201908ec1d0280a201900515500810aa80532a44090944c400001920000038c"
+      },
+      "id": "case_022",
+      "inputs": {
+        "a": "0x4a41d8bee7da3e6f251986517786eb3aa825f3b47ad0bc5e574001da01882f9f",
+        "b": "0x4339b4ced1d0a88a78ff71ff555981cffe0732aec0b0966d689023b2fe36d38c",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x57f4ebd1ffb4321c9f1fe8c9a77f562d3e4fead8bbaf2ffc9b8fd7289329b6bb"
+      },
+      "id": "case_023",
+      "inputs": {
+        "a": "0x41387ac19d8e617683fad7b9015397ab6c2a31b8c928ab32e6f6f489e45f4000",
+        "b": "0x16cc9110623a536a1ce53f70a62cc1865265db60728784ce7d7923a17776f6bb",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x2209988b2013a0542a10400020481000080000a0201cc501701e28811175018b"
+      },
+      "id": "case_024",
+      "inputs": {
+        "a": "0x6a89daabe8f3a4557a106044aa5a94a05a3090b434bdf511f11f29b55975098b",
+        "b": "0xa73fbc9b2013eb7eafb65f9221e97014884068a0a81ec569703e38c1957fa5bb",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x3def10947192978868c3926fadb50c06c271f5424c249ebe51222f34019468b3"
+      },
+      "id": "case_025",
+      "inputs": {
+        "a": "0x79ecf73758dd8bc63602e6e9f7adf3b7468f234ac2066ccb5206a165db50f79d",
+        "b": "0x4403e7a3294f1c4e5ec174865a18ffb184fed6088e22f27503248e51dac49f2e",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x440002c5141c00e4081140c8dc8120810c230da100029884240000a8a0888921"
+      },
+      "id": "case_026",
+      "inputs": {
+        "a": "0x649b4ad5167d61e489f14cccddb121831c63cdf1008ebc84a53130ada088c92d",
+        "b": "0xdd2032cd1d9e9aed7c1dc3cbdcc1eea5aebb0dabd923d996368c0df8eddd8b61",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x79d8d3216f97a2980165b81bfaf0fee2a8a1810a851f53e8fda43021c848ba7a"
+      },
+      "id": "case_027",
+      "inputs": {
+        "a": "0x76ffb8dc90a7b1bc40e196eec9a72f3a8f8c9695aeecac50f1c37fbfbff223a1",
+        "b": "0x0f276bfdff30132441842ef53357d1d8272d179f2bf3ffb80c674f9e77ba99db",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x086204f100c3248e90418035a58543008a3048100b0181033104033000410603"
+      },
+      "id": "case_028",
+      "inputs": {
+        "a": "0x096e24ffa0cf36afb351a8bdf5854308fef6c89d8bf389bbb10683b089e10603",
+        "b": "0xace396f10dc3a58e944bc475a5ef4bc18b317e506b05e303336c0b3a665baf5b",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0xc6ea07e03d577bd32cb4ef4bbbe621f44ea0acbe5ba3096c4c2cdd92c6e236ec"
+      },
+      "id": "case_029",
+      "inputs": {
+        "a": "0xb89538e3cf4b0b2e7fabf5f3e1c9f2b8d3b458cfed66a485bd9b2ee08cb9e798",
+        "b": "0x7e7f3f03f21c70fd531f1ab85a2fd34c9d14f471b6c5ade9f1b7f3724a5bd174",
+        "op": "0x01"
+      }
+    },
+    {
+      "description": "op intersect",
+      "expected_output": {
+        "result": "0x17091881c24030c80604430a195ac148000208c4c8844090d04a0c000a001904"
+      },
+      "id": "case_030",
+      "inputs": {
+        "a": "0x77391dadffc5bed92f84cb1a9d7ec54821161cccce864094d06a0e05bbb01b46",
+        "b": "0x17c9b8c3c26831cec65647ea795ad95952cbcad4c8ad7ef3dbde2c580e4cdd35",
+        "op": "0x00"
+      }
+    },
+    {
+      "description": "op difference",
+      "expected_output": {
+        "result": "0x654eac2960c7f39ad1857f52cff81b030de70cf7bcb19a01acf005219607c0fb"
+      },
+      "id": "case_031",
+      "inputs": {
+        "a": "0x1be573a7eafca3bfd313ab7d0e93fe38a501077c694fad9b679269383ca0129e",
+        "b": "0x7eabdf8e8a3b50250296d42fc16be53ba8e60b8bd5fe379acb626c19aaa7d265",
+        "op": "0x01"
+      }
+    }
+  ],
+  "cookbook_section": "§8.6",
+  "format_version": "1",
+  "generated_at": "2026-05-17T12:55:51Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-BitwiseArithmetic.swift"
+  },
+  "output_crc32": "0x05230c95",
+  "primitive": "bitwise",
+  "seed": "0xcafebabedeadbeef"
+}

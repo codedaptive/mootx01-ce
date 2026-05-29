@@ -1,0 +1,19 @@
+[package]
+name = "corpus-kit-providers"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rust port of Swift's CorpusKitProviders target: concrete TextEmbeddingProvider and Tokenizer implementations that depend on model bundles or carry test-stub identities. DeterministicTokenizer ships today; ONNX/Candle model providers land in a follow-on R-mission."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "corpus_kit_providers"
+path = "src/lib.rs"
+
+[dependencies]
+corpus-kit = { path = "../rust" }
+# F5b: substrate-lib provides FNV-1a as a public substrate atomic
+# (I-25). DeterministicTokenizer consumes substrate_lib::fnv::hash32
+# by name instead of reimplementing the hash inline.
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }

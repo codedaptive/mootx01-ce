@@ -1,0 +1,368 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "op hash64, len 17",
+      "expected_output": {
+        "result": "0xed8be8b268cde842"
+      },
+      "id": "case_000",
+      "inputs": {
+        "op": "0x00",
+        "s": "xm3V6Q_cgbZVoLPPi"
+      }
+    },
+    {
+      "description": "op hash32, len 22",
+      "expected_output": {
+        "result": "0x1db6cd2000000000"
+      },
+      "id": "case_001",
+      "inputs": {
+        "op": "0x01",
+        "s": "VHoFIJoiFyTvJ0VhYU-NFd"
+      }
+    },
+    {
+      "description": "op hash16, len 16",
+      "expected_output": {
+        "result": "0xab3e000000000000"
+      },
+      "id": "case_002",
+      "inputs": {
+        "op": "0x02",
+        "s": "lw3rmpxLZZpH7Px4"
+      }
+    },
+    {
+      "description": "op hash64, len 3",
+      "expected_output": {
+        "result": "0xa7f6720519b959e7"
+      },
+      "id": "case_003",
+      "inputs": {
+        "op": "0x00",
+        "s": "asp"
+      }
+    },
+    {
+      "description": "op hash32, len 7",
+      "expected_output": {
+        "result": "0x17008cce00000000"
+      },
+      "id": "case_004",
+      "inputs": {
+        "op": "0x01",
+        "s": "2XneeHR"
+      }
+    },
+    {
+      "description": "op hash16, len 9",
+      "expected_output": {
+        "result": "0xf6ad000000000000"
+      },
+      "id": "case_005",
+      "inputs": {
+        "op": "0x02",
+        "s": "9Jx16Bj2K"
+      }
+    },
+    {
+      "description": "op hash64, len 15",
+      "expected_output": {
+        "result": "0x2ee419db6b193174"
+      },
+      "id": "case_006",
+      "inputs": {
+        "op": "0x00",
+        "s": "NolPiTG-7v_cbwa"
+      }
+    },
+    {
+      "description": "op hash32, len 7",
+      "expected_output": {
+        "result": "0xd66a3e7d00000000"
+      },
+      "id": "case_007",
+      "inputs": {
+        "op": "0x01",
+        "s": "lZ-YvbO"
+      }
+    },
+    {
+      "description": "op hash16, len 10",
+      "expected_output": {
+        "result": "0xe59e000000000000"
+      },
+      "id": "case_008",
+      "inputs": {
+        "op": "0x02",
+        "s": "ECjkIK2ur0"
+      }
+    },
+    {
+      "description": "op hash64, len 23",
+      "expected_output": {
+        "result": "0x5af548825c26f5ac"
+      },
+      "id": "case_009",
+      "inputs": {
+        "op": "0x00",
+        "s": "yzitvPrPZRTHuHUcl69yunW"
+      }
+    },
+    {
+      "description": "op hash32, len 23",
+      "expected_output": {
+        "result": "0x7d47d35500000000"
+      },
+      "id": "case_010",
+      "inputs": {
+        "op": "0x01",
+        "s": "NoG5-te1Vrbjj4oGFK1KGrp"
+      }
+    },
+    {
+      "description": "op hash16, len 1",
+      "expected_output": {
+        "result": "0x0528000000000000"
+      },
+      "id": "case_011",
+      "inputs": {
+        "op": "0x02",
+        "s": "B"
+      }
+    },
+    {
+      "description": "op hash64, len 19",
+      "expected_output": {
+        "result": "0x0ae0839124708b7e"
+      },
+      "id": "case_012",
+      "inputs": {
+        "op": "0x00",
+        "s": "ZDwS4wwcOOkLOxd4-Ob"
+      }
+    },
+    {
+      "description": "op hash32, len 12",
+      "expected_output": {
+        "result": "0x5554a3dd00000000"
+      },
+      "id": "case_013",
+      "inputs": {
+        "op": "0x01",
+        "s": "SMwCs9Q6AXNV"
+      }
+    },
+    {
+      "description": "op hash16, len 17",
+      "expected_output": {
+        "result": "0xc9d0000000000000"
+      },
+      "id": "case_014",
+      "inputs": {
+        "op": "0x02",
+        "s": "W52gseEedKjCLD8U2"
+      }
+    },
+    {
+      "description": "op hash64, len 23",
+      "expected_output": {
+        "result": "0x2b8bd208ef786573"
+      },
+      "id": "case_015",
+      "inputs": {
+        "op": "0x00",
+        "s": "apXpbNmjZ-XSulZ4_t9-tDX"
+      }
+    },
+    {
+      "description": "op hash32, len 8",
+      "expected_output": {
+        "result": "0x48b69d3200000000"
+      },
+      "id": "case_016",
+      "inputs": {
+        "op": "0x01",
+        "s": "VHqxgsBB"
+      }
+    },
+    {
+      "description": "op hash16, len 20",
+      "expected_output": {
+        "result": "0x7fe0000000000000"
+      },
+      "id": "case_017",
+      "inputs": {
+        "op": "0x02",
+        "s": "LN-cOlEOcHqv0gGjLgMI"
+      }
+    },
+    {
+      "description": "op hash64, len 13",
+      "expected_output": {
+        "result": "0xda64dcb3081b346f"
+      },
+      "id": "case_018",
+      "inputs": {
+        "op": "0x00",
+        "s": "rYJYah0DJhdbJ"
+      }
+    },
+    {
+      "description": "op hash32, len 4",
+      "expected_output": {
+        "result": "0x7362d20a00000000"
+      },
+      "id": "case_019",
+      "inputs": {
+        "op": "0x01",
+        "s": "uwpn"
+      }
+    },
+    {
+      "description": "op hash16, len 24",
+      "expected_output": {
+        "result": "0x48f4000000000000"
+      },
+      "id": "case_020",
+      "inputs": {
+        "op": "0x02",
+        "s": "SMLii5ZX1Q_G6MEn2cTrmr3k"
+      }
+    },
+    {
+      "description": "op hash64, len 1",
+      "expected_output": {
+        "result": "0xfc9a01864cac63af"
+      },
+      "id": "case_021",
+      "inputs": {
+        "op": "0x00",
+        "s": "1"
+      }
+    },
+    {
+      "description": "op hash32, len 12",
+      "expected_output": {
+        "result": "0x37ad200300000000"
+      },
+      "id": "case_022",
+      "inputs": {
+        "op": "0x01",
+        "s": "RMTPKrM2oWpy"
+      }
+    },
+    {
+      "description": "op hash16, len 17",
+      "expected_output": {
+        "result": "0xc58c000000000000"
+      },
+      "id": "case_023",
+      "inputs": {
+        "op": "0x02",
+        "s": "FgaQ13wnQE6jwy8IC"
+      }
+    },
+    {
+      "description": "op hash64, len 21",
+      "expected_output": {
+        "result": "0xe5cfc07221933cec"
+      },
+      "id": "case_024",
+      "inputs": {
+        "op": "0x00",
+        "s": "nnCodW3m730Nt8aTgDgpt"
+      }
+    },
+    {
+      "description": "op hash32, len 2",
+      "expected_output": {
+        "result": "0xe8af189800000000"
+      },
+      "id": "case_025",
+      "inputs": {
+        "op": "0x01",
+        "s": "Z5"
+      }
+    },
+    {
+      "description": "op hash16, len 5",
+      "expected_output": {
+        "result": "0x461e000000000000"
+      },
+      "id": "case_026",
+      "inputs": {
+        "op": "0x02",
+        "s": "TOMeh"
+      }
+    },
+    {
+      "description": "op hash64, len 21",
+      "expected_output": {
+        "result": "0x03cb2409215379c2"
+      },
+      "id": "case_027",
+      "inputs": {
+        "op": "0x00",
+        "s": "MzyRtWFXV9cgYaUBxILXv"
+      }
+    },
+    {
+      "description": "op hash32, len 12",
+      "expected_output": {
+        "result": "0x051fbede00000000"
+      },
+      "id": "case_028",
+      "inputs": {
+        "op": "0x01",
+        "s": "WOF719UZMWnr"
+      }
+    },
+    {
+      "description": "op hash16, len 7",
+      "expected_output": {
+        "result": "0xdbb2000000000000"
+      },
+      "id": "case_029",
+      "inputs": {
+        "op": "0x02",
+        "s": "C3Ketcw"
+      }
+    },
+    {
+      "description": "op hash64, len 9",
+      "expected_output": {
+        "result": "0x88de278db55d7448"
+      },
+      "id": "case_030",
+      "inputs": {
+        "op": "0x00",
+        "s": "AXtLrt3qV"
+      }
+    },
+    {
+      "description": "op hash32, len 13",
+      "expected_output": {
+        "result": "0x20f73b0200000000"
+      },
+      "id": "case_031",
+      "inputs": {
+        "op": "0x01",
+        "s": "LJMUlvtvGYyD8"
+      }
+    }
+  ],
+  "cookbook_section": "§3.3",
+  "format_version": "1",
+  "generated_at": "2026-05-29T00:59:06Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-FNV.swift"
+  },
+  "output_crc32": "0x275fd2bf",
+  "primitive": "fnv",
+  "seed": "0xcafebabedeadbeef"
+}

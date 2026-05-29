@@ -1,0 +1,608 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "cardinality 2, entropy 0.946676",
+      "expected_output": {
+        "entropy": "0x5c59723f"
+      },
+      "id": "case_000",
+      "inputs": {
+        "probabilities": [
+          "0xe195223f",
+          "0x3fd4ba3e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 4, entropy 1.1158898",
+      "expected_output": {
+        "entropy": "0x7ad58e3f"
+      },
+      "id": "case_001",
+      "inputs": {
+        "probabilities": [
+          "0xce22643c",
+          "0x9104383f",
+          "0x9dbd613e",
+          "0xc9b73f3d"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 8, entropy 2.8757",
+      "expected_output": {
+        "entropy": "0x780b3840"
+      },
+      "id": "case_002",
+      "inputs": {
+        "probabilities": [
+          "0x13bf223e",
+          "0x5a59183e",
+          "0xd9842d3e",
+          "0x402e8f3d",
+          "0x1331273e",
+          "0x8076043d",
+          "0xdd721a3e",
+          "0x1614da3d"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 16, entropy 3.649294",
+      "expected_output": {
+        "entropy": "0x088e6940"
+      },
+      "id": "case_003",
+      "inputs": {
+        "probabilities": [
+          "0x5c48ef3d",
+          "0x6d30f03c",
+          "0xf8a4103a",
+          "0xdf07e83d",
+          "0x0b50c73d",
+          "0xcebbfa3d",
+          "0xc492313d",
+          "0x3ed77b3c",
+          "0xf83f013c",
+          "0x0f13753d",
+          "0x19a7a43d",
+          "0xdc72f63d",
+          "0x7868443d",
+          "0x96f13f3d",
+          "0x0e498f3d",
+          "0xc9c2e73c"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 2, entropy 0.99907935",
+      "expected_output": {
+        "entropy": "0xaac37f3f"
+      },
+      "id": "case_004",
+      "inputs": {
+        "probabilities": [
+          "0xf8daf63e",
+          "0x8492043f"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 4, entropy 1.9520664",
+      "expected_output": {
+        "entropy": "0x50ddf93f"
+      },
+      "id": "case_005",
+      "inputs": {
+        "probabilities": [
+          "0xf677863e",
+          "0xbd80633e",
+          "0x90192d3e",
+          "0xe23ab13e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 8, entropy 2.7871346",
+      "expected_output": {
+        "entropy": "0x6a603240"
+      },
+      "id": "case_006",
+      "inputs": {
+        "probabilities": [
+          "0x5979013e",
+          "0xebce643e",
+          "0x05e0cf3d",
+          "0xae85963d",
+          "0xad57963d",
+          "0x0773d93c",
+          "0xfd745d3e",
+          "0xb3b5223e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 16, entropy 3.736722",
+      "expected_output": {
+        "entropy": "0x74266f40"
+      },
+      "id": "case_007",
+      "inputs": {
+        "probabilities": [
+          "0x8a15e33a",
+          "0x8566d63d",
+          "0xa4e4b93d",
+          "0xef93283d",
+          "0x87428e3d",
+          "0x0e41933d",
+          "0xd87cb43d",
+          "0xb3d8213d",
+          "0x5c03423c",
+          "0x158bc43d",
+          "0x4c1f763d",
+          "0xbeee823c",
+          "0xaba0c03d",
+          "0x1169a23d",
+          "0x8516d93d",
+          "0x8ceaf03c"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 2, entropy 0.968644",
+      "expected_output": {
+        "entropy": "0x0ef9773f"
+      },
+      "id": "case_008",
+      "inputs": {
+        "probabilities": [
+          "0x0dd2ca3e",
+          "0xfb961a3f"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 4, entropy 1.4860528",
+      "expected_output": {
+        "entropy": "0xfa36be3f"
+      },
+      "id": "case_009",
+      "inputs": {
+        "probabilities": [
+          "0x0478df3c",
+          "0x6cae8b3e",
+          "0xfd01ff3d",
+          "0xcb4c133f"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 8, entropy 2.9019816",
+      "expected_output": {
+        "entropy": "0x11ba3940"
+      },
+      "id": "case_010",
+      "inputs": {
+        "probabilities": [
+          "0xe1781f3e",
+          "0xcf02143d",
+          "0x1aa92c3e",
+          "0x51bfd83d",
+          "0xe3b5c73d",
+          "0x7e81213e",
+          "0xe140243e",
+          "0xb7c0f13d"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 16, entropy 3.743554",
+      "expected_output": {
+        "entropy": "0x64966f40"
+      },
+      "id": "case_011",
+      "inputs": {
+        "probabilities": [
+          "0x2210803d",
+          "0x8f61bd3d",
+          "0x18059a3d",
+          "0x4a8bce3d",
+          "0xea069d3d",
+          "0xe2ad423c",
+          "0x180c863d",
+          "0xc5f84b3d",
+          "0x31b61a3b",
+          "0x9bb9a63d",
+          "0xe4f8073d",
+          "0x338d383c",
+          "0x36e8eb3d",
+          "0x1b5e553d",
+          "0x4698d93d",
+          "0xd4cb813d"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 2, entropy 0.9835583",
+      "expected_output": {
+        "entropy": "0x7aca7b3f"
+      },
+      "id": "case_012",
+      "inputs": {
+        "probabilities": [
+          "0xa96cd93e",
+          "0xac49133f"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 4, entropy 1.9271492",
+      "expected_output": {
+        "entropy": "0xd3acf63f"
+      },
+      "id": "case_013",
+      "inputs": {
+        "probabilities": [
+          "0x7478423e",
+          "0xc2b4b13e",
+          "0x2bae9c3e",
+          "0xb4c1203e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 8, entropy 2.7395375",
+      "expected_output": {
+        "entropy": "0x95542f40"
+      },
+      "id": "case_014",
+      "inputs": {
+        "probabilities": [
+          "0xf83a593d",
+          "0xd1068a3c",
+          "0x0a408c3d",
+          "0x8fa1073e",
+          "0x1793583e",
+          "0x9075563e",
+          "0x3eac443e",
+          "0xdaf3ed3d"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 16, entropy 3.5161989",
+      "expected_output": {
+        "entropy": "0x67096140"
+      },
+      "id": "case_015",
+      "inputs": {
+        "probabilities": [
+          "0xd97afe3b",
+          "0x5800c43d",
+          "0xbe168c3d",
+          "0x51e1d73c",
+          "0x05df7d3d",
+          "0x5618023b",
+          "0x1f82123b",
+          "0x0dbb913d",
+          "0x38ed1c3e",
+          "0x12c3603d",
+          "0x3275693b",
+          "0xa971013e",
+          "0x808e0d3e",
+          "0x2b9bc63d",
+          "0x47cc483d",
+          "0xa6602c3d"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 2, entropy 0.95877725",
+      "expected_output": {
+        "entropy": "0x6d72753f"
+      },
+      "id": "case_016",
+      "inputs": {
+        "probabilities": [
+          "0x7118c33e",
+          "0xc8731e3f"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 4, entropy 1.9614966",
+      "expected_output": {
+        "entropy": "0x5212fb3f"
+      },
+      "id": "case_017",
+      "inputs": {
+        "probabilities": [
+          "0x3157a43e",
+          "0xe7e6923e",
+          "0xce525e3e",
+          "0x0231333e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 8, entropy 2.428678",
+      "expected_output": {
+        "entropy": "0x766f1b40"
+      },
+      "id": "case_018",
+      "inputs": {
+        "probabilities": [
+          "0x67f7283c",
+          "0xfad4503e",
+          "0xb3b52d3e",
+          "0x08cf093c",
+          "0xdb73523e",
+          "0xf0be723e",
+          "0x0cde273e",
+          "0x8a099c3a"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 16, entropy 3.6288812",
+      "expected_output": {
+        "entropy": "0x973f6840"
+      },
+      "id": "case_019",
+      "inputs": {
+        "probabilities": [
+          "0xf6cc9f3d",
+          "0xb473c73c",
+          "0x2cafab3c",
+          "0x1ebc953d",
+          "0x4fc1043e",
+          "0xf1ade53d",
+          "0xf112eb3d",
+          "0x45e5aa3d",
+          "0x1ad1543d",
+          "0x0193d33a",
+          "0xe17b7f3d",
+          "0xab0ed33d",
+          "0x8b20e63c",
+          "0x1750c13d",
+          "0x48789a3c",
+          "0x1977513b"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 2, entropy 0.9906638",
+      "expected_output": {
+        "entropy": "0x259c7d3f"
+      },
+      "id": "case_020",
+      "inputs": {
+        "probabilities": [
+          "0xdb8b0e3f",
+          "0x49e8e23e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 4, entropy 1.9005716",
+      "expected_output": {
+        "entropy": "0xee45f33f"
+      },
+      "id": "case_021",
+      "inputs": {
+        "probabilities": [
+          "0xb0dc333e",
+          "0x65be143e",
+          "0xccc6ba3e",
+          "0xa9eba03e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 8, entropy 2.6456308",
+      "expected_output": {
+        "entropy": "0x04522940"
+      },
+      "id": "case_022",
+      "inputs": {
+        "probabilities": [
+          "0x64c7ec3d",
+          "0x8f53343e",
+          "0x35df203e",
+          "0x38a1a73d",
+          "0x693a5a3e",
+          "0x7f000a3c",
+          "0xf3196a3e",
+          "0x57249d3c"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 16, entropy 3.8469381",
+      "expected_output": {
+        "entropy": "0x3c347640"
+      },
+      "id": "case_023",
+      "inputs": {
+        "probabilities": [
+          "0x8c80a83d",
+          "0x6c5d763d",
+          "0xab55203d",
+          "0xde78933d",
+          "0x26f56d3d",
+          "0xef868a3d",
+          "0x09eb823d",
+          "0x25a1003e",
+          "0x0ddd8f3c",
+          "0xae358a3d",
+          "0xd6abb03d",
+          "0xeb6d3f3c",
+          "0x824c853d",
+          "0x147d0d3d",
+          "0xa620633d",
+          "0x5e9cbe3d"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 2, entropy 0.9713621",
+      "expected_output": {
+        "entropy": "0x30ab783f"
+      },
+      "id": "case_024",
+      "inputs": {
+        "probabilities": [
+          "0x5529cd3e",
+          "0x556b193f"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 4, entropy 1.9778914",
+      "expected_output": {
+        "entropy": "0x8c2bfd3f"
+      },
+      "id": "case_025",
+      "inputs": {
+        "probabilities": [
+          "0x6ac14f3e",
+          "0xda6a853e",
+          "0x9d62603e",
+          "0x2183a23e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 8, entropy 2.6953552",
+      "expected_output": {
+        "entropy": "0xb3802c40"
+      },
+      "id": "case_026",
+      "inputs": {
+        "probabilities": [
+          "0xa1255f3d",
+          "0x734f0e3a",
+          "0xb383e93d",
+          "0xaee6133e",
+          "0x1784623e",
+          "0x7f304e3e",
+          "0x2d34bc3d",
+          "0x1431303e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 16, entropy 3.800918",
+      "expected_output": {
+        "entropy": "0x3e427340"
+      },
+      "id": "case_027",
+      "inputs": {
+        "probabilities": [
+          "0x6c620c3c",
+          "0x9d2f863d",
+          "0xf205753d",
+          "0x80811f3c",
+          "0x05474c3d",
+          "0x6903b53d",
+          "0x7983bf3d",
+          "0x4474b13d",
+          "0xdf35c43d",
+          "0xcd6b983d",
+          "0x9efc163d",
+          "0x95b7ab3d",
+          "0x7ebc633d",
+          "0x2ca5b43c",
+          "0x1441dc3d",
+          "0x17247d3d"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 2, entropy 0.82245094",
+      "expected_output": {
+        "entropy": "0x258c523f"
+      },
+      "id": "case_028",
+      "inputs": {
+        "probabilities": [
+          "0xe3293e3f",
+          "0x3aac833e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 4, entropy 1.9320576",
+      "expected_output": {
+        "entropy": "0xaa4df73f"
+      },
+      "id": "case_029",
+      "inputs": {
+        "probabilities": [
+          "0x3583ba3e",
+          "0x2550823e",
+          "0x4af86c3e",
+          "0x0661193e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 8, entropy 2.807858",
+      "expected_output": {
+        "entropy": "0xf2b33340"
+      },
+      "id": "case_030",
+      "inputs": {
+        "probabilities": [
+          "0x8681283e",
+          "0xac79503d",
+          "0x8659903d",
+          "0x03ef0f3e",
+          "0x9e99013d",
+          "0x3896413e",
+          "0x2436253e",
+          "0x8711443e"
+        ]
+      }
+    },
+    {
+      "description": "cardinality 16, entropy 3.6386342",
+      "expected_output": {
+        "entropy": "0x62df6840"
+      },
+      "id": "case_031",
+      "inputs": {
+        "probabilities": [
+          "0x34f8b23d",
+          "0xd8088b3b",
+          "0x448abf3d",
+          "0x3c4bd63a",
+          "0xe3c0913d",
+          "0xa669c53d",
+          "0x9b36073b",
+          "0x968c3b3d",
+          "0xdae4bc3c",
+          "0xe0e5bc3d",
+          "0x8c91883d",
+          "0x38379c3d",
+          "0x7060013e",
+          "0x823c1d3d",
+          "0xa799ee3d",
+          "0x37d16e3d"
+        ]
+      }
+    }
+  ],
+  "cookbook_section": "§8.11",
+  "format_version": "1",
+  "generated_at": "2026-05-17T13:46:40Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-InformationTheory.swift"
+  },
+  "output_crc32": "0x0cc08713",
+  "primitive": "info_theory",
+  "seed": "0xcafebabedeadbeef"
+}

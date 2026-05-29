@@ -1,0 +1,368 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "shape 0, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_000",
+      "inputs": {
+        "a": "0x00f04cbcc1190000572600004c000000",
+        "b": "0xb756a9c388700000efa000007a000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_001",
+      "inputs": {
+        "a": "0x2ae3898f554100007f4e0000c2000000",
+        "b": "0x2ae3898f554100007f4e0000c2000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_002",
+      "inputs": {
+        "a": "0x060e2a84c9a3000041580000f3000000",
+        "b": "0x060e2a84c9a3000041580000f4000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering 1",
+      "expected_output": {
+        "ordering": 1
+      },
+      "id": "case_003",
+      "inputs": {
+        "a": "0x6f4487308e8000004e300000a5000000",
+        "b": "0xe9cd7dcb6c7a000069280000c8000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_004",
+      "inputs": {
+        "a": "0x4553d668d0f70000afe00000a1000000",
+        "b": "0x4553d668d0f70000afe00000a1000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_005",
+      "inputs": {
+        "a": "0xcef1df2df03d00001f87000062000000",
+        "b": "0xcef1df2df03d00001f87000063000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering 1",
+      "expected_output": {
+        "ordering": 1
+      },
+      "id": "case_006",
+      "inputs": {
+        "a": "0x2342ae8de57500008e260000c8000000",
+        "b": "0xdf0d472a591e000098e20000ed000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_007",
+      "inputs": {
+        "a": "0x552380c2fb32000023300000f4000000",
+        "b": "0x552380c2fb32000023300000f4000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_008",
+      "inputs": {
+        "a": "0x2fee5e1379040000875e000072000000",
+        "b": "0x2fee5e1379040000875e000073000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_009",
+      "inputs": {
+        "a": "0x2e0dccf5f2a200007ec3000067000000",
+        "b": "0x1f24068f27f00000c35b000047000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_010",
+      "inputs": {
+        "a": "0x0bc53bf8caec000056d3000077000000",
+        "b": "0x0bc53bf8caec000056d3000077000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_011",
+      "inputs": {
+        "a": "0x51f0dca33c6200000c930000cf000000",
+        "b": "0x51f0dca33c6200000c930000d0000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_012",
+      "inputs": {
+        "a": "0x9776f85e3fd500002538000033000000",
+        "b": "0x33b026967ce800004fc70000a1000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_013",
+      "inputs": {
+        "a": "0x3bd886a13ff9000029300000d7000000",
+        "b": "0x3bd886a13ff9000029300000d7000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_014",
+      "inputs": {
+        "a": "0x38c29888d7820000d24e0000c0000000",
+        "b": "0x38c29888d7820000d24e0000c1000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering 1",
+      "expected_output": {
+        "ordering": 1
+      },
+      "id": "case_015",
+      "inputs": {
+        "a": "0x12317c97fa3c0000cf0e000046000000",
+        "b": "0xf69156f4eb290000713b0000cd000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_016",
+      "inputs": {
+        "a": "0x841df3d172aa0000c4af0000a1000000",
+        "b": "0x841df3d172aa0000c4af0000a1000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_017",
+      "inputs": {
+        "a": "0x6b1d140638b10000005e0000bd000000",
+        "b": "0x6b1d140638b10000005e0000be000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_018",
+      "inputs": {
+        "a": "0xa3c5fabb730d0000d7540000f5000000",
+        "b": "0xba123ee715bd0000dbfe0000c9000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_019",
+      "inputs": {
+        "a": "0x7689176aa814000024c20000a6000000",
+        "b": "0x7689176aa814000024c20000a6000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_020",
+      "inputs": {
+        "a": "0xa7e8c2c4924e00000ea400000b000000",
+        "b": "0xa7e8c2c4924e00000ea400000c000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering 1",
+      "expected_output": {
+        "ordering": 1
+      },
+      "id": "case_021",
+      "inputs": {
+        "a": "0x695aecb584ab0000481f0000ed000000",
+        "b": "0xe06e835d519900003e960000fb000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_022",
+      "inputs": {
+        "a": "0x558c6b1bfd8f0000ff67000042000000",
+        "b": "0x558c6b1bfd8f0000ff67000042000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_023",
+      "inputs": {
+        "a": "0xc1146cfb131f0000d6350000c0000000",
+        "b": "0xc1146cfb131f0000d6350000c1000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_024",
+      "inputs": {
+        "a": "0x86efea339b4500004b01000033000000",
+        "b": "0x7ebc630186c50000f2b1000055000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_025",
+      "inputs": {
+        "a": "0xc1531e227e9c00002889000001000000",
+        "b": "0xc1531e227e9c00002889000001000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_026",
+      "inputs": {
+        "a": "0x9e1447727b5d00001cd80000c9000000",
+        "b": "0x9e1447727b5d00001cd80000ca000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering 1",
+      "expected_output": {
+        "ordering": 1
+      },
+      "id": "case_027",
+      "inputs": {
+        "a": "0x0ab14e07d6e30000a27b000024000000",
+        "b": "0x36826c9fe5600000548c000091000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_028",
+      "inputs": {
+        "a": "0xb4a85504b02e00009e6c000098000000",
+        "b": "0xb4a85504b02e00009e6c000098000000"
+      }
+    },
+    {
+      "description": "shape 2, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_029",
+      "inputs": {
+        "a": "0x19b4f67cdad200004857000093000000",
+        "b": "0x19b4f67cdad200004857000094000000"
+      }
+    },
+    {
+      "description": "shape 0, ordering -1",
+      "expected_output": {
+        "ordering": -1
+      },
+      "id": "case_030",
+      "inputs": {
+        "a": "0x1562a153792600002906000091000000",
+        "b": "0x29f6ec7c27d20000f3a500002b000000"
+      }
+    },
+    {
+      "description": "shape 1, ordering 0",
+      "expected_output": {
+        "ordering": 0
+      },
+      "id": "case_031",
+      "inputs": {
+        "a": "0xed9a4397da370000a165000014000000",
+        "b": "0xed9a4397da370000a165000014000000"
+      }
+    }
+  ],
+  "cookbook_section": "§5.2",
+  "format_version": "1",
+  "generated_at": "2026-05-17T13:25:51Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-HLC.swift"
+  },
+  "output_crc32": "0x9303e020",
+  "primitive": "hlc",
+  "seed": "0xcafebabedeadbeef"
+}

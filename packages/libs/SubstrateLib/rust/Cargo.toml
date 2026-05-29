@@ -1,0 +1,65 @@
+[package]
+name = "substrate-lib"
+version = "0.36.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Canonical scalar reference implementation of the GeniusLocus substrate primitives from GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "substrate_lib"
+path = "lib.rs"
+
+[features]
+# `simd-nightly` enables the portable-SIMD kernel backend via
+# `std::simd::u64x4` for `or_reduce_batch` (and future Phase 2.β
+# / 2.γ ops). Requires a Rust nightly toolchain (the
+# `portable_simd` feature is unstable as of 1.97-nightly).
+#
+# Off by default so stable builds (Rust 1.75+) continue to work
+# without modification. The test harness turns this on in its
+# own Cargo.toml so the conformance gate can run
+# `--kernel=simd` against the reference.
+#
+# See `DECISION_OR_REDUCE_BACKENDS_2026-05-17.md` (Axis 1) for
+# the SIMD implementation rationale and Axis 2 for why no AMX/
+# BNNS path applies to bitwise OR-reduce.
+simd-nightly = ["substrate-kernel/simd-nightly"]
+
+# `serde-support` enables JSON wire-format compatibility with the
+# Swift port. Each substrate primitive's Swift type is Codable
+# (auto-synthesized) and emits a specific JSON shape; this feature
+# adds matching serde derives + per-field rename attrs on the Rust
+# mirrors so the two ports produce byte-identical wire output.
+#
+# Off by default to keep SubstrateLib's foundational-library
+# posture: pure-math consumers don't pull serde. Wire-format
+# consumers (QueueKit Rust, federation transports, audit-log
+# replicators) opt in.
+#
+# F16 (2026-05-27): added after the cross-team audit found
+# QueueKit Rust carrying a local Hlc workaround for SubstrateLib
+# Rust's serde gap. The systemic finding was 11 Swift Codable
+# types vs 0 Rust serde types. F16.A covers the 8 with clean
+# field mappings; F16.B (AuditValue / AuditEntry / GSetAuditLog)
+# is deferred pending a wire-format design decision for enums
+# with associated values.
+serde-support = ["dep:serde", "dep:serde_repr", "dep:serde-big-array"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+substrate-types = { path = "../../SubstrateTypes/rust" }
+substrate-kernel = { path = "../../SubstrateKernel/rust" }
+substrate-ml = { path = "../../SubstrateML/rust" }
+serde_repr = { version = "0.1", optional = true }
+# Serde's built-in array impls only cover N ≤ 32. CountVector256's
+# [u32; 256] needs serde-big-array (a #[serde(with = "BigArray")]
+# attribute supplies the missing impl).
+serde-big-array = { version = "0.5", optional = true }
+
+[dev-dependencies]
+# serde_json drives the F16 byte-identity conformance tests by
+# encoding instances and asserting the JSON output matches the
+# Swift Codable fixture. Only used in tests/.
+serde_json = "1"

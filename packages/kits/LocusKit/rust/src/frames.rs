@@ -1,0 +1,216 @@
+//! Verb input frames for the estate surface. Ports the `CaptureFrame`,
+//! `MutationKind`, and `LearnFrame` types from `Frames.swift`.
+//!
+//! `RecallFrame`, `HydrationLevel`, `Ordering`, and `StateCluster` already
+//! live in `filter.rs` (landed LP-1E), so only the capture / mutation /
+//! learn types belong here. Callers import from both modules as needed.
+//!
+//! Per `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` §§ 7.1 / 7.8.3.
+
+use crate::adjectives::{AdjectiveSensitivity, Trust};
+use crate::drawer_operational::{CaptureChannel, ContentKind};
+use crate::estate_types::LatticeAnchor;
+use crate::filter::LineageID;
+use crate::provenance::{Channel, Sensitivity, SourceType};
+
+// MARK: - CaptureFrame
+
+/// Slots for the `capture` verb. Per spec § 7.1 and § 7.8.3.
+///
+/// Every slot is named; no raw bitmap value crosses this boundary.
+/// `estate_verbs.rs` translates these slots into a storage `Drawer`
+/// and writes it via `DrawerStore::add_drawer`.
+#[derive(Debug, Clone)]
+pub struct CaptureFrame {
+    /// Verbatim content to store (rung 1 — exact bytes preserved).
+    pub content: String,
+
+    /// How this content was captured. Lands in bits 0–3 of the
+    /// resulting drawer's `operational_bitmap`.
+    pub channel: CaptureChannel,
+
+    /// Adjective sensitivity tier. Defaults to `Normal`.
+    ///
+    /// Scale-gapped raw values (0/4/8/12) are shifted left by 4 in
+    /// the adjective bitmap assembly to land in bits 4–7.
+    pub sensitivity: AdjectiveSensitivity,
+
+    /// Content kind. Defaults to `Prose`. Lands in bits 4–7 of the
+    /// resulting drawer's `operational_bitmap`.
+    pub kind: ContentKind,
+
+    /// Provenance Channel (cookbook §2.5, provenance bitmap bits 6–11).
+    /// The capture-time origin axis — UI vs MCP agent vs file import vs
+    /// federation inbound, etc. Distinct from the operational
+    /// `CaptureChannel` above; defaults to `UiTyped` (raw 0) so existing
+    /// callers continue to produce zero-provenance drawers as before.
+    pub provenance_channel: Channel,
+
+    /// Provenance SourceType (cookbook §2.5, provenance bitmap bits 0–5).
+    /// Who/what produced this content. Defaults to `User` (raw 0).
+    pub source_type: SourceType,
+
+    /// Provenance Sensitivity (cookbook §2.5, provenance bitmap bits
+    /// 30–35). The estate-level access posture at capture time, distinct
+    /// from the access-control `sensitivity` adjective above (which is
+    /// mutable post-capture). Defaults to `Normal` (raw 0).
+    pub provenance_sensitivity: Sensitivity,
+
+    /// Lineage identifier shared with any prior version of this content.
+    /// When `Some` and an active predecessor sharing this lineage exists,
+    /// `capture` triggers the supersession cascade in `DrawerStore::add_drawer`
+    /// (spec § 6.2 / § 6.3). When `None` a fresh UUID is stamped so each
+    /// new drawer is its own lineage by default (spec § 5.10).
+    pub lineage_id: Option<LineageID>,
+
+    /// Room within the estate the drawer is filed under.
+    pub room: String,
+
+    /// Lattice anchor — `udc_code` required per invariant I-5.
+    pub lattice_anchor: LatticeAnchor,
+
+    /// Actor identifier written into the drawer's `added_by` field and
+    /// into any bitmap-audit row this capture produces.
+    pub added_by: String,
+
+    /// Embedding model id for the modelID-tagging contract (I-4).
+    /// Required even before vectors are generated so a future model bump
+    /// cannot accidentally compare across versions.
+    pub embedding_model_id: String,
+}
+
+impl CaptureFrame {
+    /// Construct a `CaptureFrame` with the spec defaults: `Typed` channel,
+    /// `Normal` sensitivity, `Prose` kind, no lineage id. Mirrors the
+    /// Swift `CaptureFrame.init(content:channel:room:latticeAnchor:addedBy:embeddingModelID:)`.
+    pub fn new(
+        content: impl Into<String>,
+        channel: CaptureChannel,
+        room: impl Into<String>,
+        lattice_anchor: LatticeAnchor,
+        added_by: impl Into<String>,
+        embedding_model_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            channel,
+            sensitivity: AdjectiveSensitivity::Normal,
+            kind: ContentKind::Prose,
+            provenance_channel: Channel::UiTyped,
+            source_type: SourceType::User,
+            provenance_sensitivity: Sensitivity::Normal,
+            lineage_id: None,
+            room: room.into(),
+            lattice_anchor,
+            added_by: added_by.into(),
+            embedding_model_id: embedding_model_id.into(),
+        }
+    }
+}
+
+// MARK: - MutationKind
+
+/// Named mutation operations for the `mutate` verb. Per spec § 7.8.3.
+///
+/// Callers express intent in named cases; the evaluator translates each
+/// case into the appropriate bitmap mutation. No caller-facing raw bit
+/// value participates in this enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationKind {
+    /// Move the row's confirmation axis to `.UserConfirmed`.
+    Confirm,
+    /// Move the row's state to `Rejected` (terminal cluster).
+    Reject,
+    /// Move the row's state to `Contested` (still currently-believed
+    /// cluster, but flagged for resolution).
+    Contest,
+    /// Resolve a contested row back to `Active` once the contest is settled.
+    Resolve,
+    /// Explicit supersession (used when the caller knows the new version's
+    /// lineage id does not match but the semantic supersession relationship
+    /// should still be recorded).
+    Supersede,
+    /// Move a withdrawn / expired row back to `Active`.
+    Revive,
+    /// Move the row's state to `Accepted` (terminal cluster — the row
+    /// is canonical and will not move again).
+    Accept,
+    /// Set the row's sensitivity axis to the supplied tier.
+    CorrectSensitivity(AdjectiveSensitivity),
+    /// Set the row's trust axis to the supplied value.
+    CorrectTrust(Trust),
+}
+
+// MARK: - LearnFrame
+
+/// Slots for the `learn` verb. Scaffold only — full slot set
+/// (`SourceCatalogEntry`, `LearnMode`, `RefreshPolicy`) is declared in
+/// the standing-signals mission.
+#[derive(Debug, Clone)]
+pub struct LearnFrame {
+    /// Caller-supplied handle naming the source to learn.
+    pub handle: String,
+}
+
+impl LearnFrame {
+    /// Create a `LearnFrame` with the given source handle.
+    pub fn new(handle: impl Into<String>) -> Self {
+        Self { handle: handle.into() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adjectives::AdjectiveSensitivity;
+    use crate::drawer_operational::CaptureChannel;
+    use crate::estate_types::LatticeAnchor;
+
+    #[test]
+    fn capture_frame_new_defaults() {
+        let f = CaptureFrame::new(
+            "hello world",
+            CaptureChannel::Typed,
+            "kitchen",
+            LatticeAnchor::udc("5"),
+            "alice",
+            "test-v1",
+        );
+        assert_eq!(f.content, "hello world");
+        assert_eq!(f.channel, CaptureChannel::Typed);
+        assert_eq!(f.sensitivity, AdjectiveSensitivity::Normal);
+        assert_eq!(f.kind, ContentKind::Prose);
+        assert!(f.lineage_id.is_none());
+        assert_eq!(f.room, "kitchen");
+        assert_eq!(f.lattice_anchor.udc_code, "5");
+        assert_eq!(f.added_by, "alice");
+        assert_eq!(f.embedding_model_id, "test-v1");
+    }
+
+    #[test]
+    fn mutation_kind_correct_sensitivity_carries_value() {
+        let mk = MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted);
+        match mk {
+            MutationKind::CorrectSensitivity(s) => {
+                assert_eq!(s, AdjectiveSensitivity::Restricted);
+            }
+            _ => panic!("expected CorrectSensitivity"),
+        }
+    }
+
+    #[test]
+    fn mutation_kind_cases_distinct() {
+        assert_ne!(MutationKind::Confirm, MutationKind::Reject);
+        assert_ne!(MutationKind::Contest, MutationKind::Resolve);
+    }
+
+    #[test]
+    fn learn_frame_stores_handle() {
+        let f = LearnFrame::new("source-abc");
+        assert_eq!(f.handle, "source-abc");
+    }
+}

@@ -1,0 +1,21 @@
+# Pin the Rust harness to a nightly toolchain.
+#
+# Rationale: the harness depends on
+# `geniuslocus-reference` with the `simd-nightly` feature, which
+# in turn requires the unstable `portable_simd` library feature
+# (tracking issue rust-lang/rust#86656). Stable Rust can build
+# the reference crate without the feature flag, but the harness
+# needs the SIMD kernel available for the conformance gate to
+# run `--kernel=simd`.
+#
+# We pin to a specific nightly date for reproducibility. Bump
+# the date when std::simd APIs change or a newer nightly is
+# needed for unrelated reasons; otherwise, keep this stable so
+# the harness's behavior is deterministic across machines.
+#
+# See `docs/decisions/DECISION_OR_REDUCE_BACKENDS_2026-05-17.md`
+# for the rationale on nightly Rust in this project.
+
+[toolchain]
+channel = "nightly-2026-05-16"
+components = ["rustc", "cargo", "rust-std"]

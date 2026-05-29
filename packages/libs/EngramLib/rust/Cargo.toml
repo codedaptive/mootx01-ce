@@ -1,0 +1,21 @@
+[package]
+name = "engram-lib"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Product-facing similarity, retrieval, and aggregation API over 256-bit engrams. Wraps the GeniusLocus substrate kernel layer behind a stable surface."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "engram_lib"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Pass-through to the reference crate's portable-SIMD kernel.
+simd-nightly = ["substrate-lib/simd-nightly"]
+
+[dependencies]
+substrate-lib = { path = "../../SubstrateLib/rust" }
+substrate-types = { path = "../../SubstrateTypes/rust" }

@@ -1,0 +1,58 @@
+{
+  "format_version": "1",
+  "primitive": "locuskit_kgfact_temporal",
+  "cookbook_section": "§4.1 / §5.5",
+  "generator": {
+    "language": "swift",
+    "harness_version": "1.0.0",
+    "reference_file": "LocusKit/Sources/LocusKit/KGFact.swift"
+  },
+  "seed": "0x0000000000000003",
+  "generated_at": "2026-05-23T00:00:00Z",
+  "case_count": 2,
+  "schema_note": "Temporal-validity behavior on KGFact at the current LocusKit rung is encoded via state transitions on the adjective bitmap: the kgFacts(forDrawerID:) query excludes facts whose state cluster is >= 7 (rejected/accepted-terminal/tombstoned-post-resolution). 'Still valid' at as-of-time-T means the fact was inserted at or before T and its state cluster is still below 7. The valid_from / ended / as-of triple the mission references is realized here as filedAt vs. state-cluster transitions, which is the Swift LocusKit's current ground truth. Per-observation equality is the conformance gate.",
+  "cases": [
+    {
+      "id": "case_000",
+      "description": "insert two facts from one source drawer; both are visible via kgFacts(forDrawerID:)",
+      "inputs": {
+        "ops": [
+          { "op": "capture", "content": "alice's home address", "room": "people", "udc": "910", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "addKGFact", "id": "f-001", "subject": "alice", "predicate": "livesIn", "object": "berlin", "sourceDrawerIndex": 0, "filedAtEpoch": 1700000000 },
+          { "op": "addKGFact", "id": "f-002", "subject": "alice", "predicate": "worksFor", "object": "acme", "sourceDrawerIndex": 0, "filedAtEpoch": 1700000050 },
+          { "op": "kgFactsForDrawer", "sourceDrawerIndex": 0 }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "captured", "captureIndex": 0, "expectContent": "alice's home address", "expectRoom": "people", "expectUDC": "910", "expectStateActive": true },
+          { "kind": "kgFactAdded", "id": "f-001" },
+          { "kind": "kgFactAdded", "id": "f-002" },
+          { "kind": "kgFactList", "expectIds": ["f-001", "f-002"] }
+        ]
+      }
+    },
+    {
+      "id": "case_001",
+      "description": "as-of replay: facts ordered by filedAt asc inside kgFactsForDrawer reflect the temporal order they were asserted",
+      "inputs": {
+        "ops": [
+          { "op": "capture", "content": "policy doc", "room": "policies", "udc": "34", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "addKGFact", "id": "p-early", "subject": "policy.42", "predicate": "supersedes", "object": "policy.41", "sourceDrawerIndex": 0, "filedAtEpoch": 1700000000 },
+          { "op": "addKGFact", "id": "p-mid",   "subject": "policy.42", "predicate": "authoredBy", "object": "alice",     "sourceDrawerIndex": 0, "filedAtEpoch": 1700000100 },
+          { "op": "addKGFact", "id": "p-late",  "subject": "policy.42", "predicate": "ratifiedBy", "object": "council",   "sourceDrawerIndex": 0, "filedAtEpoch": 1700000200 },
+          { "op": "kgFactsForDrawer", "sourceDrawerIndex": 0 }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "captured", "captureIndex": 0, "expectContent": "policy doc", "expectRoom": "policies", "expectUDC": "34", "expectStateActive": true },
+          { "kind": "kgFactAdded", "id": "p-early" },
+          { "kind": "kgFactAdded", "id": "p-mid" },
+          { "kind": "kgFactAdded", "id": "p-late" },
+          { "kind": "kgFactList", "expectIds": ["p-early", "p-mid", "p-late"] }
+        ]
+      }
+    }
+  ]
+}

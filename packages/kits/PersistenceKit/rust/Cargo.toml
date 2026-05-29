@@ -1,0 +1,17 @@
+[package]
+name = "persistence-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Storage abstraction layer for the GeniusLocus substrate kits. Closed-enum predicate algebra, Storage + RowStore + BlobStore + VectorIndex + AuditLog + StorageObserver traits. InMemory backend ships at v1.0; SQLite backend is a follow-on."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "persistence_kit"
+path = "src/lib.rs"
+
+[dependencies]
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+uuid = { version = "1", features = ["v4"] }

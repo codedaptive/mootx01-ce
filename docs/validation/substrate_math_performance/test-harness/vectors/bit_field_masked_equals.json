@@ -1,0 +1,400 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "corner: all_zero",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_000",
+      "inputs": {
+        "bitmap": "0x0000000000000000",
+        "expected": "0x0000000000000000",
+        "mask": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "corner: all_ones",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_001",
+      "inputs": {
+        "bitmap": "0xffffffffffffffff",
+        "expected": "0xffffffffffffffff",
+        "mask": "0xffffffffffffffff"
+      }
+    },
+    {
+      "description": "corner: zero_bitmap_nonzero_expected",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_002",
+      "inputs": {
+        "bitmap": "0x0000000000000000",
+        "expected": "0x1200000000000000",
+        "mask": "0xff00000000000000"
+      }
+    },
+    {
+      "description": "corner: zero_mask_zero_expected",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_003",
+      "inputs": {
+        "bitmap": "0xff00000000000000",
+        "expected": "0x0000000000000000",
+        "mask": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "corner: zero_mask_nonzero_expected",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_004",
+      "inputs": {
+        "bitmap": "0xff00000000000000",
+        "expected": "0x4200000000000000",
+        "mask": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "corner: post_mask_aligned_match",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_005",
+      "inputs": {
+        "bitmap": "0x7856341200000000",
+        "expected": "0x0056000000000000",
+        "mask": "0x00ff000000000000"
+      }
+    },
+    {
+      "description": "corner: expected_bit_outside_mask",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_006",
+      "inputs": {
+        "bitmap": "0x7856341200000000",
+        "expected": "0x0156000000000000",
+        "mask": "0x00ff000000000000"
+      }
+    },
+    {
+      "description": "corner: sign_bit_low_nibble",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_007",
+      "inputs": {
+        "bitmap": "0xffffffffffffffff",
+        "expected": "0x0f00000000000000",
+        "mask": "0x0f00000000000000"
+      }
+    },
+    {
+      "description": "corner: cookbook_state_field",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_008",
+      "inputs": {
+        "bitmap": "0x0000000003000000",
+        "expected": "0x0000000003000000",
+        "mask": "0x000000003f000000"
+      }
+    },
+    {
+      "description": "corner: field_full_expected_partial",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_009",
+      "inputs": {
+        "bitmap": "0x000000003f000000",
+        "expected": "0x0000000003000000",
+        "mask": "0x000000003f000000"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_010",
+      "inputs": {
+        "bitmap": "0x00f04cbcc11901ee",
+        "expected": "0x4c0574bf470bad03",
+        "mask": "0x5726fae76555a388"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_011",
+      "inputs": {
+        "bitmap": "0xb756a9c38870b9ca",
+        "expected": "0xa700a9418820b808",
+        "mask": "0xefa0f97dbea2fe3d"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_012",
+      "inputs": {
+        "bitmap": "0x7a0992d4dd0cf60c",
+        "expected": "0x7f4e3171c595dfc1",
+        "mask": "0x2ae3898f55411fcf"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_013",
+      "inputs": {
+        "bitmap": "0xc213a6cb2353d9dc",
+        "expected": "0x020222800103d158",
+        "mask": "0x060e2a84c9a3f75a"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_014",
+      "inputs": {
+        "bitmap": "0x4158001b4a57c9d4",
+        "expected": "0x6f4487308e808cc4",
+        "mask": "0xf34d2343d700f129"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_015",
+      "inputs": {
+        "bitmap": "0x4e30177a4aaeaf8a",
+        "expected": "0x0420044248808880",
+        "mask": "0xa56d4442dd8188e0"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_016",
+      "inputs": {
+        "bitmap": "0xe9cd7dcb6c7a2738",
+        "expected": "0xc8b74e3b2e77b8d9",
+        "mask": "0x69285ff7a43bce00"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_017",
+      "inputs": {
+        "bitmap": "0x4553d668d0f7fbba",
+        "expected": "0x0540940000644aaa",
+        "mask": "0xafe095800c644aeb"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_018",
+      "inputs": {
+        "bitmap": "0xa1fc60fbe01f2753",
+        "expected": "0x1f870fb654f1eb0e",
+        "mask": "0xcef1df2df03d511d"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_019",
+      "inputs": {
+        "bitmap": "0x620fc73066eedb72",
+        "expected": "0x2202860064644812",
+        "mask": "0x2342ae8de5756c9a"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_020",
+      "inputs": {
+        "bitmap": "0x8e267d9a62e343e7",
+        "expected": "0xdf0d472a591ee759",
+        "mask": "0xc84ca5a1fef2ff5b"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_021",
+      "inputs": {
+        "bitmap": "0x98e21673d8bc5986",
+        "expected": "0x8882167108bc0806",
+        "mask": "0xed8316792fbd2c36"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_022",
+      "inputs": {
+        "bitmap": "0x552380c2fb324f55",
+        "expected": "0xf41f71730252c4b3",
+        "mask": "0x23300af12019a65b"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_023",
+      "inputs": {
+        "bitmap": "0x2fee5e1379040898",
+        "expected": "0x074e401130000810",
+        "mask": "0x875e60b9b05b9d73"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_024",
+      "inputs": {
+        "bitmap": "0x724f8a62e0c203ed",
+        "expected": "0x7ec34e71230072c5",
+        "mask": "0x2e0dccf5f2a29d6f"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_025",
+      "inputs": {
+        "bitmap": "0x6769abe1ee0f8d59",
+        "expected": "0x0720028126008540",
+        "mask": "0x1f24068f27f0c540"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_026",
+      "inputs": {
+        "bitmap": "0xc35bef67bb10b240",
+        "expected": "0x0bc53bf8caec17bf",
+        "mask": "0x47df07e7cdd63a17"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_027",
+      "inputs": {
+        "bitmap": "0x56d3a9332b41558c",
+        "expected": "0x5653a90300414000",
+        "mask": "0x777fa983947fe003"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_028",
+      "inputs": {
+        "bitmap": "0x51f0dca33c627af9",
+        "expected": "0xcf45f1a74585ec61",
+        "mask": "0x0c939237aecd45d8"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_029",
+      "inputs": {
+        "bitmap": "0x9776f85e3fd572a5",
+        "expected": "0x053078120e1040a1",
+        "mask": "0x25387b130e1044ab"
+      }
+    },
+    {
+      "description": "prng: independent",
+      "expected_output": {
+        "result": "0x00"
+      },
+      "id": "case_030",
+      "inputs": {
+        "bitmap": "0x3381cfc7eaf4f9d1",
+        "expected": "0x4fc73303fd0bfe1b",
+        "mask": "0x33b026967ce8005e"
+      }
+    },
+    {
+      "description": "prng: aligned",
+      "expected_output": {
+        "result": "0x01"
+      },
+      "id": "case_031",
+      "inputs": {
+        "bitmap": "0xa16fed98dd91ade4",
+        "expected": "0x214884801d910584",
+        "mask": "0x3bd886a13ff9158f"
+      }
+    }
+  ],
+  "cookbook_section": "§2.8",
+  "format_version": "1",
+  "generated_at": "2026-05-29T09:55:57Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-BitField.swift"
+  },
+  "output_crc32": "0x54f6c65f",
+  "primitive": "bit_field_masked_equals",
+  "seed": "0xcafebabedeadbeef"
+}

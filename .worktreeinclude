@@ -1,0 +1,6 @@
+# Files to copy into new worktrees at creation time.
+# Only gitignored files matching these patterns are copied.
+# See: https://code.claude.com/docs/en/worktrees#copy-gitignored-files-into-worktrees
+
+# Active mission symlink — Wave 4 enforcement hooks read this
+.claude/active-mission.md

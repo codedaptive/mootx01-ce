@@ -1,0 +1,17 @@
+[package]
+name = "neuron-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "The algorithms layer of the MOOTx01 substrate. Composes EideticLib's deterministic text-to-anchor lookup and wraps it in substrate-shaped LatticeAnchorInference records that carry the provenance enrichment_status bit transition per cookbook section 2.5. Conformance-gated against the Swift port at NeuronKit/Sources/NeuronKit. Per DESIGN_CONSTRAINTS.md C-1, no external runtime dependencies; ML capabilities live above the substrate, not within it."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "neuron_kit"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+eidetic-lib = { path = "../../../libs/EideticLib/rust" }
