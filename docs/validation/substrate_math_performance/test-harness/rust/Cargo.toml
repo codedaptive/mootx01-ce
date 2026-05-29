@@ -1,0 +1,45 @@
+[package]
+name = "geniuslocus-test-harness"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+
+[lib]
+name = "harness"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gen-vectors"
+path = "src/bin/gen_vectors.rs"
+
+[[bin]]
+name = "validate-vectors"
+path = "src/bin/validate_vectors.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+# Path 2: depend on the real reference implementations. The
+# harness primitives that previously contained byte-identical
+# stubs (e.g. simhash) will now delegate to the canonical Rust
+# port in this crate. A regenerate-vectors pass produces new
+# CRCs against the real impls, replacing the stub-derived
+# baseline CRCs.
+#
+# The harness opts into the `simd-nightly` feature so that
+# `KernelKind::Simd` resolves to `kernel_simd::SimdKernel`
+# instead of falling back to `ScalarKernel`. This requires a
+# nightly toolchain; see `rust-toolchain.toml` in this directory.
+substrate-kit = { path = "../../../../../packages/libs/SubstrateLib/rust", package = "substrate-lib", features = ["simd-nightly"] }
+
+[features]
+default = ["simd-nightly"]
+# Passthrough: the harness re-exports the reference crate's
+# simd-nightly feature so kernel_registry::available() can
+# cfg-gate on it. Disable with `--no-default-features` to test
+# the stable-fallback path.
+simd-nightly = ["substrate-kit/simd-nightly"]
+
+[dev-dependencies]

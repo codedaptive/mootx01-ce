@@ -1,0 +1,85 @@
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Archives and sensitive data
+*.archive
+*.binary
+*.db
+.obsidian/
+
+# Zip files
+*.zip
+
+# Context packs (generated at session start, not committed)
+.context/
+
+# Claude Code session state
+.claude/active-mission.md
+.claude/worktrees/
+.context/
+./CLAUDE.MD
+
+#Swift / Rust builds
+.build/
+.swiftpm/
+
+# Rust build artifacts — global, any depth (every crate's target/ dir)
+**/target/
+
+# Security-audit Finder-flag manifest (local triage sidecar)
+packages/.audit-flagged
+
+# Local-only directories (any depth) — not pushed upstream
+_sandbox*/
+.claude*/
+
+# Python test/build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.venv/
+venv/
+
+# Go test/build artifacts
+*.test
+coverage.out
+coverage.html

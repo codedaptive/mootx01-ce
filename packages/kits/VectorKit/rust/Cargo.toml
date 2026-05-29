@@ -1,0 +1,22 @@
+[package]
+name = "vectorkit"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+description = "On-device embedding generation and persistence-kit-backed vector storage. EmbeddingProvider trait, FloatSimHash projection, model-tagged vector records per spec I-4."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "vectorkit"
+path = "src/lib.rs"
+
+# Storage now flows through persistence-kit (any backend), not direct
+# rusqlite. EngramLib and SubstrateLib are still consumed for the
+# Engram type and the FloatSimHash projection. Rusqlite is gone.
+[dependencies]
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+engram-lib = { path = "../../../libs/EngramLib/rust" }
+persistence-kit = { path = "../../PersistenceKit/rust" }
+uuid = { version = "1", features = ["v4"] }

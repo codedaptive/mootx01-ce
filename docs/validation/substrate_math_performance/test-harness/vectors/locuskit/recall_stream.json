@@ -1,0 +1,60 @@
+{
+  "format_version": "1",
+  "primitive": "locuskit_recall_stream",
+  "cookbook_section": "§7.8.4 / §7.3",
+  "generator": {
+    "language": "swift",
+    "harness_version": "1.0.0",
+    "reference_file": "LocusKit/Sources/LocusKit/RecallStream.swift"
+  },
+  "seed": "0x0000000000000004",
+  "generated_at": "2026-05-23T00:00:00Z",
+  "case_count": 2,
+  "schema_note": "Recall pagination over the room filter. Captures N drawers into one room, then recallAll paginates them with the given pageSize. Ordering at .byCaptureTimeDesc returns newest captured first. The runner pulls every page and concatenates; the observation counts and content ordering are the conformance gate.",
+  "cases": [
+    {
+      "id": "case_000",
+      "description": "five captures, paginate by 2; pages = [2,2,1], total 5, newest-first",
+      "inputs": {
+        "ops": [
+          { "op": "capture", "content": "c1", "room": "library", "udc": "0", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "c2", "room": "library", "udc": "0", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "c3", "room": "library", "udc": "0", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "c4", "room": "library", "udc": "0", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "c5", "room": "library", "udc": "0", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "recallPaged", "room": "library", "pageSize": 2 }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "captured", "captureIndex": 0, "expectContent": "c1", "expectRoom": "library", "expectUDC": "0", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 1, "expectContent": "c2", "expectRoom": "library", "expectUDC": "0", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 2, "expectContent": "c3", "expectRoom": "library", "expectUDC": "0", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 3, "expectContent": "c4", "expectRoom": "library", "expectUDC": "0", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 4, "expectContent": "c5", "expectRoom": "library", "expectUDC": "0", "expectStateActive": true },
+          { "kind": "recallPaged", "expectTotal": 5, "expectContents": ["c5", "c4", "c3", "c2", "c1"] }
+        ]
+      }
+    },
+    {
+      "id": "case_001",
+      "description": "default page size returns all when corpus is small; ordering newest first",
+      "inputs": {
+        "ops": [
+          { "op": "capture", "content": "x1", "room": "hall", "udc": "0", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "x2", "room": "hall", "udc": "0", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "capture", "content": "x3", "room": "hall", "udc": "0", "addedBy": "owner", "embeddingModelID": "test-v1" },
+          { "op": "recallAll", "room": "hall" }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "captured", "captureIndex": 0, "expectContent": "x1", "expectRoom": "hall", "expectUDC": "0", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 1, "expectContent": "x2", "expectRoom": "hall", "expectUDC": "0", "expectStateActive": true },
+          { "kind": "captured", "captureIndex": 2, "expectContent": "x3", "expectRoom": "hall", "expectUDC": "0", "expectStateActive": true },
+          { "kind": "recalled", "expectCount": 3, "expectFirstContent": "x3" }
+        ]
+      }
+    }
+  ]
+}

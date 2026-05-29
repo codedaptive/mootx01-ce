@@ -1,0 +1,36 @@
+{
+  "schema_version": "1",
+  "note": "MDCC-02 pinned-parent map (CollapseRule tier 1). For a multi-parent Wikidata concept, names the candidate parent that wins the single-parent collapse. These anchor high-traffic language concepts to their linguistics parent so they route to MDCC 400 by inheritance. NOTE: on the current 100%-udc_hint-pinned seed every concept is placed by its direct class pin in the assembler's first pass, so these parent pins are consumed and wired but inert on placement; they become active when the udc_hint layer is relaxed (a future mission). This mirrors MDCC-04's documented handling of inert routing nodes. The 'rationale' field is ignored by the loader.",
+  "pins": [
+    {
+      "child": "Q30642",
+      "parent": "Q8162",
+      "rationale": "natural language processing has parents on both the linguistics (Q8162) and computing sides; pin the linguistics parent so NLP routes to Language (400), not Generalities/computing, once hint pinning is relaxed."
+    },
+    {
+      "child": "Q1078276",
+      "parent": "Q30642",
+      "rationale": "natural language understanding is a subfield of natural language processing (Q30642); pin that parent so it inherits the language branch rather than a generic AI parent."
+    },
+    {
+      "child": "Q1513879",
+      "parent": "Q30642",
+      "rationale": "natural language generation is a subfield of natural language processing (Q30642); same language-branch routing as NLU."
+    },
+    {
+      "child": "Q35395",
+      "parent": "Q8162",
+      "rationale": "phonetics is a branch of linguistics (Q8162); pin the linguistics parent over any acoustics/physics parent so it stays in Language (400)."
+    },
+    {
+      "child": "Q2395230",
+      "parent": "Q8162",
+      "rationale": "syntax is a branch of linguistics (Q8162); pin the linguistics parent over any logic/formal-grammar parent."
+    },
+    {
+      "child": "Q7553",
+      "parent": "Q8162",
+      "rationale": "translation (the linguistic process) has parents spanning linguistics and the arts; pin linguistics (Q8162) so it routes to Language and communication (400)."
+    }
+  ]
+}

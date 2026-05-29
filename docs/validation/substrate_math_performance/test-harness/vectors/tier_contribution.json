@@ -1,0 +1,636 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "case=1, |cohort|=0",
+      "expected_output": {
+        "aggregate": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "row_count": "0x00000000",
+        "wire_bytes": "0x00f04cbcc11901ee5726fae76555a3880000000100000000000000000000000000000000000000000000000000000000000000000000000003ad0b47bf74054c"
+      },
+      "id": "case_000",
+      "inputs": {
+        "estate_uuid": "0x00f04cbcc11901ee5726fae76555a388",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0x4c0574bf470bad03",
+        "shareable": []
+      }
+    },
+    {
+      "description": "case=2, |cohort|=1",
+      "expected_output": {
+        "aggregate": "0x2ae3898f55411fcf7f4e3171c595dfc1c213a6cb2353d9dc060e2a84c9a3f75a",
+        "row_count": "0x01000000",
+        "wire_bytes": "0xb756a9c38870b9caefa0f97dbea2fe3d0000000200000001cf1f41558f89e32ac1df95c571314e7fdcd95323cba613c25af7a3c9842a0e060cf60cddd492097a"
+      },
+      "id": "case_001",
+      "inputs": {
+        "estate_uuid": "0xb756a9c38870b9caefa0f97dbea2fe3d",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0x7a0992d4dd0cf60c",
+        "shareable": [
+          "0x2ae3898f55411fcf7f4e3171c595dfc1c213a6cb2353d9dc060e2a84c9a3f75a"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=2",
+      "expected_output": {
+        "aggregate": "0xceb75f7b6effbfdbe57fd66addf7fbfaefedfdcb6c7e6ffbe9fc7fffe43fef53",
+        "row_count": "0x02000000",
+        "wire_bytes": "0x4158001b4a57c9d4f34d2343d700f1290000000300000002dbbfff6e7b5fb7cefafbf7dd6ad67fe5fb6f7e6ccbfdedef53ef3fe4ff7ffce9c48c808e3087446f"
+      },
+      "id": "case_002",
+      "inputs": {
+        "estate_uuid": "0x4158001b4a57c9d4f34d2343d700f129",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0x6f4487308e808cc4",
+        "shareable": [
+          "0x4e30177a4aaeaf8aa56d4442dd8188e0e9cd7dcb6c7a273869285ff7a43bce00",
+          "0xc8b74e3b2e77b8d94553d668d0f7fbbaafe095800c644aeba1fc60fbe01f2753"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=3",
+      "expected_output": {
+        "aggregate": "0xfffffffffffffdbfefef7ffb7fff6fffdf7fe5fbfffbff7fff7fcffbf9dfe7ff",
+        "row_count": "0x03000000",
+        "wire_bytes": "0xcef1df2df03d511d1f870fb654f1eb0e0000000100000003bffdffffffffffffff6fff7ffb7fefef7ffffbfffbe57fdfffe7dff9fbcf7fff72dbee6630c70f62"
+      },
+      "id": "case_003",
+      "inputs": {
+        "estate_uuid": "0xcef1df2df03d511d1f870fb654f1eb0e",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0x620fc73066eedb72",
+        "shareable": [
+          "0x2342ae8de5756c9a8e267d9a62e343e7c84ca5a1fef2ff5bdf0d472a591ee759",
+          "0x98e21673d8bc5986ed8316792fbd2c36552380c2fb324f5523300af12019a65b",
+          "0xf41f71730252c4b32fee5e1379040898875e60b9b05b9d73724f8a62e0c203ed"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=4",
+      "expected_output": {
+        "aggregate": "0xfff7ffbf7ffdfdfffffffffffffffefff7fffffffff7ffff3fdffffffffdffff",
+        "row_count": "0x04000000",
+        "wire_bytes": "0x2e0dccf5f2a29d6f7ec34e71230072c50000000200000004fffdfd7fbffff7fffffefffffffffffffffff7fffffffff7fffffdffffffdf3f598d0feee1ab6967"
+      },
+      "id": "case_004",
+      "inputs": {
+        "estate_uuid": "0x2e0dccf5f2a29d6f7ec34e71230072c5",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0x6769abe1ee0f8d59",
+        "shareable": [
+          "0x1f24068f27f0c540c35bef67bb10b24047df07e7cdd63a170bc53bf8caec17bf",
+          "0x56d3a9332b41558c777fa983947fe00351f0dca33c627af90c939237aecd45d8",
+          "0xcf45f1a74585ec619776f85e3fd572a525387b130e1044ab3381cfc7eaf4f9d1",
+          "0x33b026967ce8005e4fc73303fd0bfe1ba16fed98dd91ade43bd886a13ff9158f"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=5",
+      "expected_output": {
+        "aggregate": "0xf77fffffffffffffffffffffffbff7fffbffffffff3fffffffdf7fffffffffff",
+        "row_count": "0x05000000",
+        "wire_bytes": "0x2930181cde23df25d799776cbbf31de00000000300000005ffffffffffff7ff7fff7bfffffffffffffff3ffffffffffbffffffffff7fdfffbceb82d78898c238"
+      },
+      "id": "case_005",
+      "inputs": {
+        "estate_uuid": "0x2930181cde23df25d799776cbbf31de0",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0x38c29888d782ebbc",
+        "shareable": [
+          "0xd24e7287bfc49bfcc06c021c921fe64512317c97fa3c3d7fcf0e6d8cfcff18c2",
+          "0x4678f69e02f7bf0af69156f4eb29d06d713b67a7310bfb31cd055bc935a5e3e7",
+          "0x841df3d172aabbcfc4af6df08e160130a1d429263e0defe06b1d140638b1168d",
+          "0x005e9be05c87fa81bd2df5c299ab62d2a3c5fabb730df8d5d7547a3b6e27659d",
+          "0xf52181fd0bed0772ba123ee715bdc0a8dbfe60f10b123289c9d26bc8dfd311b8"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=6",
+      "expected_output": {
+        "aggregate": "0xffffeffffffffffffffffffbffffffdffffff7fffffffffffffffffffffffffd",
+        "row_count": "0x06000000",
+        "wire_bytes": "0x7689176aa814e18b24c2cc8cd90d76150000000100000006ffffffffffefffffdffffffffbfffffffffffffffff7fffffdffffffffffffff775f17f540087da6"
+      },
+      "id": "case_006",
+      "inputs": {
+        "estate_uuid": "0x7689176aa814e18b24c2cc8cd90d7615",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0xa67d0840f5175f77",
+        "shareable": [
+          "0xa7e8c2c4924ec25a0ea45d4267040f040bec01f6e0b38894695aecb584ab6a3c",
+          "0x481fcfbc4cd45414ed1567f0192246d2e06e835d5199f35e3e96c1fb1f7deec1",
+          "0xfb380999e5e49373558c6b1bfd8f0395ff67b0a72021fbc942e5af3a4fbcea84",
+          "0xc1146cfb131f21f3d635ea53a42755d6c0155452af6bd46d86efea339b45123c",
+          "0x4b01823c0be8e81233e64eb03b65a44d7ebc630186c56896f2b1a2d4ce3453f0",
+          "0x55ad45460fa6f9edc1531e227e9c37da2889e4413888e883016b7a403df1460c"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=7",
+      "expected_output": {
+        "aggregate": "0xfffffffffffffffffbffffffffdffffffffffffffbffffdfffffffffffffffff",
+        "row_count": "0x07000000",
+        "wire_bytes": "0x9e1447727b5d319a1cd8928a4343226e0000000200000007ffffffffffffffffffffdffffffffffbdffffffbffffffffffffffffffffffff2a45b7e36e0f9cc9"
+      },
+      "id": "case_007",
+      "inputs": {
+        "estate_uuid": "0x9e1447727b5d319a1cd8928a4343226e",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0xc99c0f6ee3b7452a",
+        "shareable": [
+          "0x0ab14e07d6e3c463a27b18cba795f2022493872eba0d5a0336826c9fe5609472",
+          "0x548cfa91465c0ff791d4a52899d34c58b4a85504b02e7e059e6c87436a56bfcb",
+          "0x98c59d8dc541d6de19b4f67cdad23e9c4857c7e850b8db4e9350f3c96820a943",
+          "0x1562a15379268a632906cea5ec01d9a191ad0aab31dc889529f6ec7c27d2a385",
+          "0xf3a5172b756010652b35f8aa92466851ed9a4397da373d0aa1654301aef748cf",
+          "0x140a3509d34561ac21e65fba11c64d082e2333832a47e5d082d9c0f56e42fdf0",
+          "0x8b44f9832ddc92a6fa340992af9cf400fdfaa7495a5ff790d86d6f9815de0e2d"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=0",
+      "expected_output": {
+        "aggregate": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "row_count": "0x00000000",
+        "wire_bytes": "0xd4e44d2408dcbf264d8a87a6069cd18700000003000000000000000000000000000000000000000000000000000000000000000000000000f1083c5b23fc5d30"
+      },
+      "id": "case_008",
+      "inputs": {
+        "estate_uuid": "0xd4e44d2408dcbf264d8a87a6069cd187",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0x305dfc235b3c08f1",
+        "shareable": []
+      }
+    },
+    {
+      "description": "case=1, |cohort|=1",
+      "expected_output": {
+        "aggregate": "0x60bc7af4fce87160392bff2d418ebf023e61629fa110d57313574e9c33028cbf",
+        "row_count": "0x01000000",
+        "wire_bytes": "0xf656d02f895f78d02714569ae3625fd500000001000000016071e8fcf47abc6002bf8e412dff2b3973d510a19f62613ebf8c02339c4e57139b0c90d1dee628ce"
+      },
+      "id": "case_009",
+      "inputs": {
+        "estate_uuid": "0xf656d02f895f78d02714569ae3625fd5",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0xce28e6ded1900c9b",
+        "shareable": [
+          "0x60bc7af4fce87160392bff2d418ebf023e61629fa110d57313574e9c33028cbf"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=2",
+      "expected_output": {
+        "aggregate": "0xf9be76ce73f1fd4dcfa6ca5df53d94ff69befb93fbe7ddef5fefbb7f775da65f",
+        "row_count": "0x02000000",
+        "wire_bytes": "0x845303f0f8fa0634b5b26b30dcd76baf00000002000000024dfdf173ce76bef9ff943df55dcaa6cfefdde7fb93fbbe695fa65d777fbbef5f22d6a562b688e22f"
+      },
+      "id": "case_010",
+      "inputs": {
+        "estate_uuid": "0x845303f0f8fa0634b5b26b30dcd76baf",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0x2fe288b662a5d622",
+        "shareable": [
+          "0xd1b254823250b10541a28a55f12d94ff49be3b91b3675dcb49ac1b7f3059865d",
+          "0x78be62cc51b14c4d8e86c058651d84c26080f08378a08da71fcbaa384745225b"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=3",
+      "expected_output": {
+        "aggregate": "0xbfffbefeff7bf5ef7fff6b7ff7fbfe77fffcf7fefffffdffffdffffbfdf6ffff",
+        "row_count": "0x03000000",
+        "wire_bytes": "0xe49825b93617f28ab551f89ead8bed7b0000000300000003eff57bfffebeffbf77fefbf77f6bff7ffffdfffffef7fcfffffff6fdfbffdfff4071bd5362d86a64"
+      },
+      "id": "case_011",
+      "inputs": {
+        "estate_uuid": "0xe49825b93617f28ab551f89ead8bed7b",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0x646ad86253bd7140",
+        "shareable": [
+          "0x20b7aa16d42234a85114093fb4f066064f5c0466baf474b4a8d6e6f05136e80e",
+          "0x1bb9b6fc6f38b18c52f06344578bc866f3f8876eaf5bcd42ddc5bcd8e4e4197b",
+          "0x96ea2070eb6144632c7f6a24236a9e73f89cf7fcde0a416d969e03034872efd6"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=4",
+      "expected_output": {
+        "aggregate": "0xfffefffbffffff9f5ffdfffffffefffffffffffff7fffffffe6ffbfefbffbfff",
+        "row_count": "0x04000000",
+        "wire_bytes": "0xd6c587e48d22d41d02d6d86090725a7300000001000000049ffffffffbfffefffffffefffffffd5ffffffff7ffffffffffbffffbfefb6ffe93868935c88cd968"
+      },
+      "id": "case_012",
+      "inputs": {
+        "estate_uuid": "0xd6c587e48d22d41d02d6d86090725a73",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0x68d98cc835898693",
+        "shareable": [
+          "0x6898788b3f82c2134a41d8bee7da3e6f251986517786eb3aa825f3b47ad0bc5e",
+          "0x574001da01882f9f4339b4ced1d0a88a78ff71ff555981cffe0732aec0b0966d",
+          "0x689023b2fe36d38c41387ac19d8e617683fad7b9015397ab6c2a31b8c928ab32",
+          "0xe6f6f489e45f400016cc9110623a536a1ce53f70a62cc1865265db60728784ce"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=5",
+      "expected_output": {
+        "aggregate": "0xdefffffffebffffff73fbffdffffffbfffffffff7ffffffffffffffffffdffb7",
+        "row_count": "0x05000000",
+        "wire_bytes": "0x7d7923a17776f6bb6a89daabe8f3a4550000000200000005ffffbffeffffffdebffffffffdbf3ff7ffffff7fffffffffb7fffdffffffffffa0945aaa4460107a"
+      },
+      "id": "case_013",
+      "inputs": {
+        "estate_uuid": "0x7d7923a17776f6bb6a89daabe8f3a455",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0x7a106044aa5a94a0",
+        "shareable": [
+          "0x5a3090b434bdf511f11f29b55975098ba73fbc9b2013eb7eafb65f9221e97014",
+          "0x884068a0a81ec569703e38c1957fa5bb79ecf73758dd8bc63602e6e9f7adf3b7",
+          "0x468f234ac2066ccb5206a165db50f79d4403e7a3294f1c4e5ec174865a18ffb1",
+          "0x84fed6088e22f27503248e51dac49f2e649b4ad5167d61e489f14cccddb12183",
+          "0x1c63cdf1008ebc84a53130ada088c92ddd2032cd1d9e9aed7c1dc3cbdcc1eea5"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=6",
+      "expected_output": {
+        "aggregate": "0xfffffffffffffffffffffffffffffffffffffffffffbffffffffffffffffffff",
+        "row_count": "0x06000000",
+        "wire_bytes": "0xaebb0dabd923d996368c0df8eddd8b610000000300000006fffffffffffffffffffffffffffffffffffffbffffffffffffffffffffffffffbcb1a790dcb8ff76"
+      },
+      "id": "case_014",
+      "inputs": {
+        "estate_uuid": "0xaebb0dabd923d996368c0df8eddd8b61",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0x76ffb8dc90a7b1bc",
+        "shareable": [
+          "0x40e196eec9a72f3a8f8c9695aeecac50f1c37fbfbff223a10f276bfdff301324",
+          "0x41842ef53357d1d8272d179f2bf3ffb80c674f9e77ba99db096e24ffa0cf36af",
+          "0xb351a8bdf5854308fef6c89d8bf389bbb10683b089e10603ace396f10dc3a58e",
+          "0x944bc475a5ef4bc18b317e506b05e303336c0b3a665baf5bb89538e3cf4b0b2e",
+          "0x7fabf5f3e1c9f2b8d3b458cfed66a485bd9b2ee08cb9e7987e7f3f03f21c70fd",
+          "0x531f1ab85a2fd34c9d14f471b6c5ade9f1b7f3724a5bd17477391dadffc5bed9"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=7",
+      "expected_output": {
+        "aggregate": "0xfffffffffffff7ffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "row_count": "0x07000000",
+        "wire_bytes": "0x2f84cb1a9d7ec54821161cccce8640940000000100000007fff7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff461bb0bb050e6ad0"
+      },
+      "id": "case_015",
+      "inputs": {
+        "estate_uuid": "0x2f84cb1a9d7ec54821161cccce864094",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0xd06a0e05bbb01b46",
+        "shareable": [
+          "0x17c9b8c3c26831cec65647ea795ad95952cbcad4c8ad7ef3dbde2c580e4cdd35",
+          "0x1be573a7eafca3bfd313ab7d0e93fe38a501077c694fad9b679269383ca0129e",
+          "0x7eabdf8e8a3b50250296d42fc16be53ba8e60b8bd5fe379acb626c19aaa7d265",
+          "0x9e3b019af7c9f5d828a98954bfc89b86027831f36df156d021fcd2c7254b7997",
+          "0xd043abf13381d77f15fab2466c2cae6df47f89cae78774a08625f467c71f67df",
+          "0x60e4787254f8a64a09c3f6f84015839725cf069bd474a083469503d824fe457f",
+          "0x26c40744dcfd725e22f52e570ddafbff7cb9aaee485698ad916fc146bc51245b"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=0",
+      "expected_output": {
+        "aggregate": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "row_count": "0x00000000",
+        "wire_bytes": "0x3277bad07fa0d01823f4b9fc1300806600000002000000000000000000000000000000000000000000000000000000000000000000000000aade081c54d84572"
+      },
+      "id": "case_016",
+      "inputs": {
+        "estate_uuid": "0x3277bad07fa0d01823f4b9fc13008066",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0x7245d8541c08deaa",
+        "shareable": []
+      }
+    },
+    {
+      "description": "case=3, |cohort|=1",
+      "expected_output": {
+        "aggregate": "0x5dae92314845b44e232949b662b310e107c893c8134aad1243bedf597ec0aedd",
+        "row_count": "0x01000000",
+        "wire_bytes": "0xc080a807892cdff3c7a4bdd09c48453900000003000000014eb445483192ae5de110b362b649292312ad4a13c893c807ddaec07e59dfbe437e109f2a5f4e35b4"
+      },
+      "id": "case_017",
+      "inputs": {
+        "estate_uuid": "0xc080a807892cdff3c7a4bdd09c484539",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0xb4354e5f2a9f107e",
+        "shareable": [
+          "0x5dae92314845b44e232949b662b310e107c893c8134aad1243bedf597ec0aedd"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=2",
+      "expected_output": {
+        "aggregate": "0xdfedeffc6f9f5b7f7e2dbdfffdc57fdfaf57b7f49fd3fda7edfffffdef7fb6b7",
+        "row_count": "0x02000000",
+        "wire_bytes": "0x817d510bdfb8f6b2e30b1f34065e4a7900000001000000027f5b9f6ffcefeddfdf7fc5fdffbd2d7ea7fdd39ff4b757afb7b67feffdffffedbb3362e701f8ebcb"
+      },
+      "id": "case_018",
+      "inputs": {
+        "estate_uuid": "0x817d510bdfb8f6b2e30b1f34065e4a79",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0xcbebf801e76233bb",
+        "shareable": [
+          "0x94ede5ec678e5066562d08f99d816e4d8f03b7340d4175a7cdf64fa9e27aa686",
+          "0xcf6c8b14489b1b5d2c04bdd7e9453592a657a6f09792bc87253fbed4ef7794b5"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=3",
+      "expected_output": {
+        "aggregate": "0xfff9f7fbbf6fff7ffdffff7fffffeabbfffebf7bdfefffef6edfbeadbfefcfff",
+        "row_count": "0x03000000",
+        "wire_bytes": "0x88ef00ef43147e0fc8fabd492e7f3a8e00000002000000037fff6fbffbf7f9ffbbeaffff7ffffffdefffefdf7bbffeffffcfefbfadbedf6e35d32686c01409b9"
+      },
+      "id": "case_019",
+      "inputs": {
+        "estate_uuid": "0x88ef00ef43147e0fc8fabd492e7f3a8e",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0xb90914c08626d335",
+        "shareable": [
+          "0xf359c4d2aa6de467717dc71f1ce8aa31f5ceb95b4d6dbf822ad03001ae8c431f",
+          "0x7fb8d2899b6eff6ca09b717caee7688a7a221c1a92224e4f66938089b8a1c9c8",
+          "0x5ec1f1f12d21cb7e4d2c8d4965b102007638b67912a1d52642dcbead97464df4"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=4",
+      "expected_output": {
+        "aggregate": "0xfffffffdddffdfffbffefffbfff7dfbfefffdffbbe7ffffff7fff76ffebeffd6",
+        "row_count": "0x04000000",
+        "wire_bytes": "0x2de1c11ac9a61d82915687a2dce88c250000000300000004ffdfffddfdffffffbfdff7fffbfffebfffff7fbefbdfffefd6ffbefe6ff7fff7822fec5b95c0014c"
+      },
+      "id": "case_020",
+      "inputs": {
+        "estate_uuid": "0x2de1c11ac9a61d82915687a2dce88c25",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0x4c01c0955bec2f82",
+        "shareable": [
+          "0x91d8751cd5f992723722d0d2d90759360aa2de39265f044db0f8f443d434cc54",
+          "0x75578279942c95e0ab3acbe9fa56ce9a6b5bd5db186fcfe3e6da7447801c2756",
+          "0xadbdeff0d00f571ea9dccdc91fc7c3aa246614f914201429d197876aac8295d4",
+          "0x661e658c4dc91d1336eaabc87eb6cfa3ce08c91a8a36683c3002c360e630af84"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=5",
+      "expected_output": {
+        "aggregate": "0xffffdffdfffffffffffffffbffdfafffffffffff7fffffffefdfffffffffffff",
+        "row_count": "0x05000000",
+        "wire_bytes": "0x4fcb753d73c6c823d80caaf5955f4df20000000100000005fffffffffddfffffffafdffffbffffffffffff7fffffffffffffffffffffdfeff07a41f9d768edb0"
+      },
+      "id": "case_021",
+      "inputs": {
+        "estate_uuid": "0x4fcb753d73c6c823d80caaf5955f4df2",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0xb0ed68d7f9417af0",
+        "shareable": [
+          "0x9f6d9e31244e2286466aff7bed5ba2b880cd6c675fa7dc8d6ac5f6e64062986f",
+          "0xb56f8e98bcdb6878770f9701f0cb08a156575e5632ea09460d4dbd686ecdd062",
+          "0xeada188d1d75da2ede23198b4d8480f77a24ced910b5e3950996421a94d80212",
+          "0x56da5c35eb65e35b587f4ac107d820423c9f7f343f98c0bca291813673a2dd9e",
+          "0xdc61d34047830ebc0cf2f9c8c144adb00dbd855934a496224dd3c26921092d90"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=6",
+      "expected_output": {
+        "aggregate": "0xffffffffffffffffffffffffffffffffffffffffffffffffffefffffffffffff",
+        "row_count": "0x06000000",
+        "wire_bytes": "0xdcf33215860624e5ce504793fc5e80180000000200000006ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffefff5bdac02a3a398c03"
+      },
+      "id": "case_022",
+      "inputs": {
+        "estate_uuid": "0xdcf33215860624e5ce504793fc5e8018",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0x038c393a2ac0da5b",
+        "shareable": [
+          "0xf0d3ae6875d98ef9b792913999bc7beb0cb9b491ad29605efbe3b490e4278685",
+          "0x37212104bb04bb0f74515fe0de433d1de70f79223f4bcee71369fdf8ef3b9e9f",
+          "0xfc3026cf747d9b2340302be4b7b38c2aedac04182eb1b0a28663f6ffeeed33b4",
+          "0x9d1ce5c59fc94cf60665562a7352b8f2cfdb51c5e79d6f905320933951d517dc",
+          "0xf10bfb7f243f27a333c469ec4a46b54739fa73ce969a7ca3cc67a338f7319493",
+          "0x6d0e00706e94fed6e81f5145357efd09e65ed18c8ba7abadc44bbcfd489b5dda"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=7",
+      "expected_output": {
+        "aggregate": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffdfffffff",
+        "row_count": "0x07000000",
+        "wire_bytes": "0xc787d6a70d5e80b61434eb418d73fa420000000300000007ffffffffffffffffffffffffffffffffffffffffffffffffffffffdfffffffff34efd6c52630c5a6"
+      },
+      "id": "case_023",
+      "inputs": {
+        "estate_uuid": "0xc787d6a70d5e80b61434eb418d73fa42",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0xa6c53026c5d6ef34",
+        "shareable": [
+          "0x99bc17ed3fc8cddc9831864f33a3c94fab15b12a43296854d3bdf0040391ab22",
+          "0x3084f0098044c3eadf97843c1aa56a8bf146c0adfd6b73b1ef5dd6f81db3c0aa",
+          "0xfddc600b6281c63e4279be1768945115c6323c2f426e65aab21b502944183201",
+          "0xc00e35593c14f7faaec9435b053f57ef9b2aac958c4a32f2979a7833c2c20e84",
+          "0x2209b1495eb38b6525e590d8f2b7cf1a71810be8c7195bdf954b5de91bc745f8",
+          "0x93625a005c1a7586302fb843486baf78e8f20330ecea34695ffa1eb3996005dc",
+          "0x7bc35e67d0a9b73db59068988ac612843d4faddec8888a98ee0d5e20d06d5104"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=0",
+      "expected_output": {
+        "aggregate": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "row_count": "0x00000000",
+        "wire_bytes": "0xf3da138c0bb7482be636aac2fb3dde9600000001000000000000000000000000000000000000000000000000000000000000000000000000499d77ee6a6027f0"
+      },
+      "id": "case_024",
+      "inputs": {
+        "estate_uuid": "0xf3da138c0bb7482be636aac2fb3dde96",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0xf027606aee779d49",
+        "shareable": []
+      }
+    },
+    {
+      "description": "case=2, |cohort|=1",
+      "expected_output": {
+        "aggregate": "0xdcabc89a292945c5f7376c3e8ed6f5ffe4e2d62fcf964978c4cf6b1c939845ee",
+        "row_count": "0x01000000",
+        "wire_bytes": "0x0d1d0ccfc6dad87b51a3cad6b1cfff500000000200000001c54529299ac8abdcfff5d68e3e6c37f7784996cf2fd6e2e4ee4598931c6bcfc4a6c8fab2f80071de"
+      },
+      "id": "case_025",
+      "inputs": {
+        "estate_uuid": "0x0d1d0ccfc6dad87b51a3cad6b1cfff50",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0xde7100f8b2fac8a6",
+        "shareable": [
+          "0xdcabc89a292945c5f7376c3e8ed6f5ffe4e2d62fcf964978c4cf6b1c939845ee"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=2",
+      "expected_output": {
+        "aggregate": "0xe5fff7eda3f5f1b75bebfdf5f7efdbbef3f35e7ffebe329d77b77fbdfb1eeb7e",
+        "row_count": "0x02000000",
+        "wire_bytes": "0x5336fa4c9e4ce54e827001d65780e47d0000000300000002b7f1f5a3edf7ffe5bedbeff7f5fdeb5b9d32befe7f5ef3f37eeb1efbbd7fb7772c587b89fc8d4416"
+      },
+      "id": "case_026",
+      "inputs": {
+        "estate_uuid": "0x5336fa4c9e4ce54e827001d65780e47d",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0x16448dfc897b582c",
+        "shareable": [
+          "0xe09185e9a2e571a15a6afc4471aed1bef1b15a6fc49e321553935f399306aa7e",
+          "0x25ee77658155b03651c129f1a6e54b9893724672baa6109c37363eb5ea1a436c"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=3",
+      "expected_output": {
+        "aggregate": "0xeffbbbffeffffff4f7f67effc7feffb7ffbaffefff8f7d7ffff7eff7ffedbdbf",
+        "row_count": "0x03000000",
+        "wire_bytes": "0x10e400b7bc9124992f55c7e6926ce8460000000100000003f4ffffefffbbfbefb7fffec7ff7ef6f77f7d8fffefffbaffbfbdedfff7eff7ffba1f8544762d94b4"
+      },
+      "id": "case_027",
+      "inputs": {
+        "estate_uuid": "0x10e400b7bc9124992f55c7e6926ce846",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0xb4942d7644851fba",
+        "shareable": [
+          "0xa5e39bd9eebc257463522a5cc17e2f36a6187a8b3e8f6853aee4a325ea04a19e",
+          "0x8b1ab8ce604b89a0d5620ac2464ed78153b2252ca8076c0555336a97b7a89987",
+          "0x603a807961c87e0032b47e3d85b69ca6580285e66905556a9d842de1d845ac34"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=4",
+      "expected_output": {
+        "aggregate": "0xffffff7effffff7ffffef7fff7bffffbefedffff7f6fffffffefff57fffbdfff",
+        "row_count": "0x04000000",
+        "wire_bytes": "0x7c91cd1bf10391d6792c8a6adbf1910c00000002000000047fffffff7efffffffbffbff7fff7feffffff6f7fffffedefffdffbff57ffefffdb2ae105dd0eb4a8"
+      },
+      "id": "case_028",
+      "inputs": {
+        "estate_uuid": "0x7c91cd1bf10391d6792c8a6adbf1910c",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0xa8b40edd05e12adb",
+        "shareable": [
+          "0x8a49317afcdfbf6cf79af565d00f46e227a9e72e026b5a1fa6c4130142e9d6af",
+          "0x89ed651610f7c324626cb1a3109e51bb096c39ed6307c6ad4767ab5777825479",
+          "0xc4b2a450d29e4a70dcecc529e6b180d901a58afb586e623388686415c6029bbe",
+          "0x33ba8e2a073a942f1fc88370171e6d78ca4d02c5256dfdfc5b07eb40fa90d246"
+        ]
+      }
+    },
+    {
+      "description": "case=3, |cohort|=5",
+      "expected_output": {
+        "aggregate": "0xdfff7ffffffbffffdeffffffb7ffffdffffffffffffffffefffffbffffffefff",
+        "row_count": "0x05000000",
+        "wire_bytes": "0x64b3bf1723c7cd418fc0f85eca4a92080000000300000005fffffbffff7fffdfdfffffb7ffffffdefeffffffffffffffffeffffffffbfffff3d4e92d8314c877"
+      },
+      "id": "case_029",
+      "inputs": {
+        "estate_uuid": "0x64b3bf1723c7cd418fc0f85eca4a9208",
+        "federation_case": "0x03000000",
+        "hlc_packed": "0x77c814832de9d4f3",
+        "shareable": [
+          "0x13f31091df611c3248653a0fb797c1140161c9ae3436e03614f1a350d8348508",
+          "0xc4ee7fddc6038e780edbeed697541b497f539980e84f16febb66998585aa2e4f",
+          "0xcdbc19734a8819f80a5f469693453288b178132ac25d84242667bb0e7d122df9",
+          "0x4c8c014d3f30be1cc0ffd4e913dfe201639d0e5fed78d8325dd4586615316412",
+          "0xc1f4112c60f044591efd3b0d32e7258b3dc8f5637eaf4d5e4fcf825df3f0855f"
+        ]
+      }
+    },
+    {
+      "description": "case=1, |cohort|=6",
+      "expected_output": {
+        "aggregate": "0xfffffffffffffffffbfffffffffffff7ffdfffffffffffffffffffffefffffff",
+        "row_count": "0x06000000",
+        "wire_bytes": "0x3d8bdb03c0f55766e578e2626fe6fab60000000100000006fffffffffffffffff7fffffffffffffbffffffffffffdfffffffffefffffffff0bea0f6c6729e23f"
+      },
+      "id": "case_030",
+      "inputs": {
+        "estate_uuid": "0x3d8bdb03c0f55766e578e2626fe6fab6",
+        "federation_case": "0x01000000",
+        "hlc_packed": "0x3fe229676c0fea0b",
+        "shareable": [
+          "0x356cd09f3812113e4b35342d2dc2f335fa9cdd99c88469f7d27f2e91a4a14118",
+          "0xf01e22f80923e2850142dba354535ba7f60c1a6b5b3b1308e01b69690a8711a3",
+          "0x272c2924033dbf576a0d0b8a49538db50581fe2dd2888f179706754f21826f57",
+          "0x496744511ab13db44b6457bf4aa07c810f5059a762a33b1ac5752f514c90ff45",
+          "0x707dba97d9c68d314080899be6ad7ff27d1845cc1df42fd2f8d905e3a97dae83",
+          "0x6aa4fb0b75f7075e916235e7854e14d5729eb6daf85e7b29ba7b821b6237ffe8"
+        ]
+      }
+    },
+    {
+      "description": "case=2, |cohort|=7",
+      "expected_output": {
+        "aggregate": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "row_count": "0x07000000",
+        "wire_bytes": "0x2102aa00662d270e2247ce75ed53446e0000000200000007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff07a51d4ff0389946"
+      },
+      "id": "case_031",
+      "inputs": {
+        "estate_uuid": "0x2102aa00662d270e2247ce75ed53446e",
+        "federation_case": "0x02000000",
+        "hlc_packed": "0x469938f04f1da507",
+        "shareable": [
+          "0xe81725a29a0b804b17121b83135c72ed71a2462c02becacca78e671ead29b896",
+          "0x0be32c71518a95b0703bd6cd9f99e96c2b678f1d04b11bea59042d198d1345c3",
+          "0x63670675d1fec0fce4b0ce5e062ee0a2b5490cb13fe5bb2771b231219577178f",
+          "0xe49cc3a725aecb2406bff1e6ae45ae1e6c594ad4f43a117225c409e739b47f6f",
+          "0xf989f8281820417a2b46f486df411a4a7a740040a62ae7e951282e14262a21b4",
+          "0xef2184a1ea3ce1343e2cf8adb1e8e763ba9874f0189faf48a78e03724cca67c2",
+          "0xf17b72e46cbaeda8955facd0bde291faeea125c3442218ac98e18ab5139b33d7"
+        ]
+      }
+    }
+  ],
+  "cookbook_section": "§12.3",
+  "format_version": "1",
+  "generated_at": "2026-05-17T15:21:56Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-TierContributionFingerprint.swift"
+  },
+  "output_crc32": "0x4b67bcb5",
+  "primitive": "tier_contribution",
+  "seed": "0xcafebabedeadbeef"
+}

@@ -1,0 +1,56 @@
+{
+  "format_version": "1",
+  "primitive": "locuskit_tunnel_traverse",
+  "cookbook_section": "§7.8.1",
+  "generator": {
+    "language": "swift",
+    "harness_version": "1.0.0",
+    "reference_file": "LocusKit/Sources/LocusKit/Tunnel.swift"
+  },
+  "seed": "0x0000000000000002",
+  "generated_at": "2026-05-23T00:00:00Z",
+  "case_count": 2,
+  "schema_note": "Stateful operation-sequence over Tunnel CRUD. Tunnels are stored directionally; tunnelsFrom returns only tunnels whose source matches and which are not tombstoned. Tunnel ids are caller-supplied here (LocusKit accepts whatever id the caller supplies at this rung). Per-observation equality is the conformance gate.",
+  "cases": [
+    {
+      "id": "case_000",
+      "description": "create two tunnels from wing_default/kitchen; tunnelsFrom returns both ordered by filedAt asc",
+      "inputs": {
+        "ops": [
+          { "op": "addTunnel", "id": "t-001", "sourceWing": "wing_owner", "sourceRoom": "kitchen", "targetWing": "wing_owner", "targetRoom": "pantry", "label": "shelves-into", "addedBy": "alice", "filedAtEpoch": 1700000000 },
+          { "op": "addTunnel", "id": "t-002", "sourceWing": "wing_owner", "sourceRoom": "kitchen", "targetWing": "wing_owner", "targetRoom": "garden", "label": "opens-onto", "addedBy": "alice", "filedAtEpoch": 1700000100 },
+          { "op": "tunnelsFromRoom", "sourceWing": "wing_owner", "sourceRoom": "kitchen" }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "tunnelAdded", "id": "t-001" },
+          { "kind": "tunnelAdded", "id": "t-002" },
+          { "kind": "traversed", "expectIds": ["t-001", "t-002"] }
+        ]
+      }
+    },
+    {
+      "id": "case_001",
+      "description": "tunnelsFrom(wing:) returns wing-scoped tunnels; tunnelsTo(wing:) returns inbound",
+      "inputs": {
+        "ops": [
+          { "op": "addTunnel", "id": "t-a", "sourceWing": "wing_a", "sourceRoom": "r1", "targetWing": "wing_b", "targetRoom": "r2", "label": "cross-a-to-b", "addedBy": "bob", "filedAtEpoch": 1700000000 },
+          { "op": "addTunnel", "id": "t-b", "sourceWing": "wing_a", "sourceRoom": "r3", "targetWing": "wing_c", "targetRoom": "r4", "label": "cross-a-to-c", "addedBy": "bob", "filedAtEpoch": 1700000050 },
+          { "op": "addTunnel", "id": "t-c", "sourceWing": "wing_b", "sourceRoom": "r2", "targetWing": "wing_a", "targetRoom": "r1", "label": "back-to-a", "addedBy": "bob", "filedAtEpoch": 1700000100 },
+          { "op": "tunnelsFromWing", "sourceWing": "wing_a" },
+          { "op": "tunnelsToWing", "targetWing": "wing_a" }
+        ]
+      },
+      "expected_output": {
+        "observations": [
+          { "kind": "tunnelAdded", "id": "t-a" },
+          { "kind": "tunnelAdded", "id": "t-b" },
+          { "kind": "tunnelAdded", "id": "t-c" },
+          { "kind": "traversed", "expectIds": ["t-a", "t-b"] },
+          { "kind": "traversed", "expectIds": ["t-c"] }
+        ]
+      }
+    }
+  ]
+}

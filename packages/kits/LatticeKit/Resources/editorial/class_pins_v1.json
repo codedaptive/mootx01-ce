@@ -1,0 +1,226 @@
+{
+  "schema_version": "1",
+  "note": "MDCC-02 pinned-class map. Each entry overrides the udc_hint-derived pinnedClassBase for one concept. v1 corrects the UDC-class-8 conflation: UDC merges 'Language. Linguistics. Literature' so every language concept inherited a hint of 8 and bucketed to MDCC 800 (Literature); MDCC's spine separates 400 (Language and communication) from 800 (Literature). These pins move the reviewed linguistics cohort 800 -> 400. The 'rationale' field documents each editorial decision and is ignored by the loader.",
+  "pins": [
+    {
+      "qid": "Q315",
+      "classBase": 400,
+      "rationale": "'language' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q34770",
+      "classBase": 400,
+      "rationale": "'language' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q75488338",
+      "classBase": 400,
+      "rationale": "'language' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q33742",
+      "classBase": 400,
+      "rationale": "'natural language' is computational linguistics — Language and communication (400); not literature, and the language facet outranks the computing facet on the spine."
+    },
+    {
+      "qid": "Q57159190",
+      "classBase": 400,
+      "rationale": "'natural language' is computational linguistics — Language and communication (400); not literature, and the language facet outranks the computing facet on the spine."
+    },
+    {
+      "qid": "Q8162",
+      "classBase": 400,
+      "rationale": "'linguistics' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q14467526",
+      "classBase": 400,
+      "rationale": "'linguist' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q112182478",
+      "classBase": 400,
+      "rationale": "'linguistics and language' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q66664364",
+      "classBase": 400,
+      "rationale": "'linguistic term' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q1478235",
+      "classBase": 400,
+      "rationale": "'history of linguistics' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q8192",
+      "classBase": 400,
+      "rationale": "'writing system' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q35395",
+      "classBase": 400,
+      "rationale": "'phonetics' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q81066006",
+      "classBase": 400,
+      "rationale": "'phonetics' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q96725769",
+      "classBase": 400,
+      "rationale": "'phonetics and speech sciences' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q110761784",
+      "classBase": 400,
+      "rationale": "'phonetics and speech science' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q8091",
+      "classBase": 400,
+      "rationale": "'grammar' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q37258088",
+      "classBase": 400,
+      "rationale": "'grammar' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q115804591",
+      "classBase": 400,
+      "rationale": "'grammar' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q19911815",
+      "classBase": 400,
+      "rationale": "'grammar' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q15991187",
+      "classBase": 400,
+      "rationale": "'grammarian' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q2395230",
+      "classBase": 400,
+      "rationale": "'syntax' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q37437",
+      "classBase": 400,
+      "rationale": "'syntax' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q477930",
+      "classBase": 400,
+      "rationale": "'syntax' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q71047059",
+      "classBase": 400,
+      "rationale": "'syntax' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q1152399",
+      "classBase": 400,
+      "rationale": "'syntax' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q25449815",
+      "classBase": 400,
+      "rationale": "'semantics' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q39645",
+      "classBase": 400,
+      "rationale": "'semantics' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q139808385",
+      "classBase": 400,
+      "rationale": "'semantics' is a subfield/object of linguistics — MDCC 400; the udc_hint '8' (UDC 'Language. Linguistics. Literature') wrongly bucketed it under Literature (800)."
+    },
+    {
+      "qid": "Q40634",
+      "classBase": 400,
+      "rationale": "'philology' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q110404717",
+      "classBase": 400,
+      "rationale": "'philology' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q13418253",
+      "classBase": 400,
+      "rationale": "'philologist' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q25295",
+      "classBase": 400,
+      "rationale": "'language family' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q2330667",
+      "classBase": 400,
+      "rationale": "'language development' is a language/linguistics concept — MDCC separates 400 (Language and communication) from 800 (Literature); the udc_hint '8' conflated them."
+    },
+    {
+      "qid": "Q3621696",
+      "classBase": 400,
+      "rationale": "'language model' is computational linguistics — Language and communication (400); not literature, and the language facet outranks the computing facet on the spine."
+    },
+    {
+      "qid": "Q30642",
+      "classBase": 400,
+      "rationale": "'natural language processing' is computational linguistics — Language and communication (400); not literature, and the language facet outranks the computing facet on the spine."
+    },
+    {
+      "qid": "Q1078276",
+      "classBase": 400,
+      "rationale": "'natural language understanding' is computational linguistics — Language and communication (400); not literature, and the language facet outranks the computing facet on the spine."
+    },
+    {
+      "qid": "Q1513879",
+      "classBase": 400,
+      "rationale": "'natural language generation' is computational linguistics — Language and communication (400); not literature, and the language facet outranks the computing facet on the spine."
+    },
+    {
+      "qid": "Q7553",
+      "classBase": 400,
+      "rationale": "'translation' is an applied-language activity — Language and communication (400), not a literary work (800)."
+    },
+    {
+      "qid": "Q21561311",
+      "classBase": 400,
+      "rationale": "'rhetoric' is the study/practice of persuasive discourse — communication, MDCC 400; UDC class 8 filed it with literature."
+    },
+    {
+      "qid": "Q26693471",
+      "classBase": 400,
+      "rationale": "'rhetoric' is the study/practice of persuasive discourse — communication, MDCC 400; UDC class 8 filed it with literature."
+    },
+    {
+      "qid": "Q81009",
+      "classBase": 400,
+      "rationale": "'rhetoric' is the study/practice of persuasive discourse — communication, MDCC 400; UDC class 8 filed it with literature."
+    },
+    {
+      "qid": "Q1896045",
+      "classBase": 400,
+      "rationale": "'rhetoric' is the study/practice of persuasive discourse — communication, MDCC 400; UDC class 8 filed it with literature."
+    },
+    {
+      "qid": "Q361809",
+      "classBase": 400,
+      "rationale": "'rhetorician' is the study/practice of persuasive discourse — communication, MDCC 400; UDC class 8 filed it with literature."
+    },
+    {
+      "qid": "Q1762471",
+      "classBase": 400,
+      "rationale": "'rhetorical device' is the study/practice of persuasive discourse — communication, MDCC 400; UDC class 8 filed it with literature."
+    }
+  ]
+}

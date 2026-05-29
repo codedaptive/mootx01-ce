@@ -1,0 +1,368 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "shape 0, a=\"3.8\", b=\"3.8\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_000",
+      "inputs": {
+        "a": "3.8",
+        "b": "3.8"
+      }
+    },
+    {
+      "description": "shape 1, a=\"1.9.8.5.7\", b=\"1.9.8.5.8\", d=0.2222222222222222",
+      "expected_output": {
+        "distance": "0x1cc7711cc771cc3f"
+      },
+      "id": "case_001",
+      "inputs": {
+        "a": "1.9.8.5.7",
+        "b": "1.9.8.5.8"
+      }
+    },
+    {
+      "description": "shape 2, a=\"5.3.5\", b=\"5\", d=0.8",
+      "expected_output": {
+        "distance": "0x9a9999999999e93f"
+      },
+      "id": "case_002",
+      "inputs": {
+        "a": "5.3.5",
+        "b": "5"
+      }
+    },
+    {
+      "description": "shape 3, a=\"5.7.7\", b=\"8.5.5.2.5\", d=1.5555555555555556",
+      "expected_output": {
+        "distance": "0x398ee3388ee3f83f"
+      },
+      "id": "case_003",
+      "inputs": {
+        "a": "5.7.7",
+        "b": "8.5.5.2.5"
+      }
+    },
+    {
+      "description": "shape 0, a=\"6.9\", b=\"6.9\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_004",
+      "inputs": {
+        "a": "6.9",
+        "b": "6.9"
+      }
+    },
+    {
+      "description": "shape 1, a=\"2.4.6\", b=\"2.4.6\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_005",
+      "inputs": {
+        "a": "2.4.6",
+        "b": "2.4.6"
+      }
+    },
+    {
+      "description": "shape 2, a=\"2.2.7.8.4\", b=\"2.2.7\", d=0.4444444444444444",
+      "expected_output": {
+        "distance": "0x1cc7711cc771dc3f"
+      },
+      "id": "case_006",
+      "inputs": {
+        "a": "2.2.7.8.4",
+        "b": "2.2.7"
+      }
+    },
+    {
+      "description": "shape 3, a=\"1.8.5.1.8\", b=\"6.1.5.5.5\", d=2.0",
+      "expected_output": {
+        "distance": "0x0000000000000040"
+      },
+      "id": "case_007",
+      "inputs": {
+        "a": "1.8.5.1.8",
+        "b": "6.1.5.5.5"
+      }
+    },
+    {
+      "description": "shape 0, a=\"8.4.2.3.3\", b=\"8.4.2.3.3\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_008",
+      "inputs": {
+        "a": "8.4.2.3.3",
+        "b": "8.4.2.3.3"
+      }
+    },
+    {
+      "description": "shape 1, a=\"8.7.7.5\", b=\"8.7.7.9\", d=0.2857142857142857",
+      "expected_output": {
+        "distance": "0x922449922449d23f"
+      },
+      "id": "case_009",
+      "inputs": {
+        "a": "8.7.7.5",
+        "b": "8.7.7.9"
+      }
+    },
+    {
+      "description": "shape 2, a=\"7.1\", b=\"7\", d=0.6666666666666666",
+      "expected_output": {
+        "distance": "0x555555555555e53f"
+      },
+      "id": "case_010",
+      "inputs": {
+        "a": "7.1",
+        "b": "7"
+      }
+    },
+    {
+      "description": "shape 3, a=\"4.4\", b=\"1.9.1.1.7\", d=1.3333333333333333",
+      "expected_output": {
+        "distance": "0x555555555555f53f"
+      },
+      "id": "case_011",
+      "inputs": {
+        "a": "4.4",
+        "b": "1.9.1.1.7"
+      }
+    },
+    {
+      "description": "shape 0, a=\"5.5.9.5\", b=\"5.5.9.5\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_012",
+      "inputs": {
+        "a": "5.5.9.5",
+        "b": "5.5.9.5"
+      }
+    },
+    {
+      "description": "shape 1, a=\"2.8\", b=\"2.8\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_013",
+      "inputs": {
+        "a": "2.8",
+        "b": "2.8"
+      }
+    },
+    {
+      "description": "shape 2, a=\"2.7.7.5.4\", b=\"2.7.7.5\", d=0.2222222222222222",
+      "expected_output": {
+        "distance": "0x1cc7711cc771cc3f"
+      },
+      "id": "case_014",
+      "inputs": {
+        "a": "2.7.7.5.4",
+        "b": "2.7.7.5"
+      }
+    },
+    {
+      "description": "shape 3, a=\"7.4.7.1\", b=\"8.6.4\", d=1.7142857142857142",
+      "expected_output": {
+        "distance": "0xdbb66ddbb66dfb3f"
+      },
+      "id": "case_015",
+      "inputs": {
+        "a": "7.4.7.1",
+        "b": "8.6.4"
+      }
+    },
+    {
+      "description": "shape 0, a=\"2.7\", b=\"2.7\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_016",
+      "inputs": {
+        "a": "2.7",
+        "b": "2.7"
+      }
+    },
+    {
+      "description": "shape 1, a=\"6.1.3.8\", b=\"6.1.3.5\", d=0.2857142857142857",
+      "expected_output": {
+        "distance": "0x922449922449d23f"
+      },
+      "id": "case_017",
+      "inputs": {
+        "a": "6.1.3.8",
+        "b": "6.1.3.5"
+      }
+    },
+    {
+      "description": "shape 2, a=\"8.4.9.9\", b=\"8.4\", d=0.5714285714285714",
+      "expected_output": {
+        "distance": "0x922449922449e23f"
+      },
+      "id": "case_018",
+      "inputs": {
+        "a": "8.4.9.9",
+        "b": "8.4"
+      }
+    },
+    {
+      "description": "shape 3, a=\"1.2.4\", b=\"1.5.6.2.7\", d=1.1111111111111112",
+      "expected_output": {
+        "distance": "0x721cc7711cc7f13f"
+      },
+      "id": "case_019",
+      "inputs": {
+        "a": "1.2.4",
+        "b": "1.5.6.2.7"
+      }
+    },
+    {
+      "description": "shape 0, a=\"4.6.3.6.6\", b=\"4.6.3.6.6\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_020",
+      "inputs": {
+        "a": "4.6.3.6.6",
+        "b": "4.6.3.6.6"
+      }
+    },
+    {
+      "description": "shape 1, a=\"2.6\", b=\"2.4\", d=0.6666666666666666",
+      "expected_output": {
+        "distance": "0x555555555555e53f"
+      },
+      "id": "case_021",
+      "inputs": {
+        "a": "2.6",
+        "b": "2.4"
+      }
+    },
+    {
+      "description": "shape 2, a=\"3.7\", b=\"3\", d=0.6666666666666666",
+      "expected_output": {
+        "distance": "0x555555555555e53f"
+      },
+      "id": "case_022",
+      "inputs": {
+        "a": "3.7",
+        "b": "3"
+      }
+    },
+    {
+      "description": "shape 3, a=\"5.5\", b=\"6.8.5\", d=1.6",
+      "expected_output": {
+        "distance": "0x9a9999999999f93f"
+      },
+      "id": "case_023",
+      "inputs": {
+        "a": "5.5",
+        "b": "6.8.5"
+      }
+    },
+    {
+      "description": "shape 0, a=\"5.6.4.6\", b=\"5.6.4.6\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_024",
+      "inputs": {
+        "a": "5.6.4.6",
+        "b": "5.6.4.6"
+      }
+    },
+    {
+      "description": "shape 1, a=\"7.6\", b=\"7.5\", d=0.6666666666666666",
+      "expected_output": {
+        "distance": "0x555555555555e53f"
+      },
+      "id": "case_025",
+      "inputs": {
+        "a": "7.6",
+        "b": "7.5"
+      }
+    },
+    {
+      "description": "shape 2, a=\"6.7\", b=\"6\", d=0.6666666666666666",
+      "expected_output": {
+        "distance": "0x555555555555e53f"
+      },
+      "id": "case_026",
+      "inputs": {
+        "a": "6.7",
+        "b": "6"
+      }
+    },
+    {
+      "description": "shape 3, a=\"5.5.2\", b=\"3.8.5.1\", d=1.7142857142857142",
+      "expected_output": {
+        "distance": "0xdbb66ddbb66dfb3f"
+      },
+      "id": "case_027",
+      "inputs": {
+        "a": "5.5.2",
+        "b": "3.8.5.1"
+      }
+    },
+    {
+      "description": "shape 0, a=\"8.3.4\", b=\"8.3.4\", d=0.0",
+      "expected_output": {
+        "distance": "0x0000000000000000"
+      },
+      "id": "case_028",
+      "inputs": {
+        "a": "8.3.4",
+        "b": "8.3.4"
+      }
+    },
+    {
+      "description": "shape 1, a=\"9.2\", b=\"9.9\", d=0.6666666666666666",
+      "expected_output": {
+        "distance": "0x555555555555e53f"
+      },
+      "id": "case_029",
+      "inputs": {
+        "a": "9.2",
+        "b": "9.9"
+      }
+    },
+    {
+      "description": "shape 2, a=\"9.3.7.4.9\", b=\"9.3.7\", d=0.4444444444444444",
+      "expected_output": {
+        "distance": "0x1cc7711cc771dc3f"
+      },
+      "id": "case_030",
+      "inputs": {
+        "a": "9.3.7.4.9",
+        "b": "9.3.7"
+      }
+    },
+    {
+      "description": "shape 3, a=\"1.3.9.2\", b=\"6.5.1.4.9\", d=1.7777777777777777",
+      "expected_output": {
+        "distance": "0x1cc7711cc771fc3f"
+      },
+      "id": "case_031",
+      "inputs": {
+        "a": "1.3.9.2",
+        "b": "6.5.1.4.9"
+      }
+    }
+  ],
+  "cookbook_section": "§8.3",
+  "format_version": "1",
+  "generated_at": "2026-05-17T13:38:53Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-LatticeDistance.swift"
+  },
+  "output_crc32": "0x6c4e453f",
+  "primitive": "lattice",
+  "seed": "0xcafebabedeadbeef"
+}

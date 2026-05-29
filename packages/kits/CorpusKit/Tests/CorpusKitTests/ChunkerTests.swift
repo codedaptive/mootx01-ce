@@ -1,0 +1,68 @@
+// ChunkerTests.swift
+
+import XCTest
+@testable import CorpusKit
+// ─────────────────────────────────────────────────────────────────
+// DO NOT REIMPLEMENT SUBSTRATE MATH.
+//
+// The substrate publishes conformance-gated, byte-identical
+// Swift+Rust implementations of every primitive listed in
+// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
+// top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
+// NMF, FFT, eigenvalue centrality, or any other substrate primitive,
+// it's already in SubstrateTypes / SubstrateKernel / SubstrateML.
+// CI catches drift four ways. See packages/libs/Substrate{Types,
+// Kernel,ML}/AGENTS.md.
+// ─────────────────────────────────────────────────────────────────
+import SubstrateLib
+
+final class ChunkerTests: XCTestCase {
+
+    func testChunkerProducesNonEmptyChunks() {
+        let text = String(repeating: "This is a test sentence. ", count: 50)
+        var gen = HLCGenerator(nodeID: 1)
+        let chunks = Chunker.chunk(
+            text: text,
+            sourceID: "doc-1",
+            configuration: ChunkerConfiguration(targetChars: 200, overlapChars: 20),
+            hlcGenerator: &gen
+        )
+        XCTAssertFalse(chunks.isEmpty)
+        for c in chunks {
+            XCTAssertFalse(c.text.isEmpty)
+            XCTAssertEqual(c.sourceID, "doc-1")
+        }
+    }
+
+    func testChunkerRespectsTargetSize() {
+        let text = String(repeating: "Sentence. ", count: 200)  // ~2000 chars
+        var gen = HLCGenerator(nodeID: 1)
+        let chunks = Chunker.chunk(
+            text: text,
+            sourceID: "doc-2",
+            configuration: ChunkerConfiguration(targetChars: 300, overlapChars: 0),
+            hlcGenerator: &gen
+        )
+        XCTAssertGreaterThan(chunks.count, 1)
+        // Allow some slack since chunker respects sentence boundaries.
+        for c in chunks {
+            XCTAssertLessThan(c.text.count, 600, "chunk grossly oversized: \(c.text.count)")
+        }
+    }
+
+    func testChunkerHLCMonotonic() {
+        let text = String(repeating: "One. Two. Three. ", count: 30)
+        var gen = HLCGenerator(nodeID: 1)
+        let chunks = Chunker.chunk(
+            text: text,
+            sourceID: "doc-3",
+            configuration: ChunkerConfiguration(targetChars: 100, overlapChars: 10),
+            hlcGenerator: &gen
+        )
+        for i in 0..<(chunks.count - 1) {
+            XCTAssertLessThan(chunks[i].hlc, chunks[i + 1].hlc,
+                              "HLCs not monotonic at chunk \(i)")
+        }
+    }
+}

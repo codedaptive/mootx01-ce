@@ -1,0 +1,3109 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "noun=0, |events|=12, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x015aecb584ab6a3c",
+        "last_event_hlc": "0xa05d0000000000000000000000000000",
+        "operational_bitmap": "0x481fcfbc4cd45414",
+        "provenance_bitmap": "0xed1567f0192246d2",
+        "qid": "0x3e96c1fb1f7dee41",
+        "state_raw": "0x01",
+        "tombstoned": "0x01",
+        "udc": "0xe06e835d5199f35e"
+      },
+      "id": "case_000",
+      "inputs": {
+        "estate_uuid": "0x00f04cbcc11901ee5726fae76555a388",
+        "events": [
+          {
+            "after_adjective": "0x0399776cbbf31de0",
+            "after_operational": "0x38c29888d782ebbc",
+            "after_provenance": "0xd24e7287bfc49bfc",
+            "after_qid": "0x12317c97fa3c3d7f",
+            "after_udc": "0xc06c021c921fe645",
+            "hlc": "0x64430000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13f1df2df03d511d",
+            "after_operational": "0x1f870fb654f1eb0e",
+            "after_provenance": "0x620fc73066eedb72",
+            "after_qid": "0x8e267d9a62e34367",
+            "after_udc": "0x2342ae8de5756c9a",
+            "hlc": "0x9b0e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01d26bc8dfd311b8",
+            "after_operational": "0x7689176aa814e18b",
+            "after_provenance": "0x24c2cc8cd90d7615",
+            "after_qid": "0xa7e8c2c4924ec25a",
+            "after_udc": "0xa67d0840f5175f77",
+            "hlc": "0x91590000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x035e9be05c87fa81",
+            "after_operational": "0xbd2df5c299ab62d2",
+            "after_provenance": "0xa3c5fabb730df8d5",
+            "after_qid": "0xf52181fd0bed0772",
+            "after_udc": "0xd7547a3b6e27659d",
+            "hlc": "0xd6560000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x024e3171c595dfc1",
+            "after_operational": "0xc213a6cb2353d9dc",
+            "after_provenance": "0x060e2a84c9a3f75a",
+            "after_qid": "0xf34d2343d700f129",
+            "after_udc": "0x4158001b4a57c9d4",
+            "hlc": "0x7b090000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x214f8a62e0c203ed",
+            "after_operational": "0x2e0dccf5f2a29d6f",
+            "after_provenance": "0x7ec34e71230072c5",
+            "after_qid": "0x1f24068f27f0c540",
+            "after_udc": "0x6769abe1ee0f8d59",
+            "hlc": "0x94290000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x109156f4eb29d06d",
+            "after_operational": "0x713b67a7310bfb31",
+            "after_provenance": "0xcd055bc935a5e3e7",
+            "after_qid": "0xc4af6df08e160130",
+            "after_udc": "0x841df3d172aabbcf",
+            "hlc": "0x34520000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x026d4442dd8188e0",
+            "after_operational": "0xe9cd7dcb6c7a2738",
+            "after_provenance": "0x69285ff7a43bce00",
+            "after_qid": "0x4553d668d0f7fb3a",
+            "after_udc": "0xc8b74e3b2e77b8d9",
+            "hlc": "0xeb0d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01387b130e1044ab",
+            "after_operational": "0x3381cfc7eaf4f9d1",
+            "after_provenance": "0x33b026967ce8005e",
+            "after_qid": "0xa16fed98dd91ad64",
+            "after_udc": "0x4fc73303fd0bfe1b",
+            "hlc": "0x283b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x015aecb584ab6a3c",
+            "after_operational": "0x481fcfbc4cd45414",
+            "after_provenance": "0xed1567f0192246d2",
+            "after_qid": "0x3e96c1fb1f7dee41",
+            "after_udc": "0xe06e835d5199f35e",
+            "hlc": "0xa05d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13c53bf8caec17bf",
+            "after_operational": "0x56d3a9332b41558c",
+            "after_provenance": "0x777fa983947fe003",
+            "after_qid": "0x0c939237aecd4558",
+            "after_udc": "0x51f0dca33c627af9",
+            "hlc": "0x58350000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03e21673d8bc5986",
+            "after_operational": "0xed8316792fbd2c36",
+            "after_provenance": "0x552380c2fb324f55",
+            "after_qid": "0xf41f71730252c433",
+            "after_udc": "0x23300af12019a65b",
+            "hlc": "0x641b0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x00",
+        "row_id": "0x4c0574bf470bad03b756a9c38870b9ca"
+      }
+    },
+    {
+      "description": "noun=1, |events|=6, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x20bc7af4fce87160",
+        "last_event_hlc": "0x99250000000000000000000000000000",
+        "operational_bitmap": "0x392bff2d418ebf02",
+        "provenance_bitmap": "0x3e61629fa110d573",
+        "qid": "0x845303f0f8fa0634",
+        "state_raw": "0x20",
+        "tombstoned": "0x01",
+        "udc": "0x13574e9c33028cbf"
+      },
+      "id": "case_001",
+      "inputs": {
+        "estate_uuid": "0xf2b1a2d4ce3453f055ad45460fa6f9ed",
+        "events": [
+          {
+            "after_adjective": "0x129c0f6ee3b7452a",
+            "after_operational": "0x0ab14e07d6e3c463",
+            "after_provenance": "0xa27b18cba795f202",
+            "after_qid": "0x36826c9fe5609472",
+            "after_udc": "0x2493872eba0d5a03",
+            "hlc": "0x9f040000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x110a3509d34561ac",
+            "after_operational": "0x21e65fba11c64d08",
+            "after_provenance": "0x2e2333832a47e5d0",
+            "after_qid": "0x8b44f9832ddc9226",
+            "after_udc": "0x82d9c0f56e42fdf0",
+            "hlc": "0x761c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x216d6f9815de0e2d",
+            "after_operational": "0xd4e44d2408dcbf26",
+            "after_provenance": "0x4d8a87a6069cd187",
+            "after_qid": "0xf656d02f895f7850",
+            "after_udc": "0x305dfc235b3c08f1",
+            "hlc": "0x71210000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20bc7af4fce87160",
+            "after_operational": "0x392bff2d418ebf02",
+            "after_provenance": "0x3e61629fa110d573",
+            "after_qid": "0x845303f0f8fa0634",
+            "after_udc": "0x13574e9c33028cbf",
+            "hlc": "0x99250000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x2106cea5ec01d9a1",
+            "after_operational": "0x91ad0aab31dc8895",
+            "after_provenance": "0x29f6ec7c27d2a385",
+            "after_qid": "0x2b35f8aa92466851",
+            "after_udc": "0xf3a5172b75601065",
+            "hlc": "0x88110000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11a85504b02e7e05",
+            "after_operational": "0x9e6c87436a56bfcb",
+            "after_provenance": "0x98c59d8dc541d6de",
+            "after_qid": "0x4857c7e850b8db4e",
+            "after_udc": "0x19b4f67cdad23e9c",
+            "hlc": "0xf4100000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x01",
+        "row_id": "0xc1531e227e9c37da2889e4413888e883"
+      }
+    },
+    {
+      "description": "noun=2, |events|=12, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x137f3f03f21c70fd",
+        "last_event_hlc": "0x39770000000000000000000000000000",
+        "operational_bitmap": "0x531f1ab85a2fd34c",
+        "provenance_bitmap": "0x9d14f471b6c5ade9",
+        "qid": "0x77391dadffc5be59",
+        "state_raw": "0x13",
+        "tombstoned": "0x00",
+        "udc": "0xf1b7f3724a5bd174"
+      },
+      "id": "case_002",
+      "inputs": {
+        "estate_uuid": "0x49ac1b7f3059865d78be62cc51b14c4d",
+        "events": [
+          {
+            "after_adjective": "0x116ad86253bd7140",
+            "after_operational": "0x20b7aa16d42234a8",
+            "after_provenance": "0x5114093fb4f06606",
+            "after_qid": "0xa8d6e6f05136e80e",
+            "after_udc": "0x4f5c0466baf474b4",
+            "hlc": "0xe5080000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x003090b434bdf511",
+            "after_operational": "0xf11f29b55975098b",
+            "after_provenance": "0xa73fbc9b2013eb7e",
+            "after_qid": "0x884068a0a81ec569",
+            "after_udc": "0xafb65f9221e97014",
+            "hlc": "0x303a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x012d179f2bf3ffb8",
+            "after_operational": "0x0c674f9e77ba99db",
+            "after_provenance": "0x096e24ffa0cf36af",
+            "after_qid": "0xfef6c89d8bf3893b",
+            "after_udc": "0xb351a8bdf5854308",
+            "hlc": "0xb36b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00f6f489e45f4000",
+            "after_operational": "0x16cc9110623a536a",
+            "after_provenance": "0x1ce53f70a62cc186",
+            "after_qid": "0x7d7923a17776f63b",
+            "after_udc": "0x5265db60728784ce",
+            "hlc": "0xc5300000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x004bc475a5ef4bc1",
+            "after_operational": "0x8b317e506b05e303",
+            "after_provenance": "0x336c0b3a665baf5b",
+            "after_qid": "0x7fabf5f3e1c9f238",
+            "after_udc": "0xb89538e3cf4b0b2e",
+            "hlc": "0x65720000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02f8876eaf5bcd42",
+            "after_operational": "0xddc5bcd8e4e4197b",
+            "after_provenance": "0x96ea2070eb614463",
+            "after_qid": "0xf89cf7fcde0a416d",
+            "after_udc": "0x2c7f6a24236a9e73",
+            "hlc": "0x01120000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00d6d86090725a73",
+            "after_operational": "0x68d98cc835898693",
+            "after_provenance": "0x6898788b3f82c213",
+            "after_qid": "0x251986517786eb3a",
+            "after_udc": "0x4a41d8bee7da3e6f",
+            "hlc": "0x98200000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1102e6e9f7adf3b7",
+            "after_operational": "0x468f234ac2066ccb",
+            "after_provenance": "0x5206a165db50f79d",
+            "after_qid": "0x5ec174865a18ff31",
+            "after_udc": "0x4403e7a3294f1c4e",
+            "hlc": "0xa1480000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x019b4ad5167d61e4",
+            "after_operational": "0x89f14cccddb12183",
+            "after_provenance": "0x1c63cdf1008ebc84",
+            "after_qid": "0xdd2032cd1d9e9a6d",
+            "after_udc": "0xa53130ada088c92d",
+            "hlc": "0x26570000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x108c0df8eddd8b61",
+            "after_operational": "0x76ffb8dc90a7b1bc",
+            "after_provenance": "0x40e196eec9a72f3a",
+            "after_qid": "0xf1c37fbfbff22321",
+            "after_udc": "0x8f8c9695aeecac50",
+            "hlc": "0xa3640000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x137f3f03f21c70fd",
+            "after_operational": "0x531f1ab85a2fd34c",
+            "after_provenance": "0x9d14f471b6c5ade9",
+            "after_qid": "0x77391dadffc5be59",
+            "after_udc": "0xf1b7f3724a5bd174",
+            "hlc": "0x39770000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0339b4ced1d0a88a",
+            "after_operational": "0x78ff71ff555981cf",
+            "after_provenance": "0xfe0732aec0b0966d",
+            "after_qid": "0x41387ac19d8e6176",
+            "after_udc": "0x689023b2fe36d38c",
+            "hlc": "0x41260000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x02",
+        "row_id": "0x8e86c058651d84c26080f08378a08da7"
+      }
+    },
+    {
+      "description": "noun=3, |events|=11, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x12ed68d7f9417af0",
+        "last_event_hlc": "0xdc6a0000000000000000000000000000",
+        "operational_bitmap": "0x9f6d9e31244e2286",
+        "provenance_bitmap": "0x466aff7bed5ba2b8",
+        "qid": "0x6ac5f6e64062986f",
+        "state_raw": "0x12",
+        "tombstoned": "0x01",
+        "udc": "0x80cd6c675fa7dc8d"
+      },
+      "id": "case_003",
+      "inputs": {
+        "estate_uuid": "0x7eabdf8e8a3b50250296d42fc16be53b",
+        "events": [
+          {
+            "after_adjective": "0x019b717caee7688a",
+            "after_operational": "0x7a221c1a92224e4f",
+            "after_provenance": "0x66938089b8a1c9c8",
+            "after_qid": "0x4d2c8d4965b10200",
+            "after_udc": "0x5ec1f1f12d21cb7e",
+            "hlc": "0x60480000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12e1c11ac9a61d82",
+            "after_operational": "0x915687a2dce88c25",
+            "after_provenance": "0x4c01c0955bec2f82",
+            "after_qid": "0x3722d0d2d9075936",
+            "after_udc": "0x91d8751cd5f99272",
+            "hlc": "0xd7500000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02578279942c95e0",
+            "after_operational": "0xab3acbe9fa56ce9a",
+            "after_provenance": "0x6b5bd5db186fcfe3",
+            "after_qid": "0xadbdeff0d00f571e",
+            "after_udc": "0xe6da7447801c2756",
+            "hlc": "0xe2520000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11cf069bd474a083",
+            "after_operational": "0x469503d824fe457f",
+            "after_provenance": "0x26c40744dcfd725e",
+            "after_qid": "0x7cb9aaee4856982d",
+            "after_udc": "0x22f52e570ddafbff",
+            "hlc": "0x8a0d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1203b7340d4175a7",
+            "after_operational": "0xcdf64fa9e27aa686",
+            "after_provenance": "0xcf6c8b14489b1b5d",
+            "after_qid": "0xa657a6f09792bc07",
+            "after_udc": "0x2c04bdd7e9453592",
+            "hlc": "0x0f390000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20fcd2c7254b7997",
+            "after_operational": "0xd043abf13381d77f",
+            "after_provenance": "0x15fab2466c2cae6d",
+            "after_qid": "0x8625f467c71f675f",
+            "after_udc": "0xf47f89cae78774a0",
+            "hlc": "0x29090000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12ed68d7f9417af0",
+            "after_operational": "0x9f6d9e31244e2286",
+            "after_provenance": "0x466aff7bed5ba2b8",
+            "after_qid": "0x6ac5f6e64062986f",
+            "after_udc": "0x80cd6c675fa7dc8d",
+            "hlc": "0xdc6a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02fabd492e7f3a8e",
+            "after_operational": "0xb90914c08626d335",
+            "after_provenance": "0xf359c4d2aa6de467",
+            "after_qid": "0xf5ceb95b4d6dbf02",
+            "after_udc": "0x717dc71f1ce8aa31",
+            "hlc": "0x35480000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02f4b9fc13008066",
+            "after_operational": "0x7245d8541c08deaa",
+            "after_provenance": "0xc080a807892cdff3",
+            "after_qid": "0xb4354e5f2a9f107e",
+            "after_udc": "0xc7a4bdd09c484539",
+            "hlc": "0x1c1d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21c893c8134aad12",
+            "after_operational": "0x43bedf597ec0aedd",
+            "after_provenance": "0x817d510bdfb8f6b2",
+            "after_qid": "0xcbebf801e762333b",
+            "after_udc": "0xe30b1f34065e4a79",
+            "hlc": "0x7a2b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0097876aac8295d4",
+            "after_operational": "0x661e658c4dc91d13",
+            "after_provenance": "0x36eaabc87eb6cfa3",
+            "after_qid": "0x3002c360e630af04",
+            "after_udc": "0xce08c91a8a36683c",
+            "hlc": "0x8c5f0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x03",
+        "row_id": "0xa8e60b8bd5fe379acb626c19aaa7d265"
+      }
+    },
+    {
+      "description": "noun=4, |events|=10, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x02abc89a292945c5",
+        "last_event_hlc": "0x92350000000000000000000000000000",
+        "operational_bitmap": "0xf7376c3e8ed6f5ff",
+        "provenance_bitmap": "0xe4e2d62fcf964978",
+        "qid": "0x5336fa4c9e4ce54e",
+        "state_raw": "0x02",
+        "tombstoned": "0x01",
+        "udc": "0xc4cf6b1c939845ee"
+      },
+      "id": "case_004",
+      "inputs": {
+        "estate_uuid": "0x3c9f7f343f98c0bca291813673a2dd9e",
+        "events": [
+          {
+            "after_adjective": "0x03625a005c1a7586",
+            "after_operational": "0x302fb843486baf78",
+            "after_provenance": "0xe8f20330ecea3469",
+            "after_qid": "0x7bc35e67d0a9b73d",
+            "after_udc": "0x5ffa1eb3996005dc",
+            "hlc": "0x8a310000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1346c0adfd6b73b1",
+            "after_operational": "0xef5dd6f81db3c0aa",
+            "after_provenance": "0xfddc600b6281c63e",
+            "after_qid": "0xc6323c2f426e652a",
+            "after_udc": "0x4279be1768945115",
+            "hlc": "0x65240000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x010d5e20d06d5104",
+            "after_operational": "0xf3da138c0bb7482b",
+            "after_provenance": "0xe636aac2fb3dde96",
+            "after_qid": "0x0d1d0ccfc6dad87b",
+            "after_udc": "0xf027606aee779d49",
+            "hlc": "0x40320000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x10c53026c5d6ef34",
+            "after_operational": "0x99bc17ed3fc8cddc",
+            "after_provenance": "0x9831864f33a3c94f",
+            "after_qid": "0xd3bdf0040391ab22",
+            "after_udc": "0xab15b12a43296854",
+            "hlc": "0x34200000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03515fe0de433d1d",
+            "after_operational": "0xe70f79223f4bcee7",
+            "after_provenance": "0x1369fdf8ef3b9e9f",
+            "after_qid": "0x40302be4b7b38c2a",
+            "after_udc": "0xfc3026cf747d9b23",
+            "hlc": "0x4a070000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x2167a338f7319493",
+            "after_operational": "0x6d0e00706e94fed6",
+            "after_provenance": "0xe81f5145357efd09",
+            "after_qid": "0xc44bbcfd489b5d5a",
+            "after_udc": "0xe65ed18c8ba7abad",
+            "hlc": "0x6c180000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00c9435b053f57ef",
+            "after_operational": "0x9b2aac958c4a32f2",
+            "after_provenance": "0x979a7833c2c20e84",
+            "after_qid": "0x25e590d8f2b7cf1a",
+            "after_udc": "0x2209b1495eb38b65",
+            "hlc": "0x18300000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02abc89a292945c5",
+            "after_operational": "0xf7376c3e8ed6f5ff",
+            "after_provenance": "0xe4e2d62fcf964978",
+            "after_qid": "0x5336fa4c9e4ce54e",
+            "after_udc": "0xc4cf6b1c939845ee",
+            "hlc": "0x92350000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x001ce5c59fc94cf6",
+            "after_operational": "0x0665562a7352b8f2",
+            "after_provenance": "0xcfdb51c5e79d6f90",
+            "after_qid": "0xf10bfb7f243f2723",
+            "after_udc": "0x5320933951d517dc",
+            "hlc": "0x38140000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x10504793fc5e8018",
+            "after_operational": "0x038c393a2ac0da5b",
+            "after_provenance": "0xf0d3ae6875d98ef9",
+            "after_qid": "0x0cb9b491ad29605e",
+            "after_udc": "0xb792913999bc7beb",
+            "hlc": "0x4e030000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x04",
+        "row_id": "0xdc61d34047830ebc0cf2f9c8c144adb0"
+      }
+    },
+    {
+      "description": "noun=5, |events|=10, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x130d0b8a49538db5",
+        "last_event_hlc": "0x49580000000000000000000000000000",
+        "operational_bitmap": "0x0581fe2dd2888f17",
+        "provenance_bitmap": "0x9706754f21826f57",
+        "qid": "0x4b6457bf4aa07c01",
+        "state_raw": "0x13",
+        "tombstoned": "0x00",
+        "udc": "0x496744511ab13db4"
+      },
+      "id": "case_005",
+      "inputs": {
+        "estate_uuid": "0x37363eb5ea1a436c10e400b7bc912499",
+        "events": [
+          {
+            "after_adjective": "0x01b3bf1723c7cd41",
+            "after_operational": "0x8fc0f85eca4a9208",
+            "after_provenance": "0x77c814832de9d4f3",
+            "after_qid": "0x48653a0fb797c114",
+            "after_udc": "0x13f31091df611c32",
+            "hlc": "0x632b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x130d0b8a49538db5",
+            "after_operational": "0x0581fe2dd2888f17",
+            "after_provenance": "0x9706754f21826f57",
+            "after_qid": "0x4b6457bf4aa07c01",
+            "after_udc": "0x496744511ab13db4",
+            "hlc": "0x49580000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02ecc529e6b180d9",
+            "after_operational": "0x01a58afb586e6233",
+            "after_provenance": "0x88686415c6029bbe",
+            "after_qid": "0x1fc88370171e6d78",
+            "after_udc": "0x33ba8e2a073a942f",
+            "hlc": "0x981d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x119cdd99c88469f7",
+            "after_operational": "0xd27f2e91a4a14118",
+            "after_provenance": "0xf01e22f80923e285",
+            "after_qid": "0xf60c1a6b5b3b1308",
+            "after_udc": "0x0142dba354535ba7",
+            "hlc": "0x684c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20ee7fddc6038e78",
+            "after_operational": "0x0edbeed697541b49",
+            "after_provenance": "0x7f539980e84f16fe",
+            "after_qid": "0xcdbc19734a881978",
+            "after_udc": "0xbb66998585aa2e4f",
+            "hlc": "0x652c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x100285e66905556a",
+            "after_operational": "0x9d842de1d845ac34",
+            "after_provenance": "0x7c91cd1bf10391d6",
+            "after_qid": "0xa8b40edd05e12a5b",
+            "after_udc": "0x792c8a6adbf1910c",
+            "hlc": "0xc50c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0367bb0e7d122df9",
+            "after_operational": "0x4c8c014d3f30be1c",
+            "after_provenance": "0xc0ffd4e913dfe201",
+            "after_qid": "0x5dd4586615316412",
+            "after_udc": "0x639d0e5fed78d832",
+            "hlc": "0x703b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20e4a325ea04a19e",
+            "after_operational": "0x8b1ab8ce604b89a0",
+            "after_provenance": "0xd5620ac2464ed781",
+            "after_qid": "0x55336a97b7a89907",
+            "after_udc": "0x53b2252ca8076c05",
+            "hlc": "0x64020000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01a9e72e026b5a1f",
+            "after_operational": "0xa6c4130142e9d6af",
+            "after_provenance": "0x89ed651610f7c324",
+            "after_qid": "0x096c39ed6307c62d",
+            "after_udc": "0x626cb1a3109e51bb",
+            "hlc": "0x50160000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02c8f5637eaf4d5e",
+            "after_operational": "0x4fcf825df3f0855f",
+            "after_provenance": "0x3d8bdb03c0f55766",
+            "after_qid": "0x3fe229676c0fea0b",
+            "after_udc": "0xe578e2626fe6fab6",
+            "hlc": "0x32400000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x05",
+        "row_id": "0x2f55c7e6926ce846b4942d7644851fba"
+      }
+    },
+    {
+      "description": "noun=6, |events|=5, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x0339011cd291f215",
+        "last_event_hlc": "0xfb1d0000000000000000000000000000",
+        "operational_bitmap": "0x6593fc5d6cc5be2a",
+        "provenance_bitmap": "0x3ecac337b44b174d",
+        "qid": "0xa43de1f8adecb075",
+        "state_raw": "0x03",
+        "tombstoned": "0x00",
+        "udc": "0xb12e2a99fb4f3f93"
+      },
+      "id": "case_006",
+      "inputs": {
+        "estate_uuid": "0xba7b821b6237ffe82102aa00662d270e",
+        "events": [
+          {
+            "after_adjective": "0x138e671ead29b896",
+            "after_operational": "0x0be32c71518a95b0",
+            "after_provenance": "0x703bd6cd9f99e96c",
+            "after_qid": "0x59042d198d134543",
+            "after_udc": "0x2b678f1d04b11bea",
+            "hlc": "0x18020000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0339011cd291f215",
+            "after_operational": "0x6593fc5d6cc5be2a",
+            "after_provenance": "0x3ecac337b44b174d",
+            "after_qid": "0xa43de1f8adecb075",
+            "after_udc": "0xb12e2a99fb4f3f93",
+            "hlc": "0xfb1d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1346f486df411a4a",
+            "after_operational": "0x7a740040a62ae7e9",
+            "after_provenance": "0x51282e14262a21b4",
+            "after_qid": "0x3e2cf8adb1e8e763",
+            "after_udc": "0xef2184a1ea3ce134",
+            "hlc": "0xa20d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02490cb13fe5bb27",
+            "after_operational": "0x71b231219577178f",
+            "after_provenance": "0xe49cc3a725aecb24",
+            "after_qid": "0x6c594ad4f43a1172",
+            "after_udc": "0x06bff1e6ae45ae1e",
+            "hlc": "0x7c090000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x017b72e46cbaeda8",
+            "after_operational": "0x955facd0bde291fa",
+            "after_provenance": "0xeea125c3442218ac",
+            "after_qid": "0x8ddfe52bd63d714d",
+            "after_udc": "0x98e18ab5139b33d7",
+            "hlc": "0x5d160000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x06",
+        "row_id": "0x2247ce75ed53446e469938f04f1da507"
+      }
+    },
+    {
+      "description": "noun=7, |events|=12, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x03fca5b8d5ea727e",
+        "last_event_hlc": "0x68660000000000000000000000000000",
+        "operational_bitmap": "0xc3879e779e7276df",
+        "provenance_bitmap": "0xe362cdcea7189bec",
+        "qid": "0x74fff065b9ddf831",
+        "state_raw": "0x03",
+        "tombstoned": "0x00",
+        "udc": "0xec2d39c9628dfbe5"
+      },
+      "id": "case_007",
+      "inputs": {
+        "estate_uuid": "0x4fda6c767146004c05f9209765f752cc",
+        "events": [
+          {
+            "after_adjective": "0x0153e242b6546522",
+            "after_operational": "0x356f0a58ed89d826",
+            "after_provenance": "0x17cca190af4baa00",
+            "after_qid": "0x4af47809591aee2a",
+            "after_udc": "0xf5a8752fd689ed7e",
+            "hlc": "0xae280000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20e79e3a598fc9f6",
+            "after_operational": "0x6db2170932d7e032",
+            "after_provenance": "0xd95fa3bdcf95d88b",
+            "after_qid": "0x2310483ec769c37f",
+            "after_udc": "0xed841a33b820c166",
+            "hlc": "0xab360000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0175f488547edc8e",
+            "after_operational": "0xd5e8c9548c795575",
+            "after_provenance": "0x300bd7cfd8fb299b",
+            "after_qid": "0xbcfc027f3f418576",
+            "after_udc": "0xcc8394985dfd139f",
+            "hlc": "0x23530000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20deb52ed34ccb66",
+            "after_operational": "0xae6d15452c09a8e2",
+            "after_provenance": "0x5062e2ed5ae8e023",
+            "after_qid": "0x66e6769446d88315",
+            "after_udc": "0x54bb0f735596ce59",
+            "hlc": "0x17460000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03870f27efd8f8c0",
+            "after_operational": "0xd4985821d204807d",
+            "after_provenance": "0x50196b6978e49457",
+            "after_qid": "0x6f60d4d3a1252914",
+            "after_udc": "0x030926e6fb504216",
+            "hlc": "0xdb220000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00c1d7a87059b9c6",
+            "after_operational": "0xc08859e6cef98a5f",
+            "after_provenance": "0x4ee5f6cb444d42a0",
+            "after_qid": "0x82fe7bc257b10c5f",
+            "after_udc": "0x4fcc9b2282ef4a12",
+            "hlc": "0xe3420000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00b58484b1f4f2eb",
+            "after_operational": "0x0eaad87dca79c60c",
+            "after_provenance": "0x67515492a08bd006",
+            "after_qid": "0xc9757f746f7df500",
+            "after_udc": "0xb0ab9ebbcb30ad3b",
+            "hlc": "0x351d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03a5b223793fa51b",
+            "after_operational": "0x01d1d2a770031681",
+            "after_provenance": "0xc2b526e544d1b4d0",
+            "after_qid": "0x401d9669ad9d6c1e",
+            "after_udc": "0xb974a3c380505034",
+            "hlc": "0xd55d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0169e9c3ccc9f855",
+            "after_operational": "0x5e35792de22fb619",
+            "after_provenance": "0x556e6ba59d7a4076",
+            "after_qid": "0x709921da3b444916",
+            "after_udc": "0x0ab53f44fe1d963d",
+            "hlc": "0xac0e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11eca3004c124dcb",
+            "after_operational": "0x8fccaeb7f2004584",
+            "after_provenance": "0x161fa9d699bd6b96",
+            "after_qid": "0x8c98d8377659e32a",
+            "after_udc": "0xda5dac1ddba90051",
+            "hlc": "0xf4580000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x031f203cd75622b6",
+            "after_operational": "0xfcc3c2ce85285445",
+            "after_provenance": "0x2f854120392afea7",
+            "after_qid": "0x0de70c8c73412375",
+            "after_udc": "0x625236c22fbb39f6",
+            "hlc": "0x665d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03fca5b8d5ea727e",
+            "after_operational": "0xc3879e779e7276df",
+            "after_provenance": "0xe362cdcea7189bec",
+            "after_qid": "0x74fff065b9ddf831",
+            "after_udc": "0xec2d39c9628dfbe5",
+            "hlc": "0x68660000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x07",
+        "row_id": "0x9004610972ddc30d0a13cf418777f732"
+      }
+    },
+    {
+      "description": "noun=0, |events|=5, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x00bc59f5a48a369c",
+        "last_event_hlc": "0x95230000000000000000000000000000",
+        "operational_bitmap": "0xd6c7e1f90d000b18",
+        "provenance_bitmap": "0x3c6bd3b8cd347eb7",
+        "qid": "0x0b7dd8e8b6b85b23",
+        "state_raw": "0x00",
+        "tombstoned": "0x00",
+        "udc": "0xb95117ecf83aa292"
+      },
+      "id": "case_008",
+      "inputs": {
+        "estate_uuid": "0x1bcfb384ab75a777fd26664c522c3919",
+        "events": [
+          {
+            "after_adjective": "0x11708f23d2d466c9",
+            "after_operational": "0xdc51f7433350399e",
+            "after_provenance": "0x5561bacf234f6544",
+            "after_qid": "0xa2bdffa3d352b26e",
+            "after_udc": "0x6bcb28566bb2e20b",
+            "hlc": "0xf4030000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13799fac1de87df0",
+            "after_operational": "0x66ee9cb168f92f76",
+            "after_provenance": "0xc87723f8eca97f96",
+            "after_qid": "0x42f713dbb5b5473e",
+            "after_udc": "0xc9a13410761a7fea",
+            "hlc": "0x231b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x032a84b2ff3c97e5",
+            "after_operational": "0x0bfa223dc278e82e",
+            "after_provenance": "0x5f3064eaf3086f14",
+            "after_qid": "0x3f8699b833afd129",
+            "after_udc": "0x956a9ab6ce1dcccf",
+            "hlc": "0xd50f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01277d2b11cfca94",
+            "after_operational": "0x82c6a42a4d41034f",
+            "after_provenance": "0xc4975aa229b9711f",
+            "after_qid": "0xccc2321244d27859",
+            "after_udc": "0x757812e766a94a2c",
+            "hlc": "0xc1110000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00bc59f5a48a369c",
+            "after_operational": "0xd6c7e1f90d000b18",
+            "after_provenance": "0x3c6bd3b8cd347eb7",
+            "after_qid": "0x0b7dd8e8b6b85b23",
+            "after_udc": "0xb95117ecf83aa292",
+            "hlc": "0x95230000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x00",
+        "row_id": "0x5ad4ef0e9fc4e642a92407b84d3ab39b"
+      }
+    },
+    {
+      "description": "noun=1, |events|=12, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x02d97ba0278e6617",
+        "last_event_hlc": "0x6b7b0000000000000000000000000000",
+        "operational_bitmap": "0x64d05dc840ad5753",
+        "provenance_bitmap": "0x5416ee73740e7d00",
+        "qid": "0x3ab605bf29bf7812",
+        "state_raw": "0x02",
+        "tombstoned": "0x00",
+        "udc": "0xfd9314fcd9e64b13"
+      },
+      "id": "case_009",
+      "inputs": {
+        "estate_uuid": "0xf33945f2a7ed475c0beadf0390153775",
+        "events": [
+          {
+            "after_adjective": "0x100e60f997ea9b2c",
+            "after_operational": "0xe82fa2d6dbf5f57e",
+            "after_provenance": "0x0c01d456dcf38fd0",
+            "after_qid": "0x5fa7ff7ba0ad7343",
+            "after_udc": "0xa1bcfa57a3cfe426",
+            "hlc": "0x146e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x113e276fb58f3671",
+            "after_operational": "0xe5df84e721be0979",
+            "after_provenance": "0xa100721a6ec1af36",
+            "after_qid": "0xe6fc6d4fc5a87721",
+            "after_udc": "0xb00dd35604724d37",
+            "hlc": "0x9f780000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01346efc95835521",
+            "after_operational": "0x3fbbc533f582df32",
+            "after_provenance": "0x3cde74a5b27768ef",
+            "after_qid": "0x6d3549cc8e139444",
+            "after_udc": "0xcb8083bc2bb41588",
+            "hlc": "0x72090000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12f68d265bdd4cef",
+            "after_operational": "0xb2c174306efab912",
+            "after_provenance": "0xbb1744016c3695f4",
+            "after_qid": "0x3576ac4e8cd9aa5b",
+            "after_udc": "0xd05f3a4332c59979",
+            "hlc": "0x05430000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1313b8b208a8b336",
+            "after_operational": "0x474ce6fcfeb353d0",
+            "after_provenance": "0x5daa74f2e96a20e8",
+            "after_qid": "0x55f162dbf9a25d62",
+            "after_udc": "0xcb9d198c1c8a6dab",
+            "hlc": "0xdf160000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02d97ba0278e6617",
+            "after_operational": "0x64d05dc840ad5753",
+            "after_provenance": "0x5416ee73740e7d00",
+            "after_qid": "0x3ab605bf29bf7812",
+            "after_udc": "0xfd9314fcd9e64b13",
+            "hlc": "0x6b7b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x133480b82408b08a",
+            "after_operational": "0x8290ea407a547c46",
+            "after_provenance": "0x84bdfe72bb74d2b7",
+            "after_qid": "0x3a2178d9332bc179",
+            "after_udc": "0x8e39b4361bfdbda9",
+            "hlc": "0x40570000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x107da4a75634d10e",
+            "after_operational": "0xe2fdce6a2d70d33d",
+            "after_provenance": "0x4e7afd1b9d255739",
+            "after_qid": "0x34ae062c50fb6e06",
+            "after_udc": "0x9c21518cc04948e0",
+            "hlc": "0xc4610000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02f62da6319e753d",
+            "after_operational": "0x76c01d33dfaea486",
+            "after_provenance": "0xffe47e952db3ca21",
+            "after_qid": "0x0c1fb55c8b5e5606",
+            "after_udc": "0xad0c44f1fc38264d",
+            "hlc": "0x0e230000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x016baad639ce0cee",
+            "after_operational": "0x15ff04cda50a2309",
+            "after_provenance": "0x15200c56cbff230e",
+            "after_qid": "0x960bf4524e36b26e",
+            "after_udc": "0xf2d2f89826f2400d",
+            "hlc": "0x3b4d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0335671009454358",
+            "after_operational": "0x3d30c361e3bd8116",
+            "after_provenance": "0x9fb5e0efc806ae81",
+            "after_qid": "0x77caaca0ae833864",
+            "after_udc": "0x5a5d1f8926b796ff",
+            "hlc": "0xc92e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1186b5c9ca2bd4ef",
+            "after_operational": "0xdb67b4ab3c6dd762",
+            "after_provenance": "0x31a830c03d389025",
+            "after_qid": "0x47ffba79b829f32e",
+            "after_udc": "0x57e8358ccdadbff3",
+            "hlc": "0x4f3c0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x01",
+        "row_id": "0x65f68f12dd919e5c4013eeb0fcee8f32"
+      }
+    },
+    {
+      "description": "noun=2, |events|=11, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x13285d57230a1c46",
+        "last_event_hlc": "0xb5650000000000000000000000000000",
+        "operational_bitmap": "0x00d754645b1122cf",
+        "provenance_bitmap": "0x0945424a38d06a56",
+        "qid": "0x84423615ab5cd431",
+        "state_raw": "0x13",
+        "tombstoned": "0x01",
+        "udc": "0xf4e524187f180efe"
+      },
+      "id": "case_010",
+      "inputs": {
+        "estate_uuid": "0x0139e63f81d2e81b10bcb7550ac9f954",
+        "events": [
+          {
+            "after_adjective": "0x20a784c64ea92c74",
+            "after_operational": "0x91665e2ca7543d6b",
+            "after_provenance": "0x8850ba48e2f55695",
+            "after_qid": "0xf22e9262214c8974",
+            "after_udc": "0x31103b8b584c0af6",
+            "hlc": "0x3c1a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1395eae3276c0106",
+            "after_operational": "0xef78c69f0a5008da",
+            "after_provenance": "0x424ab91fe2728d71",
+            "after_qid": "0x1fafa02396442607",
+            "after_udc": "0xff65bddc748e4d06",
+            "hlc": "0xda500000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03b3a4f11e2cefd1",
+            "after_operational": "0xea52a9ee85cd17ac",
+            "after_provenance": "0x21619da07bb445c3",
+            "after_qid": "0xbb395d1d78fecd4e",
+            "after_udc": "0xa73274ca7766c3a7",
+            "hlc": "0x48270000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13285d57230a1c46",
+            "after_operational": "0x00d754645b1122cf",
+            "after_provenance": "0x0945424a38d06a56",
+            "after_qid": "0x84423615ab5cd431",
+            "after_udc": "0xf4e524187f180efe",
+            "hlc": "0xb5650000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12a3717f34c14c4a",
+            "after_operational": "0x19647dca7cad3fd0",
+            "after_provenance": "0x1e45f2d1a7e26a93",
+            "after_qid": "0x522594d9df4a7454",
+            "after_udc": "0x681b4630a692f573",
+            "hlc": "0xe93b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x207068732e771854",
+            "after_operational": "0x56118e5bcf299648",
+            "after_provenance": "0x68166c5f8a7e6d2d",
+            "after_qid": "0x7bca853bba678902",
+            "after_udc": "0x192649b4f2976d77",
+            "hlc": "0x1d410000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x018dac07843d36e8",
+            "after_operational": "0xd8bd65b33da00e2d",
+            "after_provenance": "0xfe3a9283f8c46e4e",
+            "after_qid": "0x7519e11ef2801556",
+            "after_udc": "0x92bc99239cda91bc",
+            "hlc": "0x1b5b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03ba7c424b01eb09",
+            "after_operational": "0x73c3c83f8c8da0e7",
+            "after_provenance": "0x32dd0eeed761bc91",
+            "after_qid": "0xd36a5d031e49c014",
+            "after_udc": "0xd6e24cbed192195f",
+            "hlc": "0x28310000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x139e487dde6d579f",
+            "after_operational": "0x8426a081b67549bb",
+            "after_provenance": "0x362cb4c528a6cd65",
+            "after_qid": "0x78927211ead45d07",
+            "after_udc": "0x1e0855de18cd0de7",
+            "hlc": "0x3e230000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21f08962be8c6f11",
+            "after_operational": "0x90208e310acd5eea",
+            "after_provenance": "0xf7658560395424bd",
+            "after_qid": "0x3d018889ec9ce429",
+            "after_udc": "0xcb63c482e1a5c1ce",
+            "hlc": "0x7c110000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x104991c9b8a52930",
+            "after_operational": "0xaea3491db07de64c",
+            "after_provenance": "0x51e45c8e14775a39",
+            "after_qid": "0xfa6709d7b804c05a",
+            "after_udc": "0xf55c63f383f0d29b",
+            "hlc": "0xad020000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x02",
+        "row_id": "0x032c0faa27238966f38b8d072618972d"
+      }
+    },
+    {
+      "description": "noun=3, |events|=5, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x10f1a72600b6c3a3",
+        "last_event_hlc": "0x8e250000000000000000000000000000",
+        "operational_bitmap": "0xe78032aff1d7ee1c",
+        "provenance_bitmap": "0xad16c06f65ba7a4d",
+        "qid": "0x72e946cbf3d4296d",
+        "state_raw": "0x10",
+        "tombstoned": "0x01",
+        "udc": "0x9df035b9c9788a26"
+      },
+      "id": "case_011",
+      "inputs": {
+        "estate_uuid": "0x0ea5f1889b1ef349d60b3e2d06e52463",
+        "events": [
+          {
+            "after_adjective": "0x132c38dd7b5353fb",
+            "after_operational": "0x80dc5b5c1f745df9",
+            "after_provenance": "0x5aad4c10e0f071d6",
+            "after_qid": "0x0817f5de632f483f",
+            "after_udc": "0xee290e4398c68d78",
+            "hlc": "0xce190000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x10f1a72600b6c3a3",
+            "after_operational": "0xe78032aff1d7ee1c",
+            "after_provenance": "0xad16c06f65ba7a4d",
+            "after_qid": "0x72e946cbf3d4296d",
+            "after_udc": "0x9df035b9c9788a26",
+            "hlc": "0x8e250000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0261584e8252bca4",
+            "after_operational": "0x068190929df7d836",
+            "after_provenance": "0x24d39e23c4e1c79c",
+            "after_qid": "0x04a10de8549e1d1f",
+            "after_udc": "0xecd325cdc0c95114",
+            "hlc": "0x6f0a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21937a5293a440dd",
+            "after_operational": "0xf12e67c8f8cd2962",
+            "after_provenance": "0x0a189f29d225094c",
+            "after_qid": "0x933aac4e6ee6727a",
+            "after_udc": "0x55c0d976840a6e1f",
+            "hlc": "0x401e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x020786d0e5a01ecc",
+            "after_operational": "0x84bf86464316186b",
+            "after_provenance": "0x81cb29c83189448c",
+            "after_qid": "0x9b5456d2d5430a45",
+            "after_udc": "0x26f60cc4d6773ad0",
+            "hlc": "0xa5070000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x03",
+        "row_id": "0x3fc19fc33b60c2ad1fa2ece3f8de74c6"
+      }
+    },
+    {
+      "description": "noun=4, |events|=9, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x13009e5659c22eab",
+        "last_event_hlc": "0x7f3e0000000000000000000000000000",
+        "operational_bitmap": "0xc8a5414f7d0732d3",
+        "provenance_bitmap": "0x37756fddccd40e7c",
+        "qid": "0x371d53ae1d513571",
+        "state_raw": "0x13",
+        "tombstoned": "0x00",
+        "udc": "0x898b050cba32c934"
+      },
+      "id": "case_012",
+      "inputs": {
+        "estate_uuid": "0xd67676599076ee4a00476542d6107ce5",
+        "events": [
+          {
+            "after_adjective": "0x000f0a42885fc24d",
+            "after_operational": "0x344bfb498b1261c6",
+            "after_provenance": "0x957c27058e7db8b7",
+            "after_qid": "0xf81d09e988f17f54",
+            "after_udc": "0xcaed6a873ac864be",
+            "hlc": "0xdb110000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13009e5659c22eab",
+            "after_operational": "0xc8a5414f7d0732d3",
+            "after_provenance": "0x37756fddccd40e7c",
+            "after_qid": "0x371d53ae1d513571",
+            "after_udc": "0x898b050cba32c934",
+            "hlc": "0x7f3e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x10fbbc7918c19686",
+            "after_operational": "0xf88c94df282a42b1",
+            "after_provenance": "0xe19bd19c15ddc098",
+            "after_qid": "0x82ac7718abf39064",
+            "after_udc": "0xeb5a4fb9aa4a02e4",
+            "hlc": "0xe11c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x208b3d95ec5db8db",
+            "after_operational": "0x40d5a2dc2c234524",
+            "after_provenance": "0x22d253ae65d99fed",
+            "after_qid": "0xb58d5ebbf8f59a79",
+            "after_udc": "0x1594ae04b26371ea",
+            "hlc": "0x08180000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13e7ee4f2cccb23c",
+            "after_operational": "0x17cbe69f8c16264b",
+            "after_provenance": "0x49ede080098c0913",
+            "after_qid": "0x77c50d4766d75203",
+            "after_udc": "0xf7757e2a37a70bca",
+            "hlc": "0x570a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20a5397bfa62f65c",
+            "after_operational": "0xeb62eeabedff5d3e",
+            "after_provenance": "0x2d42ee58d44b125e",
+            "after_qid": "0x38a12094ded87a09",
+            "after_udc": "0x118edcae54ec511b",
+            "hlc": "0x492b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12031a1eb9b29bbd",
+            "after_operational": "0x66de5d1d37ed9d3f",
+            "after_provenance": "0x813d88ef3517143e",
+            "after_qid": "0x8d9790c9f9f5c949",
+            "after_udc": "0x951e46772c41f47f",
+            "hlc": "0xa3290000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0006b32a949cacd5",
+            "after_operational": "0x473ab6809896bc53",
+            "after_provenance": "0x1ed464f673a39281",
+            "after_qid": "0x8055fce86b868f4f",
+            "after_udc": "0x9fa641cbc47025ad",
+            "hlc": "0xca300000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0120c92c12d6c69b",
+            "after_operational": "0xf19c534f9d223d16",
+            "after_provenance": "0x7ded5d3ede7ba157",
+            "after_qid": "0x2b1f9372ccc10f52",
+            "after_udc": "0xe37da768345efbf1",
+            "hlc": "0x76330000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x04",
+        "row_id": "0xb43131412deb09212f3d7ea94e4386bd"
+      }
+    },
+    {
+      "description": "noun=5, |events|=11, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x215648926a60fcb1",
+        "last_event_hlc": "0x4f4f0000000000000000000000000000",
+        "operational_bitmap": "0x68a46ddf81d575f5",
+        "provenance_bitmap": "0x8c27c6dd2cdc5be3",
+        "qid": "0xe5fba29fdf83137f",
+        "state_raw": "0x21",
+        "tombstoned": "0x01",
+        "udc": "0x4c2901c30a2fe057"
+      },
+      "id": "case_013",
+      "inputs": {
+        "estate_uuid": "0x924a6ba904fc82df5cb247700be6ee62",
+        "events": [
+          {
+            "after_adjective": "0x03073b61da75ae64",
+            "after_operational": "0x767a935688b2e45b",
+            "after_provenance": "0x63f6a1b6b3aa67ce",
+            "after_qid": "0xd1e673304e11e540",
+            "after_udc": "0x6106f03ed7079160",
+            "hlc": "0x0a060000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x10faa704c81dade8",
+            "after_operational": "0x337791ba7d2fd288",
+            "after_provenance": "0xb92d8547d800a44e",
+            "after_qid": "0xa4cbf8a2f1545301",
+            "after_udc": "0xe65c9960d0409230",
+            "hlc": "0x05480000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x215648926a60fcb1",
+            "after_operational": "0x68a46ddf81d575f5",
+            "after_provenance": "0x8c27c6dd2cdc5be3",
+            "after_qid": "0xe5fba29fdf83137f",
+            "after_udc": "0x4c2901c30a2fe057",
+            "hlc": "0x4f4f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x109ec6a7212193d6",
+            "after_operational": "0x6bbc3342f7ebf3ad",
+            "after_provenance": "0xa0adf1f08b323554",
+            "after_qid": "0x063f259ded459007",
+            "after_udc": "0xe44ead37f6502dff",
+            "hlc": "0xe9210000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11b8e2cca4d719d4",
+            "after_operational": "0x875555b666e49456",
+            "after_provenance": "0xf6683af1803ae74c",
+            "after_qid": "0x3d2a9133d9ac6253",
+            "after_udc": "0xa856d15d679f07d4",
+            "hlc": "0x193a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x021639d7b7211388",
+            "after_operational": "0xb2c6240f146ccf91",
+            "after_provenance": "0x04d6d4a465e16b70",
+            "after_qid": "0x21a8d76945dccb40",
+            "after_udc": "0x81064fcb13edba38",
+            "hlc": "0x6a1b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11f116a962ec3834",
+            "after_operational": "0x5ac7990d838a765d",
+            "after_provenance": "0xc5d8938372b12d66",
+            "after_qid": "0xdf8c190c929e485e",
+            "after_udc": "0xbdcd52f2583e2078",
+            "hlc": "0x91140000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12472086f18aacca",
+            "after_operational": "0xbaf171e76e2f7033",
+            "after_provenance": "0xb5155c2359700623",
+            "after_qid": "0x9df8a5ffc3bb0b4d",
+            "after_udc": "0x49edae5b6cbeb577",
+            "hlc": "0xde110000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03a64aa041698306",
+            "after_operational": "0x6d50d25a91aa964a",
+            "after_provenance": "0x9c8bb66692036bd2",
+            "after_qid": "0x0437beb38728ab37",
+            "after_udc": "0x568837762a4b23ba",
+            "hlc": "0x782e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02def5df87a9aeee",
+            "after_operational": "0x5e5ebc4988758fb9",
+            "after_provenance": "0x89b8d32b0ff346af",
+            "after_qid": "0x59ef8a71f1819656",
+            "after_udc": "0x1fe31f41117d9f3b",
+            "hlc": "0x6c310000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02d1ef41f6964dba",
+            "after_operational": "0x2c7aca8368eeccb5",
+            "after_provenance": "0xa6eb13f75155efef",
+            "after_qid": "0xf7a54ad929938e68",
+            "after_udc": "0xb82c51175eb1fb26",
+            "hlc": "0xdc4b0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x05",
+        "row_id": "0x3f2921d2dd3050138572154687d46236"
+      }
+    },
+    {
+      "description": "noun=6, |events|=5, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x007c0f2dc08881e0",
+        "last_event_hlc": "0x7b230000000000000000000000000000",
+        "operational_bitmap": "0xcf235acd6bc88653",
+        "provenance_bitmap": "0xd2fdda973e35c101",
+        "qid": "0x0d22b6ff2127e66b",
+        "state_raw": "0x00",
+        "tombstoned": "0x00",
+        "udc": "0xf03f38c1ca24a8ca"
+      },
+      "id": "case_014",
+      "inputs": {
+        "estate_uuid": "0x6e13cc4dedf65c5618c253a93562042b",
+        "events": [
+          {
+            "after_adjective": "0x1173a596f3f249fc",
+            "after_operational": "0x08928ada327c69f4",
+            "after_provenance": "0x2018e9fd33c70fc6",
+            "after_qid": "0xd10ee8080c565a30",
+            "after_udc": "0x65abc2d1b797b2f8",
+            "hlc": "0xe2040000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x001eca16777dda33",
+            "after_operational": "0xf6a8f94ede563159",
+            "after_provenance": "0xbd66b1a287816871",
+            "after_qid": "0x0a00f29c394b7a1c",
+            "after_udc": "0xebc14ad40ff2dd60",
+            "hlc": "0x0f130000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1189e36576946b0d",
+            "after_operational": "0xc72210789ab8ea5a",
+            "after_provenance": "0xffdc4bb7a43b21e1",
+            "after_qid": "0x57e1a1d677172025",
+            "after_udc": "0xfab85bd29506073a",
+            "hlc": "0xb5070000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x007c0f2dc08881e0",
+            "after_operational": "0xcf235acd6bc88653",
+            "after_provenance": "0xd2fdda973e35c101",
+            "after_qid": "0x0d22b6ff2127e66b",
+            "after_udc": "0xf03f38c1ca24a8ca",
+            "hlc": "0x7b230000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x136e112b2b0b505a",
+            "after_operational": "0x6b04100c8a9c6feb",
+            "after_provenance": "0x5331d9537190f24b",
+            "after_qid": "0x483e237127389622",
+            "after_udc": "0xf93f9cef05de3aca",
+            "hlc": "0x7e1b0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x06",
+        "row_id": "0x15825c7ede6e1462dc59dee75c947b7d"
+      }
+    },
+    {
+      "description": "noun=7, |events|=9, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x01cad0da7a22d609",
+        "last_event_hlc": "0xf42f0000000000000000000000000000",
+        "operational_bitmap": "0xb7ff43533fc5b587",
+        "provenance_bitmap": "0xfeae1df3afa7f000",
+        "qid": "0xe0261cd990d58763",
+        "state_raw": "0x01",
+        "tombstoned": "0x01",
+        "udc": "0x333b3f4a45fc675f"
+      },
+      "id": "case_015",
+      "inputs": {
+        "estate_uuid": "0xc13a1bb00909ff0f456051e6a49c2dfe",
+        "events": [
+          {
+            "after_adjective": "0x01cad0da7a22d609",
+            "after_operational": "0xb7ff43533fc5b587",
+            "after_provenance": "0xfeae1df3afa7f000",
+            "after_qid": "0xe0261cd990d58763",
+            "after_udc": "0x333b3f4a45fc675f",
+            "hlc": "0xf42f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00540f6cf6df2722",
+            "after_operational": "0xc6c53ef33e293ef8",
+            "after_provenance": "0x11cb5fc20e644c6a",
+            "after_qid": "0x1c03b60b3d179164",
+            "after_udc": "0x640af47af5ec837a",
+            "hlc": "0xd4120000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x120ad1008617a227",
+            "after_operational": "0x2b6c605dbac8c275",
+            "after_provenance": "0x0dca753033bee8d9",
+            "after_qid": "0x3fbbff19aeeab74b",
+            "after_udc": "0xfa7ee606b5f7f34c",
+            "hlc": "0x7c080000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x130c23d2431293e4",
+            "after_operational": "0xe0bdf3d56c808c24",
+            "after_provenance": "0x1a011767830c0fd8",
+            "after_qid": "0x15d723d808296a47",
+            "after_udc": "0x409333ebed554dc8",
+            "hlc": "0x7b050000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00bd3c042f00506c",
+            "after_operational": "0x2b02bb38a99f6543",
+            "after_provenance": "0x28b8ef0a51bd78b5",
+            "after_qid": "0x7e93bbb283fba939",
+            "after_udc": "0x3257fe5416eb9f0d",
+            "hlc": "0x6b190000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11e700b602722051",
+            "after_operational": "0xcab4872e047dab23",
+            "after_provenance": "0xcb8998ea6a5093d5",
+            "after_qid": "0x98e98580dff6bf40",
+            "after_udc": "0xec7d58a3c845751e",
+            "hlc": "0xfe260000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x2115d2ff2f2754a1",
+            "after_operational": "0xd5d0f7ddd1d4869b",
+            "after_provenance": "0x31b1e68156be282b",
+            "after_qid": "0x81a28bcd37e6e623",
+            "after_udc": "0x360e85f8127c3331",
+            "hlc": "0xa40c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x10abf53b1cb8cc5d",
+            "after_operational": "0xb9eec5f7003961fc",
+            "after_provenance": "0x6d4b55ad4b9d96ef",
+            "after_qid": "0x0efa9132e482d06f",
+            "after_udc": "0xcf5d9c38f5f0f220",
+            "hlc": "0x8c080000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1096bb33ff6d4470",
+            "after_operational": "0xd31c249de7fac470",
+            "after_provenance": "0x1fe64efb8bb9346c",
+            "after_qid": "0x68631000cbd14f08",
+            "after_udc": "0x74ff023bc904df8e",
+            "hlc": "0x1a0c0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x07",
+        "row_id": "0xad05a1445d65c8889e32deb5a8837410"
+      }
+    },
+    {
+      "description": "noun=0, |events|=8, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x0209640dd06beac7",
+        "last_event_hlc": "0xb9450000000000000000000000000000",
+        "operational_bitmap": "0x30328c5d28af1705",
+        "provenance_bitmap": "0xfa25d297d6ba4ef0",
+        "qid": "0x67864b36d4819d43",
+        "state_raw": "0x02",
+        "tombstoned": "0x01",
+        "udc": "0x2005049bf10ebaa3"
+      },
+      "id": "case_016",
+      "inputs": {
+        "estate_uuid": "0x5cd8f72186c1da940ae28f5d8850d89a",
+        "events": [
+          {
+            "after_adjective": "0x01531c4dda2b4061",
+            "after_operational": "0x75727298f91516c6",
+            "after_provenance": "0xbc5038ce7a942c0c",
+            "after_qid": "0x93b3d82b5d4a362e",
+            "after_udc": "0xa8db3c6e01bafc32",
+            "hlc": "0x87230000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01fd6451316e9979",
+            "after_operational": "0x7f7aab6665383722",
+            "after_provenance": "0x574d72aaca78b4ec",
+            "after_qid": "0x780ffb51b6fc5139",
+            "after_udc": "0xe0a91d3ccda04727",
+            "hlc": "0x580c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x002035bfae7d352a",
+            "after_operational": "0x2a25bdba90c3f280",
+            "after_provenance": "0xa109c510d4f6c56a",
+            "after_qid": "0x1c63d020e9a80719",
+            "after_udc": "0xeac9b3b88858c49d",
+            "hlc": "0x46300000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x214e390126d7f54e",
+            "after_operational": "0x1bdbf0ef545b2090",
+            "after_provenance": "0xc41df745b9b4102f",
+            "after_qid": "0x22777f747c44bd4d",
+            "after_udc": "0x7e91f20602f50b5c",
+            "hlc": "0x6d3c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11fbf5f6c0533077",
+            "after_operational": "0xae05c7f6784647af",
+            "after_provenance": "0x6c7bfa0fda080041",
+            "after_qid": "0x17550a4260542808",
+            "after_udc": "0x5089541d3c9f48e2",
+            "hlc": "0xb41f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21a2f1b897c118db",
+            "after_operational": "0x81ae6c09d42a2e97",
+            "after_provenance": "0x422c9871bf867781",
+            "after_qid": "0x5dff71e854b9a46d",
+            "after_udc": "0x4d401b1b8e80957f",
+            "hlc": "0x97130000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1224096329a0360f",
+            "after_operational": "0x771ce63b529ac0dd",
+            "after_provenance": "0x649581312d1845f7",
+            "after_qid": "0x7ecb0c07da90741e",
+            "after_udc": "0x68bf9092b9a431d7",
+            "hlc": "0x03140000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0209640dd06beac7",
+            "after_operational": "0x30328c5d28af1705",
+            "after_provenance": "0xfa25d297d6ba4ef0",
+            "after_qid": "0x67864b36d4819d43",
+            "after_udc": "0x2005049bf10ebaa3",
+            "hlc": "0xb9450000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x00",
+        "row_id": "0x37f3b47f2bff8c25ae065ec646b14a13"
+      }
+    },
+    {
+      "description": "noun=1, |events|=6, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x13224558bfe34c0f",
+        "last_event_hlc": "0xf83d0000000000000000000000000000",
+        "operational_bitmap": "0xc798f419b2fc858b",
+        "provenance_bitmap": "0x0974b61c683619eb",
+        "qid": "0x0e6fbcb993b4b204",
+        "state_raw": "0x13",
+        "tombstoned": "0x01",
+        "udc": "0x56a2ce1def966b9d"
+      },
+      "id": "case_017",
+      "inputs": {
+        "estate_uuid": "0x8aaeefbb930380f5dea88174bbd76b6f",
+        "events": [
+          {
+            "after_adjective": "0x014382bca0223384",
+            "after_operational": "0xa33b3a542e409c67",
+            "after_provenance": "0x7de89c8c35cb36c8",
+            "after_qid": "0xb970d5383b836f39",
+            "after_udc": "0x393edb73eae7e0e2",
+            "hlc": "0x8c1b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00cc14aee7cfaaf9",
+            "after_operational": "0x7db9c84ff4bf508c",
+            "after_provenance": "0xbae0064f0f6083a4",
+            "after_qid": "0xa925eb71195a3f3d",
+            "after_udc": "0x841ad72a426fef69",
+            "hlc": "0xae2f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x013b321cd4689be2",
+            "after_operational": "0xdf893ed214563db3",
+            "after_provenance": "0x7bdd567f98e40ca5",
+            "after_qid": "0x128e1f495bd7151f",
+            "after_udc": "0x2ae73f9db199e79e",
+            "hlc": "0xda0f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13224558bfe34c0f",
+            "after_operational": "0xc798f419b2fc858b",
+            "after_provenance": "0x0974b61c683619eb",
+            "after_qid": "0x0e6fbcb993b4b204",
+            "after_udc": "0x56a2ce1def966b9d",
+            "hlc": "0xf83d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21698c4bb6eabe83",
+            "after_operational": "0xd19d87bd0181a6c6",
+            "after_provenance": "0x30233634a004eec3",
+            "after_qid": "0x2ae81705e63ea554",
+            "after_udc": "0x9b4a156b5b59a6c2",
+            "hlc": "0x74340000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x006ee6e7464e628d",
+            "after_operational": "0x09b9d77963447157",
+            "after_provenance": "0xc6a177053694903f",
+            "after_qid": "0x3bda65122bb3d16a",
+            "after_udc": "0x72a862011d1f1110",
+            "hlc": "0xcc2a0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x01",
+        "row_id": "0xfa22ccae7a7bb1cd55336c8da6a35401"
+      }
+    },
+    {
+      "description": "noun=2, |events|=6, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x20ad045bb9e04400",
+        "last_event_hlc": "0xd0360000000000000000000000000000",
+        "operational_bitmap": "0x198736a2cd6f791f",
+        "provenance_bitmap": "0xdc6453b9f40274b2",
+        "qid": "0x4091dc5d63632b4f",
+        "state_raw": "0x20",
+        "tombstoned": "0x00",
+        "udc": "0x5eaa8234149e140c"
+      },
+      "id": "case_018",
+      "inputs": {
+        "estate_uuid": "0x5deddcb4a2f515e1a36ccd0aa3e61801",
+        "events": [
+          {
+            "after_adjective": "0x0216d8eb04f2e0b0",
+            "after_operational": "0x67b8f08b2202a610",
+            "after_provenance": "0x5fcb4d81768953a7",
+            "after_qid": "0x7eafb2992194c12a",
+            "after_udc": "0xfc8b749af7654e13",
+            "hlc": "0x900b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00b1b2a6ce40dacd",
+            "after_operational": "0x1af7cfb59483bf5b",
+            "after_provenance": "0x1fb3519b0c110467",
+            "after_qid": "0x8822dd888af13421",
+            "after_udc": "0x4c8507c62be013f4",
+            "hlc": "0xa7230000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20ad045bb9e04400",
+            "after_operational": "0x198736a2cd6f791f",
+            "after_provenance": "0xdc6453b9f40274b2",
+            "after_qid": "0x4091dc5d63632b4f",
+            "after_udc": "0x5eaa8234149e140c",
+            "hlc": "0xd0360000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11f24877e1c6eccd",
+            "after_operational": "0xdf29e2218491f884",
+            "after_provenance": "0x8550e409b6e96c7e",
+            "after_qid": "0xb3383a6525951974",
+            "after_udc": "0x58b347403256fa44",
+            "hlc": "0x7b310000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13f928db5f320f14",
+            "after_operational": "0x4fbc80557cf89690",
+            "after_provenance": "0x4745ade676da86d4",
+            "after_qid": "0x7620be135e72a820",
+            "after_udc": "0x700ba7b713786fe6",
+            "hlc": "0x82160000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11fc43e8187442a0",
+            "after_operational": "0x700ebbd7a1af639a",
+            "after_provenance": "0x652b8b5e189d4081",
+            "after_qid": "0xb8975ecd87a2625b",
+            "after_udc": "0x885d98dabdb332db",
+            "hlc": "0xd40e0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x02",
+        "row_id": "0x365ede69ceaeabef5df80786d3010131"
+      }
+    },
+    {
+      "description": "noun=3, |events|=5, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x00d82f136b3f8913",
+        "last_event_hlc": "0xea230000000000000000000000000000",
+        "operational_bitmap": "0xd536bf087b177544",
+        "provenance_bitmap": "0x1f466c4d30e0195d",
+        "qid": "0xf7850c7d8ea89c05",
+        "state_raw": "0x00",
+        "tombstoned": "0x01",
+        "udc": "0xb6fb3c91a2f3b468"
+      },
+      "id": "case_019",
+      "inputs": {
+        "estate_uuid": "0xb6a99a558c79a6d441de070bfdc22493",
+        "events": [
+          {
+            "after_adjective": "0x1234df18006434bb",
+            "after_operational": "0x39340c484671526c",
+            "after_provenance": "0x703530b253536f31",
+            "after_qid": "0x121b83baa46e3519",
+            "after_udc": "0x0b233f523877eee7",
+            "hlc": "0xfe190000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x203420f9d285019e",
+            "after_operational": "0x017e25f5748c85bd",
+            "after_provenance": "0x7fc327c302fdb5ff",
+            "after_qid": "0xaef85a460b8f1e4e",
+            "after_udc": "0xe666eb90b12707c9",
+            "hlc": "0x8c080000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00d82f136b3f8913",
+            "after_operational": "0xd536bf087b177544",
+            "after_provenance": "0x1f466c4d30e0195d",
+            "after_qid": "0xf7850c7d8ea89c05",
+            "after_udc": "0xb6fb3c91a2f3b468",
+            "hlc": "0xea230000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03bf847ade478a59",
+            "after_operational": "0xfebbb8672d51731f",
+            "after_provenance": "0x04bfc348d3b27b3d",
+            "after_qid": "0x2b0b769fe87d2b40",
+            "after_udc": "0x9bd13a98b05bec5d",
+            "hlc": "0xad1a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21f3fbd1e0fa7dec",
+            "after_operational": "0xba36fe9372378940",
+            "after_provenance": "0xf90e379fe832ff0f",
+            "after_qid": "0x598ff84bcc64265b",
+            "after_udc": "0x1f86a5fcd7566c6e",
+            "hlc": "0xd7100000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x03",
+        "row_id": "0x39f9ca6877d9ab9010195a38c8bbfd46"
+      }
+    },
+    {
+      "description": "noun=4, |events|=11, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x138244a0a41d1e09",
+        "last_event_hlc": "0xfa4f0000000000000000000000000000",
+        "operational_bitmap": "0x163e538a4f556f68",
+        "provenance_bitmap": "0x5780487acce3081c",
+        "qid": "0x48400a3fb3442079",
+        "state_raw": "0x13",
+        "tombstoned": "0x01",
+        "udc": "0x4c66b4a4619198d7"
+      },
+      "id": "case_020",
+      "inputs": {
+        "estate_uuid": "0xa31ea62f1914145d2c0eeb6a2505b304",
+        "events": [
+          {
+            "after_adjective": "0x138244a0a41d1e09",
+            "after_operational": "0x163e538a4f556f68",
+            "after_provenance": "0x5780487acce3081c",
+            "after_qid": "0x48400a3fb3442079",
+            "after_udc": "0x4c66b4a4619198d7",
+            "hlc": "0xfa4f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x2125f5e2b19266de",
+            "after_operational": "0xaa7be9d98d1e0f93",
+            "after_provenance": "0x42789c2ec3f5534d",
+            "after_qid": "0x798ec0b64a8c0809",
+            "after_udc": "0xaa44b46756afdc12",
+            "hlc": "0x00120000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0116d8e232344d15",
+            "after_operational": "0x057f94fae9e43900",
+            "after_provenance": "0x0d239a78a00aa54b",
+            "after_qid": "0x526fa6ff3abbc837",
+            "after_udc": "0x5aed4aed278da176",
+            "hlc": "0x44430000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13ca702674eafcd7",
+            "after_operational": "0x4487f694355e02af",
+            "after_provenance": "0x4f8c2886597d876d",
+            "after_qid": "0x7c6ef0edd6c2403a",
+            "after_udc": "0xd4d52f2a9fed0830",
+            "hlc": "0x84200000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x204b0ad582385fc8",
+            "after_operational": "0x3f0247cab98a0a92",
+            "after_provenance": "0xbbd305753eb833eb",
+            "after_qid": "0x88c805cfb95cf902",
+            "after_udc": "0xb67c8ef8d5818152",
+            "hlc": "0x98460000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13d7fa9784673d77",
+            "after_operational": "0xe6601c71970e374a",
+            "after_provenance": "0x49c750ab0c1afbfa",
+            "after_qid": "0xa66825d02ca87a7c",
+            "after_udc": "0xa0ff054d7df83bd4",
+            "hlc": "0xab170000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1397519d85a85fb3",
+            "after_operational": "0x3f01a51968d1bcda",
+            "after_provenance": "0xb88fb335f37f418f",
+            "after_qid": "0xf3086a33dde5a94c",
+            "after_udc": "0x711e5f92ef130d96",
+            "hlc": "0xb80d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20df7597babe00e6",
+            "after_operational": "0x725f4aa1c8f3c61b",
+            "after_provenance": "0xe6e7eb321c12ea5b",
+            "after_qid": "0x89dd5137388e8b61",
+            "after_udc": "0xfdccdb347aff1356",
+            "hlc": "0x37430000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x019cef89ceb953b9",
+            "after_operational": "0x9053f796563285ad",
+            "after_provenance": "0x31b8e39754b12b42",
+            "after_qid": "0x5c1c3dd97db35b75",
+            "after_udc": "0x80bf6973ba2df383",
+            "hlc": "0x08020000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01e56fad03f08a53",
+            "after_operational": "0xbce51854e15d3cc8",
+            "after_provenance": "0xbeee5c1a47f4ed96",
+            "after_qid": "0x9d3537b7b05c375a",
+            "after_udc": "0x3713ac529759b254",
+            "hlc": "0x09350000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21f1f34fcb5a5432",
+            "after_operational": "0x7f817f40520230e0",
+            "after_provenance": "0x4420b2c3ecc7f4a6",
+            "after_qid": "0xd92fadfc4b311734",
+            "after_udc": "0x9c01ff507c1d2ee8",
+            "hlc": "0xc0250000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x04",
+        "row_id": "0xe59c9212669f9c71b0ef820b3116ed31"
+      }
+    },
+    {
+      "description": "noun=5, |events|=10, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x03230ca66ae5a941",
+        "last_event_hlc": "0x634f0000000000000000000000000000",
+        "operational_bitmap": "0xd3c5e8471bfbca53",
+        "provenance_bitmap": "0x8586dcc877068ee4",
+        "qid": "0xfd7f64bd5a958f1e",
+        "state_raw": "0x03",
+        "tombstoned": "0x01",
+        "udc": "0xc6ff673fe8cfc489"
+      },
+      "id": "case_021",
+      "inputs": {
+        "estate_uuid": "0x7acf86b4d0a809336b1f83a1ae8fb3c3",
+        "events": [
+          {
+            "after_adjective": "0x111057838b45f37f",
+            "after_operational": "0xd7b6435cbbcd8222",
+            "after_provenance": "0x2d4333f5367536f5",
+            "after_qid": "0x495ac8a9bf38703c",
+            "after_udc": "0xaecd509e2bfd5399",
+            "hlc": "0xed140000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20253a06acfa0ef3",
+            "after_operational": "0xe3a1e2bc520a88f0",
+            "after_provenance": "0x838ff81219848cf8",
+            "after_qid": "0xc2b0a44de3081411",
+            "after_udc": "0xf588d0139b3b10cf",
+            "hlc": "0x1c0e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x138f854120011edf",
+            "after_operational": "0x0e569bc474341d2c",
+            "after_provenance": "0x6189294ea04ca198",
+            "after_qid": "0x77101bf32b953576",
+            "after_udc": "0xa3c2506ad17e35dd",
+            "hlc": "0xc13f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13ae244bfcaf5bd4",
+            "after_operational": "0xca92ade742b2cdfd",
+            "after_provenance": "0x591a262e3a8af3e3",
+            "after_qid": "0x4746afccf517f559",
+            "after_udc": "0x3bca9d4811dde146",
+            "hlc": "0xc12f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1157b07168cbc59f",
+            "after_operational": "0x74e4b981bd72d369",
+            "after_provenance": "0xce584284564230a8",
+            "after_qid": "0x59d3a3f0e30c1c69",
+            "after_udc": "0xddd442fcb3d033cb",
+            "hlc": "0xdc3e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13f3f34bccef7ae6",
+            "after_operational": "0x03c8339bd1ba9353",
+            "after_provenance": "0x0a4cd208305c88bf",
+            "after_qid": "0x26731151a58e5a57",
+            "after_udc": "0x6c581f2f5064bbae",
+            "hlc": "0xcf0f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00a475aafcc36f58",
+            "after_operational": "0x0dc8aca9e76d1820",
+            "after_provenance": "0x0045b23a5f34ab17",
+            "after_qid": "0xf6d753f292ad4c08",
+            "after_udc": "0xbc33fa113dc02bc6",
+            "hlc": "0xbe220000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03230ca66ae5a941",
+            "after_operational": "0xd3c5e8471bfbca53",
+            "after_provenance": "0x8586dcc877068ee4",
+            "after_qid": "0xfd7f64bd5a958f1e",
+            "after_udc": "0xc6ff673fe8cfc489",
+            "hlc": "0x634f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x125d059926a2570c",
+            "after_operational": "0x4c9caf34d5320b3b",
+            "after_provenance": "0xdc58935a841ff0a0",
+            "after_qid": "0x11eb4af023b7be6f",
+            "after_udc": "0x46ccdb689c3db6dd",
+            "hlc": "0x53480000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x213de3bab2449e5a",
+            "after_operational": "0x64d53e2cedbceb30",
+            "after_provenance": "0xa095405cd7489a32",
+            "after_qid": "0x8d519fc08f62443d",
+            "after_udc": "0xc83343b1352eb6f7",
+            "hlc": "0x8e470000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x05",
+        "row_id": "0xb08726c6044c42e55e93370a39879b7b"
+      }
+    },
+    {
+      "description": "noun=6, |events|=12, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x0208e475f8c4c3ff",
+        "last_event_hlc": "0xe8500000000000000000000000000000",
+        "operational_bitmap": "0x46dd44ddc618b8ef",
+        "provenance_bitmap": "0xc9fe4d29693c90ba",
+        "qid": "0xa5da82fd094dd419",
+        "state_raw": "0x02",
+        "tombstoned": "0x01",
+        "udc": "0x011958da1f3a8029"
+      },
+      "id": "case_022",
+      "inputs": {
+        "estate_uuid": "0x629af0a2ff260fb9974f6926ca8ddcfa",
+        "events": [
+          {
+            "after_adjective": "0x1177c227f7fabf50",
+            "after_operational": "0x7f0118a54ef7d169",
+            "after_provenance": "0x039e230850660564",
+            "after_qid": "0xa94188dd81343166",
+            "after_udc": "0x502998d9c4c1b48f",
+            "hlc": "0xfc0b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03860a7dfcdbde8d",
+            "after_operational": "0xf74f65bd1a1ca53a",
+            "after_provenance": "0xadb10832d7739ba2",
+            "after_qid": "0xf4313bba4806ec0b",
+            "after_udc": "0x7405463d87c0bc23",
+            "hlc": "0x6e1d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x008f9996c6f52dc1",
+            "after_operational": "0x66bb22b3ed0ce532",
+            "after_provenance": "0xaeaa233731460da7",
+            "after_qid": "0x9cf7b90e40224d35",
+            "after_udc": "0x402c0d18152000b8",
+            "hlc": "0x3a250000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11f8ccf91ed3ec5b",
+            "after_operational": "0xc196611ff32c2d91",
+            "after_provenance": "0xabadbd6ba798571e",
+            "after_qid": "0xe66166d4ad704b1b",
+            "after_udc": "0x4ea33bcebb9c8844",
+            "hlc": "0xa3180000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x218d863c63f2a0d1",
+            "after_operational": "0x88b4cf58a409305e",
+            "after_provenance": "0xecf32b6bfdef5478",
+            "after_qid": "0xdb610cd3b30e9b5e",
+            "after_udc": "0xfda359df750eb736",
+            "hlc": "0x17380000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0208e475f8c4c3ff",
+            "after_operational": "0x46dd44ddc618b8ef",
+            "after_provenance": "0xc9fe4d29693c90ba",
+            "after_qid": "0xa5da82fd094dd419",
+            "after_udc": "0x011958da1f3a8029",
+            "hlc": "0xe8500000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1246ee25ee9e421c",
+            "after_operational": "0xacb72884b3031dfd",
+            "after_provenance": "0x9a52e441494f215f",
+            "after_qid": "0xe409f5f87b55ff0e",
+            "after_udc": "0x81e54b00c15a7915",
+            "hlc": "0x842f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20c4119e935e89be",
+            "after_operational": "0x77c1203f97de3616",
+            "after_provenance": "0x1808048d700ba7f3",
+            "after_qid": "0x536b7db5bdacfb0a",
+            "after_udc": "0x08beeadb5a7a3f4e",
+            "hlc": "0x04120000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21ac287b4b422101",
+            "after_operational": "0xd6f8af6aadaa9d29",
+            "after_provenance": "0xd834179ce37cd251",
+            "after_qid": "0x29d2b610d319f54a",
+            "after_udc": "0xe69fe28dd93cd73d",
+            "hlc": "0x16440000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x007a8705965521bc",
+            "after_operational": "0x8339784a4baf259b",
+            "after_provenance": "0xc9db605ace8d5a00",
+            "after_qid": "0x14b327d4c2a96a33",
+            "after_udc": "0xcf9f4e2ea614c9ac",
+            "hlc": "0xe9210000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x002b39b8d5371f49",
+            "after_operational": "0xe9a610b67ea72140",
+            "after_provenance": "0x1bcac96e88813863",
+            "after_qid": "0x864f503e34a92f29",
+            "after_udc": "0xdfcaca65f9789e60",
+            "hlc": "0xde4d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20a907377cf10ffa",
+            "after_operational": "0x344633bf4899442f",
+            "after_provenance": "0x38d2c2ff1176b8ee",
+            "after_qid": "0x033bd2e98c319c6c",
+            "after_udc": "0x64fb140fe7632ead",
+            "hlc": "0xd4080000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x06",
+        "row_id": "0xf4a0bdbbc33dc27029af83cc3599d4dc"
+      }
+    },
+    {
+      "description": "noun=7, |events|=7, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x01847c12af21b67e",
+        "last_event_hlc": "0x92420000000000000000000000000000",
+        "operational_bitmap": "0xe722c90817176196",
+        "provenance_bitmap": "0x005c4abd81ea90c7",
+        "qid": "0x19a2e19f0797e14a",
+        "state_raw": "0x01",
+        "tombstoned": "0x01",
+        "udc": "0x9aaa650c4757b066"
+      },
+      "id": "case_023",
+      "inputs": {
+        "estate_uuid": "0x7ca6821fef2739c2463ed30b5216032c",
+        "events": [
+          {
+            "after_adjective": "0x12f3c1f27a999523",
+            "after_operational": "0xe7d5f707c61cfa11",
+            "after_provenance": "0x2ac6595dd44e255f",
+            "after_qid": "0x3484838f7d55f06d",
+            "after_udc": "0xf5b2af05efd14156",
+            "hlc": "0x14140000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21317f9544f64b7d",
+            "after_operational": "0x97d34eeea6283f5b",
+            "after_provenance": "0x2b98a6b16499c87e",
+            "after_qid": "0xc42994ca8015b33c",
+            "after_udc": "0xfdf3c6ce0c5eb79e",
+            "hlc": "0xa4180000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01847c12af21b67e",
+            "after_operational": "0xe722c90817176196",
+            "after_provenance": "0x005c4abd81ea90c7",
+            "after_qid": "0x19a2e19f0797e14a",
+            "after_udc": "0x9aaa650c4757b066",
+            "hlc": "0x92420000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0054f9afa1be5d09",
+            "after_operational": "0xc78d3dd781f65764",
+            "after_provenance": "0x447eef72c491eac5",
+            "after_qid": "0x9cc69fa1bd4b7d6b",
+            "after_udc": "0x0c13f4f08ca4980c",
+            "hlc": "0xc41d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x005e3e555ddbaf2d",
+            "after_operational": "0xd817eeb85698d8af",
+            "after_provenance": "0xa94904dd2afb115a",
+            "after_qid": "0xe2f64ea8f20c9116",
+            "after_udc": "0xc214df5a93dcebe8",
+            "hlc": "0xab2d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0133079df7b65c87",
+            "after_operational": "0x1ffc45655e2cc282",
+            "after_provenance": "0xf1a1bf3d2f399eae",
+            "after_qid": "0x50df57a52e389b2a",
+            "after_udc": "0xca6cd0d5737ca6a4",
+            "hlc": "0x600f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01b293cce04a1e1a",
+            "after_operational": "0x2ee6ef7014dab1db",
+            "after_provenance": "0xb5bcd5c01310fdf5",
+            "after_qid": "0xbbdbcd7758c4de08",
+            "after_udc": "0xae54f7c2c5777fa7",
+            "hlc": "0xfe3b0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x07",
+        "row_id": "0x890518be8c9215592d10474701bb9022"
+      }
+    },
+    {
+      "description": "noun=0, |events|=6, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x0340c35732ec5bd3",
+        "last_event_hlc": "0xad310000000000000000000000000000",
+        "operational_bitmap": "0x5a0e4b7e04eaafd7",
+        "provenance_bitmap": "0x80846744eb29a5c5",
+        "qid": "0x0293f5f87ba5ef0e",
+        "state_raw": "0x03",
+        "tombstoned": "0x00",
+        "udc": "0x6cda6bbca76daca7"
+      },
+      "id": "case_024",
+      "inputs": {
+        "estate_uuid": "0x4b99882344f5cb37999dffa493c4d136",
+        "events": [
+          {
+            "after_adjective": "0x01337dc1179c16e0",
+            "after_operational": "0xe8294f31ce9f63ff",
+            "after_provenance": "0x3666d8ef10d1c9b8",
+            "after_qid": "0x65042766d4541634",
+            "after_udc": "0xdf0ee6be769bec66",
+            "hlc": "0xaf060000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0240cc76ebda8216",
+            "after_operational": "0x38ed954a20866568",
+            "after_provenance": "0x48f0b0198b16ff01",
+            "after_qid": "0xc794a8cd20f47144",
+            "after_udc": "0xf31331539790060f",
+            "hlc": "0xf02b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0340c35732ec5bd3",
+            "after_operational": "0x5a0e4b7e04eaafd7",
+            "after_provenance": "0x80846744eb29a5c5",
+            "after_qid": "0x0293f5f87ba5ef0e",
+            "after_udc": "0x6cda6bbca76daca7",
+            "hlc": "0xad310000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1372b443e6e7d50c",
+            "after_operational": "0xc0c4ec1dcb39f17d",
+            "after_provenance": "0xe68c036aba1c3193",
+            "after_qid": "0x96fdd0ea59cb4c15",
+            "after_udc": "0xf48cdce934c762e4",
+            "hlc": "0x94130000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x031f7c73396022ba",
+            "after_operational": "0x6c7e4a561192f5b7",
+            "after_provenance": "0xc6781828d2d1a2d4",
+            "after_qid": "0x00051d6996df034c",
+            "after_udc": "0xf88ca6bead6e71bb",
+            "hlc": "0xec210000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00d5aa1653fed73f",
+            "after_operational": "0xf30d0618714ea109",
+            "after_provenance": "0x022512d90a33620f",
+            "after_qid": "0xe78121e74d93e540",
+            "after_udc": "0xfbcf3aa447ad9cbb",
+            "hlc": "0xf02d0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x00",
+        "row_id": "0x35bd87e5b80bbe4243cf93007f01cf7f"
+      }
+    },
+    {
+      "description": "noun=1, |events|=5, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x13d230c51db3f956",
+        "last_event_hlc": "0xf3270000000000000000000000000000",
+        "operational_bitmap": "0xb7594fc4c0a78301",
+        "provenance_bitmap": "0xc4545dca121ba30e",
+        "qid": "0xf85bc0162b09587d",
+        "state_raw": "0x13",
+        "tombstoned": "0x00",
+        "udc": "0x068870fa4ab648db"
+      },
+      "id": "case_025",
+      "inputs": {
+        "estate_uuid": "0xd899af8d3474909811f91b406147db85",
+        "events": [
+          {
+            "after_adjective": "0x024961d8b7368eb6",
+            "after_operational": "0xccbc5f7d0468d8f5",
+            "after_provenance": "0xfa2623d6ef087d81",
+            "after_qid": "0x59f713d107c24b16",
+            "after_udc": "0x3ea170c818594556",
+            "hlc": "0xbc210000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x028069d5ef770046",
+            "after_operational": "0xb9f46de2966ad145",
+            "after_provenance": "0xef62bfda8773f8b0",
+            "after_qid": "0x462db3f0471c7c78",
+            "after_udc": "0xbac863f9bea2b31c",
+            "hlc": "0x1a0a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00f3a7160a015d27",
+            "after_operational": "0xcb5712b93192f738",
+            "after_provenance": "0x19fe10a307b9ea19",
+            "after_qid": "0xd2a906cb29e2bb5f",
+            "after_udc": "0x0b6b64abe4a374e9",
+            "hlc": "0x06170000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13fcb9c077a3157a",
+            "after_operational": "0x0a67dcc855bc884e",
+            "after_provenance": "0x88c87c0530e9ce37",
+            "after_qid": "0x02a3d6807b281159",
+            "after_udc": "0xffb2f9ccd6226a9f",
+            "hlc": "0x04160000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13d230c51db3f956",
+            "after_operational": "0xb7594fc4c0a78301",
+            "after_provenance": "0xc4545dca121ba30e",
+            "after_qid": "0xf85bc0162b09587d",
+            "after_udc": "0x068870fa4ab648db",
+            "hlc": "0xf3270000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x01",
+        "row_id": "0x62db63946fd74d84bd1d9766266bc6d8"
+      }
+    },
+    {
+      "description": "noun=2, |events|=10, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x03033f6fc888502e",
+        "last_event_hlc": "0x51610000000000000000000000000000",
+        "operational_bitmap": "0xbcd624275c502fef",
+        "provenance_bitmap": "0x69b11db9adbe10d0",
+        "qid": "0xf02f093f1619da67",
+        "state_raw": "0x03",
+        "tombstoned": "0x01",
+        "udc": "0x3f3a48e3dcaa41de"
+      },
+      "id": "case_026",
+      "inputs": {
+        "estate_uuid": "0x2907f31027d7456786518a35eddcc445",
+        "events": [
+          {
+            "after_adjective": "0x138d3c6742590c94",
+            "after_operational": "0x526c31d0b5a5fcd7",
+            "after_provenance": "0x8bd043d4da0c2a7b",
+            "after_qid": "0x56687faef0374253",
+            "after_udc": "0x83065161c8da23e8",
+            "hlc": "0xec080000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x2051e86723993c86",
+            "after_operational": "0x9cdb695b8913a147",
+            "after_provenance": "0xc32827845d2dd4f7",
+            "after_qid": "0xfead131b99aa3b1b",
+            "after_udc": "0xde41eb35f6656b48",
+            "hlc": "0xde1d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02c3b6f478bf41f8",
+            "after_operational": "0x4efc21df05542ee9",
+            "after_provenance": "0x1c14f60af82220e8",
+            "after_qid": "0xc75f28b38e32fa4d",
+            "after_udc": "0xd8c38072b5ba15bb",
+            "hlc": "0xa45c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1064c49d0278cc7a",
+            "after_operational": "0x092ee39c84dd5025",
+            "after_provenance": "0xe1534ff838ae3d01",
+            "after_qid": "0x72bf71b63074ec39",
+            "after_udc": "0xea131a4ea1e941e5",
+            "hlc": "0xa4520000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03359229000545d0",
+            "after_operational": "0x3b6fd1ae5d806218",
+            "after_provenance": "0x292a6a0b9cbfbcf8",
+            "after_qid": "0x84ad032a022f395d",
+            "after_udc": "0x152a8e06ce64da13",
+            "hlc": "0x7f2b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12dec0a284b1fd2d",
+            "after_operational": "0x1f6cea15a20419da",
+            "after_provenance": "0x9ec6aef2dce9400a",
+            "after_qid": "0xd6b87ba169e60546",
+            "after_udc": "0xace5ce3bd37992e9",
+            "hlc": "0x55390000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12f233bc7520b849",
+            "after_operational": "0xf94f5ef3d0cb0fb4",
+            "after_provenance": "0x9fa2abda7619cc4c",
+            "after_qid": "0x91532f1f2de3246f",
+            "after_udc": "0x40ed62204f2b5a15",
+            "hlc": "0x6b3e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x03033f6fc888502e",
+            "after_operational": "0xbcd624275c502fef",
+            "after_provenance": "0x69b11db9adbe10d0",
+            "after_qid": "0xf02f093f1619da67",
+            "after_udc": "0x3f3a48e3dcaa41de",
+            "hlc": "0x51610000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20e6ecb30ad6b512",
+            "after_operational": "0xdf20655ce30e11ad",
+            "after_provenance": "0xc823aa8baf5c9863",
+            "after_qid": "0xce91dd1f77d9184c",
+            "after_udc": "0x5e5cbc22821e13fb",
+            "hlc": "0x00440000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21609862af3b8f36",
+            "after_operational": "0xe64c4db2a31d70fc",
+            "after_provenance": "0x37e62beee4ead838",
+            "after_qid": "0xb9495352833c8e03",
+            "after_udc": "0x58b85d1312286ecb",
+            "hlc": "0x94130000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x02",
+        "row_id": "0x203dced96fdd4242796d5e171d70847c"
+      }
+    },
+    {
+      "description": "noun=3, |events|=10, tombstoned=true",
+      "expected_output": {
+        "adjective_bitmap": "0x12b306f4c6b784b5",
+        "last_event_hlc": "0x2d550000000000000000000000000000",
+        "operational_bitmap": "0x5c601de10861c7de",
+        "provenance_bitmap": "0x4be0f48aeeb14214",
+        "qid": "0x3f3ce93d1a90e170",
+        "state_raw": "0x12",
+        "tombstoned": "0x01",
+        "udc": "0xc9516638c8132c21"
+      },
+      "id": "case_027",
+      "inputs": {
+        "estate_uuid": "0x7efae6b56a0f9748151d275215945ed8",
+        "events": [
+          {
+            "after_adjective": "0x13d933d6c806474f",
+            "after_operational": "0x0d1db2b1b62b22fb",
+            "after_provenance": "0x2a3715c6324ef7f7",
+            "after_qid": "0x4b03f76f08dc2617",
+            "after_udc": "0x7c620dfb9aaf87fe",
+            "hlc": "0xb91c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12b306f4c6b784b5",
+            "after_operational": "0x5c601de10861c7de",
+            "after_provenance": "0x4be0f48aeeb14214",
+            "after_qid": "0x3f3ce93d1a90e170",
+            "after_udc": "0xc9516638c8132c21",
+            "hlc": "0x2d550000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x026fe64e25593638",
+            "after_operational": "0x4c08e28a00c41b40",
+            "after_provenance": "0xb00499947a0eb084",
+            "after_qid": "0x5038f3efb0e59815",
+            "after_udc": "0x2d7068ab68351aee",
+            "hlc": "0xe42b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x015c3212e2e5dc99",
+            "after_operational": "0xda46f94738f70454",
+            "after_provenance": "0xadf61fba3fdb9bd7",
+            "after_qid": "0x6c570d56a81c1c40",
+            "after_udc": "0x7608e726b4f3382e",
+            "hlc": "0x5b310000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1047d653514e5ac3",
+            "after_operational": "0xbb36e886ab63ac49",
+            "after_provenance": "0xeedfad810c600852",
+            "after_qid": "0x1e34db5e402b2d6c",
+            "after_udc": "0x7ce4d634879e0f83",
+            "hlc": "0x82420000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x21c76bd0443d2d46",
+            "after_operational": "0x2e7aa985043f1fab",
+            "after_provenance": "0x1d4457d4cc6de1a3",
+            "after_qid": "0xd4ec21d8b1126c4f",
+            "after_udc": "0xba061a3cdfbea301",
+            "hlc": "0xac2d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1233425db8d03a15",
+            "after_operational": "0xb6553c011d9bbcc8",
+            "after_provenance": "0xee7e9d5fdc36e493",
+            "after_qid": "0x97f0e79d35a77f50",
+            "after_udc": "0x13fef07e0415a26d",
+            "hlc": "0xa80b0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x006c6fd4c2c79ab3",
+            "after_operational": "0x6346cd7d428f203d",
+            "after_provenance": "0x7ce508d070052d91",
+            "after_qid": "0x0a1a46f80d065941",
+            "after_udc": "0xf48eb0102b3ab482",
+            "hlc": "0x46130000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x022b6151b2632ca2",
+            "after_operational": "0x8feece101b9c8d16",
+            "after_provenance": "0x634f441fa63ea867",
+            "after_qid": "0xb36808331d294f3b",
+            "after_udc": "0xf413dee4f7ec4acc",
+            "hlc": "0x9f4d0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00fcc26b65fd2e65",
+            "after_operational": "0x5f0c1c1be645edc1",
+            "after_provenance": "0x3addd0a2cd634106",
+            "after_qid": "0x2aae6306efe0ae22",
+            "after_udc": "0xfb1394f59f42774e",
+            "hlc": "0x31350000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x03",
+        "row_id": "0x3b5c4d050dc4133faf8ddfcbd9ae5945"
+      }
+    },
+    {
+      "description": "noun=4, |events|=6, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x10aecf95af8ce1d4",
+        "last_event_hlc": "0xc8430000000000000000000000000000",
+        "operational_bitmap": "0x266ab6da588aacf4",
+        "provenance_bitmap": "0x9566a5df85a3f3fa",
+        "qid": "0x437bab22d0e16b6c",
+        "state_raw": "0x10",
+        "tombstoned": "0x00",
+        "udc": "0x22c73a8eaa5593d6"
+      },
+      "id": "case_028",
+      "inputs": {
+        "estate_uuid": "0x963dfb16043fa14436f1e3cd0ef253d8",
+        "events": [
+          {
+            "after_adjective": "0x003cbf0243af4693",
+            "after_operational": "0xc7ca558a21afea18",
+            "after_provenance": "0x3c80ec5cb7451bf7",
+            "after_qid": "0xbc3350d5cd81c111",
+            "after_udc": "0xfb14e216a7178248",
+            "hlc": "0xfd290000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x010e427f41455929",
+            "after_operational": "0x67235bd042d7afc6",
+            "after_provenance": "0xbadf804523d0072c",
+            "after_qid": "0xf1733c6d3cc95f44",
+            "after_udc": "0x2b0037eed3b749a1",
+            "hlc": "0x65050000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1251956e4968ed2b",
+            "after_operational": "0x451e25d4acaa5c64",
+            "after_provenance": "0xd8678bc3ce069658",
+            "after_qid": "0x0e6b7f6ec936cc27",
+            "after_udc": "0x663da8a8201a5b9f",
+            "hlc": "0x00150000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x12130ca5cb4be944",
+            "after_operational": "0x1db40fe0e4fe2a7f",
+            "after_provenance": "0xc715f03b7909c921",
+            "after_qid": "0xaefc3e050e1be04d",
+            "after_udc": "0xad12d2e09cf42ea5",
+            "hlc": "0x30340000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x10aecf95af8ce1d4",
+            "after_operational": "0x266ab6da588aacf4",
+            "after_provenance": "0x9566a5df85a3f3fa",
+            "after_qid": "0x437bab22d0e16b6c",
+            "after_udc": "0x22c73a8eaa5593d6",
+            "hlc": "0xc8430000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00f7d25c852bb9d0",
+            "after_operational": "0x662b776d1ef2b68c",
+            "after_provenance": "0x69c313cbe047312e",
+            "after_qid": "0xd261204b02ab4e14",
+            "after_udc": "0x4589dfed46842e81",
+            "hlc": "0x591e0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x04",
+        "row_id": "0xc41838b6d9de193f1126e096570f3836"
+      }
+    },
+    {
+      "description": "noun=5, |events|=5, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x20b77babeae29781",
+        "last_event_hlc": "0xb3170000000000000000000000000000",
+        "operational_bitmap": "0x368e6a75aed64b5d",
+        "provenance_bitmap": "0xf7371848bb45bed8",
+        "qid": "0x8814268863c3c44c",
+        "state_raw": "0x20",
+        "tombstoned": "0x00",
+        "udc": "0xcb184c1835989e58"
+      },
+      "id": "case_029",
+      "inputs": {
+        "estate_uuid": "0xcfe7e0a26768a7633d6ee0ed2560041c",
+        "events": [
+          {
+            "after_adjective": "0x01baec835c7b313b",
+            "after_operational": "0x1f67a460fdf7e21f",
+            "after_provenance": "0x55fd1caf76e2dfe9",
+            "after_qid": "0xbad901ac9465c217",
+            "after_udc": "0xc237e2554e3b3030",
+            "hlc": "0x51070000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02b5b599de67a909",
+            "after_operational": "0xf772dea3a6f4be15",
+            "after_provenance": "0x608c61a00bca3396",
+            "after_qid": "0x7b9f954d7d46f87d",
+            "after_udc": "0x357f38332292f6db",
+            "hlc": "0xe10f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02915b9053a339cc",
+            "after_operational": "0x92b76b41ff2181e9",
+            "after_provenance": "0x20a048440ef979ff",
+            "after_qid": "0x4369d8c7e2ae3a7b",
+            "after_udc": "0x9931023efb36d8fd",
+            "hlc": "0xe9130000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x1302f3ea0ab1219a",
+            "after_operational": "0x93230bf1798d57d8",
+            "after_provenance": "0x75cd5e01b5c8b501",
+            "after_qid": "0xc138bdd9aa7e1b40",
+            "after_udc": "0xe298bb96121c4a33",
+            "hlc": "0x79150000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20b77babeae29781",
+            "after_operational": "0x368e6a75aed64b5d",
+            "after_provenance": "0xf7371848bb45bed8",
+            "after_qid": "0x8814268863c3c44c",
+            "after_udc": "0xcb184c1835989e58",
+            "hlc": "0xb3170000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x05",
+        "row_id": "0xa8324a17b7e29af7a01a22a485534563"
+      }
+    },
+    {
+      "description": "noun=6, |events|=9, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x20f427c701f05111",
+        "last_event_hlc": "0xa1440000000000000000000000000000",
+        "operational_bitmap": "0x628ffdd2dde7b25b",
+        "provenance_bitmap": "0xcc9acce15050f196",
+        "qid": "0xbb4c1242ea4b9441",
+        "state_raw": "0x20",
+        "tombstoned": "0x00",
+        "udc": "0x1ab47dfb4e287865"
+      },
+      "id": "case_030",
+      "inputs": {
+        "estate_uuid": "0x4f68b0f5a938d196698027e8becc32f9",
+        "events": [
+          {
+            "after_adjective": "0x01e7c47f75fb0036",
+            "after_operational": "0x2c5f7797f9e70afc",
+            "after_provenance": "0x2f923403313db5b4",
+            "after_qid": "0x610a75d317f4c16d",
+            "after_udc": "0x2d7f716f05b1c4b3",
+            "hlc": "0x372a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20f427c701f05111",
+            "after_operational": "0x628ffdd2dde7b25b",
+            "after_provenance": "0xcc9acce15050f196",
+            "after_qid": "0xbb4c1242ea4b9441",
+            "after_udc": "0x1ab47dfb4e287865",
+            "hlc": "0xa1440000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x008f03a23ae68400",
+            "after_operational": "0x673d87e68b4f5340",
+            "after_provenance": "0xbe12b5c48a5beb71",
+            "after_qid": "0x91bdf890b58da95a",
+            "after_udc": "0x84fb6af228a9ba1d",
+            "hlc": "0xfd1e0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x209cc0efc237e354",
+            "after_operational": "0xf9999672eae7002a",
+            "after_provenance": "0x297bc9c6c49daed8",
+            "after_qid": "0x978a4f7b5c7a5528",
+            "after_udc": "0x852e1dcb69f77ae5",
+            "hlc": "0xee0c0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00951ae8adc75b4e",
+            "after_operational": "0x5d3f967e851becb8",
+            "after_provenance": "0x7099d7b5a23c9066",
+            "after_qid": "0xdb6924e1d4c66f0e",
+            "after_udc": "0xbceb9275f15a56b2",
+            "hlc": "0xe62a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x11691c910249d954",
+            "after_operational": "0x52ebc5c58dfc6470",
+            "after_provenance": "0x9741bc9391a0f03f",
+            "after_qid": "0xef67fd0682340a29",
+            "after_udc": "0x816cce233113b9f8",
+            "hlc": "0x782a0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00f941b2556073f8",
+            "after_operational": "0xc12a1703739a1f3c",
+            "after_provenance": "0x7dd6a8b85e1e34b6",
+            "after_qid": "0x7c8779ebd6a19329",
+            "after_udc": "0x73c679fa9d14062a",
+            "hlc": "0x0c350000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x2089a0f1bc8e465c",
+            "after_operational": "0x426637e91448e8e0",
+            "after_provenance": "0x17df182d02fec8d3",
+            "after_qid": "0xcee3df89f1b98719",
+            "after_udc": "0xd97cf2422aa5eb73",
+            "hlc": "0xac350000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x127a9c7254b44da8",
+            "after_operational": "0xa604dd1301d0535e",
+            "after_provenance": "0xb9e037012fa9d959",
+            "after_qid": "0x57ace06e5c19705c",
+            "after_udc": "0xb937282191098988",
+            "hlc": "0x251a0000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x06",
+        "row_id": "0xfcbfad064846672a974954b657198d88"
+      }
+    },
+    {
+      "description": "noun=7, |events|=8, tombstoned=false",
+      "expected_output": {
+        "adjective_bitmap": "0x02ac659ef93143fe",
+        "last_event_hlc": "0x86520000000000000000000000000000",
+        "operational_bitmap": "0x340c6ba86a51e145",
+        "provenance_bitmap": "0x6d564bdfaf666e8c",
+        "qid": "0xfb31f985cdadc22e",
+        "state_raw": "0x02",
+        "tombstoned": "0x00",
+        "udc": "0x072dbcdd19c64903"
+      },
+      "id": "case_031",
+      "inputs": {
+        "estate_uuid": "0x32acc0f105e0984052f23fbfa593179a",
+        "events": [
+          {
+            "after_adjective": "0x03f3ec6ec1aca323",
+            "after_operational": "0xdab25bc18ab73026",
+            "after_provenance": "0xa31d334cfcc16fbe",
+            "after_qid": "0xbede87b2306d5f5c",
+            "after_udc": "0xe526c6ade42c7553",
+            "hlc": "0x00350000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x01619a100a132b15",
+            "after_operational": "0x85f2df13cce59d3d",
+            "after_provenance": "0x6ee467b756ebb273",
+            "after_qid": "0x7cdedd7f0cf4cd0d",
+            "after_udc": "0x44524c78b6738a22",
+            "hlc": "0x320f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x0319f1048ce4e47b",
+            "after_operational": "0x034fa6cd83191383",
+            "after_provenance": "0xccf14431b9ea2004",
+            "after_qid": "0x1a379da1d07ffb64",
+            "after_udc": "0x9664c9097ab095c5",
+            "hlc": "0xe5270000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x02ac659ef93143fe",
+            "after_operational": "0x340c6ba86a51e145",
+            "after_provenance": "0x6d564bdfaf666e8c",
+            "after_qid": "0xfb31f985cdadc22e",
+            "after_udc": "0x072dbcdd19c64903",
+            "hlc": "0x86520000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20ed019dc5eaea47",
+            "after_operational": "0x8cf852688c99fa4f",
+            "after_provenance": "0xe3592ca9c33d2ff5",
+            "after_qid": "0xa024f5a205787e1f",
+            "after_udc": "0x1474212361d4cb8f",
+            "hlc": "0x394f0000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x13698e6f70c0fc53",
+            "after_operational": "0x523bf19185f0b201",
+            "after_provenance": "0x11f66e00e4bb6edc",
+            "after_qid": "0x2127b37b73a69b2c",
+            "after_udc": "0x1e785613c0b1f216",
+            "hlc": "0x95350000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x00ae96affc068212",
+            "after_operational": "0xbf9f84fbf977b7e4",
+            "after_provenance": "0x123404355e8cafd4",
+            "after_qid": "0x0f9d942b88bb6c1a",
+            "after_udc": "0x3c1f797079bc685b",
+            "hlc": "0x3e400000000000000000000000000000",
+            "verb": "mutate"
+          },
+          {
+            "after_adjective": "0x20d666e9f9cc1b3c",
+            "after_operational": "0x4c3b18b23a92576d",
+            "after_provenance": "0x47d473813d905dbf",
+            "after_qid": "0x47e6e84901f1f464",
+            "after_udc": "0x951986ec49933352",
+            "hlc": "0x6f180000000000000000000000000000",
+            "verb": "mutate"
+          }
+        ],
+        "noun_type": "0x07",
+        "row_id": "0x3e714b28b9f26fb333fdaa3f95d4bf0b"
+      }
+    }
+  ],
+  "cookbook_section": "§5.3+§8.15",
+  "format_version": "1",
+  "generated_at": "2026-05-17T17:00:20Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-AuditLogFold.swift"
+  },
+  "output_crc32": "0xa747722e",
+  "primitive": "audit_log_fold",
+  "seed": "0xcafebabedeadbeef"
+}

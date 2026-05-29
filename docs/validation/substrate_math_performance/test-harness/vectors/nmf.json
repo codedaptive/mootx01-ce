@@ -1,0 +1,3352 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "m=4, n=3, rank=2, maxIter=20",
+      "expected_output": {
+        "final_error": "0x2a49ae3d",
+        "h": [
+          [
+            "0x464ee63e",
+            "0x9871ec3e",
+            "0x33b2343e"
+          ],
+          [
+            "0xf56a063f",
+            "0x0e493d34",
+            "0x35386d3f"
+          ]
+        ],
+        "iterations": "0x14000000",
+        "w": [
+          [
+            "0x63400e3e",
+            "0xf8d4573f"
+          ],
+          [
+            "0x815e8f3c",
+            "0x1815443f"
+          ],
+          [
+            "0x398de33f",
+            "0x48079a3c"
+          ],
+          [
+            "0xd75e1a3f",
+            "0xf4204c3f"
+          ]
+        ]
+      },
+      "id": "case_000",
+      "inputs": {
+        "inner_seed": "0x00f04cbcc11901ee",
+        "m": "0x04000000",
+        "max_iterations": "0x14000000",
+        "n": "0x03000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x55a3083f",
+            "0xc0426b3c",
+            "0x70b94a3f"
+          ],
+          [
+            "0x88fa773e",
+            "0xc0604f3d",
+            "0x411f4f3f"
+          ],
+          [
+            "0x95df413f",
+            "0x53d95c3f",
+            "0x46efb53e"
+          ],
+          [
+            "0x57c9543f",
+            "0x00c4273e",
+            "0x808c443f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=5, n=4, rank=2, maxIter=25",
+      "expected_output": {
+        "final_error": "0xb2044b3e",
+        "h": [
+          [
+            "0xed28093d",
+            "0x8cda3c3f",
+            "0xd282a53f",
+            "0x364b563f"
+          ],
+          [
+            "0xaf08603f",
+            "0x60aad93e",
+            "0x8cae833c",
+            "0x0e60093f"
+          ]
+        ],
+        "iterations": "0x19000000",
+        "w": [
+          [
+            "0xfc9f843b",
+            "0x3e37883f"
+          ],
+          [
+            "0xb80f613e",
+            "0x47da3c3f"
+          ],
+          [
+            "0x1b0e123f",
+            "0x51c3743e"
+          ],
+          [
+            "0x6245a03e",
+            "0x5414883e"
+          ],
+          [
+            "0xd8b7f93e",
+            "0x783b9f3e"
+          ]
+        ]
+      },
+      "id": "case_001",
+      "inputs": {
+        "inner_seed": "0x4e30177a4aaeaf8a",
+        "m": "0x05000000",
+        "max_iterations": "0x19000000",
+        "n": "0x04000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x8188603f",
+            "0xe89d603e",
+            "0x003b4e3b",
+            "0x77b8593f"
+          ],
+          [
+            "0xf7fb3a3f",
+            "0x644a6b3f",
+            "0x3e4ea63e",
+            "0xe889ea3d"
+          ],
+          [
+            "0x10bf6e3d",
+            "0xdcb7e53e",
+            "0x756c1a3f",
+            "0xe343673f"
+          ],
+          [
+            "0xe4ffb73e",
+            "0x3cceb33e",
+            "0xbc59063f",
+            "0xf4b2583e"
+          ],
+          [
+            "0x649eaa3e",
+            "0x324cb73e",
+            "0x52c4333f",
+            "0x0408183f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=6, n=5, rank=3, maxIter=30",
+      "expected_output": {
+        "final_error": "0x1506e33d",
+        "h": [
+          [
+            "0xb200863e",
+            "0xab999e3a",
+            "0xe8250a3f",
+            "0xed02903d",
+            "0xd697bb39"
+          ],
+          [
+            "0x959f533f",
+            "0x7866ea3e",
+            "0x4e05223b",
+            "0xa14ec83e",
+            "0x75c2f43e"
+          ],
+          [
+            "0x7f4ea03c",
+            "0x9ef0143f",
+            "0x89dcc23e",
+            "0x415a333f",
+            "0xa3b4143e"
+          ]
+        ],
+        "iterations": "0x1d000000",
+        "w": [
+          [
+            "0xdf4aae3f",
+            "0xd458233f",
+            "0xaefcec3d"
+          ],
+          [
+            "0x4fcc883f",
+            "0xce8a6038",
+            "0x6063e73e"
+          ],
+          [
+            "0x358fa33e",
+            "0x31f38d3f",
+            "0x2804df3e"
+          ],
+          [
+            "0xbdf1d23c",
+            "0x85ad753f",
+            "0x787abe3e"
+          ],
+          [
+            "0xbf9aa43e",
+            "0x7553993d",
+            "0xf641b33f"
+          ],
+          [
+            "0x4e51d636",
+            "0x0189163f",
+            "0x4aeadb3e"
+          ]
+        ]
+      },
+      "id": "case_002",
+      "inputs": {
+        "inner_seed": "0x875e60b9b05b9d73",
+        "m": "0x06000000",
+        "max_iterations": "0x1e000000",
+        "n": "0x05000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xc2036d3f",
+            "0x443bdf3e",
+            "0x0072453f",
+            "0x1e1ab33e",
+            "0xe08b813e"
+          ],
+          [
+            "0x2064813e",
+            "0xb0d6b93d",
+            "0xec173f3f",
+            "0x41550c3f",
+            "0xc01f783c"
+          ],
+          [
+            "0x627a793f",
+            "0xcd45583f",
+            "0x0ad9c33e",
+            "0xd572253f",
+            "0x10442b3f"
+          ],
+          [
+            "0xf4f9513f",
+            "0xd001bc3e",
+            "0x58f0df3d",
+            "0x91ad643f",
+            "0xf9150f3f"
+          ],
+          [
+            "0x8c7c173e",
+            "0xf31d603f",
+            "0x82eb3c3f",
+            "0xc49b7c3f",
+            "0x3ecc8b3e"
+          ],
+          [
+            "0x787afe3e",
+            "0xff18423f",
+            "0x70ff2b3d",
+            "0x52a0db3e",
+            "0x2cec473e"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=8, n=6, rank=3, maxIter=35",
+      "expected_output": {
+        "final_error": "0x2ba4033e",
+        "h": [
+          [
+            "0x7c1cc13e",
+            "0x72c62b3d",
+            "0x221b543f",
+            "0xf94e173e",
+            "0x38914f3c",
+            "0xa178073e"
+          ],
+          [
+            "0x8e21b13d",
+            "0xbede8a35",
+            "0xe8320d3e",
+            "0xf4e69b3e",
+            "0xf0d22f3f",
+            "0x18870f3f"
+          ],
+          [
+            "0xd0e62b3f",
+            "0xc770193f",
+            "0x5a392b3d",
+            "0xad081c3f",
+            "0x7926ba3e",
+            "0xbedb813e"
+          ]
+        ],
+        "iterations": "0x23000000",
+        "w": [
+          [
+            "0xe7437e3f",
+            "0xd59e3c3f",
+            "0x1c6fbe3e"
+          ],
+          [
+            "0x83acdc3e",
+            "0x62ffea3e",
+            "0x01d9663f"
+          ],
+          [
+            "0xe0d21b3f",
+            "0x17f8803e",
+            "0x77728b3e"
+          ],
+          [
+            "0x0d253e3f",
+            "0xb0aa653f",
+            "0xe2d8e23b"
+          ],
+          [
+            "0xc3d3b73e",
+            "0x7c05043f",
+            "0x3b26813f"
+          ],
+          [
+            "0x13a6a93d",
+            "0x04d4b43f",
+            "0x957e273e"
+          ],
+          [
+            "0x416a373d",
+            "0xeb921c3b",
+            "0x1168843f"
+          ],
+          [
+            "0xbbd0a838",
+            "0x3de76d3f",
+            "0x6272923e"
+          ]
+        ]
+      },
+      "id": "case_003",
+      "inputs": {
+        "inner_seed": "0xcd055bc935a5e3e7",
+        "m": "0x08000000",
+        "max_iterations": "0x23000000",
+        "n": "0x06000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xaabb4f3f",
+            "0x5804403e",
+            "0x0def603f",
+            "0xb1160d3f",
+            "0x87fa013f",
+            "0xab62523f"
+          ],
+          [
+            "0x0df8553f",
+            "0x27651d3f",
+            "0xda0fe43e",
+            "0xbdc0283f",
+            "0x1232093f",
+            "0xd311383f"
+          ],
+          [
+            "0x14e10b3f",
+            "0x68b0ab3d",
+            "0x2ebeee3e",
+            "0x9c84b53e",
+            "0x80e0813c",
+            "0xb388143f"
+          ],
+          [
+            "0xacaa713e",
+            "0xa0a6a23d",
+            "0x2246523f",
+            "0x32e7bd3e",
+            "0x7dee413f",
+            "0xc827e73e"
+          ],
+          [
+            "0x8f03153f",
+            "0x21fb493f",
+            "0xbcea043f",
+            "0x1f21733f",
+            "0x2755563f",
+            "0xd6a8db3e"
+          ],
+          [
+            "0x1449703e",
+            "0x4047973d",
+            "0xca489b3e",
+            "0xc568163f",
+            "0x3453703f",
+            "0xa6f96d3f"
+          ],
+          [
+            "0x9c375a3f",
+            "0x88e8033f",
+            "0x106f443d",
+            "0x5d311a3f",
+            "0x8644dc3e",
+            "0xdc16293e"
+          ],
+          [
+            "0xc689c73e",
+            "0x40a53c3c",
+            "0x4083563c",
+            "0xc028e53e",
+            "0x5c0f773f",
+            "0xa699b03e"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=4, n=3, rank=2, maxIter=20",
+      "expected_output": {
+        "final_error": "0xf7b7993d",
+        "h": [
+          [
+            "0x8d47ab3e",
+            "0x8f47313f",
+            "0x0b32bf3e"
+          ],
+          [
+            "0x5d28393f",
+            "0xbf883e3d",
+            "0x100eab3e"
+          ]
+        ],
+        "iterations": "0x0c000000",
+        "w": [
+          [
+            "0xb93d9a3f",
+            "0xe9c1093f"
+          ],
+          [
+            "0x6877dd3e",
+            "0xe354973e"
+          ],
+          [
+            "0x059f543f",
+            "0xc03b033f"
+          ],
+          [
+            "0xc046b73e",
+            "0xd183883e"
+          ]
+        ]
+      },
+      "id": "case_004",
+      "inputs": {
+        "inner_seed": "0xb4a85504b02e7e05",
+        "m": "0x04000000",
+        "max_iterations": "0x14000000",
+        "n": "0x03000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x56bf4b3f",
+            "0x41d65e3f",
+            "0xd23e1c3f"
+          ],
+          [
+            "0x70b79d3e",
+            "0x4052873e",
+            "0x4c14c73e"
+          ],
+          [
+            "0x01d9213f",
+            "0xdc88153f",
+            "0xd2a3053f"
+          ],
+          [
+            "0xc020ca3e",
+            "0x8cd0a23e",
+            "0x70d3233d"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=5, n=4, rank=2, maxIter=25",
+      "expected_output": {
+        "final_error": "0x33064b3e",
+        "h": [
+          [
+            "0x69bc183f",
+            "0x310c163f",
+            "0xe63c583e",
+            "0x7e59183e"
+          ],
+          [
+            "0x9fab5b3e",
+            "0x90382a3a",
+            "0x34762d3f",
+            "0x2987333f"
+          ]
+        ],
+        "iterations": "0x19000000",
+        "w": [
+          [
+            "0xb9e0aa3e",
+            "0x06989e3f"
+          ],
+          [
+            "0xcd5eeb3e",
+            "0x604af53e"
+          ],
+          [
+            "0xcec6d13e",
+            "0x8d8f8b3f"
+          ],
+          [
+            "0x3b429b3f",
+            "0xbcff253c"
+          ],
+          [
+            "0x0142723f",
+            "0xabc3b33e"
+          ]
+        ]
+      },
+      "id": "case_005",
+      "inputs": {
+        "inner_seed": "0xa1654301aef748cf",
+        "m": "0x05000000",
+        "max_iterations": "0x19000000",
+        "n": "0x04000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x45612c3f",
+            "0x60dc043d",
+            "0x47e5503f",
+            "0x42fd703f"
+          ],
+          [
+            "0xdc92263f",
+            "0x009c743b",
+            "0x5ff7103f",
+            "0x783b343e"
+          ],
+          [
+            "0x70ff1a3e",
+            "0x9cd1073f",
+            "0x3c08713f",
+            "0x5f78503f"
+          ],
+          [
+            "0x625f553f",
+            "0x900c1b3f",
+            "0xd0e3c03e",
+            "0x80e32f3c"
+          ],
+          [
+            "0x20aae73e",
+            "0x028c3f3f",
+            "0xe81b503e",
+            "0xd76b2f3f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=6, n=5, rank=3, maxIter=30",
+      "expected_output": {
+        "final_error": "0x78071f3d",
+        "h": [
+          [
+            "0xc22d753f",
+            "0xdf08c23d",
+            "0x9b3af23e",
+            "0xfa0d833e",
+            "0x510c1e3f"
+          ],
+          [
+            "0xd8b5193a",
+            "0x2d03223f",
+            "0xfa73543f",
+            "0x45cb2e3d",
+            "0x1589893e"
+          ],
+          [
+            "0xcea43c3e",
+            "0xa9334a3f",
+            "0x1064343a",
+            "0x6aa7413f",
+            "0x5db11a3d"
+          ]
+        ],
+        "iterations": "0x1e000000",
+        "w": [
+          [
+            "0xebca243c",
+            "0x787a7c3f",
+            "0x707ade3e"
+          ],
+          [
+            "0xabc1273f",
+            "0xd4eb033e",
+            "0x4cd3123f"
+          ],
+          [
+            "0xb590953d",
+            "0x483c293c",
+            "0x35865c3f"
+          ],
+          [
+            "0xa179023f",
+            "0x0b146d3d",
+            "0x84e8d93e"
+          ],
+          [
+            "0xcde6ef3e",
+            "0x385f2f3f",
+            "0x8fda0339"
+          ],
+          [
+            "0x27001e3f",
+            "0xba4fd43d",
+            "0xf3bdb23b"
+          ]
+        ]
+      },
+      "id": "case_006",
+      "inputs": {
+        "inner_seed": "0x2fe288b662a5d622",
+        "m": "0x06000000",
+        "max_iterations": "0x1e000000",
+        "n": "0x05000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x002ab63c",
+            "0x2d947f3f",
+            "0x675d4b3f",
+            "0xb20cbb3e",
+            "0x62999a3e"
+          ],
+          [
+            "0x1d84423f",
+            "0xa08d273f",
+            "0x8a44b63e",
+            "0x17f20a3f",
+            "0x16dbf73e"
+          ],
+          [
+            "0x7ae3803e",
+            "0x2234283f",
+            "0x00decc3c",
+            "0xf474343f",
+            "0x60836e3d"
+          ],
+          [
+            "0x38b10c3f",
+            "0x1691cd3e",
+            "0xb69a853e",
+            "0xc833f63e",
+            "0xc288c63e"
+          ],
+          [
+            "0xd43ce73e",
+            "0x1482da3e",
+            "0x72ef563f",
+            "0x10a1ee3d",
+            "0xe4b4e63e"
+          ],
+          [
+            "0x8986133f",
+            "0x10149e3d",
+            "0xb47dde3e",
+            "0x18ae6b3e",
+            "0xa079bd3e"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=8, n=6, rank=3, maxIter=35",
+      "expected_output": {
+        "final_error": "0xe1cf123e",
+        "h": [
+          [
+            "0x5a66373e",
+            "0xcfa96b3b",
+            "0xaee7ef3d",
+            "0x54462b3f",
+            "0x1c35503e",
+            "0x5361583f"
+          ],
+          [
+            "0xcb172b3f",
+            "0xf0ec443e",
+            "0x2dc8413f",
+            "0x5a36273e",
+            "0x28b3143e",
+            "0x5765f63c"
+          ],
+          [
+            "0x9287223e",
+            "0xe2e12c3f",
+            "0x89ac813e",
+            "0x3f8a8e3d",
+            "0x4eb0273f",
+            "0xc9fef23c"
+          ]
+        ],
+        "iterations": "0x23000000",
+        "w": [
+          [
+            "0x65b12e3f",
+            "0xd630a83e",
+            "0x58a5423f"
+          ],
+          [
+            "0x5f185a3f",
+            "0x0a62a43d",
+            "0x1ab9f03e"
+          ],
+          [
+            "0xb32a9b3e",
+            "0xe039373d",
+            "0xc936453f"
+          ],
+          [
+            "0x97fd3b3f",
+            "0x65c3dc3e",
+            "0x4519713f"
+          ],
+          [
+            "0xfd14d13e",
+            "0x7b4ddf3d",
+            "0x68368d3f"
+          ],
+          [
+            "0x17d10b3f",
+            "0x7dbd543f",
+            "0xb87d9c3e"
+          ],
+          [
+            "0x329e683f",
+            "0x30e6063f",
+            "0xac63023c"
+          ],
+          [
+            "0x7711d432",
+            "0x557e2b3f",
+            "0x173c813f"
+          ]
+        ]
+      },
+      "id": "case_007",
+      "inputs": {
+        "inner_seed": "0x574001da01882f9f",
+        "m": "0x08000000",
+        "max_iterations": "0x23000000",
+        "n": "0x06000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xd0a80a3f",
+            "0x59814f3f",
+            "0x602ddb3e",
+            "0x36d30c3f",
+            "0x1cc3ec3e",
+            "0x53972b3f"
+          ],
+          [
+            "0xa0ac4a3e",
+            "0x00be803a",
+            "0x74a6d43e",
+            "0x2cc1063f",
+            "0x87844e3f",
+            "0x76f63b3f"
+          ],
+          [
+            "0xe649ab3e",
+            "0x5a94203f",
+            "0xe8ad8f3d",
+            "0x75090b3f",
+            "0x26d6fd3e",
+            "0x4887a33d"
+          ],
+          [
+            "0x3c8ad33e",
+            "0x7fa53b3f",
+            "0xdd8b463f",
+            "0xadf3373f",
+            "0x066c4b3f",
+            "0x50f71d3f"
+          ],
+          [
+            "0x9e389c3e",
+            "0x18ff313f",
+            "0x44e4eb3e",
+            "0x107f3a3e",
+            "0x7d61643f",
+            "0xb121033f"
+          ],
+          [
+            "0x8ebc043f",
+            "0x2026373e",
+            "0x9e9a6d3f",
+            "0xc1ee253f",
+            "0x23d9163f",
+            "0xba17c33e"
+          ],
+          [
+            "0xa7b13c3f",
+            "0x9cbe683e",
+            "0xd859a13e",
+            "0xf223213f",
+            "0xc04c103e",
+            "0x57d1583f"
+          ],
+          [
+            "0xf3ff383f",
+            "0xba995b3f",
+            "0xcf362f3f",
+            "0x5038043d",
+            "0xf3893b3f",
+            "0x40b8413c"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=4, n=3, rank=2, maxIter=20",
+      "expected_output": {
+        "final_error": "0xac75da3d",
+        "h": [
+          [
+            "0x3acb1d3f",
+            "0x682fb93c",
+            "0x5921d83e"
+          ],
+          [
+            "0xe41e9a3e",
+            "0x5dd8493f",
+            "0xad5bae3e"
+          ]
+        ],
+        "iterations": "0x14000000",
+        "w": [
+          [
+            "0xdc858b3f",
+            "0xe8e1ab3c"
+          ],
+          [
+            "0xf005583d",
+            "0x57e9713f"
+          ],
+          [
+            "0xf1cc1d3e",
+            "0x21189c3f"
+          ],
+          [
+            "0x95b8a93f",
+            "0xe03b0e3f"
+          ]
+        ]
+      },
+      "id": "case_008",
+      "inputs": {
+        "inner_seed": "0xace396f10dc3a58e",
+        "m": "0x04000000",
+        "max_iterations": "0x14000000",
+        "n": "0x03000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xef4b413f",
+            "0x40c1783c",
+            "0xb65eb73e"
+          ],
+          [
+            "0x2c2d383e",
+            "0xc9f2383f",
+            "0x66a4053f"
+          ],
+          [
+            "0xb9e7183f",
+            "0x1c707d3f",
+            "0x5ea6993e"
+          ],
+          [
+            "0xc5ad693f",
+            "0xb6a2e93e",
+            "0xc5be593f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=5, n=4, rank=2, maxIter=25",
+      "expected_output": {
+        "final_error": "0xa075ae3d",
+        "h": [
+          [
+            "0x200c5a3f",
+            "0x52db463f",
+            "0x6e035d3e",
+            "0x1804af3e"
+          ],
+          [
+            "0xedb1133f",
+            "0xc204923d",
+            "0x986d7c3f",
+            "0xe451b93e"
+          ]
+        ],
+        "iterations": "0x19000000",
+        "w": [
+          [
+            "0x32696a3e",
+            "0x12913e3f"
+          ],
+          [
+            "0xa925c93e",
+            "0xaf36373f"
+          ],
+          [
+            "0x01183d3f",
+            "0x2767eb3b"
+          ],
+          [
+            "0x22a7ad3e",
+            "0x9bfb433f"
+          ],
+          [
+            "0xa27c3e3f",
+            "0xbea2ae3e"
+          ]
+        ]
+      },
+      "id": "case_009",
+      "inputs": {
+        "inner_seed": "0x2f84cb1a9d7ec548",
+        "m": "0x05000000",
+        "max_iterations": "0x19000000",
+        "n": "0x04000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x8640143f",
+            "0x60378c3e",
+            "0x68314e3f",
+            "0xb4b2b33e"
+          ],
+          [
+            "0xad7e733f",
+            "0x3075573e",
+            "0xfca33f3f",
+            "0x4cfa633e"
+          ],
+          [
+            "0x4fad1b3f",
+            "0xa0121e3f",
+            "0xec40153e",
+            "0xac956f3e"
+          ],
+          [
+            "0xfe371a3f",
+            "0x4ea5cb3e",
+            "0xc9f5583f",
+            "0xc89b063f"
+          ],
+          [
+            "0xf156503f",
+            "0x4b79173f",
+            "0x02afff3e",
+            "0x585cdb3e"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=6, n=5, rank=3, maxIter=30",
+      "expected_output": {
+        "final_error": "0x4221ad3d",
+        "h": [
+          [
+            "0x6a8cd53e",
+            "0x2d7ba73c",
+            "0x03f4b93e",
+            "0x148f313e",
+            "0x3f70a73e"
+          ],
+          [
+            "0xc516363e",
+            "0x752a003f",
+            "0xf931933c",
+            "0x6980f73e",
+            "0xf53ed73e"
+          ],
+          [
+            "0xada32d3e",
+            "0xa2e1383f",
+            "0x6932233f",
+            "0x7d6c643d",
+            "0xd6d8133d"
+          ]
+        ],
+        "iterations": "0x1b000000",
+        "w": [
+          [
+            "0x1afdc63f",
+            "0x45eea93e",
+            "0xf86c003e"
+          ],
+          [
+            "0x51da633d",
+            "0xfb4fd83e",
+            "0xd2af893f"
+          ],
+          [
+            "0x2b10633f",
+            "0x2d3f073e",
+            "0x5d475c3f"
+          ],
+          [
+            "0x612cba3c",
+            "0x39ffd83f",
+            "0x9992703d"
+          ],
+          [
+            "0xedf4153f",
+            "0x6788403f",
+            "0x2d58c63e"
+          ],
+          [
+            "0xec6c9a3f",
+            "0xf27f1a3f",
+            "0x7bfad03d"
+          ]
+        ]
+      },
+      "id": "case_010",
+      "inputs": {
+        "inner_seed": "0xf47f89cae78774a0",
+        "m": "0x06000000",
+        "max_iterations": "0x1e000000",
+        "n": "0x05000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x1f675f3f",
+            "0xf04d953e",
+            "0x1583173f",
+            "0x74a0033f",
+            "0xfc8bfe3e"
+          ],
+          [
+            "0xfae5bc3e",
+            "0xdafb7f3f",
+            "0x56982d3f",
+            "0xa248b63e",
+            "0x0085c63d"
+          ],
+          [
+            "0x0000cd3e",
+            "0x08de2a3f",
+            "0x2cdf733f",
+            "0x2015653e",
+            "0x3e21fc3e"
+          ],
+          [
+            "0x8a689d3e",
+            "0xb310613f",
+            "0x506a953d",
+            "0xc0ae5d3f",
+            "0xb8f6323f"
+          ],
+          [
+            "0xbc94f23e",
+            "0x62333b3f",
+            "0x1ca1cc3e",
+            "0x02dd9a3e",
+            "0x4175273f"
+          ],
+          [
+            "0x7aa6063f",
+            "0x3637ba3e",
+            "0x4535123f",
+            "0x92bc073f",
+            "0x7794353f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=8, n=6, rank=3, maxIter=35",
+      "expected_output": {
+        "final_error": "0x6532113e",
+        "h": [
+          [
+            "0xef46a73e",
+            "0x3e9d343f",
+            "0xfb87993e",
+            "0x08a0803f",
+            "0xac48f93e",
+            "0x68a7613c"
+          ],
+          [
+            "0x2db70e3e",
+            "0x5921743d",
+            "0x0706e33d",
+            "0x134c173e",
+            "0xd6716d3e",
+            "0x0571213f"
+          ],
+          [
+            "0xcf27ba3e",
+            "0x19817f3e",
+            "0xc055023f",
+            "0x1022ae39",
+            "0xc106183f",
+            "0xcfb9033e"
+          ]
+        ],
+        "iterations": "0x23000000",
+        "w": [
+          [
+            "0x4f46273e",
+            "0xd7f7bc3d",
+            "0xd6e5413f"
+          ],
+          [
+            "0xd5394c3f",
+            "0xeda18b3d",
+            "0xc269c43d"
+          ],
+          [
+            "0x9f0fb03e",
+            "0x064dab3e",
+            "0x4f7a2a3f"
+          ],
+          [
+            "0x0ccdff3e",
+            "0xf1eeb33f",
+            "0xead9093d"
+          ],
+          [
+            "0xd17e763d",
+            "0x38443b3c",
+            "0xd405933f"
+          ],
+          [
+            "0x772bec3c",
+            "0x847ea93f",
+            "0x090c6b3f"
+          ],
+          [
+            "0x1cd6ec3e",
+            "0xf7ab583f",
+            "0xb79bd73e"
+          ],
+          [
+            "0xf643503f",
+            "0xf329373e",
+            "0xdf44e03c"
+          ]
+        ]
+      },
+      "id": "case_011",
+      "inputs": {
+        "inner_seed": "0x88ef00ef43147e0f",
+        "m": "0x08000000",
+        "max_iterations": "0x23000000",
+        "n": "0x06000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x7f3a0e3f",
+            "0x984c573e",
+            "0xdac8cf3e",
+            "0xa0ab463e",
+            "0x6dbf023f",
+            "0x601cfa3d"
+          ],
+          [
+            "0xdcfed93e",
+            "0xe7680a3f",
+            "0x449c9e3e",
+            "0xa1c9483f",
+            "0x4296fd3e",
+            "0x00402c38"
+          ],
+          [
+            "0x84561b3e",
+            "0x464d743f",
+            "0xa61d023f",
+            "0xa033163e",
+            "0xec2f023f",
+            "0xf225e53e"
+          ],
+          [
+            "0x1c64593e",
+            "0xbe089a3e",
+            "0x6898a93e",
+            "0x2c95603f",
+            "0x56ce1a3f",
+            "0x6fcf633f"
+          ],
+          [
+            "0x384eac3e",
+            "0x78b8f23d",
+            "0xc7c32a3f",
+            "0x8050243e",
+            "0x8295543f",
+            "0x48ee983d"
+          ],
+          [
+            "0xb6cf233f",
+            "0xd8a0713e",
+            "0x30af043f",
+            "0x18230f3e",
+            "0x5f4d723f",
+            "0x417a703f"
+          ],
+          [
+            "0x4e22063f",
+            "0x5ba2383f",
+            "0xa7dc0d3f",
+            "0xc430df3e",
+            "0xb6d1f03e",
+            "0xcb08213f"
+          ],
+          [
+            "0xd4138c3e",
+            "0x9aa1c53e",
+            "0xd4693b3e",
+            "0x8480773f",
+            "0xb5e3153f",
+            "0xc016903d"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=4, n=3, rank=2, maxIter=20",
+      "expected_output": {
+        "final_error": "0x0a405c3d",
+        "h": [
+          [
+            "0xb4130c3e",
+            "0x7356313f",
+            "0xca25493f"
+          ],
+          [
+            "0x8365d93e",
+            "0xceebe93e",
+            "0x353e9d3b"
+          ]
+        ],
+        "iterations": "0x14000000",
+        "w": [
+          [
+            "0xf6a44c3f",
+            "0xac41c03e"
+          ],
+          [
+            "0x7a56e73d",
+            "0x8645c03f"
+          ],
+          [
+            "0x9d30503e",
+            "0x25a3bb3f"
+          ],
+          [
+            "0xc90d933f",
+            "0x578ade3e"
+          ]
+        ]
+      },
+      "id": "case_012",
+      "inputs": {
+        "inner_seed": "0x56da5c35eb65e35b",
+        "m": "0x04000000",
+        "max_iterations": "0x14000000",
+        "n": "0x03000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xb041843e",
+            "0x98c03c3f",
+            "0xa2dd1e3f"
+          ],
+          [
+            "0x830e3c3f",
+            "0x44ad303f",
+            "0x905a0a3e"
+          ],
+          [
+            "0x092d103f",
+            "0x0624653f",
+            "0xf002c43d"
+          ],
+          [
+            "0x80b5b73e",
+            "0xd98e793f",
+            "0xbc7b6b3f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=5, n=4, rank=2, maxIter=25",
+      "expected_output": {
+        "final_error": "0x72c3023e",
+        "h": [
+          [
+            "0x713fbc3e",
+            "0x3ad5373f",
+            "0x13f9053f",
+            "0x094e423e"
+          ],
+          [
+            "0x8d62403f",
+            "0x2f80233e",
+            "0x3b31b53b",
+            "0xfcba7b3f"
+          ]
+        ],
+        "iterations": "0x18000000",
+        "w": [
+          [
+            "0x1baa0b3d",
+            "0x76fc503f"
+          ],
+          [
+            "0x9536213e",
+            "0x73a9283f"
+          ],
+          [
+            "0x0b3ebb3f",
+            "0xdfea813e"
+          ],
+          [
+            "0xa98d343f",
+            "0xcd8a1f3f"
+          ],
+          [
+            "0xe2852d3f",
+            "0x0f350a3f"
+          ]
+        ]
+      },
+      "id": "case_013",
+      "inputs": {
+        "inner_seed": "0x0cb9b491ad29605e",
+        "m": "0x05000000",
+        "max_iterations": "0x19000000",
+        "n": "0x04000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x2786053f",
+            "0x40b07b3d",
+            "0x18eae93d",
+            "0x4bce673f"
+          ],
+          [
+            "0x3b9e1f3f",
+            "0xf46d0e3e",
+            "0xcc322a3e",
+            "0xb1b0223f"
+          ],
+          [
+            "0xed33343f",
+            "0xc94c763f",
+            "0x52b8723f",
+            "0x9d6f103f"
+          ],
+          [
+            "0xd5175c3f",
+            "0x3f27233f",
+            "0x8c6a8f3e",
+            "0x9a7c233f"
+          ],
+          [
+            "0x3194133f",
+            "0x94fe563f",
+            "0xe0d71f3d",
+            "0xa7ab2d3f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=6, n=5, rank=3, maxIter=30",
+      "expected_output": {
+        "final_error": "0x96d0fc3d",
+        "h": [
+          [
+            "0xdfcfcc3c",
+            "0xd5f7583e",
+            "0xcf686f3f",
+            "0xaada3a3e",
+            "0x1b76da3e"
+          ],
+          [
+            "0x6ddc563f",
+            "0xff0a323e",
+            "0xde33173e",
+            "0xd7ae463f",
+            "0x2ae4c53d"
+          ],
+          [
+            "0xc539ac3e",
+            "0x33f27d3f",
+            "0x9c69833d",
+            "0x1b698c3e",
+            "0xac51ad3e"
+          ]
+        ],
+        "iterations": "0x1e000000",
+        "w": [
+          [
+            "0xc615f63d",
+            "0xe7146a3f",
+            "0x8ba6e73d"
+          ],
+          [
+            "0x9c587f3f",
+            "0x8cb9c23e",
+            "0xf8e4e23c"
+          ],
+          [
+            "0x362f3d38",
+            "0x83984a3f",
+            "0x7dcd8e3d"
+          ],
+          [
+            "0xa8cd3e3f",
+            "0xa8111f3f",
+            "0x1c481d3f"
+          ],
+          [
+            "0xd5ae763f",
+            "0x1874d23d",
+            "0xa7290e3f"
+          ],
+          [
+            "0x1c7a7e3e",
+            "0xc3fd373e",
+            "0x16d15c3f"
+          ]
+        ]
+      },
+      "id": "case_014",
+      "inputs": {
+        "inner_seed": "0xc44bbcfd489b5dda",
+        "m": "0x06000000",
+        "max_iterations": "0x1e000000",
+        "n": "0x05000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x5e80363f",
+            "0xe6f4853e",
+            "0x58bf533e",
+            "0xc8cd5c3f",
+            "0x46939f3e"
+          ],
+          [
+            "0x52d0a83e",
+            "0x44ae0a3e",
+            "0x44c36a3f",
+            "0xa56a0b3f",
+            "0x6b73313f"
+          ],
+          [
+            "0xb3c02a3f",
+            "0x041a7b3e",
+            "0xa08caa3d",
+            "0x6e652a3f",
+            "0x000c993b"
+          ],
+          [
+            "0x14f77a3f",
+            "0x3f576f3f",
+            "0x4a32723f",
+            "0xc20e043f",
+            "0x6617cb3e"
+          ],
+          [
+            "0xb87dd63d",
+            "0x195b5f3f",
+            "0xc745783f",
+            "0x1a75063f",
+            "0xd65ef13e"
+          ],
+          [
+            "0xd469d23e",
+            "0x60055c3f",
+            "0xa4de763e",
+            "0xc612043f",
+            "0x888a183f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=8, n=6, rank=3, maxIter=35",
+      "expected_output": {
+        "final_error": "0x40b0ea3d",
+        "h": [
+          [
+            "0xa0d9d13e",
+            "0xa715e43c",
+            "0x49b3d43c",
+            "0x16ed433f",
+            "0x3f7e1d3e",
+            "0x0533163f"
+          ],
+          [
+            "0x334ca13c",
+            "0x2460803f",
+            "0xde749e3e",
+            "0x9546ba3d",
+            "0x6f622d3e",
+            "0xbf73013e"
+          ],
+          [
+            "0x0beaec3e",
+            "0x47e3eb3c",
+            "0xe4d2153f",
+            "0xf13c413e",
+            "0x51bc013f",
+            "0x11aa993d"
+          ]
+        ],
+        "iterations": "0x1f000000",
+        "w": [
+          [
+            "0xddd3273f",
+            "0xc7f91b3f",
+            "0x799a713d"
+          ],
+          [
+            "0x87d86d3f",
+            "0x0167683f",
+            "0x96b6b13e"
+          ],
+          [
+            "0x73831838",
+            "0xfba2263f",
+            "0x1ee5333f"
+          ],
+          [
+            "0x4d9f523f",
+            "0x9373133f",
+            "0xc523a33e"
+          ],
+          [
+            "0xb56d2b3f",
+            "0x2bd23a3e",
+            "0x977b163f"
+          ],
+          [
+            "0x1d65083f",
+            "0xc126fe3e",
+            "0x6100233b"
+          ],
+          [
+            "0x7563cd3d",
+            "0xca96003c",
+            "0x1351ce3f"
+          ],
+          [
+            "0xbd5b183f",
+            "0xf5eed43d",
+            "0x86b27a3f"
+          ]
+        ]
+      },
+      "id": "case_015",
+      "inputs": {
+        "inner_seed": "0xee0d5e20d06d5104",
+        "m": "0x08000000",
+        "max_iterations": "0x23000000",
+        "n": "0x06000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xdc222d3e",
+            "0x3dde163f",
+            "0xee3a933e",
+            "0xb4b1f73e",
+            "0x9effa13e",
+            "0xfac8263f"
+          ],
+          [
+            "0x2945453f",
+            "0xd6f57f3f",
+            "0x2c93f03e",
+            "0x98456e3f",
+            "0x98ca9d3e",
+            "0x00c9fb3e"
+          ],
+          [
+            "0xec61313e",
+            "0xe571213f",
+            "0xaed13e3f",
+            "0xf094a93d",
+            "0x0c54fd3e",
+            "0x54c15a3e"
+          ],
+          [
+            "0xe54b183f",
+            "0xa6101c3f",
+            "0x3486d83e",
+            "0x9124193f",
+            "0xd8d08d3e",
+            "0x851f3a3f"
+          ],
+          [
+            "0x784be83e",
+            "0xf8bd583e",
+            "0x1ed1a63e",
+            "0x04a11e3f",
+            "0x4b89203f",
+            "0x4ed7013f"
+          ],
+          [
+            "0xe080ad3c",
+            "0xa899073f",
+            "0x0090fd3a",
+            "0xb69c263f",
+            "0x0aaad43e",
+            "0x14b1523e"
+          ],
+          [
+            "0x0391563f",
+            "0x101f493d",
+            "0xe12a5b3f",
+            "0xbe7fd93e",
+            "0x0f46623f",
+            "0x58d3fa3d"
+          ],
+          [
+            "0xe9d62f3f",
+            "0xdc0f133e",
+            "0x9e513b3f",
+            "0x07c62d3f",
+            "0x04a9f23e",
+            "0x3c95e03e"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=4, n=3, rank=2, maxIter=20",
+      "expected_output": {
+        "final_error": "0x7508323d",
+        "h": [
+          [
+            "0x4f392e3e",
+            "0x2721003f",
+            "0x876d023c"
+          ],
+          [
+            "0x2b3b473e",
+            "0xb977133d",
+            "0xfc15273f"
+          ]
+        ],
+        "iterations": "0x14000000",
+        "w": [
+          [
+            "0x46f8b43f",
+            "0x1b506d3e"
+          ],
+          [
+            "0xa33cfd3f",
+            "0xf556d83e"
+          ],
+          [
+            "0x14973838",
+            "0xfd29b93f"
+          ],
+          [
+            "0x259e483e",
+            "0x6422bb3e"
+          ]
+        ]
+      },
+      "id": "case_016",
+      "inputs": {
+        "inner_seed": "0xdcecc529e6b180d9",
+        "m": "0x04000000",
+        "max_iterations": "0x14000000",
+        "n": "0x03000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xb8894d3e",
+            "0x029b3e3f",
+            "0xe8503e3e"
+          ],
+          [
+            "0x3cdaf03e",
+            "0x6dfd7c3f",
+            "0x20a58d3e"
+          ],
+          [
+            "0x8e9b833e",
+            "0xa024093d",
+            "0xe9d4733f"
+          ],
+          [
+            "0x8471483e",
+            "0xb80ca63d",
+            "0xd8805b3e"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=5, n=4, rank=2, maxIter=25",
+      "expected_output": {
+        "final_error": "0x16f7ed3d",
+        "h": [
+          [
+            "0x4250513f",
+            "0xf9d83c3f",
+            "0x8bad013d",
+            "0x602c493f"
+          ],
+          [
+            "0x99f7e83d",
+            "0x89a2e93c",
+            "0x1620053f",
+            "0xfc4d5f3d"
+          ]
+        ],
+        "iterations": "0x15000000",
+        "w": [
+          [
+            "0x6701973e",
+            "0x9b6ef23f"
+          ],
+          [
+            "0x0263853f",
+            "0xa190853e"
+          ],
+          [
+            "0xbf784d3d",
+            "0x8ef5c63e"
+          ],
+          [
+            "0x8637f63e",
+            "0x1b85233f"
+          ],
+          [
+            "0x3725123f",
+            "0xf7458d3b"
+          ]
+        ]
+      },
+      "id": "case_017",
+      "inputs": {
+        "inner_seed": "0x14f1a350d8348508",
+        "m": "0x05000000",
+        "max_iterations": "0x19000000",
+        "n": "0x04000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x061cf13e",
+            "0xa836923e",
+            "0x4f167e3f",
+            "0x545d9e3e"
+          ],
+          [
+            "0x8819783f",
+            "0x4532083f",
+            "0x7411123e",
+            "0x122d793f"
+          ],
+          [
+            "0x80f1e53d",
+            "0x806ff13b",
+            "0xe0614b3e",
+            "0x8821933d"
+          ],
+          [
+            "0xe089b23e",
+            "0xe7250b3f",
+            "0x5e9bbc3e",
+            "0xe00bbf3e"
+          ],
+          [
+            "0xeaafcc3e",
+            "0xe6fa363f",
+            "0xf0a03e3d",
+            "0x4844783e"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=6, n=5, rank=3, maxIter=30",
+      "expected_output": {
+        "final_error": "0xb196e83d",
+        "h": [
+          [
+            "0xcf7a393f",
+            "0x5fd0c23d",
+            "0x08fc793e",
+            "0xa58fac3e",
+            "0xf77ebf3c"
+          ],
+          [
+            "0x3d1d973c",
+            "0xc921503f",
+            "0xf72f133d",
+            "0x6322cc3e",
+            "0x114c923d"
+          ],
+          [
+            "0x45b4983e",
+            "0xe25c9f3e",
+            "0x0e830e3f",
+            "0x9890f63c",
+            "0xcd3b213f"
+          ]
+        ],
+        "iterations": "0x1e000000",
+        "w": [
+          [
+            "0xde01bb3f",
+            "0x184f863c",
+            "0x90a14c3d"
+          ],
+          [
+            "0xb4c60e3f",
+            "0x0a438a3c",
+            "0x9ad1413f"
+          ],
+          [
+            "0x52a03f3f",
+            "0x051cca3e",
+            "0xeab90e3e"
+          ],
+          [
+            "0x9fe9363f",
+            "0x9c64f43e",
+            "0x6a96823f"
+          ],
+          [
+            "0x51e41a3e",
+            "0x9d9c883f",
+            "0x6037723b"
+          ],
+          [
+            "0x2d510a3e",
+            "0x8157553f",
+            "0x1e69863f"
+          ]
+        ]
+      },
+      "id": "case_018",
+      "inputs": {
+        "inner_seed": "0x4b35342d2dc2f335",
+        "m": "0x06000000",
+        "max_iterations": "0x1e000000",
+        "n": "0x05000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x8469773f",
+            "0x080dc23d",
+            "0x23e2053f",
+            "0x535b273f",
+            "0xb033013d"
+          ],
+          [
+            "0x8711233f",
+            "0x7a7eaf3e",
+            "0x538d353f",
+            "0x407cbc3d",
+            "0x04dfae3e"
+          ],
+          [
+            "0xb13d343f",
+            "0xa07c013f",
+            "0x18ddd13d",
+            "0x20ff8b3e",
+            "0x1837463e"
+          ],
+          [
+            "0xad7f723f",
+            "0xf42f523f",
+            "0x7dae033f",
+            "0xee0fbc3e",
+            "0x4e14553f"
+          ],
+          [
+            "0x78ed253e",
+            "0x37ff683f",
+            "0xd072623d",
+            "0xa688dc3e",
+            "0xa0a3f43c"
+          ],
+          [
+            "0x1600973e",
+            "0x5c726d3f",
+            "0xbeca4c3f",
+            "0x29b8163f",
+            "0x8a95303f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=8, n=6, rank=3, maxIter=35",
+      "expected_output": {
+        "final_error": "0xe6d2d03d",
+        "h": [
+          [
+            "0xbcc1333f",
+            "0x89e0ca3e",
+            "0xe185913d",
+            "0x322b713e",
+            "0x8397203c",
+            "0xc815c23e"
+          ],
+          [
+            "0x4c3c1f3e",
+            "0x3634453e",
+            "0x5da2823b",
+            "0x0c9a443e",
+            "0xacacf53e",
+            "0xc67f1e3f"
+          ],
+          [
+            "0x78b8ec3d",
+            "0x75a3ac3e",
+            "0x3e2e403f",
+            "0x16c4bb3e",
+            "0x3ad55f3e",
+            "0x29b53e3d"
+          ]
+        ],
+        "iterations": "0x23000000",
+        "w": [
+          [
+            "0x14618e3f",
+            "0xef1f9b3c",
+            "0x22c98e3f"
+          ],
+          [
+            "0x5663a13a",
+            "0x6e9a033f",
+            "0x0211183f"
+          ],
+          [
+            "0xb1c69c3f",
+            "0x7ef6f03e",
+            "0x565a143e"
+          ],
+          [
+            "0x41fcf83e",
+            "0x212e823f",
+            "0xe5b38b3f"
+          ],
+          [
+            "0x20d1583d",
+            "0xc9a6a93f",
+            "0x4b688d3d"
+          ],
+          [
+            "0xdf51913f",
+            "0x2178143f",
+            "0xd69daa3c"
+          ],
+          [
+            "0x2cf8c238",
+            "0x57e7a13e",
+            "0x3102573f"
+          ],
+          [
+            "0x747c633c",
+            "0xcb3d713f",
+            "0x4d95873e"
+          ]
+        ]
+      },
+      "id": "case_019",
+      "inputs": {
+        "inner_seed": "0x703bd6cd9f99e96c",
+        "m": "0x08000000",
+        "max_iterations": "0x23000000",
+        "n": "0x06000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xb11b6a3f",
+            "0x1345433f",
+            "0xfec07c3f",
+            "0x2ee0223f",
+            "0x94ef1e3e",
+            "0x77170f3f"
+          ],
+          [
+            "0xb82e133e",
+            "0x2872f53d",
+            "0x7422e43e",
+            "0x68ffde3e",
+            "0x4082f43e",
+            "0x8234943e"
+          ],
+          [
+            "0x2ae7693f",
+            "0x2a21343f",
+            "0xf084533e",
+            "0xd0cfc73e",
+            "0x3e5f913e",
+            "0xca67423f"
+          ],
+          [
+            "0xbaed283f",
+            "0xe2917a3f",
+            "0x22182c3f",
+            "0x9b33573f",
+            "0x3d714d3f",
+            "0x71172a3f"
+          ],
+          [
+            "0x36eb8e3e",
+            "0x8894af3d",
+            "0x14fb2a3e",
+            "0x962e9a3e",
+            "0x4f3f133f",
+            "0xecb0753f"
+          ],
+          [
+            "0x1a6b6d3f",
+            "0x6c18f23e",
+            "0x3820833d",
+            "0xa8eddc3e",
+            "0x8c00983e",
+            "0xf7524c3f"
+          ],
+          [
+            "0xd03d5c3d",
+            "0xdcdd4b3e",
+            "0xad79443f",
+            "0x6cfc673e",
+            "0x7289b53e",
+            "0x92f1ab3e"
+          ],
+          [
+            "0x78b1cd3d",
+            "0xf480ec3e",
+            "0x7458763e",
+            "0x204ab23d",
+            "0x7c22f13e",
+            "0xc27e273f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=4, n=3, rank=2, maxIter=20",
+      "expected_output": {
+        "final_error": "0xef47ce3d",
+        "h": [
+          [
+            "0xf37a0f3f",
+            "0x6877f33e",
+            "0xfbaec73b"
+          ],
+          [
+            "0xb254523d",
+            "0x16bfcc3e",
+            "0x71ac2c3f"
+          ]
+        ],
+        "iterations": "0x14000000",
+        "w": [
+          [
+            "0xa9b9f439",
+            "0x5a318d3e"
+          ],
+          [
+            "0x165d8c3f",
+            "0xa6fc063f"
+          ],
+          [
+            "0x863b883f",
+            "0xfb6ebd3e"
+          ],
+          [
+            "0x84a3d33b",
+            "0xa11dbc3f"
+          ]
+        ]
+      },
+      "id": "case_020",
+      "inputs": {
+        "inner_seed": "0x87b58484b1f4f2eb",
+        "m": "0x04000000",
+        "max_iterations": "0x14000000",
+        "n": "0x03000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x90674c3d",
+            "0x6011da3c",
+            "0xc0b46e3e"
+          ],
+          [
+            "0x7df5003f",
+            "0xe0f1663f",
+            "0x12f9863e"
+          ],
+          [
+            "0xd8f8403f",
+            "0x0800fb3e",
+            "0xc829af3e"
+          ],
+          [
+            "0x8012b23d",
+            "0x2529143f",
+            "0x6d747f3f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=5, n=4, rank=2, maxIter=25",
+      "expected_output": {
+        "final_error": "0x5084073e",
+        "h": [
+          [
+            "0x97a9903e",
+            "0xf084813d",
+            "0xb2ebef3c",
+            "0x69196e3f"
+          ],
+          [
+            "0x60822f3f",
+            "0x5b3bb03e",
+            "0xfb81883f",
+            "0xb0ee303e"
+          ]
+        ],
+        "iterations": "0x11000000",
+        "w": [
+          [
+            "0x080e083f",
+            "0x0753213c"
+          ],
+          [
+            "0x9421613f",
+            "0xecc42e3f"
+          ],
+          [
+            "0x1b56df3e",
+            "0x9b74c03e"
+          ],
+          [
+            "0x72fb8e3e",
+            "0xb088443f"
+          ],
+          [
+            "0xa9db063f",
+            "0x3540d23e"
+          ]
+        ]
+      },
+      "id": "case_021",
+      "inputs": {
+        "inner_seed": "0xc99310fb2faa10bc",
+        "m": "0x05000000",
+        "max_iterations": "0x19000000",
+        "n": "0x04000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x5095093e",
+            "0x24621b3e",
+            "0x004b2a3b",
+            "0x12dbfd3e"
+          ],
+          [
+            "0x1aee2a3f",
+            "0x30071a3d",
+            "0x03e35c3f",
+            "0x8fc9763f"
+          ],
+          [
+            "0x5c834b3e",
+            "0x95d80b3f",
+            "0x4082cd3e",
+            "0xd286ff3e"
+          ],
+          [
+            "0x40d5243f",
+            "0x4499bf3e",
+            "0x59b9463f",
+            "0xf215bf3e"
+          ],
+          [
+            "0x4d42203f",
+            "0x7857923d",
+            "0x6219be3e",
+            "0x2161023f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=6, n=5, rank=3, maxIter=30",
+      "expected_output": {
+        "final_error": "0xb8d91c3e",
+        "h": [
+          [
+            "0x3ef3a53e",
+            "0x789dea3c",
+            "0x7991e13d",
+            "0x9e36c63e",
+            "0x898a103f"
+          ],
+          [
+            "0x562c8e3e",
+            "0x4947223f",
+            "0x518ac43b",
+            "0x8457c43d",
+            "0xdb3e293e"
+          ],
+          [
+            "0x7519ca3e",
+            "0x2f060a3e",
+            "0x8178263f",
+            "0x7ddb713b",
+            "0xd84cbf3e"
+          ]
+        ],
+        "iterations": "0x1e000000",
+        "w": [
+          [
+            "0x2d8c853b",
+            "0x4e44ae3f",
+            "0xc22a8d3d"
+          ],
+          [
+            "0xda82833f",
+            "0xa61b1d3c",
+            "0xde7b353f"
+          ],
+          [
+            "0xa734693e",
+            "0x5df0b73e",
+            "0xdd5fb83f"
+          ],
+          [
+            "0x06582e3f",
+            "0x99e8453f",
+            "0xa0ffe13e"
+          ],
+          [
+            "0xb328933f",
+            "0x0445613f",
+            "0xa2c5d63d"
+          ],
+          [
+            "0x3103c13e",
+            "0x9ca6c83f",
+            "0xdd4d653e"
+          ]
+        ]
+      },
+      "id": "case_022",
+      "inputs": {
+        "inner_seed": "0x28b209afd2fe9b61",
+        "m": "0x06000000",
+        "max_iterations": "0x1e000000",
+        "n": "0x05000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x9896cd3e",
+            "0x09a8623f",
+            "0xa0830f3e",
+            "0x2c9db33e",
+            "0xc01eac3d"
+          ],
+          [
+            "0xf8c1703f",
+            "0xc0226f3d",
+            "0x7edc0e3f",
+            "0xf2aaea3e",
+            "0xfb291b3f"
+          ],
+          [
+            "0xfd131f3f",
+            "0x820aed3e",
+            "0x7f277e3f",
+            "0x00b0df3d",
+            "0x124d4b3f"
+          ],
+          [
+            "0x0045043f",
+            "0xbd6b163f",
+            "0x5201a23e",
+            "0x648d2b3e",
+            "0xe3d25b3f"
+          ],
+          [
+            "0x38288d3e",
+            "0x5622363f",
+            "0x50a88a3e",
+            "0x2afe273f",
+            "0xbb39763f"
+          ],
+          [
+            "0x4123753f",
+            "0xeea9713f",
+            "0x48b5a73d",
+            "0xf829dd3d",
+            "0x0316013f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=8, n=6, rank=3, maxIter=35",
+      "expected_output": {
+        "final_error": "0x36211c3e",
+        "h": [
+          [
+            "0x6834c43b",
+            "0x662ec03e",
+            "0xe7d29e38",
+            "0xfdfa263f",
+            "0xc61a9f3e",
+            "0xcbea113f"
+          ],
+          [
+            "0xd745353f",
+            "0xa059023f",
+            "0x4271c23e",
+            "0xd520523c",
+            "0x89ae8e38",
+            "0x6144df3e"
+          ],
+          [
+            "0x32dd843e",
+            "0x46f8703d",
+            "0x6185ae3e",
+            "0xe807b83e",
+            "0xa81c0c3f",
+            "0xe07eab3c"
+          ]
+        ],
+        "iterations": "0x1f000000",
+        "w": [
+          [
+            "0x0f97b43f",
+            "0xa9cd4c3e",
+            "0x1631ca3d"
+          ],
+          [
+            "0x3c09753c",
+            "0x7451923f",
+            "0xe67e253f"
+          ],
+          [
+            "0xb88cf83e",
+            "0x13439b3f",
+            "0x07213d3d"
+          ],
+          [
+            "0x6ac09e3b",
+            "0xeeb0813f",
+            "0x032cd03e"
+          ],
+          [
+            "0xaff5a53e",
+            "0x44b95f3e",
+            "0x8c328b3f"
+          ],
+          [
+            "0xd484743e",
+            "0xb263a33c",
+            "0xdd63b23f"
+          ],
+          [
+            "0x76f0733f",
+            "0x7805a93e",
+            "0xcf25373c"
+          ],
+          [
+            "0x2b724b3f",
+            "0x23050c3b",
+            "0x11b65c3f"
+          ]
+        ]
+      },
+      "id": "case_023",
+      "inputs": {
+        "inner_seed": "0xc2b526e544d1b4d0",
+        "m": "0x08000000",
+        "max_iterations": "0x23000000",
+        "n": "0x06000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x4041513e",
+            "0x9d6c1e3f",
+            "0x3866a33d",
+            "0x1cb57c3f",
+            "0xd4e5fc3e",
+            "0x72765f3f"
+          ],
+          [
+            "0x189b6c3f",
+            "0x8dfb653f",
+            "0xddf8313f",
+            "0x4ae4b03e",
+            "0x02448e3e",
+            "0x4086813e"
+          ],
+          [
+            "0xf5494f3f",
+            "0xc253373f",
+            "0x1018083f",
+            "0x72739e3e",
+            "0x9823d03d",
+            "0x698a763f"
+          ],
+          [
+            "0xd960713f",
+            "0x563a933e",
+            "0xea4eef3e",
+            "0x60c9c93d",
+            "0x88cd853e",
+            "0x3ab31b3f"
+          ],
+          [
+            "0x2ff8483f",
+            "0x505d8b3d",
+            "0x34c42d3e",
+            "0xd466493f",
+            "0x50391e3f",
+            "0x9eca883e"
+          ],
+          [
+            "0x202b3e3d",
+            "0xa464dd3e",
+            "0xe35d453f",
+            "0xb858f93e",
+            "0x3c97653f",
+            "0xe0a13b3e"
+          ],
+          [
+            "0x4078a33d",
+            "0x1dcc4f3f",
+            "0xbc46273e",
+            "0xeedb0f3f",
+            "0xcc9c9b3e",
+            "0xcfca143f"
+          ],
+          [
+            "0x82069e3e",
+            "0xc88dfb3d",
+            "0xa42a313e",
+            "0xd278593f",
+            "0x111a453f",
+            "0x8031103f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=4, n=3, rank=2, maxIter=20",
+      "expected_output": {
+        "final_error": "0x4264fa3d",
+        "h": [
+          [
+            "0xf703133f",
+            "0x9f07213a",
+            "0x9e81533f"
+          ],
+          [
+            "0x6e82223f",
+            "0x7fc7633f",
+            "0xccd91f3f"
+          ]
+        ],
+        "iterations": "0x14000000",
+        "w": [
+          [
+            "0xbf94753e",
+            "0x9ce4423f"
+          ],
+          [
+            "0x09376c3c",
+            "0xe2377f3f"
+          ],
+          [
+            "0xf839483f",
+            "0x53b0273e"
+          ],
+          [
+            "0xf64d3a3e",
+            "0x8dae3d3f"
+          ]
+        ]
+      },
+      "id": "case_024",
+      "inputs": {
+        "inner_seed": "0x40799fac1de87df0",
+        "m": "0x04000000",
+        "max_iterations": "0x14000000",
+        "n": "0x03000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xf25fec3e",
+            "0xa97f163f",
+            "0x1a7f6a3f"
+          ],
+          [
+            "0xb5473e3f",
+            "0x54a67c3f",
+            "0xe6cdc83e"
+          ],
+          [
+            "0x8a361c3f",
+            "0x0058c03d",
+            "0x347e373f"
+          ],
+          [
+            "0x3aa2123f",
+            "0xb85b233f",
+            "0x704f233f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=5, n=4, rank=2, maxIter=25",
+      "expected_output": {
+        "final_error": "0xf28cdf3d",
+        "h": [
+          [
+            "0x6dc5f73e",
+            "0x7136c63c",
+            "0x26c3803d",
+            "0x4ea1f63e"
+          ],
+          [
+            "0x735c8b3e",
+            "0xca17763f",
+            "0xda87f33f",
+            "0x7dbc3e3f"
+          ]
+        ],
+        "iterations": "0x16000000",
+        "w": [
+          [
+            "0x2231263f",
+            "0xd0f5203e"
+          ],
+          [
+            "0x702f983e",
+            "0x0f65ce3e"
+          ],
+          [
+            "0xc4d5ed3f",
+            "0xf279553d"
+          ],
+          [
+            "0x61964d3f",
+            "0x1bc9d53e"
+          ],
+          [
+            "0x45e4ac3e",
+            "0xa7e90c3f"
+          ]
+        ]
+      },
+      "id": "case_025",
+      "inputs": {
+        "inner_seed": "0xae0cab69cdc599cc",
+        "m": "0x05000000",
+        "max_iterations": "0x19000000",
+        "n": "0x04000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x3a94a83e",
+            "0x900ce53d",
+            "0xda8fb83e",
+            "0x2a6eea3e"
+          ],
+          [
+            "0x223db93e",
+            "0xb83f4a3e",
+            "0xc6fe683f",
+            "0x3a5fac3e"
+          ],
+          [
+            "0xcb95693f",
+            "0x0c56053e",
+            "0x087e4b3e",
+            "0x77686f3f"
+          ],
+          [
+            "0xb415083f",
+            "0x2628893e",
+            "0xdaec6d3f",
+            "0xa4b32a3f"
+          ],
+          [
+            "0xa0ce5a3e",
+            "0xb353503f",
+            "0x6a20683f",
+            "0x8a6d2b3f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=6, n=5, rank=3, maxIter=30",
+      "expected_output": {
+        "final_error": "0x905be13d",
+        "h": [
+          [
+            "0xc4c2323f",
+            "0x8a818f3e",
+            "0xa1200e3f",
+            "0x805a363f",
+            "0xc28c8d3a"
+          ],
+          [
+            "0x08d5563c",
+            "0xbd93ce3c",
+            "0x6582be3e",
+            "0x8013023f",
+            "0x95fa713e"
+          ],
+          [
+            "0x4a0e5f3e",
+            "0x45241c3f",
+            "0x8d57843e",
+            "0x2c66a53c",
+            "0x2896123f"
+          ]
+        ],
+        "iterations": "0x1e000000",
+        "w": [
+          [
+            "0xadf5193f",
+            "0x7629b83d",
+            "0x513c9e3d"
+          ],
+          [
+            "0x832b9e3e",
+            "0xbda3a03f",
+            "0xbbb6253a"
+          ],
+          [
+            "0x8ae5d53d",
+            "0xf2b9dc3f",
+            "0x11651d3f"
+          ],
+          [
+            "0xb146773b",
+            "0x1967373e",
+            "0x0ae2c43f"
+          ],
+          [
+            "0x7a9c8f3f",
+            "0x993c203e",
+            "0x41e7c53e"
+          ],
+          [
+            "0x806e713f",
+            "0x6dd6b33e",
+            "0xa1401b3f"
+          ]
+        ]
+      },
+      "id": "case_026",
+      "inputs": {
+        "inner_seed": "0x55f162dbf9a25d62",
+        "m": "0x06000000",
+        "max_iterations": "0x1e000000",
+        "n": "0x05000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x6053053f",
+            "0x6c033c3e",
+            "0x78d6753e",
+            "0xaea4063f",
+            "0xcc2a073e"
+          ],
+          [
+            "0x704c9a3e",
+            "0xc0cbca3c",
+            "0xa8f9e23e",
+            "0xd9227b3f",
+            "0x8a86b03e"
+          ],
+          [
+            "0xe80db43d",
+            "0x06ae013f",
+            "0xb7967f3f",
+            "0x8338643f",
+            "0xe662333f"
+          ],
+          [
+            "0x46cbc33e",
+            "0x2bd46f3f",
+            "0xdaaec53e",
+            "0xe040163e",
+            "0xadbf733f"
+          ],
+          [
+            "0x29f32e3f",
+            "0xb9633e3f",
+            "0xe97b5c3f",
+            "0xdd4c6f3f",
+            "0xd0cf953d"
+          ],
+          [
+            "0x3695743f",
+            "0x8a33f33e",
+            "0xd9aa5b3f",
+            "0x7b0e3e3f",
+            "0x64ef093f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=8, n=6, rank=3, maxIter=35",
+      "expected_output": {
+        "final_error": "0x398e183e",
+        "h": [
+          [
+            "0xa80a633a",
+            "0xfdacca3e",
+            "0x9a6d243d",
+            "0xd843ec3e",
+            "0x4b05153f",
+            "0x1f70723e"
+          ],
+          [
+            "0x71020f3f",
+            "0x891c883b",
+            "0xe752703d",
+            "0xadd76b3c",
+            "0x77b60b3f",
+            "0xe00ecc3e"
+          ],
+          [
+            "0xb73c2e3e",
+            "0x7908ff3d",
+            "0xe0be1e3f",
+            "0x4ca70b3f",
+            "0xc88b0d3b",
+            "0x4645913e"
+          ]
+        ],
+        "iterations": "0x20000000",
+        "w": [
+          [
+            "0x88eb3e3f",
+            "0x0217c139",
+            "0xf86fd73e"
+          ],
+          [
+            "0xa970843e",
+            "0xc6ab253f",
+            "0x131f883f"
+          ],
+          [
+            "0x3b74813d",
+            "0xee7bbf3f",
+            "0xeb5c703e"
+          ],
+          [
+            "0x0a7daa3f",
+            "0x3ef0dd3d",
+            "0x91cdeb3c"
+          ],
+          [
+            "0x49b21a3f",
+            "0x9c03373e",
+            "0xc395043f"
+          ],
+          [
+            "0x47607a3d",
+            "0x983b6839",
+            "0xcb13c03f"
+          ],
+          [
+            "0x3a0d803f",
+            "0x9033093f",
+            "0xcbeede3c"
+          ],
+          [
+            "0xdd93013e",
+            "0x1770a23e",
+            "0x82f4683f"
+          ]
+        ]
+      },
+      "id": "case_027",
+      "inputs": {
+        "inner_seed": "0xe36baad639ce0cee",
+        "m": "0x08000000",
+        "max_iterations": "0x23000000",
+        "n": "0x06000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xa030123d",
+            "0xf03f623d",
+            "0x200f543d",
+            "0x36b26e3f",
+            "0xc6d0bd3e",
+            "0x78ef903e"
+          ],
+          [
+            "0x08b00a3f",
+            "0xa8f88c3e",
+            "0x74d2373f",
+            "0xfdbd293f",
+            "0x5682f33e",
+            "0xdd362c3f"
+          ],
+          [
+            "0x5e22763f",
+            "0x40136d3d",
+            "0xc04d773e",
+            "0x945c653e",
+            "0x4948603f",
+            "0xfb6e063f"
+          ],
+          [
+            "0x90c4563e",
+            "0x9124573f",
+            "0xa86f323e",
+            "0xeaebfd3e",
+            "0xf38f503f",
+            "0x3c931b3e"
+          ],
+          [
+            "0x5ae7863e",
+            "0xce39fb3e",
+            "0xca48f13e",
+            "0x1e6de23e",
+            "0x7c13f23e",
+            "0x04bf5a3e"
+          ],
+          [
+            "0xc8355d3e",
+            "0xa0de053e",
+            "0x6d707f3f",
+            "0xcc595d3f",
+            "0x7034bb3d",
+            "0x5aafa63e"
+          ],
+          [
+            "0x001cfa3a",
+            "0x305f9a3d",
+            "0xf8c5933d",
+            "0x6a13f83e",
+            "0x3080743f",
+            "0x66ac4b3f"
+          ],
+          [
+            "0x1677b03e",
+            "0xb684953e",
+            "0x4118023f",
+            "0x1c68fa3e",
+            "0xd8d09f3d",
+            "0xb03b2a3f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=4, n=3, rank=2, maxIter=20",
+      "expected_output": {
+        "final_error": "0xe27b333d",
+        "h": [
+          [
+            "0xb537403e",
+            "0x9a3b193e",
+            "0x3ffdd43e"
+          ],
+          [
+            "0x90b0cb3e",
+            "0x229cde3d",
+            "0xb63f873e"
+          ]
+        ],
+        "iterations": "0x14000000",
+        "w": [
+          [
+            "0x71eb933e",
+            "0xa1e65f3f"
+          ],
+          [
+            "0xab19613e",
+            "0x87f7893f"
+          ],
+          [
+            "0x6594543d",
+            "0x6d2d6d3f"
+          ],
+          [
+            "0x8d96b43f",
+            "0x364eb43d"
+          ]
+        ]
+      },
+      "id": "case_028",
+      "inputs": {
+        "inner_seed": "0xd2e2ebd2cd2688d8",
+        "m": "0x04000000",
+        "max_iterations": "0x14000000",
+        "n": "0x03000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x2ecfdb3e",
+            "0x9046df3d",
+            "0x92f3a93e"
+          ],
+          [
+            "0x4612cd3e",
+            "0x605c363e",
+            "0x580ae83e"
+          ],
+          [
+            "0x7441df3e",
+            "0x6823ce3d",
+            "0x94a6403e"
+          ],
+          [
+            "0xfacc993e",
+            "0xdc69653e",
+            "0xf0d21b3f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=5, n=4, rank=2, maxIter=25",
+      "expected_output": {
+        "final_error": "0x656dea3d",
+        "h": [
+          [
+            "0x4911493f",
+            "0x94cefb3e",
+            "0x60b4a93e",
+            "0x85b89c3f"
+          ],
+          [
+            "0x931b093f",
+            "0x1e40453f",
+            "0x4cb8d03e",
+            "0xa2c4553c"
+          ]
+        ],
+        "iterations": "0x19000000",
+        "w": [
+          [
+            "0xfb514b3f",
+            "0x5ce80d3e"
+          ],
+          [
+            "0xa798443f",
+            "0x4b46093f"
+          ],
+          [
+            "0x7039f13e",
+            "0x5a89a53e"
+          ],
+          [
+            "0x92a0cf3e",
+            "0x2975813f"
+          ],
+          [
+            "0x2c28323f",
+            "0x9903c73e"
+          ]
+        ]
+      },
+      "id": "case_029",
+      "inputs": {
+        "inner_seed": "0xfa6709d7b804c0da",
+        "m": "0x05000000",
+        "max_iterations": "0x19000000",
+        "n": "0x04000000",
+        "rank": "0x02000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x734f723f",
+            "0xc2f1d93e",
+            "0x607c8b3d",
+            "0xcd5e6a3f"
+          ],
+          [
+            "0x54243d3f",
+            "0xa5c14e3f",
+            "0x9ce4293f",
+            "0x25087b3f"
+          ],
+          [
+            "0xa89bfd3e",
+            "0x5259e83e",
+            "0xa87ad63e",
+            "0xf556153f"
+          ],
+          [
+            "0x4c0a763f",
+            "0x4c89743f",
+            "0x2c06e93e",
+            "0x3630f73e"
+          ],
+          [
+            "0x6d571f3f",
+            "0x75493b3f",
+            "0x4c9bcb3e",
+            "0xcd0d673f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=6, n=5, rank=3, maxIter=30",
+      "expected_output": {
+        "final_error": "0xac97b73d",
+        "h": [
+          [
+            "0xe406343f",
+            "0x4f20223e",
+            "0x8705a03d",
+            "0xee0f113f",
+            "0xc2feab3d"
+          ],
+          [
+            "0xa06d0939",
+            "0x3304df3e",
+            "0xdeaef13e",
+            "0xfdff3d3f",
+            "0x89c8413f"
+          ],
+          [
+            "0x74317f3e",
+            "0xde97013f",
+            "0x79956f3f",
+            "0xd902a73d",
+            "0xc31ed93d"
+          ]
+        ],
+        "iterations": "0x1e000000",
+        "w": [
+          [
+            "0xe57ada3b",
+            "0x834a6d3f",
+            "0x0615fe3e"
+          ],
+          [
+            "0xd753573f",
+            "0x9246ac3d",
+            "0xe6fafc3e"
+          ],
+          [
+            "0x1400893f",
+            "0x3207883d",
+            "0x23dece3e"
+          ],
+          [
+            "0xaadeff3d",
+            "0xedaa0e3f",
+            "0xe66ce43e"
+          ],
+          [
+            "0x3c684a3e",
+            "0xd28a6e3e",
+            "0x71d0263f"
+          ],
+          [
+            "0x14008d3e",
+            "0x71f8853f",
+            "0x1d781c3c"
+          ]
+        ]
+      },
+      "id": "case_030",
+      "inputs": {
+        "inner_seed": "0x78927211ead45d87",
+        "m": "0x06000000",
+        "max_iterations": "0x1e000000",
+        "n": "0x05000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0xa824b83d",
+            "0x74b2553f",
+            "0x2cef513f",
+            "0xcd172c3f",
+            "0xb445433f"
+          ],
+          [
+            "0x66c3273f",
+            "0xfc9b9d3e",
+            "0x5fa1273f",
+            "0x8148323f",
+            "0x10b01e3d"
+          ],
+          [
+            "0x8da0673f",
+            "0x61bc113f",
+            "0x2433be3e",
+            "0x49c0143f",
+            "0xd0299f3e"
+          ],
+          [
+            "0xb86e373e",
+            "0x8299943e",
+            "0xad3f503f",
+            "0xe26a133f",
+            "0x24ebe73e"
+          ],
+          [
+            "0x94e8a83e",
+            "0xdc8ed53e",
+            "0x47be3f3f",
+            "0xee30a83e",
+            "0x522c913e"
+          ],
+          [
+            "0xf8b5353e",
+            "0x2edbee3e",
+            "0x6789023f",
+            "0x2389753f",
+            "0x0415533f"
+          ]
+        ]
+      }
+    },
+    {
+      "description": "m=8, n=6, rank=3, maxIter=35",
+      "expected_output": {
+        "final_error": "0x7bb7253e",
+        "h": [
+          [
+            "0xf2a4e93d",
+            "0xc6e3623e",
+            "0x16e51e3f",
+            "0x7947253e",
+            "0xc92c173f",
+            "0x5c64273d"
+          ],
+          [
+            "0xda89443f",
+            "0xf196993c",
+            "0xdd4fde3c",
+            "0x7b96c13e",
+            "0x13372c3e",
+            "0x315e913e"
+          ],
+          [
+            "0xdbb6343e",
+            "0xb574333f",
+            "0x1e29f53e",
+            "0xeab5853d",
+            "0x6a78263e",
+            "0x41481f3f"
+          ]
+        ],
+        "iterations": "0x23000000",
+        "w": [
+          [
+            "0x782a5b37",
+            "0x6f6d463f",
+            "0x16f6833e"
+          ],
+          [
+            "0x6136273d",
+            "0xbfeba33f",
+            "0xff2eed3e"
+          ],
+          [
+            "0x8a50b63f",
+            "0x6ad9323e",
+            "0xdb9ed93c"
+          ],
+          [
+            "0xe428cc3e",
+            "0x4653813f",
+            "0xe703333f"
+          ],
+          [
+            "0x61f70b3f",
+            "0x3957543e",
+            "0x22bf543f"
+          ],
+          [
+            "0x4e22383f",
+            "0x5eb2e43e",
+            "0x47dc6b3f"
+          ],
+          [
+            "0x7f37263f",
+            "0x9035fa3e",
+            "0xa698e53e"
+          ],
+          [
+            "0x77f65b3f",
+            "0xb886053f",
+            "0xa0a4583d"
+          ]
+        ]
+      },
+      "id": "case_031",
+      "inputs": {
+        "inner_seed": "0x3f95eae3276c0106",
+        "m": "0x08000000",
+        "max_iterations": "0x23000000",
+        "n": "0x06000000",
+        "rank": "0x03000000",
+        "tolerance": "0x17b7d138",
+        "v": [
+          [
+            "0x50085a3f",
+            "0xe41ae33e",
+            "0xc0b1c93c",
+            "0x80c8e43c",
+            "0xcced3b3e",
+            "0x34ad2b3e"
+          ],
+          [
+            "0x3d36683f",
+            "0x803a343e",
+            "0x88dd9c3e",
+            "0xda913c3f",
+            "0x002bac3e",
+            "0x2aa6533f"
+          ],
+          [
+            "0x0401753e",
+            "0x14388c3e",
+            "0x11224f3f",
+            "0xa0d5ac3e",
+            "0x180e7e3f",
+            "0x7051473e"
+          ],
+          [
+            "0x66c4673f",
+            "0x202ce53e",
+            "0x02e4203f",
+            "0x5e84f03e",
+            "0x4c1c143f",
+            "0x4f1c5e3f"
+          ],
+          [
+            "0xeea3d53e",
+            "0x5093653f",
+            "0xc8664f3f",
+            "0x100bac3e",
+            "0x3ce6933e",
+            "0xca49c63e"
+          ],
+          [
+            "0x60c22d3f",
+            "0xde74463f",
+            "0x051d493f",
+            "0x40c3f53c",
+            "0x245d5d3f",
+            "0xa01e4c3f"
+          ],
+          [
+            "0x2c30d63e",
+            "0x89440c3f",
+            "0x773a503f",
+            "0x430a453f",
+            "0x8ceb463e",
+            "0x0415a73e"
+          ],
+          [
+            "0x52bc243f",
+            "0xdc635b3e",
+            "0xe1c71c3f",
+            "0x488ea23d",
+            "0x9e1d1f3f",
+            "0x682f343e"
+          ]
+        ]
+      }
+    }
+  ],
+  "cookbook_section": "§6.9",
+  "format_version": "1",
+  "generated_at": "2026-05-17T16:01:17Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-NMFAlternatingLeastSquares.swift"
+  },
+  "output_crc32": "0x300bf633",
+  "primitive": "nmf",
+  "seed": "0xcafebabedeadbeef"
+}

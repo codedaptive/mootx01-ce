@@ -1,0 +1,1417 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "n=6, input_level=0, target=1",
+      "expected_output": {
+        "end_hlc": "0x620fc73066ee00000000000000000000",
+        "fingerprint": "0xffffefffef7fffdffffffffffff7fffffffffff7fffeffffffffffffffffffff",
+        "level": "0x01",
+        "row_count": "0x07a50300",
+        "start_hlc": "0xc213a6cb235300000000000000000000"
+      },
+      "id": "case_000",
+      "inputs": {
+        "target_level": "0x01",
+        "windows": [
+          {
+            "end_hlc": "0x4c0574bf470b00000000000000000000",
+            "fingerprint": "0xb756a9c38870b9caefa0f97dbea2fe3d7a0992d4dd0cf60c2ae3898f55411fcf",
+            "level": "0x00",
+            "row_count": "0x7f4e0000",
+            "start_hlc": "0x5726fae7655500000000000000000000"
+          },
+          {
+            "end_hlc": "0x060e2a84c9a300000000000000000000",
+            "fingerprint": "0x4158001b4a57c9d4f34d2343d700f1296f4487308e808cc44e30177a4aaeaf8a",
+            "level": "0x00",
+            "row_count": "0xa56d0000",
+            "start_hlc": "0xc213a6cb235300000000000000000000"
+          },
+          {
+            "end_hlc": "0x69285ff7a43b00000000000000000000",
+            "fingerprint": "0xc8b74e3b2e77b8d94553d668d0f7fbbaafe095800c644aeba1fc60fbe01f2753",
+            "level": "0x00",
+            "row_count": "0xcef10000",
+            "start_hlc": "0xe9cd7dcb6c7a00000000000000000000"
+          },
+          {
+            "end_hlc": "0x620fc73066ee00000000000000000000",
+            "fingerprint": "0x2342ae8de5756c9a8e267d9a62e343e7c84ca5a1fef2ff5bdf0d472a591ee759",
+            "level": "0x00",
+            "row_count": "0x98e20000",
+            "start_hlc": "0x1f870fb654f100000000000000000000"
+          },
+          {
+            "end_hlc": "0x552380c2fb3200000000000000000000",
+            "fingerprint": "0x23300af12019a65bf41f71730252c4b32fee5e1379040898875e60b9b05b9d73",
+            "level": "0x00",
+            "row_count": "0x724f0000",
+            "start_hlc": "0xed8316792fbd00000000000000000000"
+          },
+          {
+            "end_hlc": "0x7ec34e71230000000000000000000000",
+            "fingerprint": "0x6769abe1ee0f8d591f24068f27f0c540c35bef67bb10b24047df07e7cdd63a17",
+            "level": "0x00",
+            "row_count": "0x0bc50000",
+            "start_hlc": "0x2e0dccf5f2a200000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=6, input_level=1, target=2",
+      "expected_output": {
+        "end_hlc": "0x841df3d172aa00000000000000000000",
+        "fingerprint": "0xffffffffffffffffffffffefffffffeffffffffffff7ffbfffffffffffffffff",
+        "level": "0x02",
+        "row_count": "0x57550200",
+        "start_hlc": "0xa3c5fabb730d00000000000000000000"
+      },
+      "id": "case_001",
+      "inputs": {
+        "target_level": "0x02",
+        "windows": [
+          {
+            "end_hlc": "0x51f0dca33c6200000000000000000000",
+            "fingerprint": "0x0c939237aecd45d8cf45f1a74585ec619776f85e3fd572a525387b130e1044ab",
+            "level": "0x01",
+            "row_count": "0x33810000",
+            "start_hlc": "0x777fa983947f00000000000000000000"
+          },
+          {
+            "end_hlc": "0x4fc73303fd0b00000000000000000000",
+            "fingerprint": "0xa16fed98dd91ade43bd886a13ff9158f2930181cde23df25d799776cbbf31de0",
+            "level": "0x01",
+            "row_count": "0x38c20000",
+            "start_hlc": "0x33b026967ce800000000000000000000"
+          },
+          {
+            "end_hlc": "0xc06c021c921f00000000000000000000",
+            "fingerprint": "0x12317c97fa3c3d7fcf0e6d8cfcff18c24678f69e02f7bf0af69156f4eb29d06d",
+            "level": "0x01",
+            "row_count": "0x713b0000",
+            "start_hlc": "0xd24e7287bfc400000000000000000000"
+          },
+          {
+            "end_hlc": "0x841df3d172aa00000000000000000000",
+            "fingerprint": "0xc4af6df08e160130a1d429263e0defe06b1d140638b1168d005e9be05c87fa81",
+            "level": "0x01",
+            "row_count": "0xbd2d0000",
+            "start_hlc": "0xcd055bc935a500000000000000000000"
+          },
+          {
+            "end_hlc": "0xd7547a3b6e2700000000000000000000",
+            "fingerprint": "0xf52181fd0bed0772ba123ee715bdc0a8dbfe60f10b123289c9d26bc8dfd311b8",
+            "level": "0x01",
+            "row_count": "0x76890000",
+            "start_hlc": "0xa3c5fabb730d00000000000000000000"
+          },
+          {
+            "end_hlc": "0xa67d0840f51700000000000000000000",
+            "fingerprint": "0xa7e8c2c4924ec25a0ea45d4267040f040bec01f6e0b38894695aecb584ab6a3c",
+            "level": "0x01",
+            "row_count": "0x481f0000",
+            "start_hlc": "0x24c2cc8cd90d00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=3, input_level=2, target=3",
+      "expected_output": {
+        "end_hlc": "0xc1531e227e9c00000000000000000000",
+        "fingerprint": "0xffffeffbffedfbff5feffb7fffffef9ffff7fff77b7dffdf7efdffbbcfffeafe",
+        "level": "0x03",
+        "row_count": "0x7c630100",
+        "start_hlc": "0xd635ea53a42700000000000000000000"
+      },
+      "id": "case_002",
+      "inputs": {
+        "target_level": "0x03",
+        "windows": [
+          {
+            "end_hlc": "0x3e96c1fb1f7d00000000000000000000",
+            "fingerprint": "0xfb380999e5e49373558c6b1bfd8f0395ff67b0a72021fbc942e5af3a4fbcea84",
+            "level": "0x02",
+            "row_count": "0xc1140000",
+            "start_hlc": "0xe06e835d519900000000000000000000"
+          },
+          {
+            "end_hlc": "0xc0155452af6b00000000000000000000",
+            "fingerprint": "0x86efea339b45123c4b01823c0be8e81233e64eb03b65a44d7ebc630186c56896",
+            "level": "0x02",
+            "row_count": "0xf2b10000",
+            "start_hlc": "0xd635ea53a42700000000000000000000"
+          },
+          {
+            "end_hlc": "0xc1531e227e9c00000000000000000000",
+            "fingerprint": "0x2889e4413888e883016b7a403df1460c9e1447727b5d319a1cd8928a4343226e",
+            "level": "0x02",
+            "row_count": "0xc99c0000",
+            "start_hlc": "0x55ad45460fa600000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=2, input_level=3, target=4",
+      "expected_output": {
+        "end_hlc": "0x19b4f67cdad200000000000000000000",
+        "fingerprint": "0x7ed7effff5f8df7ed7dcfbd96e7caff795f6a57bf9f7ce7bbdaedfa5fc2fffa5",
+        "level": "0x04",
+        "row_count": "0x2f1a0100",
+        "start_hlc": "0x98c59d8dc54100000000000000000000"
+      },
+      "id": "case_003",
+      "inputs": {
+        "target_level": "0x04",
+        "windows": [
+          {
+            "end_hlc": "0x2493872eba0d00000000000000000000",
+            "fingerprint": "0x36826c9fe5609472548cfa91465c0ff791d4a52899d34c58b4a85504b02e7e05",
+            "level": "0x03",
+            "row_count": "0x9e6c0000",
+            "start_hlc": "0xa27b18cba79500000000000000000000"
+          },
+          {
+            "end_hlc": "0x19b4f67cdad200000000000000000000",
+            "fingerprint": "0x4857c7e850b8db4e9350f3c96820a9431562a15379268a632906cea5ec01d9a1",
+            "level": "0x03",
+            "row_count": "0x91ad0000",
+            "start_hlc": "0x98c59d8dc54100000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=3, input_level=4, target=5",
+      "expected_output": {
+        "end_hlc": "0x8b44f9832ddc00000000000000000000",
+        "fingerprint": "0xffbe5f9fffffffdfffffe7dfffffffdffcff7ffdffff7fedfdefffbf59deff2e",
+        "level": "0x05",
+        "row_count": "0xb90e0100",
+        "start_hlc": "0x305dfc235b3c00000000000000000000"
+      },
+      "id": "case_004",
+      "inputs": {
+        "target_level": "0x05",
+        "windows": [
+          {
+            "end_hlc": "0x2b35f8aa924600000000000000000000",
+            "fingerprint": "0xed9a4397da373d0aa1654301aef748cf140a3509d34561ac21e65fba11c64d08",
+            "level": "0x04",
+            "row_count": "0x2e230000",
+            "start_hlc": "0xf3a5172b756000000000000000000000"
+          },
+          {
+            "end_hlc": "0x8b44f9832ddc00000000000000000000",
+            "fingerprint": "0xfa340992af9cf400fdfaa7495a5ff790d86d6f9815de0e2dd4e44d2408dcbf26",
+            "level": "0x04",
+            "row_count": "0x4d8a0000",
+            "start_hlc": "0x82d9c0f56e4200000000000000000000"
+          },
+          {
+            "end_hlc": "0xf656d02f895f00000000000000000000",
+            "fingerprint": "0x2714569ae3625fd5ce28e6ded1900c9b60bc7af4fce87160392bff2d418ebf02",
+            "level": "0x04",
+            "row_count": "0x3e610000",
+            "start_hlc": "0x305dfc235b3c00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=3, input_level=0, target=1",
+      "expected_output": {
+        "end_hlc": "0x5114093fb4f000000000000000000000",
+        "fingerprint": "0x6ffefcf7faf5ffb7fffffefa7777fb5fffbbbffdff3ff7fffffffbdfffeffdff",
+        "level": "0x01",
+        "row_count": "0xa00f0200",
+        "start_hlc": "0x20b7aa16d42200000000000000000000"
+      },
+      "id": "case_005",
+      "inputs": {
+        "target_level": "0x01",
+        "windows": [
+          {
+            "end_hlc": "0xb5b26b30dcd700000000000000000000",
+            "fingerprint": "0x2fe288b662a5d622d1b254823250b10541a28a55f12d94ff49be3b91b3675dcb",
+            "level": "0x00",
+            "row_count": "0x49ac0000",
+            "start_hlc": "0x845303f0f8fa00000000000000000000"
+          },
+          {
+            "end_hlc": "0x8e86c058651d00000000000000000000",
+            "fingerprint": "0x6080f08378a08da71fcbaa384745225be49825b93617f28ab551f89ead8bed7b",
+            "level": "0x00",
+            "row_count": "0x646a0000",
+            "start_hlc": "0x78be62cc51b100000000000000000000"
+          },
+          {
+            "end_hlc": "0x5114093fb4f000000000000000000000",
+            "fingerprint": "0x4f5c0466baf474b4a8d6e6f05136e80e1bb9b6fc6f38b18c52f06344578bc866",
+            "level": "0x00",
+            "row_count": "0xf3f80000",
+            "start_hlc": "0x20b7aa16d42200000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=3, input_level=1, target=2",
+      "expected_output": {
+        "end_hlc": "0x4a41d8bee7da00000000000000000000",
+        "fingerprint": "0xfdbdfffdff8eeb7fbffff7bf7bf3ffffffefb7fecdaaffbfe7fffceff5fffafb",
+        "level": "0x02",
+        "row_count": "0xf6a40200",
+        "start_hlc": "0x96ea2070eb6100000000000000000000"
+      },
+      "id": "case_006",
+      "inputs": {
+        "target_level": "0x02",
+        "windows": [
+          {
+            "end_hlc": "0x2c7f6a24236a00000000000000000000",
+            "fingerprint": "0xf89cf7fcde0a416d969e03034872efd6d6c587e48d22d41d02d6d86090725a73",
+            "level": "0x01",
+            "row_count": "0x68d90000",
+            "start_hlc": "0x96ea2070eb6100000000000000000000"
+          },
+          {
+            "end_hlc": "0x4a41d8bee7da00000000000000000000",
+            "fingerprint": "0x251986517786eb3aa825f3b47ad0bc5e574001da01882f9f4339b4ced1d0a88a",
+            "level": "0x01",
+            "row_count": "0x78ff0000",
+            "start_hlc": "0x6898788b3f8200000000000000000000"
+          },
+          {
+            "end_hlc": "0x689023b2fe3600000000000000000000",
+            "fingerprint": "0x41387ac19d8e617683fad7b9015397ab6c2a31b8c928ab32e6f6f489e45f4000",
+            "level": "0x01",
+            "row_count": "0x16cc0000",
+            "start_hlc": "0xfe0732aec0b000000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=2, input_level=2, target=3",
+      "expected_output": {
+        "end_hlc": "0x7d7923a1777600000000000000000000",
+        "fingerprint": "0x7abffaebfdffa5ff7bfcf777fadf9fe67e32f6fdf7bdf7b7f79f2bffdb776dcb",
+        "level": "0x03",
+        "row_count": "0xf9450000",
+        "start_hlc": "0x5265db60728700000000000000000000"
+      },
+      "id": "case_007",
+      "inputs": {
+        "target_level": "0x03",
+        "windows": [
+          {
+            "end_hlc": "0x7d7923a1777600000000000000000000",
+            "fingerprint": "0x6a89daabe8f3a4557a106044aa5a94a05a3090b434bdf511f11f29b55975098b",
+            "level": "0x02",
+            "row_count": "0xa73f0000",
+            "start_hlc": "0x5265db60728700000000000000000000"
+          },
+          {
+            "end_hlc": "0x884068a0a81e00000000000000000000",
+            "fingerprint": "0x703e38c1957fa5bb79ecf73758dd8bc63602e6e9f7adf3b7468f234ac2066ccb",
+            "level": "0x02",
+            "row_count": "0x52060000",
+            "start_hlc": "0xafb65f9221e900000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=6, input_level=3, target=4",
+      "expected_output": {
+        "end_hlc": "0xb10683b089e100000000000000000000",
+        "fingerprint": "0xffffbffffffffffefffffffffffffffffffffffffffffbffffffffffffffffff",
+        "level": "0x04",
+        "row_count": "0xe2280300",
+        "start_hlc": "0x5ec174865a1800000000000000000000"
+      },
+      "id": "case_008",
+      "inputs": {
+        "target_level": "0x04",
+        "windows": [
+          {
+            "end_hlc": "0x84fed6088e2200000000000000000000",
+            "fingerprint": "0x03248e51dac49f2e649b4ad5167d61e489f14cccddb121831c63cdf1008ebc84",
+            "level": "0x03",
+            "row_count": "0xa5310000",
+            "start_hlc": "0x5ec174865a1800000000000000000000"
+          },
+          {
+            "end_hlc": "0x7c1dc3cbdcc100000000000000000000",
+            "fingerprint": "0xaebb0dabd923d996368c0df8eddd8b6176ffb8dc90a7b1bc40e196eec9a72f3a",
+            "level": "0x03",
+            "row_count": "0x8f8c0000",
+            "start_hlc": "0xdd2032cd1d9e00000000000000000000"
+          },
+          {
+            "end_hlc": "0x0f276bfdff3000000000000000000000",
+            "fingerprint": "0x41842ef53357d1d8272d179f2bf3ffb80c674f9e77ba99db096e24ffa0cf36af",
+            "level": "0x03",
+            "row_count": "0xb3510000",
+            "start_hlc": "0xf1c37fbfbff200000000000000000000"
+          },
+          {
+            "end_hlc": "0xb10683b089e100000000000000000000",
+            "fingerprint": "0xace396f10dc3a58e944bc475a5ef4bc18b317e506b05e303336c0b3a665baf5b",
+            "level": "0x03",
+            "row_count": "0xb8950000",
+            "start_hlc": "0xfef6c89d8bf300000000000000000000"
+          },
+          {
+            "end_hlc": "0xd3b458cfed6600000000000000000000",
+            "fingerprint": "0xbd9b2ee08cb9e7987e7f3f03f21c70fd531f1ab85a2fd34c9d14f471b6c5ade9",
+            "level": "0x03",
+            "row_count": "0xf1b70000",
+            "start_hlc": "0x7fabf5f3e1c900000000000000000000"
+          },
+          {
+            "end_hlc": "0x2f84cb1a9d7e00000000000000000000",
+            "fingerprint": "0x21161cccce864094d06a0e05bbb01b4617c9b8c3c26831cec65647ea795ad959",
+            "level": "0x03",
+            "row_count": "0x52cb0000",
+            "start_hlc": "0x77391dadffc500000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=3, input_level=4, target=5",
+      "expected_output": {
+        "end_hlc": "0x9e3b019af7c900000000000000000000",
+        "fingerprint": "0xededff7effffbfdf6ffbfffb7df5d7df7fffdfdfff7ff9b7d6d7fffff7fff77f",
+        "level": "0x05",
+        "row_count": "0xe3a40200",
+        "start_hlc": "0xf47f89cae78700000000000000000000"
+      },
+      "id": "case_009",
+      "inputs": {
+        "target_level": "0x05",
+        "windows": [
+          {
+            "end_hlc": "0xd313ab7d0e9300000000000000000000",
+            "fingerprint": "0xa501077c694fad9b679269383ca0129e7eabdf8e8a3b50250296d42fc16be53b",
+            "level": "0x04",
+            "row_count": "0xa8e60000",
+            "start_hlc": "0x1be573a7eafc00000000000000000000"
+          },
+          {
+            "end_hlc": "0x9e3b019af7c900000000000000000000",
+            "fingerprint": "0x28a98954bfc89b86027831f36df156d021fcd2c7254b7997d043abf13381d77f",
+            "level": "0x04",
+            "row_count": "0x15fa0000",
+            "start_hlc": "0xcb626c19aaa700000000000000000000"
+          },
+          {
+            "end_hlc": "0x8625f467c71f00000000000000000000",
+            "fingerprint": "0x60e4787254f8a64a09c3f6f84015839725cf069bd474a083469503d824fe457f",
+            "level": "0x04",
+            "row_count": "0x26c40000",
+            "start_hlc": "0xf47f89cae78700000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=2, input_level=0, target=1",
+      "expected_output": {
+        "end_hlc": "0x916fc146bc5100000000000000000000",
+        "fingerprint": "0x337ffbf67fb3d0f927fcbbfc134aad7673ffdf5d7ec8feffc1fdf90fdfbcfff3",
+        "level": "0x01",
+        "row_count": "0xaab00000",
+        "start_hlc": "0x7cb9aaee485600000000000000000000"
+      },
+      "id": "case_010",
+      "inputs": {
+        "target_level": "0x01",
+        "windows": [
+          {
+            "end_hlc": "0x916fc146bc5100000000000000000000",
+            "fingerprint": "0x3277bad07fa0d01823f4b9fc130080667245d8541c08deaac080a807892cdff3",
+            "level": "0x00",
+            "row_count": "0xc7a40000",
+            "start_hlc": "0x7cb9aaee485600000000000000000000"
+          },
+          {
+            "end_hlc": "0x5dae9231484500000000000000000000",
+            "fingerprint": "0x232949b662b310e107c893c8134aad1243bedf597ec0aedd817d510bdfb8f6b2",
+            "level": "0x00",
+            "row_count": "0xe30b0000",
+            "start_hlc": "0xb4354e5f2a9f00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=5, input_level=1, target=2",
+      "expected_output": {
+        "end_hlc": "0x562d08f99d8100000000000000000000",
+        "fingerprint": "0xffffff7fffffffefffffdffbfefeffffffffdfdffbfffffffffffffffdfdffff",
+        "level": "0x02",
+        "row_count": "0xcc320200",
+        "start_hlc": "0x0aa2de39265f00000000000000000000"
+      },
+      "id": "case_011",
+      "inputs": {
+        "target_level": "0x02",
+        "windows": [
+          {
+            "end_hlc": "0x562d08f99d8100000000000000000000",
+            "fingerprint": "0x8f03b7340d4175a7cdf64fa9e27aa686cf6c8b14489b1b5d2c04bdd7e9453592",
+            "level": "0x01",
+            "row_count": "0xa6570000",
+            "start_hlc": "0x94ede5ec678e00000000000000000000"
+          },
+          {
+            "end_hlc": "0x88ef00ef431400000000000000000000",
+            "fingerprint": "0xc8fabd492e7f3a8eb90914c08626d335f359c4d2aa6de467717dc71f1ce8aa31",
+            "level": "0x01",
+            "row_count": "0xf5ce0000",
+            "start_hlc": "0x253fbed4ef7700000000000000000000"
+          },
+          {
+            "end_hlc": "0x7fb8d2899b6e00000000000000000000",
+            "fingerprint": "0xa09b717caee7688a7a221c1a92224e4f66938089b8a1c9c85ec1f1f12d21cb7e",
+            "level": "0x01",
+            "row_count": "0x4d2c0000",
+            "start_hlc": "0x2ad03001ae8c00000000000000000000"
+          },
+          {
+            "end_hlc": "0x42dcbead974600000000000000000000",
+            "fingerprint": "0x2de1c11ac9a61d82915687a2dce88c254c01c0955bec2f8291d8751cd5f99272",
+            "level": "0x01",
+            "row_count": "0x37220000",
+            "start_hlc": "0x7638b67912a100000000000000000000"
+          },
+          {
+            "end_hlc": "0xb0f8f443d43400000000000000000000",
+            "fingerprint": "0x75578279942c95e0ab3acbe9fa56ce9a6b5bd5db186fcfe3e6da7447801c2756",
+            "level": "0x01",
+            "row_count": "0xadbd0000",
+            "start_hlc": "0x0aa2de39265f00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=3, input_level=2, target=3",
+      "expected_output": {
+        "end_hlc": "0x56575e5632ea00000000000000000000",
+        "fingerprint": "0xff7ffffd6fcffff7fefaffffffffffbfdeeffdffdfb7fcff7ae7fffff6f7ffff",
+        "level": "0x03",
+        "row_count": "0x0dd10100",
+        "start_hlc": "0x246614f9142000000000000000000000"
+      },
+      "id": "case_012",
+      "inputs": {
+        "target_level": "0x03",
+        "windows": [
+          {
+            "end_hlc": "0xd197876aac8200000000000000000000",
+            "fingerprint": "0x661e658c4dc91d1336eaabc87eb6cfa3ce08c91a8a36683c3002c360e630af84",
+            "level": "0x02",
+            "row_count": "0x4fcb0000",
+            "start_hlc": "0x246614f9142000000000000000000000"
+          },
+          {
+            "end_hlc": "0xb0ed68d7f94100000000000000000000",
+            "fingerprint": "0x9f6d9e31244e2286466aff7bed5ba2b880cd6c675fa7dc8d6ac5f6e64062986f",
+            "level": "0x02",
+            "row_count": "0xb56f0000",
+            "start_hlc": "0xd80caaf5955f00000000000000000000"
+          },
+          {
+            "end_hlc": "0x56575e5632ea00000000000000000000",
+            "fingerprint": "0x0d4dbd686ecdd062eada188d1d75da2ede23198b4d8480f77a24ced910b5e395",
+            "level": "0x02",
+            "row_count": "0x09960000",
+            "start_hlc": "0x770f9701f0cb00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=4, input_level=3, target=4",
+      "expected_output": {
+        "end_hlc": "0x9d1ce5c59fc900000000000000000000",
+        "fingerprint": "0xe7ffff3e7ffbfffffffbfffdfffffffffff2fffffdfdfffffdbfffffbfbfffff",
+        "level": "0x04",
+        "row_count": "0x68280300",
+        "start_hlc": "0x37212104bb0400000000000000000000"
+      },
+      "id": "case_013",
+      "inputs": {
+        "target_level": "0x04",
+        "windows": [
+          {
+            "end_hlc": "0x3c9f7f343f9800000000000000000000",
+            "fingerprint": "0xa291813673a2dd9edc61d34047830ebc0cf2f9c8c144adb00dbd855934a49622",
+            "level": "0x03",
+            "row_count": "0x4dd30000",
+            "start_hlc": "0x587f4ac107d800000000000000000000"
+          },
+          {
+            "end_hlc": "0xce504793fc5e00000000000000000000",
+            "fingerprint": "0x038c393a2ac0da5bf0d3ae6875d98ef9b792913999bc7beb0cb9b491ad29605e",
+            "level": "0x03",
+            "row_count": "0xfbe30000",
+            "start_hlc": "0xdcf33215860600000000000000000000"
+          },
+          {
+            "end_hlc": "0x74515fe0de4300000000000000000000",
+            "fingerprint": "0xe70f79223f4bcee71369fdf8ef3b9e9ffc3026cf747d9b2340302be4b7b38c2a",
+            "level": "0x03",
+            "row_count": "0xedac0000",
+            "start_hlc": "0x37212104bb0400000000000000000000"
+          },
+          {
+            "end_hlc": "0x9d1ce5c59fc900000000000000000000",
+            "fingerprint": "0x0665562a7352b8f2cfdb51c5e79d6f905320933951d517dcf10bfb7f243f27a3",
+            "level": "0x03",
+            "row_count": "0x33c40000",
+            "start_hlc": "0x8663f6ffeeed00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=3, input_level=4, target=5",
+      "expected_output": {
+        "end_hlc": "0x99bc17ed3fc800000000000000000000",
+        "fingerprint": "0xfdfff74f77ffff7fef7fffbfebbffbfdd7fffcff4bfffffaf79ff6afcd5ef3ff",
+        "level": "0x05",
+        "row_count": "0xb3da0000",
+        "start_hlc": "0xcc67a338f73100000000000000000000"
+      },
+      "id": "case_014",
+      "inputs": {
+        "target_level": "0x05",
+        "windows": [
+          {
+            "end_hlc": "0x6d0e00706e9400000000000000000000",
+            "fingerprint": "0xe81f5145357efd09e65ed18c8ba7abadc44bbcfd489b5ddac787d6a70d5e80b6",
+            "level": "0x04",
+            "row_count": "0x14340000",
+            "start_hlc": "0xcc67a338f73100000000000000000000"
+          },
+          {
+            "end_hlc": "0x99bc17ed3fc800000000000000000000",
+            "fingerprint": "0x9831864f33a3c94fab15b12a43296854d3bdf0040391ab223084f0098044c3ea",
+            "level": "0x04",
+            "row_count": "0xdf970000",
+            "start_hlc": "0xa6c53026c5d600000000000000000000"
+          },
+          {
+            "end_hlc": "0xef5dd6f81db300000000000000000000",
+            "fingerprint": "0xfddc600b6281c63e4279be1768945115c6323c2f426e65aab21b502944183201",
+            "level": "0x04",
+            "row_count": "0xc00e0000",
+            "start_hlc": "0xf146c0adfd6b00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=2, input_level=0, target=1",
+      "expected_output": {
+        "end_hlc": "0xe8f20330ecea00000000000000000000",
+        "fingerprint": "0x7ffbbffbdff38ffd7fe7defff2bfff3ff5916bf8cfdf5bdfbd4ffdffdbcfcff8",
+        "level": "0x01",
+        "row_count": "0x81700000",
+        "start_hlc": "0x9b2aac958c4a00000000000000000000"
+      },
+      "id": "case_015",
+      "inputs": {
+        "target_level": "0x01",
+        "windows": [
+          {
+            "end_hlc": "0x979a7833c2c200000000000000000000",
+            "fingerprint": "0x2209b1495eb38b6525e590d8f2b7cf1a71810be8c7195bdf954b5de91bc745f8",
+            "level": "0x00",
+            "row_count": "0x93620000",
+            "start_hlc": "0x9b2aac958c4a00000000000000000000"
+          },
+          {
+            "end_hlc": "0xe8f20330ecea00000000000000000000",
+            "fingerprint": "0x5ffa1eb3996005dc7bc35e67d0a9b73db59068988ac612843d4faddec8888a98",
+            "level": "0x00",
+            "row_count": "0xee0d0000",
+            "start_hlc": "0x302fb843486b00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=7, input_level=1, target=2",
+      "expected_output": {
+        "end_hlc": "0x792c8a6adbf100000000000000000000",
+        "fingerprint": "0xfffffffffffffffffffffbfffffffffffffffffffffffeffffffffffefffffff",
+        "level": "0x02",
+        "row_count": "0x308f0300",
+        "start_hlc": "0x7c91cd1bf10300000000000000000000"
+      },
+      "id": "case_016",
+      "inputs": {
+        "target_level": "0x02",
+        "windows": [
+          {
+            "end_hlc": "0xf027606aee7700000000000000000000",
+            "fingerprint": "0x0d1d0ccfc6dad87b51a3cad6b1cfff50de7100f8b2fac8a6dcabc89a292945c5",
+            "level": "0x01",
+            "row_count": "0xf7370000",
+            "start_hlc": "0xe636aac2fb3d00000000000000000000"
+          },
+          {
+            "end_hlc": "0xc4cf6b1c939800000000000000000000",
+            "fingerprint": "0x5336fa4c9e4ce54e827001d65780e47d16448dfc897b582ce09185e9a2e571a1",
+            "level": "0x01",
+            "row_count": "0x5a6a0000",
+            "start_hlc": "0xe4e2d62fcf9600000000000000000000"
+          },
+          {
+            "end_hlc": "0x53935f39930600000000000000000000",
+            "fingerprint": "0x25ee77658155b03651c129f1a6e54b9893724672baa6109c37363eb5ea1a436c",
+            "level": "0x01",
+            "row_count": "0x10e40000",
+            "start_hlc": "0xf1b15a6fc49e00000000000000000000"
+          },
+          {
+            "end_hlc": "0xb4942d76448500000000000000000000",
+            "fingerprint": "0xa5e39bd9eebc257463522a5cc17e2f36a6187a8b3e8f6853aee4a325ea04a19e",
+            "level": "0x01",
+            "row_count": "0x8b1a0000",
+            "start_hlc": "0x2f55c7e6926c00000000000000000000"
+          },
+          {
+            "end_hlc": "0x53b2252ca80700000000000000000000",
+            "fingerprint": "0x55336a97b7a89987603a807961c87e0032b47e3d85b69ca6580285e66905556a",
+            "level": "0x01",
+            "row_count": "0x9d840000",
+            "start_hlc": "0xd5620ac2464e00000000000000000000"
+          },
+          {
+            "end_hlc": "0x792c8a6adbf100000000000000000000",
+            "fingerprint": "0xa8b40edd05e12adb8a49317afcdfbf6cf79af565d00f46e227a9e72e026b5a1f",
+            "level": "0x01",
+            "row_count": "0xa6c40000",
+            "start_hlc": "0x7c91cd1bf10300000000000000000000"
+          },
+          {
+            "end_hlc": "0x626cb1a3109e00000000000000000000",
+            "fingerprint": "0x096c39ed6307c6ad4767ab5777825479c4b2a450d29e4a70dcecc529e6b180d9",
+            "level": "0x01",
+            "row_count": "0x01a50000",
+            "start_hlc": "0x89ed651610f700000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=2, input_level=2, target=3",
+      "expected_output": {
+        "end_hlc": "0x48653a0fb79700000000000000000000",
+        "fingerprint": "0xcb6dcbef357ffdfe5ff7eb50fab4d74ee4ffffdfe7c7cf798fdbfededf5e9b49",
+        "level": "0x03",
+        "row_count": "0xf61b0100",
+        "start_hlc": "0x33ba8e2a073a00000000000000000000"
+      },
+      "id": "case_017",
+      "inputs": {
+        "target_level": "0x03",
+        "windows": [
+          {
+            "end_hlc": "0x1fc88370171e00000000000000000000",
+            "fingerprint": "0xca4d02c5256dfdfc5b07eb40fa90d24664b3bf1723c7cd418fc0f85eca4a9208",
+            "level": "0x02",
+            "row_count": "0x77c80000",
+            "start_hlc": "0x33ba8e2a073a00000000000000000000"
+          },
+          {
+            "end_hlc": "0x48653a0fb79700000000000000000000",
+            "fingerprint": "0x0161c9ae3436e03614f1a350d8348508c4ee7fddc6038e780edbeed697541b49",
+            "level": "0x02",
+            "row_count": "0x7f530000",
+            "start_hlc": "0x13f31091df6100000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=3, input_level=3, target=4",
+      "expected_output": {
+        "end_hlc": "0xc1f4112c60f000000000000000000000",
+        "fingerprint": "0xfffd3f2ffffff7bfffffffffffbf6dffdfffafddfff1ff5ffdfffffbdbfff7e7",
+        "level": "0x04",
+        "row_count": "0x49580100",
+        "start_hlc": "0x3fe229676c0f00000000000000000000"
+      },
+      "id": "case_018",
+      "inputs": {
+        "target_level": "0x04",
+        "windows": [
+          {
+            "end_hlc": "0x0a5f4696934500000000000000000000",
+            "fingerprint": "0xb178132ac25d84242667bb0e7d122df94c8c014d3f30be1cc0ffd4e913dfe201",
+            "level": "0x03",
+            "row_count": "0x639d0000",
+            "start_hlc": "0xcdbc19734a8800000000000000000000"
+          },
+          {
+            "end_hlc": "0xc1f4112c60f000000000000000000000",
+            "fingerprint": "0x1efd3b0d32e7258b3dc8f5637eaf4d5e4fcf825df3f0855f3d8bdb03c0f55766",
+            "level": "0x03",
+            "row_count": "0xe5780000",
+            "start_hlc": "0x5dd45866153100000000000000000000"
+          },
+          {
+            "end_hlc": "0x356cd09f381200000000000000000000",
+            "fingerprint": "0x4b35342d2dc2f335fa9cdd99c88469f7d27f2e91a4a14118f01e22f80923e285",
+            "level": "0x03",
+            "row_count": "0x01420000",
+            "start_hlc": "0x3fe229676c0f00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=6, input_level=4, target=5",
+      "expected_output": {
+        "end_hlc": "0x71a2462c02be00000000000000000000",
+        "fingerprint": "0xffffffbfffffffff7ff7fffff7ffffffffffffffffffeffffffffffffffdffff",
+        "level": "0x05",
+        "row_count": "0xa0aa0100",
+        "start_hlc": "0x916235e7854e00000000000000000000"
+      },
+      "id": "case_019",
+      "inputs": {
+        "target_level": "0x05",
+        "windows": [
+          {
+            "end_hlc": "0x272c2924033d00000000000000000000",
+            "fingerprint": "0x6a0d0b8a49538db50581fe2dd2888f179706754f21826f57496744511ab13db4",
+            "level": "0x04",
+            "row_count": "0x4b640000",
+            "start_hlc": "0xe01b69690a8700000000000000000000"
+          },
+          {
+            "end_hlc": "0xc5752f514c9000000000000000000000",
+            "fingerprint": "0x707dba97d9c68d314080899be6ad7ff27d1845cc1df42fd2f8d905e3a97dae83",
+            "level": "0x04",
+            "row_count": "0x6aa40000",
+            "start_hlc": "0x0f5059a762a300000000000000000000"
+          },
+          {
+            "end_hlc": "0x729eb6daf85e00000000000000000000",
+            "fingerprint": "0xba7b821b6237ffe82102aa00662d270e2247ce75ed53446e469938f04f1da507",
+            "level": "0x04",
+            "row_count": "0xe8170000",
+            "start_hlc": "0x916235e7854e00000000000000000000"
+          },
+          {
+            "end_hlc": "0x71a2462c02be00000000000000000000",
+            "fingerprint": "0xa78e671ead29b8960be32c71518a95b0703bd6cd9f99e96c2b678f1d04b11bea",
+            "level": "0x04",
+            "row_count": "0x59040000",
+            "start_hlc": "0x17121b83135c00000000000000000000"
+          },
+          {
+            "end_hlc": "0xe4b0ce5e062e00000000000000000000",
+            "fingerprint": "0xb5490cb13fe5bb2771b231219577178fe49cc3a725aecb2406bff1e6ae45ae1e",
+            "level": "0x04",
+            "row_count": "0x6c590000",
+            "start_hlc": "0x63670675d1fe00000000000000000000"
+          },
+          {
+            "end_hlc": "0xf989f828182000000000000000000000",
+            "fingerprint": "0x2b46f486df411a4a7a740040a62ae7e951282e14262a21b4ef2184a1ea3ce134",
+            "level": "0x04",
+            "row_count": "0x3e2c0000",
+            "start_hlc": "0x25c409e739b400000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=4, input_level=0, target=1",
+      "expected_output": {
+        "end_hlc": "0xf17b72e46cba00000000000000000000",
+        "fingerprint": "0xf7fffcfdfffffffefffbeff7fdeffffdfffffbbfffffffdffdffeffffffff3ff",
+        "level": "0x01",
+        "row_count": "0xb6fb0100",
+        "start_hlc": "0xc53c7d71853600000000000000000000"
+      },
+      "id": "case_020",
+      "inputs": {
+        "target_level": "0x01",
+        "windows": [
+          {
+            "end_hlc": "0xf17b72e46cba00000000000000000000",
+            "fingerprint": "0x955facd0bde291faeea125c3442218ac98e18ab5139b33d78ddfe52bd63d71cd",
+            "level": "0x00",
+            "row_count": "0x9dc70000",
+            "start_hlc": "0xa78e03724cca00000000000000000000"
+          },
+          {
+            "end_hlc": "0xfa39011cd29100000000000000000000",
+            "fingerprint": "0x6593fc5d6cc5be2a3ecac337b44b174db12e2a99fb4f3f93a43de1f8adecb0f5",
+            "level": "0x00",
+            "row_count": "0x056c0000",
+            "start_hlc": "0xc3ca892d069b00000000000000000000"
+          },
+          {
+            "end_hlc": "0x18902d6a490700000000000000000000",
+            "fingerprint": "0xc7ac60f86ed4766e4fda6c767146004c05f9209765f752cc9004610972ddc30d",
+            "level": "0x00",
+            "row_count": "0x0a130000",
+            "start_hlc": "0xc53c7d71853600000000000000000000"
+          },
+          {
+            "end_hlc": "0xab1ea6b2501b00000000000000000000",
+            "fingerprint": "0x137b20d17fb9c45a8369e9c3ccc9f8555e35792de22fb619556e6ba59d7a4076",
+            "level": "0x00",
+            "row_count": "0x0ab50000",
+            "start_hlc": "0x374b1bc2f5ad00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=2, input_level=1, target=2",
+      "expected_output": {
+        "end_hlc": "0x3872cee3dcc200000000000000000000",
+        "fingerprint": "0xbfb78fa7fffcfaebdebad87dda7dc67d77597ffbf8efd457b3abbefffb70ef3f",
+        "level": "0x02",
+        "row_count": "0x38d60000",
+        "start_hlc": "0x880e90c73e3e00000000000000000000"
+      },
+      "id": "case_021",
+      "inputs": {
+        "target_level": "0x02",
+        "windows": [
+          {
+            "end_hlc": "0x3872cee3dcc200000000000000000000",
+            "fingerprint": "0x87b58484b1f4f2eb0eaad87dca79c60c67515492a08bd006b0ab9ebbcb30ad3b",
+            "level": "0x01",
+            "row_count": "0xc9750000",
+            "start_hlc": "0x880e90c73e3e00000000000000000000"
+          },
+          {
+            "end_hlc": "0x299a77205e8900000000000000000000",
+            "fingerprint": "0xb8870f27efd8f8c0d4985821d204807d50196b6978e49457030926e6fb504216",
+            "level": "0x01",
+            "row_count": "0x6f600000",
+            "start_hlc": "0xa555977bb1e000000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=4, input_level=2, target=3",
+      "expected_output": {
+        "end_hlc": "0xefe79e3a598f00000000000000000000",
+        "fingerprint": "0xffff5ffffffffaffdffff7fffffffaabffffff7fffffef7feffe7fffdffbefff",
+        "level": "0x03",
+        "row_count": "0x71ba0100",
+        "start_hlc": "0x408e9602870300000000000000000000"
+      },
+      "id": "case_022",
+      "inputs": {
+        "target_level": "0x03",
+        "windows": [
+          {
+            "end_hlc": "0x3e53e242b65400000000000000000000",
+            "fingerprint": "0x356f0a58ed89d82617cca190af4baa00f5a8752fd689ed7e4af47809591aeeaa",
+            "level": "0x02",
+            "row_count": "0xfc1d0000",
+            "start_hlc": "0xc99310fb2faa00000000000000000000"
+          },
+          {
+            "end_hlc": "0xefe79e3a598f00000000000000000000",
+            "fingerprint": "0x6db2170932d7e032d95fa3bdcf95d88bed841a33b820c1662310483ec769c37f",
+            "level": "0x02",
+            "row_count": "0x376c0000",
+            "start_hlc": "0x408e9602870300000000000000000000"
+          },
+          {
+            "end_hlc": "0x5fc1d7a8705900000000000000000000",
+            "fingerprint": "0xc08859e6cef98a5f4ee5f6cb444d42a04fcc9b2282ef4a1282fe7bc257b10c5f",
+            "level": "0x02",
+            "row_count": "0x33b30000",
+            "start_hlc": "0xd25d6acb2fa200000000000000000000"
+          },
+          {
+            "end_hlc": "0x84deb52ed34c00000000000000000000",
+            "fingerprint": "0xae6d15452c09a8e25062e2ed5ae8e02354bb0f735596ce5966e6769446d88315",
+            "level": "0x02",
+            "row_count": "0x0b7d0000",
+            "start_hlc": "0x28b209afd2fe00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=5, input_level=3, target=4",
+      "expected_output": {
+        "end_hlc": "0xd5e8c9548c7900000000000000000000",
+        "fingerprint": "0xffffffffffffffffffffbfdffffffbfffdfffeffffddffffffefffffffffffff",
+        "level": "0x04",
+        "row_count": "0x2e7c0300",
+        "start_hlc": "0x3beca3004c1200000000000000000000"
+      },
+      "id": "case_023",
+      "inputs": {
+        "target_level": "0x04",
+        "windows": [
+          {
+            "end_hlc": "0xd5e8c9548c7900000000000000000000",
+            "fingerprint": "0x300bd7cfd8fb299bcc8394985dfd139fbcfc027f3f418576d0a51c094f7f27fe",
+            "level": "0x03",
+            "row_count": "0xa3d10000",
+            "start_hlc": "0x7075f488547e00000000000000000000"
+          },
+          {
+            "end_hlc": "0x8fccaeb7f20000000000000000000000",
+            "fingerprint": "0x161fa9d699bd6b96da5dac1ddba900518c98d8377659e32a7124c31b40e3d2db",
+            "level": "0x03",
+            "row_count": "0x0b8a0000",
+            "start_hlc": "0x3beca3004c1200000000000000000000"
+          },
+          {
+            "end_hlc": "0xfcc3c2ce852800000000000000000000",
+            "fingerprint": "0x2f854120392afea7625236c22fbb39f60de70c8c734123f56e60aec567eea9f1",
+            "level": "0x03",
+            "row_count": "0x29d20000",
+            "start_hlc": "0x1b1f203cd75600000000000000000000"
+          },
+          {
+            "end_hlc": "0x01d1d2a7700300000000000000000000",
+            "fingerprint": "0xc2b526e544d1b4d0b974a3c380505034401d9669ad9d6c9e92480cd997c76c14",
+            "level": "0x03",
+            "row_count": "0xe74f0000",
+            "start_hlc": "0xf6a5b223793f00000000000000000000"
+          },
+          {
+            "end_hlc": "0xc3879e779e7200000000000000000000",
+            "fingerprint": "0xe362cdcea7189becec2d39c9628dfbe574fff065b9ddf8b187476facd5257258",
+            "level": "0x03",
+            "row_count": "0x70fe0000",
+            "start_hlc": "0x30fca5b8d5ea00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=4, input_level=4, target=5",
+      "expected_output": {
+        "end_hlc": "0x2f708f23d2d400000000000000000000",
+        "fingerprint": "0xffffff7ff77cf9bf5ff7ffffffffff5fffeffffeffffffdffffffffffffffbff",
+        "level": "0x05",
+        "row_count": "0x19d70100",
+        "start_hlc": "0x4b3600d2c50d00000000000000000000"
+      },
+      "id": "case_024",
+      "inputs": {
+        "target_level": "0x05",
+        "windows": [
+          {
+            "end_hlc": "0x70cf51b985c200000000000000000000",
+            "fingerprint": "0x5190ff07261018880fd747d210b9394f26eeea7e9c73041add47ae8f85698af6",
+            "level": "0x04",
+            "row_count": "0x5b650000",
+            "start_hlc": "0xd9f4c51a69f500000000000000000000"
+          },
+          {
+            "end_hlc": "0x1bcfb384ab7500000000000000000000",
+            "fingerprint": "0xfd26664c522c39195ad4ef0e9fc4e642a92407b84d3ab39bc87a3766ed2ff8c8",
+            "level": "0x04",
+            "row_count": "0xf3c30000",
+            "start_hlc": "0xf05a557e182b00000000000000000000"
+          },
+          {
+            "end_hlc": "0x2f708f23d2d400000000000000000000",
+            "fingerprint": "0xdc51f7433350399e5561bacf234f65446bcb28566bb2e20ba2bdffa3d352b26e",
+            "level": "0x04",
+            "row_count": "0xe05b0000",
+            "start_hlc": "0x4b3600d2c50d00000000000000000000"
+          },
+          {
+            "end_hlc": "0x442a84b2ff3c00000000000000000000",
+            "fingerprint": "0x0bfa223dc278e82e5f3064eaf3086f14956a9ab6ce1dcccf3f8699b833afd129",
+            "level": "0x04",
+            "row_count": "0xeb510000",
+            "start_hlc": "0xdd8caf7f1b5c00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=5, input_level=0, target=1",
+      "expected_output": {
+        "end_hlc": "0x66ee9cb168f900000000000000000000",
+        "fingerprint": "0xfffffffeffff7ffffffbffffffbfffffffffffffffffffffffdffffeffffffff",
+        "level": "0x01",
+        "row_count": "0xe15b0200",
+        "start_hlc": "0x1b4be1f8f71d00000000000000000000"
+      },
+      "id": "case_025",
+      "inputs": {
+        "target_level": "0x01",
+        "windows": [
+          {
+            "end_hlc": "0x82c6a42a4d4100000000000000000000",
+            "fingerprint": "0xc4975aa229b9711f757812e766a94a2cccc2321244d278d96159c0da49111ac5",
+            "level": "0x00",
+            "row_count": "0x0d9d0000",
+            "start_hlc": "0x56277d2b11cf00000000000000000000"
+          },
+          {
+            "end_hlc": "0x66ee9cb168f900000000000000000000",
+            "fingerprint": "0xc87723f8eca97f96c9a13410761a7fea42f713dbb5b547be7118d8d84954a6fc",
+            "level": "0x00",
+            "row_count": "0x0af20000",
+            "start_hlc": "0x40799fac1de800000000000000000000"
+          },
+          {
+            "end_hlc": "0xd6c7e1f90d0000000000000000000000",
+            "fingerprint": "0x3c6bd3b8cd347eb7b95117ecf83aa2920b7dd8e8b6b85ba3df07e6b6d0704fa3",
+            "level": "0x00",
+            "row_count": "0xae0c0000",
+            "start_hlc": "0x1bbc59f5a48a00000000000000000000"
+          },
+          {
+            "end_hlc": "0x3b1435a0429200000000000000000000",
+            "fingerprint": "0xf33945f2a7ed475c0beadf039015377565f68f12dd919e5c4013eeb0fcee8f32",
+            "level": "0x00",
+            "row_count": "0xaf8a0000",
+            "start_hlc": "0x1b4be1f8f71d00000000000000000000"
+          },
+          {
+            "end_hlc": "0xfd992394fccb00000000000000000000",
+            "fingerprint": "0xf3346efc958355213fbbc533f582df323cde74a5b27768efcb8083bc2bb41588",
+            "level": "0x00",
+            "row_count": "0x6d350000",
+            "start_hlc": "0x71f91c29dd9d00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=6, input_level=1, target=2",
+      "expected_output": {
+        "end_hlc": "0xe0f68d265bdd00000000000000000000",
+        "fingerprint": "0xfffffffffffffffffffffeffffffffffffffffffffffffffffffffffffffffff",
+        "level": "0x02",
+        "row_count": "0x5b700300",
+        "start_hlc": "0x01cc790f8b6400000000000000000000"
+      },
+      "id": "case_026",
+      "inputs": {
+        "target_level": "0x02",
+        "windows": [
+          {
+            "end_hlc": "0x0113b8b208a800000000000000000000",
+            "fingerprint": "0x474ce6fcfeb353d05daa74f2e96a20e8cb9d198c1c8a6dab55f162dbf9a25d62",
+            "level": "0x01",
+            "row_count": "0x2e9c0000",
+            "start_hlc": "0x79150eb10ba400000000000000000000"
+          },
+          {
+            "end_hlc": "0x19f62da6319e00000000000000000000",
+            "fingerprint": "0x76c01d33dfaea486ffe47e952db3ca21ad0c44f1fc38264d0c1fb55c8b5e5606",
+            "level": "0x01",
+            "row_count": "0xba7b0000",
+            "start_hlc": "0x9a9d00aed3db00000000000000000000"
+          },
+          {
+            "end_hlc": "0x69356710094500000000000000000000",
+            "fingerprint": "0x3d30c361e3bd81169fb5e0efc806ae815a5d1f8926b796ff77caaca0ae8338e4",
+            "level": "0x01",
+            "row_count": "0x856d0000",
+            "start_hlc": "0x0df44a3890d900000000000000000000"
+          },
+          {
+            "end_hlc": "0xdb86b5c9ca2b00000000000000000000",
+            "fingerprint": "0xdb67b4ab3c6dd76231a830c03d38902557e8358ccdadbff347ffba79b829f3ae",
+            "level": "0x01",
+            "row_count": "0xb5e60000",
+            "start_hlc": "0x5733062a78a300000000000000000000"
+          },
+          {
+            "end_hlc": "0xe0f68d265bdd00000000000000000000",
+            "fingerprint": "0xb2c174306efab912bb1744016c3695f4d05f3a4332c599793576ac4e8cd9aadb",
+            "level": "0x01",
+            "row_count": "0x35aa0000",
+            "start_hlc": "0xa480f2c9f5e900000000000000000000"
+          },
+          {
+            "end_hlc": "0xe36baad639ce00000000000000000000",
+            "fingerprint": "0x15ff04cda50a230915200c56cbff230ef2d2f89826f2400d960bf4524e36b2ee",
+            "level": "0x01",
+            "row_count": "0x045a0000",
+            "start_hlc": "0x01cc790f8b6400000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=5, input_level=2, target=3",
+      "expected_output": {
+        "end_hlc": "0xe82fa2d6dbf500000000000000000000",
+        "fingerprint": "0xffffff7fffffffffffbfffffffffffffffffffffffffffffffffffffffffffff",
+        "level": "0x03",
+        "row_count": "0xe7280200",
+        "start_hlc": "0xbc3480b8240800000000000000000000"
+      },
+      "id": "case_027",
+      "inputs": {
+        "target_level": "0x03",
+        "windows": [
+          {
+            "end_hlc": "0x8290ea407a5400000000000000000000",
+            "fingerprint": "0x84bdfe72bb74d2b78e39b4361bfdbda93a2178d9332bc17983fa03e458dd36ac",
+            "level": "0x02",
+            "row_count": "0x30270000",
+            "start_hlc": "0xbc3480b8240800000000000000000000"
+          },
+          {
+            "end_hlc": "0xe2fdce6a2d7000000000000000000000",
+            "fingerprint": "0x4e7afd1b9d2557399c21518cc04948e034ae062c50fb6e864f3cf32c0a24b135",
+            "level": "0x02",
+            "row_count": "0xc4ec0000",
+            "start_hlc": "0x167da4a7563400000000000000000000"
+          },
+          {
+            "end_hlc": "0xe82fa2d6dbf500000000000000000000",
+            "fingerprint": "0x0c01d456dcf38fd0a1bcfa57a3cfe4265fa7ff7ba0ad73438a9ab39a78e79c7d",
+            "level": "0x02",
+            "row_count": "0x7d1b0000",
+            "start_hlc": "0x890e60f997ea00000000000000000000"
+          },
+          {
+            "end_hlc": "0xe5df84e721be00000000000000000000",
+            "fingerprint": "0xa100721a6ec1af36b00dd35604724d37e6fc6d4fc5a87721cbe243bb4c6d70ff",
+            "level": "0x02",
+            "row_count": "0xa4e20000",
+            "start_hlc": "0x963e276fb58f00000000000000000000"
+          },
+          {
+            "end_hlc": "0x64d05dc840ad00000000000000000000",
+            "fingerprint": "0x5416ee73740e7d00fd9314fcd9e64b133ab605bf29bf78123cfd1d63bfb5097c",
+            "level": "0x02",
+            "row_count": "0xd2160000",
+            "start_hlc": "0x27d97ba0278e00000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=2, input_level=3, target=4",
+      "expected_output": {
+        "end_hlc": "0x0139e63f81d200000000000000000000",
+        "fingerprint": "0xd6fff7777ec9f9d627becfff772fbd7ffb9fed67ff1bff3f7f765f7f7dbc3ffe",
+        "level": "0x04",
+        "row_count": "0x7e750100",
+        "start_hlc": "0xe42ca02ca78b00000000000000000000"
+      },
+      "id": "case_028",
+      "inputs": {
+        "target_level": "0x04",
+        "windows": [
+          {
+            "end_hlc": "0x528228bdc65b00000000000000000000",
+            "fingerprint": "0xc6ef402774411882269ecef5750e347d3a1e6065ff1bfa1369761c0b20b03baa",
+            "level": "0x03",
+            "row_count": "0xd2e20000",
+            "start_hlc": "0xe42ca02ca78b00000000000000000000"
+          },
+          {
+            "end_hlc": "0x0139e63f81d200000000000000000000",
+            "fingerprint": "0x10bcb7550ac9f954032c0faa27238966f38b8d072618972d3664577e5d2c0574",
+            "level": "0x03",
+            "row_count": "0xac920000",
+            "start_hlc": "0xc33bb476bd9700000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=6, input_level=4, target=5",
+      "expected_output": {
+        "end_hlc": "0xea52a9ee85cd00000000000000000000",
+        "fingerprint": "0xfffdffeffff7ffffffffffffffffdffffffffffffffffdffffffffff7fffffff",
+        "level": "0x05",
+        "row_count": "0xca970100",
+        "start_hlc": "0x2bba7c424b0100000000000000000000"
+      },
+      "id": "case_029",
+      "inputs": {
+        "target_level": "0x05",
+        "windows": [
+          {
+            "end_hlc": "0xaea3491db07d00000000000000000000",
+            "fingerprint": "0x51e45c8e14775a39f55c63f383f0d29bfa6709d7b804c0dace4e533257734ff2",
+            "level": "0x04",
+            "row_count": "0xbfa40000",
+            "start_hlc": "0xb34991c9b8a500000000000000000000"
+          },
+          {
+            "end_hlc": "0x90208e310acd00000000000000000000",
+            "fingerprint": "0xf7658560395424bdcb63c482e1a5c1ce3d018889ec9ce4a9bf38011c5b2508fb",
+            "level": "0x04",
+            "row_count": "0xe21d0000",
+            "start_hlc": "0xcaf08962be8c00000000000000000000"
+          },
+          {
+            "end_hlc": "0x91665e2ca75400000000000000000000",
+            "fingerprint": "0x8850ba48e2f5569531103b8b584c0af6f22e9262214c89f401b97ffe09168374",
+            "level": "0x04",
+            "row_count": "0xcb030000",
+            "start_hlc": "0xb3a784c64ea900000000000000000000"
+          },
+          {
+            "end_hlc": "0x8426a081b67500000000000000000000",
+            "fingerprint": "0x362cb4c528a6cd651e0855de18cd0de778927211ead45d870904cdb07f950417",
+            "level": "0x04",
+            "row_count": "0xb54d0000",
+            "start_hlc": "0x629e487dde6d00000000000000000000"
+          },
+          {
+            "end_hlc": "0xea52a9ee85cd00000000000000000000",
+            "fingerprint": "0x21619da07bb445c3a73274ca7766c3a7bb395d1d78fecd4edf89c26e1e5fa1a7",
+            "level": "0x04",
+            "row_count": "0x7b630000",
+            "start_hlc": "0xdeb3a4f11e2c00000000000000000000"
+          },
+          {
+            "end_hlc": "0x73c3c83f8c8d00000000000000000000",
+            "fingerprint": "0x32dd0eeed761bc91d6e24cbed192195fd36a5d031e49c094c07af16f5ce8944f",
+            "level": "0x04",
+            "row_count": "0x2e200000",
+            "start_hlc": "0x2bba7c424b0100000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=4, input_level=0, target=1",
+      "expected_output": {
+        "end_hlc": "0x1e45f2d1a7e200000000000000000000",
+        "fingerprint": "0xfffffffffedffdff7ffff5ffffefffd7ffff7ffef77fffff7ffffbffdf4fffff",
+        "level": "0x01",
+        "row_count": "0x99bc0100",
+        "start_hlc": "0x56118e5bcf2900000000000000000000"
+      },
+      "id": "case_030",
+      "inputs": {
+        "target_level": "0x01",
+        "windows": [
+          {
+            "end_hlc": "0x1e45f2d1a7e200000000000000000000",
+            "fingerprint": "0x681b4630a692f573522594d9df4a745433e51fb4956ec76a5ae550e28347bebf",
+            "level": "0x00",
+            "row_count": "0xfb700000",
+            "start_hlc": "0x19647dca7cad00000000000000000000"
+          },
+          {
+            "end_hlc": "0x68166c5f8a7e00000000000000000000",
+            "fingerprint": "0x192649b4f2976d777bca853bba678982bcef6b10f32389f50fea9b959e0415d3",
+            "level": "0x00",
+            "row_count": "0x3f950000",
+            "start_hlc": "0x56118e5bcf2900000000000000000000"
+          },
+          {
+            "end_hlc": "0x424ab91fe27200000000000000000000",
+            "fingerprint": "0xff65bddc748e4d061fafa0239644260740fa63e21473fb2e75e4f8ed984deb2a",
+            "level": "0x00",
+            "row_count": "0xec8d0000",
+            "start_hlc": "0xef78c69f0a5000000000000000000000"
+          },
+          {
+            "end_hlc": "0xfe3a9283f8c400000000000000000000",
+            "fingerprint": "0x92bc99239cda91bc7519e11ef2801556998a66ce242aa6d35977a8b75d41403d",
+            "level": "0x00",
+            "row_count": "0x73280000",
+            "start_hlc": "0xd8bd65b33da000000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "description": "n=6, input_level=1, target=2",
+      "expected_output": {
+        "end_hlc": "0x5aad4c10e0f000000000000000000000",
+        "fingerprint": "0xffffffffffffffffffffffffffffdfffffffff7ffffbffffffefffffffefffff",
+        "level": "0x02",
+        "row_count": "0x30f60100",
+        "start_hlc": "0x84bf8646431600000000000000000000"
+      },
+      "id": "case_031",
+      "inputs": {
+        "target_level": "0x02",
+        "windows": [
+          {
+            "end_hlc": "0xf4e524187f1800000000000000000000",
+            "fingerprint": "0x84423615ab5cd4315563a5fe2466c4e7693a1c30e81096720dc0c07ceb02e4a0",
+            "level": "0x01",
+            "row_count": "0xf5270000",
+            "start_hlc": "0x0945424a38d000000000000000000000"
+          },
+          {
+            "end_hlc": "0xd5bfa7edad4f00000000000000000000",
+            "fingerprint": "0x3509254641f7d16a2c3cd0f9b85093e5d142e87ae7c866cf7a29594847880556",
+            "level": "0x01",
+            "row_count": "0x0ea50000",
+            "start_hlc": "0x05df3afbd64c00000000000000000000"
+          },
+          {
+            "end_hlc": "0x3fc19fc33b6000000000000000000000",
+            "fingerprint": "0x1fa2ece3f8de74c67845aae21c051dc9a4b78d38001aae072aeb0c6a98245ddd",
+            "level": "0x01",
+            "row_count": "0x0c070000",
+            "start_hlc": "0xd60b3e2d06e500000000000000000000"
+          },
+          {
+            "end_hlc": "0x81cb29c8318900000000000000000000",
+            "fingerprint": "0x26f60cc4d6773ad09b5456d2d5430ac5c9b21139a3e3ba3106893b9ba9828a53",
+            "level": "0x01",
+            "row_count": "0xee610000",
+            "start_hlc": "0x84bf8646431600000000000000000000"
+          },
+          {
+            "end_hlc": "0x24d39e23c4e100000000000000000000",
+            "fingerprint": "0xecd325cdc0c9511404a10de8549e1d9f5ecf66777fda0b2d9942ad6aa2ad8335",
+            "level": "0x01",
+            "row_count": "0x862c0000",
+            "start_hlc": "0x068190929df700000000000000000000"
+          },
+          {
+            "end_hlc": "0x5aad4c10e0f000000000000000000000",
+            "fingerprint": "0xee290e4398c68d780817f5de632f483f71947c5d65d27d2377648d7115e9aa70",
+            "level": "0x01",
+            "row_count": "0xad930000",
+            "start_hlc": "0x80dc5b5c1f7400000000000000000000"
+          }
+        ]
+      }
+    }
+  ],
+  "cookbook_section": "§8.14",
+  "format_version": "1",
+  "generated_at": "2026-05-17T15:10:25Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-TemporalCompression.swift"
+  },
+  "output_crc32": "0xdc3144c0",
+  "primitive": "temporal_compression",
+  "seed": "0xcafebabedeadbeef"
+}

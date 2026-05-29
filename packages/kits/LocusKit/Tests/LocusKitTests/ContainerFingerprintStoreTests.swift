@@ -1,0 +1,145 @@
+// ContainerFingerprintStoreTests.swift
+//
+// Tests for the per-container OR-reduction aggregate (spec section
+// 11.5) and its maintenance: incremental OR-in on capture, roll-up to
+// the wing, rebuild tightening, and the backfill that Estate.open runs
+// so an existing estate's aggregate covers every active row.
+
+import Foundation
+import Testing
+@testable import LocusKit
+
+@Suite("ContainerFingerprintStoreTests")
+struct ContainerFingerprintStoreTests {
+
+    private func makeStore() async throws -> (ContainerFingerprintStore, URL) {
+        let url = TestStorage.tempURL()
+        let store = try await ContainerFingerprintStore(storage: TestStorage.sqlite(url))
+        return (store, url)
+    }
+
+    private func drawer(id: String, wing: String, room: String,
+                        adj: Int64, op: Int64, prov: Int64) -> Drawer {
+        let content = "c-" + id
+        return Drawer(id: TestStorage.tid(id), content: content, wing: wing, room: room, addedBy: "t",
+                      filedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                      embeddingModelID: "m",
+                      provenance: prov,
+                      adjectiveBitmap: adj,
+                      operationalBitmap: op,
+                      lineageID: UUID())
+    }
+
+    // MARK: - Incremental OR-in
+
+    @Test("orIn maintains the room row and the wing roll-up")
+    func orInMaintainsRoomAndWing() async throws {
+        let (store, url) = try await makeStore()
+        defer { TestStorage.cleanup(url) }
+        try await store.orIn(wing: "w", room: "r1", adjective: 0b0001, operational: 0b0010, provenance: 0b0100)
+        try await store.orIn(wing: "w", room: "r2", adjective: 0b1000, operational: 0b0000, provenance: 0b0000)
+
+        let r1 = try await store.get(wing: "w", room: "r1")
+        #expect(r1 == ContainerFingerprint(adjective: 0b0001, operational: 0b0010, provenance: 0b0100))
+        let wing = try await store.get(wing: "w", room: "")
+        #expect(wing == ContainerFingerprint(adjective: 0b1001, operational: 0b0010, provenance: 0b0100))
+    }
+
+    @Test("orIn into the same room accumulates by OR")
+    func orInAccumulates() async throws {
+        let (store, url) = try await makeStore()
+        defer { TestStorage.cleanup(url) }
+        try await store.orIn(wing: "w", room: "r", adjective: 0b0001, operational: 0, provenance: 0)
+        try await store.orIn(wing: "w", room: "r", adjective: 0b0010, operational: 0, provenance: 0)
+        let r = try await store.get(wing: "w", room: "r")
+        #expect(r?.adjective == 0b0011)
+    }
+
+    @Test("An unmaterialized container reads back as nil, meaning scan")
+    func absentIsNil() async throws {
+        let (store, url) = try await makeStore()
+        defer { TestStorage.cleanup(url) }
+        #expect(try await store.get(wing: "w", room: "none") == nil)
+    }
+
+    // MARK: - Rebuild
+
+    @Test("rebuildRoom tightens an over-set row to the OR of its active drawers")
+    func rebuildTightens() async throws {
+        let (store, url) = try await makeStore()
+        defer { TestStorage.cleanup(url) }
+        // Simulate a stale over-approximation, then rebuild from a
+        // smaller active set.
+        try await store.orIn(wing: "w", room: "r", adjective: 0b1111, operational: 0, provenance: 0)
+        let active = [drawer(id: "1", wing: "w", room: "r", adj: 0b0001 << 26, op: 0, prov: 0),
+                      drawer(id: "2", wing: "w", room: "r", adj: 0b0010 << 26, op: 0, prov: 0)]
+        try await store.rebuildRoom(wing: "w", room: "r", activeDrawers: active)
+        let r = try await store.get(wing: "w", room: "r")
+        #expect(r?.adjective == 0b0011 << 26)
+    }
+
+    @Test("rebuildAll covers every container and rolls up the wing")
+    func rebuildAllCoversContainers() async throws {
+        let (store, url) = try await makeStore()
+        defer { TestStorage.cleanup(url) }
+        let ds = [drawer(id: "1", wing: "w", room: "r1", adj: 0b001 << 26, op: 0, prov: 0),
+                  drawer(id: "2", wing: "w", room: "r1", adj: 0b010 << 26, op: 0, prov: 0),
+                  drawer(id: "3", wing: "w", room: "r2", adj: 0b100 << 26, op: 0, prov: 0)]
+        try await store.rebuildAll(activeDrawers: ds)
+        #expect(try await store.get(wing: "w", room: "r1")?.adjective == 0b011 << 26)
+        #expect(try await store.get(wing: "w", room: "r2")?.adjective == 0b100 << 26)
+        #expect(try await store.get(wing: "w", room: "")?.adjective == 0b111 << 26)
+    }
+
+    // MARK: - Estate integration
+
+    @Test("Capture maintains the aggregate across rooms and the wing roll-up")
+    func captureMaintainsAggregate() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        let estate = try await Estate.create(
+            storage: TestStorage.sqlite(url),
+            owner: OwnerCredentials(ownerIdentifier: "o"))
+
+        // Two captures into different rooms with distinct operational bits.
+        let f1 = CaptureFrame(content: "a", channel: .voiced, room: "r1",
+                              latticeAnchor: LatticeAnchor(udcCode: "004"),
+                              addedBy: "t", embeddingModelID: "m", kind: .prose)
+        let f2 = CaptureFrame(content: "b", channel: .typed, room: "r2",
+                              latticeAnchor: LatticeAnchor(udcCode: "004"),
+                              addedBy: "t", embeddingModelID: "m", kind: .code)
+        let d1 = try await estate.capture(f1)
+        let d2 = try await estate.capture(f2)
+
+        let room1 = try await estate.containerFP.get(wing: d1.wing, room: "r1")
+        #expect(room1 == ContainerFingerprint(adjective: d1.adjectiveBitmap,
+                                              operational: d1.operationalBitmap,
+                                              provenance: d1.provenance))
+        let wing = try await estate.containerFP.get(wing: d1.wing, room: "")
+        #expect(wing == ContainerFingerprint(adjective: d1.adjectiveBitmap | d2.adjectiveBitmap,
+                                             operational: d1.operationalBitmap | d2.operationalBitmap,
+                                             provenance: d1.provenance | d2.provenance))
+    }
+
+    @Test("Estate.open backfills the aggregate from existing rows")
+    func openBackfillsAggregate() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        let storage = TestStorage.sqlite(url)
+
+        // Seed the manifest via create, then add rows through a bare
+        // DrawerStore so the capture OR-in is bypassed and the
+        // aggregate starts absent.
+        _ = try await Estate.create(storage: storage,
+                                    owner: OwnerCredentials(ownerIdentifier: "o"))
+        let drawerStore = try await DrawerStore(storage: storage)
+        try await drawerStore.addDrawer(drawer(id: "1", wing: "w", room: "r", adj: 0, op: 1 << 24, prov: 0))
+        try await drawerStore.addDrawer(drawer(id: "2", wing: "w", room: "r", adj: 0, op: 16 << 24, prov: 0))
+
+        // Reopening runs the backfill, making the aggregate cover both.
+        let estate = try await Estate.open(storage: storage,
+                                           owner: OwnerCredentials(ownerIdentifier: "o"))
+        let r = try await estate.containerFP.get(wing: "w", room: "r")
+        #expect(r?.operational == 17 << 24)
+    }
+}

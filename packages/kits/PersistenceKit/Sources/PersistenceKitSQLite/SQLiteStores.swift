@@ -1,0 +1,88 @@
+// SQLiteStores.swift
+//
+// Wrappers around SQLiteBackend implementing the four PersistenceKit
+// store protocols.
+
+import Foundation
+import PersistenceKit
+// ─────────────────────────────────────────────────────────────────
+// DO NOT REIMPLEMENT SUBSTRATE MATH.
+//
+// The substrate publishes conformance-gated, byte-identical
+// Swift+Rust implementations of every primitive listed in
+// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
+// top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
+// NMF, FFT, eigenvalue centrality, or any other substrate primitive,
+// it's already in SubstrateTypes / SubstrateKernel / SubstrateML.
+// CI catches drift four ways. See packages/libs/Substrate{Types,
+// Kernel,ML}/AGENTS.md.
+// ─────────────────────────────────────────────────────────────────
+import SubstrateLib
+import SubstrateTypes
+
+final class SQLiteRowStore: RowStore, Sendable {
+    let backend: SQLiteBackend
+    init(backend: SQLiteBackend) { self.backend = backend }
+
+    func insert(table: String, values: [String: TypedValue]) async throws -> RowHandle {
+        try await backend.insertRow(table: table, values: values)
+    }
+    func upsert(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle {
+        try await backend.upsertRow(table: table, values: values, conflictColumns: conflictColumns)
+    }
+    func update(table: String, values: [String: TypedValue], where predicate: StoragePredicate) async throws -> Int {
+        try await backend.updateRows(table: table, values: values, where: predicate)
+    }
+    func delete(table: String, where predicate: StoragePredicate) async throws -> Int {
+        try await backend.deleteRows(table: table, where: predicate)
+    }
+    func query(table: String, where predicate: StoragePredicate?, orderBy: [OrderClause], limit: Int?, offset: Int?) async throws -> [StorageRow] {
+        try await backend.queryRows(table: table, where: predicate, orderBy: orderBy, limit: limit, offset: offset, tableSchema: nil)
+    }
+    func count(table: String, where predicate: StoragePredicate?) async throws -> Int {
+        try await backend.countRows(table: table, where: predicate)
+    }
+}
+
+final class SQLiteBlobStore: BlobStore, Sendable {
+    let backend: SQLiteBackend
+    init(backend: SQLiteBackend) { self.backend = backend }
+
+    func put(key: BlobKey, bytes: Data) async throws { try await backend.putBlob(key, bytes: bytes) }
+    func get(key: BlobKey) async throws -> Data? { try await backend.getBlob(key) }
+    func delete(key: BlobKey) async throws { try await backend.deleteBlob(key) }
+    func exists(key: BlobKey) async throws -> Bool { try await backend.blobExists(key) }
+    func size(key: BlobKey) async throws -> Int? { try await backend.blobSize(key) }
+}
+
+final class SQLiteAuditLog: AuditLog, Sendable {
+    let backend: SQLiteBackend
+    init(backend: SQLiteBackend) { self.backend = backend }
+
+    func append(_ event: AuditEvent) async throws { try await backend.appendAuditEvent(event) }
+    func appendBatch(_ events: [AuditEvent]) async throws { try await backend.appendAuditBatch(events) }
+    func iterate(after: HLC?, rowID: UUID?, limit: Int) async throws -> [AuditEvent] {
+        try await backend.iterateAudit(after: after, rowID: rowID, limit: limit)
+    }
+    func eventsForRow(_ rowID: UUID) async throws -> [AuditEvent] {
+        try await backend.auditEventsForRow(rowID)
+    }
+    func count() async throws -> Int {
+        try await backend.auditCount()
+    }
+}
+
+final class SQLiteTransaction: StorageTransaction, Sendable {
+    let rowStore: any RowStore
+    let blobStore: any BlobStore
+    let vectorIndex: any VectorIndex
+    let auditLog: any AuditLog
+
+    init(backend: SQLiteBackend) {
+        self.rowStore = SQLiteRowStore(backend: backend)
+        self.blobStore = SQLiteBlobStore(backend: backend)
+        self.vectorIndex = SQLiteVectorIndex(backend: backend)
+        self.auditLog = SQLiteAuditLog(backend: backend)
+    }
+}

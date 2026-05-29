@@ -1,0 +1,82 @@
+Creative Commons Attribution-ShareAlike 3.0 Unported
+https://creativecommons.org/licenses/by-sa/3.0/
+
+Applies to: Sources/GnomonKit/Resources/UDCSchedule.json
+
+This file is licensed under the Creative Commons Attribution-
+ShareAlike 3.0 Unported License (CC BY-SA 3.0). To view a copy
+of this license, visit https://creativecommons.org/licenses/by-sa/3.0/
+or send a letter to Creative Commons, PO Box 1866, Mountain
+View, CA 94042, USA.
+
+Attribution
+-----------
+
+The UDC schedule data is derived from the Universal Decimal
+Classification Summary (UDC Summary, or udcS) published by the
+UDC Consortium at https://udcdata.info, which is itself
+released under CC BY-SA 3.0. The UDC Consortium is the holder
+of the UDC and the publisher of the Master Reference File from
+which the Summary is selected.
+
+When you redistribute this data file (or any portion or
+derivative of it), you must:
+
+  1. Give appropriate credit to the UDC Consortium as the
+     original source of the schedule. A note such as "Based on
+     the UDC Summary published by the UDC Consortium under
+     CC BY-SA 3.0" is sufficient.
+
+  2. Provide a link to https://creativecommons.org/licenses/by-sa/3.0/
+     or a copy of this license.
+
+  3. Indicate that this file may itself differ from the
+     original UDC Summary (for example, our pipeline may have
+     subset the Summary, added gazetteer terms, or restructured
+     the schema).
+
+  4. License any redistribution under the same CC BY-SA 3.0
+     license. This is the "share-alike" clause: derivatives of
+     this file must carry the same license.
+
+What this license does NOT cover
+--------------------------------
+
+This license applies ONLY to the data file
+`Sources/GnomonKit/Resources/UDCSchedule.json` and any direct
+copy or derivative of it.
+
+It does NOT apply to:
+
+  - The code in `Sources/GnomonKit/` and `rust/src/`, which is
+    licensed under the project's main MIT-or-Apache-2.0 license
+    (see LICENSE and LICENSE-APACHE).
+
+  - The output of the GnomonKit lookup function. UDC codes
+    themselves are facts (not subject to copyright). Wikidata
+    Q-IDs are dedicated to the public domain by Wikidata under
+    CC0. A program that consumes the lookup function and uses
+    its returned codes does not become a derivative of this
+    data file under any reasonable reading of CC BY-SA's reach.
+
+  - Code that depends on GnomonKit through its public Swift or
+    Rust API. The "mere aggregation" doctrine (explicit in
+    GPLv2 section 2, and implicit in CC BY-SA's narrower
+    scope) covers software linkage to a separately-licensed
+    data file when the boundary is clean and the consumer
+    interacts only through the published API.
+
+This separation is intentional. The data file ships under
+CC-BY-SA so its origin license is honored. The code ships under
+MIT-or-Apache so it composes cleanly with the broader MOOTx01
+substrate and any third-party consumer.
+
+UDC Consortium
+--------------
+
+The UDC Consortium is a Dutch nonprofit (registered in The Hague)
+that maintains and publishes the Universal Decimal Classification.
+The UDC Summary is one of several products derived from the
+Master Reference File. For questions about the UDC Summary or
+about UDC licensing in commercial settings, contact
+udcs AT udcc.org.

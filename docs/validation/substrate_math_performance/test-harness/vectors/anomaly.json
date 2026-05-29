@@ -1,0 +1,880 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "window size 4, current -51.5667",
+      "expected_output": {
+        "z_score": "0x543b6ebf"
+      },
+      "id": "case_000",
+      "inputs": {
+        "current": "0x46444ec2",
+        "window": [
+          "0xb7e1ab42",
+          "0x4df3d740",
+          "0x9f41c2c2",
+          "0x7e836942"
+        ]
+      }
+    },
+    {
+      "description": "window size 8, current 8.3486",
+      "expected_output": {
+        "z_score": "0xfc59dabd"
+      },
+      "id": "case_001",
+      "inputs": {
+        "current": "0xff930541",
+        "window": [
+          "0x8dbfb3c2",
+          "0xab417742",
+          "0xb2da4d42",
+          "0x92139142",
+          "0x4574e7c1",
+          "0x987a8442",
+          "0x707786c2",
+          "0x10375642"
+        ]
+      }
+    },
+    {
+      "description": "window size 16, current -33.3521",
+      "expected_output": {
+        "z_score": "0x3314e4be"
+      },
+      "id": "case_002",
+      "inputs": {
+        "current": "0x846805c2",
+        "window": [
+          "0x4ad59642",
+          "0xa38460c2",
+          "0xc4bdc6c2",
+          "0x3a308c42",
+          "0x64533842",
+          "0x3ca4a742",
+          "0xbf250cc2",
+          "0x11319ac2",
+          "0x57afb0c2",
+          "0xe14224c1",
+          "0xdb25a541",
+          "0x135aa142",
+          "0x5800e1c1",
+          "0x841beec1",
+          "0x5cc39e40",
+          "0x31b466c2"
+        ]
+      }
+    },
+    {
+      "description": "window size 32, current -14.2085",
+      "expected_output": {
+        "z_score": "0xf51abbbe"
+      },
+      "id": "case_003",
+      "inputs": {
+        "current": "0x005663c1",
+        "window": [
+          "0xe431e3c1",
+          "0x80c52142",
+          "0x19329641",
+          "0x0ed11ac1",
+          "0xdf55aa42",
+          "0x97cd4cc1",
+          "0x40045942",
+          "0x624ef0c1",
+          "0x729545c2",
+          "0x8ed345c2",
+          "0x12b4a3c2",
+          "0xc22a4542",
+          "0xac291a41",
+          "0x3af1c1c2",
+          "0x39cfbd42",
+          "0x10ed8942",
+          "0xc1f9bbc1",
+          "0xb30dea41",
+          "0xb2340742",
+          "0x8d168042",
+          "0x567ad4c1",
+          "0x0f439cc2",
+          "0x334f9d42",
+          "0xa8923c41",
+          "0x59d38cc2",
+          "0xcc2e9642",
+          "0xf65f3e42",
+          "0x62b3c242",
+          "0xdf9035c2",
+          "0x202918bf",
+          "0x1d8e4e42",
+          "0x0e34b7c2"
+        ]
+      }
+    },
+    {
+      "description": "window size 4, current 75.7295",
+      "expected_output": {
+        "z_score": "0xd6ff863f"
+      },
+      "id": "case_004",
+      "inputs": {
+        "current": "0x84759742",
+        "window": [
+          "0x7ecf73c2",
+          "0xb253a242",
+          "0x732a7942",
+          "0x9bfc79c2"
+        ]
+      }
+    },
+    {
+      "description": "window size 8, current 43.8044",
+      "expected_output": {
+        "z_score": "0x3e483a3f"
+      },
+      "id": "case_005",
+      "inputs": {
+        "current": "0xb3372f42",
+        "window": [
+          "0xa49b2341",
+          "0xbcdcc53f",
+          "0x2bba8042",
+          "0x94538642",
+          "0x34b8b741",
+          "0xee9c2ec1",
+          "0x9db4fe41",
+          "0xc2e3e540"
+        ]
+      }
+    },
+    {
+      "description": "window size 16, current 67.4474",
+      "expected_output": {
+        "z_score": "0x8353ac3f"
+      },
+      "id": "case_006",
+      "inputs": {
+        "current": "0x0de58642",
+        "window": [
+          "0x7a7d1441",
+          "0x8c77a6c2",
+          "0xc1b6d7c0",
+          "0x98c1e8c1",
+          "0x8aa8c1c2",
+          "0x5f568041",
+          "0xaa3253c2",
+          "0x753ba8c2",
+          "0x958d8042",
+          "0x848dcec1",
+          "0x47094e42",
+          "0x5e471bc1",
+          "0x3e568341",
+          "0xc7306742",
+          "0xb8d87540",
+          "0xc0e3b342"
+        ]
+      }
+    },
+    {
+      "description": "window size 32, current 61.9414",
+      "expected_output": {
+        "z_score": "0x37bea63f"
+      },
+      "id": "case_007",
+      "inputs": {
+        "current": "0x04c47742",
+        "window": [
+          "0xc62063c1",
+          "0xe84654c2",
+          "0x1674aac2",
+          "0x445e1dc2",
+          "0xcf0e8c41",
+          "0x0182af42",
+          "0x13d6ab42",
+          "0xe4f68c42",
+          "0x906a4340",
+          "0x27d1b4c2",
+          "0x85b4a341",
+          "0xba535fc1",
+          "0x12f385c2",
+          "0x7571b0c1",
+          "0xf764c3c2",
+          "0x4cc3c2c2",
+          "0x50c127c1",
+          "0x0008ba42",
+          "0xd91ff8c1",
+          "0xd86abfc2",
+          "0xedb56c42",
+          "0xc62e9442",
+          "0xa088b041",
+          "0x619119c2",
+          "0x7c8f3cc2",
+          "0x92e0b1c1",
+          "0x468cd341",
+          "0x5f978641",
+          "0x82ff8c40",
+          "0xa859a8c1",
+          "0x259a11c2",
+          "0x5a00b8c2"
+        ]
+      }
+    },
+    {
+      "description": "window size 4, current 30.1357",
+      "expected_output": {
+        "z_score": "0x3336cc3d"
+      },
+      "id": "case_008",
+      "inputs": {
+        "current": "0xdf15f141",
+        "window": [
+          "0xf8af0a42",
+          "0x7b06bbc2",
+          "0x7ecc7c42",
+          "0xb78bb042"
+        ]
+      }
+    },
+    {
+      "description": "window size 8, current 21.1321",
+      "expected_output": {
+        "z_score": "0x4b809f3e"
+      },
+      "id": "case_009",
+      "inputs": {
+        "current": "0x840ea941",
+        "window": [
+          "0xcc81c6c2",
+          "0x24145441",
+          "0xc59881c2",
+          "0x38748bc2",
+          "0x3c78c340",
+          "0xde9cb042",
+          "0x29787b42",
+          "0x09658542"
+        ]
+      }
+    },
+    {
+      "description": "window size 16, current -3.1813",
+      "expected_output": {
+        "z_score": "0x5a57983d"
+      },
+      "id": "case_010",
+      "inputs": {
+        "current": "0xda9a4bc0",
+        "window": [
+          "0x1638c5c1",
+          "0xb2b4c3c2",
+          "0xb81818c1",
+          "0x86954642",
+          "0x336a6dc2",
+          "0x00311442",
+          "0x9e9091c2",
+          "0xf31abfc2",
+          "0x8657c742",
+          "0xe2836b42",
+          "0x5478d7c1",
+          "0x57701ec2",
+          "0xdbdc4f42",
+          "0x2835f741",
+          "0xd169e6c1",
+          "0x20d20841"
+        ]
+      }
+    },
+    {
+      "description": "window size 32, current 46.8459",
+      "expected_output": {
+        "z_score": "0x8e8bac3f"
+      },
+      "id": "case_011",
+      "inputs": {
+        "current": "0x31623b42",
+        "window": [
+          "0x919c46c2",
+          "0xd445fb41",
+          "0x29ffbdc2",
+          "0x7aed2342",
+          "0x2cb5b0c2",
+          "0x3ca71e41",
+          "0x9b9a9dc1",
+          "0x443e3fc2",
+          "0x78f174c0",
+          "0xa294b3c1",
+          "0xd3c31ac1",
+          "0x03536ac1",
+          "0x22d68742",
+          "0x8b6499c2",
+          "0x6f151ec1",
+          "0xb0117441",
+          "0x1520a9c2",
+          "0x5b6e51c1",
+          "0xfddf57c2",
+          "0xece3cfc1",
+          "0x12e9c241",
+          "0x283e0541",
+          "0x36747842",
+          "0x682466c1",
+          "0x23502041",
+          "0x2279f0c0",
+          "0xe3380842",
+          "0x23a971c2",
+          "0x6c9bc7c2",
+          "0xd67787c1",
+          "0x4cdda840",
+          "0x265e7542"
+        ]
+      }
+    },
+    {
+      "description": "window size 4, current -0.8451",
+      "expected_output": {
+        "z_score": "0x62cff23e"
+      },
+      "id": "case_012",
+      "inputs": {
+        "current": "0x285958bf",
+        "window": [
+          "0x895c04c2",
+          "0x329fcb41",
+          "0x09f0abc2",
+          "0x36f60941"
+        ]
+      }
+    },
+    {
+      "description": "window size 8, current 39.0597",
+      "expected_output": {
+        "z_score": "0x5c8a133f"
+      },
+      "id": "case_013",
+      "inputs": {
+        "current": "0x2b3d1c42",
+        "window": [
+          "0x940fa8c2",
+          "0x04f08ac1",
+          "0x2d653a42",
+          "0x13755c42",
+          "0x7dd92e42",
+          "0x93b16b42",
+          "0xb449bb41",
+          "0x89e71bc2"
+        ]
+      }
+    },
+    {
+      "description": "window size 16, current 44.5311",
+      "expected_output": {
+        "z_score": "0xdd43563f"
+      },
+      "id": "case_014",
+      "inputs": {
+        "current": "0xd71f3242",
+        "window": [
+          "0xae5afbc0",
+          "0xbc4c7ec2",
+          "0x53d89c42",
+          "0x92941c40",
+          "0xbcd36c40",
+          "0x1c7580c2",
+          "0x9741ab42",
+          "0x3614ed41",
+          "0x1bcd8e41",
+          "0xdb55bec1",
+          "0x2aab3d42",
+          "0x162b5ac2",
+          "0x9ee313c2",
+          "0xa820cf41",
+          "0x05a28fc2",
+          "0x18c78a42"
+        ]
+      }
+    },
+    {
+      "description": "window size 32, current -20.4509",
+      "expected_output": {
+        "z_score": "0xb3d1c0be"
+      },
+      "id": "case_015",
+      "inputs": {
+        "current": "0x6c9ba3c1",
+        "window": [
+          "0x33208f42",
+          "0x478b1342",
+          "0x8016bbc2",
+          "0x170f3a42",
+          "0x4045c3c2",
+          "0x06183741",
+          "0x4b0d4c42",
+          "0x48edc1c2",
+          "0x07f8e2c1",
+          "0x5b0e80c2",
+          "0xb4f63142",
+          "0xf60d8d40",
+          "0x44a89b41",
+          "0x2cffc342",
+          "0x0dec1fc2",
+          "0x841fa542",
+          "0x0ec70bc1",
+          "0x143a8c42",
+          "0xd6962cc2",
+          "0x8b267d41",
+          "0x7ae934c2",
+          "0x655a7442",
+          "0x8e71eec1",
+          "0xee75b442",
+          "0x72ac67c2",
+          "0x74e04642",
+          "0x75e45dc2",
+          "0x2efbac41",
+          "0x68f4bb41",
+          "0xa4b28dc2",
+          "0x12d354c2",
+          "0xf4dda341"
+        ]
+      }
+    },
+    {
+      "description": "window size 4, current -0.1236",
+      "expected_output": {
+        "z_score": "0x1e96b4bf"
+      },
+      "id": "case_016",
+      "inputs": {
+        "current": "0xc019fdbd",
+        "window": [
+          "0x0a008b42",
+          "0x8836a540",
+          "0xb10f7b42",
+          "0x15b69241"
+        ]
+      }
+    },
+    {
+      "description": "window size 8, current 99.9873",
+      "expected_output": {
+        "z_score": "0x4bc13540"
+      },
+      "id": "case_017",
+      "inputs": {
+        "current": "0x85f9c742",
+        "window": [
+          "0xdafe64c1",
+          "0x4cd8ca41",
+          "0x20119542",
+          "0x39b626c2",
+          "0x43f39241",
+          "0xa8563540",
+          "0x905111bf",
+          "0x53b1d1c1"
+        ]
+      }
+    },
+    {
+      "description": "window size 16, current -39.5065",
+      "expected_output": {
+        "z_score": "0xb03250bf"
+      },
+      "id": "case_018",
+      "inputs": {
+        "current": "0xad061ec2",
+        "window": [
+          "0x0d7c0e42",
+          "0x065de6c1",
+          "0x063aa1c2",
+          "0x00609fc1",
+          "0xd9f50542",
+          "0xb50cb542",
+          "0x7f075dc2",
+          "0xe481c1bf",
+          "0xa80c1ac2",
+          "0x18aa9742",
+          "0x3cd1aac2",
+          "0x0c619242",
+          "0xff421f42",
+          "0xd2bca7c0",
+          "0x92003942",
+          "0x8888a0c1"
+        ]
+      }
+    },
+    {
+      "description": "window size 32, current -76.2968",
+      "expected_output": {
+        "z_score": "0xde8baebf"
+      },
+      "id": "case_019",
+      "inputs": {
+        "current": "0xf99798c2",
+        "window": [
+          "0xd69cf641",
+          "0xea41a640",
+          "0x7713dac1",
+          "0xde996341",
+          "0x426ac140",
+          "0xf46f2742",
+          "0x01cbafc2",
+          "0x34db3141",
+          "0x29cc67c2",
+          "0x57ac96c1",
+          "0xebc974c2",
+          "0x4a630940",
+          "0x752697c2",
+          "0x21876dc1",
+          "0x481f0241",
+          "0xd62b18c2",
+          "0x17766342",
+          "0x384e71bf",
+          "0xcbfbc7c2",
+          "0x34528bc2",
+          "0xbdb8b542",
+          "0xd894d33f",
+          "0xd6538dc2",
+          "0x30b8da3f",
+          "0xd8d227c1",
+          "0xca2966c2",
+          "0x57521fc2",
+          "0xde0107c2",
+          "0x15e99642",
+          "0x9a89a741",
+          "0x1df49b42",
+          "0xc8c502c2"
+        ]
+      }
+    },
+    {
+      "description": "window size 4, current 27.9776",
+      "expected_output": {
+        "z_score": "0x783c243f"
+      },
+      "id": "case_020",
+      "inputs": {
+        "current": "0x32d2df41",
+        "window": [
+          "0xcea30542",
+          "0x8ed087c2",
+          "0x9b298442",
+          "0x7621aac2"
+        ]
+      }
+    },
+    {
+      "description": "window size 8, current -12.8162",
+      "expected_output": {
+        "z_score": "0x2398febe"
+      },
+      "id": "case_021",
+      "inputs": {
+        "current": "0x370f4dc1",
+        "window": [
+          "0x573a53c2",
+          "0x60376a40",
+          "0x4b1690c2",
+          "0xe498b242",
+          "0x06bfaf42",
+          "0x9e599940",
+          "0x5cfb3042",
+          "0x28462d41"
+        ]
+      }
+    },
+    {
+      "description": "window size 16, current 79.0162",
+      "expected_output": {
+        "z_score": "0x8b2fd93f"
+      },
+      "id": "case_022",
+      "inputs": {
+        "current": "0x49089e42",
+        "window": [
+          "0x9dc2bdc0",
+          "0xf576ce41",
+          "0x052135c2",
+          "0xff66b6c1",
+          "0x52957dc2",
+          "0xceb8ba42",
+          "0x2bcf8841",
+          "0x8edbabc2",
+          "0xc9b2e1c1",
+          "0x5d5941c2",
+          "0xdbd93d42",
+          "0x34e9c041",
+          "0x59ad3b42",
+          "0x741d1842",
+          "0xa0f491c2",
+          "0xf0324a41"
+        ]
+      }
+    },
+    {
+      "description": "window size 32, current -72.9139",
+      "expected_output": {
+        "z_score": "0xef86aabf"
+      },
+      "id": "case_023",
+      "inputs": {
+        "current": "0xedd391c2",
+        "window": [
+          "0x6db7a1c2",
+          "0xd0e8e1c1",
+          "0x33efbd42",
+          "0x56f1a742",
+          "0x0027d2c1",
+          "0xcf198a40",
+          "0xca6bafc2",
+          "0x47509ac2",
+          "0x5532a242",
+          "0xf19cc541",
+          "0x0d5d90c2",
+          "0x288485c2",
+          "0x52d0d841",
+          "0x45222342",
+          "0xfad7b842",
+          "0x0040b342",
+          "0x2a734d41",
+          "0x3de58f42",
+          "0x4ab5db41",
+          "0x85e92fc2",
+          "0xc2cadd41",
+          "0x64bc7441",
+          "0xc7ed8742",
+          "0xeb63b8c2",
+          "0x6ab80e42",
+          "0x42328d42",
+          "0x26512a42",
+          "0x59b13ec2",
+          "0x83926ac2",
+          "0x88019142",
+          "0xe3a916c2",
+          "0x803a08c2"
+        ]
+      }
+    },
+    {
+      "description": "window size 4, current -50.9567",
+      "expected_output": {
+        "z_score": "0xd9205bc0"
+      },
+      "id": "case_024",
+      "inputs": {
+        "current": "0xadd34bc2",
+        "window": [
+          "0x1ad1a642",
+          "0x0eb50e41",
+          "0xae881a42",
+          "0x2f9a0542"
+        ]
+      }
+    },
+    {
+      "description": "window size 8, current -79.0536",
+      "expected_output": {
+        "z_score": "0xcf9ca3bf"
+      },
+      "id": "case_025",
+      "inputs": {
+        "current": "0x721b9ec2",
+        "window": [
+          "0x89b0a6c2",
+          "0xf87c0442",
+          "0xba21c6c2",
+          "0x0f22c042",
+          "0x52f8ad42",
+          "0x946eb242",
+          "0xe4e14a40",
+          "0xe156a5c1"
+        ]
+      }
+    },
+    {
+      "description": "window size 16, current 54.1173",
+      "expected_output": {
+        "z_score": "0xf668893f"
+      },
+      "id": "case_026",
+      "inputs": {
+        "current": "0x20785842",
+        "window": [
+          "0x57fe9442",
+          "0x07edbb42",
+          "0x8a6fa140",
+          "0x8ddeb6c0",
+          "0x4a758ec1",
+          "0x66c88f42",
+          "0x10224fc2",
+          "0xacaa4b40",
+          "0xd2619941",
+          "0xc640c1c2",
+          "0x625e84c2",
+          "0xfdec8e41",
+          "0xecf329c2",
+          "0x6ca54fc0",
+          "0x99e012c2",
+          "0x1a68f241"
+        ]
+      }
+    },
+    {
+      "description": "window size 32, current -15.0395",
+      "expected_output": {
+        "z_score": "0xd16e35be"
+      },
+      "id": "case_027",
+      "inputs": {
+        "current": "0x9ca170c1",
+        "window": [
+          "0x1ef0c742",
+          "0x5ad0c0c0",
+          "0xbe4cac42",
+          "0x727319c2",
+          "0x00bed2bf",
+          "0xc0b582c2",
+          "0xd707d141",
+          "0x404f4442",
+          "0xe9e0a6c2",
+          "0xa89585bf",
+          "0xf61865c2",
+          "0x57da9741",
+          "0x0e68af41",
+          "0x3bb976c1",
+          "0x8a249d41",
+          "0xae6932c2",
+          "0x80a23542",
+          "0x522814c1",
+          "0x96ab66c2",
+          "0x41590bc2",
+          "0x596ebf41",
+          "0x155acb41",
+          "0x781ab83f",
+          "0x3587bfc2",
+          "0x6801be40",
+          "0xe839c7c2",
+          "0x7253f141",
+          "0xa16c87c1",
+          "0xa8656bc2",
+          "0x95428742",
+          "0xf75bb4c2",
+          "0x00738e42"
+        ]
+      }
+    },
+    {
+      "description": "window size 4, current 46.3428",
+      "expected_output": {
+        "z_score": "0xca1c513f"
+      },
+      "id": "case_028",
+      "inputs": {
+        "current": "0x0e5f3942",
+        "window": [
+          "0x778d9942",
+          "0xb90297c2",
+          "0x987f1542",
+          "0xce8d8ec2"
+        ]
+      }
+    },
+    {
+      "description": "window size 8, current 97.6484",
+      "expected_output": {
+        "z_score": "0x70f70840"
+      },
+      "id": "case_029",
+      "inputs": {
+        "current": "0xfa4bc342",
+        "window": [
+          "0xd60a0f42",
+          "0x4ebfa6c0",
+          "0x495b44c1",
+          "0x15d98b42",
+          "0x686c6fc2",
+          "0x66a44342",
+          "0xcb507bc2",
+          "0x1258bdc0"
+        ]
+      }
+    },
+    {
+      "description": "window size 16, current -77.5446",
+      "expected_output": {
+        "z_score": "0xa2e364bf"
+      },
+      "id": "case_030",
+      "inputs": {
+        "current": "0xd5169bc2",
+        "window": [
+          "0xfead32c2",
+          "0xf25c42c2",
+          "0x6c9bbac2",
+          "0xacfcb442",
+          "0x516773c2",
+          "0x8491a7c2",
+          "0x578364c2",
+          "0xdfafbac2",
+          "0xb521bac0",
+          "0x9a8a2bc2",
+          "0xdb02c542",
+          "0x2d8e18c2",
+          "0xe4a7bb42",
+          "0xbde8cc40",
+          "0x2ff18ec2",
+          "0x6c56bd42"
+        ]
+      }
+    },
+    {
+      "description": "window size 32, current -67.5923",
+      "expected_output": {
+        "z_score": "0xe39e68bf"
+      },
+      "id": "case_031",
+      "inputs": {
+        "current": "0x3d2f87c2",
+        "window": [
+          "0x840dc5c2",
+          "0x891b71c2",
+          "0x7343abc2",
+          "0x2411f2c1",
+          "0xc8590b41",
+          "0x7a9ad2c1",
+          "0xe4facac1",
+          "0x455aa0c1",
+          "0x0fd02b42",
+          "0x4962b5c2",
+          "0xa80a4ec2",
+          "0x426667c2",
+          "0xde94ba42",
+          "0x7419a2c2",
+          "0x6b159340",
+          "0xc7faf541",
+          "0xf461bbc2",
+          "0x8c2ddb41",
+          "0xc394fbc1",
+          "0xa3592742",
+          "0xbc2fa3c2",
+          "0x1487fdc1",
+          "0xc9402342",
+          "0x80ae943f",
+          "0xd1029fc2",
+          "0x5e4135c2",
+          "0xf52475c2",
+          "0x7ee7b242",
+          "0xed6a8042",
+          "0x6a143840",
+          "0x384ed4c1",
+          "0xbaef8442"
+        ]
+      }
+    }
+  ],
+  "cookbook_section": "§8.13",
+  "format_version": "1",
+  "generated_at": "2026-05-17T13:20:18Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "glref-swift-AnomalyDetection.swift"
+  },
+  "output_crc32": "0x6c6fda4d",
+  "primitive": "anomaly",
+  "seed": "0xcafebabedeadbeef"
+}
