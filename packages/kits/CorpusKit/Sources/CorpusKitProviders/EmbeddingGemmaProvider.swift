@@ -11,6 +11,7 @@
 // private impl detail (see MiniLMTextProvider for the rationale).
 
 import Foundation
+import SubstrateTypes
 import EngramLib
 import CorpusKit
 import VectorKit
@@ -27,7 +28,6 @@ import VectorKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import SubstrateML
 
 public struct EmbeddingGemmaProvider: EmbeddingProvider {

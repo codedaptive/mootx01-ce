@@ -44,7 +44,7 @@
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::fingerprint256::Fingerprint256;
+use substrate_types::fingerprint256::Fingerprint256;
 
 /// Pack a single i64 bitmap column into block 0 of a
 /// `Fingerprint256` with blocks 1–3 zero. The packing is a

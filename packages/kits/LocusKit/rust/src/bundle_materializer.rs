@@ -25,7 +25,7 @@
 //!   lands, callers compose
 //!   `materialize_room(wing, room, &store.drawers_in(wing, room)?, now)`.
 //! - Swift's default kernel `PortableKernel.kernelForCurrentPlatform()`
-//!   is replaced by `substrate_lib::kernel::ScalarKernel` — the
+//!   is replaced by `substrate_kernel::kernel::ScalarKernel` — the
 //!   scalar reference is the cross-port bit-identity baseline; SIMD
 //!   backends compose against the same `SubstrateKernel` trait so a
 //!   caller wanting acceleration substitutes a different kernel
@@ -51,8 +51,8 @@ use crate::node_bundle_store::{BundleKind, NodeBundleStore};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::count_vector::CountVector256;
-use substrate_lib::kernel::SubstrateKernel;
+use substrate_types::count_vector::CountVector256;
+use substrate_kernel::kernel::SubstrateKernel;
 
 /// Recomputes Bundle A from a node's active drawer set.
 ///
@@ -146,7 +146,7 @@ mod tests {
     use crate::drawer::Drawer;
     use std::sync::Arc;
     use persistence_kit::inmemory::InMemoryStorage;
-    use substrate_lib::kernel::ScalarKernel;
+    use substrate_kernel::kernel::ScalarKernel;
     use uuid::Uuid;
 
     fn drawer_at(id: &str, wing: &str, room: &str) -> Drawer {

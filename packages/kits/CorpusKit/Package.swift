@@ -26,8 +26,8 @@ let package = Package(
         .library(name: "CorpusKitProviders", targets: ["CorpusKitProviders"]),
     ],
     dependencies: [
-        .package(path: "../../libs/SubstrateLib"),
         .package(path: "../../libs/SubstrateTypes"),
+        .package(path: "../../libs/SubstrateML"),
         .package(path: "../../libs/EngramLib"),
         .package(path: "../../libs/EideticLib"),
         .package(path: "../PersistenceKit"),
@@ -39,7 +39,7 @@ let package = Package(
         .target(
             name: "CorpusKit",
             dependencies: [
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes", "SubstrateML",
                 "EngramLib",
                 .product(name: "EideticLib", package: "EideticLib"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
@@ -53,7 +53,7 @@ let package = Package(
             name: "CorpusKitProviders",
             dependencies: [
                 "CorpusKit",
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes", "SubstrateML",
                 "EngramLib",
                 "VectorKit",
             ],

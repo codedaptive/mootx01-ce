@@ -23,6 +23,12 @@ pub mod kernel;
 #[cfg(feature = "simd-nightly")]
 pub mod kernel_simd;
 
+// Relocated 2026-05-29 (four-package split addendum): the hot-path
+// bit/hash primitives moved here from substrate-lib.
+pub mod bit_field;
+pub mod hamming_nn;
+pub mod sha256;
+
 pub use kernel::*;
 
 pub const VERSION: &str = "1.0.0-skeleton";

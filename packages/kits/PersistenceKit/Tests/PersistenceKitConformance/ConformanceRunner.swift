@@ -6,6 +6,7 @@
 
 import XCTest
 import PersistenceKit
+import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -19,7 +20,6 @@ import PersistenceKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 /// Backend factory: each backend's test target supplies one.
 public typealias StorageFactory = @Sendable () async throws -> any Storage

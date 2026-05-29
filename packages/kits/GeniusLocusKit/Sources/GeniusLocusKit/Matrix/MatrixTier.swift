@@ -41,7 +41,6 @@ import Foundation
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import SubstrateTypes
 
 // MARK: - Coordinate types

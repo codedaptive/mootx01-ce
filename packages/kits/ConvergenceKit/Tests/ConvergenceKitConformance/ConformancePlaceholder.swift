@@ -6,6 +6,7 @@
 // package layout works.
 
 import Foundation
+import SubstrateTypes
 import ConvergenceKit
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
@@ -21,7 +22,6 @@ import PersistenceKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 public struct SyncConformanceRunner {
     public init() {}

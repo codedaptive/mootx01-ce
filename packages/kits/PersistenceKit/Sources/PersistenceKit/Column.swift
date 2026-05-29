@@ -4,6 +4,7 @@
 // queries. Comparable for stable ordering in test fixtures.
 
 import Foundation
+import SubstrateTypes
 
 public struct Column: Sendable, Hashable, Comparable {
     public let table: String

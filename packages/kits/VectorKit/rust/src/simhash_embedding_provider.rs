@@ -5,7 +5,7 @@
 //! The provider holds a stable `projection_seed` and an injectable
 //! inference closure that turns text into a dense `Vec<f32>`. The
 //! closure result is fed through
-//! `substrate_lib::float_simhash::project` (the canonical SimHash
+//! `substrate_ml::float_simhash::project` (the canonical SimHash
 //! projection -- bit-identical Swift/Rust per the substrate's
 //! conformance harness) to obtain the 256-bit `Engram`.
 //!
@@ -33,7 +33,7 @@ use engram_lib::Engram;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::float_simhash;
+use substrate_ml::float_simhash;
 
 use crate::{EmbeddingProvider, VectorKitError};
 

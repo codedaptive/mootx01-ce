@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
-use crate::hlc::HLC;
-use crate::fingerprint256::Fingerprint256;
+use substrate_types::hlc::HLC;
+use substrate_types::fingerprint256::Fingerprint256;
 // F11 consolidation (2026-05-27): the canonical RowState enum
 // (cookbook §2.3 scale-gapped raws) lives in row_state.rs. This
 // re-export keeps `crate::verbs::RowState` resolvable for any

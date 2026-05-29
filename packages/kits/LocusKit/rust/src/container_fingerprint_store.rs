@@ -47,8 +47,8 @@ use crate::schema;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::fingerprint256::Fingerprint256;
-use substrate_lib::or_reduce;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::or_reduce;
 use std::sync::Arc;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use persistence_kit::storage::Storage;
@@ -81,7 +81,7 @@ impl ContainerFingerprint {
     /// a wing and to fold a new row in.
     ///
     /// M1/M5: routes the per-column bitwise OR through
-    /// `substrate_lib::or_reduce` at canonical Fingerprint256 width.
+    /// `substrate_types::or_reduce` at canonical Fingerprint256 width.
     /// Each ContainerFingerprint packs as blocks 0 (adjective), 1
     /// (operational), 2 (provenance), block 3 reserved zero;
     /// or_reduce::reduce ORs the two carrier fingerprints; we unpack

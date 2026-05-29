@@ -215,7 +215,7 @@ pub struct RecallFrame {
     /// Historical reconstruction — return rows as they were at this
     /// timestamp (epoch seconds). `None` = current state. Per spec
     /// § 6.8.
-    pub as_of: Option<substrate_lib::hlc::HLC>,
+    pub as_of: Option<substrate_types::hlc::HLC>,
 }
 
 impl RecallFrame {

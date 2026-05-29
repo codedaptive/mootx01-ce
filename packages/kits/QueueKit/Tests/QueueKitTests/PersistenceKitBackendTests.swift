@@ -5,6 +5,7 @@
 // integration, not the InMemory implementation itself.
 
 import XCTest
+import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -18,7 +19,6 @@ import XCTest
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import QueueKit

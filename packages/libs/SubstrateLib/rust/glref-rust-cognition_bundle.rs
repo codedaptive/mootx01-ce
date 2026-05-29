@@ -8,7 +8,7 @@
 // ledger, RecallTrace summary, preferred pipelines, lexicon.
 
 use std::collections::HashMap;
-use crate::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TournamentWeights {

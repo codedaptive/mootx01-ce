@@ -20,7 +20,7 @@ use persistence_kit::{inmemory::InMemoryStorage, Storage};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::hlc::HLC;
+use substrate_types::hlc::HLC;
 use convergence_kit::{ConflictPolicy, SyncDirection};
 use uuid::Uuid;
 use vectorkit::VectorStore;

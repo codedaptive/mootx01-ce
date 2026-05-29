@@ -40,6 +40,7 @@
 // rather than a behavioural assertion.
 
 import XCTest
+import SubstrateTypes
 import Foundation
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -54,7 +55,6 @@ import Foundation
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 @testable import GeniusLocusKit
 
 final class TheoremsTests: XCTestCase {

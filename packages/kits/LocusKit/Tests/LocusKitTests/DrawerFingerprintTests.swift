@@ -7,6 +7,7 @@
 // must project through distinct hyperplanes).
 
 import Foundation
+import SubstrateTypes
 import Testing
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.

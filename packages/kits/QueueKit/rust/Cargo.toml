@@ -5,7 +5,6 @@ edition = "2021"
 description = "QueueKit Rust parallel — FilesystemBackend per QUEUEKIT_SPEC"
 
 [dependencies]
-substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

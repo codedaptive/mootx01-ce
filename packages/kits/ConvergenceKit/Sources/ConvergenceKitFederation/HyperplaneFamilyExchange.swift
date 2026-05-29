@@ -8,6 +8,7 @@
 // (seed + dimension) signed by each peer's Ed25519 key.
 
 import Foundation
+import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -21,7 +22,6 @@ import Foundation
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 public struct HyperplaneFamilySpec: Sendable, Codable, Hashable {
     /// Deterministic seed used by HyperplaneFamily(seed:) to

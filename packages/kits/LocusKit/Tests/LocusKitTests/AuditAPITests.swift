@@ -1,4 +1,5 @@
 import Testing
+import SubstrateTypes
 import Foundation
 @testable import LocusKit
 // ─────────────────────────────────────────────────────────────────

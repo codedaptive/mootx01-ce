@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 // MARK: - Tier
 
@@ -307,9 +307,9 @@ impl UnifiedAuditLog {
 }
 // Content-hash facade for audit entries. F18.3 (2026-05-27): the
 // self-contained SHA-256 that lived here was removed in favor of the
-// canonical `substrate_lib::sha256` (FIPS 180-4, NIST-vector gated).
+// canonical `substrate_kernel::sha256` (FIPS 180-4, NIST-vector gated).
 // The free-function name is kept so call sites and the audit_parity
 // re-export are unchanged; the math is centralized in the substrate.
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
-    substrate_lib::sha256::hash(bytes)
+    substrate_kernel::sha256::hash(bytes)
 }

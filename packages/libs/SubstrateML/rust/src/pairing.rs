@@ -6,8 +6,8 @@
 // Five-step protocol: nonce exchange, deterministic shared-family
 // generation, family commit, initial audit-log sync, audit event.
 
-use crate::hlc::HLC;
-use crate::hyperplane::HyperplaneFamily;
+use substrate_types::hlc::HLC;
+use substrate_types::hyperplane::HyperplaneFamily;
 use crate::tier_contribution::FederationCase;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

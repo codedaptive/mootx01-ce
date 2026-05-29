@@ -25,7 +25,6 @@ let package = Package(
         .library(name: "PersistenceKitPostgreSQL", targets: ["PersistenceKitPostgreSQL"]),
     ],
     dependencies: [
-        .package(path: "../../libs/SubstrateLib"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
     ],
@@ -44,26 +43,26 @@ let package = Package(
         // Core protocols and types.
         .target(
             name: "PersistenceKit",
-            dependencies: ["SubstrateLib", "SubstrateTypes"],
+            dependencies: ["SubstrateTypes"],
             path: "Sources/PersistenceKit"
         ),
 
         // Backends.
         .target(
             name: "PersistenceKitInMemory",
-            dependencies: ["PersistenceKit", "SubstrateLib", "SubstrateTypes"],
+            dependencies: ["PersistenceKit", "SubstrateTypes"],
             path: "Sources/PersistenceKitInMemory"
         ),
         .target(
             name: "PersistenceKitSQLite",
-            dependencies: ["PersistenceKit", "SubstrateLib", "SubstrateTypes", "CSQLiteVec"],
+            dependencies: ["PersistenceKit", "SubstrateTypes", "CSQLiteVec"],
             path: "Sources/PersistenceKitSQLite"
         ),
         .target(
             name: "PersistenceKitPostgreSQL",
             dependencies: [
                 "PersistenceKit",
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes",
                 .product(name: "PostgresNIO", package: "postgres-nio"),
             ],
             path: "Sources/PersistenceKitPostgreSQL"
@@ -72,32 +71,32 @@ let package = Package(
         // Tests.
         .testTarget(
             name: "PersistenceKitTests",
-            dependencies: ["PersistenceKit", "SubstrateLib", "SubstrateTypes"],
+            dependencies: ["PersistenceKit", "SubstrateTypes"],
             path: "Tests/PersistenceKitTests"
         ),
         .target(
             name: "PersistenceKitConformance",
-            dependencies: ["PersistenceKit", "SubstrateLib", "SubstrateTypes"],
+            dependencies: ["PersistenceKit", "SubstrateTypes"],
             path: "Tests/PersistenceKitConformance"
         ),
         .testTarget(
             name: "PersistenceKitConformanceTests",
-            dependencies: ["PersistenceKit", "PersistenceKitConformance", "SubstrateLib", "SubstrateTypes"],
+            dependencies: ["PersistenceKit", "PersistenceKitConformance", "SubstrateTypes"],
             path: "Tests/PersistenceKitConformanceTests"
         ),
         .testTarget(
             name: "PersistenceKitInMemoryTests",
-            dependencies: ["PersistenceKit", "PersistenceKitInMemory", "PersistenceKitConformance", "SubstrateLib", "SubstrateTypes"],
+            dependencies: ["PersistenceKit", "PersistenceKitInMemory", "PersistenceKitConformance", "SubstrateTypes"],
             path: "Tests/PersistenceKitInMemoryTests"
         ),
         .testTarget(
             name: "PersistenceKitSQLiteTests",
-            dependencies: ["PersistenceKit", "PersistenceKitSQLite", "PersistenceKitConformance", "SubstrateLib", "SubstrateTypes"],
+            dependencies: ["PersistenceKit", "PersistenceKitSQLite", "PersistenceKitConformance", "SubstrateTypes"],
             path: "Tests/PersistenceKitSQLiteTests"
         ),
         .testTarget(
             name: "PersistenceKitPostgreSQLTests",
-            dependencies: ["PersistenceKit", "PersistenceKitPostgreSQL", "PersistenceKitConformance", "SubstrateLib", "SubstrateTypes"],
+            dependencies: ["PersistenceKit", "PersistenceKitPostgreSQL", "PersistenceKitConformance", "SubstrateTypes"],
             path: "Tests/PersistenceKitPostgreSQLTests"
         ),
     ]

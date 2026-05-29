@@ -54,7 +54,7 @@ use crate::drawer::Drawer;
 // ─────────────────────────────────────────────────────────────────
 use substrate_lib::row_state::BitmapFields;
 use substrate_lib::row_state::RowVerb;
-use substrate_lib::hlc::HLCGenerator;
+use substrate_types::hlc::HLCGenerator;
 use substrate_lib::audit_gate;
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use crate::drawer_store::DrawerStore;
@@ -74,7 +74,7 @@ use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use persistence_kit::storage::Storage;
 use persistence_kit::types::{Column, StorageRow, TypedValue};
 use uuid::Uuid;
-use substrate_lib::bit_field;
+use substrate_kernel::bit_field;
 
 // ---------------------------------------------------------------------------
 // Table names
@@ -201,7 +201,7 @@ impl InMemoryDrawerStore {
             _ => return 0,
         };
         // FNV-1a 32-bit (SubstrateLib), masked to non-negative i32.
-        let h = substrate_lib::fnv::hash32(&uuid);
+        let h = substrate_types::fnv::hash32(&uuid);
         (h & 0x7FFF_FFFF) as i32
     }
 
@@ -2130,7 +2130,7 @@ mod tests {
     fn tid(label: &str) -> String {
         // Deterministic UUID from a label without needing the uuid v5
         // feature. Builds on the FNV-1a 64-bit primitive (offset basis +
-        // prime, same constants as substrate_lib::fnv::hash64), but is
+        // prime, same constants as substrate_types::fnv::hash64), but is
         // *not* a pure FNV-1a string hash: it interleaves the hash-step
         // with byte placement to scatter influence across all 16 output
         // bytes. Keeping it inline here — refactoring to call `hash64`

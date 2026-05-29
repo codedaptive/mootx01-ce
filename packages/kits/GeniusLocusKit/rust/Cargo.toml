@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # rather than hold byte-compatible local mirrors. The GLK-01/03 missions
 # deferred this dependency ("no new dependencies"); the local types were
 # always built byte-compatible anticipating exactly this wiring.
-substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # The coordinator, handle, and lattice-overlap fan-out logic remain pure
 # Rust; LocusKit-equivalent recall is mocked through a trait that

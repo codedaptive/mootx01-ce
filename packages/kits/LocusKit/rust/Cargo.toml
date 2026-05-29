@@ -21,6 +21,8 @@ path = "src/lib.rs"
 persistence-kit = { path = "../../PersistenceKit/rust" }
 substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
+substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

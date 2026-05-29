@@ -1,6 +1,9 @@
 import Foundation
 import XCTest
 @testable import SubstrateLib
+import SubstrateML
+import SubstrateKernel
+import SubstrateTypes
 
 /// Conformance tests for `BitField` — the parametric bit-field
 /// primitives that kits consume (F18 atomic-centralization cascade).

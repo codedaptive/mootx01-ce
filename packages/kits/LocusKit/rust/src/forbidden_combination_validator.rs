@@ -43,7 +43,7 @@ use crate::error::LocusKitError;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::bit_field;
+use substrate_kernel::bit_field;
 
 // MARK: - Forbidden field values (cookbook §2.3)
 //

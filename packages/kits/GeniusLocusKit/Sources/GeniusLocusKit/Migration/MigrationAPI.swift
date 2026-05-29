@@ -11,6 +11,7 @@
 // deterministic and testable.
 
 import Foundation
+import SubstrateTypes
 import LocusKit
 import PersistenceKit
 import OSLog

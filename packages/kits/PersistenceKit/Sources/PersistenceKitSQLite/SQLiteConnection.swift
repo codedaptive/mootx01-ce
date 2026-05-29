@@ -5,6 +5,7 @@
 // Loads the vendored sqlite-vec extension on every connection.
 
 import Foundation
+import SubstrateTypes
 import SQLite3
 import CSQLiteVec
 import PersistenceKit
@@ -21,7 +22,6 @@ import PersistenceKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 final class SQLiteConnection: @unchecked Sendable {
     var handle: OpaquePointer?

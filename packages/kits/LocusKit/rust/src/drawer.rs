@@ -48,7 +48,7 @@ use uuid::Uuid;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::bit_field;
+use substrate_kernel::bit_field;
 
 /// A unit of verbatim content stored in the MemPalace surface.
 ///
@@ -388,7 +388,7 @@ mod tests {
 
 #[cfg(test)]
 mod sealed_bit_tests {
-    use substrate_lib::bit_field;
+    use substrate_kernel::bit_field;
 
     #[test]
     fn bit_27_set_means_sealed() {

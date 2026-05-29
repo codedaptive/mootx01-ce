@@ -698,12 +698,12 @@ impl BitmapEvaluator {
     /// in the log).
     fn reconstruct_at(
         row_id: &str,
-        as_of: substrate_lib::hlc::HLC,
+        as_of: substrate_types::hlc::HLC,
         store: &dyn DrawerStore,
-    ) -> Result<Option<substrate_lib::audit_log_fold::ProjectedRowState>, LocusKitError> {
+    ) -> Result<Option<substrate_ml::audit_log_fold::ProjectedRowState>, LocusKitError> {
         let uuid = crate::drawer_store_inmemory::require_uuid(row_id, "rowID")?;
         let events = store.audit_events_for_row(row_id)?;
-        Ok(substrate_lib::audit_log_fold::AuditLogFold::project_state_at(
+        Ok(substrate_ml::audit_log_fold::AuditLogFold::project_state_at(
             substrate_lib::verbs::RowId(uuid.as_u128()),
             substrate_lib::verbs::NounType::Drawer,
             &events,

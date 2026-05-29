@@ -3,6 +3,7 @@
 // Top-level protocol every ConvergenceKit backend conforms to.
 
 import Foundation
+import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -16,7 +17,6 @@ import Foundation
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import PersistenceKit
 
 public protocol SyncEngine: Sendable {

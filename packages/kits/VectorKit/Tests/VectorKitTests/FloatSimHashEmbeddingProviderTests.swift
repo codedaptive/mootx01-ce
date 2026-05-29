@@ -1,4 +1,5 @@
 import XCTest
+import SubstrateML
 import EngramLib
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -13,7 +14,6 @@ import EngramLib
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 @testable import VectorKit
 
 /// Tests for `FloatSimHashEmbeddingProvider` — the concrete

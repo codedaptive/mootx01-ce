@@ -4,7 +4,7 @@
 // glref-swift-ActionOutcomeMatrix.swift.
 
 use std::collections::HashMap;
-use crate::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 /// Composite key (action_kind, outcome_category) into the matrix.
 /// Both fields fit in 6 bits per bitmap-tier invariant I-6.

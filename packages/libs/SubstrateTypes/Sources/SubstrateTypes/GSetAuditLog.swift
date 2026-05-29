@@ -24,7 +24,6 @@
 // because HLC gives a total order to apply entries.
 
 import Foundation
-import SubstrateTypes
 
 /// One immutable entry in the audit log.
 ///

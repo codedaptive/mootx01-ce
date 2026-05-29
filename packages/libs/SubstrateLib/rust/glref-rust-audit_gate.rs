@@ -13,11 +13,11 @@
 // separately so as not to churn every AuditEvent constructor here.
 
 use std::collections::HashSet;
-use crate::bit_field;
-use crate::sha256;
+use substrate_kernel::bit_field;
+use substrate_kernel::sha256;
 use crate::row_state::{self, BitmapFields, RowState, RowVerb};
 use crate::verbs::{AuditEvent, LatticeAnchor, NounType, RowId};
-use crate::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 // MARK: - Field slots
 

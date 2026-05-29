@@ -26,8 +26,14 @@ STANDALONE  LocusKit            VectorKit           CorpusKit
 GROUNDING   LatticeKit          EideticLib
 FOUNDATION  EngramLib           AriaLexiconLib
 STORAGE     PersistenceKit      ConvergenceKit      QueueKit
-MATH        SubstrateLib
+SUBSTRATE   SubstrateLib  (orchestration: verbs + row-state automaton + AuditGate)
+MATH        SubstrateTypes      SubstrateKernel     SubstrateML
 ```
+
+The substrate ships as **four packages** (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR
+addendum 2026-05-29): `SubstrateTypes` (pure data), `SubstrateKernel`
+(hot-path kernels), `SubstrateML` (cold-path / ML algorithms), and
+`SubstrateLib` — the orchestration layer over the other three.
 
 `ARIA_MCP` (in `Apps/`) sits above all packages as the external access surface.
 
@@ -37,22 +43,67 @@ MATH        SubstrateLib
 
 ---
 
-### SubstrateLib
+### SubstrateTypes
 
-**Role:** The math bedrock. All numerical primitives the system depends on.
-Every other package that needs math calls this one.
+**Role:** The data bedrock. The value types every kit speaks; zero compute.
 
 **Provides:**
 - `Fingerprint256` — 256-bit typed vector, the universal hash unit
-- `HLC` — Hybrid Logical Clock for deterministic timestamp ordering
+- `HLC` + `HLCGenerator` — Hybrid Logical Clock and its generator
 - `GSetAuditLog` — append-only G-Set CRDT for audit trails
-- Hamming distance, SimHash fingerprinting, OR-reduce over fingerprint sets
-- BradleyTerry ranking, FFT, NMF (Non-negative Matrix Factorization)
-- Platform-optimized kernel dispatch: CPU / NEON / Metal / ANE
+- `AuditEvent`, `LatticeAnchor`, `Row`, `NounType`, `RowState`
+- `MatrixF/C/O/T` (storage + indexing), `RowBitmaps`, `BlockMask`, `BitVector216`
+- The algebra: `Hamming`, `SimHash`, `ORReduce`, `BitwiseArithmetic`, `HyperplaneFamily`, `CountVector256`, `FNV`, `ThreeDBitTensor`, `RecallTypes`
 
-**Does NOT:** No storage, no state, no management. Pure functions only.
+**Does NOT:** No compute kernels, no algorithms, no I/O. Pure shape + algebra.
 
-**Dependencies:** None.  
+**Dependencies:** None.  **Languages:** Swift + Rust (conformance-gated)
+
+---
+
+### SubstrateKernel
+
+**Role:** Hardware-dispatched hot-path kernels (the §17.6 measured path).
+
+**Provides:**
+- `PortableKernel` + `SubstrateKernel` protocol; `ScalarKernel`, `SimdKernel`, NEON/BNNS/Metal backends
+- `SHA256` (content-ID / seal), `HammingNN` top-K, `BitField` extraction
+
+**Does NOT:** No pure types (those are in SubstrateTypes), no ML algorithms.
+
+**Dependencies:** SubstrateTypes.  **Languages:** Swift + Rust (conformance-gated)
+
+---
+
+### SubstrateML
+
+**Role:** Cold-path and dreaming-driven algorithms — learning, graph, projection.
+
+**Provides:**
+- `BradleyTerry`, `NMF`, `FFT`, `CommunityDetection`, `RandomWalks`, `AnomalyDetection`, `LLMCalibrationCurve`, `InformationTheory`, `EigenvalueCentrality`
+- `MatrixDecay`, `MomentSummary`, `TemporalCompression`, `AuditLogFold`, `PartialStateRecall`, `FloatSimHash`, `LatticeDistance`, `CompositeDistance`, `FeatureExtractors`
+- Federation: `PairingHandshake`, `TierContributionFingerprint`, `TierAscendingQuery`, `ActionOutcomeMatrix`, `DPORReduction`
+
+**Does NOT:** No pure types, no hot-path kernels.
+
+**Dependencies:** SubstrateTypes, SubstrateKernel.  **Languages:** Swift + Rust
+
+---
+
+### SubstrateLib
+
+**Role:** The orchestration layer over the three sub-packages. The control
+surface that composes Types, Kernel, ML, and the audit log into the substrate.
+
+**Provides:**
+- `Verbs` — the nine-verb substrate mechanics
+- `RowStateAutomaton` — the row-state finite-state machine (legal transitions, I-22)
+- `AuditGate` — the single write gate (admits FieldWrite sets, validates against the vocabulary and RowStateAutomaton, assigns content-ID)
+
+**Does NOT:** No pure types, kernels, or ML algorithms — it depends on those.
+As of 2026-05-29 it no longer re-exports them (the transitional shim was removed).
+
+**Dependencies:** SubstrateTypes, SubstrateKernel, SubstrateML.  
 **Languages:** Swift + Rust (conformance-gated)  
 **Spec:** `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`
 
@@ -407,20 +458,27 @@ daemons only. CognitionKit composes these into recipes.
 
 ```
 AriaLexiconLib  ← (none)
-SubstrateLib    ← (none)
+SubstrateTypes  ← (none)
+SubstrateKernel ← SubstrateTypes
+SubstrateML     ← SubstrateTypes, SubstrateKernel
+SubstrateLib    ← SubstrateTypes, SubstrateKernel, SubstrateML
 LatticeKit      ← (none)
-EngramLib       ← SubstrateLib
+EngramLib       ← SubstrateTypes, SubstrateKernel
 EideticLib      ← LatticeKit
-PersistenceKit  ← SubstrateLib
-ConvergenceKit  ← SubstrateLib, PersistenceKit
-QueueKit        ← SubstrateLib, PersistenceKit
-LocusKit        ← PersistenceKit
-VectorKit       ← EngramLib, SubstrateLib, PersistenceKit
-CorpusKit       ← VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateLib
-GeniusLocusKit  ← AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit
-NeuronKit       ← EideticLib, EngramLib, GeniusLocusKit, LocusKit
+PersistenceKit  ← SubstrateTypes
+ConvergenceKit  ← SubstrateTypes, PersistenceKit
+QueueKit        ← SubstrateTypes, PersistenceKit
+LocusKit        ← SubstrateTypes, SubstrateKernel, SubstrateML, SubstrateLib, PersistenceKit
+VectorKit       ← EngramLib, SubstrateTypes, SubstrateML, PersistenceKit
+CorpusKit       ← VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateTypes, SubstrateML
+GeniusLocusKit  ← AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit, SubstrateTypes, SubstrateKernel
+NeuronKit       ← EideticLib, EngramLib, GeniusLocusKit, LocusKit, SubstrateTypes
 CognitionKit    ← NeuronKit, GeniusLocusKit (planned)
 ```
+
+Only LocusKit keeps a direct `SubstrateLib` dependency — it drives the
+verbs (RowStateAutomaton + AuditGate). Every other consumer depends on
+the precise sub-package(s) it uses.
 
 ---
 
@@ -428,7 +486,10 @@ CognitionKit    ← NeuronKit, GeniusLocusKit (planned)
 
 | Package | Swift | Rust | Status |
 |---------|-------|------|--------|
-| SubstrateLib | ✅ | ✅ | Built |
+| SubstrateTypes | ✅ | ✅ | Built |
+| SubstrateKernel | ✅ | ✅ | Built |
+| SubstrateML | ✅ | ✅ | Built |
+| SubstrateLib | ✅ | ✅ | Built (orchestration layer) |
 | PersistenceKit | ✅ | ✅ | Built |
 | ConvergenceKit | ✅ | ✅ | Built |
 | QueueKit | ✅ | ✅ | Built + Python parity |
@@ -448,4 +509,4 @@ Build status reflects functional tests only.
 
 ---
 
-*Last updated: 2026-05-26*
+*Last updated: 2026-05-29 (four-package substrate split complete).*

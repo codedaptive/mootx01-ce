@@ -12,7 +12,7 @@ use crate::estate_types::RowID;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitmapState {
     pub row_id: RowID,
-    pub as_of: substrate_lib::hlc::HLC,
+    pub as_of: substrate_types::hlc::HLC,
     pub adjective_bitmap: i64,
     pub operational_bitmap: i64,
     pub provenance_bitmap: i64,

@@ -8,6 +8,7 @@
 // proves the lossless tree composition holds end to end.
 
 import Foundation
+import SubstrateTypes
 import Testing
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.

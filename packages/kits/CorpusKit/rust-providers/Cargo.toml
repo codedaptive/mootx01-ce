@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 corpus-kit = { path = "../rust" }
-# F5b: substrate-lib provides FNV-1a as a public substrate atomic
-# (I-25). DeterministicTokenizer consumes substrate_lib::fnv::hash32
+# F5b: substrate-types provides FNV-1a as a public substrate atomic
+# (I-25). DeterministicTokenizer consumes substrate_types::fnv::hash32
 # by name instead of reimplementing the hash inline.
-substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }

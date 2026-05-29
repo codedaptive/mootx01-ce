@@ -43,14 +43,14 @@ use crate::drawer::Drawer;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::fingerprint256::Fingerprint256;
-use substrate_lib::hyperplane::HyperplaneFamily;
-use substrate_lib::simhash;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::hyperplane::HyperplaneFamily;
+use substrate_types::simhash;
 
 // FNV-1a (consumed from SubstrateLib)
 //
 // FNV-1a is a SubstrateLib public atomic (I-25). DrawerFingerprint
-// consumes `substrate_lib::fnv::hash64` and `substrate_lib::fnv::hash16`
+// consumes `substrate_types::fnv::hash64` and `substrate_types::fnv::hash16`
 // by name; the kit-local `fnv1a64` / `fnv1a16` helpers that used to
 // live here were retired in F5b along with the substrate's internal
 // copy in feature_extractors.
@@ -91,12 +91,12 @@ impl EstateFingerprintFamilies {
     /// per block, so two replicas of an estate agree and the four
     /// families stay independent. Mirrors the Swift `baseSeed`.
     pub fn base_seed(estate_uuid: &str) -> [u8; 32] {
-        HyperplaneFamily::expand_seed_64(substrate_lib::fnv::hash64(&format!("GLfp-base:{}", estate_uuid)))
+        HyperplaneFamily::expand_seed_64(substrate_types::fnv::hash64(&format!("GLfp-base:{}", estate_uuid)))
     }
 
     /// The estate-UUID hash byte that block 3 carries (cookbook § 3.5).
     pub fn estate_uuid_byte(&self) -> u8 {
-        substrate_lib::fnv::hash64(&self.estate_uuid) as u8
+        substrate_types::fnv::hash64(&self.estate_uuid) as u8
     }
 
     // MARK: - Drawer derivation
@@ -111,13 +111,13 @@ impl EstateFingerprintFamilies {
 
         let lattice_input = simhash::lattice_input(
             udc_prefix_hash(&drawer.udc_code),
-            substrate_lib::fnv::hash16(drawer.wikidata_qid.as_deref().unwrap_or("")),
+            substrate_types::fnv::hash16(drawer.wikidata_qid.as_deref().unwrap_or("")),
             // Q-ID closure cache deferred; null per I-17 (cross-noun).
             0,
         );
 
         let lineage_temporal_input = simhash::lineage_temporal_input(
-            substrate_lib::fnv::hash16(&drawer.lineage_id.to_string()),
+            substrate_types::fnv::hash16(&drawer.lineage_id.to_string()),
             capture_week_bucket(drawer.filed_at),
             // Drawers carry no defer pattern; null per I-17.
             0,
@@ -180,7 +180,7 @@ pub fn capture_week_bucket(filed_at: i64) -> u8 {
 /// "6137".
 pub fn udc_prefix_hash(udc_code: &str) -> u16 {
     let digits: String = udc_code.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
-    substrate_lib::fnv::hash16(&digits)
+    substrate_types::fnv::hash16(&digits)
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +202,7 @@ mod tests {
         d
     }
 
-    // --- FNV-1a helpers (now SubstrateLib-owned, see substrate_lib::fnv tests) ---
+    // --- FNV-1a helpers (now SubstrateLib-owned, see substrate_types::fnv tests) ---
     //
     // The pure-FNV-1a determinism tests live in SubstrateLib; here we
     // keep only the tests that pin DrawerFingerprint's specific use of
@@ -213,18 +213,18 @@ mod tests {
     #[test]
     fn udc_prefix_hash_strips_separators() {
         // "613.71" -> "6137"
-        assert_eq!(udc_prefix_hash("613.71"), substrate_lib::fnv::hash16("6137"));
+        assert_eq!(udc_prefix_hash("613.71"), substrate_types::fnv::hash16("6137"));
     }
 
     #[test]
     fn udc_prefix_hash_caps_at_four_digits() {
         // "1234567" -> "1234"
-        assert_eq!(udc_prefix_hash("1234567"), substrate_lib::fnv::hash16("1234"));
+        assert_eq!(udc_prefix_hash("1234567"), substrate_types::fnv::hash16("1234"));
     }
 
     #[test]
     fn udc_prefix_hash_empty_string() {
-        assert_eq!(udc_prefix_hash(""), substrate_lib::fnv::hash16(""));
+        assert_eq!(udc_prefix_hash(""), substrate_types::fnv::hash16(""));
     }
 
     // --- capture_week_bucket: pre-epoch zero, post-epoch modulo 256 ---
@@ -369,10 +369,10 @@ mod tests {
         assert_eq!(fam.fingerprint(&a2), fam.fingerprint(&b2));
     }
 
-    /// Estate-UUID byte is the low byte of `substrate_lib::fnv::hash64(estate_uuid)`.
+    /// Estate-UUID byte is the low byte of `substrate_types::fnv::hash64(estate_uuid)`.
     #[test]
     fn estate_uuid_byte_is_low_byte_of_fnv() {
         let fam = EstateFingerprintFamilies::new(UUID_A);
-        assert_eq!(fam.estate_uuid_byte(), substrate_lib::fnv::hash64(UUID_A) as u8);
+        assert_eq!(fam.estate_uuid_byte(), substrate_types::fnv::hash64(UUID_A) as u8);
     }
 }

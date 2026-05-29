@@ -78,7 +78,7 @@ struct ManifestTests {
         #expect(try await store.getMeta(key: "provenance_defaults") == "0")
         #expect(try await store.getMeta(key: "active_storage_mode") == "8")
         #expect(try await store.getMeta(key: "tables_present") == "")
-        #expect(try await store.getMeta(key: "bitmap_layout_version") == "v0.35")
+        #expect(try await store.getMeta(key: "bitmap_layout_version") == "v1.0")
         #expect(try await store.getMeta(key: "provenance_bitmap_version") == "v1.0")
 
         // estate_uuid must be a parseable UUID string.
@@ -165,7 +165,7 @@ struct ManifestTests {
         #expect(values.provenanceDefaults == 0)
         #expect(values.activeStorageMode == 8)
         #expect(values.tablesPresent == "")
-        #expect(values.bitmapLayoutVersion == "v0.35")
+        #expect(values.bitmapLayoutVersion == "v1.0")
         #expect(values.provenanceBitmapVersion == "v1.0")
 
         // Optional keys are absent by default — nil on a fresh open.

@@ -12,10 +12,12 @@
 //!     RowBitmaps, BitVector216, TimeRange, enums.
 
 pub mod audit_event;
+pub mod bit_tensor;
 pub mod bitwise;
 pub mod count_vector;
 pub mod fingerprint256;
 pub mod fnv;
+pub mod gset;
 pub mod hamming;
 pub mod hlc;
 pub mod hyperplane;

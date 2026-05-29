@@ -1,6 +1,9 @@
 import Foundation
 import XCTest
 @testable import SubstrateLib
+import SubstrateML
+import SubstrateKernel
+import SubstrateTypes
 
 /// The write gate + vocabulary freeze: the properties that make
 /// corruption unrepresentable through the interface.

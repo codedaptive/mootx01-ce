@@ -24,7 +24,7 @@
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 use genius_locus_kit::audit::{
     AuditProjectionFold, AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog,

@@ -23,6 +23,7 @@
 // production code. No production source is added or modified.
 
 import XCTest
+import SubstrateTypes
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -40,7 +41,6 @@ import PersistenceKitInMemory
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 @testable import GeniusLocusKit
 
 final class PerformanceGateTests: XCTestCase {

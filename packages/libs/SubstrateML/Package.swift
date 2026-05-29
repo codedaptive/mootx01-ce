@@ -2,7 +2,7 @@
 //
 // Package.swift — SubstrateML
 //
-// SubstrateML is layer 3 of the three-package SubstrateLib split
+// SubstrateML is layer 3 of the four-package substrate split
 // (I-30, cookbook v1.0 §20). Cold-path and dreaming-driven
 // algorithms — learning, graph algorithms, projection.
 //
@@ -30,7 +30,6 @@
 //   (the §11 primitive suite), GeniusLocusKit (federation),
 //   dreaming-daemon code paths.
 //
-// Build status during refactor: skeleton.
 
 import PackageDescription
 

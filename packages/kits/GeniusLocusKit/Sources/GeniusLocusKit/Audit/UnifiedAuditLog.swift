@@ -44,6 +44,7 @@
 //   history.
 
 import Foundation
+import SubstrateKernel
 import OSLog
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -58,7 +59,6 @@ import OSLog
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import SubstrateTypes
 
 // MARK: - Tier provenance
@@ -404,12 +404,12 @@ public struct UnifiedAuditEntryKey: Hashable, Sendable, Codable {
 // MARK: - SHA-256
 /// Content-hash facade for audit entries. F18.3 (2026-05-27): the
 /// self-contained SHA-256 that lived here was removed in favor of the
-/// canonical `SubstrateLib.SHA256` (FIPS 180-4, NIST-vector gated). The
+/// canonical `SHA256` (FIPS 180-4, NIST-vector gated). The
 /// facade name is kept so call sites and tests are unchanged; the math
 /// is now centralized in the substrate per the atomic-centralization rule.
 enum UnifiedAuditSHA256 {
     static func hash(_ bytes: [UInt8]) -> [UInt8] {
-        return SubstrateLib.SHA256.hash(bytes)
+        return SHA256.hash(bytes)
     }
 }
 

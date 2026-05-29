@@ -3,8 +3,8 @@
 // Partial-state recall per cookbook § 8.8. Mirror of
 // glref-swift-PartialStateRecall.swift.
 
-use crate::fingerprint256::Fingerprint256;
-use crate::verbs::RowId;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::RowId;
 use std::collections::HashSet;
 
 pub struct PartialStateRecall;

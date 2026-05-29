@@ -12,7 +12,6 @@ name = "convergence_kit"
 path = "src/lib.rs"
 
 [dependencies]
-substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
 serde = { version = "1", features = ["derive"] }

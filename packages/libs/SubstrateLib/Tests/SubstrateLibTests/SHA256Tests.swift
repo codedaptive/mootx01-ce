@@ -1,6 +1,9 @@
 import Foundation
 import XCTest
 @testable import SubstrateLib
+import SubstrateML
+import SubstrateKernel
+import SubstrateTypes
 
 /// SHA-256 conformance — NIST FIPS 180-4 published vectors. Mirror of
 /// the Rust sha256 test module; the two legs are gated against the

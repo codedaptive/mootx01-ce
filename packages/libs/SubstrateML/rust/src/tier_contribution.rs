@@ -10,9 +10,9 @@
 //   bytes 24..55  OR-reduced fingerprint (32 bytes)
 //   bytes 56..63  HLC packed (u64 BE)
 
-use crate::hlc::HLC;
-use crate::fingerprint256::Fingerprint256;
-use crate::kernel::PortableKernel;
+use substrate_types::hlc::HLC;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_kernel::kernel::PortableKernel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FederationCase {

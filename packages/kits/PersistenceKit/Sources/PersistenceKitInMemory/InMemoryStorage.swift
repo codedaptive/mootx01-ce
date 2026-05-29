@@ -20,7 +20,6 @@ import PersistenceKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import SubstrateTypes
 
 public final class InMemoryStorage: Storage, Sendable {

@@ -5,7 +5,7 @@
 //
 // The provider holds a stable projection seed and an injectable
 // inference closure that turns text into a dense [Float] vector. The
-// closure result is fed through SubstrateLib.FloatSimHash.project
+// closure result is fed through SubstrateML.FloatSimHash.project
 // (the canonical SimHash projection, bit-identical Swift/Rust per
 // the substrate conformance harness) to obtain the 256-bit Engram.
 //
@@ -31,7 +31,6 @@ import Foundation
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import SubstrateML
 
 public struct FloatSimHashEmbeddingProvider: EmbeddingProvider {

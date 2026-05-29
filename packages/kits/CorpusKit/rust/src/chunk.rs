@@ -10,7 +10,7 @@
 //! CorpusKit/Sources/CorpusKit/Chunk.swift::deriveID and the parity test).
 //!
 //! HLC is stored as the substrate's `HLC` value directly --
-//! `substrate_lib::hlc::HLC` is `Copy`, so embedding it adds no
+//! `substrate_types::hlc::HLC` is `Copy`, so embedding it adds no
 //! cost. Metadata is the only field that ever crosses the serde
 //! boundary (encoded as JSON in `BundleStore`); the struct itself
 //! is not serde-derived because nothing serializes a `Chunk`
@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::hlc::HLC;
+use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

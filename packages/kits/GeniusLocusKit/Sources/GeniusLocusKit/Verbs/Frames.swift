@@ -1,4 +1,5 @@
 import Foundation
+import SubstrateTypes
 import LocusKit
 
 // MARK: - Re-exported LocusKit frames

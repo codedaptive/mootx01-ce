@@ -17,6 +17,7 @@
 // `valid == true` and `firstBrokenAt == nil`.
 
 import Foundation
+import SubstrateTypes
 
 /// Integrity report for a unified audit log. Per NEURONKIT_SPEC §3.5.
 public struct AuditChainReport: Sendable, Equatable {

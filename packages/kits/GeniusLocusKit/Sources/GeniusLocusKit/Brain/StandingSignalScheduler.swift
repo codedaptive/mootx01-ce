@@ -13,7 +13,6 @@ import OSLog
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitInMemory

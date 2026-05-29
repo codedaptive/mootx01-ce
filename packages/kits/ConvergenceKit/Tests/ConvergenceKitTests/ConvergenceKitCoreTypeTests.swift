@@ -1,6 +1,7 @@
 // ConvergenceKitCoreTypeTests.swift
 
 import XCTest
+import SubstrateTypes
 import ConvergenceKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -15,7 +16,6 @@ import ConvergenceKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 final class ConvergenceKitCoreTypeTests: XCTestCase {
 

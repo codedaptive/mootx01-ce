@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::fingerprint256::Fingerprint256;
-use substrate_lib::hlc::HLC;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::hlc::HLC;
 
 /// Stable row identifier. Mirrors Swift's `RowKey = UUID`.
 pub type RowKey = uuid::Uuid;

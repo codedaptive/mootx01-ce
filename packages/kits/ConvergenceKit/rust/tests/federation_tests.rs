@@ -17,7 +17,7 @@ use persistence_kit::{inmemory::InMemoryStorage, Storage};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::hlc::HLC;
+use substrate_types::hlc::HLC;
 use convergence_kit::{
     proposal_signing_bytes, verify_signature, ConflictPolicy, FederationRelay,
     FederationSyncEngine, HyperplaneFamilySpec, LocalIdentity, PairingProposal, SyncDirection,

@@ -3,7 +3,7 @@
 // MiniLM-L6 v2 text embedding provider. Pulls tokenization from
 // the DeterministicTokenizer (the BERT WordPiece tokenizer
 // shipped as a follow-on once the CoreML model bundle includes
-// the vocab metadata). Projection uses SubstrateLib.FloatSimHash
+// the vocab metadata). Projection uses SubstrateML.FloatSimHash
 // with a stable projection seed owned here in CorpusKitProviders so
 // the two providers produce bit-identical engrams for the same
 // pooled float vector.
@@ -19,6 +19,7 @@
 // compute, text/weights/tokenizer live outside it).
 
 import Foundation
+import SubstrateTypes
 import EngramLib
 import CorpusKit
 import VectorKit
@@ -35,7 +36,6 @@ import VectorKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import SubstrateML
 
 public struct MiniLMTextProvider: EmbeddingProvider {

@@ -11,7 +11,6 @@
 
 import Foundation
 import CorpusKit
-import SubstrateLib
 import SubstrateTypes
 
 public struct DeterministicTokenizer: Tokenizer {
