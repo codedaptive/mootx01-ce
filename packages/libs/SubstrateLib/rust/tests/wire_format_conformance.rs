@@ -15,11 +15,11 @@
 
 #![cfg(feature = "serde-support")]
 
-use substrate_lib::count_vector::CountVector256;
-use substrate_lib::fingerprint256::Fingerprint256;
-use substrate_lib::hlc::HLC;
-use substrate_lib::hyperplane::{Hyperplane, HyperplaneFamily};
-use substrate_lib::gset::AuditVerb;
+use substrate_types::count_vector::CountVector256;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::hlc::HLC;
+use substrate_types::hyperplane::{Hyperplane, HyperplaneFamily};
+use substrate_types::gset::AuditVerb;
 use substrate_lib::row_state::{RowState, RowVerb};
 
 // ============================================================
@@ -203,7 +203,7 @@ fn audit_verb_raw_value_encoding() {
 // F16.B — AuditValue, AuditEntry, GSetAuditLog
 // ============================================================
 
-use substrate_lib::gset::{AuditEntry, AuditValue, GSetAuditLog, RowID};
+use substrate_types::gset::{AuditEntry, AuditValue, GSetAuditLog, RowID};
 
 // AuditValue ----------------------------------------------------
 
@@ -276,7 +276,7 @@ fn sample_audit_entry(
     AuditEntry {
         id: [0xAB; 32],
         hlc: HLC::new(1_700_000_000_000, 0, 1),
-        verb: substrate_lib::gset::AuditVerb::Mutate,
+        verb: substrate_types::gset::AuditVerb::Mutate,
         // UUID 550E8400-E29B-41D4-A716-446655440000 as a u128
         // big-endian: 0x550E8400_E29B41D4_A7164466_55440000.
         row_id: 0x550E8400_E29B41D4_A7164466_55440000_u128,
@@ -367,13 +367,13 @@ fn gset_audit_log_round_trip_multiple_sorted() {
     let hlc = HLC::new(1, 0, 1);
 
     let e_high = AuditEntry {
-        id: high_id, hlc, verb: substrate_lib::gset::AuditVerb::Mutate,
+        id: high_id, hlc, verb: substrate_types::gset::AuditVerb::Mutate,
         row_id: 0, field_path: "f".into(),
         before_value: None, after_value: Some(AuditValue::Integer(2)),
         origin_row_id: None,
     };
     let e_low = AuditEntry {
-        id: low_id, hlc, verb: substrate_lib::gset::AuditVerb::Mutate,
+        id: low_id, hlc, verb: substrate_types::gset::AuditVerb::Mutate,
         row_id: 0, field_path: "f".into(),
         before_value: None, after_value: Some(AuditValue::Integer(1)),
         origin_row_id: None,

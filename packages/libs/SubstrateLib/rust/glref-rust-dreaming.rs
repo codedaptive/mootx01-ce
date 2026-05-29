@@ -7,7 +7,7 @@
 // resolver lives outside this file so tests can deterministically
 // inject which rules fire on a given tick.
 
-use crate::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DreamingRule {

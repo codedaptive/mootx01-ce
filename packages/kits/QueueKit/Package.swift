@@ -17,7 +17,6 @@ let package = Package(
         .library(name: "QueueKit", targets: ["QueueKit"]),
     ],
     dependencies: [
-        .package(path: "../../libs/SubstrateLib"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(path: "../PersistenceKit"),
         // ConvergenceKit is NOT listed here — spec §11.
@@ -26,7 +25,6 @@ let package = Package(
         .target(
             name: "QueueKit",
             dependencies: [
-                .product(name: "SubstrateLib", package: "SubstrateLib"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
             ]
@@ -35,7 +33,6 @@ let package = Package(
             name: "QueueKitTests",
             dependencies: [
                 "QueueKit",
-                .product(name: "SubstrateLib", package: "SubstrateLib"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),

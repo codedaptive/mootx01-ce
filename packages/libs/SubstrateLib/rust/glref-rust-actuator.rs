@@ -9,7 +9,7 @@
 //   I-23  reversibility tag (irreversible actions require confirm)
 
 use std::collections::HashSet;
-use crate::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]

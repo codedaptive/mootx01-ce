@@ -28,7 +28,6 @@ import PersistenceKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 /// Storage for model-tagged vectors. Wraps a PersistenceKit Storage
 /// instance; the kit does not see backend selection.

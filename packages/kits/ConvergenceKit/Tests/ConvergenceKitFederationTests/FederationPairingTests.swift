@@ -5,6 +5,7 @@
 // on one side appear on the other after pull.
 
 import XCTest
+import SubstrateTypes
 import ConvergenceKit
 import ConvergenceKitFederation
 import PersistenceKit
@@ -22,7 +23,6 @@ import PersistenceKitInMemory
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 final class FederationPairingTests: XCTestCase {
 

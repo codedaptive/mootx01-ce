@@ -1,4 +1,5 @@
 import XCTest
+import SubstrateTypes
 import Foundation
 import LocusKit
 import PersistenceKit

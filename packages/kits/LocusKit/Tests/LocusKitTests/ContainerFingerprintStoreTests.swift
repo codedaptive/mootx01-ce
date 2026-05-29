@@ -6,6 +6,7 @@
 // so an existing estate's aggregate covers every active row.
 
 import Foundation
+import SubstrateTypes
 import Testing
 @testable import LocusKit
 

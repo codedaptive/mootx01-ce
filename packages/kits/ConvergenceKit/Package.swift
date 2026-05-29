@@ -25,7 +25,6 @@ let package = Package(
         .library(name: "ConvergenceKitFederation", targets: ["ConvergenceKitFederation"]),
     ],
     dependencies: [
-        .package(path: "../../libs/SubstrateLib"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(path: "../PersistenceKit"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
@@ -35,7 +34,7 @@ let package = Package(
         .target(
             name: "ConvergenceKit",
             dependencies: [
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
             ],
             path: "Sources/ConvergenceKit"
@@ -46,7 +45,7 @@ let package = Package(
             name: "ConvergenceKitNone",
             dependencies: [
                 "ConvergenceKit",
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
             ],
             path: "Sources/ConvergenceKitNone"
@@ -55,7 +54,7 @@ let package = Package(
             name: "ConvergenceKitCloudKit",
             dependencies: [
                 "ConvergenceKit",
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
             ],
             path: "Sources/ConvergenceKitCloudKit"
@@ -64,7 +63,7 @@ let package = Package(
             name: "ConvergenceKitFederation",
             dependencies: [
                 "ConvergenceKit",
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
@@ -76,7 +75,7 @@ let package = Package(
             name: "ConvergenceKitConformance",
             dependencies: [
                 "ConvergenceKit",
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],
@@ -86,7 +85,7 @@ let package = Package(
         // Test targets.
         .testTarget(
             name: "ConvergenceKitTests",
-            dependencies: ["ConvergenceKit", "SubstrateLib", "SubstrateTypes"],
+            dependencies: ["ConvergenceKit", "SubstrateTypes"],
             path: "Tests/ConvergenceKitTests"
         ),
         .testTarget(

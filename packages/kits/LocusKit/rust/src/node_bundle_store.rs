@@ -56,7 +56,7 @@ use persistence_kit::types::{Column, StorageRow, TypedValue};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::count_vector::CountVector256;
+use substrate_types::count_vector::CountVector256;
 
 const TABLE: &str = "node_bundles";
 

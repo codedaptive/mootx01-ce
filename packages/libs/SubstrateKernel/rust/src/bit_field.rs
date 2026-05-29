@@ -41,7 +41,7 @@
 ///
 /// # Example
 /// ```
-/// use substrate_lib::bit_field;
+/// use substrate_kernel::bit_field;
 /// # let adjective: i64 = 0;
 /// // Cookbook §2.3: trust at bits 18-23 (6-bit field).
 /// let trust_raw = bit_field::extract_field(adjective, 18, 6);
@@ -64,7 +64,7 @@ pub fn extract_field(bitmap: i64, shift: u32, width: u32) -> i64 {
 ///
 /// # Example
 /// ```
-/// use substrate_lib::bit_field;
+/// use substrate_kernel::bit_field;
 /// # let new_state_raw: i64 = 0;
 /// # let prior_bitmap: i64 = 0;
 /// // Cookbook §2.3: state at bits 0-5 (6-bit field).
@@ -110,7 +110,7 @@ pub fn write_field(value: i64, into_bitmap: i64, shift: u32, width: u32) -> i64 
 ///
 /// # Example
 /// ```
-/// use substrate_lib::bit_field;
+/// use substrate_kernel::bit_field;
 /// # let adjective: i64 = 0;
 /// // Cookbook §2.8: state field at bits 0-3 (4-bit field), test
 /// // whether state == 3 (canonical).

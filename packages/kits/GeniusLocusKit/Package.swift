@@ -43,7 +43,7 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
-        .package(name: "SubstrateLib", path: "../../libs/SubstrateLib"),
+        .package(path: "../../libs/SubstrateKernel"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(name: "LocusKit", path: "../LocusKit"),
         .package(name: "VectorKit", path: "../VectorKit"),
@@ -60,7 +60,7 @@ let package = Package(
             name: "GeniusLocusKit",
             dependencies: [
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
-                .product(name: "SubstrateLib", package: "SubstrateLib"),
+                .product(name: "SubstrateKernel", package: "SubstrateKernel"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "VectorKit", package: "VectorKit"),

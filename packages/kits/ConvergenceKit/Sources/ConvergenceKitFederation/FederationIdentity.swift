@@ -5,6 +5,7 @@
 // metadata (a small blob row) so it survives restarts.
 
 import Foundation
+import SubstrateTypes
 import Crypto
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -19,7 +20,6 @@ import Crypto
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import PersistenceKit
 
 public struct PeerIdentity: Sendable, Hashable {

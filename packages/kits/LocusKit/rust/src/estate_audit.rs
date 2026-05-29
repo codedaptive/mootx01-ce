@@ -65,11 +65,11 @@ impl Estate {
     pub fn bitmap_state(
         &self,
         row_id: &str,
-        as_of: substrate_lib::hlc::HLC,
+        as_of: substrate_types::hlc::HLC,
     ) -> Result<BitmapState, LocusKitError> {
         let uuid = require_uuid(row_id, "rowID")?;
         let events = self.store.audit_events_for_row(row_id)?;
-        let projected = substrate_lib::audit_log_fold::AuditLogFold::project_state_at(
+        let projected = substrate_ml::audit_log_fold::AuditLogFold::project_state_at(
             substrate_lib::verbs::RowId(uuid.as_u128()),
             substrate_lib::verbs::NounType::Drawer,
             &events,
@@ -162,7 +162,7 @@ mod tests {
         // A valid-but-absent UUID: no events for it → DrawerNotFound.
         // (A non-UUID id is a different, louder contract error.)
         let err = estate
-            .bitmap_state("99999999-9999-4999-8999-999999999999", substrate_lib::hlc::HLC::new(1_700_000_000, 0, 0))
+            .bitmap_state("99999999-9999-4999-8999-999999999999", substrate_types::hlc::HLC::new(1_700_000_000, 0, 0))
             .unwrap_err();
         assert!(matches!(err, crate::error::LocusKitError::DrawerNotFound { .. }));
     }
@@ -174,7 +174,7 @@ mod tests {
         // Ask for state before the genesis event existed: no events at or
         // before this HLC → DrawerNotFound (the row had no state yet).
         let err = estate
-            .bitmap_state(&id, substrate_lib::hlc::HLC::new(1_700_000_050, 0, 0))
+            .bitmap_state(&id, substrate_types::hlc::HLC::new(1_700_000_050, 0, 0))
             .unwrap_err();
         assert!(matches!(err, crate::error::LocusKitError::DrawerNotFound { .. }));
     }

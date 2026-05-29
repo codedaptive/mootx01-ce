@@ -41,7 +41,7 @@ use genius_locus_kit::verbs::frames::{CaptureFrame, LatticeAnchor};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 const CAPTURE_P99_CEILING_MILLIS: f64 = 100.0;
 const ENRICHMENT_RATE_FLOOR_PER_HOUR: f64 = 60.0;

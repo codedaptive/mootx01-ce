@@ -14,7 +14,7 @@ purpose: |
   bit-exact-cross-language operation the substrate ships.
 relates_to:
   - docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md (the math contract; this doc indexes its conformance gate)
-  - docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md (the three-package split documented in §6 below)
+  - docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md (the four-package split documented in §6 below)
   - docs/validation/substrate_math_performance/test-harness/primitive-catalog.md (the operator-facing gate catalog, machine-readable)
   - docs/validation/substrate_math_performance/test-harness/test-vector-format.md (canonical JSON + binary CRC format spec)
   - docs/validation/substrate_math_performance/test-harness/primitive-walkthrough-SimHash.md (worked example for adding a primitive)
@@ -47,7 +47,7 @@ The harness lives at
 The reference implementations these primitives wrap live in the
 SubstrateLib package at
 `/Users/bob/devlop/mootx01-rc/packages/libs/SubstrateLib/` (Swift +
-Rust legs side by side; see §6 for the three-package split).
+Rust legs side by side; see §6 for the four-package split).
 
 To add a new primitive to the gate, follow §7. To verify a code
 change against the gate, follow §8.
@@ -60,7 +60,7 @@ change against the gate, follow §8.
 this file names the canonical Swift API, the canonical Rust API,
 the source file each lives in, the harness test vector that pins
 them, the test vector's CRC, and a one-line description of what
-the operation does. It also documents the three-package library
+the operation does. It also documents the four-package library
 split (§6), the workflow for adding a new primitive (§7), and the
 verification commands (§8).
 
@@ -502,19 +502,23 @@ lives at `test-harness/primitive-walkthrough-SimHash.md`.
 
 ---
 
-## §6. The three-package SubstrateLib split
+## §6. The four-package substrate split
 
-Per `DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md` (Phase 6
-of the pre-ship refactor), the published SubstrateLib at
-`packages/libs/SubstrateLib/` splits into three packages. The
-split is an SPM package boundary in Swift and a Cargo workspace
-boundary in Rust; consumers depend on whichever combination they
-need.
+Per `DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md` (Phase 6)
+as corrected by its 2026-05-29 addendum, the substrate ships as **four
+sibling packages** under `packages/libs/`: `SubstrateTypes`,
+`SubstrateKernel`, `SubstrateML`, and the retained `SubstrateLib`
+orchestration layer (nine-verb mechanics + row-state automaton +
+AuditGate) that depends on the other three. They are **siblings on
+disk**, each its own SPM package (Swift) and Cargo crate (Rust) — not
+nested inside SubstrateLib. Consumers depend on whichever combination
+they need; SubstrateLib no longer re-exports the sub-packages (the
+transitional shim was removed 2026-05-29).
 
 ### §6.1. SubstrateTypes — pure data, zero compute
 
-**Swift:** `packages/libs/SubstrateLib/swift/Sources/SubstrateTypes/`
-**Rust:** `packages/libs/SubstrateLib/rust/crates/substrate-types/`
+**Swift:** `packages/libs/SubstrateTypes/Sources/SubstrateTypes/`
+**Rust:** `packages/libs/SubstrateTypes/rust/`
 
 Contains the data types every kit speaks, with NO algorithms:
 
@@ -536,8 +540,8 @@ SubstrateTypes.
 
 ### §6.2. SubstrateKernel — bandwidth-bound bit operations
 
-**Swift:** `packages/libs/SubstrateLib/swift/Sources/SubstrateKernel/`
-**Rust:** `packages/libs/SubstrateLib/rust/crates/substrate-kernel/`
+**Swift:** `packages/libs/SubstrateKernel/Sources/SubstrateKernel/`
+**Rust:** `packages/libs/SubstrateKernel/rust/`
 
 Contains the hot-path bit-tensor operations that the Phase 2
 measurement work selected (cookbook §17.6). All of these are
@@ -562,8 +566,8 @@ no learning, no graph algorithms — those belong above.
 
 ### §6.3. SubstrateML — learning + graph algorithms
 
-**Swift:** `packages/libs/SubstrateLib/swift/Sources/SubstrateML/`
-**Rust:** `packages/libs/SubstrateLib/rust/crates/substrate-ml/`
+**Swift:** `packages/libs/SubstrateML/Sources/SubstrateML/`
+**Rust:** `packages/libs/SubstrateML/rust/`
 
 Contains the cold-path or dreaming-driven algorithms (§2.2 Tier 2
 + §2.3 Tier 3 of this document):
@@ -586,7 +590,7 @@ Contains the cold-path or dreaming-driven algorithms (§2.2 Tier 2
 do NOT need this package — only LocusKit, CognitionKit, and
 GeniusLocusKit consume it.
 
-### §6.4. Why three packages, not one
+### §6.4. Why four packages, not one
 
 The cost was small (a few `package.swift` and `Cargo.toml` edits)
 and the value is concrete:

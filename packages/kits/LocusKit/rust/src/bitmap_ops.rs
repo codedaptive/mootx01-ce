@@ -42,7 +42,7 @@
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::bit_field;
+use substrate_kernel::bit_field;
 
 #[inline]
 pub fn and_mask(bitmap: i64, mask: i64, expected: i64) -> bool {

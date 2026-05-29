@@ -2,7 +2,7 @@
 //
 // Package.swift — SubstrateKernel
 //
-// SubstrateKernel is layer 2 of the three-package SubstrateLib split
+// SubstrateKernel is layer 2 of the four-package substrate split
 // (I-30, cookbook v1.0 §20). Bandwidth-bound bit operations plus the
 // write-gate and clock-maker primitives.
 //
@@ -29,7 +29,6 @@
 //   All hot-path consumers — LocusKit, RagKit, CognitionKit,
 //   GeniusLocusKit, PersistenceKit (for AuditGate enforcement).
 //
-// Build status during refactor: skeleton.
 
 import PackageDescription
 

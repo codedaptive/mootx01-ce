@@ -6,7 +6,7 @@
 //! free functions. The underlying representation and kernel
 //! selection are hidden.
 //!
-//! `Engram` is a type alias for `substrate_lib::fingerprint256::
+//! `Engram` is a type alias for `substrate_types::fingerprint256::
 //! Fingerprint256` -- substrate primitives (`Engram::new`,
 //! `Engram::ZERO`, the bit/block accessors) are the canonical
 //! surface and used directly. EngramLib does not wrap them.
@@ -35,8 +35,8 @@
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::fingerprint256::Fingerprint256;
-use substrate_lib::kernel::{PortableKernel, SubstrateKernel};
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_kernel::kernel::{PortableKernel, SubstrateKernel};
 
 /// 256-bit engram. Aliased to the substrate's `Fingerprint256`
 /// (four 64-bit blocks). The alias is the stable public name;

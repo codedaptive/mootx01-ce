@@ -34,6 +34,8 @@ let package = Package(
     dependencies: [
         .package(name: "SubstrateLib", path: "../../libs/SubstrateLib"),
         .package(path: "../../libs/SubstrateTypes"),
+        .package(path: "../../libs/SubstrateKernel"),
+        .package(path: "../../libs/SubstrateML"),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
     ],
     targets: [
@@ -42,6 +44,8 @@ let package = Package(
             dependencies: [
                 .product(name: "SubstrateLib", package: "SubstrateLib"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                .product(name: "SubstrateKernel", package: "SubstrateKernel"),
+                .product(name: "SubstrateML", package: "SubstrateML"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
             ],
             path: "Sources/LocusKit"

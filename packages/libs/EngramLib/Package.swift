@@ -24,13 +24,13 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(path: "../SubstrateLib"),
         .package(path: "../SubstrateTypes"),
+        .package(path: "../SubstrateKernel"),
     ],
     targets: [
         .target(
             name: "EngramLib",
-            dependencies: ["SubstrateLib", "SubstrateTypes"]
+            dependencies: ["SubstrateTypes", "SubstrateKernel"]
         ),
         .testTarget(
             name: "EngramLibTests",

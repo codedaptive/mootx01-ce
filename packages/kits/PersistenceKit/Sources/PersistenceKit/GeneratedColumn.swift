@@ -18,6 +18,7 @@
 // One expression, three faithful realizations, no escape hatch.
 
 import Foundation
+import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -31,7 +32,6 @@ import Foundation
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 /// A column whose value is computed from an expression over other
 /// columns in the same row. Always STORED: PostgreSQL has no

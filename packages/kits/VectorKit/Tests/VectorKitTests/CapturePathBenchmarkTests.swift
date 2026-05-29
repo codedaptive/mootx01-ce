@@ -1,4 +1,5 @@
 import XCTest
+import SubstrateML
 import EngramLib
 import PersistenceKit
 import PersistenceKitInMemory

@@ -1,4 +1,6 @@
 import Foundation
+import SubstrateTypes
+import SubstrateKernel
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //

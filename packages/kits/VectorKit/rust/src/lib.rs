@@ -9,7 +9,7 @@
 //! - `FloatSimHashEmbeddingProvider` is the only provider shipped
 //!   today. It accepts a host-supplied inference closure that
 //!   returns a `Vec<f32>`, then projects through
-//!   `substrate_lib::float_simhash::project` (the canonical
+//!   `substrate_ml::float_simhash::project` (the canonical
 //!   SimHash projection) with a stable per-provider seed. Mirrors
 //!   Swift's MiniLM / mpnet / EmbeddingGemma providers in CorpusKit.
 //! - FTS5 removed; `find_by_keyword` is a substring LIKE on

@@ -21,8 +21,8 @@ use std::collections::BinaryHeap;
 // (Removed unused `use std::cmp::Reverse;` — the heap implements
 // PartialOrd/Ord directly on HammingNNHit.)
 
-use crate::fingerprint256::Fingerprint256;
-use crate::hamming;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::hamming;
 
 /// One hit from a top-K Hamming-NN scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,7 +119,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hamming::ALL_BLOCKS;
+    use substrate_types::hamming::ALL_BLOCKS;
 
     #[test]
     fn top_one_finds_self() {

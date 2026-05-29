@@ -9,6 +9,7 @@
 // tests, deployments without iCloud or federation).
 
 import Foundation
+import SubstrateTypes
 import ConvergenceKit
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
@@ -24,7 +25,6 @@ import PersistenceKit
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 public final class NoSyncEngine: SyncEngine, Sendable {
     let stateActor: StateActor

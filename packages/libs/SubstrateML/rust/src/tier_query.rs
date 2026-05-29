@@ -7,7 +7,7 @@
 // peers/aggregator, peer applies DP, originator combines.
 
 use std::collections::HashMap;
-use crate::hlc::HLC;
+use substrate_types::hlc::HLC;
 use crate::dp_or_reduce::{DPParameters, DPORReduction};
 use crate::random_walks::SplitMix64;
 

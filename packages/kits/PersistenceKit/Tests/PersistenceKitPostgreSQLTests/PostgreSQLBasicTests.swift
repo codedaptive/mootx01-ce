@@ -4,6 +4,7 @@
 // (still pass) so CI without postgres remains green.
 
 import XCTest
+import SubstrateTypes
 import PersistenceKit
 import PersistenceKitPostgreSQL
 // ─────────────────────────────────────────────────────────────────
@@ -19,7 +20,6 @@ import PersistenceKitPostgreSQL
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 
 final class PostgreSQLBasicTests: XCTestCase {
 

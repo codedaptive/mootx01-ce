@@ -6,8 +6,8 @@
 // to Swift's implementation for cross-platform engram storage to
 // round-trip correctly.
 
-use substrate_lib::fingerprint256::Fingerprint256;
-use substrate_lib::float_simhash;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_ml::float_simhash;
 
 fn ramp384() -> Vec<f32> {
     (0..384).map(|i| (i as f32) / 384.0 - 0.5).collect()

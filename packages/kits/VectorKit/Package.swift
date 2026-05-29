@@ -19,7 +19,7 @@ let package = Package(
     products: [.library(name: "VectorKit", targets: ["VectorKit"])],
     dependencies: [
         .package(name: "EngramLib", path: "../../libs/EngramLib"),
-        .package(name: "SubstrateLib", path: "../../libs/SubstrateLib"),
+        .package(path: "../../libs/SubstrateML"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
     ],
@@ -28,7 +28,7 @@ let package = Package(
             name: "VectorKit",
             dependencies: [
                 "EngramLib",
-                "SubstrateLib", "SubstrateTypes",
+                "SubstrateTypes", "SubstrateML",
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
             ]
         ),

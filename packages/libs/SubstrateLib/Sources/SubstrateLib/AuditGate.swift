@@ -38,6 +38,7 @@
 
 import Foundation
 import SubstrateTypes
+import SubstrateKernel  // BitField, SHA256 (relocated 2026-05-29 four-package split)
 
 // MARK: - Field slots
 

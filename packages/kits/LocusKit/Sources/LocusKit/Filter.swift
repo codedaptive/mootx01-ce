@@ -1,4 +1,5 @@
 import Foundation
+import SubstrateTypes
 
 // MARK: - Supporting typealiases for Filter
 

@@ -25,4 +25,15 @@ pub mod nmf;
 pub mod random_walks;
 pub mod temporal_compression;
 
+// Relocated 2026-05-29 (four-package split addendum): cold-path /
+// federation / dreaming algorithms moved here from substrate-lib.
+pub mod action_outcome;
+pub mod audit_log_fold;
+pub mod decay;
+pub mod dp_or_reduce;
+pub mod pairing;
+pub mod partial_state_recall;
+pub mod tier_contribution;
+pub mod tier_query;
+
 pub const VERSION: &str = "1.0.0-skeleton";

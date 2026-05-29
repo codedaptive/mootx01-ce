@@ -110,7 +110,7 @@ impl Tokenizer for DeterministicTokenizer {
 /// Swift `DeterministicTokenizer.tokenize` because both consume the
 /// same substrate atomic.
 fn stable_token_id(token: &str, vocab_size: u32) -> i32 {
-    let hash = substrate_lib::fnv::hash32(token);
+    let hash = substrate_types::fnv::hash32(token);
     let id = (hash % (vocab_size - 2)) + 2;
     id as i32
 }

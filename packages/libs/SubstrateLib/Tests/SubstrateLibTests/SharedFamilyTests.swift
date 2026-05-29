@@ -1,5 +1,8 @@
 import XCTest
 @testable import SubstrateLib
+import SubstrateML
+import SubstrateKernel
+import SubstrateTypes
 
 /// Tests for the shared and local hyperplane family generation. They
 /// pin the fix to generateSharedFamily, which had reused one base seed

@@ -4,7 +4,7 @@
 //
 // These types are the wire vocabulary that recall primitives,
 // federation queries (TierAscendingQuery), and downstream
-// cognition recipes share. They live in SubstrateLib because
+// cognition recipes share. They live in SubstrateTypes because
 // federation needs them (paper § 9: federation responses are
 // RecallResult-shaped wire objects) and because keeping them
 // in one place across kits avoids redefinition drift.
@@ -33,13 +33,14 @@
 // is fetched separately by consumers that need it (typically
 // after ranking is settled).
 //
-// PROMOTED 2026-05-19 from glref-swift-CognitionKit.swift to
-// SubstrateLib per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
-// TierAscendingQuery (federation, this kit) and CognitionKit
-// (upstream) both consume these types from this single source.
+// PROMOTED 2026-05-19 from glref-swift-CognitionKit.swift, then
+// relocated 2026-05-29 from SubstrateLib to SubstrateTypes per the
+// four-package split (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR
+// addendum 2026-05-29). TierAscendingQuery (federation, SubstrateML)
+// and CognitionKit (upstream) both consume these types from this
+// single source.
 
 import Foundation
-import SubstrateTypes
 
 /// A single (RowId, score) pair from a recall primitive.
 ///

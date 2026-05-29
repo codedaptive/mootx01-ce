@@ -11,7 +11,7 @@ purpose: dense mathematical and computational specification for the
          canon, the conformance harness (23 cross-language-pinned
          primitives), and the 2026-05-28 decision set (Clock Triangle,
          Capture Genesis Event, Row Identity UUID, SubstrateLib
-         three-package split). The implementer working from this
+         four-package split). The implementer working from this
          cookbook reads it once and ships v1.0 code.
 relates_to:
   - docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36_2026-05-16.md (predecessor; v1.0 supersedes)
@@ -74,11 +74,13 @@ v1.0 brings in scope.
    audit write path requires the row id to parse as a UUID and
    fails loudly otherwise.
 
-4. **SubstrateLib three-package split (new §20).** SubstrateLib
-   ships as three packages: SubstrateTypes (pure data, zero
+4. **Substrate four-package split (new §20).** The substrate
+   ships as four packages: SubstrateTypes (pure data, zero
    compute), SubstrateKernel (bandwidth-bound bit operations,
-   the §17.6 measured hot-path kernels), and SubstrateML (cold-
-   path / dreaming algorithms). Kits depend on whichever
+   the §17.6 measured hot-path kernels), SubstrateML (cold-
+   path / dreaming algorithms), and SubstrateLib (the retained
+   orchestration layer — nine-verb mechanics, row-state automaton,
+   AuditGate — over the other three). Kits depend on whichever
    combination they need. This makes I-25 (one implementation
    per atomic) explicit in the build graph.
 
@@ -101,7 +103,7 @@ v1.0 brings in scope.
    relevant sections).** I-26 (capture emits a gated genesis
    event); I-27 (integrity triangle: three cross-checking legs);
    I-28 (single clock maker per log); I-29 (row identity is a
-   UUID); I-30 (SubstrateLib ships as three packages). These
+   UUID); I-30 (the substrate ships as four packages). These
    join I-15 through I-25 of v0.36 and I-1 through I-14 carried
    from v0.35.
 
@@ -149,8 +151,9 @@ forward. I-26 through I-30 are introduced in v1.0:
   and a takeover is an explicit logged operation (§5.6.1).
 - **I-29.** Every synced or audited row's identity is a UUID
   (§2.1, §16).
-- **I-30.** SubstrateLib ships as three packages: SubstrateTypes,
-  SubstrateKernel, SubstrateML (§20).
+- **I-30.** The substrate ships as four packages: SubstrateTypes,
+  SubstrateKernel, SubstrateML, and the retained SubstrateLib
+  orchestration layer (§20).
 
 ---
 
@@ -3748,11 +3751,18 @@ v1.0 harness has explicitly left out per cookbook §7.3.
 
 ## §20. SubstrateLib package layout (v1.0)
 
-**I-30. SubstrateLib ships as three packages.** The published
-`packages/libs/SubstrateLib/` is an SPM package (Swift) and Cargo
-workspace (Rust) split into three substrate-side packages.
-Consumers depend on whichever combination they need; the
-boundary is enforced by the build graph.
+**I-30. The substrate ships as four packages.** Per the
+DECISION_SUBSTRATELIB_PRESHIP_REFACTOR addendum (2026-05-29), the
+substrate splits into four SPM packages (Swift) / Cargo crates (Rust):
+`SubstrateTypes` (pure data, incl. HLC + HLCGenerator),
+`SubstrateKernel` (hot-path kernels + SHA256, HammingNN, BitField),
+`SubstrateML` (cold-path / ML algorithms), and `SubstrateLib` — the
+retained orchestration layer that owns the nine-verb mechanics, the
+row-state automaton, and the AuditGate write-gate, and depends on the
+other three. Consumers depend on
+whichever combination they need; the boundary is enforced by the build
+graph, and SubstrateLib no longer re-exports the sub-packages (the
+transitional shim was removed once the symbol tail relocated, 2026-05-29).
 
 ### §20.1. SubstrateTypes — pure data, zero compute
 
@@ -3760,8 +3770,7 @@ Contains the data types every kit speaks, with no algorithms,
 no I/O, no transcendentals:
 
 - `Fingerprint256` (struct + wire encoding only)
-- `HLC` (struct + ordering + wire encoding only; the *generator*
-  lives in SubstrateKernel)
+- `HLC` (struct + ordering + wire encoding) and its `HLCGenerator`
 - `LatticeAnchor`, `Row`, `RowLite`, `NounType`, `RowStateValue`
 - `AuditEvent` (the struct shape)
 - `MatrixF`, `MatrixC`, `MatrixO`, `MatrixT` (storage and indexing,
@@ -3787,9 +3796,12 @@ HARNESS_REFERENCE §2.1 (Tier 1):
 - The combinators layer: `zip4`/`reduce4`/`map4`/`popcount` over
   Fingerprint256
 - `SimdKernel` (Swift NEON via `import simd`; Rust `std::simd`)
-- `AuditGate` (the write gate that admits FieldWrite sets and
-  validates against VocabularyValidator; the gate's `prior == nil`
-  branch is the capture path, I-26)
+- `SHA256`, `BitField` (content-ID / seal hashing and bitmap
+  field extraction; the hot-path leaves the AuditGate depends on)
+
+(`AuditGate` itself is **not** here — as of 2026-05-29 it stays in
+SubstrateLib's orchestration layer because it calls `RowStateAutomaton`;
+see §20.4 and I-30.)
 - `HLCGenerator` (`open` / `tick` / `takeover`, I-28)
 - SHA-256 content-ID (`audit_gate::content_id` in Rust;
   `ContentID.compute` in Swift); the seal construction (I-27)
@@ -3820,9 +3832,14 @@ HARNESS_REFERENCE §2.2 (Tier 2) and §2.3 (Tier 3):
 kits do NOT need this package — only LocusKit, CognitionKit, and
 GeniusLocusKit consume it.
 
-### §20.4. Why three packages
+### §20.4. Why four packages
 
-The split serves four purposes:
+SubstrateTypes, SubstrateKernel, and SubstrateML are the three
+sub-packages described above; **SubstrateLib is the fourth** — the
+retained orchestration layer (nine-verb mechanics, row-state automaton,
+AuditGate write-gate) that depends on the other three. It is a real,
+narrow dependency, not a re-export shim (the transitional `@_exported`
+re-export was removed 2026-05-29). The split serves four purposes:
 
 1. **Compile time.** A kit that only serializes rows compiles
    against SubstrateTypes alone and avoids SubstrateKernel's
@@ -3839,7 +3856,7 @@ The split serves four purposes:
    SubstrateKernel's CRC-pinned conformance vectors (the harness)
    don't need to recompile when SubstrateML changes.
 
-`I-25` (one implementation per atomic) applies across all three:
+`I-25` (one implementation per atomic) applies across all four:
 atomics live in whichever package they belong to, and every
 consumer imports them by name. Per
 `DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md` Phase 6.

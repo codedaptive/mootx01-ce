@@ -12,7 +12,6 @@ name = "corpus_kit"
 path = "src/lib.rs"
 
 [dependencies]
-substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 engram-lib = { path = "../../../libs/EngramLib/rust" }
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }

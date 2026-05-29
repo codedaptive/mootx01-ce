@@ -14,6 +14,7 @@
 // without `eventTime` reads back with eventTime == filedAt.
 
 import Testing
+import SubstrateTypes
 import Foundation
 import PersistenceKit
 @testable import LocusKit

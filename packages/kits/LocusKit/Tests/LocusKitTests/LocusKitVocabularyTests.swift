@@ -1,4 +1,5 @@
 import XCTest
+import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //

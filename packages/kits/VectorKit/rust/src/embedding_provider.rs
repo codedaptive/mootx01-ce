@@ -15,7 +15,7 @@ use crate::error::VectorKitError;
 /// Conformers project text into a 256-bit `Engram` whose Hamming
 /// geometry approximates the model's semantic similarity. The
 /// canonical projection lives in
-/// `substrate_lib::float_simhash::project`; conformers that
+/// `substrate_ml::float_simhash::project`; conformers that
 /// produce engrams by any other path break the cross-provider
 /// distance contract and should not be used in production.
 pub trait EmbeddingProvider: Send + Sync {

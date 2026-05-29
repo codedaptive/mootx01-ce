@@ -23,6 +23,7 @@
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 import SubstrateLib
+import SubstrateTypes
 
 public enum LocusKitVocabulary {
 

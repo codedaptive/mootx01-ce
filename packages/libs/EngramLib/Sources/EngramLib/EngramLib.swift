@@ -23,7 +23,6 @@ import Foundation
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import SubstrateTypes
 import SubstrateKernel
 
@@ -42,7 +41,7 @@ internal let _engramLibCachedKernel: any SubstrateKernel = PortableKernel.kernel
 ///
 /// Construct via the `Engram` initializers below, not by reaching
 /// into the underlying representation.
-public typealias Engram = SubstrateLib.Fingerprint256
+public typealias Engram = Fingerprint256
 
 extension Engram {
     /// Construct an engram from four 64-bit blocks. The blocks

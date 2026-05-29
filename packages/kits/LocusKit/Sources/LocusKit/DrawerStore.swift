@@ -33,6 +33,7 @@
 // per the deterministic-engine rule.
 
 import Foundation
+import SubstrateKernel
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -464,7 +465,7 @@ public actor DrawerStore {
             writes(for: .adjective, from: d.adjectiveBitmap) +
             writes(for: .operational, from: d.operationalBitmap) +
             writes(for: .provenance, from: d.provenance)
-        let anchor = SubstrateLib.LatticeAnchor.udc(d.udcCode)
+        let anchor = SubstrateTypes.LatticeAnchor.udc(d.udcCode)
 
         try await storage.transaction(isolation: .serializable) { txn in
             _ = try await txn.rowStore.insert(
@@ -523,7 +524,7 @@ public actor DrawerStore {
             )
             // mutateState does not touch the drawer's lattice anchor, so
             // before and after anchors are the row's current udcCode.
-            let anchor = SubstrateLib.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
 
             // Route the state change through the substrate write gate:
             // it RMWs the state field into the snapshot, runs the basis
@@ -625,7 +626,7 @@ public actor DrawerStore {
                 operational: UInt64(bitPattern: priorOperational),
                 provenance: UInt64(bitPattern: priorProvenance)
             )
-            let anchor = SubstrateLib.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
 
             // Preserve bits 24-25 of the prior flags; set bit 26 (which
             // is the third bit of the 3-bit slot, raw value 0b100).
@@ -738,7 +739,7 @@ public actor DrawerStore {
                 adjective: UInt64(bitPattern: Self.int64(row["adjectiveBitmap"])),
                 operational: UInt64(bitPattern: Self.int64(row["operationalBitmap"])),
                 provenance: UInt64(bitPattern: Self.int64(row["provenance"])))
-            let anchor = SubstrateLib.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
 
             // verb .mutate is the state self-loop (active→active); a field
             // edit preserves state, so this is the correct verb.

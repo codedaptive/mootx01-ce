@@ -14,8 +14,8 @@ path = "src/lib.rs"
 [features]
 default = []
 # Pass-through to the reference crate's portable-SIMD kernel.
-simd-nightly = ["substrate-lib/simd-nightly"]
+simd-nightly = ["substrate-kernel/simd-nightly"]
 
 [dependencies]
-substrate-lib = { path = "../../SubstrateLib/rust" }
+substrate-kernel = { path = "../../SubstrateKernel/rust" }
 substrate-types = { path = "../../SubstrateTypes/rust" }

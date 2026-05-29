@@ -68,6 +68,7 @@
 // diary bitmap columns; see each table's section comment.
 
 import Foundation
+import SubstrateML
 import PersistenceKit
 
 public enum LocusKitSchema {

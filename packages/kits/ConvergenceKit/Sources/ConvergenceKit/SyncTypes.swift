@@ -3,6 +3,7 @@
 // Core enums and value types for ConvergenceKit.
 
 import Foundation
+import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -16,7 +17,6 @@ import Foundation
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 import PersistenceKit
 
 /// Direction of replication per synced table.

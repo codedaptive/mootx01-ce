@@ -15,7 +15,7 @@ path = "src/lib.rs"
 # rusqlite. EngramLib and SubstrateLib are still consumed for the
 # Engram type and the FloatSimHash projection. Rusqlite is gone.
 [dependencies]
-substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
+substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 engram-lib = { path = "../../../libs/EngramLib/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }

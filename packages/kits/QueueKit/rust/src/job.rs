@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-pub use substrate_lib::hlc::HLC;
+pub use substrate_types::hlc::HLC;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct JobId(pub String);

@@ -12,6 +12,7 @@
 //   • NMF factorization approximates the input matrix.
 
 import XCTest
+import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -25,7 +26,6 @@ import XCTest
 // CI catches drift four ways. See packages/libs/Substrate{Types,
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-import SubstrateLib
 @testable import GeniusLocusKit
 
 final class MatrixTierTests: XCTestCase {

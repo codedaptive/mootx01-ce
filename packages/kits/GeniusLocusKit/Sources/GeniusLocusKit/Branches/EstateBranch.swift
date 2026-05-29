@@ -1,4 +1,5 @@
 import Foundation
+import SubstrateTypes
 import OSLog
 import LocusKit
 import PersistenceKit

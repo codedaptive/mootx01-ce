@@ -8,8 +8,8 @@
 // rusqlite or sqlx.
 
 use std::sync::Mutex;
-use crate::hlc::HLC;
-use crate::fingerprint256::Fingerprint256;
+use substrate_types::hlc::HLC;
+use substrate_types::fingerprint256::Fingerprint256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditEvent {

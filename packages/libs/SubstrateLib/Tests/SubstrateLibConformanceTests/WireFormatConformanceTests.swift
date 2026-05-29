@@ -40,6 +40,9 @@
 
 import XCTest
 @testable import SubstrateLib
+import SubstrateML
+import SubstrateKernel
+import SubstrateTypes
 
 final class WireFormatConformanceTests: XCTestCase {
 

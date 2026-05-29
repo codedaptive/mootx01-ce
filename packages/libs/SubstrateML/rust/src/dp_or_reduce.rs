@@ -7,7 +7,7 @@
 // k = 3.
 
 use crate::random_walks::SplitMix64;
-use crate::fingerprint256::Fingerprint256;
+use substrate_types::fingerprint256::Fingerprint256;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DPParameters {

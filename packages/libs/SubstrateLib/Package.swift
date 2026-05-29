@@ -2,24 +2,22 @@
 //
 // Package.swift — SubstrateLib
 //
-// SubstrateLib is the math foundation of the GeniusLocus substrate.
-// It holds the four-block 256-bit fingerprint construction, the G-Set
-// CRDT audit log primitives under HLC ordering, the matrix tier
-// kernels with learned dispatch across NEON / BNNS / Metal / SIMD,
-// and the federation primitives (pairing handshake, tier-ascending
-// query, hyperplane family).
+// SubstrateLib is the orchestration layer of the four-package substrate
+// split (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR addendum 2026-05-29). It
+// owns the nine-verb mechanics and the row-state automaton — the control
+// surface that composes the three sub-packages — plus the AuditGate write
+// gate. The value types live in SubstrateTypes, the hardware-dispatched
+// kernels in SubstrateKernel, and the cold-path / ML algorithms in
+// SubstrateML; SubstrateLib depends on all three and no longer re-exports
+// them (the @_exported shim was removed when the symbol tail relocated).
 //
-// The mathematics here is conformance-gated. Every backend produces
-// bit-identical output to the scalar reference across the four
-// conformance cells. See Tests/SubstrateLibConformanceTests/ for
-// the gate fixtures.
+// The mathematics across the four packages is conformance-gated. Every
+// backend produces bit-identical output to the scalar reference. See
+// Tests/SubstrateLibConformanceTests/ for the gate fixtures.
 //
 // SubstrateLib was promoted from
 // docs/engineering/substrate_reference/GeniusLocusReference/
 // on 2026-05-19 per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
-// The reference implementation continues to exist as a checked-in
-// artifact for cookbook cross-reference; SubstrateLib is the
-// published product surface that downstream kits consume.
 
 import PackageDescription
 
@@ -36,17 +34,12 @@ let package = Package(
         ),
     ],
     dependencies: [
-        // Phase 6 (decision 2026-05-28 §6.6): migrating types into
-        // SubstrateTypes one leaf at a time. SubstrateLib remains
-        // the published surface and re-exports SubstrateTypes for
-        // downstream consumers (see SubstrateLibExports.swift).
+        // The orchestration layer composes all three sub-packages:
+        // value types (SubstrateTypes), hardware kernels
+        // (SubstrateKernel — AuditGate's bit_field/sha256), and the
+        // cold-path / ML algorithms (SubstrateML).
         .package(path: "../SubstrateTypes"),
-        // Phase 6.9b (decision 2026-05-28 §6): kernel layer
-        // (PortableKernel + hardware backends) migrated to
-        // SubstrateKernel.
         .package(path: "../SubstrateKernel"),
-        // Phase 6.9c (decision 2026-05-28 §6): ML algorithms
-        // migrated to SubstrateML.
         .package(path: "../SubstrateML"),
     ],
     targets: [
@@ -57,12 +50,12 @@ let package = Package(
         ),
         .testTarget(
             name: "SubstrateLibTests",
-            dependencies: ["SubstrateLib"],
+            dependencies: ["SubstrateLib", "SubstrateTypes", "SubstrateKernel", "SubstrateML"],
             path: "Tests/SubstrateLibTests"
         ),
         .testTarget(
             name: "SubstrateLibConformanceTests",
-            dependencies: ["SubstrateLib"],
+            dependencies: ["SubstrateLib", "SubstrateTypes", "SubstrateKernel", "SubstrateML"],
             path: "Tests/SubstrateLibConformanceTests"
         ),
     ]

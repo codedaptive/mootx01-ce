@@ -18,9 +18,9 @@
 // exposable RecallResult, composition is associative.
 
 use std::collections::{HashMap, HashSet};
-use crate::hlc::HLC;
-use crate::fingerprint256::Fingerprint256;
-use crate::tier_query::RecallScoreLite as RecallScore;
+use substrate_types::hlc::HLC;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_ml::tier_query::RecallScoreLite as RecallScore;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DistanceBreakdown {

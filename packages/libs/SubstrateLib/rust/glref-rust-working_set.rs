@@ -10,8 +10,8 @@
 
 use std::fs;
 use std::path::Path;
-use crate::hlc::HLC;
-use crate::bit_tensor::ThreeDBitTensor;
+use substrate_types::hlc::HLC;
+use substrate_types::bit_tensor::ThreeDBitTensor;
 
 #[derive(Debug, Clone)]
 pub struct WorkingSetHeader {

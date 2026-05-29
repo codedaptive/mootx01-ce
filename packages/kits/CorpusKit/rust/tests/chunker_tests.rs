@@ -14,7 +14,7 @@ use corpus_kit::{chunk, ChunkerConfiguration};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::hlc::HLCGenerator;
+use substrate_types::hlc::HLCGenerator;
 
 #[test]
 fn chunker_short_input_is_one_chunk() {

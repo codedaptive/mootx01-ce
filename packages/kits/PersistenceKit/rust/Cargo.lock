@@ -166,7 +166,6 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "persistence-kit"
 version = "0.1.0"
 dependencies = [
- "substrate-lib",
  "substrate-types",
  "uuid",
 ]
@@ -270,30 +269,6 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
-name = "substrate-kernel"
-version = "1.0.0-skeleton"
-dependencies = [
- "substrate-types",
-]
-
-[[package]]
-name = "substrate-lib"
-version = "0.36.0"
-dependencies = [
- "substrate-kernel",
- "substrate-ml",
- "substrate-types",
-]
-
-[[package]]
-name = "substrate-ml"
-version = "1.0.0-skeleton"
-dependencies = [
- "substrate-kernel",
- "substrate-types",
-]
 
 [[package]]
 name = "substrate-types"
