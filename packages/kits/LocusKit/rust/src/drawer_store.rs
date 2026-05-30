@@ -49,6 +49,7 @@ use crate::error::LocusKitError;
 use crate::estate_types::RowID;
 use crate::kg_fact::KGFact;
 use crate::manifest::ManifestValues;
+use crate::proposal::Proposal;
 use crate::recall_trace_item::RecallTraceItem;
 use crate::summaries::{RoomSummary, WingSummary};
 use crate::adjectives::State;
@@ -291,6 +292,35 @@ pub trait DrawerStore: Send + Sync {
         &self,
         _source_drawer_id: &str,
     ) -> Result<Vec<KGFact>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
+    // -----------------------------------------------------------------
+    // Proposal CRUD
+    // -----------------------------------------------------------------
+
+    /// Insert a proposal. The lattice anchor is required per cookbook
+    /// §2.7 (I-16): an empty `udc_code` is rejected with
+    /// `LocusKitError::InvalidContent` before the insert. `target_row_id`
+    /// is NOT validated non-empty — a brand-new-object proposal has no
+    /// existing target row.
+    fn add_proposal(&self, _proposal: &Proposal) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "add_proposal not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Fetch a proposal by id. Returns `None` on miss.
+    fn get_proposal(&self, _id: &str) -> Result<Option<Proposal>, LocusKitError> {
+        Ok(None)
+    }
+
+    /// All proposals targeting a given row, ordered by `filed_at`
+    /// ascending. Resolves through the `idx_proposals_target` index.
+    fn proposals_for_target(
+        &self,
+        _target_row_id: &str,
+    ) -> Result<Vec<Proposal>, LocusKitError> {
         Ok(Vec::new())
     }
 

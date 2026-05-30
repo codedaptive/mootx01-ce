@@ -93,6 +93,7 @@ public enum LocusKitSchema {
                 diaryTable,
                 manifestTable,
                 kgFactsTable,
+                proposalsTable,
                 nodeBundlesTable,
                 containerFingerprintsTable,
                 recallTraceTable,
@@ -349,6 +350,52 @@ public enum LocusKitSchema {
         ]
     )
 
+    // MARK: - proposals
+    //
+    // Proposal persistence per mission NOUN-PRO-01 and cookbook §2.4.
+    // Three Int64 bitmap columns mirror the in-memory value type's
+    // adjective / operational / provenance axes; `candidateState` is a
+    // fourth bitmap carrying the proposed adjective set the proposal
+    // would apply to its target if accepted (cookbook §10.7
+    // candidate_state). The lattice anchor (cookbook §2.7 / I-16) is
+    // stored as the same four columns drawers use — udcCode +
+    // udcFacets + wikidataQID + wikidataQidsSecondary — with udcCode
+    // TEXT NOT NULL DEFAULT ''; `addProposal` rejects an empty anchor
+    // before insert. Same headroom convention as kg_facts.
+    static let proposalsTable = TableDeclaration(
+        name: "proposals",
+        columns: [
+            .text("id"),
+            .text("targetRowID"),
+            .text("justification", nullable: true),
+            .bitmap("candidateState"),
+            .bitmap("adjectiveBitmap"),
+            .bitmap("operationalBitmap"),
+            .bitmap("provenanceBitmap"),
+            ColumnDeclaration(name: "udcCode", type: .text,
+                              nullable: false, defaultValue: .text("")),
+            .text("udcFacets", nullable: true),
+            .text("wikidataQID", nullable: true),
+            .text("wikidataQidsSecondary", nullable: true),
+            .timestamp("filedAt"),
+            .json("ext", nullable: true)
+        ],
+        primaryKey: ["id"],
+        generatedColumns: [
+            // (adjectiveBitmap & 0x3F), the state field. Proposals are
+            // filtered by lifecycle state — pending while awaiting
+            // confirmation vs accepted/rejected/withdrawn afterward —
+            // via the per-cluster predicate `(state >> 4) & 0x3`; the
+            // field extract is indexed here as on drawers and kg_facts.
+            // Cookbook §2.3 6-bit field.
+            GeneratedColumn(
+                name: "g_state_cluster",
+                type: .int,
+                expression: .bitAnd(.column("adjectiveBitmap"), .literal(0x3F))
+            )
+        ]
+    )
+
     // MARK: - recall_trace
     //
     // RecallTraceItem persistence per NEURONKIT_SPEC §3.1. One row per
@@ -438,6 +485,12 @@ public enum LocusKitSchema {
         IndexDeclaration(name: "idx_kg_facts_sourceDrawer", table: "kg_facts", columns: ["sourceDrawerID"]),
         IndexDeclaration(name: "idx_kg_facts_subject", table: "kg_facts", columns: ["subject"]),
         IndexDeclaration(name: "idx_kg_facts_state_cluster", table: "kg_facts", columns: ["g_state_cluster"]),
+        // proposals — query paths: by target row (which proposals act
+        // on a row), by lattice anchor (anchor resolution), and by
+        // lifecycle state cluster (pending vs resolved)
+        IndexDeclaration(name: "idx_proposals_target", table: "proposals", columns: ["targetRowID"]),
+        IndexDeclaration(name: "idx_proposals_udcCode", table: "proposals", columns: ["udcCode"]),
+        IndexDeclaration(name: "idx_proposals_state_cluster", table: "proposals", columns: ["g_state_cluster"]),
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration(name: "idx_recall_trace_target", table: "recall_trace", columns: ["target"]),
