@@ -37,17 +37,19 @@ state recall, a pairing handshake, or a bitwise/bitfield extraction
 bit-identical Swift+Rust implementation already shipped. You do not
 need to write a second one.
 
-Each of these 23 operations is conformance-gated: the Swift and the
+Each of these 24 operations is conformance-gated: the Swift and the
 Rust implementations are byte-for-byte identical on their canonical
 test vector (32 cases each, CRC-pinned). Drift between the two
 languages would be caught by CI in the next harness run.
 
 The harness lives at
 `/Users/bob/devlop/mootx01-ce/docs/validation/substrate_math_performance/test-harness/`.
-The reference implementations these primitives wrap live in the
-SubstrateLib package at
-`/Users/bob/devlop/mootx01-ce/packages/libs/SubstrateLib/` (Swift +
-Rust legs side by side; see §6 for the four-package split).
+The reference implementations these primitives wrap are distributed
+across the four substrate packages under
+`/Users/bob/devlop/mootx01-ce/packages/libs/` (SubstrateTypes,
+SubstrateKernel, SubstrateML, and SubstrateLib; Swift + Rust legs side
+by side). The §2.0 map gives each primitive's package; §6 explains the
+split.
 
 To add a new primitive to the gate, follow §7. To verify a code
 change against the gate, follow §8.
@@ -77,7 +79,7 @@ candidate for promotion (see §7).
 
 ---
 
-## §2. The 23 conformance-gated primitives
+## §2. The 24 conformance-gated primitives
 
 Each row tells an agent four things:
 1. **Where the math lives** (cookbook §).
@@ -88,17 +90,54 @@ Each row tells an agent four things:
 All file paths are relative to the repo root
 `/Users/bob/devlop/mootx01-ce/`.
 
+### §2.0. Where each primitive lives (four-package map)
+
+Per the 2026-05-29 four-package split (§6), each gated primitive's
+reference implementation lives in one of the substrate packages below.
+Swift paths are `packages/libs/<Package>/Sources/<Package>/<file>`; Rust
+paths are `packages/libs/<Package>/rust/src/<module>`.
+
+| Primitive | Package | Swift file | Rust module |
+|---|---|---|---|
+| `simhash` | SubstrateTypes | `SimHash.swift` | `simhash.rs` |
+| `hamming` | SubstrateTypes | `Hamming.swift` | `hamming.rs` |
+| `or_reduce` | SubstrateTypes | `ORReduce.swift` | `or_reduce.rs` |
+| `bitwise` | SubstrateTypes | `BitwiseArithmetic.swift` | `bitwise.rs` |
+| `fingerprint` | SubstrateTypes | `Fingerprint256.swift` | `fingerprint256.rs` |
+| `hlc` | SubstrateTypes | `HLC.swift` | `hlc.rs` |
+| `fnv` | SubstrateTypes | `FNV.swift` | `fnv.rs` |
+| `bit_field_masked_equals` | SubstrateKernel | `BitField.swift` | `bit_field.rs` |
+| `lattice` | SubstrateML | `LatticeDistance.swift` | `lattice_distance.rs` |
+| `info_theory` | SubstrateML | `InformationTheory.swift` | `info_theory.rs` |
+| `bradley_terry` | SubstrateML | `BradleyTerry.swift` | `bradley_terry.rs` |
+| `partial_state_recall` | SubstrateML | `PartialStateRecall.swift` | `partial_state_recall.rs` |
+| `temporal_compression` | SubstrateML | `TemporalCompression.swift` | `temporal_compression.rs` |
+| `anomaly` | SubstrateML | `AnomalyDetection.swift` | `anomaly.rs` |
+| `matrix_decay` | SubstrateML | `MatrixDecay.swift` | `decay.rs` |
+| `moment_summary` | SubstrateML | `MomentSummary.swift` | `moment_summary.rs` |
+| `field_presence_matrix_f` | SubstrateTypes | `MatrixF.swift` | `matrix_f.rs` |
+| `tier_contribution` | SubstrateML | `TierContributionFingerprint.swift` | `tier_contribution.rs` |
+| `pairing_handshake` | SubstrateML | `PairingHandshake.swift` | `pairing.rs` |
+| `fft` | SubstrateML | `FFT.swift` | `fft.rs` |
+| `hamming_nn` | SubstrateKernel | `HammingNN.swift` | `hamming_nn.rs` |
+| `nmf` | SubstrateML | `NMFAlternatingLeastSquares.swift` | `nmf.rs` |
+| `eigenvalue_centrality` | SubstrateML | `EigenvalueCentrality.swift` | `eigenvalue_centrality.rs` |
+| `audit_log_fold` | SubstrateML | `AuditLogFold.swift` | `audit_log_fold.rs` |
+
+(`AuditGate`, `Verbs`, and `RowStateAutomaton` are the orchestration
+layer in SubstrateLib — not gated primitives, so not in this table.)
+
 ### §2.1. Tier 1 — atomic primitives (8 ops)
 
-These are the substrate's irreducible bit operations. Any kit
-using these MUST call the SubstrateLib API named below — never a
-reimplementation (I-25, cookbook §1.4).
+These are the substrate's irreducible bit operations. Any kit using
+these MUST call the substrate API named below — never a reimplementation
+(I-25, cookbook §1.4). The package each lives in is given by the §2.0 map.
 
 #### `simhash` — §3.6 — CRC `0xddd18e12`
 - **Swift:** `SimHash.computeBlock(_ v: BitVector192, family: HyperplaneFamily) -> UInt64`
-  in `packages/libs/SubstrateLib/swift/Sources/SubstrateLib/SimHash.swift`
+  in `packages/libs/SubstrateTypes/Sources/SubstrateTypes/SimHash.swift`
 - **Rust:** `simhash::SimHash::compute_block(v: &[u64; 3], family: &HyperplaneFamily) -> u64`
-  in `packages/libs/SubstrateLib/rust/src/simhash.rs`
+  in `packages/libs/SubstrateTypes/rust/src/simhash.rs`
 - **Harness Swift:** `test-harness/swift/Sources/Harness/Primitives/SimHashPrimitive.swift`
 - **Harness Rust:** `test-harness/rust/src/primitives/simhash.rs`
 - **Vector:** `test-harness/vectors/simhash.json`
@@ -157,7 +196,7 @@ reimplementation (I-25, cookbook §1.4).
 #### `fnv` — §3.3 — CRC `0x275fd2bf`
 - **Swift:** `FNV.hash64(_:) -> UInt64`, `FNV.hash32(_:) -> UInt32`,
   `FNV.hash16(_:) -> UInt16`
-  in `packages/libs/SubstrateLib/Sources/SubstrateLib/FNV.swift`
+  in `packages/libs/SubstrateTypes/Sources/SubstrateTypes/FNV.swift`
 - **Rust:** `fnv::hash64(s: &str) -> u64`, `fnv::hash32(s: &str) -> u32`,
   `fnv::hash16(s: &str) -> u16`
   in `packages/libs/SubstrateTypes/rust/src/fnv.rs`
@@ -175,9 +214,9 @@ reimplementation (I-25, cookbook §1.4).
 
 #### `bit_field_masked_equals` — §2.8 — CRC `0x54f6c65f`
 - **Swift:** `BitField.maskedEquals(_ bitmap: Int64, mask: Int64, expected: Int64) -> Bool`
-  in `packages/libs/SubstrateLib/Sources/SubstrateLib/BitField.swift`
+  in `packages/libs/SubstrateKernel/Sources/SubstrateKernel/BitField.swift`
 - **Rust:** `bit_field::masked_equals(bitmap: i64, mask: i64, expected: i64) -> bool`
-  in `packages/libs/SubstrateLib/rust/glref-rust-bit_field.rs`
+  in `packages/libs/SubstrateKernel/rust/src/bit_field.rs`
 - **Harness Swift:** `test-harness/swift/Sources/Harness/Primitives/BitFieldMaskedEqualsPrimitive.swift`
 - **Harness Rust:** `test-harness/rust/src/primitives/bit_field_masked_equals.rs`
 - **Vector:** `test-harness/vectors/bit_field_masked_equals.json`
@@ -431,7 +470,7 @@ code should match its language's idiom.
 
 ## §5. Workflow — adding a new primitive to the gate
 
-The 23 ops in §2 were all promoted through this workflow. If you
+The 24 ops in §2 were all promoted through this workflow. If you
 are adding a 23rd, the steps are mechanical. The worked example
 lives at `test-harness/primitive-walkthrough-SimHash.md`.
 
@@ -638,7 +677,7 @@ backend, or compiler is conforming if and only if it can:
 2. `validate-vectors <name>.json` against the Swift-generated
    canonical vector and PASS.
 
-A platform that passes for all 23 primitives is fully substrate-
+A platform that passes for all 24 primitives is fully substrate-
 conforming. A platform that passes for the Tier-1 subset (§2.1)
 is hot-path-conforming and can run reads but not the dreaming
 daemon.
@@ -732,8 +771,9 @@ accident.
 ---
 
 *End of harness reference. If you found yourself about to write a
-SimHash, a Hamming distance, an OR-reduce, or any of the other 22
-operations in §2: stop. Use the one in `SubstrateLib`. It is
+SimHash, a Hamming distance, an OR-reduce, or any of the other gated
+operations in §2: stop. Use the one already in the substrate (the §2.0
+map gives its package). It is
 gated, byte-identical Swift↔Rust, and the next 12 lines of code
 you don't have to write are 12 lines of bugs you don't have to
 fix.*
