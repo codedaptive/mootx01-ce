@@ -959,6 +959,69 @@ public actor DrawerStore {
         return try rows.map(Self.proposalFromRow)
     }
 
+    // MARK: - Association CRUD
+
+    /// Insert an association. The edge endpoints and `addedBy` are required
+    /// (mirroring `addTunnel`), and the lattice anchor is required per
+    /// cookbook §2.7 (I-16): an empty `udcCode` is rejected with
+    /// `LocusKitError.invalidContent` before the insert, mirroring
+    /// `addProposal`. Conflicting ids surface as duplicateKey.
+    public func addAssociation(_ a: Association) async throws {
+        try Self.validateNonEmpty(a.sourceWing, label: "sourceWing")
+        try Self.validateNonEmpty(a.sourceRoom, label: "sourceRoom")
+        try Self.validateNonEmpty(a.targetWing, label: "targetWing")
+        try Self.validateNonEmpty(a.targetRoom, label: "targetRoom")
+        try Self.validateNonEmpty(a.label, label: "label")
+        try Self.validateNonEmpty(a.addedBy, label: "addedBy")
+        try Self.validateNonEmpty(a.latticeAnchor.udcCode, label: "latticeAnchor.udcCode")
+        _ = try await storage.rowStore.insert(
+            table: "associations", values: Self.associationValues(a))
+    }
+
+    /// Fetch an association by id. Returns nil for an absent id — a routine
+    /// query miss, not an error, mirroring `getTunnel` / `getProposal`.
+    public func getAssociation(id: String) async throws -> Association? {
+        let rows = try await storage.rowStore.query(
+            table: "associations",
+            where: .eq(Column(table: "associations", name: "id"), .text(id))
+        )
+        return try rows.first.map(Self.associationFromRow)
+    }
+
+    /// All non-tombstoned associations from a source wing/room pair, ordered
+    /// by `filedAt` ascending. Resolves through `idx_associations_source`.
+    /// Mirrors `tunnelsFrom(wing:room:)`.
+    public func associationsFrom(wing: String, room: String) async throws -> [Association] {
+        let rows = try await storage.rowStore.query(
+            table: "associations",
+            where: .and([
+                .eq(Column(table: "associations", name: "sourceWing"), .text(wing)),
+                .eq(Column(table: "associations", name: "sourceRoom"), .text(room)),
+                .isNull(Column(table: "associations", name: "tombstonedAt"))
+            ]),
+            orderBy: [OrderClause(column: Column(table: "associations", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.associationFromRow)
+    }
+
+    /// All non-tombstoned associations to a target wing/room pair, ordered
+    /// by `filedAt` ascending. Resolves through `idx_associations_target`.
+    /// Mirrors `tunnelsTo(wing:)`.
+    public func associationsTo(wing: String, room: String) async throws -> [Association] {
+        let rows = try await storage.rowStore.query(
+            table: "associations",
+            where: .and([
+                .eq(Column(table: "associations", name: "targetWing"), .text(wing)),
+                .eq(Column(table: "associations", name: "targetRoom"), .text(room)),
+                .isNull(Column(table: "associations", name: "tombstonedAt"))
+            ]),
+            orderBy: [OrderClause(column: Column(table: "associations", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.associationFromRow)
+    }
+
     // MARK: - Diary CRUD
 
     /// Insert a diary entry. Conflicting ids surface as duplicateKey.
@@ -1277,6 +1340,30 @@ public actor DrawerStore {
         ]
     }
 
+    private static func associationValues(_ a: Association) -> [String: TypedValue] {
+        [
+            "id": .text(a.id),
+            "sourceWing": .text(a.sourceWing),
+            "sourceRoom": .text(a.sourceRoom),
+            "sourceDrawerId": a.sourceDrawerId.map { TypedValue.text($0) } ?? .null,
+            "targetWing": .text(a.targetWing),
+            "targetRoom": .text(a.targetRoom),
+            "targetDrawerId": a.targetDrawerId.map { TypedValue.text($0) } ?? .null,
+            "label": .text(a.label),
+            "addedBy": .text(a.addedBy),
+            "filedAt": .timestamp(a.filedAt),
+            "tombstonedAt": a.tombstonedAt.map { TypedValue.timestamp($0) } ?? .null,
+            "removedByBatch": a.removedByBatch.map { TypedValue.text($0) } ?? .null,
+            "udcCode": .text(a.latticeAnchor.udcCode),
+            "udcFacets": a.latticeAnchor.udcFacets.map { TypedValue.text($0) } ?? .null,
+            "wikidataQID": a.latticeAnchor.wikidataQID.map { TypedValue.text($0) } ?? .null,
+            "wikidataQidsSecondary": a.latticeAnchor.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null,
+            "adjectiveBitmap": .bitmap(a.adjectiveBitmap),
+            "operationalBitmap": .bitmap(a.operationalBitmap),
+            "provenanceBitmap": .bitmap(a.provenanceBitmap)
+        ]
+    }
+
     private static func diaryValues(_ e: DiaryEntry) -> [String: TypedValue] {
         [
             "id": .text(e.id),
@@ -1393,6 +1480,32 @@ public actor DrawerStore {
             targetDrawerId: optString(row["targetDrawerId"]),
             label: string(row["label"]),
             kind: TunnelKind(rawValue: Int(int64(row["kind_id"]))) ?? .references,
+            adjectiveBitmap: int64(row["adjectiveBitmap"]),
+            operationalBitmap: int64(row["operationalBitmap"]),
+            provenanceBitmap: int64(row["provenanceBitmap"]),
+            addedBy: string(row["addedBy"]),
+            filedAt: date(row["filedAt"]),
+            tombstonedAt: optDate(row["tombstonedAt"]),
+            removedByBatch: optString(row["removedByBatch"])
+        )
+    }
+
+    private static func associationFromRow(_ row: StorageRow) throws -> Association {
+        Association(
+            id: string(row["id"]),
+            sourceWing: string(row["sourceWing"]),
+            sourceRoom: string(row["sourceRoom"]),
+            sourceDrawerId: optString(row["sourceDrawerId"]),
+            targetWing: string(row["targetWing"]),
+            targetRoom: string(row["targetRoom"]),
+            targetDrawerId: optString(row["targetDrawerId"]),
+            label: string(row["label"]),
+            latticeAnchor: LatticeAnchor(
+                udcCode: string(row["udcCode"]),
+                udcFacets: optString(row["udcFacets"]),
+                wikidataQID: optString(row["wikidataQID"]),
+                wikidataQidsSecondary: optString(row["wikidataQidsSecondary"])
+            ),
             adjectiveBitmap: int64(row["adjectiveBitmap"]),
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
