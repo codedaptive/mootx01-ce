@@ -5,6 +5,16 @@
 //
 // Five-step: local exact compute, sign with shared key, forward to
 // peers/aggregator, peer applies DP, originator combines.
+//
+// RECALL-RESULT TYPES (Swift/Rust asymmetry — intentional). The Swift
+// port keeps the full recall vocabulary (RecallScore, RecallResult,
+// DistanceBreakdown, RowProjection) in
+// substrate-types/RecallTypes.swift. This Rust port does not mirror that
+// module; it materializes only the lean RecallScoreLite / RecallResultLite
+// shapes the query path needs, here beside TierAscendingQuery.
+// DistanceBreakdown and RowProjection have no Rust equivalent by design.
+// Do not extract a recall_types module for parity — conformance covers
+// the wire-gated path, not these convenience shapes.
 
 use std::collections::HashMap;
 use substrate_types::hlc::HLC;
