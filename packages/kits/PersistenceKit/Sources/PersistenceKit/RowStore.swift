@@ -30,7 +30,9 @@ public struct RowHandle: Sendable, Hashable {
 
 public protocol RowStore: Sendable {
     func insert(table: String, values: [String: TypedValue]) async throws -> RowHandle
+    @discardableResult
     func upsert(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle
+    @discardableResult
     func update(table: String, values: [String: TypedValue], where: StoragePredicate) async throws -> Int
     func delete(table: String, where: StoragePredicate) async throws -> Int
     func query(

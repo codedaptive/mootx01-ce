@@ -23,7 +23,6 @@
 //                            hot-path footgun in HammingNN.
 
 import Foundation
-import SubstrateTypes
 
 public struct BlockMask: OptionSet, Sendable, Hashable, Codable {
     public let rawValue: UInt8
