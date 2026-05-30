@@ -1,74 +1,67 @@
 ---
-name: substrate-lib-legacy-redirect
-description: Use this skill when an agent encounters a reference to the deprecated SubstrateLib monolith — an old import line, an old `use` statement, a doc cross-reference, or any code that points at `packages/libs/SubstrateLib/`. The skill redirects to whichever of the three successor packages (SubstrateTypes, SubstrateKernel, SubstrateML) actually owns the symbol. Trigger this any time an agent is about to add or maintain a SubstrateLib import.
+name: substrate-lib
+description: Use this skill when an agent is deciding whether to depend on SubstrateLib or one of its three sub-packages, or is working with the substrate's write path — the nine verbs, the row-state automaton, or the AuditGate write gate. SubstrateLib is the retained orchestration layer of the four-package substrate split; depend on it only if you drive the verbs / row-state machine (today only LocusKit does). For value types, kernels, or ML primitives, depend on SubstrateTypes / SubstrateKernel / SubstrateML directly. Trigger this when adding a SubstrateLib import, writing through AuditGate, or reasoning about verb/row-state mechanics.
 ---
 
-# substrate-lib-legacy-redirect — don't import the deprecated monolith
+# substrate-lib — the substrate orchestration layer
 
 ## When this skill applies
 
 An agent is about to:
-- Add `.package(path: "../SubstrateLib")` to a Swift `Package.swift`
-- Add `substrate-lib = { path = "..." }` to a Rust `Cargo.toml`
-- Write `import SubstrateLib` or `use substrate_lib::...`
-- Maintain code that already does any of the above
+- Add a `SubstrateLib` dependency (Swift `Package.swift` or Rust `Cargo.toml`)
+- Write a mutation through the substrate (every write goes through `AuditGate`)
+- Work with the nine verbs or the `RowStateAutomaton` state machine
+- Decide whether SubstrateLib or a sub-package is the right dependency
 
 ## The one rule
 
-The `SubstrateLib` package is deprecated. Its symbols moved to three
-successors. Don't import the monolith; import the specific
-successor(s) you need.
+SubstrateLib is **retained** as the orchestration layer (four-package
+split, 2026-05-29 addendum) — it is NOT deprecated. But depend on it
+**only if you drive the verbs / row-state machine / write gate**. If you
+only need a value type, a kernel, or an ML primitive, depend on the
+precise sub-package instead.
 
-## Redirect table
+## What lives in SubstrateLib (and only here)
 
-| If you wanted… | Import |
+| Symbol | Use |
 |---|---|
-| `Fingerprint256`, `HLC`, `Row`, `RowLite`, `LatticeAnchor`, `AuditEvent`, layout constants, enums, `MatrixF/C/O/T` (storage) | `SubstrateTypes` |
-| `SimHash`, Fingerprint256 ops (distance / OR / AND / XOR / prototype), `HammingNN`, `SimdKernel`, `AuditGate`, `HLCGenerator`, SHA-256 seal | `SubstrateKernel` |
-| `MatrixDecay`, `MomentSummary`, `BradleyTerry`, `Anomaly`, `InfoTheory`, `TemporalCompression`, `PartialStateRecall`, `FFT`, `NMF`, `EigenvalueCentrality`, `AuditLogFold`, `TierContribution`, `PairingHandshake` | `SubstrateML` |
+| `Verbs` | The nine substrate verbs and their mechanics |
+| `RowStateAutomaton` | `RowStateAutomaton.validate(from:on:targetingFields:)` — legal-transition + I-22 check |
+| `AuditGate` | `try AuditGate.admit(verb:prior:writes:actor:hlc:)` — the only legitimate path to a mutation |
 
-## How to migrate an import
+`AuditGate` lives here (not in SubstrateKernel) because it calls
+`RowStateAutomaton`; it *consumes* `SubstrateKernel`'s `BitField` + `SHA256`.
 
-Swift, before:
+## Where everything else lives (depend on these directly)
+
+| If you wanted… | Depend on |
+|---|---|
+| `Fingerprint256`, `HLC` + `HLCGenerator`, `AuditEvent`, `LatticeAnchor`, `Row`, `NounType`, layout constants, `SimHash`, `Hamming`, `ORReduce`, `MatrixF/C/O/T`, `GSetAuditLog`, `RecallTypes` | `SubstrateTypes` |
+| `PortableKernel`/`SimdKernel`, `HammingNN`, `BitField`, `SHA256` | `SubstrateKernel` |
+| `MatrixDecay`, `BradleyTerry`, `FFT`, `NMF`, `AuditLogFold`, `PartialStateRecall`, `PairingHandshake`, `TierContribution*`, `DPORReduction`, … | `SubstrateML` |
+
+## How to depend on it (verb-drivers)
+
 ```swift
 .package(path: "../../libs/SubstrateLib"),
 // targets dependencies: ["SubstrateLib"]
-
 import SubstrateLib
 ```
 
-Swift, after — depend on the subset you actually use:
-```swift
-.package(path: "../../libs/SubstrateTypes"),
-.package(path: "../../libs/SubstrateKernel"),
-// targets dependencies: ["SubstrateTypes", "SubstrateKernel"]
-
-import SubstrateTypes
-import SubstrateKernel
-```
-
-Rust, before:
 ```toml
 substrate-lib = { path = "../../libs/SubstrateLib/rust" }
 ```
 
-```rust
-use substrate_lib::{Fingerprint256, simhash::SimHash};
-```
+## Anti-patterns
 
-Rust, after:
-```toml
-substrate-types  = { path = "../../libs/SubstrateTypes/rust" }
-substrate-kernel = { path = "../../libs/SubstrateKernel/rust" }
-```
-
-```rust
-use substrate_types::Fingerprint256;
-use substrate_kernel::simhash::SimHash;
-```
+1. **Depending on SubstrateLib for a value type / kernel / ML primitive.**
+   Those moved to the sub-packages; SubstrateLib no longer re-exports them.
+   Depend on `SubstrateTypes` / `SubstrateKernel` / `SubstrateML` directly.
+2. **Writing to the audit log without `AuditGate.admit`.** Bypasses I-22
+   enforcement, the seal, and the per-mode `sealed` bit. The gate is the
+   only authoring point.
 
 ## What to read
 
-`packages/libs/SubstrateLib/AGENTS.md` for the full redirect mapping
-and rationale. The three successor packages each have their own
-`AGENTS.md` and `SKILL.md` documenting what lives there.
+`packages/libs/SubstrateLib/AGENTS.md` for the AuditGate write-path
+reference. The three sub-packages each have their own `AGENTS.md`/`SKILL.md`.

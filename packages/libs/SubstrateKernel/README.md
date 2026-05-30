@@ -1,18 +1,26 @@
 # SubstrateKernel
 
-Layer 2 — bandwidth-bound bit operations + write gate + clock maker of the four-package SubstrateLib split.
+Layer 2 — bandwidth-bound bit operations of the four-package substrate split.
 
-**Status:** built; four-package split mid-migration (per
+**Status:** built; four-package split complete (per
 `docs/decisions/DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md`
-Phase 6 and the 2026-05-29 addendum). Symbols here hold real code;
-remaining symbols are still resident in `SubstrateLib`, which is
-RETAINED as the orchestration package (the four-package end-state),
-not deleted. A temporary `@_exported` re-export keeps downstream kits
-compiling until consumers re-point precisely.
+Phase 6 and the 2026-05-29 addendum). Consumers depend on this package
+directly; the transitional `@_exported` re-export shim has been removed.
+`SubstrateLib` is RETAINED as the orchestration package of the
+four-package end-state (verbs, row-state automaton, AuditGate), not
+deleted.
 
 ## What lives here
 
-The hot path. SimHash, Hamming, OR-reduce, Fingerprint256 ops, SimdKernel, HammingNN top-K, AuditGate, HLCGenerator, SHA-256 seal. Tier-1 of the conformance harness lives here.
+The hot path: SimHash, Hamming, OR-reduce, Fingerprint256 ops,
+SimdKernel, HammingNN top-K, `BitField`, and `SHA256` (content-ID /
+seal). Tier-1 of the conformance harness lives here.
+
+The `AuditGate` write gate is **not** here — it lives in `SubstrateLib`
+(the orchestration layer) because it validates against
+`RowStateAutomaton`; it *consumes* this package's `BitField` and
+`SHA256`. The HLC `HLCGenerator` clock-maker lives in `SubstrateTypes`
+alongside the `HLC` value type.
 
 See `docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md` §6 for
 the canonical breakdown of where each substrate primitive lives,
@@ -45,15 +53,14 @@ SubstrateKernel/
     └── src/lib.rs
 ```
 
-## Build status during refactor
+## Substrate end-state
 
 `SubstrateLib` is RETAINED as the orchestration package of the
-four-package end-state (it holds the verb mechanics and the row-state
-automaton, which fit none of Types/Kernel/ML; see the 2026-05-29
-addendum). The migration re-points the downstream consumers to the
-appropriate one(s) of SubstrateKernel's siblings and removes the
-temporary `@_exported` re-export shim — it does NOT delete
-`SubstrateLib`.
+four-package end-state (it holds the verb mechanics, the row-state
+automaton, and the AuditGate write gate, which fit none of
+Types/Kernel/ML; see the 2026-05-29 addendum). The migration re-pointed
+every downstream consumer to the appropriate sibling(s) and removed the
+temporary `@_exported` re-export shim — it did NOT delete `SubstrateLib`.
 
 ## License
 

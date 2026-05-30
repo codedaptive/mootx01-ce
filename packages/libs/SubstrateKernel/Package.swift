@@ -4,7 +4,7 @@
 //
 // SubstrateKernel is layer 2 of the four-package substrate split
 // (I-30, cookbook v1.0 §20). Bandwidth-bound bit operations plus the
-// write-gate and clock-maker primitives.
+// content/seal hashing and bitmap-field primitives.
 //
 // What lives here (Tier 1 of HARNESS_REFERENCE §2.1):
 //   SimHash family
@@ -13,21 +13,21 @@
 //   The combinators layer: zip4 / reduce4 / map4 / popcount over
 //     Fingerprint256
 //   SimdKernel (Swift NEON via `import simd`)
-//   AuditGate (the write gate; admits FieldWrite sets, validates
-//              against VocabularyValidator; the gate's prior == nil
-//              branch is the capture path, I-26)
-//   HLCGenerator (open / tick / takeover, I-28)
+//   BitField (bitmap field extraction / masked-equals)
 //   SHA-256 content-ID and seal computation (the I-27 integrity
 //                                            triangle's binding leg)
 //
 // What does NOT live here:
-//   Pure types (those are in SubstrateTypes)
+//   Pure types (those are in SubstrateTypes — incl. HLC + HLCGenerator)
 //   Learning, graph algorithms, matrix updates (those are in
 //   SubstrateML)
+//   The AuditGate write gate (it validates against RowStateAutomaton,
+//   so it lives in SubstrateLib, the orchestration layer; it *consumes*
+//   this package's BitField + SHA256). See the 2026-05-29 addendum.
 //
 // Consumers that depend on this package:
-//   All hot-path consumers — LocusKit, RagKit, CognitionKit,
-//   GeniusLocusKit, PersistenceKit (for AuditGate enforcement).
+//   Hot-path consumers — LocusKit, CorpusKit, GeniusLocusKit, EngramLib,
+//   and SubstrateLib (its AuditGate consumes BitField + SHA256).
 //
 
 import PackageDescription

@@ -1,9 +1,13 @@
 # SubstrateKernel
 
-The substrate's hot-path layer. Bandwidth-bound bit operations, the
-write gate, the clock maker, and the SHA-256 seal. Every hot-path
-read or write in the substrate touches at least one symbol from
-this package.
+The substrate's hot-path layer. Bandwidth-bound bit operations, bitmap
+field extraction, and the SHA-256 hash. Every hot-path read or write in
+the substrate touches at least one symbol from this package.
+
+The write gate (`AuditGate`) lives in `SubstrateLib` and the clock maker
+(`HLCGenerator`) in `SubstrateTypes`; both *consume* this package but are
+documented in their own AGENTS.md (see the 2026-05-29 four-package
+addendum).
 
 ## When to use this package
 
@@ -12,9 +16,8 @@ Use this when you need to:
 - Measure Hamming distance, OR-reduce, AND, XOR, or majority-vote
   combine fingerprints
 - Run a top-K nearest-neighbor search by Hamming distance
-- Stamp an event with an HLC and seal it with SHA-256
-- Open or hold the estate-wide HLC generator
-- Admit a mutation through the AuditGate (capture or mutate)
+- Extract or masked-compare a bitmap field (`BitField`)
+- Compute a SHA-256 hash (the primitive the AuditGate seal is built on)
 
 ## DON'T reinvent these — they're conformance-gated
 
@@ -31,9 +34,10 @@ loop, the gate will catch the drift and CI will go red.
 | `Fingerprint256.compute` (full four-block) | §3.6 | `0xa4b2c8d3` | |
 | `HLC` compare + wire encoding | §5.2 | `0x4f1e8073` | |
 
-Beyond the gated six, this package also publishes the AuditGate,
-HLCGenerator, and SHA-256 seal — equally not-to-be-reimplemented
-(they're enforcement points for I-26, I-27, I-28).
+Beyond the gated six, this package also publishes `BitField` and the
+`SHA-256` hash — equally not-to-be-reimplemented. The AuditGate write
+gate (I-26/I-22, in `SubstrateLib`) and the HLCGenerator clock maker
+(I-28, in `SubstrateTypes`) build on these.
 
 ## Hot-path primitives — by name
 
@@ -106,79 +110,45 @@ let kernel = PortableKernel.kernelForCurrentPlatform()
 let kernel = portable_kernel::for_current_platform();
 ```
 
-## Write-gate and clock-maker primitives
+### BitField — bitmap field extraction
 
-### AuditGate — the only legitimate path to a mutation
-
-Every write — including capture (I-26) — passes through
-`AuditGate.admit`. The `prior == nil` branch is capture; `prior !=
-nil` branches are the four mutators. The gate runs
-`ForbiddenCombinations.check` over the merged basis (I-22), seals
-the event per custody mode (I-27), and emits one `AuditEvent`.
+Branchless extract / masked-equals over the packed adjective /
+operational / provenance bitmaps. The substrate's bitmap accessors and
+the AuditGate vocabulary check both build on it.
 
 ```swift
-let event = try AuditGate.admit(
-    verb: .capture,
-    prior: nil,
-    writes: fieldWrites,
-    actor: actor,
-    hlc: hlc.tick()
-)
+let trust = BitField.extractField(adjectiveBitmap, shift: 18, width: 6)
 ```
 
 ```rust
-let event = AuditGate::admit(
-    Verb::Capture, None, &field_writes, &actor, hlc.tick()
-)?;
+use substrate_kernel::bit_field;
+let trust = bit_field::extract_field(adjective_bitmap, 18, 6);
 ```
 
-Do not bypass the gate. Storage layers (PersistenceKit) ENFORCE
-the gate's contract on receive — they refuse a write missing a
-required HLC or seal — but PersistenceKit does not author HLCs or
-seals (cookbook §5.11). The gate is the only authoring point.
+### SHA-256 — the content-hash primitive (I-27 binding leg)
 
-### HLCGenerator — the clock maker (I-28)
-
-There is exactly one active maker per audit log. `open` claims the
-maker; a second `open` is REFUSED. Promotion is an explicit
-logged `takeover`.
+SHA-256 over the wire fields of an event is the seal. The hash itself
+lives here; the seal/content-ID is *computed by* `AuditGate`
+(`SubstrateLib`) using this primitive — you do not stamp the seal bit
+directly (that is the gate's job per custody mode).
 
 ```swift
-// At estate boot (GLK or a standalone kit's top entity):
-let hlc = try HLCGenerator.open(over: log, nodeID: thisNodeID)
-
-// Hand to holders by initializer injection:
-let locus = LocusKit(hlc: hlc)
-let rag   = RagKit(hlc: hlc)
-
-// In any holder, stamp events:
-let stamp = hlc.tick()
+let digest: [UInt8] = SHA256.hash(bytes)
 ```
 
 ```rust
-let hlc = HLCGenerator::open(&log, this_node_id)?;
-let stamp = hlc.tick();
+use substrate_kernel::sha256;
+let digest: [u8; 32] = sha256::hash(&bytes);
 ```
 
-### SHA-256 content-ID and seal — the I-27 binding leg
+## Not in this package: the write gate + clock maker
 
-The seal is SHA-256 over the wire fields of an event, including
-the full HLC with maker node id. Computed inline at the gate.
-
-```swift
-let id: UInt128 = ContentID.compute(verb: verb, hlc: hlc,
-                                     before: before, after: after,
-                                     actor: actor)
-```
-
-```rust
-use substrate_kernel::audit_gate::content_id;
-let id: u128 = content_id(verb, &hlc, &before, &after, &actor);
-```
-
-You do not stamp the seal bit directly. That's `AuditGate`'s job
-per custody mode (strict → 1 at write; lazy → 0 at write, dreaming
-pass flips to 1 after the seal computes).
+- **`AuditGate`** — the only legitimate path to a mutation — lives in
+  `SubstrateLib` (it validates against `RowStateAutomaton`, the
+  orchestration FSM). It consumes this package's `BitField` + `SHA256`.
+  See `SubstrateLib`'s AGENTS.md.
+- **`HLCGenerator`** — the clock maker (I-28) — lives in `SubstrateTypes`
+  alongside the `HLC` value type. See `SubstrateTypes`' AGENTS.md.
 
 ## Importing
 
@@ -211,16 +181,13 @@ need a `Row` or `HLC` struct, depend on `SubstrateTypes` directly.
    `Fingerprint256.hammingDistance`. The implementation in this
    package is SIMD-vectorized and was benchmarked at ~2.6 ns/pair.
 
-3. **Stamping HLC fields by hand.** Always go through
-   `HLCGenerator.tick()`. Manually constructing an HLC value skips
-   the monotonicity guarantee.
+3. **Open-coding bitmap field extraction.** Use `BitField.extractField`
+   / `maskedEquals`; a hand-rolled shift-and-mask drifts from the gated
+   layout. (HLC stamping via `HLCGenerator` and audit writes via
+   `AuditGate` are the same "don't reinvent" rule, but those symbols
+   live in `SubstrateTypes` / `SubstrateLib` — see their AGENTS.md.)
 
-4. **Writing to the audit log directly.** All writes go through
-   `AuditGate.admit`. The gate is where I-22 enforcement,
-   ForbiddenCombinations.check, the seal, and the per-mode
-   `sealed` bit all happen.
-
-5. **Computing a custom seal.** The seal is SHA-256 over a specific
+4. **Computing a custom seal.** The seal is SHA-256 over a specific
    field order (verb || hlc || before || after || actor || ...). If
    you change the order or the included fields, the seal becomes
    non-verifiable.
