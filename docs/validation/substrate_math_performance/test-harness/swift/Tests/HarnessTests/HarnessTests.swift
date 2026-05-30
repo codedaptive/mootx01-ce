@@ -90,7 +90,7 @@ final class HarnessTests: XCTestCase {
         let seed: UInt64 = 0xCAFE_BABE_DEAD_BEEF
         let file = try SimHashPrimitive.generate(seed: seed)
         XCTAssertEqual(file.primitive, "simhash")
-        XCTAssertEqual(file.cases.count, 32)
+        XCTAssertEqual(file.cases.count, 40)  // 32 pair-at-a-time + 8 batched
         XCTAssertEqual(file.generator.language, "swift")
 
         let result = try SimHashPrimitive.validate(file)
