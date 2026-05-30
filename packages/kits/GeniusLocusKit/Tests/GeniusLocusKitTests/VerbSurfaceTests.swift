@@ -9,8 +9,8 @@ import PersistenceKitInMemory
 /// One round-trip per verb against a composed estate, plus the
 /// AriaLexicon §7.2 acceptance-matrix conformance.
 ///
-/// `capture`, `recall`, and `withdraw` round-trip through LocusKit's
-/// live verb surface. `mutate`, `expunge`, `reanchor`, and `learn`
+/// `capture`, `recall`, `withdraw`, and `expunge` round-trip through
+/// LocusKit's live verb surface. `mutate`, `reanchor`, and `learn`
 /// reach LocusKit's stubs and the GLK boundary re-raises the
 /// "not yet implemented" failure as
 /// `VerbError.notSupportedByEstate(verb:)` so callers see a single
@@ -133,21 +133,19 @@ final class VerbSurfaceTests: XCTestCase {
         }
     }
 
-    /// With confirmation, the call reaches LocusKit's expunge stub
-    /// and is remapped to `VerbError.notSupportedByEstate`.
-    func testExpungeWithConfirmationSurfacesNotSupported() async throws {
+    /// With confirmation, expunge runs LocusKit's live verb body: the
+    /// row is tombstoned (content zeroed, `tombstonedAt` stamped), so a
+    /// recall scoped to active rows no longer sees it. Mirrors the
+    /// `withdraw` round-trip — expunge is the heavier sticky tombstone.
+    func testExpungeWithConfirmationTombstonesRow() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "expunge target"))
-        await XCTAssertThrowsErrorAsync(
-            try await kit.expunge(handle, ExpungeFrame(
-                rowID: stored.id, reason: "verb tests", confirmation: true
-            ))
-        ) { error in
-            guard case VerbError.notSupportedByEstate(let verb) = error else {
-                return XCTFail("expected .notSupportedByEstate, got \(error)")
-            }
-            XCTAssertEqual(verb, "expunge")
-        }
+        try await kit.expunge(handle, ExpungeFrame(
+            rowID: stored.id, reason: "verb tests", confirmation: true
+        ))
+        let activeRows = try await kit.recall(handle, recallAllActive())
+        XCTAssertFalse(activeRows.contains { $0.id == stored.id },
+                       "expunged drawer should not appear in active-only recall")
     }
 
     // MARK: - reanchor round-trip
