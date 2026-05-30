@@ -22,7 +22,7 @@ import Foundation
 /// inclusive. The decimal-extension digits beyond the three-digit
 /// spine code (`450.137`, etc.) carry the leaf-resolution data the
 /// assembler fills in from the CC0 graph.
-public struct MDCCClass: Sendable, Hashable {
+public struct LatticeClass: Sendable, Hashable {
     /// The three-digit integer base code (000, 100, ... 900). Stored
     /// as Int so arithmetic is direct; rendered with leading zeros.
     public let base: Int
@@ -54,35 +54,35 @@ public struct MDCCClass: Sendable, Hashable {
 public enum NotationSpine {
 
     /// The full top-of-tree, ordered by base code.
-    public static let classes: [MDCCClass] = [
-        MDCCClass(base: 0,
+    public static let classes: [LatticeClass] = [
+        LatticeClass(base: 0,
                   name: "Generalities",
                   scopeNote: "Knowledge, information, classification, computing, and reference works that span every other class."),
-        MDCCClass(base: 100,
+        LatticeClass(base: 100,
                   name: "Philosophy and psychology",
                   scopeNote: "Inquiry into mind, reason, and the structure of thought."),
-        MDCCClass(base: 200,
+        LatticeClass(base: 200,
                   name: "Religion and belief systems",
                   scopeNote: "Religions, mythologies, ritual practice, and the history of belief."),
-        MDCCClass(base: 300,
+        LatticeClass(base: 300,
                   name: "Social sciences",
                   scopeNote: "Society, economics, politics, law, and education."),
-        MDCCClass(base: 400,
+        LatticeClass(base: 400,
                   name: "Language and communication",
                   scopeNote: "Languages, linguistics, writing systems, and the practice of communication."),
-        MDCCClass(base: 500,
+        LatticeClass(base: 500,
                   name: "Natural sciences and mathematics",
                   scopeNote: "Mathematics and the natural sciences from formal logic through biology."),
-        MDCCClass(base: 600,
+        LatticeClass(base: 600,
                   name: "Applied sciences and technology",
                   scopeNote: "Engineering, medicine, agriculture, and the practical applications of natural science."),
-        MDCCClass(base: 700,
+        LatticeClass(base: 700,
                   name: "Arts and recreation",
                   scopeNote: "Fine arts, performing arts, design, sport, and recreation."),
-        MDCCClass(base: 800,
+        LatticeClass(base: 800,
                   name: "Literature",
                   scopeNote: "Literary works organised by language and form."),
-        MDCCClass(base: 900,
+        LatticeClass(base: 900,
                   name: "History and geography",
                   scopeNote: "History, biography, geography, and the historical record."),
     ]
@@ -90,7 +90,7 @@ public enum NotationSpine {
     /// Returns the class that owns a given three-digit base code, or
     /// nil if no class on the spine owns that base. Lookup is O(N)
     /// over ten elements; not worth indexing.
-    public static func owningClass(forBase base: Int) -> MDCCClass? {
+    public static func owningClass(forBase base: Int) -> LatticeClass? {
         classes.first { $0.base == base }
     }
 
@@ -98,7 +98,7 @@ public enum NotationSpine {
     /// "450.137". The integer part is parsed, then rounded down to the
     /// nearest hundred to find the owning class. Returns nil if the
     /// code is malformed or out of range.
-    public static func owningClass(for code: String) -> MDCCClass? {
+    public static func owningClass(for code: String) -> LatticeClass? {
         let integerPart = code.split(separator: ".").first.map(String.init) ?? code
         guard let value = Int(integerPart), (0...999).contains(value) else {
             return nil

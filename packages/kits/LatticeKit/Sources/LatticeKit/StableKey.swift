@@ -121,13 +121,13 @@ public struct StableKeyRegistry: Sendable {
     /// this walk depends only on which codes are already occupied — not
     /// on input order or build time — a concept that lands on 500.3 in
     /// one run lands on 500.3 in every run with the same registry.
-    public func nextFreeCode(in mdccClass: MDCCClass) -> String? {
+    public func nextFreeCode(in latticeClass: LatticeClass) -> String? {
         // 1. Flat band NN00-NN79. Offsets 0..<80 never reach the
         //    reserved NN80-NN99 block, so no reservation check is
         //    needed here; the depth bands below do check, because their
         //    base loop is the same 0..<80 range and stays unreserved.
         for offset in 0..<80 {
-            let code = String(format: "%03d", mdccClass.base + offset)
+            let code = String(format: "%03d", latticeClass.base + offset)
             if !isOccupied(code) {
                 return code
             }
@@ -138,7 +138,7 @@ public struct StableKeyRegistry: Sendable {
             slotsAtDepth *= 10
             let width = depth   // zero-padded extension width for this depth
             for offset in 0..<80 {
-                let base = mdccClass.base + offset
+                let base = latticeClass.base + offset
                 let baseCode = String(format: "%03d", base)
                 // Skip any flat slot whose integer base is reserved so
                 // the extension space under a reserved code is never

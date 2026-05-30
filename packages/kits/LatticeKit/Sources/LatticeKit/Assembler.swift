@@ -179,7 +179,7 @@ public enum Assembler {
         //    resolved to a class are deferred and then placed in 000
         //    (Generalities) as a fallback — this is documented
         //    behaviour, not an error.
-        var assignedClass: [String: MDCCClass] = [:]
+        var assignedClass: [String: LatticeClass] = [:]
         let identities = byIdentity.keys.sorted()
 
         // First pass: direct pins.

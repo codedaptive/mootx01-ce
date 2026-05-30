@@ -72,25 +72,25 @@ public struct ReservedRange: Sendable, Hashable {
 public enum ReservedRanges {
 
     /// All reserved ranges in v1, ordered by lower bound.
-    public static let table: [ReservedRange] = NotationSpine.classes.flatMap { mdccClass in
+    public static let table: [ReservedRange] = NotationSpine.classes.flatMap { latticeClass in
         // Each class holds 80-99 of its hundred as community + annex.
         // Concretely: for class 500, community is 580-599, annex is
         // 590-599. The annex range is nested inside the community
         // range — annex codes are a sub-policy of community codes,
         // marked provisional until ratified.
-        let communityLower = mdccClass.base + 80
-        let communityUpper = mdccClass.base + 99
-        let annexLower = mdccClass.base + 90
-        let annexUpper = mdccClass.base + 99
+        let communityLower = latticeClass.base + 80
+        let communityUpper = latticeClass.base + 99
+        let annexLower = latticeClass.base + 90
+        let annexUpper = latticeClass.base + 99
         return [
             ReservedRange(lowerBound: communityLower,
                           upperBound: communityUpper,
                           kind: .community,
-                          note: "Community-ratified additions inside \(mdccClass.name)."),
+                          note: "Community-ratified additions inside \(latticeClass.name)."),
             ReservedRange(lowerBound: annexLower,
                           upperBound: annexUpper,
                           kind: .annex,
-                          note: "Provisional annex codes inside \(mdccClass.name)."),
+                          note: "Provisional annex codes inside \(latticeClass.name)."),
         ]
     }
 

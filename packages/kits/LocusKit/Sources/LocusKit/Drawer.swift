@@ -144,7 +144,7 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     /// carries an MDCC (MOOT Decimal Classification) code — MDCC is
     /// the live reference scheme. The MDCC-scheme value as produced
     /// by the reasoning layer is EideticLib/NeuronKit's separate
-    /// `LatticeAnchorInference.mdccCode`; both are `String`, so the
+    /// `LatticeAnchorInference.code`; both are `String`, so the
     /// compiler does not police feeding one into the other. See
     /// § 5.8 "Two schemes, two field names" for the coexistence and
     /// the deferred storage-field rename. Empty string means "no

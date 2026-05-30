@@ -244,7 +244,7 @@ struct PipelineIntegrationTests {
 
         // Reload the persisted registry and feed it back as the prior
         // registry for a second run.
-        let registryURL = dir.appendingPathComponent("MDCCRegistryV1.json")
+        let registryURL = dir.appendingPathComponent("LatticeRegistryV1.json")
         let reloaded = try CanonWriter.loadRegistry(from: registryURL)
         let second = try await assembleFixture(registry: reloaded)
 
@@ -275,7 +275,7 @@ struct PipelineIntegrationTests {
         #expect(!codes.isEmpty)
 
         // Slow-docs markdown names every spine class that has entries.
-        let docsURL = dir.appendingPathComponent("MDCCDocsV1.md")
+        let docsURL = dir.appendingPathComponent("LatticeDocsV1.md")
         let docs = try String(contentsOf: docsURL, encoding: .utf8)
         let populatedBases = Set(out.canon.entries.map(\.classBase))
         for cls in NotationSpine.classes where populatedBases.contains(cls.base) {

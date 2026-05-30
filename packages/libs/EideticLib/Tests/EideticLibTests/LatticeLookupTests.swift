@@ -17,16 +17,16 @@ final class MDCCLookupTests: XCTestCase {
     func testLookupReturnsLatticeCodePresentInCanon() throws {
         let anchor = EideticLib.lookup("philosophy")
         XCTAssertFalse(
-            anchor.mdccCode.isEmpty,
+            anchor.code.isEmpty,
             "philosophy must resolve to an MDCC code"
         )
         XCTAssertTrue(
-            Code.isWellFormed(anchor.mdccCode),
-            "resolved code \(anchor.mdccCode) must be a well-formed MDCC code"
+            Code.isWellFormed(anchor.code),
+            "resolved code \(anchor.code) must be a well-formed MDCC code"
         )
         let entry = try XCTUnwrap(
-            LatticeKit.entry(for: anchor.mdccCode),
-            "resolved code \(anchor.mdccCode) must exist in the bundled MDCC canon"
+            LatticeKit.entry(for: anchor.code),
+            "resolved code \(anchor.code) must exist in the bundled MDCC canon"
         )
         XCTAssertEqual(entry.label, "philosophy")
     }
@@ -35,7 +35,7 @@ final class MDCCLookupTests: XCTestCase {
     //    as the Wikidata Q-ID.
     func testLookupCarriesCanonSourceIdentityAsQID() throws {
         let anchor = EideticLib.lookup("philosophy")
-        let entry = try XCTUnwrap(LatticeKit.entry(for: anchor.mdccCode))
+        let entry = try XCTUnwrap(LatticeKit.entry(for: anchor.code))
         XCTAssertEqual(
             anchor.wikidataQID,
             entry.sourceIdentity,
@@ -67,7 +67,7 @@ final class MDCCLookupTests: XCTestCase {
     func testNoCanonMatchReturnsEmptyCodeNotUDCFallback() {
         let anchor = EideticLib.lookup("zxcvqwertyasdfgh")
         XCTAssertEqual(
-            anchor.mdccCode, "",
+            anchor.code, "",
             "no canon match must yield an empty MDCC code, not a fallback"
         )
         XCTAssertNil(anchor.wikidataQID)
@@ -87,14 +87,14 @@ final class MDCCLookupTests: XCTestCase {
         )
     }
 
-    // 6. Anchor shape: exposes mdccCode and no udcCode. The Rust-port
+    // 6. Anchor shape: exposes code and no udcCode. The Rust-port
     //    sibling struct carries the same rename as a documented
     //    follow-up (see TASK_MDCC_03_BLAST_RADIUS.md).
     func testAnchorExposesLatticeCodeAndNoUDCCode() {
         let anchor = EideticLib.lookup("chemistry")
         let mirror = Mirror(reflecting: anchor)
         let labels = mirror.children.compactMap { $0.label }
-        XCTAssertTrue(labels.contains("mdccCode"), "Anchor must expose mdccCode")
+        XCTAssertTrue(labels.contains("code"), "Anchor must expose code")
         XCTAssertFalse(labels.contains("udcCode"), "Anchor must not expose udcCode")
     }
 }

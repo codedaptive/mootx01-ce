@@ -29,7 +29,7 @@ final class LatticeAnchorInferenceTests: XCTestCase {
 
     func testInferenceRoundTrip() throws {
         let inference = LatticeAnchorInference(
-            mdccCode: "004.42",
+            code: "004.42",
             wikidataQID: "Q21198",
             confidence: AnchorConfidence.medium.rawValue,
             enrichmentStatusBits: EnrichmentStatus.qidCompleted.rawValue,
@@ -65,7 +65,7 @@ final class InferLatticeAnchorTests: XCTestCase {
         // enrichment_status = none (the substrate has not yet
         // produced an anchor for this content).
         let inference = NeuronKit.inferLatticeAnchor("qwertyzxcvb nonsense")
-        XCTAssertEqual(inference.mdccCode, "")
+        XCTAssertEqual(inference.code, "")
         XCTAssertNil(inference.wikidataQID)
         XCTAssertEqual(
             inference.enrichmentStatusBits,
@@ -78,7 +78,7 @@ final class InferLatticeAnchorTests: XCTestCase {
         // sourceIdentity is its Q-ID; MDCC code and Q-ID both
         // populated means status = qidCompleted.
         let inference = NeuronKit.inferLatticeAnchor("chemistry")
-        XCTAssertFalse(inference.mdccCode.isEmpty)
+        XCTAssertFalse(inference.code.isEmpty)
         XCTAssertNotNil(inference.wikidataQID)
         XCTAssertEqual(
             inference.enrichmentStatusBits,

@@ -10,7 +10,7 @@ import Testing
 @Suite("Collapse rule")
 struct CollapseRuleTests {
 
-    private func makeResolver(_ map: [String: Int]) -> @Sendable (String) -> MDCCClass? {
+    private func makeResolver(_ map: [String: Int]) -> @Sendable (String) -> LatticeClass? {
         return { id in
             guard let base = map[id] else { return nil }
             return NotationSpine.owningClass(forBase: base)

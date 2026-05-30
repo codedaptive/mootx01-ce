@@ -93,7 +93,7 @@ final class WikidataResolverTests: XCTestCase {
 
     func testLookupChemistryReturnsAnchorWithQid() {
         let anchor = EideticLib.lookup("chemistry")
-        XCTAssertFalse(anchor.mdccCode.isEmpty)
+        XCTAssertFalse(anchor.code.isEmpty)
         let qid = anchor.wikidataQID
         XCTAssertNotNil(qid)
         XCTAssertTrue((qid ?? "").hasPrefix("Q"), "Q-ID must start with Q")
@@ -101,7 +101,7 @@ final class WikidataResolverTests: XCTestCase {
 
     func testLookupNonsenseReturnsAnchorWithNilQid() {
         let anchor = EideticLib.lookup("zxcvqwertyasdfgh")
-        XCTAssertEqual(anchor.mdccCode, "")
+        XCTAssertEqual(anchor.code, "")
         XCTAssertNil(anchor.wikidataQID)
     }
 }
