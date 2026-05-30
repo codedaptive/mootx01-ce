@@ -21,7 +21,7 @@ pub struct LatticeAnchorInference {
     /// with sufficient evidence. Empty string means
     /// classification failed; the caller should leave the
     /// drawer's anchor code unset or fall back to a default.
-    pub mdcc_code: String,
+    pub code: String,
 
     /// The Wikidata Q-ID for the drawer's primary concept, or
     /// `None` if the resolver could not find a confident match.
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn inference_roundtrips_through_json() {
         let inference = LatticeAnchorInference {
-            mdcc_code: "004.42".to_string(),
+            code: "004.42".to_string(),
             wikidata_qid: Some("Q21198".to_string()),
             confidence: AnchorConfidence::Medium.raw(),
             enrichment_status_bits: EnrichmentStatus::QidCompleted.raw(),

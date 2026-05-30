@@ -57,7 +57,7 @@ mod tests {
         // Until the FDC runtime (GNO-FDC-06/07) lands, lookup is a
         // stub: empty code, null confidence, stub data version.
         let anchor = lookup("organic chemistry research");
-        assert_eq!(anchor.mdcc_code, "");
+        assert_eq!(anchor.code, "");
         assert_eq!(anchor.confidence, 0);
         assert!(anchor.wikidata_qid.is_none());
     }
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn lookup_empty_string_yields_empty_anchor() {
         let anchor = lookup("");
-        assert_eq!(anchor.mdcc_code, "");
+        assert_eq!(anchor.code, "");
         assert_eq!(anchor.confidence, 0);
     }
 

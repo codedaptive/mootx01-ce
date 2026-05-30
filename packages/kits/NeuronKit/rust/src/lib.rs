@@ -58,7 +58,7 @@ pub const fn linguistic_pipeline_mode() -> LinguisticPipelineMode {
 /// apply. Composes `eidetic_lib::lookup`.
 pub fn infer_lattice_anchor(content: &str) -> LatticeAnchorInference {
     let anchor = eidetic_lib::lookup(content);
-    let status = if anchor.mdcc_code.is_empty() {
+    let status = if anchor.code.is_empty() {
         EnrichmentStatus::None
     } else if anchor.wikidata_qid.is_none() {
         EnrichmentStatus::QidPending
@@ -66,7 +66,7 @@ pub fn infer_lattice_anchor(content: &str) -> LatticeAnchorInference {
         EnrichmentStatus::QidCompleted
     };
     LatticeAnchorInference {
-        mdcc_code: anchor.mdcc_code,
+        code: anchor.code,
         wikidata_qid: anchor.wikidata_qid,
         confidence: anchor.confidence,
         enrichment_status_bits: status.raw(),
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn nonsense_term_produces_enrichment_status_none() {
         let inference = infer_lattice_anchor("qwertyzxcvb nonsense");
-        assert_eq!(inference.mdcc_code, "");
+        assert_eq!(inference.code, "");
         assert!(inference.wikidata_qid.is_none());
         assert_eq!(
             inference.enrichment_status_bits,
@@ -111,7 +111,7 @@ mod tests {
         // "chemistry => QidCompleted" parity assertion the Swift
         // port already makes.
         let inference = infer_lattice_anchor("chemistry");
-        assert_eq!(inference.mdcc_code, "");
+        assert_eq!(inference.code, "");
         assert!(inference.wikidata_qid.is_none());
         assert_eq!(
             inference.enrichment_status_bits,
