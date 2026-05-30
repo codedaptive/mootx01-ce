@@ -63,6 +63,7 @@ pub fn schema() -> SchemaDeclaration {
             manifest_table(),
             kg_facts_table(),
             proposals_table(),
+            associations_table(),
             node_bundles_table(),
             container_fingerprints_table(),
             recall_trace_table(),
@@ -356,6 +357,54 @@ fn proposals_table() -> TableDeclaration {
 }
 
 // ---------------------------------------------------------------------------
+// associations
+// ---------------------------------------------------------------------------
+
+/// Association persistence per mission NOUN-ASC-01 and cookbook §2.4. The
+/// edge-shaped sibling of `tunnels`: source + target endpoints (wing +
+/// room + optional drawer id), three Int64 bitmap columns, and the Rev 1.0
+/// soft-delete reservation. Two differences from `tunnels`: there is no
+/// `kind_id` (an association carries no typed-relationship vocabulary — all
+/// semantics live in operationalBitmap, cookbook §2.4), and the lattice
+/// anchor (cookbook §2.7 / I-16) is stored as the same four columns drawers
+/// and proposals use — udcCode TEXT NOT NULL DEFAULT '' + udcFacets +
+/// wikidataQID + wikidataQidsSecondary; `add_association` rejects an empty
+/// anchor before insert. No generated columns — like `tunnels`, the edge
+/// endpoints are the indexed query paths.
+fn associations_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "associations".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("id"),
+            ColumnDeclaration::text("sourceWing"),
+            ColumnDeclaration::text("sourceRoom"),
+            ColumnDeclaration::text("sourceDrawerId").nullable(),
+            ColumnDeclaration::text("targetWing"),
+            ColumnDeclaration::text("targetRoom"),
+            ColumnDeclaration::text("targetDrawerId").nullable(),
+            ColumnDeclaration::text("label"),
+            ColumnDeclaration::text("addedBy"),
+            ColumnDeclaration::timestamp("filedAt"),
+            ColumnDeclaration::timestamp("tombstonedAt").nullable(),
+            ColumnDeclaration::text("removedByBatch").nullable(),
+            ColumnDeclaration::new("udcCode", ColumnType::Text)
+                .with_default(TypedValue::Text(String::new())),
+            ColumnDeclaration::text("udcFacets").nullable(),
+            ColumnDeclaration::text("wikidataQID").nullable(),
+            ColumnDeclaration::text("wikidataQidsSecondary").nullable(),
+            ColumnDeclaration::bitmap("adjectiveBitmap"),
+            ColumnDeclaration::bitmap("operationalBitmap"),
+            ColumnDeclaration::bitmap("provenanceBitmap"),
+            ColumnDeclaration::json("ext").nullable(),
+        ],
+        primary_key: vec!["id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // node_bundles
 // ---------------------------------------------------------------------------
 
@@ -549,6 +598,23 @@ fn indices() -> Vec<IndexDeclaration> {
             "proposals",
             vec!["g_state_cluster".to_string()],
         ),
+        // associations — edge-lookup query paths mirror tunnels (source +
+        // target endpoint), plus the lattice-anchor resolution index.
+        IndexDeclaration::new(
+            "idx_associations_source",
+            "associations",
+            vec!["sourceWing".to_string(), "sourceRoom".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_associations_target",
+            "associations",
+            vec!["targetWing".to_string(), "targetRoom".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_associations_udcCode",
+            "associations",
+            vec!["udcCode".to_string()],
+        ),
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration::new(
@@ -603,6 +669,7 @@ mod tests {
                 "manifest",
                 "kg_facts",
                 "proposals",
+                "associations",
                 "node_bundles",
                 "container_fingerprints",
                 "recall_trace",
@@ -820,6 +887,9 @@ mod tests {
                 "idx_proposals_target",
                 "idx_proposals_udcCode",
                 "idx_proposals_state_cluster",
+                "idx_associations_source",
+                "idx_associations_target",
+                "idx_associations_udcCode",
                 "idx_recall_trace_target",
                 "idx_recall_trace_recalledAt",
             ]
