@@ -17,7 +17,7 @@ actor ObserverRegistry {
         let id = UUID()
         let stream = AsyncStream<TableChange>(bufferingPolicy: .bufferingOldest(1024)) { continuation in
             let sub = Subscription(id: id, table: table, events: events, continuation: continuation)
-            Task { await self.add(sub) }
+            Task { await self.add(sub) }  // actor hop; await is required
             continuation.onTermination = { _ in
                 Task { await self.remove(id: id) }
             }
