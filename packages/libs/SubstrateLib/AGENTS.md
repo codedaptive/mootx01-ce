@@ -1,87 +1,88 @@
-# SubstrateLib (legacy)
+# SubstrateLib — the substrate orchestration layer
 
-> **This package is deprecated.** Its symbols have migrated to three
-> successor packages — `SubstrateTypes`, `SubstrateKernel`,
-> `SubstrateML`. If you are looking for a substrate primitive, this
-> is not where it lives anymore.
+The fourth package of the four-package substrate split, and the one that
+composes the other three into a *writable* substrate. SubstrateLib owns
+the control surface: the nine-verb mechanics, the row-state automaton,
+and the AuditGate write gate. It depends on `SubstrateTypes` (values),
+`SubstrateKernel` (hot-path kernels), and `SubstrateML` (cold-path
+algorithms), and — as of the 2026-05-29 addendum — **no longer
+re-exports them** (the transitional `@_exported` shim was removed).
 
-## If you came here looking for a symbol
+> Not deprecated. The earlier "three-package atomic swap that deletes
+> SubstrateLib" plan was reversed by the 2026-05-29 addendum: the verb
+> mechanics + row-state automaton fit none of Types/Kernel/ML, so
+> SubstrateLib is **retained** as the orchestration package.
 
-| You wanted… | Now in |
+## What lives here
+
+| Symbol | Role |
 |---|---|
-| `Fingerprint256`, `HLC`, `Row`, `RowLite`, `LatticeAnchor`, `AuditEvent`, layout constants, enums, `MatrixF/C/O/T` (storage only) | `../SubstrateTypes/` |
-| `SimHash`, `Fingerprint256` ops (distance / OR / AND / XOR / prototype), `HammingNN` top-K, `SimdKernel`, `AuditGate`, `HLCGenerator`, SHA-256 seal | `../SubstrateKernel/` |
-| `MatrixDecay`, `MomentSummary`, `BradleyTerry`, `Anomaly`, `InfoTheory`, `TemporalCompression`, `PartialStateRecall`, `FFT`, `NMF`, `EigenvalueCentrality`, `AuditLogFold`, `TierContribution`, `PairingHandshake` | `../SubstrateML/` |
+| `Verbs` | The nine-verb substrate mechanics (capture, reanchor, mutate, withdraw, expunge, recall, propose, associate, learn) |
+| `RowStateAutomaton` | The row-state finite-state machine — legal transitions + I-22 forbidden combinations |
+| `AuditGate` | The single write gate (below) |
 
-Each successor package has its own `AGENTS.md` describing the
-symbols and usage. Start there.
+(The Rust leg also carries the cookbook scalar-oracle reference impls for
+higher layers — `working_set`, `sqlite_tail`, `cognition_kit`,
+`cognition_bundle`, `actuator`, `dreaming` — until those kits get their
+own Rust crates. They are reference scaffolding, not substrate atomics.)
 
-## Why this exists at all
+## AuditGate — the only legitimate path to a mutation
 
-Until 2026-05-28, this was the published substrate surface. The
-three-package split (cookbook v1.0 §20, I-30) separates pure types
-from hot-path bit operations from cold-path learning. The split
-makes the build graph match the layering: a kit that only
-serializes rows depends only on `SubstrateTypes`; the harness
-gate's six Tier-1 atomics depend only on `SubstrateKernel`; the
-dreaming daemon's 15+ ML primitives depend on `SubstrateML`.
+Every write — including capture (I-26) — passes through `AuditGate.admit`.
+The `prior == nil` branch is capture; `prior != nil` branches are the four
+mutators. The gate runs `ForbiddenCombinations.check` over the merged
+basis (I-22), validates the transition via `RowStateAutomaton.validate`
+(why AuditGate lives here, not in SubstrateKernel — it depends on the
+orchestration FSM), seals the event per custody mode (I-27, using
+`SubstrateKernel`'s `SHA256`), and emits one `AuditEvent`. The bitmap
+field reads it performs go through `SubstrateKernel`'s `BitField`.
 
-## Don't add new code here
-
-If you have a new primitive to land:
-
-- Pure data (struct, enum, layout constant)? → `../SubstrateTypes/`
-- Hot-path bit operation, gate, clock, seal? → `../SubstrateKernel/`
-- Learning algorithm, graph algorithm, projection? → `../SubstrateML/`
-
-Each successor's `AGENTS.md` lists what belongs there and what
-doesn't.
-
-## If you're maintaining a downstream kit
-
-The 9 downstream consumers that historically imported
-`SubstrateLib` should be re-pointed to whichever of the three
-successors they actually need. See the per-symbol table above for
-mapping.
-
-In Swift, replace:
 ```swift
-.package(path: "../../libs/SubstrateLib"),
+let event = try AuditGate.admit(
+    verb: .capture, prior: nil,
+    writes: fieldWrites, actor: actor, hlc: hlc.tick()
+)
+```
+
+```rust
+let event = AuditGate::admit(
+    Verb::Capture, None, &field_writes, &actor, hlc.tick()
+)?;
+```
+
+Do not bypass the gate. Storage layers (PersistenceKit) ENFORCE the
+gate's contract on receive — they refuse a write missing a required HLC
+or seal — but do not author HLCs or seals (cookbook §5.11). The gate is
+the only authoring point; that is what makes corruption unrepresentable.
+
+## Who depends on SubstrateLib
+
+Only the **verb-drivers** depend on SubstrateLib directly — the kits that
+drive the substrate verbs / row-state machine. Today that is **LocusKit**
+(it uses `RowStateAutomaton` + `AuditGate`). Every other kit depends on
+the precise sub-package(s) it uses (`SubstrateTypes` / `SubstrateKernel` /
+`SubstrateML`), not on SubstrateLib.
+
+```swift
+.package(path: "../../libs/SubstrateLib"),       // verb-drivers only
 // targets: dependencies: ["SubstrateLib"]
 ```
-with the subset you actually use:
-```swift
-.package(path: "../../libs/SubstrateTypes"),
-.package(path: "../../libs/SubstrateKernel"),
-// targets: dependencies: ["SubstrateTypes", "SubstrateKernel"]
-```
 
-In Rust, replace:
 ```toml
-substrate-lib = { path = "../../libs/SubstrateLib/rust" }
-```
-with the subset you use:
-```toml
-substrate-types  = { path = "../../libs/SubstrateTypes/rust" }
-substrate-kernel = { path = "../../libs/SubstrateKernel/rust" }
+substrate-lib = { path = "../../libs/SubstrateLib/rust" }   # verb-drivers only
 ```
 
-## Conformance through the transition
+If you only need a value type, a kernel, or an ML primitive — depend on
+`SubstrateTypes` / `SubstrateKernel` / `SubstrateML` directly. See each
+successor's `AGENTS.md`.
 
-The 22 cross-language-pinned conformance vectors continue to pass
-across both the legacy `SubstrateLib` and the three-package
-successor — verified four-way on every gated primitive before the
-symbol was removed from this package. See
-`../../../docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md`
-for the canonical index and the four-way verification commands.
+## Conformance
 
-## Related docs
-
-- `../../../docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md`
-  — the agentic discovery index for all 22 conformance-gated
-  primitives, with the canonical Swift API, Rust API, and CRCs.
-- `../../../docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
-  §20 — the package-split rationale.
+The cross-language-pinned conformance vectors pass four-way across the
+split. See
+`../../../docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md` for the
+canonical index and verification commands, and cookbook v1.0 §20 + the
+2026-05-29 addendum for the split rationale.
 
 ## License
 
