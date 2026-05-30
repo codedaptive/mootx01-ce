@@ -62,6 +62,7 @@ pub fn schema() -> SchemaDeclaration {
             diary_table(),
             manifest_table(),
             kg_facts_table(),
+            proposals_table(),
             node_bundles_table(),
             container_fingerprints_table(),
             recall_trace_table(),
@@ -300,6 +301,61 @@ fn kg_facts_table() -> TableDeclaration {
 }
 
 // ---------------------------------------------------------------------------
+// proposals
+// ---------------------------------------------------------------------------
+
+/// Proposal persistence per mission NOUN-PRO-01 and cookbook §2.4.
+/// Three Int64 bitmap columns mirror the in-memory value type's
+/// adjective / operational / provenance axes; `candidateState` is a
+/// fourth bitmap carrying the proposed adjective set the proposal would
+/// apply to its target if accepted (cookbook §10.7 candidate_state).
+/// The lattice anchor (cookbook §2.7 / I-16) is stored as the same four
+/// columns drawers use — udcCode + udcFacets + wikidataQID +
+/// wikidataQidsSecondary — with udcCode TEXT NOT NULL DEFAULT '';
+/// `add_proposal` rejects an empty anchor before insert. Same headroom
+/// convention as kg_facts.
+fn proposals_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "proposals".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("id"),
+            ColumnDeclaration::text("targetRowID"),
+            ColumnDeclaration::text("justification").nullable(),
+            ColumnDeclaration::bitmap("candidateState"),
+            ColumnDeclaration::bitmap("adjectiveBitmap"),
+            ColumnDeclaration::bitmap("operationalBitmap"),
+            ColumnDeclaration::bitmap("provenanceBitmap"),
+            ColumnDeclaration::new("udcCode", ColumnType::Text)
+                .with_default(TypedValue::Text(String::new())),
+            ColumnDeclaration::text("udcFacets").nullable(),
+            ColumnDeclaration::text("wikidataQID").nullable(),
+            ColumnDeclaration::text("wikidataQidsSecondary").nullable(),
+            ColumnDeclaration::timestamp("filedAt"),
+            ColumnDeclaration::json("ext").nullable(),
+        ],
+        primary_key: vec!["id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: vec![
+            // (adjectiveBitmap & 0x3F), the state cluster. Proposals are
+            // filtered by lifecycle state — pending while awaiting
+            // confirmation vs accepted/rejected/withdrawn afterward — via
+            // the per-cluster predicate `(state >> 4) & 0x3`; the field
+            // extract is indexed here as on drawers and kg_facts. 6-bit
+            // mask (0x3F) to match the full state field.
+            GeneratedColumn::new(
+                "g_state_cluster",
+                ColumnType::Int,
+                GeneratedExpression::BitAnd(
+                    Box::new(GeneratedExpression::Column("adjectiveBitmap".to_string())),
+                    Box::new(GeneratedExpression::Literal(0x3F)),
+                ),
+            ),
+        ],
+        append_only: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // node_bundles
 // ---------------------------------------------------------------------------
 
@@ -476,6 +532,23 @@ fn indices() -> Vec<IndexDeclaration> {
             "kg_facts",
             vec!["g_state_cluster".to_string()],
         ),
+        // proposals — query paths: by target row, by lattice anchor
+        // (anchor resolution), and by lifecycle state cluster
+        IndexDeclaration::new(
+            "idx_proposals_target",
+            "proposals",
+            vec!["targetRowID".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_proposals_udcCode",
+            "proposals",
+            vec!["udcCode".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_proposals_state_cluster",
+            "proposals",
+            vec!["g_state_cluster".to_string()],
+        ),
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration::new(
@@ -513,7 +586,11 @@ mod tests {
         assert!(schema().migrations.is_empty());
     }
 
-    /// Ten tables in the declared order, matching the Swift declaration.
+    /// Tables in the declared order, matching the Swift declaration.
+    /// `proposals` follows `kg_facts` (both noun tables). The Swift
+    /// schema additionally carries a `keys` table (ENC-01) the Rust
+    /// port does not yet mirror; that pre-existing divergence is
+    /// unrelated to this list.
     #[test]
     fn table_count_and_order() {
         let names: Vec<String> = schema().tables.iter().map(|t| t.name.clone()).collect();
@@ -525,6 +602,7 @@ mod tests {
                 "diary",
                 "manifest",
                 "kg_facts",
+                "proposals",
                 "node_bundles",
                 "container_fingerprints",
                 "recall_trace",
@@ -739,6 +817,9 @@ mod tests {
                 "idx_kg_facts_sourceDrawer",
                 "idx_kg_facts_subject",
                 "idx_kg_facts_state_cluster",
+                "idx_proposals_target",
+                "idx_proposals_udcCode",
+                "idx_proposals_state_cluster",
                 "idx_recall_trace_target",
                 "idx_recall_trace_recalledAt",
             ]
