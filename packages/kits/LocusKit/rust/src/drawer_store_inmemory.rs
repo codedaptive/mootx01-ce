@@ -58,6 +58,7 @@ use substrate_types::hlc::HLCGenerator;
 use substrate_lib::audit_gate;
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use crate::association::Association;
+use crate::learned_reference::LearnedReference;
 use crate::drawer_store::DrawerStore;
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
@@ -87,6 +88,7 @@ const T_TUNNELS: &str = "tunnels";
 const T_KG_FACTS: &str = "kg_facts";
 const T_PROPOSALS: &str = "proposals";
 const T_ASSOCIATIONS: &str = "associations";
+const T_LEARNED_REFERENCES: &str = "learned_references";
 const T_DIARY: &str = "diary";
 const T_MANIFEST: &str = "manifest";
 const T_RECALL_TRACE: &str = "recall_trace";
@@ -1466,6 +1468,69 @@ impl DrawerStore for InMemoryDrawerStore {
     }
 
     // -----------------------------------------------------------------
+    // LearnedReference CRUD
+    // -----------------------------------------------------------------
+
+    fn add_learned_reference(&self, reference: &LearnedReference) -> Result<(), LocusKitError> {
+        // handle + added_by required; lattice anchor required per cookbook
+        // §2.7 (I-16, mirroring add_association). source_catalog_id is
+        // intentionally not validated — a reference may be ungrounded.
+        validate_non_empty(&reference.handle, "handle")?;
+        validate_non_empty(&reference.added_by, "addedBy")?;
+        validate_non_empty(&reference.lattice_anchor.udc_code, "latticeAnchor.udcCode")?;
+        self.storage
+            .row_store()
+            .insert(T_LEARNED_REFERENCES, learned_reference_values(reference))
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    fn get_learned_reference(&self, id: &str) -> Result<Option<LearnedReference>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_LEARNED_REFERENCES,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_LEARNED_REFERENCES, "id"),
+                    TypedValue::Text(id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.first().map(learned_reference_from_row))
+    }
+
+    fn learned_references_from_source(
+        &self,
+        source_catalog_id: &str,
+    ) -> Result<Vec<LearnedReference>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_LEARNED_REFERENCES,
+                Some(&StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_LEARNED_REFERENCES, "sourceCatalogID"),
+                        TypedValue::Text(source_catalog_id.to_string()),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_LEARNED_REFERENCES, "tombstonedAt")),
+                ])),
+                &[OrderClause::new(
+                    Column::new(T_LEARNED_REFERENCES, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(learned_reference_from_row).collect())
+    }
+
+    // -----------------------------------------------------------------
     // Diary CRUD
     // -----------------------------------------------------------------
 
@@ -2172,6 +2237,77 @@ fn tunnel_from_row(row: &StorageRow) -> Tunnel {
     }
 }
 
+fn learned_reference_values(reference: &LearnedReference) -> BTreeMap<String, TypedValue> {
+    let mut m = BTreeMap::new();
+    m.insert("id".to_string(), TypedValue::Text(reference.id.clone()));
+    m.insert(
+        "sourceCatalogID".to_string(),
+        TypedValue::Text(reference.source_catalog_id.clone()),
+    );
+    m.insert("handle".to_string(), TypedValue::Text(reference.handle.clone()));
+    m.insert("addedBy".to_string(), TypedValue::Text(reference.added_by.clone()));
+    m.insert("filedAt".to_string(), TypedValue::Timestamp(reference.filed_at));
+    m.insert(
+        "tombstonedAt".to_string(),
+        reference
+            .tombstoned_at
+            .map(TypedValue::Timestamp)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "removedByBatch".to_string(),
+        reference
+            .removed_by_batch
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "udcCode".to_string(),
+        TypedValue::Text(reference.lattice_anchor.udc_code.clone()),
+    );
+    m.insert(
+        "udcFacets".to_string(),
+        reference
+            .lattice_anchor
+            .udc_facets
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "wikidataQID".to_string(),
+        reference
+            .lattice_anchor
+            .wikidata_qid
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "wikidataQidsSecondary".to_string(),
+        reference
+            .lattice_anchor
+            .wikidata_qids_secondary
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "adjectiveBitmap".to_string(),
+        TypedValue::Bitmap(reference.adjective_bitmap),
+    );
+    m.insert(
+        "operationalBitmap".to_string(),
+        TypedValue::Bitmap(reference.operational_bitmap),
+    );
+    m.insert(
+        "provenanceBitmap".to_string(),
+        TypedValue::Bitmap(reference.provenance_bitmap),
+    );
+    m
+}
+
 fn association_from_row(row: &StorageRow) -> Association {
     Association {
         id: string_value_of(row.get("id")),
@@ -2182,6 +2318,27 @@ fn association_from_row(row: &StorageRow) -> Association {
         target_room: string_value_of(row.get("targetRoom")),
         target_drawer_id: opt_string_value_of(row.get("targetDrawerId")),
         label: string_value_of(row.get("label")),
+        lattice_anchor: LatticeAnchor::new(
+            string_value_of(row.get("udcCode")),
+            opt_string_value_of(row.get("udcFacets")),
+            opt_string_value_of(row.get("wikidataQID")),
+            opt_string_value_of(row.get("wikidataQidsSecondary")),
+        ),
+        adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
+        operational_bitmap: i64_value_of(row.get("operationalBitmap")),
+        provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),
+        added_by: string_value_of(row.get("addedBy")),
+        filed_at: i64_value_of(row.get("filedAt")),
+        tombstoned_at: opt_int_value_of(row.get("tombstonedAt")),
+        removed_by_batch: opt_string_value_of(row.get("removedByBatch")),
+    }
+}
+
+fn learned_reference_from_row(row: &StorageRow) -> LearnedReference {
+    LearnedReference {
+        id: string_value_of(row.get("id")),
+        source_catalog_id: string_value_of(row.get("sourceCatalogID")),
+        handle: string_value_of(row.get("handle")),
         lattice_anchor: LatticeAnchor::new(
             string_value_of(row.get("udcCode")),
             opt_string_value_of(row.get("udcFacets")),

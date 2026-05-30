@@ -31,8 +31,11 @@
 //! `i64 filed_at` (epoch seconds; the SQLite column is still TEXT ISO8601),
 //! `Date? tombstonedAt` → `Option<i64> tombstoned_at`.
 
-use crate::bitmap_ops::{extract_field, extract_flag};
 use crate::estate_types::LatticeAnchor;
+// Bit-field extraction goes through the conformance-gated substrate-kernel
+// primitive (the same one `association_operational.rs` uses); do not
+// reimplement shift/mask math.
+use substrate_kernel::bit_field;
 
 // MARK: - Operational axes (cookbook §2.4, temporal-dominant)
 //
@@ -196,21 +199,21 @@ impl LearnedReference {
 
     // Operational accessors — mirror the Swift computed properties.
     // Bit-field extraction goes through the conformance-gated
-    // `crate::bitmap_ops` primitives; do not reimplement shift/mask math.
+    // `substrate_kernel::bit_field` primitive; do not reimplement shift/mask math.
 
     /// Refresh policy (bits 0–5).
     pub fn refresh_policy(&self) -> RefreshPolicy {
-        RefreshPolicy::from_raw(extract_field(self.operational_bitmap, 0, 6))
+        RefreshPolicy::from_raw(bit_field::extract_field(self.operational_bitmap, 0, 6))
     }
 
     /// Drift severity (bits 6–11).
     pub fn drift_severity(&self) -> DriftSeverity {
-        DriftSeverity::from_raw(extract_field(self.operational_bitmap, 6, 6))
+        DriftSeverity::from_raw(bit_field::extract_field(self.operational_bitmap, 6, 6))
     }
 
-    /// Learn mode (bit 12).
+    /// Learn mode (bit 12). A single-bit field decoded as a 1-bit slice.
     pub fn mode(&self) -> LearnMode {
-        if extract_flag(self.operational_bitmap, 12) {
+        if bit_field::extract_field(self.operational_bitmap, 12, 1) != 0 {
             LearnMode::ByIngestion
         } else {
             LearnMode::ByReference
@@ -219,7 +222,7 @@ impl LearnedReference {
 
     /// Acquisition source (bits 13–18).
     pub fn acquisition_source(&self) -> LearnedReferenceSource {
-        LearnedReferenceSource::from_raw(extract_field(self.operational_bitmap, 13, 6))
+        LearnedReferenceSource::from_raw(bit_field::extract_field(self.operational_bitmap, 13, 6))
     }
 }
 

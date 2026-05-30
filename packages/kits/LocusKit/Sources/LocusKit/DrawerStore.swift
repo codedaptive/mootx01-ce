@@ -1022,6 +1022,49 @@ public actor DrawerStore {
         return try rows.map(Self.associationFromRow)
     }
 
+    // MARK: - LearnedReference CRUD
+
+    /// Insert a learned reference. `handle` and `addedBy` are required, and
+    /// the lattice anchor is required per cookbook §2.7 (I-16): an empty
+    /// `udcCode` is rejected with `LocusKitError.invalidContent` before the
+    /// insert, mirroring `addAssociation`. Conflicting ids surface as
+    /// duplicateKey. (`sourceCatalogID` is intentionally not validated
+    /// non-empty — a reference may be learned without a catalog entry.)
+    public func addLearnedReference(_ r: LearnedReference) async throws {
+        try Self.validateNonEmpty(r.handle, label: "handle")
+        try Self.validateNonEmpty(r.addedBy, label: "addedBy")
+        try Self.validateNonEmpty(r.latticeAnchor.udcCode, label: "latticeAnchor.udcCode")
+        _ = try await storage.rowStore.insert(
+            table: "learned_references", values: Self.learnedReferenceValues(r))
+    }
+
+    /// Fetch a learned reference by id. Returns nil for an absent id — a
+    /// routine query miss, not an error, mirroring `getAssociation`.
+    public func getLearnedReference(id: String) async throws -> LearnedReference? {
+        let rows = try await storage.rowStore.query(
+            table: "learned_references",
+            where: .eq(Column(table: "learned_references", name: "id"), .text(id))
+        )
+        return try rows.first.map(Self.learnedReferenceFromRow)
+    }
+
+    /// All non-tombstoned references learned from a source catalog entry,
+    /// ordered by `filedAt` ascending. Resolves through
+    /// `idx_learned_references_source`. Mirrors `associationsFrom`; the
+    /// refresh-sweep query path for a source's references.
+    public func learnedReferences(forSourceCatalogID sourceCatalogID: String) async throws -> [LearnedReference] {
+        let rows = try await storage.rowStore.query(
+            table: "learned_references",
+            where: .and([
+                .eq(Column(table: "learned_references", name: "sourceCatalogID"), .text(sourceCatalogID)),
+                .isNull(Column(table: "learned_references", name: "tombstonedAt"))
+            ]),
+            orderBy: [OrderClause(column: Column(table: "learned_references", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.learnedReferenceFromRow)
+    }
+
     // MARK: - Diary CRUD
 
     /// Insert a diary entry. Conflicting ids surface as duplicateKey.
@@ -1433,6 +1476,25 @@ public actor DrawerStore {
         ]
     }
 
+    private static func learnedReferenceValues(_ r: LearnedReference) -> [String: TypedValue] {
+        [
+            "id": .text(r.id),
+            "sourceCatalogID": .text(r.sourceCatalogID),
+            "handle": .text(r.handle),
+            "addedBy": .text(r.addedBy),
+            "filedAt": .timestamp(r.filedAt),
+            "tombstonedAt": r.tombstonedAt.map { TypedValue.timestamp($0) } ?? .null,
+            "removedByBatch": r.removedByBatch.map { TypedValue.text($0) } ?? .null,
+            "udcCode": .text(r.latticeAnchor.udcCode),
+            "udcFacets": r.latticeAnchor.udcFacets.map { TypedValue.text($0) } ?? .null,
+            "wikidataQID": r.latticeAnchor.wikidataQID.map { TypedValue.text($0) } ?? .null,
+            "wikidataQidsSecondary": r.latticeAnchor.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null,
+            "adjectiveBitmap": .bitmap(r.adjectiveBitmap),
+            "operationalBitmap": .bitmap(r.operationalBitmap),
+            "provenanceBitmap": .bitmap(r.provenanceBitmap)
+        ]
+    }
+
     // MARK: - Row decode helpers
 
     private static func drawerFromRow(_ row: StorageRow) throws -> Drawer {
@@ -1500,6 +1562,27 @@ public actor DrawerStore {
             targetRoom: string(row["targetRoom"]),
             targetDrawerId: optString(row["targetDrawerId"]),
             label: string(row["label"]),
+            latticeAnchor: LatticeAnchor(
+                udcCode: string(row["udcCode"]),
+                udcFacets: optString(row["udcFacets"]),
+                wikidataQID: optString(row["wikidataQID"]),
+                wikidataQidsSecondary: optString(row["wikidataQidsSecondary"])
+            ),
+            adjectiveBitmap: int64(row["adjectiveBitmap"]),
+            operationalBitmap: int64(row["operationalBitmap"]),
+            provenanceBitmap: int64(row["provenanceBitmap"]),
+            addedBy: string(row["addedBy"]),
+            filedAt: date(row["filedAt"]),
+            tombstonedAt: optDate(row["tombstonedAt"]),
+            removedByBatch: optString(row["removedByBatch"])
+        )
+    }
+
+    private static func learnedReferenceFromRow(_ row: StorageRow) throws -> LearnedReference {
+        LearnedReference(
+            id: string(row["id"]),
+            sourceCatalogID: string(row["sourceCatalogID"]),
+            handle: string(row["handle"]),
             latticeAnchor: LatticeAnchor(
                 udcCode: string(row["udcCode"]),
                 udcFacets: optString(row["udcFacets"]),
