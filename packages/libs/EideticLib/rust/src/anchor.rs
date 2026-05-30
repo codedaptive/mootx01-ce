@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct Anchor {
     /// The MDCC code at the deepest depth supported by the
     /// evidence. Empty string means classification failed.
-    pub mdcc_code: String,
+    pub code: String,
 
     /// The Wikidata Q-ID for the primary concept, or `None` if
     /// the resolver could not find a confident match.
@@ -32,7 +32,7 @@ impl Anchor {
     /// replace these sentinels once the pipeline lands.
     pub fn not_implemented() -> Self {
         Anchor {
-            mdcc_code: String::new(),
+            code: String::new(),
             wikidata_qid: None,
             confidence: 0,
             data_version: "0.1.0-stub".to_string(),
@@ -47,7 +47,7 @@ mod tests {
     #[test]
     fn anchor_roundtrips_through_json() {
         let anchor = Anchor {
-            mdcc_code: "547".to_string(),
+            code: "547".to_string(),
             wikidata_qid: Some("Q11165".to_string()),
             confidence: 32,
             data_version: "0.1.0".to_string(),
@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn not_implemented_carries_stub_data_version() {
         let stub = Anchor::not_implemented();
-        assert_eq!(stub.mdcc_code, "");
+        assert_eq!(stub.code, "");
         assert!(stub.wikidata_qid.is_none());
         assert_eq!(stub.confidence, 0);
         assert_eq!(stub.data_version, "0.1.0-stub");
