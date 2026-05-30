@@ -921,6 +921,44 @@ public actor DrawerStore {
         return try rows.map(Self.kgFactFromRow)
     }
 
+    // MARK: - Proposal CRUD
+
+    /// Insert a Proposal. The lattice anchor is required per cookbook
+    /// §2.7 (I-16): an empty `udcCode` is rejected with
+    /// `LocusKitError.invalidContent` before the insert, mirroring the
+    /// capture-path guard in `EstateVerbs.swift`. `targetRowID` is NOT
+    /// validated non-empty — a brand-new-object proposal (target object
+    /// type `.noneBrandNew`) legitimately has no existing target row.
+    /// Conflicting ids surface as duplicateKey.
+    public func addProposal(_ p: Proposal) async throws {
+        try Self.validateNonEmpty(p.latticeAnchor.udcCode, label: "latticeAnchor.udcCode")
+        _ = try await storage.rowStore.insert(
+            table: "proposals", values: Self.proposalValues(p))
+    }
+
+    /// Fetch a Proposal by id. Returns nil for an absent id — a routine
+    /// query miss, not an error, mirroring `getKGFact` / `getDrawer`.
+    public func getProposal(id: String) async throws -> Proposal? {
+        let rows = try await storage.rowStore.query(
+            table: "proposals",
+            where: .eq(Column(table: "proposals", name: "id"), .text(id))
+        )
+        return try rows.first.map(Self.proposalFromRow)
+    }
+
+    /// All proposals targeting a given row, ordered by `filedAt`
+    /// ascending. Resolves through the `idx_proposals_target` index on
+    /// `targetRowID`. Mirrors `kgFacts(forDrawerID:)`.
+    public func proposals(forTargetRowID targetRowID: String) async throws -> [Proposal] {
+        let rows = try await storage.rowStore.query(
+            table: "proposals",
+            where: .eq(Column(table: "proposals", name: "targetRowID"), .text(targetRowID)),
+            orderBy: [OrderClause(column: Column(table: "proposals", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.proposalFromRow)
+    }
+
     // MARK: - Diary CRUD
 
     /// Insert a diary entry. Conflicting ids surface as duplicateKey.
@@ -1291,6 +1329,23 @@ public actor DrawerStore {
         ]
     }
 
+    private static func proposalValues(_ p: Proposal) -> [String: TypedValue] {
+        [
+            "id": .text(p.id),
+            "targetRowID": .text(p.targetRowID),
+            "justification": p.justification.map { TypedValue.text($0) } ?? .null,
+            "candidateState": .bitmap(p.candidateState),
+            "adjectiveBitmap": .bitmap(p.adjectiveBitmap),
+            "operationalBitmap": .bitmap(p.operationalBitmap),
+            "provenanceBitmap": .bitmap(p.provenanceBitmap),
+            "udcCode": .text(p.latticeAnchor.udcCode),
+            "udcFacets": p.latticeAnchor.udcFacets.map { TypedValue.text($0) } ?? .null,
+            "wikidataQID": p.latticeAnchor.wikidataQID.map { TypedValue.text($0) } ?? .null,
+            "wikidataQidsSecondary": p.latticeAnchor.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null,
+            "filedAt": .timestamp(p.filedAt)
+        ]
+    }
+
     // MARK: - Row decode helpers
 
     private static func drawerFromRow(_ row: StorageRow) throws -> Drawer {
@@ -1371,6 +1426,25 @@ public actor DrawerStore {
             predicate: string(row["predicate"]),
             object: string(row["object"]),
             sourceDrawerID: string(row["sourceDrawerID"]),
+            adjectiveBitmap: int64(row["adjectiveBitmap"]),
+            operationalBitmap: int64(row["operationalBitmap"]),
+            provenanceBitmap: int64(row["provenanceBitmap"]),
+            filedAt: date(row["filedAt"])
+        )
+    }
+
+    private static func proposalFromRow(_ row: StorageRow) throws -> Proposal {
+        Proposal(
+            id: string(row["id"]),
+            targetRowID: string(row["targetRowID"]),
+            justification: optString(row["justification"]),
+            candidateState: int64(row["candidateState"]),
+            latticeAnchor: LatticeAnchor(
+                udcCode: string(row["udcCode"]),
+                udcFacets: optString(row["udcFacets"]),
+                wikidataQID: optString(row["wikidataQID"]),
+                wikidataQidsSecondary: optString(row["wikidataQidsSecondary"])
+            ),
             adjectiveBitmap: int64(row["adjectiveBitmap"]),
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
