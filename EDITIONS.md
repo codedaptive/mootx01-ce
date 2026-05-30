@@ -40,6 +40,18 @@ The commercial edition is not a different product. It is the same substrate with
 
 ---
 
+## For enterprise clients, under NDA
+
+Two further artifacts are available to enterprise clients under NDA.
+
+**The mathematical treatment.** The formal documentation of the substrate's algorithms and the analysis establishing their validity, the rigorous account of why the core's mathematics does what it claims. This is the depth behind the source-available core, provided to clients who need to evaluate the substrate at that level.
+
+**The knowledge-sharing RFC.** A proposed common protocol and knowledge-signature scheme for sharing AI knowledge between systems, verifiably and portably. It is pending public release. Until then it is open for review by commercial clients, specifically so that those betting on the protocol can raise concerns about its future openness and have a hand in the result before it is finalized. The NDA period is a review window ahead of an open release, not a wall around a proprietary standard.
+
+Contact us for access to either.
+
+---
+
 ## Language implementations
 
 The substrate is one design with several implementations, conformance-gated against shared test vectors. They do not all have the same reach, and that is deliberate.
