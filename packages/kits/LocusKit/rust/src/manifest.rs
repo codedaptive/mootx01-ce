@@ -318,7 +318,7 @@ mod tests {
             tables_present: "drawers,tunnels,diary".to_string(),
             created_at: 1_700_000_000,
             last_modified: 1_700_000_000,
-            bitmap_layout_version: "v0.35".to_string(),
+            bitmap_layout_version: "v1.0".to_string(),
             provenance_bitmap_version: "v1".to_string(),
             federation_group_id: None,
             mining_patterns_hash: None,
@@ -328,6 +328,6 @@ mod tests {
         };
         let mv2 = mv.clone();
         assert_eq!(mv, mv2);
-        assert_eq!(mv.bitmap_layout_version, "v0.35");
+        assert_eq!(mv.bitmap_layout_version, "v1.0");
     }
 }

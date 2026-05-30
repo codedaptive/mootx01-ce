@@ -31,7 +31,7 @@ use uuid::Uuid;
 /// returning `EstateError::ManifestMismatch { key:
 /// "bitmap_layout_version", ... }`. Bumped lock-step with any
 /// breaking change to a bitmap layout, see spec §13.2.
-pub const EXPECTED_BITMAP_LAYOUT_VERSION: &str = "v0.35";
+pub const EXPECTED_BITMAP_LAYOUT_VERSION: &str = "v1.0";
 
 // MARK: - Estate
 
@@ -333,7 +333,7 @@ mod tests {
     /// changing it is a coordinated cross-port event.
     #[test]
     fn expected_bitmap_layout_version_matches_spec() {
-        assert_eq!(EXPECTED_BITMAP_LAYOUT_VERSION, "v0.35");
+        assert_eq!(EXPECTED_BITMAP_LAYOUT_VERSION, "v1.0");
     }
 
     /// Open succeeds when the manifest's bitmap layout version matches
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn open_succeeds_on_matching_layout() {
         let store = Arc::new(FakeStore::new(
-            "v0.35",
+            "v1.0",
             "11111111-1111-1111-1111-111111111111",
         ));
         let estate = Estate::open(store, OwnerCredentials::new("alice@icloud.com")).unwrap();
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn open_rejects_empty_owner_identifier() {
         let store = Arc::new(FakeStore::new(
-            "v0.35",
+            "v1.0",
             "11111111-1111-1111-1111-111111111111",
         ));
         let err = Estate::open(store, OwnerCredentials::new("")).unwrap_err();
@@ -375,7 +375,7 @@ mod tests {
             EstateError::ManifestMismatch { key, found, expected } => {
                 assert_eq!(key, "bitmap_layout_version");
                 assert_eq!(found, "v0.99");
-                assert_eq!(expected, "v0.35");
+                assert_eq!(expected, "v1.0");
             }
             other => panic!("expected ManifestMismatch, got {:?}", other),
         }
@@ -385,7 +385,7 @@ mod tests {
     /// the key `estate_uuid` so the caller can re-key the row.
     #[test]
     fn open_rejects_invalid_estate_uuid() {
-        let store = Arc::new(FakeStore::new("v0.35", "not-a-uuid"));
+        let store = Arc::new(FakeStore::new("v1.0", "not-a-uuid"));
         let err = Estate::open(store, OwnerCredentials::new("alice")).unwrap_err();
         match err {
             EstateError::ManifestMismatch { key, found, .. } => {
@@ -399,7 +399,7 @@ mod tests {
     /// Substrate read failure surfaces as `SubstrateUnavailable`.
     #[test]
     fn open_surfaces_substrate_failure() {
-        let mut s = FakeStore::new("v0.35", "11111111-1111-1111-1111-111111111111");
+        let mut s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
         s.fail_read = true;
         let store: Arc<dyn DrawerStore> = Arc::new(s);
         let err = Estate::open(store, OwnerCredentials::new("alice")).unwrap_err();
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn create_stamps_owner_identifier() {
         let store = Arc::new(FakeStore::new(
-            "v0.35",
+            "v1.0",
             "22222222-2222-2222-2222-222222222222",
         ));
         let _ = Estate::create(
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn create_stamps_estate_name_when_supplied() {
         let store = Arc::new(FakeStore::new(
-            "v0.35",
+            "v1.0",
             "22222222-2222-2222-2222-222222222222",
         ));
         let initial = ManifestValues {
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn create_rejects_empty_owner_identifier() {
         let store = Arc::new(FakeStore::new(
-            "v0.35",
+            "v1.0",
             "22222222-2222-2222-2222-222222222222",
         ));
         let err = Estate::create(store, OwnerCredentials::new(""), None).unwrap_err();
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn close_is_no_op() {
         let store = Arc::new(FakeStore::new(
-            "v0.35",
+            "v1.0",
             "33333333-3333-3333-3333-333333333333",
         ));
         let estate = Estate::open(store, OwnerCredentials::new("alice")).unwrap();
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn manifest_accessor_rereads() {
         let store = Arc::new(FakeStore::new(
-            "v0.35",
+            "v1.0",
             "44444444-4444-4444-4444-444444444444",
         ));
         let estate = Estate::create(
@@ -512,7 +512,7 @@ mod tests {
             tables_present: "drawers".to_string(),
             created_at: 1_700_000_000,
             last_modified: 1_700_000_000,
-            bitmap_layout_version: "v0.35".to_string(),
+            bitmap_layout_version: "v1.0".to_string(),
             provenance_bitmap_version: "v1".to_string(),
             federation_group_id: None,
             mining_patterns_hash: None,

@@ -35,7 +35,7 @@ public actor Estate {
     /// value, throwing `EstateError.manifestMismatch(key:
     /// "bitmap_layout_version", ...)`. Bumped lock-step with any
     /// breaking change to a bitmap layout, see spec section 13.2.
-    public static let expectedBitmapLayoutVersion: String = "v0.35"
+    public static let expectedBitmapLayoutVersion: String = "v1.0"
 
     // MARK: - Private state
 

@@ -18,7 +18,7 @@ import Testing
 ///    and re-open of a freshly created estate succeeds.
 /// 2. Manifest — a freshly created estate exposes a typed
 ///    `ManifestValues` snapshot with `manifestVersion == "1.0"` and
-///    `bitmapLayoutVersion == "v0.35"`. A seeded database carrying
+///    `bitmapLayoutVersion == "v1.0"`. A seeded database carrying
 ///    `bitmap_layout_version = "v99.0"` refuses to open and throws
 ///    `EstateError.manifestMismatch(key: "bitmap_layout_version", …)`.
 ///    `Estate.create` with a non-empty `estateName` round-trips to a
@@ -146,9 +146,9 @@ struct EstateTests {
     }
 
     /// `bitmap_layout_version` on a freshly created estate is
-    /// "v0.35" — the value the kit writes at this iteration of the
+    /// "v1.0" — the value the kit writes at this iteration of the
     /// spec. This is the field Estate validates on open.
-    @Test("Estate.manifest.bitmapLayoutVersion equals \"v0.35\" on a fresh estate")
+    @Test("Estate.manifest.bitmapLayoutVersion equals \"v1.0\" on a fresh estate")
     func manifestBitmapLayoutVersionAfterCreate() async throws {
         let url = makeTempURL()
         defer { cleanup(url) }
@@ -156,7 +156,7 @@ struct EstateTests {
         let estate = try await Estate.create(storage: TestStorage.sqlite(url), owner: testOwner)
         defer { Task { try? await estate.close() } }
         let manifest = try await estate.manifest
-        #expect(manifest.bitmapLayoutVersion == "v0.35")
+        #expect(manifest.bitmapLayoutVersion == "v1.0")
     }
 
     /// A database whose manifest was hand-seeded with an
@@ -190,7 +190,7 @@ struct EstateTests {
         } catch let EstateError.manifestMismatch(key, found, expected) {
             #expect(key == "bitmap_layout_version")
             #expect(found == "v99.0")
-            #expect(expected == "v0.35")
+            #expect(expected == "v1.0")
         }
     }
 
@@ -220,8 +220,8 @@ struct EstateTests {
             tablesPresent: "",
             createdAt: Date(timeIntervalSince1970: 0),
             lastModified: Date(timeIntervalSince1970: 0),
-            bitmapLayoutVersion: "v0.35",
-            provenanceBitmapVersion: "v0.35",
+            bitmapLayoutVersion: "v1.0",
+            provenanceBitmapVersion: "v1.0",
             federationGroupID: nil,
             miningPatternsHash: nil,
             tinyModelID: nil,

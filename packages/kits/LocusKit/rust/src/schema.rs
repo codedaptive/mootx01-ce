@@ -579,8 +579,10 @@ mod tests {
         assert_eq!(conf.expression.evaluate(&row), 5);
     }
 
-    /// The drawers state-cluster expression masks the low nibble of
-    /// `adjectiveBitmap`.
+    /// The drawers state-cluster expression masks the low 6 bits of
+    /// `adjectiveBitmap` (Codex Pass #2 F2: was 0xF, now 0x3F so the
+    /// full 6-bit state field is captured — a 4-bit mask aliased
+    /// superseded/tombstoned onto active).
     #[test]
     fn state_cluster_expression_evaluates() {
         use std::collections::BTreeMap;
@@ -593,7 +595,7 @@ mod tests {
             .unwrap();
         let mut row = BTreeMap::new();
         row.insert("adjectiveBitmap".to_string(), TypedValue::Bitmap(0xFFFF_FFF5));
-        assert_eq!(cluster.expression.evaluate(&row), 0x5);
+        assert_eq!(cluster.expression.evaluate(&row), 0x35);
     }
 
     /// Operational channel masks the low nibble of `operationalBitmap`.
