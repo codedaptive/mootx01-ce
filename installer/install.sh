@@ -96,10 +96,11 @@ run() {
     # Echoes the command, then runs it. Suppresses execution under
     # MOOTX01_DRY_RUN=1 so test_install_sh.sh can verify the call
     # graph without actually touching the filesystem or invoking
-    # swift build.
+    # swift build. Arguments are passed as real argv (no eval), so
+    # paths containing spaces survive intact.
     log "+ $*"
     if [[ "$DRY_RUN" != "1" ]]; then
-        eval "$@"
+        "$@"
     fi
 }
 
@@ -111,13 +112,13 @@ build_binary() {
     log ""
     log "Building mootx01-mcp (release)..."
     require_swift
-    run "swift build -c release --package-path \"$SCRIPT_DIR\" --product mootx01-mcp"
+    run swift build -c release --package-path "$SCRIPT_DIR" --product mootx01-mcp
 }
 
 place_binary() {
     log ""
     log "Installing $BINARY_NAME to $BIN_DIR/"
-    run "mkdir -p \"$BIN_DIR\""
+    run mkdir -p "$BIN_DIR"
     if [[ "$DRY_RUN" != "1" ]]; then
         local built="$SCRIPT_DIR/.build/release/$BINARY_NAME"
         [[ -f "$built" ]] || die "build artifact missing at $built"
@@ -136,7 +137,7 @@ merge_json_config() {
     local label="$2"
     log ""
     log "Wiring $label ($config_path)"
-    run "mkdir -p \"$(dirname \"$config_path\")\""
+    run mkdir -p "$(dirname "$config_path")"
     if [[ "$DRY_RUN" == "1" ]]; then
         log "  (dry run) would merge \"$SERVER_NAME\" entry into $config_path"
         return 0
@@ -199,7 +200,7 @@ PY
 write_continue_yaml() {
     log ""
     log "Wiring Continue ($CONTINUE_CONFIG)"
-    run "mkdir -p \"$CONTINUE_DIR\""
+    run mkdir -p "$CONTINUE_DIR"
     if [[ "$DRY_RUN" == "1" ]]; then
         log "  (dry run) would write $CONTINUE_CONFIG"
         return 0

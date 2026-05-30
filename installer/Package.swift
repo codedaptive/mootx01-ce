@@ -35,11 +35,11 @@ let package = Package(
         .executable(name: "mootx01-mcp", targets: ["mootx01-mcp"]),
     ],
     dependencies: [
-        .package(name: "AriaLexicon", path: "../AriaLexicon"),
-        .package(name: "GeniusLocusKit", path: "../GeniusLocusKit"),
-        .package(name: "LocusKit", path: "../LocusKit"),
-        .package(name: "PersistenceKit", path: "../PersistenceKit"),
-        .package(name: "ARIA_MCP", path: "../ARIA_MCP"),
+        .package(name: "AriaLexiconLib", path: "../packages/libs/AriaLexiconLib"),
+        .package(name: "GeniusLocusKit", path: "../packages/kits/GeniusLocusKit"),
+        .package(name: "LocusKit", path: "../packages/kits/LocusKit"),
+        .package(name: "PersistenceKit", path: "../packages/kits/PersistenceKit"),
+        .package(name: "ARIA_MCP", path: "../apps/ARIA_MCP"),
     ],
     targets: [
         .target(
@@ -52,7 +52,7 @@ let package = Package(
             dependencies: [
                 "MootInstallerCore",
                 .product(name: "AriaMCP", package: "ARIA_MCP"),
-                .product(name: "AriaLexicon", package: "AriaLexicon"),
+                .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),

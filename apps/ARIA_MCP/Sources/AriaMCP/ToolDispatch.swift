@@ -192,7 +192,11 @@ public struct ToolDispatcher: Sendable {
     /// projected set, including names whose verb is `propose` or
     /// `associate` (those are not callable tools per § 4).
     public static func parseToolName(_ name: String) -> (Verb, Noun)? {
-        let parts = name.split(separator: "_", maxSplits: 1).map(String.init)
+        // Strip the product namespace prefix (`moot_`) before parsing the
+        // ARIA grammar body. Names without it are not projected tools.
+        guard name.hasPrefix(ToolProjection.toolNamePrefix) else { return nil }
+        let body = String(name.dropFirst(ToolProjection.toolNamePrefix.count))
+        let parts = body.split(separator: "_", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return nil }
         // Try verb_noun first (the action form): parts[0] is the verb.
         if let verb = Verb(rawValue: parts[0]),
@@ -334,7 +338,7 @@ public struct ToolDispatcher: Sendable {
     /// projection. It has no AriaLexicon (verb, noun) pair, so `dispatch`
     /// matches it before `parseToolName` and `ToolProjection` advertises
     /// it as an explicit non-projected entry in `tools/list`.
-    public static let crossEstateRecallToolName = "cross_estate_recall"
+    public static let crossEstateRecallToolName = "moot_cross_estate_recall"
 
     /// Run `cross_estate_recall`: a grant-authorized federated read that
     /// fans across the locally-open estates the caller is entitled to
