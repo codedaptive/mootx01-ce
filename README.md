@@ -121,8 +121,8 @@ The near-term path to a usable release, in order:
 2. **Ship the ARIA MCP reference server.** A reference implementation of the MCP server that exposes a MOOTx01 estate over the ARIA grammar, so anyone can compile it and use their MOOT from an agentic chat or coding harness — Claude, Claude Code, or any MCP-capable client.
 3. **Full security sweep.** A complete security, quality-control, and hardening pass across the substrate and the MCP server. No kit has cleared this gate yet; this is where that happens, before the server is put in front of people who did not build it themselves.
 4. **Binary package for non-compiler users.** A precompiled, installable binary of the MCP reference server, so people who do not want to build from source can install a hardened binary and run it. The binary follows the security sweep deliberately: the first artifact aimed at non-developers is also the first one that has been hardened.
-5. **Multilple Side Cars and Small Expriemental apps** A reference set of application to increase awareness of the sidecar and embedding possibilities in the system.
-6. And a rather large number of ideas roadblocked by several days of getting the house in order for you'all.
+5. **Multiple sidecars and small experimental apps.** A reference set of applications to increase awareness of the sidecar and embedding possibilities in the system.
+6. And a rather large number of ideas, roadblocked by several days of getting the house in order for you all.
 
 This roadmap describes intended sequence, not committed dates.
 
