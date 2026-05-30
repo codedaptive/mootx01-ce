@@ -6,24 +6,21 @@ harness. It is the empirical foundation for the cookbook's §4.4
 portable kernel layer and §17 performance budgets.
 
 A new engineer (human or agent) joining substrate work reads
-this README, the decision index at `../../decisions/README.md`,
-and the Phase 2 final selection at
-`../../decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`,
+this README and the constitutional spec
+(`../../engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`),
 then is ready to extend the kernel layer with new backends or
-new ops.
+new ops. (The per-op kernel-selection decision records are kept in
+the development tree and are not shipped in the open-core edition.)
 
 ## Directory layout
 
 ```
-substrate_reference/
+substrate_math_performance/
 ├── README.md                              this file
-├── GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36_2026-05-16.md
-│                                           the constitutional
-│                                           spec; owned upstream
 ├── AGENT_HOWTO.md                         orientation for agentic
 │                                           programming agents
 ├── SKILL.md                               Claude skill descriptor
-├── GeniusLocusReference/                  Swift reference port
+├── GeniusLocusReference/                  Swift reference port (library only)
 │   ├── Package.swift
 │   ├── glref-swift-PortableKernel.swift   trait + dispatcher + KernelKind
 │   ├── glref-swift-PortableKernel-SIMD.swift  SimdKernel (production default)
@@ -32,43 +29,52 @@ substrate_reference/
 │   ├── glref-swift-PortableKernel-Metal.swift MetalKernel (rejected, retained)
 │   ├── glref-swift-HyperplaneFamily.swift
 │   ├── glref-swift-SimHash.swift
-│   └── ... (45 reference files)
-├── rust/                                  Rust reference port
-│   ├── Cargo.toml
-│   ├── glref-rust-kernel.rs               trait + ScalarKernel + dispatcher
-│   ├── glref-rust-kernel_simd.rs          SimdKernel (production default)
-│   ├── glref-rust-simhash.rs
-│   ├── glref-rust-hyperplane.rs
-│   ├── glref-rust-fingerprint256.rs
-│   └── ... (41 reference files)
+│   └── ... (reference files)
 ├── metal/                                 Metal compute shaders
 │   └── glref-metal-hamming_nn.metal       (rejected at large N,
 │                                           retained; see Phase 2.δ-2)
-└── test-harness/                          benchmark and conformance
-    ├── vectors/                            18 JSON test-vector files
+└── test-harness/                          conformance harness (benchmark
+    │                                       sweep not yet ported — see below)
+    ├── vectors/                            24 JSON test-vector files
+    │                                       (+ locuskit/ subdir, 4 files)
     ├── swift/                              Swift harness (SwiftPM)
     │   ├── Package.swift
     │   ├── Sources/
     │   │   ├── GenVectors/                 generate test vectors from scalar ref
     │   │   ├── ValidateVectors/            validate vectors against any kernel
-    │   │   ├── StressTest/                 main benchmark sweep
-    │   │   ├── TopKBench/                  Phase 2.δ-1 K × N sweep
     │   │   └── Harness/                    shared utilities
     │   └── Tests/
-    │       └── HarnessTests/               2 test files (DispatcherTests + Harness)
-    ├── rust/                               Rust harness (Cargo)
+    │       └── HarnessTests/               DispatcherTests + HarnessTests
+    ├── rust/                               Rust harness (Cargo; pinned nightly)
     │   ├── Cargo.toml
+    │   ├── rust-toolchain.toml             pins nightly-2026-05-16
     │   └── src/bin/
-    │       ├── gen-vectors.rs
-    │       ├── validate-vectors.rs
-    │       └── stress_test.rs
+    │       ├── gen_vectors.rs
+    │       └── validate_vectors.rs
     └── benchmarks/results/                 gitignored per-run JSON output
         └── {date}-{hw-slug}/               e.g. 2026-05-18-apple-m5-max/
 ```
 
+The Rust reference port is no longer a single `rust/` tree here. After
+the four-package substrate refactor it is split across
+`packages/libs/SubstrateTypes/rust/` (types: SimHash, Fingerprint256,
+HLC, Hamming), `packages/libs/SubstrateKernel/rust/` (kernel dispatch +
+SIMD), `packages/libs/SubstrateML/rust/` (ML primitives), and
+`packages/libs/SubstrateLib/rust/` (the orchestration layer). The current
+constitutional spec is
+`docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
+(the v0.36 cookbook is superseded and not retained in this edition).
+
+The benchmark sweep (`stress-test`, `topk-bench`, Rust `stress_test`) is
+NOT present in this repo: the `StressTest/` and `TopKBench/` Swift sources
+and the Rust `stress_test` bin are not in the tree. Until they are ported,
+only the conformance binaries (`gen-vectors`, `validate-vectors`) build
+and run here.
+
 ## What lives where
 
-- **The constitutional spec** is `GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36_2026-05-16.md`.
+- **The constitutional spec** is
+  `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`.
   Math first, annotations where needed. The cookbook defines the
   contract; the reference implementations satisfy it. New
   cookbook sections come from upstream design sessions, not from
@@ -99,23 +105,33 @@ substrate_reference/
 ### Prerequisites
 
 - macOS 14+ on Apple Silicon (apple-m5-max is the reference
-  hardware; older M-series works too)
-- Swift 6.0 toolchain (Xcode 15.4+ or standalone Swift)
-- Rust 1.76+ toolchain (rustup)
+  hardware; older M-series works too; validated on macOS 26)
+- Swift 6.0+ toolchain (Xcode 15.4+ or standalone Swift; validated 6.3.2)
+- Rust stable 1.75+ toolchain (rustup) for the four substrate crates
+- Rust nightly-2026-05-16 toolchain for the test harness: it pulls the
+  SIMD kernel via the `simd-nightly` / `portable_simd` feature, which is
+  unstable. Install it before building the harness:
+  `rustup toolchain install nightly-2026-05-16`. The
+  `test-harness/rust/rust-toolchain.toml` then selects it automatically;
+  on stable the harness fails with `error[E0554]`.
 - For Metal kernel: any Apple Silicon Mac; no extra setup
 
 ### Swift reference + harness
 
+If a `.build/` directory was copied from another worktree (a stale module
+cache referencing a different absolute path), the first build fails with
+`missing required module 'SwiftShims'`. Run `rm -rf .build` first.
+
 ```sh
-# Reference Swift port (the GeniusLocusReference package)
+# Reference Swift port (the GeniusLocusReference package — a library, no
+# test target, so do not run `swift test` here)
 cd docs/validation/substrate_math_performance/GeniusLocusReference
 swift build -c release            # compiles to .build/release/
-swift test                         # runs reference unit tests
 
 # Harness (depends on the reference package via local path)
 cd docs/validation/substrate_math_performance/test-harness/swift
-swift build -c release             # compiles all four executables
-swift test                         # runs DispatcherTests + HarnessTests
+swift build -c release             # compiles gen-vectors and validate-vectors
+swift test                         # DispatcherTests + HarnessTests, all pass
 
 # Conformance gate: every kernel passes against every vector
 .build/release/validate-vectors ../vectors/hamming.json --kernel scalar
@@ -124,7 +140,13 @@ swift test                         # runs DispatcherTests + HarnessTests
 .build/release/validate-vectors ../vectors/hamming.json --kernel neon
 .build/release/validate-vectors ../vectors/hamming.json --kernel metal
 # Each prints CRC expected/actual and PASS or FAIL.
+```
 
+The benchmark sweep (`stress-test`, `topk-bench`) is not yet ported to
+this repo (see the directory-layout note above). The commands below are
+the intended interface once those executables land:
+
+```sh
 # Benchmark sweep (produces JSON in benchmarks/results/{date}-{hw}/)
 .build/release/stress-test                     # full sweep, ~5 minutes
 .build/release/stress-test --quick             # 1-minute version
@@ -138,21 +160,26 @@ swift test                         # runs DispatcherTests + HarnessTests
 
 ### Rust reference + harness
 
-```sh
-# Reference Rust port
-cd docs/validation/substrate_math_performance/rust
-cargo build --release
-cargo test
+The Rust reference is the four substrate crates (no single `rust/` tree
+under this directory). Each builds on stable Rust:
 
-# Harness
+```sh
+# Reference Rust port — four crates (build/test on stable)
+cd packages/libs/SubstrateTypes/rust  && cargo build --release && cargo test
+cd packages/libs/SubstrateKernel/rust && cargo build --release && cargo test
+cd packages/libs/SubstrateML/rust     && cargo build --release && cargo test
+cd packages/libs/SubstrateLib/rust    && cargo build --release && cargo test
+
+# Harness — requires the pinned nightly (rust-toolchain.toml selects it
+# automatically once nightly-2026-05-16 is installed; see Prerequisites)
 cd docs/validation/substrate_math_performance/test-harness/rust
 cargo build --release
 cargo test
 
-# Conformance and stress-test mirror the Swift binaries
+# Conformance mirrors the Swift binaries
 ./target/release/validate-vectors ../vectors/hamming.json --kernel scalar
 ./target/release/validate-vectors ../vectors/hamming.json --kernel simd
-./target/release/stress_test --quick
+# (Rust stress_test is part of the not-yet-ported sweep above.)
 ```
 
 ### Regenerating vectors
@@ -162,7 +189,7 @@ algorithm changes), regenerate every vector:
 
 ```sh
 cd docs/validation/substrate_math_performance/test-harness/swift
-.build/release/gen-vectors ../vectors/         # overwrites all 18 vectors
+.build/release/gen-vectors ../vectors/         # overwrites all 24 vectors
 ```
 
 Every kernel's `validate-vectors` then re-runs and must PASS.

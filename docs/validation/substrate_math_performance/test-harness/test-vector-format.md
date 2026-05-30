@@ -32,7 +32,7 @@ the conformance gate.
 ## Directory layout
 
 ```
-substrate_reference/
+substrate_math_performance/
 ├── test-harness/
 │   ├── swift/      Swift generator + validator sources
 │   ├── rust/       Rust generator + validator sources
@@ -143,7 +143,7 @@ these encodings:
 | `Option<T>` | `null` for None, T-encoded for Some | `null` or `"0x1234"` |
 | `Vec<T>` / array | JSON array of T-encoded values | `["0x01", "0x02"]` |
 | `Fingerprint256` | hex string `"0x..."`, exactly 64 hex digits (32 bytes LE) | `"0x000...01"` |
-| `HLC` | object `{ "physical_time": int, "logical_count": int, "node_id": int }` | |
+| `HLC` | hex string `"0x..."`, exactly 32 hex digits (16 bytes LE wire form: 8 bytes i64 physical_time, 4 bytes i32 logical_count, 4 bytes i32 node_id) | `"0x00f04cbcc11900000000000001000000"` |
 | UUID (RowID) | hex string `"0x..."`, exactly 32 hex digits (16 bytes LE) | |
 
 f64 must be hex-encoded because JSON number parsing is not
@@ -909,8 +909,9 @@ The harness ships a registry mapping primitive name → generator
 function + validator function in each language. Adding a new
 primitive requires:
 
-1. Land Swift + Rust reference implementations under
-   `substrate_reference/{GeniusLocusReference,rust}/`.
+1. Land Swift + Rust reference implementations: Swift under
+   `substrate_math_performance/GeniusLocusReference/`, Rust under the four
+   substrate crates `packages/libs/Substrate{Types,Kernel,ML,Lib}/rust/`.
 2. Register the primitive in
    `test-harness/swift/Sources/Harness/Primitives/PrimitiveRegistry.swift`
    and `test-harness/rust/src/primitives/registry.rs`.
