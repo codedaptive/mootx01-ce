@@ -190,16 +190,15 @@ public struct StdioServer {
         // on a Sendable async sequence over stdin.
         var buffer = Data()
         while true {
-            let chunk: Data
-            do {
-                guard let next = try input.read(upToCount: 4096), !next.isEmpty else {
-                    break
-                }
-                chunk = next
-            } catch {
-                Logging.stderr.log("stdin read failed: \(error)")
-                break
-            }
+            // availableData returns as soon as bytes are present at the
+            // pipe (when the client sends a line), rather than blocking
+            // to fill a fixed-size buffer. read(upToCount:) stalled the
+            // initialize handshake on a persistent stdio connection (the
+            // client holds stdin open and waits for the reply), tripping
+            // the MCP client's 30s connection timeout. availableData
+            // returns empty Data on EOF, which ends the loop cleanly.
+            let chunk = input.availableData
+            if chunk.isEmpty { break }
             buffer.append(chunk)
             while let newlineIndex = buffer.firstIndex(of: 0x0A) {
                 let frame = buffer.subdata(in: buffer.startIndex..<newlineIndex)

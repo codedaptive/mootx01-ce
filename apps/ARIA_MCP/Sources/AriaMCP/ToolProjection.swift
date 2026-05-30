@@ -179,13 +179,20 @@ public enum ToolProjection {
         return .object(object)
     }
 
+    /// Product namespace prefix on every MCP tool name. The ARIA
+    /// grammar (`verb_noun` / `noun_verb`) is the body; `moot_` marks
+    /// the surface as MOOTx01's so it never collides with another
+    /// connected MCP server's generic verbs. The dispatcher strips this
+    /// prefix in `parseToolName` before re-parsing the grammar.
+    public static let toolNamePrefix = "moot_"
+
     /// The MCP-facing tool name for a `(verb, noun)` pair.
     public static func toolName(verb: Verb, noun: Noun) -> String {
         switch verb {
         case .recall:
-            return "\(noun.rawValue)_\(verb.rawValue)"
+            return "\(toolNamePrefix)\(noun.rawValue)_\(verb.rawValue)"
         default:
-            return "\(verb.rawValue)_\(noun.rawValue)"
+            return "\(toolNamePrefix)\(verb.rawValue)_\(noun.rawValue)"
         }
     }
 
