@@ -45,6 +45,7 @@ use crate::drawer::Drawer;
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 use substrate_lib::row_state::RowVerb;
+use crate::association::Association;
 use crate::error::LocusKitError;
 use crate::estate_types::RowID;
 use crate::kg_fact::KGFact;
@@ -321,6 +322,46 @@ pub trait DrawerStore: Send + Sync {
         &self,
         _target_row_id: &str,
     ) -> Result<Vec<Proposal>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
+    // -----------------------------------------------------------------
+    // Association CRUD
+    // -----------------------------------------------------------------
+
+    /// Insert an association. The edge endpoints and `added_by` are
+    /// required (mirroring `add_tunnel`), and the lattice anchor is
+    /// required per cookbook §2.7 (I-16): an empty `udc_code` is rejected
+    /// with `LocusKitError::InvalidContent` before the insert.
+    fn add_association(&self, _association: &Association) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "add_association not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Fetch an association by id. Returns `None` on miss.
+    fn get_association(&self, _id: &str) -> Result<Option<Association>, LocusKitError> {
+        Ok(None)
+    }
+
+    /// All non-tombstoned associations from a source wing/room pair,
+    /// ordered by `filed_at` ascending. Resolves through
+    /// `idx_associations_source`.
+    fn associations_from(
+        &self,
+        _wing: &str,
+        _room: &str,
+    ) -> Result<Vec<Association>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
+    /// All non-tombstoned associations to a target wing/room pair, ordered
+    /// by `filed_at` ascending. Resolves through `idx_associations_target`.
+    fn associations_to(
+        &self,
+        _wing: &str,
+        _room: &str,
+    ) -> Result<Vec<Association>, LocusKitError> {
         Ok(Vec::new())
     }
 
