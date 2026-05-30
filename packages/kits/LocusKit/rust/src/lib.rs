@@ -119,6 +119,8 @@ pub mod kg_fact;
 pub mod kg_fact_operational;
 pub mod manifest;
 pub mod node_bundle_store;
+pub mod proposal;
+pub mod proposal_operational;
 pub mod provenance;
 pub mod recall_trace_item;
 pub mod schema;
