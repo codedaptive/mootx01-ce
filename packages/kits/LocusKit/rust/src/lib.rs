@@ -121,6 +121,9 @@ pub mod fingerprint256_adapters;
 pub mod forbidden_combination_validator;
 pub mod kg_fact;
 pub mod kg_fact_operational;
+pub mod learned_reference;
+#[cfg(test)]
+mod learned_reference_tests;
 pub mod manifest;
 pub mod node_bundle_store;
 pub mod proposal;
