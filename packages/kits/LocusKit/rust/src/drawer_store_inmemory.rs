@@ -57,6 +57,7 @@ use substrate_lib::row_state::RowVerb;
 use substrate_types::hlc::HLCGenerator;
 use substrate_lib::audit_gate;
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
+use crate::association::Association;
 use crate::drawer_store::DrawerStore;
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
@@ -85,6 +86,7 @@ const T_DRAWERS: &str = "drawers";
 const T_TUNNELS: &str = "tunnels";
 const T_KG_FACTS: &str = "kg_facts";
 const T_PROPOSALS: &str = "proposals";
+const T_ASSOCIATIONS: &str = "associations";
 const T_DIARY: &str = "diary";
 const T_MANIFEST: &str = "manifest";
 const T_RECALL_TRACE: &str = "recall_trace";
@@ -1361,6 +1363,109 @@ impl DrawerStore for InMemoryDrawerStore {
     }
 
     // -----------------------------------------------------------------
+    // Association CRUD
+    // -----------------------------------------------------------------
+
+    fn add_association(&self, association: &Association) -> Result<(), LocusKitError> {
+        // Edge endpoints + added_by required (mirroring add_tunnel); lattice
+        // anchor required per cookbook §2.7 (I-16, mirroring add_proposal).
+        validate_non_empty(&association.source_wing, "sourceWing")?;
+        validate_non_empty(&association.source_room, "sourceRoom")?;
+        validate_non_empty(&association.target_wing, "targetWing")?;
+        validate_non_empty(&association.target_room, "targetRoom")?;
+        validate_non_empty(&association.label, "label")?;
+        validate_non_empty(&association.added_by, "addedBy")?;
+        validate_non_empty(&association.lattice_anchor.udc_code, "latticeAnchor.udcCode")?;
+        self.storage
+            .row_store()
+            .insert(T_ASSOCIATIONS, association_values(association))
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    fn get_association(&self, id: &str) -> Result<Option<Association>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_ASSOCIATIONS,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_ASSOCIATIONS, "id"),
+                    TypedValue::Text(id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.first().map(association_from_row))
+    }
+
+    fn associations_from(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<Association>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_ASSOCIATIONS,
+                Some(&StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_ASSOCIATIONS, "sourceWing"),
+                        TypedValue::Text(wing.to_string()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_ASSOCIATIONS, "sourceRoom"),
+                        TypedValue::Text(room.to_string()),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_ASSOCIATIONS, "tombstonedAt")),
+                ])),
+                &[OrderClause::new(
+                    Column::new(T_ASSOCIATIONS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(association_from_row).collect())
+    }
+
+    fn associations_to(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<Association>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_ASSOCIATIONS,
+                Some(&StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_ASSOCIATIONS, "targetWing"),
+                        TypedValue::Text(wing.to_string()),
+                    ),
+                    StoragePredicate::Eq(
+                        Column::new(T_ASSOCIATIONS, "targetRoom"),
+                        TypedValue::Text(room.to_string()),
+                    ),
+                    StoragePredicate::IsNull(Column::new(T_ASSOCIATIONS, "tombstonedAt")),
+                ])),
+                &[OrderClause::new(
+                    Column::new(T_ASSOCIATIONS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(association_from_row).collect())
+    }
+
+    // -----------------------------------------------------------------
     // Diary CRUD
     // -----------------------------------------------------------------
 
@@ -1838,6 +1943,98 @@ fn kg_fact_values(f: &KGFact) -> BTreeMap<String, TypedValue> {
     m
 }
 
+fn association_values(a: &Association) -> BTreeMap<String, TypedValue> {
+    let mut m = BTreeMap::new();
+    m.insert("id".to_string(), TypedValue::Text(a.id.clone()));
+    m.insert(
+        "sourceWing".to_string(),
+        TypedValue::Text(a.source_wing.clone()),
+    );
+    m.insert(
+        "sourceRoom".to_string(),
+        TypedValue::Text(a.source_room.clone()),
+    );
+    m.insert(
+        "sourceDrawerId".to_string(),
+        a.source_drawer_id
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "targetWing".to_string(),
+        TypedValue::Text(a.target_wing.clone()),
+    );
+    m.insert(
+        "targetRoom".to_string(),
+        TypedValue::Text(a.target_room.clone()),
+    );
+    m.insert(
+        "targetDrawerId".to_string(),
+        a.target_drawer_id
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert("label".to_string(), TypedValue::Text(a.label.clone()));
+    m.insert("addedBy".to_string(), TypedValue::Text(a.added_by.clone()));
+    m.insert("filedAt".to_string(), TypedValue::Timestamp(a.filed_at));
+    m.insert(
+        "tombstonedAt".to_string(),
+        a.tombstoned_at
+            .map(TypedValue::Timestamp)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "removedByBatch".to_string(),
+        a.removed_by_batch
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "udcCode".to_string(),
+        TypedValue::Text(a.lattice_anchor.udc_code.clone()),
+    );
+    m.insert(
+        "udcFacets".to_string(),
+        a.lattice_anchor
+            .udc_facets
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "wikidataQID".to_string(),
+        a.lattice_anchor
+            .wikidata_qid
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "wikidataQidsSecondary".to_string(),
+        a.lattice_anchor
+            .wikidata_qids_secondary
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "adjectiveBitmap".to_string(),
+        TypedValue::Bitmap(a.adjective_bitmap),
+    );
+    m.insert(
+        "operationalBitmap".to_string(),
+        TypedValue::Bitmap(a.operational_bitmap),
+    );
+    m.insert(
+        "provenanceBitmap".to_string(),
+        TypedValue::Bitmap(a.provenance_bitmap),
+    );
+    m
+}
+
 fn proposal_values(p: &Proposal) -> BTreeMap<String, TypedValue> {
     let mut m = BTreeMap::new();
     m.insert("id".to_string(), TypedValue::Text(p.id.clone()));
@@ -1965,6 +2162,32 @@ fn tunnel_from_row(row: &StorageRow) -> Tunnel {
         target_drawer_id: opt_string_value_of(row.get("targetDrawerId")),
         label: string_value_of(row.get("label")),
         kind: TunnelKind::from_raw(i64_value_of(row.get("kind_id"))),
+        adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
+        operational_bitmap: i64_value_of(row.get("operationalBitmap")),
+        provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),
+        added_by: string_value_of(row.get("addedBy")),
+        filed_at: i64_value_of(row.get("filedAt")),
+        tombstoned_at: opt_int_value_of(row.get("tombstonedAt")),
+        removed_by_batch: opt_string_value_of(row.get("removedByBatch")),
+    }
+}
+
+fn association_from_row(row: &StorageRow) -> Association {
+    Association {
+        id: string_value_of(row.get("id")),
+        source_wing: string_value_of(row.get("sourceWing")),
+        source_room: string_value_of(row.get("sourceRoom")),
+        source_drawer_id: opt_string_value_of(row.get("sourceDrawerId")),
+        target_wing: string_value_of(row.get("targetWing")),
+        target_room: string_value_of(row.get("targetRoom")),
+        target_drawer_id: opt_string_value_of(row.get("targetDrawerId")),
+        label: string_value_of(row.get("label")),
+        lattice_anchor: LatticeAnchor::new(
+            string_value_of(row.get("udcCode")),
+            opt_string_value_of(row.get("udcFacets")),
+            opt_string_value_of(row.get("wikidataQID")),
+            opt_string_value_of(row.get("wikidataQidsSecondary")),
+        ),
         adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
         provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),

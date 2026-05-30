@@ -92,6 +92,10 @@
 //! concrete implementation.
 
 pub mod adjectives;
+pub mod association;
+pub mod association_operational;
+#[cfg(test)]
+mod association_tests;
 pub mod estate_audit;
 pub mod estate_verbs;
 pub mod frames;

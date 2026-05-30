@@ -94,6 +94,7 @@ public enum LocusKitSchema {
                 manifestTable,
                 kgFactsTable,
                 proposalsTable,
+                associationsTable,
                 nodeBundlesTable,
                 containerFingerprintsTable,
                 recallTraceTable,
@@ -396,6 +397,49 @@ public enum LocusKitSchema {
         ]
     )
 
+    // MARK: - associations
+    //
+    // Association persistence per mission NOUN-ASC-01 and cookbook §2.4.
+    // The edge-shaped sibling of `tunnels`: source + target endpoints
+    // (wing + room + optional drawer id), three Int64 bitmap columns, and
+    // the Rev 1.0 soft-delete reservation. Two differences from `tunnels`:
+    // there is no `kind_id` (an association carries no typed-relationship
+    // vocabulary — all semantics live in operationalBitmap, cookbook §2.4),
+    // and the lattice anchor (cookbook §2.7 / I-16, anchored to the
+    // lattice-midpoint of the endpoints) is stored as the same four columns
+    // drawers and proposals use — udcCode TEXT NOT NULL DEFAULT '' +
+    // udcFacets + wikidataQID + wikidataQidsSecondary; `addAssociation`
+    // rejects an empty anchor before insert. Same headroom convention as
+    // tunnels. No generated columns — like `tunnels`, the edge endpoints
+    // (not a state cluster) are the indexed query paths.
+    static let associationsTable = TableDeclaration(
+        name: "associations",
+        columns: [
+            .text("id"),
+            .text("sourceWing"),
+            .text("sourceRoom"),
+            .text("sourceDrawerId", nullable: true),
+            .text("targetWing"),
+            .text("targetRoom"),
+            .text("targetDrawerId", nullable: true),
+            .text("label"),
+            .text("addedBy"),
+            .timestamp("filedAt"),
+            .timestamp("tombstonedAt", nullable: true),
+            .text("removedByBatch", nullable: true),
+            ColumnDeclaration(name: "udcCode", type: .text,
+                              nullable: false, defaultValue: .text("")),
+            .text("udcFacets", nullable: true),
+            .text("wikidataQID", nullable: true),
+            .text("wikidataQidsSecondary", nullable: true),
+            .bitmap("adjectiveBitmap"),
+            .bitmap("operationalBitmap"),
+            .bitmap("provenanceBitmap"),
+            .json("ext", nullable: true)
+        ],
+        primaryKey: ["id"]
+    )
+
     // MARK: - recall_trace
     //
     // RecallTraceItem persistence per NEURONKIT_SPEC §3.1. One row per
@@ -491,6 +535,11 @@ public enum LocusKitSchema {
         IndexDeclaration(name: "idx_proposals_target", table: "proposals", columns: ["targetRowID"]),
         IndexDeclaration(name: "idx_proposals_udcCode", table: "proposals", columns: ["udcCode"]),
         IndexDeclaration(name: "idx_proposals_state_cluster", table: "proposals", columns: ["g_state_cluster"]),
+        // associations — edge-lookup query paths mirror tunnels (source +
+        // target endpoint), plus the lattice-anchor resolution index.
+        IndexDeclaration(name: "idx_associations_source", table: "associations", columns: ["sourceWing", "sourceRoom"]),
+        IndexDeclaration(name: "idx_associations_target", table: "associations", columns: ["targetWing", "targetRoom"]),
+        IndexDeclaration(name: "idx_associations_udcCode", table: "associations", columns: ["udcCode"]),
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration(name: "idx_recall_trace_target", table: "recall_trace", columns: ["target"]),
