@@ -83,7 +83,7 @@ public struct CollapseRule: Sendable {
 
     /// Resolves a source identity to the spine class it belongs to,
     /// if known. Returns nil if the identity has not yet been placed.
-    public typealias ClassResolver = @Sendable (String) -> MDCCClass?
+    public typealias ClassResolver = @Sendable (String) -> LatticeClass?
 
     public let pins: PinnedParents
     public let resolver: ClassResolver

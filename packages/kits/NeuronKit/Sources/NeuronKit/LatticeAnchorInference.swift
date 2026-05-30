@@ -22,8 +22,8 @@ public struct LatticeAnchorInference: Equatable, Sendable, Codable {
 
     /// The MDCC code resolved from the canon. Empty string means no
     /// canon entry matched; the caller should leave the drawer's
-    /// mdccCode unset or fall back to a default.
-    public let mdccCode: String
+    /// code unset or fall back to a default.
+    public let code: String
 
     /// The Wikidata Q-ID for the drawer's primary concept, or nil
     /// if the resolver could not find a confident match. When nil,
@@ -50,13 +50,13 @@ public struct LatticeAnchorInference: Equatable, Sendable, Codable {
     public let pipelineMode: LinguisticPipelineMode
 
     public init(
-        mdccCode: String,
+        code: String,
         wikidataQID: String?,
         confidence: UInt8,
         enrichmentStatusBits: UInt8,
         pipelineMode: LinguisticPipelineMode
     ) {
-        self.mdccCode = mdccCode
+        self.code = code
         self.wikidataQID = wikidataQID
         self.confidence = confidence
         self.enrichmentStatusBits = enrichmentStatusBits

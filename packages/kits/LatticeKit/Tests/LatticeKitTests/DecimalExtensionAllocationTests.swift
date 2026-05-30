@@ -37,20 +37,20 @@ struct DecimalExtensionAllocationTests {
         return StableKeyRegistry(entries: entries)
     }
 
-    /// Allocates `count` fresh identities into `mdccClass` starting from
+    /// Allocates `count` fresh identities into `latticeClass` starting from
     /// `start`, emulating the assembler's running-registry loop: each
     /// allocation appends a pin so the next call sees it occupied.
     /// Returns the code sequence and the final registry.
     private func allocateSequence(
         count: Int,
-        into mdccClass: MDCCClass,
+        into latticeClass: LatticeClass,
         start: StableKeyRegistry
     ) -> (codes: [String], registry: StableKeyRegistry) {
         var entries = start.entries
         var registry = start
         var codes: [String] = []
         for i in 0..<count {
-            guard let code = registry.nextFreeCode(in: mdccClass) else { break }
+            guard let code = registry.nextFreeCode(in: latticeClass) else { break }
             codes.append(code)
             entries.append(StableKeyEntry(
                 sourceIdentity: "Qnew_\(i)",

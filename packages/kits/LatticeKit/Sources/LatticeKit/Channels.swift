@@ -110,7 +110,7 @@ public enum Channels {
 
         out += "## Channels\n\n"
         out += "- Fast-codes (`LatticeCodesV1.json`) — pull frequently; tiny payload.\n"
-        out += "- Slow-docs (`MDCCDocsV1.md`) — pull at canon-cut cadence.\n"
+        out += "- Slow-docs (`LatticeDocsV1.md`) — pull at canon-cut cadence.\n"
         return out
     }
 }

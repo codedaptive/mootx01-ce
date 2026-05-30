@@ -48,7 +48,7 @@ public enum NeuronKit {
     ) -> LatticeAnchorInference {
         let anchor = EideticLib.lookup(content)
         let status: EnrichmentStatus = {
-            if anchor.mdccCode.isEmpty {
+            if anchor.code.isEmpty {
                 return .none
             } else if anchor.wikidataQID == nil {
                 return .qidPending
@@ -57,7 +57,7 @@ public enum NeuronKit {
             }
         }()
         return LatticeAnchorInference(
-            mdccCode: anchor.mdccCode,
+            code: anchor.code,
             wikidataQID: anchor.wikidataQID,
             confidence: anchor.confidence,
             enrichmentStatusBits: status.rawValue,

@@ -15,14 +15,14 @@ final class EideticLibTests: XCTestCase {
     func testLookupChemistryResolvesToCanonCode() {
         let anchor = EideticLib.lookup("chemistry")
         XCTAssertFalse(
-            anchor.mdccCode.isEmpty,
+            anchor.code.isEmpty,
             "lookup must resolve a canon term to an MDCC code"
         )
     }
 
     func testLookupEmptyStringYieldsEmptyAnchor() {
         let anchor = EideticLib.lookup("")
-        XCTAssertEqual(anchor.mdccCode, "")
+        XCTAssertEqual(anchor.code, "")
         XCTAssertEqual(anchor.confidence, 0)
     }
 
@@ -41,7 +41,7 @@ final class EideticLibTests: XCTestCase {
 
     func testAnchorRoundTripsThroughJSON() throws {
         let anchor = Anchor(
-            mdccCode: "503",
+            code: "503",
             wikidataQID: "Q2329",
             confidence: 48,
             dataVersion: "v1"

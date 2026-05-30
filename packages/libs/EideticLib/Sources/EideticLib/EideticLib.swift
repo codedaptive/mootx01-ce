@@ -37,7 +37,7 @@ public enum EideticLib {
     /// LatticeKit's canon version rather than loaded from a JSON stub:
     /// the manifest is scheme metadata, and the real canon lives in
     /// LatticeKit.
-    private static let derivedMDCCManifest = LatticeSchemeManifest(
+    private static let derivedLatticeManifest = LatticeSchemeManifest(
         canonVersion: LatticeKit.canonVersion,
         dataVersion: version,
         // MDCC is original work; the scheme itself is unlicensed. The
@@ -57,7 +57,7 @@ public enum EideticLib {
     /// The manifest for the MDCC default scheme. Derived from the
     /// bundled LatticeKit canon version; always present.
     public static func defaultSchemeManifest() -> LatticeSchemeManifest? {
-        derivedMDCCManifest
+        derivedLatticeManifest
     }
 
     /// Classifies a string against the MDCC code grammar without
@@ -107,7 +107,7 @@ public enum EideticLib {
         ) else {
             // No canon match: empty anchor, never a fallback code.
             return Anchor(
-                mdccCode: "",
+                code: "",
                 wikidataQID: nil,
                 confidence: 0,
                 dataVersion: canon.canonVersion
@@ -124,7 +124,7 @@ public enum EideticLib {
         }
 
         return Anchor(
-            mdccCode: resolution.code,
+            code: resolution.code,
             wikidataQID: qid,
             confidence: resolution.confidence,
             dataVersion: canon.canonVersion
@@ -145,7 +145,7 @@ public struct Anchor: Equatable, Sendable, Codable {
 
     /// The MDCC code resolved from the canon at the best-matching
     /// entry. Empty string means no canon entry matched the term.
-    public let mdccCode: String
+    public let code: String
 
     /// The Wikidata Q-ID for the primary concept (the resolved
     /// canon entry's source identity), or nil if no entry matched.
@@ -161,12 +161,12 @@ public struct Anchor: Equatable, Sendable, Codable {
     public let dataVersion: String
 
     public init(
-        mdccCode: String,
+        code: String,
         wikidataQID: String?,
         confidence: UInt8,
         dataVersion: String
     ) {
-        self.mdccCode = mdccCode
+        self.code = code
         self.wikidataQID = wikidataQID
         self.confidence = confidence
         self.dataVersion = dataVersion
@@ -176,7 +176,7 @@ public struct Anchor: Equatable, Sendable, Codable {
     /// fails to load — a build/configuration error, not a runtime
     /// condition.
     public static let notImplemented = Anchor(
-        mdccCode: "",
+        code: "",
         wikidataQID: nil,
         confidence: 0,
         dataVersion: "0.1.0-stub"

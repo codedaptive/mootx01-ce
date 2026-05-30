@@ -50,7 +50,7 @@ import LatticeKit
 /// The outcome of resolving a term against the MDCC canon: the
 /// resolved code, its CC0 Wikidata source identity, and a confidence
 /// packed into the substrate's 6-bit provenance confidence value set.
-public struct MDCCResolution: Equatable, Sendable {
+public struct LatticeResolution: Equatable, Sendable {
 
     /// The resolved MDCC code (present in the bundled canon).
     public let code: String
@@ -82,7 +82,7 @@ public enum LatticeResolver {
         normalized: [String],
         stemmed: [String],
         canon: LatticeCanon
-    ) -> MDCCResolution? {
+    ) -> LatticeResolution? {
         guard !normalized.isEmpty else { return nil }
 
         // One linear scan over the canon. Per-entry scoring (label
@@ -95,7 +95,7 @@ public enum LatticeResolver {
 
         // Running best, compared on the ranking vector documented
         // at the top of the file.
-        var best: (resolution: MDCCResolution, exact: Bool, matched: Int, extra: Int)?
+        var best: (resolution: LatticeResolution, exact: Bool, matched: Int, extra: Int)?
 
         for entry in canon.entries {
             let labelTokens = Tokenizer.tokenize(entry.label).map(Normalizer.normalize)
@@ -123,7 +123,7 @@ public enum LatticeResolver {
                 matched: matched,
                 inputCount: normalized.count
             )
-            let candidate = MDCCResolution(
+            let candidate = LatticeResolution(
                 code: entry.code,
                 sourceIdentity: entry.sourceIdentity,
                 confidence: confidence
@@ -144,8 +144,8 @@ public enum LatticeResolver {
     /// True when `a` strictly beats `b` on the ranking vector:
     /// (exactLabel, matchedInputCount, -extraLabelTokens, -codeOrder).
     private static func beats(
-        _ a: (resolution: MDCCResolution, exact: Bool, matched: Int, extra: Int),
-        over b: (resolution: MDCCResolution, exact: Bool, matched: Int, extra: Int)
+        _ a: (resolution: LatticeResolution, exact: Bool, matched: Int, extra: Int),
+        over b: (resolution: LatticeResolution, exact: Bool, matched: Int, extra: Int)
     ) -> Bool {
         if a.exact != b.exact { return a.exact }
         if a.matched != b.matched { return a.matched > b.matched }

@@ -7,10 +7,10 @@
 //                          resource the kit loads at runtime.
 //   LatticeCodesV1.json     — the fast-codes channel (compact, code-sorted,
 //                          pulled frequently).
-//   MDCCDocsV1.md        — the slow-docs channel (documented spine,
+//   LatticeDocsV1.md        — the slow-docs channel (documented spine,
 //                          reserved ranges, entries) plus a provenance
 //                          header naming the CC0 source and access date.
-//   MDCCRegistryV1.json  — the persisted stable-key registry, so a
+//   LatticeRegistryV1.json  — the persisted stable-key registry, so a
 //                          rerun pins every previously assigned code.
 //
 // Determinism is the whole point: the same `AssemblerOutput` plus the
@@ -72,8 +72,8 @@ public enum CanonWriter {
     /// The four artifact filenames, fixed for v1.
     public static let canonFilename = "LatticeCanonV1.json"
     public static let codesFilename = "LatticeCodesV1.json"
-    public static let docsFilename = "MDCCDocsV1.md"
-    public static let registryFilename = "MDCCRegistryV1.json"
+    public static let docsFilename = "LatticeDocsV1.md"
+    public static let registryFilename = "LatticeRegistryV1.json"
 
     /// The deterministic JSON encoder shared by every artifact. Sorted
     /// keys fix field order; unescaped slashes keep any URI-shaped value
