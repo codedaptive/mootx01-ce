@@ -59,9 +59,10 @@ use substrate_lib::audit_gate;
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use crate::drawer_store::DrawerStore;
 use crate::error::LocusKitError;
-use crate::estate_types::RowID;
+use crate::estate_types::{LatticeAnchor, RowID};
 use crate::kg_fact::KGFact;
 use crate::manifest::{ManifestKey, ManifestValues};
+use crate::proposal::Proposal;
 use crate::recall_trace_item::RecallTraceItem;
 use crate::schema;
 use crate::summaries::{RoomSummary, WingSummary};
@@ -83,6 +84,7 @@ use substrate_kernel::bit_field;
 const T_DRAWERS: &str = "drawers";
 const T_TUNNELS: &str = "tunnels";
 const T_KG_FACTS: &str = "kg_facts";
+const T_PROPOSALS: &str = "proposals";
 const T_DIARY: &str = "diary";
 const T_MANIFEST: &str = "manifest";
 const T_RECALL_TRACE: &str = "recall_trace";
@@ -1301,6 +1303,64 @@ impl DrawerStore for InMemoryDrawerStore {
     }
 
     // -----------------------------------------------------------------
+    // Proposal CRUD
+    // -----------------------------------------------------------------
+
+    fn add_proposal(&self, proposal: &Proposal) -> Result<(), LocusKitError> {
+        // Lattice anchor required per cookbook §2.7 (I-16). target_row_id
+        // is intentionally not validated — brand-new-object proposals
+        // carry no existing target.
+        validate_non_empty(&proposal.lattice_anchor.udc_code, "latticeAnchor.udcCode")?;
+        self.storage
+            .row_store()
+            .insert(T_PROPOSALS, proposal_values(proposal))
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    fn get_proposal(&self, id: &str) -> Result<Option<Proposal>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_PROPOSALS,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_PROPOSALS, "id"),
+                    TypedValue::Text(id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.first().map(proposal_from_row))
+    }
+
+    fn proposals_for_target(
+        &self,
+        target_row_id: &str,
+    ) -> Result<Vec<Proposal>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_PROPOSALS,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_PROPOSALS, "targetRowID"),
+                    TypedValue::Text(target_row_id.to_string()),
+                )),
+                &[OrderClause::new(
+                    Column::new(T_PROPOSALS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(proposal_from_row).collect())
+    }
+
+    // -----------------------------------------------------------------
     // Diary CRUD
     // -----------------------------------------------------------------
 
@@ -1778,6 +1838,68 @@ fn kg_fact_values(f: &KGFact) -> BTreeMap<String, TypedValue> {
     m
 }
 
+fn proposal_values(p: &Proposal) -> BTreeMap<String, TypedValue> {
+    let mut m = BTreeMap::new();
+    m.insert("id".to_string(), TypedValue::Text(p.id.clone()));
+    m.insert(
+        "targetRowID".to_string(),
+        TypedValue::Text(p.target_row_id.clone()),
+    );
+    m.insert(
+        "justification".to_string(),
+        p.justification
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "candidateState".to_string(),
+        TypedValue::Bitmap(p.candidate_state),
+    );
+    m.insert(
+        "adjectiveBitmap".to_string(),
+        TypedValue::Bitmap(p.adjective_bitmap),
+    );
+    m.insert(
+        "operationalBitmap".to_string(),
+        TypedValue::Bitmap(p.operational_bitmap),
+    );
+    m.insert(
+        "provenanceBitmap".to_string(),
+        TypedValue::Bitmap(p.provenance_bitmap),
+    );
+    m.insert(
+        "udcCode".to_string(),
+        TypedValue::Text(p.lattice_anchor.udc_code.clone()),
+    );
+    m.insert(
+        "udcFacets".to_string(),
+        p.lattice_anchor
+            .udc_facets
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "wikidataQID".to_string(),
+        p.lattice_anchor
+            .wikidata_qid
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "wikidataQidsSecondary".to_string(),
+        p.lattice_anchor
+            .wikidata_qids_secondary
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert("filedAt".to_string(), TypedValue::Timestamp(p.filed_at));
+    m
+}
+
 fn recall_trace_values(item: &RecallTraceItem) -> BTreeMap<String, TypedValue> {
     let mut m = BTreeMap::new();
     m.insert("id".to_string(), TypedValue::Text(item.id.clone()));
@@ -1876,6 +1998,25 @@ fn kg_fact_from_row(row: &StorageRow) -> KGFact {
         predicate: string_value_of(row.get("predicate")),
         object: string_value_of(row.get("object")),
         source_drawer_id: string_value_of(row.get("sourceDrawerID")),
+        adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
+        operational_bitmap: i64_value_of(row.get("operationalBitmap")),
+        provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),
+        filed_at: i64_value_of(row.get("filedAt")),
+    }
+}
+
+fn proposal_from_row(row: &StorageRow) -> Proposal {
+    Proposal {
+        id: string_value_of(row.get("id")),
+        target_row_id: string_value_of(row.get("targetRowID")),
+        justification: opt_string_value_of(row.get("justification")),
+        candidate_state: i64_value_of(row.get("candidateState")),
+        lattice_anchor: LatticeAnchor::new(
+            string_value_of(row.get("udcCode")),
+            opt_string_value_of(row.get("udcFacets")),
+            opt_string_value_of(row.get("wikidataQID")),
+            opt_string_value_of(row.get("wikidataQidsSecondary")),
+        ),
         adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
         provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),

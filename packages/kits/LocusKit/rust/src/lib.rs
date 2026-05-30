@@ -121,6 +121,8 @@ pub mod manifest;
 pub mod node_bundle_store;
 pub mod proposal;
 pub mod proposal_operational;
+#[cfg(test)]
+mod proposal_tests;
 pub mod provenance;
 pub mod recall_trace_item;
 pub mod schema;
