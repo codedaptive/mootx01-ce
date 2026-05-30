@@ -1,22 +1,22 @@
 ---
 status: draft
-authors: Bob Pankratz (via/ claude)
-date: 2026-05-27
+authors: Bob Pankratz (via Skippy)
+date: 2026-05-29
 version: v0.8
 package: SubstrateLib
 languages: [swift, rust]
 relates_to:
   - SUBSTRATELIB_SPEC_v0.8.md  (the contract this interface implements)
+  - SUBSTRATETYPES_INTERFACE_v0.8.md  (Layer 1 types consumed)
+  - SUBSTRATEKERNEL_INTERFACE_v0.8.md  (Layer 2 primitives consumed)
+  - SUBSTRATEML_INTERFACE_v0.8.md     (Layer 3 algorithms consumed)
 purpose: |
-  Public API surface of SubstrateLib in both ports, in two tiers within
-  § 2. Tier 1 is the CONSUMED CONTRACT — the 18 types other packages
-  actually import — documented in full with bilingual signatures. Tier 2
-  (§ 2's closing subsection) is the BROADER LIBRARY SURFACE — the
-  remaining ~99 public types that exist in the library but are not yet
-  consumed by the system; a table of contents (name + role + source
-  file) for future builders, not full signatures. The companion SPEC
-  carries the behavioral contracts (invariants I-1…I-7, conformance
-  C-1…C-6).
+  Public API surface of SubstrateLib in both ports. Three Swift files
+  publish the nine substrate verbs (`Verbs.Substrate`), the row-state
+  automaton (`RowStateAutomaton`), and the AuditGate write-gate
+  (`AuditGate.admit`). The Rust mirror exposes the same shapes with
+  Rust-idiomatic names. The companion SPEC carries the behavioral
+  contracts (I-22, I-25, I-26, I-30, O-1 through O-4).
 ---
 
 # SubstrateLib Interface
@@ -25,343 +25,369 @@ purpose: |
 
 **Swift:** `packages/libs/SubstrateLib/`
 
-- `Sources/SubstrateLib/` — 44 files, one per primitive or algorithm
-  family.
-- `Tests/SubstrateLibTests/`, `Tests/SubstrateLibConformanceTests/`
-- `Package.swift`
+- `Sources/SubstrateLib/` — 3 files:
+  - `Verbs.swift` — the nine substrate verbs + `Substrate` namespace
+    + `SubstrateError`.
+  - `RowStateAutomaton.swift` — transition table, `validate`,
+    `BitmapFields`, `ForbiddenCombinations`, `TransitionKey`.
+  - `AuditGate.swift` — `AuditGate.admit`, `FieldSlot`, `FieldWrite`,
+    `Vocabulary`, `Column`, `AuditGateError`.
+- `Tests/SubstrateLibTests/` — unit + conformance.
+- `Tests/SubstrateLibConformanceTests/` — bilingual conformance gate.
+- `Package.swift` — depends on `SubstrateTypes`, `SubstrateKernel`,
+  `SubstrateML`.
 
 **Rust:** `packages/libs/SubstrateLib/rust/`
 
-- `rust/lib.rs` plus per-family `rust/glref-rust-*.rs` reference files
-  (crate `substrate-lib`).
+- `lib.rs` — crate root.
+- `glref-rust-verbs.rs` — verbs module.
+- `glref-rust-row_state.rs` — automaton logic (BitmapFields and the
+  value-type enums live in `substrate-types/rust/src/row_state.rs`).
+- `glref-rust-audit_gate.rs` — AuditGate.admit, FieldSlot, FieldWrite,
+  Vocabulary, Column.
+- Plus six kit-cookbook reference files (`actuator.rs`,
+  `cognition_bundle.rs`, `cognition_kit.rs`, `dreaming.rs`,
+  `sqlite_tail.rs`, `working_set.rs`) — these are the Rust scalar
+  oracle for cookbook §§ 4.2, 4.3, 11, 13, 14, 15 and stay in this
+  crate by design until the kits they reference get their own Rust
+  crates.
+- `tests/` — conformance vectors.
+- `Cargo.toml` — depends on `substrate-types`, `substrate-kernel`,
+  `substrate-ml`.
 
-Naming differs by port convention (Swift `ScalarKernel()` /
-`hammingDistance256`; Rust `ScalarKernel` / `hamming_distance_256`); the
-*results* are bit-for-bit identical (SPEC § 4, I-1 / I-7).
-
-> **Two-tier surface.** SubstrateLib declares 117 public types, but only
-> 18 are consumed by other packages today. § 2 Tier 1 documents those 18
-> in full — the contract the system actually depends on. The Tier 2
-> subsection at the end of § 2 is a table of contents for the rest:
-> present in the library, not yet consumed, kept so future builders can
-> find them.
+Naming differs by port convention; behavior is bit-identical
+(SPEC § 7).
 
 ## § 2 — Public types
 
-### Tier 1 — consumed contract
+### `Substrate`, `SubstrateError`
 
-#### `Fingerprint256`
-
-The universal 256-bit hash unit (SPEC § 4, I-2).
-
-```swift
-public struct Fingerprint256: Hashable, Sendable, Codable {
-    public var block0, block1, block2, block3: UInt64
-    public init(block0: UInt64, block1: UInt64, block2: UInt64, block3: UInt64)
-    public static let zero: Fingerprint256
-    public var words: [UInt64] { get }
-    public func bit(at index: Int) -> Bool
-    public func testBit(at index: Int) -> Bool
-    public mutating func setBit(at index: Int, to on: Bool = true)
-    public func block(at index: Int) -> UInt64
-    public func bitwiseOR(_ other: Fingerprint256) -> Fingerprint256
-    public static func fromBits(_ bits: [Bool]) -> Fingerprint256
-    public var wireBytes: [UInt8] { get }
-    public init(wireBytes bytes: [UInt8]) throws   // Fingerprint256Error.invalidWireLength
-}
-```
-**Rust:** `pub struct Fingerprint256 { block0..block3: u64 }` with `ZERO`,
-`bit`, `set_bit`, `bitwise_or`, `wire_bytes`, `from_wire_bytes`.
-
-#### `Hamming`
-
-```swift
-public enum Hamming {
-    public static func distance(_ a: Fingerprint256, _ b: Fingerprint256) -> Int   // 0…256
-    public static func similarity(_ a: Fingerprint256, _ b: Fingerprint256) -> Double // 1 − d/256
-}
-```
-
-#### `CountVector256`
-
-Per-bit count fold over a set of fingerprints; majority vote.
-
-```swift
-public struct CountVector256: Sendable, Equatable, Codable {
-    public static let zero: CountVector256
-    public init()
-    public init(counts: [UInt32], n: UInt32)
-    public static func + (lhs: CountVector256, rhs: CountVector256) -> CountVector256
-    public func majorityVote() -> Fingerprint256
-    public func profile() -> [Float]
-    public static func fold(_ fingerprints: [Fingerprint256]) -> CountVector256
-}
-```
-
-#### `SimHash` / `SimHashInput` / `FloatSimHash` / `HyperplaneFamily`
-
-The SimHash fingerprinting family — block projection from typed inputs.
-
-```swift
-public enum SimHash {
-    public static func block(over v: [UInt64], /* planes */ …) -> UInt64
-    public static func fingerprint(bitmapInput: [UInt64], …) -> Fingerprint256
-    public static func fingerprintBatch(bitmapInputs: [[UInt64]], …) -> [Fingerprint256]
-    public static func fingerprint(fromSubhashes subhashes: [UInt64], …) -> Fingerprint256
-}
-public enum SimHashInput {   // builds the [UInt64] input vector per block
-    public static func bitmap(adjective: UInt64, …) -> [UInt64]
-    public static func lattice(udcPrefixHash: UInt16, …) -> [UInt64]
-    public static func lineageTemporal(lineageHash: UInt16, …) -> [UInt64]
-    public static func channelSource(channel: UInt8, …) -> [UInt64]
-}
-public enum FloatSimHash {
-    public static func project(vector: [Float], seed: UInt64) -> Fingerprint256
-}
-public struct Hyperplane: Sendable, Codable, Equatable {
-    public let positiveMask: [UInt64]; public let negativeMask: [UInt64]; public let bitLength: Int
-    public init(positiveMask: [UInt64], negativeMask: [UInt64], bitLength: Int)
-    public func sign(over v: [UInt64]) -> Bool
-}
-public struct HyperplaneFamily: Sendable, Codable, Equatable {
-    public let blockIndex: Int          // 0…3
-    public let inputBitLength: Int      // 192 for block 0, 64 for blocks 1–3
-    public let planes: [Hyperplane]     // exactly 64
-    public static func generate(seed: [UInt8], …) -> HyperplaneFamily
-    public func canonicalHash() -> UInt64
-}
-```
-
-#### `SubstrateKernel` / `PortableKernel`
-
-The compute protocol and dispatcher. Consumers obtain a kernel from
-`PortableKernel`; the scalar backend is the reference (SPEC § 4, I-1).
-The backend structs themselves (`ScalarKernel`, `SimdKernel`, …) are
-Tier 2 — consumers do not name them directly.
-
-```swift
-public protocol SubstrateKernel: Sendable {
-    var kind: KernelKind { get }
-    func popcount64(_ x: UInt64) -> Int
-    func hammingDistance256(_ a: Fingerprint256, _ b: Fingerprint256) -> Int
-    func orReduce256(_ fingerprints: [Fingerprint256]) -> Fingerprint256
-    func hammingTopK(probe: Fingerprint256, candidates: [Fingerprint256], k: Int) -> [HammingNNHit]
-    func simhashCompute(subhashes: [UInt64], …) -> Fingerprint256
-    func countFold256(_ fingerprints: [Fingerprint256]) -> CountVector256
-    // + batch variants (hammingDistanceBatch, simhashBlockBatch, orReduceBatch, countFoldBatch)
-}
-public enum PortableKernel {
-    public static func kernelForCurrentPlatform() -> SubstrateKernel
-    public static func kernel(of kind: KernelKind) -> SubstrateKernel
-}
-```
-**Rust:** `pub trait SubstrateKernel: Send + Sync` + dispatcher.
-
-#### `HLC` / `HLCGenerator`
-
-Hybrid Logical Clock; total order; packed form (SPEC § 4, I-5).
-
-```swift
-public struct HLC: Hashable, Sendable, Codable, Comparable {
-    public let physicalTime: Int64
-    public let logicalCount: Int32
-    public let nodeID: Int32
-    public init(physicalTime: Int64, logicalCount: Int32, nodeID: Int32)
-    public static let zero: HLC
-    public func advanced() -> HLC
-    public var packed: UInt64 { get }
-    public init(packed: UInt64)
-    public static func < (lhs: HLC, rhs: HLC) -> Bool
-}
-public struct HLCGenerator: Sendable {
-    public let nodeID: Int32
-    public init(nodeID: Int32, lastPhysical: Int64 = 0, lastLogical: Int32 = 0)
-    public mutating func send(now: Int64) -> HLC
-    public mutating func receive(remote: HLC, now: Int64) -> HLC
-}
-```
-
-#### Row / verb value model: `LatticeAnchor`, `Row`, `AuditEvent`, `AuditVerb`, `Substrate`
-
-The in-memory value model the persistence layer mirrors. `Substrate` is
-a value-type facade that applies the nine verbs to a row set and appends
-audit events (the runtime ARIA vocabulary lives in `AriaLexiconLib`).
-
-```swift
-public struct LatticeAnchor: Hashable, Sendable {
-    public let udcCode: UInt64
-    public let qidPointer: UInt64      // 0 == null
-    public var isNull: Bool { get }
-    public static func udc(_ udcString: String) -> LatticeAnchor
-}
-public struct Row: Sendable {
-    public let id: UUID
-    public let nounType: NounType            // Tier 2 enum
-    public var state: RowStateValue
-    public var adjectiveBitmap: Int64
-    public var operationalBitmap: Int64
-    public var provenanceBitmap: Int64
-    public var fingerprint: Fingerprint256
-    public var latticeAnchor: LatticeAnchor
-    public var lineageId: UUID?
-    public var content: Data?
-}
-public struct AuditEvent: Sendable {
-    public let eventID: UUID
-    public let estateUuid: UUID
-    public let rowId: UUID
-    public let hlc: HLC
-    public let verb: String
-    public let beforeBitmaps: (adjective: Int64, operational: Int64, provenance: Int64)?
-    // … afterBitmaps and related fields; compound key (eventID, hlc) gives append idempotence
-}
-public enum AuditVerb: String, Sendable, Codable {
-    case capture, mutate, retract, sync, pair, unpair, derive, decay, promote, migrate, dreamCompact
-}
-public struct Substrate {
-    public let estateUuid: UUID
-    public var rows: [UUID: Row]
-    public var auditEvents: [AuditEvent]     // appended; treat as G-Set
-    public var hlc: HLC
-    public var rowCountActive: Int64
-    public init(estateUuid: UUID, hlc: HLC)
-
-    public enum MutationKind: String {
-        case confirm, reject, contest, supersede
-        case automatedConfirm = "automated_confirm"
-        case decay, expire
-        case lineageAdvance = "lineage_advance"
-        case actuatorConfirm = "actuator_confirm"
-    }
-    // The nine verbs, applied in-memory (mutating; append audit events):
-    public mutating func capture(/* … */)
-    public mutating func reanchor(/* … */)
-    public mutating func mutate(rowId: UUID, mutationKind: MutationKind, /* … */)
-    public mutating func withdraw(/* … */)
-    public mutating func expunge(/* … */)
-    public func recall(matching predicate: (Row) -> Bool, /* … */) -> [Row]
-    public mutating func propose(/* … */)
-    public mutating func associate(/* … */)
-    public mutating func learn(/* … */)
-}
-```
-**Rust:** `verbs` module mirrors `Substrate`, `Row`, `AuditEvent`,
-`MutationKind`, `LatticeAnchor`.
-
-#### `SplitMix64`
-
-Deterministic RNG (seeded; no ambient entropy).
-
-```swift
-public struct SplitMix64 {
-    public var state: UInt64
-    public init(seed: UInt64)
-    public mutating func next() -> UInt64
-}
-```
-
-### Tier 2 — broader library surface (table of contents)
-
-The following public types are **present in the library but not yet
-consumed by any other package** (measured against all package Sources,
-2026-05-27). Recorded here as a navigable index for future builders —
-name, role, source file. Full signatures live in the cited file; promote
-a type into Tier 1 when a consumer adopts it.
-
-- **Kernel backends:** `ScalarKernel` (the reference impl), `SimdKernel`,
-  `NeonKernel`, `BnnsKernel`, `MetalKernel`, `KernelKind` — `PortableKernel*.swift`.
-- **Audit CRDT (G-Set):** `GSetAuditLog`, `AuditEntry`, `AuditValue` —
-  `GSetAuditLog.swift`. (The consumed audit type is `AuditEvent`, Tier 1.)
-- **Row-state machine:** `RowState`, `RowStateValue`, `RowVerb`,
-  `RowStateAutomaton`, `RowStateError`, `NounType`, `ProjectedRowState`,
-  `RowProjection`, `TransitionKey`, `RowId` — `Verbs.swift`,
-  `RowStateAutomaton.swift`, `PartialStateRecall.swift`.
-- **Distances:** `CompositeDistance`, `DistanceBreakdown`, `LatticeDistance`,
-  `UDCTreeDistance`, `WikidataGraphDistance`, `HammingNN`, `HammingNNHit` —
-  `CompositeDistance.swift`, `LatticeDistance.swift`, `HammingNN.swift`.
-- **Matrices:** `MatrixF`, `MatrixC`, `MatrixO`, `MatrixT`, `MatrixDecay`,
-  `DecayingMatrix` — `Matrix*.swift`.
-- **Ranking / graph:** `BradleyTerryEstimator`, `PreferenceObservation`,
-  `EigenvalueCentrality`, `CommunityDetection`, `RandomWalks`,
-  `ActionOutcomeMatrix`, `ActionOutcomeCell`, `ActionOutcomeKey`,
-  `CooccurrenceKey`, `CausalityKey`, `WikidataAdjacencyProvider` —
-  `BradleyTerry.swift`, `EigenvalueCentrality.swift`, `CommunityDetection.swift`,
-  `RandomWalks.swift`, `ActionOutcomeMatrix.swift`.
-- **Signal / info / stats:** `FFT`, `Complex`, `InformationTheory`,
-  `MomentSummary`, `AnomalyDetection`, `TemporalCompression`,
-  `LLMCalibrationCurve`, `NMFAlternatingLeastSquares`, `NMFFactorization`,
-  `DPORReduction`, `DPParameters`, `ORReduce`, `BitwiseArithmetic`,
-  `ThreeDBitTensor` — respective `*.swift`.
-- **Recall / tier:** `RecallResult`, `RecallScore`, `TierAscendingQuery`,
-  `TierAscendingQueryProtocol`, `TargetTier`, `TierContribution`,
-  `TierContributionFingerprint`, `PartialStateRecall`, `TimeRange`,
-  `TemporalWindow` — `RecallTypes.swift`, `TierAscendingQuery.swift`,
-  `TierContributionFingerprint.swift`.
-- **Feature extractors (caller-supplied samples, no live I/O):**
-  `HealthKitExtractor`/`HealthKitSample`, `CoreLocationExtractor`/`CoreLocationSample`,
-  `EventKitExtractor`/`EventKitSample`, `ScreenTimeExtractor`/`ScreenTimeSample`,
-  `SystemTelemetryExtractor`/`SystemTelemetrySample`, `AmbientSampleRow`,
-  `RhythmAnalysis`/`RhythmResult`, `StreamSourceFlag` — `FeatureExtractors.swift`.
-- **Pairing / federation:** `PairingHandshake`, `PairingNonce`,
-  `PairingRecord`, `PeerResponse`, `PairingAuditPayload`, `PrivacyLedger`,
-  `FederationCase`, `ForbiddenCombinations` — `PairingHandshake.swift`.
-- **Decay / misc:** `DecayHalfLives`, `WindowLevel`, `BitmapFields`,
-  `LatticeAnchorStr` — respective `*.swift`.
-
-## § 3 — Public functions
-
-The principal Tier-1 entry points (types in § 2):
-
-```swift
-PortableKernel.kernelForCurrentPlatform() -> SubstrateKernel
-Hamming.distance(_:_:) -> Int            // 0…256
-kernel.orReduce256([Fingerprint256]) -> Fingerprint256
-CountVector256.fold([Fingerprint256]) -> CountVector256
-SimHash.fingerprint(bitmapInput:…) -> Fingerprint256
-FloatSimHash.project(vector:seed:) -> Fingerprint256
-HyperplaneFamily.generate(seed:…) -> HyperplaneFamily
-```
-
-## § 4 — Errors
-
-```swift
-public enum Fingerprint256Error: Error, Sendable { case invalidWireLength(Int) }
-public enum RowStateError: Error, Sendable, Equatable          // illegal transitions (Tier 2)
-public enum SubstrateError: Error, Equatable                   // pairing / precondition (Tier 2)
-```
-**Rust:** `FingerprintError`, `HLCError`, `SubstrateError`. Meaning: SPEC § 6.
-
-## § 5 — Conformance test entry points
+The verb namespace + verb-driver error surface. SPEC § 5.1.
 
 **Swift:**
 
-```
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  swift test --package-path packages/libs/SubstrateLib
-```
+```swift
+public enum SubstrateError: Error, Equatable {
+    case rowNotFound(rowId: UUID)
+    case illegalTransition(prior: RowState, verb: RowVerb)
+    case forbiddenCombination(reason: String)
+    case vocabularyViolation(slot: String, reason: String)
+    case stateInconsistentWithVerb(verb: String)
+    case contentIDCollision
+}
 
-(Targets: `SubstrateLibTests`, `SubstrateLibConformanceTests` — the
-latter runs the shared `glref` vectors against each kernel backend.)
+public struct Substrate {
+    public static func capture(
+        rowId: UUID,
+        nounType: NounType,
+        initialFields: BitmapFields,
+        latticeAnchor: LatticeAnchor?,
+        hlc: HLC,
+        actor: String,
+        vocabulary: Vocabulary
+    ) -> Result<AuditEvent, SubstrateError>
+
+    public static func reanchor(
+        rowId: UUID,
+        prior: BitmapFields,
+        newAnchor: LatticeAnchor,
+        priorAnchor: LatticeAnchor?,
+        hlc: HLC,
+        actor: String,
+        vocabulary: Vocabulary
+    ) -> Result<AuditEvent, SubstrateError>
+
+    public static func mutate(
+        rowId: UUID,
+        prior: BitmapFields,
+        priorAnchor: LatticeAnchor?,
+        writes: [FieldWrite],
+        hlc: HLC,
+        actor: String,
+        vocabulary: Vocabulary
+    ) -> Result<AuditEvent, SubstrateError>
+
+    // withdraw, expunge, recall, propose, associate, learn —
+    // analogous signatures, each taking prior bitmaps + writes + HLC
+    // + actor + vocabulary.
+}
+```
 
 **Rust:**
 
+```rust
+pub enum SubstrateError {
+    RowNotFound(RowId),
+    IllegalTransition { prior: RowState, verb: RowVerb },
+    ForbiddenCombination(String),
+    VocabularyViolation { slot: String, reason: String },
+    StateInconsistentWithVerb(String),
+    ContentIdCollision,
+}
+
+pub mod substrate {
+    pub fn capture(/* … */) -> Result<AuditEvent, SubstrateError>;
+    pub fn reanchor(/* … */) -> Result<AuditEvent, SubstrateError>;
+    pub fn mutate(/* … */) -> Result<AuditEvent, SubstrateError>;
+    // withdraw, expunge, recall, propose, associate, learn
+}
 ```
-cargo test -p substrate-lib
+
+### `RowStateAutomaton`, `BitmapFields`, `TransitionKey`, `ForbiddenCombinations`
+
+Row-state automaton. SPEC § 5.2.
+
+**Swift:**
+
+```swift
+public enum RowStateAutomaton {
+    public static let transitions: [TransitionKey: RowState]
+    public static func transition(from: RowState, on: RowVerb) -> RowState?
+    public static func validate(
+        from: RowState?,
+        on: RowVerb,
+        targetingFields: BitmapFields
+    ) throws -> RowState
+}
+
+public struct TransitionKey: Hashable, Sendable {
+    public let from: RowState
+    public let on: RowVerb
+}
+
+public struct BitmapFields: Sendable {
+    public let adjective: UInt64
+    public let operational: UInt64
+    public let provenance: UInt64
+}
+
+public enum ForbiddenCombinations {
+    public static func check(state: RowState, fields: BitmapFields) throws
+}
 ```
+
+**Rust:**
+
+```rust
+pub mod row_state {
+    pub static TRANSITIONS: LazyLock<HashMap<TransitionKey, RowState>>;
+    pub fn transition(from: RowState, on: RowVerb) -> Option<RowState>;
+    pub fn validate(
+        from: Option<RowState>,
+        on: RowVerb,
+        fields: BitmapFields,
+    ) -> Result<RowState, RowStateError>;
+
+    pub struct TransitionKey { pub from: RowState, pub on: RowVerb }
+    pub struct BitmapFields { pub adjective: u64, pub operational: u64, pub provenance: u64 }
+
+    pub fn check_forbidden_combinations(state: RowState, fields: BitmapFields) -> Result<(), RowStateError>;
+}
+```
+
+### `AuditGate`, `FieldSlot`, `FieldWrite`, `Vocabulary`, `Column`, `AuditGateError`
+
+Write gate. SPEC § 5.3.
+
+**Swift:**
+
+```swift
+public enum AuditGateError: Error, Equatable {
+    case vocabularyViolation(slot: String, reason: String)
+    case basisViolation(RowStateError)
+    case stateInconsistentWithVerb(verb: String)
+}
+
+public enum Column: String, Sendable, Hashable {
+    case adjective, operational, provenance
+}
+
+public struct FieldSlot: Hashable, Sendable {
+    public let column: Column
+    public let shift: Int
+    public let width: Int
+    public let label: String
+    public let legalValues: Set<Int64>?         // nil = any value within width
+    public init(column: Column, shift: Int, width: Int, label: String, legalValues: Set<Int64>? = nil)
+}
+
+public struct FieldWrite: Sendable {
+    public let slot: FieldSlot
+    public let value: Int64
+}
+
+public struct Vocabulary: Sendable {
+    public let slots: [FieldSlot]
+    /// `freeze()` validates the slot set (no overlapping ranges,
+    /// no width mismatches, no value-set inconsistencies) at
+    /// construction time. A frozen vocabulary cannot produce a
+    /// corrupt write later.
+    public static func freeze(basis: [FieldSlot], extensions: [FieldSlot]) -> Result<Vocabulary, VocabularyError>
+    public func slot(for column: Column, shift: Int) -> FieldSlot?
+}
+
+public enum AuditGate {
+    /// Single legal substrate write. Validates, merges, hashes,
+    /// emits one canonical AuditEvent.
+    public static func admit(
+        estateUuid: UUID,
+        rowId: UUID,
+        nounType: NounType,
+        verb: RowVerb,
+        prior: BitmapFields?,                   // nil for capture
+        priorLatticeAnchor: LatticeAnchor?,
+        writes: [FieldWrite],
+        afterLatticeAnchor: LatticeAnchor?,
+        vocabulary: Vocabulary,
+        hlc: HLC,
+        actor: String
+    ) -> Result<AuditEvent, AuditGateError>
+}
+```
+
+**Rust:**
+
+```rust
+pub mod audit_gate {
+    pub enum AuditGateError {
+        VocabularyViolation { slot: String, reason: String },
+        BasisViolation(RowStateError),
+        StateInconsistentWithVerb(String),
+    }
+
+    pub enum Column { Adjective, Operational, Provenance }
+
+    pub struct FieldSlot { pub column: Column, pub shift: u32, pub width: u32, pub label: &'static str, pub legal_values: Option<HashSet<i64>> }
+    impl FieldSlot {
+        pub fn new(column: Column, shift: u32, width: u32, label: &'static str) -> Self;
+        pub fn with_values(column: Column, shift: u32, width: u32, label: &'static str, legal: &[i64]) -> Self;
+    }
+
+    pub struct FieldWrite { pub slot: FieldSlot, pub value: i64 }
+
+    pub struct Vocabulary { pub slots: Vec<FieldSlot> }
+    impl Vocabulary {
+        pub fn freeze(basis: Vec<FieldSlot>, extensions: Vec<FieldSlot>) -> Result<Self, VocabularyError>;
+        pub fn slot(&self, column: Column, shift: u32) -> Option<&FieldSlot>;
+    }
+
+    pub fn admit(
+        estate_uuid: u128,
+        row_id: RowId,
+        noun_type: NounType,
+        verb: RowVerb,
+        prior: Option<BitmapFields>,
+        prior_anchor: Option<LatticeAnchor>,
+        writes: &[FieldWrite],
+        after_anchor: LatticeAnchor,
+        vocabulary: &Vocabulary,
+        hlc: HLC,
+        actor: &str,
+    ) -> Result<AuditEvent, AuditGateError>;
+}
+```
+
+## § 3 — Public functions
+
+All operations on this package are members of the three top-level
+namespaces (`Substrate`, `RowStateAutomaton`, `AuditGate`) or their
+helper types. No free top-level functions.
+
+## § 4 — Errors
+
+| Error | Raised by | Cause |
+|---|---|---|
+| `AuditGateError.vocabularyViolation(slot:reason:)` | `AuditGate.admit` | FieldWrite's slot undeclared, value out-of-range, or value exceeds width |
+| `AuditGateError.basisViolation(RowStateError)` | `AuditGate.admit` | RowStateAutomaton refused transition or forbidden-combination check failed |
+| `AuditGateError.stateInconsistentWithVerb(verb:)` | `AuditGate.admit` | verb arg and written state mismatch |
+| `RowStateError.illegalTransition(RowState, RowVerb)` | `RowStateAutomaton.validate` | (state, verb) not in transition table |
+| `RowStateError.forbiddenCombination(state:, fields:)` | `RowStateAutomaton.validate` / `ForbiddenCombinations.check` | merged bitmap violates I-22 |
+| `SubstrateError.*` | `Substrate.<verb>` | verb-driver surface; wraps gate-level errors with verb context |
+
+## § 5 — Conformance test entry points
+
+- **Swift:** `Tests/SubstrateLibTests/`
+  - `VerbsTests.swift`
+  - `RowStateAutomatonTests.swift`
+  - `AuditGateTests.swift`
+  - `VocabularyTests.swift`
+- **Swift conformance gate:** `Tests/SubstrateLibConformanceTests/`
+  - `AuditGateConformanceTests.swift`
+  - `RowStateAutomatonConformanceTests.swift`
+  - `VerbConformanceTests.swift`
+- **Rust:** per-module `#[cfg(test)] mod tests` plus
+  `tests/wire_format_conformance.rs` and
+  `tests/bitmap_field_constants_conformance.rs`.
 
 ## § 6 — Examples
 
 ```swift
+import SubstrateTypes
 import SubstrateLib
 
-let kernel = PortableKernel.kernelForCurrentPlatform()   // results == scalar reference
-let d = kernel.hammingDistance256(a, b)                  // 0…256
-let merged = kernel.orReduce256([a, b, c])               // associative, commutative
+// Define a vocabulary (subset of LocusKit's adjective basis).
+let stateSlot = FieldSlot(
+    column: .adjective, shift: 0, width: 6, label: "state",
+    legalValues: [0, 1, 2, 3, 16, 17, 18, 19, 32, 33]
+)
+let flagsSlot = FieldSlot(
+    column: .adjective, shift: 24, width: 3, label: "flags"
+)
 
-var gen = HLCGenerator(nodeID: 1)
-let stamp = gen.send(now: 1_716_800_000)                 // time passed in, never read internally
+let vocab = try Vocabulary.freeze(basis: [stateSlot, flagsSlot], extensions: []).get()
+
+// Capture a brand-new row.
+let captureResult = AuditGate.admit(
+    estateUuid: estateUUID,
+    rowId: UUID(),
+    nounType: .drawer,
+    verb: .capture,
+    prior: nil,
+    priorLatticeAnchor: nil,
+    writes: [FieldWrite(slot: stateSlot, value: 0)],   // active
+    afterLatticeAnchor: LatticeAnchor.unknown,
+    vocabulary: vocab,
+    hlc: hlcGen.send(now: nowMillis),
+    actor: "alice"
+)
+let captureEvent = try captureResult.get()
+// captureEvent.verb == .capture
+// captureEvent.afterBitmaps.adjective & 0x3F == 0
+
+// Mutate the row's flags (set bit 26 = dreaming_recalc_required).
+let mutateResult = AuditGate.admit(
+    estateUuid: estateUUID,
+    rowId: captureEvent.rowId,
+    nounType: .drawer,
+    verb: .mutate,
+    prior: captureEvent.afterBitmaps,
+    priorLatticeAnchor: captureEvent.afterLatticeAnchor,
+    writes: [FieldWrite(slot: flagsSlot, value: 0b100)],  // bit 26
+    afterLatticeAnchor: captureEvent.afterLatticeAnchor,
+    vocabulary: vocab,
+    hlc: hlcGen.send(now: nowMillis + 100),
+    actor: "alice"
+)
+let mutateEvent = try mutateResult.get()
+// mutateEvent.afterBitmaps.adjective & (1 << 26) != 0
 ```
 
----
+```rust
+use substrate_types::*;
+use substrate_lib::audit_gate::{self, FieldSlot, FieldWrite, Column, Vocabulary};
 
-*End of SubstrateLib Interface v0.8.*
+let state_slot = FieldSlot::with_values(Column::Adjective, 0, 6, "state",
+    &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33]);
+let flags_slot = FieldSlot::new(Column::Adjective, 24, 3, "flags");
+let vocab = Vocabulary::freeze(vec![state_slot, flags_slot], vec![]).unwrap();
+
+let capture_event = audit_gate::admit(
+    estate_uuid, row_id, NounType::Drawer, RowVerb::Capture,
+    None, None,
+    &[FieldWrite { slot: state_slot, value: 0 }],
+    LatticeAnchor::unknown(),
+    &vocab,
+    hlc_gen.send(now_millis),
+    "alice",
+)?;
+```
