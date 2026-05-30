@@ -43,10 +43,10 @@ test vector (32 cases each, CRC-pinned). Drift between the two
 languages would be caught by CI in the next harness run.
 
 The harness lives at
-`/Users/bob/devlop/mootx01-rc/docs/validation/substrate_math_performance/test-harness/`.
+`/Users/bob/devlop/mootx01-ce/docs/validation/substrate_math_performance/test-harness/`.
 The reference implementations these primitives wrap live in the
 SubstrateLib package at
-`/Users/bob/devlop/mootx01-rc/packages/libs/SubstrateLib/` (Swift +
+`/Users/bob/devlop/mootx01-ce/packages/libs/SubstrateLib/` (Swift +
 Rust legs side by side; see §6 for the four-package split).
 
 To add a new primitive to the gate, follow §7. To verify a code
@@ -86,7 +86,7 @@ Each row tells an agent four things:
 4. **What the operation does** (one line).
 
 All file paths are relative to the repo root
-`/Users/bob/devlop/mootx01-rc/`.
+`/Users/bob/devlop/mootx01-ce/`.
 
 ### §2.1. Tier 1 — atomic primitives (8 ops)
 
@@ -652,7 +652,7 @@ passes:
 
 ```bash
 # Full gate sweep, both languages, on-disk vectors:
-cd /Users/bob/devlop/mootx01-rc/docs/validation/substrate_math_performance/test-harness/swift
+cd /Users/bob/devlop/mootx01-ce/docs/validation/substrate_math_performance/test-harness/swift
 for v in ../vectors/*.json; do
   name=$(basename "$v" .json)
   swift_result=$(.build/debug/validate-vectors "$v" 2>&1 | tail -1)
