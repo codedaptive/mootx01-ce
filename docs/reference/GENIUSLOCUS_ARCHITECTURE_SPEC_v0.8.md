@@ -14,7 +14,7 @@ relates_to:
   - OPEN_QUESTIONS_FOR_REFINEMENT.md (open questions backlog)
 ---
 
-# GeniusLocus Architecture Specification — v0.35
+# GeniusLocus Architecture Specification — v0.8
 
 ## 1. Purpose, audience, and scope
 
@@ -1474,7 +1474,7 @@ Enrichment-daemon throughput target: at least 60 drawers/hour on Apple Silicon M
 
 ### 13.1 Conformance levels
 
-An implementation is conforming if it satisfies all the requirements in this section. Conformance is per-version: an implementation conforms to v0.35 by satisfying v0.35's requirements.
+An implementation is conforming if it satisfies all the requirements in this section. Conformance is per-version: an implementation conforms to v0.8 by satisfying v0.8's requirements.
 
 ### 13.2 Required behaviors
 
@@ -1776,7 +1776,7 @@ Values for the drawer operational bitmap's `content_kind` field:
 
 ---
 
-*End of GeniusLocus Architecture Specification v0.35.*
+*End of GeniusLocus Architecture Specification v0.8.*
 
 ---
 
