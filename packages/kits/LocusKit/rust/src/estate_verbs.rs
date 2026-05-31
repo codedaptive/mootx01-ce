@@ -40,6 +40,7 @@ use crate::drawer::Drawer;
 use crate::error::LocusKitError;
 use crate::estate::Estate;
 use crate::frames::{CaptureFrame, LearnFrame, MutationKind};
+use crate::provenance::Confirmation;
 use crate::recall_stream::RecallStream;
 use crate::recall_trace_item::RecallTraceItem;
 use crate::filter::RecallFrame;
@@ -417,20 +418,88 @@ impl Estate {
     }
 
     // -----------------------------------------------------------------------
-    // Stubs (implemented in later missions)
+    // mutate
     // -----------------------------------------------------------------------
 
-    /// Mutate a row's bitmap state. Body pending — implementation lands
-    /// in a later LOCI mission (mutation-verb stream not yet assigned).
+    /// Mutate a row along one of its mutation axes.
+    ///
+    /// `MutationKind::Confirm` moves the confirmation axis (provenance bits
+    /// 18–23, cookbook §2.5) to `UserConfirmed`: read the drawer, recompose
+    /// the provenance bitmap with the confirmation field set via
+    /// `bit_field::write_field` (every other provenance axis — source_type,
+    /// channel, capture_channel, confidence, sensitivity-at-capture,
+    /// enrichment_status — is preserved untouched), and persist through
+    /// `DrawerStore::mutate_provenance`, which routes the gated column write
+    /// and appends one sealed `AuditEvent` atomically. Mirror of Swift
+    /// `Estate.mutate` for `.confirm`.
+    ///
+    /// The state-axis kinds (Reject / Contest / Resolve / Supersede /
+    /// Revive) move the row's *state*, not its confirmation, so they belong
+    /// on the `mutate_state` automaton path; that path is not yet wired
+    /// here, so they return `InvalidContent`, which GLK's `remap` turns into
+    /// `NotSupportedByEstate`.
+    ///
+    /// `now` is taken from the wall clock here — the mirror of Swift
+    /// `Estate.mutate`, which defaults its store call's `now` to `Date()`.
+    /// The confirmation transition itself is deterministic (a pure function
+    /// of the prior bitmap); only the audit row's timestamp is clock-derived.
     pub fn mutate(
         &self,
-        _row_id: &str,
-        _kind: MutationKind,
+        row_id: &str,
+        kind: MutationKind,
         _payload: Option<&str>,
     ) -> Result<(), LocusKitError> {
-        Err(LocusKitError::InvalidContent(
-            "mutate not yet implemented".to_string(),
-        ))
+        match kind {
+            MutationKind::Confirm => {
+                let drawer = self
+                    .store
+                    .get_drawer(row_id)?
+                    .ok_or_else(|| LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    })?;
+
+                // Confirmation lives in provenance bits 18–23; write_field
+                // clears that field and ORs in UserConfirmed, leaving the
+                // other provenance axes intact.
+                let new_provenance = bit_field::write_field(
+                    Confirmation::UserConfirmed.raw_value(),
+                    drawer.provenance,
+                    18,
+                    6,
+                );
+
+                let changed_by = self
+                    .store
+                    .read_manifest()
+                    .map(|m| m.owner_identifier)
+                    .unwrap_or_default();
+                let changed_by = if changed_by.is_empty() {
+                    "estate".to_string()
+                } else {
+                    changed_by
+                };
+
+                // Store `now` is epoch-seconds (Swift `Date` → i64 seconds).
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                self.store.mutate_provenance(
+                    row_id,
+                    new_provenance,
+                    &changed_by,
+                    Some("confirmed via Estate.mutate"),
+                    now,
+                )
+            }
+            // State-axis mutations are not yet wired; the "not yet
+            // implemented" marker is the sentinel GLK's `remap` keys on to
+            // produce NotSupportedByEstate (rather than UnderlyingEstateFailure).
+            _ => Err(LocusKitError::InvalidContent(
+                "mutate: state-axis kinds not yet implemented (only Confirm)".to_string(),
+            )),
+        }
     }
 
     /// Reanchor a drawer to a different room and/or lattice position.
@@ -700,12 +769,39 @@ mod tests {
         assert_eq!(state, State::Withdrawn);
     }
 
-    // --- stubs ---
+    // --- mutate ---
 
     #[test]
-    fn mutate_stub_returns_invalid_content() {
+    fn mutate_confirm_transitions_confirmation_to_user_confirmed() {
         let estate = make_estate();
-        let err = estate.mutate("id", MutationKind::Confirm, None).unwrap_err();
+        let drawer = basic_capture(&estate, "to confirm", "study");
+        // Freshly captured rows are Unconfirmed.
+        assert_eq!(drawer.confirmation(), Confirmation::Unconfirmed);
+
+        estate.mutate(&drawer.id, MutationKind::Confirm, None).unwrap();
+
+        // Re-read: the confirmation axis is now UserConfirmed and every
+        // other axis is preserved (room/state unchanged).
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(after.confirmation(), Confirmation::UserConfirmed);
+        assert_eq!(after.room, "study");
+        assert_eq!(State::from_raw(after.adjective_bitmap & 0x3F), State::Active);
+    }
+
+    #[test]
+    fn mutate_confirm_missing_row_returns_not_found() {
+        let estate = make_estate();
+        let err = estate.mutate("no-such-id", MutationKind::Confirm, None).unwrap_err();
+        assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
+    }
+
+    #[test]
+    fn mutate_state_axis_kind_is_not_yet_implemented() {
+        // Reject is a state-axis transition; that path is not wired here, so
+        // it returns InvalidContent (GLK remaps to NotSupportedByEstate).
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "x", "r");
+        let err = estate.mutate(&drawer.id, MutationKind::Reject, None).unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
     }
 

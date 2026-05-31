@@ -229,10 +229,12 @@ impl EstateCoordinator {
 
     // MARK: - mutate
 
-    /// Apply a named mutation to a drawer. The LocusKit `mutate` is a stub
-    /// that returns `InvalidContent("mutate not yet implemented")`, which
-    /// `remap` turns into `NotSupportedByEstate { verb: "mutate" }` — parity
-    /// of the Swift comment and behaviour.
+    /// Apply a named mutation to a drawer. The `Confirm` kind is live — it
+    /// transitions the row's confirmation axis to `UserConfirmed` and returns
+    /// `Ok`. The state-axis kinds (Reject/Contest/Resolve/Supersede/Revive)
+    /// are not yet wired in LocusKit and return
+    /// `InvalidContent("…not yet implemented…")`, which `remap` turns into
+    /// `NotSupportedByEstate { verb: "mutate" }` — parity of the Swift surface.
     pub fn mutate(
         &self,
         handle: &EstateHandle,
@@ -343,6 +345,15 @@ mod tests {
         f
     }
 
+    fn confirmed() -> RecallFrame {
+        // Admit user-confirmed rows (the evaluator's default ceiling, here
+        // explicit) so a confirmed row is returned by recall.
+        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
+        f.hydration_level = HydrationLevel::Structured;
+        f.ordering = Ordering::ByCaptureTimeDesc;
+        f
+    }
+
     // CO-1: capture then recall returns the captured drawer with matching
     // content — the live verb dispatch produces a real dataset (the whole
     // point: the GLK boundary returns the estate's rows, not a stub).
@@ -394,12 +405,33 @@ mod tests {
         );
     }
 
-    // CO-5: mutate hits the LocusKit stub and is remapped to
-    // NotSupportedByEstate — parity of the Swift remap behaviour.
+    // CO-5: mutate(Confirm) reaches the real estate and transitions the row's
+    // confirmation axis to UserConfirmed — the live verb dispatch produces a
+    // real state change (parity of Swift Estate.mutate(.confirm)).
     #[test]
-    fn co5_mutate_is_not_supported_yet() {
+    fn co5_mutate_confirm_transitions_confirmation() {
+        use locus_kit::provenance::Confirmation;
         let (coord, h) = open_one();
-        let err = coord.mutate(&h, "row-1", MutationKind::Confirm, None).unwrap_err();
+        let stored = coord.capture(&h, cap_frame("delta"), NOW).expect("capture");
+        coord
+            .mutate(&h, &stored.id, MutationKind::Confirm, None)
+            .expect("mutate confirm");
+        // The row now satisfies the user-confirmed ceiling.
+        let rows = coord.recall(&h, confirmed(), NOW).expect("recall");
+        let row = rows
+            .iter()
+            .find(|r| r.id == stored.id)
+            .expect("confirmed row present in recall");
+        assert_eq!(row.confirmation(), Confirmation::UserConfirmed);
+    }
+
+    // CO-5b: a state-axis mutation kind (Reject) is not yet wired and remaps
+    // to NotSupportedByEstate — the dispatch chain's error mapping is intact.
+    #[test]
+    fn co5b_state_axis_mutate_is_not_supported() {
+        let (coord, h) = open_one();
+        let stored = coord.capture(&h, cap_frame("epsilon"), NOW).expect("capture");
+        let err = coord.mutate(&h, &stored.id, MutationKind::Reject, None).unwrap_err();
         assert_eq!(
             err,
             VerbDispatchError::Verb(VerbError::NotSupportedByEstate { verb: "mutate".to_string() })

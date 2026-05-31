@@ -85,17 +85,36 @@ final class VerbSurfaceTests: XCTestCase {
 
     // MARK: - mutate round-trip
 
-    /// `capture` then `mutate`: the call reaches LocusKit's mutate
-    /// stub through the GLK boundary, and the boundary re-raises the
-    /// "not yet implemented" stub as
-    /// `VerbError.notSupportedByEstate(verb: "mutate")`. The test
-    /// confirms the dispatch chain is wired by asserting on the
-    /// remapped error case rather than the LocusKit one.
-    func testMutateRoundTripSurfacesNotSupported() async throws {
+    /// `capture` then `mutate(.confirm)`: the call reaches LocusKit's
+    /// live mutate path through the GLK boundary and transitions the
+    /// row's confirmation axis to `.userConfirmed`. Verified by recalling
+    /// the row under a user-confirmed frame and reading its confirmation.
+    func testMutateConfirmRoundTripTransitionsConfirmation() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "mutate target"))
+        try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .confirm))
+
+        // The row now satisfies a user-confirmed recall frame.
+        let confirmedFrame = RecallFrame(
+            filterChain: [.userConfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+        let rows = try await kit.recall(handle, confirmedFrame)
+        let row = try XCTUnwrap(rows.first { $0.id == stored.id },
+                                "confirmed row should appear in a user-confirmed recall")
+        XCTAssertEqual(row.confirmation, .userConfirmed)
+    }
+
+    /// A state-axis mutation kind (`.reject`) is not yet wired, so the GLK
+    /// boundary re-raises LocusKit's "not yet implemented" marker as
+    /// `VerbError.notSupportedByEstate(verb: "mutate")`. Confirms the
+    /// dispatch chain's error remap is intact for unimplemented kinds.
+    func testMutateStateAxisKindSurfacesNotSupported() async throws {
+        let (kit, handle) = try await openOneEstate()
+        let stored = try await kit.capture(handle, captureFrame(content: "reject target"))
         await XCTAssertThrowsErrorAsync(
-            try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .confirm))
+            try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .reject))
         ) { error in
             guard case VerbError.notSupportedByEstate(let verb) = error else {
                 return XCTFail("expected .notSupportedByEstate, got \(error)")
