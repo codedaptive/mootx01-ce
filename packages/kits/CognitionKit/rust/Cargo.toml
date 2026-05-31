@@ -26,8 +26,11 @@ serde_json = "1"
 genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
 neuron-kit = { path = "../../NeuronKit/rust" }
 locus-kit = { path = "../../LocusKit/rust" }
+# The gated promotion (confirm_migration_promotion) parses the report's
+# estate-free String branch ids back to the typed BranchId to drive
+# glk_promote_branch over the coordinator's retained branch registry.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # Test-only: building a parent estate to derive branches from.
 persistence-kit = { path = "../../PersistenceKit/rust" }
-uuid = { version = "1", features = ["v4"] }

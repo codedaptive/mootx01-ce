@@ -37,9 +37,10 @@ use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::estate_types::LatticeAnchor;
 use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
 use locus_kit::frames::CaptureFrame;
+use uuid::Uuid;
 
-use crate::error::SubstrateError;
-use crate::migration_orchestration::{BenchmarkOutcome, CorpusEntry, RecipeSubstrate};
+use crate::error::{RecipeError, RecipeRunError, SubstrateError};
+use crate::migration_orchestration::{BenchmarkOutcome, CoreReport, CorpusEntry, RecipeSubstrate};
 
 /// A live `RecipeSubstrate` over a real `EstateCoordinator` + parent estate.
 /// Branches are minted in the coordinator's registry (the Swift model); the
@@ -151,6 +152,76 @@ impl RecipeSubstrate for LiveRecipeSubstrate<'_> {
     }
 }
 
+/// Parse a report's estate-free `String` branch id back to a typed
+/// `BranchId` for the coordinator's branch registry.
+fn parse_branch_id(s: &str) -> Result<BranchId, SubstrateError> {
+    Uuid::parse_str(s)
+        .map_err(|e| SubstrateError::new("promote_branch", format!("bad branch id '{s}': {e}")))
+}
+
+/// Confirm promotion of the winning plan's branch into the estate and discard
+/// the losers — the explicit human-gated second step (spec B-3). `run`
+/// (run_migration_benchmark) never promotes; this does. Parity of the Swift
+/// `MigrationBenchmark.confirmPromotion`.
+///
+/// Branches are resolved from the coordinator's retained registry, so this
+/// works across the stateless run→confirm boundary (two separate calls): the
+/// `CoreReport` carries the branch ids the run surfaced; the coordinator still
+/// holds the live branches.
+///
+/// Guards (parity of the Swift throws):
+///   - `RecipeError::SilentConceptLoss` if `winner_plan_name` names a plan the
+///     C-13 gate disqualified (C-5: a disqualified plan is never promoted).
+///   - `RecipeError::UserConfirmationRequired` if `winner_plan_name` names no
+///     plan in the report.
+pub fn confirm_migration_promotion(
+    coord: &mut EstateCoordinator,
+    report: &CoreReport,
+    winner_plan_name: &str,
+    handle: &EstateHandle,
+    now: i64,
+) -> Result<(), RecipeRunError> {
+    // C-5: never promote a disqualified plan. The branch id comes from
+    // plan_results (DisqualifiedCore carries only name + lost_concepts).
+    if let Some(dq) = report.disqualified.iter().find(|d| d.name == winner_plan_name) {
+        let branch_id = report
+            .plan_results
+            .iter()
+            .find(|p| p.name == winner_plan_name)
+            .map(|p| p.branch_id.clone())
+            .unwrap_or_default();
+        return Err(RecipeError::SilentConceptLoss {
+            branch_id,
+            lost_concepts: dq.lost_concepts.clone(),
+        }
+        .into());
+    }
+
+    // Resolve the winner plan's branch; an unknown plan is a confirmation
+    // error (the human is naming a branch the report never produced).
+    let winner = report
+        .plan_results
+        .iter()
+        .find(|p| p.name == winner_plan_name)
+        .ok_or_else(|| RecipeError::UserConfirmationRequired {
+            action: format!("promote unknown plan '{winner_plan_name}'"),
+        })?;
+    let winner_bid = parse_branch_id(&winner.branch_id)?;
+    coord
+        .glk_promote_branch(winner_bid, handle, now)
+        .map_err(|e| SubstrateError::new("promote_branch", format!("{e:?}")))?;
+
+    // Discard the losers; their rows are retained for audit (I-15).
+    for pr in &report.plan_results {
+        if pr.name != winner_plan_name {
+            if let Ok(bid) = parse_branch_id(&pr.branch_id) {
+                let _ = coord.glk_discard_branch(bid);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,10 +231,20 @@ mod tests {
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
     use locus_kit::estate_types::OwnerCredentials;
+    use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
     use persistence_kit::inmemory::InMemoryStorage;
     use uuid::Uuid;
 
     const NOW: i64 = 1_700_000_000;
+
+    /// Recall all unconfirmed rows from an estate — used to inspect the parent
+    /// after a promotion.
+    fn all_frame() -> RecallFrame {
+        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+        f.hydration_level = HydrationLevel::Structured;
+        f.ordering = Ordering::ByCaptureTimeDesc;
+        f
+    }
 
     fn coord_with_parent() -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
@@ -234,5 +315,72 @@ mod tests {
         );
         // The per-plan result still records the lost concept.
         assert!(report.plan_results[0].lost.contains(&"e3".to_string()));
+    }
+
+    // CK-LIVE-3: confirm_migration_promotion actually promotes the winner's
+    // post-derivation rows into the parent estate (B-3 gated second step).
+    // The parent was empty before; after promotion it holds the migrated rows.
+    #[test]
+    fn ck_live3_confirm_promotes_winner_into_parent() {
+        let (mut coord, h) = coord_with_parent();
+        let plans = vec![plan("flat")];
+        let origin = origin(&[("e1", "alpha"), ("e2", "beta")]);
+
+        let report = {
+            let mut sub = LiveRecipeSubstrate::new(&mut coord, h, NOW);
+            run_migration_benchmark(&mut sub, &plans, &origin).expect("run")
+        };
+        assert_eq!(report.winner.as_deref(), Some("flat"));
+        // Parent is still empty before confirmation (run never promotes).
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 0);
+
+        confirm_migration_promotion(&mut coord, &report, "flat", &h, NOW).expect("promote");
+        // The two migrated concepts are now in the parent estate.
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 2);
+    }
+
+    // CK-LIVE-4: confirming a DISQUALIFIED plan raises SilentConceptLoss
+    // (C-5) — a plan the C-13 gate dropped is never promoted.
+    #[test]
+    fn ck_live4_confirm_disqualified_is_silent_concept_loss() {
+        let (mut coord, h) = coord_with_parent();
+        let plans = vec![plan("flat")];
+        let origin = origin(&[("e1", "alpha"), ("e3", "")]); // e3 dropped
+
+        let report = {
+            let mut sub = LiveRecipeSubstrate::new(&mut coord, h, NOW);
+            run_migration_benchmark(&mut sub, &plans, &origin).expect("run")
+        };
+        let err = confirm_migration_promotion(&mut coord, &report, "flat", &h, NOW).unwrap_err();
+        match err {
+            RecipeRunError::Recipe(RecipeError::SilentConceptLoss { lost_concepts, .. }) => {
+                assert!(lost_concepts.contains(&"e3".to_string()));
+            }
+            other => panic!("expected SilentConceptLoss, got {other:?}"),
+        }
+        // Nothing was promoted (the disqualified branch's rows stay isolated).
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 0);
+    }
+
+    // CK-LIVE-5: confirming a plan the report never produced raises
+    // UserConfirmationRequired (the human named an unknown branch).
+    #[test]
+    fn ck_live5_confirm_unknown_plan_requires_confirmation() {
+        let (mut coord, h) = coord_with_parent();
+        let plans = vec![plan("flat")];
+        let origin = origin(&[("e1", "alpha")]);
+
+        let report = {
+            let mut sub = LiveRecipeSubstrate::new(&mut coord, h, NOW);
+            run_migration_benchmark(&mut sub, &plans, &origin).expect("run")
+        };
+        let err =
+            confirm_migration_promotion(&mut coord, &report, "ghost-plan", &h, NOW).unwrap_err();
+        match err {
+            RecipeRunError::Recipe(RecipeError::UserConfirmationRequired { action }) => {
+                assert!(action.contains("ghost-plan"));
+            }
+            other => panic!("expected UserConfirmationRequired, got {other:?}"),
+        }
     }
 }
