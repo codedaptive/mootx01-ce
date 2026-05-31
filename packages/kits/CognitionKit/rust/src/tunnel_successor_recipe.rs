@@ -1,17 +1,17 @@
-//! Anticipate — the conscious "what comes next" recipe (Lens 8, Prediction).
-//! Given an anchor memory, follow its OUTGOING tunnels (the directed
-//! association graph) and rank where they lead by frequency — "after this,
-//! you tend to reach these." Pre-stage the memory before it's asked for.
+//! TunnelSuccessor — directed-tunnel successor prediction. Given an anchor
+//! memory, follow its OUTGOING tunnels (the directed association graph) and
+//! rank where they lead by frequency — "this memory points onward to these."
 //!
-//! NET-NEW, Rust-first (ninth lens). Pure CognitionKit sequencing over GLK
-//! `recall_tunnels` (the directed edges). Read-only.
+//! This is NOT the brainstorm's Anticipate (Lens 8). Anticipate is the LEARNED
+//! action-outcome / temporal-causality model — "after you DO X you tend to
+//! NEED Y" — which lives in `anticipate_recipe` over SubstrateML's
+//! `action_outcome` matrix fed from the HLC audit-event stream. This recipe is
+//! the simpler, explicit-graph successor signal: what the author linked
+//! downstream, not what behaviour tends to follow. Kept as its own honest
+//! lens; named for what it actually computes.
 //!
-//! v1 model: directed tunnel-successor frequency. The brainstorm's full
-//! Anticipate folds in the action-outcome / temporal-causality T-matrix
-//! (`SubstrateML::action_outcome`), which needs an HLC-stamped action→outcome
-//! EVENT STREAM the estate does not yet expose; the tunnel graph is the
-//! available causal signal, and that refinement layers on when the stream
-//! lands.
+//! Pure CognitionKit sequencing over GLK `recall_tunnels` (the directed
+//! edges). Read-only.
 
 use std::collections::BTreeMap;
 
@@ -23,7 +23,7 @@ use crate::error::{RecipeRunError, SubstrateError};
 /// A predicted-next memory: the target drawer id and how many tunnels lead to
 /// it from the anchor.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Anticipation {
+pub struct Successor {
     pub id: String,
     pub weight: usize,
 }
@@ -31,13 +31,13 @@ pub struct Anticipation {
 /// Predict the memories most likely to follow `anchor_id` in `wing`: rank the
 /// targets of its outgoing drawer-to-drawer tunnels by frequency, top `k`
 /// (ties broken by id). Read-only; recall failure → `RecipeRunError::Substrate`.
-pub fn run_anticipate(
+pub fn run_tunnel_successor(
     coord: &EstateCoordinator,
     handle: &EstateHandle,
     wing: &str,
     anchor_id: &str,
     k: usize,
-) -> Result<Vec<Anticipation>, RecipeRunError> {
+) -> Result<Vec<Successor>, RecipeRunError> {
     let tunnels = coord
         .recall_tunnels(handle, wing)
         .map_err(|e| SubstrateError::new("recall_tunnels", format!("{e:?}")))?;
@@ -53,8 +53,8 @@ pub fn run_anticipate(
         }
     }
 
-    let mut ranked: Vec<Anticipation> =
-        counts.into_iter().map(|(id, weight)| Anticipation { id, weight }).collect();
+    let mut ranked: Vec<Successor> =
+        counts.into_iter().map(|(id, weight)| Successor { id, weight }).collect();
     ranked.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.id.cmp(&b.id)));
     ranked.truncate(k);
     Ok(ranked)
@@ -103,14 +103,14 @@ mod tests {
     // CK-AN-1: from the anchor, the more-frequently-tunneled target is the
     // stronger prediction; an unrelated edge elsewhere is ignored.
     #[test]
-    fn ck_an1_frequent_successor_ranks_first() {
+    fn ck_ts1_frequent_successor_ranks_first() {
         let (coord, h) = coord_with_parent();
         edge(&coord, &h, "t1", "anchor", "X");
         edge(&coord, &h, "t2", "anchor", "X"); // X twice
         edge(&coord, &h, "t3", "anchor", "Y"); // Y once
         edge(&coord, &h, "t4", "other", "Z"); // unrelated to anchor
 
-        let out = run_anticipate(&coord, &h, WING, "anchor", 5).expect("anticipate");
+        let out = run_tunnel_successor(&coord, &h, WING, "anchor", 5).expect("anticipate");
         assert_eq!(out.len(), 2, "only the anchor's successors");
         assert_eq!(out[0].id, "X", "the frequent successor leads");
         assert_eq!(out[0].weight, 2);
@@ -119,10 +119,10 @@ mod tests {
 
     // CK-AN-2: an anchor with no outgoing tunnels predicts nothing (guarded).
     #[test]
-    fn ck_an2_no_successors_empty() {
+    fn ck_ts2_no_successors_empty() {
         let (coord, h) = coord_with_parent();
         edge(&coord, &h, "t1", "other", "Z");
-        let out = run_anticipate(&coord, &h, WING, "anchor", 5).expect("anticipate");
+        let out = run_tunnel_successor(&coord, &h, WING, "anchor", 5).expect("anticipate");
         assert!(out.is_empty());
     }
 }

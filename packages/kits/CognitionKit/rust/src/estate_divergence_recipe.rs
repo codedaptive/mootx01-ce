@@ -1,19 +1,18 @@
-//! MindOverlap — the conscious "where we converge vs diverge" recipe (Lens 9,
-//! Federated). Compare two estates' room distributions by Jensen-Shannon / KL
-//! divergence (NeuronKit `drift`): low = two minds organized alike, high =
-//! they diverge. The coordinator holds both estates, so the comparison is one
-//! recipe over two handles.
+//! EstateDivergence — compare two estates' room distributions by
+//! Jensen-Shannon / KL divergence (NeuronKit `drift`): low = organized alike,
+//! high = they diverge. The coordinator holds both estates, so it's one recipe
+//! over two handles.
 //!
-//! NET-NEW, Rust-first (tenth lens — completes the brainstorm set). Pure
-//! CognitionKit sequencing: recall each estate via GLK + NeuronKit drift
+//! This is NOT the brainstorm's MindOverlap (Lens 9). MindOverlap's defining
+//! property is PRIVACY-PRESERVING federation — divergence over the shared
+//! hyperplane family computed WITHOUT either side reading the other's content,
+//! via the pairing handshake + DP-OR-reduce. That lives in `mind_overlap_recipe`.
+//! This recipe reads BOTH estates' distributions directly — it is the
+//! non-private, same-device divergence, useful in its own right but not the
+//! federated lens. Named for what it actually does.
+//!
+//! Pure CognitionKit sequencing: recall each estate via GLK + NeuronKit drift
 //! (SubstrateML InformationTheory). Read-only.
-//!
-//! v1 reads both estates' distributions directly. The brainstorm's full
-//! MindOverlap is PRIVACY-PRESERVING — KL over the shared hyperplane family
-//! computed without either side reading the other's content, via the
-//! federation pairing handshake + DP OR-reduce (`SubstrateML::pairing` /
-//! `dp_or_reduce`). That privacy layer is the refinement; the divergence
-//! itself is the same `drift`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,7 +25,7 @@ use crate::error::{RecipeRunError, SubstrateError};
 
 /// How two estates' mental models compare. Low `divergence` = convergent.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MindOverlap {
+pub struct EstateDivergence {
     pub divergence: DriftScore,
     pub a_count: usize,
     pub b_count: usize,
@@ -51,13 +50,13 @@ fn normalized(vocab: &[String], counts: &BTreeMap<String, f64>, total: usize) ->
 /// distributions. `make_frame` builds the recall frame for each (called once
 /// per estate). Either estate empty ⇒ zero divergence (nothing to compare).
 /// Read-only; a recall failure propagates as `RecipeRunError::Substrate`.
-pub fn run_mind_overlap<F>(
+pub fn run_estate_divergence<F>(
     coord: &EstateCoordinator,
     handle_a: &EstateHandle,
     handle_b: &EstateHandle,
     make_frame: F,
     now: i64,
-) -> Result<MindOverlap, RecipeRunError>
+) -> Result<EstateDivergence, RecipeRunError>
 where
     F: Fn() -> RecallFrame,
 {
@@ -70,7 +69,7 @@ where
     let (ac, bc) = (da.len(), db.len());
 
     if ac == 0 || bc == 0 {
-        return Ok(MindOverlap {
+        return Ok(EstateDivergence {
             divergence: DriftScore { jensen_shannon: 0.0, kl_divergence: 0.0 },
             a_count: ac,
             b_count: bc,
@@ -87,7 +86,7 @@ where
     let p = normalized(&vocab, &a_rooms, ac);
     let q = normalized(&vocab, &b_rooms, bc);
 
-    Ok(MindOverlap { divergence: drift(&p, &q), a_count: ac, b_count: bc })
+    Ok(EstateDivergence { divergence: drift(&p, &q), a_count: ac, b_count: bc })
 }
 
 #[cfg(test)]
@@ -135,7 +134,7 @@ mod tests {
     // CK-MO-1: two estates filed into disjoint rooms (philosophy vs cooking)
     // diverge sharply; the lens computes one mind against another.
     #[test]
-    fn ck_mo1_disjoint_minds_diverge() {
+    fn ck_ed1_disjoint_minds_diverge() {
         let mut coord = EstateCoordinator::new();
         let a = open_estate(&mut coord);
         let b = open_estate(&mut coord);
@@ -145,20 +144,20 @@ mod tests {
         for _ in 0..3 {
             capture(&coord, &b, "cooking");
         }
-        let mo = run_mind_overlap(&coord, &a, &b, all, NOW).expect("overlap");
+        let mo = run_estate_divergence(&coord, &a, &b, all, NOW).expect("overlap");
         assert_eq!((mo.a_count, mo.b_count), (3, 3));
         assert!(mo.divergence.jensen_shannon > 0.5, "disjoint minds diverge, got {}", mo.divergence.jensen_shannon);
     }
 
     // CK-MO-2: two estates organized the same way converge (near-zero divergence).
     #[test]
-    fn ck_mo2_aligned_minds_converge() {
+    fn ck_ed2_aligned_minds_converge() {
         let mut coord = EstateCoordinator::new();
         let a = open_estate(&mut coord);
         let b = open_estate(&mut coord);
         capture(&coord, &a, "philosophy");
         capture(&coord, &b, "philosophy");
-        let mo = run_mind_overlap(&coord, &a, &b, all, NOW).expect("overlap");
+        let mo = run_estate_divergence(&coord, &a, &b, all, NOW).expect("overlap");
         assert!(mo.divergence.jensen_shannon.abs() < 1e-5, "aligned minds converge, got {}", mo.divergence.jensen_shannon);
     }
 }
