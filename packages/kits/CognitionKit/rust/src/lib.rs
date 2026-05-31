@@ -1,28 +1,28 @@
 //! CognitionKit — the behaviour-recipe layer of the MOOTx01 substrate
 //! (Rust port).
 //!
-//! This crate is the Rust side of the Swift `CognitionKit` package. Per
-//! CLAUDE.md neither port leads: both implement the same spec and are
-//! gated against shared fixtures. CognitionKit implements no algorithms
-//! itself — recipes SEQUENCE NeuronKit reasoning and GeniusLocusKit
-//! verbs. The only thing in a recipe worth porting is therefore its
-//! DETERMINISTIC DECISION CORE — the pure logic with no estate, no
-//! actor, no I/O:
+//! This crate is the Rust side of the Swift `CognitionKit` package.
+//! CognitionKit implements no algorithms itself — recipes SEQUENCE
+//! NeuronKit reasoning and GeniusLocusKit verbs. Three layers live here:
 //!
-//!   - the NeuronKit capability set + the pre-execution capability gate
-//!     (`capability`)
-//!   - the recipe error model (`error`)
-//!   - the recipe catalog / descriptor self-discovery surface (`catalog`)
-//!   - the migration-benchmark decision core: duplicate-plan guard,
-//!     origin partition, lost-concept union, C-13 gate + survivor
-//!     ranking (`migration_ranking`)
+//! 1. **Swift-paired decision cores + estate-driven recipes** (`neither port
+//!    leads`, gated against shared fixtures): the capability set + gate
+//!    (`capability`), the error model (`error`), the catalog/descriptor
+//!    self-discovery surface (`catalog`), the migration ranking decision core
+//!    (`migration_ranking`), and — now that Pass 2 has landed the live Rust
+//!    GeniusLocusKit estate + NeuronKit branch/benchmark/tournament surfaces —
+//!    the estate-driven bodies themselves (`grounded_synthesis`,
+//!    `migration_orchestration`, `migration_live`).
 //!
-//! The estate-driven recipe bodies (`GroundedSynthesis.run`,
-//! `MigrationBenchmark.run`, `confirmPromotion`) are NOT ported here:
-//! they require the GeniusLocusKit estate handle and the NeuronKit
-//! branch/benchmark/tournament surfaces, which are Swift-only at v0.8.
-//! Closing that gap is Pass 2 — it expands the Rust NeuronKit and GLK
-//! crates first, then ports the recipe bodies on top.
+//! 2. **NET-NEW Rust-first reasoning lenses** (`*_recipe` below): named
+//!    behaviours that sequence gated SubstrateML math into estate-level
+//!    reasoning (Keystones, LatentThemes, TrustLens, Drift, Contradiction,
+//!    Constellation, ThemeWeather, FeelsLike, TunnelSuccessor, EstateDivergence,
+//!    Anticipate, MindOverlap, Bias, FreeAssociation). These have NO Swift
+//!    sibling — they are an exploratory Rust-first layer, so they are
+//!    deliberately ABSENT from the Swift-anchored `catalog`. Their path to
+//!    becoming discoverable/invokable product recipes is the graduation gate in
+//!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v1.0_2026-05-31.md`.
 //!
 //! Determinism: every function here is a pure function of its inputs.
 //! No clock, no randomness, no unordered iteration that reaches output.
