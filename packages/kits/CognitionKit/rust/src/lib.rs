@@ -36,6 +36,7 @@ pub mod catalog;
 pub mod migration_ranking;
 pub mod migration_orchestration;
 pub mod migration_live;
+pub mod grounded_synthesis;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::RecipeError;
@@ -49,3 +50,4 @@ pub use migration_orchestration::{
     PlanResultCore, RecipeSubstrate,
 };
 pub use migration_live::LiveRecipeSubstrate;
+pub use grounded_synthesis::{run_grounded_synthesis, GroundedOutput};
