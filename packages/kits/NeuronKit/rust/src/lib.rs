@@ -35,6 +35,7 @@ pub mod latent_themes;
 pub mod drift;
 pub mod anomaly_scan;
 pub mod constellation;
+pub mod spreading_activation;
 pub mod theme_weather;
 pub mod partial_recall;
 pub mod anticipation;
@@ -68,6 +69,7 @@ pub use latent_themes::{latent_themes, LatentThemes, ThemeLoading};
 pub use drift::{drift, DriftScore};
 pub use anomaly_scan::{anomalies, Anomaly};
 pub use constellation::{constellations, Constellation};
+pub use spreading_activation::{spreading_activation, Activation};
 pub use theme_weather::{recency_weight, theme_weather, CategoryMomentum};
 pub use partial_recall::{
     partial_recall, BLOCK_CHANNEL, BLOCK_CONCEPT, BLOCK_STRUCTURE, BLOCK_TEMPORAL,
