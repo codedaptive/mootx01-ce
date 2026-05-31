@@ -206,9 +206,10 @@ public struct MigrationBenchmark: Recipe {
         }
         // Plan names key the branch map and the confirm step; a duplicate
         // would silently collide (last wins) and leak a derived branch.
-        // Reject it up front so the failure is explicit, not a leak.
-        let planNames = input.plans.map(\.name)
-        if let dup = firstDuplicate(planNames) {
+        // Reject it up front so the failure is explicit, not a leak. The
+        // uniqueness check is part of the shared, conformance-gated
+        // decision core.
+        if let dup = MigrationRanking.firstDuplicate(input.plans.map(\.name)) {
             throw RecipeError.duplicatePlanName(dup)
         }
 
@@ -217,6 +218,33 @@ public struct MigrationBenchmark: Recipe {
         // only the report timestamp, not any logic. Captured once so every
         // parallel branch is benchmarked at the same deterministic instant.
         let now = Date()
+
+        // Partition the origin ONCE, before the per-plan fan-out. Which
+        // entries are migratable (non-empty content) vs droppable is a
+        // function of the origin alone — it does NOT vary by plan. Computing
+        // it per plan re-trimmed every entry N_plans times; hoisting it here
+        // makes that an O(entries) pass instead of O(plans × entries) and
+        // hands each plan an already-filtered set to capture. Behaviour is
+        // identical: every plan's lost set is still droppedIDs ∪ its own
+        // benchmark notFound, and droppedIDs is the same value each plan saw.
+        var migratableEntries: [ExternalEntry] = []
+        migratableEntries.reserveCapacity(input.origin.entries.count)
+        var droppedIDs: [String] = []
+        for entry in input.origin.entries {
+            if entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                droppedIDs.append(entry.id)
+            } else {
+                migratableEntries.append(entry)
+            }
+        }
+        let originName = input.origin.name
+        // Bind the finished partitions to immutable `let`s before the task
+        // group. Each concurrent task captures these by value; capturing a
+        // mutable `var` would risk a data race under Swift 6 strict
+        // concurrency (the closure is a `sending` parameter). They are never
+        // mutated after this point — read-only shared input to every plan.
+        let migratable = migratableEntries
+        let dropped = droppedIDs
 
         // Per-plan work runs CONCURRENTLY. Each plan derives its own COW
         // branch — an independent in-memory estate that shares nothing with
@@ -227,13 +255,14 @@ public struct MigrationBenchmark: Recipe {
         // ranking is a pure sort over the collected results, independent of
         // task completion order (the C-13 gate and tie-break are applied in
         // the serial merge, not in the concurrent tasks).
-        let origin = input.origin
         var resultsByName: [String: PlanResult] = [:]
+        resultsByName.reserveCapacity(input.plans.count)
         try await withThrowingTaskGroup(of: PlanResult.self) { group in
             for plan in input.plans {
                 group.addTask {
                     try await Self.processPlan(
-                        plan, origin: origin, estate: estate, kit: kit, now: now)
+                        plan, migratable: migratable, dropped: dropped,
+                        originName: originName, estate: estate, kit: kit, now: now)
                 }
             }
             for try await result in group {
@@ -241,49 +270,59 @@ public struct MigrationBenchmark: Recipe {
             }
         }
 
-        // Deterministic assembly: walk plans in INPUT order so the report's
-        // collections (and the tie-break baseline) do not depend on which
-        // concurrent task finished first.
+        // Deterministic assembly: walk plans in INPUT order so the
+        // benchmark-report collection and the ranking's tie-break baseline
+        // do not depend on which concurrent task finished first. Build the
+        // identity-free PlanOutcome list and hand it to the shared,
+        // conformance-gated decision core; the recipe then rehydrates the
+        // branch identity (UUIDs, which are not part of the pure core)
+        // by plan name.
         var benchmarkReports: [BenchmarkReport] = []
-        var rankings: [BranchRanking] = []
-        var disqualified: [DisqualifiedPlan] = []
+        benchmarkReports.reserveCapacity(input.plans.count)
         var branchesByPlan: [String: any BranchHandle] = [:]
+        branchesByPlan.reserveCapacity(input.plans.count)
+        var outcomes: [MigrationRanking.PlanOutcome] = []
+        outcomes.reserveCapacity(input.plans.count)
         for plan in input.plans {
             guard let result = resultsByName[plan.name] else { continue }
             branchesByPlan[plan.name] = result.branch
             benchmarkReports.append(result.report)
-            // C-13 gate: a non-empty lost set disqualifies the plan; it is
-            // neither scored nor ranked.
-            if result.lost.isEmpty {
-                let report = result.report
-                let combined = report.recallOverlap * report.meanReciprocalRank
-                rankings.append(BranchRanking(
-                    branchID: result.branch.branchID,
-                    planName: plan.name,
-                    recallOverlap: report.recallOverlap,
-                    meanReciprocalRank: report.meanReciprocalRank,
-                    combinedScore: combined))
-            } else {
-                disqualified.append(DisqualifiedPlan(
-                    branchID: result.branch.branchID,
-                    planName: plan.name,
-                    lostConcepts: result.lost))
-            }
+            outcomes.append(MigrationRanking.PlanOutcome(
+                name: plan.name,
+                recallOverlap: result.report.recallOverlap,
+                meanReciprocalRank: result.report.meanReciprocalRank,
+                lost: result.lost))
         }
 
-        // Rank survivors: combined score descending, ties by plan name
-        // ascending so the ordering is reproducible (the documented
-        // tie-degeneracy lives here until structure-aware recall lands).
-        rankings.sort { lhs, rhs in
-            if lhs.combinedScore != rhs.combinedScore {
-                return lhs.combinedScore > rhs.combinedScore
-            }
-            return lhs.planName < rhs.planName
+        // The C-13 gate, the combined-score, the survivor ranking, and the
+        // tie-break all live in MigrationRanking.rank — the same function
+        // the Rust port implements and both test suites gate on shared
+        // fixtures.
+        let ranked = MigrationRanking.rank(outcomes)
+
+        // Rehydrate branch identity by name. Every name in `ranked` came
+        // from `outcomes`, which came from `resultsByName`, so the lookups
+        // resolve; compactMap is defensive belt-and-suspenders.
+        let rankings: [BranchRanking] = ranked.rankings.compactMap { r in
+            guard let branch = resultsByName[r.name]?.branch else { return nil }
+            return BranchRanking(
+                branchID: branch.branchID,
+                planName: r.name,
+                recallOverlap: r.recallOverlap,
+                meanReciprocalRank: r.meanReciprocalRank,
+                combinedScore: r.combinedScore)
+        }
+        let disqualified: [DisqualifiedPlan] = ranked.disqualified.compactMap { d in
+            guard let branch = resultsByName[d.name]?.branch else { return nil }
+            return DisqualifiedPlan(
+                branchID: branch.branchID,
+                planName: d.name,
+                lostConcepts: d.lostConcepts)
         }
 
         let comparison = MigrationComparisonReport(
-            winnerBranchID: rankings.first?.branchID,
-            winnerPlanName: rankings.first?.planName,
+            winnerBranchID: ranked.winner.flatMap { resultsByName[$0]?.branch.branchID },
+            winnerPlanName: ranked.winner,
             rankings: rankings,
             disqualified: disqualified)
 
@@ -294,13 +333,19 @@ public struct MigrationBenchmark: Recipe {
     }
 
     /// The concurrent unit of `run`: derive one plan's COW branch,
-    /// populate it with an id-correlated benchmark corpus, benchmark it,
+    /// populate it from the pre-filtered migratable entries, benchmark it,
     /// and compute its lost-concept set. Pure with respect to the recipe
     /// (no shared mutable state) so it runs safely inside the task group.
     /// `static` so the task closure captures no `self`.
+    ///
+    /// `migratable` and `dropped` are computed once by `run` (they are
+    /// plan-independent) and passed in, so this function does no redundant
+    /// content filtering.
     private static func processPlan(
         _ plan: MigrationPlan,
-        origin: ExternalCorpus,
+        migratable: [ExternalEntry],
+        dropped: [String],
+        originName: String,
         estate: EstateHandle,
         kit: GeniusLocusKit,
         now: Date
@@ -309,20 +354,13 @@ public struct MigrationBenchmark: Recipe {
         let branch = try await NeuronKit.deriveBranch(
             name: plan.name, from: estate, in: kit)
 
-        // Populate the branch per the plan. Record the minted Drawer.id ↔
-        // content correlation; track concepts that cannot be migrated
-        // (empty content) as dropped. Captures into one branch estate are
-        // serialized by that estate's actor; that is correct — the
-        // parallelism is ACROSS branches, not within one.
+        // Populate the branch from the pre-filtered migratable entries.
+        // Record the minted Drawer.id ↔ content correlation. Captures into
+        // one branch estate are serialized by that estate's actor; that is
+        // correct — the parallelism is ACROSS branches, not within one.
         var correlated: [ExternalEntry] = []
-        var dropped: [String] = []
-        for entry in origin.entries {
-            let trimmed = entry.content.trimmingCharacters(
-                in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
-                dropped.append(entry.id)
-                continue
-            }
+        correlated.reserveCapacity(migratable.count)
+        for entry in migratable {
             let frame = LocusKit.CaptureFrame(
                 content: entry.content,
                 channel: .typed,
@@ -340,13 +378,14 @@ public struct MigrationBenchmark: Recipe {
 
         // Benchmark the branch against its own id-correlated corpus.
         let corpus = ExternalCorpus(
-            name: "\(origin.name)#\(plan.name)", entries: correlated)
+            name: "\(originName)#\(plan.name)", entries: correlated)
         let report = try await NeuronKit.benchmark(
             branch: branch, against: corpus, now: now)
 
         // lost = never-captured (dropped) ∪ captured-but-unrecallable
-        // (benchmark notFound). Sorted for deterministic reporting.
-        let lost = Set(dropped).union(report.notFoundInBranch).sorted()
+        // (benchmark notFound), via the shared conformance-gated core.
+        let lost = MigrationRanking.lostConcepts(
+            dropped: dropped, notFound: report.notFoundInBranch)
         return PlanResult(
             planName: plan.name, branch: branch, report: report, lost: lost)
     }
@@ -362,15 +401,6 @@ public struct MigrationBenchmark: Recipe {
         let lost: [String]
     }
 
-    /// The first value that appears more than once in `values`, scanning
-    /// in order, or nil when every value is unique.
-    private func firstDuplicate(_ values: [String]) -> String? {
-        var seen = Set<String>()
-        for value in values where !seen.insert(value).inserted {
-            return value
-        }
-        return nil
-    }
 
     /// Confirm promotion of the winning plan's branch into the estate and
     /// discard the losing branches. This is the explicit human-gated
