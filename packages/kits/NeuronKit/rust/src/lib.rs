@@ -37,6 +37,7 @@ pub mod anomaly_scan;
 pub mod constellation;
 pub mod theme_weather;
 pub mod partial_recall;
+pub mod anticipation;
 pub mod dreaming_decision;
 pub mod dreaming_cycle;
 pub mod maintenance_decision;
@@ -69,6 +70,7 @@ pub use theme_weather::{recency_weight, theme_weather, CategoryMomentum};
 pub use partial_recall::{
     partial_recall, BLOCK_CHANNEL, BLOCK_CONCEPT, BLOCK_STRUCTURE, BLOCK_TEMPORAL,
 };
+pub use anticipation::{anticipate, ActionObservation, ActionPrediction};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,
