@@ -40,6 +40,7 @@ pub mod grounded_synthesis;
 pub mod keystones_recipe;
 pub mod latent_themes_recipe;
 pub mod trust_lens_recipe;
+pub mod drift_recipe;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::{RecipeError, RecipeRunError, SubstrateError};
@@ -57,3 +58,4 @@ pub use grounded_synthesis::{run_grounded_synthesis, GroundedOutput};
 pub use keystones_recipe::run_keystones;
 pub use latent_themes_recipe::run_latent_themes;
 pub use trust_lens_recipe::{run_trust_grounded_synthesis, TrustGroundedOutput};
+pub use drift_recipe::{run_drift, DriftOutput};
