@@ -3,7 +3,7 @@ name = "cognition-kit"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "CognitionKit — the behaviour-recipe layer of the MOOTx01 substrate (Rust port). Recipes sequence NeuronKit reasoning and GeniusLocusKit verbs; this crate ports the deterministic decision core (capability gate, error model, recipe catalog, migration ranking) that is conformance-gated against the Swift reference at CognitionKit/Sources/CognitionKit. Per CLAUDE.md neither port leads. The estate-driven recipe bodies are Swift-only until the Rust NeuronKit/GLK estate surfaces land."
+description = "CognitionKit — the behaviour-recipe layer of the MOOTx01 substrate (Rust port). Recipes sequence NeuronKit reasoning and GeniusLocusKit verbs; this crate ports the deterministic decision core (capability gate, error model, recipe catalog, migration ranking) AND the live recipe execution: a real RecipeSubstrate adapter binding the migration-benchmark orchestration to the GeniusLocusKit COW branch verbs + NeuronKit benchmark. Conformance-gated against the Swift reference at CognitionKit/Sources/CognitionKit. Per CLAUDE.md neither port leads."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -19,3 +19,15 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The live recipe execution sequences GLK COW branch verbs + NeuronKit's
+# benchmark over the real LocusKit estate, mirroring the Swift CognitionKit
+# imports (GeniusLocusKit + NeuronKit + LocusKit). Acyclic: none of these
+# depend on CognitionKit.
+genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
+neuron-kit = { path = "../../NeuronKit/rust" }
+locus-kit = { path = "../../LocusKit/rust" }
+
+[dev-dependencies]
+# Test-only: building a parent estate to derive branches from.
+persistence-kit = { path = "../../PersistenceKit/rust" }
+uuid = { version = "1", features = ["v4"] }
