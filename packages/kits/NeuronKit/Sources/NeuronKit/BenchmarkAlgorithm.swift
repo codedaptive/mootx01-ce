@@ -103,64 +103,36 @@ public extension NeuronKit {
         now: Date
     ) async throws -> BenchmarkReport {
         // 1. Query set + expected-ID set from the corpus. The expected
-        //    set is index-aligned with `asRecallFrames()` so the MRR
-        //    pairing below is well-defined on the default path.
+        //    ids are index-aligned with `asRecallFrames()` so the MRR
+        //    pairing is well-defined on the default path.
         let frames = queries.isEmpty ? origin.asRecallFrames() : queries
         let expectedIDs = origin.entries.map(\.id)
-        let expectedSet = Set(expectedIDs)
 
-        // 2-3. Recall each frame (the ONLY substrate call this function
-        //      makes), accumulate the union of found IDs, and record the
-        //      reciprocal rank of each expected concept within its own
-        //      query's ranked results.
-        var foundSet = Set<String>()
-        var reciprocalRanks: [Float] = []
-        for index in frames.indices {
-            let drawers = try await branch.recall(frames[index])
-            let ids = drawers.map(\.id)
-            foundSet.formUnion(ids)
-
-            // MRR pairing: frame `index` scores expected concept `index`.
-            // Skip when the override supplied more frames than entries.
-            guard index < expectedIDs.count else { continue }
-            let expectedID = expectedIDs[index]
-            if let position = ids.firstIndex(of: expectedID) {
-                // 1-based rank; first occurrence wins.
-                reciprocalRanks.append(1.0 / Float(position + 1))
-            } else {
-                // Concept not located by its own query — contributes 0.
-                reciprocalRanks.append(0.0)
-            }
+        // 2. Recall each frame — the ONLY substrate call this function
+        //    makes — collecting each query's ranked id list. This is the
+        //    estate I/O that keeps `benchmark` Swift-only.
+        var foundPerQuery: [[String]] = []
+        foundPerQuery.reserveCapacity(frames.count)
+        for frame in frames {
+            let drawers = try await branch.recall(frame)
+            foundPerQuery.append(drawers.map(\.id))
         }
 
-        // 4-5. Loss and surplus are set differences over the union of
-        //      all recalls (C-13: a concept counts as recalled if ANY
-        //      query surfaced it). Sorted for deterministic reports.
-        let notFoundInBranch = expectedSet.subtracting(foundSet).sorted()
-        let newInBranch = foundSet.subtracting(expectedSet).sorted()
-
-        // 6-8. Metrics. Every denominator is guarded; the documented
-        //      convention is 0 (not a crash) when a set is empty.
-        let intersectionCount = expectedSet.intersection(foundSet).count
-        let unionCount = expectedSet.union(foundSet).count
-        let recallOverlap = unionCount == 0
-            ? Float(0)
-            : Float(intersectionCount) / Float(unionCount)
-        let recallPrecision = foundSet.isEmpty
-            ? Float(0)
-            : Float(intersectionCount) / Float(foundSet.count)
-        let meanReciprocalRank = reciprocalRanks.isEmpty
-            ? Float(0)
-            : reciprocalRanks.reduce(0, +) / Float(reciprocalRanks.count)
+        // 3. Every metric is a pure function of (expectedIDs, foundPerQuery),
+        //    delegated to the conformance-gated `BenchmarkScoring.score` —
+        //    the same core the Rust port implements. `branchID` and
+        //    `evaluatedAt` are the only estate-/clock-supplied fields.
+        let s = BenchmarkScoring.score(
+            expectedIDs: expectedIDs, foundPerQuery: foundPerQuery)
 
         return BenchmarkReport(
             branchID: branch.branchID,
-            queryCount: frames.count,
-            recallOverlap: recallOverlap,
-            recallPrecision: recallPrecision,
-            meanReciprocalRank: meanReciprocalRank,
-            notFoundInBranch: notFoundInBranch,
-            newInBranch: newInBranch,
+            queryCount: s.queryCount,
+            recallOverlap: s.recallOverlap,
+            recallPrecision: s.recallPrecision,
+            meanReciprocalRank: s.meanReciprocalRank,
+            notFoundInBranch: s.notFoundInBranch,
+            newInBranch: s.newInBranch,
             evaluatedAt: now
         )
     }

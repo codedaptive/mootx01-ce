@@ -27,6 +27,7 @@ pub mod context_synthesizer;
 pub mod scenario_profile;
 pub mod tournament;
 pub mod mmr_rank;
+pub mod benchmark_scoring;
 
 pub use lattice_anchor::{
     AnchorConfidence, EnrichmentStatus, LatticeAnchorInference,
@@ -40,6 +41,7 @@ pub use context_synthesizer::{synthesize, ContextDocument, DrawerRowMeta};
 pub use scenario_profile::ScenarioProfile;
 pub use tournament::{bradley_terry, BradleyTerryScore, PairwiseOutcome, TournamentError};
 pub use mmr_rank::{mmr_rank, mmr_select};
+pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
 
 /// The NeuronKit crate version. Pinned with the substrate
 /// schema version.
