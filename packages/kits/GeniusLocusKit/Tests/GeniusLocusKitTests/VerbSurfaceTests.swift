@@ -166,10 +166,10 @@ final class VerbSurfaceTests: XCTestCase {
 
     /// `capture` then `reanchor`: the drawer's lattice anchor moves to
     /// the supplied target. Recall sees the updated anchor on the returned
-    /// row. Mirrors `testWithdrawRoundTrip` — the stub-surfaces-notSupported
-    /// version was correct only while `Estate.reanchor` was a stub; now that
-    /// the verb is implemented it must become a real round-trip.
-    func testReanchorRoundTripSurfacesNotSupported() async throws {
+    /// row. Mirrors `testWithdrawRoundTrip` — the prior stub-surfaces-
+    /// notSupported version was correct only while `Estate.reanchor` was a
+    /// stub; now that the verb is implemented it is a real round-trip.
+    func testReanchorRoundTrip() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "reanchor target"))
         // Reanchor the drawer to a new lattice position.
