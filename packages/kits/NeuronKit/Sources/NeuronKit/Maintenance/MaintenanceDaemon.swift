@@ -160,15 +160,16 @@ public actor MaintenanceDaemon {
     // MARK: - The cycle (§ 3.2 + § 3.5)
 
     private func runCycle(now: Date) async throws -> MaintenanceCycleReport {
-        var emitted: [ProposeFrame] = []
-        var suppressed = 0
-
         // ── Step 0: audit-chain integrity monitor (§ 3.5) ──────────────
         // Verify on the audit-check cadence, tracked independently of the
         // scan tick so a slow full-chain verification need not run every
-        // tick. First run always checks (lastAuditCheckAt == nil).
+        // tick. First run always checks (lastAuditCheckAt == nil). The
+        // verification math is GLK-owned (`AuditChainVerifier.verify`); the
+        // daemon owns the scheduling and turns the verdict into the pure
+        // core's `AuditVerdict` input.
         var auditChecked = false
         var auditReport: AuditChainReport? = nil
+        var auditVerdict: MaintenanceDecision.AuditVerdict? = nil
         let auditDue: Bool = {
             guard let last = lastAuditCheckAt else { return true }
             let elapsedMs = now.timeIntervalSince(last) * 1000.0
@@ -176,144 +177,82 @@ public actor MaintenanceDaemon {
         }()
         if auditDue {
             let log = try await reader.currentAuditLog()
-            // Reuse the live verifier (GLK-03). The daemon owns scheduling
-            // and the proposal; GeniusLocusKit owns the verification math.
             let report = AuditChainVerifier.verify(log)
             auditChecked = true
             auditReport = report
             lastAuditCheckAt = now
-            if !report.valid {
-                // Derive a stable RowID for the proposal target from the
-                // first broken entry's timestamp (epoch milliseconds) so
-                // re-detecting the SAME break re-derives the SAME key and
-                // is idempotently suppressed. `firstBrokenAt` is set
-                // whenever `valid == false` in the current verifier, but
-                // we guard nil defensively and fall back to a stable
-                // sentinel so the proposal is never lost.
-                let brokenTag: String
-                if let brokenAt = report.firstBrokenAt {
-                    brokenTag = String(Int(brokenAt.timeIntervalSince1970 * 1000.0))
-                } else {
-                    brokenTag = "unknown"
-                }
-                let target: RowID = "audit-break-\(brokenTag)"
-                let key = "audit_integrity|\(brokenTag)"
-                let frame = ProposeFrame(
-                    target: target,
-                    // No typed ProposalKind case exists for audit
-                    // integrity; use the documented `.other` escape hatch
-                    // rather than adding a case to GLK's ProposalKind.
-                    kind: .other("audit_integrity"),
-                    justification:
-                        "maintenance: audit chain integrity violation; "
-                        + "first broken entry at \(brokenTag) "
-                        + "(entries \(report.entryCount))"
-                )
-                if register(key: key) { try await sink.propose(frame); emitted.append(frame) }
-                else { suppressed += 1 }
+            // First broken entry's epoch-milliseconds, when supplied, is
+            // the stable break identity so re-detecting the SAME break
+            // re-derives the SAME key and is idempotently suppressed.
+            let brokenMillis = report.firstBrokenAt.map {
+                Int64($0.timeIntervalSince1970 * 1000.0)
             }
+            auditVerdict = MaintenanceDecision.AuditVerdict(
+                valid: report.valid, firstBrokenAtMillis: brokenMillis)
         }
 
-        // ── Step 1: forbidden-combination scan (invariant I-3) ─────────
-        // I-3: a row may not be both secret AND publicly exportable. Scan
-        // active drawers and propose a discipline-violation for each.
+        // ── Steps 1–5 input gathering: read the seams and project each
+        // scan into the pure core's identity-free shape. The `now`-relative
+        // age subtractions and the I-3 secret-AND-public bitmap read (on
+        // the substrate `Drawer` type) stay here; the THRESHOLDS, KEY
+        // FORMATS, SCAN ORDER, and B-4 dedup all live in the core.
         let active = try await reader.activeDrawers()
-        var forbiddenCombinations = 0
-        for drawer in active where Self.isForbiddenCombination(drawer) {
-            forbiddenCombinations += 1
-            let key = "discipline|\(drawer.id)"
-            let frame = ProposeFrame(
-                target: drawer.id,
-                kind: .disciplineViolation,
-                justification:
-                    "maintenance: forbidden combination (secret AND public) on drawer \(drawer.id)"
-            )
-            if register(key: key) { try await sink.propose(frame); emitted.append(frame) }
-            else { suppressed += 1 }
+        let forbiddenDrawerIDs = active.filter(Self.isForbiddenCombination).map(\.id)
+        let agedActive = active.map {
+            MaintenanceDecision.AgedRow(id: $0.id, ageSeconds: now.timeIntervalSince($0.filedAt))
         }
-
-        // ── Step 2: decay-candidate scan ───────────────────────────────
-        // Active drawers whose age (ingest clock `filedAt`, the
-        // monotonic when-we-learned-it timestamp) past `now` exceeds the
-        // decay window. The ingest clock is used rather than `eventTime`
-        // because decay tracks how long the row has lived in the store;
-        // the production adapter may switch to event-time once two-clock
-        // semantics ship. Proposed as a mutate-candidate (§ 11.1: decay
-        // routed through propose for confirmation); the daemon never
-        // applies the decay.
-        var decayCandidates = 0
-        for drawer in active where now.timeIntervalSince(drawer.filedAt) > policy.decayWindowSeconds {
-            decayCandidates += 1
-            let key = "decay|\(drawer.id)"
-            let frame = ProposeFrame(
-                target: drawer.id,
-                kind: .mutateCandidate,
-                justification:
-                    "maintenance: decay candidate; drawer \(drawer.id) older than decay window"
-            )
-            if register(key: key) { try await sink.propose(frame); emitted.append(frame) }
-            else { suppressed += 1 }
-        }
-
-        // ── Step 3: tombstone/expunge-candidate scan ───────────────────
-        // Tombstoned drawers tombstoned longer ago than the grace window.
+        let tombstoned = try await reader.tombstonedDrawers()
         // `tombstonedAt` is always set on a tombstoned row, but guard nil
         // defensively (a malformed row is simply skipped, not crashed).
-        let tombstoned = try await reader.tombstonedDrawers()
-        var tombstoneCandidates = 0
-        for drawer in tombstoned {
-            guard let tombstonedAt = drawer.tombstonedAt else { continue }
-            guard now.timeIntervalSince(tombstonedAt) > policy.tombstoneGraceSeconds else { continue }
-            tombstoneCandidates += 1
-            let key = "tombstone|\(drawer.id)"
-            let frame = ProposeFrame(
-                target: drawer.id,
-                kind: .mutateCandidate,
-                justification:
-                    "maintenance: expunge candidate; drawer \(drawer.id) tombstoned past grace window"
-            )
-            if register(key: key) { try await sink.propose(frame); emitted.append(frame) }
-            else { suppressed += 1 }
+        let agedTombstoned = tombstoned.compactMap { drawer -> MaintenanceDecision.AgedRow? in
+            guard let tombstonedAt = drawer.tombstonedAt else { return nil }
+            return MaintenanceDecision.AgedRow(
+                id: drawer.id, ageSeconds: now.timeIntervalSince(tombstonedAt))
         }
-
-        // ── Step 4: fingerprint-drift scan ─────────────────────────────
-        // Observations whose drift fraction meets or exceeds the policy
-        // threshold. The scope key (room/wing) is the stable target — a
-        // drifted fingerprint is a property of the scope, not a single
-        // row. No typed ProposalKind case exists; use `.other`.
         let fingerprintObs = try await reader.fingerprintBaselines()
-        var fingerprintDrifts = 0
-        for obs in fingerprintObs where obs.driftFraction >= policy.fingerprintDriftThreshold {
-            fingerprintDrifts += 1
-            let key = "fingerprint_drift|\(obs.scopeKey)"
-            let frame = ProposeFrame(
-                target: obs.scopeKey,
-                kind: .other("fingerprint_drift"),
-                justification:
-                    "maintenance: fingerprint drift \(obs.driftFraction) on scope \(obs.scopeKey)"
-            )
-            if register(key: key) { try await sink.propose(frame); emitted.append(frame) }
-            else { suppressed += 1 }
+        let fingerprintDrift = fingerprintObs.map {
+            MaintenanceDecision.DriftRow(key: $0.scopeKey, driftFraction: $0.driftFraction)
+        }
+        let references = try await reader.learnedReferences()
+        let referenceDrift = references.map {
+            MaintenanceDecision.DriftRow(key: $0.referenceRowID, driftFraction: $0.sourceDriftFraction)
         }
 
-        // ── Step 5: byReference-validity scan ──────────────────────────
-        // Learned references whose source content has drifted past the
-        // threshold. Proposed as a byReference-drift (the typed case).
-        let references = try await reader.learnedReferences()
-        var byReferenceDrifts = 0
-        for obs in references where obs.sourceDriftFraction >= policy.byReferenceDriftThreshold {
-            byReferenceDrifts += 1
-            let key = "byref|\(obs.referenceRowID)"
-            let frame = ProposeFrame(
-                target: obs.referenceRowID,
-                kind: .byReferenceDrift,
-                justification:
-                    "maintenance: byReference source drift \(obs.sourceDriftFraction) "
-                    + "on reference \(obs.referenceRowID)"
-            )
-            if register(key: key) { try await sink.propose(frame); emitted.append(frame) }
-            else { suppressed += 1 }
+        // ── Delegate every DECISION to the pure core (steps 0–5) ───────
+        // Conformance-gated against the Rust port
+        // (NeuronKit/rust/src/maintenance_decision.rs). See MaintenanceDecision.swift.
+        let outcome = MaintenanceDecision.decide(
+            audit: auditVerdict,
+            forbiddenDrawerIDs: forbiddenDrawerIDs,
+            agedActive: agedActive,
+            decayWindowSeconds: policy.decayWindowSeconds,
+            agedTombstoned: agedTombstoned,
+            tombstoneGraceSeconds: policy.tombstoneGraceSeconds,
+            fingerprintDrift: fingerprintDrift,
+            fingerprintDriftThreshold: policy.fingerprintDriftThreshold,
+            referenceDrift: referenceDrift,
+            byReferenceDriftThreshold: policy.byReferenceDriftThreshold,
+            alreadyProposedKeys: proposedKeys
+        )
+        proposedKeys = outcome.updatedProposedKeys
+
+        // Enact the decisions: build one ProposeFrame per emitted decision
+        // (in the core's scan order), choosing the ProposalKind and
+        // justification from the category. The audit entry-count comes from
+        // the in-scope `auditReport`; the drift fractions come from each
+        // decision's `detailValue`.
+        var emitted: [ProposeFrame] = []
+        for decision in outcome.emitted {
+            let frame = frame(for: decision, auditReport: auditReport)
+            try await sink.propose(frame)
+            emitted.append(frame)
         }
+        let suppressed = outcome.suppressedDuplicates
+        let forbiddenCombinations = outcome.forbiddenCombinations
+        let decayCandidates = outcome.decayCandidates
+        let tombstoneCandidates = outcome.tombstoneCandidates
+        let fingerprintDrifts = outcome.fingerprintDrifts
+        let byReferenceDrifts = outcome.byReferenceDrifts
 
         // ── Step 6: write exactly one diary entry recording the cycle ──
         cycleCount += 1
@@ -349,16 +288,65 @@ public actor MaintenanceDaemon {
         )
     }
 
-    // MARK: - Idempotency helper
+    // MARK: - Proposal frame construction
 
-    /// Record `key` as proposed and report whether it was new. A key
-    /// already in `proposedKeys` returns false (the caller suppresses and
-    /// counts it); a fresh key is inserted and returns true (the caller
-    /// emits the proposal). This is the B-4 idempotency memory.
-    private func register(key: String) -> Bool {
-        if proposedKeys.contains(key) { return false }
-        proposedKeys.insert(key)
-        return true
+    /// Build the `ProposeFrame` for one core decision, choosing the
+    /// `ProposalKind` and the human-facing justification from the decision's
+    /// category. The justification text is Swift-side (not part of the
+    /// portable conformance contract — the same boundary the dreaming port
+    /// drew); its variable parts come from the decision's `target` /
+    /// `detailValue` and, for the audit category, the in-scope
+    /// `auditReport`.
+    private func frame(
+        for decision: MaintenanceDecision.Decision,
+        auditReport: AuditChainReport?
+    ) -> ProposeFrame {
+        switch decision.category {
+        case .auditIntegrity:
+            // The break tag is the suffix of the audit key after the "|".
+            let tag = decision.key.split(separator: "|", maxSplits: 1).last.map(String.init) ?? "unknown"
+            return ProposeFrame(
+                target: decision.target,
+                // No typed ProposalKind case exists for audit integrity;
+                // use the documented `.other` escape hatch rather than
+                // adding a case to GLK's ProposalKind.
+                kind: .other("audit_integrity"),
+                justification:
+                    "maintenance: audit chain integrity violation; "
+                    + "first broken entry at \(tag) "
+                    + "(entries \(auditReport?.entryCount ?? 0))")
+        case .disciplineViolation:
+            return ProposeFrame(
+                target: decision.target,
+                kind: .disciplineViolation,
+                justification:
+                    "maintenance: forbidden combination (secret AND public) on drawer \(decision.target)")
+        case .decay:
+            return ProposeFrame(
+                target: decision.target,
+                kind: .mutateCandidate,
+                justification:
+                    "maintenance: decay candidate; drawer \(decision.target) older than decay window")
+        case .tombstone:
+            return ProposeFrame(
+                target: decision.target,
+                kind: .mutateCandidate,
+                justification:
+                    "maintenance: expunge candidate; drawer \(decision.target) tombstoned past grace window")
+        case .fingerprintDrift:
+            return ProposeFrame(
+                target: decision.target,
+                kind: .other("fingerprint_drift"),
+                justification:
+                    "maintenance: fingerprint drift \(decision.detailValue ?? 0) on scope \(decision.target)")
+        case .byReferenceDrift:
+            return ProposeFrame(
+                target: decision.target,
+                kind: .byReferenceDrift,
+                justification:
+                    "maintenance: byReference source drift \(decision.detailValue ?? 0) "
+                    + "on reference \(decision.target)")
+        }
     }
 
     // MARK: - Pure helpers (deterministic; Rust port matches)
