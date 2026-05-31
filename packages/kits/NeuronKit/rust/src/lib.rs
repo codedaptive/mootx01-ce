@@ -74,7 +74,7 @@ pub use partial_recall::{
 };
 pub use anticipation::{anticipate, ActionObservation, ActionPrediction};
 pub use mind_overlap::{dp_summary, summary_overlap};
-pub use bias::{representation_bias, CategoryBias};
+pub use bias::{learned_preference, representation_bias, CategoryBias, PreferenceStrength};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,
