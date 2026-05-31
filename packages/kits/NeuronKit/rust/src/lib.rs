@@ -29,6 +29,7 @@ pub mod tournament;
 pub mod mmr_rank;
 pub mod benchmark_scoring;
 pub mod benchmark_live;
+pub mod tournament_live;
 pub mod dreaming_decision;
 pub mod dreaming_cycle;
 pub mod maintenance_decision;
@@ -48,6 +49,10 @@ pub use tournament::{bradley_terry, BradleyTerryScore, PairwiseOutcome, Tourname
 pub use mmr_rank::{mmr_rank, mmr_select};
 pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
 pub use benchmark_live::{benchmark as benchmark_branch, BenchmarkReport};
+pub use tournament_live::{
+    rank_tournament, run_tournament, BranchScore, DisqualificationReason, DisqualifiedBranch,
+    TournamentReport,
+};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,
