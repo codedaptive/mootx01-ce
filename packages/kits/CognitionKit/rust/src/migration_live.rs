@@ -19,12 +19,13 @@
 //!     corpus (one unconfirmed-recall query per entry; the set metrics use
 //!     the union, the scoring math itself is gated in neuron_kit).
 //!
-//! Known limitation (pre-existing seam shape, not introduced here): the
-//! `RecipeSubstrate` trait is infallible, so this live adapter surfaces a
-//! substrate failure as a panic. The orchestration's own guards
-//! (duplicate-plan, empty-plans) still run before any substrate call. Growing
-//! the trait to a `Result` is a follow-on that touches the orchestration +
-//! fake + fixtures together.
+//! The `RecipeSubstrate` seam is fallible: each op returns
+//! `Result<_, SubstrateError>`, so this adapter maps the underlying GLK /
+//! branch error into a `SubstrateError` (operation + detail) rather than
+//! panicking. `run_migration_benchmark` propagates it as
+//! `RecipeRunError::Substrate`, alongside the recipe's own
+//! `RecipeRunError::Recipe` guard failures — the Rust encoding of the Swift
+//! recipe's heterogeneous untyped `throws`.
 
 use std::collections::HashMap;
 
@@ -37,6 +38,7 @@ use locus_kit::estate_types::LatticeAnchor;
 use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 
+use crate::error::SubstrateError;
 use crate::migration_orchestration::{BenchmarkOutcome, CorpusEntry, RecipeSubstrate};
 
 /// A live `RecipeSubstrate` over a real `EstateCoordinator` + parent estate.
@@ -75,15 +77,15 @@ impl<'a> LiveRecipeSubstrate<'a> {
 }
 
 impl RecipeSubstrate for LiveRecipeSubstrate<'_> {
-    fn derive_branch(&mut self, plan_name: &str) -> String {
+    fn derive_branch(&mut self, plan_name: &str) -> Result<String, SubstrateError> {
         let bid = self
             .coord
             .glk_derive_branch(plan_name, &self.parent, self.now)
-            .expect("live derive_branch");
+            .map_err(|e| SubstrateError::new("derive_branch", format!("{e:?}")))?;
         let key = bid.to_string();
         self.branch_ids.insert(key.clone(), bid);
         self.plan_names.insert(key.clone(), plan_name.to_string());
-        key
+        Ok(key)
     }
 
     fn capture(
@@ -94,7 +96,7 @@ impl RecipeSubstrate for LiveRecipeSubstrate<'_> {
         lattice_code: &str,
         embedding_model_id: &str,
         sensitivity: i64,
-    ) -> String {
+    ) -> Result<String, SubstrateError> {
         let plan = self.plan_names.get(branch_id).cloned().unwrap_or_default();
         let mut frame = CaptureFrame::new(
             content,
@@ -105,25 +107,47 @@ impl RecipeSubstrate for LiveRecipeSubstrate<'_> {
             embedding_model_id,
         );
         frame.sensitivity = AdjectiveSensitivity::from_raw(sensitivity);
-        let bid = *self.branch_ids.get(branch_id).expect("tracked branch id");
-        let branch = self.coord.branch_handle_for(bid).expect("tracked branch");
-        branch.capture(frame, self.now).expect("live capture").id
+        // The branch id was minted by `derive_branch` on this same adapter,
+        // so a missing mapping is an internal invariant violation, not a
+        // substrate failure — surface it as one for a uniform error channel.
+        let bid = *self
+            .branch_ids
+            .get(branch_id)
+            .ok_or_else(|| SubstrateError::new("capture", format!("untracked branch id {branch_id}")))?;
+        let branch = self
+            .coord
+            .branch_handle_for(bid)
+            .ok_or_else(|| SubstrateError::new("capture", "branch not in registry"))?;
+        branch
+            .capture(frame, self.now)
+            .map(|d| d.id)
+            .map_err(|e| SubstrateError::new("capture", format!("{e:?}")))
     }
 
-    fn benchmark(&mut self, branch_id: &str, corpus: &[CorpusEntry]) -> BenchmarkOutcome {
-        let bid = *self.branch_ids.get(branch_id).expect("tracked branch id");
-        let branch = self.coord.branch_handle_for(bid).expect("tracked branch");
+    fn benchmark(
+        &mut self,
+        branch_id: &str,
+        corpus: &[CorpusEntry],
+    ) -> Result<BenchmarkOutcome, SubstrateError> {
+        let bid = *self
+            .branch_ids
+            .get(branch_id)
+            .ok_or_else(|| SubstrateError::new("benchmark", format!("untracked branch id {branch_id}")))?;
+        let branch = self
+            .coord
+            .branch_handle_for(bid)
+            .ok_or_else(|| SubstrateError::new("benchmark", "branch not in registry"))?;
         let expected_ids: Vec<String> = corpus.iter().map(|c| c.id.clone()).collect();
         // One unconfirmed-recall query per corpus entry — the set metrics use
         // the union of all queries' results (matching the Swift default path's
-        // 1:1 frame-per-entry shape).
+        // 1:1 frame-per-entry shape). `benchmark_branch` is itself infallible.
         let queries: Vec<RecallFrame> = corpus.iter().map(|_| Self::one_query()).collect();
         let report = neuron_kit::benchmark_branch(branch, &expected_ids, queries, self.now);
-        BenchmarkOutcome {
+        Ok(BenchmarkOutcome {
             recall_overlap: report.recall_overlap,
             mean_reciprocal_rank: report.mean_reciprocal_rank,
             not_found: report.not_found_in_branch,
-        }
+        })
     }
 }
 

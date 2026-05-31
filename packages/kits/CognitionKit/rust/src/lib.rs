@@ -39,7 +39,7 @@ pub mod migration_live;
 pub mod grounded_synthesis;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
-pub use error::RecipeError;
+pub use error::{RecipeError, RecipeRunError, SubstrateError};
 pub use catalog::{recipe_catalog, recipe_descriptor, recipe_names, RecipeDescriptor};
 pub use migration_ranking::{
     first_duplicate, lost_concepts, partition_origin, rank,

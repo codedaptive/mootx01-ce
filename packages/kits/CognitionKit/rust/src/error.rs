@@ -88,6 +88,73 @@ impl fmt::Display for RecipeError {
 
 impl std::error::Error for RecipeError {}
 
+/// A failure of a substrate operation behind the `RecipeSubstrate` seam
+/// (derive / capture / benchmark / recall). Substrate-agnostic: the live
+/// adapter maps the underlying GLK / estate error into `operation` +
+/// `detail`; the deterministic test fake never errors. Swift's `RecipeError`
+/// has no such case — its untyped `throws` lets the underlying error
+/// propagate; this type is the Rust encoding of that propagated arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubstrateError {
+    /// The seam operation that failed (e.g. "derive_branch", "capture",
+    /// "benchmark", "recall").
+    pub operation: String,
+    /// Textual cause from the underlying substrate error.
+    pub detail: String,
+}
+
+impl SubstrateError {
+    /// Construct a substrate error from an operation name and any displayable
+    /// underlying cause.
+    pub fn new(operation: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self { operation: operation.into(), detail: detail.into() }
+    }
+}
+
+impl fmt::Display for SubstrateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SubstrateError.{}: {}", self.operation, self.detail)
+    }
+}
+
+impl std::error::Error for SubstrateError {}
+
+/// The result of running a recipe: either a recipe-level `RecipeError` (the
+/// closed, parity-gated guard set) or a propagated `SubstrateError`. This is
+/// the Rust encoding of the Swift recipes' heterogeneous untyped `throws` —
+/// `RecipeError` for the recipe's own guards, the underlying substrate error
+/// otherwise. `RecipeError` stays closed and unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipeRunError {
+    /// A recipe-level guard failure (capability gate, duplicate plan, etc.).
+    Recipe(RecipeError),
+    /// A propagated substrate-operation failure.
+    Substrate(SubstrateError),
+}
+
+impl From<RecipeError> for RecipeRunError {
+    fn from(e: RecipeError) -> Self {
+        RecipeRunError::Recipe(e)
+    }
+}
+
+impl From<SubstrateError> for RecipeRunError {
+    fn from(e: SubstrateError) -> Self {
+        RecipeRunError::Substrate(e)
+    }
+}
+
+impl fmt::Display for RecipeRunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecipeRunError::Recipe(e) => write!(f, "{e}"),
+            RecipeRunError::Substrate(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for RecipeRunError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

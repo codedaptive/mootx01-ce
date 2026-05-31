@@ -14,11 +14,11 @@
 //! only substrate read is the GLK `recall` verb; `synthesize` is read-only
 //! (NeuronKit C-9) over the rows already materialised.
 //!
-//! Same infallible-seam note as `migration_live`: `RecipeError` has no
-//! estate-failure case (parity of the Swift enum; Swift's untyped `throws`
-//! lets the underlying error propagate). The recipe's contract is a valid,
-//! open handle, so a recall failure is a contract violation surfaced as a
-//! panic; growing the recipe surface to carry estate errors is a follow-on.
+//! Error surface: the recipe returns `Result<_, RecipeRunError>` — the
+//! capability gate fails as `RecipeRunError::Recipe(RecipeError)`, a recall
+//! failure propagates as `RecipeRunError::Substrate(SubstrateError)`. This is
+//! the Rust encoding of the Swift recipe's heterogeneous untyped `throws`
+//! (`RecipeError` stays the closed, parity-gated guard set).
 
 use std::collections::HashMap;
 
@@ -30,7 +30,7 @@ use neuron_kit::{
 };
 
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
-use crate::error::RecipeError;
+use crate::error::{RecipeRunError, SubstrateError};
 
 /// Recipe output: the synthesized, provenance-grounded context document and
 /// the number of recalled drawers it was grounded on. Mirrors the Swift
@@ -51,16 +51,19 @@ pub fn run_grounded_synthesis(
     frame: RecallFrame,
     tuning: RecallFrameTuning,
     now: i64,
-) -> Result<GroundedOutput, RecipeError> {
-    // B-5: verify capabilities before any substrate touch.
+) -> Result<GroundedOutput, RecipeRunError> {
+    // B-5: verify capabilities before any substrate touch. A capability gate
+    // failure propagates as RecipeRunError::Recipe.
     verify_capabilities(
         &[NeuronKitCapability::HybridRecall, NeuronKitCapability::Synthesize],
         &shipped_capabilities(),
     )?;
 
-    // 1. Recall over the single GLK recall-verb boundary (now real). The
-    //    recipe contract guarantees a valid open handle.
-    let drawers = coord.recall(handle, frame, now).expect("grounded_synthesis recall");
+    // 1. Recall over the single GLK recall-verb boundary (now real). A recall
+    //    failure (e.g. a stale handle) propagates as RecipeRunError::Substrate.
+    let drawers = coord
+        .recall(handle, frame, now)
+        .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
 
     // 2. Project to DrawerRow for rerank, and to per-id metadata for
     //    synthesis. Recalled rows are active, hence currently believed; the
@@ -105,6 +108,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::error::RecipeError;
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
