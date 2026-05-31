@@ -38,6 +38,7 @@ pub mod migration_orchestration;
 pub mod migration_live;
 pub mod grounded_synthesis;
 pub mod keystones_recipe;
+pub mod latent_themes_recipe;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::{RecipeError, RecipeRunError, SubstrateError};
@@ -53,3 +54,4 @@ pub use migration_orchestration::{
 pub use migration_live::{confirm_migration_promotion, LiveRecipeSubstrate};
 pub use grounded_synthesis::{run_grounded_synthesis, GroundedOutput};
 pub use keystones_recipe::run_keystones;
+pub use latent_themes_recipe::run_latent_themes;
