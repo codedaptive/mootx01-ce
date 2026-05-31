@@ -96,6 +96,9 @@ pub mod association;
 pub mod association_operational;
 #[cfg(test)]
 mod association_tests;
+#[cfg(test)]
+mod capture_tunnel_tests;
+
 pub mod estate_audit;
 pub mod estate_verbs;
 pub mod frames;
