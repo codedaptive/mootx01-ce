@@ -152,7 +152,9 @@ public actor DreamingDaemon {
     /// candidate and the negative baseline. 0.2 gives a comfortable
     /// margin around the 0.7 `minConfidence` default: a fully-used
     /// candidate scores ≈ 0.88 and a fully-unused one ≈ 0.05.
-    static let temperature: Double = 0.2
+    /// The value lives in `DreamingDecision` (the portable decision core);
+    /// this alias keeps the actor's own references reading naturally.
+    static let temperature: Double = DreamingDecision.temperature
 
     /// EWC++ retention factor (step 4). A consolidated confidence from an
     /// earlier cycle decays by at most this factor per cycle in the absence
@@ -161,8 +163,9 @@ public actor DreamingDaemon {
     /// permits for v1: it implements the contract "prior associations are
     /// not catastrophically overwritten" without the full Fisher-matrix
     /// machinery. 0.9 keeps a consolidated 0.88 above the 0.7 gate for
-    /// several barren cycles before it lapses.
-    static let ewcRetention: Float = 0.9
+    /// several barren cycles before it lapses. Defined in the portable
+    /// `DreamingDecision` core; aliased here for the actor's references.
+    static let ewcRetention: Float = DreamingDecision.ewcRetention
 
     // MARK: - Injected seams
 
@@ -316,52 +319,49 @@ public actor DreamingDaemon {
         // ── Step 5 (prep): existing Tunnel keys for duplicate suppression
         let tunnelKeys = Set(try await reader.existingTunnels().compactMap(Self.tunnelKey))
 
+        // ── Steps 3–6: delegate every DECISION to the pure core ────────
+        // The actor only gathers seam inputs and enacts the result; the
+        // contrastive score, EWC++ blend, duplicate suppression, and
+        // confidence-AND-attempts gate all live in `DreamingDecision` so
+        // the math is portable and conformance-gated against the Rust port
+        // (NeuronKit/rust/src/dreaming_decision.rs). See DreamingDecision.swift.
+        let outcome = DreamingDecision.decide(
+            observations: observations.map {
+                DreamingDecision.Observation(
+                    endpointA: $0.endpointA,
+                    endpointB: $0.endpointB,
+                    attempts: $0.attempts,
+                    evidenceTargets: $0.evidenceTargets)
+            },
+            rewardByTarget: rewardByTarget,
+            existingTunnelKeys: tunnelKeys,
+            alreadyProposedKeys: proposedKeys,
+            consolidated: consolidated,
+            minConfidence: policy.minConfidence,
+            minAttempts: policy.minAttempts,
+            minSuccessRate: policy.minSuccessRate
+        )
+
+        // Fold the core's decisions back into actor state and the substrate.
+        // `updatedConsolidated` covers every observation considered (EWC++
+        // retains scores that did not clear the gate); `emitted` is in the
+        // observations' order, so proposals are issued deterministically.
+        consolidated = outcome.updatedConsolidated
+        let scores = outcome.scores
+        let suppressedDuplicates = outcome.suppressedDuplicates
+        let belowThreshold = outcome.belowThreshold
+
         var emitted: [ProposeFrame] = []
-        var suppressedDuplicates = 0
-        var belowThreshold = 0
-        var scores: [String: Float] = [:]
-
-        for obs in observations {
-            let key = Self.candidateKey(obs.endpointA, obs.endpointB)
-
-            // ── Step 3: contrastive (InfoNCE-inspired) score ───────────
-            let raw = Self.contrastiveConfidence(
-                evidenceTargets: obs.evidenceTargets,
-                rewardByTarget: rewardByTarget,
-                baseline: policy.minSuccessRate
-            )
-
-            // ── Step 4: EWC++ consolidation ────────────────────────────
-            // Blend the fresh score with the retained consolidated value
-            // so an association that scored strongly earlier is not catastrophically
-            // overwritten by a barren cycle. The consolidated value
-            // decays by at most `ewcRetention` per cycle.
-            let retained = (consolidated[key] ?? 0) * Self.ewcRetention
-            let effective = Swift.max(raw, retained)
-            consolidated[key] = effective
-            scores[key] = effective
-
-            // ── Step 5: suppress duplicates of existing Tunnels and of
-            // proposals already emitted in a prior cycle (B-4 idempotency)
-            if tunnelKeys.contains(key) || proposedKeys.contains(key) {
-                suppressedDuplicates += 1
-                continue
-            }
-
-            // ── Step 6: gate on confidence AND attempts, then propose ───
-            guard effective >= policy.minConfidence, obs.attempts >= policy.minAttempts else {
-                belowThreshold += 1
-                continue
-            }
+        for candidate in outcome.emitted {
             let frame = ProposeFrame(
-                target: obs.endpointA,
+                target: candidate.endpointA,
                 kind: .miningPattern,
                 justification:
-                    "dreaming: latent alignment \(obs.endpointA)↔\(obs.endpointB) "
-                    + "(attempts \(obs.attempts), confidence \(effective))"
+                    "dreaming: latent alignment \(candidate.endpointA)↔\(candidate.endpointB) "
+                    + "(attempts \(candidate.attempts), confidence \(candidate.confidence))"
             )
             try await sink.propose(frame)
-            proposedKeys.insert(key)
+            proposedKeys.insert(candidate.key)
             emitted.append(frame)
         }
 
@@ -404,9 +404,10 @@ public actor DreamingDaemon {
 
     /// Canonical, order-independent key for a candidate endpoint pair, so
     /// A↔B and B↔A collapse to one candidate (matches the Tunnel
-    /// symmetric-id spirit).
+    /// symmetric-id spirit). Delegates to the portable `DreamingDecision`
+    /// core so the actor and the Rust port share one definition.
     static func candidateKey(_ a: RowID, _ b: RowID) -> String {
-        a <= b ? "\(a)|\(b)" : "\(b)|\(a)"
+        DreamingDecision.candidateKey(a, b)
     }
 
     /// Candidate key for an existing Tunnel, or `nil` when the tunnel is
@@ -424,20 +425,17 @@ public actor DreamingDaemon {
     /// baseline. A two-way softmax over (positive, negative) at
     /// `temperature` gives the confidence — high when the candidate's
     /// rows were acted on (reward near 1), low when they were ignored
-    /// (reward near 0). A candidate with no evidence scores 0.
+    /// (reward near 0). A candidate with no evidence scores 0. Delegates to
+    /// the portable `DreamingDecision` core (Rust-parity Bucket A), the
+    /// single definition shared with `dreaming_decision.rs`.
     static func contrastiveConfidence(
         evidenceTargets: [RowID],
         rewardByTarget: [RowID: Float],
         baseline: Float
     ) -> Float {
-        guard !evidenceTargets.isEmpty else { return 0 }
-        var sum: Float = 0
-        for target in evidenceTargets { sum += rewardByTarget[target] ?? 0 }
-        let mean = sum / Float(evidenceTargets.count)
-        // Double precision for the exponentials, then narrow to Float so
-        // the value matches the Rust port bit-for-bit on shared vectors.
-        let pos = exp(Double(mean) / temperature)
-        let neg = exp(Double(baseline) / temperature)
-        return Float(pos / (pos + neg))
+        DreamingDecision.contrastiveConfidence(
+            evidenceTargets: evidenceTargets,
+            rewardByTarget: rewardByTarget,
+            baseline: baseline)
     }
 }
