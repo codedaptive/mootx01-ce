@@ -31,14 +31,21 @@ pub fn dp_summary(
     DPORReduction::reduce(fingerprints, &params, seed)
 }
 
-/// Overlap between two DP summaries: `1 - normalized Hamming` over all four
-/// blocks. 1.0 = identical aggregates (convergent minds); → 0 as they diverge.
+/// Overlap between two DP summaries: `1 - normalized Hamming` over the
+/// content/structure/concept blocks (0 structure, 1 concept, 3 channel) — 192
+/// bits. 1.0 = identical aggregates (convergent minds); → 0 as they diverge.
 /// Computed on the summaries ONLY — neither estate's individual fingerprints
 /// are read here.
+///
+/// Block 2 (lineage-temporal) is DELIBERATELY excluded: it encodes per-row
+/// identity (a random lineage id per drawer), so it differs even between two
+/// estates holding the very same memory — comparing it across estates is both
+/// meaningless and nondeterministic. Cross-estate overlap is about what the
+/// estates are ABOUT and how they're structured, not which rows they minted.
 pub fn summary_overlap(a: Fingerprint256, b: Fingerprint256) -> f64 {
-    let all_blocks: HashSet<u8> = [0, 1, 2, 3].into_iter().collect();
-    let h = PartialStateRecall::hamming_blocks(a, b, &all_blocks);
-    1.0 - (h as f64 / 256.0)
+    let content_blocks: HashSet<u8> = [0, 1, 3].into_iter().collect();
+    let h = PartialStateRecall::hamming_blocks(a, b, &content_blocks);
+    1.0 - (h as f64 / 192.0)
 }
 
 #[cfg(test)]
