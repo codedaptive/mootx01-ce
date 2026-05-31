@@ -28,6 +28,7 @@ pub mod scenario_profile;
 pub mod tournament;
 pub mod mmr_rank;
 pub mod benchmark_scoring;
+pub mod dreaming_decision;
 
 pub use lattice_anchor::{
     AnchorConfidence, EnrichmentStatus, LatticeAnchorInference,
@@ -42,6 +43,10 @@ pub use scenario_profile::ScenarioProfile;
 pub use tournament::{bradley_terry, BradleyTerryScore, PairwiseOutcome, TournamentError};
 pub use mmr_rank::{mmr_rank, mmr_select};
 pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
+pub use dreaming_decision::{
+    candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
+    Observation, Outcome as DreamingOutcome,
+};
 
 /// The NeuronKit crate version. Pinned with the substrate
 /// schema version.
