@@ -27,6 +27,10 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 # GLK and LocusKit do not depend on NeuronKit.
 genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
 locus-kit = { path = "../../LocusKit/rust" }
+# Keystones (Lens 1, Structure) surfaces SubstrateML's gated
+# EigenvalueCentrality as a NeuronKit reasoning function — the deep matrix
+# math lives in SubstrateML; NeuronKit shapes it into a substrate result.
+substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 
 [dev-dependencies]
 # Test-only: building a parent estate to derive branches from needs the
