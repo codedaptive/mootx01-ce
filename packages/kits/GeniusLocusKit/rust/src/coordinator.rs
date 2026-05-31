@@ -97,15 +97,22 @@ fn remap(verb: &str, error: LocusKitError) -> VerbError {
 /// live verb-dispatch surface. Construction is cheap; the registry starts
 /// empty. Callers admit estates via `open` and address them by
 /// `EstateHandle` thereafter.
-#[derive(Debug, Default)]
+///
+/// It also owns the COW-branch registry (`branches`), parity of the Swift
+/// actor's `branches: [BranchID: EstateBranch]`: branches are inserted by
+/// `glk_derive_branch` and retained through every lifecycle state so the
+/// audit trail stays reachable (I-15). The branch verbs live in
+/// `branches.rs` as an `impl EstateCoordinator` block.
+#[derive(Default)]
 pub struct EstateCoordinator {
     registry: HashMap<EstateHandle, Estate>,
+    pub(crate) branches: HashMap<crate::branches::BranchId, crate::branches::EstateBranch>,
 }
 
 impl EstateCoordinator {
-    /// Construct a coordinator with an empty registry.
+    /// Construct a coordinator with empty estate and branch registries.
     pub fn new() -> Self {
-        Self { registry: HashMap::new() }
+        Self { registry: HashMap::new(), branches: HashMap::new() }
     }
 
     /// Number of estates currently open.

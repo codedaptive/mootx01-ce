@@ -1,46 +1,36 @@
 //! COW (copy-on-write) branch surface — the Rust parity of the Swift
 //! `GeniusLocusKit/Branches/*` + the `glkDeriveBranch` / `glkPromoteBranch`
-//! / `glkMergeDrawers` verbs in `Verbs/VerbSurface.swift`.
+//! / `glkMergeDrawers` / `branchHandle(for:)` verbs in `VerbSurface.swift`.
 //!
-//! A branch is a logical copy of a parent estate at derivation time, backed
-//! by a fresh in-memory `locus_kit::Estate`. The parent is NEVER modified by
-//! derivation or by captures into the branch — spec invariant I-15. Rows are
-//! propagated into the parent only by an explicit `promote` (all post-
-//! derivation rows) or `merge_drawers` (a cherry-picked subset).
+//! Following the Swift model exactly: branches are minted by verbs ON THE
+//! kit (`impl EstateCoordinator` below) and retained in the coordinator's
+//! `branches` registry through every lifecycle state (I-15 — the audit trail
+//! must stay reachable). A branch is a logical copy of a parent estate at
+//! derivation time, backed by a fresh in-memory `locus_kit::Estate`. The
+//! parent is NEVER modified by derivation or by captures into the branch;
+//! rows reach the parent only via an explicit `glk_promote_branch` (all
+//! post-derivation rows) or `glk_merge_drawers` (a cherry-picked subset).
 //!
-//! ## Why this is where GLK-rust binds the real LocusKit estate
-//!
-//! The rest of the GLK Rust scaffold mocks LocusKit recall behind a trait.
-//! Branching cannot be mocked: it IS capture/recall over a real estate. So
-//! this module depends on `locus_kit` directly (acyclic — LocusKit does not
-//! depend on GLK) and on `persistence_kit` for the in-memory `Storage`
-//! backend. This is the "downstream mission wires the real Rust port" the
-//! crate's dependency comment anticipated.
-//!
-//! ## Registry-light shape vs. the Swift actor
-//!
-//! The Swift verbs live on the `GeniusLocusKit` actor and resolve an
-//! `EstateHandle` to an estate through a kit-held registry, with a
-//! `branchNotTracked` guard and an E-2 "promotion target must be the
-//! branch's parent" guard. The Rust port folds those away: an `EstateBranch`
-//! HOLDS its parent estate (a cheap `Arc`-sharing clone of the parent), so
-//! `promote` / `merge_drawers` write to that parent directly — the target is
-//! the branch's parent by construction, so the E-2 guard is structural and
-//! the not-tracked guard is unnecessary. The COW semantics are identical.
+//! The clone is behaviour-faithful so BOTH platforms return identical
+//! datasets — derive snapshots the same rows, promote/merge move the same
+//! rows, compare_to_parent reports the same diff.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use locus_kit::drawer::Drawer;
+use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::error::LocusKitError;
 use locus_kit::estate::Estate;
 use locus_kit::estate_types::{EstateError, LatticeAnchor, OwnerCredentials};
-use locus_kit::filter::{HydrationLevel, Ordering, RecallFrame};
 use locus_kit::filter::Filter;
+use locus_kit::filter::{HydrationLevel, Ordering, RecallFrame};
 use locus_kit::frames::CaptureFrame;
-use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
+
+use crate::coordinator::EstateCoordinator;
+use crate::handle::EstateHandle;
 
 /// Unique identifier for a COW branch, minted at derivation. Mirrors the
 /// Swift `BranchID = UUID`.
@@ -57,9 +47,8 @@ pub enum BranchStatus {
     Discarded,
 }
 
-/// Advisory scoring metadata for a branch (Brain-layer ranking input). The
-/// substrate does not derive or enforce these — parity with the Swift
-/// `BranchScore`.
+/// Advisory scoring metadata for a branch (Brain-layer ranking input);
+/// parity with the Swift `BranchScore`. The substrate does not derive these.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BranchScore {
     pub quality: f64,
@@ -75,8 +64,8 @@ pub struct DifferentialReport {
     pub withdrawn_in_branch: Vec<String>,
 }
 
-/// Outcome of a selective `merge_drawers`. `conflicts` is reserved (always
-/// empty), matching Swift.
+/// Outcome of a selective `glk_merge_drawers`. `conflicts` is reserved
+/// (always empty), matching Swift.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergeReport {
     pub merged: Vec<String>,
@@ -84,12 +73,21 @@ pub struct MergeReport {
     pub skipped: Vec<String>,
 }
 
-/// Errors a branch operation can surface — a thin union over the two
-/// underlying LocusKit error types.
+/// Errors a branch verb can surface. The estate-level cases (`Estate`,
+/// `Locus`) arise while building/promoting; the kit-level cases mirror the
+/// Swift `GeniusLocusKitError.branchNotTracked` and the E-2 promotion-target
+/// guard.
 #[derive(Debug)]
 pub enum BranchError {
     Estate(EstateError),
     Locus(LocusKitError),
+    /// The addressed estate was not open (parity of `estate(for:)`).
+    EstateNotOpen,
+    /// The branch was not minted by this coordinator (parity of
+    /// `GeniusLocusKitError.branchNotTracked`).
+    NotTracked { branch_id: BranchId },
+    /// The promotion/merge target is not the branch's parent estate (E-2).
+    PromotionTargetMismatch { branch_id: BranchId },
 }
 
 impl From<EstateError> for BranchError {
@@ -99,14 +97,15 @@ impl From<LocusKitError> for BranchError {
     fn from(e: LocusKitError) -> Self { BranchError::Locus(e) }
 }
 
-/// A read-write COW branch backed by a fresh in-memory estate.
+/// A read-write COW branch backed by a fresh in-memory estate. Minted and
+/// retained by `EstateCoordinator`; mirrors the Swift `EstateBranch`.
 pub struct EstateBranch {
     pub branch_id: BranchId,
     pub name: String,
     pub lineage_depth: usize,
     /// The branch's own estate — captures land here only.
     branch_estate: Estate,
-    /// The parent estate, sharing the parent's store (`Arc`). `promote` /
+    /// The parent estate (Arc-shares the parent's store). `promote` /
     /// `merge_drawers` write here; nothing else does (I-15).
     parent_estate: Estate,
     /// Branch-estate IDs copied from the parent at derivation. Any branch ID
@@ -117,7 +116,7 @@ pub struct EstateBranch {
 
 impl EstateBranch {
     /// Recall every unconfirmed row from an estate, draining all pages —
-    /// the snapshot read `glkDeriveBranch` and the promote/merge scans use.
+    /// the snapshot/promote/merge scans.
     fn recall_all(estate: &Estate, now: i64) -> Vec<Drawer> {
         let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
         frame.hydration_level = HydrationLevel::Structured;
@@ -125,11 +124,10 @@ impl EstateBranch {
         estate.recall(frame, now).collect_all()
     }
 
-    /// Rebuild a `CaptureFrame` from a stored row, preserving the fields the
-    /// Swift re-capture preserves: content, capture channel, room, the full
-    /// lattice anchor, author, embedding model, adjective sensitivity, and
-    /// content kind. (`CaptureFrame::new` defaults sensitivity/kind, so they
-    /// are set explicitly after construction.)
+    /// Rebuild a `CaptureFrame` from a stored row, preserving content,
+    /// capture channel, room, the full lattice anchor, author, embedding
+    /// model, adjective sensitivity, and content kind (the fields the Swift
+    /// re-capture preserves).
     fn capture_frame_from(row: &Drawer) -> CaptureFrame {
         let mut frame = CaptureFrame::new(
             row.content.clone(),
@@ -149,20 +147,20 @@ impl EstateBranch {
         frame
     }
 
-    /// Build a fresh, isolated in-memory branch estate. The owner encodes the
-    /// branch id for log traceability, matching the Swift `branch-<uuid>`.
+    /// Build a fresh, isolated in-memory branch estate (owner encodes the
+    /// branch id, matching the Swift `branch-<uuid>`).
     fn new_branch_estate(branch_id: BranchId, now: i64) -> Result<Estate, BranchError> {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store = Arc::new(InMemoryDrawerStore::new(storage, now, None)?);
         let owner = OwnerCredentials::new(format!("branch-{branch_id}"));
-        let estate = Estate::create(store, owner, None)?;
-        Ok(estate)
+        Ok(Estate::create(store, owner, None)?)
     }
 
     /// Copy `snapshot_rows` into a new branch estate, recording the minted
     /// branch-estate IDs as the derivation snapshot. Shared by both derive
-    /// entry points.
-    fn build(
+    /// entry points. `pub(crate)` — branches are minted through the
+    /// coordinator's verbs, mirroring the Swift `glkDeriveBranch`.
+    pub(crate) fn build(
         name: String,
         parent_estate: Estate,
         snapshot_rows: &[Drawer],
@@ -187,33 +185,16 @@ impl EstateBranch {
         })
     }
 
-    /// Derive a branch from a parent estate (lineage depth 1). All current
-    /// parent rows are copied into a fresh branch estate; the parent is
-    /// untouched. Parity of `glkDeriveBranch(name:from:)`.
-    pub fn derive(name: impl Into<String>, parent: &Estate, now: i64) -> Result<Self, BranchError> {
-        let snapshot_rows = Self::recall_all(parent, now);
-        Self::build(name.into(), parent.clone(), &snapshot_rows, 1, now)
-    }
-
-    /// Derive a child branch from another branch (lineage depth + 1). Parity
-    /// of `glkDeriveBranch(name:fromBranch:)`.
-    pub fn derive_from_branch(
-        name: impl Into<String>,
-        parent_branch: &EstateBranch,
-        now: i64,
-    ) -> Result<Self, BranchError> {
-        let snapshot_rows = Self::recall_all(&parent_branch.branch_estate, now);
-        Self::build(
-            name.into(),
-            parent_branch.branch_estate.clone(),
-            &snapshot_rows,
-            parent_branch.lineage_depth + 1,
-            now,
-        )
-    }
-
     /// Current lifecycle status.
     pub fn status(&self) -> BranchStatus { self.status }
+
+    /// The parent estate's UUID — used by the coordinator's E-2 guard to
+    /// confirm a promotion/merge targets the branch's actual parent.
+    pub(crate) fn parent_estate_uuid(&self) -> Uuid { self.parent_estate.estate_uuid() }
+
+    /// The branch estate (read-only) — the coordinator reads it to derive a
+    /// child branch (branch-of-branch).
+    pub(crate) fn branch_estate(&self) -> &Estate { &self.branch_estate }
 
     /// Capture a new drawer into this branch estate only. The parent is
     /// untouched (I-15).
@@ -226,23 +207,20 @@ impl EstateBranch {
         Self::recall_all(&self.branch_estate, now)
     }
 
-    /// Recall from this branch estate with a caller-supplied frame. The
-    /// per-query read path the migration benchmark uses (it issues one
-    /// `recall_with` per query frame and is otherwise read-only). The parent
-    /// is never touched.
+    /// Recall from this branch estate with a caller-supplied frame — the
+    /// per-query read path the migration benchmark uses (read-only; the
+    /// parent is never touched).
     pub fn recall_with(&self, frame: RecallFrame, now: i64) -> Vec<Drawer> {
         self.branch_estate.recall(frame, now).collect_all()
     }
 
     /// Transition the branch to `Discarded`. Rows are retained for audit;
     /// `recall` still works afterwards.
-    pub fn discard(&mut self) {
+    pub(crate) fn set_discarded(&mut self) {
         self.status = BranchStatus::Discarded;
     }
 
     /// Compare the current branch state to the derivation snapshot.
-    /// `new_in_branch` = branch IDs absent from the snapshot;
-    /// `withdrawn_in_branch` = snapshot IDs no longer present.
     pub fn compare_to_parent(&self, now: i64) -> DifferentialReport {
         let current_ids: BTreeSet<String> =
             self.recall(now).into_iter().map(|d| d.id).collect();
@@ -257,11 +235,10 @@ impl EstateBranch {
         }
     }
 
-    /// Promote the branch into its parent: re-capture every row added after
-    /// derivation (not in the snapshot) into the parent estate, then
-    /// transition to `Won`. Returns the number of rows promoted. Parity of
-    /// `glkPromoteBranch`.
-    pub fn promote(&mut self, now: i64) -> Result<usize, BranchError> {
+    /// Re-capture every post-derivation row into the parent estate and
+    /// transition to `Won`. Returns the count promoted. `pub(crate)` — driven
+    /// by the coordinator's `glk_promote_branch`.
+    pub(crate) fn promote(&mut self, now: i64) -> Result<usize, BranchError> {
         let new_rows: Vec<Drawer> = self
             .recall(now)
             .into_iter()
@@ -274,10 +251,13 @@ impl EstateBranch {
         Ok(new_rows.len())
     }
 
-    /// Cherry-pick specific branch rows into the parent by branch-estate ID,
-    /// then transition to `Merged`. IDs not present in the branch are
-    /// `skipped`. Parity of `glkMergeDrawers`.
-    pub fn merge_drawers(&mut self, drawer_ids: &[String], now: i64) -> Result<MergeReport, BranchError> {
+    /// Cherry-pick branch rows into the parent by branch-estate ID; transition
+    /// to `Merged`. Driven by the coordinator's `glk_merge_drawers`.
+    pub(crate) fn merge_drawers(
+        &mut self,
+        drawer_ids: &[String],
+        now: i64,
+    ) -> Result<MergeReport, BranchError> {
         let rows = self.recall(now);
         let mut merged = Vec::new();
         let mut skipped = Vec::new();
@@ -295,128 +275,254 @@ impl EstateBranch {
     }
 }
 
+// MARK: - Branch verbs on the kit (parity of VerbSurface.swift branch verbs)
+
+impl EstateCoordinator {
+    /// Derive a COW branch from the estate addressed by `handle` (lineage
+    /// depth 1). Snapshots all current parent rows into a fresh branch estate
+    /// and retains the branch in the registry. Parity of
+    /// `glkDeriveBranch(name:from:)`. Returns the new branch's id.
+    pub fn glk_derive_branch(
+        &mut self,
+        name: impl Into<String>,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<BranchId, BranchError> {
+        let parent = self.estate_for(handle).map_err(|_| BranchError::EstateNotOpen)?;
+        let snapshot_rows = EstateBranch::recall_all(parent, now);
+        let branch = EstateBranch::build(name.into(), parent.clone(), &snapshot_rows, 1, now)?;
+        let id = branch.branch_id;
+        self.branches.insert(id, branch);
+        Ok(id)
+    }
+
+    /// Derive a child branch from an existing tracked branch (lineage depth
+    /// + 1). Parity of `glkDeriveBranch(name:fromBranch:)`.
+    pub fn glk_derive_branch_from_branch(
+        &mut self,
+        name: impl Into<String>,
+        parent_branch_id: BranchId,
+        now: i64,
+    ) -> Result<BranchId, BranchError> {
+        let parent_branch = self
+            .branches
+            .get(&parent_branch_id)
+            .ok_or(BranchError::NotTracked { branch_id: parent_branch_id })?;
+        let snapshot_rows = EstateBranch::recall_all(parent_branch.branch_estate(), now);
+        let parent_estate = parent_branch.branch_estate().clone();
+        let depth = parent_branch.lineage_depth + 1;
+        let branch = EstateBranch::build(name.into(), parent_estate, &snapshot_rows, depth, now)?;
+        let id = branch.branch_id;
+        self.branches.insert(id, branch);
+        Ok(id)
+    }
+
+    /// Promote a tracked branch into the estate addressed by `handle`,
+    /// re-capturing every post-derivation row into the parent and
+    /// transitioning the branch to `Won`. Parity of `glkPromoteBranch`.
+    /// Guards: branch must be tracked; `handle` must address the branch's
+    /// parent estate (E-2).
+    pub fn glk_promote_branch(
+        &mut self,
+        branch_id: BranchId,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<usize, BranchError> {
+        let target_uuid = self
+            .estate_for(handle)
+            .map_err(|_| BranchError::EstateNotOpen)?
+            .estate_uuid();
+        let branch = self
+            .branches
+            .get_mut(&branch_id)
+            .ok_or(BranchError::NotTracked { branch_id })?;
+        if branch.parent_estate_uuid() != target_uuid {
+            return Err(BranchError::PromotionTargetMismatch { branch_id });
+        }
+        branch.promote(now)
+    }
+
+    /// Cherry-pick specific branch rows into the estate addressed by
+    /// `handle`, transitioning the branch to `Merged`. Parity of
+    /// `glkMergeDrawers`. Same guards as `glk_promote_branch`.
+    pub fn glk_merge_drawers(
+        &mut self,
+        drawer_ids: &[String],
+        branch_id: BranchId,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<MergeReport, BranchError> {
+        let target_uuid = self
+            .estate_for(handle)
+            .map_err(|_| BranchError::EstateNotOpen)?
+            .estate_uuid();
+        let branch = self
+            .branches
+            .get_mut(&branch_id)
+            .ok_or(BranchError::NotTracked { branch_id })?;
+        if branch.parent_estate_uuid() != target_uuid {
+            return Err(BranchError::PromotionTargetMismatch { branch_id });
+        }
+        branch.merge_drawers(drawer_ids, now)
+    }
+
+    /// Discard a tracked branch (status -> `Discarded`); rows retained for
+    /// audit. Parity of `BranchHandle.discard()`.
+    pub fn glk_discard_branch(&mut self, branch_id: BranchId) -> Result<(), BranchError> {
+        let branch = self
+            .branches
+            .get_mut(&branch_id)
+            .ok_or(BranchError::NotTracked { branch_id })?;
+        branch.set_discarded();
+        Ok(())
+    }
+
+    /// Resolve a tracked branch by id to a read-only handle — the stateless
+    /// recovery accessor (parity of `branchHandle(for:)`). `None` when no
+    /// branch with that id was minted by this coordinator.
+    pub fn branch_handle_for(&self, branch_id: BranchId) -> Option<&EstateBranch> {
+        self.branches.get(&branch_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::drawer_store::DrawerStore;
 
     const NOW: i64 = 1_700_000_000;
 
-    /// Build a parent estate seeded with `contents.len()` rows.
-    fn parent_with(contents: &[&str]) -> Estate {
+    /// Build a coordinator with one open parent estate seeded with the given
+    /// row contents. Returns (coordinator, parent handle).
+    fn coord_with_parent(contents: &[&str]) -> (EstateCoordinator, EstateHandle) {
+        let mut coord = EstateCoordinator::new();
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let estate = Estate::create(store, OwnerCredentials::new("owner"), None).unwrap();
+        let store: Arc<dyn DrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
+        let handle = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
         for c in contents {
             let frame = CaptureFrame::new(
                 *c,
-                locus_kit::drawer_operational::CaptureChannel::Typed,
+                CaptureChannel::Typed,
                 "study",
                 LatticeAnchor::udc("0"),
                 "alice",
                 "test-v1",
             );
-            estate.capture(frame, NOW).unwrap();
+            // Capture into the parent via the live verb surface.
+            coord.capture(&handle, frame, NOW).unwrap();
         }
-        estate
+        (coord, handle)
     }
 
-    fn branch_capture(branch: &EstateBranch, content: &str) -> Drawer {
+    fn branch_capture(coord: &EstateCoordinator, branch_id: BranchId, content: &str) -> String {
         let frame = CaptureFrame::new(
             content,
-            locus_kit::drawer_operational::CaptureChannel::Typed,
+            CaptureChannel::Typed,
             "study",
             LatticeAnchor::udc("0"),
             "bob",
             "test-v1",
         );
-        branch.capture(frame, NOW).unwrap()
+        coord.branch_handle_for(branch_id).unwrap().capture(frame, NOW).unwrap().id
     }
 
-    // BR-1: derivation snapshots all parent rows; the parent is untouched.
+    // BR-1: glk_derive_branch snapshots all parent rows; the parent is
+    // untouched (I-15).
     #[test]
-    fn br1_derive_snapshots_parent_and_leaves_it_unmodified() {
-        let parent = parent_with(&["alpha", "beta"]);
-        let branch = EstateBranch::derive("b1", &parent, NOW).unwrap();
+    fn br1_derive_snapshots_parent() {
+        let (mut coord, h) = coord_with_parent(&["alpha", "beta"]);
+        let bid = coord.glk_derive_branch("b1", &h, NOW).unwrap();
+        let branch = coord.branch_handle_for(bid).unwrap();
         assert_eq!(branch.recall(NOW).len(), 2, "branch starts with the 2 parent rows");
         assert_eq!(branch.lineage_depth, 1);
         assert_eq!(branch.status(), BranchStatus::Active);
         // I-15: parent unchanged by derivation.
-        assert_eq!(EstateBranch::recall_all(&parent, NOW).len(), 2);
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 2);
     }
 
-    // BR-2: a capture into the branch is isolated; compareToParent reports it
-    // as new-in-branch and the parent is still untouched (I-15).
+    fn all_frame() -> RecallFrame {
+        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+        f.hydration_level = HydrationLevel::Structured;
+        f.ordering = Ordering::ByCaptureTimeDesc;
+        f
+    }
+
+    // BR-2: a branch capture is isolated; compareToParent reports it as
+    // new-in-branch; the parent stays untouched (I-15).
     #[test]
-    fn br2_branch_capture_is_isolated_and_diffed() {
-        let parent = parent_with(&["alpha"]);
-        let branch = EstateBranch::derive("b2", &parent, NOW).unwrap();
-        branch_capture(&branch, "gamma");
+    fn br2_branch_capture_isolated_and_diffed() {
+        let (mut coord, h) = coord_with_parent(&["alpha"]);
+        let bid = coord.glk_derive_branch("b2", &h, NOW).unwrap();
+        branch_capture(&coord, bid, "gamma");
+        let branch = coord.branch_handle_for(bid).unwrap();
         assert_eq!(branch.recall(NOW).len(), 2);
         let diff = branch.compare_to_parent(NOW);
-        assert_eq!(diff.new_in_branch.len(), 1, "the new row is new-in-branch");
+        assert_eq!(diff.new_in_branch.len(), 1);
         assert!(diff.withdrawn_in_branch.is_empty());
-        assert!(diff.modified_in_branch.is_empty());
-        // I-15: parent still has only its original row.
-        assert_eq!(EstateBranch::recall_all(&parent, NOW).len(), 1);
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 1, "I-15: parent untouched");
     }
 
-    // BR-3: promote re-captures only post-derivation rows into the parent and
-    // transitions to Won. The snapshot rows are NOT duplicated into the parent.
+    // BR-3: promote moves only post-derivation rows into the parent; status
+    // -> Won.
     #[test]
     fn br3_promote_moves_new_rows_and_wins() {
-        let parent = parent_with(&["alpha"]);
-        let mut branch = EstateBranch::derive("b3", &parent, NOW).unwrap();
-        branch_capture(&branch, "gamma");
-        branch_capture(&branch, "delta");
-        let promoted = branch.promote(NOW).unwrap();
-        assert_eq!(promoted, 2, "two post-derivation rows promoted");
-        assert_eq!(branch.status(), BranchStatus::Won);
-        // Parent now has its original row plus the two promoted ones (the
-        // snapshot copy is not re-added).
-        assert_eq!(EstateBranch::recall_all(&parent, NOW).len(), 3);
+        let (mut coord, h) = coord_with_parent(&["alpha"]);
+        let bid = coord.glk_derive_branch("b3", &h, NOW).unwrap();
+        branch_capture(&coord, bid, "gamma");
+        branch_capture(&coord, bid, "delta");
+        let promoted = coord.glk_promote_branch(bid, &h, NOW).unwrap();
+        assert_eq!(promoted, 2);
+        assert_eq!(coord.branch_handle_for(bid).unwrap().status(), BranchStatus::Won);
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 3, "parent + 2 promoted");
     }
 
-    // BR-4: merge cherry-picks by branch-estate ID; unknown IDs are skipped;
-    // status becomes Merged.
+    // BR-4: merge cherry-picks by id; unknown ids skipped; status -> Merged.
     #[test]
-    fn br4_merge_cherry_picks_by_id() {
-        let parent = parent_with(&["alpha"]);
-        let mut branch = EstateBranch::derive("b4", &parent, NOW).unwrap();
-        let g = branch_capture(&branch, "gamma");
-        branch_capture(&branch, "delta");
-        let report = branch
-            .merge_drawers(&[g.id.clone(), "no-such-id".to_string()], NOW)
+    fn br4_merge_cherry_picks() {
+        let (mut coord, h) = coord_with_parent(&["alpha"]);
+        let bid = coord.glk_derive_branch("b4", &h, NOW).unwrap();
+        let g = branch_capture(&coord, bid, "gamma");
+        branch_capture(&coord, bid, "delta");
+        let report = coord
+            .glk_merge_drawers(&[g.clone(), "no-such-id".to_string()], bid, &h, NOW)
             .unwrap();
-        assert_eq!(report.merged, vec![g.id]);
+        assert_eq!(report.merged, vec![g]);
         assert_eq!(report.skipped, vec!["no-such-id".to_string()]);
-        assert!(report.conflicts.is_empty());
-        assert_eq!(branch.status(), BranchStatus::Merged);
-        // Parent got exactly the one cherry-picked row (original + 1).
-        assert_eq!(EstateBranch::recall_all(&parent, NOW).len(), 2);
+        assert_eq!(coord.branch_handle_for(bid).unwrap().status(), BranchStatus::Merged);
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 2, "parent + 1 merged");
     }
 
     // BR-5: branch-of-branch increments lineage depth and snapshots the
     // parent branch's current rows.
     #[test]
     fn br5_branch_of_branch_lineage_depth() {
-        let parent = parent_with(&["alpha"]);
-        let b1 = EstateBranch::derive("b1", &parent, NOW).unwrap();
-        branch_capture(&b1, "gamma");
-        let b2 = EstateBranch::derive_from_branch("b2", &b1, NOW).unwrap();
-        assert_eq!(b2.lineage_depth, 2);
-        assert_eq!(b2.recall(NOW).len(), 2, "child snapshots parent branch's 2 rows");
+        let (mut coord, h) = coord_with_parent(&["alpha"]);
+        let b1 = coord.glk_derive_branch("b1", &h, NOW).unwrap();
+        branch_capture(&coord, b1, "gamma");
+        let b2 = coord.glk_derive_branch_from_branch("b2", b1, NOW).unwrap();
+        let child = coord.branch_handle_for(b2).unwrap();
+        assert_eq!(child.lineage_depth, 2);
+        assert_eq!(child.recall(NOW).len(), 2, "child snapshots parent branch's 2 rows");
     }
 
-    // BR-6: discard transitions to Discarded but rows remain recallable
-    // (audit retention), and the parent is never touched.
+    // BR-6: discard retains rows; parent untouched. And an untracked branch
+    // id is rejected (parity of branchNotTracked).
     #[test]
-    fn br6_discard_retains_rows_and_spares_parent() {
-        let parent = parent_with(&["alpha"]);
-        let mut branch = EstateBranch::derive("b6", &parent, NOW).unwrap();
-        branch_capture(&branch, "gamma");
-        branch.discard();
-        assert_eq!(branch.status(), BranchStatus::Discarded);
-        assert_eq!(branch.recall(NOW).len(), 2, "rows retained after discard");
-        assert_eq!(EstateBranch::recall_all(&parent, NOW).len(), 1, "I-15: parent untouched");
+    fn br6_discard_and_not_tracked_guard() {
+        let (mut coord, h) = coord_with_parent(&["alpha"]);
+        let bid = coord.glk_derive_branch("b6", &h, NOW).unwrap();
+        branch_capture(&coord, bid, "gamma");
+        coord.glk_discard_branch(bid).unwrap();
+        assert_eq!(coord.branch_handle_for(bid).unwrap().status(), BranchStatus::Discarded);
+        assert_eq!(coord.branch_handle_for(bid).unwrap().recall(NOW).len(), 2, "rows retained");
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 1, "I-15: parent untouched");
+
+        let bogus = Uuid::new_v4();
+        match coord.glk_promote_branch(bogus, &h, NOW) {
+            Err(BranchError::NotTracked { branch_id }) => assert_eq!(branch_id, bogus),
+            other => panic!("expected NotTracked, got {other:?}"),
+        }
     }
 }
