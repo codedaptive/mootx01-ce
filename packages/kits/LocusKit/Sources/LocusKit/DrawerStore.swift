@@ -681,6 +681,109 @@ public actor DrawerStore {
         }
     }
 
+    /// Reanchor a drawer: update the row's placement columns (`room` and/or
+    /// lattice anchor columns), emitting one sealed audit event for the move.
+    ///
+    /// Routes through `AuditGate.admit` with `verb: .mutate` (the active→active
+    /// self-loop) because no `RowVerb.reanchor` case exists. The anchor delta
+    /// is expressed via `priorLatticeAnchor` ≠ `afterLatticeAnchor`. The three
+    /// bitmaps are read and passed as-is (unchanged by a reanchor). All column
+    /// writes and the audit event append occur in the same transaction.
+    ///
+    /// Throws:
+    ///   - `LocusKitError.drawerNotFound(id:)` when the row is absent.
+    ///   - `LocusKitError.invalidContent(...)` when the gate rejects the write.
+    public func reanchorGated(
+        drawerId: String,
+        toRoom: String? = nil,
+        toLattice: LatticeAnchor? = nil,
+        changedBy: String,
+        reason: String? = nil,
+        now: Date = Date()
+    ) async throws {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(changedBy, label: "changedBy")
+
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
+        let estate = estateUuid
+        let vocab = vocabulary
+
+        try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+            guard let row = rows.first else {
+                throw LocusKitError.drawerNotFound(id: drawerId)
+            }
+            let priorBitmap = Self.int64(row["adjectiveBitmap"])
+            let priorOperational = Self.int64(row["operationalBitmap"])
+            let priorProvenance = Self.int64(row["provenance"])
+            let prior = BitmapFields(
+                adjective: UInt64(bitPattern: priorBitmap),
+                operational: UInt64(bitPattern: priorOperational),
+                provenance: UInt64(bitPattern: priorProvenance)
+            )
+            let priorAnchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let afterAnchor: SubstrateTypes.LatticeAnchor
+            if let newLattice = toLattice {
+                afterAnchor = SubstrateTypes.LatticeAnchor.udc(newLattice.udcCode)
+            } else {
+                afterAnchor = priorAnchor
+            }
+
+            // Reanchor is a placement move, not a bitmap field edit. No
+            // FieldWrites are needed — the gate records the anchor delta via
+            // priorLatticeAnchor/afterLatticeAnchor and validates the verb
+            // (mutate = active→active self-loop). Pass an empty writes array.
+            let result = AuditGate.admit(
+                estateUuid: estate,
+                rowId: rowUuid,
+                nounType: .drawer,
+                verb: .mutate,
+                prior: prior,
+                priorLatticeAnchor: priorAnchor,
+                writes: [],
+                afterLatticeAnchor: afterAnchor,
+                vocabulary: vocab,
+                hlc: stamp,
+                actor: changedBy
+            )
+            let event: AuditEvent
+            switch result {
+            case .success(let e): event = e
+            case .failure(let v):
+                throw LocusKitError.invalidContent("reanchor rejected by gate: \(v)")
+            }
+
+            // Build the column update dictionary. Always update at least
+            // the columns named in the event (bitmaps are unchanged, so the
+            // write is idempotent there) plus any placement columns that changed.
+            var updateValues: [String: TypedValue] = [:]
+            if let newLattice = toLattice {
+                updateValues["udcCode"] = .text(newLattice.udcCode)
+                updateValues["udcFacets"] = newLattice.udcFacets.map { .text($0) } ?? .null
+                updateValues["wikidataQID"] = newLattice.wikidataQID.map { .text($0) } ?? .null
+                updateValues["wikidataQidsSecondary"] = newLattice.wikidataQidsSecondary.map { .text($0) } ?? .null
+            }
+            if let newRoom = toRoom {
+                updateValues["room"] = .text(newRoom)
+            }
+
+            if !updateValues.isEmpty {
+                _ = try await txn.rowStore.update(
+                    table: "drawers",
+                    values: updateValues,
+                    where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+                )
+            }
+            try await txn.auditLog.append(event)
+            _ = reason   // retained for future ProvFrame composition
+        }
+    }
+
     /// Parse a row id string to a UUID for the audit event, or throw.
     /// Per the clock decision the audit event's rowId is a real UUID and
     /// is sealed into the content-id; a non-UUID id at a gated write site
