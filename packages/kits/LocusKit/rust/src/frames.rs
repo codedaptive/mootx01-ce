@@ -12,6 +12,8 @@ use crate::drawer_operational::{CaptureChannel, ContentKind};
 use crate::estate_types::LatticeAnchor;
 use crate::filter::LineageID;
 use crate::provenance::{Channel, Sensitivity, SourceType};
+use crate::tunnel_operational::TunnelKind;
+
 
 // MARK: - CaptureFrame
 
@@ -104,6 +106,70 @@ impl CaptureFrame {
             lattice_anchor,
             added_by: added_by.into(),
             embedding_model_id: embedding_model_id.into(),
+        }
+    }
+}
+
+// MARK: - TunnelCaptureFrame
+
+/// Slots for the `capture` verb applied to a **tunnel** (a graph edge).
+/// Mirrors Swift `TunnelCaptureFrame`. Per spec § 7.1 / § 7.8.3.
+///
+/// `capture` is legal on exactly two nouns — drawer and tunnel. The drawer
+/// path uses `CaptureFrame`; this is the edge-shaped sibling: source +
+/// target endpoints (wing + room + optional drawer id), a free-form
+/// `label`, and the typed `kind`.
+///
+/// There are deliberately no content, lattice-anchor, or embedding slots,
+/// and the three bitmaps are not exposed — standalone capture zero-inits
+/// them, byte-identical to the tunnel the supersession cascade writes in
+/// `InMemoryDrawerStore::add_drawer_with_cascade`. One tunnel shape, two
+/// entry points (mission VERB-CAP-01).
+#[derive(Debug, Clone)]
+pub struct TunnelCaptureFrame {
+    /// Wing of the source endpoint.
+    pub source_wing: String,
+    /// Room of the source endpoint.
+    pub source_room: String,
+    /// Drawer id at the source endpoint. `None` means "the room itself".
+    pub source_drawer_id: Option<String>,
+    /// Wing of the target endpoint.
+    pub target_wing: String,
+    /// Room of the target endpoint.
+    pub target_room: String,
+    /// Drawer id at the target endpoint. `None` means "the room itself".
+    pub target_drawer_id: Option<String>,
+    /// Free-form relationship label (matches `Tunnel.label`).
+    pub label: String,
+    /// Typed relationship kind. The `new` constructor defaults this to
+    /// `TunnelKind::References`, matching `Tunnel`'s non-cascade default.
+    pub kind: TunnelKind,
+    /// Actor identifier written into the tunnel's `added_by` field.
+    pub added_by: String,
+}
+
+impl TunnelCaptureFrame {
+    /// Construct a `TunnelCaptureFrame` with `kind` defaulting to
+    /// `TunnelKind::References` and both drawer ids `None` (a room-level
+    /// edge). Mirrors the Swift initializer's defaults.
+    pub fn new(
+        source_wing: impl Into<String>,
+        source_room: impl Into<String>,
+        target_wing: impl Into<String>,
+        target_room: impl Into<String>,
+        label: impl Into<String>,
+        added_by: impl Into<String>,
+    ) -> Self {
+        Self {
+            source_wing: source_wing.into(),
+            source_room: source_room.into(),
+            source_drawer_id: None,
+            target_wing: target_wing.into(),
+            target_room: target_room.into(),
+            target_drawer_id: None,
+            label: label.into(),
+            kind: TunnelKind::References,
+            added_by: added_by.into(),
         }
     }
 }
