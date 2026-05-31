@@ -34,6 +34,7 @@ pub mod capability;
 pub mod error;
 pub mod catalog;
 pub mod migration_ranking;
+pub mod migration_orchestration;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::RecipeError;
@@ -41,4 +42,8 @@ pub use catalog::{recipe_catalog, recipe_descriptor, recipe_names, RecipeDescrip
 pub use migration_ranking::{
     first_duplicate, lost_concepts, partition_origin, rank,
     DisqualifiedCore, PlanOutcome, RankedPlan, RankingResult,
+};
+pub use migration_orchestration::{
+    run_migration_benchmark, BenchmarkOutcome, CorpusEntry, CoreReport, OriginEntry, PlanInput,
+    PlanResultCore, RecipeSubstrate,
 };
