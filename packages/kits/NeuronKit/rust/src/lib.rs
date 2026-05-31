@@ -30,6 +30,7 @@ pub mod mmr_rank;
 pub mod benchmark_scoring;
 pub mod benchmark_live;
 pub mod tournament_live;
+pub mod keystones;
 pub mod dreaming_decision;
 pub mod dreaming_cycle;
 pub mod maintenance_decision;
@@ -53,6 +54,7 @@ pub use tournament_live::{
     rank_tournament, run_tournament, BranchScore, DisqualificationReason, DisqualifiedBranch,
     TournamentReport,
 };
+pub use keystones::{keystones, Keystone};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,
