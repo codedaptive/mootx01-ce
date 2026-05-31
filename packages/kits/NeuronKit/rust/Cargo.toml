@@ -31,6 +31,9 @@ locus-kit = { path = "../../LocusKit/rust" }
 # EigenvalueCentrality as a NeuronKit reasoning function — the deep matrix
 # math lives in SubstrateML; NeuronKit shapes it into a substrate result.
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
+# FeelsLike (Lens 7) surfaces SubstrateML's partial_state_recall, whose
+# row id + fingerprint types (RowId, Fingerprint256) come from SubstrateTypes.
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 
 [dev-dependencies]
 # Test-only: building a parent estate to derive branches from needs the

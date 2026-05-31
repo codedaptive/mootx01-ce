@@ -219,6 +219,7 @@ dependencies = [
  "serde",
  "serde_json",
  "substrate-ml",
+ "substrate-types",
  "uuid",
 ]
 
