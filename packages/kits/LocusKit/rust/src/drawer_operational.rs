@@ -194,6 +194,18 @@ impl Drawer {
         ContentKind::from_raw(bit_field::extract_field(self.operational_bitmap, 6, 6))
     }
 
+    /// Decode bits 6–11 of `adjective_bitmap` as an `AdjectiveSensitivity`.
+    /// Returns `Normal` for unrecognised raw values. Cookbook §2.3 6-bit
+    /// field. The parity of the Swift `Drawer.adjectiveSensitivity` computed
+    /// property; named `adjective_sensitivity` (not `sensitivity`) to avoid
+    /// colliding with the provenance-bitmap `sensitivity()` accessor.
+    pub fn adjective_sensitivity(&self) -> crate::adjectives::AdjectiveSensitivity {
+        // Cookbook §2.3: adjective sensitivity at bits 6-11 of adjective_bitmap.
+        crate::adjectives::AdjectiveSensitivity::from_raw(
+            bit_field::extract_field(self.adjective_bitmap, 6, 6),
+        )
+    }
+
     /// The feature-flag region of `operational_bitmap` masked to bits
     /// 12–23. Bit positions inside the masked value match the
     /// `DrawerFeatureFlags` constants exactly. Cookbook §2.4.

@@ -20,5 +20,12 @@ path = "src/lib.rs"
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # The coordinator, handle, and lattice-overlap fan-out logic remain pure
-# Rust; LocusKit-equivalent recall is mocked through a trait that
-# downstream missions wire to the real Rust port when it exists.
+# Rust; LocusKit-equivalent recall is mocked through a trait in those
+# surfaces. The COW branch surface (src/branches), by contrast, IS the
+# downstream mission that wires the real Rust LocusKit estate: a branch is
+# a fresh in-memory `locus_kit::Estate` and branching is pure capture/recall
+# over it, so it binds the real port directly (acyclic — LocusKit does not
+# depend on GLK). persistence-kit supplies the in-memory `Storage` backend.
+locus-kit = { path = "../../LocusKit/rust" }
+persistence-kit = { path = "../../PersistenceKit/rust" }
+uuid = { version = "1", features = ["v4"] }

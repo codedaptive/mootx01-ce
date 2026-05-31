@@ -43,6 +43,7 @@ pub mod handle;
 pub mod coordinator;
 pub mod fan_out;
 pub mod verbs;
+pub mod branches;
 pub mod audit;
 pub mod brain;
 pub mod matrix;
