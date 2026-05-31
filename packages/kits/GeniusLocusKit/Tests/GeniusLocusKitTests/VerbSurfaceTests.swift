@@ -164,21 +164,25 @@ final class VerbSurfaceTests: XCTestCase {
         }
     }
 
-    /// With a target, the call reaches LocusKit's reanchor stub and
-    /// is remapped to `VerbError.notSupportedByEstate`.
+    /// `capture` then `reanchor`: the drawer's lattice anchor moves to
+    /// the supplied target. Recall sees the updated anchor on the returned
+    /// row. Mirrors `testWithdrawRoundTrip` — the stub-surfaces-notSupported
+    /// version was correct only while `Estate.reanchor` was a stub; now that
+    /// the verb is implemented it must become a real round-trip.
     func testReanchorRoundTripSurfacesNotSupported() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "reanchor target"))
-        await XCTAssertThrowsErrorAsync(
-            try await kit.reanchor(handle, ReanchorFrame(
-                rowID: stored.id, toLattice: .udc("003.000")
-            ))
-        ) { error in
-            guard case VerbError.notSupportedByEstate(let verb) = error else {
-                return XCTFail("expected .notSupportedByEstate, got \(error)")
-            }
-            XCTAssertEqual(verb, "reanchor")
+        // Reanchor the drawer to a new lattice position.
+        try await kit.reanchor(handle, ReanchorFrame(
+            rowID: stored.id, toLattice: .udc("003.000")
+        ))
+        // Recall should return the drawer with the updated anchor.
+        let rows = try await kit.recall(handle, recallAllActive())
+        guard let updated = rows.first(where: { $0.id == stored.id }) else {
+            return XCTFail("reanchored drawer should still appear in active recall")
         }
+        XCTAssertEqual(updated.udcCode, "003.000",
+                       "lattice anchor should reflect the reanchor target")
     }
 
     // MARK: - learn round-trip

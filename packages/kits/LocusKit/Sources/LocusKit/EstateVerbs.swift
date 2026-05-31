@@ -373,16 +373,47 @@ public extension Estate {
         )
     }
 
-    /// Reanchor a row to a different room or lattice position. Body
-    /// pending — implementation lands in a later LOCI mission
-    /// (reanchor-verb stream not yet assigned).
+    /// Reanchor a drawer to a different room and/or lattice position.
+    ///
+    /// Moves the row's placement: `toRoom` changes the `room` column;
+    /// `toLattice` updates `udcCode`, `udcFacets`, `wikidataQID`, and
+    /// `wikidataQidsSecondary`. At least one must be supplied (belt-and-
+    /// suspenders guard; the primary empty check is GLK's `VerbError.emptyReanchor`
+    /// boundary before dispatch). An absent row throws `drawerNotFound`.
+    ///
+    /// The placement change is persisted via `DrawerStore.reanchorGated`,
+    /// which reads the current row in a transaction, admits a `.mutate`
+    /// (active→active self-loop) event through `AuditGate.admit` carrying
+    /// the anchor delta in `priorLatticeAnchor` / `afterLatticeAnchor`, and
+    /// writes the updated columns + the sealed audit event atomically.
+    /// The row's three bitmaps (adjective, operational, provenance) are left
+    /// unchanged.
+    ///
+    /// - Parameters:
+    ///   - rowID: the drawer's `id`.
+    ///   - toRoom: optional new room name.
+    ///   - toLattice: optional new lattice anchor.
     func reanchor(
         rowID: RowID,
         toRoom: RoomID? = nil,
         toLattice: LatticeAnchor? = nil
     ) async throws {
-        throw LocusKitError.invalidContent(
-            "reanchor not yet implemented"
+        guard toRoom != nil || toLattice != nil else {
+            throw LocusKitError.invalidContent(
+                "reanchor requires toRoom or toLattice"
+            )
+        }
+        guard try await store.getDrawer(id: rowID) != nil else {
+            throw LocusKitError.drawerNotFound(id: rowID)
+        }
+        let changedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
+        try await store.reanchorGated(
+            drawerId: rowID,
+            toRoom: toRoom,
+            toLattice: toLattice,
+            changedBy: changedBy.isEmpty ? "estate" : changedBy,
+            reason: "reanchored via Estate.reanchor",
+            now: Date()
         )
     }
 

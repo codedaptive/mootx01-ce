@@ -1124,6 +1124,110 @@ impl DrawerStore for InMemoryDrawerStore {
         Ok(())
     }
 
+    fn reanchor_gated(
+        &self,
+        drawer_id: &str,
+        to_room: Option<&str>,
+        to_lattice: Option<crate::estate_types::LatticeAnchor>,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        validate_non_empty(drawer_id, "drawerId")?;
+        validate_non_empty(changed_by, "changedBy")?;
+
+        // Read all three bitmaps so we can construct BitmapFields.
+        let prior_bitmap = self.read_drawer_bitmap(drawer_id, "adjectiveBitmap")?;
+        let prior_operational = self.read_drawer_bitmap(drawer_id, "operationalBitmap")?;
+        let prior_provenance = self.read_drawer_bitmap(drawer_id, "provenance")?;
+
+        let row_uuid = require_uuid(drawer_id, "drawerId")?;
+        let prior = BitmapFields {
+            adjective: prior_bitmap as u64,
+            operational: prior_operational as u64,
+            provenance: prior_provenance as u64,
+        };
+
+        // Prior anchor is read from the row's current udcCode.
+        let prior_udc = self.read_drawer_udc(drawer_id)?;
+        let prior_anchor = substrate_lib::verbs::LatticeAnchor::udc(&prior_udc);
+
+        // After anchor: the new lattice if provided, else the prior anchor.
+        let after_udc: String;
+        let after_anchor = if let Some(ref new_lat) = to_lattice {
+            after_udc = new_lat.udc_code.clone();
+            substrate_lib::verbs::LatticeAnchor::udc(&after_udc)
+        } else {
+            after_udc = prior_udc.clone();
+            prior_anchor
+        };
+
+        // Reanchor is a placement move — no FieldWrites. The gate records the
+        // anchor delta via prior/after anchor and validates verb=Mutate
+        // (active→active self-loop). Empty writes slice is correct here.
+        let stamp = self.hlc.lock().unwrap().send(now);
+        let event = audit_gate::admit(
+            self.estate_uuid.as_u128(),
+            substrate_lib::verbs::RowId(row_uuid.as_u128()),
+            substrate_lib::verbs::NounType::Drawer,
+            RowVerb::Mutate,
+            Some(prior),
+            Some(prior_anchor),
+            &[],
+            after_anchor,
+            &self.vocabulary,
+            stamp,
+            changed_by,
+        ).map_err(|v| LocusKitError::InvalidContent(format!("reanchor rejected by gate: {:?}", v)))?;
+
+        // Materialized projection: update placement columns + append the
+        // sealed event. Bitmaps are unchanged by a reanchor.
+        let row_store = self.storage.row_store();
+        let mut update_vals = BTreeMap::new();
+        if let Some(ref new_lat) = to_lattice {
+            update_vals.insert("udcCode".to_string(), TypedValue::Text(new_lat.udc_code.clone()));
+            update_vals.insert(
+                "udcFacets".to_string(),
+                new_lat.udc_facets.as_deref()
+                    .map(|s| TypedValue::Text(s.to_string()))
+                    .unwrap_or(TypedValue::Null),
+            );
+            update_vals.insert(
+                "wikidataQID".to_string(),
+                new_lat.wikidata_qid.as_deref()
+                    .map(|s| TypedValue::Text(s.to_string()))
+                    .unwrap_or(TypedValue::Null),
+            );
+            update_vals.insert(
+                "wikidataQidsSecondary".to_string(),
+                new_lat.wikidata_qids_secondary.as_deref()
+                    .map(|s| TypedValue::Text(s.to_string()))
+                    .unwrap_or(TypedValue::Null),
+            );
+        }
+        if let Some(new_room) = to_room {
+            update_vals.insert("room".to_string(), TypedValue::Text(new_room.to_string()));
+        }
+        if !update_vals.is_empty() {
+            row_store
+                .update(
+                    T_DRAWERS,
+                    update_vals,
+                    &StoragePredicate::Eq(
+                        Column::new(T_DRAWERS, "id"),
+                        TypedValue::Text(drawer_id.to_string()),
+                    ),
+                )
+                .map_err(map_storage_err)?;
+        }
+        self.storage
+            .audit_log()
+            .append(pk_audit_event_from(&event))
+            .map_err(map_storage_err)?;
+        let _ = (reason, after_udc);   // retained for future ProvFrame composition
+        Ok(())
+    }
+
     // -----------------------------------------------------------------
     // Tunnel CRUD
     // -----------------------------------------------------------------
