@@ -47,6 +47,7 @@ pub mod theme_weather_recipe;
 pub mod feels_like_recipe;
 pub mod tunnel_successor_recipe;
 pub mod estate_divergence_recipe;
+pub mod anticipate_recipe;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::{RecipeError, RecipeRunError, SubstrateError};
@@ -71,3 +72,4 @@ pub use theme_weather_recipe::run_theme_weather;
 pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
 pub use tunnel_successor_recipe::{run_tunnel_successor, Successor};
 pub use estate_divergence_recipe::{run_estate_divergence, EstateDivergence};
+pub use anticipate_recipe::run_anticipate;
