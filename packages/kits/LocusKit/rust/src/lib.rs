@@ -128,6 +128,8 @@ pub mod proposal_operational;
 #[cfg(test)]
 mod proposal_tests;
 pub mod provenance;
+#[cfg(test)]
+mod reanchor_tests;
 pub mod recall_trace_item;
 pub mod schema;
 pub mod summaries;
