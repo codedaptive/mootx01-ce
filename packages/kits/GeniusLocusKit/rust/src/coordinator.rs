@@ -27,6 +27,7 @@ use locus_kit::estate::Estate;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::filter::RecallFrame;
 use locus_kit::frames::{CaptureFrame, MutationKind};
+use locus_kit::tunnel::Tunnel;
 
 use crate::handle::{EstateHandle, EstateUuid};
 use crate::verbs::surface::VerbError;
@@ -207,6 +208,23 @@ impl EstateCoordinator {
     ) -> Result<Vec<Drawer>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         Ok(estate.recall(frame, now).collect_all())
+    }
+
+    // MARK: - recall_tunnels
+
+    /// Read the tunnels originating in `wing` for the estate addressed by
+    /// `handle` — the graph-read accessor a structural reasoning lens
+    /// (keystone centrality) needs. The drawer-to-drawer tunnels are the
+    /// edges of the association graph. Read-only; parallels `recall`.
+    pub fn recall_tunnels(
+        &self,
+        handle: &EstateHandle,
+        wing: &str,
+    ) -> Result<Vec<Tunnel>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate
+            .tunnels_from_wing(wing)
+            .map_err(|e| remap("recall_tunnels", e).into())
     }
 
     // MARK: - mutate
