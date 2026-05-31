@@ -26,7 +26,12 @@ use genius_locus_kit::audit::{
 };
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::fan_out::LatticeRegion;
-use genius_locus_kit::handle::EstateUuid;
+use genius_locus_kit::handle::{EstateHandle, EstateUuid};
+use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+use locus_kit::estate_types::OwnerCredentials;
+use persistence_kit::inmemory::InMemoryStorage;
+use std::sync::Arc;
+use uuid::Uuid;
 use genius_locus_kit::matrix::{MatrixCalibrationRegistry, MatrixTier};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -48,6 +53,23 @@ use genius_locus_kit::training::{
 
 // MARK: - Multi-estate fan-out by lattice overlap
 
+/// Open one estate over a fresh in-memory store whose estate UUID is fixed
+/// from `uuid_bytes`, so the handle UUID (derived from the opened estate) is
+/// deterministic. The registry holds the real `locus_kit::Estate`, so `open`
+/// takes a store + owner exactly as the Swift actor's `open(storage:owner:)`.
+fn open_estate(
+    coord: &mut EstateCoordinator,
+    uuid_bytes: EstateUuid,
+    low: i64,
+    high: i64,
+) -> EstateHandle {
+    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::from_bytes(uuid_bytes)));
+    let store = Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
+    coord
+        .open(store, OwnerCredentials::new("owner"), low, high)
+        .expect("open succeeds")
+}
+
 #[test]
 fn multi_estate_open_and_fan_out_routes_by_overlap() {
     let mut coord = EstateCoordinator::new();
@@ -55,12 +77,9 @@ fn multi_estate_open_and_fan_out_routes_by_overlap() {
     let uuid_b: EstateUuid = [0xB0; 16];
     let uuid_c: EstateUuid = [0xC0; 16];
 
-    let h_a = coord.open(uuid_a, 0, 10, "estate-a".to_string())
-        .expect("open A succeeds");
-    let h_b = coord.open(uuid_b, 5, 15, "estate-b".to_string())
-        .expect("open B succeeds");
-    let h_c = coord.open(uuid_c, 20, 30, "estate-c".to_string())
-        .expect("open C succeeds");
+    let h_a = open_estate(&mut coord, uuid_a, 0, 10);
+    let h_b = open_estate(&mut coord, uuid_b, 5, 15);
+    let h_c = open_estate(&mut coord, uuid_c, 20, 30);
 
     assert_eq!(coord.open_estate_count(), 3);
 
@@ -90,7 +109,7 @@ fn multi_estate_open_and_fan_out_routes_by_overlap() {
 
     // Close and verify the handle becomes stale.
     coord.close(&h_a).expect("close A succeeds");
-    assert!(coord.state_for(&h_a).is_err());
+    assert!(coord.estate_for(&h_a).is_err());
     assert_eq!(coord.open_estate_count(), 2);
 }
 

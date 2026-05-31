@@ -50,7 +50,7 @@ pub mod matrix;
 pub mod training;
 
 pub use handle::EstateHandle;
-pub use coordinator::{EstateCoordinator, GeniusLocusKitError};
+pub use coordinator::{EstateCoordinator, GeniusLocusKitError, VerbDispatchError};
 pub use fan_out::{LatticeRegion, EstateRecallContribution};
 pub use verbs::{
     Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LearnFrame,
