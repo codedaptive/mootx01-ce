@@ -1,19 +1,24 @@
 //! Bias — the conscious "what you lean toward and away from" recipe (Lens 4,
-//! Preference & judgment). Two honest signals over the estate:
+//! Preference & judgment). Three honest signals over the estate:
 //!   - REPRESENTATION: each room's share of the active set vs a reference,
 //!     signed (NeuronKit `representation_bias`) — over-weighted = bias FOR,
 //!     under-weighted/absent = bias AGAINST.
 //!   - DISMISSAL: each room's withdrawal rate — what you actively take back.
 //!     A high dismissal rate is "bias against" you enacted, not just absence.
+//!   - LEARNED PREFERENCE: a Bradley-Terry utility per room fitted from actual
+//!     CURATION choices — confirmations as endorsements, withdrawals as
+//!     dismissals (NeuronKit `learned_preference`). This is preference REVEALED
+//!     BY CURATION, distinct from representation's capture-volume share: a room
+//!     captured heavily but never confirmed ranks high in representation yet
+//!     low here — "what you actually keep vs what merely accumulates."
 //!
-//! NET-NEW, Rust-first (the real Lens 4 — the distributional + dismissal half).
-//! Pure CognitionKit sequencing: two recalls via GLK (active + withdrawn) +
-//! NeuronKit representation_bias. Read-only.
+//! NET-NEW, Rust-first (the real Lens 4). Pure CognitionKit sequencing: three
+//! recalls via GLK (active + confirmed + withdrawn) + NeuronKit
+//! `representation_bias` and `learned_preference`. Read-only.
 //!
-//! Withdrawal is a LIVE verb (unlike confirm), so dismissal is computable
-//! end-to-end today. The deeper LEARNED preference — Bradley-Terry utility from
-//! actual choices — needs a preference/confirm event source (the confirm verb);
-//! that is being added separately.
+//! All three signals are computable end-to-end today: withdrawal and the
+//! confirm verb are both live, so the learned-preference fit reads real
+//! endorsement/dismissal events rather than a placeholder.
 
 use std::collections::BTreeMap;
 
@@ -22,7 +27,7 @@ use genius_locus_kit::EstateCoordinator;
 use locus_kit::adjectives::State;
 use locus_kit::drawer::Drawer;
 use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
-use neuron_kit::{representation_bias, CategoryBias};
+use neuron_kit::{learned_preference, representation_bias, CategoryBias, PreferenceStrength};
 
 use crate::error::{RecipeRunError, SubstrateError};
 
@@ -36,6 +41,11 @@ pub struct BiasReport {
     /// Per-room withdrawal rate (withdrawn / (active + withdrawn)), the
     /// enacted "bias against" — most-dismissed first.
     pub dismissal: Vec<(String, f64)>,
+    /// Learned preference per room (Bradley-Terry over confirmations as
+    /// endorsements and withdrawals as dismissals), re-centered on neutral —
+    /// strongest first. `strength > 0` = preferred by curation, `< 0` =
+    /// disfavored, `≈ 0` = no curation signal yet.
+    pub learned: Vec<PreferenceStrength>,
 }
 
 fn room_counts(drawers: &[Drawer]) -> Vec<(String, f64)> {
@@ -55,8 +65,19 @@ fn frame_for(state: State) -> RecallFrame {
     f
 }
 
-/// Compute the estate's representation bias (active rooms vs `reference`) and
-/// dismissal rates (withdrawn rooms). Read-only; recall failure →
+fn confirmed_frame() -> RecallFrame {
+    // The endorsement signal: rows the user confirmed (still active). The
+    // UserConfirmed filter admits exactly the confirmed set, the complement of
+    // the Unconfirmed frame above.
+    let mut f = RecallFrame::new(vec![Filter::UserConfirmed, Filter::State(State::Active)]);
+    f.hydration_level = HydrationLevel::Structured;
+    f.ordering = Ordering::ByCaptureTimeDesc;
+    f
+}
+
+/// Compute the estate's representation bias (active rooms vs `reference`),
+/// dismissal rates (withdrawn rooms), and learned preference (Bradley-Terry
+/// over confirmations vs withdrawals). Read-only; recall failure →
 /// `RecipeRunError::Substrate`.
 pub fn run_bias(
     coord: &EstateCoordinator,
@@ -66,6 +87,9 @@ pub fn run_bias(
 ) -> Result<BiasReport, RecipeRunError> {
     let active = coord
         .recall(handle, frame_for(State::Active), now)
+        .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
+    let confirmed = coord
+        .recall(handle, confirmed_frame(), now)
         .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
     let withdrawn = coord
         .recall(handle, frame_for(State::Withdrawn), now)
@@ -90,7 +114,27 @@ pub fn run_bias(
         y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| x.0.cmp(&y.0))
     });
 
-    Ok(BiasReport { biased_for, biased_against, dismissal })
+    // Learned preference: per-room curation record (confirmations as
+    // endorsements, withdrawals as dismissals) over the union of every room
+    // that appears in any of the three sets — so an active-but-uncurated room
+    // is reported at neutral rather than omitted.
+    let confirmed_by_room: BTreeMap<String, f64> = room_counts(&confirmed).into_iter().collect();
+    let mut rooms: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    rooms.extend(active_by_room.keys().cloned());
+    rooms.extend(confirmed_by_room.keys().cloned());
+    rooms.extend(withdrawn_by_room.keys().cloned());
+    let records: Vec<(String, i64, i64)> = rooms
+        .into_iter()
+        .map(|room| {
+            let endorsements = confirmed_by_room.get(&room).copied().unwrap_or(0.0) as i64;
+            let dismissals = withdrawn_by_room.get(&room).copied().unwrap_or(0.0) as i64;
+            (room, endorsements, dismissals)
+        })
+        .collect();
+    let learned = learned_preference(&records)
+        .map_err(|e| SubstrateError::new("learned_preference", format!("{e:?}")))?;
+
+    Ok(BiasReport { biased_for, biased_against, dismissal, learned })
 }
 
 #[cfg(test)]
@@ -102,7 +146,7 @@ mod tests {
     use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
     use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
-    use locus_kit::frames::CaptureFrame;
+    use locus_kit::frames::{CaptureFrame, MutationKind};
     use persistence_kit::inmemory::InMemoryStorage;
     use uuid::Uuid;
 
@@ -167,5 +211,44 @@ mod tests {
         let doubts = report.dismissal.iter().find(|(room, _)| room == "doubts");
         assert!(doubts.is_some(), "the withdrawn room shows dismissal");
         assert!(doubts.unwrap().1 > 0.0, "dismissal rate is positive: {:?}", doubts);
+    }
+
+    // CK-BI-3: learned preference reads real curation choices end-to-end —
+    // confirming a room's memories (the LIVE confirm verb) makes it preferred,
+    // withdrawing another's makes it disfavored, and an untouched room sits at
+    // neutral between them. This is the half the confirm verb unblocked.
+    #[test]
+    fn ck_bi3_confirm_and_withdraw_drive_learned_preference() {
+        let (coord, h) = coord_with_parent();
+        // "kept": captured then confirmed (endorsed).
+        for _ in 0..3 {
+            let id = capture(&coord, &h, "kept");
+            coord.mutate(&h, &id, MutationKind::Confirm, None).expect("confirm");
+        }
+        // "dropped": captured then withdrawn (dismissed).
+        for _ in 0..3 {
+            let id = capture(&coord, &h, "dropped");
+            coord.withdraw(&h, &id, Some("reconsidered"), NOW).expect("withdraw");
+        }
+        // "untouched": captured and left alone (no curation signal).
+        capture(&coord, &h, "untouched");
+        capture(&coord, &h, "untouched");
+
+        let report = run_bias(&coord, &h, &reference(&[("kept", 1.0)]), NOW).expect("bias");
+        let learned = &report.learned;
+
+        // Endorsed leads, dismissed trails, neutral sits between.
+        let order: Vec<&str> = learned.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(order, vec!["kept", "untouched", "dropped"], "curation orders preference");
+
+        let kept = learned.iter().find(|p| p.label == "kept").unwrap();
+        let dropped = learned.iter().find(|p| p.label == "dropped").unwrap();
+        let untouched = learned.iter().find(|p| p.label == "untouched").unwrap();
+        assert!(kept.strength > 0.0, "confirmed room preferred: {}", kept.strength);
+        assert!(dropped.strength < 0.0, "withdrawn room disfavored: {}", dropped.strength);
+        assert!(untouched.strength.abs() < 1e-6, "uncurated room neutral: {}", untouched.strength);
+        // The raw curation counts round-tripped through the recall frames.
+        assert_eq!(kept.endorsements, 3);
+        assert_eq!(dropped.dismissals, 3);
     }
 }
