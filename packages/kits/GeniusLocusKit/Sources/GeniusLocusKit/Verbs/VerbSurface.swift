@@ -39,9 +39,10 @@ import SubstrateTypes
 ///
 /// Error mapping: LocusKit's verb stubs throw
 /// `LocusKitError.invalidContent("…not yet implemented")` for
-/// `mutate`, `reanchor`, and `learn` today (`expunge` is implemented
-/// and dispatches straight through to LocusKit). The GLK
-/// boundary recognises this pattern and re-raises it as
+/// `reanchor` and `learn` today, and for `mutate`'s state-axis kinds
+/// (`mutate`'s `.confirm` kind is implemented and dispatches straight
+/// through; `expunge` is implemented too). The GLK boundary recognises
+/// this pattern and re-raises it as
 /// `VerbError.notSupportedByEstate(verb:)` so callers see a single
 /// case across all stubbed-verb dispatches. Other LocusKit failures
 /// flow through as `VerbError.underlyingEstateFailure(verb:reason:)`.
@@ -103,11 +104,13 @@ public extension GeniusLocusKit {
     /// Apply a named mutation to a drawer in the estate addressed by
     /// `handle`.
     ///
-    /// Today this dispatches to `LocusKit.Estate.mutate(rowID:kind:payload:)`,
-    /// which is a stub that throws `LocusKitError.invalidContent`
-    /// until its owning mission ships. The GLK boundary re-raises that
-    /// as `VerbError.notSupportedByEstate(verb: "mutate")` so callers
-    /// branch on a single case.
+    /// Dispatches to `LocusKit.Estate.mutate(rowID:kind:payload:)`. The
+    /// `.confirm` kind is live — it moves the row's confirmation axis to
+    /// `.userConfirmed` and returns normally. The state-axis kinds
+    /// (`.reject` / `.contest` / `.resolve` / `.supersede` / `.revive`)
+    /// are not yet wired and throw `LocusKitError.invalidContent`; the GLK
+    /// boundary re-raises those as `VerbError.notSupportedByEstate(verb:
+    /// "mutate")` so callers branch on a single case.
     func mutate(_ handle: EstateHandle, _ frame: MutateFrame) async throws {
         let estate = try estate(for: handle)
         do {

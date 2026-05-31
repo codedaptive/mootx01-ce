@@ -115,11 +115,53 @@ struct EstateVerbTests {
         #expect(pageCount == 1)
     }
 
-    @Test("mutate stub throws invalidContent")
-    func mutate_throwsInvalidContent() async throws {
+    @Test("mutate(.confirm) transitions the confirmation axis to userConfirmed")
+    func mutate_confirm_transitionsConfirmation() async throws {
+        let (estate, _) = try await makeEstate()
+        let frame = CaptureFrame(
+            content: "to confirm",
+            channel: .typed,
+            room: "study",
+            latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "test-agent",
+            embeddingModelID: "minilm-v6"
+        )
+        let drawer = try await estate.capture(frame)
+        // Freshly captured rows are unconfirmed.
+        #expect(drawer.confirmation == .unconfirmed)
+
+        try await estate.mutate(rowID: drawer.id, kind: .confirm)
+
+        // Re-read: confirmation is now userConfirmed; every other axis is
+        // preserved (room/state unchanged).
+        let after = try #require(try await estate.store.getDrawer(id: drawer.id))
+        #expect(after.confirmation == .userConfirmed)
+        #expect(after.room == "study")
+        #expect(after.adjectiveBitmap & 0x3F == 0)  // state still active
+    }
+
+    @Test("mutate(.confirm) on a missing row throws drawerNotFound")
+    func mutate_confirm_missingRow_throwsNotFound() async throws {
         let (estate, _) = try await makeEstate()
         await #expect(throws: LocusKitError.self) {
-            try await estate.mutate(rowID: "x", kind: .confirm, payload: String?.none)
+            try await estate.mutate(rowID: "no-such-id", kind: .confirm, payload: String?.none)
+        }
+    }
+
+    @Test("mutate state-axis kind is not yet implemented (throws invalidContent)")
+    func mutate_stateAxisKind_throwsInvalidContent() async throws {
+        let (estate, _) = try await makeEstate()
+        let frame = CaptureFrame(
+            content: "x",
+            channel: .typed,
+            room: "r",
+            latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "test-agent",
+            embeddingModelID: "minilm-v6"
+        )
+        let drawer = try await estate.capture(frame)
+        await #expect(throws: LocusKitError.self) {
+            try await estate.mutate(rowID: drawer.id, kind: .reject, payload: String?.none)
         }
     }
 }

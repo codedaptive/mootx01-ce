@@ -361,16 +361,61 @@ public extension Estate {
 
     // MARK: - Stubs (implemented in later missions)
 
-    /// Mutate a row's bitmap state. Body pending — implementation lands
-    /// in a later LOCI mission (mutation-verb stream not yet assigned).
+    /// Mutate a row along one of its mutation axes.
+    ///
+    /// `.confirm` moves the confirmation axis (provenance bits 18–23,
+    /// cookbook §2.5) to `.userConfirmed`: read the drawer, recompose the
+    /// provenance bitmap with the confirmation field set via
+    /// `BitField.writeField` (every other provenance axis — sourceType,
+    /// channel, captureChannel, confidence, sensitivityAtCapture,
+    /// enrichmentStatus — is preserved untouched), and persist through
+    /// `DrawerStore.mutateProvenance`, which routes the gated column write
+    /// and appends one sealed `AuditEvent` atomically.
+    ///
+    /// The state-axis kinds (`.reject` / `.contest` / `.resolve` /
+    /// `.supersede` / `.revive`) move the row's *state*, not its
+    /// confirmation, so they belong on the `mutateState` automaton path;
+    /// that path is not yet wired here, so they throw `.invalidContent`
+    /// carrying the "not yet implemented" marker GLK's surface remaps to
+    /// `VerbError.notSupportedByEstate`.
+    ///
+    /// `now` is taken as `Date()` here, matching `withdraw`; the
+    /// confirmation transition itself is deterministic (a pure function of
+    /// the prior bitmap), only the audit row's timestamp is clock-derived.
     func mutate(
         rowID: RowID,
         kind: MutationKind,
         payload: String? = nil
     ) async throws {
-        throw LocusKitError.invalidContent(
-            "mutate not yet implemented"
-        )
+        switch kind {
+        case .confirm:
+            guard let drawer = try await store.getDrawer(id: rowID) else {
+                throw LocusKitError.drawerNotFound(id: rowID)
+            }
+            // Confirmation lives in provenance bits 18–23; writeField clears
+            // that field and ORs in userConfirmed, leaving the other
+            // provenance axes intact.
+            let newProvenance = BitField.writeField(
+                Int64(Confirmation.userConfirmed.rawValue),
+                into: drawer.provenance,
+                shift: 18, width: 6
+            )
+            let changedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
+            try await store.mutateProvenance(
+                drawerId: rowID,
+                newProvenance: newProvenance,
+                changedBy: changedBy.isEmpty ? "estate" : changedBy,
+                reason: "confirmed via Estate.mutate",
+                now: Date()
+            )
+        default:
+            // State-axis mutations are not yet wired; the "not yet
+            // implemented" marker is the sentinel the GLK surface keys on to
+            // raise notSupportedByEstate rather than underlyingEstateFailure.
+            throw LocusKitError.invalidContent(
+                "mutate: state-axis kinds not yet implemented (only confirm)"
+            )
+        }
     }
 
     /// Reanchor a drawer to a different room and/or lattice position.
