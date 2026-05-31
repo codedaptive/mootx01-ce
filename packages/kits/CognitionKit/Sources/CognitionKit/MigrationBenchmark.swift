@@ -204,80 +204,76 @@ public struct MigrationBenchmark: Recipe {
         guard !input.plans.isEmpty else {
             throw RecipeError.insufficientBranches(minimum: 1, provided: 0)
         }
+        // Plan names key the branch map and the confirm step; a duplicate
+        // would silently collide (last wins) and leak a derived branch.
+        // Reject it up front so the failure is explicit, not a leak.
+        let planNames = input.plans.map(\.name)
+        if let dup = firstDuplicate(planNames) {
+            throw RecipeError.duplicatePlanName(dup)
+        }
 
         // Recipe-entry wall clock stamps each benchmark's evaluatedAt. A
         // conscious action happens at a real instant; this value affects
-        // only the report timestamp, not any logic.
+        // only the report timestamp, not any logic. Captured once so every
+        // parallel branch is benchmarked at the same deterministic instant.
         let now = Date()
 
+        // Per-plan work runs CONCURRENTLY. Each plan derives its own COW
+        // branch — an independent in-memory estate that shares nothing with
+        // the others until the deterministic ranking merge below. The GLK
+        // actor serializes branch-registry mutation; captures target
+        // distinct branch estates and run in parallel, so N plans cost ~1
+        // plan's wall-clock instead of N. Determinism is unaffected:
+        // ranking is a pure sort over the collected results, independent of
+        // task completion order (the C-13 gate and tie-break are applied in
+        // the serial merge, not in the concurrent tasks).
+        let origin = input.origin
+        var resultsByName: [String: PlanResult] = [:]
+        try await withThrowingTaskGroup(of: PlanResult.self) { group in
+            for plan in input.plans {
+                group.addTask {
+                    try await Self.processPlan(
+                        plan, origin: origin, estate: estate, kit: kit, now: now)
+                }
+            }
+            for try await result in group {
+                resultsByName[result.planName] = result
+            }
+        }
+
+        // Deterministic assembly: walk plans in INPUT order so the report's
+        // collections (and the tie-break baseline) do not depend on which
+        // concurrent task finished first.
         var benchmarkReports: [BenchmarkReport] = []
         var rankings: [BranchRanking] = []
         var disqualified: [DisqualifiedPlan] = []
         var branchesByPlan: [String: any BranchHandle] = [:]
-
         for plan in input.plans {
-            // 1. Derive a COW branch for this plan (parent untouched, I-15).
-            let branch = try await NeuronKit.deriveBranch(
-                name: plan.name, from: estate, in: kit)
-            branchesByPlan[plan.name] = branch
-
-            // 2. Populate the branch per the plan. Record the minted
-            //    Drawer.id ↔ content correlation; track concepts that
-            //    cannot be migrated (empty content) as dropped.
-            var correlated: [ExternalEntry] = []
-            var dropped: [String] = []
-            for entry in input.origin.entries {
-                let trimmed = entry.content.trimmingCharacters(
-                    in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else {
-                    dropped.append(entry.id)
-                    continue
-                }
-                let frame = LocusKit.CaptureFrame(
-                    content: entry.content,
-                    channel: .typed,
-                    room: plan.room,
-                    latticeAnchor: LocusKit.LatticeAnchor.udc(plan.latticeCode),
-                    addedBy: "migration-\(plan.name)",
-                    embeddingModelID: plan.embeddingModelID,
-                    sensitivity: plan.sensitivity)
-                let drawer = try await branch.capture(frame)
-                // Correlate the benchmark id to the MINTED drawer id so
-                // the benchmark's identity compare is meaningful.
-                correlated.append(ExternalEntry(
-                    id: drawer.id, content: entry.content, tags: entry.tags))
-            }
-
-            // 3. Benchmark the branch against its own id-correlated corpus.
-            let corpus = ExternalCorpus(
-                name: "\(input.origin.name)#\(plan.name)", entries: correlated)
-            let report = try await NeuronKit.benchmark(
-                branch: branch, against: corpus, now: now)
-            benchmarkReports.append(report)
-
-            // 4. C-13 gate: lost = never-captured (dropped) ∪ captured-
-            //    but-unrecallable (benchmark notFound). Non-empty ⇒
-            //    disqualified; the branch is neither scored nor ranked.
-            let lost = Set(dropped).union(report.notFoundInBranch).sorted()
-            if lost.isEmpty {
+            guard let result = resultsByName[plan.name] else { continue }
+            branchesByPlan[plan.name] = result.branch
+            benchmarkReports.append(result.report)
+            // C-13 gate: a non-empty lost set disqualifies the plan; it is
+            // neither scored nor ranked.
+            if result.lost.isEmpty {
+                let report = result.report
                 let combined = report.recallOverlap * report.meanReciprocalRank
                 rankings.append(BranchRanking(
-                    branchID: branch.branchID,
+                    branchID: result.branch.branchID,
                     planName: plan.name,
                     recallOverlap: report.recallOverlap,
                     meanReciprocalRank: report.meanReciprocalRank,
                     combinedScore: combined))
             } else {
                 disqualified.append(DisqualifiedPlan(
-                    branchID: branch.branchID,
+                    branchID: result.branch.branchID,
                     planName: plan.name,
-                    lostConcepts: lost))
+                    lostConcepts: result.lost))
             }
         }
 
-        // 5. Rank survivors: combined score descending, ties by plan name
-        //    ascending so the ordering is reproducible (the documented
-        //    tie-degeneracy lives here until structure-aware recall lands).
+        // Rank survivors: combined score descending, ties by plan name
+        // ascending so the ordering is reproducible (the documented
+        // tie-degeneracy lives here until structure-aware recall lands).
         rankings.sort { lhs, rhs in
             if lhs.combinedScore != rhs.combinedScore {
                 return lhs.combinedScore > rhs.combinedScore
@@ -295,6 +291,85 @@ public struct MigrationBenchmark: Recipe {
             benchmarkReports: benchmarkReports,
             comparisonReport: comparison,
             branchesByPlan: branchesByPlan)
+    }
+
+    /// The concurrent unit of `run`: derive one plan's COW branch,
+    /// populate it with an id-correlated benchmark corpus, benchmark it,
+    /// and compute its lost-concept set. Pure with respect to the recipe
+    /// (no shared mutable state) so it runs safely inside the task group.
+    /// `static` so the task closure captures no `self`.
+    private static func processPlan(
+        _ plan: MigrationPlan,
+        origin: ExternalCorpus,
+        estate: EstateHandle,
+        kit: GeniusLocusKit,
+        now: Date
+    ) async throws -> PlanResult {
+        // Derive a COW branch for this plan (parent untouched, I-15).
+        let branch = try await NeuronKit.deriveBranch(
+            name: plan.name, from: estate, in: kit)
+
+        // Populate the branch per the plan. Record the minted Drawer.id ↔
+        // content correlation; track concepts that cannot be migrated
+        // (empty content) as dropped. Captures into one branch estate are
+        // serialized by that estate's actor; that is correct — the
+        // parallelism is ACROSS branches, not within one.
+        var correlated: [ExternalEntry] = []
+        var dropped: [String] = []
+        for entry in origin.entries {
+            let trimmed = entry.content.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                dropped.append(entry.id)
+                continue
+            }
+            let frame = LocusKit.CaptureFrame(
+                content: entry.content,
+                channel: .typed,
+                room: plan.room,
+                latticeAnchor: LocusKit.LatticeAnchor.udc(plan.latticeCode),
+                addedBy: "migration-\(plan.name)",
+                embeddingModelID: plan.embeddingModelID,
+                sensitivity: plan.sensitivity)
+            let drawer = try await branch.capture(frame)
+            // Correlate the benchmark id to the MINTED drawer id so the
+            // benchmark's identity compare is meaningful.
+            correlated.append(ExternalEntry(
+                id: drawer.id, content: entry.content, tags: entry.tags))
+        }
+
+        // Benchmark the branch against its own id-correlated corpus.
+        let corpus = ExternalCorpus(
+            name: "\(origin.name)#\(plan.name)", entries: correlated)
+        let report = try await NeuronKit.benchmark(
+            branch: branch, against: corpus, now: now)
+
+        // lost = never-captured (dropped) ∪ captured-but-unrecallable
+        // (benchmark notFound). Sorted for deterministic reporting.
+        let lost = Set(dropped).union(report.notFoundInBranch).sorted()
+        return PlanResult(
+            planName: plan.name, branch: branch, report: report, lost: lost)
+    }
+
+    /// The result of processing one plan concurrently. `any BranchHandle`
+    /// is `Sendable`, so this value type crosses the task-group boundary
+    /// cleanly. Private — an internal carrier between `processPlan` and
+    /// the serial merge in `run`.
+    private struct PlanResult: Sendable {
+        let planName: String
+        let branch: any BranchHandle
+        let report: BenchmarkReport
+        let lost: [String]
+    }
+
+    /// The first value that appears more than once in `values`, scanning
+    /// in order, or nil when every value is unique.
+    private func firstDuplicate(_ values: [String]) -> String? {
+        var seen = Set<String>()
+        for value in values where !seen.insert(value).inserted {
+            return value
+        }
+        return nil
     }
 
     /// Confirm promotion of the winning plan's branch into the estate and

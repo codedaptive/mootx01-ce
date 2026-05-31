@@ -34,13 +34,15 @@ enum RecipeTools {
 
     // MARK: - Tool names
 
+    static let listRecipesToolName = "moot_list_recipes"
     static let groundedSynthesisToolName = "moot_grounded_synthesis"
     static let runMigrationBenchmarkToolName = "moot_run_migration_benchmark"
     static let confirmMigrationPromotionToolName = "moot_confirm_migration_promotion"
 
     /// True when `name` is one of the recipe tools dispatched by name.
     static func isRecipeTool(_ name: String) -> Bool {
-        name == groundedSynthesisToolName
+        name == listRecipesToolName
+            || name == groundedSynthesisToolName
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
     }
@@ -51,10 +53,23 @@ enum RecipeTools {
     /// after the lexicon projection and the federation tool.
     static func tools() -> [ProjectedTool] {
         [
+            listRecipesTool(),
             groundedSynthesisTool(),
             runMigrationBenchmarkTool(),
             confirmMigrationPromotionTool(),
         ]
+    }
+
+    /// The recipe-discovery tool. Reads `RecipeCatalog` so the surfaced
+    /// list stays in lockstep with the shipped recipes — a new recipe
+    /// registered in the catalog appears here automatically. Takes no
+    /// arguments; it is the conscious mind enumerating its own behaviours.
+    private static func listRecipesTool() -> ProjectedTool {
+        ProjectedTool(
+            name: listRecipesToolName,
+            description: "List the available CognitionKit behaviour recipes — each with its version, description, and the NeuronKit capabilities it requires.",
+            inputSchema: objectSchema(properties: [:], required: []),
+            provenance: .recipe)
     }
 
     private static func groundedSynthesisTool() -> ProjectedTool {
@@ -149,6 +164,11 @@ enum RecipeTools {
         defaultHandle: EstateHandle,
         resolveHandle: ([String: JSONValue]) throws -> EstateHandle
     ) async throws -> JSONValue {
+        // Recipe discovery needs no estate; answer it before resolving a
+        // handle so `moot_list_recipes` works even with no estate targeted.
+        if name == listRecipesToolName {
+            return runListRecipes()
+        }
         let handle = try resolveHandle(args)
         switch name {
         case groundedSynthesisToolName:
@@ -162,6 +182,22 @@ enum RecipeTools {
                 code: JSONRPCErrorCode.methodNotFound,
                 message: "Unknown recipe tool: \(name)")
         }
+    }
+
+    // MARK: - list_recipes
+
+    /// Render the recipe catalog as a text listing. Pure read over
+    /// `RecipeCatalog` — no estate, no substrate touch.
+    private static func runListRecipes() -> JSONValue {
+        var lines: [String] = ["recipes: \(RecipeCatalog.all.count)"]
+        for descriptor in RecipeCatalog.all {
+            let caps = descriptor.requiredCapabilities
+                .map(\.rawValue).joined(separator: ", ")
+            lines.append("  - \(descriptor.name) v\(descriptor.version)")
+            lines.append("      \(descriptor.description)")
+            lines.append("      capabilities: \(caps)")
+        }
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
     }
 
     // MARK: - grounded_synthesis

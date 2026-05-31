@@ -209,6 +209,73 @@ final class MigrationBenchmarkTests: XCTestCase {
         let resolved = await kit.branchHandle(for: UUID())
         XCTAssertNil(resolved)
     }
+
+    // MARK: - Concurrency + robustness improvements
+
+    func testDuplicatePlanNamesAreRejected() async throws {
+        let (kit, handle) = try await makeEstate()
+        let origin = ExternalCorpus(name: "src", entries: [
+            ExternalEntry(id: "a", content: "anything at all", tags: []),
+        ])
+        let input = MigrationBenchmark.Input(
+            origin: origin,
+            plans: [
+                plan("same", room: "r1", code: "000"),
+                plan("same", room: "r2", code: "100"),  // duplicate name
+            ])
+        await XCTAssertThrowsErrorAsync(
+            try await MigrationBenchmark().run(
+                input: input, estate: handle, kit: kit)
+        ) { error in
+            XCTAssertEqual(error as? RecipeError, .duplicatePlanName("same"))
+        }
+    }
+
+    func testParallelRunIsDeterministicAcrossManyPlans() async throws {
+        // The plan loop now runs concurrently. The result must be
+        // identical to a serial run: every plan benchmarks its own clean
+        // corpus, all survive, and the winner + ranking order are stable
+        // (score desc, ties by plan name asc) regardless of which task
+        // finished first. Four plans exercise the task group.
+        let (kit, handle) = try await makeEstate()
+        let origin = ExternalCorpus(name: "src", entries: [
+            ExternalEntry(id: "a", content: "alpha concerning felines", tags: []),
+            ExternalEntry(id: "b", content: "beta concerning canines", tags: []),
+            ExternalEntry(id: "c", content: "gamma concerning equines", tags: []),
+        ])
+        let input = MigrationBenchmark.Input(
+            origin: origin,
+            plans: [
+                plan("delta", room: "r1", code: "000"),
+                plan("alpha", room: "r2", code: "100"),
+                plan("charlie", room: "r3", code: "200"),
+                plan("bravo", room: "r4", code: "300"),
+            ])
+        let recipe = MigrationBenchmark()
+        let out = try await recipe.run(input: input, estate: handle, kit: kit)
+
+        // All four clean plans survive; none disqualified.
+        XCTAssertTrue(out.comparisonReport.disqualified.isEmpty)
+        XCTAssertEqual(out.comparisonReport.rankings.count, 4)
+        XCTAssertEqual(out.benchmarkReports.count, 4)
+        XCTAssertEqual(out.branchesByPlan.count, 4)
+
+        // All four branches are distinct, live handles.
+        let branchIDs = Set(out.branchesByPlan.values.map(\.branchID))
+        XCTAssertEqual(branchIDs.count, 4)
+
+        // Determinism: equal scores ⇒ tie-break by plan name ascending.
+        // With identical clean corpora every score ties, so the ranking
+        // must be alphabetical by plan name.
+        let ranked = out.comparisonReport.rankings.map(\.planName)
+        XCTAssertEqual(ranked, ["alpha", "bravo", "charlie", "delta"])
+        XCTAssertEqual(out.comparisonReport.winnerPlanName, "alpha")
+
+        // Run again — the winner is stable across independent concurrent runs.
+        let out2 = try await recipe.run(input: input, estate: handle, kit: kit)
+        XCTAssertEqual(out2.comparisonReport.rankings.map(\.planName),
+                       ["alpha", "bravo", "charlie", "delta"])
+    }
 }
 
 // MARK: - async throwing-assertion helper

@@ -33,6 +33,11 @@ public enum RecipeError: Error, Sendable, Equatable, CustomStringConvertible {
     /// than it needs to run a meaningful comparison.
     case insufficientBranches(minimum: Int, provided: Int)
 
+    /// Two or more plans share a name. Plan names key the branch map and
+    /// the confirmation step, so a duplicate would silently collide and
+    /// leak a derived branch; the recipe rejects it before deriving any.
+    case duplicatePlanName(String)
+
     /// A migration plan's branch silently lost at least one origin
     /// concept (`BenchmarkReport.notFoundInBranch` was non-empty). The
     /// branch is disqualified from ranking; attempting to promote a
@@ -57,6 +62,8 @@ public enum RecipeError: Error, Sendable, Equatable, CustomStringConvertible {
             return "RecipeError.missingCapability: NeuronKit capability '\(cap.rawValue)' is not available; recipe cannot run."
         case .insufficientBranches(let minimum, let provided):
             return "RecipeError.insufficientBranches: need at least \(minimum) branches, got \(provided)."
+        case .duplicatePlanName(let name):
+            return "RecipeError.duplicatePlanName: plan name '\(name)' appears more than once; plan names must be unique."
         case .silentConceptLoss(let branchID, let lostConcepts):
             return "RecipeError.silentConceptLoss: branch \(branchID) lost \(lostConcepts.count) concept(s): \(lostConcepts.joined(separator: ", "))."
         case .tournamentNoWinner(let disqualifiedCount):
