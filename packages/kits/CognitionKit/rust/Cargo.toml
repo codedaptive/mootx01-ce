@@ -1,0 +1,21 @@
+[package]
+name = "cognition-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "CognitionKit — the behaviour-recipe layer of the MOOTx01 substrate (Rust port). Recipes sequence NeuronKit reasoning and GeniusLocusKit verbs; this crate ports the deterministic decision core (capability gate, error model, recipe catalog, migration ranking) that is conformance-gated against the Swift reference at CognitionKit/Sources/CognitionKit. Per CLAUDE.md neither port leads. The estate-driven recipe bodies are Swift-only until the Rust NeuronKit/GLK estate surfaces land."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "cognition_kit"
+path = "src/lib.rs"
+
+# Standalone crate (no top-level Cargo workspace in this repo; sibling
+# kits are each standalone crates). The deterministic decision core has
+# no external runtime dependency. serde mirrors the Swift Codable
+# RecipeDescriptor so the catalog's wire shape can be round-tripped and
+# gated identically across ports.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
