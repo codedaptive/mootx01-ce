@@ -226,6 +226,14 @@ impl EstateBranch {
         Self::recall_all(&self.branch_estate, now)
     }
 
+    /// Recall from this branch estate with a caller-supplied frame. The
+    /// per-query read path the migration benchmark uses (it issues one
+    /// `recall_with` per query frame and is otherwise read-only). The parent
+    /// is never touched.
+    pub fn recall_with(&self, frame: RecallFrame, now: i64) -> Vec<Drawer> {
+        self.branch_estate.recall(frame, now).collect_all()
+    }
+
     /// Transition the branch to `Discarded`. Rows are retained for audit;
     /// `recall` still works afterwards.
     pub fn discard(&mut self) {

@@ -20,3 +20,17 @@ eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 # (`mmr_rank` / `MMREngine`) derives relevance and inter-candidate
 # similarity from that distance — the Rust port of the Swift MMRRank.swift.
 engram-lib = { path = "../../../libs/EngramLib/rust" }
+# The migration recall-fidelity benchmark and tournament (NEURONKIT_SPEC
+# § 4.7) score COW branches. GLK owns the branch surface; NeuronKit consumes
+# it, mirroring the Swift NeuronKit `import GeniusLocusKit` / `import LocusKit`
+# in BenchmarkAlgorithm.swift / Tournament.swift / BranchOps.swift. Acyclic:
+# GLK and LocusKit do not depend on NeuronKit.
+genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
+locus-kit = { path = "../../LocusKit/rust" }
+
+[dev-dependencies]
+# Test-only: building a parent estate to derive branches from needs the
+# in-memory Storage backend (the same construction LocusKit's own tests use)
+# and a fresh estate UUID.
+persistence-kit = { path = "../../PersistenceKit/rust" }
+uuid = { version = "1", features = ["v4"] }
