@@ -85,10 +85,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use genius_locus_kit::branches::EstateBranch;
+    use genius_locus_kit::branches::BranchId;
+    use genius_locus_kit::{EstateCoordinator, EstateHandle};
     use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
-    use locus_kit::estate::Estate;
     use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
     use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
     use locus_kit::frames::CaptureFrame;
@@ -97,13 +98,20 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000;
 
-    fn empty_parent() -> Estate {
+    /// Open an empty parent estate in a coordinator and derive a branch from
+    /// it (the Swift model: branches are minted by the kit's verb). Returns
+    /// the coordinator (owning the branch) and the branch id.
+    fn empty_branch() -> (EstateCoordinator, EstateHandle, BranchId) {
+        let mut coord = EstateCoordinator::new();
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
+        let store: Arc<dyn DrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
+        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let bid = coord.glk_derive_branch("b", &h, NOW).unwrap();
+        (coord, h, bid)
     }
 
-    fn cap(branch: &EstateBranch, content: &str) -> String {
+    fn cap(coord: &EstateCoordinator, bid: BranchId, content: &str) -> String {
         let frame = CaptureFrame::new(
             content,
             CaptureChannel::Typed,
@@ -112,7 +120,7 @@ mod tests {
             "alice",
             "test-v1",
         );
-        branch.capture(frame, NOW).unwrap().id
+        coord.branch_handle_for(bid).unwrap().capture(frame, NOW).unwrap().id
     }
 
     /// A per-query recall frame over the branch's unconfirmed rows (freshly
@@ -132,14 +140,14 @@ mod tests {
     // nothing is lost. recallOverlap = 1, notFound empty (C-13 clean).
     #[test]
     fn bl1_perfect_recall_is_clean() {
-        let parent = empty_parent();
-        let branch = EstateBranch::derive("b", &parent, NOW).unwrap();
-        let id_a = cap(&branch, "alpha concept");
-        let id_b = cap(&branch, "beta concept");
+        let (coord, _h, bid) = empty_branch();
+        let id_a = cap(&coord, bid, "alpha concept");
+        let id_b = cap(&coord, bid, "beta concept");
         let expected = vec![id_a.clone(), id_b.clone()];
         let queries = vec![query(), query()];
 
-        let report = benchmark(&branch, &expected, queries, NOW);
+        let branch = coord.branch_handle_for(bid).unwrap();
+        let report = benchmark(branch, &expected, queries, NOW);
         assert_eq!(report.query_count, 2);
         assert!(report.not_found_in_branch.is_empty(), "C-13: nothing lost");
         assert_eq!(report.recall_overlap, 1.0, "found set == expected set");
@@ -151,16 +159,16 @@ mod tests {
     // the branch surfaces in not_found_in_branch (the C-13 disqualifier).
     #[test]
     fn bl2_silent_loss_is_flagged() {
-        let parent = empty_parent();
-        let branch = EstateBranch::derive("b", &parent, NOW).unwrap();
-        let id_a = cap(&branch, "alpha concept");
+        let (coord, _h, bid) = empty_branch();
+        let id_a = cap(&coord, bid, "alpha concept");
         // expected includes a ghost id that was never captured.
         let ghost = "concept-never-migrated".to_string();
         let expected = vec![id_a, ghost.clone()];
         // One query that finds alpha; the ghost has no row to find.
         let queries = vec![query(), query()];
 
-        let report = benchmark(&branch, &expected, queries, NOW);
+        let branch = coord.branch_handle_for(bid).unwrap();
+        let report = benchmark(branch, &expected, queries, NOW);
         assert!(
             report.not_found_in_branch.contains(&ghost),
             "the un-migrated concept is the C-13 loss signal: {:?}",

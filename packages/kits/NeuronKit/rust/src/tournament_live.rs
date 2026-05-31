@@ -127,10 +127,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use genius_locus_kit::branches::EstateBranch;
+    use genius_locus_kit::EstateCoordinator;
     use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
-    use locus_kit::estate::Estate;
     use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
     use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
     use locus_kit::frames::CaptureFrame;
@@ -216,10 +216,13 @@ mod tests {
     // benchmarked, survives the gate, and is the advisory winner.
     #[test]
     fn tr5_run_tournament_end_to_end() {
+        // The Swift model: mint the branch through the kit's verb.
+        let mut coord = EstateCoordinator::new();
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let parent = Estate::create(store, OwnerCredentials::new("owner"), None).unwrap();
-        let branch = EstateBranch::derive("b", &parent, NOW).unwrap();
+        let store: Arc<dyn DrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
+        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let bid = coord.glk_derive_branch("b", &h, NOW).unwrap();
 
         let mut ids = Vec::new();
         for c in ["alpha", "beta"] {
@@ -231,7 +234,7 @@ mod tests {
                 "alice",
                 "test-v1",
             );
-            ids.push(branch.capture(frame, NOW).unwrap().id);
+            ids.push(coord.branch_handle_for(bid).unwrap().capture(frame, NOW).unwrap().id);
         }
 
         let make_queries = || {
@@ -244,7 +247,8 @@ mod tests {
             vec![mk(), mk()]
         };
 
-        let t = run_tournament(&[branch], &ids, make_queries, NOW);
+        let branch = coord.branch_handle_for(bid).unwrap();
+        let t = run_tournament(std::slice::from_ref(branch), &ids, make_queries, NOW);
         assert!(t.disqualified.is_empty(), "clean branch is not disqualified");
         assert_eq!(t.ranking.len(), 1);
         assert!(t.winner.is_some(), "the clean branch is the advisory winner");
