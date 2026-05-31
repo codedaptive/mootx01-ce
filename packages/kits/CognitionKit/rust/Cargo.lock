@@ -45,6 +45,7 @@ dependencies = [
  "persistence-kit",
  "serde",
  "serde_json",
+ "substrate-types",
  "uuid",
 ]
 
@@ -231,6 +232,7 @@ dependencies = [
  "serde",
  "serde_json",
  "substrate-ml",
+ "substrate-types",
 ]
 
 [[package]]

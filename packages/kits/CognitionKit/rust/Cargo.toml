@@ -30,6 +30,8 @@ locus-kit = { path = "../../LocusKit/rust" }
 # estate-free String branch ids back to the typed BranchId to drive
 # glk_promote_branch over the coordinator's retained branch registry.
 uuid = { version = "1", features = ["v4"] }
+# FeelsLike maps drawer ids to partial_state_recall's RowId(u128).
+substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 
 [dev-dependencies]
 # Test-only: building a parent estate to derive branches from.
