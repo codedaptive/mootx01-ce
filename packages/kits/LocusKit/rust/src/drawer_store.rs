@@ -234,6 +234,29 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Reanchor a drawer: update its placement columns (`room` and/or lattice
+    /// anchor columns) and emit one sealed audit event for the move — all in
+    /// one logical operation. Routes through `AuditGate::admit` with
+    /// `verb = Mutate` (the active→active self-loop; there is no `RowVerb::Reanchor`
+    /// case). The anchor delta is expressed via differing `prior_lattice_anchor`
+    /// and `after_lattice_anchor`. The three bitmaps are read from the current
+    /// row and passed unchanged.
+    ///
+    /// At least one of `to_room` / `to_lattice` must be `Some`.
+    fn reanchor_gated(
+        &self,
+        _drawer_id: &str,
+        _to_room: Option<&str>,
+        _to_lattice: Option<crate::estate_types::LatticeAnchor>,
+        _changed_by: &str,
+        _reason: Option<&str>,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "reanchor_gated not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     // -----------------------------------------------------------------
     // Tunnel CRUD
     // -----------------------------------------------------------------

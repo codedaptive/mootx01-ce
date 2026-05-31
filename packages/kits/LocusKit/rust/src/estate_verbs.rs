@@ -413,18 +413,55 @@ impl Estate {
         ))
     }
 
-    /// Reanchor a row to a different room or lattice position. Body
-    /// pending — implementation lands in a later LOCI mission
-    /// (reanchor-verb stream not yet assigned).
+    /// Reanchor a drawer to a different room and/or lattice position.
+    ///
+    /// Moves the row's placement: `to_room` changes the `room` column;
+    /// `to_lattice` updates the lattice anchor columns. At least one must
+    /// be supplied (belt-and-suspenders; the primary empty check is GLK's
+    /// boundary). An absent row returns `LocusKitError::DrawerNotFound`.
+    ///
+    /// Delegates to `DrawerStore::reanchor_gated`, which reads the row,
+    /// admits a `Mutate` event through the gate (active→active self-loop,
+    /// anchor delta carried via before/after anchor), and writes the updated
+    /// columns + the sealed audit event. The three bitmaps are unchanged.
     pub fn reanchor(
         &self,
-        _row_id: &str,
-        _to_room: Option<&str>,
-        _to_lattice: Option<crate::estate_types::LatticeAnchor>,
+        row_id: &str,
+        to_room: Option<&str>,
+        to_lattice: Option<crate::estate_types::LatticeAnchor>,
     ) -> Result<(), LocusKitError> {
-        Err(LocusKitError::InvalidContent(
-            "reanchor not yet implemented".to_string(),
-        ))
+        if to_room.is_none() && to_lattice.is_none() {
+            return Err(LocusKitError::InvalidContent(
+                "reanchor requires toRoom or toLattice".to_string(),
+            ));
+        }
+        if self.store.get_drawer(row_id)?.is_none() {
+            return Err(LocusKitError::DrawerNotFound {
+                id: row_id.to_string(),
+            });
+        }
+        let changed_by = self
+            .store
+            .read_manifest()
+            .map(|m| m.owner_identifier)
+            .unwrap_or_default();
+        let changed_by = if changed_by.is_empty() {
+            "estate".to_string()
+        } else {
+            changed_by
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.store.reanchor_gated(
+            row_id,
+            to_room,
+            to_lattice,
+            &changed_by,
+            Some("reanchored via Estate.reanchor"),
+            now,
+        )
     }
 
     /// Register a learned reference. Body pending — implementation lands
@@ -653,10 +690,54 @@ mod tests {
     }
 
     #[test]
-    fn reanchor_stub_returns_invalid_content() {
+    fn reanchor_empty_args_returns_invalid_content() {
+        // Belt-and-suspenders guard: both to_room and to_lattice nil.
         let estate = make_estate();
         let err = estate.reanchor("id", None, None).unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    }
+
+    #[test]
+    fn reanchor_nonexistent_row_returns_not_found() {
+        let estate = make_estate();
+        let err = estate
+            .reanchor(
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                Some("new-room"),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
+    }
+
+    #[test]
+    fn reanchor_to_new_room_updates_room() {
+        let estate = make_estate();
+        let d = basic_capture(&estate, "content", "original-room");
+        estate
+            .reanchor(&d.id, Some("new-room"), None)
+            .unwrap();
+        let updated = estate.store.get_drawer(&d.id).unwrap().unwrap();
+        assert_eq!(updated.room, "new-room");
+        // Bitmaps unchanged.
+        assert_eq!(updated.adjective_bitmap, d.adjective_bitmap);
+        assert_eq!(updated.operational_bitmap, d.operational_bitmap);
+        assert_eq!(updated.provenance, d.provenance);
+    }
+
+    #[test]
+    fn reanchor_to_new_lattice_updates_udc() {
+        let estate = make_estate();
+        let d = basic_capture(&estate, "content", "room-x");
+        estate
+            .reanchor(&d.id, None, Some(LatticeAnchor::udc("003.000")))
+            .unwrap();
+        let updated = estate.store.get_drawer(&d.id).unwrap().unwrap();
+        assert_eq!(updated.udc_code, "003.000");
+        // Bitmaps unchanged.
+        assert_eq!(updated.adjective_bitmap, d.adjective_bitmap);
+        assert_eq!(updated.operational_bitmap, d.operational_bitmap);
+        assert_eq!(updated.provenance, d.provenance);
     }
 
     #[test]
