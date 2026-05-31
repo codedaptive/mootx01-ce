@@ -51,8 +51,27 @@ final class RecipeToolsTests: XCTestCase {
         XCTAssertEqual(recipeNames, [
             "moot_confirm_migration_promotion",
             "moot_grounded_synthesis",
+            "moot_list_recipes",
             "moot_run_migration_benchmark",
         ])
+    }
+
+    func testListRecipesDispatchEnumeratesCatalog() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "lr"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_list_recipes", arguments: .object([:]))
+        let obj = try XCTUnwrap(result.objectValue)
+        XCTAssertEqual(obj["isError"]?.boolValue, false)
+        let text = try XCTUnwrap(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        // The listing reflects the shipped catalog.
+        XCTAssertTrue(text.contains("grounded_synthesis"))
+        XCTAssertTrue(text.contains("migration_benchmark"))
+        XCTAssertTrue(text.contains("capabilities:"))
     }
 
     func testRecipeToolsDoNotCollideWithLexiconNames() {
