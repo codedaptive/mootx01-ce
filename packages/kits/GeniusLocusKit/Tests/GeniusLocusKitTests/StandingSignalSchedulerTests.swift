@@ -5,6 +5,20 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import GeniusLocusKit
 
+// `ProposalKind` is declared in BOTH LocusKit (Int-backed, in
+// ProposalOperational.swift) and GeniusLocusKit (string-backed Brain-layer
+// taxonomy, in Brain/ProposalKind.swift). This test imports both modules,
+// so the bare name is ambiguous. Every `ProposalKind` reference in this
+// file is the GLK Brain-layer enum — its cases (`.amend`, `.testPropose`,
+// `.other(String)`, …) exist only on the GLK type.
+//
+// A `GeniusLocusKit.ProposalKind` qualifier does NOT work: the module name
+// is shadowed by the same-named `GeniusLocusKit` actor, so the qualifier
+// resolves to the actor and fails. The correct disambiguator is a SCOPED
+// import of the exact enum — a single-declaration import takes name-lookup
+// priority, so the bare `ProposalKind` in this file binds to the GLK enum.
+import enum GeniusLocusKit.ProposalKind
+
 /// Tests for the GLK-04 standing-signals scheduler.
 ///
 /// The scheduler dispatches in a single serial lane over QueueKit;
