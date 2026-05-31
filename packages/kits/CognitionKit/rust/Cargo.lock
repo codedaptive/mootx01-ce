@@ -230,6 +230,7 @@ dependencies = [
  "locus-kit",
  "serde",
  "serde_json",
+ "substrate-ml",
 ]
 
 [[package]]
