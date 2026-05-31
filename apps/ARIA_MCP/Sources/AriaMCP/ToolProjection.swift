@@ -44,6 +44,12 @@ public enum ToolProvenance: Sendable, Equatable {
     /// A federation-surface tool that sits above the lexicon projection.
     /// It has no `(verb, noun)` pair and is dispatched by name.
     case federation
+    /// A CognitionKit behaviour-recipe tool that sits above the lexicon
+    /// projection. Like `.federation` it has no `(verb, noun)` pair and is
+    /// dispatched by name. The MCP↔CognitionKit channel is R/W: these are
+    /// the conscious-mind recipes an agent triggers (and, for the
+    /// migration flow, the human-confirmed promotion step).
+    case recipe
 }
 
 /// A single tool advertised in `tools/list`. The structure mirrors the
@@ -111,6 +117,12 @@ public enum ToolProjection {
         // tools/list solely from this list, so the federation tool must
         // ride here to be advertised on the wire.
         out.append(federationTool())
+        // CognitionKit behaviour-recipe tools sit above the lexicon
+        // projection too (provenance `.recipe`, dispatched by name). They
+        // are the conscious-mind surface the MCP↔CognitionKit R/W channel
+        // exposes. Appended after the federation tool so the lexicon
+        // projection's byte-for-byte conformance is untouched.
+        out.append(contentsOf: RecipeTools.tools())
         return out
     }
 
