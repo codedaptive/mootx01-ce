@@ -43,6 +43,7 @@ use crate::frames::{CaptureFrame, LearnFrame, MutationKind};
 use crate::recall_stream::RecallStream;
 use crate::recall_trace_item::RecallTraceItem;
 use crate::filter::RecallFrame;
+use crate::tunnel::Tunnel;
 use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -268,6 +269,25 @@ impl Estate {
 
         let page_size = frame.limit.unwrap_or(RecallStream::DEFAULT_PAGE_SIZE);
         RecallStream::new(filtered, page_size, frame.hydration_level)
+    }
+
+    // -----------------------------------------------------------------------
+    // tunnels_from_wing
+    // -----------------------------------------------------------------------
+
+    /// Read the tunnels originating in `wing` — the estate-level surface over
+    /// `DrawerStore::tunnels_from_wing`. The drawer-to-drawer tunnels are the
+    /// edges of the estate's association graph; a reasoning lens (e.g.
+    /// keystone centrality) consumes them through the kit. Read-only.
+    pub fn tunnels_from_wing(&self, wing: &str) -> Result<Vec<Tunnel>, LocusKitError> {
+        self.store.tunnels_from_wing(wing)
+    }
+
+    /// Add a tunnel (an association-graph edge) to the estate — the
+    /// estate-level surface over `DrawerStore::add_tunnel`. The reasoning
+    /// graph the keystone lens consumes is built from these.
+    pub fn add_tunnel(&self, tunnel: &Tunnel) -> Result<(), LocusKitError> {
+        self.store.add_tunnel(tunnel)
     }
 
     // -----------------------------------------------------------------------
