@@ -29,6 +29,7 @@ pub mod tournament;
 pub mod mmr_rank;
 pub mod benchmark_scoring;
 pub mod dreaming_decision;
+pub mod maintenance_decision;
 
 pub use lattice_anchor::{
     AnchorConfidence, EnrichmentStatus, LatticeAnchorInference,
@@ -46,6 +47,11 @@ pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,
+};
+pub use maintenance_decision::{
+    broken_tag, decide as maintenance_decide, AgedRow, AuditVerdict,
+    Category as MaintenanceCategory, Decision as MaintenanceDecision, DriftRow,
+    Inputs as MaintenanceInputs, Outcome as MaintenanceOutcome,
 };
 
 /// The NeuronKit crate version. Pinned with the substrate
