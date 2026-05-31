@@ -42,6 +42,7 @@ pub mod latent_themes_recipe;
 pub mod trust_lens_recipe;
 pub mod drift_recipe;
 pub mod contradiction_recipe;
+pub mod constellation_recipe;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::{RecipeError, RecipeRunError, SubstrateError};
@@ -61,3 +62,4 @@ pub use latent_themes_recipe::run_latent_themes;
 pub use trust_lens_recipe::{run_trust_grounded_synthesis, TrustGroundedOutput};
 pub use drift_recipe::{run_drift, DriftOutput};
 pub use contradiction_recipe::{run_contradiction, ContradictionOutput};
+pub use constellation_recipe::run_constellation;
