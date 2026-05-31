@@ -49,5 +49,5 @@ pub use migration_orchestration::{
     run_migration_benchmark, BenchmarkOutcome, CorpusEntry, CoreReport, OriginEntry, PlanInput,
     PlanResultCore, RecipeSubstrate,
 };
-pub use migration_live::LiveRecipeSubstrate;
+pub use migration_live::{confirm_migration_promotion, LiveRecipeSubstrate};
 pub use grounded_synthesis::{run_grounded_synthesis, GroundedOutput};
