@@ -45,6 +45,7 @@ pub mod contradiction_recipe;
 pub mod constellation_recipe;
 pub mod theme_weather_recipe;
 pub mod feels_like_recipe;
+pub mod anticipate_recipe;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::{RecipeError, RecipeRunError, SubstrateError};
@@ -67,3 +68,4 @@ pub use contradiction_recipe::{run_contradiction, ContradictionOutput};
 pub use constellation_recipe::run_constellation;
 pub use theme_weather_recipe::run_theme_weather;
 pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
+pub use anticipate_recipe::{run_anticipate, Anticipation};
