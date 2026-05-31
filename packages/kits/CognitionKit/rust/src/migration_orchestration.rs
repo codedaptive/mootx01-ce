@@ -22,7 +22,7 @@
 //! Live-estate execution still waits on the Rust LocusKit estate; a live
 //! adapter conforming to `RecipeSubstrate` is a future bridge.
 
-use crate::error::RecipeError;
+use crate::error::{RecipeError, RecipeRunError, SubstrateError};
 use crate::migration_ranking::{
     lost_concepts, rank, DisqualifiedCore, PlanOutcome, RankedPlan,
 };
@@ -66,10 +66,12 @@ pub struct BenchmarkOutcome {
 /// test fake both implement it; the orchestration neither knows nor cares
 /// which. Mirrors the Swift `RecipeSubstrate` protocol.
 pub trait RecipeSubstrate {
-    /// Derive a COW branch for `plan_name`; return its branch id.
-    fn derive_branch(&mut self, plan_name: &str) -> String;
+    /// Derive a COW branch for `plan_name`; return its branch id, or a
+    /// `SubstrateError` if the substrate write fails.
+    fn derive_branch(&mut self, plan_name: &str) -> Result<String, SubstrateError>;
 
-    /// Capture one entry into `branch_id`; return the MINTED drawer id.
+    /// Capture one entry into `branch_id`; return the MINTED drawer id, or a
+    /// `SubstrateError` on failure.
     fn capture(
         &mut self,
         branch_id: &str,
@@ -78,10 +80,15 @@ pub trait RecipeSubstrate {
         lattice_code: &str,
         embedding_model_id: &str,
         sensitivity: i64,
-    ) -> String;
+    ) -> Result<String, SubstrateError>;
 
-    /// Benchmark `branch_id` against `corpus`; return the outcome.
-    fn benchmark(&mut self, branch_id: &str, corpus: &[CorpusEntry]) -> BenchmarkOutcome;
+    /// Benchmark `branch_id` against `corpus`; return the outcome, or a
+    /// `SubstrateError` on failure.
+    fn benchmark(
+        &mut self,
+        branch_id: &str,
+        corpus: &[CorpusEntry],
+    ) -> Result<BenchmarkOutcome, SubstrateError>;
 }
 
 /// One plan's full per-plan result, in input order. Mirrors Swift
@@ -119,16 +126,17 @@ pub fn run_migration_benchmark<S: RecipeSubstrate>(
     substrate: &mut S,
     plans: &[PlanInput],
     origin: &[OriginEntry],
-) -> Result<CoreReport, RecipeError> {
+) -> Result<CoreReport, RecipeRunError> {
     if plans.is_empty() {
         return Err(RecipeError::InsufficientBranches {
             minimum: 1,
             provided: 0,
-        });
+        }
+        .into());
     }
     let names: Vec<String> = plans.iter().map(|p| p.name.clone()).collect();
     if let Some(dup) = crate::migration_ranking::first_duplicate(&names) {
-        return Err(RecipeError::DuplicatePlanName(dup));
+        return Err(RecipeError::DuplicatePlanName(dup).into());
     }
 
     // Partition the origin ONCE — migratable vs dropped is plan-independent.
@@ -145,7 +153,7 @@ pub fn run_migration_benchmark<S: RecipeSubstrate>(
     let mut plan_results: Vec<PlanResultCore> = Vec::with_capacity(plans.len());
     let mut outcomes: Vec<PlanOutcome> = Vec::with_capacity(plans.len());
     for plan in plans {
-        let branch_id = substrate.derive_branch(&plan.name);
+        let branch_id = substrate.derive_branch(&plan.name)?;
         let mut corpus: Vec<CorpusEntry> = Vec::with_capacity(migratable.len());
         for entry in &migratable {
             let minted = substrate.capture(
@@ -155,13 +163,13 @@ pub fn run_migration_benchmark<S: RecipeSubstrate>(
                 &plan.lattice_code,
                 &plan.embedding_model_id,
                 plan.sensitivity,
-            );
+            )?;
             corpus.push(CorpusEntry {
                 id: minted,
                 content: entry.content.clone(),
             });
         }
-        let outcome = substrate.benchmark(&branch_id, &corpus);
+        let outcome = substrate.benchmark(&branch_id, &corpus)?;
         let lost = lost_concepts(&dropped, &outcome.not_found);
         plan_results.push(PlanResultCore {
             name: plan.name.clone(),
@@ -216,9 +224,9 @@ mod tests {
     }
 
     impl RecipeSubstrate for FakeSubstrate {
-        fn derive_branch(&mut self, plan_name: &str) -> String {
+        fn derive_branch(&mut self, plan_name: &str) -> Result<String, SubstrateError> {
             self.calls.push(format!("derive:{}", plan_name));
-            format!("branch-{}", plan_name)
+            Ok(format!("branch-{}", plan_name))
         }
 
         fn capture(
@@ -229,14 +237,18 @@ mod tests {
             _lattice_code: &str,
             _embedding_model_id: &str,
             _sensitivity: i64,
-        ) -> String {
+        ) -> Result<String, SubstrateError> {
             let n = *self.capture_count.get(branch_id).unwrap_or(&0);
             self.capture_count.insert(branch_id.to_string(), n + 1);
             self.calls.push(format!("capture:{}:{}", branch_id, content));
-            format!("drawer-{}-{}", branch_id, n)
+            Ok(format!("drawer-{}-{}", branch_id, n))
         }
 
-        fn benchmark(&mut self, branch_id: &str, corpus: &[CorpusEntry]) -> BenchmarkOutcome {
+        fn benchmark(
+            &mut self,
+            branch_id: &str,
+            corpus: &[CorpusEntry],
+        ) -> Result<BenchmarkOutcome, SubstrateError> {
             self.calls.push(format!("benchmark:{}", branch_id));
             let not_found: Vec<String> = corpus
                 .iter()
@@ -251,11 +263,11 @@ mod tests {
                 found as f32 / total as f32
             };
             let mrr = if found == 0 { 0.0 } else { 1.0 };
-            BenchmarkOutcome {
+            Ok(BenchmarkOutcome {
                 recall_overlap: overlap,
                 mean_reciprocal_rank: mrr,
                 not_found,
-            }
+            })
         }
     }
 
@@ -382,12 +394,56 @@ mod tests {
         let err = run_migration_benchmark(&mut fake, &[], &[]).unwrap_err();
         assert_eq!(
             err,
-            RecipeError::InsufficientBranches {
+            RecipeRunError::Recipe(RecipeError::InsufficientBranches {
                 minimum: 1,
                 provided: 0
-            }
+            })
         );
         assert!(fake.calls.is_empty());
+    }
+
+    /// A substrate that fails its first `derive_branch` — to prove the
+    /// fallible seam propagates a substrate failure (not a panic).
+    struct FailingSubstrate;
+    impl RecipeSubstrate for FailingSubstrate {
+        fn derive_branch(&mut self, _plan_name: &str) -> Result<String, SubstrateError> {
+            Err(SubstrateError::new("derive_branch", "estate offline"))
+        }
+        fn capture(
+            &mut self,
+            _b: &str,
+            _c: &str,
+            _r: &str,
+            _l: &str,
+            _e: &str,
+            _s: i64,
+        ) -> Result<String, SubstrateError> {
+            unreachable!("derive fails first")
+        }
+        fn benchmark(
+            &mut self,
+            _b: &str,
+            _c: &[CorpusEntry],
+        ) -> Result<BenchmarkOutcome, SubstrateError> {
+            unreachable!("derive fails first")
+        }
+    }
+
+    // A substrate-op failure during the run propagates as
+    // RecipeRunError::Substrate — the fallible-seam hardening.
+    #[test]
+    fn substrate_failure_propagates_as_substrate_error() {
+        let mut sub = FailingSubstrate;
+        let err = run_migration_benchmark(
+            &mut sub,
+            &[plan("p", "r", "000")],
+            &origin(&[("a", "alpha")]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            RecipeRunError::Substrate(SubstrateError::new("derive_branch", "estate offline"))
+        );
     }
 
     #[test]
@@ -399,7 +455,10 @@ mod tests {
             &origin(&[("a", "x")]),
         )
         .unwrap_err();
-        assert_eq!(err, RecipeError::DuplicatePlanName("dup".to_string()));
+        assert_eq!(
+            err,
+            RecipeRunError::Recipe(RecipeError::DuplicatePlanName("dup".to_string()))
+        );
         assert!(fake.calls.is_empty());
     }
 }
