@@ -34,6 +34,7 @@ pub mod keystones;
 pub mod latent_themes;
 pub mod drift;
 pub mod anomaly_scan;
+pub mod constellation;
 pub mod dreaming_decision;
 pub mod dreaming_cycle;
 pub mod maintenance_decision;
@@ -61,6 +62,7 @@ pub use keystones::{keystones, Keystone};
 pub use latent_themes::{latent_themes, LatentThemes, ThemeLoading};
 pub use drift::{drift, DriftScore};
 pub use anomaly_scan::{anomalies, Anomaly};
+pub use constellation::{constellations, Constellation};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,
