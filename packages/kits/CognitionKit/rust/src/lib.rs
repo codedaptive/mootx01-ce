@@ -35,6 +35,7 @@ pub mod error;
 pub mod catalog;
 pub mod migration_ranking;
 pub mod migration_orchestration;
+pub mod migration_live;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::RecipeError;
@@ -47,3 +48,4 @@ pub use migration_orchestration::{
     run_migration_benchmark, BenchmarkOutcome, CorpusEntry, CoreReport, OriginEntry, PlanInput,
     PlanResultCore, RecipeSubstrate,
 };
+pub use migration_live::LiveRecipeSubstrate;
