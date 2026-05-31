@@ -103,6 +103,72 @@ public struct CaptureFrame: Sendable {
     }
 }
 
+// MARK: - TunnelCaptureFrame
+
+/// Slots for the `capture` verb applied to a **tunnel** (a graph edge).
+/// Per spec § 7.1 / § 7.8.3.
+///
+/// `capture` is legal on exactly two nouns — drawer and tunnel
+/// (AriaLexiconLib `Acceptance.swift`). The drawer path uses
+/// `CaptureFrame`; this is the edge-shaped sibling. A tunnel links two
+/// locations, so the frame carries source + target endpoints (wing + room
+/// + optional drawer id), a free-form `label`, and the typed `kind`.
+///
+/// There are deliberately no content, lattice-anchor, or embedding slots:
+/// a tunnel row stores no content blob, the `tunnels` table has no
+/// lattice-anchor columns (the endpoint drawers carry the anchors), and a
+/// tunnel has no embedding. The three operational / adjective / provenance
+/// bitmaps are likewise not exposed — standalone capture initialises them
+/// to 0, byte-identical to the tunnel the supersession cascade writes in
+/// `DrawerStore.addDrawerWithCascade` (which constructs a `Tunnel` with the
+/// same all-zero bitmap defaults). One tunnel shape, two entry points
+/// (mission VERB-CAP-01).
+public struct TunnelCaptureFrame: Sendable {
+    /// Wing of the source endpoint.
+    public var sourceWing: String
+    /// Room of the source endpoint.
+    public var sourceRoom: String
+    /// Drawer id at the source endpoint. Nil means "the room itself".
+    public var sourceDrawerId: String?
+    /// Wing of the target endpoint.
+    public var targetWing: String
+    /// Room of the target endpoint.
+    public var targetRoom: String
+    /// Drawer id at the target endpoint. Nil means "the room itself".
+    public var targetDrawerId: String?
+    /// Free-form relationship label. Domain-specific; not validated
+    /// against a closed catalogue (matches `Tunnel.label`).
+    public var label: String
+    /// Typed relationship kind from the closed vocabulary. Defaults to
+    /// `.references` — the same default `Tunnel`'s designated initializer
+    /// uses for non-cascade tunnels.
+    public var kind: TunnelKind
+    /// Actor identifier written into the tunnel's `addedBy` field.
+    public var addedBy: String
+
+    public init(
+        sourceWing: String,
+        sourceRoom: String,
+        targetWing: String,
+        targetRoom: String,
+        label: String,
+        addedBy: String,
+        sourceDrawerId: String? = nil,
+        targetDrawerId: String? = nil,
+        kind: TunnelKind = .references
+    ) {
+        self.sourceWing = sourceWing
+        self.sourceRoom = sourceRoom
+        self.sourceDrawerId = sourceDrawerId
+        self.targetWing = targetWing
+        self.targetRoom = targetRoom
+        self.targetDrawerId = targetDrawerId
+        self.label = label
+        self.kind = kind
+        self.addedBy = addedBy
+    }
+}
+
 // MARK: - RecallFrame
 
 /// Slots for the `recall` verb. Per spec § 7.8.3.
