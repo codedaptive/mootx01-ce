@@ -11,24 +11,45 @@
 // Whenever the Swift predicate changes, this file must change with
 // it; the parity gate exists precisely to catch drift between ports.
 
+use std::sync::Arc;
+
 use genius_locus_kit::{
     EstateCoordinator, EstateHandle, GeniusLocusKitError, LatticeRegion,
 };
+use locus_kit::drawer_store::DrawerStore;
+use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+use locus_kit::estate_types::OwnerCredentials;
+use persistence_kit::inmemory::InMemoryStorage;
+use uuid::Uuid;
 
-/// The shared estate set used by every parity test below. Three
-/// estates with distinct, partially-overlapping zoom windows.
-/// Identical to the windows used in
-/// `Tests/GeniusLocusKitTests/CrossEstateOverlapTests.swift`.
+/// Open one estate over a fresh in-memory store whose estate UUID is fixed
+/// from `uuid_bytes` (so the handle UUID — derived from the opened estate —
+/// is deterministic and the sort order below holds). The registry now holds
+/// the real `locus_kit::Estate`, so `open` takes a store + owner exactly as
+/// the Swift actor's `open(storage:owner:)` does.
+fn open_estate(
+    coord: &mut EstateCoordinator,
+    uuid_bytes: [u8; 16],
+    low: i64,
+    high: i64,
+) -> EstateHandle {
+    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::from_bytes(uuid_bytes)));
+    let store = Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
+    coord
+        .open(store, OwnerCredentials::new("owner"), low, high)
+        .expect("open")
+}
+
+/// The shared estate set used by every parity test below. Three estates
+/// with distinct, partially-overlapping zoom windows. Identical to the
+/// windows used in `Tests/GeniusLocusKitTests/CrossEstateOverlapTests.swift`.
 fn open_three_estates() -> (EstateCoordinator, EstateHandle, EstateHandle, EstateHandle) {
     let mut coord = EstateCoordinator::new();
-    // UUID bytes chosen so sort order matches the test expectations
-    // below (low < mid < high lexicographically).
-    let u_low: [u8; 16]  = [1; 16];
-    let u_mid: [u8; 16]  = [2; 16];
-    let u_high: [u8; 16] = [3; 16];
-    let h_low  = coord.open(u_low,  0,  10, "low".into()).expect("open low");
-    let h_mid  = coord.open(u_mid,  5,  15, "mid".into()).expect("open mid");
-    let h_high = coord.open(u_high, 20, 30, "high".into()).expect("open high");
+    // UUID bytes chosen so sort order matches the test expectations below
+    // (low < mid < high lexicographically).
+    let h_low = open_estate(&mut coord, [1; 16], 0, 10);
+    let h_mid = open_estate(&mut coord, [2; 16], 5, 15);
+    let h_high = open_estate(&mut coord, [3; 16], 20, 30);
     (coord, h_low, h_mid, h_high)
 }
 
@@ -51,7 +72,7 @@ fn close_leaves_remaining_handles_live() {
     assert!(!live.contains(&h_mid));
 
     // Stale handle lookup raises EstateNotOpen.
-    let err = coord.state_for(&h_mid).err().expect("expected EstateNotOpen");
+    let err = coord.estate_for(&h_mid).err().expect("expected EstateNotOpen");
     assert_eq!(
         err,
         GeniusLocusKitError::EstateNotOpen { estate_uuid: h_mid.estate_uuid }
@@ -61,13 +82,20 @@ fn close_leaves_remaining_handles_live() {
 #[test]
 fn duplicate_open_is_rejected() {
     let mut coord = EstateCoordinator::new();
-    let uuid: [u8; 16] = [42; 16];
-    coord.open(uuid, 0, 10, "first".into()).expect("first open");
+    // The faithful duplicate scenario is the SAME database opened twice:
+    // one store, opened through two handles. Both reads resolve the same
+    // immutable manifest estate UUID (§ 7.7), so the second open is rejected.
+    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::from_bytes([42; 16])));
+    let store: Arc<dyn DrawerStore> =
+        Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
+    let h = coord
+        .open(store.clone(), OwnerCredentials::new("owner"), 0, 10)
+        .expect("first open");
     let err = coord
-        .open(uuid, 0, 10, "second".into())
+        .open(store.clone(), OwnerCredentials::new("owner"), 0, 10)
         .err()
         .expect("expected DuplicateEstate");
-    assert_eq!(err, GeniusLocusKitError::DuplicateEstate { estate_uuid: uuid });
+    assert_eq!(err, GeniusLocusKitError::DuplicateEstate { estate_uuid: h.estate_uuid });
 }
 
 #[test]
@@ -78,7 +106,11 @@ fn overlap_routes_to_low_and_mid() {
     let hits = coord
         .estates_overlapping(LatticeRegion::new(4, 8))
         .expect("overlap query");
-    assert_eq!(hits, vec![h_low, h_mid]);
+    // The contract is set-based (the sort in estates_overlapping is a test
+    // convenience); compare as a set so the result is robust to the
+    // estate UUIDs the in-memory store mints.
+    let hit_set: std::collections::HashSet<EstateHandle> = hits.into_iter().collect();
+    assert_eq!(hit_set, std::collections::HashSet::from([h_low, h_mid]));
 }
 
 #[test]
