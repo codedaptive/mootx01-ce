@@ -40,10 +40,13 @@ final class ToolProjectionTests: XCTestCase {
     func testNamingDiscipline() {
         for tool in ToolProjection.tools() {
             guard case .lexicon(let verb, let noun) = tool.provenance else { continue }
+            // Shipped names carry the product namespace prefix (moot_)
+            // ahead of the ARIA grammar body (commit e6dd7ba).
+            let prefix = ToolProjection.toolNamePrefix
             if verb == .recall {
-                XCTAssertEqual(tool.name, "\(noun.rawValue)_recall")
+                XCTAssertEqual(tool.name, "\(prefix)\(noun.rawValue)_recall")
             } else {
-                XCTAssertEqual(tool.name, "\(verb.rawValue)_\(noun.rawValue)")
+                XCTAssertEqual(tool.name, "\(prefix)\(verb.rawValue)_\(noun.rawValue)")
             }
         }
     }
@@ -68,9 +71,9 @@ final class ToolProjectionTests: XCTestCase {
     /// smoke test for the wire works through them.
     func testCoreToolsArePresent() {
         let names = Set(ToolProjection.tools().map(\.name))
-        XCTAssertTrue(names.contains("capture_drawer"))
-        XCTAssertTrue(names.contains("drawer_recall"))
-        XCTAssertTrue(names.contains("withdraw_drawer"))
+        XCTAssertTrue(names.contains("moot_capture_drawer"))
+        XCTAssertTrue(names.contains("moot_drawer_recall"))
+        XCTAssertTrue(names.contains("moot_withdraw_drawer"))
     }
 
     /// `cross_estate_recall` is the one federation tool above the lexicon
@@ -80,7 +83,7 @@ final class ToolProjectionTests: XCTestCase {
         let federation = ToolProjection.tools().filter { $0.provenance == .federation }
         XCTAssertEqual(federation.count, 1, "exactly one federation tool is expected")
         let tool = try XCTUnwrap(federation.first)
-        XCTAssertEqual(tool.name, "cross_estate_recall")
+        XCTAssertEqual(tool.name, ToolDispatcher.crossEstateRecallToolName)
         XCTAssertNil(tool.verb)
         XCTAssertNil(tool.noun)
         XCTAssertNil(

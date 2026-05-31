@@ -129,6 +129,15 @@ public struct ToolDispatcher: Sendable {
             if name == Self.crossEstateRecallToolName {
                 return try await runCrossEstateRecall(args)
             }
+            // CognitionKit behaviour-recipe tools sit above the lexicon
+            // projection (provenance `.recipe`), so they are matched by
+            // name before parseToolName — which would reject a non-lexicon
+            // name as methodNotFound. RecipeTools owns their decode + run.
+            if RecipeTools.isRecipeTool(name) {
+                return try await RecipeTools.dispatch(
+                    name: name, args: args, kit: kit, defaultHandle: handle,
+                    resolveHandle: resolveHandle)
+            }
             guard let (verb, noun) = parseToolName(name) else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.methodNotFound,

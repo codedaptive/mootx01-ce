@@ -97,8 +97,8 @@ final class ServerTests: XCTestCase {
         let tools = try XCTUnwrap(object["tools"]?.arrayValue)
         XCTAssertFalse(tools.isEmpty)
         let names = tools.compactMap { $0.objectValue?["name"]?.stringValue }
-        XCTAssertTrue(names.contains("capture_drawer"))
-        XCTAssertTrue(names.contains("drawer_recall"))
+        XCTAssertTrue(names.contains("moot_capture_drawer"))
+        XCTAssertTrue(names.contains("moot_drawer_recall"))
         // No substrate-driven verbs on the surface.
         XCTAssertFalse(names.contains(where: { $0.hasPrefix("propose_") }))
         XCTAssertFalse(names.contains(where: { $0.hasPrefix("associate_") }))
@@ -114,7 +114,7 @@ final class ServerTests: XCTestCase {
             id: .integer(10),
             method: "tools/call",
             params: .object([
-                "name": .string("capture_drawer"),
+                "name": .string("moot_capture_drawer"),
                 "arguments": .object([
                     "content": .string("aria-mcp end-to-end test row"),
                     "room": .string("aria-mcp-tests"),
@@ -138,7 +138,7 @@ final class ServerTests: XCTestCase {
             id: .integer(11),
             method: "tools/call",
             params: .object([
-                "name": .string("drawer_recall"),
+                "name": .string("moot_drawer_recall"),
                 "arguments": .object([
                     "filter": .string("unconfirmed"),
                     "ordering": .string("byCaptureTimeDesc"),
@@ -170,7 +170,7 @@ final class ServerTests: XCTestCase {
             id: .integer(20),
             method: "tools/call",
             params: .object([
-                "name": .string("expunge_drawer"),
+                "name": .string("moot_expunge_drawer"),
                 "arguments": .object([
                     "rowID": .string("nonexistent"),
                     "reason": .string("test"),

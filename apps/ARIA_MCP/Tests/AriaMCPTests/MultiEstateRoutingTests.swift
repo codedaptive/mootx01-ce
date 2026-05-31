@@ -91,21 +91,21 @@ final class MultiEstateRoutingTests: XCTestCase {
 
         // Capture into B explicitly by estateID.
         let captured = try await dispatcher.dispatch(
-            name: "capture_drawer",
+            name: "moot_capture_drawer",
             arguments: captureArgs(content: "row-in-B", estateID: hB.estateUUID)
         )
         XCTAssertFalse(isError(captured))
 
         // Recall from B by estateID sees the row.
         let fromB = try await dispatcher.dispatch(
-            name: "drawer_recall", arguments: recallArgs(estateID: hB.estateUUID)
+            name: "moot_drawer_recall", arguments: recallArgs(estateID: hB.estateUUID)
         )
         XCTAssertTrue(text(of: fromB)?.contains("row-in-B") ?? false,
             "estateID-targeted recall must see the row captured into that estate")
 
         // Recall from the default estate (A) must NOT see B's row.
         let fromDefault = try await dispatcher.dispatch(
-            name: "drawer_recall", arguments: recallArgs()
+            name: "moot_drawer_recall", arguments: recallArgs()
         )
         XCTAssertFalse(text(of: fromDefault)?.contains("row-in-B") ?? false,
             "the default estate must not see a row captured into estate B")
@@ -122,19 +122,19 @@ final class MultiEstateRoutingTests: XCTestCase {
 
         // Capture with no estateID — the v1.0 path — targets the default.
         let captured = try await dispatcher.dispatch(
-            name: "capture_drawer", arguments: captureArgs(content: "row-in-default")
+            name: "moot_capture_drawer", arguments: captureArgs(content: "row-in-default")
         )
         XCTAssertFalse(isError(captured))
 
         // Recall with no estateID sees it; recall from B does not.
         let fromDefault = try await dispatcher.dispatch(
-            name: "drawer_recall", arguments: recallArgs()
+            name: "moot_drawer_recall", arguments: recallArgs()
         )
         XCTAssertTrue(text(of: fromDefault)?.contains("row-in-default") ?? false,
             "omitted estateID must behave exactly as the single-estate v1.0 path")
 
         let fromB = try await dispatcher.dispatch(
-            name: "drawer_recall", arguments: recallArgs(estateID: hB.estateUUID)
+            name: "moot_drawer_recall", arguments: recallArgs(estateID: hB.estateUUID)
         )
         XCTAssertFalse(text(of: fromB)?.contains("row-in-default") ?? false,
             "the default row must not leak into estate B")
@@ -151,7 +151,7 @@ final class MultiEstateRoutingTests: XCTestCase {
         // A well-formed UUID that names no registered estate.
         do {
             _ = try await dispatcher.dispatch(
-                name: "drawer_recall", arguments: recallArgs(estateID: UUID())
+                name: "moot_drawer_recall", arguments: recallArgs(estateID: UUID())
             )
             XCTFail("unknown estateID should throw invalidParams")
         } catch let error as JSONRPCError {
@@ -161,7 +161,7 @@ final class MultiEstateRoutingTests: XCTestCase {
         // A malformed (non-UUID) estateID is the same out-of-band error.
         do {
             _ = try await dispatcher.dispatch(
-                name: "drawer_recall",
+                name: "moot_drawer_recall",
                 arguments: .object(["filter": .string("unconfirmed"),
                                     "estateID": .string("not-a-uuid")])
             )
@@ -212,13 +212,13 @@ final class MultiEstateRoutingTests: XCTestCase {
         // Each estate captures a uniquely-tagged row.
         for (handle, tag) in [(hB, "row-from-B"), (hC, "row-from-C"), (hD, "row-from-D")] {
             _ = try await dispatcher.dispatch(
-                name: "capture_drawer",
+                name: "moot_capture_drawer",
                 arguments: captureArgs(content: tag, estateID: handle.estateUUID)
             )
         }
 
         let result = try await dispatcher.dispatch(
-            name: "cross_estate_recall", arguments: crossArgs(requester: hA)
+            name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
         )
         XCTAssertFalse(isError(result), "an authorized fan must succeed")
         let body = try XCTUnwrap(text(of: result))
@@ -239,7 +239,7 @@ final class MultiEstateRoutingTests: XCTestCase {
 
         // B captures content but issues no grant to A.
         _ = try await dispatcher.dispatch(
-            name: "capture_drawer",
+            name: "moot_capture_drawer",
             arguments: captureArgs(content: "secret-B", estateID: hB.estateUUID)
         )
 
@@ -247,7 +247,7 @@ final class MultiEstateRoutingTests: XCTestCase {
         // not a thrown JSON-RPC error: the read reached the
         // substrate-mediated surface and was refused (A-versus-C, §13).
         let result = try await dispatcher.dispatch(
-            name: "cross_estate_recall", arguments: crossArgs(requester: hA)
+            name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
         )
         XCTAssertTrue(isError(result),
             "a no-grant cross-estate call must be refused with isError == true")
@@ -267,16 +267,16 @@ final class MultiEstateRoutingTests: XCTestCase {
         // B grants A only the "kitchen" room, then captures into two rooms.
         _ = try await kit.issueGrant(hB, grantOptions(to: hA, scope: .room("kitchen")))
         _ = try await dispatcher.dispatch(
-            name: "capture_drawer",
+            name: "moot_capture_drawer",
             arguments: captureArgs(content: "kitchen-row", room: "kitchen", estateID: hB.estateUUID)
         )
         _ = try await dispatcher.dispatch(
-            name: "capture_drawer",
+            name: "moot_capture_drawer",
             arguments: captureArgs(content: "garage-row", room: "garage", estateID: hB.estateUUID)
         )
 
         let result = try await dispatcher.dispatch(
-            name: "cross_estate_recall", arguments: crossArgs(requester: hA)
+            name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
         )
         XCTAssertFalse(isError(result))
         let body = try XCTUnwrap(text(of: result))

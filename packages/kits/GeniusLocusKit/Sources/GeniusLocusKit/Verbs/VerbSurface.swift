@@ -472,6 +472,28 @@ public extension GeniusLocusKit {
         return MergeReport(merged: merged, conflicts: [], skipped: skipped)
     }
 
+    // MARK: - branchHandle(for:)
+
+    /// Resolve a tracked branch by its `BranchID` to its `BranchHandle`.
+    ///
+    /// Branches are retained in the kit's registry through every lifecycle
+    /// state (active / won / merged / discarded) from `glkDeriveBranch`
+    /// until the kit is released (the audit trail must remain reachable,
+    /// I-15). This read accessor lets a *stateless* caller recover a live
+    /// handle from a `BranchID` a prior call surfaced — notably the
+    /// ARIA_MCP recipe surface, where a recipe's `run` and its
+    /// human-confirmed promotion arrive as two separate stateless
+    /// `tools/call` invocations against one long-lived kit. Returns nil
+    /// when no branch with that id was derived by this kit instance.
+    ///
+    /// Read-only: it neither mints nor mutates branch state. Promotion,
+    /// merge, and discard still flow through `glkPromoteBranch` /
+    /// `glkMergeDrawers` / `BranchHandle.discard()` — the write surface is
+    /// unchanged.
+    func branchHandle(for branchID: BranchID) -> (any BranchHandle)? {
+        branches[branchID]
+    }
+
     // MARK: - Internal helpers
 
     /// Drain all unconfirmed rows from a LocusKit estate into an array.

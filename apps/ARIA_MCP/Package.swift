@@ -38,6 +38,8 @@ let package = Package(
     dependencies: [
         .package(name: "AriaLexiconLib", path: "../../packages/libs/AriaLexiconLib"),
         .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
+        .package(name: "NeuronKit", path: "../../packages/kits/NeuronKit"),
+        .package(name: "CognitionKit", path: "../../packages/kits/CognitionKit"),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
     ],
@@ -47,6 +49,8 @@ let package = Package(
             dependencies: [
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "NeuronKit", package: "NeuronKit"),
+                .product(name: "CognitionKit", package: "CognitionKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
@@ -70,6 +74,8 @@ let package = Package(
                 "AriaMCP",
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "NeuronKit", package: "NeuronKit"),
+                .product(name: "CognitionKit", package: "CognitionKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),

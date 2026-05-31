@@ -46,7 +46,7 @@ final class SchemeDiscriminatorTests: XCTestCase {
             id: .integer(id),
             method: "tools/call",
             params: .object([
-                "name": .string("capture_drawer"),
+                "name": .string("moot_capture_drawer"),
                 "arguments": .object(arguments),
             ])
         )
@@ -111,7 +111,7 @@ final class SchemeDiscriminatorTests: XCTestCase {
             id: .integer(102),
             method: "tools/call",
             params: .object([
-                "name": .string("drawer_recall"),
+                "name": .string("moot_drawer_recall"),
                 "arguments": .object([
                     "filter": .string("unconfirmed"),
                     "ordering": .string("byCaptureTimeDesc"),
