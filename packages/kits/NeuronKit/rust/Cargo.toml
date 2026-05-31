@@ -15,3 +15,8 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
+# EngramLib supplies the typed `Engram` (Fingerprint256) and its Hamming
+# `distance` primitive. NEURONKIT_SPEC § 4.1 step 4's standalone MMR rerank
+# (`mmr_rank` / `MMREngine`) derives relevance and inter-candidate
+# similarity from that distance — the Rust port of the Swift MMRRank.swift.
+engram-lib = { path = "../../../libs/EngramLib/rust" }

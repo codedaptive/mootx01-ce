@@ -23,6 +23,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-lib"
+version = "0.1.0"
+dependencies = [
+ "substrate-kernel",
+ "substrate-types",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -39,6 +47,7 @@ name = "neuron-kit"
 version = "0.1.0"
 dependencies = [
  "eidetic-lib",
+ "engram-lib",
  "serde",
  "serde_json",
 ]
@@ -113,6 +122,17 @@ dependencies = [
  "serde_core",
  "zmij",
 ]
+
+[[package]]
+name = "substrate-kernel"
+version = "1.0.0-skeleton"
+dependencies = [
+ "substrate-types",
+]
+
+[[package]]
+name = "substrate-types"
+version = "1.0.0-skeleton"
 
 [[package]]
 name = "syn"
