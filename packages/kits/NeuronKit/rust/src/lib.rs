@@ -39,6 +39,7 @@ pub mod theme_weather;
 pub mod partial_recall;
 pub mod anticipation;
 pub mod mind_overlap;
+pub mod bias;
 pub mod dreaming_decision;
 pub mod dreaming_cycle;
 pub mod maintenance_decision;
@@ -73,6 +74,7 @@ pub use partial_recall::{
 };
 pub use anticipation::{anticipate, ActionObservation, ActionPrediction};
 pub use mind_overlap::{dp_summary, summary_overlap};
+pub use bias::{representation_bias, CategoryBias};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,

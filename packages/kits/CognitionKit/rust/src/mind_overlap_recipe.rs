@@ -40,7 +40,11 @@ pub struct MindOverlap {
 /// reduction's contract.
 const EPSILON: f64 = 8.0;
 const DELTA: f64 = 1e-6;
-const K_ANONYMITY: usize = 1;
+// k-anonymity > 1 so only bits SHARED by several memories survive the
+// reduction — the summary becomes the estate's dominant structure, not a
+// near-all-ones saturation (k=1 keeps any bit any single drawer sets, which
+// saturates and makes every estate look identical).
+const K_ANONYMITY: usize = 3;
 
 /// Compute the privacy-preserving overlap between estate `handle_a` and estate
 /// `handle_b`. Reads each estate independently, reduces each to a DP summary
@@ -111,19 +115,26 @@ mod tests {
 
     const NOW: i64 = 1_700_000_000;
 
-    fn open_estate(coord: &mut EstateCoordinator) -> EstateHandle {
-        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    // Fixed UUID per estate so the shared family + DP seed are deterministic
+    // (the Laplace noise is seeded from the estate UUIDs — random UUIDs would
+    // make the noise, and the test, flaky).
+    fn open_estate(coord: &mut EstateCoordinator, uuid: [u8; 16]) -> EstateHandle {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::from_bytes(uuid)));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
         coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap()
     }
 
-    fn capture(coord: &EstateCoordinator, h: &EstateHandle, content: &str, room: &str) {
+    // The fingerprint encodes the LATTICE anchor (concept block), structure,
+    // and channel — not raw text. So two estates are "convergent" when they
+    // share lattice anchors, "divergent" when they don't; `udc` is what makes
+    // the comparison meaningful.
+    fn capture(coord: &EstateCoordinator, h: &EstateHandle, content: &str, room: &str, udc: &str) {
         let frame = CaptureFrame::new(
             content,
             CaptureChannel::Typed,
             room,
-            LatticeAnchor::udc("0"),
+            LatticeAnchor::udc(udc),
             "alice",
             "test-v1",
         );
@@ -144,16 +155,25 @@ mod tests {
     #[test]
     fn ck_mo1_convergent_overlaps_more_than_divergent() {
         let mut coord = EstateCoordinator::new();
-        let a = open_estate(&mut coord);
-        let twin = open_estate(&mut coord); // same memories as A
-        let other = open_estate(&mut coord); // disjoint memories
+        let a = open_estate(&mut coord, [1; 16]);
+        let twin = open_estate(&mut coord, [2; 16]); // same memories as A
+        let other = open_estate(&mut coord, [3; 16]); // disjoint memories
 
-        for c in ["alpha concept", "beta concept", "gamma concept"] {
-            capture(&coord, &a, c, "study");
-            capture(&coord, &twin, c, "study");
+        // A and its twin share content AND room (structure/lattice/channel
+        // blocks match — only the per-row lineage block differs); "other" is
+        // disjoint on content AND room. Enough drawers that the aggregate
+        // signal dominates the DP noise.
+        // A and its twin share the same lattice anchors (concepts 1xx);
+        // "other" is anchored in a disjoint region (concepts 6xx). The lattice
+        // block is what the fingerprint encodes, so this is genuine
+        // conceptual convergence vs divergence.
+        let phil_udc = ["100", "110", "120", "130", "140", "150"];
+        for (i, u) in phil_udc.iter().enumerate() {
+            capture(&coord, &a, &format!("philosophy note {i}"), "study", u);
+            capture(&coord, &twin, &format!("philosophy note {i}"), "study", u);
         }
-        for c in ["zulu recipe", "yankee recipe", "xray recipe"] {
-            capture(&coord, &other, c, "kitchen");
+        for (i, u) in ["600", "610", "620", "630", "640", "650"].iter().enumerate() {
+            capture(&coord, &other, &format!("cooking note {i}"), "kitchen", u);
         }
 
         let conv = run_mind_overlap(&coord, &a, &twin, all, NOW).expect("overlap");
@@ -170,9 +190,9 @@ mod tests {
     #[test]
     fn ck_mo2_empty_guarded() {
         let mut coord = EstateCoordinator::new();
-        let a = open_estate(&mut coord);
-        let b = open_estate(&mut coord);
-        capture(&coord, &a, "alpha", "study");
+        let a = open_estate(&mut coord, [4; 16]);
+        let b = open_estate(&mut coord, [5; 16]);
+        capture(&coord, &a, "alpha", "study", "100");
         // b is empty
         let mo = run_mind_overlap(&coord, &a, &b, all, NOW).expect("overlap");
         assert_eq!(mo.overlap, 0.0);
