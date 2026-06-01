@@ -68,7 +68,7 @@ any one language's types would not serve the doctrine. The
 filesystem-native shape is the language-agnostic shape.
 
 The reference implementation in Swift (QueueKit) defines what
-"conforming" means in concrete terms; the Rust port mirrors it
+"conforming" means in concrete terms; the Rust version mirrors it
 with bit-identity; the Python port matches the behavioral
 shape.
 
@@ -190,7 +190,7 @@ The suite covers at minimum:
 The full test vector set is a future deliverable. The vectors
 themselves live alongside QueueKit's spec at
 `Packages/QueueKit/Tests/` once QueueKit is implemented; the
-Rust port reuses the vector data through cross-language test
+Rust version reuses the vector data through cross-language test
 infrastructure; the Python port reuses the behavioral
 expectations from the same vectors.
 
