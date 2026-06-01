@@ -47,7 +47,6 @@ use crate::frames::TunnelCaptureFrame;
 
 use crate::recall_trace_item::RecallTraceItem;
 use crate::filter::RecallFrame;
-use crate::tunnel::Tunnel;
 use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
