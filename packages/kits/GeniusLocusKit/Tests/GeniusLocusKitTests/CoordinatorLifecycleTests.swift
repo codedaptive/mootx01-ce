@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -11,7 +11,8 @@ import PersistenceKitInMemory
 /// registry semantics that downstream sub-missions build on: handles
 /// are unique per estate UUID, `handles` reports the live set, and
 /// `close` is observable through subsequent lookups.
-final class CoordinatorLifecycleTests: XCTestCase {
+@Suite("Coordinator lifecycle")
+struct CoordinatorLifecycleTests {
 
     /// Build an in-memory `Storage` open for one estate. Each call
     /// produces an isolated storage instance because every
@@ -26,7 +27,8 @@ final class CoordinatorLifecycleTests: XCTestCase {
     }
 
     /// Opening three estates yields three distinct live handles.
-    func testOpenThreeEstatesYieldsThreeHandles() async throws {
+    @Test
+    func openThreeEstatesYieldsThreeHandles() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-A")
 
@@ -41,13 +43,14 @@ final class CoordinatorLifecycleTests: XCTestCase {
 
         let count = await kit.openEstateCount
         let handles = await kit.handles
-        XCTAssertEqual(count, 3)
-        XCTAssertEqual(Set(handles), Set([h1, h2, h3]))
+        #expect(count == 3)
+        #expect(Set(handles) == Set([h1, h2, h3]))
     }
 
     /// Closing one of three handles leaves two open and the closed
     /// handle stale.
-    func testCloseLeavesRemainingHandlesLive() async throws {
+    @Test
+    func closeLeavesRemainingHandlesLive() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-A")
 
@@ -64,57 +67,44 @@ final class CoordinatorLifecycleTests: XCTestCase {
 
         let count = await kit.openEstateCount
         let live = Set(await kit.handles)
-        XCTAssertEqual(count, 2)
-        XCTAssertEqual(live, Set([h1, h3]))
+        #expect(count == 2)
+        #expect(live == Set([h1, h3]))
 
         // h2 is stale — lookup must raise estateNotOpen.
-        await XCTAssertThrowsErrorAsync(try await kit.estate(for: h2)) { error in
-            guard case GeniusLocusKitError.estateNotOpen(let uuid) = error else {
-                return XCTFail("expected .estateNotOpen, got \(error)")
-            }
-            XCTAssertEqual(uuid, h2.estateUUID)
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
+            try await kit.estate(for: h2)
+        }
+        if case .estateNotOpen(let uuid)? = thrown {
+            #expect(uuid == h2.estateUUID)
+        } else {
+            Issue.record("expected .estateNotOpen, got \(String(describing: thrown))")
         }
     }
 
     /// Opening the same estate twice raises `duplicateEstate`.
-    func testDuplicateOpenIsRejected() async throws {
+    @Test
+    func duplicateOpenIsRejected() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-A")
         let storage = makeStorage()
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
 
         let h1 = try await kit.open(storage: storage, owner: owner)
-        await XCTAssertThrowsErrorAsync(try await kit.open(storage: storage, owner: owner)) { error in
-            guard case GeniusLocusKitError.duplicateEstate(let uuid) = error else {
-                return XCTFail("expected .duplicateEstate, got \(error)")
-            }
-            XCTAssertEqual(uuid, h1.estateUUID)
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
+            try await kit.open(storage: storage, owner: owner)
+        }
+        if case .duplicateEstate(let uuid)? = thrown {
+            #expect(uuid == h1.estateUUID)
+        } else {
+            Issue.record("expected .duplicateEstate, got \(String(describing: thrown))")
         }
     }
 
     /// Newly initialized kit holds no estates.
-    func testKitInitializesWithEmptyRegistry() async throws {
+    @Test
+    func kitInitializesWithEmptyRegistry() async throws {
         let kit = GeniusLocusKit()
         let count = await kit.openEstateCount
-        XCTAssertEqual(count, 0)
-    }
-}
-
-// MARK: - Async XCTest helper
-
-/// XCTest does not ship an async `XCTAssertThrowsError` overload as of
-/// Swift 6.0, so the suite defines its own. Captures the thrown error
-/// and forwards it to the `errorHandler` for case-pattern matching.
-func XCTAssertThrowsErrorAsync<T>(
-    _ expression: @autoclosure () async throws -> T,
-    file: StaticString = #filePath,
-    line: UInt = #line,
-    _ errorHandler: (Error) -> Void = { _ in }
-) async {
-    do {
-        _ = try await expression()
-        XCTFail("expected throw, none thrown", file: file, line: line)
-    } catch {
-        errorHandler(error)
+        #expect(count == 0)
     }
 }

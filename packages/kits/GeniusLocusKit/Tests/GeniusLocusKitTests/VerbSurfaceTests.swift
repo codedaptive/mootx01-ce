@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import AriaLexiconLib
 import LocusKit
@@ -20,7 +20,8 @@ import PersistenceKitInMemory
 /// In every case the verb call reaches the GLK boundary, resolves the
 /// handle through `estate(for:)`, and dispatches; the assertion is on
 /// the observed outcome.
-final class VerbSurfaceTests: XCTestCase {
+@Suite("Verb surface round-trips")
+struct VerbSurfaceTests {
 
     /// In-memory storage seeded for one estate. Each call returns a
     /// fresh isolated storage so a verb test never sees another
@@ -75,12 +76,13 @@ final class VerbSurfaceTests: XCTestCase {
 
     /// `capture` then `recall`: a row filed through the GLK verb
     /// surface is recoverable through the GLK verb surface.
-    func testCaptureThenRecall() async throws {
+    @Test
+    func captureThenRecall() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "captured row"))
         let rows = try await kit.recall(handle, recallAllActive())
-        XCTAssertTrue(rows.contains { $0.id == stored.id },
-                      "captured drawer should appear in recall results")
+        #expect(rows.contains { $0.id == stored.id },
+                "captured drawer should appear in recall results")
     }
 
     // MARK: - mutate round-trip
@@ -89,7 +91,8 @@ final class VerbSurfaceTests: XCTestCase {
     /// live mutate path through the GLK boundary and transitions the
     /// row's confirmation axis to `.userConfirmed`. Verified by recalling
     /// the row under a user-confirmed frame and reading its confirmation.
-    func testMutateConfirmRoundTripTransitionsConfirmation() async throws {
+    @Test
+    func mutateConfirmRoundTripTransitionsConfirmation() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "mutate target"))
         try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .confirm))
@@ -101,25 +104,26 @@ final class VerbSurfaceTests: XCTestCase {
             ordering: .byCaptureTimeDesc
         )
         let rows = try await kit.recall(handle, confirmedFrame)
-        let row = try XCTUnwrap(rows.first { $0.id == stored.id },
-                                "confirmed row should appear in a user-confirmed recall")
-        XCTAssertEqual(row.confirmation, .userConfirmed)
+        let row = try #require(rows.first { $0.id == stored.id },
+                               "confirmed row should appear in a user-confirmed recall")
+        #expect(row.confirmation == .userConfirmed)
     }
 
     /// A state-axis mutation kind (`.reject`) is not yet wired, so the GLK
     /// boundary re-raises LocusKit's "not yet implemented" marker as
     /// `VerbError.notSupportedByEstate(verb: "mutate")`. Confirms the
     /// dispatch chain's error remap is intact for unimplemented kinds.
-    func testMutateStateAxisKindSurfacesNotSupported() async throws {
+    @Test
+    func mutateStateAxisKindSurfacesNotSupported() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "reject target"))
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: VerbError.self) {
             try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .reject))
-        ) { error in
-            guard case VerbError.notSupportedByEstate(let verb) = error else {
-                return XCTFail("expected .notSupportedByEstate, got \(error)")
-            }
-            XCTAssertEqual(verb, "mutate")
+        }
+        if case .notSupportedByEstate(let verb)? = thrown {
+            #expect(verb == "mutate")
+        } else {
+            Issue.record("expected .notSupportedByEstate, got \(String(describing: thrown))")
         }
     }
 
@@ -127,13 +131,14 @@ final class VerbSurfaceTests: XCTestCase {
 
     /// `capture` then `withdraw`: the row's state flips to
     /// `.withdrawn`; a recall scoped to active rows no longer sees it.
-    func testWithdrawRoundTrip() async throws {
+    @Test
+    func withdrawRoundTrip() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "withdraw target"))
         try await kit.withdraw(handle, WithdrawFrame(rowID: stored.id, reason: "verb tests"))
         let activeRows = try await kit.recall(handle, recallAllActive())
-        XCTAssertFalse(activeRows.contains { $0.id == stored.id },
-                       "withdrawn drawer should not appear in active-only recall")
+        #expect(!activeRows.contains { $0.id == stored.id },
+                "withdrawn drawer should not appear in active-only recall")
     }
 
     // MARK: - expunge round-trip
@@ -141,14 +146,14 @@ final class VerbSurfaceTests: XCTestCase {
     /// Confirmation gate fires before dispatch — an expunge without
     /// `confirmation = true` raises `VerbError.expungeNotConfirmed` at
     /// the GLK boundary, the substrate is never reached.
-    func testExpungeWithoutConfirmationRaisesGuard() async throws {
+    @Test
+    func expungeWithoutConfirmationRaisesGuard() async throws {
         let (kit, handle) = try await openOneEstate()
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: VerbError.self) {
             try await kit.expunge(handle, ExpungeFrame(rowID: "any", reason: "test", confirmation: false))
-        ) { error in
-            guard case VerbError.expungeNotConfirmed = error else {
-                return XCTFail("expected .expungeNotConfirmed, got \(error)")
-            }
+        }
+        if case .expungeNotConfirmed? = thrown {} else {
+            Issue.record("expected .expungeNotConfirmed, got \(String(describing: thrown))")
         }
     }
 
@@ -156,15 +161,16 @@ final class VerbSurfaceTests: XCTestCase {
     /// row is tombstoned (content zeroed, `tombstonedAt` stamped), so a
     /// recall scoped to active rows no longer sees it. Mirrors the
     /// `withdraw` round-trip — expunge is the heavier sticky tombstone.
-    func testExpungeWithConfirmationTombstonesRow() async throws {
+    @Test
+    func expungeWithConfirmationTombstonesRow() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "expunge target"))
         try await kit.expunge(handle, ExpungeFrame(
             rowID: stored.id, reason: "verb tests", confirmation: true
         ))
         let activeRows = try await kit.recall(handle, recallAllActive())
-        XCTAssertFalse(activeRows.contains { $0.id == stored.id },
-                       "expunged drawer should not appear in active-only recall")
+        #expect(!activeRows.contains { $0.id == stored.id },
+                "expunged drawer should not appear in active-only recall")
     }
 
     // MARK: - reanchor round-trip
@@ -172,14 +178,14 @@ final class VerbSurfaceTests: XCTestCase {
     /// An empty reanchor (neither room nor lattice) raises
     /// `VerbError.emptyReanchor` at the GLK boundary; the substrate
     /// is never reached.
-    func testReanchorEmptyRaisesGuard() async throws {
+    @Test
+    func reanchorEmptyRaisesGuard() async throws {
         let (kit, handle) = try await openOneEstate()
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: VerbError.self) {
             try await kit.reanchor(handle, ReanchorFrame(rowID: "any"))
-        ) { error in
-            guard case VerbError.emptyReanchor = error else {
-                return XCTFail("expected .emptyReanchor, got \(error)")
-            }
+        }
+        if case .emptyReanchor? = thrown {} else {
+            Issue.record("expected .emptyReanchor, got \(String(describing: thrown))")
         }
     }
 
@@ -188,7 +194,8 @@ final class VerbSurfaceTests: XCTestCase {
     /// row. Mirrors `testWithdrawRoundTrip` — the prior stub-surfaces-
     /// notSupported version was correct only while `Estate.reanchor` was a
     /// stub; now that the verb is implemented it is a real round-trip.
-    func testReanchorRoundTrip() async throws {
+    @Test
+    func reanchorRoundTrip() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "reanchor target"))
         // Reanchor the drawer to a new lattice position.
@@ -198,24 +205,26 @@ final class VerbSurfaceTests: XCTestCase {
         // Recall should return the drawer with the updated anchor.
         let rows = try await kit.recall(handle, recallAllActive())
         guard let updated = rows.first(where: { $0.id == stored.id }) else {
-            return XCTFail("reanchored drawer should still appear in active recall")
+            Issue.record("reanchored drawer should still appear in active recall")
+            return
         }
-        XCTAssertEqual(updated.udcCode, "003.000",
-                       "lattice anchor should reflect the reanchor target")
+        #expect(updated.udcCode == "003.000",
+                "lattice anchor should reflect the reanchor target")
     }
 
     // MARK: - learn round-trip
 
     /// `learn` reaches LocusKit's learn stub and is remapped.
-    func testLearnRoundTripSurfacesNotSupported() async throws {
+    @Test
+    func learnRoundTripSurfacesNotSupported() async throws {
         let (kit, handle) = try await openOneEstate()
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: VerbError.self) {
             try await kit.learn(handle, LearnFrame(handle: "test-source"))
-        ) { error in
-            guard case VerbError.notSupportedByEstate(let verb) = error else {
-                return XCTFail("expected .notSupportedByEstate, got \(error)")
-            }
-            XCTAssertEqual(verb, "learn")
+        }
+        if case .notSupportedByEstate(let verb)? = thrown {
+            #expect(verb == "learn")
+        } else {
+            Issue.record("expected .notSupportedByEstate, got \(String(describing: thrown))")
         }
     }
 
@@ -225,15 +234,16 @@ final class VerbSurfaceTests: XCTestCase {
     /// LocusKit Estate method. The GLK surface validates the handle
     /// (so a stale handle still raises `estateNotOpen`), then raises
     /// `VerbError.notSupportedByEstate` directly.
-    func testProposeRaisesNotSupported() async throws {
+    @Test
+    func proposeRaisesNotSupported() async throws {
         let (kit, handle) = try await openOneEstate()
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: VerbError.self) {
             try await kit.propose(handle, ProposeFrame(target: "row-1", kind: .amend))
-        ) { error in
-            guard case VerbError.notSupportedByEstate(let verb) = error else {
-                return XCTFail("expected .notSupportedByEstate, got \(error)")
-            }
-            XCTAssertEqual(verb, "propose")
+        }
+        if case .notSupportedByEstate(let verb)? = thrown {
+            #expect(verb == "propose")
+        } else {
+            Issue.record("expected .notSupportedByEstate, got \(String(describing: thrown))")
         }
     }
 
@@ -241,15 +251,15 @@ final class VerbSurfaceTests: XCTestCase {
     /// the handle-resolution step, demonstrating the surface still
     /// validates the routing precondition before reporting verb
     /// support.
-    func testProposeOnStaleHandleRaisesEstateNotOpen() async throws {
+    @Test
+    func proposeOnStaleHandleRaisesEstateNotOpen() async throws {
         let (kit, handle) = try await openOneEstate()
         try await kit.close(handle)
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
             try await kit.propose(handle, ProposeFrame(target: "row-1", kind: .amend))
-        ) { error in
-            guard case GeniusLocusKitError.estateNotOpen = error else {
-                return XCTFail("expected .estateNotOpen, got \(error)")
-            }
+        }
+        if case .estateNotOpen? = thrown {} else {
+            Issue.record("expected .estateNotOpen, got \(String(describing: thrown))")
         }
     }
 
@@ -257,15 +267,16 @@ final class VerbSurfaceTests: XCTestCase {
 
     /// `associate` is substrate-driven (dreaming daemon) and raises
     /// `notSupportedByEstate`.
-    func testAssociateRaisesNotSupported() async throws {
+    @Test
+    func associateRaisesNotSupported() async throws {
         let (kit, handle) = try await openOneEstate()
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: VerbError.self) {
             try await kit.associate(handle, AssociateFrame(a: "row-a", b: "row-b", weight: 0.5))
-        ) { error in
-            guard case VerbError.notSupportedByEstate(let verb) = error else {
-                return XCTFail("expected .notSupportedByEstate, got \(error)")
-            }
-            XCTAssertEqual(verb, "associate")
+        }
+        if case .notSupportedByEstate(let verb)? = thrown {
+            #expect(verb == "associate")
+        } else {
+            Issue.record("expected .notSupportedByEstate, got \(String(describing: thrown))")
         }
     }
 
@@ -275,8 +286,9 @@ final class VerbSurfaceTests: XCTestCase {
     /// by the AriaLexicon §7.2 matrix. If this asserts false the
     /// surface has drifted from the matrix and must be reconciled
     /// before merge.
-    func testSurfaceTargetsAreAcceptedByLexicon() {
-        XCTAssertTrue(
+    @Test
+    func surfaceTargetsAreAcceptedByLexicon() {
+        #expect(
             AriaLexiconConformance.everySurfaceTargetIsAccepted(),
             "GLK surface targets must satisfy AriaLexicon §7.2"
         )
@@ -287,11 +299,12 @@ final class VerbSurfaceTests: XCTestCase {
     /// for `legalPairs` itself; here as a guard against future
     /// refactors that change the enumeration without updating the
     /// underlying lookup.
-    func testEnumeratedLegalPairsAreAccepted() {
+    @Test
+    func enumeratedLegalPairsAreAccepted() {
         let pairs = AriaLexiconConformance.legalPairs
-        XCTAssertFalse(pairs.isEmpty, "legalPairs must enumerate at least one combination")
+        #expect(!pairs.isEmpty, "legalPairs must enumerate at least one combination")
         for (noun, verb) in pairs {
-            XCTAssertTrue(
+            #expect(
                 Acceptance.accepts(noun, verb),
                 "enumerated legal pair (\(noun), \(verb)) should be accepted"
             )
@@ -302,19 +315,20 @@ final class VerbSurfaceTests: XCTestCase {
     /// the matrix lookup rejects. The Vector noun's row alone
     /// guarantees a non-empty set (vectors are substrate-managed and
     /// accept no verbs), which the test asserts explicitly.
-    func testEnumeratedIllegalPairsAreRejected() {
+    @Test
+    func enumeratedIllegalPairsAreRejected() {
         let pairs = AriaLexiconConformance.illegalPairs
-        XCTAssertFalse(pairs.isEmpty, "illegalPairs must enumerate at least one combination (Vector accepts none)")
+        #expect(!pairs.isEmpty, "illegalPairs must enumerate at least one combination (Vector accepts none)")
         for (noun, verb) in pairs {
-            XCTAssertFalse(
-                Acceptance.accepts(noun, verb),
+            #expect(
+                !Acceptance.accepts(noun, verb),
                 "enumerated illegal pair (\(noun), \(verb)) should be rejected"
             )
         }
         // Vector accepts no verbs — every verb against Vector is illegal.
         let vectorIllegal = pairs.filter { $0.0 == .vector }
-        XCTAssertEqual(vectorIllegal.count, Verb.allCases.count,
-                       "Vector should reject all nine verbs")
+        #expect(vectorIllegal.count == Verb.allCases.count,
+                "Vector should reject all nine verbs")
     }
 
     /// Every GLK method name resolves to a `Verb` case through the
@@ -322,18 +336,19 @@ final class VerbSurfaceTests: XCTestCase {
     /// the GLK surface was renamed without updating the lexicon
     /// (or vice versa) — the conformance contract requires they
     /// stay in lock-step.
-    func testGLKMethodNamesMapToLexiconVerbs() {
+    @Test
+    func glkMethodNamesMapToLexiconVerbs() {
         let glkMethodNames = [
             "capture", "recall", "mutate", "withdraw", "expunge",
             "reanchor", "learn", "propose", "associate",
         ]
         for name in glkMethodNames {
-            XCTAssertNotNil(
-                AriaLexiconConformance.verb(for: name),
+            #expect(
+                AriaLexiconConformance.verb(for: name) != nil,
                 "GLK method '\(name)' must map to an AriaLexicon Verb"
             )
         }
-        XCTAssertEqual(glkMethodNames.count, Verb.allCases.count,
-                       "GLK surface must cover all nine lexicon verbs")
+        #expect(glkMethodNames.count == Verb.allCases.count,
+                "GLK surface must cover all nine lexicon verbs")
     }
 }

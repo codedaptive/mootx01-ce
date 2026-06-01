@@ -15,7 +15,7 @@
 // the verifier, asOf projection, recovery, and new-verb hashing are
 // exercised in isolation.
 
-import XCTest
+import Testing
 import SubstrateTypes
 import Foundation
 import LocusKit
@@ -36,7 +36,8 @@ import PersistenceKitInMemory
 // ─────────────────────────────────────────────────────────────────
 @testable import GeniusLocusKit
 
-final class GLK03_AuditIntegrationTests: XCTestCase {
+@Suite("GLK-03 unified audit log integration")
+struct GLK03_AuditIntegrationTests {
 
     // MARK: - Estate helpers (mirror VerbSurfaceTests)
 
@@ -90,10 +91,11 @@ final class GLK03_AuditIntegrationTests: XCTestCase {
 
     /// Opening an estate mints an empty UnifiedAuditLog in the registry;
     /// `auditLog(for:)` returns it (non-nil) rather than throwing.
-    func testRegistryPresentAfterOpen() async throws {
+    @Test
+    func registryPresentAfterOpen() async throws {
         let (kit, handle) = try await openOneEstate()
         let log = try await kit.auditLog(for: handle)
-        XCTAssertEqual(log.count, 0, "a freshly opened estate's audit log is empty")
+        #expect(log.count == 0, "a freshly opened estate's audit log is empty")
     }
 
     // MARK: - Test 2 — bridge produces entries
@@ -101,31 +103,33 @@ final class GLK03_AuditIntegrationTests: XCTestCase {
     /// Capturing then withdrawing a drawer produces at least one
     /// bitmap_audit row; `feedAuditLog` bridges those rows into the
     /// registry's log so `count > 0`.
-    func testFeedAuditLogBridgesRows() async throws {
+    @Test
+    func feedAuditLogBridgesRows() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "bridge target"))
         try await kit.withdraw(handle, WithdrawFrame(rowID: stored.id, reason: "glk03"))
 
         try await kit.feedAuditLog(for: handle)
         let log = try await kit.auditLog(for: handle)
-        XCTAssertGreaterThan(log.count, 0, "bridged audit rows should populate the log")
-        XCTAssertTrue(log.orderedEntries.allSatisfy { $0.tier == .locus },
-                      "all bridged entries are .locus tier")
+        #expect(log.count > 0, "bridged audit rows should populate the log")
+        #expect(log.orderedEntries.allSatisfy { $0.tier == .locus },
+                "all bridged entries are .locus tier")
     }
 
     // MARK: - Test 3 — verify clean chain
 
     /// A freshly populated, uncorrupted log verifies as valid with a
     /// nil firstBrokenAt.
-    func testVerifyCleanChain() async throws {
+    @Test
+    func verifyCleanChain() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "clean chain"))
         try await kit.withdraw(handle, WithdrawFrame(rowID: stored.id, reason: "glk03"))
 
         let report = try await kit.verifyAuditChain(handle)
-        XCTAssertTrue(report.valid, "an uncorrupted chain is valid")
-        XCTAssertNil(report.firstBrokenAt, "no break on a clean chain")
-        XCTAssertGreaterThan(report.entryCount, 0)
+        #expect(report.valid, "an uncorrupted chain is valid")
+        #expect(report.firstBrokenAt == nil, "no break on a clean chain")
+        #expect(report.entryCount > 0)
     }
 
     // MARK: - Test 4 — C-12 invariant (corrupted entry)
@@ -133,7 +137,8 @@ final class GLK03_AuditIntegrationTests: XCTestCase {
     /// Corrupting an entry's stored id (flipping a byte) breaks the
     /// content-hash check: the report is invalid and firstBrokenAt is
     /// set. NEURONKIT_SPEC invariant C-12.
-    func testCorruptedEntryFailsVerification() {
+    @Test
+    func corruptedEntryFailsVerification() {
         let good = entry(time: 1_000, row: rowA)
         // Flip one byte of the stored id while keeping the 32-byte
         // SHA-256 width the explicit-id initializer requires. The
@@ -154,15 +159,16 @@ final class GLK03_AuditIntegrationTests: XCTestCase {
         )
         let log = UnifiedAuditLog(entries: [corrupted])
         let report = AuditChainVerifier.verify(log)
-        XCTAssertFalse(report.valid, "a corrupted id must fail verification")
-        XCTAssertNotNil(report.firstBrokenAt, "firstBrokenAt set on break (C-12)")
+        #expect(!report.valid, "a corrupted id must fail verification")
+        #expect(report.firstBrokenAt != nil, "firstBrokenAt set on break (C-12)")
     }
 
     // MARK: - Test 5 — asOf projection
 
     /// Projecting asOf an HLC earlier than some entries yields fewer
     /// rows than the full projection.
-    func testAsOfProjectionHasFewerRows() {
+    @Test
+    func asOfProjectionHasFewerRows() {
         let log = UnifiedAuditLog(entries: [
             entry(time: 1, row: rowA),
             entry(time: 5, row: rowB),
@@ -170,16 +176,17 @@ final class GLK03_AuditIntegrationTests: XCTestCase {
         let full = AuditProjectionFold.project(log)
         let asOf = AuditProjectionFold.project(
             log, asOf: HLC(physicalTime: 3, logicalCount: 0, nodeID: 0))
-        XCTAssertEqual(full.count, 2)
-        XCTAssertLessThan(asOf.count, full.count, "asOf cutoff excludes the later row")
-        XCTAssertEqual(asOf.count, 1)
+        #expect(full.count == 2)
+        #expect(asOf.count < full.count, "asOf cutoff excludes the later row")
+        #expect(asOf.count == 1)
     }
 
     // MARK: - Test 6 — recovery round-trip
 
     /// Rebuild from the log and verify against the reference projection:
     /// no divergence.
-    func testRecoveryRoundTrip() {
+    @Test
+    func recoveryRoundTrip() {
         let log = UnifiedAuditLog(entries: [
             entry(time: 1, row: rowA),
             entry(time: 2, row: rowB),
@@ -188,23 +195,24 @@ final class GLK03_AuditIntegrationTests: XCTestCase {
         let result = AuditRecovery.rebuild(from: log)
         let divergence = AuditRecovery.verify(rebuilt: result.projection,
                                               against: reference)
-        XCTAssertTrue(divergence.isEmpty, "rebuilt projection matches reference")
+        #expect(divergence.isEmpty, "rebuilt projection matches reference")
     }
 
     // MARK: - Test 7 — new federation verbs
 
     /// The four federation verbs construct valid content-addressed
     /// entries (32-byte SHA-256 id), distinct per verb.
-    func testFederationVerbsCompileAndHash() {
+    @Test
+    func federationVerbsCompileAndHash() {
         let verbs: [UnifiedAuditVerb] = [
             .grantIssued, .grantRevoked, .keyDecayed, .physicalKeyDecayed,
         ]
         var ids = Set<[UInt8]>()
         for v in verbs {
             let e = entry(time: 100, row: rowA, verb: v, field: "grant")
-            XCTAssertEqual(e.id.count, 32, "content hash is 32-byte SHA-256")
+            #expect(e.id.count == 32, "content hash is 32-byte SHA-256")
             ids.insert(e.id)
         }
-        XCTAssertEqual(ids.count, 4, "each verb produces a distinct content hash")
+        #expect(ids.count == 4, "each verb produces a distinct content hash")
     }
 }

@@ -39,7 +39,7 @@
 // `PerformanceGateTests.swift` because its evidence is a measurement
 // rather than a behavioural assertion.
 
-import XCTest
+import Testing
 import SubstrateTypes
 import Foundation
 // ─────────────────────────────────────────────────────────────────
@@ -57,7 +57,8 @@ import Foundation
 // ─────────────────────────────────────────────────────────────────
 @testable import GeniusLocusKit
 
-final class TheoremsTests: XCTestCase {
+@Suite("Theorems 4, 6, 7, 8")
+struct TheoremsTests {
 
     // MARK: - Test fixtures
 
@@ -104,7 +105,8 @@ final class TheoremsTests: XCTestCase {
     /// substrate mid-flight; the final projection observes the
     /// post-completion state. Every transition appears in the audit log
     /// regardless of the asOf cut — the log is grow-only (I-20).
-    func testTheorem4_ModelVersionUpgradePreservesEveryTransition() {
+    @Test
+    func theorem4_ModelVersionUpgradePreservesEveryTransition() {
         let rowA = UUID()
         let rowB = UUID()
         let rowC = UUID()
@@ -136,13 +138,12 @@ final class TheoremsTests: XCTestCase {
 
         // Pre-upgrade snapshot: every live row is at v1.
         let preUpgrade = AuditProjectionFold.project(log, asOf: hlc(9))
-        XCTAssertEqual(preUpgrade.liveRows.count, 3,
-                       "all three rows are visible pre-upgrade")
+        #expect(preUpgrade.liveRows.count == 3,
+                "all three rows are visible pre-upgrade")
         for row in [rowA, rowB, rowC] {
             let proj = preUpgrade.row(tier: .locus, rowID: row)
-            XCTAssertEqual(proj?.fields["provenance.model_version"],
-                           .string("v1"),
-                           "row \(row) reads v1 pre-upgrade")
+            #expect(proj?.fields["provenance.model_version"] == .string("v1"),
+                    "row \(row) reads v1 pre-upgrade")
         }
 
         // Mid-upgrade cut: row A has migrated, B and C have not. This is
@@ -150,37 +151,33 @@ final class TheoremsTests: XCTestCase {
         // requires — the substrate returns version-correct results per
         // row, not a global blocked state.
         let midUpgrade = AuditProjectionFold.project(log, asOf: hlc(10))
-        XCTAssertEqual(midUpgrade.row(tier: .locus, rowID: rowA)?
-                        .fields["provenance.model_version"],
-                       .string("v2"))
-        XCTAssertEqual(midUpgrade.row(tier: .locus, rowID: rowB)?
-                        .fields["provenance.model_version"],
-                       .string("v1"))
-        XCTAssertEqual(midUpgrade.row(tier: .locus, rowID: rowC)?
-                        .fields["provenance.model_version"],
-                       .string("v1"))
+        #expect(midUpgrade.row(tier: .locus, rowID: rowA)?
+                    .fields["provenance.model_version"] == .string("v2"))
+        #expect(midUpgrade.row(tier: .locus, rowID: rowB)?
+                    .fields["provenance.model_version"] == .string("v1"))
+        #expect(midUpgrade.row(tier: .locus, rowID: rowC)?
+                    .fields["provenance.model_version"] == .string("v1"))
 
         // Post-upgrade snapshot: every live row reads v2.
         let postUpgrade = AuditProjectionFold.project(log)
-        XCTAssertEqual(postUpgrade.liveRows.count, 3)
+        #expect(postUpgrade.liveRows.count == 3)
         for row in [rowA, rowB, rowC] {
-            XCTAssertEqual(postUpgrade.row(tier: .locus, rowID: row)?
-                            .fields["provenance.model_version"],
-                           .string("v2"),
-                           "row \(row) reads v2 post-upgrade")
+            #expect(postUpgrade.row(tier: .locus, rowID: row)?
+                        .fields["provenance.model_version"] == .string("v2"),
+                    "row \(row) reads v2 post-upgrade")
         }
 
         // Audit trail preserves every transition. The grow-only set
         // (I-20) records all six events regardless of the asOf cut a
         // caller projects against. This is the load-bearing fact behind
         // the theorem: the audit log is not lossy on regeneration.
-        XCTAssertEqual(log.count, 6,
-                       "audit log retains capture and migrate events for every row")
+        #expect(log.count == 6,
+                "audit log retains capture and migrate events for every row")
         for row in [rowA, rowB, rowC] {
             let rowEntries = log.entries(forRow: row, tier: .locus)
-            XCTAssertEqual(rowEntries.count, 2,
-                           "row \(row) carries both the v1 capture and the v2 migrate")
-            XCTAssertEqual(rowEntries.map(\.verb), [.capture, .migrate])
+            #expect(rowEntries.count == 2,
+                    "row \(row) carries both the v1 capture and the v2 migrate")
+            #expect(rowEntries.map(\.verb) == [.capture, .migrate])
         }
     }
 
@@ -199,7 +196,8 @@ final class TheoremsTests: XCTestCase {
     /// reprojects from the same log, and asserts the projections are
     /// identical. Equality of the two `UnifiedProjection` values is
     /// what reversibility means in the substrate's vocabulary.
-    func testTheorem6_StorageFidelityRoundTripReversibility() {
+    @Test
+    func theorem6_StorageFidelityRoundTripReversibility() {
         var log = UnifiedAuditLog()
         var rowIDs: [UUID] = []
 
@@ -216,16 +214,16 @@ final class TheoremsTests: XCTestCase {
         // First projection: the materialised state the substrate would
         // serve to a recall request at full fidelity.
         let fullFidelity = AuditProjectionFold.project(log)
-        XCTAssertEqual(fullFidelity.liveRows.count, 16)
+        #expect(fullFidelity.liveRows.count == 16)
 
         // Simulate a fidelity-mode change that "discards" the cached
         // materialised state. The audit log is unaffected — it is the
         // source of truth (paper §6.5). Reprojection from the same log
         // must yield byte-identical state.
         let reprojected = AuditProjectionFold.project(log)
-        XCTAssertEqual(fullFidelity, reprojected,
-                       "discarding and reprojecting must be bit-for-bit reversible")
-        XCTAssertEqual(reprojected.liveRows.count, 16)
+        #expect(fullFidelity == reprojected,
+                "discarding and reprojecting must be bit-for-bit reversible")
+        #expect(reprojected.liveRows.count == 16)
 
         // Round-trip a different fidelity mode by re-folding the log
         // entries in a permuted order. Convergence (cookbook §5.4)
@@ -239,8 +237,8 @@ final class TheoremsTests: XCTestCase {
             permuted.add(entry)
         }
         let permutedProjection = AuditProjectionFold.project(permuted)
-        XCTAssertEqual(fullFidelity, permutedProjection,
-                       "projection depends only on the entry set, not insertion order")
+        #expect(fullFidelity == permutedProjection,
+                "projection depends only on the entry set, not insertion order")
     }
 
     // MARK: - Theorem 7: First-class memory corrections
@@ -256,7 +254,8 @@ final class TheoremsTests: XCTestCase {
     /// emits for user-confirm, corrections, and contests (cookbook
     /// §10.3). The `provenance` field-path varies per transition to
     /// expose which version a reader sees.
-    func testTheorem7_FirstClassCorrectionsFourVersionLifecycle() {
+    @Test
+    func theorem7_FirstClassCorrectionsFourVersionLifecycle() {
         let row = UUID()
         var log = UnifiedAuditLog()
 
@@ -278,41 +277,36 @@ final class TheoremsTests: XCTestCase {
                       after: .string("agent-contested")))
 
         // All four versions present in storage.
-        XCTAssertEqual(log.count, 4)
-        XCTAssertEqual(log.entries(forRow: row, tier: .locus).count, 4)
+        #expect(log.count == 4)
+        #expect(log.entries(forRow: row, tier: .locus).count == 4)
 
         // Default (current) query returns the active (most recent)
         // version.
         let current = AuditProjectionFold.project(log)
-        XCTAssertEqual(current.row(tier: .locus, rowID: row)?
-                        .fields["provenance"],
-                       .string("agent-contested"))
+        #expect(current.row(tier: .locus, rowID: row)?
+                    .fields["provenance"] == .string("agent-contested"))
 
         // Historical asOf queries reconstruct each prior state.
         let asOfStep1 = AuditProjectionFold.project(log, asOf: hlc(1))
-        XCTAssertEqual(asOfStep1.row(tier: .locus, rowID: row)?
-                        .fields["provenance"],
-                       .string("captured"))
+        #expect(asOfStep1.row(tier: .locus, rowID: row)?
+                    .fields["provenance"] == .string("captured"))
 
         let asOfStep2 = AuditProjectionFold.project(log, asOf: hlc(2))
-        XCTAssertEqual(asOfStep2.row(tier: .locus, rowID: row)?
-                        .fields["provenance"],
-                       .string("user-confirmed"))
+        #expect(asOfStep2.row(tier: .locus, rowID: row)?
+                    .fields["provenance"] == .string("user-confirmed"))
 
         let asOfStep3 = AuditProjectionFold.project(log, asOf: hlc(3))
-        XCTAssertEqual(asOfStep3.row(tier: .locus, rowID: row)?
-                        .fields["provenance"],
-                       .string("user-corrected"))
+        #expect(asOfStep3.row(tier: .locus, rowID: row)?
+                    .fields["provenance"] == .string("user-corrected"))
 
         let asOfStep4 = AuditProjectionFold.project(log, asOf: hlc(4))
-        XCTAssertEqual(asOfStep4.row(tier: .locus, rowID: row)?
-                        .fields["provenance"],
-                       .string("agent-contested"))
+        #expect(asOfStep4.row(tier: .locus, rowID: row)?
+                    .fields["provenance"] == .string("agent-contested"))
 
         // Audit entries cover every state change. The verbs partition
         // into the one capture and three mutates the lifecycle demands.
         let verbs = log.entries(forRow: row, tier: .locus).map(\.verb)
-        XCTAssertEqual(verbs, [.capture, .mutate, .mutate, .mutate])
+        #expect(verbs == [.capture, .mutate, .mutate, .mutate])
     }
 
     // MARK: - Theorem 8: First-class memory provenance
@@ -332,7 +326,8 @@ final class TheoremsTests: XCTestCase {
     /// user-confirmed directives. The "actor acts on the confirmed set"
     /// is restated here as "the projection filtered by the confirmed
     /// bit returns exactly the 10 confirmed rows."
-    func testTheorem8_ProvenanceConfirmedBitSelectsExactlyConfirmedRows() {
+    @Test
+    func theorem8_ProvenanceConfirmedBitSelectsExactlyConfirmedRows() {
         var log = UnifiedAuditLog()
         var confirmedRows: Set<UUID> = []
         var unconfirmedRows: Set<UUID> = []
@@ -368,7 +363,7 @@ final class TheoremsTests: XCTestCase {
         }
 
         let projection = AuditProjectionFold.project(log)
-        XCTAssertEqual(projection.liveRows.count, 20)
+        #expect(projection.liveRows.count == 20)
 
         // Filter by the confirmed bit at the projection layer. This is
         // the substrate-level statement of the implementation plan's
@@ -379,17 +374,17 @@ final class TheoremsTests: XCTestCase {
             else { return false }
             return (bits & Self.confirmedBit) != 0
         }
-        XCTAssertEqual(confirmedHits.count, 10,
-                       "exactly the ten confirmed rows match the bitmap predicate")
-        XCTAssertEqual(Set(confirmedHits.map(\.rowID)), confirmedRows)
+        #expect(confirmedHits.count == 10,
+                "exactly the ten confirmed rows match the bitmap predicate")
+        #expect(Set(confirmedHits.map(\.rowID)) == confirmedRows)
 
         let unconfirmedHits = projection.liveRows.filter { row in
             guard case .bitmap(let bits) = row.fields["provenance.bits"]
             else { return true }
             return (bits & Self.confirmedBit) == 0
         }
-        XCTAssertEqual(unconfirmedHits.count, 10,
-                       "exactly the ten unconfirmed rows match the inverse predicate")
-        XCTAssertEqual(Set(unconfirmedHits.map(\.rowID)), unconfirmedRows)
+        #expect(unconfirmedHits.count == 10,
+                "exactly the ten unconfirmed rows match the inverse predicate")
+        #expect(Set(unconfirmedHits.map(\.rowID)) == unconfirmedRows)
     }
 }

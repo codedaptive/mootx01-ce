@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -12,7 +12,8 @@ import PersistenceKitInMemory
 /// coordinator does not share storage across estates, so isolation is
 /// structural rather than enforced through any cross-estate access
 /// control list.
-final class EstateIsolationTests: XCTestCase {
+@Suite("Estate isolation")
+struct EstateIsolationTests {
 
     private func makeStorage() -> InMemoryStorage {
         InMemoryStorage(configuration: EstateConfiguration(
@@ -22,7 +23,8 @@ final class EstateIsolationTests: XCTestCase {
 
     /// Capture into estate A must not appear in a recall against
     /// estate B.
-    func testWriteIntoEstateAIsInvisibleInEstateB() async throws {
+    @Test
+    func writeIntoEstateAIsInvisibleInEstateB() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-iso")
         let sA = makeStorage()
@@ -57,14 +59,14 @@ final class EstateIsolationTests: XCTestCase {
         let stream = await estateB.recall(recall)
         var idsInB: [String] = []
         for await page in stream { idsInB.append(contentsOf: page.rows.map(\.id)) }
-        XCTAssertEqual(idsInB, [],
+        #expect(idsInB == [],
             "estate B must not see drawer \(drawer.id) captured in estate A")
 
         // And the symmetric direction — A still sees its own drawer.
         let streamA = await estateA.recall(recall)
         var idsInA: [String] = []
         for await page in streamA { idsInA.append(contentsOf: page.rows.map(\.id)) }
-        XCTAssertTrue(idsInA.contains(drawer.id),
+        #expect(idsInA.contains(drawer.id),
             "estate A must still see its own drawer")
     }
 }
