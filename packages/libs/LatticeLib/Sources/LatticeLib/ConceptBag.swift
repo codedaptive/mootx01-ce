@@ -5,7 +5,10 @@
 // encoder and the build-time signature producer (cookbook §7 runs it over a
 // code's label / title / article texts).
 //
-//   Step 1  tag — keep only Noun/Verb tokens (WordClassTagger).
+//   Step 1  tag — keep Noun/Verb tokens (WordClassTagger), plus any token that
+//           resolves to a Wikidata Q-ID concept (cookbook §3.2 relaxation:
+//           recovers named entities the POS tagger drops, decided from the
+//           pinned lexicon so it stays deterministic across platforms).
 //   Step 2  canonicalize — normalize + Porter2-stem each kept token, then look
 //           it up in the pinned lexicon: a hit contributes its conceptID, a
 //           miss contributes the surface form as its own key.
@@ -33,14 +36,20 @@ public enum BagBuilder {
     ) -> ConceptBag {
         var bag: ConceptBag = [:]
         for token in Tokenizer.tokenize(text) {
-            // Step 1: tag; keep only the requested classes.
-            guard keepClasses.contains(LatticeLib.wordClass(token)) else { continue }
             // Step 2: canonicalize (normalize + stem), then lexicon lookup.
             let key = Stemmer.stem(Normalizer.normalize(token))
             guard !key.isEmpty else { continue }
-            let concept = lexicon.entries[key] ?? key   // hit -> conceptID; miss -> surface
-            // Step 3: accumulate.
-            bag[concept, default: 0] += 1
+            let concept = lexicon.entries[key]          // nil if not in the lexicon
+            // Step 1 (relaxed — cookbook §3.2): keep nouns/verbs, OR any token
+            // that resolves to a Wikidata Q-ID concept. The Q-ID path recovers
+            // named entities the POS tagger mislabels/drops, and it decides
+            // membership from the PINNED lexicon (deterministic, identical
+            // build+runtime) rather than fragile cross-platform proper-noun
+            // tagging — so it adds coverage without risking the agreement property.
+            let isQID = concept?.hasPrefix("Q") ?? false
+            guard keepClasses.contains(LatticeLib.wordClass(token)) || isQID else { continue }
+            // Step 3: accumulate (hit -> conceptID; miss kept via POS -> surface).
+            bag[concept ?? key, default: 0] += 1
         }
         return bag
     }
