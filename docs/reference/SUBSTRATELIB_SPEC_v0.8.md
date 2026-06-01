@@ -251,34 +251,3 @@ this package ships conformance vectors:
   event sequence, produces an identical event across ports.
 
 The vectors live in `tests/` directories of both legs.
-
-## § 8 — Out of scope
-
-- Storage I/O — lives in PersistenceKit. Verbs here produce events;
-  consumers persist them.
-- The kit-side verb-driver glue (transaction management, materialized
-  projection updates, audit-log appends) — lives in
-  `LOCUSKIT_SPEC_v0.8.md`.
-- Cross-kit orchestration (the GLK redact pipeline that calls
-  LocusKit's expunge + RAG's vector delete) — lives in
-  `GENIUSLOCUSKIT_SPEC_v0.8.md`.
-- Dreaming pass — lives in NeuronKit (which orchestrates calls into
-  this package's verb mechanics).
-
-## § 9 — Open questions
-
-- **BitmapFields placement.** Today `BitmapFields` lives in
-  `RowStateAutomaton.swift` in this package, but it's a pure value
-  type that could reasonably move to SubstrateTypes. The current
-  placement reflects its tight coupling to the automaton; whether
-  to relocate is open.
-- **Verb dispatch performance.** The nine verbs each call AuditGate
-  in their hot path. Whether the verb-call layer needs further
-  inlining or whether AuditGate itself becomes a hot-path operation
-  that should move to SubstrateKernel is an open question — but the
-  decision is constrained by the AuditGate→RowStateAutomaton call
-  which keeps both in this package.
-- **Future verb additions.** Cookbook §10's nine-verb closed set is
-  I-22. Should the substrate ever need a tenth verb (federation
-  v1.1?), the addition reopens this layer; the decision is gated by
-  a cookbook amendment.
