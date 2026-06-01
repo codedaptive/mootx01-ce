@@ -2,7 +2,8 @@
 //
 // Covers QUEUEKIT_SPEC §6 wire format and §7 supporting types.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -19,36 +20,37 @@ import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 @testable import QueueKit
 
-final class SupportingTypeTests: XCTestCase {
+@Suite("Supporting types (QUEUEKIT_SPEC §6/§7)")
+struct SupportingTypeTests {
 
-    func testObservationStatusRawValues() {
-        XCTAssertEqual(ObservationStatus.running.rawValue, "running")
-        XCTAssertEqual(ObservationStatus.done.rawValue, "done")
-        XCTAssertEqual(
-            ObservationStatus.doneWithConcerns.rawValue,
+    @Test func observationStatusRawValues() {
+        #expect(ObservationStatus.running.rawValue == "running")
+        #expect(ObservationStatus.done.rawValue == "done")
+        #expect(
+            ObservationStatus.doneWithConcerns.rawValue ==
             "done_with_concerns")
-        XCTAssertEqual(
-            ObservationStatus.needsContext.rawValue, "needs_context")
-        XCTAssertEqual(ObservationStatus.blocked.rawValue, "blocked")
+        #expect(
+            ObservationStatus.needsContext.rawValue == "needs_context")
+        #expect(ObservationStatus.blocked.rawValue == "blocked")
     }
 
-    func testObservationStatusTerminalDiscrimination() {
-        XCTAssertFalse(ObservationStatus.running.isTerminal)
-        XCTAssertTrue(ObservationStatus.done.isTerminal)
-        XCTAssertTrue(ObservationStatus.doneWithConcerns.isTerminal)
-        XCTAssertTrue(ObservationStatus.needsContext.isTerminal)
-        XCTAssertTrue(ObservationStatus.blocked.isTerminal)
+    @Test func observationStatusTerminalDiscrimination() {
+        #expect(!ObservationStatus.running.isTerminal)
+        #expect(ObservationStatus.done.isTerminal)
+        #expect(ObservationStatus.doneWithConcerns.isTerminal)
+        #expect(ObservationStatus.needsContext.isTerminal)
+        #expect(ObservationStatus.blocked.isTerminal)
     }
 
-    func testJobIDIs32LowercaseHex() {
+    @Test func jobIDIs32LowercaseHex() {
         let id = JobID.generate()
-        XCTAssertEqual(id.rawValue.count, 32)
-        XCTAssertTrue(id.rawValue.allSatisfy {
+        #expect(id.rawValue.count == 32)
+        #expect(id.rawValue.allSatisfy {
             ($0.isNumber || ($0 >= "a" && $0 <= "f"))
         })
     }
 
-    func testSortableHLCFormat() {
+    @Test func sortableHLCFormat() {
         // Spec §6: {physicalTime:016d}-{logicalCount:08d}-
         //          {nodeID_unsigned:010d}
         let hlc = HLC(
@@ -56,10 +58,10 @@ final class SupportingTypeTests: XCTestCase {
             logicalCount: 0,
             nodeID: Int32(bitPattern: 3735928559))  // 0xDEADBEEF
         let s = WireFormat.sortableHLC(hlc)
-        XCTAssertEqual(s, "0001747526400000-00000000-3735928559")
+        #expect(s == "0001747526400000-00000000-3735928559")
     }
 
-    func testFilenameMatchesSpecExample() {
+    @Test func filenameMatchesSpecExample() {
         // Spec §6 concrete example:
         // 0001747526400000-00000000-3735928559-deadbeef00...
         let job = Job(
@@ -73,11 +75,11 @@ final class SupportingTypeTests: XCTestCase {
             payload: Data(),
             extensions: [:])
         let filename = WireFormat.filename(for: job)
-        XCTAssertEqual(filename,
+        #expect(filename ==
             "0001747526400000-00000000-3735928559-my-stream-deadbeef000000000000000000000000")
     }
 
-    func testJobJSONRoundTrip() throws {
+    @Test func jobJSONRoundTrip() throws {
         let original = Job(
             id: JobID(rawValue: "deadbeef000000000000000000000000"),
             streamID: StreamID(rawValue: "my-stream"),
@@ -91,27 +93,27 @@ final class SupportingTypeTests: XCTestCase {
         let encoded = try WireFormat.encoder.encode(original)
         let decoded = try WireFormat.decoder.decode(
             Job.self, from: encoded)
-        XCTAssertEqual(decoded.id, original.id)
-        XCTAssertEqual(decoded.streamID, original.streamID)
-        XCTAssertEqual(decoded.submittedAt, original.submittedAt)
-        XCTAssertEqual(decoded.priority, original.priority)
-        XCTAssertEqual(decoded.payload, original.payload)
-        XCTAssertEqual(decoded.extensions, original.extensions)
+        #expect(decoded.id == original.id)
+        #expect(decoded.streamID == original.streamID)
+        #expect(decoded.submittedAt == original.submittedAt)
+        #expect(decoded.priority == original.priority)
+        #expect(decoded.payload == original.payload)
+        #expect(decoded.extensions == original.extensions)
     }
 
-    func testBase64URLNoPadding() {
+    @Test func base64URLNoPadding() {
         let cases: [(Data, String)] = [
             (Data(), ""),
             (Data([0xff]), "_w"),
             (Data([0xfb, 0xff]), "-_8"),
         ]
         for (data, expected) in cases {
-            XCTAssertEqual(Job.base64urlEncode(data), expected)
-            XCTAssertEqual(Job.base64urlDecode(expected), data)
+            #expect(Job.base64urlEncode(data) == expected)
+            #expect(Job.base64urlDecode(expected) == data)
         }
     }
 
-    func testSignalFileJSONShape() throws {
+    @Test func signalFileJSONShape() throws {
         let sig = SignalFile(
             jobID: JobID(rawValue: "deadbeef000000000000000000000000"),
             status: .done,
@@ -123,12 +125,12 @@ final class SupportingTypeTests: XCTestCase {
         let data = try WireFormat.encoder.encode(sig)
         let s = String(data: data, encoding: .utf8)!
         // Keys appear sorted: artifacts, completed_at, job_id, status
-        XCTAssertTrue(s.contains("\"status\":\"done\""))
-        XCTAssertTrue(s.contains("\"job_id\":\"deadbeef000000000000000000000000\""))
-        XCTAssertTrue(s.contains("\"physical_time\":1747526400000"))
+        #expect(s.contains("\"status\":\"done\""))
+        #expect(s.contains("\"job_id\":\"deadbeef000000000000000000000000\""))
+        #expect(s.contains("\"physical_time\":1747526400000"))
     }
 
-    func testArtifactRefRoundTrip() throws {
+    @Test func artifactRefRoundTrip() throws {
         let arts: [ArtifactRef] = [
             .filePath("/tmp/x"),
             .commitHash("abc"),
@@ -138,6 +140,6 @@ final class SupportingTypeTests: XCTestCase {
         let data = try WireFormat.encoder.encode(arts)
         let decoded = try WireFormat.decoder.decode(
             [ArtifactRef].self, from: data)
-        XCTAssertEqual(decoded, arts)
+        #expect(decoded == arts)
     }
 }
