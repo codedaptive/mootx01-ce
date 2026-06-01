@@ -36,7 +36,9 @@ PersistenceKit through its `StorageObserver`, ships outbound changes
 over a backend transport, and applies inbound changes back through the
 receiver's PersistenceKit `rowStore` — which fires `StorageObserver`
 naturally on the receive side, so downstream watchers wake without
-knowing sync exists.
+knowing sync exists. The Federation backend's transport is pluggable
+behind a `Relay` abstraction (INTERFACE § 4), so a hosted SyncServer can
+replace the in-process relay without engine changes.
 
 The wire unit is a single PersistenceKit row mutation tagged with a
 hybrid logical clock (HLC), schema version, and kit ID. The receiver
@@ -202,8 +204,11 @@ sortable `Int64` (48 bits physical, 12 bits logical, 4 bits node).
 **B-7 (Federation pairing):** two estates pair by exchanging public keys
 and a shared `HyperplaneFamilySpec` (seed + dimension) so their 256-bit
 fingerprints are directly comparable. Pairing is symmetric — each side
-registers the other. At v0.8 pairing is in-process via a shared
-`FederationRelay`; cross-machine wire transport is deferred (§ 9).
+registers the other. Pairing rides a `Relay` transport abstraction
+(INTERFACE § 4): the in-process `FederationRelay` is the local-and-test
+implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
+`Relay` conformer requiring no change to the engine. Cross-machine wire
+transport rollout is tracked in § 9.
 
 ## § 6 — Error model (conceptual)
 
