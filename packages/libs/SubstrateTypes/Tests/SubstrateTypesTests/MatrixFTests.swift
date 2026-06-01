@@ -40,6 +40,18 @@ struct MatrixFTests {
         #expect(m[1, 0] == 0)
     }
 
+    @Test("applyRow(+1) with a fully-set bit-vector raises every one of the 216 cells")
+    func applyRowAllSetCapture() {
+        // Mirrors the Rust `apply_row_all_set_capture` (closure `always_set`):
+        // an all-ones RowBitmaps yields a BitVector216 with all 216 bits set
+        // (every field reads 0x3F), so capture increments every cell to 1.
+        var m = MatrixF()
+        let full = RowBitmaps(adjective: -1, operational: -1, provenance: -1).bitVector()
+        m.applyRow(delta: 1, bitVector: full)
+        #expect(m.totalCount == Int64(MatrixF.cellCount))   // 216
+        for c in m.cells { #expect(c == 1) }
+    }
+
     @Test("applyRow(+1) then applyRow(-1) restores zero")
     func applyRowInverse() {
         var m = MatrixF()
