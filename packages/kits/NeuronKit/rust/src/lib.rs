@@ -31,6 +31,7 @@ pub mod benchmark_scoring;
 pub mod benchmark_live;
 pub mod tournament_live;
 pub mod keystones;
+pub mod structure_graph;
 pub mod latent_themes;
 pub mod drift;
 pub mod anomaly_scan;
