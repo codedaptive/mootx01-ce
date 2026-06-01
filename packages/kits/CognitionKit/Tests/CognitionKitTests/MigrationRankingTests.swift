@@ -1,9 +1,9 @@
 // MigrationRankingTests.swift
 //
 // Conformance fixtures for the deterministic decision core. These exact
-// inputs and expected outputs are mirrored by the Rust port's
+// inputs and expected outputs are mirrored by the Rust version's
 // `migration_ranking` tests (CognitionKit/rust/src/migration_ranking.rs)
-// — both ports must agree. Per CLAUDE.md neither port leads; this file
+// — both versions must agree. Per CLAUDE.md neither leads; this file
 // and the Rust `#[cfg(test)]` block are the shared gate.
 //
 // FIXTURES (keep in lockstep with the Rust tests):
@@ -15,56 +15,57 @@
 //   F6 rank with one lost plan -> disqualified, excluded from ranking
 //   F7 rank distinct scores -> strict descending by combinedScore
 
-import XCTest
+import Testing
+import Foundation
 @testable import CognitionKit
 
-final class MigrationRankingTests: XCTestCase {
+@Suite("MigrationRankingTests")
+struct MigrationRankingTests {
 
     // F1 / F2 — duplicate detection
-    func testFirstDuplicate() {
-        XCTAssertNil(MigrationRanking.firstDuplicate(["a", "b", "c"]))
-        XCTAssertEqual(MigrationRanking.firstDuplicate(["x", "y", "x", "y"]), "x")
-        XCTAssertNil(MigrationRanking.firstDuplicate([]))
+    @Test("first duplicate")
+    func firstDuplicate() {
+        #expect(MigrationRanking.firstDuplicate(["a", "b", "c"]) == nil)
+        #expect(MigrationRanking.firstDuplicate(["x", "y", "x", "y"]) == "x")
+        #expect(MigrationRanking.firstDuplicate([]) == nil)
     }
 
     // F3 — lost-concept union, sorted + deduped
-    func testLostConcepts() {
-        XCTAssertEqual(
-            MigrationRanking.lostConcepts(dropped: ["b"], notFound: ["a", "b"]),
-            ["a", "b"])
-        XCTAssertEqual(
-            MigrationRanking.lostConcepts(dropped: [], notFound: []),
-            [])
-        XCTAssertEqual(
-            MigrationRanking.lostConcepts(dropped: ["z", "m"], notFound: ["m", "a"]),
-            ["a", "m", "z"])
+    @Test("lost concepts")
+    func lostConcepts() {
+        #expect(MigrationRanking.lostConcepts(dropped: ["b"], notFound: ["a", "b"]) == ["a", "b"])
+        #expect(MigrationRanking.lostConcepts(dropped: [], notFound: []) == [])
+        #expect(MigrationRanking.lostConcepts(dropped: ["z", "m"], notFound: ["m", "a"]) == ["a", "m", "z"])
     }
 
     // F4 — origin partition by empty-after-trim content
-    func testPartitionOrigin() {
+    @Test("partition origin")
+    func partitionOrigin() {
         let result = MigrationRanking.partitionOrigin([
             (id: "a", content: "hi"),
             (id: "b", content: "   "),
             (id: "c", content: "yo"),
         ])
-        XCTAssertEqual(result.migratable, ["a", "c"])
-        XCTAssertEqual(result.dropped, ["b"])
+        #expect(result.migratable == ["a", "c"])
+        #expect(result.dropped == ["b"])
     }
 
     // F5 — four clean equal-score plans rank alphabetically
-    func testRankEqualScoresTieBreakByName() {
+    @Test("rank equal scores tie-break by name")
+    func rankEqualScoresTieBreakByName() {
         let outcomes = ["delta", "alpha", "charlie", "bravo"].map {
             MigrationRanking.PlanOutcome(
                 name: $0, recallOverlap: 1.0, meanReciprocalRank: 1.0, lost: [])
         }
         let r = MigrationRanking.rank(outcomes)
-        XCTAssertEqual(r.rankings.map(\.name), ["alpha", "bravo", "charlie", "delta"])
-        XCTAssertEqual(r.winner, "alpha")
-        XCTAssertTrue(r.disqualified.isEmpty)
+        #expect(r.rankings.map(\.name) == ["alpha", "bravo", "charlie", "delta"])
+        #expect(r.winner == "alpha")
+        #expect(r.disqualified.isEmpty)
     }
 
     // F6 — a lost plan is disqualified, never ranked
-    func testRankDisqualifiesLostPlan() {
+    @Test("rank disqualifies lost plan")
+    func rankDisqualifiesLostPlan() {
         let outcomes = [
             MigrationRanking.PlanOutcome(
                 name: "clean", recallOverlap: 1.0, meanReciprocalRank: 1.0, lost: []),
@@ -72,14 +73,15 @@ final class MigrationRankingTests: XCTestCase {
                 name: "lossy", recallOverlap: 0.5, meanReciprocalRank: 0.5, lost: ["x"]),
         ]
         let r = MigrationRanking.rank(outcomes)
-        XCTAssertEqual(r.rankings.map(\.name), ["clean"])
-        XCTAssertEqual(r.disqualified.map(\.name), ["lossy"])
-        XCTAssertEqual(r.disqualified.first?.lostConcepts, ["x"])
-        XCTAssertEqual(r.winner, "clean")
+        #expect(r.rankings.map(\.name) == ["clean"])
+        #expect(r.disqualified.map(\.name) == ["lossy"])
+        #expect(r.disqualified.first?.lostConcepts == ["x"])
+        #expect(r.winner == "clean")
     }
 
     // F7 — distinct scores rank strictly descending; combinedScore = overlap*mrr
-    func testRankDistinctScoresDescending() {
+    @Test("rank distinct scores descending")
+    func rankDistinctScoresDescending() {
         let outcomes = [
             MigrationRanking.PlanOutcome(
                 name: "low", recallOverlap: 0.2, meanReciprocalRank: 0.5, lost: []),   // 0.10
@@ -89,16 +91,17 @@ final class MigrationRankingTests: XCTestCase {
                 name: "mid", recallOverlap: 0.5, meanReciprocalRank: 0.8, lost: []),   // 0.40
         ]
         let r = MigrationRanking.rank(outcomes)
-        XCTAssertEqual(r.rankings.map(\.name), ["high", "mid", "low"])
-        XCTAssertEqual(r.rankings.first?.combinedScore ?? 0, 0.8, accuracy: 1e-6)
-        XCTAssertEqual(r.winner, "high")
+        #expect(r.rankings.map(\.name) == ["high", "mid", "low"])
+        #expect(abs((r.rankings.first?.combinedScore ?? 0) - 0.8) < 1e-6)
+        #expect(r.winner == "high")
     }
 
     // Empty input -> empty result, no winner.
-    func testRankEmpty() {
+    @Test("rank empty")
+    func rankEmpty() {
         let r = MigrationRanking.rank([])
-        XCTAssertTrue(r.rankings.isEmpty)
-        XCTAssertTrue(r.disqualified.isEmpty)
-        XCTAssertNil(r.winner)
+        #expect(r.rankings.isEmpty)
+        #expect(r.disqualified.isEmpty)
+        #expect(r.winner == nil)
     }
 }

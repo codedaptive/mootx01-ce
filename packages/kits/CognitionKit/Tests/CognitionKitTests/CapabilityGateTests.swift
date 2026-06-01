@@ -6,58 +6,56 @@
 // `RecipeError.missingCapability` naming the first missing capability in
 // `NeuronKitCapability.allCases` order.
 
-import XCTest
+import Testing
+import Foundation
 @testable import CognitionKit
 
-final class CapabilityGateTests: XCTestCase {
+@Suite("CapabilityGateTests")
+struct CapabilityGateTests {
 
-    func testAllShippedCapabilitiesAreAvailableByDefault() throws {
+    @Test("all shipped capabilities are available by default")
+    func allShippedCapabilitiesAreAvailableByDefault() throws {
         // Every declared capability maps to a shipped NeuronKit surface,
         // so the default host set covers all of them.
-        XCTAssertNoThrow(
-            try verifyCapabilities(required: NeuronKitCapability.allCases)
-        )
-        XCTAssertEqual(shippedNeuronKitCapabilities,
-                       Set(NeuronKitCapability.allCases))
+        try verifyCapabilities(required: NeuronKitCapability.allCases)
+        #expect(shippedNeuronKitCapabilities == Set(NeuronKitCapability.allCases))
     }
 
-    func testEmptyRequirementAlwaysPasses() throws {
-        XCTAssertNoThrow(try verifyCapabilities(required: []))
-        XCTAssertNoThrow(try verifyCapabilities(required: [], available: []))
+    @Test("empty requirement always passes")
+    func emptyRequirementAlwaysPasses() throws {
+        try verifyCapabilities(required: [])
+        try verifyCapabilities(required: [], available: [])
     }
 
-    func testMissingCapabilityThrowsNamingIt() {
+    @Test("missing capability throws naming it")
+    func missingCapabilityThrowsNamingIt() {
         // Host supports only hybridRecall; a recipe needing runTournament
         // must fail at the gate.
         let available: Set<NeuronKitCapability> = [.hybridRecall]
-        XCTAssertThrowsError(
+        #expect(throws: RecipeError.missingCapability(.runTournament)) {
             try verifyCapabilities(required: [.hybridRecall, .runTournament],
                                    available: available)
-        ) { error in
-            XCTAssertEqual(error as? RecipeError,
-                           .missingCapability(.runTournament))
         }
     }
 
-    func testFirstMissingIsReportedInDeclarationOrder() {
+    @Test("first missing is reported in declaration order")
+    func firstMissingIsReportedInDeclarationOrder() {
         // With two missing, the FIRST in allCases order is reported so the
         // failure is deterministic. allCases order:
         // hybridRecall, synthesize, deriveBranch, promoteBranch,
         // benchmark, runTournament. deriveBranch precedes benchmark.
         let available: Set<NeuronKitCapability> = [.hybridRecall, .synthesize]
-        XCTAssertThrowsError(
+        #expect(throws: RecipeError.missingCapability(.deriveBranch)) {
             try verifyCapabilities(required: [.benchmark, .deriveBranch],
                                    available: available)
-        ) { error in
-            XCTAssertEqual(error as? RecipeError,
-                           .missingCapability(.deriveBranch))
         }
     }
 
-    func testRecipeErrorIsEquatableAndDescribed() {
+    @Test("RecipeError is equatable and described")
+    func recipeErrorIsEquatableAndDescribed() {
         let err = RecipeError.silentConceptLoss(
             branchID: UUID(), lostConcepts: ["a", "b"])
-        XCTAssertTrue(err.description.contains("silentConceptLoss"))
-        XCTAssertTrue(err.description.contains("2 concept"))
+        #expect(err.description.contains("silentConceptLoss"))
+        #expect(err.description.contains("2 concept"))
     }
 }

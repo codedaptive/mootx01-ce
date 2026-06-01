@@ -5,43 +5,47 @@
 // metadata, so any enumerator (MCP surface, agent, composing recipe)
 // sees the truth.
 
-import XCTest
+import Testing
+import Foundation
 @testable import CognitionKit
 
-final class RecipeCatalogTests: XCTestCase {
+@Suite("RecipeCatalogTests")
+struct RecipeCatalogTests {
 
-    func testCatalogListsAllShippedRecipes() {
-        XCTAssertEqual(RecipeCatalog.names.sorted(),
-                       ["grounded_synthesis", "migration_benchmark"])
+    @Test("catalog lists all shipped recipes")
+    func catalogListsAllShippedRecipes() {
+        #expect(RecipeCatalog.names.sorted() == ["grounded_synthesis", "migration_benchmark"])
     }
 
-    func testDescriptorMatchesLiveRecipeMetadata() {
+    @Test("descriptor matches live recipe metadata")
+    func descriptorMatchesLiveRecipeMetadata() throws {
         // The descriptor projection must equal what the live recipe
         // reports — no drift between the catalog and the recipe.
         let gs = GroundedSynthesis()
-        let descriptor = try? XCTUnwrap(
-            RecipeCatalog.descriptor(named: gs.name))
-        XCTAssertEqual(descriptor?.version, gs.version)
-        XCTAssertEqual(descriptor?.description, gs.description)
-        XCTAssertEqual(descriptor?.requiredCapabilities, gs.requiredCapabilities)
+        let descriptor = try #require(RecipeCatalog.descriptor(named: gs.name))
+        #expect(descriptor.version == gs.version)
+        #expect(descriptor.description == gs.description)
+        #expect(descriptor.requiredCapabilities == gs.requiredCapabilities)
     }
 
-    func testDescriptorProjectionFromRecipe() {
+    @Test("descriptor projection from recipe")
+    func descriptorProjectionFromRecipe() {
         let mb = MigrationBenchmark()
         let descriptor = RecipeDescriptor(mb)
-        XCTAssertEqual(descriptor.name, "migration_benchmark")
-        XCTAssertEqual(descriptor.requiredCapabilities,
-                       [.deriveBranch, .benchmark, .promoteBranch])
+        #expect(descriptor.name == "migration_benchmark")
+        #expect(descriptor.requiredCapabilities == [.deriveBranch, .benchmark, .promoteBranch])
     }
 
-    func testUnknownNameYieldsNilDescriptor() {
-        XCTAssertNil(RecipeCatalog.descriptor(named: "no_such_recipe"))
+    @Test("unknown name yields nil descriptor")
+    func unknownNameYieldsNilDescriptor() {
+        #expect(RecipeCatalog.descriptor(named: "no_such_recipe") == nil)
     }
 
-    func testDescriptorRoundTripsThroughCodable() throws {
+    @Test("descriptor round-trips through Codable")
+    func descriptorRoundTripsThroughCodable() throws {
         let original = RecipeDescriptor(GroundedSynthesis())
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(RecipeDescriptor.self, from: data)
-        XCTAssertEqual(decoded, original)
+        #expect(decoded == original)
     }
 }
