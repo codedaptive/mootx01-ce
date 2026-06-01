@@ -1,72 +1,67 @@
-//! Constellation — emergent communities over the association graph (Lens 1,
-//! Structure): the NeuronKit reasoning surface over SubstrateML's Louvain
-//! `CommunityDetection`. Where Keystones finds the load-bearing nodes,
-//! Constellation finds the CLUSTERS — the emergent themes the user never named
-//! ("these memories group together whether or not you filed them that way").
-//!
-//! Layer B-1: the clustering math lives in SubstrateML; this shapes a
-//! drawer-id graph into named communities. CognitionKit sequences it over the
-//! estate's tunnel graph (same graph Keystones reads).
+//! Constellation — emergent communities (SPEC § 7.1, Lens 1 Structure).
+//! Surfaces SubstrateML's gated Louvain `CommunityDetection` over the same
+//! drawer/tunnel graph Keystones reads, then groups drawer-ids by the community
+//! label the primitive assigns. Finds the CLUSTERS the user never named. Owns
+//! no math (I-17); pure and total (I-18, B-8).
 
 use std::collections::BTreeMap;
 
 use substrate_ml::community_detection::CommunityDetection;
 
-/// Default Louvain passes — enough for phase-1 convergence on the graphs the
-/// lens sees; matches the substrate harness default usage.
+use crate::structure_graph;
+
+/// Default Louvain passes for the lens; phase-1 convergence on the graphs the
+/// surface sees.
 pub const DEFAULT_MAX_PASSES: usize = 10;
 
 /// The emergent communities of a graph.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Constellation {
-    /// Each community as a sorted group of node (drawer) ids; groups are
-    /// ordered by their smallest member for a deterministic result.
+    /// Each community is an ascending-sorted group of drawer ids; the groups are
+    /// ordered by their smallest member. Both orderings derive purely from the
+    /// ids, so the result does not depend on which integers the primitive
+    /// assigned its labels — the determinism C-Det requires.
     pub communities: Vec<Vec<String>>,
 }
 
-/// Detect communities over the UNDIRECTED graph formed by `edges` (drawer-id
-/// pairs), weight 1 each; edges with an endpoint absent from `node_ids` are
-/// ignored. Louvain phase-1 via SubstrateML.
+/// Detect communities over the undirected, unit-weight graph formed by `edges`,
+/// grouping `node_ids` by community. Self-loops and absent-endpoint edges are
+/// ignored. Empty `node_ids` ⇒ no communities (C-16).
 pub fn constellations(
     node_ids: &[String],
     edges: &[(String, String)],
     max_passes: usize,
 ) -> Constellation {
-    let n = node_ids.len();
-    if n == 0 {
+    if node_ids.is_empty() {
         return Constellation { communities: Vec::new() };
     }
-    let index: BTreeMap<&str, usize> =
-        node_ids.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
-    let mut adjacency: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
-    for (a, b) in edges {
-        if let (Some(&i), Some(&j)) = (index.get(a.as_str()), index.get(b.as_str())) {
-            if i != j {
-                adjacency[i].push((j, 1.0));
-                adjacency[j].push((i, 1.0));
-            }
-        }
-    }
 
+    let adjacency = structure_graph::build(node_ids, edges);
     let labels = CommunityDetection::detect(&adjacency, max_passes);
 
-    let mut groups: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    // Group ids by their assigned label, then impose an id-derived canonical
+    // ordering so the result is independent of the label integers.
+    let mut by_label: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for (i, &label) in labels.iter().enumerate() {
-        groups.entry(label).or_default().push(node_ids[i].clone());
+        by_label.entry(label).or_default().push(node_ids[i].clone());
     }
-    let mut communities: Vec<Vec<String>> = groups
+    let mut communities: Vec<Vec<String>> = by_label
         .into_values()
-        .map(|mut g| {
-            g.sort();
-            g
+        .map(|mut group| {
+            group.sort();
+            group
         })
         .collect();
     communities.sort_by(|a, b| a[0].cmp(&b[0]));
+
     Constellation { communities }
 }
 
 #[cfg(test)]
 mod tests {
+    // Tests assert the behavioral claims SPEC § 7.1 makes about Constellation:
+    // clusters are recovered from raw connectivity, the result is deterministic
+    // regardless of input order, and the surface is total over edge inputs.
     use super::*;
 
     fn ids(xs: &[&str]) -> Vec<String> {
@@ -76,10 +71,8 @@ mod tests {
         xs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
     }
 
-    // CS-1: two disjoint triangles form two communities. The emergent themes
-    // are recovered from raw connectivity, no labels supplied.
     #[test]
-    fn cs1_two_triangles_two_communities() {
+    fn disjoint_cliques_become_separate_communities() {
         let nodes = ids(&["A1", "A2", "A3", "B1", "B2", "B3"]);
         let g = edges(&[
             ("A1", "A2"),
@@ -90,15 +83,37 @@ mod tests {
             ("B2", "B3"),
         ]);
         let c = constellations(&nodes, &g, DEFAULT_MAX_PASSES);
-        assert_eq!(c.communities.len(), 2, "two cliques ⇒ two communities");
-        // Each community is one full triangle.
-        assert!(c.communities.iter().any(|grp| grp == &ids(&["A1", "A2", "A3"])));
-        assert!(c.communities.iter().any(|grp| grp == &ids(&["B1", "B2", "B3"])));
+        assert_eq!(c.communities.len(), 2);
+        assert!(c.communities.contains(&ids(&["A1", "A2", "A3"])));
+        assert!(c.communities.contains(&ids(&["B1", "B2", "B3"])));
     }
 
-    // CS-2: empty graph ⇒ no communities (guarded).
     #[test]
-    fn cs2_empty_is_guarded() {
+    fn ordering_is_independent_of_input_order() {
+        let g = edges(&[
+            ("A1", "A2"),
+            ("A1", "A3"),
+            ("A2", "A3"),
+            ("B1", "B2"),
+            ("B1", "B3"),
+            ("B2", "B3"),
+        ]);
+        let forward = constellations(&ids(&["A1", "A2", "A3", "B1", "B2", "B3"]), &g, DEFAULT_MAX_PASSES);
+        let shuffled = constellations(&ids(&["B3", "A2", "B1", "A3", "A1", "B2"]), &g, DEFAULT_MAX_PASSES);
+        assert_eq!(forward, shuffled);
+        for group in &forward.communities {
+            let mut sorted = group.clone();
+            sorted.sort();
+            assert_eq!(group, &sorted, "each community ascending");
+        }
+        let firsts: Vec<&String> = forward.communities.iter().map(|g| &g[0]).collect();
+        let mut sorted_firsts = firsts.clone();
+        sorted_firsts.sort();
+        assert_eq!(firsts, sorted_firsts, "communities ordered by smallest member");
+    }
+
+    #[test]
+    fn total_over_edge_inputs() {
         assert!(constellations(&[], &[], DEFAULT_MAX_PASSES).communities.is_empty());
     }
 }
