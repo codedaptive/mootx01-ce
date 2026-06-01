@@ -4,7 +4,7 @@
 // scheme is MDCC, the private Moot Decimal Classification Codes
 // scheme. The default ships complete with the kit's bundle and
 // is resolvable without any network access — its canon comes from
-// LatticeKit and its manifest is derived from the bundled canon
+// LatticeLib and its manifest is derived from the bundled canon
 // version (see EideticLib.defaultSchemeManifest()).
 //
 // Foreign schemes — anything under a share-alike or attribution
@@ -50,7 +50,7 @@ public enum ClassificationScheme: Sendable, Hashable, Codable {
 public struct LatticeSchemeManifest: Sendable, Hashable, Codable {
 
     /// The MDCC canon version this manifest pins. Matches the
-    /// canonVersion field LatticeKit publishes on its canon bundle.
+    /// canonVersion field LatticeLib publishes on its canon bundle.
     public let canonVersion: String
 
     /// The reference data version. Distinct from canon version

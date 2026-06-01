@@ -27,7 +27,7 @@
 
 import Foundation
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Pipeline integration")
 struct PipelineIntegrationTests {

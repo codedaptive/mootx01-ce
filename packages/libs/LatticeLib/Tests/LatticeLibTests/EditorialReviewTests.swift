@@ -31,7 +31,7 @@
 
 import Foundation
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Editorial review set (MDCC-02)")
 struct EditorialReviewTests {
@@ -108,15 +108,15 @@ struct EditorialReviewTests {
 
     /// The editorial pin directory, resolved relative to this test file
     /// so the test finds the build-input files without a bundle
-    /// resource. This file lives at LatticeKit/Tests/LatticeKitTests/, so the
+    /// resource. This file lives at LatticeLib/Tests/LatticeLibTests/, so the
     /// package root is three directories up; the pins live under
     /// Resources/editorial/ at the package root (build inputs, not
     /// bundled).
     private static func editorialURL(_ filename: String) -> URL {
         URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // LatticeKitTests
+            .deletingLastPathComponent()   // LatticeLibTests
             .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // LatticeKit (package root)
+            .deletingLastPathComponent()   // LatticeLib (package root)
             .appendingPathComponent("Resources/editorial/\(filename)")
     }
 

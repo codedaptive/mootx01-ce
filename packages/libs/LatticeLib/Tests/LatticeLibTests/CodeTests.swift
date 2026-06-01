@@ -4,7 +4,7 @@
 // presence: a code may be well-formed but valid-but-unknown.
 
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Code grammar")
 struct CodeTests {

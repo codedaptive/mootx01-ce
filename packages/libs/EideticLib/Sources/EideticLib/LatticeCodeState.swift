@@ -13,10 +13,10 @@
 //                canon pull
 //
 // The grammar in LatticeCodeGrammar is the same grammar enforced by
-// LatticeKit's Code.isWellFormed(_:). It is reimplemented here in
+// LatticeLib's Code.isWellFormed(_:). It is reimplemented here in
 // six lines so EideticLib can validate codes without importing
-// LatticeKit. The two implementations are conformance-checked via
-// agreement tests in LatticeKit's CodeTests.
+// LatticeLib. The two implementations are conformance-checked via
+// agreement tests in LatticeLib's CodeTests.
 
 import Foundation
 
@@ -32,7 +32,7 @@ public enum LatticeCodeState: Sendable, Hashable, Codable {
 
     /// Well-formed and present in the bound canon. The associated
     /// value is the code itself; resolution to a label/entry is
-    /// performed by the consumer through their LatticeKit canon.
+    /// performed by the consumer through their LatticeLib canon.
     case known(String)
 
     /// Well-formed but not present in the bound canon. The
@@ -63,16 +63,16 @@ public enum LatticeCodeState: Sendable, Hashable, Codable {
 
 /// The MDCC code grammar in EideticLib. Pure-Swift, no canon access.
 ///
-/// Parallel implementation of LatticeKit's `Code.isWellFormed(_:)`. Kept
+/// Parallel implementation of LatticeLib's `Code.isWellFormed(_:)`. Kept
 /// as a dependency-free grammar check so `classifyLatticeCode` can
 /// validate a code's shape without loading the canon, even though
-/// EideticLib now depends on LatticeKit for resolution. Bit-for-bit
-/// agreement with LatticeKit is enforced by tests that share the
-/// canonical conformance vectors in LatticeKit's test target.
+/// EideticLib now depends on LatticeLib for resolution. Bit-for-bit
+/// agreement with LatticeLib is enforced by tests that share the
+/// canonical conformance vectors in LatticeLib's test target.
 public enum LatticeCodeGrammar {
 
     /// Maximum digits permitted after the decimal point. Matches
-    /// LatticeKit's `Code.maxExtensionDigits` (v1: 8). Locked across
+    /// LatticeLib's `Code.maxExtensionDigits` (v1: 8). Locked across
     /// both implementations.
     public static let maxExtensionDigits: Int = 8
 

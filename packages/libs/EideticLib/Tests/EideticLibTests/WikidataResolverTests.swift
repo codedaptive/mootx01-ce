@@ -6,7 +6,7 @@
 
 import Testing
 @testable import EideticLib
-import LatticeKit
+import LatticeLib
 
 @Suite("Wikidata resolver")
 struct WikidataResolverTests {

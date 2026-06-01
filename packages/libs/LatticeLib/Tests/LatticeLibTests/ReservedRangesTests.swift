@@ -5,7 +5,7 @@
 // downstream consumer see a stable reservation table.
 
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Reserved ranges")
 struct ReservedRangesTests {

@@ -24,7 +24,7 @@
 //
 //   --seed         CC0 concept seed JSON. Defaults to EideticLib's
 //                  committed WikidataSubset.json, resolved relative to
-//                  the LatticeKit source tree.
+//                  the LatticeLib source tree.
 //   --fixture      Offline edge graph: a JSON array of {child,parent}.
 //                  When supplied, no network call is made.
 //   --registry     Prior persisted registry to pin existing codes
@@ -47,7 +47,7 @@
 //                  current date at the CLI boundary.
 
 import Foundation
-import LatticeKit
+import LatticeLib
 
 /// Parsed command-line options.
 struct BuildOptions {
@@ -296,7 +296,7 @@ struct MDCCBuild {
                 edgeSource: edgeSource,
                 pinnedParents: pinnedParents,
                 priorRegistry: priorRegistry,
-                canonVersion: LatticeKit.canonVersion
+                canonVersion: LatticeLib.canonVersion
             )
 
             // 5. Write the four artifacts with provenance.

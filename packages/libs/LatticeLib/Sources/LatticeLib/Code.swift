@@ -19,7 +19,7 @@
 // Validity does not imply presence in the canon. A well-formed code
 // may be valid-but-unknown — accepted by tooling, stored and
 // round-tripped intact, queryable as pending, resolved on the next
-// canon pull. See LatticeKit.entry(for:) for the resolution path.
+// canon pull. See LatticeLib.entry(for:) for the resolution path.
 
 import Foundation
 

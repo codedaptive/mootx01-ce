@@ -6,12 +6,12 @@
 // version that produced the answer.
 //
 // lookup grounds a term against the default MDCC scheme by
-// resolving it through the bundled MDCC canon (from LatticeKit).
+// resolving it through the bundled MDCC canon (from LatticeLib).
 // Network is never consulted. Determinism is guaranteed against
-// the pinned canon version recorded in LatticeKit's bundled canon.
+// the pinned canon version recorded in LatticeLib's bundled canon.
 
 import Foundation
-import LatticeKit
+import LatticeLib
 
 /// The EideticLib module surface. Stateless from the caller's
 /// perspective; internally caches the parsed reference data
@@ -30,15 +30,15 @@ public enum EideticLib {
     // The MDCC canon (CC0/public-domain) is the classification
     // source. The Wikidata subset (CC0) confirms the canon
     // entry's Q-ID anchor. No CC-BY-SA data is cached or bundled.
-    private static let cachedCanon: LatticeCanon? = LatticeKit.bundledCanon()
+    private static let cachedCanon: LatticeCanon? = LatticeLib.bundledCanon()
     private static let cachedSubset: WikidataSubset? = WikidataSubset.loadBundled()
 
     /// The bundled manifest for the MDCC default scheme. Derived from
-    /// LatticeKit's canon version rather than loaded from a JSON stub:
+    /// LatticeLib's canon version rather than loaded from a JSON stub:
     /// the manifest is scheme metadata, and the real canon lives in
-    /// LatticeKit.
+    /// LatticeLib.
     private static let derivedLatticeManifest = LatticeSchemeManifest(
-        canonVersion: LatticeKit.canonVersion,
+        canonVersion: LatticeLib.canonVersion,
         dataVersion: version,
         // MDCC is original work; the scheme itself is unlicensed. The
         // bundled leaves resolve against the CC0 MDCC canon. Foreign-
@@ -55,7 +55,7 @@ public enum EideticLib {
     public static let defaultScheme: ClassificationScheme = .mdcc
 
     /// The manifest for the MDCC default scheme. Derived from the
-    /// bundled LatticeKit canon version; always present.
+    /// bundled LatticeLib canon version; always present.
     public static func defaultSchemeManifest() -> LatticeSchemeManifest? {
         derivedLatticeManifest
     }
@@ -63,7 +63,7 @@ public enum EideticLib {
     /// Classifies a string against the MDCC code grammar without
     /// consulting any canon. Returns whether the code is malformed,
     /// well-formed-and-known (callers resolve the entry through
-    /// their bound LatticeKit canon), or well-formed-but-pending —
+    /// their bound LatticeLib canon), or well-formed-but-pending —
     /// the valid-but-unknown state from the launch plan. Pending
     /// codes round-trip intact and are queryable as pending until
     /// the next canon pull resolves them.

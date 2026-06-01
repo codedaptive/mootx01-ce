@@ -1,7 +1,7 @@
 // LatticeResolver.swift
 //
 // Resolves a term's normalized/stemmed tokens to an entry in the
-// MDCC canon (from LatticeKit). This is the grounding step of
+// MDCC canon (from LatticeLib). This is the grounding step of
 // EideticLib.lookup: it replaces the former UDC pipeline
 // (GazetteerMatcher + Classifier + UDCSchedule), which classified
 // against the CC-BY-SA UDC schedule. The MDCC canon is CC0/public-
@@ -45,7 +45,7 @@
 // anchor — never a fallback code.
 
 import Foundation
-import LatticeKit
+import LatticeLib
 
 /// The outcome of resolving a term against the MDCC canon: the
 /// resolved code, its CC0 Wikidata source identity, and a confidence
