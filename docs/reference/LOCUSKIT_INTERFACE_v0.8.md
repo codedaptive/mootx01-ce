@@ -40,11 +40,11 @@ purpose: |
 
 Naming differs by port convention (Swift `addDrawer` / `bitmapAuditTrail`;
 Rust `add_drawer` / `bitmap_audit_trail`). The two ports also differ in
-*shape* — Swift is `actor`/`async`, the Rust port is synchronous and takes
+*shape* — Swift is `actor`/`async`, the Rust version is synchronous and takes
 `now: i64` explicitly; the Rust `DrawerStore` is a trait with an in-memory
 implementation only. The value-level results agree (SPEC § 8, I-11).
 
-> **Two-tier surface.** LocusKit declares 74 public types in the Swift port,
+> **Two-tier surface.** LocusKit declares 74 public types in the Swift version,
 > of which 33 are referenced by another package (GeniusLocusKit, NeuronKit,
 > ARIA_MCP; measured 2026-05-27). Several of those measured hits are
 > common-word coincidences from unrelated local types in the consumer
@@ -433,7 +433,7 @@ file; promote a type into Tier 1 when a consumer adopts it.
 - **Bitmap helpers:** free functions `andMask`, `thresholdCompare` + `ThresholdOp`,
   `xor`, `isIdentical`, `hammingDistance`, `shiftExtract`, `simdBallot` —
   `BitmapOps.swift`. (The recall evaluator `BitmapEvaluator` is `internal` in
-  the Swift port; the Rust port exposes it as `pub struct BitmapEvaluator`.)
+  the Swift version; the Rust version exposes it as `pub struct BitmapEvaluator`.)
 - **KG-fact operational axes:** `KGExtractorClass`, `KGAssertionKind`,
   `KGSpecificity`, `KGConfidenceBand` — `KGFactOperational.swift`.
 - **Diary operational axes:** `DiaryEventClass`, `DiarySeverity`,
@@ -444,8 +444,8 @@ file; promote a type into Tier 1 when a consumer adopts it.
 - **Taxonomy summaries:** `WingSummary`, `RoomSummary` (computed
   `GROUP BY` projections; no wings/rooms table) — `Summaries.swift`.
 - **Rust-only helper shapes:** `BitmapAuditPair`, `RoomBundle`,
-  `RoomLevelEntry`, `InMemoryDrawerStore` — present in the Rust port where
-  the Swift port keeps the equivalent internal (SPEC § 8).
+  `RoomLevelEntry`, `InMemoryDrawerStore` — present in the Rust version where
+  the Swift version keeps the equivalent internal (SPEC § 8).
 
 ## § 3 — Public functions
 

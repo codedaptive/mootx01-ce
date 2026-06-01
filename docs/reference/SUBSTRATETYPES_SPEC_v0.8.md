@@ -294,27 +294,3 @@ The vectors live in `tests/` directories of both legs and are
 run by CI on every commit. A diff in any vector — between Swift and
 Rust output for the same input, or between either port and the
 shared expectation — fails the conformance gate.
-
-## § 8 — Out of scope
-
-- Persistence (`tombstonedAt`, `removedByBatch`, etc.) — lives in
-  PersistenceKit.
-- HLC-based audit-log fold — lives in SubstrateML.
-- The row-state automaton's transition logic — lives in SubstrateLib.
-- The nine verb implementations — live in SubstrateLib.
-- The write gate — lives in SubstrateLib (`AuditGate`).
-- Hardware-dispatched algebra (NEON, BNNS, Metal, AVX) — lives in
-  SubstrateKernel.
-- Lattice anchor validation (UDC code syntax, Wikidata adjacency) —
-  lives in EngramLib.
-
-## § 9 — Open questions
-
-- **HLC overflow semantics.** Today `logical` overflows raise
-  `HLCError`. Should the generator instead block-and-wait for the
-  next physical millisecond? Discussion deferred until federation
-  v1.1 work begins.
-- **`Fingerprint256` random-construction API.** Tests and benchmarks
-  construct random fingerprints via deterministic seeded PRNGs that
-  live in test-side helpers. Whether a production random-fingerprint
-  factory belongs in this package or in SubstrateML is open.

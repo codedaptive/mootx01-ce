@@ -3464,7 +3464,7 @@ This section reconciles the cookbook's per-primitive budget
 estimates with the empirical outcomes from Phase 2 kernel
 measurement work (commits `d8602d4` through `d87d824`). Hardware
 is apple-m5-max throughout; results may differ on other Apple
-Silicon variants or on Rust port targets.
+Silicon variants or on Rust version targets.
 
 #### §17.6.1. Per-primitive measured costs
 
@@ -3863,7 +3863,7 @@ consumer imports them by name. Per
 
 ---
 
-## Appendix A — Open questions still tracked
+## Appendix A — Design Edges
 
 Open questions tracked for future refinement. Questions resolved
 by the v1.0 decision set are listed first with their resolution.
@@ -3985,39 +3985,4 @@ Sections trace back to designer artifacts as follows:
 | §18 (conformance) | This spec | New |
 | §19 (out of scope) | First and final math passes §5 | Roadmap |
 
----
 
-## Appendix C — Migration verification checklist
-
-After running `migrate_0_35_to_0_36`, an implementation MUST verify:
-
-- [ ] All rows have lattice anchors populated (I-16).
-- [ ] All adjective bitmaps use new 6-bit field widths (§2.3).
-- [ ] All operational bitmaps use noun-specific layouts (§2.4).
-- [ ] All provenance bitmaps use new layout (§2.5).
-- [ ] All fingerprints computed under v0.36 hyperplane seeds.
-- [ ] Bit-slice runtime files materialized correctly (CRC against
-       expected hash).
-- [ ] F, C, O matrices initialized from audit log replay.
-- [ ] Calibration curves initialized empty.
-- [ ] W_tournament and W_ranking initialized to framework defaults.
-- [ ] DrawerStateValidator invoked on all write paths (§9.9).
-- [ ] All 22 bitmap-field constants match source (§2.8).
-- [ ] Reference test suite passes for the conformance tier
-       (kernel, fingerprint, automaton, matrices, cognitionkit).
-- [ ] Manifest `schema_version = "0.36"` and
-       `bitmap_layout_version = "0.36"`.
-- [ ] Audit log preserved verbatim from v0.35; new audit row
-       `migration_completed(from=0.35, to=0.36)` appended.
-
-Migration is reversible only via the snapshot at step 1 of §16.2.
-No reverse-migration function is provided.
-
----
-
-*End of cookbook. Implementations against this spec produce a
-working v0.36 GeniusLocus substrate. Where the spec is silent, the
-v0.35 architecture spec applies. Where the spec contradicts v0.35,
-this document supersedes. Open questions in Appendix A guide
-v0.37/v0.38 spec evolution. The math design phase of the
-2026-05-16 session is closed; the implementation phase begins.*

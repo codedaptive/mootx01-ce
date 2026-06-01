@@ -4,11 +4,11 @@ authors: Bob Pankratz (via/ claude)
 date: 2026-05-27
 version: v0.8
 package: LatticeKit
-languages: [swift]   # Rust port pending; canon + grammar is the cross-port target
+languages: [swift]   # Rust version pending; canon + grammar is the cross-port target
 relates_to:
   - LATTICEKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of LatticeKit (Swift; Rust port pending). § 2
+  Public API surface of LatticeKit (Swift; Rust version pending). § 2
   Tier 1 documents the consumed contract — canon lookup and the code
   grammar — in full. The Tier 2 subsection of § 2 is a table of contents
   for the editorial / assembly tooling (the `mdcc-build` machinery),

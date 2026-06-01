@@ -55,7 +55,7 @@ Four library products: `ConvergenceKit`, `ConvergenceKitNone`,
 - `src/pairing.rs` — `HyperplaneFamilySpec`, `PairingProposal`,
   `PairingAcceptance`, `proposal_signing_bytes`
 
-CloudKit is Apple-only and is intentionally omitted from the Rust port.
+CloudKit is Apple-only and is intentionally omitted from the Rust version.
 
 ## § 2 — Public types
 
@@ -328,7 +328,7 @@ pub struct NoSyncEngine { /* … */ }
 impl NoSyncEngine { pub fn new() -> Self; }   // also Default
 ```
 
-**CloudKit — `CloudKitSyncEngine`** (Swift only; SPEC § 5, B-6):
+**CloudKit — `CloudKitSyncEngine`** (Apple-platform; SPEC § 5, B-6):
 
 ```swift
 public final class CloudKitSyncEngine: SyncEngine, Sendable {

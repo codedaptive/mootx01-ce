@@ -172,7 +172,7 @@ public struct ToolName: Sendable, Hashable, Codable, RawRepresentable {
 ```
 
 **Rust:** `pub struct JobId(pub String);`, `pub struct StreamId(pub String);`,
-`pub struct SessionId(pub String);` (no `ToolName` in the Rust port —
+`pub struct SessionId(pub String);` (no `ToolName` in the Rust version —
 allowlist validation is unimplemented, SPEC § 9).
 
 ### `ObservationStatus`

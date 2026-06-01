@@ -45,13 +45,13 @@ purpose: |
 Naming differs by port convention (Swift `glkDeriveBranch` /
 `registerStandingSignal`; Rust `snake_case`). The two ports also differ in
 *shape* — Swift is the `GeniusLocusKit` actor with `async` methods; the
-Rust port is synchronous (`EstateCoordinator` struct, a stateless verb
-`Surface`, `SerialLaneScheduler`) — and in *coverage*: the Rust port does
+Rust version is synchronous (`EstateCoordinator` struct, a stateless verb
+`Surface`, `SerialLaneScheduler`) — and in *coverage*: the Rust version does
 not yet implement grants, federation, branches, or migration. Value-level
 results agree on the surfaces both implement (SPEC § 8, I-15).
 
 > **Two-tier surface.** GeniusLocusKit declares 116 public types in the
-> Swift port, of which 36 are referenced by another package (NeuronKit,
+> Swift version, of which 36 are referenced by another package (NeuronKit,
 > ARIA_MCP; measured 2026-05-27). One of those 36 (`Key`, i.e.
 > `UnifiedProjection.Key`) is a common-word coincidence; the genuinely
 > consumed contract is the ~35 types in Tier 1 below — the actor, the verb
@@ -142,7 +142,7 @@ public actor GeniusLocusKit {
 stateless verb `Surface` (the nine verbs returning `Result<…, VerbError>`),
 `LatticeRegion` + `EstateRecallContribution` fan-out, and `SerialLaneScheduler`.
 The grant, federation, branch, and migration methods are not present in the
-Rust port at this revision (SPEC § 8).
+Rust version at this revision (SPEC § 8).
 
 #### `EstateHandle`
 
@@ -276,7 +276,7 @@ public struct IssueGrantResult: Sendable {
     public let grant: Grant; public let scopeKey: Data?   // non-nil only for handed-over / decay-derived custody
 }
 ```
-**Rust:** not present — federation is Swift-only at this revision (SPEC § 8).
+**Rust:** not present — federation is implemented in the Swift version and not yet in the Rust version.
 
 #### Grant model: `Grant`, `GrantOptions`, `GrantScope`, `GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`, `GrantError`
 
@@ -451,7 +451,7 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
 ```
 **Rust:** `pub enum GeniusLocusKitError` (`coordinator.rs`) mirrors the
 lifecycle/fan-out/scheduler cases; the grant/branch/federation cases are
-Swift-only (SPEC § 8). Meaning: SPEC § 6.
+present in the Swift version and not yet in the Rust version. Meaning: SPEC § 6.
 
 ### Tier 2 — broader surface (table of contents)
 
@@ -541,7 +541,7 @@ public enum MatrixPersistenceError: Error, Equatable, Sendable    // snapshot lo
 ```
 **Rust:** `pub enum GeniusLocusKitError`, `VerbError`, `MatrixPersistenceError`,
 and `SchedulerError` mirror the implemented surfaces; `GrantError` and
-`MigrationError` are Swift-only (SPEC § 8). Meaning: SPEC § 6.
+`MigrationError` are present in the Swift version and not yet in the Rust version. Meaning: SPEC § 6.
 
 ## § 5 — Conformance test entry points
 

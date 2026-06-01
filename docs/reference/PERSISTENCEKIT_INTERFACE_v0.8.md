@@ -445,7 +445,7 @@ public enum BackendConfiguration: Sendable {
 }
 ```
 **Rust:** `pub struct EstateConfiguration { estate_id, backend }` (the
-Rust port carries no encryption config at v0.8),
+Rust version carries no encryption config at v0.8),
 `pub enum BackendConfiguration { Sqlite{…}, Postgresql{…}, InMemory }`.
 
 #### Backend entry points: `InMemoryStorage`, `SQLiteStorage`, `PostgreSQLStorage`

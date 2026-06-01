@@ -4,7 +4,7 @@ authors: Bob Pankratz (via/ claude)
 date: 2026-05-27
 version: v0.8
 package: ARIA_MCP
-languages: [swift]   # Swift only; no Rust port present in apps/ARIA_MCP
+languages: [swift]   # access surface, implemented in Swift
 relates_to:
   - ARIA_MCP_SPEC_v0.8.md  (the contract this interface implements)
   - ARIALEXICONLIB_SPEC_v0.8.md  (the grammar this surface projects)
@@ -14,7 +14,7 @@ purpose: |
   the ARIA grammar onto Model Context Protocol tools and dispatches them
   against GeniusLocusKit estates. Documents the JSON-RPC transport, the
   JSONValue wire type, the lexicon→tool projection, the multi-estate
-  tool dispatcher, and the server loop. Swift only (no Rust port). The
+  tool dispatcher, and the server loop. The access surface is implemented in Swift. The
   companion SPEC carries the behavioral contracts.
 ---
 
@@ -35,7 +35,7 @@ purpose: |
 - `Package.swift` — depends on AriaLexiconLib, GeniusLocusKit, LocusKit,
   PersistenceKit (path deps under `../../packages/`).
 
-**Rust:** none. ARIA_MCP is the access surface and is Swift-only at v0.8.
+**Rust:** none. ARIA_MCP is the external access surface above the substrate and is implemented in Swift.
 
 This is the external access surface above the substrate; it is not
 imported by any other package, so it is documented single-tier (its full
@@ -218,7 +218,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 ```
 
 (Targets: `AriaMCPTests` — JSON-RPC, stdio framing, server, tool
-projection, multi-estate routing, scheme discriminator.) No Rust port.
+projection, multi-estate routing, scheme discriminator.) No Rust version.
 
 ## § 6 — Examples
 
