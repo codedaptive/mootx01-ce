@@ -5,7 +5,7 @@
 // else (articles, prepositions, times, adjectives, punctuation) is
 // discarded, which is what `.other` represents here.
 //
-// This is the return type of `EideticLib.wordClass(_:)`. It is pure
+// This is the return type of `LatticeLib.wordClass(_:)`. It is pure
 // data with a byte-identical shape to the Rust port's `WordClass`
 // enum, so the two ports agree on every shared conformance vector.
 
