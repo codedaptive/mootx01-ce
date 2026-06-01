@@ -1,66 +1,85 @@
 // EngramLibTests.swift
+//
+// swift-testing suite for the EngramLib-type API: distance,
+// distances, findNearest, findWithin, union, and Session. Mirrors
+// the Rust behavior set in rust/tests/engram_lib_tests.rs. Match-type
+// coverage lives in the peer suite MatchTests.swift.
 
-import XCTest
+import Testing
 @testable import EngramLib
 
-final class EngramLibTests: XCTestCase {
+@Suite("EngramLib API")
+struct EngramLibTests {
 
-    func testDistanceIdentical() {
+    // MARK: - Distance
+
+    @Test("identical engrams are distance 0")
+    func distanceIdentical() {
         let a = Engram(blocks: 0xDEAD, 0xBEEF, 0xCAFE, 0xBABE)
-        XCTAssertEqual(EngramLib.distance(a, a), 0)
+        #expect(EngramLib.distance(a, a) == 0)
     }
 
-    func testDistanceInverse() {
+    @Test("bit-inverse engrams are distance 256")
+    func distanceInverse() {
         let a = Engram.zero
         let b = Engram(blocks: .max, .max, .max, .max)
-        XCTAssertEqual(EngramLib.distance(a, b), 256)
+        #expect(EngramLib.distance(a, b) == 256)
     }
 
-    func testDistanceKnown() {
+    @Test("known bit pattern yields known distance")
+    func distanceKnown() {
         let a = Engram(blocks: 0, 0, 0, 0)
         let b = Engram(blocks: 0b1011, 0, 0, 0)
-        XCTAssertEqual(EngramLib.distance(a, b), 3)
+        #expect(EngramLib.distance(a, b) == 3)
     }
 
-    func testDistancesEmpty() {
+    @Test("distances over empty candidates is empty")
+    func distancesEmpty() {
         let probe = Engram.zero
-        XCTAssertEqual(EngramLib.distances(probe: probe, candidates: []), [])
+        #expect(EngramLib.distances(probe: probe, candidates: []) == [])
     }
 
-    func testDistancesBatchMatchesPair() {
+    @Test("batch distances match per-pair distances")
+    func distancesBatchMatchesPair() {
         let probe = Engram(blocks: 0xAAAA_AAAA, 0, 0, 0)
         let estate = (0..<10).map { i in
             Engram(blocks: UInt64(i) &* 0xDEAD, UInt64(i), 0, 0)
         }
         let batch = EngramLib.distances(probe: probe, candidates: estate)
         for i in 0..<estate.count {
-            XCTAssertEqual(batch[i], EngramLib.distance(probe, estate[i]))
+            #expect(batch[i] == EngramLib.distance(probe, estate[i]))
         }
     }
 
-    func testFindNearestEmpty() {
+    // MARK: - Nearest neighbor
+
+    @Test("findNearest over empty candidates is empty")
+    func findNearestEmpty() {
         let probe = Engram.zero
-        XCTAssertEqual(EngramLib.findNearest(probe: probe, in: [], k: 5), [])
+        #expect(EngramLib.findNearest(probe: probe, in: [], k: 5) == [])
     }
 
-    func testFindNearestKZeroOrNegative() {
+    @Test("findNearest with k <= 0 is empty")
+    func findNearestKZeroOrNegative() {
         let probe = Engram.zero
         let estate = [Engram(blocks: 1, 0, 0, 0)]
-        XCTAssertEqual(EngramLib.findNearest(probe: probe, in: estate, k: 0), [])
-        XCTAssertEqual(EngramLib.findNearest(probe: probe, in: estate, k: -1), [])
+        #expect(EngramLib.findNearest(probe: probe, in: estate, k: 0) == [])
+        #expect(EngramLib.findNearest(probe: probe, in: estate, k: -1) == [])
     }
 
-    func testFindNearestKGreaterThanN() {
+    @Test("findNearest clamps k to candidate count")
+    func findNearestKGreaterThanN() {
         let probe = Engram.zero
         let estate = [
             Engram(blocks: 1, 0, 0, 0),
             Engram(blocks: 3, 0, 0, 0),
         ]
         let result = EngramLib.findNearest(probe: probe, in: estate, k: 10)
-        XCTAssertEqual(result.count, 2)
+        #expect(result.count == 2)
     }
 
-    func testFindNearestOrdering() {
+    @Test("findNearest orders by ascending distance")
+    func findNearestOrdering() {
         let probe = Engram.zero
         let estate = [
             Engram(blocks: 0b1111, 0, 0, 0),
@@ -69,11 +88,12 @@ final class EngramLibTests: XCTestCase {
             Engram(blocks: 0b11,   0, 0, 0),
         ]
         let result = EngramLib.findNearest(probe: probe, in: estate, k: 3)
-        XCTAssertEqual(result.map { $0.index }, [1, 3, 2])
-        XCTAssertEqual(result.map { $0.distance }, [1, 2, 3])
+        #expect(result.map { $0.index } == [1, 3, 2])
+        #expect(result.map { $0.distance } == [1, 2, 3])
     }
 
-    func testFindNearestTieBreakByIndex() {
+    @Test("findNearest breaks distance ties by ascending index")
+    func findNearestTieBreakByIndex() {
         let probe = Engram.zero
         let estate = [
             Engram(blocks: 0b1,   0, 0, 0),
@@ -81,25 +101,30 @@ final class EngramLibTests: XCTestCase {
             Engram(blocks: 0b100, 0, 0, 0),
         ]
         let result = EngramLib.findNearest(probe: probe, in: estate, k: 3)
-        XCTAssertEqual(result.map { $0.index }, [0, 1, 2])
+        #expect(result.map { $0.index } == [0, 1, 2])
     }
 
-    func testFindNearestSingle() {
+    @Test("findNearest single returns the closest match")
+    func findNearestSingle() {
         let probe = Engram.zero
         let estate = [
             Engram(blocks: 0b111, 0, 0, 0),
             Engram(blocks: 0b1,   0, 0, 0),
         ]
         let match = EngramLib.findNearest(probe: probe, in: estate)
-        XCTAssertEqual(match?.index, 1)
-        XCTAssertEqual(match?.distance, 1)
+        #expect(match?.index == 1)
+        #expect(match?.distance == 1)
     }
 
-    func testFindNearestSingleEmpty() {
-        XCTAssertNil(EngramLib.findNearest(probe: Engram.zero, in: []))
+    @Test("findNearest single over empty candidates is nil")
+    func findNearestSingleEmpty() {
+        #expect(EngramLib.findNearest(probe: Engram.zero, in: []) == nil)
     }
 
-    func testFindWithin() {
+    // MARK: - Filtering
+
+    @Test("findWithin returns candidates inside the radius, ordered")
+    func findWithin() {
         let probe = Engram.zero
         let estate = [
             Engram(blocks: 0b1,    0, 0, 0),
@@ -107,47 +132,58 @@ final class EngramLibTests: XCTestCase {
             Engram(blocks: 0b11,   0, 0, 0),
         ]
         let result = EngramLib.findWithin(probe: probe, in: estate, maxDistance: 2)
-        XCTAssertEqual(result.map { $0.index }, [0, 2])
-        XCTAssertEqual(result.map { $0.distance }, [1, 2])
+        #expect(result.map { $0.index } == [0, 2])
+        #expect(result.map { $0.distance } == [1, 2])
     }
 
-    func testFindWithinEmpty() {
-        XCTAssertEqual(
+    @Test("findWithin over empty candidates is empty")
+    func findWithinEmpty() {
+        #expect(
             EngramLib.findWithin(probe: Engram.zero,
-                                 in: [], maxDistance: 10),
-            [])
+                                 in: [], maxDistance: 10) == [])
     }
 
-    func testFindWithinNegativeMax() {
+    @Test("findWithin with negative maxDistance is empty")
+    func findWithinNegativeMax() {
+        // Swift-only extra coverage: Rust find_within takes u32, so a
+        // negative maxDistance is structurally impossible there. The
+        // Swift guard (maxDistance >= 0) is the peer behavior.
         let probe = Engram.zero
         let estate = [Engram(blocks: 1, 0, 0, 0)]
-        XCTAssertEqual(
-            EngramLib.findWithin(probe: probe, in: estate, maxDistance: -1),
-            [])
+        #expect(
+            EngramLib.findWithin(probe: probe, in: estate, maxDistance: -1) == [])
     }
 
-    func testUnionEmpty() {
-        XCTAssertEqual(EngramLib.union([]), Engram.zero)
+    // MARK: - Aggregation
+
+    @Test("union of no engrams is the zero engram")
+    func unionEmpty() {
+        #expect(EngramLib.union([]) == Engram.zero)
     }
 
-    func testUnionTwo() {
+    @Test("pairwise union ORs the bits")
+    func unionTwo() {
         let a = Engram(blocks: 0b1010, 0, 0, 0)
         let b = Engram(blocks: 0b0101, 0, 0, 0)
         let result = EngramLib.union(a, b)
-        XCTAssertEqual(result.block0, 0b1111)
+        #expect(result.block0 == 0b1111)
     }
 
-    func testUnionMany() {
+    @Test("union over many engrams ORs all bits")
+    func unionMany() {
         let engrams = [
             Engram(blocks: 0b0001, 0, 0, 0),
             Engram(blocks: 0b0010, 0, 0, 0),
             Engram(blocks: 0b0100, 0, 0, 0),
             Engram(blocks: 0b1000, 0, 0, 0),
         ]
-        XCTAssertEqual(EngramLib.union(engrams).block0, 0b1111)
+        #expect(EngramLib.union(engrams).block0 == 0b1111)
     }
 
-    func testSessionMatchesStateless() {
+    // MARK: - Session
+
+    @Test("session results match the stateless API")
+    func sessionMatchesStateless() {
         let probe = Engram(blocks: 0xDEAD_BEEF, 0, 0, 0)
         let estate = (0..<100).map { i in
             Engram(blocks: UInt64(i) &* 0xABCD, UInt64(i), 0, 0)
@@ -155,16 +191,6 @@ final class EngramLibTests: XCTestCase {
         let stateless = EngramLib.findNearest(probe: probe, in: estate, k: 10)
         let session = EngramLib.session()
         let stateful = session.findNearest(probe: probe, in: estate, k: 10)
-        XCTAssertEqual(stateless, stateful)
-    }
-
-    func testMatchOrdering() {
-        let m1 = Match(index: 5, distance: 3)
-        let m2 = Match(index: 1, distance: 3)
-        let m3 = Match(index: 0, distance: 2)
-        XCTAssertTrue(m3 < m2)
-        XCTAssertTrue(m2 < m1)
-        let sorted = [m1, m2, m3].sorted()
-        XCTAssertEqual(sorted.map { $0.index }, [0, 1, 5])
+        #expect(stateless == stateful)
     }
 }
