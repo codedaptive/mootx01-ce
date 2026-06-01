@@ -10,6 +10,7 @@
 import Testing
 import Foundation
 @testable import EideticLib
+@testable import LatticeLib
 
 /// One shared conformance vector (mirrors the Rust `Vector` struct).
 private struct WordClassVector: Decodable {

@@ -9,6 +9,7 @@
 import Testing
 import Foundation
 @testable import EideticLib
+@testable import LatticeLib
 
 @Suite("Stemmer Snowball conformance")
 struct StemmerTests {

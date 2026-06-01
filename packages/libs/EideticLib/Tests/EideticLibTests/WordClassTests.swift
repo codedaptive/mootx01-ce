@@ -9,6 +9,7 @@
 import Testing
 import Foundation
 @testable import EideticLib
+@testable import LatticeLib
 
 @Suite("WordClass enum")
 struct WordClassTests {

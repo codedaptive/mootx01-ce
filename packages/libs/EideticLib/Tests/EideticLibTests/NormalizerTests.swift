@@ -8,6 +8,7 @@
 
 import Testing
 @testable import EideticLib
+@testable import LatticeLib
 
 @Suite("Normalizer")
 struct NormalizerTests {
