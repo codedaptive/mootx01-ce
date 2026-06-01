@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import GeniusLocusKit
 import LocusKit
@@ -13,9 +13,14 @@ import PersistenceKitInMemory
 /// The tests run the server against an in-memory pipe pair instead of
 /// the process's real stdin/stdout so they can assert against the
 /// bytes that would have been written.
-final class StdioFramingTests: XCTestCase {
+///
+/// `.serialized`: each case drives a real `Pipe()` pair and the stdio
+/// read loop end-to-end; preserve the one-at-a-time execution the suite
+/// ran under XCTest.
+@Suite("Stdio framing", .serialized)
+struct StdioFramingTests {
 
-    func testInitializeRoundTripsOverPipes() async throws {
+    @Test func testInitializeRoundTripsOverPipes() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-pipe-tests")
         let storage = InMemoryStorage(
@@ -53,16 +58,16 @@ final class StdioFramingTests: XCTestCase {
 
         let response = try outPipe.fileHandleForReading.readToEnd() ?? Data()
         // Server must terminate every response with a single newline.
-        XCTAssertEqual(response.last, 0x0A)
+        #expect(response.last == 0x0A)
         let trimmed = response.dropLast()
         let parsed = try JSONValue.parse(trimmed)
-        let object = try XCTUnwrap(parsed.objectValue)
-        XCTAssertEqual(object["jsonrpc"], .string("2.0"))
-        XCTAssertEqual(object["id"], .integer(1))
-        XCTAssertNotNil(object["result"])
+        let object = try #require(parsed.objectValue)
+        #expect(object["jsonrpc"] == .string("2.0"))
+        #expect(object["id"] == .integer(1))
+        #expect(object["result"] != nil)
     }
 
-    func testToolsListRoundTripsOverPipes() async throws {
+    @Test func testToolsListRoundTripsOverPipes() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-pipe-tests-2")
         let storage = InMemoryStorage(
@@ -95,15 +100,15 @@ final class StdioFramingTests: XCTestCase {
         try outPipe.fileHandleForWriting.close()
 
         let response = try outPipe.fileHandleForReading.readToEnd() ?? Data()
-        XCTAssertEqual(response.last, 0x0A)
+        #expect(response.last == 0x0A)
         let parsed = try JSONValue.parse(response.dropLast())
-        let object = try XCTUnwrap(parsed.objectValue)
-        let result = try XCTUnwrap(object["result"]?.objectValue)
-        let tools = try XCTUnwrap(result["tools"]?.arrayValue)
-        XCTAssertFalse(tools.isEmpty, "tools/list must project the lexicon surface")
+        let object = try #require(parsed.objectValue)
+        let result = try #require(object["result"]?.objectValue)
+        let tools = try #require(result["tools"]?.arrayValue)
+        #expect(!tools.isEmpty, "tools/list must project the lexicon surface")
     }
 
-    func testParseErrorEmitsNullIDResponse() async throws {
+    @Test func testParseErrorEmitsNullIDResponse() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-pipe-tests-3")
         let storage = InMemoryStorage(
@@ -131,9 +136,9 @@ final class StdioFramingTests: XCTestCase {
 
         let response = try outPipe.fileHandleForReading.readToEnd() ?? Data()
         let parsed = try JSONValue.parse(response.dropLast())
-        let object = try XCTUnwrap(parsed.objectValue)
-        XCTAssertEqual(object["id"], .null)
-        let error = try XCTUnwrap(object["error"]?.objectValue)
-        XCTAssertEqual(error["code"], .integer(Int64(JSONRPCErrorCode.parseError)))
+        let object = try #require(parsed.objectValue)
+        #expect(object["id"] == .null)
+        let error = try #require(object["error"]?.objectValue)
+        #expect(error["code"] == .integer(Int64(JSONRPCErrorCode.parseError)))
     }
 }
