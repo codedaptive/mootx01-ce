@@ -1,11 +1,12 @@
 // NoSyncEngineTests.swift
 
-import XCTest
+import Testing
 import SubstrateTypes
 import ConvergenceKit
 import ConvergenceKitNone
 import PersistenceKit
 import PersistenceKitInMemory
+import Foundation
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -20,7 +21,8 @@ import PersistenceKitInMemory
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class NoSyncEngineTests: XCTestCase {
+@Suite("NoSyncEngine")
+struct NoSyncEngineTests {
 
     func makeStorage() -> any Storage {
         InMemoryStorage(configuration: EstateConfiguration(
@@ -38,50 +40,47 @@ final class NoSyncEngineTests: XCTestCase {
         )
     }
 
-    func testEnableThenDisable() async throws {
+    @Test("enable then disable transitions state")
+    func enableThenDisable() async throws {
         let engine = NoSyncEngine()
         let storage = makeStorage()
         try await engine.enable(manifest: makeManifest(), storage: storage)
-        if case .enabled(let zone, _, _) = await engine.state {
-            XCTAssertEqual(zone, "test-zone")
-        } else {
-            XCTFail("expected enabled state")
+        guard case .enabled(let zone, _, _) = await engine.state else {
+            Issue.record("expected enabled state")
+            return
         }
+        #expect(zone == "test-zone")
         try await engine.disable()
-        if case .disabled = await engine.state {
-            // ok
-        } else {
-            XCTFail("expected disabled state")
+        guard case .disabled = await engine.state else {
+            Issue.record("expected disabled state")
+            return
         }
     }
 
-    func testPushWithoutEnableFails() async throws {
+    @Test("push without enable throws notEnabled")
+    func pushWithoutEnableFails() async throws {
         let engine = NoSyncEngine()
-        do {
+        await #expect(throws: SyncError.notEnabled) {
             _ = try await engine.push()
-            XCTFail("expected throw")
-        } catch SyncError.notEnabled {
-            // ok
         }
     }
 
-    func testPushPullEmpty() async throws {
+    @Test("push and pull on empty return zero")
+    func pushPullEmpty() async throws {
         let engine = NoSyncEngine()
         try await engine.enable(manifest: makeManifest(), storage: makeStorage())
         let pushed = try await engine.push()
         let pulled = try await engine.pull()
-        XCTAssertEqual(pushed.pushed, 0)
-        XCTAssertEqual(pulled.pulled, 0)
+        #expect(pushed.pushed == 0)
+        #expect(pulled.pulled == 0)
     }
 
-    func testDoubleEnableFails() async throws {
+    @Test("double enable throws alreadyEnabled")
+    func doubleEnableFails() async throws {
         let engine = NoSyncEngine()
         try await engine.enable(manifest: makeManifest(), storage: makeStorage())
-        do {
+        await #expect(throws: SyncError.alreadyEnabled) {
             try await engine.enable(manifest: makeManifest(), storage: makeStorage())
-            XCTFail("expected throw on double enable")
-        } catch SyncError.alreadyEnabled {
-            // ok
         }
     }
 }

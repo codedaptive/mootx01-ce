@@ -1,15 +1,16 @@
 // FederationStubTests.swift
-import XCTest
+import Testing
 import ConvergenceKit
 import ConvergenceKitFederation
 
-final class FederationStubTests: XCTestCase {
-    func testStubExists() async {
+@Suite("FederationSyncEngine stub")
+struct FederationStubTests {
+    @Test("engine starts disabled")
+    func stubExists() async {
         let engine = FederationSyncEngine()
-        if case .disabled = await engine.state {
-            // ok
-        } else {
-            XCTFail("expected disabled")
+        guard case .disabled = await engine.state else {
+            Issue.record("expected disabled")
+            return
         }
     }
 }

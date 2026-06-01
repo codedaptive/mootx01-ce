@@ -1,6 +1,7 @@
 // ConvergenceKitCoreTypeTests.swift
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import ConvergenceKit
 // ─────────────────────────────────────────────────────────────────
@@ -17,9 +18,11 @@ import ConvergenceKit
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class ConvergenceKitCoreTypeTests: XCTestCase {
+@Suite("ConvergenceKit core types")
+struct ConvergenceKitCoreTypeTests {
 
-    func testManifestRoundtripCodable() throws {
+    @Test("SyncManifest round-trips through Codable")
+    func manifestRoundtripCodable() throws {
         let manifest = SyncManifest(
             kitID: "TestKit",
             schemaVersion: 1,
@@ -31,12 +34,13 @@ final class ConvergenceKitCoreTypeTests: XCTestCase {
         )
         let encoded = try JSONEncoder().encode(manifest)
         let decoded = try JSONDecoder().decode(SyncManifest.self, from: encoded)
-        XCTAssertEqual(decoded.kitID, "TestKit")
-        XCTAssertEqual(decoded.tables.count, 2)
-        XCTAssertEqual(decoded.tables[1].conflictPolicy, .appendOnly)
+        #expect(decoded.kitID == "TestKit")
+        #expect(decoded.tables.count == 2)
+        #expect(decoded.tables[1].conflictPolicy == .appendOnly)
     }
 
-    func testSyncRecordRoundtrip() throws {
+    @Test("SyncRecord round-trips through Codable")
+    func syncRecordRoundtrip() throws {
         let hlc = HLC(physicalTime: 1_700_000_000, logicalCount: 0, nodeID: 1)
         let record = SyncRecord(
             table: "drawers",
@@ -54,41 +58,45 @@ final class ConvergenceKitCoreTypeTests: XCTestCase {
         )
         let encoded = try JSONEncoder().encode(record)
         let decoded = try JSONDecoder().decode(SyncRecord.self, from: encoded)
-        XCTAssertEqual(decoded.table, "drawers")
-        XCTAssertEqual(decoded.event, .insert)
-        XCTAssertEqual(decoded.kitID, "TestKit")
+        #expect(decoded.table == "drawers")
+        #expect(decoded.event == .insert)
+        #expect(decoded.kitID == "TestKit")
 
         guard let values = decoded.values?.asTypedValues else {
-            return XCTFail("values missing")
+            Issue.record("values missing")
+            return
         }
-        XCTAssertEqual(values["adjective"], .bitmap(0x07))
-        XCTAssertEqual(values["verbatim"], .text("hello"))
+        #expect(values["adjective"] == .bitmap(0x07))
+        #expect(values["verbatim"] == .text("hello"))
     }
 
-    func testPackedHLCRoundtrip() {
+    @Test("PackedHLC round-trips to HLC")
+    func packedHLCRoundtrip() {
         let hlc = HLC(physicalTime: 12345, logicalCount: 67, nodeID: 8)
         let packed = PackedHLC(hlc)
         let back = packed.asHLC
-        XCTAssertEqual(back.physicalTime, 12345)
-        XCTAssertEqual(back.logicalCount, 67)
-        XCTAssertEqual(back.nodeID, 8)
+        #expect(back.physicalTime == 12345)
+        #expect(back.logicalCount == 67)
+        #expect(back.nodeID == 8)
     }
 
-    func testFingerprintRoundtrip() {
+    @Test("FingerprintWire round-trips to Fingerprint256")
+    func fingerprintRoundtrip() {
         let fp = Fingerprint256(block0: 0xDEAD, block1: 0xBEEF, block2: 0xCAFE, block3: 0xBABE)
         let wire = FingerprintWire(fp)
         let back = wire.asFingerprint
-        XCTAssertEqual(back, fp)
+        #expect(back == fp)
     }
 
-    func testSyncErrorEquality() {
-        XCTAssertEqual(
-            SyncError.schemaMismatch(expected: 1, received: 2),
+    @Test("SyncError equality discriminates associated values")
+    func syncErrorEquality() {
+        #expect(
             SyncError.schemaMismatch(expected: 1, received: 2)
+            == SyncError.schemaMismatch(expected: 1, received: 2)
         )
-        XCTAssertNotEqual(
-            SyncError.schemaMismatch(expected: 1, received: 2),
-            SyncError.schemaMismatch(expected: 1, received: 3)
+        #expect(
+            SyncError.schemaMismatch(expected: 1, received: 2)
+            != SyncError.schemaMismatch(expected: 1, received: 3)
         )
     }
 }
