@@ -124,10 +124,22 @@ public struct ActionOutcomeMatrix: Sendable {
     /// Best actions for the given outcome, ranked by Wilson lower
     /// bound (so under-observed cells do not float to the top).
     /// Ties broken by total count desc, then action ascending.
+    ///
+    /// Returns all four signals so callers see the same value the
+    /// ranking was computed from:
+    ///   action          — action_kind (6-bit field o07)
+    ///   rate            — empirical success rate (successCount/totalCount)
+    ///   wilsonLowerBound — 95 % Wilson interval lower bound used to rank;
+    ///                      always ≤ rate; narrows toward rate as count grows
+    ///   count           — total observations (minObservations floor applied)
+    ///
+    /// Returning rate without wilsonLowerBound would create an
+    /// order/value mismatch: results are ordered by Wilson LB but the
+    /// returned "rate" field would imply raw-rate ordering to callers.
     public func topActions(forOutcome outcome: UInt8,
                            k: Int,
                            minObservations: UInt32 = 1)
-                          -> [(action: UInt8, rate: Float32, count: UInt32)] {
+                          -> [(action: UInt8, rate: Float32, wilsonLowerBound: Float32, count: UInt32)] {
         let filtered = cells.compactMap {
             (key, cell) -> (UInt8, Float32, Float32, UInt32)? in
             guard key.outcomeCategory == outcome,
@@ -139,7 +151,7 @@ public struct ActionOutcomeMatrix: Sendable {
             if lhs.3 != rhs.3 { return lhs.3 > rhs.3 }
             return lhs.0 < rhs.0
         }
-        return sorted.prefix(k).map { ($0.0, $0.1, $0.3) }
+        return sorted.prefix(k).map { ($0.0, $0.1, $0.2, $0.3) }
     }
 
     /// Total number of populated cells.

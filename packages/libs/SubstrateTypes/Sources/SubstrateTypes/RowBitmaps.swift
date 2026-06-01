@@ -7,18 +7,24 @@
 // 36/6/3 layout literals that previously appeared inline in
 // Verbs.swift (`12`, `24`, `6`, `0x3F`) and Substrate.rowHasBit.
 //
-// Layout (cookbook § 2.3):
-//   36 fields, 6 bits per field, packed across three Int64
-//   columns of 12 fields each:
+// Layout (cookbook §2.3 / §2.4 / §2.5):
+//   Three flat Int64 columns, each holding named bit-fields at
+//   specific bit positions. The abstract 36-field / 6-bit-per-field
+//   grid used for matrix-F indexing maps as:
 //
-//     adjective    fields 0..<12   (72 bits used; 64 bits storage; high 8 unused)
-//     operational  fields 12..<24
-//     provenance   fields 24..<36
+//     adjective    fields  0..<12  → adjective_bitmap  (bits 0–27 used,
+//                                    bits 28–63 reserved per §2.3)
+//     operational  fields 12..<24  → operational_bitmap (bits 0–30 used,
+//                                    bits 26–63 reserved per §2.4)
+//     provenance   fields 24..<36  → provenance_bitmap  (bits 0–41 used,
+//                                    bits 42–63 reserved per §2.5)
 //
-// The 12-fields × 6-bits = 72 bits per column overflows a single
-// Int64 by 8 bits; the substrate accepts this by allocating
-// 6 × 12 = 72 bit positions per column with the high 8 bits
-// reserved (cookbook §2.3 footnote 2). This file documents that.
+// The real named fields do NOT form a uniform 12 × 6-bit grid; they
+// are named ranges at specific bit positions. RowBitmaps.field(idx)
+// reads them as if the grid were uniform — valid for real row data
+// because real fields only use bits 0–27/0–30/0–41 (far below the
+// Int64 boundary). For arbitrary 216-bit presence grids (e.g. harness
+// conformance cases) use BitVector216(presenceBytes:) directly.
 //
 // Lens citations:
 //   Clojure convergent B   — implicit 36×6 bitmap layout
@@ -102,10 +108,29 @@ public struct RowBitmaps: Sendable, Hashable, Codable {
 
 // MARK: - BitVector216
 
-/// Dense 216-bit view over a `RowBitmaps`. Each bit is the
-/// (field, bit) position from cookbook §2.3. Useful when the
-/// consumer wants to iterate every present bit (e.g. MatrixF
-/// presence-count updates).
+/// Dense 216-bit view for field-presence consumers (e.g. MatrixF).
+///
+/// Two initializers serve two distinct use-cases:
+///
+/// `init(rowBitmaps:)` — builds a BitVector216 from a live substrate
+/// row. Each of the 36 fields' 6-bit values is read via
+/// `RowBitmaps.field(_:)`, which correctly extracts the named-field
+/// positions defined in cookbook §2.3/§2.4/§2.5. Because the real
+/// bitmap fields only occupy bits 0–27/0–30/0–41 of their Int64
+/// columns respectively, the 72-bit logical grid is never reached in
+/// practice and no real data is lost. Use this path when updating
+/// MatrixF from row-capture/expunge events.
+///
+/// `init(presenceBytes:)` — builds a BitVector216 from a raw 27-byte
+/// (216-bit) presence pattern where bit at absolute index
+/// `field * 6 + bit` is packed at `bytes[pos/8]`, bit `pos%8`
+/// (LSB-first). This is the layout used by the harness vector format
+/// (cookbook §6.1 / HARNESS_REFERENCE §2.3) for `field_presence_matrix_f`
+/// conformance cases. Use this path when consuming raw presence data
+/// from the harness, network wire, or any source that supplies the
+/// full abstract 36×6 grid — including bits at field positions 10,
+/// 11, 22, 23, 34, 35 (absolute bits 60–71), which `init(rowBitmaps:)`
+/// cannot round-trip through the RowBitmaps Int64 columns.
 public struct BitVector216: Sendable, Hashable {
 
     public static let bitCount = RowBitmaps.totalBits
@@ -113,6 +138,14 @@ public struct BitVector216: Sendable, Hashable {
 
     @usableFromInline internal let storage: [UInt8]
 
+    /// Initialise from a live substrate row. Reads the 6-bit value of
+    /// each of the 36 fields via `RowBitmaps.field(_:)` and maps each
+    /// set bit to its absolute position `field * 6 + bit`. Correct for
+    /// row-data consumers (capture / expunge / mutate delta against
+    /// MatrixF). The upper positions 60–71 of the 216-bit grid reflect
+    /// only reserved bits from the Int64 columns and will always be
+    /// zero for any conforming row (cookbook §2.3 bits 28–63 reserved,
+    /// §2.4 bits 26–63 reserved, §2.5 bits 42–63 reserved).
     @inlinable
     public init(rowBitmaps: RowBitmaps) {
         var s = [UInt8](repeating: 0, count: Self.byteCount)
@@ -124,6 +157,24 @@ public struct BitVector216: Sendable, Hashable {
             }
         }
         self.storage = s
+    }
+
+    /// Initialise from a raw 27-byte presence pattern (216 bits packed
+    /// LSB-first). Bit at absolute index `pos = field * 6 + bit` is
+    /// stored at `bytes[pos / 8]`, bit `pos % 8`. This is the canonical
+    /// layout for the `bit_presence` field in harness vector cases for
+    /// `field_presence_matrix_f` (cookbook §6.1). Use this path when
+    /// building a BitVector216 from raw presence data — in particular
+    /// when the presence pattern may have bits set at positions 60–71
+    /// (fields 10/11/22/23/34/35) that cannot be encoded in a
+    /// RowBitmaps value.
+    ///
+    /// Precondition: `presenceBytes.count == BitVector216.byteCount` (27).
+    @inlinable
+    public init(presenceBytes: [UInt8]) {
+        precondition(presenceBytes.count == Self.byteCount,
+                     "BitVector216.init(presenceBytes:): must be exactly \(Self.byteCount) bytes")
+        self.storage = presenceBytes
     }
 
     /// Bit at absolute index 0..<216.
