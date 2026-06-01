@@ -281,40 +281,6 @@ re-claimed by a later `drain()` (B-7).
 **C-7 (bit-identity, Filesystem):** the Swift, Rust, and Python
 Filesystem backends produce byte-identical filenames, job-file JSON,
 and signal-file JSON for identical inputs. Fixtures are generated from
-the Swift port and consumed by the Rust and Python suites. (The
+the Swift version and consumed by the Rust and Python suites. (The
 PersistenceKit backend is behaviour-conformant, not byte-identical,
 since it stores rows rather than files.)
-
-## § 8 — Out of scope
-
-- The byte-level wire/on-disk format (filename encoding, job JSON,
-  signal JSON, base64url payload) → `QUEUE_PROTOCOL_SPEC_v0.8.md`.
-- `HLC` / `HLCGenerator` math and node-id packing →
-  `SUBSTRATELIB_SPEC_v0.8.md`.
-- `Storage`, `RowStore`, `StorageObserver`, isolation levels, and the
-  append-only semantics the PersistenceKit backend depends on →
-  `PERSISTENCEKIT_SPEC_v0.8.md`.
-- Cross-device distribution. QueueKit does not import ConvergenceKit
-  and never appears to know sync exists. The application enables
-  ConvergenceKit on the **same** `Storage` instance QueueKit mounts,
-  with a `SyncManifest` covering the jobs table, replicating the
-  inserted (claimable) row while keeping claim state device-local.
-  The replication and arbitration policy → `CONVERGENCEKIT_SPEC_v0.8.md`
-  and the application layer, never QueueKit.
-- The standing-signal scheduling policy that feeds the queue (emission
-  cadence, FIFO serial-lane semantics) → `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md`.
-
-## § 9 — Open questions
-
-- `ToolName` and an allowlist-validation-at-`send()` path are defined
-  in the type model but not currently enforced by the shipped
-  backends; whether allowlist validation belongs in QueueKit or at the
-  consumer (GeniusLocusKit Brain) is an open call.
-- The PersistenceKit backend's PostgreSQL deployment may use
-  `SELECT … FOR UPDATE SKIP LOCKED` instead of a blocking
-  `.serializable` claim; both are conforming (the guarantee, not the
-  mechanism, is the contract), but the production choice is unsettled.
-
----
-
-*End of QueueKit Specification v0.8.*
