@@ -4,7 +4,8 @@
 // Storage; the contract under test is the QueueKit/PersistenceKit
 // integration, not the InMemory implementation itself.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -23,7 +24,8 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import QueueKit
 
-final class PersistenceKitBackendTests: XCTestCase {
+@Suite("PersistenceKitBackend (QUEUEKIT_SPEC §10)")
+struct PersistenceKitBackendTests {
 
     func makeBackend() async throws -> PersistenceKitBackend {
         let storage = InMemoryStorage(
@@ -34,7 +36,7 @@ final class PersistenceKitBackendTests: XCTestCase {
         return PersistenceKitBackend(storage: storage)
     }
 
-    func testWriteThenDrain() async throws {
+    @Test func writeThenDrain() async throws {
         let backend = try await makeBackend()
         let job = Job(
             id: JobID.generate(),
@@ -44,18 +46,18 @@ final class PersistenceKitBackendTests: XCTestCase {
             extensions: ["k": .string("v")])
         try await backend.write(job)
         let claimed = try await backend.drainAvailable()
-        XCTAssertEqual(claimed.count, 1)
-        XCTAssertEqual(claimed[0].0.id, job.id)
-        XCTAssertEqual(claimed[0].0.extensions, job.extensions)
+        #expect(claimed.count == 1)
+        #expect(claimed[0].0.id == job.id)
+        #expect(claimed[0].0.extensions == job.extensions)
     }
 
-    func testDrainOnEmpty() async throws {
+    @Test func drainOnEmpty() async throws {
         let backend = try await makeBackend()
         let claimed = try await backend.drainAvailable()
-        XCTAssertTrue(claimed.isEmpty)
+        #expect(claimed.isEmpty)
     }
 
-    func testCompleteMovesToDone() async throws {
+    @Test func completeMovesToDone() async throws {
         let backend = try await makeBackend()
         let job = Job(
             id: JobID.generate(),
@@ -67,47 +69,47 @@ final class PersistenceKitBackendTests: XCTestCase {
         try await backend.complete(
             job.id, status: .done, artifacts: [])
         let completed = try await backend.completed(streamID: nil)
-        XCTAssertEqual(completed.count, 1)
-        XCTAssertEqual(completed[0].id, job.id)
+        #expect(completed.count == 1)
+        #expect(completed[0].id == job.id)
     }
 
-    func testCompleteJobNotFound() async throws {
+    @Test func completeJobNotFound() async throws {
         let backend = try await makeBackend()
         do {
             try await backend.complete(
                 JobID(rawValue: "deadbeef000000000000000000000000"),
                 status: .done, artifacts: [])
-            XCTFail("expected throw")
+            Issue.record("expected throw")
         } catch QueueError.jobNotFound {
             // expected
         }
     }
 
-    func testCompleteRejectsRunning() async throws {
+    @Test func completeRejectsRunning() async throws {
         let backend = try await makeBackend()
         do {
             try await backend.complete(
                 JobID(rawValue: "x"),
                 status: .running, artifacts: [])
-            XCTFail("expected throw")
+            Issue.record("expected throw")
         } catch QueueError.invalidTerminalStatus {
             // expected
         }
     }
 
-    func testTableNotAppendOnly() {
+    @Test func tableNotAppendOnly() {
         // Spec §10 v1.1: appendOnly MUST be false.
         let decl = QueueKitSchema.declaration()
         let table = decl.tables.first { $0.name == queueKitTableName }!
-        XCTAssertFalse(table.appendOnly,
+        #expect(!table.appendOnly,
             "spec §10 v1.1: jobs table must be mutable, not appendOnly")
     }
 
-    func testRequiredIndices() {
+    @Test func requiredIndices() {
         let decl = QueueKitSchema.declaration()
         let names = Set(decl.indices.map { $0.name })
-        XCTAssertTrue(names.contains("idx_queuekit_status"))
-        XCTAssertTrue(names.contains("idx_queuekit_claim_order"))
-        XCTAssertTrue(names.contains("idx_queuekit_stream"))
+        #expect(names.contains("idx_queuekit_status"))
+        #expect(names.contains("idx_queuekit_claim_order"))
+        #expect(names.contains("idx_queuekit_stream"))
     }
 }
