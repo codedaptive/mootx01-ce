@@ -348,26 +348,3 @@ Other algorithms (Bradley-Terry, NMF, FFT, eigenvalue centrality,
 random walks) are conformance-tested but not federation-critical;
 small floating-point drift between ports is tolerated within an
 ε-bound per algorithm.
-
-## § 8 — Out of scope
-
-- Verb mechanics — live in SubstrateLib.
-- AuditGate write gate — lives in SubstrateLib.
-- Hot-path primitives (SimHash signing on small inputs, Hamming
-  distance) — those live in SubstrateKernel.
-- Storage I/O — lives in PersistenceKit.
-- Recall scoring composition (assembling DistanceBreakdown from
-  the component distances) — lives in LocusKit.
-- Dreaming daemon orchestration — lives in NeuronKit.
-
-## § 9 — Open questions
-
-- **MatrixDecay half-life policy.** The static table of half-lives
-  per matrix kind (`DecayHalfLives`) is currently fixed. Whether
-  half-lives should become per-estate-configurable is open.
-- **BradleyTerry convergence criterion.** The online SGD does not
-  carry a convergence stopping rule; consumers run a fixed iteration
-  budget. Whether to expose a convergence callback is open.
-- **DPORReduction privacy budget semantics.** The DP parameters
-  expose `epsilon` and `delta`; whether per-row budget accounting
-  is the substrate's responsibility or the consumer's is open.
