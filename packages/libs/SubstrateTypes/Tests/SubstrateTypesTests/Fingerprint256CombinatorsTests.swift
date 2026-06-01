@@ -1,122 +1,172 @@
 // Fingerprint256CombinatorsTests.swift
 //
-// Phase 1 of DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md.
-// Verifies the combinator layer (zip4 / reduce4 / map4 / popcount
-// + batch siblings) is bit-identical to the inline four-block
-// patterns it will replace in Phase 2.
+// Per-type suite for Fingerprint256. Covers the core value type
+// (wire encoding, bit access, zero) and the Phase 1 combinator layer
+// (zip4 / reduce4 / map4 / popcount + batch siblings).
+//
+// Mirrors the Rust `fingerprint256.rs` inline #[test] set:
+//   zero_wire_bytes_all_zero, bit_zero_in_block_zero,
+//   bit_zero_in_block_one, round_trip_wire_bytes, plus the
+//   combinator tests (zip4/reduce4/map4/popcount/batch).
+//
+// swift-testing (import Testing) only.
 
-import XCTest
+import Testing
 @testable import SubstrateTypes
 
-final class Fingerprint256CombinatorsTests: XCTestCase {
+@Suite("Fingerprint256 — core + combinators")
+struct Fingerprint256CombinatorsTests {
 
-    private let a = Fingerprint256(block0: 0xFF00, block1: 0x0F00,
-                                    block2: 0x00FF, block3: 0xF0F0)
-    private let b = Fingerprint256(block0: 0x0FF0, block1: 0xFF00,
-                                    block2: 0x0FF0, block3: 0x0F0F)
+    let a = Fingerprint256(block0: 0xFF00, block1: 0x0F00,
+                           block2: 0x00FF, block3: 0xF0F0)
+    let b = Fingerprint256(block0: 0x0FF0, block1: 0xFF00,
+                           block2: 0x0FF0, block3: 0x0F0F)
 
-    // MARK: zip4
+    // MARK: - Core value type (mirrors Rust core tests)
 
-    func testZip4OrMatchesBitwiseOR() {
-        let viaZip4 = a.zip4(b, |)
-        let viaBitwiseOR = a.union(b)
-        XCTAssertEqual(viaZip4, viaBitwiseOR)
+    @Test("zero fingerprint encodes to 32 zero bytes")
+    func zeroWireBytesAllZero() {
+        #expect(Fingerprint256.zero.wireBytes == [UInt8](repeating: 0, count: 32))
     }
 
-    func testZip4XorEqualsBlockwiseXOR() {
+    @Test("bit 0 lives in block 0")
+    func bitZeroInBlockZero() {
+        let fp = Fingerprint256(block0: 1, block1: 0, block2: 0, block3: 0)
+        #expect(fp.bit(at: 0))
+        #expect(!fp.bit(at: 1))
+    }
+
+    @Test("bit 64 lives in block 1")
+    func bitZeroInBlockOne() {
+        let fp = Fingerprint256(block0: 0, block1: 1, block2: 0, block3: 0)
+        #expect(fp.bit(at: 64))
+        #expect(!fp.bit(at: 63))
+    }
+
+    @Test("wireBytes round-trips through init(wireBytes:)")
+    func roundTripWireBytes() throws {
+        let fp = Fingerprint256(block0: 0xDEAD_BEEF, block1: 0xCAFE_F00D,
+                                block2: 0x1234, block3: 0x5678)
+        let wire = fp.wireBytes
+        let back = try Fingerprint256(wireBytes: wire)
+        #expect(fp == back)
+    }
+
+    @Test("init(wireBytes:) rejects a wrong-length buffer")
+    func wireBytesWrongLengthThrows() {
+        #expect(throws: Fingerprint256Error.self) {
+            _ = try Fingerprint256(wireBytes: [UInt8](repeating: 0, count: 31))
+        }
+    }
+
+    @Test("fromBytes returns nil on invalid length (non-throwing adapter)")
+    func fromBytesNilOnInvalidLength() {
+        #expect(Fingerprint256.fromBytes([0, 1, 2]) == nil)
+        #expect(Fingerprint256.fromBytes(a.toBytes()) == a)
+    }
+
+    // MARK: - zip4
+
+    @Test("zip4 with | equals union")
+    func zip4OrMatchesUnion() {
+        #expect(a.zip4(b, |) == a.union(b))
+    }
+
+    @Test("zip4 with ^ is blockwise XOR")
+    func zip4XorIsBlockwiseXOR() {
         let r = a.zip4(b, ^)
-        XCTAssertEqual(r.block0, a.block0 ^ b.block0)
-        XCTAssertEqual(r.block1, a.block1 ^ b.block1)
-        XCTAssertEqual(r.block2, a.block2 ^ b.block2)
-        XCTAssertEqual(r.block3, a.block3 ^ b.block3)
+        #expect(r.block0 == a.block0 ^ b.block0)
+        #expect(r.block1 == a.block1 ^ b.block1)
+        #expect(r.block2 == a.block2 ^ b.block2)
+        #expect(r.block3 == a.block3 ^ b.block3)
     }
 
-    func testZip4AndEqualsBlockwiseAND() {
+    @Test("zip4 with & is blockwise AND")
+    func zip4AndIsBlockwiseAND() {
         let r = a.zip4(b, &)
-        XCTAssertEqual(r.block0, a.block0 & b.block0)
-        XCTAssertEqual(r.block1, a.block1 & b.block1)
-        XCTAssertEqual(r.block2, a.block2 & b.block2)
-        XCTAssertEqual(r.block3, a.block3 & b.block3)
+        #expect(r.block0 == a.block0 & b.block0)
+        #expect(r.block1 == a.block1 & b.block1)
+        #expect(r.block2 == a.block2 & b.block2)
+        #expect(r.block3 == a.block3 & b.block3)
     }
 
-    // MARK: reduce4
+    // MARK: - reduce4
 
-    func testReduce4OrEmptyIsZero() {
-        let r = Fingerprint256.reduce4([], |)
-        XCTAssertEqual(r, .zero)
+    @Test("reduce4 of empty with | is zero")
+    func reduce4OrEmptyIsZero() {
+        #expect(Fingerprint256.reduce4([], |) == .zero)
     }
 
-    func testReduce4OrMultipleIsBlockwiseOR() {
+    @Test("reduce4 of many with | is blockwise OR")
+    func reduce4OrMultipleIsBlockwiseOR() {
         let c = Fingerprint256(block0: 1, block1: 2, block2: 4, block3: 8)
         let r = Fingerprint256.reduce4([a, b, c], |)
-        XCTAssertEqual(r.block0, a.block0 | b.block0 | c.block0)
-        XCTAssertEqual(r.block1, a.block1 | b.block1 | c.block1)
-        XCTAssertEqual(r.block2, a.block2 | b.block2 | c.block2)
-        XCTAssertEqual(r.block3, a.block3 | b.block3 | c.block3)
+        #expect(r.block0 == a.block0 | b.block0 | c.block0)
+        #expect(r.block1 == a.block1 | b.block1 | c.block1)
+        #expect(r.block2 == a.block2 | b.block2 | c.block2)
+        #expect(r.block3 == a.block3 | b.block3 | c.block3)
     }
 
-    // MARK: map4
+    // MARK: - map4
 
-    func testMap4ComplementInvertsAllBlocks() {
+    @Test("map4 with ~ inverts all blocks")
+    func map4ComplementInvertsAllBlocks() {
         let r = a.map4(~)
-        XCTAssertEqual(r.block0, ~a.block0)
-        XCTAssertEqual(r.block1, ~a.block1)
-        XCTAssertEqual(r.block2, ~a.block2)
-        XCTAssertEqual(r.block3, ~a.block3)
+        #expect(r.block0 == ~a.block0)
+        #expect(r.block1 == ~a.block1)
+        #expect(r.block2 == ~a.block2)
+        #expect(r.block3 == ~a.block3)
     }
 
-    // MARK: popcount
+    // MARK: - popcount
 
-    func testPopcountZeroIsZero() {
-        XCTAssertEqual(Fingerprint256.zero.popcount(), 0)
+    @Test("popcount of zero is zero")
+    func popcountZeroIsZero() {
+        #expect(Fingerprint256.zero.popcount() == 0)
     }
 
-    func testPopcountAllOnesIs256() {
+    @Test("popcount of all ones is 256")
+    func popcountAllOnesIs256() {
         let allOnes = Fingerprint256(block0: .max, block1: .max,
-                                      block2: .max, block3: .max)
-        XCTAssertEqual(allOnes.popcount(), 256)
+                                     block2: .max, block3: .max)
+        #expect(allOnes.popcount() == 256)
     }
 
-    func testPopcountSumsAcrossBlocks() {
-        // 8 + 4 + 8 + 8 = 28
-        XCTAssertEqual(a.popcount(),
+    @Test("popcount sums across blocks")
+    func popcountSumsAcrossBlocks() {
+        #expect(a.popcount() ==
             a.block0.nonzeroBitCount
             + a.block1.nonzeroBitCount
             + a.block2.nonzeroBitCount
             + a.block3.nonzeroBitCount)
     }
 
-    func testHammingViaZip4Popcount() {
+    @Test("hamming via zip4(^).popcount() equals the direct sum")
+    func hammingViaZip4Popcount() {
         let viaCombinators = a.zip4(b, ^).popcount()
         let direct =
             (a.block0 ^ b.block0).nonzeroBitCount
           + (a.block1 ^ b.block1).nonzeroBitCount
           + (a.block2 ^ b.block2).nonzeroBitCount
           + (a.block3 ^ b.block3).nonzeroBitCount
-        XCTAssertEqual(viaCombinators, direct)
+        #expect(viaCombinators == direct)
     }
 
-    // MARK: batch siblings
+    // MARK: - batch siblings
 
-    func testZip4BatchPairwise() {
-        let xs = [a, b]
-        let ys = [b, a]
-        let out = Fingerprint256.zip4Batch(xs, ys, |)
-        XCTAssertEqual(out.count, 2)
-        XCTAssertEqual(out[0], a.zip4(b, |))
-        XCTAssertEqual(out[1], b.zip4(a, |))
+    @Test("zip4Batch maps pairwise across equal-length arrays")
+    func zip4BatchPairwise() {
+        let out = Fingerprint256.zip4Batch([a, b], [b, a], |)
+        #expect(out.count == 2)
+        #expect(out[0] == a.zip4(b, |))
+        #expect(out[1] == b.zip4(a, |))
     }
 
-    func testZip4BatchMismatchedLengthsReturnsEmpty() {
-        // In release builds the function returns []; in debug it
-        // also asserts. We only validate the return shape here.
-        // (Disabled at debug; verified separately.)
-    }
-
-    func testMap4BatchAppliesPerElement() {
+    @Test("map4Batch applies the op per element")
+    func map4BatchAppliesPerElement() {
         let out = Fingerprint256.map4Batch([a, b], ~)
-        XCTAssertEqual(out.count, 2)
-        XCTAssertEqual(out[0], a.map4(~))
-        XCTAssertEqual(out[1], b.map4(~))
+        #expect(out.count == 2)
+        #expect(out[0] == a.map4(~))
+        #expect(out[1] == b.map4(~))
     }
 }
