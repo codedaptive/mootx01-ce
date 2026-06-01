@@ -1,0 +1,4305 @@
+{
+  "codes" : [
+    {
+      "code" : "000",
+      "label" : "General works, books and libraries, information sciences"
+    },
+    {
+      "code" : "001",
+      "label" : "\"Intellectual life\""
+    },
+    {
+      "code" : "002",
+      "label" : "\"Books -- History\" | History of the book"
+    },
+    {
+      "code" : "003",
+      "label" : "\"System theory\""
+    },
+    {
+      "code" : "004",
+      "label" : "\"Computers\" + \"Computer science\""
+    },
+    {
+      "code" : "005",
+      "label" : "\"Computer programming\""
+    },
+    {
+      "code" : "006",
+      "label" : "\"Cognitive science\""
+    },
+    {
+      "code" : "006.6",
+      "label" : "\"Computer graphics\""
+    },
+    {
+      "code" : "010",
+      "label" : "Bibliography"
+    },
+    {
+      "code" : "011",
+      "label" : "General bibliographies + Universal catalogs"
+    },
+    {
+      "code" : "012",
+      "label" : "Bibliographies of individuals"
+    },
+    {
+      "code" : "014",
+      "label" : "\"Anonyms and pseudonyms -- Bibliography\" | Bibliographies of pseudonymous and anonymous works"
+    },
+    {
+      "code" : "015",
+      "label" : "\"Bibliography, national\" | Bibliographies of specific countries"
+    },
+    {
+      "code" : "016",
+      "label" : "Bibliographies of special subjects"
+    },
+    {
+      "code" : "017",
+      "label" : "\"Classified catalogs\""
+    },
+    {
+      "code" : "018",
+      "label" : "\"Author catalogs\""
+    },
+    {
+      "code" : "019",
+      "label" : "\"Dictionary catalogs\""
+    },
+    {
+      "code" : "020",
+      "label" : "\"Library science\""
+    },
+    {
+      "code" : "021",
+      "label" : "Scope, usefulness, founding, and supporting of libraries"
+    },
+    {
+      "code" : "022",
+      "label" : "\"Library architecture\" + \"Library buildings\""
+    },
+    {
+      "code" : "023",
+      "label" : "\"Library employees\""
+    },
+    {
+      "code" : "025",
+      "label" : "\"Library administration\" + Library departments"
+    },
+    {
+      "code" : "026",
+      "label" : "\"Special libraries\""
+    },
+    {
+      "code" : "027",
+      "label" : "General libraries + Library reports, etc."
+    },
+    {
+      "code" : "028",
+      "label" : "\"Books and reading\""
+    },
+    {
+      "code" : "030",
+      "label" : "Encyclopedias"
+    },
+    {
+      "code" : "031",
+      "label" : "American encyclopedias"
+    },
+    {
+      "code" : "032",
+      "label" : "British encyclopedias"
+    },
+    {
+      "code" : "033",
+      "label" : "German encyclopedias"
+    },
+    {
+      "code" : "034",
+      "label" : "French encyclopedias"
+    },
+    {
+      "code" : "035",
+      "label" : "Italian encyclopedias"
+    },
+    {
+      "code" : "036",
+      "label" : "Spanish encyclopedias"
+    },
+    {
+      "code" : "037",
+      "label" : "Slavic encyclopedias"
+    },
+    {
+      "code" : "038",
+      "label" : "Scandinavian encyclopedias"
+    },
+    {
+      "code" : "039",
+      "label" : "Encylopedias of other languages"
+    },
+    {
+      "code" : "050",
+      "label" : "\"Periodicals\" | General periodicals"
+    },
+    {
+      "code" : "051",
+      "label" : "\"American periodicals\""
+    },
+    {
+      "code" : "052",
+      "label" : "\"English periodicals\" + \"British Periodicals\""
+    },
+    {
+      "code" : "053",
+      "label" : "\"German periodicals\""
+    },
+    {
+      "code" : "054",
+      "label" : "\"French periodicals\""
+    },
+    {
+      "code" : "055",
+      "label" : "\"Italian periodicals\""
+    },
+    {
+      "code" : "056",
+      "label" : "\"Spanish periodicals\""
+    },
+    {
+      "code" : "057",
+      "label" : "\"Slavic periodicals\" + \"Russian periodicals\""
+    },
+    {
+      "code" : "058",
+      "label" : "\"Scandinavian periodicals\""
+    },
+    {
+      "code" : "059",
+      "label" : "Periodicals of other languages"
+    },
+    {
+      "code" : "060",
+      "label" : "\"Associations, institutions, etc.\" | Societies"
+    },
+    {
+      "code" : "061",
+      "label" : "American societies"
+    },
+    {
+      "code" : "062",
+      "label" : "English societies"
+    },
+    {
+      "code" : "063",
+      "label" : "German societies"
+    },
+    {
+      "code" : "064",
+      "label" : "French societies"
+    },
+    {
+      "code" : "065",
+      "label" : "Italian societies"
+    },
+    {
+      "code" : "066",
+      "label" : "Spanish societies"
+    },
+    {
+      "code" : "067",
+      "label" : "Slavic societies"
+    },
+    {
+      "code" : "068",
+      "label" : "Other learned societies"
+    },
+    {
+      "code" : "069",
+      "label" : "Museums"
+    },
+    {
+      "code" : "070",
+      "label" : "\"Journalism\" + \"Newspapers\""
+    },
+    {
+      "code" : "071",
+      "label" : "\"American newspapers\""
+    },
+    {
+      "code" : "072",
+      "label" : "\"English newspapers\""
+    },
+    {
+      "code" : "073",
+      "label" : "\"German newspapers\""
+    },
+    {
+      "code" : "074",
+      "label" : "\"French newspapers\""
+    },
+    {
+      "code" : "075",
+      "label" : "\"Italian newspapers\""
+    },
+    {
+      "code" : "076",
+      "label" : "\"Spanish newspapers\""
+    },
+    {
+      "code" : "077",
+      "label" : "\"Slavic newspapers\""
+    },
+    {
+      "code" : "078",
+      "label" : "\"Scandinavian newspapers\""
+    },
+    {
+      "code" : "079",
+      "label" : "Other newspapers"
+    },
+    {
+      "code" : "080",
+      "label" : "\"Anthologies\" + \"Quotations\""
+    },
+    {
+      "code" : "081",
+      "label" : "American anthologies"
+    },
+    {
+      "code" : "082",
+      "label" : "English anthologies"
+    },
+    {
+      "code" : "083",
+      "label" : "German anthologies"
+    },
+    {
+      "code" : "084",
+      "label" : "French anthologies"
+    },
+    {
+      "code" : "085",
+      "label" : "Italian anthologies"
+    },
+    {
+      "code" : "086",
+      "label" : "Spanish anthologies"
+    },
+    {
+      "code" : "087",
+      "label" : "Slavic anthologies"
+    },
+    {
+      "code" : "088",
+      "label" : "Scandinavian anthologies"
+    },
+    {
+      "code" : "089",
+      "label" : "Anthologies for other languages"
+    },
+    {
+      "code" : "090",
+      "label" : "\"Rare books\""
+    },
+    {
+      "code" : "091",
+      "label" : "\"Manuscripts\" + \"Autographs\""
+    },
+    {
+      "code" : "092",
+      "label" : "\"Block books\""
+    },
+    {
+      "code" : "093",
+      "label" : "\"Early printed books\" + \"Incunabula\""
+    },
+    {
+      "code" : "094",
+      "label" : "\"Privately printed books\" + Rare printing"
+    },
+    {
+      "code" : "095",
+      "label" : "Rare bindings"
+    },
+    {
+      "code" : "096",
+      "label" : "Rare illustrations or materials"
+    },
+    {
+      "code" : "097",
+      "label" : "\"Bookplates\" + Book ownership"
+    },
+    {
+      "code" : "098",
+      "label" : "\"Prohibited books\" + \"Lost books\" + \"Imaginary books and libraries\""
+    },
+    {
+      "code" : "099",
+      "label" : "Other book rarities + Curiosa + Minute size, etc."
+    },
+    {
+      "code" : "100",
+      "label" : "Philosophy and psychology"
+    },
+    {
+      "code" : "101",
+      "label" : "\"Philosophy -- Introductions\" + \"Methodology\""
+    },
+    {
+      "code" : "102",
+      "label" : "Philosophy outlines"
+    },
+    {
+      "code" : "103",
+      "label" : "\"Philosophy --  Dictionaries\" + Philosophy encyclopedias"
+    },
+    {
+      "code" : "105",
+      "label" : "\"Philosophy -- Periodicals\" + \"Psychology -- Periodicals\""
+    },
+    {
+      "code" : "106",
+      "label" : "Philosophical societies, transactions, etc."
+    },
+    {
+      "code" : "107",
+      "label" : "Philosophy study and teaching"
+    },
+    {
+      "code" : "108",
+      "label" : "Philosophy collections"
+    },
+    {
+      "code" : "109",
+      "label" : "\"Philosophy -- History\" | History of philosophy"
+    },
+    {
+      "code" : "110",
+      "label" : "\"Metaphysics\""
+    },
+    {
+      "code" : "111",
+      "label" : "\"Ontology\""
+    },
+    {
+      "code" : "114",
+      "label" : "\"Space\" (in the philosophical sense)"
+    },
+    {
+      "code" : "115",
+      "label" : "\"Time -- Philosophy\""
+    },
+    {
+      "code" : "116",
+      "label" : "\"Movement (Philosophy)\" + \"Evolution\" (in the philosophical sense)"
+    },
+    {
+      "code" : "117",
+      "label" : "\"Matter\""
+    },
+    {
+      "code" : "118",
+      "label" : "\"Power (Philosophy)\""
+    },
+    {
+      "code" : "119",
+      "label" : "\"Mathematics -- Philosophy\""
+    },
+    {
+      "code" : "120",
+      "label" : "Special metaphysical topics"
+    },
+    {
+      "code" : "121",
+      "label" : "\"Knowledge, Theory of\" | Theory of knowledge"
+    },
+    {
+      "code" : "122",
+      "label" : "\"Causation\" | Cause and effect"
+    },
+    {
+      "code" : "123",
+      "label" : "\"Free will and determinism\" + \"Necessity (Philosophy)\""
+    },
+    {
+      "code" : "124",
+      "label" : "\"Teleology\""
+    },
+    {
+      "code" : "126",
+      "label" : "\"Self (Philosophy)\" + \"Consciousness\""
+    },
+    {
+      "code" : "127",
+      "label" : "Unconsciousness + Automata"
+    },
+    {
+      "code" : "128",
+      "label" : "\"Soul\" + \"Philosophical anthropology\" + \"Human beings\""
+    },
+    {
+      "code" : "129",
+      "label" : "\"Immortality\" + \"Future life\" | Life after death (from philosophical or not-specifically-Christian perspectives)"
+    },
+    {
+      "code" : "130",
+      "label" : "\"Mind and body\" + \"Parapsychology\""
+    },
+    {
+      "code" : "131",
+      "label" : "\"Mental health\""
+    },
+    {
+      "code" : "133",
+      "label" : "\"Occultism\""
+    },
+    {
+      "code" : "135",
+      "label" : "\"Dreams\""
+    },
+    {
+      "code" : "137",
+      "label" : "\"Personality\" + \"Temperament\""
+    },
+    {
+      "code" : "138",
+      "label" : "\"Physiognomy\""
+    },
+    {
+      "code" : "139",
+      "label" : "\"Phrenology\""
+    },
+    {
+      "code" : "140",
+      "label" : "\"Ideology\" | Philosophical systems"
+    },
+    {
+      "code" : "141",
+      "label" : "\"Idealism\" + \"Transcendentalism\""
+    },
+    {
+      "code" : "142",
+      "label" : "\"Criticism (Philosophy)\""
+    },
+    {
+      "code" : "143",
+      "label" : "\"Intuition\" | Philosophical intuition"
+    },
+    {
+      "code" : "144",
+      "label" : "\"Empiricism\" + \"Humanism\" + \"Pragmatism\""
+    },
+    {
+      "code" : "145",
+      "label" : "Sensationalism"
+    },
+    {
+      "code" : "146",
+      "label" : "\"Materialism\" + \"Positivism\""
+    },
+    {
+      "code" : "147",
+      "label" : "\"Pantheism\" + \"Monism\""
+    },
+    {
+      "code" : "148",
+      "label" : "\"Eclecticism\""
+    },
+    {
+      "code" : "149",
+      "label" : "Other philosophical systems"
+    },
+    {
+      "code" : "150",
+      "label" : "\"Psychology\""
+    },
+    {
+      "code" : "152",
+      "label" : "\"Psychophysiology\""
+    },
+    {
+      "code" : "153",
+      "label" : "\"Thought and thinking\""
+    },
+    {
+      "code" : "154",
+      "label" : "\"Subconsciousness\""
+    },
+    {
+      "code" : "155",
+      "label" : "\"Creative ability\" + \"Imagination\" + \"Developmental psychology\""
+    },
+    {
+      "code" : "156",
+      "label" : "\"Psychology, Comparative\""
+    },
+    {
+      "code" : "158",
+      "label" : "Sensibility + Emotions + Affections"
+    },
+    {
+      "code" : "160",
+      "label" : "\"Logic\""
+    },
+    {
+      "code" : "161",
+      "label" : "\"Induction (Logic)\""
+    },
+    {
+      "code" : "162",
+      "label" : "Deductive logic"
+    },
+    {
+      "code" : "165",
+      "label" : "\"Fallacies (Logic)\" + \"Paradox\""
+    },
+    {
+      "code" : "166",
+      "label" : "\"Syllogism\" + \"Enthymeme (Logic)\""
+    },
+    {
+      "code" : "167",
+      "label" : "\"Hypothesis\""
+    },
+    {
+      "code" : "168",
+      "label" : "\"Persuasion (Rhetoric)\" | Argument and persuasion"
+    },
+    {
+      "code" : "169",
+      "label" : "\"Analogy\""
+    },
+    {
+      "code" : "170",
+      "label" : "\"Ethics\""
+    },
+    {
+      "code" : "171",
+      "label" : "Theories of ethics + Philosophy of ethics"
+    },
+    {
+      "code" : "172",
+      "label" : "\"Political ethics\""
+    },
+    {
+      "code" : "173",
+      "label" : "Family ethics"
+    },
+    {
+      "code" : "174",
+      "label" : "\"Professional ethics\""
+    },
+    {
+      "code" : "174.1",
+      "label" : "Clergy -- Professional ethics"
+    },
+    {
+      "code" : "174.2",
+      "label" : "\"Bioethics\" + \"Medical ethics\""
+    },
+    {
+      "code" : "174.3",
+      "label" : "\"Legal ethics\""
+    },
+    {
+      "code" : "174.4",
+      "label" : "\"Business ethics\""
+    },
+    {
+      "code" : "174.6",
+      "label" : "\"Gambling\""
+    },
+    {
+      "code" : "174.7",
+      "label" : "\"Honor\" + \"Honesty\""
+    },
+    {
+      "code" : "174.9",
+      "label" : "Other professional ethical issues"
+    },
+    {
+      "code" : "175",
+      "label" : "Ethics of amusements"
+    },
+    {
+      "code" : "176",
+      "label" : "\"Sexual ethics\""
+    },
+    {
+      "code" : "177",
+      "label" : "\"Social ethics\""
+    },
+    {
+      "code" : "178",
+      "label" : "\"Temperance\" + Stimulants and narcotics | Ethics of consumption"
+    },
+    {
+      "code" : "179",
+      "label" : "Other ethical topics"
+    },
+    {
+      "code" : "180",
+      "label" : "\"Philosophy, Ancient\" | Ancient, Medieval and Eastern philosophy"
+    },
+    {
+      "code" : "181",
+      "label" : "\"Philosophy, Asian\" | Asian philosophy"
+    },
+    {
+      "code" : "182",
+      "label" : "Ancient Greek philosophy"
+    },
+    {
+      "code" : "183",
+      "label" : "\"Sophists (Greek philosophy)\" + \"Socrates\""
+    },
+    {
+      "code" : "184",
+      "label" : "\"Plato\" + \"Platonists\""
+    },
+    {
+      "code" : "185",
+      "label" : "\"Aristotle\" + \"Peripatetics\""
+    },
+    {
+      "code" : "186",
+      "label" : "\"Skeptics (Greek philosophy)\" + \"Neoplatonism\""
+    },
+    {
+      "code" : "187",
+      "label" : "\"Epicurus\" + \"Epicureans (Greek philosophy)\""
+    },
+    {
+      "code" : "188",
+      "label" : "\"Stoics\" | Stoicism"
+    },
+    {
+      "code" : "189",
+      "label" : "Early Christian philosophy + \"Philosophy, Medieval\""
+    },
+    {
+      "code" : "190",
+      "label" : "\"Philosophy, Modern\" + Modern philosophy"
+    },
+    {
+      "code" : "191",
+      "label" : "\"Philosophy, American\""
+    },
+    {
+      "code" : "192",
+      "label" : "\"Philosophy, British\""
+    },
+    {
+      "code" : "193",
+      "label" : "\"Philosophy, German\""
+    },
+    {
+      "code" : "194",
+      "label" : "\"Philosophy, French\""
+    },
+    {
+      "code" : "195",
+      "label" : "\"Philosophy, Italian\""
+    },
+    {
+      "code" : "196",
+      "label" : "\"Philosophy, Spanish\""
+    },
+    {
+      "code" : "197",
+      "label" : "\"Philosophy, Russian\" + Slavic philosophy"
+    },
+    {
+      "code" : "198",
+      "label" : "Scandinavian philosophy"
+    },
+    {
+      "code" : "199",
+      "label" : "Other modern philosophers"
+    },
+    {
+      "code" : "200",
+      "label" : "\"Religion\" | Religion and theology"
+    },
+    {
+      "code" : "201",
+      "label" : "\"Religion -- Philosophy\" | Philosophy of religion"
+    },
+    {
+      "code" : "202",
+      "label" : "Religious compendia + Religious outlines + Religious systems"
+    },
+    {
+      "code" : "203",
+      "label" : "\"Religion -- Dictionaries\" + Religion encyclopedias"
+    },
+    {
+      "code" : "204",
+      "label" : "Religious essays, lectures, disputations, addresses"
+    },
+    {
+      "code" : "205",
+      "label" : "\"Religion -- Periodicals\""
+    },
+    {
+      "code" : "206",
+      "label" : "Religion societies, transactions, reports, etc."
+    },
+    {
+      "code" : "207",
+      "label" : "\"Religious education\" + \"Theological seminaries\""
+    },
+    {
+      "code" : "208",
+      "label" : "Religion collections"
+    },
+    {
+      "code" : "209",
+      "label" : "\"Religion -- History\""
+    },
+    {
+      "code" : "210",
+      "label" : "\"Natural theology\" + \"Secularism\""
+    },
+    {
+      "code" : "211",
+      "label" : "\"Deism\" + \"Atheism\""
+    },
+    {
+      "code" : "212",
+      "label" : "\"Pantheism\" + \"Theosophy\""
+    },
+    {
+      "code" : "213",
+      "label" : "\"Creation\" + \"Evolution -- Religious aspects\""
+    },
+    {
+      "code" : "214",
+      "label" : "\"Providence and government of God\" + \"Theodicy\" + \"Fate and fatalism\""
+    },
+    {
+      "code" : "215",
+      "label" : "\"Religion and science\""
+    },
+    {
+      "code" : "218",
+      "label" : "\"Future life\" + \"Immortality\" + \"Eternity\" (from Christian perspectives)"
+    },
+    {
+      "code" : "220",
+      "label" : "\"Bible\""
+    },
+    {
+      "code" : "222",
+      "label" : "\"Bible. O.T. Historical Books\" | Historical books of the Old Testament"
+    },
+    {
+      "code" : "223",
+      "label" : "Poetical books of the Old Testament"
+    },
+    {
+      "code" : "224",
+      "label" : "\"Bible. O.T. Prophets\" | Prophetic books of the Old Testament"
+    },
+    {
+      "code" : "226",
+      "label" : "(\"Bible. N.T. Gospels\" + \"Bible. N.T. Acts\") | Gospels and Acts"
+    },
+    {
+      "code" : "227",
+      "label" : "\"Bible. N.T. Epistles\" | Epistles (New Testament)"
+    },
+    {
+      "code" : "228",
+      "label" : "\"Bible. N.T. Revelation\" | Book of Revelation"
+    },
+    {
+      "code" : "229",
+      "label" : "\"Bible. O.T. Apocrypha\" + \"Apocryphal books\""
+    },
+    {
+      "code" : "230",
+      "label" : "\"Theology, Doctrinal\" | Doctrinal theology"
+    },
+    {
+      "code" : "231",
+      "label" : "\"God\""
+    },
+    {
+      "code" : "232",
+      "label" : "\"Jesus Christ\""
+    },
+    {
+      "code" : "233",
+      "label" : "\"Theological anthropology\""
+    },
+    {
+      "code" : "234",
+      "label" : "\"Salvation\""
+    },
+    {
+      "code" : "235",
+      "label" : "\"Angels\" + \"Devil\" + \"Demonology\" + \"Saints\""
+    },
+    {
+      "code" : "236",
+      "label" : "\"Eschatology\""
+    },
+    {
+      "code" : "238",
+      "label" : "\"Creeds\" + \"Catechisms\" + \"Covenant theology\""
+    },
+    {
+      "code" : "239",
+      "label" : "\"Apologetics\""
+    },
+    {
+      "code" : "240",
+      "label" : "\"Devotional literature\" + \"Theology, Practical\""
+    },
+    {
+      "code" : "241",
+      "label" : "\"Christian ethics\""
+    },
+    {
+      "code" : "242",
+      "label" : "\"Meditations\" + \"Contemplation\""
+    },
+    {
+      "code" : "243",
+      "label" : "\"Conversion\" + \"Evangelistic work\""
+    },
+    {
+      "code" : "247",
+      "label" : "\"Religious articles\""
+    },
+    {
+      "code" : "248",
+      "label" : "\"Christian life\""
+    },
+    {
+      "code" : "249",
+      "label" : "\"Families -- Religious life\""
+    },
+    {
+      "code" : "250",
+      "label" : "\"Pastoral theology\""
+    },
+    {
+      "code" : "251",
+      "label" : "\"Preaching\""
+    },
+    {
+      "code" : "252",
+      "label" : "\"Sermons\""
+    },
+    {
+      "code" : "253",
+      "label" : "\"Evangelistic work\" + \"Clergy\""
+    },
+    {
+      "code" : "254",
+      "label" : "\"Church management\""
+    },
+    {
+      "code" : "255",
+      "label" : "\"Monasticism and religious orders\""
+    },
+    {
+      "code" : "259",
+      "label" : "Other ministries and church work"
+    },
+    {
+      "code" : "260",
+      "label" : "\"Church\" + \"Church work\""
+    },
+    {
+      "code" : "261",
+      "label" : "\"Church and the world\""
+    },
+    {
+      "code" : "262",
+      "label" : "\"Church polity\""
+    },
+    {
+      "code" : "263",
+      "label" : "\"Sabbath\" + \"Sunday\" + \"Christian pilgrims and pilgrimages\" + \"Church year\""
+    },
+    {
+      "code" : "264",
+      "label" : "\"Public worship\""
+    },
+    {
+      "code" : "265",
+      "label" : "\"Sacraments\""
+    },
+    {
+      "code" : "266",
+      "label" : "\"Missions\" + \"Home missions\""
+    },
+    {
+      "code" : "267",
+      "label" : "Christian associations`"
+    },
+    {
+      "code" : "268",
+      "label" : "\"Christian education\""
+    },
+    {
+      "code" : "269",
+      "label" : "\"Revivals\" + \"Spiritual retreats\" + \"Parish missions\""
+    },
+    {
+      "code" : "270",
+      "label" : "\"Church history\" | History of Christianity"
+    },
+    {
+      "code" : "271",
+      "label" : "\"Monasticism and religious orders\""
+    },
+    {
+      "code" : "272",
+      "label" : "\"Persecution\""
+    },
+    {
+      "code" : "273",
+      "label" : "\"Christian heresies\""
+    },
+    {
+      "code" : "274",
+      "label" : "\"Europe -- Church history\" + \"Christianity -- Europe\""
+    },
+    {
+      "code" : "275",
+      "label" : "\"Asia -- Church history\" + \"Christiantiy -- Asia\""
+    },
+    {
+      "code" : "276",
+      "label" : "\"Africa -- Church history\" + \"Christianity -- Africa\""
+    },
+    {
+      "code" : "277",
+      "label" : "North America -- Church history + Christianity -- North America"
+    },
+    {
+      "code" : "278",
+      "label" : "South America -- Church history + Christianity -- South America"
+    },
+    {
+      "code" : "279",
+      "label" : "Oceania -- Church history + Christianity -- Oceania"
+    },
+    {
+      "code" : "280",
+      "label" : "\"Christian sects\""
+    },
+    {
+      "code" : "281",
+      "label" : "\"Church history--Primitive and early church, ca. 30-600\" + \"Eastern churches\""
+    },
+    {
+      "code" : "282",
+      "label" : "\"Catholic Church\""
+    },
+    {
+      "code" : "283",
+      "label" : "\"Anglican Communion\""
+    },
+    {
+      "code" : "284",
+      "label" : "\"Protestant churches\" + \"Protestantism\""
+    },
+    {
+      "code" : "285",
+      "label" : "\"Reformed Church\" + \"Presbyterian Church\" + \"Congregational churches\""
+    },
+    {
+      "code" : "286",
+      "label" : "\"Baptists\""
+    },
+    {
+      "code" : "287",
+      "label" : "\"Methodism\""
+    },
+    {
+      "code" : "289",
+      "label" : "Other Christian sects"
+    },
+    {
+      "code" : "290",
+      "label" : "\"Religions\" | Non-Christian religions and comparative religion"
+    },
+    {
+      "code" : "291",
+      "label" : "\"Mythology\""
+    },
+    {
+      "code" : "292",
+      "label" : "\"Mythology, Classical\""
+    },
+    {
+      "code" : "293",
+      "label" : "\"Mythology, Germanic\" + Northern European mythology and religion"
+    },
+    {
+      "code" : "294",
+      "label" : "\"Hinduism\" + \"Brahmanism\" + \"Buddhism\" + \"Sikhism\""
+    },
+    {
+      "code" : "295",
+      "label" : "\"Zoroastrianism\""
+    },
+    {
+      "code" : "296",
+      "label" : "\"Judaism\""
+    },
+    {
+      "code" : "297",
+      "label" : "\"Islam\" + \"Bahai Faith\""
+    },
+    {
+      "code" : "299",
+      "label" : "Other religions"
+    },
+    {
+      "code" : "300",
+      "label" : "\"Social sciences\""
+    },
+    {
+      "code" : "301",
+      "label" : "\"Sociology\""
+    },
+    {
+      "code" : "302",
+      "label" : "\"Social psychology\""
+    },
+    {
+      "code" : "303",
+      "label" : "\"Social sciences -- Dictionaries\" + Social science encyclopedias"
+    },
+    {
+      "code" : "304",
+      "label" : "Social science essays, lectures, addresses"
+    },
+    {
+      "code" : "304.2",
+      "label" : "\"Human ecology\""
+    },
+    {
+      "code" : "304.5",
+      "label" : "\"Sociobiology\""
+    },
+    {
+      "code" : "304.6",
+      "label" : "\"Population\""
+    },
+    {
+      "code" : "304.8",
+      "label" : "(\"Emigration and immigration\" + \"Migration, Internal\") from demographic perspectives | Migrations"
+    },
+    {
+      "code" : "305",
+      "label" : "\"Social sciences -- Periodicals\""
+    },
+    {
+      "code" : "306",
+      "label" : "\"Culture\""
+    },
+    {
+      "code" : "307",
+      "label" : "\"Social sciences -- Research\" + \"Social sciences -- Study and teaching\" + \"Cities and towns\""
+    },
+    {
+      "code" : "310",
+      "label" : "\"Statistics\""
+    },
+    {
+      "code" : "314",
+      "label" : "Europe -- Statistics"
+    },
+    {
+      "code" : "315",
+      "label" : "Asia -- Statistics"
+    },
+    {
+      "code" : "316",
+      "label" : "Africa -- Statistics"
+    },
+    {
+      "code" : "317",
+      "label" : "North America -- Statistics + America -- Statistics"
+    },
+    {
+      "code" : "318",
+      "label" : "South America -- Statistics + Latin America -- Statistics"
+    },
+    {
+      "code" : "319",
+      "label" : "Oceania -- Statistics + Polar regions -- Statistics"
+    },
+    {
+      "code" : "320",
+      "label" : "\"Political science\""
+    },
+    {
+      "code" : "321",
+      "label" : "\"Political science -- Philosophy\" + Forms of government"
+    },
+    {
+      "code" : "322",
+      "label" : "\"Religion and state\" + \"Church and state\""
+    },
+    {
+      "code" : "323",
+      "label" : "\"Human rights\" + \"Ethnic relations\" + \"Race relations\" + \"Minorities\""
+    },
+    {
+      "code" : "324",
+      "label" : "\"Elections\" + \"Suffrage\" + \"Political parties\""
+    },
+    {
+      "code" : "325",
+      "label" : "\"Colonies\" + \"Emigration and immigration\" from political perspectives"
+    },
+    {
+      "code" : "326",
+      "label" : "\"Slavery\" + \"African Americans\""
+    },
+    {
+      "code" : "327",
+      "label" : "\"International relations\" + \"World politics\""
+    },
+    {
+      "code" : "328",
+      "label" : "\"Legislative bodies\""
+    },
+    {
+      "code" : "330",
+      "label" : "\"Economics\""
+    },
+    {
+      "code" : "331",
+      "label" : "\"Labor\" + \"Capital\""
+    },
+    {
+      "code" : "332",
+      "label" : "\"Finance\""
+    },
+    {
+      "code" : "333",
+      "label" : "\"Land use\""
+    },
+    {
+      "code" : "334",
+      "label" : "\"Cooperation\""
+    },
+    {
+      "code" : "335",
+      "label" : "\"Socialism\" + \"Communism\""
+    },
+    {
+      "code" : "336",
+      "label" : "\"Finance, Public\""
+    },
+    {
+      "code" : "337",
+      "label" : "\"International economic relations\""
+    },
+    {
+      "code" : "338",
+      "label" : "\"Industries\" + \"Prices\" + \"Microeconomics\""
+    },
+    {
+      "code" : "339",
+      "label" : "\"Macroeconomics\" + \"Poor\" (from economic perspectives) + \"Consumption (Economics)\" + \"Consumers\""
+    },
+    {
+      "code" : "340",
+      "label" : "\"Law\""
+    },
+    {
+      "code" : "341",
+      "label" : "\"International law\""
+    },
+    {
+      "code" : "342",
+      "label" : "\"Constitutional law\" + \"Comparative government\""
+    },
+    {
+      "code" : "343",
+      "label" : "\"Criminal law\""
+    },
+    {
+      "code" : "344",
+      "label" : "\"Martial law\""
+    },
+    {
+      "code" : "345",
+      "label" : "\"Law -- United States\""
+    },
+    {
+      "code" : "346",
+      "label" : "\"Law -- Great Britain\""
+    },
+    {
+      "code" : "347",
+      "label" : "\"Common law\" | Anglo-American legal tradition"
+    },
+    {
+      "code" : "348",
+      "label" : "\"Canon law\" + \"Ecclesiastical law\""
+    },
+    {
+      "code" : "349",
+      "label" : "Law in other jurisdictions"
+    },
+    {
+      "code" : "350",
+      "label" : "\"Public administration\" + \"Military art and science\""
+    },
+    {
+      "code" : "351",
+      "label" : "\"Public administration\" (for central government)"
+    },
+    {
+      "code" : "352",
+      "label" : "\"Local government\""
+    },
+    {
+      "code" : "353",
+      "label" : "\"United States -- Politics and government\" + \"State governments\""
+    },
+    {
+      "code" : "354",
+      "label" : "Non-US governments"
+    },
+    {
+      "code" : "356",
+      "label" : "\"Infantry\""
+    },
+    {
+      "code" : "357",
+      "label" : "\"Cavalry\""
+    },
+    {
+      "code" : "358",
+      "label" : "\"Weapons\" + \"Armor\" (regimental) + \"Air power\" + \"Military engineers\""
+    },
+    {
+      "code" : "359",
+      "label" : "\"Naval art and science\" + \"Sea-power\""
+    },
+    {
+      "code" : "360",
+      "label" : "\"Social service\" + \"Societies\""
+    },
+    {
+      "code" : "361",
+      "label" : "\"Charity\""
+    },
+    {
+      "code" : "362",
+      "label" : "\"Hospitals\" + \"Asylums\" + \"Human services\""
+    },
+    {
+      "code" : "362.1",
+      "label" : "\"Hospitals\""
+    },
+    {
+      "code" : "362.2",
+      "label" : "\"Mentally ill\""
+    },
+    {
+      "code" : "362.3",
+      "label" : "\"People with mental disabilities\""
+    },
+    {
+      "code" : "362.4",
+      "label" : "\"People with disabilities\" + \"Blind\" + \"Deaf\""
+    },
+    {
+      "code" : "362.5",
+      "label" : "\"Poor\" (from social service perspectives)"
+    },
+    {
+      "code" : "362.6",
+      "label" : "\"Older people -- Care\""
+    },
+    {
+      "code" : "362.7",
+      "label" : "\"Child welfare\""
+    },
+    {
+      "code" : "362.8",
+      "label" : "Other human services"
+    },
+    {
+      "code" : "362.9",
+      "label" : "Social service in particular countries and regions"
+    },
+    {
+      "code" : "363",
+      "label" : "\"Political activists\""
+    },
+    {
+      "code" : "363.1",
+      "label" : "\"Risk\" + \"Accidents\""
+    },
+    {
+      "code" : "363.2",
+      "label" : "\"Police\""
+    },
+    {
+      "code" : "363.31",
+      "label" : "\"Censorship\""
+    },
+    {
+      "code" : "363.32",
+      "label" : "\"Terrorism\""
+    },
+    {
+      "code" : "363.33",
+      "label" : "\"Gun control\""
+    },
+    {
+      "code" : "363.34",
+      "label" : "\"Disasters\""
+    },
+    {
+      "code" : "363.35",
+      "label" : "\"Civil defense\""
+    },
+    {
+      "code" : "363.37",
+      "label" : "\"Fire departments\" + \"Fire prevention\""
+    },
+    {
+      "code" : "363.41",
+      "label" : "\"Prohibition\" + \"Temperance\" (as a political movement)"
+    },
+    {
+      "code" : "363.42",
+      "label" : "\"Gambling -- Law and legislation\""
+    },
+    {
+      "code" : "363.45",
+      "label" : "\"Drug control\""
+    },
+    {
+      "code" : "363.46",
+      "label" : "\"Abortion -- Government policy\""
+    },
+    {
+      "code" : "363.47",
+      "label" : "\"Pornography\""
+    },
+    {
+      "code" : "363.5",
+      "label" : "\"Housing\""
+    },
+    {
+      "code" : "363.6",
+      "label" : "\"Public utilities\""
+    },
+    {
+      "code" : "363.7",
+      "label" : "\"Environmental protection\""
+    },
+    {
+      "code" : "363.728",
+      "label" : "\"Refuse and refuse disposal\""
+    },
+    {
+      "code" : "363.73",
+      "label" : "\"Pollution\""
+    },
+    {
+      "code" : "363.7386",
+      "label" : "\"Acid rain\""
+    },
+    {
+      "code" : "363.8",
+      "label" : "\"Food supply\""
+    },
+    {
+      "code" : "363.9",
+      "label" : "\"Birth control\" + \"Overpopulation\" + \"Eugenics\""
+    },
+    {
+      "code" : "364",
+      "label" : "\"Criminology\""
+    },
+    {
+      "code" : "365",
+      "label" : "\"Correctional institutions\""
+    },
+    {
+      "code" : "366",
+      "label" : "\"Secret societies\""
+    },
+    {
+      "code" : "367",
+      "label" : "\"Clubs\""
+    },
+    {
+      "code" : "368",
+      "label" : "\"Insurance\""
+    },
+    {
+      "code" : "369",
+      "label" : "Other associations and institutions"
+    },
+    {
+      "code" : "370",
+      "label" : "\"Education\""
+    },
+    {
+      "code" : "371",
+      "label" : "\"Teachers\" + \"Teaching\" + \"School management and organization\""
+    },
+    {
+      "code" : "372",
+      "label" : "\"Education, Elementary\" + \"Kindergarten\""
+    },
+    {
+      "code" : "373",
+      "label" : "\"Education, Secondary\" + \"High schools\""
+    },
+    {
+      "code" : "374",
+      "label" : "\"Adult education\" + \"Continuing education\""
+    },
+    {
+      "code" : "375",
+      "label" : "\"Education -- Curricula\""
+    },
+    {
+      "code" : "378",
+      "label" : "\"Education, Higher\" + \"Universities and colleges\""
+    },
+    {
+      "code" : "379",
+      "label" : "\"Education and state\" + \"Public schools\""
+    },
+    {
+      "code" : "380",
+      "label" : "\"Commerce\" + \"Communication and traffic\""
+    },
+    {
+      "code" : "381",
+      "label" : "\"Commerce\""
+    },
+    {
+      "code" : "382",
+      "label" : "\"International trade\""
+    },
+    {
+      "code" : "383",
+      "label" : "\"Postal service\""
+    },
+    {
+      "code" : "384",
+      "label" : "\"Telecommunication\""
+    },
+    {
+      "code" : "384.1",
+      "label" : "\"Telegraph\""
+    },
+    {
+      "code" : "384.3",
+      "label" : "\"Internet\""
+    },
+    {
+      "code" : "384.4",
+      "label" : "\"Cables, Submarine\""
+    },
+    {
+      "code" : "384.5",
+      "label" : "\"Broadcasting\" | Radio and television"
+    },
+    {
+      "code" : "384.6",
+      "label" : "\"Telephone\""
+    },
+    {
+      "code" : "384.8",
+      "label" : "\"Motion picture industry\""
+    },
+    {
+      "code" : "385",
+      "label" : "\"Railroads\" (from usage perspectives)"
+    },
+    {
+      "code" : "386",
+      "label" : "\"Waterways\""
+    },
+    {
+      "code" : "387",
+      "label" : "\"Shipping\""
+    },
+    {
+      "code" : "388",
+      "label" : "\"Local transit\""
+    },
+    {
+      "code" : "389",
+      "label" : "\"Weights and measures\" + \"Metrology\""
+    },
+    {
+      "code" : "390",
+      "label" : "\"Ethnology\" | Customs and folklore"
+    },
+    {
+      "code" : "391",
+      "label" : "\"Costume\" + \"Cosmetics\" + \"Fashion\""
+    },
+    {
+      "code" : "392",
+      "label" : "\"Families\" + \"Courtship\" + \"Marriage\" + \"Sex\""
+    },
+    {
+      "code" : "393",
+      "label" : "\"Death -- Social aspects\" + \"Funeral rites and ceremonies\""
+    },
+    {
+      "code" : "394",
+      "label" : "\"Manners and customs\""
+    },
+    {
+      "code" : "395",
+      "label" : "\"Etiquette\""
+    },
+    {
+      "code" : "398",
+      "label" : "\"Folklore\""
+    },
+    {
+      "code" : "399",
+      "label" : "\"Weapons\" + \"Armor\" (personal)"
+    },
+    {
+      "code" : "400",
+      "label" : "(\"Philology\" + \"Language and languages\") | Languages and linguistics"
+    },
+    {
+      "code" : "401",
+      "label" : "\"Language and languages -- Philosophy\" + \"Language and languages -- Origin\""
+    },
+    {
+      "code" : "402",
+      "label" : "Language outlines and compendia + \"Language and languages -- Vocational guidance\""
+    },
+    {
+      "code" : "403",
+      "label" : "\"Language and languages -- Dictionaries\" + \"Linguistics -- Dictionaries\" + Language and linguistics encyclopedias"
+    },
+    {
+      "code" : "404",
+      "label" : "Essay collections on languages and linguistics"
+    },
+    {
+      "code" : "405",
+      "label" : "\"Language and languages -- Periodicals\""
+    },
+    {
+      "code" : "406",
+      "label" : "Language and linguistic societies, transactions, reports, etc."
+    },
+    {
+      "code" : "407",
+      "label" : "\"Language and languages -- Study and teaching\""
+    },
+    {
+      "code" : "408",
+      "label" : "Linguistics collections + \"Languages, Artificial\""
+    },
+    {
+      "code" : "409",
+      "label" : "\"Historical linguistics\" + Languages in particular countries and regions"
+    },
+    {
+      "code" : "410",
+      "label" : "\"Linguistics\""
+    },
+    {
+      "code" : "411",
+      "label" : "\"Writing\" + \"Alphabet\""
+    },
+    {
+      "code" : "412",
+      "label" : "\"Semantics\" + \"Etymology\""
+    },
+    {
+      "code" : "413",
+      "label" : "\"Language and languages -- Dictionaries\" + \"Lexicography\""
+    },
+    {
+      "code" : "414",
+      "label" : "\"Phonology\" + \"Phonetics\" + \"Deaf -- Means of communication\""
+    },
+    {
+      "code" : "415",
+      "label" : "\"Grammar, Comparative and general\""
+    },
+    {
+      "code" : "417",
+      "label" : "\"Paleography\" + \"Inscriptions\""
+    },
+    {
+      "code" : "418",
+      "label" : "\"Language acquisition\" + \"Applied linguistics\""
+    },
+    {
+      "code" : "419",
+      "label" : "\"Sign language\""
+    },
+    {
+      "code" : "420",
+      "label" : "\"English language\""
+    },
+    {
+      "code" : "421",
+      "label" : "\"English language -- Orthography and spelling\" + \"English language -- Phonetics\""
+    },
+    {
+      "code" : "422",
+      "label" : "\"English language -- Semantics\" + \"English language -- Etymology\""
+    },
+    {
+      "code" : "423",
+      "label" : "\"English language -- Dictionaries\" + \"English language -- Lexicography\""
+    },
+    {
+      "code" : "425",
+      "label" : "\"English language -- Grammar\""
+    },
+    {
+      "code" : "427",
+      "label" : "\"English language -- Dialects\" + \"English language -- Slang\" + \"English language -- Jargon\" + \"English language -- Middle English, 1100-1500\""
+    },
+    {
+      "code" : "428",
+      "label" : "\"English language -- Study and teaching\" + \"English language -- Usage\""
+    },
+    {
+      "code" : "429",
+      "label" : "\"English language -- Old English, ca. 450-1100\""
+    },
+    {
+      "code" : "430",
+      "label" : "\"German language\" + \"Germanic languages\""
+    },
+    {
+      "code" : "431",
+      "label" : "\"German language -- Orthography and spelling\" + \"German language -- Phonetics\""
+    },
+    {
+      "code" : "432",
+      "label" : "\"German language -- Semantics\" + \"German language -- Etymology\""
+    },
+    {
+      "code" : "433",
+      "label" : "\"German language -- Dictionaries\" + \"German language -- Lexicography\""
+    },
+    {
+      "code" : "435",
+      "label" : "\"German language -- Grammar\""
+    },
+    {
+      "code" : "437",
+      "label" : "\"German language -- Dialects\" + \"German language -- Slang\" + \"German language -- Jargon\""
+    },
+    {
+      "code" : "438",
+      "label" : "\"German language -- Study and teaching\" + \"German language -- Usage\""
+    },
+    {
+      "code" : "439",
+      "label" : "Other Germanic, non-English languages"
+    },
+    {
+      "code" : "440",
+      "label" : "\"French language\""
+    },
+    {
+      "code" : "441",
+      "label" : "\"French language -- Orthography and spelling\" + \"French language -- Phonetics\""
+    },
+    {
+      "code" : "442",
+      "label" : "\"French language -- Semantics\" + \"French language -- Etymology\""
+    },
+    {
+      "code" : "443",
+      "label" : "\"French language -- Dictionaries\" + \"French language -- Lexicography\""
+    },
+    {
+      "code" : "445",
+      "label" : "\"French language -- Grammar\""
+    },
+    {
+      "code" : "447",
+      "label" : "\"French language -- Dialects\" + \"French language -- Slang\" + French language -- Jargon + \"French language -- To 1300\""
+    },
+    {
+      "code" : "448",
+      "label" : "\"French language -- Study and teaching\" + \"French language -- Usage\""
+    },
+    {
+      "code" : "449",
+      "label" : "\"Catalan language\" + \"Proven&ccedil;al language\""
+    },
+    {
+      "code" : "450",
+      "label" : "\"Italian language\" + \"Romanian language\""
+    },
+    {
+      "code" : "451",
+      "label" : "Italian language -- Orthography and spelling + \"Italian language -- Phonetics\""
+    },
+    {
+      "code" : "452",
+      "label" : "Italian language -- Semantics + \"Italian language -- Etymology\""
+    },
+    {
+      "code" : "453",
+      "label" : "\"Italian language -- Dictionaries\" + Italian language -- Lexicography"
+    },
+    {
+      "code" : "455",
+      "label" : "\"Italian language -- Grammar\""
+    },
+    {
+      "code" : "457",
+      "label" : "\"Italian language -- Dialects\" + \"Italian language -- Slang\""
+    },
+    {
+      "code" : "458",
+      "label" : "\"Italian language -- Study and teaching\" + \"Italian language -- Usage\""
+    },
+    {
+      "code" : "459",
+      "label" : "\"Romanian language\""
+    },
+    {
+      "code" : "460",
+      "label" : "\"Spanish language\" + \"Portuguese language\""
+    },
+    {
+      "code" : "461",
+      "label" : "Spanish language -- Orthography and spelling + \"Spanish language -- Phonetics\""
+    },
+    {
+      "code" : "462",
+      "label" : "\"Spanish language -- Semantics\" + \"Spanish language -- Etymology\""
+    },
+    {
+      "code" : "463",
+      "label" : "\"Spanish language -- Dictionaries\" + Spanish language -- Lexicography"
+    },
+    {
+      "code" : "465",
+      "label" : "Spanish language -- Grammar"
+    },
+    {
+      "code" : "467",
+      "label" : "\"Spanish language -- Dialects\" + \"Spanish language -- Slang\""
+    },
+    {
+      "code" : "468",
+      "label" : "Spanish language -- Study and teaching + \"Spanish language -- Usage\""
+    },
+    {
+      "code" : "469",
+      "label" : "\"Portuguese language\""
+    },
+    {
+      "code" : "470",
+      "label" : "\"Latin language\" + \"Latin philology\""
+    },
+    {
+      "code" : "471",
+      "label" : "Latin language -- Orthography and spelling + \"Latin language -- Pronunciation\""
+    },
+    {
+      "code" : "472",
+      "label" : "\"Latin language -- Semantics\" + \"Latin language -- Etymology\""
+    },
+    {
+      "code" : "473",
+      "label" : "\"Latin language -- Dictionaries\" + Latin language -- Lexicography"
+    },
+    {
+      "code" : "475",
+      "label" : "\"Latin language -- Grammar\""
+    },
+    {
+      "code" : "477",
+      "label" : "Latin language -- Dialects + \"Latin language, Medieval and modern\""
+    },
+    {
+      "code" : "478",
+      "label" : "\"Latin language -- Study and teaching\" + Latin language -- Usage"
+    },
+    {
+      "code" : "479",
+      "label" : "\"Romance languages\""
+    },
+    {
+      "code" : "480",
+      "label" : "\"Greek language\" + \"Greek philology\""
+    },
+    {
+      "code" : "481",
+      "label" : "\"Greek language -- Alphabet\" + \"Greek language -- Pronunciation\""
+    },
+    {
+      "code" : "482",
+      "label" : "\"Greek language -- Semantics\" + \"Greek language -- Etymology\""
+    },
+    {
+      "code" : "483",
+      "label" : "Greek language -- Dictionaries + Greek language -- Lexicography"
+    },
+    {
+      "code" : "485",
+      "label" : "\"Greek language -- Grammar\""
+    },
+    {
+      "code" : "487",
+      "label" : "\"Greek language -- Dialects\" + \"Greek language, Biblical\""
+    },
+    {
+      "code" : "488",
+      "label" : "\"Greek language -- Study and teaching\""
+    },
+    {
+      "code" : "489",
+      "label" : "\"Greek language, Modern\""
+    },
+    {
+      "code" : "490",
+      "label" : "Other languages"
+    },
+    {
+      "code" : "491",
+      "label" : "\"Indo-European languages\""
+    },
+    {
+      "code" : "492",
+      "label" : "\"Semitic languages\""
+    },
+    {
+      "code" : "493",
+      "label" : "\"Hamitic languages\""
+    },
+    {
+      "code" : "494",
+      "label" : "\"Altaic languages\" + \"Uralic languages\""
+    },
+    {
+      "code" : "495",
+      "label" : "East Asian languages"
+    },
+    {
+      "code" : "496",
+      "label" : "\"African languages\""
+    },
+    {
+      "code" : "497",
+      "label" : "\"Indians of North America -- Languages\""
+    },
+    {
+      "code" : "498",
+      "label" : "\"Indians of South America -- Languages\""
+    },
+    {
+      "code" : "499",
+      "label" : "\"Austronesian languages\" + \"Languages, Artificial\" + minor languages"
+    },
+    {
+      "code" : "500",
+      "label" : "\"Science\" + \"Natural history\""
+    },
+    {
+      "code" : "501",
+      "label" : "\"Science -- Philosophy\" | Philosophy of science"
+    },
+    {
+      "code" : "502",
+      "label" : "Science outlines and introductions + \"Science -- Vocational guidance\""
+    },
+    {
+      "code" : "503",
+      "label" : "\"Science -- Dictionaries\" + \"Science -- Encyclopedias\""
+    },
+    {
+      "code" : "505",
+      "label" : "\"Science -- Periodicals\""
+    },
+    {
+      "code" : "506",
+      "label" : "\"Science -- Societies, etc.\""
+    },
+    {
+      "code" : "507",
+      "label" : "\"Research\" (scientific) + \"Science -- Study and teaching\""
+    },
+    {
+      "code" : "508",
+      "label" : "Collections of scientific essays and papers"
+    },
+    {
+      "code" : "509",
+      "label" : "\"Science -- History\" + Science in particular countries and regions"
+    },
+    {
+      "code" : "510",
+      "label" : "\"Mathematics\""
+    },
+    {
+      "code" : "511",
+      "label" : "\"Arithmetic\""
+    },
+    {
+      "code" : "512",
+      "label" : "\"Algebra\""
+    },
+    {
+      "code" : "513",
+      "label" : "\"Geometry\""
+    },
+    {
+      "code" : "514",
+      "label" : "\"Trigonometry\" + \"Topology\""
+    },
+    {
+      "code" : "515",
+      "label" : "\"Calculus\" + \"Mathematical analysis\""
+    },
+    {
+      "code" : "516",
+      "label" : "\"Geometry, Algebraic\""
+    },
+    {
+      "code" : "518",
+      "label" : "\"Numerical analysis\""
+    },
+    {
+      "code" : "519",
+      "label" : "(\"Probabilities\" + \"Mathematical statistics\") | Probability and statistics"
+    },
+    {
+      "code" : "520",
+      "label" : "\"Astronomy\""
+    },
+    {
+      "code" : "521",
+      "label" : "Theoretical astronomy + \"Celestial mechanics\""
+    },
+    {
+      "code" : "522",
+      "label" : "\"Spherical astronomy\" + \"Astronomy -- Observations\""
+    },
+    {
+      "code" : "523",
+      "label" : "Descriptive astronomy + The universe and heavenly bodies"
+    },
+    {
+      "code" : "525",
+      "label" : "\"Earth\""
+    },
+    {
+      "code" : "526",
+      "label" : "\"Geodesy\""
+    },
+    {
+      "code" : "527",
+      "label" : "\"Navigation\""
+    },
+    {
+      "code" : "528",
+      "label" : "\"Ephemerides\" + \"Nautical almanacs\""
+    },
+    {
+      "code" : "529",
+      "label" : "\"Chronology\""
+    },
+    {
+      "code" : "530",
+      "label" : "\"Physics\""
+    },
+    {
+      "code" : "531",
+      "label" : "\"Mechanics\""
+    },
+    {
+      "code" : "532",
+      "label" : "\"Fluid mechanics\""
+    },
+    {
+      "code" : "533",
+      "label" : "\"Gas dynamics\" + \"Aerodynamics\" + \"Pneumatics\""
+    },
+    {
+      "code" : "534",
+      "label" : "\"Sound\""
+    },
+    {
+      "code" : "535",
+      "label" : "\"Optics\" + \"Light\""
+    },
+    {
+      "code" : "536",
+      "label" : "\"Heat\" + \"Thermodynamics\""
+    },
+    {
+      "code" : "537",
+      "label" : "\"Electricity\""
+    },
+    {
+      "code" : "538",
+      "label" : "\"Magnetism\""
+    },
+    {
+      "code" : "539",
+      "label" : "\"Nuclear physics\" + \"Matter\""
+    },
+    {
+      "code" : "540",
+      "label" : "\"Chemistry\""
+    },
+    {
+      "code" : "541",
+      "label" : "\"Chemistry, Physical and theoretical\" | Physical chemistry + Theoretical chemistry"
+    },
+    {
+      "code" : "542",
+      "label" : "\"Chemical laboratories\""
+    },
+    {
+      "code" : "543",
+      "label" : "\"Chemistry, Analytic\""
+    },
+    {
+      "code" : "546",
+      "label" : "\"Chemistry, Inorganic\""
+    },
+    {
+      "code" : "547",
+      "label" : "\"Chemistry, Organic\""
+    },
+    {
+      "code" : "548",
+      "label" : "\"Crystallography\""
+    },
+    {
+      "code" : "549",
+      "label" : "\"Mineralogy\""
+    },
+    {
+      "code" : "550",
+      "label" : "\"Geology\" + \"Earth sciences\""
+    },
+    {
+      "code" : "551",
+      "label" : "\"Physical geology\" + \"Geodynamics\""
+    },
+    {
+      "code" : "552",
+      "label" : "\"Petrology\" + \"Rocks\" + \"Minerals\""
+    },
+    {
+      "code" : "553",
+      "label" : "\"Geology, Economic\""
+    },
+    {
+      "code" : "554",
+      "label" : "\"Geology -- Europe\""
+    },
+    {
+      "code" : "555",
+      "label" : "\"Geology -- Asia\""
+    },
+    {
+      "code" : "556",
+      "label" : "\"Geology -- Africa\""
+    },
+    {
+      "code" : "557",
+      "label" : "\"Geology -- North America\""
+    },
+    {
+      "code" : "558",
+      "label" : "\"Geology -- South America\""
+    },
+    {
+      "code" : "559",
+      "label" : "Geology of Oceania, polar, and extraterrestrial regions"
+    },
+    {
+      "code" : "559.4",
+      "label" : "\"Geology -- Australia\""
+    },
+    {
+      "code" : "559.9",
+      "label" : "\"Astrogeology\""
+    },
+    {
+      "code" : "560",
+      "label" : "\"Paleontology\""
+    },
+    {
+      "code" : "561",
+      "label" : "\"Paleobotany\""
+    },
+    {
+      "code" : "563",
+      "label" : "\"Protozoa, Fossil\""
+    },
+    {
+      "code" : "564",
+      "label" : "\"Mollusks, Fossil\""
+    },
+    {
+      "code" : "565",
+      "label" : "\"Arthropoda, Fossil\""
+    },
+    {
+      "code" : "567",
+      "label" : "\"Fishes, Fossil\" + \"Amphibians, Fossil\" + \"Reptiles, Fossil\""
+    },
+    {
+      "code" : "567.9",
+      "label" : "\"Dinosaurs\""
+    },
+    {
+      "code" : "568",
+      "label" : "\"Birds, Fossil\""
+    },
+    {
+      "code" : "569",
+      "label" : "\"Mammals, Fossil\""
+    },
+    {
+      "code" : "570",
+      "label" : "\"Biology\" + \"Anthropology\""
+    },
+    {
+      "code" : "571",
+      "label" : "\"Prehistoric peoples\""
+    },
+    {
+      "code" : "572",
+      "label" : "\"Anthropology\""
+    },
+    {
+      "code" : "573",
+      "label" : "\"Physical anthropology\" + \"Human evolution\" + \"Human beings -- Origin\""
+    },
+    {
+      "code" : "575",
+      "label" : "\"Evolution (Biology)\" + \"Genetics\""
+    },
+    {
+      "code" : "576",
+      "label" : "\"Microbiology\""
+    },
+    {
+      "code" : "577",
+      "label" : "\"Life (Biology)\""
+    },
+    {
+      "code" : "578",
+      "label" : "\"Microscopy\""
+    },
+    {
+      "code" : "579",
+      "label" : "\"Biological specimens\""
+    },
+    {
+      "code" : "580",
+      "label" : "\"Botany\""
+    },
+    {
+      "code" : "581",
+      "label" : "\"Plant physiology\" + \"Plant anatomy\""
+    },
+    {
+      "code" : "582",
+      "label" : "\"Phanerogams\" + \"Trees\""
+    },
+    {
+      "code" : "583",
+      "label" : "\"Dicotyledons\""
+    },
+    {
+      "code" : "584",
+      "label" : "\"Monocotyledons\""
+    },
+    {
+      "code" : "585",
+      "label" : "\"Gymnosperms\""
+    },
+    {
+      "code" : "587",
+      "label" : "\"Pteridophyta\""
+    },
+    {
+      "code" : "588",
+      "label" : "\"Bryophytes\""
+    },
+    {
+      "code" : "590",
+      "label" : "\"Zoology\""
+    },
+    {
+      "code" : "591",
+      "label" : "Animal physiology"
+    },
+    {
+      "code" : "593",
+      "label" : "\"Protozoa\""
+    },
+    {
+      "code" : "594",
+      "label" : "\"Mollusks\""
+    },
+    {
+      "code" : "595",
+      "label" : "\"Arthropoda\" + \"Worms\""
+    },
+    {
+      "code" : "597",
+      "label" : "\"Fishes\" + \"Amphibians\" + \"Reptiles\""
+    },
+    {
+      "code" : "598",
+      "label" : "\"Birds\""
+    },
+    {
+      "code" : "599",
+      "label" : "\"Mammals\""
+    },
+    {
+      "code" : "600",
+      "label" : "\"Industrial arts\" + \"Technology\" + \"Engineering\" | Applied sciences and technology"
+    },
+    {
+      "code" : "601",
+      "label" : "\"Technology -- Philosophy\" | Philosophy of technology"
+    },
+    {
+      "code" : "602",
+      "label" : "\"Formulas, recipes, etc.\" | Technological recipes"
+    },
+    {
+      "code" : "603",
+      "label" : "\"Technology -- Dictionaries\" + \"Technology -- Encyclopedias\" + Industrial arts -- Dictionaries + Engineering -- Dictionaries"
+    },
+    {
+      "code" : "604",
+      "label" : "Essay collections on technology, engineering, and industrial arts"
+    },
+    {
+      "code" : "605",
+      "label" : "\"Technology -- Periodicals\" + \"Industrial arts -- Periodicals\" + \"Engineering -- Periodicals\""
+    },
+    {
+      "code" : "606",
+      "label" : "\"Technology -- Societies, etc.\" + \"Engineering -- Societies, etc.\" + Industrial arts -- Societies, etc."
+    },
+    {
+      "code" : "607",
+      "label" : "\"Technical education\" + \"Industrial arts -- Study and teaching\" + \"Engineering -- Study and teaching\" + \"Research, Industrial\""
+    },
+    {
+      "code" : "608",
+      "label" : "\"Inventions\" + \"Patents\""
+    },
+    {
+      "code" : "609",
+      "label" : "\"Technology -- History\" + \"Industrial arts -- History\""
+    },
+    {
+      "code" : "610",
+      "label" : "\"Medicine\""
+    },
+    {
+      "code" : "611",
+      "label" : "\"Anatomy\""
+    },
+    {
+      "code" : "612",
+      "label" : "\"Physiology\""
+    },
+    {
+      "code" : "612.1",
+      "label" : "\"Cardiovascular system\""
+    },
+    {
+      "code" : "612.2",
+      "label" : "\"Respiration\""
+    },
+    {
+      "code" : "612.3",
+      "label" : "\"Digestion\""
+    },
+    {
+      "code" : "612.4",
+      "label" : "Glands"
+    },
+    {
+      "code" : "612.5",
+      "label" : "\"Animal heat\""
+    },
+    {
+      "code" : "612.6",
+      "label" : "\"Reproduction\""
+    },
+    {
+      "code" : "612.7",
+      "label" : "\"Musculoskeletal system\" + \"Larynx\" + \"Skin\""
+    },
+    {
+      "code" : "612.8",
+      "label" : "\"Nervous system\""
+    },
+    {
+      "code" : "612.81",
+      "label" : "\"Nerves, Peripheral\""
+    },
+    {
+      "code" : "612.82",
+      "label" : "\"Central nervous system\" + \"Brain\""
+    },
+    {
+      "code" : "612.84",
+      "label" : "\"Vision\""
+    },
+    {
+      "code" : "612.85",
+      "label" : "\"Hearing\""
+    },
+    {
+      "code" : "612.86",
+      "label" : "\"Smell\""
+    },
+    {
+      "code" : "612.87",
+      "label" : "\"Taste\""
+    },
+    {
+      "code" : "612.88",
+      "label" : "\"Touch\""
+    },
+    {
+      "code" : "612.9",
+      "label" : "Other parts of the body"
+    },
+    {
+      "code" : "613",
+      "label" : "\"Health\" + \"Hygiene\""
+    },
+    {
+      "code" : "614",
+      "label" : "\"Public health\""
+    },
+    {
+      "code" : "615",
+      "label" : "\"Materia medica\" + \"Drugs\" + \"Pharmacy\""
+    },
+    {
+      "code" : "615.8",
+      "label" : "\"Medicine, Physical\""
+    },
+    {
+      "code" : "615.84",
+      "label" : "\"Radiology, Medical\""
+    },
+    {
+      "code" : "615.85",
+      "label" : "\"Mental healing\""
+    },
+    {
+      "code" : "615.88",
+      "label" : "\"Patent medicines\""
+    },
+    {
+      "code" : "615.88",
+      "label" : "\"Traditional medicine\""
+    },
+    {
+      "code" : "615.892",
+      "label" : "\"Acupuncture\""
+    },
+    {
+      "code" : "616",
+      "label" : "\"Pathology\" + \"Diseases\" + Treatment"
+    },
+    {
+      "code" : "617",
+      "label" : "\"Surgery\" + \"Dentistry\""
+    },
+    {
+      "code" : "618",
+      "label" : "\"Women -- Health and hygiene\" + \"Children -- Health and hygiene\" + \"Gynecology\" + \"Pediatrics\""
+    },
+    {
+      "code" : "620",
+      "label" : "\"Engineering\""
+    },
+    {
+      "code" : "621",
+      "label" : "\"Mechanical engineering\" + \"Machinery\""
+    },
+    {
+      "code" : "621.1",
+      "label" : "\"Steam engineering\""
+    },
+    {
+      "code" : "621.2",
+      "label" : "\"Hydraulic machinery\""
+    },
+    {
+      "code" : "621.3",
+      "label" : "\"Electrical engineering\""
+    },
+    {
+      "code" : "621.4",
+      "label" : "\"Heat engineering\""
+    },
+    {
+      "code" : "621.5",
+      "label" : "\"Pneumatic machinery\" + \"Compressed air\" + \"Refrigeration and refrigerating machinery\""
+    },
+    {
+      "code" : "621.6",
+      "label" : "\"Fans (Machinery)\" + \"Pumping machinery\""
+    },
+    {
+      "code" : "621.7",
+      "label" : "\"Production engineering\" + \"Factories\" + \"Machine-shop practice\""
+    },
+    {
+      "code" : "621.8",
+      "label" : "Other mechanical engineering topics"
+    },
+    {
+      "code" : "621.9",
+      "label" : "\"Machine-tools\""
+    },
+    {
+      "code" : "622",
+      "label" : "\"Mining engineering\" + \"Mines and mineral resources\""
+    },
+    {
+      "code" : "623",
+      "label" : "\"Military engineering\" + \"Marine engineering\""
+    },
+    {
+      "code" : "624",
+      "label" : "\"Bridges\" + \"Roofs\" + \"Civil engineering\""
+    },
+    {
+      "code" : "625",
+      "label" : "\"Railroads\" (from engineering perspectives) + \"Roads\""
+    },
+    {
+      "code" : "627",
+      "label" : "\"Hydraulic engineering\" + \"Ocean engineering\" + \"Rivers\" + \"Harbors\""
+    },
+    {
+      "code" : "628",
+      "label" : "\"Sanitary engineering\" + \"Sanitation\" + \"Water-supply\""
+    },
+    {
+      "code" : "629",
+      "label" : "Other branches of engineering"
+    },
+    {
+      "code" : "630",
+      "label" : "\"Agriculture\""
+    },
+    {
+      "code" : "631",
+      "label" : "\"Farms\" + \"Soils\" + \"Agricultural machinery\" + \"Plants -- Nutrition\" + \"Water in agriculture\""
+    },
+    {
+      "code" : "632",
+      "label" : "Agricultural hindrances (blight, disease, weeds, pests)"
+    },
+    {
+      "code" : "633",
+      "label" : "\"Field crops\""
+    },
+    {
+      "code" : "634",
+      "label" : "\"Tree crops\" + \"Fruit\" + \"Nuts\" + \"Vineyards\" + \"Orchards\" + \"Forests and forestry\" (in agricultural applications)"
+    },
+    {
+      "code" : "635",
+      "label" : "\"Gardening\" (for food)"
+    },
+    {
+      "code" : "636",
+      "label" : "\"Domestic animals\" + \"Pets\""
+    },
+    {
+      "code" : "637",
+      "label" : "\"Dairying\""
+    },
+    {
+      "code" : "638",
+      "label" : "\"Bee culture\" + \"Sericulture\""
+    },
+    {
+      "code" : "639",
+      "label" : "\"Hunting\" (for food) + \"Fishing\" (for food) + \"Trapping\" + \"Fish culture\""
+    },
+    {
+      "code" : "640",
+      "label" : "\"Home economics\""
+    },
+    {
+      "code" : "641",
+      "label" : "\"Cooking\" + \"Gastronomy\""
+    },
+    {
+      "code" : "642",
+      "label" : "\"Entertaining\""
+    },
+    {
+      "code" : "643",
+      "label" : "\"Dwellings\""
+    },
+    {
+      "code" : "644",
+      "label" : "\"Dwellings -- Heating and ventilation\" + \"Dwellings -- Energy conservation\" + \"Dwellings -- Lighting\""
+    },
+    {
+      "code" : "645",
+      "label" : "\"House furnishings\""
+    },
+    {
+      "code" : "646",
+      "label" : "\"Clothing and dress\" + \"Fashion\" + \"Beauty, Personal\""
+    },
+    {
+      "code" : "647",
+      "label" : "\"Household employees\" + \"Caterers and catering\" + \"Real estate management\""
+    },
+    {
+      "code" : "648",
+      "label" : "\"Sanitation, Household\""
+    },
+    {
+      "code" : "649",
+      "label" : "\"Child rearing\" + \"Parenting\""
+    },
+    {
+      "code" : "650",
+      "label" : "\"Business\""
+    },
+    {
+      "code" : "651",
+      "label" : "\"Office management\""
+    },
+    {
+      "code" : "652",
+      "label" : "\"Business communication\" + \"Typewriting\" + \"Copying processes\" + \"Word processing\""
+    },
+    {
+      "code" : "653",
+      "label" : "\"Shorthand\" + \"Dictation (Office practice)\""
+    },
+    {
+      "code" : "657",
+      "label" : "\"Accounting\" + \"Bookkeeping\""
+    },
+    {
+      "code" : "658",
+      "label" : "\"Management\""
+    },
+    {
+      "code" : "659",
+      "label" : "\"Industrial publicity\" + \"Marketing\" + other business topics"
+    },
+    {
+      "code" : "660",
+      "label" : "\"Chemistry, Technical\" + \"Chemical engineering\""
+    },
+    {
+      "code" : "661",
+      "label" : "\"Chemicals\""
+    },
+    {
+      "code" : "662",
+      "label" : "\"Explosives\" + \"Fuel\""
+    },
+    {
+      "code" : "663",
+      "label" : "\"Beverages\""
+    },
+    {
+      "code" : "664",
+      "label" : "\"Food\""
+    },
+    {
+      "code" : "665",
+      "label" : "\"Petroleum\" + \"Oils and fats\" + \"Natural gas\" + \"Gas manufacture and works\""
+    },
+    {
+      "code" : "666",
+      "label" : "\"Ceramics\" + \"Clay\" + \"Cement\""
+    },
+    {
+      "code" : "667",
+      "label" : "\"Pigments\" + \"Paint\" + \"Cleaning\" + \"Textile printing\""
+    },
+    {
+      "code" : "668",
+      "label" : "\"Polymers\" + \"Plastics\" + other organic chemicals"
+    },
+    {
+      "code" : "669",
+      "label" : "\"Metallurgy\" + \"Assaying\""
+    },
+    {
+      "code" : "670",
+      "label" : "\"Manufactures\" | Manufacturing"
+    },
+    {
+      "code" : "672",
+      "label" : "\"Ironwork\" + \"Steelwork\""
+    },
+    {
+      "code" : "673",
+      "label" : "\"Brass\" + \"Bronze\""
+    },
+    {
+      "code" : "674",
+      "label" : "\"Forest products\""
+    },
+    {
+      "code" : "675",
+      "label" : "\"Leather\""
+    },
+    {
+      "code" : "676",
+      "label" : "\"Paper\" + \"Paper products\""
+    },
+    {
+      "code" : "677",
+      "label" : "\"Textile fabrics\""
+    },
+    {
+      "code" : "678",
+      "label" : "\"Rubber\""
+    },
+    {
+      "code" : "679",
+      "label" : "Other manufactured goods"
+    },
+    {
+      "code" : "680",
+      "label" : "\"Handicraft\" + \"Occupations\""
+    },
+    {
+      "code" : "681",
+      "label" : "\"Clocks and watches\" + \"Scientific apparatus and instruments\""
+    },
+    {
+      "code" : "682",
+      "label" : "\"Blacksmithing\""
+    },
+    {
+      "code" : "683",
+      "label" : "\"Firearms\" + \"Locksmithing\""
+    },
+    {
+      "code" : "684",
+      "label" : "\"Woodwork\" + \"Furniture\" (utilitarian)"
+    },
+    {
+      "code" : "685",
+      "label" : "\"Footwear\" + \"Leather industry and trade\" + \"Luggage\""
+    },
+    {
+      "code" : "686",
+      "label" : "\"Bookbinding\" + \"Printing\""
+    },
+    {
+      "code" : "687",
+      "label" : "\"Clothing trade\""
+    },
+    {
+      "code" : "688",
+      "label" : "\"Toys\" + \"Costume jewelry\" + \"Carriages and carts\" + \"Packaging\""
+    },
+    {
+      "code" : "689",
+      "label" : "\"Basket making\""
+    },
+    {
+      "code" : "690",
+      "label" : "\"Building\""
+    },
+    {
+      "code" : "691",
+      "label" : "\"Building materials\" + Building process + Building preservation"
+    },
+    {
+      "code" : "692",
+      "label" : "\"Architecture -- Designs and plans\" + \"Buildings -- Specifications\""
+    },
+    {
+      "code" : "693",
+      "label" : "\"Masonry\" + \"Building, Fireproof\" + Weatherproofing + \"Acoustical engineering\" + Special building techniques"
+    },
+    {
+      "code" : "694",
+      "label" : "\"Carpentry\""
+    },
+    {
+      "code" : "695",
+      "label" : "\"Roofing\""
+    },
+    {
+      "code" : "696",
+      "label" : "\"Plumbing\" + \"Pipe fitting\""
+    },
+    {
+      "code" : "697",
+      "label" : "\"Heating\" + \"Ventilation\" + \"Air conditioning\""
+    },
+    {
+      "code" : "698",
+      "label" : "\"Painting, Industrial\" + \"House painting\" + \"Paperhanging\""
+    },
+    {
+      "code" : "699",
+      "label" : "\"Railroad cars\""
+    },
+    {
+      "code" : "700",
+      "label" : "\"Arts\" | Arts and recreation"
+    },
+    {
+      "code" : "701",
+      "label" : "\"Art -- Philosophy\" + Aesthetics"
+    },
+    {
+      "code" : "702",
+      "label" : "\"Art appreciation\" + \"Art -- Vocational guidance\" Art surveys and introductions"
+    },
+    {
+      "code" : "703",
+      "label" : "\"Art -- Dictionaries\" + Art encyclopedias"
+    },
+    {
+      "code" : "704",
+      "label" : "Essays, lectures, addresses in the arts"
+    },
+    {
+      "code" : "705",
+      "label" : "\"Art -- Periodicals\""
+    },
+    {
+      "code" : "706",
+      "label" : "\"Art -- Societies, etc.\""
+    },
+    {
+      "code" : "707",
+      "label" : "\"Art -- Study and teaching\""
+    },
+    {
+      "code" : "708",
+      "label" : "\"Art museums\""
+    },
+    {
+      "code" : "709",
+      "label" : "\"Art -- History\""
+    },
+    {
+      "code" : "710",
+      "label" : "\"Gardening\" (ornamental) + \"Parks\" + \"Forests and forestry\" (in conservation applications)"
+    },
+    {
+      "code" : "711",
+      "label" : "\"City planning\" + \"Regional planning\""
+    },
+    {
+      "code" : "712",
+      "label" : "\"Gardens\" + \"Landscape architecture\""
+    },
+    {
+      "code" : "713",
+      "label" : "\"Scenic byways\" + \"Garden walks\""
+    },
+    {
+      "code" : "714",
+      "label" : "\"Water in landscape architecture\""
+    },
+    {
+      "code" : "715",
+      "label" : "\"Shrubs\" + \"Ornamental trees\""
+    },
+    {
+      "code" : "716",
+      "label" : "\"Gardening\" (ornamental)"
+    },
+    {
+      "code" : "717",
+      "label" : "\"Garden ornaments and furniture\""
+    },
+    {
+      "code" : "718",
+      "label" : "\"Sepulchral monuments\""
+    },
+    {
+      "code" : "719",
+      "label" : "\"Cemeteries\""
+    },
+    {
+      "code" : "720",
+      "label" : "\"Architecture\""
+    },
+    {
+      "code" : "721",
+      "label" : "\"Architectural design\""
+    },
+    {
+      "code" : "722",
+      "label" : "\"Architecture, Ancient\" + \"Architecture, Oriental\""
+    },
+    {
+      "code" : "723",
+      "label" : "\"Architecture, Medieval\" + \"Architecture, Byzantine\" + \"Islamic architecture\" + \"Architecture, Gothic\""
+    },
+    {
+      "code" : "724",
+      "label" : "\"Architecture, Modern\""
+    },
+    {
+      "code" : "725",
+      "label" : "\"Public architecture\""
+    },
+    {
+      "code" : "726",
+      "label" : "\"Religious architecture\""
+    },
+    {
+      "code" : "727",
+      "label" : "(\"School buildings\" + \"Museum architecture\")| Educational and research architecture"
+    },
+    {
+      "code" : "728",
+      "label" : "\"Architecture, Domestic\""
+    },
+    {
+      "code" : "729",
+      "label" : "\"Decoration and ornament\""
+    },
+    {
+      "code" : "730",
+      "label" : "\"Sculpture\""
+    },
+    {
+      "code" : "731",
+      "label" : "\"Sculpture materials\" + \"Sculpture -- Technique\" + Methods of sculpture"
+    },
+    {
+      "code" : "733",
+      "label" : "\"Sculpture, Classical\""
+    },
+    {
+      "code" : "734",
+      "label" : "\"Sculpture, Medieval\""
+    },
+    {
+      "code" : "735",
+      "label" : "\"Sculpture, Modern\""
+    },
+    {
+      "code" : "736",
+      "label" : "\"Carving (Decorative arts)\" + \"Gems\" + \"Glyptics\""
+    },
+    {
+      "code" : "737",
+      "label" : "\"Numismatics\" | Coins and medals"
+    },
+    {
+      "code" : "738",
+      "label" : "\"Pottery\""
+    },
+    {
+      "code" : "739",
+      "label" : "\"Art metal-work\""
+    },
+    {
+      "code" : "740",
+      "label" : "\"Drawing\" + \"Decoration and ornament\" + \"Design\""
+    },
+    {
+      "code" : "741",
+      "label" : "\"Drawing -- Technique\" + \"Caricatures and cartoons\" + Specific drawing techniques"
+    },
+    {
+      "code" : "742",
+      "label" : "\"Perspective\""
+    },
+    {
+      "code" : "743",
+      "label" : "\"Anatomy, Artistic\" + \"Figure drawing\" + \"Nude in art\" + \"Animals in art\""
+    },
+    {
+      "code" : "744",
+      "label" : "\"Mechanical drawing\" + \"Geometrical drawing\""
+    },
+    {
+      "code" : "745",
+      "label" : "\"Decorative arts\""
+    },
+    {
+      "code" : "746",
+      "label" : "\"Needlework\" + \"Fancy work\""
+    },
+    {
+      "code" : "747",
+      "label" : "\"Interior decoration\""
+    },
+    {
+      "code" : "748",
+      "label" : "\"Glassware\" + \"Glass art\""
+    },
+    {
+      "code" : "749",
+      "label" : "Artistic furniture"
+    },
+    {
+      "code" : "750",
+      "label" : "\"Painting\" + \"Art\""
+    },
+    {
+      "code" : "751",
+      "label" : "\"Painting -- Technique\" + \"Artists' materials\" + Methods of painting"
+    },
+    {
+      "code" : "752",
+      "label" : "\"Color in art\""
+    },
+    {
+      "code" : "753",
+      "label" : "Epic, mythic, and idealistic painting"
+    },
+    {
+      "code" : "754",
+      "label" : "\"Genre painting\""
+    },
+    {
+      "code" : "755",
+      "label" : "\"Religious art\" + Religious painting"
+    },
+    {
+      "code" : "756",
+      "label" : "Painting of historical or milirary scenes"
+    },
+    {
+      "code" : "757",
+      "label" : "\"Portraits\""
+    },
+    {
+      "code" : "758",
+      "label" : "\"Landscape painting\" + \"Marine painting\" + \"Still-life painting\""
+    },
+    {
+      "code" : "759",
+      "label" : "Painting of specific regions and artists + Schools pf painting"
+    },
+    {
+      "code" : "760",
+      "label" : "\"Engraving\" + \"Graphic arts\""
+    },
+    {
+      "code" : "761",
+      "label" : "\"Wood-engraving\" + \"Relief printing\""
+    },
+    {
+      "code" : "762",
+      "label" : "Cooper and steel engraving"
+    },
+    {
+      "code" : "763",
+      "label" : "\"Lithography\""
+    },
+    {
+      "code" : "764",
+      "label" : "\"Chromolithography\" + \"Serigraphy\""
+    },
+    {
+      "code" : "765",
+      "label" : "Line engraving + \"Stipple engraving\""
+    },
+    {
+      "code" : "766",
+      "label" : "\"Mezzotint engraving\" + \"Aquatint\""
+    },
+    {
+      "code" : "767",
+      "label" : "\"Etchers\" + \"Etching\""
+    },
+    {
+      "code" : "768",
+      "label" : "Machine engraving"
+    },
+    {
+      "code" : "769",
+      "label" : "\"Printers\" + \"Engravers\" + Collections of engravings and printing"
+    },
+    {
+      "code" : "770",
+      "label" : "\"Photography\""
+    },
+    {
+      "code" : "771",
+      "label" : "\"Photography -- Equipment and supplies\" + Photography technique"
+    },
+    {
+      "code" : "772",
+      "label" : "\"Color photography\" + \"Photography -- Printing processes\""
+    },
+    {
+      "code" : "773",
+      "label" : "\"Photography -- Printing processes -- Oil\""
+    },
+    {
+      "code" : "774",
+      "label" : "\"Holography\""
+    },
+    {
+      "code" : "775",
+      "label" : "\"Photography -- Digital techniques\""
+    },
+    {
+      "code" : "776",
+      "label" : "\"Digital art\""
+    },
+    {
+      "code" : "777",
+      "label" : "\"Photoengraving\""
+    },
+    {
+      "code" : "778",
+      "label" : "Photographic applications + \"Cinematography\""
+    },
+    {
+      "code" : "779",
+      "label" : "\"Photographers\" + \"Photographs\""
+    },
+    {
+      "code" : "780",
+      "label" : "\"Music\""
+    },
+    {
+      "code" : "781",
+      "label" : "\"Music theory\""
+    },
+    {
+      "code" : "782",
+      "label" : "\"Dramatic music\""
+    },
+    {
+      "code" : "783",
+      "label" : "\"Sacred music\""
+    },
+    {
+      "code" : "784",
+      "label" : "\"Vocal music\" + \"Popular music\""
+    },
+    {
+      "code" : "785",
+      "label" : "\"Orchestra\" | Orchestral music"
+    },
+    {
+      "code" : "786",
+      "label" : "\"Keyboard instruments\""
+    },
+    {
+      "code" : "787",
+      "label" : "\"Stringed instruments\""
+    },
+    {
+      "code" : "788",
+      "label" : "\"Wind instruments\""
+    },
+    {
+      "code" : "790",
+      "label" : "\"Amusements\" + \"Recreation\""
+    },
+    {
+      "code" : "791",
+      "label" : "Public entertainment"
+    },
+    {
+      "code" : "792",
+      "label" : "\"Theater\""
+    },
+    {
+      "code" : "794",
+      "label" : "Games of skill"
+    },
+    {
+      "code" : "795",
+      "label" : "\"Card games\" + Games of chance"
+    },
+    {
+      "code" : "796",
+      "label" : "\"Sports\" + \"Athletics\""
+    },
+    {
+      "code" : "797",
+      "label" : "\"Boats and boating\" + \"Aquatic sports\" + \"Aeronautical sports\""
+    },
+    {
+      "code" : "798",
+      "label" : "\"Horsemanship\" + \"Horse sports\" + \"Dog sports\""
+    },
+    {
+      "code" : "799",
+      "label" : "\"Hunting\" (for sport) + \"Fishing\" (for sport) + \"Shooting\""
+    },
+    {
+      "code" : "800",
+      "label" : "\"Literature\""
+    },
+    {
+      "code" : "801",
+      "label" : "\"Literature -- Philosophy\" + \"Literature -- Aesthetics\""
+    },
+    {
+      "code" : "802",
+      "label" : "Literary compendia and outlines"
+    },
+    {
+      "code" : "803",
+      "label" : "Literature -- Dictionaries + Literary encyclopedias"
+    },
+    {
+      "code" : "805",
+      "label" : "\"Literature -- Periodicals\""
+    },
+    {
+      "code" : "806",
+      "label" : "\"Literature -- Societies, etc.\""
+    },
+    {
+      "code" : "807",
+      "label" : "\"Literature -- Research\" + \"Literature -- Study and teaching\""
+    },
+    {
+      "code" : "808",
+      "label" : "\"Rhetoric\" + \"Style, Literary\""
+    },
+    {
+      "code" : "809",
+      "label" : "Specific topics in literature"
+    },
+    {
+      "code" : "810",
+      "label" : "\"American literature\""
+    },
+    {
+      "code" : "811",
+      "label" : "\"American poetry\""
+    },
+    {
+      "code" : "812",
+      "label" : "\"American drama\""
+    },
+    {
+      "code" : "813",
+      "label" : "\"American fiction\""
+    },
+    {
+      "code" : "814",
+      "label" : "\"American essays\""
+    },
+    {
+      "code" : "815",
+      "label" : "\"Speeches, addresses, etc., American\""
+    },
+    {
+      "code" : "816",
+      "label" : "\"American letters\""
+    },
+    {
+      "code" : "817",
+      "label" : "\"American wit and humor\""
+    },
+    {
+      "code" : "818",
+      "label" : "\"Authors, American\" + American miscellany"
+    },
+    {
+      "code" : "820",
+      "label" : "\"English literature\""
+    },
+    {
+      "code" : "821",
+      "label" : "\"English poetry\""
+    },
+    {
+      "code" : "822",
+      "label" : "\"English drama\""
+    },
+    {
+      "code" : "823",
+      "label" : "\"English fiction\""
+    },
+    {
+      "code" : "824",
+      "label" : "\"English essays\""
+    },
+    {
+      "code" : "825",
+      "label" : "\"Speeches, addresses, etc., English\""
+    },
+    {
+      "code" : "826",
+      "label" : "\"English letters\""
+    },
+    {
+      "code" : "827",
+      "label" : "\"English wit and humor\""
+    },
+    {
+      "code" : "828",
+      "label" : "\"Authors, English\" + English miscellany"
+    },
+    {
+      "code" : "829",
+      "label" : "\"English literature -- Old English, ca. 450-1100\""
+    },
+    {
+      "code" : "830",
+      "label" : "\"German literature\""
+    },
+    {
+      "code" : "831",
+      "label" : "\"German poetry\""
+    },
+    {
+      "code" : "832",
+      "label" : "\"German drama\""
+    },
+    {
+      "code" : "833",
+      "label" : "\"German fiction\""
+    },
+    {
+      "code" : "834",
+      "label" : "\"German essays\""
+    },
+    {
+      "code" : "835",
+      "label" : "\"Speeches, addresses, etc., German\""
+    },
+    {
+      "code" : "836",
+      "label" : "\"German letters\""
+    },
+    {
+      "code" : "837",
+      "label" : "\"German wit and humor\""
+    },
+    {
+      "code" : "838",
+      "label" : "\"Authors, German\" + German miscellany"
+    },
+    {
+      "code" : "839",
+      "label" : "Literature in other Germanic languages"
+    },
+    {
+      "code" : "840",
+      "label" : "\"French literature\""
+    },
+    {
+      "code" : "841",
+      "label" : "\"French poetry\""
+    },
+    {
+      "code" : "842",
+      "label" : "\"French drama\""
+    },
+    {
+      "code" : "843",
+      "label" : "\"French fiction\""
+    },
+    {
+      "code" : "844",
+      "label" : "\"French essays\""
+    },
+    {
+      "code" : "845",
+      "label" : "\"Speeches, addresses, etc., French\""
+    },
+    {
+      "code" : "846",
+      "label" : "\"French letters\""
+    },
+    {
+      "code" : "847",
+      "label" : "\"French wit and humor\""
+    },
+    {
+      "code" : "848",
+      "label" : "\"Authors, French\" + French miscellany"
+    },
+    {
+      "code" : "849",
+      "label" : "\"Proven&ccedil;al literature\"  + \"Catalan literature\""
+    },
+    {
+      "code" : "850",
+      "label" : "\"Italian literature\" + \"Romanian literature\""
+    },
+    {
+      "code" : "851",
+      "label" : "\"Italian poetry\""
+    },
+    {
+      "code" : "852",
+      "label" : "\"Italian drama\""
+    },
+    {
+      "code" : "853",
+      "label" : "\"Italian fiction\""
+    },
+    {
+      "code" : "854",
+      "label" : "\"Italian essays\""
+    },
+    {
+      "code" : "855",
+      "label" : "\"Speeches, addresses, etc., Italian\""
+    },
+    {
+      "code" : "856",
+      "label" : "\"Italian letters\""
+    },
+    {
+      "code" : "857",
+      "label" : "\"Italian wit and humor\""
+    },
+    {
+      "code" : "858",
+      "label" : "\"Authors, Italian\" + Italian miscellany"
+    },
+    {
+      "code" : "859",
+      "label" : "\"Romanian literature\""
+    },
+    {
+      "code" : "860",
+      "label" : "\"Spanish literature\""
+    },
+    {
+      "code" : "861",
+      "label" : "\"Spanish poetry\""
+    },
+    {
+      "code" : "862",
+      "label" : "\"Spanish drama\""
+    },
+    {
+      "code" : "863",
+      "label" : "\"Spanish fiction\""
+    },
+    {
+      "code" : "864",
+      "label" : "\"Spanish essays\""
+    },
+    {
+      "code" : "855",
+      "label" : "\"Speeches, addresses, etc., Spanish\""
+    },
+    {
+      "code" : "866",
+      "label" : "\"Spanish letters\""
+    },
+    {
+      "code" : "857",
+      "label" : "\"Spanish wit and humor\""
+    },
+    {
+      "code" : "868",
+      "label" : "\"Authors, Spanish\" + Spanish miscellany"
+    },
+    {
+      "code" : "869",
+      "label" : "\"Portuguese literature\""
+    },
+    {
+      "code" : "870",
+      "label" : "\"Latin literature\""
+    },
+    {
+      "code" : "871",
+      "label" : "\"Latin poetry\""
+    },
+    {
+      "code" : "872",
+      "label" : "\"Latin drama\""
+    },
+    {
+      "code" : "873",
+      "label" : "\"Epic poetry, Latin\""
+    },
+    {
+      "code" : "874",
+      "label" : "Latin lyric poetry"
+    },
+    {
+      "code" : "875",
+      "label" : "\"Speeches, addresses, etc., Latin.\""
+    },
+    {
+      "code" : "876",
+      "label" : "\"Latin letters\""
+    },
+    {
+      "code" : "877",
+      "label" : "\"Latin wit and humor\""
+    },
+    {
+      "code" : "878",
+      "label" : "\"Authors, Latin\" + Latin miscellany"
+    },
+    {
+      "code" : "879",
+      "label" : "\"Latin literature, Medieval and modern\""
+    },
+    {
+      "code" : "880",
+      "label" : "\"Greek literature\" + \"Classical literature\""
+    },
+    {
+      "code" : "881",
+      "label" : "\"Greek poetry\" + \"Classical poetry\""
+    },
+    {
+      "code" : "882",
+      "label" : "\"Greek drama\" + \"Classical drama\""
+    },
+    {
+      "code" : "883",
+      "label" : "\"Epic poetry, Greek\" + \"Epic poetry, classical\""
+    },
+    {
+      "code" : "884",
+      "label" : "Greek and classical lyric poetry"
+    },
+    {
+      "code" : "885",
+      "label" : "\"Speeches, addresses, etc., Greek\" + Classical speeches"
+    },
+    {
+      "code" : "886",
+      "label" : "\"Greek letters\" + \"Classical letters\""
+    },
+    {
+      "code" : "887",
+      "label" : "\"Greek wit and humor\" + \"Classical wit and humor\""
+    },
+    {
+      "code" : "888",
+      "label" : "\"Authors, Greek\" + \"Authors, Classical\" + Greek and classical miscellany"
+    },
+    {
+      "code" : "889",
+      "label" : "\"Greek literature, Modern\""
+    },
+    {
+      "code" : "890",
+      "label" : "Literature of other languages"
+    },
+    {
+      "code" : "891",
+      "label" : "Literature of other Indo-European languages"
+    },
+    {
+      "code" : "892",
+      "label" : "\"Semitic literature\""
+    },
+    {
+      "code" : "893",
+      "label" : "Literature of Hamitic languages"
+    },
+    {
+      "code" : "894",
+      "label" : "\"Altaic literature\" + \"Uralic literature\""
+    },
+    {
+      "code" : "895",
+      "label" : "\"East Asian literature\""
+    },
+    {
+      "code" : "896",
+      "label" : "\"African literature\""
+    },
+    {
+      "code" : "897",
+      "label" : "\"Indian literature\" from North America"
+    },
+    {
+      "code" : "898",
+      "label" : "\"Indian literature\" from South America"
+    },
+    {
+      "code" : "899",
+      "label" : "\"Austronesian literature\" + other literatures"
+    },
+    {
+      "code" : "900",
+      "label" : "\"History\" + \"Geography\""
+    },
+    {
+      "code" : "901",
+      "label" : "\"Civilization\" + \"History -- Philosophy\" | Philosophy of history"
+    },
+    {
+      "code" : "902",
+      "label" : "\"Chronology, Historical\""
+    },
+    {
+      "code" : "903",
+      "label" : "\"History --  Dictionaries\" + Historical encyclopedias"
+    },
+    {
+      "code" : "904",
+      "label" : "Historical essays, lectures, addresses"
+    },
+    {
+      "code" : "905",
+      "label" : "\"History -- Periodicals\""
+    },
+    {
+      "code" : "906",
+      "label" : "\"History -- Societies, etc.\""
+    },
+    {
+      "code" : "907",
+      "label" : "\"History -- Study and teaching\""
+    },
+    {
+      "code" : "908",
+      "label" : "Historical collections and miscellanea"
+    },
+    {
+      "code" : "909",
+      "label" : "Universal and general modern histories"
+    },
+    {
+      "code" : "910",
+      "label" : "\"Geography\" + \"Voyages and travels\""
+    },
+    {
+      "code" : "911",
+      "label" : "\"Historical geography\""
+    },
+    {
+      "code" : "912",
+      "label" : "\"Maps\" + \"Atlases\""
+    },
+    {
+      "code" : "913",
+      "label" : "\"Antiquities\" + \"Archaeology\""
+    },
+    {
+      "code" : "914",
+      "label" : "\"Europe -- Description and travel\""
+    },
+    {
+      "code" : "915",
+      "label" : "\"Asia -- Description and travel\""
+    },
+    {
+      "code" : "916",
+      "label" : "\"Africa -- Description and travel\""
+    },
+    {
+      "code" : "917",
+      "label" : "\"America -- Description and travel\" + \"North America -- Description and travel\""
+    },
+    {
+      "code" : "918",
+      "label" : "\"Latin America -- Description and travel\" + \"South America -- Description and travel\""
+    },
+    {
+      "code" : "919",
+      "label" : "\"Oceania -- Description and travel\" + \"Polar regions -- Discovery and exploration\""
+    },
+    {
+      "code" : "920",
+      "label" : "\"Biography\""
+    },
+    {
+      "code" : "930",
+      "label" : "\"History, Ancient\" | Ancient history"
+    },
+    {
+      "code" : "931",
+      "label" : "(\"China -- History -- To 221 B.C.\" + \"China -- History -- 221 B.C.-960 A.D.\" ) | Ancient China"
+    },
+    {
+      "code" : "932",
+      "label" : "\"Egypt -- History -- To 640 A.D.\" | Ancient Egypt"
+    },
+    {
+      "code" : "933",
+      "label" : "(\"Palestine -- History -- To 70 A.D.\" + \"Jews -- History -- To 70 A.D.\") | Ancient Judea"
+    },
+    {
+      "code" : "934",
+      "label" : "(\"India -- History -- To 324 B.C.\" + \"India -- History -- 324 B.C.-1000 A.D.\") | Ancient India"
+    },
+    {
+      "code" : "935",
+      "label" : "\"Iraq -- History -- To 634\" + \"Iran -- History -- To 640\""
+    },
+    {
+      "code" : "936",
+      "label" : "\"Europe -- History -- To 476\""
+    },
+    {
+      "code" : "937",
+      "label" : "\"Rome\" | Ancient Rome"
+    },
+    {
+      "code" : "938",
+      "label" : "(\"Greece -- History -- To 146 B.C.\" + \"Greece -- History -- 146 B.C.-323 A.D.\") | Ancient Greece"
+    },
+    {
+      "code" : "939",
+      "label" : "Ancient history in other areas"
+    },
+    {
+      "code" : "940",
+      "label" : "\"Europe\""
+    },
+    {
+      "code" : "941",
+      "label" : "\"Scotland\" + \"Ireland\""
+    },
+    {
+      "code" : "942",
+      "label" : "\"England\" + \"Great Britain\""
+    },
+    {
+      "code" : "943",
+      "label" : "\"Germany\" + \"Europe, Central\""
+    },
+    {
+      "code" : "944",
+      "label" : "\"France\""
+    },
+    {
+      "code" : "945",
+      "label" : "\"Italy\""
+    },
+    {
+      "code" : "946",
+      "label" : "\"Spain\" + \"Portugal\""
+    },
+    {
+      "code" : "947",
+      "label" : "\"Russia\" + \"Finland\" + \"Europe, Eastern\""
+    },
+    {
+      "code" : "948",
+      "label" : "\"Scandinavia\""
+    },
+    {
+      "code" : "949",
+      "label" : "Smaller European countries"
+    },
+    {
+      "code" : "949.1",
+      "label" : "\"Iceland\""
+    },
+    {
+      "code" : "949.2",
+      "label" : "\"Netherlands\""
+    },
+    {
+      "code" : "949.3",
+      "label" : "\"Belgium\""
+    },
+    {
+      "code" : "949.4",
+      "label" : "\"Switzerland\""
+    },
+    {
+      "code" : "949.5",
+      "label" : "\"Greece\" + \"Byzantine Empire\""
+    },
+    {
+      "code" : "949.6",
+      "label" : "\"Turkey\" + \"Balkan Peninsula\""
+    },
+    {
+      "code" : "949.7",
+      "label" : "\"Bulgaria\" + Former Yugoslavia countries"
+    },
+    {
+      "code" : "949.8",
+      "label" : "\"Romania\""
+    },
+    {
+      "code" : "949.9",
+      "label" : "\"Aegean Islands (Greece and Turkey)\" + \"Crete (Greece)\""
+    },
+    {
+      "code" : "950",
+      "label" : "\"Asia\""
+    },
+    {
+      "code" : "951",
+      "label" : "\"China\" + \"Korea\""
+    },
+    {
+      "code" : "952",
+      "label" : "\"Japan\""
+    },
+    {
+      "code" : "953",
+      "label" : "\"Arabian Peninsula\""
+    },
+    {
+      "code" : "954",
+      "label" : "\"India\" + \"Pakistan\" + \"Bangladesh\""
+    },
+    {
+      "code" : "955",
+      "label" : "\"Iran\""
+    },
+    {
+      "code" : "956",
+      "label" : "\"Middle East\""
+    },
+    {
+      "code" : "957",
+      "label" : "\"Siberia (Russia)\""
+    },
+    {
+      "code" : "958",
+      "label" : "\"Afghanistan\""
+    },
+    {
+      "code" : "959",
+      "label" : "\"Southeast Asia\""
+    },
+    {
+      "code" : "960",
+      "label" : "\"Africa\""
+    },
+    {
+      "code" : "961",
+      "label" : "\"Africa, North\" | North Africa"
+    },
+    {
+      "code" : "961.1",
+      "label" : "\"Tunisia\""
+    },
+    {
+      "code" : "961.2",
+      "label" : "\"Libya\""
+    },
+    {
+      "code" : "962",
+      "label" : "\"Egypt\" + \"Sudan\""
+    },
+    {
+      "code" : "963",
+      "label" : "\"Ethiopia\" + \"Eritrea\""
+    },
+    {
+      "code" : "963.5",
+      "label" : "\"Eritrea\""
+    },
+    {
+      "code" : "964",
+      "label" : "\"Morocco\" + \"Western Sahara\""
+    },
+    {
+      "code" : "964.8",
+      "label" : "\"Western Sahara\""
+    },
+    {
+      "code" : "965",
+      "label" : "\"Algeria\""
+    },
+    {
+      "code" : "966",
+      "label" : "\"Africa, West\"  | West Africa"
+    },
+    {
+      "code" : "967",
+      "label" : "\"Africa, Sub-Saharan\"  | Sub-Saharan Africa"
+    },
+    {
+      "code" : "968",
+      "label" : "\"South Africa\" + \"Africa, Southern\""
+    },
+    {
+      "code" : "969",
+      "label" : "\"Madagascar\" + \"Islands of the Indian Ocean\""
+    },
+    {
+      "code" : "970",
+      "label" : "\"America\" + \"North America\""
+    },
+    {
+      "code" : "971",
+      "label" : "\"Canada\""
+    },
+    {
+      "code" : "971.1",
+      "label" : "\"British Columbia\""
+    },
+    {
+      "code" : "971.2",
+      "label" : "\"Northwest, Canadian\""
+    },
+    {
+      "code" : "971.23",
+      "label" : "\"Alberta\""
+    },
+    {
+      "code" : "971.24",
+      "label" : "\"Saskatchewan\""
+    },
+    {
+      "code" : "971.27",
+      "label" : "\"Manitoba\""
+    },
+    {
+      "code" : "971.3",
+      "label" : "\"Ontario\""
+    },
+    {
+      "code" : "971.4",
+      "label" : "\"Qu&eacute;bec (Province)\""
+    },
+    {
+      "code" : "971.5",
+      "label" : "\"New Brunswick\" + \"Atlantic Provinces\""
+    },
+    {
+      "code" : "971.6",
+      "label" : "\"Nova Scotia\" + \"Acadia\""
+    },
+    {
+      "code" : "971.7",
+      "label" : "\"Prince Edward Island\""
+    },
+    {
+      "code" : "971.8",
+      "label" : "\"Newfoundland and Labrador\""
+    },
+    {
+      "code" : "971.9",
+      "label" : "\"Canada, Northern\""
+    },
+    {
+      "code" : "972",
+      "label" : "\"Mexico\" + \"Central America\""
+    },
+    {
+      "code" : "974",
+      "label" : "\"New England\" + \"Middle Atlantic States\""
+    },
+    {
+      "code" : "974.1",
+      "label" : "\"Maine\""
+    },
+    {
+      "code" : "974.2",
+      "label" : "\"New Hampshire\""
+    },
+    {
+      "code" : "974.3",
+      "label" : "\"Vermont\""
+    },
+    {
+      "code" : "974.4",
+      "label" : "\"Massachusetts\""
+    },
+    {
+      "code" : "974.5",
+      "label" : "\"Rhode Island\""
+    },
+    {
+      "code" : "974.6",
+      "label" : "\"Connecticut\""
+    },
+    {
+      "code" : "974.7",
+      "label" : "\"New York (State)\""
+    },
+    {
+      "code" : "974.8",
+      "label" : "\"Pennsylvania\""
+    },
+    {
+      "code" : "974.9",
+      "label" : "\"New Jersey\""
+    },
+    {
+      "code" : "975",
+      "label" : "\"South Atlantic States\" + \"Middle Atlantic States\" + \"West Virginia\""
+    },
+    {
+      "code" : "975.1",
+      "label" : "\"Delaware\""
+    },
+    {
+      "code" : "975.2",
+      "label" : "\"Maryland\""
+    },
+    {
+      "code" : "975.3",
+      "label" : "\"Washington (D.C.)\""
+    },
+    {
+      "code" : "975.4",
+      "label" : "\"West Virginia\""
+    },
+    {
+      "code" : "975.5",
+      "label" : "\"Virginia\""
+    },
+    {
+      "code" : "975.6",
+      "label" : "\"North Carolina\""
+    },
+    {
+      "code" : "975.7",
+      "label" : "\"South Carolina\""
+    },
+    {
+      "code" : "975.8",
+      "label" : "\"Georgia\""
+    },
+    {
+      "code" : "975.9",
+      "label" : "\"Florida\""
+    },
+    {
+      "code" : "975",
+      "label" : "\"Gulf States\" + \"Southwest, Old\""
+    },
+    {
+      "code" : "976.1",
+      "label" : "\"Alabama\""
+    },
+    {
+      "code" : "976.2",
+      "label" : "\"Mississippi\""
+    },
+    {
+      "code" : "976.3",
+      "label" : "\"Louisiana\""
+    },
+    {
+      "code" : "976.4",
+      "label" : "\"Texas\""
+    },
+    {
+      "code" : "976.6",
+      "label" : "\"Oklahoma\""
+    },
+    {
+      "code" : "976.7",
+      "label" : "\"Arkansas\""
+    },
+    {
+      "code" : "976.8",
+      "label" : "\"Tennessee\""
+    },
+    {
+      "code" : "976.9",
+      "label" : "\"Kentucky\""
+    },
+    {
+      "code" : "977",
+      "label" : "\"Middle West\""
+    },
+    {
+      "code" : "977.1",
+      "label" : "\"Ohio\""
+    },
+    {
+      "code" : "977.2",
+      "label" : "\"Indiana\""
+    },
+    {
+      "code" : "977.3",
+      "label" : "\"Illinois\""
+    },
+    {
+      "code" : "977.4",
+      "label" : "\"Michigan\""
+    },
+    {
+      "code" : "977.5",
+      "label" : "\"Wisconsin\""
+    },
+    {
+      "code" : "977.6",
+      "label" : "\"Minnesota\""
+    },
+    {
+      "code" : "977.7",
+      "label" : "\"Iowa\""
+    },
+    {
+      "code" : "977.8",
+      "label" : "\"Missouri\""
+    },
+    {
+      "code" : "978",
+      "label" : "\"West (U.S.)\" | Great plains and mountain west"
+    },
+    {
+      "code" : "978.1",
+      "label" : "\"Kansas\""
+    },
+    {
+      "code" : "978.2",
+      "label" : "\"Nebraska\""
+    },
+    {
+      "code" : "978.3",
+      "label" : "\"South Dakota\""
+    },
+    {
+      "code" : "978.4",
+      "label" : "\"North Dakota\""
+    },
+    {
+      "code" : "978.6",
+      "label" : "\"Montana\""
+    },
+    {
+      "code" : "978.7",
+      "label" : "\"Wyoming\""
+    },
+    {
+      "code" : "978.8",
+      "label" : "\"Colorado\""
+    },
+    {
+      "code" : "978.9",
+      "label" : "\"New Mexico\""
+    },
+    {
+      "code" : "979",
+      "label" : "\"Pacific States\" | Far western states"
+    },
+    {
+      "code" : "979.1",
+      "label" : "\"Arizona\""
+    },
+    {
+      "code" : "979.2",
+      "label" : "\"Utah\""
+    },
+    {
+      "code" : "979.3",
+      "label" : "\"Nevada\""
+    },
+    {
+      "code" : "979.4",
+      "label" : "\"California\""
+    },
+    {
+      "code" : "979.5",
+      "label" : "\"Oregon\""
+    },
+    {
+      "code" : "979.6",
+      "label" : "\"Idaho\""
+    },
+    {
+      "code" : "979.7",
+      "label" : "\"Washington (State)\""
+    },
+    {
+      "code" : "979.8",
+      "label" : "\"Alaska\""
+    },
+    {
+      "code" : "980",
+      "label" : "\"South America\" + \"Latin America\""
+    },
+    {
+      "code" : "981",
+      "label" : "\"Brazil\""
+    },
+    {
+      "code" : "982",
+      "label" : "\"Argentina\""
+    },
+    {
+      "code" : "983",
+      "label" : "\"Chile\""
+    },
+    {
+      "code" : "984",
+      "label" : "\"Bolivia\""
+    },
+    {
+      "code" : "985",
+      "label" : "\"Peru\""
+    },
+    {
+      "code" : "986",
+      "label" : "\"Panama\" + \"Colombia\" + \"Ecuador\""
+    },
+    {
+      "code" : "987",
+      "label" : "\"Venezuela\""
+    },
+    {
+      "code" : "988",
+      "label" : "\"Suriname\" + \"Guyana\""
+    },
+    {
+      "code" : "989",
+      "label" : "\"Paraguay\" + \"Uruguay\""
+    },
+    {
+      "code" : "990",
+      "label" : "\"Oceania\" + \"Polar regions\""
+    },
+    {
+      "code" : "991.1",
+      "label" : "\"Borneo\""
+    },
+    {
+      "code" : "991.2",
+      "label" : "\"Celebes (Indonesia)\""
+    },
+    {
+      "code" : "991.3",
+      "label" : "\"Maluku (Indonesia)\""
+    },
+    {
+      "code" : "991.4",
+      "label" : "\"Philippines\""
+    },
+    {
+      "code" : "992.1",
+      "label" : "\"Sumatra (Indonesia)\""
+    },
+    {
+      "code" : "992.2",
+      "label" : "\"Java (Indonesia)\""
+    },
+    {
+      "code" : "993.1",
+      "label" : "\"New Zealand\""
+    },
+    {
+      "code" : "993.3",
+      "label" : "\"Loyalty Islands (New Caledonia)\""
+    },
+    {
+      "code" : "993.4",
+      "label" : "\"Vanuatu\""
+    },
+    {
+      "code" : "993.5",
+      "label" : "\"Solomon Islands\""
+    },
+    {
+      "code" : "993.6",
+      "label" : "\"New Britain Island (Papua New Guinea)\" + \"New Ireland Island (Papua New Guinea) \""
+    },
+    {
+      "code" : "993.7",
+      "label" : "\"Admiralty Islands (Papua New Guinea)\""
+    },
+    {
+      "code" : "994",
+      "label" : "\"Australia\""
+    },
+    {
+      "code" : "995",
+      "label" : "\"New Guinea\""
+    },
+    {
+      "code" : "996",
+      "label" : "\"Polynesia\""
+    },
+    {
+      "code" : "996.1",
+      "label" : "\"Fiji\" + \"Tonga\" + \"Samoan Islands\""
+    },
+    {
+      "code" : "996.2",
+      "label" : "\"Society Islands (French Polynesia)\" + \"Austral Islands (French Polynesia)\" + \"Cook Islands\""
+    },
+    {
+      "code" : "996.3",
+      "label" : "\"Marquesas Islands (French Polynesia)\" + \"Tuamotu Archipelago (French Polynesia) \""
+    },
+    {
+      "code" : "996.4",
+      "label" : "\"Kiritimati (Kiribati)\" + Minor Polynesian islands"
+    },
+    {
+      "code" : "996.5",
+      "label" : "\"Micronesia\""
+    },
+    {
+      "code" : "996.6",
+      "label" : "\"Caroline Islands\" + \"Palau\""
+    },
+    {
+      "code" : "996.7",
+      "label" : "\"Mariana Islands\" + \"Guam\""
+    },
+    {
+      "code" : "996.8",
+      "label" : "\"Marshall Islands\" + \"Kiribati\""
+    },
+    {
+      "code" : "996.9",
+      "label" : "\"Hawaii\""
+    },
+    {
+      "code" : "997",
+      "label" : "Isolated islands"
+    },
+    {
+      "code" : "998",
+      "label" : "\"Polar regions\""
+    },
+    {
+      "code" : "998.9",
+      "label" : "\"Antarctica\""
+    },
+    {
+      "code" : "999",
+      "label" : "\"Outer space\""
+    }
+  ],
+  "frame_version" : "1.0.0"
+}
