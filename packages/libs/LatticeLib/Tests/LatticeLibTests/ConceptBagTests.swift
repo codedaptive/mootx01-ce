@@ -1,0 +1,36 @@
+// ConceptBagTests.swift
+//
+// Drives BagBuilder Steps 2–3 (canonicalize + accumulate) deterministically.
+// Step 1 (NLTagger noun/verb filter) is non-deterministic across OS versions,
+// so these tests keep all word classes — the tagger filter is exercised
+// separately by WordClassTaggerTests.
+
+import Testing
+@testable import LatticeLib
+
+@Suite("BagBuilder (cookbook §2–§4)")
+struct ConceptBagTests {
+    private let lexicon = CanonicalizationLexicon(
+        version: "t", language: "en",
+        entries: ["cat": "Q146", "dog": "Q144"]
+    )
+
+    @Test("lexicon hits map to conceptIDs and counts accumulate")
+    func hitsAccumulate() {
+        let bag = BagBuilder.bag("cat cat dog", lexicon: lexicon, keep: [.noun, .verb, .other])
+        #expect(bag["Q146"] == 2)
+        #expect(bag["Q144"] == 1)
+    }
+
+    @Test("a lexicon miss keeps the stemmed surface form as its own key")
+    func missKeepsSurface() {
+        let bag = BagBuilder.bag("zxcvbnm", lexicon: lexicon, keep: [.noun, .verb, .other])
+        #expect(bag["zxcvbnm"] == 1)   // not in lexicon -> surface key
+        #expect(bag["Q146"] == nil)
+    }
+
+    @Test("empty text yields an empty bag")
+    func emptyText() {
+        #expect(BagBuilder.bag("", lexicon: lexicon, keep: [.noun, .verb, .other]).isEmpty)
+    }
+}
