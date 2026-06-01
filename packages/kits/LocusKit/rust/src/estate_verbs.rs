@@ -993,4 +993,47 @@ mod tests {
             other => panic!("expected DrawerNotFound, got {:?}", other),
         }
     }
+
+    // -----------------------------------------------------------------
+    // tunnels_from_wing — estate-level read over the association graph.
+    // Mirrors Swift `EstateTunnelReadTests` case-for-case.
+    // -----------------------------------------------------------------
+
+    fn tunnel_frame(source: &str, target: &str, label: &str) -> TunnelCaptureFrame {
+        TunnelCaptureFrame::new(source, "r1", target, "r2", label, "bilby")
+    }
+
+    #[test]
+    fn tunnels_from_wing_returns_outgoing() {
+        let estate = make_estate();
+        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), 1_700_000_001).unwrap();
+        estate.capture_tunnel(tunnel_frame("study", "garden", "relates"), 1_700_000_002).unwrap();
+
+        let tunnels = estate.tunnels_from_wing("study").unwrap();
+        assert_eq!(tunnels.len(), 2);
+        let targets: std::collections::BTreeSet<&str> =
+            tunnels.iter().map(|t| t.target_wing.as_str()).collect();
+        assert_eq!(targets, ["garden", "kitchen"].into_iter().collect());
+        assert!(tunnels.iter().all(|t| t.source_wing == "study"));
+    }
+
+    #[test]
+    fn tunnels_from_wing_is_empty_for_unlinked_wing() {
+        let estate = make_estate();
+        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), 1_700_000_001).unwrap();
+
+        let tunnels = estate.tunnels_from_wing("attic").unwrap();
+        assert!(tunnels.is_empty());
+    }
+
+    #[test]
+    fn tunnels_from_wing_is_scoped_to_source_wing() {
+        let estate = make_estate();
+        estate.capture_tunnel(tunnel_frame("study", "kitchen", "a"), 1_700_000_001).unwrap();
+        estate.capture_tunnel(tunnel_frame("garden", "kitchen", "b"), 1_700_000_002).unwrap();
+
+        let from_study = estate.tunnels_from_wing("study").unwrap();
+        assert_eq!(from_study.len(), 1);
+        assert_eq!(from_study[0].source_wing, "study");
+    }
 }

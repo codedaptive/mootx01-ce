@@ -1,0 +1,67 @@
+import Foundation
+import PersistenceKit
+import Testing
+@testable import LocusKit
+
+/// `Estate.tunnelsFromWing(_:)` — the estate-level public read over the
+/// association graph (`DrawerStore.tunnelsFrom(wing:)`). The reasoning
+/// graph the structural reasoning lenses consume is built from these
+/// edges; the read is the Swift peer of the Rust `Estate::tunnels_from_wing`.
+@Suite("EstateTunnelReadTests")
+struct EstateTunnelReadTests {
+
+    private func makeEstate() async throws -> Estate {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("locuskit-tunnelread-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("estate.sqlite3")
+        return try await Estate.create(
+            storage: TestStorage.sqlite(path),
+            owner: OwnerCredentials(ownerIdentifier: "test-owner")
+        )
+    }
+
+    private func frame(source: String, target: String, label: String) -> TunnelCaptureFrame {
+        TunnelCaptureFrame(
+            sourceWing: source, sourceRoom: "r1",
+            targetWing: target, targetRoom: "r2",
+            label: label, addedBy: "bilby",
+            sourceDrawerId: nil, targetDrawerId: nil, kind: .references
+        )
+    }
+
+    // Tunnels captured from a wing are returned by that wing's read.
+    @Test("tunnelsFromWing returns the wing's outgoing tunnels")
+    func returnsOutgoing() async throws {
+        let estate = try await makeEstate()
+        _ = try await estate.capture(frame(source: "study", target: "kitchen", label: "links"))
+        _ = try await estate.capture(frame(source: "study", target: "garden", label: "relates"))
+
+        let tunnels = try await estate.tunnelsFromWing("study")
+        #expect(tunnels.count == 2)
+        #expect(Set(tunnels.map(\.targetWing)) == ["kitchen", "garden"])
+        #expect(tunnels.allSatisfy { $0.sourceWing == "study" })
+    }
+
+    // A wing with no outgoing tunnels reads empty (never throws).
+    @Test("tunnelsFromWing is empty for a wing with no tunnels")
+    func emptyForUnlinkedWing() async throws {
+        let estate = try await makeEstate()
+        _ = try await estate.capture(frame(source: "study", target: "kitchen", label: "links"))
+
+        let tunnels = try await estate.tunnelsFromWing("attic")
+        #expect(tunnels.isEmpty)
+    }
+
+    // The read is scoped to the source wing — other wings' tunnels are excluded.
+    @Test("tunnelsFromWing is scoped to the source wing")
+    func scopedToSourceWing() async throws {
+        let estate = try await makeEstate()
+        _ = try await estate.capture(frame(source: "study", target: "kitchen", label: "a"))
+        _ = try await estate.capture(frame(source: "garden", target: "kitchen", label: "b"))
+
+        let fromStudy = try await estate.tunnelsFromWing("study")
+        #expect(fromStudy.count == 1)
+        #expect(fromStudy.first?.sourceWing == "study")
+    }
+}
