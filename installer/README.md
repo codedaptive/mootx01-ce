@@ -66,7 +66,7 @@ discard.
 Two test legs cover the installer:
 
 ```bash
-# Path math, config-entry shape (Swift / XCTest)
+# Path math, config-entry shape (Swift / swift-testing)
 swift test --package-path Installer
 
 # install.sh control flow (bash, dry-run against a sandbox HOME)

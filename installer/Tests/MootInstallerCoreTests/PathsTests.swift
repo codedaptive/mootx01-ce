@@ -4,57 +4,61 @@
 // filesystem touching; the tests inject environment and home so
 // they run identically under any user.
 
-import XCTest
+import Foundation
+import Testing
 @testable import MootInstallerCore
 
-final class PathsTests: XCTestCase {
+@Suite("MootPaths path math")
+struct PathsTests {
 
-    func testResolveDataDirectoryDefaultsToApplicationSupport() {
+    @Test("resolveDataDirectory defaults to Application Support")
+    func resolveDataDirectoryDefaultsToApplicationSupport() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         let resolved = MootPaths.resolveDataDirectory(
             environment: [:],
             homeDirectory: home
         )
-        XCTAssertEqual(
-            resolved.path,
-            "/Users/test/Library/Application Support/MOOTx01"
+        #expect(
+            resolved.path == "/Users/test/Library/Application Support/MOOTx01"
         )
     }
 
-    func testResolveDataDirectoryHonorsEnvironmentOverride() {
+    @Test("resolveDataDirectory honors the environment override")
+    func resolveDataDirectoryHonorsEnvironmentOverride() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         let resolved = MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": "/tmp/sandbox-moot"],
             homeDirectory: home
         )
-        XCTAssertEqual(resolved.path, "/tmp/sandbox-moot")
+        #expect(resolved.path == "/tmp/sandbox-moot")
     }
 
-    func testResolveDataDirectoryIgnoresEmptyOverride() {
+    @Test("resolveDataDirectory ignores an empty override")
+    func resolveDataDirectoryIgnoresEmptyOverride() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         let resolved = MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": ""],
             homeDirectory: home
         )
-        XCTAssertEqual(
-            resolved.path,
-            "/Users/test/Library/Application Support/MOOTx01"
+        #expect(
+            resolved.path == "/Users/test/Library/Application Support/MOOTx01"
         )
     }
 
-    func testEstateURLAppendsFixedFilename() {
+    @Test("estateURL appends the fixed filename")
+    func estateURLAppendsFixedFilename() {
         let dir = URL(fileURLWithPath: "/Users/test/Library/Application Support/MOOTx01", isDirectory: true)
         let estate = MootPaths.estateURL(in: dir)
-        XCTAssertEqual(
-            estate.path,
-            "/Users/test/Library/Application Support/MOOTx01/estate.sqlite"
+        #expect(
+            estate.path == "/Users/test/Library/Application Support/MOOTx01/estate.sqlite"
         )
     }
 
-    func testDefaultOwnerIdentifierIsNonEmpty() {
+    @Test("default owner identifier is non-empty")
+    func defaultOwnerIdentifierIsNonEmpty() {
         // LocusKit.Estate.create rejects an empty owner identifier
         // up front; the default the installer stamps must satisfy
         // that precondition.
-        XCTAssertFalse(MootPaths.defaultOwnerIdentifier.isEmpty)
+        #expect(!MootPaths.defaultOwnerIdentifier.isEmpty)
     }
 }
