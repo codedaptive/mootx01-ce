@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import AriaLexiconLib
 import GeniusLocusKit
@@ -24,7 +24,12 @@ import PersistenceKitInMemory
 /// Recalls use `.unconfirmed` so the default `.userConfirmed` prepend
 /// does not prune freshly-captured rows (provenance == 0), matching the
 /// GLK federation tests.
-final class MultiEstateRoutingTests: XCTestCase {
+///
+/// `.serialized`: every case opens multiple live in-memory estates,
+/// issues grants, and runs multi-step capture/recall sequences; preserve
+/// the one-at-a-time execution the suite ran under XCTest.
+@Suite("Multi-estate routing", .serialized)
+struct MultiEstateRoutingTests {
 
     // MARK: - Harness
 
@@ -82,7 +87,7 @@ final class MultiEstateRoutingTests: XCTestCase {
 
     // MARK: - 1. estateID routes to the named estate; default is isolated
 
-    func testEstateIDRoutesToNamedEstateAndLeavesDefaultUntouched() async throws {
+    @Test func testEstateIDRoutesToNamedEstateAndLeavesDefaultUntouched() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-routing")
         let hA = try await openEstate(in: kit, owner: owner)   // default
@@ -94,26 +99,26 @@ final class MultiEstateRoutingTests: XCTestCase {
             name: "moot_capture_drawer",
             arguments: captureArgs(content: "row-in-B", estateID: hB.estateUUID)
         )
-        XCTAssertFalse(isError(captured))
+        #expect(!isError(captured))
 
         // Recall from B by estateID sees the row.
         let fromB = try await dispatcher.dispatch(
             name: "moot_drawer_recall", arguments: recallArgs(estateID: hB.estateUUID)
         )
-        XCTAssertTrue(text(of: fromB)?.contains("row-in-B") ?? false,
+        #expect(text(of: fromB)?.contains("row-in-B") ?? false,
             "estateID-targeted recall must see the row captured into that estate")
 
         // Recall from the default estate (A) must NOT see B's row.
         let fromDefault = try await dispatcher.dispatch(
             name: "moot_drawer_recall", arguments: recallArgs()
         )
-        XCTAssertFalse(text(of: fromDefault)?.contains("row-in-B") ?? false,
+        #expect(!(text(of: fromDefault)?.contains("row-in-B") ?? false),
             "the default estate must not see a row captured into estate B")
     }
 
     // MARK: - 2. Omitted estateID hits the default estate (v1.0 regression)
 
-    func testOmittedEstateIDHitsDefaultEstate() async throws {
+    @Test func testOmittedEstateIDHitsDefaultEstate() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-default")
         let hA = try await openEstate(in: kit, owner: owner)   // default
@@ -124,25 +129,25 @@ final class MultiEstateRoutingTests: XCTestCase {
         let captured = try await dispatcher.dispatch(
             name: "moot_capture_drawer", arguments: captureArgs(content: "row-in-default")
         )
-        XCTAssertFalse(isError(captured))
+        #expect(!isError(captured))
 
         // Recall with no estateID sees it; recall from B does not.
         let fromDefault = try await dispatcher.dispatch(
             name: "moot_drawer_recall", arguments: recallArgs()
         )
-        XCTAssertTrue(text(of: fromDefault)?.contains("row-in-default") ?? false,
+        #expect(text(of: fromDefault)?.contains("row-in-default") ?? false,
             "omitted estateID must behave exactly as the single-estate v1.0 path")
 
         let fromB = try await dispatcher.dispatch(
             name: "moot_drawer_recall", arguments: recallArgs(estateID: hB.estateUUID)
         )
-        XCTAssertFalse(text(of: fromB)?.contains("row-in-default") ?? false,
+        #expect(!(text(of: fromB)?.contains("row-in-default") ?? false),
             "the default row must not leak into estate B")
     }
 
     // MARK: - 3. Unknown / malformed estateID is an out-of-band invalidParams
 
-    func testUnknownEstateIDReturnsInvalidParams() async throws {
+    @Test func testUnknownEstateIDReturnsInvalidParams() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-unknown")
         let hA = try await openEstate(in: kit, owner: owner)
@@ -153,9 +158,9 @@ final class MultiEstateRoutingTests: XCTestCase {
             _ = try await dispatcher.dispatch(
                 name: "moot_drawer_recall", arguments: recallArgs(estateID: UUID())
             )
-            XCTFail("unknown estateID should throw invalidParams")
+            Issue.record("unknown estateID should throw invalidParams")
         } catch let error as JSONRPCError {
-            XCTAssertEqual(error.code, JSONRPCErrorCode.invalidParams)
+            #expect(error.code == JSONRPCErrorCode.invalidParams)
         }
 
         // A malformed (non-UUID) estateID is the same out-of-band error.
@@ -165,9 +170,9 @@ final class MultiEstateRoutingTests: XCTestCase {
                 arguments: .object(["filter": .string("unconfirmed"),
                                     "estateID": .string("not-a-uuid")])
             )
-            XCTFail("malformed estateID should throw invalidParams")
+            Issue.record("malformed estateID should throw invalidParams")
         } catch let error as JSONRPCError {
-            XCTAssertEqual(error.code, JSONRPCErrorCode.invalidParams)
+            #expect(error.code == JSONRPCErrorCode.invalidParams)
         }
     }
 
@@ -195,7 +200,7 @@ final class MultiEstateRoutingTests: XCTestCase {
 
     // MARK: - 4. cross_estate_recall fans across authorized estates
 
-    func testCrossEstateRecallFansAcrossAuthorizedEstates() async throws {
+    @Test func testCrossEstateRecallFansAcrossAuthorizedEstates() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-fan")
         let hA = try await openEstate(in: kit, owner: owner)   // requester
@@ -220,17 +225,17 @@ final class MultiEstateRoutingTests: XCTestCase {
         let result = try await dispatcher.dispatch(
             name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
         )
-        XCTAssertFalse(isError(result), "an authorized fan must succeed")
-        let body = try XCTUnwrap(text(of: result))
-        XCTAssertTrue(body.contains("row-from-B"), "B's grant admits A — B contributes")
-        XCTAssertTrue(body.contains("row-from-C"), "C's grant admits A — C contributes")
-        XCTAssertFalse(body.contains("row-from-D"),
+        #expect(!isError(result), "an authorized fan must succeed")
+        let body = try #require(text(of: result))
+        #expect(body.contains("row-from-B"), "B's grant admits A — B contributes")
+        #expect(body.contains("row-from-C"), "C's grant admits A — C contributes")
+        #expect(!body.contains("row-from-D"),
             "D granted nothing — its rows must not appear")
     }
 
     // MARK: - 5. No-grant cross_estate_recall is refused cleanly
 
-    func testNoGrantCrossEstateRecallRefusedAsErrorResult() async throws {
+    @Test func testNoGrantCrossEstateRecallRefusedAsErrorResult() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-nogrant")
         let hA = try await openEstate(in: kit, owner: owner)   // requester
@@ -249,15 +254,15 @@ final class MultiEstateRoutingTests: XCTestCase {
         let result = try await dispatcher.dispatch(
             name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
         )
-        XCTAssertTrue(isError(result),
+        #expect(isError(result),
             "a no-grant cross-estate call must be refused with isError == true")
-        XCTAssertFalse(text(of: result)?.contains("secret-B") ?? false,
+        #expect(!(text(of: result)?.contains("secret-B") ?? false),
             "refused call must not leak the ungranted estate's content")
     }
 
     // MARK: - 6. Scope narrowing — a room grant discloses only that room
 
-    func testRoomScopedGrantNarrowsToThatRoom() async throws {
+    @Test func testRoomScopedGrantNarrowsToThatRoom() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-scope")
         let hA = try await openEstate(in: kit, owner: owner)   // requester
@@ -278,11 +283,11 @@ final class MultiEstateRoutingTests: XCTestCase {
         let result = try await dispatcher.dispatch(
             name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
         )
-        XCTAssertFalse(isError(result))
-        let body = try XCTUnwrap(text(of: result))
-        XCTAssertTrue(body.contains("kitchen-row"),
+        #expect(!isError(result))
+        let body = try #require(text(of: result))
+        #expect(body.contains("kitchen-row"),
             "the room-scoped grant admits the kitchen row")
-        XCTAssertFalse(body.contains("garage-row"),
+        #expect(!body.contains("garage-row"),
             "§10 answer-assembly narrowing must exclude rows outside the granted room")
     }
 }

@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import AriaLexiconLib
 import GeniusLocusKit
@@ -19,7 +19,12 @@ import PersistenceKitInMemory
 /// migration, out of scope here), so both schemes construct the same
 /// anchor; the discriminator's present job is declaration + validation
 /// at the ARIA boundary, expressing the dual-scheme model in spec §5.8.
-final class SchemeDiscriminatorTests: XCTestCase {
+///
+/// `.serialized`: each case opens a live in-memory estate and runs a
+/// capture/recall sequence; preserve the one-at-a-time execution the
+/// suite ran under XCTest.
+@Suite("Scheme discriminator", .serialized)
+struct SchemeDiscriminatorTests {
 
     /// Build a dispatcher wired to a fresh in-memory estate. Mirrors the
     /// harness in `ServerTests` so each case gets isolated state.
@@ -51,12 +56,12 @@ final class SchemeDiscriminatorTests: XCTestCase {
             ])
         )
         let raw = await dispatcher.handle(request)
-        return try XCTUnwrap(raw)
+        return try #require(raw)
     }
 
     // MARK: - mdcc scheme routes correctly
 
-    func testCaptureWithMdccSchemeIsAcceptedAndEchoed() async throws {
+    @Test func testCaptureWithMdccSchemeIsAcceptedAndEchoed() async throws {
         let dispatcher = try await makeDispatcher()
         let response = try await capture(dispatcher, arguments: [
             "content": .string("mdcc-tagged anchor row"),
@@ -68,22 +73,22 @@ final class SchemeDiscriminatorTests: XCTestCase {
         ], id: 100)
 
         guard case .result(let result) = response.payload else {
-            XCTFail("mdcc capture returned error: \(response.payload)")
+            Issue.record("mdcc capture returned error: \(response.payload)")
             return
         }
-        let object = try XCTUnwrap(result.objectValue)
-        XCTAssertEqual(object["isError"], .bool(false))
-        let text = try XCTUnwrap(
+        let object = try #require(result.objectValue)
+        #expect(object["isError"] == .bool(false))
+        let text = try #require(
             object["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue }
         )
         // The validated scheme is echoed so the caller can confirm how
         // its code was interpreted.
-        XCTAssertTrue(text.contains("scheme: mdcc"), "expected mdcc scheme echoed, got: \(text)")
+        #expect(text.contains("scheme: mdcc"), "expected mdcc scheme echoed, got: \(text)")
     }
 
     // MARK: - omitting the arg preserves the default (udc) behavior
 
-    func testOmittedSchemeDefaultsToUdcAndRoundTrips() async throws {
+    @Test func testOmittedSchemeDefaultsToUdcAndRoundTrips() async throws {
         let dispatcher = try await makeDispatcher()
 
         // Capture without the scheme arg — must behave as today.
@@ -95,16 +100,16 @@ final class SchemeDiscriminatorTests: XCTestCase {
             "embeddingModelID": .string("test-model-v1"),
         ], id: 101)
         guard case .result(let captureResult) = captureResponse.payload else {
-            XCTFail("default capture returned error: \(captureResponse.payload)")
+            Issue.record("default capture returned error: \(captureResponse.payload)")
             return
         }
-        let captureObject = try XCTUnwrap(captureResult.objectValue)
-        XCTAssertEqual(captureObject["isError"], .bool(false))
-        let captureText = try XCTUnwrap(
+        let captureObject = try #require(captureResult.objectValue)
+        #expect(captureObject["isError"] == .bool(false))
+        let captureText = try #require(
             captureObject["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue }
         )
         // Default path resolves to udc.
-        XCTAssertTrue(captureText.contains("scheme: udc"), "expected udc default echoed, got: \(captureText)")
+        #expect(captureText.contains("scheme: udc"), "expected udc default echoed, got: \(captureText)")
 
         // Recall still returns the row — substrate behavior unchanged.
         let recallRequest = JSONRPCRequest(
@@ -119,21 +124,21 @@ final class SchemeDiscriminatorTests: XCTestCase {
             ])
         )
         let recallRaw = await dispatcher.handle(recallRequest)
-        let recallResponse = try XCTUnwrap(recallRaw)
+        let recallResponse = try #require(recallRaw)
         guard case .result(let recallResult) = recallResponse.payload else {
-            XCTFail("recall returned error: \(recallResponse.payload)")
+            Issue.record("recall returned error: \(recallResponse.payload)")
             return
         }
-        let recallObject = try XCTUnwrap(recallResult.objectValue)
-        let content = try XCTUnwrap(
+        let recallObject = try #require(recallResult.objectValue)
+        let content = try #require(
             recallObject["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue }
         )
-        XCTAssertTrue(content.contains("default-scheme anchor row"))
+        #expect(content.contains("default-scheme anchor row"))
     }
 
     // MARK: - explicit "udc" is accepted
 
-    func testExplicitUdcSchemeIsAccepted() async throws {
+    @Test func testExplicitUdcSchemeIsAccepted() async throws {
         let dispatcher = try await makeDispatcher()
         let response = try await capture(dispatcher, arguments: [
             "content": .string("explicit-udc anchor row"),
@@ -144,20 +149,20 @@ final class SchemeDiscriminatorTests: XCTestCase {
             "classificationScheme": .string("udc"),
         ], id: 103)
         guard case .result(let result) = response.payload else {
-            XCTFail("explicit udc capture returned error: \(response.payload)")
+            Issue.record("explicit udc capture returned error: \(response.payload)")
             return
         }
-        let object = try XCTUnwrap(result.objectValue)
-        XCTAssertEqual(object["isError"], .bool(false))
-        let text = try XCTUnwrap(
+        let object = try #require(result.objectValue)
+        #expect(object["isError"] == .bool(false))
+        let text = try #require(
             object["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue }
         )
-        XCTAssertTrue(text.contains("scheme: udc"), "expected udc scheme echoed, got: \(text)")
+        #expect(text.contains("scheme: udc"), "expected udc scheme echoed, got: \(text)")
     }
 
     // MARK: - unknown scheme is rejected
 
-    func testUnknownSchemeReturnsInvalidParams() async throws {
+    @Test func testUnknownSchemeReturnsInvalidParams() async throws {
         let dispatcher = try await makeDispatcher()
         let response = try await capture(dispatcher, arguments: [
             "content": .string("bad-scheme anchor row"),
@@ -168,9 +173,9 @@ final class SchemeDiscriminatorTests: XCTestCase {
             "classificationScheme": .string("dewey"),
         ], id: 104)
         guard case .error(let error) = response.payload else {
-            XCTFail("unknown scheme did not produce a JSON-RPC error: \(response.payload)")
+            Issue.record("unknown scheme did not produce a JSON-RPC error: \(response.payload)")
             return
         }
-        XCTAssertEqual(error.code, JSONRPCErrorCode.invalidParams)
+        #expect(error.code == JSONRPCErrorCode.invalidParams)
     }
 }
