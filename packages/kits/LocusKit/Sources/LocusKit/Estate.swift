@@ -246,6 +246,18 @@ public actor Estate {
         try await store.allDrawers()
     }
 
+    // MARK: - Association graph
+
+    /// Every non-tombstoned tunnel whose source is `wing`, in stable
+    /// filed-at order. The estate-level public read over the association
+    /// graph (`DrawerStore.tunnelsFrom(wing:)`) — the edge set the
+    /// structural reasoning lenses build their drawer graph from. A wing
+    /// with no outgoing tunnels reads empty rather than throwing.
+    /// Peer of the Rust `Estate::tunnels_from_wing`.
+    public func tunnelsFromWing(_ wing: String) async throws -> [Tunnel] {
+        try await store.tunnelsFrom(wing: wing)
+    }
+
     // MARK: - Manifest and identity
 
     /// Typed snapshot of the estate manifest.
