@@ -2,8 +2,8 @@
 //
 // Conformance fixtures for the portable migration orchestration. These
 // exact inputs, the recorded CALL SEQUENCE, and the assembled report are
-// mirrored by the Rust port's `migration_orchestration` tests
-// (CognitionKit/rust/src/migration_orchestration.rs) — both ports run the
+// mirrored by the Rust version's `migration_orchestration` tests
+// (CognitionKit/rust/src/migration_orchestration.rs) — both versions run the
 // identical logic over an identical deterministic fake and must agree.
 //
 // SHARED FIXTURES (keep in lockstep with the Rust tests):
@@ -17,7 +17,8 @@
 // The fake mints DETERMINISTIC ids: branch -> "branch-<plan>", drawer ->
 // "drawer-<branchID>-<captureIndex>". The Rust fake mints the same.
 
-import XCTest
+import Testing
+import Foundation
 @testable import CognitionKit
 
 /// Deterministic in-memory substrate. Records every call so the test can
@@ -69,7 +70,8 @@ private final class FakeSubstrate: RecipeSubstrate {
     }
 }
 
-final class MigrationOrchestrationTests: XCTestCase {
+@Suite("MigrationOrchestrationTests")
+struct MigrationOrchestrationTests {
 
     private func plan(_ name: String, _ room: String, _ code: String)
         -> MigrationOrchestration.PlanInput {
@@ -79,7 +81,8 @@ final class MigrationOrchestrationTests: XCTestCase {
     }
 
     // SEAM-1 — clean, two plans: full sequence + tie-break ranking
-    func testSeam1CleanTwoPlans() throws {
+    @Test("SEAM-1 clean two plans")
+    func seam1CleanTwoPlans() throws {
         let fake = FakeSubstrate()
         let origin = [
             MigrationOrchestration.OriginEntry(id: "a", content: "alpha"),
@@ -91,7 +94,7 @@ final class MigrationOrchestrationTests: XCTestCase {
             origin: origin)
 
         // Exact call sequence — the heart of the orchestration gate.
-        XCTAssertEqual(fake.calls, [
+        #expect(fake.calls == [
             "derive:flat",
             "capture:branch-flat:alpha",
             "capture:branch-flat:beta",
@@ -103,17 +106,17 @@ final class MigrationOrchestrationTests: XCTestCase {
         ])
 
         // Both clean → both survive; equal scores → alphabetical.
-        XCTAssertTrue(report.disqualified.isEmpty)
-        XCTAssertEqual(report.rankings.map(\.name), ["flat", "nested"])
-        XCTAssertEqual(report.winner, "flat")
+        #expect(report.disqualified.isEmpty)
+        #expect(report.rankings.map(\.name) == ["flat", "nested"])
+        #expect(report.winner == "flat")
         // Per-plan branch ids threaded through.
-        XCTAssertEqual(report.planResults.map(\.branchID),
-                       ["branch-flat", "branch-nested"])
-        XCTAssertEqual(report.planResults.first?.recallOverlap, 1.0)
+        #expect(report.planResults.map(\.branchID) == ["branch-flat", "branch-nested"])
+        #expect(report.planResults.first?.recallOverlap == 1.0)
     }
 
     // SEAM-2 — empty-content entry dropped (never captured) → disqualified
-    func testSeam2EmptyContentDropped() throws {
+    @Test("SEAM-2 empty content dropped")
+    func seam2EmptyContentDropped() throws {
         let fake = FakeSubstrate()
         let origin = [
             MigrationOrchestration.OriginEntry(id: "good", content: "valid"),
@@ -123,19 +126,20 @@ final class MigrationOrchestrationTests: XCTestCase {
             substrate: fake, plans: [plan("only", "r1", "000")], origin: origin)
 
         // The blank entry is NOT captured.
-        XCTAssertEqual(fake.calls, [
+        #expect(fake.calls == [
             "derive:only",
             "capture:branch-only:valid",
             "benchmark:branch-only",
         ])
-        XCTAssertTrue(report.rankings.isEmpty)
-        XCTAssertNil(report.winner)
-        XCTAssertEqual(report.disqualified.map(\.name), ["only"])
-        XCTAssertEqual(report.disqualified.first?.lostConcepts, ["blank"])
+        #expect(report.rankings.isEmpty)
+        #expect(report.winner == nil)
+        #expect(report.disqualified.map(\.name) == ["only"])
+        #expect(report.disqualified.first?.lostConcepts == ["blank"])
     }
 
     // SEAM-3 — benchmark marks one captured entry unrecallable
-    func testSeam3BenchmarkNotFound() throws {
+    @Test("SEAM-3 benchmark not found")
+    func seam3BenchmarkNotFound() throws {
         let fake = FakeSubstrate(unrecallable: ["beta"])
         let origin = [
             MigrationOrchestration.OriginEntry(id: "a", content: "alpha"),
@@ -144,7 +148,7 @@ final class MigrationOrchestrationTests: XCTestCase {
         let report = try MigrationOrchestration.run(
             substrate: fake, plans: [plan("p", "r1", "000")], origin: origin)
 
-        XCTAssertEqual(fake.calls, [
+        #expect(fake.calls == [
             "derive:p",
             "capture:branch-p:alpha",
             "capture:branch-p:beta",
@@ -152,35 +156,31 @@ final class MigrationOrchestrationTests: XCTestCase {
         ])
         // "beta" was captured second → minted id "drawer-branch-p-1",
         // reported not-found → plan disqualified on that minted id.
-        XCTAssertTrue(report.rankings.isEmpty)
-        XCTAssertEqual(report.disqualified.map(\.name), ["p"])
-        XCTAssertEqual(report.disqualified.first?.lostConcepts,
-                       ["drawer-branch-p-1"])
+        #expect(report.rankings.isEmpty)
+        #expect(report.disqualified.map(\.name) == ["p"])
+        #expect(report.disqualified.first?.lostConcepts == ["drawer-branch-p-1"])
     }
 
     // Guards mirror the production run().
-    func testEmptyPlansThrows() {
+    @Test("empty plans throws")
+    func emptyPlansThrows() {
         let fake = FakeSubstrate()
-        XCTAssertThrowsError(
+        #expect(throws: RecipeError.insufficientBranches(minimum: 1, provided: 0)) {
             try MigrationOrchestration.run(substrate: fake, plans: [], origin: [])
-        ) { error in
-            XCTAssertEqual(error as? RecipeError,
-                           .insufficientBranches(minimum: 1, provided: 0))
         }
         // No substrate calls made before the guard.
-        XCTAssertTrue(fake.calls.isEmpty)
+        #expect(fake.calls.isEmpty)
     }
 
-    func testDuplicatePlanNameThrows() {
+    @Test("duplicate plan name throws")
+    func duplicatePlanNameThrows() {
         let fake = FakeSubstrate()
-        XCTAssertThrowsError(
+        #expect(throws: RecipeError.duplicatePlanName("dup")) {
             try MigrationOrchestration.run(
                 substrate: fake,
                 plans: [plan("dup", "r1", "000"), plan("dup", "r2", "100")],
                 origin: [MigrationOrchestration.OriginEntry(id: "a", content: "x")])
-        ) { error in
-            XCTAssertEqual(error as? RecipeError, .duplicatePlanName("dup"))
         }
-        XCTAssertTrue(fake.calls.isEmpty)
+        #expect(fake.calls.isEmpty)
     }
 }

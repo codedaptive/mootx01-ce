@@ -5,15 +5,17 @@
 // full through-line: GLK capture/recall → NeuronKit hybridRecall +
 // ContextSynthesizer → CognitionKit recipe output.
 
-import XCTest
+import Testing
+import Foundation
 import GeniusLocusKit
 import LocusKit
 import NeuronKit
 import PersistenceKit
 import PersistenceKitInMemory
-import CognitionKit
+@testable import CognitionKit
 
-final class GroundedSynthesisTests: XCTestCase {
+@Suite("GroundedSynthesisTests")
+struct GroundedSynthesisTests {
 
     /// Open a fresh in-memory estate and capture the supplied contents
     /// into a single room. Returns the kit and its handle.
@@ -40,7 +42,8 @@ final class GroundedSynthesisTests: XCTestCase {
         return (kit, handle)
     }
 
-    func testSynthesizesOverRecalledDrawers() async throws {
+    @Test("synthesizes over recalled drawers")
+    func synthesizesOverRecalledDrawers() async throws {
         let (kit, handle) = try await makeEstate(capturing: [
             "the organic chemistry of carbon compounds",
             "carbon based life and biochemistry",
@@ -55,18 +58,19 @@ final class GroundedSynthesisTests: XCTestCase {
         let out = try await GroundedSynthesis().run(
             input: input, estate: handle, kit: kit)
 
-        XCTAssertEqual(out.drawerCount, 3)
-        XCTAssertFalse(out.context.summary.isEmpty,
-                       "summary should be populated for a non-empty recall")
+        #expect(out.drawerCount == 3)
+        #expect(!out.context.summary.isEmpty,
+                "summary should be populated for a non-empty recall")
         // The dominant room is "lab" — the summary names it.
-        XCTAssertTrue(out.context.summary.contains("lab"),
-                      "summary should name the dominant room")
+        #expect(out.context.summary.contains("lab"),
+                "summary should name the dominant room")
         // "carbon" appears in two drawers → a dominant pattern.
-        XCTAssertTrue(out.context.patterns.contains("carbon"),
-                      "repeated token should surface as a pattern")
+        #expect(out.context.patterns.contains("carbon"),
+                "repeated token should surface as a pattern")
     }
 
-    func testEmptyRecallYieldsEmptyContext() async throws {
+    @Test("empty recall yields empty context")
+    func emptyRecallYieldsEmptyContext() async throws {
         let (kit, handle) = try await makeEstate(capturing: [])
 
         let input = GroundedSynthesis.Input(
@@ -74,15 +78,15 @@ final class GroundedSynthesisTests: XCTestCase {
         let out = try await GroundedSynthesis().run(
             input: input, estate: handle, kit: kit)
 
-        XCTAssertEqual(out.drawerCount, 0)
-        XCTAssertTrue(out.context.summary.isEmpty)
-        XCTAssertTrue(out.context.patterns.isEmpty)
+        #expect(out.drawerCount == 0)
+        #expect(out.context.summary.isEmpty)
+        #expect(out.context.patterns.isEmpty)
     }
 
-    func testCapabilityMetadataIsDeclared() {
+    @Test("capability metadata is declared")
+    func capabilityMetadataIsDeclared() {
         let recipe = GroundedSynthesis()
-        XCTAssertEqual(recipe.name, "grounded_synthesis")
-        XCTAssertEqual(Set(recipe.requiredCapabilities),
-                       [.hybridRecall, .synthesize])
+        #expect(recipe.name == "grounded_synthesis")
+        #expect(Set(recipe.requiredCapabilities) == [.hybridRecall, .synthesize])
     }
 }
