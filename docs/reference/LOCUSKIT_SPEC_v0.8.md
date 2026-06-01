@@ -320,30 +320,42 @@ the same contract with different host shapes:
   the clock read entirely to the caller — a stricter realisation of the same
   determinism rule.
 - **Store backends.** The Swift `DrawerStore` is a concrete actor over any
-  injected `Storage`. The Rust version models `DrawerStore` as a `trait` with
-  `InMemoryDrawerStore` as the shipped implementation; a SQLite-backed Rust
-  store is not yet present, so the Rust version today exercises the in-memory
-  path only. The Rust version also surfaces helper shapes the Swift version keeps
-  internal (`BitmapAuditPair`, `RoomBundle`, `RoomLevelEntry`).
+  injected `Storage`; the Rust version realises the same store contract
+  through a `DrawerStore` trait. Both legs are conformance-gated to identical
+  value-level results. The Rust version also surfaces helper shapes the Swift
+  version keeps internal (`BitmapAuditPair`, `RoomBundle`, `RoomLevelEntry`).
 
 These are *shape* differences; the value-level results that C-7 gates are
 required to agree.
 
-## § 9 — Verb and coverage status
+## § 9 — Verb-noun acceptance
 
-- Five of the nine verbs ship at this revision (`capture`, `recall`,
-  `withdraw`, plus `auditTrail`/`bitmapState` history). `mutate`, `expunge`,
-  `reanchor`, and `learn` are declared and throw
-  `LocusKitError.invalidContent` until their owning missions land
-  (`propose`/`associate` enter through the tunnel/KG paths; their noun value
-  types, operational accessors, and stores ship, but verb behaviour does
-  not). The `MutationKind` vocabulary is fully specified ahead of the
-  `mutate` implementation.
-- A SQLite-backed Rust `DrawerStore` is outstanding; until it lands the Rust
-  conformance surface covers the in-memory store only (§ 8).
-- `provenance_audit` and `bitmap_audit` are separate trails; `bitmapState`
-  provenance reconstruction is best-effort until a future mission unifies
-  them.
+The nine verbs are not uniformly legal on every noun. Legality is defined by
+the acceptance matrix (`AriaLexiconLib.Acceptance`, architecture spec § 7.2),
+which is data so a conformance harness checks both ports agree:
+
+| Noun | Accepts |
+|---|---|
+| `Drawer` | capture, reanchor, mutate, withdraw, expunge, recall |
+| `Tunnel` | capture, mutate, withdraw, expunge, recall |
+| `KGFact` | mutate, withdraw, expunge, recall |
+| `DiaryEntry` | recall |
+| `Proposal` | mutate, withdraw, expunge, recall |
+| `Association` | mutate, expunge, recall |
+| `LearnedReference` | learn, mutate, withdraw, expunge, recall |
+| `Vector` | (none — substrate-managed, not verb-addressable) |
+
+- `mutate` carries the `MutationKind` axis (`confirm`, `reject`, `contest`,
+  `resolve`, `supersede`, `revive`, `accept`, `correctSensitivity`,
+  `correctTrust`); each rewrites a bounded bitmap field and writes its audit
+  row atomically, leaving the other axes intact.
+- `learn` is legal only on `LearnedReference`: it records a learned reference
+  drawer through the LRF noun substrate.
+- `propose` / `associate` are realised through the `Proposal` and
+  `Association` noun stores and the tunnel/KG-fact paths, not as dedicated
+  `Estate` verb methods.
+- A verb applied to a noun outside its accepted set is rejected by the
+  acceptance check before any storage call.
 
 ---
 
