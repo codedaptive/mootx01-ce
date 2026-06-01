@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -19,7 +19,8 @@ import GeniusLocusKit
 /// `ExternalCorpus` whose entry `id`s equal the captured `Drawer.id`s,
 /// so a content-driven `contentMatches` recall maps each expected
 /// concept onto the drawer the migration produced.
-final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
+@Suite("NK-BR-01 branch ops + migration benchmark")
+struct NK_BR_01_BranchBenchmarkTests {
 
     // MARK: - Helpers
 
@@ -61,27 +62,30 @@ final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
 
     // MARK: - Test 1: deriveBranch returns an active, depth-1 handle
 
-    func testDeriveBranchReturnsActiveDepthOneHandle() async throws {
+    @Test("deriveBranch returns an active, depth-1 handle")
+    func deriveBranchReturnsActiveDepthOneHandle() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await NeuronKit.deriveBranch(name: "t1-branch", from: handle, in: kit)
-        XCTAssertEqual(branch.status, .active)
-        XCTAssertEqual(branch.lineageDepth, 1)
+        #expect(branch.status == .active)
+        #expect(branch.lineageDepth == 1)
     }
 
     // MARK: - Test 2: promoteBranch transitions the branch to .won
 
-    func testPromoteBranchTransitionsToWon() async throws {
+    @Test("promoteBranch transitions the branch to .won")
+    func promoteBranchTransitionsToWon() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await NeuronKit.deriveBranch(name: "t2-branch", from: handle, in: kit)
         _ = try await captureIntoBranch(branch, content: "t2-promotable-row")
 
         try await NeuronKit.promoteBranch(branch, replacing: handle, in: kit)
-        XCTAssertEqual(branch.status, .won)
+        #expect(branch.status == .won)
     }
 
     // MARK: - Test 3: mergeDrawers merges the requested present drawers
 
-    func testMergeDrawersMergesRequestedPresentDrawers() async throws {
+    @Test("mergeDrawers merges the requested present drawers")
+    func mergeDrawersMergesRequestedPresentDrawers() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await NeuronKit.deriveBranch(name: "t3-branch", from: handle, in: kit)
         let rowA = try await captureIntoBranch(branch, content: "t3-row-a")
@@ -89,12 +93,13 @@ final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
 
         let report = try await NeuronKit.mergeDrawers([rowA.id, rowB.id], from: branch, into: handle, in: kit)
         // Both requested IDs are present in the branch, so both merge.
-        XCTAssertEqual(report.merged.count, 2)
+        #expect(report.merged.count == 2)
     }
 
     // MARK: - Test 4: ExternalCorpus.load(from:) decodes a MemPalace export
 
-    func testExternalCorpusLoadDecodesExport() async throws {
+    @Test("ExternalCorpus.load(from:) decodes a MemPalace export")
+    func externalCorpusLoadDecodesExport() async throws {
         let json = """
         {
           "name": "test-corpus",
@@ -111,23 +116,25 @@ final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
 
         let corpus = try ExternalCorpus.load(from: url)
-        XCTAssertEqual(corpus.name, "test-corpus")
-        XCTAssertEqual(corpus.entries.count, 3)
+        #expect(corpus.name == "test-corpus")
+        #expect(corpus.entries.count == 3)
     }
 
     // MARK: - Test 5: asRecallFrames yields one frame per entry
 
-    func testAsRecallFramesYieldsOneFramePerEntry() {
+    @Test("asRecallFrames yields one frame per entry")
+    func asRecallFramesYieldsOneFramePerEntry() {
         let corpus = ExternalCorpus(name: "frames", entries: [
             ExternalEntry(id: "c1", content: "alpha", tags: []),
             ExternalEntry(id: "c2", content: "bravo", tags: []),
         ])
-        XCTAssertEqual(corpus.asRecallFrames().count, corpus.entries.count)
+        #expect(corpus.asRecallFrames().count == corpus.entries.count)
     }
 
     // MARK: - Test 6: benchmark on a lossless branch — overlap 1.0, no loss
 
-    func testBenchmarkLosslessBranchHasFullOverlapAndNoLoss() async throws {
+    @Test("benchmark on a lossless branch — overlap 1.0, no loss")
+    func benchmarkLosslessBranchHasFullOverlapAndNoLoss() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await NeuronKit.deriveBranch(name: "t6-branch", from: handle, in: kit)
         // Distinct contents with no substring collisions so each
@@ -145,13 +152,14 @@ final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
         let report = try await NeuronKit.benchmark(
             branch: branch, against: corpus, now: Date(timeIntervalSince1970: 1_700_000_000)
         )
-        XCTAssertEqual(report.recallOverlap, 1.0, accuracy: 1e-6)
-        XCTAssertTrue(report.notFoundInBranch.isEmpty)
+        #expect(abs(report.recallOverlap - 1.0) <= 1e-6)
+        #expect(report.notFoundInBranch.isEmpty)
     }
 
     // MARK: - Test 7: C-13 — a missing concept surfaces in notFoundInBranch
 
-    func testBenchmarkMissingConceptIsZeroToleranceLoss() async throws {
+    @Test("C-13 — a missing concept surfaces in notFoundInBranch")
+    func benchmarkMissingConceptIsZeroToleranceLoss() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await NeuronKit.deriveBranch(name: "t7-branch", from: handle, in: kit)
         let a = try await captureIntoBranch(branch, content: "t7-alpha-concept")
@@ -169,14 +177,15 @@ final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
         let report = try await NeuronKit.benchmark(
             branch: branch, against: corpus, now: Date(timeIntervalSince1970: 1_700_000_000)
         )
-        XCTAssertEqual(report.notFoundInBranch.count, 1)
-        XCTAssertEqual(report.notFoundInBranch.first, missingID)
-        XCTAssertLessThan(report.recallOverlap, 1.0)
+        #expect(report.notFoundInBranch.count == 1)
+        #expect(report.notFoundInBranch.first == missingID)
+        #expect(report.recallOverlap < 1.0)
     }
 
     // MARK: - Test 8: newInBranch — a branch drawer absent from the origin
 
-    func testBenchmarkReportsNewInBranch() async throws {
+    @Test("newInBranch — a branch drawer absent from the origin")
+    func benchmarkReportsNewInBranch() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await NeuronKit.deriveBranch(name: "t8-branch", from: handle, in: kit)
         // Both drawers contain "t8-shared"; only `base` is in the corpus.
@@ -192,12 +201,13 @@ final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
         )
         // `extra` matches the "t8-shared" query but is not an expected
         // concept, so it is reported as new-in-branch.
-        XCTAssertTrue(report.newInBranch.contains(extra.id))
+        #expect(report.newInBranch.contains(extra.id))
     }
 
     // MARK: - Test 9: every metric field is finite and in [0, 1]
 
-    func testBenchmarkMetricsAreFiniteAndBounded() async throws {
+    @Test("every metric field is finite and in [0, 1]")
+    func benchmarkMetricsAreFiniteAndBounded() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await NeuronKit.deriveBranch(name: "t9-branch", from: handle, in: kit)
         let a = try await captureIntoBranch(branch, content: "t9-alpha-concept")
@@ -211,17 +221,18 @@ final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
         let report = try await NeuronKit.benchmark(
             branch: branch, against: corpus, now: Date(timeIntervalSince1970: 1_700_000_000)
         )
-        XCTAssertEqual(report.queryCount, 2)
+        #expect(report.queryCount == 2)
         for metric in [report.recallOverlap, report.recallPrecision, report.meanReciprocalRank] {
-            XCTAssertTrue(metric.isFinite)
-            XCTAssertGreaterThanOrEqual(metric, 0.0)
-            XCTAssertLessThanOrEqual(metric, 1.0)
+            #expect(metric.isFinite)
+            #expect(metric >= 0.0)
+            #expect(metric <= 1.0)
         }
     }
 
     // MARK: - Test 10: C-13 corollary — benchmark is read-only
 
-    func testBenchmarkIsReadOnly() async throws {
+    @Test("C-13 corollary — benchmark is read-only")
+    func benchmarkIsReadOnly() async throws {
         let (kit, handle) = try await openEstate()
         let branch = try await NeuronKit.deriveBranch(name: "t10-branch", from: handle, in: kit)
         _ = try await captureIntoBranch(branch, content: "t10-alpha-concept")
@@ -237,7 +248,7 @@ final class NK_BR_01_BranchBenchmarkTests: XCTestCase {
             branch: branch, against: corpus, now: Date(timeIntervalSince1970: 1_700_000_000)
         )
         let countAfter = try await branchRowCount(branch)
-        XCTAssertEqual(countBefore, countAfter,
+        #expect(countBefore == countAfter,
             "benchmark must issue no write verbs — branch drawer count must be unchanged")
     }
 }

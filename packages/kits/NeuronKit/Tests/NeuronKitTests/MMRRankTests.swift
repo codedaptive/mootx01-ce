@@ -12,11 +12,13 @@
 // greedy selection order and the input-index tie-break documented
 // here must reproduce bit-identically across ports.
 
-import XCTest
+import Testing
+import Foundation
 import EngramLib
 @testable import NeuronKit
 
-final class MMRRankTests: XCTestCase {
+@Suite("mmrRank diversity rerank")
+struct MMRRankTests {
 
     // MARK: - Fixtures
     //
@@ -62,7 +64,7 @@ final class MMRRankTests: XCTestCase {
         case "A": return fingerprintA()
         case "B": return fingerprintB()
         case "C": return fingerprintC()
-        default: XCTFail("unexpected drawer id \(d.id)"); return Engram(blocks: 0, 0, 0, 0)
+        default: Issue.record("unexpected drawer id \(d.id)"); return Engram(blocks: 0, 0, 0, 0)
         }
     }
 
@@ -70,7 +72,8 @@ final class MMRRankTests: XCTestCase {
 
     // MARK: - 1. Greedy selection order
 
-    func testGreedyOrderMatchesMMRFormula() {
+    @Test("greedy selection order matches the MMR formula")
+    func greedyOrderMatchesMMRFormula() {
         // lambda=0.7 picks A, then C (diversity beats B's marginally
         // higher relevance), then B. See the worked computation above.
         let out = mmrRank(
@@ -80,12 +83,13 @@ final class MMRRankTests: XCTestCase {
             k: 3,
             fingerprint: fingerprint
         )
-        XCTAssertEqual(out.map(\.id), ["A", "C", "B"])
+        #expect(out.map(\.id) == ["A", "C", "B"])
     }
 
     // MARK: - 2. Lambda extremes
 
-    func testLambdaOneIsPureRelevanceOrder() {
+    @Test("lambda=1.0 yields pure-relevance order")
+    func lambdaOneIsPureRelevanceOrder() {
         // lambda=1.0 zeroes the diversity term: order is closest-to-
         // query first. dist A=40 < B=44 < C=80 -> [A, B, C].
         let out = mmrRank(
@@ -95,10 +99,11 @@ final class MMRRankTests: XCTestCase {
             k: 3,
             fingerprint: fingerprint
         )
-        XCTAssertEqual(out.map(\.id), ["A", "B", "C"])
+        #expect(out.map(\.id) == ["A", "B", "C"])
     }
 
-    func testLambdaZeroIsDiversityFirst() {
+    @Test("lambda=0.0 yields diversity-first order")
+    func lambdaZeroIsDiversityFirst() {
         // lambda=0.0 zeroes the relevance term. Step 1 scores are all
         // 0 (no selection yet), so the input-index tie-break picks the
         // first candidate (A, also the most relevant). Step 2 maximises
@@ -110,12 +115,13 @@ final class MMRRankTests: XCTestCase {
             k: 3,
             fingerprint: fingerprint
         )
-        XCTAssertEqual(out.map(\.id), ["A", "C", "B"])
+        #expect(out.map(\.id) == ["A", "C", "B"])
     }
 
     // MARK: - 3. k truncation
 
-    func testKLessThanCountReturnsExactlyK() {
+    @Test("k less than count returns exactly k")
+    func kLessThanCountReturnsExactlyK() {
         let out = mmrRank(
             candidates: candidates(),
             query: query,
@@ -123,10 +129,11 @@ final class MMRRankTests: XCTestCase {
             k: 2,
             fingerprint: fingerprint
         )
-        XCTAssertEqual(out.map(\.id), ["A", "C"])
+        #expect(out.map(\.id) == ["A", "C"])
     }
 
-    func testKGreaterThanOrEqualToCountReturnsAll() {
+    @Test("k >= count returns all candidates")
+    func kGreaterThanOrEqualToCountReturnsAll() {
         let out = mmrRank(
             candidates: candidates(),
             query: query,
@@ -134,10 +141,11 @@ final class MMRRankTests: XCTestCase {
             k: 99,
             fingerprint: fingerprint
         )
-        XCTAssertEqual(out.map(\.id), ["A", "C", "B"])
+        #expect(out.map(\.id) == ["A", "C", "B"])
     }
 
-    func testKZeroReturnsEmpty() {
+    @Test("k=0 returns empty")
+    func kZeroReturnsEmpty() {
         let out = mmrRank(
             candidates: candidates(),
             query: query,
@@ -145,10 +153,11 @@ final class MMRRankTests: XCTestCase {
             k: 0,
             fingerprint: fingerprint
         )
-        XCTAssertTrue(out.isEmpty)
+        #expect(out.isEmpty)
     }
 
-    func testNegativeKReturnsEmpty() {
+    @Test("negative k returns empty")
+    func negativeKReturnsEmpty() {
         let out = mmrRank(
             candidates: candidates(),
             query: query,
@@ -156,12 +165,13 @@ final class MMRRankTests: XCTestCase {
             k: -3,
             fingerprint: fingerprint
         )
-        XCTAssertTrue(out.isEmpty)
+        #expect(out.isEmpty)
     }
 
     // MARK: - 4. Empty candidates
 
-    func testEmptyCandidatesReturnsEmpty() {
+    @Test("empty candidates returns empty")
+    func emptyCandidatesReturnsEmpty() {
         let out = mmrRank(
             candidates: [],
             query: query,
@@ -169,12 +179,13 @@ final class MMRRankTests: XCTestCase {
             k: 5,
             fingerprint: fingerprint
         )
-        XCTAssertTrue(out.isEmpty)
+        #expect(out.isEmpty)
     }
 
     // MARK: - 5. Determinism / tie-break
 
-    func testTwoRunsAreBitIdentical() {
+    @Test("two runs are bit-identical")
+    func twoRunsAreBitIdentical() {
         let first = mmrRank(
             candidates: candidates(),
             query: query,
@@ -189,10 +200,11 @@ final class MMRRankTests: XCTestCase {
             k: 3,
             fingerprint: fingerprint
         )
-        XCTAssertEqual(first.map(\.id), second.map(\.id))
+        #expect(first.map(\.id) == second.map(\.id))
     }
 
-    func testEqualScoresBreakByInputIndexAscending() {
+    @Test("equal scores break by input index ascending")
+    func equalScoresBreakByInputIndexAscending() {
         // Three identical fingerprints: every relevance and similarity
         // term is equal, so every step is a tie. The input-index
         // tie-break must preserve input order exactly.
@@ -207,7 +219,7 @@ final class MMRRankTests: XCTestCase {
             k: 3,
             fingerprint: { _ in same }
         )
-        XCTAssertEqual(out.map(\.id), ["first", "second", "third"])
+        #expect(out.map(\.id) == ["first", "second", "third"])
     }
 }
 

@@ -16,7 +16,8 @@
 // a tampered `UnifiedAuditLog` via the explicit-id entry initializer so
 // the stored id no longer matches the recomputed content hash.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import GeniusLocusKit
 import LocusKit
@@ -142,11 +143,13 @@ private func daemon(
     MaintenanceDaemon(reader: reader, sink: sink, policyStore: policyStore)
 }
 
-final class MaintenanceDaemonTests: XCTestCase {
+@Suite("Maintenance daemon conformance")
+struct MaintenanceDaemonTests {
 
     // MARK: - C-3: all five scan categories detected and proposed
 
-    func testC3_AllFiveScanCategoriesEmitAProposal() async throws {
+    @Test("C-3: all five scan categories emit a proposal")
+    func c3AllFiveScanCategoriesEmitAProposal() async throws {
         // One drawer per scan category. The forbidden drawer is recent
         // (not a decay candidate); the decay drawer is normal-sensitivity
         // (not forbidden), so each drawer hits exactly one category.
@@ -173,77 +176,81 @@ final class MaintenanceDaemonTests: XCTestCase {
 
         let report = try await d.triggerMaintenanceCycle(now: t0)
 
-        XCTAssertEqual(report.forbiddenCombinations, 1)
-        XCTAssertEqual(report.decayCandidates, 1)
-        XCTAssertEqual(report.tombstoneCandidates, 1)
-        XCTAssertEqual(report.fingerprintDrifts, 1)
-        XCTAssertEqual(report.byReferenceDrifts, 1)
-        XCTAssertEqual(report.proposalsEmitted.count, 5, "one proposal per scan category")
+        #expect(report.forbiddenCombinations == 1)
+        #expect(report.decayCandidates == 1)
+        #expect(report.tombstoneCandidates == 1)
+        #expect(report.fingerprintDrifts == 1)
+        #expect(report.byReferenceDrifts == 1)
+        #expect(report.proposalsEmitted.count == 5, "one proposal per scan category")
 
         // The clean audit log produced no integrity proposal.
-        XCTAssertEqual(report.auditChecked, true)
-        XCTAssertEqual(report.auditReport?.valid, true)
+        #expect(report.auditChecked == true)
+        #expect(report.auditReport?.valid == true)
 
         // Each category's kind is present in the emission.
         let kinds = report.proposalsEmitted.map(\.kind)
-        XCTAssertTrue(kinds.contains(.disciplineViolation))
-        XCTAssertEqual(kinds.filter { $0 == .mutateCandidate }.count, 2, "decay + tombstone both mutate-candidate")
-        XCTAssertTrue(kinds.contains(.other("fingerprint_drift")))
-        XCTAssertTrue(kinds.contains(.byReferenceDrift))
+        #expect(kinds.contains(.disciplineViolation))
+        #expect(kinds.filter { $0 == .mutateCandidate }.count == 2, "decay + tombstone both mutate-candidate")
+        #expect(kinds.contains(.other("fingerprint_drift")))
+        #expect(kinds.contains(.byReferenceDrift))
     }
 
     // MARK: - C-4 / C-12: audit-chain break → integrity proposal
 
-    func testC4_TamperedAuditLogEmitsIntegrityProposal() async throws {
+    @Test("C-4/C-12: tampered audit log emits an integrity proposal")
+    func c4TamperedAuditLogEmitsIntegrityProposal() async throws {
         let reader = FakeReader(auditLog: tamperedAuditLog())
         let sink = RecordingSink()
         let d = daemon(reader: reader, sink: sink)
 
         let report = try await d.triggerMaintenanceCycle(now: t0)
 
-        XCTAssertEqual(report.auditChecked, true)
-        XCTAssertEqual(report.auditReport?.valid, false, "real AuditChainVerifier flags the tampered entry")
-        XCTAssertEqual(report.proposalsEmitted.count, 1, "exactly the audit-integrity proposal")
-        let frame = try XCTUnwrap(report.proposalsEmitted.first)
-        XCTAssertEqual(frame.kind, .other("audit_integrity"))
+        #expect(report.auditChecked == true)
+        #expect(report.auditReport?.valid == false, "real AuditChainVerifier flags the tampered entry")
+        #expect(report.proposalsEmitted.count == 1, "exactly the audit-integrity proposal")
+        let frame = try #require(report.proposalsEmitted.first)
+        #expect(frame.kind == .other("audit_integrity"))
         // firstBrokenAt is 2000ms epoch → "2000" tag in the target RowID.
-        XCTAssertEqual(frame.target, "audit-break-2000")
+        #expect(frame.target == "audit-break-2000")
     }
 
-    func testC4_CleanAuditLogEmitsNoIntegrityProposal() async throws {
+    @Test("C-4: clean audit log emits no integrity proposal")
+    func c4CleanAuditLogEmitsNoIntegrityProposal() async throws {
         let reader = FakeReader(auditLog: cleanAuditLog())
         let sink = RecordingSink()
         let d = daemon(reader: reader, sink: sink)
 
         let report = try await d.triggerMaintenanceCycle(now: t0)
 
-        XCTAssertEqual(report.auditChecked, true)
-        XCTAssertEqual(report.auditReport?.valid, true)
-        XCTAssertEqual(report.proposalsEmitted.count, 0, "clean chain proposes nothing")
+        #expect(report.auditChecked == true)
+        #expect(report.auditReport?.valid == true)
+        #expect(report.proposalsEmitted.count == 0, "clean chain proposes nothing")
     }
 
     // MARK: - C-6: exactly one diary entry per cycle
 
-    func testC6_OneDiaryEntryPerCycleFiledUnderMaintenanceWing() async throws {
+    @Test("C-6: one diary entry per cycle filed under the maintenance wing")
+    func c6OneDiaryEntryPerCycleFiledUnderMaintenanceWing() async throws {
         let reader = FakeReader(auditLog: cleanAuditLog())
         let sink = RecordingSink()
         let d = daemon(reader: reader, sink: sink)
 
         let report = try await d.triggerMaintenanceCycle(now: t0)
         let afterOne = await sink.diaryCount()
-        XCTAssertEqual(afterOne, 1)
-        XCTAssertEqual(report.diaryEntry.wing, "wing_maintenance-daemon")
-        XCTAssertEqual(report.diaryEntry.agentName, "maintenance-daemon")
+        #expect(afterOne == 1)
+        #expect(report.diaryEntry.wing == "wing_maintenance-daemon")
+        #expect(report.diaryEntry.agentName == "maintenance-daemon")
 
         _ = try await d.triggerMaintenanceCycle(now: t0.addingTimeInterval(600))
         _ = try await d.triggerMaintenanceCycle(now: t0.addingTimeInterval(1_200))
         let afterThree = await sink.diaryCount()
-        XCTAssertEqual(afterThree, 3, "every cycle writes exactly one DiaryEntry")
+        #expect(afterThree == 3, "every cycle writes exactly one DiaryEntry")
     }
 
     // MARK: - B-2: every detected issue is a proposal, never an action
 
-    func testB2_EveryDetectedIssueIsAProposalNeverAnAction() async throws {
+    @Test("B-2: every detected issue is a proposal, never an action")
+    func b2EveryDetectedIssueIsAProposalNeverAnAction() async throws {
         let reader = FakeReader(
             active: [drawer(id: "d-forbidden", filedAt: t0, sensitivity: .secret, exportability: .public_)],
             auditLog: cleanAuditLog()
@@ -257,17 +264,18 @@ final class MaintenanceDaemonTests: XCTestCase {
         // exposes only propose + recordCycleDiary, so the daemon
         // structurally cannot remediate. The only writes this cycle were
         // one proposal and one diary entry.
-        XCTAssertEqual(report.forbiddenCombinations, 1)
-        XCTAssertEqual(report.proposalsEmitted.count, 1)
+        #expect(report.forbiddenCombinations == 1)
+        #expect(report.proposalsEmitted.count == 1)
         let total = await sink.proposalCount()
-        XCTAssertEqual(total, 1)
+        #expect(total == 1)
         let diary = await sink.diaryCount()
-        XCTAssertEqual(diary, 1)
+        #expect(diary == 1)
     }
 
     // MARK: - B-4: idempotency across cycles
 
-    func testB4_SecondCycleOverUnchangedStateProposesNothingNew() async throws {
+    @Test("B-4: second cycle over unchanged state proposes nothing new")
+    func b4SecondCycleOverUnchangedStateProposesNothingNew() async throws {
         let forbidden = drawer(id: "d-forbidden", filedAt: t0, sensitivity: .secret, exportability: .public_)
         let decayed = drawer(id: "d-decay", filedAt: t0.addingTimeInterval(-40 * 86_400))
         let tomb = drawer(
@@ -285,23 +293,24 @@ final class MaintenanceDaemonTests: XCTestCase {
         let d = daemon(reader: reader, sink: sink)
 
         let first = try await d.triggerMaintenanceCycle(now: t0)
-        XCTAssertEqual(first.proposalsEmitted.count, 5)
+        #expect(first.proposalsEmitted.count == 5)
 
         // Second cycle over identical state: every candidate is still
         // detected, but every key was already proposed, so nothing new
         // is emitted and all five are counted as suppressed duplicates.
         let second = try await d.triggerMaintenanceCycle(now: t0.addingTimeInterval(60))
-        XCTAssertEqual(second.proposalsEmitted.count, 0, "already-proposed candidates are suppressed")
-        XCTAssertEqual(second.suppressedDuplicates, 5)
+        #expect(second.proposalsEmitted.count == 0, "already-proposed candidates are suppressed")
+        #expect(second.suppressedDuplicates == 5)
 
         // Two cycles produced exactly the proposals of one.
         let total = await sink.proposalCount()
-        XCTAssertEqual(total, 5)
+        #expect(total == 5)
     }
 
     // MARK: - Policy round-trips through the manifest seam
 
-    func testPolicyRoundTripsThroughManifestSeam() async throws {
+    @Test("policy round-trips through the manifest seam")
+    func policyRoundTripsThroughManifestSeam() async throws {
         let store = InMemoryMaintenancePolicyStore()
         let reader = FakeReader()
         let sink = RecordingSink()
@@ -320,7 +329,7 @@ final class MaintenanceDaemonTests: XCTestCase {
         let d2 = daemon(reader: reader, sink: sink, policyStore: store)
         try await d2.loadPersistedPolicy()
         let loaded = await d2.currentPolicy()
-        XCTAssertEqual(loaded, MaintenancePolicy(
+        #expect(loaded == MaintenancePolicy(
             tickIntervalMs: 120_000,
             auditCheckIntervalMs: 60_000,
             decayWindowSeconds: 1_000,
@@ -332,7 +341,8 @@ final class MaintenanceDaemonTests: XCTestCase {
 
     // MARK: - pump tick cadence (injectable clock, no wall-clock sleeps)
 
-    func testPumpFiresOnConfiguredTickIntervalOnly() async throws {
+    @Test("pump fires on the configured tick interval only")
+    func pumpFiresOnConfiguredTickIntervalOnly() async throws {
         let reader = FakeReader(auditLog: cleanAuditLog())
         let sink = RecordingSink()
         let d = daemon(reader: reader, sink: sink)
@@ -340,14 +350,14 @@ final class MaintenanceDaemonTests: XCTestCase {
 
         // First pump always fires (no prior tick).
         let first = try await d.pump(now: t0)
-        XCTAssertNotNil(first)
+        #expect(first != nil)
 
         // Before the interval elapses: not due.
         let early = try await d.pump(now: t0.addingTimeInterval(100))
-        XCTAssertNil(early, "tick must not fire before the 300s interval elapses")
+        #expect(early == nil, "tick must not fire before the 300s interval elapses")
 
         // At the interval: fires.
         let second = try await d.pump(now: t0.addingTimeInterval(300))
-        XCTAssertNotNil(second, "tick fires once the interval has elapsed")
+        #expect(second != nil, "tick fires once the interval has elapsed")
     }
 }

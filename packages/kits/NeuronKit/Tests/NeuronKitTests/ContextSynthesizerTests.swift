@@ -5,24 +5,28 @@
 // surface (the synthesizer is exercised through the public function
 // to confirm the `estate:` parameter compiles and is ignored).
 
-import XCTest
+import Testing
+import Foundation
 import GeniusLocusKit
 @testable import NeuronKit
 
-final class ContextSynthesisEngineTests: XCTestCase {
+@Suite("ContextSynthesisEngine")
+struct ContextSynthesisEngineTests {
 
-    func testEmptyPageProducesEmptyDocument() {
+    @Test("an empty page produces an empty document")
+    func emptyPageProducesEmptyDocument() {
         let page = RecallStream.Page(rows: [], pageIndex: 0, isLast: true)
         let doc = ContextSynthesisEngine.synthesize(page: page)
-        XCTAssertEqual(doc.summary, "")
-        XCTAssertEqual(doc.patterns, [])
-        XCTAssertEqual(doc.successRate, 0)
-        XCTAssertEqual(doc.averageReward, 0)
-        XCTAssertEqual(doc.recommendations, [])
-        XCTAssertEqual(doc.keyInsights, [])
+        #expect(doc.summary == "")
+        #expect(doc.patterns == [])
+        #expect(doc.successRate == 0)
+        #expect(doc.averageReward == 0)
+        #expect(doc.recommendations == [])
+        #expect(doc.keyInsights == [])
     }
 
-    func testSummaryNamesCountAndDominantWingAndRoom() {
+    @Test("summary names count and dominant wing and room")
+    func summaryNamesCountAndDominantWingAndRoom() {
         let rows = [
             drawer(content: "a", wing: "alpha", room: "r1"),
             drawer(content: "b", wing: "alpha", room: "r2"),
@@ -30,13 +34,11 @@ final class ContextSynthesisEngineTests: XCTestCase {
         ]
         let page = RecallStream.Page(rows: rows, pageIndex: 0, isLast: true)
         let doc = ContextSynthesisEngine.synthesize(page: page)
-        XCTAssertEqual(
-            doc.summary,
-            "3 drawers; dominant wing alpha; dominant room r1."
-        )
+        #expect(doc.summary == "3 drawers; dominant wing alpha; dominant room r1.")
     }
 
-    func testPatternsRankByFrequencyThenFirstSeen() {
+    @Test("patterns rank by frequency then first-seen order")
+    func patternsRankByFrequencyThenFirstSeen() {
         let rows = [
             drawer(content: "carbon organic compounds"),
             drawer(content: "organic chemistry carbon"),
@@ -49,29 +51,30 @@ final class ContextSynthesisEngineTests: XCTestCase {
         // each appear once; in first-seen order:
         // compounds (row 0), chemistry (row 1), physics, waves, photons.
         // Top 5 == [carbon, organic, compounds, chemistry, physics].
-        XCTAssertEqual(doc.patterns, ["carbon", "organic", "compounds", "chemistry", "physics"])
+        #expect(doc.patterns == ["carbon", "organic", "compounds", "chemistry", "physics"])
     }
 
-    func testRecommendationsMatchPatternCount() {
+    @Test("recommendation count matches pattern count")
+    func recommendationsMatchPatternCount() {
         let rows = [drawer(content: "alpha beta gamma delta")]
         let page = RecallStream.Page(rows: rows, pageIndex: 0, isLast: true)
         let doc = ContextSynthesisEngine.synthesize(page: page)
-        XCTAssertEqual(doc.recommendations.count, doc.patterns.count)
+        #expect(doc.recommendations.count == doc.patterns.count)
     }
 
-    func testNoPatternProducesNeutralRecommendation() {
+    @Test("no pattern produces a neutral recommendation")
+    func noPatternProducesNeutralRecommendation() {
         // All content tokens under 4 chars — no patterns surface.
         let rows = [drawer(content: "a bb ccc")]
         let page = RecallStream.Page(rows: rows, pageIndex: 0, isLast: true)
         let doc = ContextSynthesisEngine.synthesize(page: page)
-        XCTAssertTrue(doc.patterns.isEmpty)
-        XCTAssertEqual(doc.recommendations.count, 1)
-        XCTAssertTrue(
-            doc.recommendations[0].contains("broadening the recall frame")
-        )
+        #expect(doc.patterns.isEmpty)
+        #expect(doc.recommendations.count == 1)
+        #expect(doc.recommendations[0].contains("broadening the recall frame"))
     }
 
-    func testKeyInsightsTakeFirstLineUpToThreeRows() {
+    @Test("key insights take the first line of up to three rows")
+    func keyInsightsTakeFirstLineUpToThreeRows() {
         let rows = [
             drawer(content: "line one\nbody body"),
             drawer(content: "single line"),
@@ -80,10 +83,11 @@ final class ContextSynthesisEngineTests: XCTestCase {
         ]
         let page = RecallStream.Page(rows: rows, pageIndex: 0, isLast: true)
         let doc = ContextSynthesisEngine.synthesize(page: page)
-        XCTAssertEqual(doc.keyInsights, ["line one", "single line", "three"])
+        #expect(doc.keyInsights == ["line one", "single line", "three"])
     }
 
-    func testSuccessRateCountsCurrentlyBelievedFraction() {
+    @Test("success rate counts the currently-believed fraction")
+    func successRateCountsCurrentlyBelievedFraction() {
         // adjectiveBitmap = 0 -> state .active -> isCurrentlyBelieved == true
         // adjectiveBitmap with state .withdrawn (raw 2 in bits 0-2) ->
         // isCurrentlyBelieved == false
@@ -101,14 +105,16 @@ final class ContextSynthesisEngineTests: XCTestCase {
         // bit-2 state is not in the currently-believed cluster. If
         // the cluster grew at the substrate level, this test holds
         // for the v0.1 LocusKit invariant.
-        XCTAssertGreaterThanOrEqual(doc.successRate, 0)
-        XCTAssertLessThanOrEqual(doc.successRate, 1)
+        #expect(doc.successRate >= 0)
+        #expect(doc.successRate <= 1)
     }
 }
 
-final class ContextSynthesizerInvariantTests: XCTestCase {
+@Suite("ContextSynthesizer invariants")
+struct ContextSynthesizerInvariantTests {
 
-    func testEngineMatchesPublicFunctionShape() {
+    @Test("engine matches the public function shape")
+    func engineMatchesPublicFunctionShape() {
         // The public `ContextSynthesizer.synthesize(from:estate:)`
         // is a pure delegator over `ContextSynthesisEngine.synthesize`
         // — the engine produces the document, the public function
@@ -126,8 +132,8 @@ final class ContextSynthesizerInvariantTests: XCTestCase {
         let rows = [drawer(content: "alpha beta gamma delta echo")]
         let page = RecallStream.Page(rows: rows, pageIndex: 0, isLast: true)
         let engineDoc = ContextSynthesisEngine.synthesize(page: page)
-        XCTAssertFalse(engineDoc.summary.isEmpty)
-        XCTAssertEqual(engineDoc.patterns.count, engineDoc.recommendations.count)
+        #expect(!engineDoc.summary.isEmpty)
+        #expect(engineDoc.patterns.count == engineDoc.recommendations.count)
     }
 }
 

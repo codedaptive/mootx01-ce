@@ -4,30 +4,36 @@
 // each gets its own test file. This file holds the module-level
 // smoke tests.
 
-import XCTest
+import Testing
+import Foundation
 @testable import NeuronKit
 
-final class NeuronKitTests: XCTestCase {
+@Suite("NeuronKit module smoke tests")
+struct NeuronKitTests {
 
-    func testModuleVersion() {
-        XCTAssertEqual(NeuronKit.version, "0.1.0")
+    @Test("module version is pinned")
+    func moduleVersion() {
+        #expect(NeuronKit.version == "0.1.0")
     }
 
-    func testLinguisticPipelineModeBuildConfiguration() {
+    @Test("linguistic pipeline mode tracks the build configuration")
+    func linguisticPipelineModeBuildConfiguration() {
         let mode = NeuronKit.linguisticPipelineMode
         #if APPLE_NLP_ACCEL
-        XCTAssertEqual(mode, .appleNLAccel)
-        XCTAssertEqual(mode.rawValue, "apple-nl-accel")
+        #expect(mode == .appleNLAccel)
+        #expect(mode.rawValue == "apple-nl-accel")
         #else
-        XCTAssertEqual(mode, .deterministicReference)
-        XCTAssertEqual(mode.rawValue, "deterministic-reference")
+        #expect(mode == .deterministicReference)
+        #expect(mode.rawValue == "deterministic-reference")
         #endif
     }
 }
 
-final class LatticeAnchorInferenceTests: XCTestCase {
+@Suite("LatticeAnchorInference")
+struct LatticeAnchorInferenceTests {
 
-    func testInferenceRoundTrip() throws {
+    @Test("inference round-trips through Codable")
+    func inferenceRoundTrip() throws {
         let inference = LatticeAnchorInference(
             code: "004.42",
             wikidataQID: "Q21198",
@@ -39,58 +45,55 @@ final class LatticeAnchorInferenceTests: XCTestCase {
         let data = try JSONEncoder().encode(inference)
         let decoded = try JSONDecoder().decode(LatticeAnchorInference.self, from: data)
 
-        XCTAssertEqual(decoded, inference)
+        #expect(decoded == inference)
     }
 
-    func testConfidenceLevelsMatchProvenanceFieldValues() {
-        XCTAssertEqual(AnchorConfidence.null.rawValue, 0)
-        XCTAssertEqual(AnchorConfidence.low.rawValue, 16)
-        XCTAssertEqual(AnchorConfidence.medium.rawValue, 32)
-        XCTAssertEqual(AnchorConfidence.high.rawValue, 48)
-        XCTAssertEqual(AnchorConfidence.verified.rawValue, 56)
+    @Test("confidence levels match provenance field values")
+    func confidenceLevelsMatchProvenanceFieldValues() {
+        #expect(AnchorConfidence.null.rawValue == 0)
+        #expect(AnchorConfidence.low.rawValue == 16)
+        #expect(AnchorConfidence.medium.rawValue == 32)
+        #expect(AnchorConfidence.high.rawValue == 48)
+        #expect(AnchorConfidence.verified.rawValue == 56)
     }
 
-    func testEnrichmentStatusValuesMatchCookbookSection2_5() {
-        XCTAssertEqual(EnrichmentStatus.none.rawValue, 0)
-        XCTAssertEqual(EnrichmentStatus.qidPending.rawValue, 1)
-        XCTAssertEqual(EnrichmentStatus.qidCompleted.rawValue, 2)
-        XCTAssertEqual(EnrichmentStatus.closureCached.rawValue, 3)
+    @Test("enrichment status values match cookbook §2.5")
+    func enrichmentStatusValuesMatchCookbookSection2_5() {
+        #expect(EnrichmentStatus.none.rawValue == 0)
+        #expect(EnrichmentStatus.qidPending.rawValue == 1)
+        #expect(EnrichmentStatus.qidCompleted.rawValue == 2)
+        #expect(EnrichmentStatus.closureCached.rawValue == 3)
     }
 }
 
-final class InferLatticeAnchorTests: XCTestCase {
+@Suite("inferLatticeAnchor")
+struct InferLatticeAnchorTests {
 
-    func testNonsenseTermProducesEnrichmentStatusNone() {
+    @Test("a nonsense term produces enrichment status none")
+    func nonsenseTermProducesEnrichmentStatusNone() {
         // No canon match means empty MDCC code, which means
         // enrichment_status = none (the substrate has not yet
         // produced an anchor for this content).
         let inference = NeuronKit.inferLatticeAnchor("qwertyzxcvb nonsense")
-        XCTAssertEqual(inference.code, "")
-        XCTAssertNil(inference.wikidataQID)
-        XCTAssertEqual(
-            inference.enrichmentStatusBits,
-            EnrichmentStatus.none.rawValue
-        )
+        #expect(inference.code == "")
+        #expect(inference.wikidataQID == nil)
+        #expect(inference.enrichmentStatusBits == EnrichmentStatus.none.rawValue)
     }
 
-    func testChemistryTermProducesQidCompletedStatus() {
+    @Test("a chemistry term produces qidCompleted status")
+    func chemistryTermProducesQidCompletedStatus() {
         // EideticLib resolves chemistry to an MDCC canon entry whose
         // sourceIdentity is its Q-ID; MDCC code and Q-ID both
         // populated means status = qidCompleted.
         let inference = NeuronKit.inferLatticeAnchor("chemistry")
-        XCTAssertFalse(inference.code.isEmpty)
-        XCTAssertNotNil(inference.wikidataQID)
-        XCTAssertEqual(
-            inference.enrichmentStatusBits,
-            EnrichmentStatus.qidCompleted.rawValue
-        )
+        #expect(!inference.code.isEmpty)
+        #expect(inference.wikidataQID != nil)
+        #expect(inference.enrichmentStatusBits == EnrichmentStatus.qidCompleted.rawValue)
     }
 
-    func testInferenceCarriesCurrentPipelineMode() {
+    @Test("inference carries the current pipeline mode")
+    func inferenceCarriesCurrentPipelineMode() {
         let inference = NeuronKit.inferLatticeAnchor("any term")
-        XCTAssertEqual(
-            inference.pipelineMode,
-            NeuronKit.linguisticPipelineMode
-        )
+        #expect(inference.pipelineMode == NeuronKit.linguisticPipelineMode)
     }
 }
