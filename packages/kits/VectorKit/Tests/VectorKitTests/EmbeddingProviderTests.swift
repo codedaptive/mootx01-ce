@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import SubstrateML
 import EngramLib
 @testable import VectorKit
@@ -20,39 +20,40 @@ private struct MockEmbeddingProvider: EmbeddingProvider {
     }
 }
 
-final class EmbeddingProviderTests: XCTestCase {
+@Suite("EmbeddingProvider")
+struct EmbeddingProviderTests {
 
     /// The mock type conforms to `EmbeddingProvider`. Compile-time
     /// guarantee plus a runtime existential check.
-    func testMockConformsToProtocol() {
+    @Test func testMockConformsToProtocol() {
         let provider: any EmbeddingProvider = MockEmbeddingProvider()
-        XCTAssertNotNil(provider)
+        #expect((provider as Any?) != nil)
     }
 
     /// Model identity fields are non-empty. Per spec I-4 these are
     /// part of every stored record; an empty value would corrupt the
     /// model-tagging contract.
-    func testModelIdentityFieldsAreNonEmpty() {
+    @Test func testModelIdentityFieldsAreNonEmpty() {
         let provider = MockEmbeddingProvider()
-        XCTAssertFalse(provider.modelID.isEmpty)
-        XCTAssertFalse(provider.modelVersion.isEmpty)
+        #expect(!provider.modelID.isEmpty)
+        #expect(!provider.modelVersion.isEmpty)
     }
 
     /// `embed(_:)` returns an `Engram` for a normal input.
-    func testEmbedReturnsEngram() async throws {
+    @Test func testEmbedReturnsEngram() async throws {
         let provider = MockEmbeddingProvider()
         let engram = try await provider.embed("hello world")
         // Non-empty input returns the mock's fixed non-zero engram.
-        XCTAssertEqual(engram, Engram(blocks: 0xDEAD, 0xBEEF, 0xCAFE, 0xBABE))
+        #expect(engram == Engram(blocks: 0xDEAD, 0xBEEF, 0xCAFE, 0xBABE))
     }
 
     /// Empty input returns the substrate's canonical zero engram.
     /// This is the cross-provider contract on EmbeddingProvider:
     /// empty strings collide on the same Hamming-distance-0 partition
     /// regardless of which provider produced them.
-    func testEmbedEmptyStringReturnsZeroEngram() async throws {
+    @Test func testEmbedEmptyStringReturnsZeroEngram() async throws {
         let provider = MockEmbeddingProvider()
         let engram = try await provider.embed("")
-        XCTAssertEqual(engram, Engram.zero)
+        #expect(engram == Engram.zero)
     }
 }
