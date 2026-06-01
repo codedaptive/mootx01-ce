@@ -65,6 +65,13 @@ let package = Package(
         // invariant that bars direct LocusKit/VectorKit/CorpusKit calls.
         .package(path: "../../libs/EngramLib"),
         .package(path: "../../libs/SubstrateTypes"),
+        // SubstrateML supplies the gated reasoning-lens math primitives
+        // (EigenvalueCentrality, CommunityDetection, RandomWalks, and the
+        // topic/preference/prediction primitives). The reasoning lenses
+        // (Sources/NeuronKit/Lenses/) are pure shapes over these primitives
+        // and own no math (SPEC I-17); this is a typed-math dependency only,
+        // consistent with B-1.
+        .package(path: "../../libs/SubstrateML"),
     ],
     targets: [
         .target(
@@ -76,6 +83,8 @@ let package = Package(
                 // MMR distance primitive — see dependency note above.
                 .product(name: "EngramLib", package: "EngramLib"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                // Gated lens math — see dependency note above (SPEC I-17).
+                .product(name: "SubstrateML", package: "SubstrateML"),
             ]
         ),
         .testTarget(
