@@ -1,6 +1,7 @@
 // SQLiteBasicTests.swift
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitSQLite
@@ -18,7 +19,7 @@ import PersistenceKitSQLite
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class SQLiteBasicTests: XCTestCase {
+struct SQLiteBasicTests {
 
     func makeStorage() throws -> SQLiteStorage {
         let tmpDir = FileManager.default.temporaryDirectory
@@ -52,15 +53,15 @@ final class SQLiteBasicTests: XCTestCase {
         )
     }
 
-    func testOpenAndSchemaVersion() async throws {
+    @Test func openAndSchemaVersion() async throws {
         let storage = try makeStorage()
         try await storage.open(schema: makeSchema(version: 1))
         let v = try await storage.currentSchemaVersion()
-        XCTAssertEqual(v, 1)
+        #expect(v == 1)
         await storage.close()
     }
 
-    func testInsertAndQuery() async throws {
+    @Test func insertAndQuery() async throws {
         let storage = try makeStorage()
         try await storage.open(schema: makeSchema())
 
@@ -80,16 +81,16 @@ final class SQLiteBasicTests: XCTestCase {
             table: "drawers",
             where: .eq(Column(table: "drawers", name: "row_id"), .uuid(rowID))
         )
-        XCTAssertEqual(rows.count, 1)
+        #expect(rows.count == 1)
         if case .text(let s) = rows[0]["verbatim"] {
-            XCTAssertEqual(s, "hello sqlite")
+            #expect(s == "hello sqlite")
         } else {
-            XCTFail("expected text verbatim")
+            Issue.record("expected text verbatim")
         }
         await storage.close()
     }
 
-    func testBitmaskPredicate() async throws {
+    @Test func bitmaskPredicate() async throws {
         let storage = try makeStorage()
         try await storage.open(schema: makeSchema())
 
@@ -111,23 +112,23 @@ final class SQLiteBasicTests: XCTestCase {
             table: "drawers",
             where: .bitmaskAll(Column(table: "drawers", name: "adjective"), mask: 0x01)
         )
-        XCTAssertEqual(allBit0, 4)
+        #expect(allBit0 == 4)
 
         let all0x07 = try await storage.rowStore.count(
             table: "drawers",
             where: .bitmaskAll(Column(table: "drawers", name: "adjective"), mask: 0x07)
         )
-        XCTAssertEqual(all0x07, 2)
+        #expect(all0x07 == 2)
 
         let none0xF0 = try await storage.rowStore.count(
             table: "drawers",
             where: .bitmaskNone(Column(table: "drawers", name: "adjective"), mask: 0xF0)
         )
-        XCTAssertEqual(none0xF0, 4)
+        #expect(none0xF0 == 4)
         await storage.close()
     }
 
-    func testAuditAppendIdempotent() async throws {
+    @Test func auditAppendIdempotent() async throws {
         let storage = try makeStorage()
         try await storage.open(schema: makeSchema())
 
@@ -149,11 +150,11 @@ final class SQLiteBasicTests: XCTestCase {
         try await storage.auditLog.append(event)
 
         let count = try await storage.auditLog.count()
-        XCTAssertEqual(count, 1)
+        #expect(count == 1)
         await storage.close()
     }
 
-    func testTransactionCommit() async throws {
+    @Test func transactionCommit() async throws {
         let storage = try makeStorage()
         try await storage.open(schema: makeSchema())
 
@@ -171,16 +172,16 @@ final class SQLiteBasicTests: XCTestCase {
             )
         }
         let count = try await storage.rowStore.count(table: "drawers", where: nil)
-        XCTAssertEqual(count, 1)
+        #expect(count == 1)
         await storage.close()
     }
 
-    func testTransactionRollback() async throws {
+    @Test func transactionRollback() async throws {
         let storage = try makeStorage()
         try await storage.open(schema: makeSchema())
 
         struct TestError: Error {}
-        do {
+        await #expect(throws: TestError.self) {
             try await storage.transaction { txn in
                 _ = try await txn.rowStore.insert(
                     table: "drawers",
@@ -195,30 +196,27 @@ final class SQLiteBasicTests: XCTestCase {
                 )
                 throw TestError()
             }
-            XCTFail("expected throw")
-        } catch is TestError {
-            // expected
         }
         let count = try await storage.rowStore.count(table: "drawers", where: nil)
-        XCTAssertEqual(count, 0, "rollback should leave no rows")
+        #expect(count == 0, "rollback should leave no rows")
         await storage.close()
     }
 
-    func testBlobRoundtrip() async throws {
+    @Test func blobRoundtrip() async throws {
         let storage = try makeStorage()
         try await storage.open(schema: makeSchema())
         let payload = Data([0xDE, 0xAD, 0xBE, 0xEF])
         try await storage.blobStore.put(key: "test/blob", bytes: payload)
         let retrieved = try await storage.blobStore.get(key: "test/blob")
-        XCTAssertEqual(retrieved, payload)
+        #expect(retrieved == payload)
         let exists = try await storage.blobStore.exists(key: "test/blob")
-        XCTAssertTrue(exists)
+        #expect(exists)
         let size = try await storage.blobStore.size(key: "test/blob")
-        XCTAssertEqual(size, 4)
+        #expect(size == 4)
         await storage.close()
     }
 
-    func testVectorKNN() async throws {
+    @Test func vectorKNN() async throws {
         let storage = try makeStorage()
         try await storage.open(schema: makeSchema())
 
@@ -234,18 +232,18 @@ final class SQLiteBasicTests: XCTestCase {
             filter: nil,
             searchParameters: nil
         )
-        XCTAssertEqual(results.count, 2)
-        XCTAssertEqual(results[0].key, k1, "exact match wins")
-        XCTAssertEqual(results[1].key, k3, "near match comes second")
+        #expect(results.count == 2)
+        #expect(results[0].key == k1, "exact match wins")
+        #expect(results[1].key == k3, "near match comes second")
         await storage.close()
     }
 
-    func testSchemaMigration() async throws {
+    @Test func schemaMigration() async throws {
         let storage = try makeStorage()
         // Open at version 1
         try await storage.open(schema: makeSchema(version: 1))
         let v1 = try await storage.currentSchemaVersion()
-        XCTAssertEqual(v1, 1)
+        #expect(v1 == 1)
 
         // Open at version 2 with an added column
         let v2 = SchemaDeclaration(
@@ -278,7 +276,7 @@ final class SQLiteBasicTests: XCTestCase {
         )
         try await storage.migrate(to: v2)
         let v2Version = try await storage.currentSchemaVersion()
-        XCTAssertEqual(v2Version, 2)
+        #expect(v2Version == 2)
         await storage.close()
     }
 }

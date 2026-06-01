@@ -1,6 +1,7 @@
 // InMemoryObserverTests.swift
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitInMemory
@@ -18,7 +19,7 @@ import PersistenceKitInMemory
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class InMemoryObserverTests: XCTestCase {
+struct InMemoryObserverTests {
 
     func makeStorage() -> InMemoryStorage {
         InMemoryStorage(configuration: EstateConfiguration(
@@ -27,7 +28,7 @@ final class InMemoryObserverTests: XCTestCase {
         ))
     }
 
-    func testInsertNotification() async throws {
+    @Test func insertNotification() async throws {
         let storage = makeStorage()
         try await storage.open(schema: SchemaDeclaration(
             kitID: "ObserverTest",
@@ -59,13 +60,13 @@ final class InMemoryObserverTests: XCTestCase {
         _ = try await storage.rowStore.insert(table: "items", values: ["id": .uuid(id2), "name": .text("second")])
 
         let changes = await collected.value
-        XCTAssertEqual(changes.count, 2, "two inserts should produce two notifications")
-        XCTAssertEqual(changes[0].event, .insert)
-        XCTAssertEqual(changes[0].table, "items")
-        XCTAssertEqual(changes[0].rowKey, id1)
+        #expect(changes.count == 2, "two inserts should produce two notifications")
+        #expect(changes[0].event == .insert)
+        #expect(changes[0].table == "items")
+        #expect(changes[0].rowKey == id1)
     }
 
-    func testDeleteNotification() async throws {
+    @Test func deleteNotification() async throws {
         let storage = makeStorage()
         try await storage.open(schema: SchemaDeclaration(
             kitID: "ObserverTest",
@@ -93,15 +94,15 @@ final class InMemoryObserverTests: XCTestCase {
             table: "items",
             where: .eq(Column(table: "items", name: "id"), .uuid(id))
         )
-        XCTAssertEqual(deleted, 1)
+        #expect(deleted == 1)
 
         let change = await collected.value
-        XCTAssertNotNil(change)
-        XCTAssertEqual(change?.event, .delete)
-        XCTAssertEqual(change?.rowKey, id)
+        #expect(change != nil)
+        #expect(change?.event == .delete)
+        #expect(change?.rowKey == id)
     }
 
-    func testEventFilterRespected() async throws {
+    @Test func eventFilterRespected() async throws {
         let storage = makeStorage()
         try await storage.open(schema: SchemaDeclaration(
             kitID: "ObserverTest",
@@ -135,6 +136,6 @@ final class InMemoryObserverTests: XCTestCase {
         )
 
         let count = await collected.value
-        XCTAssertEqual(count, 1, "only insert observed; delete filtered out")
+        #expect(count == 1, "only insert observed; delete filtered out")
     }
 }

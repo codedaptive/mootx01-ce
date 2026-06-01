@@ -100,9 +100,14 @@ actor InMemoryStateActor {
         self.observerRegistry = observerRegistry
     }
 
-    private func notify(_ change: TableChange) {
+    private func notify(_ change: TableChange) async {
         if let registry = observerRegistry {
-            Task { await registry.notify(change) }
+            // Awaited, not fire-and-forget: changes are delivered to observers in
+            // the exact order their mutations were applied. The prior
+            // `Task { await registry.notify(change) }` spawned one unordered task
+            // per change, so concurrent/sequential mutations could be observed
+            // out of order (see PK-TEST-01 InMemoryObserverTests.insertNotification).
+            await registry.notify(change)
         }
     }
 
@@ -185,7 +190,7 @@ actor InMemoryStateActor {
 
     // MARK: - Row operations (called by InMemoryRowStore)
 
-    func insertRow(table: String, values: [String: TypedValue]) throws -> RowHandle {
+    func insertRow(table: String, values: [String: TypedValue]) async throws -> RowHandle {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "insert: table \(table) not found")
         }
@@ -196,11 +201,11 @@ actor InMemoryStateActor {
         let stored = Self.materializeGenerated(t.declaration, values)
         t.rows[key] = stored
         state.tables[table] = t
-        notify(TableChange(table: table, event: .insert, rowKey: key, values: stored))
+        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored))
         return RowHandle(table: table, key: key)
     }
 
-    func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) throws -> RowHandle {
+    func upsertRow(table: String, values: [String: TypedValue], conflictColumns: [String]) async throws -> RowHandle {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "upsert: table \(table) not found")
         }
@@ -216,18 +221,18 @@ actor InMemoryStateActor {
             merged = Self.materializeGenerated(t.declaration, merged)
             t.rows[existingKey] = merged
             state.tables[table] = t
-            notify(TableChange(table: table, event: .update, rowKey: existingKey, values: merged))
+            await notify(TableChange(table: table, event: .update, rowKey: existingKey, values: merged))
             return RowHandle(table: table, key: existingKey)
         }
         let key = resolveOrAllocateKey(table: t, values: values)
         let stored = Self.materializeGenerated(t.declaration, values)
         t.rows[key] = stored
         state.tables[table] = t
-        notify(TableChange(table: table, event: .insert, rowKey: key, values: stored))
+        await notify(TableChange(table: table, event: .insert, rowKey: key, values: stored))
         return RowHandle(table: table, key: key)
     }
 
-    func updateRows(table: String, values: [String: TypedValue], where predicate: StoragePredicate) throws -> Int {
+    func updateRows(table: String, values: [String: TypedValue], where predicate: StoragePredicate) async throws -> Int {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "update: table \(table) not found")
         }
@@ -245,11 +250,11 @@ actor InMemoryStateActor {
             count += 1
         }
         state.tables[table] = t
-        for n in notifications { notify(n) }
+        for n in notifications { await notify(n) }
         return count
     }
 
-    func deleteRows(table: String, where predicate: StoragePredicate) throws -> Int {
+    func deleteRows(table: String, where predicate: StoragePredicate) async throws -> Int {
         guard var t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "delete: table \(table) not found")
         }
@@ -264,7 +269,7 @@ actor InMemoryStateActor {
             count += 1
         }
         state.tables[table] = t
-        for n in notifications { notify(n) }
+        for n in notifications { await notify(n) }
         return count
     }
 
