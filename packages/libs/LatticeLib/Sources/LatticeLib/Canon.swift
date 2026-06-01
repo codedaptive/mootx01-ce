@@ -93,7 +93,7 @@ public struct LatticeCanon: Sendable, Codable {
     }
 
     // Bundled canon loader. The v1 canon JSON file lives in
-    // Sources/LatticeKit/Resources/LatticeCanonV1.json. Build-time resource
+    // Sources/LatticeLib/Resources/LatticeCanonV1.json. Build-time resource
     // processing places it inside the kit's Bundle.module.
     static func loadBundledV1() -> LatticeCanon? {
         guard let url = Bundle.module.url(

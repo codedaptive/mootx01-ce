@@ -5,7 +5,7 @@
 // order: pinned, lowest spine-class index, lexicographic minimum.
 
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Collapse rule")
 struct CollapseRuleTests {

@@ -5,7 +5,7 @@
 // next-free-slot computation and the registry round-trip.
 
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Stable key registry")
 struct StableKeyTests {

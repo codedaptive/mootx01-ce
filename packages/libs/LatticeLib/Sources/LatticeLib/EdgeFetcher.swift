@@ -23,7 +23,7 @@
 import Foundation
 import os
 
-/// Structured errors raised by LatticeKit's pipeline surface. Per the
+/// Structured errors raised by LatticeLib's pipeline surface. Per the
 /// project convention, errors are a typed enum rather than optionals
 /// plus logging. v1 has a single case — the live edge fetch is the
 /// only operation that can fail in a way the assembler machinery
@@ -75,7 +75,7 @@ public struct WikidataEdgeSource: EdgeSource {
     private let endpoint: URL
     private let batchSize: Int
     private let session: URLSession
-    private static let log = Logger(subsystem: "com.mootx01.kit", category: "LatticeKit")
+    private static let log = Logger(subsystem: "com.mootx01.kit", category: "LatticeLib")
 
     /// - Parameters:
     ///   - endpoint: the SPARQL endpoint (defaults to WDQS).
@@ -135,7 +135,7 @@ public struct WikidataEdgeSource: EdgeSource {
         ]
         var request = URLRequest(url: components.url!)
         // WDQS requires a descriptive User-Agent and returns SPARQL JSON.
-        request.setValue("LatticeKit-build/0.1 (https://github.com/mootx01; CC0 canon build)", forHTTPHeaderField: "User-Agent")
+        request.setValue("LatticeLib-build/0.1 (https://github.com/mootx01; CC0 canon build)", forHTTPHeaderField: "User-Agent")
         request.setValue("application/sparql-results+json", forHTTPHeaderField: "Accept")
 
         let (data, response) = try await session.data(for: request)

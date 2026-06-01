@@ -5,21 +5,21 @@
 
 import Foundation
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Canon and channels")
 struct CanonAndChannelsTests {
 
     @Test("bundled v1 canon loads")
     func bundledLoads() {
-        let canon = LatticeKit.bundledCanon()
+        let canon = LatticeLib.bundledCanon()
         #expect(canon != nil)
         #expect(canon?.canonVersion == "v1")
     }
 
     @Test("bundled v1 canon resolves known codes")
     func bundledResolves() {
-        let entry = LatticeKit.entry(for: "501")
+        let entry = LatticeLib.entry(for: "501")
         #expect(entry?.label == "mathematics")
         #expect(entry?.classBase == 500)
     }
@@ -28,12 +28,12 @@ struct CanonAndChannelsTests {
     func validButUnknown() {
         // Pick a well-formed code outside the seed entries.
         #expect(Code.isWellFormed("540.137"))
-        #expect(LatticeKit.entry(for: "540.137") == nil)
+        #expect(LatticeLib.entry(for: "540.137") == nil)
     }
 
     @Test("fast-codes payload is sorted by code")
     func fastCodesSorted() {
-        let canon = LatticeKit.bundledCanon()!
+        let canon = LatticeLib.bundledCanon()!
         let payload = Channels.fastCodes(from: canon)
         let codes = payload.codes.map(\.code)
         #expect(codes == codes.sorted())
@@ -41,7 +41,7 @@ struct CanonAndChannelsTests {
 
     @Test("fast-codes JSON encoding is deterministic")
     func fastCodesDeterministic() throws {
-        let canon = LatticeKit.bundledCanon()!
+        let canon = LatticeLib.bundledCanon()!
         let payload = Channels.fastCodes(from: canon)
         let a = try Channels.encodeFastCodes(payload)
         let b = try Channels.encodeFastCodes(payload)
@@ -50,7 +50,7 @@ struct CanonAndChannelsTests {
 
     @Test("slow-docs markdown mentions every spine class")
     func slowDocsCoversSpine() {
-        let canon = LatticeKit.bundledCanon()!
+        let canon = LatticeLib.bundledCanon()!
         let doc = Channels.slowDocs(from: canon)
         for cls in NotationSpine.classes {
             #expect(doc.contains(cls.name), "missing class \(cls.name)")
@@ -59,7 +59,7 @@ struct CanonAndChannelsTests {
 
     @Test("slow-docs markdown lists reserved ranges")
     func slowDocsHasReservedRanges() {
-        let canon = LatticeKit.bundledCanon()!
+        let canon = LatticeLib.bundledCanon()!
         let doc = Channels.slowDocs(from: canon)
         #expect(doc.contains("Reserved ranges"))
         #expect(doc.contains("community"))

@@ -5,7 +5,7 @@
 // surface as test failures rather than silent canon shifts.
 
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Notation spine")
 struct NotationSpineTests {

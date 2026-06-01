@@ -1,6 +1,6 @@
-// LatticeKit.swift
+// LatticeLib.swift
 //
-// The LatticeKit module surface. Stateless from the caller's perspective;
+// The LatticeLib module surface. Stateless from the caller's perspective;
 // internally caches the parsed canon resources on first lookup so
 // subsequent calls don't re-parse JSON.
 //
@@ -12,8 +12,8 @@
 
 import Foundation
 
-/// The LatticeKit module surface.
-public enum LatticeKit {
+/// The LatticeLib module surface.
+public enum LatticeLib {
 
     /// The module version. Bumped in lockstep with the bundled canon
     /// when a new canon ships. Patch bumps may carry assembler fixes

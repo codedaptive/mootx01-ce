@@ -10,7 +10,7 @@
 // here).
 //
 // swift-testing (`import Testing` / `@Test` / `#expect`), per the
-// project standard (LatticeKit, SubstrateTypes ST-TEST-01 precedent).
+// project standard (LatticeLib, SubstrateTypes ST-TEST-01 precedent).
 
 import Testing
 @testable import SubstrateKernel

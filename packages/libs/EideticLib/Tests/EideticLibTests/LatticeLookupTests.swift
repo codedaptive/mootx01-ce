@@ -1,7 +1,7 @@
 // MDCCLookupTests.swift
 //
 // The MDCC lookup contract (MISSION_MDCC_03). EideticLib.lookup
-// resolves a term against the bundled MDCC canon (from LatticeKit),
+// resolves a term against the bundled MDCC canon (from LatticeLib),
 // returns an MDCC code and the canon entry's Wikidata Q-ID, and
 // never falls back to a UDC code. The CC-BY-SA UDC schedule is no
 // longer bundled or consulted.
@@ -9,7 +9,7 @@
 import Testing
 import Foundation
 @testable import EideticLib
-import LatticeKit
+import LatticeLib
 
 @Suite("MDCC lookup contract")
 struct MDCCLookupTests {
@@ -28,7 +28,7 @@ struct MDCCLookupTests {
             "resolved code \(anchor.code) must be a well-formed MDCC code"
         )
         let entry = try #require(
-            LatticeKit.entry(for: anchor.code),
+            LatticeLib.entry(for: anchor.code),
             "resolved code \(anchor.code) must exist in the bundled MDCC canon"
         )
         #expect(entry.label == "philosophy")
@@ -39,7 +39,7 @@ struct MDCCLookupTests {
     @Test("lookup carries canon source identity as QID")
     func lookupCarriesCanonSourceIdentityAsQID() throws {
         let anchor = EideticLib.lookup("philosophy")
-        let entry = try #require(LatticeKit.entry(for: anchor.code))
+        let entry = try #require(LatticeLib.entry(for: anchor.code))
         #expect(
             anchor.wikidataQID == entry.sourceIdentity,
             "the anchor's Q-ID must be the resolved canon entry's sourceIdentity"
@@ -110,7 +110,7 @@ struct MDCCLookupTests {
 /// ships in the EideticLib default bundle; the only bundled
 /// classification data is the CC0 Wikidata subset, and the
 /// classification source (the MDCC canon) is CC0/public-domain and
-/// lives in LatticeKit.
+/// lives in LatticeLib.
 @Suite("Licensing boundary")
 struct LicensingBoundaryTests {
 

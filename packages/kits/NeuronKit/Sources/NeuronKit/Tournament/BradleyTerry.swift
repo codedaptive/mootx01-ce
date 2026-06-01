@@ -30,7 +30,7 @@ import Foundation
 /// Structured errors raised by the Bradley-Terry fitter. Per the
 /// project convention, each module owns a typed `MOOTx01Error` enum
 /// rather than returning optionals plus logging (compare
-/// `LatticeKit`'s own `MOOTx01Error`). NeuronKit had no error enum before
+/// `LatticeLib`'s own `MOOTx01Error`). NeuronKit had no error enum before
 /// this mission; these two cases are the first.
 public enum MOOTx01Error: Error, Sendable, Equatable {
 

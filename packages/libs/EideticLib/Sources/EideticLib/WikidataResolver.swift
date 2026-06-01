@@ -16,7 +16,7 @@
 // Q-ID itself comes from the canon entry.
 
 import Foundation
-import LatticeKit
+import LatticeLib
 
 /// The resolved Q-ID plus the subset-backed evidence supporting it.
 /// Callers who only want the Q-ID read `qid`; `labelHits`/`aliasHits`

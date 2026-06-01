@@ -34,7 +34,7 @@ struct EideticLibTests {
     @Test("lookup carries canon data version")
     func lookupCarriesCanonDataVersion() {
         // dataVersion records the MDCC canon version that produced
-        // the answer (LatticeKit canon v1).
+        // the answer (LatticeLib canon v1).
         let anchor = EideticLib.lookup("chemistry")
         #expect(anchor.dataVersion == "v1")
     }

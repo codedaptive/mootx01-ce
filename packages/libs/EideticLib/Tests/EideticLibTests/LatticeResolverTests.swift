@@ -13,7 +13,7 @@
 
 import Testing
 @testable import EideticLib
-import LatticeKit
+import LatticeLib
 
 @Suite("Lattice resolver ranking")
 struct LatticeResolverTests {

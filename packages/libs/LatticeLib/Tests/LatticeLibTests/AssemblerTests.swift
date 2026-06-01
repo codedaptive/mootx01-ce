@@ -9,7 +9,7 @@
 //      registry keeps its code when the assembler re-runs.
 
 import Testing
-@testable import LatticeKit
+@testable import LatticeLib
 
 @Suite("Assembler")
 struct AssemblerTests {

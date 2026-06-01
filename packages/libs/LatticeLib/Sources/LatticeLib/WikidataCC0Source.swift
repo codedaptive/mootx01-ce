@@ -4,7 +4,7 @@
 // `SourceConcept` for the assembler. The seed is the 2026-entry file
 // shipped in EideticLib's resources
 // (EideticLib/Sources/EideticLib/Resources/WikidataSubset.json), license
-// CC0 1.0. LatticeKit does NOT import EideticLib: the executable resolves
+// CC0 1.0. LatticeLib does NOT import EideticLib: the executable resolves
 // the file path at runtime and hands it in, and this type models the
 // data shape only. The default path is resolved relative to this
 // source file so a developer- or CI-run build finds the seed without
@@ -115,15 +115,15 @@ public enum WikidataCC0Source {
     /// The default seed path: EideticLib's committed CC0 resource,
     /// resolved relative to this source file so both the test target
     /// and the `mdcc-build` executable find it without configuration.
-    /// This file lives at `<repo>/packages/kits/LatticeKit/Sources/LatticeKit/`,
+    /// This file lives at `<repo>/packages/kits/LatticeLib/Sources/LatticeLib/`,
     /// so the repo root is six directories up. EideticLib is a lib,
     /// not a kit, so its resource path includes `packages/libs/`.
     public static func defaultSeedPath() -> String {
         let thisFile = URL(fileURLWithPath: #filePath)
         let repoRoot = thisFile
-            .deletingLastPathComponent()   // LatticeKit/Sources/LatticeKit
-            .deletingLastPathComponent()   // LatticeKit/Sources
-            .deletingLastPathComponent()   // LatticeKit
+            .deletingLastPathComponent()   // LatticeLib/Sources/LatticeLib
+            .deletingLastPathComponent()   // LatticeLib/Sources
+            .deletingLastPathComponent()   // LatticeLib
             .deletingLastPathComponent()   // packages/kits
             .deletingLastPathComponent()   // packages
             .deletingLastPathComponent()   // <repo root>
