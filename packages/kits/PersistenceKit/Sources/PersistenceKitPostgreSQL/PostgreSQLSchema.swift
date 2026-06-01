@@ -15,8 +15,14 @@ enum PostgreSQLSchemaEmitter {
         // Generated columns. PostgreSQL only supports STORED, which
         // matches the cross-backend contract.
         for gen in table.generatedColumns {
+            // renderSQL emits an integer expression (booleans as 0/1, shared
+            // with InMemory/SQLite). A .bool generated column maps to PG
+            // BOOLEAN, which won't accept an integer default — cast it.
+            let expr = gen.type == .bool
+                ? "(\(gen.expression.renderSQL()))::boolean"
+                : gen.expression.renderSQL()
             cols.append("\"\(gen.name)\" \(typeSQL(gen.type)) "
-                + "GENERATED ALWAYS AS (\(gen.expression.renderSQL())) STORED")
+                + "GENERATED ALWAYS AS (\(expr)) STORED")
         }
         if !table.primaryKey.isEmpty {
             let pk = table.primaryKey.map { "\"\($0)\"" }.joined(separator: ", ")

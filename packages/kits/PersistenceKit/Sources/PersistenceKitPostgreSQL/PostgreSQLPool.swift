@@ -13,6 +13,7 @@ actor PostgreSQLPool {
     private let poolSize: Int
     private let connectionTimeout: TimeInterval
     private let idleTimeout: TimeInterval
+    private let searchPath: String?
     private let eventLoopGroup: any EventLoopGroup
 
     private var available: [PostgresConnection] = []
@@ -23,11 +24,13 @@ actor PostgreSQLPool {
     init(connectionString: String,
          poolSize: Int,
          connectionTimeout: TimeInterval,
-         idleTimeout: TimeInterval) {
+         idleTimeout: TimeInterval,
+         searchPath: String? = nil) {
         self.connectionString = connectionString
         self.poolSize = poolSize
         self.connectionTimeout = connectionTimeout
         self.idleTimeout = idleTimeout
+        self.searchPath = searchPath
         self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
@@ -103,6 +106,21 @@ actor PostgreSQLPool {
                 id: Int.random(in: 0..<Int.max),
                 logger: Logger(label: "storagekit.postgres")
             )
+            // Pin this connection to the estate's schema (idempotent create),
+            // keeping `public` on the path for shared extensions.
+            if let sp = searchPath {
+                // Extended-protocol query (executeSimple) takes one statement
+                // at a time, so issue the two separately; close on failure so
+                // a half-set-up connection never deinits unclosed.
+                let lg = Logger(label: "storagekit.postgres")
+                do {
+                    try await conn.executeSimple("CREATE SCHEMA IF NOT EXISTS \"\(sp)\"", logger: lg)
+                    try await conn.executeSimple("SET search_path TO \"\(sp)\", public", logger: lg)
+                } catch {
+                    try? await conn.close()
+                    throw error
+                }
+            }
             return conn
         } catch {
             throw StorageError.backendError(underlying: "PostgreSQL connect failed: \(error)")

@@ -41,11 +41,19 @@ public final class PostgreSQLStorage: Storage, Sendable {
         guard case let .postgresql(cs, ps, ct, it) = configuration.backend else {
             fatalError("unreachable")
         }
+        // Estate isolation: each estate lives in its own schema (the PG
+        // analogue of SQLite's one-file-per-estate). Every pooled connection
+        // pins its search_path to it, so a shared database holds many estates
+        // without table collisions. `public` stays on the path so shared
+        // extensions (e.g. pgvector) resolve.
+        let searchPath = "pk_" + configuration.estateID.uuidString
+            .replacingOccurrences(of: "-", with: "").lowercased()
         let pool = PostgreSQLPool(
             connectionString: cs,
             poolSize: ps,
             connectionTimeout: ct,
-            idleTimeout: it
+            idleTimeout: it,
+            searchPath: searchPath
         )
         self.pool = pool
         let backend = PostgreSQLBackend(pool: pool)
@@ -226,9 +234,13 @@ actor PostgreSQLBackend {
         }
     }
 
-    // Schema column lookup
+    // Schema column lookup. Generated columns are included so query
+    // SELECT lists and row decoding surface them like any other column.
     func columns(for table: String) -> [ColumnDeclaration] {
-        schemaDeclaration?.tables.first(where: { $0.name == table })?.columns ?? []
+        guard let t = schemaDeclaration?.tables.first(where: { $0.name == table }) else { return [] }
+        return t.columns + t.generatedColumns.map {
+            ColumnDeclaration(name: $0.name, type: $0.type, nullable: true)
+        }
     }
 
     func primaryKey(for table: String) -> [String] {
