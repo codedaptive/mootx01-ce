@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import SubstrateTypes
 import SubstrateKernel
 // ─────────────────────────────────────────────────────────────────
@@ -22,29 +22,34 @@ import SubstrateLib
 /// sealed_bit_tests — both legs MUST agree on bit 27 or seals verify
 /// against the wrong bit. Tests the bit contract the `sealed` accessor
 /// reads (BitField.extractFlag(adjectiveBitmap, bit: 27)).
-final class SealedBitTests: XCTestCase {
+@Suite("SealedBitTests")
+struct SealedBitTests {
 
+    @Test
     func testBit27SetMeansSealed() {
         let adj = BitField.writeFlag(true, into: 0, bit: 27)
-        XCTAssertTrue(BitField.extractFlag(adj, bit: 27))
+        #expect(BitField.extractFlag(adj, bit: 27))
     }
 
+    @Test
     func testBit27ClearMeansUnsealed() {
-        XCTAssertFalse(BitField.extractFlag(Int64(0), bit: 27))
+        #expect(!BitField.extractFlag(Int64(0), bit: 27))
     }
 
     /// Sealing must not disturb trust (bits 18-23) — different bits.
+    @Test
     func testSealedIndependentOfTrust() {
         let adj = BitField.writeField(3, into: 0, shift: 18, width: 6) // canonical
-        XCTAssertFalse(BitField.extractFlag(adj, bit: 27), "trust set must not set seal")
+        #expect(!BitField.extractFlag(adj, bit: 27), "trust set must not set seal")
         let sealed = BitField.writeFlag(true, into: adj, bit: 27)
-        XCTAssertTrue(BitField.extractFlag(sealed, bit: 27))
-        XCTAssertEqual((sealed >> 18) & 0x3F, 3, "sealing must not disturb trust")
+        #expect(BitField.extractFlag(sealed, bit: 27))
+        #expect((sealed >> 18) & 0x3F == 3, "sealing must not disturb trust")
     }
 
     /// Seal bit (27) must not be read by the neighboring bit-26 accessor.
+    @Test
     func testBit27DoesNotCollideWithBit26() {
         let onlySeal = BitField.writeFlag(true, into: 0, bit: 27)
-        XCTAssertFalse(BitField.extractFlag(onlySeal, bit: 26), "27 must not read as 26")
+        #expect(!BitField.extractFlag(onlySeal, bit: 26), "27 must not read as 26")
     }
 }
