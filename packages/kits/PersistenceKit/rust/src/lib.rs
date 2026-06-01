@@ -29,6 +29,7 @@ pub mod observer;
 pub mod storage;
 pub mod inmemory;
 pub mod sqlite;
+pub mod postgres;
 
 pub use types::*;
 pub use predicate::*;
@@ -42,3 +43,4 @@ pub use audit_log::*;
 pub use observer::*;
 pub use storage::*;
 pub use sqlite::SqliteStorage;
+pub use postgres::PostgresStorage;

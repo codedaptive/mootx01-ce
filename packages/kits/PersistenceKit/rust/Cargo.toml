@@ -18,3 +18,7 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 # ISO-8601 timestamp formatting for TEXT date columns (schema invariant).
 chrono = "0.4"
+# PostgreSQL backend: synchronous client (matches the sync Storage trait).
+# Native-type features map UUID/TIMESTAMPTZ columns to uuid::Uuid /
+# chrono::DateTime<Utc>.
+postgres = { version = "0.19", features = ["with-uuid-1", "with-chrono-0_4"] }
