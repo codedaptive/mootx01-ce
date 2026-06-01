@@ -3,7 +3,8 @@
 // Covers QUEUEKIT_SPEC §5, §6, §8, §9 — the FilesystemBackend
 // reference implementation in Swift.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -20,11 +21,12 @@ import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 @testable import QueueKit
 
-final class FilesystemBackendTests: XCTestCase {
+@Suite("FilesystemBackend (QUEUEKIT_SPEC §5/§6/§8/§9)", .serialized)
+final class FilesystemBackendTests {
 
-    var root: URL!
+    let root: URL
 
-    override func setUp() async throws {
+    init() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("queuekit-tests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
@@ -32,7 +34,7 @@ final class FilesystemBackendTests: XCTestCase {
         root = tmp
     }
 
-    override func tearDown() async throws {
+    deinit {
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -42,18 +44,18 @@ final class FilesystemBackendTests: XCTestCase {
             hlcGenerator: HLCGenerator(nodeID: nodeID))
     }
 
-    func testMaildirInitCreatesFourDirs() throws {
+    @Test func maildirInitCreatesFourDirs() throws {
         _ = try makeKit()
         for sub in ["tmp", "new", "cur", "done"] {
             var isDir: ObjCBool = false
             let p = root.appendingPathComponent(sub).path
-            XCTAssertTrue(FileManager.default.fileExists(
+            #expect(FileManager.default.fileExists(
                 atPath: p, isDirectory: &isDir))
-            XCTAssertTrue(isDir.boolValue)
+            #expect(isDir.boolValue)
         }
     }
 
-    func testSendThenDrainRoundTrip() async throws {
+    @Test func sendThenDrainRoundTrip() async throws {
         let kit = try makeKit()
         let job = Job(
             id: JobID.generate(),
@@ -64,12 +66,12 @@ final class FilesystemBackendTests: XCTestCase {
             extensions: ["k": .string("v")])
         try await kit.send(job)
         let claimed = try await kit.drain()
-        XCTAssertEqual(claimed.count, 1)
-        XCTAssertEqual(claimed[0].job.id, job.id)
-        XCTAssertEqual(claimed[0].job.extensions, job.extensions)
+        #expect(claimed.count == 1)
+        #expect(claimed[0].job.id == job.id)
+        #expect(claimed[0].job.extensions == job.extensions)
     }
 
-    func testTransitionsAreAtomic() async throws {
+    @Test func transitionsAreAtomic() async throws {
         let kit = try makeKit()
         let job = Job(
             id: JobID.generate(),
@@ -78,21 +80,21 @@ final class FilesystemBackendTests: XCTestCase {
             priority: 50, payload: Data(),
             extensions: [:])
         try await kit.send(job)
-        XCTAssertEqual(filesIn("new").count, 1)
-        XCTAssertEqual(filesIn("cur").count, 0)
+        #expect(filesIn("new").count == 1)
+        #expect(filesIn("cur").count == 0)
         let claimed = try await kit.drain()
-        XCTAssertEqual(claimed.count, 1)
-        XCTAssertEqual(filesIn("new").count, 0)
-        XCTAssertEqual(filesIn("cur").count, 1)
+        #expect(claimed.count == 1)
+        #expect(filesIn("new").count == 0)
+        #expect(filesIn("cur").count == 1)
         try await kit.reply(
             to: job.id, status: .done, artifacts: [])
-        XCTAssertEqual(filesIn("cur").count, 0)
+        #expect(filesIn("cur").count == 0)
         // done/ contains the job file + the signal file
         let done = filesIn("done")
-        XCTAssertTrue(done.contains { $0.hasSuffix(".signal") })
+        #expect(done.contains { $0.hasSuffix(".signal") })
     }
 
-    func testSignalWrittenBeforeJobMoved() async throws {
+    @Test func signalWrittenBeforeJobMoved() async throws {
         let kit = try makeKit()
         let job = Job(
             id: JobID.generate(),
@@ -106,10 +108,10 @@ final class FilesystemBackendTests: XCTestCase {
             to: job.id, status: .done, artifacts: [])
         let signalPath = root.appendingPathComponent(
             "done/\(job.id.rawValue).signal").path
-        XCTAssertTrue(FileManager.default.fileExists(atPath: signalPath))
+        #expect(FileManager.default.fileExists(atPath: signalPath))
     }
 
-    func testReplyRejectsNonTerminalStatus() async throws {
+    @Test func replyRejectsNonTerminalStatus() async throws {
         let kit = try makeKit()
         let job = Job(
             id: JobID.generate(),
@@ -121,25 +123,25 @@ final class FilesystemBackendTests: XCTestCase {
         do {
             try await kit.reply(
                 to: job.id, status: .running, artifacts: [])
-            XCTFail("expected throw")
+            Issue.record("expected throw")
         } catch QueueError.invalidTerminalStatus {
             // expected
         }
     }
 
-    func testReplyJobNotFound() async throws {
+    @Test func replyJobNotFound() async throws {
         let kit = try makeKit()
         do {
             try await kit.reply(
                 to: JobID(rawValue: "deadbeef000000000000000000000000"),
                 status: .done, artifacts: [])
-            XCTFail("expected throw")
+            Issue.record("expected throw")
         } catch QueueError.jobNotFound {
             // expected
         }
     }
 
-    func testStaleTmpCleanup() async throws {
+    @Test func staleTmpCleanup() async throws {
         _ = try makeKit()
         let stale = root.appendingPathComponent("tmp/stale-file").path
         FileManager.default.createFile(
@@ -151,16 +153,16 @@ final class FilesystemBackendTests: XCTestCase {
             ofItemAtPath: stale)
         // Re-init: this should clean it up
         _ = try makeKit()
-        XCTAssertFalse(FileManager.default.fileExists(atPath: stale))
+        #expect(!FileManager.default.fileExists(atPath: stale))
     }
 
-    func testDrainOnEmpty() async throws {
+    @Test func drainOnEmpty() async throws {
         let kit = try makeKit()
         let claimed = try await kit.drain()
-        XCTAssertTrue(claimed.isEmpty)
+        #expect(claimed.isEmpty)
     }
 
-    func testHLCOrderInDrain() async throws {
+    @Test func hlcOrderInDrain() async throws {
         let kit = try makeKit()
         // Insert in reverse order; expect drain to return in HLC order.
         let later = Job(
@@ -176,9 +178,9 @@ final class FilesystemBackendTests: XCTestCase {
         try await kit.send(later)
         try await kit.send(earlier)
         let claimed = try await kit.drain()
-        XCTAssertEqual(claimed.count, 2)
-        XCTAssertEqual(claimed[0].job.submittedAt.physicalTime, 100)
-        XCTAssertEqual(claimed[1].job.submittedAt.physicalTime, 200)
+        #expect(claimed.count == 2)
+        #expect(claimed[0].job.submittedAt.physicalTime == 100)
+        #expect(claimed[1].job.submittedAt.physicalTime == 200)
     }
 
     // MARK: - helpers

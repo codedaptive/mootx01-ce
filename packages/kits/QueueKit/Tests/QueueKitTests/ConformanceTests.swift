@@ -4,7 +4,8 @@
 // (concurrent claim) is the acceptance gate. Any duplicate claim is
 // a blocking failure.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -21,11 +22,12 @@ import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 @testable import QueueKit
 
-final class ConformanceTests: XCTestCase {
+@Suite("Conformance (QUEUEKIT_SPEC §12)", .serialized)
+final class ConformanceTests {
 
-    var root: URL!
+    let root: URL
 
-    override func setUp() async throws {
+    init() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("queuekit-conf-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
@@ -33,13 +35,13 @@ final class ConformanceTests: XCTestCase {
         root = tmp
     }
 
-    override func tearDown() async throws {
+    deinit {
         try? FileManager.default.removeItem(at: root)
     }
 
     // MARK: - Area 1: Schema round-trip
 
-    func testArea1Schema() async throws {
+    @Test func area1Schema() async throws {
         let kit = try QueueKit(
             root: root,
             hlcGenerator: HLCGenerator(nodeID: 1))
@@ -56,18 +58,18 @@ final class ConformanceTests: XCTestCase {
             ])
         try await kit.send(job)
         let claimed = try await kit.drain()
-        XCTAssertEqual(claimed.count, 1)
-        XCTAssertEqual(claimed[0].job.id, job.id)
-        XCTAssertEqual(claimed[0].job.streamID, job.streamID)
-        XCTAssertEqual(claimed[0].job.submittedAt, job.submittedAt)
-        XCTAssertEqual(claimed[0].job.priority, job.priority)
-        XCTAssertEqual(claimed[0].job.payload, job.payload)
-        XCTAssertEqual(claimed[0].job.extensions, job.extensions)
+        #expect(claimed.count == 1)
+        #expect(claimed[0].job.id == job.id)
+        #expect(claimed[0].job.streamID == job.streamID)
+        #expect(claimed[0].job.submittedAt == job.submittedAt)
+        #expect(claimed[0].job.priority == job.priority)
+        #expect(claimed[0].job.payload == job.payload)
+        #expect(claimed[0].job.extensions == job.extensions)
     }
 
     // MARK: - Area 2: Transition correctness
 
-    func testArea2Transitions() async throws {
+    @Test func area2Transitions() async throws {
         let kit = try QueueKit(
             root: root,
             hlcGenerator: HLCGenerator(nodeID: 1))
@@ -77,23 +79,23 @@ final class ConformanceTests: XCTestCase {
             submittedAt: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1),
             priority: 50, payload: Data(), extensions: [:])
         try await kit.send(job)
-        XCTAssertEqual(countIn("new"), 1)
-        XCTAssertEqual(countIn("cur"), 0)
-        XCTAssertEqual(countIn("done"), 0)
+        #expect(countIn("new") == 1)
+        #expect(countIn("cur") == 0)
+        #expect(countIn("done") == 0)
         _ = try await kit.drain()
-        XCTAssertEqual(countIn("new"), 0)
-        XCTAssertEqual(countIn("cur"), 1)
-        XCTAssertEqual(countIn("done"), 0)
+        #expect(countIn("new") == 0)
+        #expect(countIn("cur") == 1)
+        #expect(countIn("done") == 0)
         try await kit.reply(
             to: job.id, status: .done, artifacts: [])
-        XCTAssertEqual(countIn("cur"), 0)
+        #expect(countIn("cur") == 0)
         // done contains 2 entries: job file + signal
-        XCTAssertEqual(countIn("done"), 2)
+        #expect(countIn("done") == 2)
     }
 
     // MARK: - Area 3: Signal before rename
 
-    func testArea3SignalCorrectness() async throws {
+    @Test func area3SignalCorrectness() async throws {
         let kit = try QueueKit(
             root: root,
             hlcGenerator: HLCGenerator(nodeID: 1))
@@ -108,18 +110,18 @@ final class ConformanceTests: XCTestCase {
             to: job.id, status: .doneWithConcerns, artifacts: [])
         let signalPath = root.appendingPathComponent(
             "done/\(job.id.rawValue).signal").path
-        XCTAssertTrue(FileManager.default.fileExists(atPath: signalPath))
+        #expect(FileManager.default.fileExists(atPath: signalPath))
         let data = try Data(contentsOf:
             URL(fileURLWithPath: signalPath))
         let sig = try WireFormat.decoder.decode(
             SignalFile.self, from: data)
-        XCTAssertEqual(sig.status, .doneWithConcerns)
-        XCTAssertEqual(sig.jobID, job.id)
+        #expect(sig.status == .doneWithConcerns)
+        #expect(sig.jobID == job.id)
     }
 
     // MARK: - Area 4 (ACCEPTANCE GATE): Concurrent claim
 
-    func testArea4ConcurrentClaimFilesystem() async throws {
+    @Test func area4ConcurrentClaimFilesystem() async throws {
         let kit = try QueueKit(
             root: root,
             hlcGenerator: HLCGenerator(nodeID: 1))
@@ -136,7 +138,7 @@ final class ConformanceTests: XCTestCase {
                 extensions: [:])
             try await kit.send(job)
         }
-        XCTAssertEqual(countIn("new"), 100)
+        #expect(countIn("new") == 100)
 
         // 10 concurrent drainers
         let drainerCount = 10
@@ -150,22 +152,22 @@ final class ConformanceTests: XCTestCase {
                             await collected.append(c.job.id)
                         }
                     } catch {
-                        XCTFail("drain failed: \(error)")
+                        Issue.record("drain failed: \(error)")
                     }
                 }
             }
             await group.waitForAll()
         }
         let all = await collected.snapshot()
-        XCTAssertEqual(all.count, 100,
+        #expect(all.count == 100,
             "expected 100 claimed, got \(all.count)")
-        XCTAssertEqual(Set(all).count, all.count,
+        #expect(Set(all).count == all.count,
             "Area 4 BLOCKING: duplicate claim detected")
     }
 
     // MARK: - Area 5: Extension preservation
 
-    func testArea5Extensions() async throws {
+    @Test func area5Extensions() async throws {
         let kit = try QueueKit(
             root: root,
             hlcGenerator: HLCGenerator(nodeID: 1))
@@ -184,17 +186,17 @@ final class ConformanceTests: XCTestCase {
             extensions: extensions)
         try await kit.send(job)
         let claimed = try await kit.drain()
-        XCTAssertEqual(claimed[0].job.extensions, extensions)
+        #expect(claimed[0].job.extensions == extensions)
         try await kit.reply(
             to: job.id, status: .done, artifacts: [])
         let done = try await kit.completed(streamID: StreamID(rawValue: "e"))
-        XCTAssertEqual(done.count, 1)
-        XCTAssertEqual(done[0].extensions, extensions)
+        #expect(done.count == 1)
+        #expect(done[0].extensions == extensions)
     }
 
     // MARK: - Area 6: Stale tmp recovery
 
-    func testArea6StaleTmpRecovery() async throws {
+    @Test func area6StaleTmpRecovery() async throws {
         _ = try QueueKit(
             root: root,
             hlcGenerator: HLCGenerator(nodeID: 1))
@@ -208,7 +210,7 @@ final class ConformanceTests: XCTestCase {
         _ = try QueueKit(
             root: root,
             hlcGenerator: HLCGenerator(nodeID: 2))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: stale))
+        #expect(!FileManager.default.fileExists(atPath: stale))
     }
 
     // MARK: - helpers

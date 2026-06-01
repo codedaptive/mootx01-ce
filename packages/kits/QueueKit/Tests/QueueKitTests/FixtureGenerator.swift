@@ -5,11 +5,12 @@
 // for-byte reproducible; Rust and Python assert byte equality
 // against them.
 //
-// Run with: `swift test --filter FixtureGenerator.testGenerate`
+// Run with: `swift test --filter FixtureGenerator`
 // Output: writes to a tmp dir; copy to Tests/QueueKitTests/Fixtures/
 // for committed conformance.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -29,7 +30,8 @@ import SubstrateTypes
 /// Build the inputs and assert byte-stable outputs. Failures here are
 /// a spec drift signal: the fixture suite is the cross-language
 /// contract, not the Swift implementation alone.
-final class FixtureGenerator: XCTestCase {
+@Suite("Fixture generator (cross-language byte contract)", .serialized)
+struct FixtureGenerator {
 
     struct JobFixture {
         let name: String
@@ -119,7 +121,7 @@ final class FixtureGenerator: XCTestCase {
     /// Regenerate the on-disk fixture files from the Swift wire
     /// format. The output directory is printed to stdout; copy into
     /// Tests/QueueKitTests/Fixtures/ for the committed set.
-    func testGenerate() throws {
+    @Test func generate() throws {
         let outDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("queuekit-fixtures-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
@@ -196,7 +198,7 @@ final class FixtureGenerator: XCTestCase {
 
     /// Sanity check: the in-memory fixtures encode to the same bytes
     /// as the committed fixture files.
-    func testFixturesByteIdenticalToCommitted() throws {
+    @Test func fixturesByteIdenticalToCommitted() throws {
         let bundle = Bundle.module
         guard let url = bundle.url(
             forResource: "job_001_file", withExtension: "json")
@@ -208,7 +210,7 @@ final class FixtureGenerator: XCTestCase {
         let committed = try Data(contentsOf: url)
         let fresh = try WireFormat.encoder.encode(
             Self.fixtures[0].job)
-        XCTAssertEqual(committed, fresh,
+        #expect(committed == fresh,
             "Swift FilesystemBackend wire format drifted from committed fixture job_001_file.json")
     }
 }
