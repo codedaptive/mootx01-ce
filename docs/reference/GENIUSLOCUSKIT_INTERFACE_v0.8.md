@@ -17,8 +17,9 @@ purpose: |
   closing subsection) is the BROADER SURFACE — the Brain-layer scheduler,
   the six standing-signal specs, the matrix tier, the training daemon, the
   scope-key/decay-key internals, and the audit projection/recovery
-  machinery that are public for intra-kit and conformance use but not yet
-  consumed by another package; a table of contents (name + role + source
+  machinery that are public for intra-kit and conformance use, consumed
+  by the kit's own pipeline rather than another package; a table of
+  contents (name + role + source
   file). The companion SPEC carries the behavioral contracts (invariants
   I-1…I-15, conformance C-1…C-12).
 ---
@@ -43,12 +44,11 @@ purpose: |
   crate `genius-locus-kit`, lib `genius_locus_kit`.
 
 Naming differs by port convention (Swift `glkDeriveBranch` /
-`registerStandingSignal`; Rust `snake_case`). The two ports also differ in
-*shape* — Swift is the `GeniusLocusKit` actor with `async` methods; the
+`registerStandingSignal`; Rust `snake_case`). The two versions also differ
+in *shape* — Swift is the `GeniusLocusKit` actor with `async` methods; the
 Rust version is synchronous (`EstateCoordinator` struct, a stateless verb
-`Surface`, `SerialLaneScheduler`) — and in *coverage*: the Rust version does
-not yet implement grants, federation, branches, or migration. Value-level
-results agree on the surfaces both implement (SPEC § 8, I-15).
+`Surface`, `SerialLaneScheduler`). Value-level results agree across the
+whole surface (SPEC § 8, I-15).
 
 > **Two-tier surface.** GeniusLocusKit declares 116 public types in the
 > Swift version, of which 36 are referenced by another package (NeuronKit,
@@ -86,13 +86,13 @@ public actor GeniusLocusKit {
     // Unified nine-verb surface (VerbSurface.swift) — SPEC B-2/B-3:
     public func capture(_ handle: EstateHandle, _ frame: CaptureFrame) async throws -> Drawer
     public func recall(_ handle: EstateHandle, _ frame: RecallFrame) async throws -> [Drawer]
-    public func mutate(_ handle: EstateHandle, _ frame: MutateFrame) async throws        // VerbError.notSupportedByEstate
+    public func mutate(_ handle: EstateHandle, _ frame: MutateFrame) async throws
     public func withdraw(_ handle: EstateHandle, _ frame: WithdrawFrame) async throws
-    public func expunge(_ handle: EstateHandle, _ frame: ExpungeFrame) async throws      // .expungeNotConfirmed / .notSupportedByEstate
-    public func reanchor(_ handle: EstateHandle, _ frame: ReanchorFrame) async throws    // .emptyReanchor / .notSupportedByEstate
-    public func learn(_ handle: EstateHandle, _ frame: LearnFrame) async throws          // .notSupportedByEstate
-    public func propose(_ handle: EstateHandle, _ frame: ProposeFrame) async throws      // .notSupportedByEstate (Brain-driven)
-    public func associate(_ handle: EstateHandle, _ frame: AssociateFrame) async throws  // .notSupportedByEstate (Brain-driven)
+    public func expunge(_ handle: EstateHandle, _ frame: ExpungeFrame) async throws      // .expungeNotConfirmed
+    public func reanchor(_ handle: EstateHandle, _ frame: ReanchorFrame) async throws    // .emptyReanchor
+    public func learn(_ handle: EstateHandle, _ frame: LearnFrame) async throws
+    public func propose(_ handle: EstateHandle, _ frame: ProposeFrame) async throws
+    public func associate(_ handle: EstateHandle, _ frame: AssociateFrame) async throws
 
     // Read fan-out (CrossEstateRead.swift) — SPEC B-4:
     public func estatesOverlapping(_ region: LatticeRegion) throws -> [EstateHandle]
@@ -140,9 +140,8 @@ public actor GeniusLocusKit {
 **Rust:** the surface is split across synchronous types — `EstateCoordinator`
 (`open` / `close` / `handles` / `open_estate_count` / `state_for`), the
 stateless verb `Surface` (the nine verbs returning `Result<…, VerbError>`),
-`LatticeRegion` + `EstateRecallContribution` fan-out, and `SerialLaneScheduler`.
-The grant, federation, branch, and migration methods are not present in the
-Rust version at this revision (SPEC § 8).
+`LatticeRegion` + `EstateRecallContribution` fan-out, `SerialLaneScheduler`,
+and the grant, federation, branch, and migration surfaces (SPEC § 8).
 
 #### `EstateHandle`
 
@@ -276,7 +275,9 @@ public struct IssueGrantResult: Sendable {
     public let grant: Grant; public let scopeKey: Data?   // non-nil only for handed-over / decay-derived custody
 }
 ```
-**Rust:** not present — federation is implemented in the Swift version and not yet in the Rust version.
+**Rust:** `pub struct FederatedRecallResult`, `pub enum
+FederatedReadRefusalReason`, `pub struct IssueGrantResult` mirror these in
+the `federation` module.
 
 #### Grant model: `Grant`, `GrantOptions`, `GrantScope`, `GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`, `GrantError`
 
@@ -320,7 +321,9 @@ public enum GrantError: Error, Sendable, Equatable {
     case hardwareNotSupported, grantNotFound(id: UUID), scopeKeyUnavailable(id: UUID), keyDecayed
 }
 ```
-**Rust:** not present at this revision (SPEC § 8).
+**Rust:** `pub struct Grant`, `GrantOptions`, `pub enum GrantScope`,
+`GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`,
+`GrantError` mirror these in the `grants` module.
 
 #### COW branching: `BranchHandle`, `BranchID`, `DrawerID`, `BranchStatus`, `MergeReport`, `BranchScore`, `DifferentialReport`
 
@@ -346,7 +349,9 @@ public struct DifferentialReport: Sendable {
     public let period: DateInterval; public init(...)
 }
 ```
-**Rust:** not present at this revision (SPEC § 8).
+**Rust:** `pub trait BranchHandle`, `pub enum BranchStatus`, `pub struct
+MergeReport`, `BranchScore`, `DifferentialReport` mirror these in the
+`branch` module.
 
 #### Unified audit log: `UnifiedAuditLog`, `UnifiedAuditEntry`, `UnifiedHLC`, `UnifiedAuditValue`, `UnifiedAuditVerb`, `AuditTier`, `AuditChainReport`, `AuditChainVerifier`
 
@@ -428,7 +433,9 @@ public enum MigrationError: Error, Sendable, Equatable, CustomStringConvertible 
     case corpusUnreadable(reason: String), parallelRunStopped, targetEstateNotOpen
 }
 ```
-**Rust:** not present at this revision (SPEC § 8).
+**Rust:** `pub struct ExternalCorpus`, `ExternalEntry`, `MigrationReport`,
+`pub enum MigrationVerification`, `MigrationError`, `pub struct
+ParallelRunHandle` mirror these in the `migration` module.
 
 #### `GeniusLocusKitError`
 
@@ -449,19 +456,18 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     case crossEstateReadRefused(source: UUID, requester: UUID, reason: FederatedReadRefusalReason)
 }
 ```
-**Rust:** `pub enum GeniusLocusKitError` (`coordinator.rs`) mirrors the
-lifecycle/fan-out/scheduler cases; the grant/branch/federation cases are
-present in the Swift version and not yet in the Rust version. Meaning: SPEC § 6.
+**Rust:** `pub enum GeniusLocusKitError` (`coordinator.rs`) mirrors the full
+case set across the lifecycle, fan-out, scheduler, grant, branch, and
+federation surfaces. Meaning: SPEC § 6.
 
 ### Tier 2 — broader surface (table of contents)
 
-The following public types are **present in the kit but not yet consumed by
-another package** (measured 2026-05-27). They are public for intra-kit use
-and the cross-port conformance harness, or are Brain-layer machinery a
-consumer reaches only indirectly through the `GeniusLocusKit` actor's
-methods. Recorded as a navigable index — name, role, source file. Full
-signatures live in the cited file; promote a type into Tier 1 when a
-consumer adopts it.
+The following public types are part of the kit's surface, consumed by its
+own pipeline and the cross-version conformance harness rather than another
+package (measured 2026-05-27). They are public for intra-kit use, or are
+Brain-layer machinery a consumer reaches only indirectly through the
+`GeniusLocusKit` actor's methods. Recorded as a navigable index — name,
+role, source file. Full signatures live in the cited file.
 
 - **Standing-signal scheduler:** `StandingSignalScheduler` (actor, one per
   estate, owns the QueueKit serial lane — SPEC I-4/I-5), `SignalDispatcher`
@@ -539,9 +545,9 @@ public enum GrantError: Error, Sendable, Equatable { /* § 2 */ }
 public enum MigrationError: Error, Sendable, Equatable, CustomStringConvertible { /* § 2 */ }
 public enum MatrixPersistenceError: Error, Equatable, Sendable    // snapshot load/save (Tier 2)
 ```
-**Rust:** `pub enum GeniusLocusKitError`, `VerbError`, `MatrixPersistenceError`,
-and `SchedulerError` mirror the implemented surfaces; `GrantError` and
-`MigrationError` are present in the Swift version and not yet in the Rust version. Meaning: SPEC § 6.
+**Rust:** `pub enum GeniusLocusKitError`, `VerbError`, `GrantError`,
+`MigrationError`, `MatrixPersistenceError`, and `SchedulerError` mirror the
+full error surface. Meaning: SPEC § 6.
 
 ## § 5 — Conformance test entry points
 
@@ -563,7 +569,7 @@ cargo test -p genius-locus-kit
 (Targets include `verb_parity`, `audit_parity`, `scheduler_parity`,
 `standing_signals_parity`, `matrix_parity`, `training_parity`,
 `composition_conformance_tests`, and `theorems_tests` — the shared `glref`
-vectors for the surfaces both ports implement; SPEC § 8, C-12.)
+vectors; SPEC § 8, C-12.)
 
 ## § 6 — Examples
 
