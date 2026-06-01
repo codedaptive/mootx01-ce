@@ -143,6 +143,8 @@ shipped `LatticeCanonV1.json` and every entry's code is well-formed
 **C-4 (deterministic assembly):** two `Assembler` runs over identical
 inputs produce byte-identical canon output (I-4).
 
-> **Rust version:** pending. When it lands, the canon-lookup and code-grammar
-> surface (Tier 1 of the INTERFACE) is the conformance target; the
-> editorial tooling is present in the Swift version and not yet in the Rust version.
+**C-5 (cross-version parity):** the canon-lookup and code-grammar surface
+(Tier 1 of the INTERFACE) produces identical results across the Swift and
+Rust versions on the shared grammar and lookup vectors. The editorial
+tooling (`Assembler`, `StableKeyRegistry`, `mdcc-build`) is build-time
+machinery, exercised through its own conformance vectors.
