@@ -11,8 +11,9 @@
 //   • Calibration curve deflates overconfidence.
 //   • NMF factorization approximates the input matrix.
 
-import XCTest
+import Testing
 import SubstrateTypes
+import Foundation
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -28,7 +29,8 @@ import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 @testable import GeniusLocusKit
 
-final class MatrixTierTests: XCTestCase {
+@Suite("Matrix tier conformance")
+struct MatrixTierTests {
 
     // MARK: - Helpers
 
@@ -57,7 +59,8 @@ final class MatrixTierTests: XCTestCase {
 
     // MARK: - F and C
 
-    func testFieldPresenceCountsSetBits() {
+    @Test
+    func fieldPresenceCountsSetBits() {
         var tier = MatrixTier()
         // Two captures, both with bits 0 and 3 set.
         tier.applyCapture(
@@ -74,15 +77,16 @@ final class MatrixTierTests: XCTestCase {
                                    bitPosition: 3)
         let bit1 = MatrixFieldCell(fieldPath: "bitmap.adjective",
                                    bitPosition: 1)
-        XCTAssertEqual(tier.fieldPresence[bit0], 2)
-        XCTAssertEqual(tier.fieldPresence[bit3], 2)
-        XCTAssertNil(tier.fieldPresence[bit1])
-        XCTAssertEqual(tier.liveRowCount, 2)
-        XCTAssertEqual(tier.correlation(for: bit0), 1.0, accuracy: 1e-9)
-        XCTAssertEqual(tier.correlation(for: bit1), 0.0, accuracy: 1e-9)
+        #expect(tier.fieldPresence[bit0] == 2)
+        #expect(tier.fieldPresence[bit3] == 2)
+        #expect(tier.fieldPresence[bit1] == nil)
+        #expect(tier.liveRowCount == 2)
+        #expect(abs(tier.correlation(for: bit0) - 1.0) <= 1e-9)
+        #expect(abs(tier.correlation(for: bit1) - 0.0) <= 1e-9)
     }
 
-    func testCorrelationDerivesFromFieldPresence() {
+    @Test
+    func correlationDerivesFromFieldPresence() {
         var tier = MatrixTier()
         tier.applyCapture(bitmapFields: [("bm.x", 0b1)],
                           hlc: hlc(1))
@@ -92,13 +96,13 @@ final class MatrixTierTests: XCTestCase {
                           hlc: hlc(3))
         let bit0 = MatrixFieldCell(fieldPath: "bm.x", bitPosition: 0)
         // 2 of 3 rows set bit 0.
-        XCTAssertEqual(tier.correlation(for: bit0),
-                       2.0 / 3.0, accuracy: 1e-9)
+        #expect(abs(tier.correlation(for: bit0) - 2.0 / 3.0) <= 1e-9)
     }
 
     // MARK: - O
 
-    func testCoOccurrenceCanonicalSymmetric() {
+    @Test
+    func coOccurrenceCanonicalSymmetric() {
         var tier = MatrixTier()
         // One capture, two fields → one O-cell.
         tier.applyCapture(
@@ -109,33 +113,35 @@ final class MatrixTierTests: XCTestCase {
         let b = MatrixValueCoord(fieldPath: "bm.b", value: .bitmap(0b10))
         let k1 = MatrixCoOccurKey(a, b)
         let k2 = MatrixCoOccurKey(b, a)
-        XCTAssertEqual(k1, k2, "co-occurrence key must canonicalise")
-        XCTAssertEqual(tier.coOccurrence[k1], 1)
-        XCTAssertEqual(tier.coOccurrence.count, 1)
+        #expect(k1 == k2, "co-occurrence key must canonicalise")
+        #expect(tier.coOccurrence[k1] == 1)
+        #expect(tier.coOccurrence.count == 1)
     }
 
     // MARK: - T
 
-    func testTemporalLagBucketing() {
-        XCTAssertEqual(MatrixTier.lagBucket(forMinutes: 1), 1)
-        XCTAssertEqual(MatrixTier.lagBucket(forMinutes: 3), 4)
-        XCTAssertEqual(MatrixTier.lagBucket(forMinutes: 9), 16)
-        XCTAssertEqual(MatrixTier.lagBucket(forMinutes: 128), 128)
+    @Test
+    func temporalLagBucketing() {
+        #expect(MatrixTier.lagBucket(forMinutes: 1) == 1)
+        #expect(MatrixTier.lagBucket(forMinutes: 3) == 4)
+        #expect(MatrixTier.lagBucket(forMinutes: 9) == 16)
+        #expect(MatrixTier.lagBucket(forMinutes: 128) == 128)
         var tier = MatrixTier()
         let s = MatrixValueCoord(fieldPath: "f.x", value: .bitmap(1))
         let t = MatrixValueCoord(fieldPath: "f.y", value: .bitmap(2))
         tier.applyTemporalEvent(source: s, target: t, deltaMinutes: 5)
         let key = MatrixTemporalKey(source: s, target: t, lagBucket: 8)
-        XCTAssertEqual(tier.temporalCausality[key], 1)
+        #expect(tier.temporalCausality[key] == 1)
         // Out of window — no effect.
         tier.applyTemporalEvent(source: s, target: t,
                                 deltaMinutes: 1_000)
-        XCTAssertEqual(tier.temporalCausality.count, 1)
+        #expect(tier.temporalCausality.count == 1)
     }
 
     // MARK: - Rebuild equals incremental
 
-    func testRebuildFromAuditLogEqualsIncremental() {
+    @Test
+    func rebuildFromAuditLogEqualsIncremental() {
         // Build the incremental state.
         var incremental = MatrixTier()
         let rowA = UUID()
@@ -164,14 +170,15 @@ final class MatrixTierTests: XCTestCase {
 
         let rebuilt = MatrixTier.rebuild(from: log)
 
-        XCTAssertEqual(rebuilt.liveRowCount, incremental.liveRowCount)
-        XCTAssertEqual(rebuilt.fieldPresence, incremental.fieldPresence)
-        XCTAssertEqual(rebuilt.coOccurrence, incremental.coOccurrence)
+        #expect(rebuilt.liveRowCount == incremental.liveRowCount)
+        #expect(rebuilt.fieldPresence == incremental.fieldPresence)
+        #expect(rebuilt.coOccurrence == incremental.coOccurrence)
     }
 
     // MARK: - Persistence
 
-    func testInMemoryModeRebuildsButDoesNotPersist() throws {
+    @Test
+    func inMemoryModeRebuildsButDoesNotPersist() throws {
         var log = UnifiedAuditLog()
         let row = UUID()
         log.add(captureEntry(row: row, field: "bm.x",
@@ -179,12 +186,13 @@ final class MatrixTierTests: XCTestCase {
 
         let backend = MatrixPersistenceBackend(mode: .inMemory)
         let snap = try backend.rebuild(from: log)
-        XCTAssertEqual(snap.tier.liveRowCount, 1)
+        #expect(snap.tier.liveRowCount == 1)
         // .inMemory load always returns nil — no on-disk state.
-        XCTAssertNil(try backend.load())
+        #expect(try backend.load() == nil)
     }
 
-    func testSnapshottedModeRoundTripsExactly() throws {
+    @Test
+    func snapshottedModeRoundTripsExactly() throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("matrix-snap-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -208,13 +216,14 @@ final class MatrixTierTests: XCTestCase {
             mode: .snapshotted(file: tmp)
         )
         let loaded = try backend2.load()
-        XCTAssertNotNil(loaded)
-        XCTAssertEqual(loaded?.tier, snap1.tier)
-        XCTAssertEqual(loaded?.calibration, snap1.calibration)
-        XCTAssertEqual(loaded?.hlcWatermark, snap1.hlcWatermark)
+        #expect(loaded != nil)
+        #expect(loaded?.tier == snap1.tier)
+        #expect(loaded?.calibration == snap1.calibration)
+        #expect(loaded?.hlcWatermark == snap1.hlcWatermark)
     }
 
-    func testPersistenceModesAgreeOnTier() throws {
+    @Test
+    func persistenceModesAgreeOnTier() throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("matrix-eq-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -235,13 +244,14 @@ final class MatrixTierTests: XCTestCase {
         let memOut = try mem.rebuild(from: log)
         let snapOut = try snap.rebuild(from: log)
 
-        XCTAssertEqual(memOut.tier, snapOut.tier,
-                       "both modes must produce the same matrix tier")
+        #expect(memOut.tier == snapOut.tier,
+                "both modes must produce the same matrix tier")
     }
 
     // MARK: - Calibration
 
-    func testCalibrationDeflatesOverconfidence() {
+    @Test
+    func calibrationDeflatesOverconfidence() {
         var registry = MatrixCalibrationRegistry()
         // Bucket 16 covers [0.80, 0.85). Feed 4 failures.
         for _ in 0..<4 {
@@ -255,18 +265,16 @@ final class MatrixTierTests: XCTestCase {
                         outcome: .success)
         let calibrated = registry.calibrate(modelID: "test.model",
                                             claimedConfidence: 0.82)
-        XCTAssertEqual(calibrated, 0.2, accuracy: 1e-5)
+        #expect(abs(calibrated - 0.2) <= 1e-5)
         // Unknown model passes through.
-        XCTAssertEqual(
-            registry.calibrate(modelID: "unknown",
-                               claimedConfidence: 0.5),
-            0.5, accuracy: 1e-9
-        )
+        #expect(abs(registry.calibrate(modelID: "unknown",
+                                       claimedConfidence: 0.5) - 0.5) <= 1e-9)
     }
 
     // MARK: - NMF
 
-    func testNMFApproximatesInputMatrix() {
+    @Test
+    func nmfApproximatesInputMatrix() {
         // 3 × 3 rank-1-ish matrix; K = 1 should reconstruct closely.
         let o: [Double] = [
             1, 2, 3,
@@ -278,21 +286,20 @@ final class MatrixTierTests: XCTestCase {
             maxIterations: 200,
             tolerance: 1e-9
         )
-        XCTAssertLessThan(
-            f.reconstructionError, 1e-3,
-            "rank-1 input should reconstruct with low error"
-        )
+        #expect(f.reconstructionError < 1e-3,
+            "rank-1 input should reconstruct with low error")
         // Loadings for row 0 should be a single-K vector.
-        XCTAssertEqual(f.loadings(forRow: 0).count, 1)
+        #expect(f.loadings(forRow: 0).count == 1)
     }
 
-    func testNMFDeterministicAcrossRuns() {
+    @Test
+    func nmfDeterministicAcrossRuns() {
         let o: [Double] = [1, 2, 3, 4]
         let a = MatrixNMF.factorize(o: o, rows: 2, cols: 2, k: 2,
                                     seed: 42, maxIterations: 20)
         let b = MatrixNMF.factorize(o: o, rows: 2, cols: 2, k: 2,
                                     seed: 42, maxIterations: 20)
-        XCTAssertEqual(a.w, b.w)
-        XCTAssertEqual(a.h, b.h)
+        #expect(a.w == b.w)
+        #expect(a.h == b.h)
     }
 }

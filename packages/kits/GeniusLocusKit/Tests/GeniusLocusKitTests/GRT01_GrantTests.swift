@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import CryptoKit
 import LocusKit
@@ -19,7 +19,8 @@ import PersistenceKitInMemory
 /// observed `GrantStore` / `ScopeKeyVault` state. `now` is passed
 /// explicitly wherever lifetime math matters so the assertions are
 /// deterministic and never sleep on a wall clock.
-final class GRT01_GrantTests: XCTestCase {
+@Suite("GRT-01 grant surface")
+struct GRT01_GrantTests {
 
     // MARK: - Harness
 
@@ -57,51 +58,54 @@ final class GRT01_GrantTests: XCTestCase {
 
     // MARK: - 1. issueGrant mode 1 (mediated)
 
-    func testIssueGrantMode1HoldsKeyInVault() async throws {
+    @Test
+    func issueGrantMode1HoldsKeyInVault() async throws {
         let (kit, handle, _) = try await openOneEstate()
         let result = try await kit.issueGrant(handle, options(.mediated))
 
         let storeOpt = await kit.grantStore(for: handle)
-        let store = try XCTUnwrap(storeOpt)
+        let store = try #require(storeOpt)
         let active = try await store.active()
-        XCTAssertEqual(active.count, 1, "one grant row after a single mediated issue")
+        #expect(active.count == 1, "one grant row after a single mediated issue")
 
         // Mode 1: the scope key never leaves custody, so it is not
         // returned to the caller and the vault retains it.
-        XCTAssertNil(result.scopeKey, "mode 1 must not return the scope key to the caller")
+        #expect(result.scopeKey == nil, "mode 1 must not return the scope key to the caller")
         let vaultOpt = await kit.scopeVault(for: handle)
-        let vault = try XCTUnwrap(vaultOpt)
+        let vault = try #require(vaultOpt)
         let holds = await vault.holdsScopeKey(for: result.grant.id)
-        XCTAssertTrue(holds, "mode 1 vault retains the scope key internally")
+        #expect(holds, "mode 1 vault retains the scope key internally")
     }
 
     // MARK: - 2. issueGrant mode 2 (handed-over)
 
-    func testIssueGrantMode2ReturnsKeyNotRetained() async throws {
+    @Test
+    func issueGrantMode2ReturnsKeyNotRetained() async throws {
         let (kit, handle, _) = try await openOneEstate()
         let result = try await kit.issueGrant(handle, options(.handedOver))
 
         // Mode 2: the scope key is derived once and handed to the
         // recipient at issue; the vault keeps no copy.
-        XCTAssertNotNil(result.scopeKey, "mode 2 returns the derived scope key at issue")
+        #expect(result.scopeKey != nil, "mode 2 returns the derived scope key at issue")
         let vaultOpt = await kit.scopeVault(for: handle)
-        let vault = try XCTUnwrap(vaultOpt)
+        let vault = try #require(vaultOpt)
         let holds = await vault.holdsScopeKey(for: result.grant.id)
-        XCTAssertFalse(holds, "mode 2 vault must not retain a copy of the handed-over key")
+        #expect(!holds, "mode 2 vault must not retain a copy of the handed-over key")
     }
 
     // MARK: - 3. Grant is signed by the issuing estate's Ed25519 key
 
-    func testGrantSignatureVerifiesAgainstEstatePublicKey() async throws {
+    @Test
+    func grantSignatureVerifiesAgainstEstatePublicKey() async throws {
         let (kit, handle, storage) = try await openOneEstate()
         let result = try await kit.issueGrant(handle, options(.mediated))
 
         let estate = try await LocusKit.Estate.open(storage: storage, owner: OwnerCredentials(ownerIdentifier: "owner-grt01"))
         let manifest = try await estate.manifest
-        let pubKeyData = try XCTUnwrap(manifest.ed25519PublicKey)
+        let pubKeyData = try #require(manifest.ed25519PublicKey)
         let pubKey = try Curve25519.Signing.PublicKey(rawRepresentation: pubKeyData)
 
-        XCTAssertTrue(
+        #expect(
             pubKey.isValidSignature(result.grant.signature, for: result.grant.signingPayload),
             "issued grant signature must verify against the estate's Ed25519 public key"
         )
@@ -109,30 +113,33 @@ final class GRT01_GrantTests: XCTestCase {
 
     // MARK: - 4. revokeGrant mode 1 cryptographic clawback
 
-    func testRevokeMode1RemovesKeyAndBlocksAccess() async throws {
+    @Test
+    func revokeMode1RemovesKeyAndBlocksAccess() async throws {
         let (kit, handle, _) = try await openOneEstate()
         let result = try await kit.issueGrant(handle, options(.mediated))
         let vaultOpt = await kit.scopeVault(for: handle)
-        let vault = try XCTUnwrap(vaultOpt)
+        let vault = try #require(vaultOpt)
 
         try await kit.revokeGrant(handle, grantID: result.grant.id)
 
         let holds = await vault.holdsScopeKey(for: result.grant.id)
-        XCTAssertFalse(holds, "mode 1 clawback removes the scope key from the vault")
+        #expect(!holds, "mode 1 clawback removes the scope key from the vault")
 
         do {
             _ = try await vault.access(grant: result.grant, now: Date())
-            XCTFail("access after revocation must throw")
+            Issue.record("access after revocation must throw")
         } catch let error as GrantError {
             guard case .grantRevoked = error else {
-                return XCTFail("expected grantRevoked, got \(error)")
+                Issue.record("expected grantRevoked, got \(error)")
+                return
             }
         }
     }
 
     // MARK: - 5. revokeGrant mode 2 best-effort
 
-    func testRevokeMode2WritesRecordWithoutFaulting() async throws {
+    @Test
+    func revokeMode2WritesRecordWithoutFaulting() async throws {
         let (kit, handle, _) = try await openOneEstate()
         let result = try await kit.issueGrant(handle, options(.handedOver))
 
@@ -141,14 +148,15 @@ final class GRT01_GrantTests: XCTestCase {
         try await kit.revokeGrant(handle, grantID: result.grant.id)
 
         let storeOpt = await kit.grantStore(for: handle)
-        let store = try XCTUnwrap(storeOpt)
+        let store = try #require(storeOpt)
         let row = try await store.get(id: result.grant.id)
-        XCTAssertNotNil(row?.revokedAt, "mode 2 revocation writes a revocation record")
+        #expect(row?.revokedAt != nil, "mode 2 revocation writes a revocation record")
     }
 
     // MARK: - 6. Custody modes 3 and 4 gate at issue
 
-    func testExperimentalModesGateUnlessClearanceConfirmed() async throws {
+    @Test
+    func experimentalModesGateUnlessClearanceConfirmed() async throws {
         let (kit, handle, _) = try await openOneEstate()
 
         let mode3 = CustodyMode.decayDerived(
@@ -157,27 +165,30 @@ final class GRT01_GrantTests: XCTestCase {
         )
         do {
             _ = try await kit.issueGrant(handle, options(mode3))
-            XCTFail("mode 3 without clearance must throw")
+            Issue.record("mode 3 without clearance must throw")
         } catch let error as GrantError {
             guard case .experimentalModeNotActivated = error else {
-                return XCTFail("expected experimentalModeNotActivated, got \(error)")
+                Issue.record("expected experimentalModeNotActivated, got \(error)")
+                return
             }
         }
 
         let mode4 = CustodyMode.physicalDecay(experimentalIPClearanceConfirmed: false)
         do {
             _ = try await kit.issueGrant(handle, options(mode4))
-            XCTFail("mode 4 without clearance must throw")
+            Issue.record("mode 4 without clearance must throw")
         } catch let error as GrantError {
             guard case .experimentalModeNotActivated = error else {
-                return XCTFail("expected experimentalModeNotActivated, got \(error)")
+                Issue.record("expected experimentalModeNotActivated, got \(error)")
+                return
             }
         }
     }
 
     // MARK: - 7. Lifetime enforced
 
-    func testLifetimeExpiryBlocksMode1Access() async throws {
+    @Test
+    func lifetimeExpiryBlocksMode1Access() async throws {
         let (kit, handle, _) = try await openOneEstate()
         let issuedAt = Date(timeIntervalSince1970: 1_000_000)
         let expiry = issuedAt.addingTimeInterval(1)  // one-second lifetime
@@ -187,7 +198,7 @@ final class GRT01_GrantTests: XCTestCase {
             now: issuedAt
         )
         let vaultOpt = await kit.scopeVault(for: handle)
-        let vault = try XCTUnwrap(vaultOpt)
+        let vault = try #require(vaultOpt)
 
         // Before expiry: access succeeds.
         _ = try await vault.access(grant: result.grant, now: issuedAt)
@@ -195,27 +206,29 @@ final class GRT01_GrantTests: XCTestCase {
         // After expiry: access raises grantExpired.
         do {
             _ = try await vault.access(grant: result.grant, now: expiry.addingTimeInterval(1))
-            XCTFail("access after lifetime expiry must throw")
+            Issue.record("access after lifetime expiry must throw")
         } catch let error as GrantError {
             guard case .grantExpired = error else {
-                return XCTFail("expected grantExpired, got \(error)")
+                Issue.record("expected grantExpired, got \(error)")
+                return
             }
         }
     }
 
     // MARK: - 8. Manifest Ed25519 keypair present and stable
 
-    func testManifestKeypairPresentAndStableAcrossReopen() async throws {
+    @Test
+    func manifestKeypairPresentAndStableAcrossReopen() async throws {
         let storage = makeStorage()
         let owner = OwnerCredentials(ownerIdentifier: "owner-grt01")
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
 
         let first = try await LocusKit.Estate.open(storage: storage, owner: owner)
         let firstKey = try await first.manifest.ed25519PublicKey
-        XCTAssertNotNil(firstKey, "estate open generates an Ed25519 public key")
+        #expect(firstKey != nil, "estate open generates an Ed25519 public key")
 
         let second = try await LocusKit.Estate.open(storage: storage, owner: owner)
         let secondKey = try await second.manifest.ed25519PublicKey
-        XCTAssertEqual(firstKey, secondKey, "keypair is stable across re-open from the same storage")
+        #expect(firstKey == secondKey, "keypair is stable across re-open from the same storage")
     }
 }

@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -15,7 +15,8 @@ import PersistenceKitInMemory
 /// overlapping-region queries return content from all overlapping
 /// estates; disjoint-region queries return only that estate's content
 /// (or nothing, when nothing overlaps).
-final class CrossEstateOverlapTests: XCTestCase {
+@Suite("Cross-estate overlap fan-out")
+struct CrossEstateOverlapTests {
 
     /// Open an estate at the supplied zoom window by writing the
     /// manifest fields directly through `DrawerStore.setMeta` before
@@ -40,7 +41,8 @@ final class CrossEstateOverlapTests: XCTestCase {
     /// Three estates at [0,10], [5,15], [20,30]. A query at [4,8] hits
     /// the first two; a query at [25,28] hits only the third; a query
     /// at [40,50] hits none.
-    func testFanOutRoutesByZoomWindowOverlap() async throws {
+    @Test
+    func fanOutRoutesByZoomWindowOverlap() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-overlap")
 
@@ -56,22 +58,22 @@ final class CrossEstateOverlapTests: XCTestCase {
         let hHigh = try await kit.open(storage: sHigh, owner: owner)
 
         // Sanity: handles report the windows the manifest carries.
-        XCTAssertEqual(hLow.zoomWindowLow, 0); XCTAssertEqual(hLow.zoomWindowHigh, 10)
-        XCTAssertEqual(hMid.zoomWindowLow, 5); XCTAssertEqual(hMid.zoomWindowHigh, 15)
-        XCTAssertEqual(hHigh.zoomWindowLow, 20); XCTAssertEqual(hHigh.zoomWindowHigh, 30)
+        #expect(hLow.zoomWindowLow == 0); #expect(hLow.zoomWindowHigh == 10)
+        #expect(hMid.zoomWindowLow == 5); #expect(hMid.zoomWindowHigh == 15)
+        #expect(hHigh.zoomWindowLow == 20); #expect(hHigh.zoomWindowHigh == 30)
 
         // Region [4, 8] overlaps low ([0,10]) and mid ([5,15]); high
         // ([20,30]) is disjoint.
         let twoHit = try await kit.estatesOverlapping(LatticeRegion(low: 4, high: 8))
-        XCTAssertEqual(Set(twoHit), Set([hLow, hMid]))
+        #expect(Set(twoHit) == Set([hLow, hMid]))
 
         // Region [25, 28] overlaps high only.
         let oneHit = try await kit.estatesOverlapping(LatticeRegion(low: 25, high: 28))
-        XCTAssertEqual(oneHit, [hHigh])
+        #expect(oneHit == [hHigh])
 
         // Region [40, 50] overlaps none.
         let zeroHit = try await kit.estatesOverlapping(LatticeRegion(low: 40, high: 50))
-        XCTAssertEqual(zeroHit, [])
+        #expect(zeroHit == [])
     }
 
     /// Capture one drawer in each of the three estates; fan out a
@@ -79,7 +81,8 @@ final class CrossEstateOverlapTests: XCTestCase {
     /// contributions, each carrying its own captured drawer; the
     /// disjoint estate is not consulted and not present in the
     /// contribution list.
-    func testFanOutRecallReturnsOverlappingContributionsAndSkipsDisjoint() async throws {
+    @Test
+    func fanOutRecallReturnsOverlappingContributionsAndSkipsDisjoint() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-overlap-2")
 
@@ -120,29 +123,30 @@ final class CrossEstateOverlapTests: XCTestCase {
         let contributions = try await kit.fanOutRecall(frame, region: region)
         let byHandle = Dictionary(uniqueKeysWithValues: contributions.map { ($0.handle, $0) })
 
-        XCTAssertEqual(contributions.count, 2,
+        #expect(contributions.count == 2,
             "two estates overlap [4,8]; high is disjoint")
-        XCTAssertNotNil(byHandle[hLow])
-        XCTAssertNotNil(byHandle[hMid])
-        XCTAssertNil(byHandle[hHigh],
+        #expect(byHandle[hLow] != nil)
+        #expect(byHandle[hMid] != nil)
+        #expect(byHandle[hHigh] == nil,
             "disjoint estate must not appear in contributions")
 
         let idsLow = byHandle[hLow]!.drawers.map(\.id)
         let idsMid = byHandle[hMid]!.drawers.map(\.id)
-        XCTAssertTrue(idsLow.contains(dLow.id),
+        #expect(idsLow.contains(dLow.id),
             "low contribution must carry its own captured drawer")
-        XCTAssertTrue(idsMid.contains(dMid.id),
+        #expect(idsMid.contains(dMid.id),
             "mid contribution must carry its own captured drawer")
-        XCTAssertFalse(idsLow.contains(dHigh.id),
+        #expect(!idsLow.contains(dHigh.id),
             "low contribution must not carry high's drawer (storage isolation)")
-        XCTAssertFalse(idsMid.contains(dHigh.id),
+        #expect(!idsMid.contains(dHigh.id),
             "mid contribution must not carry high's drawer (storage isolation)")
     }
 
     /// Disjoint region returns the empty contribution list — the
     /// explicit disjoint-region case from the plan section 2 success
     /// criterion.
-    func testDisjointRegionReturnsEmpty() async throws {
+    @Test
+    func disjointRegionReturnsEmpty() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-disjoint")
         let storage = try await storageWithZoom(low: 0, high: 10)
@@ -153,12 +157,13 @@ final class CrossEstateOverlapTests: XCTestCase {
         let contributions = try await kit.fanOutRecall(
             frame, region: LatticeRegion(low: 50, high: 60)
         )
-        XCTAssertEqual(contributions.count, 0)
+        #expect(contributions.count == 0)
     }
 
     /// Inverted region is a programmer error and surfaces as a typed
     /// throw rather than a silent empty result.
-    func testInvertedRegionThrows() async throws {
+    @Test
+    func invertedRegionThrows() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-inverted")
         let storage = try await storageWithZoom(low: 0, high: 10)
@@ -166,14 +171,14 @@ final class CrossEstateOverlapTests: XCTestCase {
         _ = try await kit.open(storage: storage, owner: owner)
 
         let frame = RecallFrame(filterChain: [.unconfirmed])
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
             try await kit.fanOutRecall(frame, region: LatticeRegion(low: 10, high: 4))
-        ) { error in
-            guard case GeniusLocusKitError.invalidLatticeRegion(let low, let high) = error else {
-                return XCTFail("expected .invalidLatticeRegion, got \(error)")
-            }
-            XCTAssertEqual(low, 10)
-            XCTAssertEqual(high, 4)
+        }
+        if case .invalidLatticeRegion(let low, let high)? = thrown {
+            #expect(low == 10)
+            #expect(high == 4)
+        } else {
+            Issue.record("expected .invalidLatticeRegion, got \(String(describing: thrown))")
         }
     }
 }

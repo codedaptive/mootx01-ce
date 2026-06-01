@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -13,7 +13,8 @@ import PersistenceKitInMemory
 /// estate (and key) boundary unnoticed. These tests pin the guard: promoting
 /// or merging a branch into a non-parent estate throws
 /// `invalidPromotionTarget`; the legitimate parent promotion still succeeds.
-final class PromotionTargetTests: XCTestCase {
+@Suite("Branch promotion target guard")
+struct PromotionTargetTests {
 
     // MARK: - Helpers
 
@@ -62,7 +63,8 @@ final class PromotionTargetTests: XCTestCase {
 
     /// Promoting a branch derived from estate A into a different estate B must
     /// throw `invalidPromotionTarget` — content must not silently cross estates.
-    func testPromoteIntoNonParentEstateThrows() async throws {
+    @Test
+    func promoteIntoNonParentEstateThrows() async throws {
         let kit = GeniusLocusKit()
         let handleA = try await openEstate(in: kit, owner: "estate-A")
         let handleB = try await openEstate(in: kit, owner: "estate-B")
@@ -72,22 +74,23 @@ final class PromotionTargetTests: XCTestCase {
 
         do {
             try await kit.glkPromoteBranch(branch, replacing: handleB)
-            XCTFail("expected glkPromoteBranch into a non-parent estate to throw invalidPromotionTarget")
+            Issue.record("expected glkPromoteBranch into a non-parent estate to throw invalidPromotionTarget")
         } catch let error as GeniusLocusKitError {
             guard case .invalidPromotionTarget = error else {
-                XCTFail("expected GeniusLocusKitError.invalidPromotionTarget, got \(error)")
+                Issue.record("expected GeniusLocusKitError.invalidPromotionTarget, got \(error)")
                 return
             }
         }
 
         // Estate B must not have received the cross-estate content.
         let bRows = try await recallAll(kit: kit, handle: handleB)
-        XCTAssertFalse(bRows.contains(where: { $0.content == "branch-row-A" }),
+        #expect(!bRows.contains(where: { $0.content == "branch-row-A" }),
             "rejected promotion must not leak branch content into the non-parent estate")
     }
 
     /// Cherry-pick merge into a non-parent estate must likewise throw.
-    func testMergeIntoNonParentEstateThrows() async throws {
+    @Test
+    func mergeIntoNonParentEstateThrows() async throws {
         let kit = GeniusLocusKit()
         let handleA = try await openEstate(in: kit, owner: "estate-A")
         let handleB = try await openEstate(in: kit, owner: "estate-B")
@@ -97,16 +100,16 @@ final class PromotionTargetTests: XCTestCase {
 
         do {
             _ = try await kit.glkMergeDrawers([row.id], from: branch, into: handleB)
-            XCTFail("expected glkMergeDrawers into a non-parent estate to throw invalidPromotionTarget")
+            Issue.record("expected glkMergeDrawers into a non-parent estate to throw invalidPromotionTarget")
         } catch let error as GeniusLocusKitError {
             guard case .invalidPromotionTarget = error else {
-                XCTFail("expected GeniusLocusKitError.invalidPromotionTarget, got \(error)")
+                Issue.record("expected GeniusLocusKitError.invalidPromotionTarget, got \(error)")
                 return
             }
         }
 
         let bRows = try await recallAll(kit: kit, handle: handleB)
-        XCTAssertFalse(bRows.contains(where: { $0.content == "branch-row-to-merge" }),
+        #expect(!bRows.contains(where: { $0.content == "branch-row-to-merge" }),
             "rejected merge must not leak branch content into the non-parent estate")
     }
 
@@ -114,7 +117,8 @@ final class PromotionTargetTests: XCTestCase {
 
     /// Promoting a branch back into the estate it was derived from is the
     /// legitimate path and must continue to succeed.
-    func testLegitimateParentPromotionSucceeds() async throws {
+    @Test
+    func legitimateParentPromotionSucceeds() async throws {
         let kit = GeniusLocusKit()
         let handleA = try await openEstate(in: kit, owner: "estate-A")
         _ = try await captureOne(kit: kit, handle: handleA, content: "original-parent-row")
@@ -125,13 +129,14 @@ final class PromotionTargetTests: XCTestCase {
         try await kit.glkPromoteBranch(branch, replacing: handleA)
 
         let aRows = try await recallAll(kit: kit, handle: handleA)
-        XCTAssertTrue(aRows.contains(where: { $0.content == "branch-row-that-promotes" }),
+        #expect(aRows.contains(where: { $0.content == "branch-row-that-promotes" }),
             "legitimate parent promotion must land the branch row in the parent estate")
-        XCTAssertEqual(branch.status, .won)
+        #expect(branch.status == .won)
     }
 
     /// The legitimate parent merge path must also continue to succeed.
-    func testLegitimateParentMergeSucceeds() async throws {
+    @Test
+    func legitimateParentMergeSucceeds() async throws {
         let kit = GeniusLocusKit()
         let handleA = try await openEstate(in: kit, owner: "estate-A")
 
@@ -140,10 +145,10 @@ final class PromotionTargetTests: XCTestCase {
 
         let report = try await kit.glkMergeDrawers([picked.id], from: branch, into: handleA)
 
-        XCTAssertTrue(report.merged.contains(picked.id))
+        #expect(report.merged.contains(picked.id))
         let aRows = try await recallAll(kit: kit, handle: handleA)
-        XCTAssertTrue(aRows.contains(where: { $0.content == "picked-row" }),
+        #expect(aRows.contains(where: { $0.content == "picked-row" }),
             "legitimate parent merge must land the picked row in the parent estate")
-        XCTAssertEqual(branch.status, .merged)
+        #expect(branch.status == .merged)
     }
 }

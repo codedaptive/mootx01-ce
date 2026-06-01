@@ -15,7 +15,7 @@
 //
 // All-new fixtures, no production code modified.
 
-import XCTest
+import Testing
 import SubstrateTypes
 import Foundation
 import LocusKit
@@ -36,7 +36,8 @@ import PersistenceKitInMemory
 // ─────────────────────────────────────────────────────────────────
 @testable import GeniusLocusKit
 
-final class CompositionConformanceTests: XCTestCase {
+@Suite("Composition conformance")
+struct CompositionConformanceTests {
 
     // MARK: - Fixtures
 
@@ -74,7 +75,8 @@ final class CompositionConformanceTests: XCTestCase {
     /// estate, fan-out routing respects lattice overlap, and storage
     /// isolation holds between estates. This is the GLK-01 +
     /// GLK-02 surface composed end-to-end.
-    func testMultiEstateCaptureFanOutAndStorageIsolation() async throws {
+    @Test
+    func multiEstateCaptureFanOutAndStorageIsolation() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-composition")
 
@@ -105,23 +107,23 @@ final class CompositionConformanceTests: XCTestCase {
         let contributions = try await kit.fanOutRecall(
             recall, region: LatticeRegion(low: 4, high: 8))
         let byHandle = Dictionary(uniqueKeysWithValues: contributions.map { ($0.handle, $0) })
-        XCTAssertEqual(contributions.count, 2,
+        #expect(contributions.count == 2,
             "two estates overlap [4,8]; high estate must not be consulted")
-        XCTAssertNotNil(byHandle[hA])
-        XCTAssertNotNil(byHandle[hB])
-        XCTAssertNil(byHandle[hC])
+        #expect(byHandle[hA] != nil)
+        #expect(byHandle[hB] != nil)
+        #expect(byHandle[hC] == nil)
 
         // Storage isolation. Each estate's captured drawer must not
         // appear in any other estate's contribution. This is the
         // per-storage-instance invariant the coordinator preserves.
         let idsA = Set(byHandle[hA]!.drawers.map(\.id))
         let idsB = Set(byHandle[hB]!.drawers.map(\.id))
-        XCTAssertTrue(idsA.contains(dA.id), "estate A contributes its own drawer")
-        XCTAssertTrue(idsB.contains(dB.id), "estate B contributes its own drawer")
-        XCTAssertFalse(idsA.contains(dB.id), "estate A does not see B's drawer")
-        XCTAssertFalse(idsB.contains(dA.id), "estate B does not see A's drawer")
-        XCTAssertFalse(idsA.contains(dC.id),
-                       "estate C is disjoint from the recall region — its drawer cannot leak")
+        #expect(idsA.contains(dA.id), "estate A contributes its own drawer")
+        #expect(idsB.contains(dB.id), "estate B contributes its own drawer")
+        #expect(!idsA.contains(dB.id), "estate A does not see B's drawer")
+        #expect(!idsB.contains(dA.id), "estate B does not see A's drawer")
+        #expect(!idsA.contains(dC.id),
+                "estate C is disjoint from the recall region — its drawer cannot leak")
     }
 
     // MARK: - Audit projection across both tiers
@@ -131,7 +133,8 @@ final class CompositionConformanceTests: XCTestCase {
     /// The projection must key per `(tier, rowID)` so cross-tier UUID
     /// collisions do not collapse rows; the matrix tier's enrichment
     /// pass must fold both tiers' entries.
-    func testUnifiedAuditProjectionAndEnrichmentFoldBothTiers() {
+    @Test
+    func unifiedAuditProjectionAndEnrichmentFoldBothTiers() {
         var log = UnifiedAuditLog()
 
         // Three rows in the locus tier, two in the rag tier. The HLCs
@@ -165,9 +168,9 @@ final class CompositionConformanceTests: XCTestCase {
                  path: "tag_bits", after: .bitmap(0x10))
 
         let projection = AuditProjectionFold.project(log)
-        XCTAssertEqual(projection.count, 5)
-        XCTAssertEqual(projection.rows(in: .locus).count, 3)
-        XCTAssertEqual(projection.rows(in: .rag).count, 2)
+        #expect(projection.count == 5)
+        #expect(projection.rows(in: .locus).count == 3)
+        #expect(projection.rows(in: .rag).count == 2)
 
         // Composition with the matrix tier: every capture should land
         // on F-counts and bump `liveRowCount`. The enrichment pipeline
@@ -176,11 +179,11 @@ final class CompositionConformanceTests: XCTestCase {
         var calibration = MatrixCalibrationRegistry()
         let pipeline = EnrichmentPipeline()
         let result = pipeline.run(log: log, tier: &tier, calibration: &calibration)
-        XCTAssertEqual(result.transitionsConsidered, 5)
-        XCTAssertEqual(tier.liveRowCount, 5,
-                       "enrichment must fold every capture across both tiers")
-        XCTAssertFalse(tier.fieldPresence.isEmpty,
-                       "captures must populate F-counts")
+        #expect(result.transitionsConsidered == 5)
+        #expect(tier.liveRowCount == 5,
+                "enrichment must fold every capture across both tiers")
+        #expect(!tier.fieldPresence.isEmpty,
+                "captures must populate F-counts")
     }
 
     // MARK: - Standing-signal + training-daemon composition
@@ -190,7 +193,8 @@ final class CompositionConformanceTests: XCTestCase {
     /// standing signal, ticks at a controlled interval, and only
     /// enriches when the gate admits. This proves the scheduler and the
     /// daemon are interchangeable at the SignalSpec boundary.
-    func testTrainingDaemonRegistersAsStandingSignalAndGatesProperly() async throws {
+    @Test
+    func trainingDaemonRegistersAsStandingSignalAndGatesProperly() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-daemon-composition")
         let storage = try await self.storage(zoomLow: 0, high: 100)
@@ -234,8 +238,8 @@ final class CompositionConformanceTests: XCTestCase {
 
         // Tick once with the small log — gate dormant.
         try await kit.signalTick(in: handle, now: Date(timeIntervalSince1970: 60))
-        XCTAssertEqual(tierBox.value.liveRowCount, 0,
-                       "below-threshold daemon must not enrich")
+        #expect(tierBox.value.liveRowCount == 0,
+                "below-threshold daemon must not enrich")
 
         // Grow the log past the threshold and tick again — gate active.
         for i in 4..<10 {
@@ -244,8 +248,8 @@ final class CompositionConformanceTests: XCTestCase {
                           after: .bitmap(UInt64(1) << (i % 8)))
         }
         try await kit.signalTick(in: handle, now: Date(timeIntervalSince1970: 120))
-        XCTAssertEqual(tierBox.value.liveRowCount, 10,
-                       "above-threshold daemon must enrich on next tick")
+        #expect(tierBox.value.liveRowCount == 10,
+                "above-threshold daemon must enrich on next tick")
     }
 
     // MARK: - Verb surface composition
@@ -255,7 +259,8 @@ final class CompositionConformanceTests: XCTestCase {
     /// the withdrawn state and the recall filter chain agrees with the
     /// new state. This proves the unified nine-verb surface composes
     /// with the storage backend correctly.
-    func testCaptureRecallWithdrawComposeOverOneEstate() async throws {
+    @Test
+    func captureRecallWithdrawComposeOverOneEstate() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-verb-composition")
         let storage = try await self.storage(zoomLow: 0, high: 100)
@@ -273,8 +278,8 @@ final class CompositionConformanceTests: XCTestCase {
         // prune them before the verb surface returned.
         let recalled = try await kit.recall(handle,
             RecallFrame(filterChain: [.unconfirmed]))
-        XCTAssertTrue(recalled.map(\.id).contains(captured.id),
-                      "captured drawer must appear in the recall result")
+        #expect(recalled.map(\.id).contains(captured.id),
+                "captured drawer must appear in the recall result")
 
         // Withdraw and re-recall scoped to `.state(.active)`. The
         // withdrawn drawer's state axis moves to `.withdrawn`, so the
@@ -284,12 +289,12 @@ final class CompositionConformanceTests: XCTestCase {
             WithdrawFrame(rowID: captured.id, reason: "composition-test"))
         let stillActive = try await kit.recall(handle,
             RecallFrame(filterChain: [.unconfirmed, .state(.active)]))
-        XCTAssertFalse(stillActive.contains(where: { $0.id == captured.id }),
-                       "withdrawn drawer must not surface under .state(.active)")
+        #expect(!stillActive.contains(where: { $0.id == captured.id }),
+                "withdrawn drawer must not surface under .state(.active)")
         let nowWithdrawn = try await kit.recall(handle,
             RecallFrame(filterChain: [.unconfirmed, .state(.withdrawn)]))
-        XCTAssertTrue(nowWithdrawn.contains(where: { $0.id == captured.id }),
-                      "withdrawn drawer must surface under .state(.withdrawn)")
+        #expect(nowWithdrawn.contains(where: { $0.id == captured.id }),
+                "withdrawn drawer must surface under .state(.withdrawn)")
     }
 }
 

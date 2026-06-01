@@ -7,8 +7,9 @@
 // `.locus` and `.rag` tiers so each test exercises the unification
 // the mission is delivering.
 
-import XCTest
+import Testing
 import SubstrateTypes
+import Foundation
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -24,13 +25,15 @@ import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
 @testable import GeniusLocusKit
 
-final class UnifiedAuditLogTests: XCTestCase {
+@Suite("Unified audit log")
+struct UnifiedAuditLogTests {
 
     // MARK: - SHA-256 vector (FIPS 180-4)
     //
     // Guards the in-module SHA-256 against drift. The "abc" vector is
     // the FIPS 180-4 §B.1 published test value.
-    func testSHA256AbcVector() {
+    @Test
+    func sha256AbcVector() {
         let hash = UnifiedAuditSHA256.hash(Array("abc".utf8))
         let expected: [UInt8] = [
             0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
@@ -38,10 +41,11 @@ final class UnifiedAuditLogTests: XCTestCase {
             0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
             0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
         ]
-        XCTAssertEqual(hash, expected)
+        #expect(hash == expected)
     }
 
-    func testSHA256EmptyVector() {
+    @Test
+    func sha256EmptyVector() {
         let hash = UnifiedAuditSHA256.hash([])
         let expected: [UInt8] = [
             0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
@@ -49,12 +53,13 @@ final class UnifiedAuditLogTests: XCTestCase {
             0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
             0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
         ]
-        XCTAssertEqual(hash, expected)
+        #expect(hash == expected)
     }
 
     // MARK: - Entry ID determinism
 
-    func testEntryIDIsDeterministic() {
+    @Test
+    func entryIDIsDeterministic() {
         let row = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
         let hlc = HLC(physicalTime: 1000, logicalCount: 0, nodeID: 7)
         let a = UnifiedAuditEntry(
@@ -69,11 +74,12 @@ final class UnifiedAuditLogTests: XCTestCase {
             beforeValue: .null,
             afterValue: .bitmap(0x01)
         )
-        XCTAssertEqual(a.id, b.id)
-        XCTAssertEqual(a.id.count, 32)
+        #expect(a.id == b.id)
+        #expect(a.id.count == 32)
     }
 
-    func testEntryIDDiffersWhenTierDiffers() {
+    @Test
+    func entryIDDiffersWhenTierDiffers() {
         let row = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
         let hlc = HLC(physicalTime: 1000, logicalCount: 0, nodeID: 7)
         let locus = UnifiedAuditEntry(
@@ -86,40 +92,43 @@ final class UnifiedAuditLogTests: XCTestCase {
             fieldPath: "adjective.state",
             beforeValue: .null, afterValue: .bitmap(0x01)
         )
-        XCTAssertNotEqual(locus.id, rag.id)
+        #expect(locus.id != rag.id)
     }
 
     // MARK: - G-Set CRDT properties
 
-    func testAddIsIdempotent() {
+    @Test
+    func addIsIdempotent() {
         var log = UnifiedAuditLog()
         let e = makeEntry(tier: .locus, time: 1, row: rowA, field: "f", value: .integer(1))
         log.add(e)
         log.add(e)
         log.add(e)
-        XCTAssertEqual(log.count, 1)
+        #expect(log.count == 1)
     }
 
-    func testMergeIsCommutativeAndIdempotent() {
+    @Test
+    func mergeIsCommutativeAndIdempotent() {
         let e1 = makeEntry(tier: .locus, time: 1, row: rowA, field: "f", value: .integer(1))
         let e2 = makeEntry(tier: .rag,   time: 2, row: rowB, field: "g", value: .integer(2))
         let e3 = makeEntry(tier: .locus, time: 3, row: rowA, field: "f", value: .integer(3))
         var a = UnifiedAuditLog(entries: [e1, e2])
-        var b = UnifiedAuditLog(entries: [e2, e3])
+        let b = UnifiedAuditLog(entries: [e2, e3])
         var aPlusB = a
         aPlusB.merge(b)
         var bPlusA = b
         bPlusA.merge(a)
-        XCTAssertEqual(aPlusB, bPlusA)
+        #expect(aPlusB == bPlusA)
         // Idempotent: merging in the union of both does not grow either.
         a.merge(b)
         a.merge(b)
-        XCTAssertEqual(a.count, 3)
+        #expect(a.count == 3)
     }
 
     // MARK: - Cross-tier convergence (mission test requirement #1)
 
-    func testCrossTierConvergence() {
+    @Test
+    func crossTierConvergence() {
         // Two replicas hold overlapping events from both tiers.
         // Replica 1: locus capture(rowA), rag capture(rowB), rag mutate(rowB)
         // Replica 2: locus capture(rowA) [same], locus mutate(rowA), rag capture(rowB) [same]
@@ -147,21 +156,22 @@ final class UnifiedAuditLogTests: XCTestCase {
 
         let p1 = AuditProjectionFold.project(r1)
         let p2 = AuditProjectionFold.project(r2)
-        XCTAssertEqual(p1, p2)
+        #expect(p1 == p2)
 
         // Sanity check: post-fold state matches the latest per-field.
         let locusRow = p1.row(tier: .locus, rowID: rowA)
-        XCTAssertNotNil(locusRow)
-        XCTAssertEqual(locusRow?.fields["adjective.state"], .bitmap(0b0011))
-        XCTAssertEqual(locusRow?.lastVerb, .mutate)
+        #expect(locusRow != nil)
+        #expect(locusRow?.fields["adjective.state"] == .bitmap(0b0011))
+        #expect(locusRow?.lastVerb == .mutate)
 
         let ragRow = p1.row(tier: .rag, rowID: rowB)
-        XCTAssertNotNil(ragRow)
-        XCTAssertEqual(ragRow?.fields["chunk.tokens"], .integer(384))
-        XCTAssertEqual(ragRow?.lastVerb, .mutate)
+        #expect(ragRow != nil)
+        #expect(ragRow?.fields["chunk.tokens"] == .integer(384))
+        #expect(ragRow?.lastVerb == .mutate)
     }
 
-    func testProjectionIndependentOfArrivalOrder() {
+    @Test
+    func projectionIndependentOfArrivalOrder() {
         // Add the same set of events in three different orders;
         // projection must be identical (cookbook §5.4).
         let events = [
@@ -174,13 +184,14 @@ final class UnifiedAuditLogTests: XCTestCase {
         let p2 = AuditProjectionFold.project(UnifiedAuditLog(entries: events.reversed()))
         let shuffled: [UnifiedAuditEntry] = [events[2], events[0], events[3], events[1]]
         let p3 = AuditProjectionFold.project(UnifiedAuditLog(entries: shuffled))
-        XCTAssertEqual(p1, p2)
-        XCTAssertEqual(p2, p3)
+        #expect(p1 == p2)
+        #expect(p2 == p3)
     }
 
     // MARK: - asOf reconstruction (mission test requirement #2)
 
-    func testAsOfReconstructionSpansBothTiers() {
+    @Test
+    func asOfReconstructionSpansBothTiers() {
         let t10 = HLC(physicalTime: 10, logicalCount: 0, nodeID: 1)
         let t20 = HLC(physicalTime: 20, logicalCount: 0, nodeID: 1)
         let t30 = HLC(physicalTime: 30, logicalCount: 0, nodeID: 1)
@@ -201,24 +212,22 @@ final class UnifiedAuditLogTests: XCTestCase {
         // asOf t20: locus row visible at initial value, rag row visible
         // at its capture value, no mutate yet applied to locus.
         let asOf20 = AuditProjectionFold.project(log, asOf: t20)
-        XCTAssertEqual(asOf20.row(tier: .locus, rowID: rowA)?.fields["adjective.state"],
-                       .bitmap(0b0001))
-        XCTAssertEqual(asOf20.row(tier: .rag, rowID: rowB)?.fields["chunk.tokens"],
-                       .integer(100))
+        #expect(asOf20.row(tier: .locus, rowID: rowA)?.fields["adjective.state"] == .bitmap(0b0001))
+        #expect(asOf20.row(tier: .rag, rowID: rowB)?.fields["chunk.tokens"] == .integer(100))
 
         // asOf t30: locus row visible at mutated value.
         let asOf30 = AuditProjectionFold.project(log, asOf: t30)
-        XCTAssertEqual(asOf30.row(tier: .locus, rowID: rowA)?.fields["adjective.state"],
-                       .bitmap(0b0011))
+        #expect(asOf30.row(tier: .locus, rowID: rowA)?.fields["adjective.state"] == .bitmap(0b0011))
 
         // asOf at HLC zero: nothing visible yet.
         let asOfZero = AuditProjectionFold.project(log, asOf: .zero)
-        XCTAssertTrue(asOfZero.isEmpty)
+        #expect(asOfZero.isEmpty)
     }
 
     // MARK: - Recovery (mission test requirement #3)
 
-    func testRecoveryReproducesLiveProjection() {
+    @Test
+    func recoveryReproducesLiveProjection() {
         let events = [
             makeEntry(tier: .locus, time: 10, row: rowA, field: "f", value: .integer(1), verb: .capture),
             makeEntry(tier: .rag,   time: 15, row: rowB, field: "g", value: .integer(2), verb: .capture),
@@ -229,17 +238,18 @@ final class UnifiedAuditLogTests: XCTestCase {
         let live = AuditProjectionFold.project(log)
 
         let result = AuditRecovery.rebuild(from: log)
-        XCTAssertEqual(result.entriesReplayed, 4)
-        XCTAssertEqual(result.rowsRebuilt, 2)
-        XCTAssertEqual(result.locusRows, 1)
-        XCTAssertEqual(result.ragRows, 1)
-        XCTAssertEqual(result.projection, live)
+        #expect(result.entriesReplayed == 4)
+        #expect(result.rowsRebuilt == 2)
+        #expect(result.locusRows == 1)
+        #expect(result.ragRows == 1)
+        #expect(result.projection == live)
 
         let divergence = AuditRecovery.verify(rebuilt: result.projection, against: live)
-        XCTAssertTrue(divergence.isEmpty)
+        #expect(divergence.isEmpty)
     }
 
-    func testRecoveryStreamingReplayMatchesBatch() {
+    @Test
+    func recoveryStreamingReplayMatchesBatch() {
         let events = [
             makeEntry(tier: .locus, time: 10, row: rowA, field: "f", value: .integer(1), verb: .capture),
             makeEntry(tier: .rag,   time: 20, row: rowB, field: "g", value: .integer(2), verb: .capture),
@@ -247,10 +257,11 @@ final class UnifiedAuditLogTests: XCTestCase {
         ]
         let batch = AuditRecovery.rebuild(from: UnifiedAuditLog(entries: events))
         let streamed = AuditRecovery.rebuildStreaming(from: events)
-        XCTAssertEqual(streamed.projection, batch.projection)
+        #expect(streamed.projection == batch.projection)
     }
 
-    func testRecoveryAsOfReconstructsHistoricalState() {
+    @Test
+    func recoveryAsOfReconstructsHistoricalState() {
         let t10 = HLC(physicalTime: 10, logicalCount: 0, nodeID: 1)
         let t30 = HLC(physicalTime: 30, logicalCount: 0, nodeID: 1)
         let events = [
@@ -262,13 +273,14 @@ final class UnifiedAuditLogTests: XCTestCase {
                                               asOf: HLC(physicalTime: 20,
                                                                  logicalCount: 0,
                                                                  nodeID: 1))
-        XCTAssertEqual(asOfT20.entriesReplayed, 1)
-        XCTAssertEqual(asOfT20.rowsRebuilt, 1)
-        XCTAssertEqual(asOfT20.locusRows, 1)
-        XCTAssertEqual(asOfT20.ragRows, 0)
+        #expect(asOfT20.entriesReplayed == 1)
+        #expect(asOfT20.rowsRebuilt == 1)
+        #expect(asOfT20.locusRows == 1)
+        #expect(asOfT20.ragRows == 0)
     }
 
-    func testWithdrawAndExpungeAreStickyTombstones() {
+    @Test
+    func withdrawAndExpungeAreStickyTombstones() {
         let events = [
             makeEntry(tier: .locus, time: 10, row: rowA, field: "f", value: .bitmap(1), verb: .capture),
             makeEntry(tier: .locus, time: 20, row: rowA, field: "f", value: .bitmap(2), verb: .withdraw),
@@ -277,24 +289,26 @@ final class UnifiedAuditLogTests: XCTestCase {
         ]
         let p = AuditProjectionFold.project(UnifiedAuditLog(entries: events))
         let row = p.row(tier: .locus, rowID: rowA)
-        XCTAssertTrue(row?.withdrawn ?? false)
-        XCTAssertTrue(row?.expunged ?? false)
+        #expect(row?.withdrawn ?? false)
+        #expect(row?.expunged ?? false)
     }
 
     // MARK: - Tier scoping
 
-    func testEntriesByTierFiltering() {
+    @Test
+    func entriesByTierFiltering() {
         let events = [
             makeEntry(tier: .locus, time: 10, row: rowA, field: "f", value: .integer(1), verb: .capture),
             makeEntry(tier: .rag,   time: 20, row: rowB, field: "g", value: .integer(2), verb: .capture),
             makeEntry(tier: .locus, time: 30, row: rowA, field: "f", value: .integer(3), verb: .mutate),
         ]
         let log = UnifiedAuditLog(entries: events)
-        XCTAssertEqual(log.entries(tier: .locus).count, 2)
-        XCTAssertEqual(log.entries(tier: .rag).count, 1)
+        #expect(log.entries(tier: .locus).count == 2)
+        #expect(log.entries(tier: .rag).count == 1)
     }
 
-    func testRowScopingHonorsTier() {
+    @Test
+    func rowScopingHonorsTier() {
         // Pathological case: a LocusKit row and a CorpusKit row sharing
         // the same UUID. Projection must keep them disjoint.
         let shared = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
@@ -303,22 +317,23 @@ final class UnifiedAuditLogTests: XCTestCase {
             makeEntry(tier: .rag,   time: 20, row: shared, field: "g", value: .integer(2)),
         ]
         let p = AuditProjectionFold.project(UnifiedAuditLog(entries: events))
-        XCTAssertEqual(p.count, 2)
-        XCTAssertNotNil(p.row(tier: .locus, rowID: shared))
-        XCTAssertNotNil(p.row(tier: .rag, rowID: shared))
+        #expect(p.count == 2)
+        #expect(p.row(tier: .locus, rowID: shared) != nil)
+        #expect(p.row(tier: .rag, rowID: shared) != nil)
     }
 
     // MARK: - HLC ordering
 
-    func testHLCLexicographicOrder() {
+    @Test
+    func hlcLexicographicOrder() {
         let a = HLC(physicalTime: 1, logicalCount: 0, nodeID: 0)
         let b = HLC(physicalTime: 1, logicalCount: 1, nodeID: 0)
         let c = HLC(physicalTime: 1, logicalCount: 1, nodeID: 5)
         let d = HLC(physicalTime: 2, logicalCount: 0, nodeID: 0)
-        XCTAssertTrue(a < b)
-        XCTAssertTrue(b < c)
-        XCTAssertTrue(c < d)
-        XCTAssertEqual(a.wireBytes.count, 16)
+        #expect(a < b)
+        #expect(b < c)
+        #expect(c < d)
+        #expect(a.wireBytes.count == 16)
     }
 
     // MARK: - Helpers
