@@ -166,6 +166,104 @@ public extension Estate {
         return drawer
     }
 
+    /// File a new standalone **tunnel** (graph edge) into the estate.
+    ///
+    /// `capture` is legal on exactly two nouns — drawer and tunnel
+    /// (AriaLexiconLib `Acceptance.swift`). This overload is the tunnel
+    /// entry point; the `CaptureFrame` overload above handles drawers.
+    ///
+    /// Until this verb landed, a tunnel was only ever born as a side effect
+    /// of the drawer supersession cascade (`DrawerStore.addDrawerWithCascade`).
+    /// This is the standalone path, and it is deliberately byte-identical to
+    /// the row the cascade writes: it builds a `Tunnel` with the same
+    /// all-zero bitmap defaults and files it through `DrawerStore.addTunnel`,
+    /// which — exactly like the cascade's tunnel write — performs a bare row
+    /// insert. One tunnel shape, two entry points (mission VERB-CAP-01,
+    /// Known Ambiguity 1).
+    ///
+    /// ## Genesis-event treatment
+    ///
+    /// Drawer capture emits a gated genesis `AuditEvent` (`gatedCapture` →
+    /// `AuditGate.admit`). The supersession cascade does **not** emit such
+    /// an event for the tunnel it files — `addDrawerWithCascade` inserts the
+    /// tunnel row directly via `rowStore.insert`, with no audit entry, and
+    /// `DrawerStore.addTunnel` does the same. Source is ground truth
+    /// (mission "Read First"): to stay byte-identical to what the cascade
+    /// produces — the mission's load-bearing requirement, and the explicit
+    /// "do not create a divergent tunnel-creation path" gate — standalone
+    /// tunnel capture matches the cascade and files via the bare-insert
+    /// `addTunnel`. (The mission text's "mirror drawer capture's genesis
+    /// event" reflects a doc/source drift: cascade-born tunnels carry no
+    /// genesis event, so mirroring drawer capture literally would *create*
+    /// the divergence the mission forbids. See the completion report.)
+    ///
+    /// `Date()` is called once at this public boundary — mirroring the
+    /// drawer overload and CLAUDE.md's deterministic-time rule.
+    ///
+    /// - Parameter frame: tunnel-capture slots. Both endpoints' `wing` and
+    ///   `room`, plus `label` and `addedBy`, must be non-empty; throws
+    ///   `LocusKitError.invalidContent` otherwise — an edge missing an
+    ///   endpoint is not a well-formed tunnel.
+    /// - Returns: the stored `Tunnel` with its generated id.
+    func capture(_ frame: TunnelCaptureFrame) async throws -> Tunnel {
+        guard !frame.sourceWing.isEmpty else {
+            throw LocusKitError.invalidContent("sourceWing must not be empty")
+        }
+        guard !frame.sourceRoom.isEmpty else {
+            throw LocusKitError.invalidContent("sourceRoom must not be empty")
+        }
+        guard !frame.targetWing.isEmpty else {
+            throw LocusKitError.invalidContent("targetWing must not be empty")
+        }
+        guard !frame.targetRoom.isEmpty else {
+            throw LocusKitError.invalidContent("targetRoom must not be empty")
+        }
+        guard !frame.label.isEmpty else {
+            throw LocusKitError.invalidContent("label must not be empty")
+        }
+        guard !frame.addedBy.isEmpty else {
+            throw LocusKitError.invalidContent("addedBy must not be empty")
+        }
+
+        let now = Date()
+        // Bitmaps omitted → the designated initializer's all-zero defaults,
+        // byte-identical to the cascade's `Tunnel(...)` construction.
+        let tunnel = Tunnel(
+            id: UUID().uuidString,
+            sourceWing: frame.sourceWing,
+            sourceRoom: frame.sourceRoom,
+            sourceDrawerId: frame.sourceDrawerId,
+            targetWing: frame.targetWing,
+            targetRoom: frame.targetRoom,
+            targetDrawerId: frame.targetDrawerId,
+            label: frame.label,
+            kind: frame.kind,
+            addedBy: frame.addedBy,
+            filedAt: now
+        )
+        try await store.addTunnel(tunnel)
+        return tunnel
+    }
+
+    /// Internal test peek used to verify a captured tunnel after a verb
+    /// call. Mirrors `_peekDrawer`. Internal so `@testable import LocusKit`
+    /// reaches it; production callers do not.
+    internal func _peekTunnel(id: String) async throws -> Tunnel? {
+        try await store.getTunnel(id: id)
+    }
+
+    /// Internal test helper: non-tombstoned tunnels from a source wing/room
+    /// (delegates to `DrawerStore.tunnelsFrom`).
+    internal func _tunnelsFrom(wing: String, room: String) async throws -> [Tunnel] {
+        try await store.tunnelsFrom(wing: wing, room: room)
+    }
+
+    /// Internal test helper: non-tombstoned tunnels to a target wing
+    /// (delegates to `DrawerStore.tunnelsTo`).
+    internal func _tunnelsTo(wing: String) async throws -> [Tunnel] {
+        try await store.tunnelsTo(wing: wing)
+    }
+
     // MARK: - recall
 
     /// Recall rows matching the filter chain. Per spec § 7.8.1 / § 7.9.
