@@ -116,7 +116,7 @@ fn pairing_acceptance_verifies_proposer_signature() {
 fn engine_enable_disable_state_transitions() {
     let relay = Arc::new(FederationRelay::new());
     let id = Arc::new(LocalIdentity::generate());
-    let engine = FederationSyncEngine::new(id, relay);
+    let mut engine = FederationSyncEngine::new(id, relay);
     engine.enable(sample_manifest(), make_storage()).unwrap();
     let st = engine.state();
     assert!(matches!(st, convergence_kit::SyncState::Enabled { .. }));
@@ -131,8 +131,8 @@ fn two_peer_push_pull_roundtrip() {
     let relay = Arc::new(FederationRelay::new());
     let id_a = Arc::new(LocalIdentity::generate());
     let id_b = Arc::new(LocalIdentity::generate());
-    let engine_a = FederationSyncEngine::new(id_a, relay.clone());
-    let engine_b = FederationSyncEngine::new(id_b, relay.clone());
+    let mut engine_a = FederationSyncEngine::new(id_a, relay.clone());
+    let mut engine_b = FederationSyncEngine::new(id_b, relay.clone());
 
     engine_a.enable(sample_manifest(), make_storage()).unwrap();
     engine_b.enable(sample_manifest(), make_storage()).unwrap();
@@ -151,8 +151,8 @@ fn pull_rejects_kit_mismatch() {
     let relay = Arc::new(FederationRelay::new());
     let id_a = Arc::new(LocalIdentity::generate());
     let id_b = Arc::new(LocalIdentity::generate());
-    let engine_a = FederationSyncEngine::new(id_a, relay.clone());
-    let engine_b = FederationSyncEngine::new(id_b, relay.clone());
+    let mut engine_a = FederationSyncEngine::new(id_a, relay.clone());
+    let mut engine_b = FederationSyncEngine::new(id_b, relay.clone());
 
     engine_a.enable(sample_manifest(), make_storage()).unwrap();
     // B has a different kit id.
@@ -173,8 +173,8 @@ fn pull_rejects_schema_mismatch() {
     let relay = Arc::new(FederationRelay::new());
     let id_a = Arc::new(LocalIdentity::generate());
     let id_b = Arc::new(LocalIdentity::generate());
-    let engine_a = FederationSyncEngine::new(id_a, relay.clone());
-    let engine_b = FederationSyncEngine::new(id_b, relay.clone());
+    let mut engine_a = FederationSyncEngine::new(id_a, relay.clone());
+    let mut engine_b = FederationSyncEngine::new(id_b, relay.clone());
 
     engine_a.enable(sample_manifest(), make_storage()).unwrap();
     let mut alt_manifest = sample_manifest();
@@ -193,7 +193,7 @@ fn pull_rejects_schema_mismatch() {
 fn subscriber_receives_push_completed_event() {
     let relay = Arc::new(FederationRelay::new());
     let id = Arc::new(LocalIdentity::generate());
-    let engine = FederationSyncEngine::new(id, relay);
+    let mut engine = FederationSyncEngine::new(id, relay);
     engine.enable(sample_manifest(), make_storage()).unwrap();
     let rx = engine.subscribe();
     engine.enqueue(sample_record()).unwrap();
@@ -220,8 +220,8 @@ fn pull_rejects_tampered_signature() {
     let relay = Arc::new(FederationRelay::new());
     let id_a = Arc::new(LocalIdentity::generate());
     let id_b = Arc::new(LocalIdentity::generate());
-    let engine_a = FederationSyncEngine::new(id_a.clone(), relay.clone());
-    let engine_b = FederationSyncEngine::new(id_b.clone(), relay.clone());
+    let mut engine_a = FederationSyncEngine::new(id_a.clone(), relay.clone());
+    let mut engine_b = FederationSyncEngine::new(id_b.clone(), relay.clone());
 
     engine_a.enable(sample_manifest(), make_storage()).unwrap();
     engine_b.enable(sample_manifest(), make_storage()).unwrap();

@@ -1,9 +1,12 @@
 //! BM25 inverted index. In-memory; rebuilt from the underlying
-//! bundle store as needed. Mirrors the Swift BM25Index actor.
+//! bundle store as needed. The Rust port of the Swift BM25Index:
+//! the index owns its state directly and the mutating methods
+//! (`index_documents`, `remove`) take `&mut self`; scoring reads
+//! (`search`, `document_count`) take `&self`.
 
 use crate::tokenizer::Tokenizer;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +38,7 @@ struct IndexState {
 pub struct BM25Index {
     tokenizer: Arc<dyn Tokenizer>,
     parameters: BM25Parameters,
-    state: Mutex<IndexState>,
+    state: IndexState,
 }
 
 impl BM25Index {
@@ -47,21 +50,21 @@ impl BM25Index {
         BM25Index {
             tokenizer,
             parameters,
-            state: Mutex::new(IndexState {
+            state: IndexState {
                 total_docs: 0,
                 total_length_sum: 0,
                 postings: HashMap::new(),
                 doc_lengths: HashMap::new(),
-            }),
+            },
         }
     }
 
     /// Index a batch of (document id, text) pairs.
-    pub fn index_documents<'a, I>(&self, documents: I)
+    pub fn index_documents<'a, I>(&mut self, documents: I)
     where
         I: IntoIterator<Item = (Uuid, &'a str)>,
     {
-        let mut state = self.state.lock().unwrap();
+        let state = &mut self.state;
         for (id, text) in documents {
             let tokens = self.tokenizer.keyword_tokens(text);
             let len = tokens.len();
@@ -82,8 +85,8 @@ impl BM25Index {
         }
     }
 
-    pub fn remove(&self, doc_id: Uuid) {
-        let mut state = self.state.lock().unwrap();
+    pub fn remove(&mut self, doc_id: Uuid) {
+        let state = &mut self.state;
         if let Some(len) = state.doc_lengths.remove(&doc_id) {
             state.total_length_sum = state.total_length_sum.saturating_sub(len);
             state.total_docs = state.total_docs.saturating_sub(1);
@@ -106,7 +109,7 @@ impl BM25Index {
         if limit == 0 {
             return Vec::new();
         }
-        let state = self.state.lock().unwrap();
+        let state = &self.state;
         if state.total_docs == 0 {
             return Vec::new();
         }
@@ -152,6 +155,6 @@ impl BM25Index {
     }
 
     pub fn document_count(&self) -> usize {
-        self.state.lock().unwrap().total_docs
+        self.state.total_docs
     }
 }

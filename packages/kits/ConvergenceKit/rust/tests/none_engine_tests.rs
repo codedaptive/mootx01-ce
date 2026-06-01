@@ -27,14 +27,14 @@ fn sample_manifest() -> SyncManifest {
 
 #[test]
 fn enable_succeeds_when_disabled() {
-    let engine = NoSyncEngine::new();
+    let mut engine = NoSyncEngine::new();
     let storage = make_storage();
     assert!(engine.enable(sample_manifest(), storage).is_ok());
 }
 
 #[test]
 fn enable_twice_returns_already_enabled() {
-    let engine = NoSyncEngine::new();
+    let mut engine = NoSyncEngine::new();
     let storage = make_storage();
     engine.enable(sample_manifest(), storage.clone()).unwrap();
     match engine.enable(sample_manifest(), storage) {
@@ -45,14 +45,14 @@ fn enable_twice_returns_already_enabled() {
 
 #[test]
 fn push_pull_before_enable_errors() {
-    let engine = NoSyncEngine::new();
+    let mut engine = NoSyncEngine::new();
     matches!(engine.push(), Err(SyncError::NotEnabled));
     matches!(engine.pull(), Err(SyncError::NotEnabled));
 }
 
 #[test]
 fn push_pull_after_enable_returns_empty_receipts() {
-    let engine = NoSyncEngine::new();
+    let mut engine = NoSyncEngine::new();
     let storage = make_storage();
     engine.enable(sample_manifest(), storage).unwrap();
     let push_receipt = engine.push().unwrap();
@@ -64,7 +64,7 @@ fn push_pull_after_enable_returns_empty_receipts() {
 
 #[test]
 fn state_transitions_with_enable_disable() {
-    let engine = NoSyncEngine::new();
+    let mut engine = NoSyncEngine::new();
     let storage = make_storage();
     assert!(matches!(engine.state(), SyncState::Disabled));
     engine.enable(sample_manifest(), storage).unwrap();
@@ -75,7 +75,7 @@ fn state_transitions_with_enable_disable() {
 
 #[test]
 fn subscribe_returns_immediately_finished_receiver() {
-    let engine = NoSyncEngine::new();
+    let mut engine = NoSyncEngine::new();
     let rx = engine.subscribe();
     // First recv returns Disconnected quickly because the sender
     // was dropped.
