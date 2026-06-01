@@ -22,7 +22,7 @@
 // Conformance-fixture status (per mission scope): this is a test, not
 // production code. No production source is added or modified.
 
-import XCTest
+import Testing
 import SubstrateTypes
 import Foundation
 import LocusKit
@@ -43,7 +43,8 @@ import PersistenceKitInMemory
 // ─────────────────────────────────────────────────────────────────
 @testable import GeniusLocusKit
 
-final class PerformanceGateTests: XCTestCase {
+@Suite("Theorem 5 performance gate")
+struct PerformanceGateTests {
 
     // MARK: - Theorem 5 budget
 
@@ -67,7 +68,8 @@ final class PerformanceGateTests: XCTestCase {
     /// 1000 over an 8-hour day; 200 is sufficient to land a stable P99
     /// in a CI window without forcing the harness to allocate orders of
     /// magnitude more storage than the unit-test environment carries.
-    func testTheorem5_CaptureP99UnderIPhoneBudget() async throws {
+    @Test
+    func theorem5_CaptureP99UnderIPhoneBudget() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-perf-capture")
         let storage = InMemoryStorage(configuration: EstateConfiguration(
@@ -111,9 +113,8 @@ final class PerformanceGateTests: XCTestCase {
               "max=\(summary.max.formatted) ms (n=\(sampleCount) Mac profile; " +
               "iPhone budget \(Self.captureP99CeilingMillis) ms)")
 
-        XCTAssertLessThan(summary.p99, Self.captureP99CeilingMillis,
-            "P99 capture latency \(summary.p99.formatted) ms exceeds iPhone budget " +
-            "\(Self.captureP99CeilingMillis) ms (Mac profile, n=\(sampleCount))")
+        #expect(summary.p99 < Self.captureP99CeilingMillis,
+            "P99 capture latency \(summary.p99.formatted) ms exceeds iPhone budget \(Self.captureP99CeilingMillis) ms (Mac profile, n=\(sampleCount))")
     }
 
     // MARK: - Enrichment throughput
@@ -129,7 +130,8 @@ final class PerformanceGateTests: XCTestCase {
     /// floor of 60/hour gives the test enormous headroom and pins the
     /// failure mode to "something catastrophic happened in the
     /// enrichment path," not "the harness is too sensitive to noise."
-    func testTheorem5_EnrichmentThroughputClearsMacFloor() {
+    @Test
+    func theorem5_EnrichmentThroughputClearsMacFloor() {
         let sampleCount = 500
         var log = UnifiedAuditLog()
         for i in 0..<sampleCount {
@@ -159,10 +161,10 @@ final class PerformanceGateTests: XCTestCase {
         let elapsedSeconds = Double(end.uptimeNanoseconds - start.uptimeNanoseconds)
             / 1_000_000_000.0
 
-        XCTAssertEqual(result.transitionsConsidered, sampleCount,
-                       "pipeline must enrich every capture in the synthetic log")
-        XCTAssertGreaterThan(elapsedSeconds, 0,
-                             "elapsed must be a positive duration; guards against div-by-zero")
+        #expect(result.transitionsConsidered == sampleCount,
+                "pipeline must enrich every capture in the synthetic log")
+        #expect(elapsedSeconds > 0,
+                "elapsed must be a positive duration; guards against div-by-zero")
 
         let drawersPerSecond = Double(sampleCount) / elapsedSeconds
         let drawersPerHour = drawersPerSecond * 3600.0
@@ -171,9 +173,8 @@ final class PerformanceGateTests: XCTestCase {
               "drawers=\(sampleCount) rate=\(drawersPerHour.formatted) drawers/hour " +
               "(Mac profile; floor \(Self.enrichmentRateFloorPerHour) drawers/hour)")
 
-        XCTAssertGreaterThan(drawersPerHour, Self.enrichmentRateFloorPerHour,
-            "enrichment rate \(drawersPerHour.formatted) drawers/hour " +
-            "below Mac floor \(Self.enrichmentRateFloorPerHour) (n=\(sampleCount))")
+        #expect(drawersPerHour > Self.enrichmentRateFloorPerHour,
+            "enrichment rate \(drawersPerHour.formatted) drawers/hour below Mac floor \(Self.enrichmentRateFloorPerHour) (n=\(sampleCount))")
     }
 
     // MARK: - Helpers

@@ -17,14 +17,15 @@
 //   8. MigrationReport is fully Sendable (compile-time check)
 //   9. ExternalCorpus round-trip encode/decode via URL
 
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
 import GeniusLocusKit
 
-final class GLK_MIG_02_MigrationTests: XCTestCase {
+@Suite("GLK-MIG-02 migration API")
+struct GLK_MIG_02_MigrationTests {
 
     // MARK: - Fixtures
 
@@ -60,7 +61,8 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
 
     // MARK: - Test 1: importFromMemPalace creates drawers for each entry
 
-    func testImportFromMemPalaceCreatesDrawersForEachEntry() async throws {
+    @Test
+    func importFromMemPalaceCreatesDrawersForEachEntry() async throws {
         let kit = makeKit()
         let corpus = makeCorpus(count: 3)
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
@@ -73,7 +75,7 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
         )
 
         // The report must record exactly 3 drawer rows.
-        XCTAssertEqual(report.rowsByNoun["drawer"], 3,
+        #expect(report.rowsByNoun["drawer"] == 3,
             "importFromMemPalace must create one drawer per corpus entry")
 
         // The opened estate must contain the captured drawers.
@@ -83,13 +85,14 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
             ordering: .byCaptureTimeDesc
         )
         let rows = try await kit.recall(handle, frame)
-        XCTAssertEqual(rows.count, 3,
+        #expect(rows.count == 3,
             "Three drawers must be present in the target estate")
     }
 
     // MARK: - Test 2: importFromMemPalace never silently drops entries (C-13)
 
-    func testImportFromMemPalaceNeverSilentlyDropsEntries() async throws {
+    @Test
+    func importFromMemPalaceNeverSilentlyDropsEntries() async throws {
         let kit = makeKit()
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
 
@@ -112,13 +115,14 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
 
         let totalAccounted = (report.rowsByNoun["drawer"] ?? 0)
             + report.unmappedConcepts.count
-        XCTAssertEqual(totalAccounted, 3,
+        #expect(totalAccounted == 3,
             "Every entry must appear in drawers or unmappedConcepts — none dropped")
     }
 
     // MARK: - Test 3: importFromMemPalace empty corpus returns empty report
 
-    func testImportFromMemPalaceEmptyCorpusReturnsEmptyReport() async throws {
+    @Test
+    func importFromMemPalaceEmptyCorpusReturnsEmptyReport() async throws {
         let kit = makeKit()
         let corpus = ExternalCorpus(name: "empty", entries: [])
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
@@ -130,17 +134,18 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
             now: now
         )
 
-        XCTAssertNil(report.rowsByNoun["drawer"],
+        #expect(report.rowsByNoun["drawer"] == nil,
             "No drawers should be created for an empty corpus")
-        XCTAssertTrue(report.unmappedConcepts.isEmpty,
+        #expect(report.unmappedConcepts.isEmpty,
             "No unmapped concepts for an empty corpus")
-        XCTAssertTrue(report.warnings.isEmpty,
+        #expect(report.warnings.isEmpty,
             "No warnings for an empty corpus")
     }
 
     // MARK: - Test 4: runParallel writes to target in .writeToTarget mode
 
-    func testRunParallelWritesToTargetInWriteToTargetMode() async throws {
+    @Test
+    func runParallelWritesToTargetInWriteToTargetMode() async throws {
         let kit = makeKit()
         let owner = makeOwner()
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
@@ -167,7 +172,7 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
             ordering: .byCaptureTimeDesc
         )
         let targetRows = try await kit.recall(target, targetRecall)
-        XCTAssertEqual(targetRows.count, 1,
+        #expect(targetRows.count == 1,
             ".writeToTarget mode must route captures to the target estate")
 
         let _ = now // suppress unused-var warning — now is part of the test's fixture intent
@@ -175,7 +180,8 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
 
     // MARK: - Test 5: runParallel stop() prevents further captures
 
-    func testRunParallelStopPreventsFurtherCaptures() async throws {
+    @Test
+    func runParallelStopPreventsFurtherCaptures() async throws {
         let kit = makeKit()
         let owner = makeOwner()
         let source = try await kit.open(storage: makeStorage(), owner: owner)
@@ -194,16 +200,17 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
         )
         do {
             _ = try await handle.capture(frame)
-            XCTFail("capture after stop() must throw MigrationError.parallelRunStopped")
+            Issue.record("capture after stop() must throw MigrationError.parallelRunStopped")
         } catch let err as MigrationError {
-            XCTAssertEqual(err, .parallelRunStopped,
+            #expect(err == .parallelRunStopped,
                 "stop() must cause subsequent captures to throw .parallelRunStopped")
         }
     }
 
     // MARK: - Test 6: verifyMigration returns .identical for fully migrated corpus
 
-    func testVerifyMigrationReturnIdenticalForFullyMigratedCorpus() async throws {
+    @Test
+    func verifyMigrationReturnIdenticalForFullyMigratedCorpus() async throws {
         let kit = makeKit()
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
 
@@ -224,13 +231,14 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
         case .identical:
             break // expected
         case .diverged(let divergences):
-            XCTFail("Expected .identical but got .diverged with \(divergences.count) divergences: \(divergences.map { $0.entryID })")
+            Issue.record("Expected .identical but got .diverged with \(divergences.count) divergences: \(divergences.map { $0.entryID })")
         }
     }
 
     // MARK: - Test 7: verifyMigration returns .diverged for missing entry
 
-    func testVerifyMigrationReturnsDivergedForMissingEntry() async throws {
+    @Test
+    func verifyMigrationReturnsDivergedForMissingEntry() async throws {
         let kit = makeKit()
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
 
@@ -250,11 +258,11 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
 
         switch result {
         case .identical:
-            XCTFail("Expected .diverged when corpus has entry not in estate")
+            Issue.record("Expected .diverged when corpus has entry not in estate")
         case .diverged(let divergences):
-            XCTAssertEqual(divergences.count, 1,
+            #expect(divergences.count == 1,
                 "One missing entry should produce exactly one divergence")
-            XCTAssertEqual(divergences.first?.entryID, "verify-diverged-entry-1",
+            #expect(divergences.first?.entryID == "verify-diverged-entry-1",
                 "The diverged entry should be the one not imported")
         }
     }
@@ -264,7 +272,8 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
     /// This test validates the compile-time `Sendable` conformance of
     /// `MigrationReport`. If the struct or any of its fields is not
     /// `Sendable`, this actor-boundary crossing will fail to compile.
-    func testMigrationReportIsFullySendable() async throws {
+    @Test
+    func migrationReportIsFullySendable() async throws {
         let report = MigrationReport(
             rowsByNoun: ["drawer": 1],
             unmappedConcepts: [UnmappedConcept(entryID: "x", reason: "test")],
@@ -276,14 +285,15 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
         // build-time gate.
         let captured: MigrationReport = await Task.detached { report }.value
 
-        XCTAssertEqual(captured.rowsByNoun["drawer"], 1)
-        XCTAssertEqual(captured.unmappedConcepts.count, 1)
-        XCTAssertEqual(captured.warnings.count, 1)
+        #expect(captured.rowsByNoun["drawer"] == 1)
+        #expect(captured.unmappedConcepts.count == 1)
+        #expect(captured.warnings.count == 1)
     }
 
     // MARK: - Test 9: ExternalCorpus round-trip encode/decode via URL
 
-    func testExternalCorpusLoadFromURL() throws {
+    @Test
+    func externalCorpusLoadFromURL() throws {
         let original = ExternalCorpus(
             name: "round-trip-test",
             entries: [
@@ -300,10 +310,10 @@ final class GLK_MIG_02_MigrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
 
         let decoded = try ExternalCorpus.load(from: url)
-        XCTAssertEqual(decoded, original,
+        #expect(decoded == original,
             "ExternalCorpus must round-trip through JSON encode/decode")
-        XCTAssertEqual(decoded.entries.count, 2)
-        XCTAssertEqual(decoded.entries[0].id, "rt-1")
-        XCTAssertEqual(decoded.entries[1].tags, [])
+        #expect(decoded.entries.count == 2)
+        #expect(decoded.entries[0].id == "rt-1")
+        #expect(decoded.entries[1].tags == [])
     }
 }

@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import CryptoKit
 import LocusKit
@@ -19,7 +19,8 @@ import PersistenceKitInMemory
 /// estate opened through `GeniusLocusKit`, grants issued through the
 /// unified verb surface, `now` passed explicitly so issuance and the
 /// decay schedule are deterministic and never sleep on a wall clock.
-final class ENC02_DecayDerivedKeyTests: XCTestCase {
+@Suite("ENC-02 decay-derived key custody")
+struct ENC02_DecayDerivedKeyTests {
 
     // MARK: - Harness
 
@@ -73,7 +74,8 @@ final class ENC02_DecayDerivedKeyTests: XCTestCase {
 
     // MARK: - 1. Clean-room reconstruction round-trip
 
-    func testReconstructionRoundTripFromAnyKSubset() throws {
+    @Test
+    func reconstructionRoundTripFromAnyKSubset() throws {
         // Build a reference provider: K=3 of N=6. At creation every share
         // is valid, so the polynomial is fully recoverable.
         let provider = ReferenceDecayShareProvider(
@@ -84,7 +86,7 @@ final class ENC02_DecayDerivedKeyTests: XCTestCase {
             seed: Data("enc02-roundtrip-seed".utf8)
         )
         let points = provider.sharePoints()
-        XCTAssertEqual(points.count, 6, "provider yields N=6 share points")
+        #expect(points.count == 6, "provider yields N=6 share points")
 
         // Several distinct 3-subsets must all interpolate to the same
         // constant term — the planted secret. If the GF(p) math were
@@ -93,8 +95,8 @@ final class ENC02_DecayDerivedKeyTests: XCTestCase {
         for indices in subsets {
             let subset = indices.map { points[$0] }
             let recovered = LagrangeDecayKey.interpolateConstantTerm(points: subset)
-            XCTAssertEqual(
-                recovered, provider.secret,
+            #expect(
+                recovered == provider.secret,
                 "any K=3 subset \(indices) reconstructs the planted secret"
             )
         }
@@ -105,17 +107,17 @@ final class ENC02_DecayDerivedKeyTests: XCTestCase {
             threshold: 3, provider: provider, now: issuedAt
         )
         let expected = LagrangeDecayKey.key(fromSecret: provider.secret)
-        XCTAssertEqual(
-            key.withUnsafeBytes { Data($0) },
-            expected.withUnsafeBytes { Data($0) },
+        #expect(
+            key.withUnsafeBytes { Data($0) } == expected.withUnsafeBytes { Data($0) },
             "reconstructed key equals SHA-256 of the secret field element"
         )
-        XCTAssertEqual(key.bitCount / 8, 32, "reconstructed scope key is 32 bytes")
+        #expect(key.bitCount / 8 == 32, "reconstructed scope key is 32 bytes")
     }
 
     // MARK: - 2. Below threshold decays
 
-    func testBelowThresholdThrowsKeyDecayed() {
+    @Test
+    func belowThresholdThrowsKeyDecayed() {
         // Fast drift: after one day far more than (N-K) shares have
         // corrupted, so fewer than K=2 of N=3 remain valid.
         let provider = ReferenceDecayShareProvider(
@@ -126,8 +128,8 @@ final class ENC02_DecayDerivedKeyTests: XCTestCase {
             seed: Data("enc02-decay-seed".utf8)
         )
         let decayedNow = issuedAt.addingTimeInterval(86_400)  // +1 day
-        XCTAssertLessThan(
-            provider.validShareCount(now: decayedNow), 2,
+        #expect(
+            provider.validShareCount(now: decayedNow) < 2,
             "fast drift leaves fewer than K valid shares after a day"
         )
 
@@ -135,96 +137,103 @@ final class ENC02_DecayDerivedKeyTests: XCTestCase {
             _ = try LagrangeDecayKey.reconstruct(
                 threshold: 2, provider: provider, now: decayedNow
             )
-            XCTFail("reconstruction below threshold must throw")
+            Issue.record("reconstruction below threshold must throw")
         } catch let error as GrantError {
             // Appendix B.7: returns keyDecayed rather than partial recovery.
             guard case .keyDecayed = error else {
-                return XCTFail("expected keyDecayed, got \(error)")
+                Issue.record("expected keyDecayed, got \(error)")
+                return
             }
         } catch {
-            XCTFail("expected GrantError.keyDecayed, got \(error)")
+            Issue.record("expected GrantError.keyDecayed, got \(error)")
         }
     }
 
     // MARK: - 3. Gate — clearance false rejected (Appendix B.7)
 
-    func testClearanceFalseRejectedAtIssue() async throws {
+    @Test
+    func clearanceFalseRejectedAtIssue() async throws {
         let (kit, handle) = try await openOneEstate()
         do {
             _ = try await kit.issueGrant(
                 handle, options(decayMode(confirmed: false)), now: issuedAt
             )
-            XCTFail("mode 3 without clearance must throw at issue")
+            Issue.record("mode 3 without clearance must throw at issue")
         } catch let error as GrantError {
             guard case .experimentalModeNotActivated = error else {
-                return XCTFail("expected experimentalModeNotActivated, got \(error)")
+                Issue.record("expected experimentalModeNotActivated, got \(error)")
+                return
             }
         }
     }
 
     // MARK: - 4. Gate — clearance true issues
 
-    func testClearanceTrueIssuesAndReturnsScopeKey() async throws {
+    @Test
+    func clearanceTrueIssuesAndReturnsScopeKey() async throws {
         let (kit, handle) = try await openOneEstate()
         // Must not throw hardwareNotSupported: the gate now permits mode 3.
         let result = try await kit.issueGrant(
             handle, options(decayMode()), now: issuedAt
         )
-        let scopeKey = try XCTUnwrap(
+        let scopeKey = try #require(
             result.scopeKey, "mode 3 returns the reconstructed scope key at issue"
         )
-        XCTAssertEqual(scopeKey.count, 32, "mode-3 scope key is a 32-byte AES key")
+        #expect(scopeKey.count == 32, "mode-3 scope key is a 32-byte AES key")
     }
 
     // MARK: - 5. No vault retention (no-durable-opener posture)
 
-    func testNoVaultRetentionAfterMode3Issue() async throws {
+    @Test
+    func noVaultRetentionAfterMode3Issue() async throws {
         let (kit, handle) = try await openOneEstate()
         let result = try await kit.issueGrant(
             handle, options(decayMode()), now: issuedAt
         )
         let vaultOpt = await kit.scopeVault(for: handle)
-        let vault = try XCTUnwrap(vaultOpt)
+        let vault = try #require(vaultOpt)
         let holds = await vault.holdsScopeKey(for: result.grant.id)
-        XCTAssertFalse(
-            holds, "mode 3 retains nothing in the vault (Appendix B.3 no-vault)"
+        #expect(
+            !holds, "mode 3 retains nothing in the vault (Appendix B.3 no-vault)"
         )
     }
 
     // MARK: - 6. Audit assertion recorded (Appendix B.7)
 
-    func testAuditEntryCarriesDecayDerivedToken() async throws {
+    @Test
+    func auditEntryCarriesDecayDerivedToken() async throws {
         let (kit, handle) = try await openOneEstate()
         let result = try await kit.issueGrant(
             handle, options(decayMode()), now: issuedAt
         )
         let log = try await kit.auditLog(for: handle)
         let issued = log.orderedEntries.filter { $0.verb == .grantIssued }
-        XCTAssertEqual(issued.count, 1, "one .grantIssued entry after a mode-3 issue")
-        let entry = try XCTUnwrap(issued.first)
-        XCTAssertEqual(entry.rowID, result.grant.id, "grant id carried in rowID")
-        XCTAssertEqual(
-            entry.fieldPath, "decayDerived",
+        #expect(issued.count == 1, "one .grantIssued entry after a mode-3 issue")
+        let entry = try #require(issued.first)
+        #expect(entry.rowID == result.grant.id, "grant id carried in rowID")
+        #expect(
+            entry.fieldPath == "decayDerived",
             "the mode-3 grant's audit entry carries the decayDerived custody token"
         )
     }
 
     // MARK: - 7. Persistence round-trip
 
-    func testPersistedMode3GrantDecodesWithoutCorruptRow() async throws {
+    @Test
+    func persistedMode3GrantDecodesWithoutCorruptRow() async throws {
         let (kit, handle) = try await openOneEstate()
         let result = try await kit.issueGrant(
             handle, options(decayMode()), now: issuedAt
         )
         let storeOpt = await kit.grantStore(for: handle)
-        let store = try XCTUnwrap(storeOpt)
+        let store = try #require(storeOpt)
 
         // The new custodyMode(from:) decodeDerived arm must round-trip the
         // discriminant without throwing corruptRow.
         let stored = try await store.get(id: result.grant.id)
-        let grant = try XCTUnwrap(stored?.grant, "mode-3 grant decodes from storage")
-        XCTAssertEqual(
-            grant.custodyMode.signingToken, "decayDerived",
+        let grant = try #require(stored?.grant, "mode-3 grant decodes from storage")
+        #expect(
+            grant.custodyMode.signingToken == "decayDerived",
             "persisted custody-mode discriminant round-trips as decayDerived"
         )
     }

@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -20,7 +20,8 @@ import PersistenceKitInMemory
 /// the scheduler's outcome log and the diagnostics surface. This is
 /// the mission's hardest invariant: signals emit proposals, never
 /// state.
-final class StandingSignalsTests: XCTestCase {
+@Suite("Default standing signals firing")
+struct StandingSignalsTests {
 
     // MARK: - Fixture
 
@@ -56,7 +57,7 @@ final class StandingSignalsTests: XCTestCase {
     ) async throws -> SignalReport {
         let reports = try await kit.signalStatus(in: handle)
         let match = reports.first(where: { $0.signalID == id })
-        return try XCTUnwrap(match, "expected report for \(id.rawValue)")
+        return try #require(match, "expected report for \(id.rawValue)")
     }
 
     /// Assert every outcome is a propose/associate routing (the
@@ -65,16 +66,16 @@ final class StandingSignalsTests: XCTestCase {
     /// firing test.
     private func assertNoRouteFailures(
         _ outcomes: [SignalRouteOutcome],
-        file: StaticString = #file, line: UInt = #line
+        sourceLocation: SourceLocation = #_sourceLocation
     ) {
         for outcome in outcomes {
             switch outcome {
             case .routed, .routedButVerbStubbed, .diagnosticRecorded:
                 continue
             case .routeFailed(let verb, let reason):
-                XCTFail(
+                Issue.record(
                     "unexpected route failure on verb=\(verb) reason=\(reason)",
-                    file: file, line: line)
+                    sourceLocation: sourceLocation)
             }
         }
     }
@@ -91,7 +92,8 @@ final class StandingSignalsTests: XCTestCase {
 
     // MARK: - Per-signal firing tests
 
-    func testDreamingSignalEmitsProposeAndAssociate() async throws {
+    @Test
+    func dreamingSignalEmitsProposeAndAssociate() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
@@ -99,12 +101,12 @@ final class StandingSignalsTests: XCTestCase {
             cadence: DreamingSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
-        XCTAssertEqual(report.name, "dreaming-daemon")
-        XCTAssertEqual(report.emissionCount, 2,
+        #expect(report.name == "dreaming-daemon")
+        #expect(report.emissionCount == 2,
             "dreaming daemon emits one propose + one associate per fire")
         // Two emissions, one routed through propose and one through
         // associate. The order matches the spec's emission list.
-        XCTAssertEqual(report.recentOutcomes.count, 2)
+        #expect(report.recentOutcomes.count == 2)
         assertNoRouteFailures(report.recentOutcomes)
         let verbs = report.recentOutcomes.compactMap { outcome -> String? in
             switch outcome {
@@ -112,10 +114,11 @@ final class StandingSignalsTests: XCTestCase {
             case .diagnosticRecorded, .routeFailed: return nil
             }
         }
-        XCTAssertEqual(verbs.sorted(), ["associate", "propose"])
+        #expect(verbs.sorted() == ["associate", "propose"])
     }
 
-    func testMaintenanceSignalEmitsForbiddenComboPlusCandidateAndDiagnostic() async throws {
+    @Test
+    func maintenanceSignalEmitsForbiddenComboPlusCandidateAndDiagnostic() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
@@ -123,10 +126,10 @@ final class StandingSignalsTests: XCTestCase {
             cadence: MaintenanceSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
-        XCTAssertEqual(report.name, "maintenance-daemon")
-        XCTAssertEqual(report.emissionCount, 3,
+        #expect(report.name == "maintenance-daemon")
+        #expect(report.emissionCount == 3,
             "maintenance emits one propose + one mutate-candidate (routed through propose) + one diagnostic")
-        XCTAssertEqual(report.recentOutcomes.count, 3)
+        #expect(report.recentOutcomes.count == 3)
         assertNoRouteFailures(report.recentOutcomes)
         // Two propose-routed outcomes (the discipline-violation
         // proposal AND the mutate-candidate which §11.1 routes
@@ -137,12 +140,13 @@ final class StandingSignalsTests: XCTestCase {
             default: return false
             }
         }.count
-        XCTAssertEqual(proposeCount, 2)
-        XCTAssertEqual(report.recentDiagnostics.count, 1)
-        XCTAssertEqual(report.recentDiagnostics.first?.title, "maintenance.scan.summary")
+        #expect(proposeCount == 2)
+        #expect(report.recentDiagnostics.count == 1)
+        #expect(report.recentDiagnostics.first?.title == "maintenance.scan.summary")
     }
 
-    func testVectorSimilaritySignalEmitsAssociateAndDiagnostic() async throws {
+    @Test
+    func vectorSimilaritySignalEmitsAssociateAndDiagnostic() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
@@ -150,8 +154,8 @@ final class StandingSignalsTests: XCTestCase {
             cadence: VectorSimilaritySignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
-        XCTAssertEqual(report.name, "vector-similarity")
-        XCTAssertEqual(report.emissionCount, 2)
+        #expect(report.name == "vector-similarity")
+        #expect(report.emissionCount == 2)
         assertNoRouteFailures(report.recentOutcomes)
         let associateCount = report.recentOutcomes.filter { outcome in
             switch outcome {
@@ -159,11 +163,12 @@ final class StandingSignalsTests: XCTestCase {
             default: return false
             }
         }.count
-        XCTAssertEqual(associateCount, 1, "vector-similarity emits one associate per fire")
-        XCTAssertEqual(report.recentDiagnostics.count, 1)
+        #expect(associateCount == 1, "vector-similarity emits one associate per fire")
+        #expect(report.recentDiagnostics.count == 1)
     }
 
-    func testDecaySweepSignalEmitsMutateCandidateRoutedThroughPropose() async throws {
+    @Test
+    func decaySweepSignalEmitsMutateCandidateRoutedThroughPropose() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
@@ -171,8 +176,8 @@ final class StandingSignalsTests: XCTestCase {
             cadence: DecaySweepSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
-        XCTAssertEqual(report.name, "decay-sweep")
-        XCTAssertEqual(report.emissionCount, 2,
+        #expect(report.name == "decay-sweep")
+        #expect(report.emissionCount == 2,
             "decay-sweep emits one mutate-candidate (routed through propose) + one diagnostic")
         assertNoRouteFailures(report.recentOutcomes)
         // The mutate-candidate routes through propose per §11.1, so
@@ -180,13 +185,14 @@ final class StandingSignalsTests: XCTestCase {
         let firstOutcome = report.recentOutcomes[0]
         switch firstOutcome {
         case .routed(let v), .routedButVerbStubbed(let v):
-            XCTAssertEqual(v, "propose")
+            #expect(v == "propose")
         default:
-            XCTFail("expected propose routing for decay candidate, got \(firstOutcome)")
+            Issue.record("expected propose routing for decay candidate, got \(firstOutcome)")
         }
     }
 
-    func testByReferenceValiditySignalEmitsProposeAndDiagnostic() async throws {
+    @Test
+    func byReferenceValiditySignalEmitsProposeAndDiagnostic() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
@@ -194,8 +200,8 @@ final class StandingSignalsTests: XCTestCase {
             cadence: ByReferenceValiditySignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
-        XCTAssertEqual(report.name, "by-reference-validity")
-        XCTAssertEqual(report.emissionCount, 2)
+        #expect(report.name == "by-reference-validity")
+        #expect(report.emissionCount == 2)
         assertNoRouteFailures(report.recentOutcomes)
         let proposeCount = report.recentOutcomes.filter { outcome in
             switch outcome {
@@ -203,12 +209,13 @@ final class StandingSignalsTests: XCTestCase {
             default: return false
             }
         }.count
-        XCTAssertEqual(proposeCount, 1, "byReference emits one propose per fire")
-        XCTAssertEqual(report.recentDiagnostics.count, 1)
-        XCTAssertEqual(report.recentDiagnostics.first?.title, "by_reference.validation.summary")
+        #expect(proposeCount == 1, "byReference emits one propose per fire")
+        #expect(report.recentDiagnostics.count == 1)
+        #expect(report.recentDiagnostics.first?.title == "by_reference.validation.summary")
     }
 
-    func testEndOfDayTournamentSignalEmitsProposeAndDiagnostic() async throws {
+    @Test
+    func endOfDayTournamentSignalEmitsProposeAndDiagnostic() async throws {
         let (kit, handle) = try await openOneEstate()
         let id = try await registerAndFire(
             kit, in: handle,
@@ -216,8 +223,8 @@ final class StandingSignalsTests: XCTestCase {
             cadence: EndOfDayTournamentSignal.defaultCadenceSeconds)
 
         let report = try await report(kit, in: handle, for: id)
-        XCTAssertEqual(report.name, "end-of-day-tournament")
-        XCTAssertEqual(report.emissionCount, 2)
+        #expect(report.name == "end-of-day-tournament")
+        #expect(report.emissionCount == 2)
         assertNoRouteFailures(report.recentOutcomes)
         let proposeCount = report.recentOutcomes.filter { outcome in
             switch outcome {
@@ -225,51 +232,52 @@ final class StandingSignalsTests: XCTestCase {
             default: return false
             }
         }.count
-        XCTAssertEqual(proposeCount, 1)
-        XCTAssertEqual(report.recentDiagnostics.first?.title, "tournament.end_of_day.summary")
+        #expect(proposeCount == 1)
+        #expect(report.recentDiagnostics.first?.title == "tournament.end_of_day.summary")
     }
 
     // MARK: - Registration helper
 
-    func testRegisterDefaultStandingSignalsRegistersAllSix() async throws {
+    @Test
+    func registerDefaultStandingSignalsRegistersAllSix() async throws {
         let (kit, handle) = try await openOneEstate()
         let registered = try await kit.registerDefaultStandingSignals(
             in: handle, now: t0)
 
-        XCTAssertEqual(registered.count, 6, "all six v1 signals register")
-        XCTAssertEqual(
-            Set(registered.keys),
-            Set(GeniusLocusKit.defaultStandingSignalNames))
+        #expect(registered.count == 6, "all six v1 signals register")
+        #expect(
+            Set(registered.keys) == Set(GeniusLocusKit.defaultStandingSignalNames))
 
         let reports = try await kit.signalStatus(in: handle)
-        XCTAssertEqual(reports.count, 6)
+        #expect(reports.count == 6)
         for spec in reports {
-            XCTAssertEqual(spec.triggerTag, "interval",
+            #expect(spec.triggerTag == "interval",
                 "every v1 signal is interval-driven at its default cadence")
-            XCTAssertEqual(spec.state, .idle)
-            XCTAssertEqual(spec.emissionCount, 0)
+            #expect(spec.state == .idle)
+            #expect(spec.emissionCount == 0)
         }
         // Every default name is represented exactly once in the
         // status report.
         let names = Set(reports.map { $0.name })
-        XCTAssertEqual(names, Set(GeniusLocusKit.defaultStandingSignalNames))
+        #expect(names == Set(GeniusLocusKit.defaultStandingSignalNames))
     }
 
-    func testDefaultSignalCadencesMatchArchitectureSpec() throws {
+    @Test
+    func defaultSignalCadencesMatchArchitectureSpec() throws {
         // Architecture spec §11.2 / cookbook §15.2 cadences. These
         // are intentionally hard-coded so a regression in any signal
         // file is caught here rather than going silent.
-        XCTAssertEqual(DreamingSignal.defaultCadenceSeconds, 604_800,
+        #expect(DreamingSignal.defaultCadenceSeconds == 604_800,
             "dreaming daemon runs weekly")
-        XCTAssertEqual(MaintenanceSignal.defaultCadenceSeconds, 3_600,
+        #expect(MaintenanceSignal.defaultCadenceSeconds == 3_600,
             "maintenance runs hourly")
-        XCTAssertEqual(VectorSimilaritySignal.defaultCadenceSeconds, 300,
+        #expect(VectorSimilaritySignal.defaultCadenceSeconds == 300,
             "vector-similarity runs every five minutes")
-        XCTAssertEqual(DecaySweepSignal.defaultCadenceSeconds, 86_400,
+        #expect(DecaySweepSignal.defaultCadenceSeconds == 86_400,
             "decay-sweep runs daily")
-        XCTAssertEqual(ByReferenceValiditySignal.defaultCadenceSeconds, 604_800,
+        #expect(ByReferenceValiditySignal.defaultCadenceSeconds == 604_800,
             "byReference validity runs weekly")
-        XCTAssertEqual(EndOfDayTournamentSignal.defaultCadenceSeconds, 86_400,
+        #expect(EndOfDayTournamentSignal.defaultCadenceSeconds == 86_400,
             "end-of-day tournament runs daily")
     }
 }

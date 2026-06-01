@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -20,7 +20,8 @@ import PersistenceKitInMemory
 /// the locally-mediated federation layer, not a device-boundary crossing
 /// (I-13). `now` is passed explicitly wherever grant expiry matters so
 /// the assertions are deterministic and never sleep on a wall clock.
-final class CrossEstateFederationTests: XCTestCase {
+@Suite("Cross-estate federation")
+struct CrossEstateFederationTests {
 
     // MARK: - Harness
 
@@ -77,7 +78,8 @@ final class CrossEstateFederationTests: XCTestCase {
 
     // MARK: - 1. Positive — valid grant yields the source's drawer
 
-    func testValidGrantReturnsSourceDrawerAndAuthorizingGrant() async throws {
+    @Test
+    func validGrantReturnsSourceDrawerAndAuthorizingGrant() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-fed-positive")
         let hA = try await openEstate(in: kit, owner: owner)
@@ -91,17 +93,18 @@ final class CrossEstateFederationTests: XCTestCase {
             unconfirmedFrame, from: hB, requestedBy: hA
         )
 
-        XCTAssertTrue(result.drawers.map(\.id).contains(dB.id),
+        #expect(result.drawers.map(\.id).contains(dB.id),
             "valid grant must return the source estate's captured drawer")
-        XCTAssertEqual(result.grant.id, issued.grant.id,
+        #expect(result.grant.id == issued.grant.id,
             "result carries the authorizing grant as context")
-        XCTAssertEqual(result.sourceHandle, hB)
-        XCTAssertEqual(result.requesterHandle, hA)
+        #expect(result.sourceHandle == hB)
+        #expect(result.requesterHandle == hA)
     }
 
     // MARK: - 2. Negative — the A-versus-C refusal (I-23 §13)
 
-    func testReadOfUngrantedEstateRefusesNoActiveGrant() async throws {
+    @Test
+    func readOfUngrantedEstateRefusesNoActiveGrant() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-fed-avc")
         let hA = try await openEstate(in: kit, owner: owner)
@@ -113,22 +116,23 @@ final class CrossEstateFederationTests: XCTestCase {
         _ = try await capture(into: hC, tag: "c", kit: kit)
 
         // A reading C is refused — A holds no grant from C.
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
             try await kit.federatedRecall(unconfirmedFrame, from: hC, requestedBy: hA)
-        ) { error in
-            guard case let GeniusLocusKitError.crossEstateReadRefused(source, requester, reason) = error else {
-                return XCTFail("expected .crossEstateReadRefused, got \(error)")
-            }
-            XCTAssertEqual(source, hC.estateUUID)
-            XCTAssertEqual(requester, hA.estateUUID)
-            XCTAssertEqual(reason, .noActiveGrant,
+        }
+        if case .crossEstateReadRefused(let source, let requester, let reason)? = thrown {
+            #expect(source == hC.estateUUID)
+            #expect(requester == hA.estateUUID)
+            #expect(reason == .noActiveGrant,
                 "no C-to-A grant exists — refusal reason is noActiveGrant")
+        } else {
+            Issue.record("expected .crossEstateReadRefused, got \(String(describing: thrown))")
         }
     }
 
     // MARK: - 3. Expiry — refuses after expiry, succeeds before
 
-    func testExpiredGrantRefusesAfterExpirySucceedsBefore() async throws {
+    @Test
+    func expiredGrantRefusesAfterExpirySucceedsBefore() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-fed-expiry")
         let hA = try await openEstate(in: kit, owner: owner)
@@ -148,27 +152,28 @@ final class CrossEstateFederationTests: XCTestCase {
             unconfirmedFrame, from: hB, requestedBy: hA,
             now: issuedAt.addingTimeInterval(30)
         )
-        XCTAssertTrue(before.drawers.map(\.id).contains(dB.id),
+        #expect(before.drawers.map(\.id).contains(dB.id),
             "read before expiry returns the source's drawer")
 
         // After expiry: the read refuses with .grantExpired.
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
             try await kit.federatedRecall(
                 unconfirmedFrame, from: hB, requestedBy: hA,
                 now: expiry.addingTimeInterval(1)
             )
-        ) { error in
-            guard case let GeniusLocusKitError.crossEstateReadRefused(_, _, reason) = error else {
-                return XCTFail("expected .crossEstateReadRefused, got \(error)")
-            }
-            XCTAssertEqual(reason, .grantExpired,
+        }
+        if case .crossEstateReadRefused(_, _, let reason)? = thrown {
+            #expect(reason == .grantExpired,
                 "a matching grant exists but its lifetime elapsed")
+        } else {
+            Issue.record("expected .crossEstateReadRefused, got \(String(describing: thrown))")
         }
     }
 
     // MARK: - 4. Revocation — refuses after revoke
 
-    func testRevokedGrantRefusesRead() async throws {
+    @Test
+    func revokedGrantRefusesRead() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-fed-revoke")
         let hA = try await openEstate(in: kit, owner: owner)
@@ -183,20 +188,21 @@ final class CrossEstateFederationTests: XCTestCase {
         // Revoke, then the read refuses. A revoked grant is dropped from
         // GrantStore.active(), so the gate sees no active grant.
         try await kit.revokeGrant(hB, grantID: issued.grant.id)
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
             try await kit.federatedRecall(unconfirmedFrame, from: hB, requestedBy: hA)
-        ) { error in
-            guard case let GeniusLocusKitError.crossEstateReadRefused(_, _, reason) = error else {
-                return XCTFail("expected .crossEstateReadRefused, got \(error)")
-            }
-            XCTAssertEqual(reason, .noActiveGrant,
+        }
+        if case .crossEstateReadRefused(_, _, let reason)? = thrown {
+            #expect(reason == .noActiveGrant,
                 "revocation removes the grant from active() — refusal is noActiveGrant")
+        } else {
+            Issue.record("expected .crossEstateReadRefused, got \(String(describing: thrown))")
         }
     }
 
     // MARK: - 5. Isolation — only the source's rows, never the requester's
 
-    func testFederatedReadReturnsOnlySourceRows() async throws {
+    @Test
+    func federatedReadReturnsOnlySourceRows() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-fed-isolation")
         let hA = try await openEstate(in: kit, owner: owner)
@@ -211,28 +217,29 @@ final class CrossEstateFederationTests: XCTestCase {
             unconfirmedFrame, from: hB, requestedBy: hA
         )
         let ids = result.drawers.map(\.id)
-        XCTAssertTrue(ids.contains(dB.id),
+        #expect(ids.contains(dB.id),
             "result contains the source estate's row")
-        XCTAssertFalse(ids.contains(dA.id),
+        #expect(!ids.contains(dA.id),
             "result must never contain the requester's own row (storage isolation)")
     }
 
     // MARK: - 6. Stale handle — fail-closed on a closed estate
 
-    func testStaleSourceHandleThrowsEstateNotOpen() async throws {
+    @Test
+    func staleSourceHandleThrowsEstateNotOpen() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "owner-fed-stale")
         let hA = try await openEstate(in: kit, owner: owner)
         let hB = try await openEstate(in: kit, owner: owner)
         try await kit.close(hB)  // hB is now stale
 
-        await XCTAssertThrowsErrorAsync(
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
             try await kit.federatedRecall(unconfirmedFrame, from: hB, requestedBy: hA)
-        ) { error in
-            guard case let GeniusLocusKitError.estateNotOpen(uuid) = error else {
-                return XCTFail("expected .estateNotOpen, got \(error)")
-            }
-            XCTAssertEqual(uuid, hB.estateUUID)
+        }
+        if case .estateNotOpen(let uuid)? = thrown {
+            #expect(uuid == hB.estateUUID)
+        } else {
+            Issue.record("expected .estateNotOpen, got \(String(describing: thrown))")
         }
     }
 }
