@@ -1,8 +1,9 @@
-import XCTest
+import Testing
 import SubstrateML
 import EngramLib
 import PersistenceKit
 import PersistenceKitInMemory
+import Foundation
 @testable import VectorKit
 
 /// Capture-path benchmark suites for VEC-05 (Theorem 5: hardware-tier-
@@ -59,7 +60,17 @@ import PersistenceKitInMemory
 /// public API — same engram distance = 0, bit-inverse distance = 256.
 /// The deviation is logged in `docs/analysis/blast_radius/VEC_05_BLAST_RADIUS.md`
 /// (Smythe W1) and in the VEC-05 decision record.
-final class CapturePathBenchmarkTests: XCTestCase {
+///
+/// **Execution model.** These four suites assert wall-clock latency
+/// budgets (P99 / median). Under XCTest the methods ran serially, so
+/// each benchmark had the machine to itself while measuring. swift-
+/// testing runs `@Test` functions in parallel by default, which lets
+/// the four heavy benchmarks contend for CPU and inflates the measured
+/// percentiles past their calibrated ceilings. The `.serialized` trait
+/// restores the serial execution the budgets were calibrated under —
+/// it changes scheduling only, not a single assertion.
+@Suite("CapturePathBenchmark", .serialized)
+struct CapturePathBenchmarkTests {
 
     private func makeStore() async throws -> VectorStore {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
@@ -80,7 +91,7 @@ final class CapturePathBenchmarkTests: XCTestCase {
     /// embed (closure + canonical FloatSimHash projection) and store
     /// path, which is what the capture-path budget governs. Asserts
     /// P99 < 100 ms and median < 50 ms (iPhone budget, spec I-4 / R-3).
-    func testEndToEndCapturePathP99Under100Milliseconds() async throws {
+    @Test func testEndToEndCapturePathP99Under100Milliseconds() async throws {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "minilm-v6",
             modelVersion: "1.0.0",
@@ -117,10 +128,10 @@ final class CapturePathBenchmarkTests: XCTestCase {
         let stats = Self.percentiles(of: nanos)
         Self.report(suite: "end-to-end capture (n=\(texts.count))", stats: stats)
 
-        XCTAssertLessThan(stats.p99Ms, 100.0,
-                          "VEC-05 capture-path P99 budget exceeded: \(stats.p99Ms) ms")
-        XCTAssertLessThan(stats.medianMs, 50.0,
-                          "VEC-05 capture-path median budget exceeded: \(stats.medianMs) ms")
+        #expect(stats.p99Ms < 100.0,
+                "VEC-05 capture-path P99 budget exceeded: \(stats.p99Ms) ms")
+        #expect(stats.medianMs < 50.0,
+                "VEC-05 capture-path median budget exceeded: \(stats.medianMs) ms")
     }
 
     // MARK: - Suite 2: VectorStore-only latency (always runs)
@@ -129,7 +140,7 @@ final class CapturePathBenchmarkTests: XCTestCase {
     /// storage latency from embedding and projection. Asserts P99 < 5
     /// ms — the storage half of the capture-path budget, leaving the
     /// remaining ~95 ms for inference and projection on real hardware.
-    func testVectorStoreAddVectorP99Under5Milliseconds() async throws {
+    @Test func testVectorStoreAddVectorP99Under5Milliseconds() async throws {
         let store = try await Self.freshStore()
         // `Engram.zero` is the canonical empty value; reusing one
         // instance across all calls isolates storage cost from any
@@ -155,8 +166,8 @@ final class CapturePathBenchmarkTests: XCTestCase {
         let stats = Self.percentiles(of: nanos)
         Self.report(suite: "vector-store-only (n=\(sampleCount))", stats: stats)
 
-        XCTAssertLessThan(stats.p99Ms, 5.0,
-                          "VEC-05 storage-only P99 budget exceeded: \(stats.p99Ms) ms")
+        #expect(stats.p99Ms < 5.0,
+                "VEC-05 storage-only P99 budget exceeded: \(stats.p99Ms) ms")
     }
 
     // MARK: - Suite 3: Retrieval latency (always runs)
@@ -171,7 +182,7 @@ final class CapturePathBenchmarkTests: XCTestCase {
     /// text) reflects the SQLite-scan + engram-decode cost surrounding
     /// the kernel call; see suite doc above and the VEC-05 decision
     /// record for the kernel-only vs. pipeline-cost split.
-    func testFindNearestP99Under10MillisecondsOver10000VectorCorpus() async throws {
+    @Test func testFindNearestP99Under10MillisecondsOver10000VectorCorpus() async throws {
         let store = try await Self.freshStore()
         let now = Date(timeIntervalSince1970: 1_700_000_200)
 
@@ -206,10 +217,10 @@ final class CapturePathBenchmarkTests: XCTestCase {
                                                 modelID: "minilm-v6",
                                                 limit: 10)
             // Touch the result so the compiler does not elide the
-            // call entirely under `-O`. `XCTAssertEqual` would be
+            // call entirely under `-O`. `#expect` would be
             // overkill at 100 iterations; the count check is enough
             // to keep the work observed.
-            XCTAssertEqual(matches.count, 10)
+            #expect(matches.count == 10)
             let elapsed = ContinuousClock.now - started
             nanos.append(Self.nanoseconds(of: elapsed))
         }
@@ -217,8 +228,8 @@ final class CapturePathBenchmarkTests: XCTestCase {
         let stats = Self.percentiles(of: nanos)
         Self.report(suite: "find-nearest (k=10, corpus=\(corpusSize), q=\(queryCount))", stats: stats)
 
-        XCTAssertLessThan(stats.p99Ms, 50.0,
-                          "VEC-05 retrieval P99 budget exceeded: \(stats.p99Ms) ms")
+        #expect(stats.p99Ms < 50.0,
+                "VEC-05 retrieval P99 budget exceeded: \(stats.p99Ms) ms")
     }
 
     // MARK: - Suite 4: Hardware tier detection (always runs)
@@ -233,23 +244,23 @@ final class CapturePathBenchmarkTests: XCTestCase {
     /// kernels must produce `distance(x, x) == 0` and
     /// `distance(x, ~x) == 256` — the four-way-conformance contract
     /// from the substrate harness.
-    func testHardwareTierKernelSelectionMatchesArchitecture() {
+    @Test func testHardwareTierKernelSelectionMatchesArchitecture() {
         // Same engram against itself → zero Hamming distance.
         let session = EngramLib.session()
         let engram = Engram(blocks: 0xAAAA_AAAA_AAAA_AAAA,
                             0x5555_5555_5555_5555,
                             0xFFFF_0000_FFFF_0000,
                             0x0000_FFFF_0000_FFFF)
-        XCTAssertEqual(session.distance(engram, engram), 0,
-                       "platform-selected kernel returned non-zero self-distance")
+        #expect(session.distance(engram, engram) == 0,
+                "platform-selected kernel returned non-zero self-distance")
 
         // Bit-inverse → maximum Hamming distance (all 256 bits differ).
         let inverse = Engram(blocks: ~engram.block0,
                              ~engram.block1,
                              ~engram.block2,
                              ~engram.block3)
-        XCTAssertEqual(session.distance(engram, inverse), 256,
-                       "platform-selected kernel returned wrong bit-inverse distance")
+        #expect(session.distance(engram, inverse) == 256,
+                "platform-selected kernel returned wrong bit-inverse distance")
 
         #if arch(arm64)
         // Production aarch64 dispatch is documented to return

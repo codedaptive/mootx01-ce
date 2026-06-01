@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import SubstrateML
 import EngramLib
 // ─────────────────────────────────────────────────────────────────
@@ -21,7 +21,8 @@ import EngramLib
 /// simhash_provider_tests: model identity, determinism, distinct
 /// seeds produce distinct engrams, inference-failure propagation,
 /// and the empty-input contract (Engram.zero, closure not invoked).
-final class FloatSimHashEmbeddingProviderTests: XCTestCase {
+@Suite("FloatSimHashEmbeddingProvider")
+struct FloatSimHashEmbeddingProviderTests {
 
     /// Constant 384-dim vector standing in for MiniLM-shaped output.
     /// A static @Sendable closure so it can cross into the provider's
@@ -30,17 +31,17 @@ final class FloatSimHashEmbeddingProviderTests: XCTestCase {
         [Float](repeating: 0.1, count: 384)
     }
 
-    func testModelIdentityFields() {
+    @Test func testModelIdentityFields() {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "minilm-v6",
             modelVersion: "1.0.0",
             projectionSeed: 0x4D49_4E4C_4D_5F76_31,
             inference: Self.minilmInference)
-        XCTAssertEqual(provider.modelID, "minilm-v6")
-        XCTAssertEqual(provider.modelVersion, "1.0.0")
+        #expect(provider.modelID == "minilm-v6")
+        #expect(provider.modelVersion == "1.0.0")
     }
 
-    func testEmbedIsDeterministicForSameText() async throws {
+    @Test func testEmbedIsDeterministicForSameText() async throws {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "minilm-v6",
             modelVersion: "1.0.0",
@@ -48,10 +49,10 @@ final class FloatSimHashEmbeddingProviderTests: XCTestCase {
             inference: Self.minilmInference)
         let e1 = try await provider.embed("first text")
         let e2 = try await provider.embed("first text")
-        XCTAssertEqual(e1, e2, "same input must produce the same engram")
+        #expect(e1 == e2, "same input must produce the same engram")
     }
 
-    func testDifferentSeedsProduceDifferentEngrams() async throws {
+    @Test func testDifferentSeedsProduceDifferentEngrams() async throws {
         let mini = FloatSimHashEmbeddingProvider(
             modelID: "minilm-v6", modelVersion: "1.0.0",
             projectionSeed: 0x4D49_4E4C_4D_5F76_31,
@@ -62,47 +63,44 @@ final class FloatSimHashEmbeddingProviderTests: XCTestCase {
             inference: { _ in [Float](repeating: 0.5, count: 768) })
         let eMini = try await mini.embed("test")
         let eMPNet = try await mpnet.embed("test")
-        XCTAssertNotEqual(eMini, eMPNet,
-                          "different projection seeds must produce different engrams")
+        #expect(eMini != eMPNet,
+                "different projection seeds must produce different engrams")
     }
 
-    func testInferenceFailurePropagates() async throws {
+    @Test func testInferenceFailurePropagates() async throws {
         struct InferenceError: Error {}
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "broken", modelVersion: "0.0.0",
             projectionSeed: 0xCAFE,
             inference: { _ in throw InferenceError() })
-        do {
+        await #expect(throws: InferenceError.self) {
             _ = try await provider.embed("anything")
-            XCTFail("expected inference failure to propagate")
-        } catch is InferenceError {
-            // expected
         }
     }
 
     /// Empty input returns the substrate's canonical zero engram per
     /// the EmbeddingProvider contract.
-    func testEmptyInputReturnsZeroEngram() async throws {
+    @Test func testEmptyInputReturnsZeroEngram() async throws {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "minilm-v6", modelVersion: "1.0.0",
             projectionSeed: 0x4D49_4E4C_4D_5F76_31,
             inference: Self.minilmInference)
         let engram = try await provider.embed("")
-        XCTAssertEqual(engram, Engram.zero)
+        #expect(engram == Engram.zero)
     }
 
     /// The empty-input shortcut bypasses the inference closure
     /// entirely: a provider whose closure always throws still returns
     /// Engram.zero for the empty string.
-    func testEmptyInputDoesNotInvokeInference() async throws {
+    @Test func testEmptyInputDoesNotInvokeInference() async throws {
         struct ShouldNotRun: Error {}
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "guarded", modelVersion: "1.0.0",
             projectionSeed: 0xBEEF,
             inference: { _ in throw ShouldNotRun() })
         let engram = try await provider.embed("")
-        XCTAssertEqual(engram, Engram.zero,
-                       "empty input must bypass the inference closure")
+        #expect(engram == Engram.zero,
+                "empty input must bypass the inference closure")
     }
 
     /// Default `embedBatch` impl iterates `embed` sequentially.
@@ -110,7 +108,7 @@ final class FloatSimHashEmbeddingProviderTests: XCTestCase {
     /// per the trait contract), and that non-empty entries return
     /// non-zero engrams. Symmetric to the Rust
     /// `embed_batch_default_impl_handles_mixed_empty_and_non_empty`.
-    func testEmbedBatchDefaultImplHandlesMixedEmptyAndNonEmpty() async throws {
+    @Test func testEmbedBatchDefaultImplHandlesMixedEmptyAndNonEmpty() async throws {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "minilm-v6", modelVersion: "1.0.0",
             projectionSeed: 0x4D49_4E4C_4D_5F76_31,
@@ -118,18 +116,18 @@ final class FloatSimHashEmbeddingProviderTests: XCTestCase {
 
         // Empty input array -> empty output.
         let empty = try await provider.embedBatch([])
-        XCTAssertTrue(empty.isEmpty)
+        #expect(empty.isEmpty)
 
         // Mixed array: count preserved, empty entries -> Engram.zero,
         // non-empty entries -> non-zero (constant inference vector
         // projects to a fixed non-zero engram).
         let texts = ["alpha", "", "beta", ""]
         let batch = try await provider.embedBatch(texts)
-        XCTAssertEqual(batch.count, texts.count)
-        XCTAssertNotEqual(batch[0], Engram.zero, "non-empty input must yield non-zero engram")
-        XCTAssertEqual(batch[1], Engram.zero, "empty input must yield Engram.zero")
-        XCTAssertNotEqual(batch[2], Engram.zero)
-        XCTAssertEqual(batch[3], Engram.zero)
-        XCTAssertEqual(batch[0], batch[2], "constant inference -> two non-empty inputs project identically")
+        #expect(batch.count == texts.count)
+        #expect(batch[0] != Engram.zero, "non-empty input must yield non-zero engram")
+        #expect(batch[1] == Engram.zero, "empty input must yield Engram.zero")
+        #expect(batch[2] != Engram.zero)
+        #expect(batch[3] == Engram.zero)
+        #expect(batch[0] == batch[2], "constant inference -> two non-empty inputs project identically")
     }
 }
