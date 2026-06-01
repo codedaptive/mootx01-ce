@@ -7,7 +7,7 @@
 
 mod conformance;
 
-use conformance::{run_all, Factory};
+use conformance::{run_all, vector_fixtures, Factory};
 use persistence_kit::{BackendConfiguration, EstateConfiguration, PostgresStorage, Storage};
 use uuid::Uuid;
 
@@ -36,4 +36,5 @@ fn postgres_conformance() {
         Box::new(PostgresStorage::new(config).expect("connect postgres")) as Box<dyn Storage>
     });
     run_all("PostgreSQL", &factory);
+    vector_fixtures("PostgreSQL", &factory);
 }
