@@ -198,6 +198,68 @@ public struct Tunnel: Equatable, Hashable, Codable, Sendable {
 **Rust:** `pub struct KGFact`, `DiaryEntry`, `Tunnel` mirror these fields and
 accessors (`snake_case`).
 
+#### `Association`, `Proposal`, `LearnedReference`
+
+The three substrate-derived / grounding nouns behind the `propose`,
+`associate`, and `learn` lexicon entries (SPEC § 7.2). Each is an immutable
+`Sendable` value type with the three Int64 bitmaps (I-2) and TEXT ISO8601
+dates (I-7); verb behaviour lives in `EstateVerbs`, not on the noun. Per the
+§ 7.2 acceptance matrix: `Association` accepts mutate / expunge / recall (no
+capture, no withdraw); `Proposal` accepts mutate / withdraw / expunge /
+recall; `LearnedReference` accepts learn / mutate / withdraw / expunge /
+recall.
+
+```swift
+public struct Association: Equatable, Codable, Sendable {
+    public let id: String
+    public let sourceWing, sourceRoom: String; public let sourceDrawerId: String?
+    public let targetWing, targetRoom: String; public let targetDrawerId: String?
+    public let label: String
+    public let latticeAnchor: LatticeAnchor
+    public let adjectiveBitmap, operationalBitmap, provenanceBitmap: Int64
+    public let addedBy: String; public let filedAt: Date
+    public let tombstonedAt: Date?; public let removedByBatch: String?
+    public init(/* memberwise; bitmaps default 0 */)
+    // operational axes in AssociationOperational.swift (Tier 2):
+    // AssociationSignalSources (OptionSet), AssociationDecayClass, AssociationArity
+}
+
+public struct Proposal: Equatable, Codable, Sendable {
+    public let id: String
+    public let targetRowID: String                 // empty for brand-new-object proposals
+    public let justification: String?
+    public let candidateState: Int64
+    public let latticeAnchor: LatticeAnchor
+    public let adjectiveBitmap, operationalBitmap, provenanceBitmap: Int64
+    public let filedAt: Date
+    public init(/* memberwise; bitmaps default 0 */)
+    // operational axes in ProposalOperational.swift (Tier 2):
+    // ProposalKind, ProposalTargetObjectType, ProposalConfirmationSource,
+    // ProposalGeneratedByClass, ProposalConfidenceBucket
+}
+
+public struct LearnedReference: Equatable, Codable, Sendable {
+    public let id: String
+    public let sourceCatalogID: String             // SourceCatalogEntry reference
+    public let handle: String                      // indexed; learn dedupes on it
+    public let latticeAnchor: LatticeAnchor
+    public let adjectiveBitmap, operationalBitmap, provenanceBitmap: Int64
+    public let addedBy: String; public let filedAt: Date
+    public let tombstonedAt: Date?; public let removedByBatch: String?
+    public init(/* memberwise; bitmaps default 0 */)
+    // operational axes in LearnedReferenceOperational.swift (Tier 2):
+    // RefreshPolicy, DriftSeverity, LearnMode, LearnedReferenceSource
+}
+```
+**Rust:** `pub struct Association`, `Proposal`, `LearnedReference` (each with
+`pub fn new(…)`) mirror these fields (`snake_case`); the operational-axis
+enums (`AssociationSignalSources` as an `i64` newtype, `AssociationDecayClass`,
+`AssociationArity`, `ProposalKind`, `ProposalTargetObjectType`,
+`ProposalConfirmationSource`, `ProposalGeneratedByClass`,
+`ProposalConfidenceBucket`, `RefreshPolicy`, `DriftSeverity`, `LearnMode`,
+`LearnedReferenceSource`) mirror the Swift raw values byte-identically
+(`association.rs`, `proposal.rs`, `learned_reference.rs` + `*_operational.rs`).
+
 #### Verb frames: `CaptureFrame`, `RecallFrame`, `LearnFrame`, `MutationKind`
 
 The named-slot inputs to the verbs (SPEC § 5). No raw bit value crosses these
@@ -444,6 +506,16 @@ cited file.
 - **Tunnel operational axes (declared in Tier 1 nouns, indexed here):**
   `TunnelDirection`, `TunnelLifecycle`, `TunnelOriginClass`, `TunnelStrength`
   — `TunnelOperational.swift`.
+- **Association operational axes (declared in Tier 1 nouns, indexed here):**
+  `AssociationSignalSources` (OptionSet), `AssociationDecayClass`,
+  `AssociationArity` — `AssociationOperational.swift`.
+- **Proposal operational axes (declared in Tier 1 nouns, indexed here):**
+  `ProposalKind`, `ProposalTargetObjectType`, `ProposalConfirmationSource`,
+  `ProposalGeneratedByClass`, `ProposalConfidenceBucket` —
+  `ProposalOperational.swift`.
+- **LearnedReference operational axes (declared in Tier 1 nouns, indexed
+  here):** `RefreshPolicy`, `DriftSeverity`, `LearnMode`,
+  `LearnedReferenceSource` — `LearnedReferenceOperational.swift`.
 - **Taxonomy summaries:** `WingSummary`, `RoomSummary` (computed
   `GROUP BY` projections; no wings/rooms table) — `Summaries.swift`.
 - **Rust-only helper shapes:** `BitmapAuditPair`, `RoomBundle`,
