@@ -175,8 +175,8 @@ empty corpus, a non-positive limit, or an empty query token set.
 
 **B-3 (index mutation):** `index` adds documents to the inverted index;
 `remove` deletes a document's postings and corrects the corpus length
-statistics. The index is in-memory and rebuilt on demand from the
-bundle store (a persistent posting list is deferred to v1.x).
+statistics. The index is in-memory, rebuilt on demand from the bundle
+store.
 
 **B-4 (hybrid fan-out and fusion):** `HybridRecall.recall` pulls a
 candidate window of `max(limit*4, 32)` from each of the vector and
