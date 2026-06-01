@@ -21,6 +21,7 @@
 // accumulate-and-submit half of the cycle.
 
 import Foundation
+import LatticeLib
 
 /// One entry in a pool submission: a token and the tag the platform
 /// tagger assigned it. The `tag` is the uppercase Penn-style form

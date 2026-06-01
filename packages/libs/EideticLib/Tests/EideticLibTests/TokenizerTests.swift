@@ -9,6 +9,7 @@
 
 import Testing
 @testable import EideticLib
+@testable import LatticeLib
 
 @Suite("Tokenizer")
 struct TokenizerTests {
