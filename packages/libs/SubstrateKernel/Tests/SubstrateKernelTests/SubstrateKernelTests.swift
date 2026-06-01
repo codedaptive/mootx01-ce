@@ -39,3 +39,30 @@ struct SubstrateKernelSmokeTests {
         #expect(forward == reverse)
     }
 }
+
+// MARK: - Swift / Rust library-test parity matrix
+//
+// Each Swift suite asserts the behavior set its Rust `#[test]` module
+// asserts. The Rust leg has 33 `#[test]` functions (31 on stable; the
+// 2 `kernel_simd.rs` tests are gated behind the `simd-nightly` Cargo
+// feature and run under `cargo +nightly test --features simd-nightly`).
+// On the Swift leg those two SIMD count-fold behaviors run
+// unconditionally on arm64, since `SimdKernel` is always available via
+// `import simd` (no stable/nightly split).
+//
+//   Rust module (count)      →  Swift suite(s)
+//   ───────────────────────────────────────────────────────────────
+//   bit_field.rs   (14)      →  BitField                 (14 + maskedEquals)
+//   sha256.rs      (5)       →  SHA256                    (5)
+//   hamming_nn.rs  (2)       →  HammingNN                 (2)
+//   kernel.rs      (10)      →  PortableKernel dispatcher (5)
+//                               + count-fold conformance  (countFoldConformanceAcrossKernels)
+//                               + PortableKernel top-K     (4)
+//   kernel_simd.rs (2)       →  PortableKernel count-fold  (simdCountFold* ×2)
+//
+// Swift adds, beyond the Rust unit tests (expansion, never narrowing):
+//   - BitField.maskedEquals (public API the Rust port ships untested)
+//   - PortableKernel cross-kernel bit-identity conformance over every
+//     host-reachable backend (the cookbook §18.2 contract the Rust leg
+//     proves via the four-way CRC gate).
+
