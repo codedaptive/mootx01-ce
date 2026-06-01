@@ -139,19 +139,3 @@ vector (I-3).
 **C-4 (cross-port):** the Swift and Rust ports agree on distance,
 nearest, within, and union for every shared test vector (inherits
 SubstrateLib I-7).
-
-## § 8 — Out of scope
-
-- Fingerprint blocks, kernels, dispatch → `SUBSTRATELIB_SPEC_v0.8.md`.
-- Embedding generation, ANN index, model tagging → `VECTORKIT_SPEC_v0.8.md`.
-- Persistence of engrams → `PERSISTENCEKIT_SPEC_v0.8.md`.
-
-## § 9 — Open questions
-
-- The `Engram` typealias anticipates a possible `Fingerprint512`
-  widening; the stability contract (I-1) is what insulates callers if
-  that lands.
-
----
-
-*End of EngramLib Specification v0.8.*
