@@ -16,7 +16,8 @@ purpose: |
   documented with bilingual signatures. Tier 2 (§ 2's closing
   subsection) is the BROADER SURFACE — the internal stores, validators,
   fingerprint machinery, and bitmap helpers that are public for testing
-  and intra-kit use but not yet consumed by another package; a table of
+  and intra-kit use, consumed by the kit's own pipeline and tests rather
+  than another package; a table of
   contents (name + role + source file). The companion SPEC carries the
   behavioral contracts (invariants I-1…I-11, conformance C-1…C-7).
 ---
@@ -52,7 +53,8 @@ implementation only. The value-level results agree (SPEC § 8, I-11).
 > — the genuinely consumed contract is the ~24 types in Tier 1 below. § 2
 > Tier 1 documents that contract in full. The Tier 2 subsection at the end of
 > § 2 is a table of contents for the rest: public for testing and intra-kit
-> use, not yet a cross-package dependency.
+> use, consumed by the kit's own pipeline and tests rather than another
+> package.
 
 ## § 2 — Public types
 
@@ -79,10 +81,10 @@ public actor Estate {
     public func capture(_ frame: CaptureFrame) async throws -> Drawer
     public func recall(_ frame: RecallFrame) async -> RecallStream
     public func withdraw(rowID: RowID, reason: String? = nil) async throws
-    public func mutate(rowID: RowID, kind: MutationKind, payload: String? = nil) async throws  // throws .invalidContent until impl
-    public func expunge(rowID: RowID, reason: String, confirmation: Bool) async throws         // throws .invalidContent until impl
-    public func reanchor(rowID: RowID, toRoom: RoomID? = nil, toLattice: LatticeAnchor? = nil) async throws // throws .invalidContent until impl
-    public func learn(_ frame: LearnFrame) async throws                                        // throws .invalidContent until impl
+    public func mutate(rowID: RowID, kind: MutationKind, payload: String? = nil) async throws
+    public func expunge(rowID: RowID, reason: String, confirmation: Bool) async throws
+    public func reanchor(rowID: RowID, toRoom: RoomID? = nil, toLattice: LatticeAnchor? = nil) async throws
+    public func learn(_ frame: LearnFrame) async throws
 
     // History (extension Estate, EstateAudit.swift):
     public func auditTrail(rowID: RowID) async throws -> [AuditRow]
@@ -92,10 +94,10 @@ public actor Estate {
 ```
 **Rust:** `pub struct Estate` with `open`, `create`, `close`, `manifest`,
 `estate_uuid`, and verbs `capture(frame, now: i64)`, `recall(frame, now: i64)`,
-`withdraw(...)`, plus `mutate`/`expunge`/`reanchor`/`learn` stubs returning
-`Err(LocusKitError::…)`. All synchronous (SPEC § 8). `propose` / `associate`
+`withdraw(...)`, `mutate(...)`, `expunge(...)`, `reanchor(...)`, `learn(...)`,
+each taking `now: i64`. All synchronous (SPEC § 8). `propose` / `associate`
 are reached through the tunnel and KG-fact store paths, not as dedicated verb
-methods at this revision.
+methods.
 
 #### `Drawer`
 
@@ -317,7 +319,7 @@ public enum Confidence: Int, Comparable { case unknown=0, low, mediumLow, medium
 public enum Channel: Int { case unknown=0, directChat, slack, email, teams, discord, matrix, telegram, whatsapp, cli, api, mcp, fileImport, web, voice }
 public enum Sensitivity: Int { case normal=0, elevated, restricted, secret }   // 2-bit, distinct from AdjectiveSensitivity
 public typealias ProvenanceChannel = Channel
-public typealias Vector = [Float]      // placeholder until VectorKit
+public typealias Vector = [Float]      // vector recall composes via VectorKit
 ```
 **Rust:** identical enums and raw values (`snake_case` cases); `DrawerFeatureFlags`
 is a Rust bitflags-style struct with the same bit positions.
@@ -407,17 +409,18 @@ public actor DrawerStore {
     // … full CRUD + audit surface, see DrawerStore.swift
 }
 ```
-**Rust:** `pub trait DrawerStore: Send + Sync` with `InMemoryDrawerStore` as
-the shipped implementation; methods are synchronous and take `now: i64`. No
-SQLite-backed Rust store yet (SPEC § 8).
+**Rust:** `pub trait DrawerStore: Send + Sync` with `InMemoryDrawerStore`;
+methods are synchronous and take `now: i64`. The Swift `DrawerStore` is a
+concrete actor over any injected `Storage` (SQLite in production); the Rust
+version realises the same store contract through the trait (SPEC § 8).
 
 ### Tier 2 — broader surface (table of contents)
 
-The following public types are **present in the kit but not yet consumed by
-another package** (measured 2026-05-27). They are public for `@testable`
-intra-kit use, conformance tests, or scaffolded future verbs. Recorded as a
-navigable index — name, role, source file. Full signatures live in the cited
-file; promote a type into Tier 1 when a consumer adopts it.
+The following public types are part of the kit's surface and consumed by its
+own pipeline and tests, not (yet) by another package (measured 2026-05-27).
+They are public for `@testable` intra-kit use and conformance tests. Recorded
+as a navigable index — name, role, source file. Full signatures live in the
+cited file.
 
 - **Recall-pruning fingerprints:** `ContainerFingerprint`,
   `ContainerFingerprintStore` (per-container OR aggregate, recall pruning,
@@ -505,8 +508,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 cargo test -p locus-kit
 ```
 
-(Exercises the in-memory `DrawerStore` path; the SQLite-backed Rust store is
-outstanding — SPEC § 8.)
+(Exercises the `DrawerStore` contract — SPEC § 8.)
 
 ## § 6 — Examples
 
