@@ -5,58 +5,64 @@
 // The same structural assertions hold against both real and
 // synthetic data.
 
-import XCTest
+import Testing
 @testable import EideticLib
 
-final class WikidataSubsetTests: XCTestCase {
+@Suite("Wikidata subset")
+struct WikidataSubsetTests {
 
-    func testSubsetLoadsFromBundle() {
-        XCTAssertNotNil(WikidataSubset.loadBundled())
+    @Test("subset loads from bundle")
+    func subsetLoadsFromBundle() {
+        #expect(WikidataSubset.loadBundled() != nil)
     }
 
-    func testSubsetVersionsPinned() throws {
-        let subset = try XCTUnwrap(WikidataSubset.loadBundled())
-        XCTAssertEqual(subset.schemaVersion, "1")
-        XCTAssertFalse(subset.dataVersion.isEmpty)
+    @Test("subset versions pinned")
+    func subsetVersionsPinned() throws {
+        let subset = try #require(WikidataSubset.loadBundled())
+        #expect(subset.schemaVersion == "1")
+        #expect(!subset.dataVersion.isEmpty)
     }
 
-    func testEveryEntryHasNonEmptyQidAndLabel() throws {
-        let subset = try XCTUnwrap(WikidataSubset.loadBundled())
+    @Test("every entry has non-empty qid and label")
+    func everyEntryHasNonEmptyQidAndLabel() throws {
+        let subset = try #require(WikidataSubset.loadBundled())
         for entry in subset.entries {
-            XCTAssertFalse(
-                entry.qid.isEmpty,
+            #expect(
+                !entry.qid.isEmpty,
                 "entry must carry a Q-ID"
             )
-            XCTAssertTrue(
+            #expect(
                 entry.qid.hasPrefix("Q"),
                 "Q-ID \(entry.qid) must start with Q"
             )
-            XCTAssertFalse(
-                entry.label.isEmpty,
+            #expect(
+                !entry.label.isEmpty,
                 "entry \(entry.qid) label must be non-empty"
             )
         }
     }
 
-    func testEveryQidUnique() throws {
-        let subset = try XCTUnwrap(WikidataSubset.loadBundled())
+    @Test("every qid unique")
+    func everyQidUnique() throws {
+        let subset = try #require(WikidataSubset.loadBundled())
         let qids = subset.entries.map { $0.qid }
-        XCTAssertEqual(
-            Set(qids).count, qids.count,
+        #expect(
+            Set(qids).count == qids.count,
             "Q-IDs must be unique within the subset"
         )
     }
 
-    func testLabelsAreAlreadyLowercased() throws {
-        let subset = try XCTUnwrap(WikidataSubset.loadBundled())
+    @Test("labels are already lowercased")
+    func labelsAreAlreadyLowercased() throws {
+        let subset = try #require(WikidataSubset.loadBundled())
         for entry in subset.entries {
-            XCTAssertEqual(
-                entry.label, entry.label.lowercased(),
+            #expect(
+                entry.label == entry.label.lowercased(),
                 "label \(entry.label) must be lowercased"
             )
             for alias in entry.aliases {
-                XCTAssertEqual(
-                    alias, alias.lowercased(),
+                #expect(
+                    alias == alias.lowercased(),
                     "alias \(alias) must be lowercased"
                 )
             }

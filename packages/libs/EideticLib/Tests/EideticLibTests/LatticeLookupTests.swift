@@ -6,42 +6,45 @@
 // never falls back to a UDC code. The CC-BY-SA UDC schedule is no
 // longer bundled or consulted.
 
-import XCTest
+import Testing
+import Foundation
 @testable import EideticLib
 import LatticeKit
 
-final class MDCCLookupTests: XCTestCase {
+@Suite("MDCC lookup contract")
+struct MDCCLookupTests {
 
     // 1. A canon term grounds to a well-formed MDCC code that is
     //    present in the bundled MDCC canon — not a UDC code.
-    func testLookupReturnsLatticeCodePresentInCanon() throws {
+    @Test("lookup returns lattice code present in canon")
+    func lookupReturnsLatticeCodePresentInCanon() throws {
         let anchor = EideticLib.lookup("philosophy")
-        XCTAssertFalse(
-            anchor.code.isEmpty,
+        #expect(
+            !anchor.code.isEmpty,
             "philosophy must resolve to an MDCC code"
         )
-        XCTAssertTrue(
+        #expect(
             Code.isWellFormed(anchor.code),
             "resolved code \(anchor.code) must be a well-formed MDCC code"
         )
-        let entry = try XCTUnwrap(
+        let entry = try #require(
             LatticeKit.entry(for: anchor.code),
             "resolved code \(anchor.code) must exist in the bundled MDCC canon"
         )
-        XCTAssertEqual(entry.label, "philosophy")
+        #expect(entry.label == "philosophy")
     }
 
     // 2. The same lookup carries the canon entry's sourceIdentity
     //    as the Wikidata Q-ID.
-    func testLookupCarriesCanonSourceIdentityAsQID() throws {
+    @Test("lookup carries canon source identity as QID")
+    func lookupCarriesCanonSourceIdentityAsQID() throws {
         let anchor = EideticLib.lookup("philosophy")
-        let entry = try XCTUnwrap(LatticeKit.entry(for: anchor.code))
-        XCTAssertEqual(
-            anchor.wikidataQID,
-            entry.sourceIdentity,
+        let entry = try #require(LatticeKit.entry(for: anchor.code))
+        #expect(
+            anchor.wikidataQID == entry.sourceIdentity,
             "the anchor's Q-ID must be the resolved canon entry's sourceIdentity"
         )
-        XCTAssertTrue(
+        #expect(
             (anchor.wikidataQID ?? "").hasPrefix("Q"),
             "sourceIdentity is a Wikidata Q-ID"
         )
@@ -49,40 +52,43 @@ final class MDCCLookupTests: XCTestCase {
 
     // 3. A well-formed code absent from the canon is pending — the
     //    valid-but-unknown contract — and round-trips intact.
-    func testWellFormedCodeAbsentFromCanonIsPendingAndRoundTrips() throws {
+    @Test("well-formed code absent from canon is pending and round-trips")
+    func wellFormedCodeAbsentFromCanonIsPendingAndRoundTrips() throws {
         // "999.99" is well-formed grammar but not in the v1 canon.
         let knownCodes: Set<String> = ["100"]
         let state = EideticLib.classifyLatticeCode("999.99", knownCodes: knownCodes)
-        XCTAssertEqual(state, .pending("999.99"))
-        XCTAssertTrue(state.isWellFormed)
+        #expect(state == .pending("999.99"))
+        #expect(state.isWellFormed)
 
         let data = try JSONEncoder().encode(state)
         let decoded = try JSONDecoder().decode(LatticeCodeState.self, from: data)
-        XCTAssertEqual(decoded, state, "pending code must round-trip intact")
-        XCTAssertEqual(decoded.rawCode, "999.99")
+        #expect(decoded == state, "pending code must round-trip intact")
+        #expect(decoded.rawCode == "999.99")
     }
 
     // 4. A term with no canon match returns an empty MDCC code,
     //    never a UDC fallback.
-    func testNoCanonMatchReturnsEmptyCodeNotUDCFallback() {
+    @Test("no canon match returns empty code, not UDC fallback")
+    func noCanonMatchReturnsEmptyCodeNotUDCFallback() {
         let anchor = EideticLib.lookup("zxcvqwertyasdfgh")
-        XCTAssertEqual(
-            anchor.code, "",
+        #expect(
+            anchor.code == "",
             "no canon match must yield an empty MDCC code, not a fallback"
         )
-        XCTAssertNil(anchor.wikidataQID)
-        XCTAssertEqual(anchor.confidence, 0)
+        #expect(anchor.wikidataQID == nil)
+        #expect(anchor.confidence == 0)
     }
 
     // 5. No UDC data is loaded: the CC-BY-SA UDCSchedule.json
     //    resource is gone from the bundle.
-    func testUDCScheduleResourceIsAbsentFromBundle() {
+    @Test("UDC schedule resource is absent from bundle")
+    func udcScheduleResourceIsAbsentFromBundle() {
         let url = Bundle.module.url(
             forResource: "UDCSchedule",
             withExtension: "json"
         )
-        XCTAssertNil(
-            url,
+        #expect(
+            url == nil,
             "the CC-BY-SA UDCSchedule.json must not ship in the EideticLib bundle"
         )
     }
@@ -90,12 +96,13 @@ final class MDCCLookupTests: XCTestCase {
     // 6. Anchor shape: exposes code and no udcCode. The Rust-port
     //    sibling struct carries the same rename as a documented
     //    follow-up (see TASK_MDCC_03_BLAST_RADIUS.md).
-    func testAnchorExposesLatticeCodeAndNoUDCCode() {
+    @Test("anchor exposes lattice code and no udcCode")
+    func anchorExposesLatticeCodeAndNoUDCCode() {
         let anchor = EideticLib.lookup("chemistry")
         let mirror = Mirror(reflecting: anchor)
         let labels = mirror.children.compactMap { $0.label }
-        XCTAssertTrue(labels.contains("code"), "Anchor must expose code")
-        XCTAssertFalse(labels.contains("udcCode"), "Anchor must not expose udcCode")
+        #expect(labels.contains("code"), "Anchor must expose code")
+        #expect(!labels.contains("udcCode"), "Anchor must not expose udcCode")
     }
 }
 
@@ -104,22 +111,24 @@ final class MDCCLookupTests: XCTestCase {
 /// classification data is the CC0 Wikidata subset, and the
 /// classification source (the MDCC canon) is CC0/public-domain and
 /// lives in LatticeKit.
-final class LicensingBoundaryTests: XCTestCase {
+@Suite("Licensing boundary")
+struct LicensingBoundaryTests {
 
-    func testNoCCBYSAResourceShipsInBundle() throws {
+    @Test("no CC-BY-SA resource ships in bundle")
+    func noCCBYSAResourceShipsInBundle() throws {
         // The CC-BY-SA UDC schedule must be gone from the bundle.
-        XCTAssertNil(
-            Bundle.module.url(forResource: "UDCSchedule", withExtension: "json"),
+        #expect(
+            Bundle.module.url(forResource: "UDCSchedule", withExtension: "json") == nil,
             "the CC-BY-SA UDCSchedule.json must not ship"
         )
 
         // The bundled Wikidata subset must be CC0, not the encumbered
         // CC-BY-SA license the retired UDC schedule carried.
-        let subset = try XCTUnwrap(WikidataSubset.loadBundled())
+        let subset = try #require(WikidataSubset.loadBundled())
         let note = subset.licenseNote.uppercased()
-        XCTAssertTrue(note.contains("CC0"), "bundled subset must be CC0")
-        XCTAssertFalse(
-            note.contains("CC-BY-SA"),
+        #expect(note.contains("CC0"), "bundled subset must be CC0")
+        #expect(
+            !note.contains("CC-BY-SA"),
             "no CC-BY-SA share-alike data may ship in the default bundle"
         )
     }

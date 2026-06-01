@@ -6,10 +6,12 @@
 // must produce the byte-identical stem in Swift that the
 // Rust port produces via the rust-stemmers crate.
 
-import XCTest
+import Testing
+import Foundation
 @testable import EideticLib
 
-final class StemmerTests: XCTestCase {
+@Suite("Stemmer Snowball conformance")
+struct StemmerTests {
 
     struct StemPair: Codable {
         let input: String
@@ -32,20 +34,22 @@ final class StemmerTests: XCTestCase {
     }
 
     func loadCorpus() throws -> CorpusFile {
-        let data = try XCTUnwrap(
+        let data = try #require(
             Stemmer.bundledReferenceCorpus(),
             "SnowballEnglish.json missing from module bundle"
         )
         return try JSONDecoder().decode(CorpusFile.self, from: data)
     }
 
-    func testCorpusLoads() throws {
+    @Test("corpus loads")
+    func corpusLoads() throws {
         let corpus = try loadCorpus()
-        XCTAssertEqual(corpus.schemaVersion, "1")
-        XCTAssertFalse(corpus.pairs.isEmpty)
+        #expect(corpus.schemaVersion == "1")
+        #expect(!corpus.pairs.isEmpty)
     }
 
-    func testStemmerMatchesCanonicalCorpus() throws {
+    @Test("stemmer matches canonical corpus")
+    func stemmerMatchesCanonicalCorpus() throws {
         let corpus = try loadCorpus()
         var failures: [String] = []
         for pair in corpus.pairs {
@@ -56,20 +60,48 @@ final class StemmerTests: XCTestCase {
                 )
             }
         }
-        XCTAssertTrue(
+        #expect(
             failures.isEmpty,
-            "Snowball conformance failures (\(failures.count) of \(corpus.pairs.count)):\n"
-            + failures.joined(separator: "\n")
+            "Snowball conformance failures (\(failures.count) of \(corpus.pairs.count)):\n\(failures.joined(separator: "\n"))"
         )
     }
 
-    func testDeterminism() {
+    @Test("determinism")
+    func determinism() {
         let a = Stemmer.stem("running")
         let b = Stemmer.stem("running")
-        XCTAssertEqual(a, b)
+        #expect(a == b)
     }
 
-    func testEmptyStringYieldsEmpty() {
-        XCTAssertEqual(Stemmer.stem(""), "")
+    @Test("empty string yields empty")
+    func emptyStringYieldsEmpty() {
+        #expect(Stemmer.stem("") == "")
+    }
+
+    // Explicit spot checks mirroring the Rust stemmer.rs #[test] set
+    // (rust-stemmers Porter2). These are subsumed by the full-corpus
+    // conformance gate above but are asserted directly so the Swift/Rust
+    // parity set is mirrored one-to-one.
+
+    @Test("running stems to run")
+    func runningStemsToRun() {
+        #expect(Stemmer.stem("running") == "run")
+    }
+
+    @Test("ran stems to ran")
+    func ranStemsToRan() {
+        // Porter2 does not catch irregular past tense; "ran" stays "ran".
+        #expect(Stemmer.stem("ran") == "ran")
+    }
+
+    @Test("computer and computing collapse to same stem")
+    func computerAndComputingCollapseToSameStem() {
+        #expect(Stemmer.stem("computer") == Stemmer.stem("computing"))
+    }
+
+    @Test("chemistry stems consistently")
+    func chemistryStemsConsistently() {
+        #expect(!Stemmer.stem("chemistry").isEmpty)
+        #expect(!Stemmer.stem("chemical").isEmpty)
     }
 }

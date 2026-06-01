@@ -4,11 +4,12 @@
 // surfaces a resolved canon entry's sourceIdentity (its CC0 Q-ID)
 // and confirms it against the bundled CC0 subset.
 
-import XCTest
+import Testing
 @testable import EideticLib
 import LatticeKit
 
-final class WikidataResolverTests: XCTestCase {
+@Suite("Wikidata resolver")
+struct WikidataResolverTests {
 
     // MARK: helpers
 
@@ -28,25 +29,27 @@ final class WikidataResolverTests: XCTestCase {
 
     // MARK: resolution
 
-    func testResolveSurfacesEntrySourceIdentityAsQID() throws {
+    @Test("resolve surfaces entry source identity as QID")
+    func resolveSurfacesEntrySourceIdentityAsQID() throws {
         let subset = makeSubset([
             WikidataEntry(
                 qid: "Q2329", label: "chemistry",
                 aliases: ["chem"], sourceSection: "test"
             )
         ])
-        let decision = try XCTUnwrap(
+        let decision = try #require(
             WikidataResolver.resolve(
                 entry: entry(code: "503", qid: "Q2329", label: "chemistry"),
                 subset: subset
             )
         )
-        XCTAssertEqual(decision.qid, "Q2329")
-        XCTAssertEqual(decision.labelHits, 1, "subset label matches canon label")
-        XCTAssertEqual(decision.aliasHits, 1)
+        #expect(decision.qid == "Q2329")
+        #expect(decision.labelHits == 1, "subset label matches canon label")
+        #expect(decision.aliasHits == 1)
     }
 
-    func testResolveReturnsQIDEvenWhenAbsentFromSubset() throws {
+    @Test("resolve returns QID even when absent from subset")
+    func resolveReturnsQIDEvenWhenAbsentFromSubset() throws {
         // A valid canon Q-ID the bundled CC0 subset does not carry is
         // still surfaced — without subset-backed evidence.
         let subset = makeSubset([
@@ -55,28 +58,30 @@ final class WikidataResolverTests: XCTestCase {
                 aliases: [], sourceSection: "test"
             )
         ])
-        let decision = try XCTUnwrap(
+        let decision = try #require(
             WikidataResolver.resolve(
                 entry: entry(code: "100", qid: "Q5891", label: "philosophy"),
                 subset: subset
             )
         )
-        XCTAssertEqual(decision.qid, "Q5891")
-        XCTAssertEqual(decision.labelHits, 0)
-        XCTAssertEqual(decision.aliasHits, 0)
+        #expect(decision.qid == "Q5891")
+        #expect(decision.labelHits == 0)
+        #expect(decision.aliasHits == 0)
     }
 
-    func testResolveReturnsNilWhenEntryHasNoSourceIdentity() {
+    @Test("resolve returns nil when entry has no source identity")
+    func resolveReturnsNilWhenEntryHasNoSourceIdentity() {
         let subset = makeSubset([])
-        XCTAssertNil(
+        #expect(
             WikidataResolver.resolve(
                 entry: entry(code: "503", qid: "", label: "chemistry"),
                 subset: subset
-            )
+            ) == nil
         )
     }
 
-    func testResolveIsDeterministic() {
+    @Test("resolve is deterministic")
+    func resolveIsDeterministic() {
         let subset = makeSubset([
             WikidataEntry(
                 qid: "Q2329", label: "chemistry",
@@ -86,22 +91,24 @@ final class WikidataResolverTests: XCTestCase {
         let e = entry(code: "503", qid: "Q2329", label: "chemistry")
         let a = WikidataResolver.resolve(entry: e, subset: subset)
         let b = WikidataResolver.resolve(entry: e, subset: subset)
-        XCTAssertEqual(a, b)
+        #expect(a == b)
     }
 
     // MARK: integration via lookup()
 
-    func testLookupChemistryReturnsAnchorWithQid() {
+    @Test("lookup chemistry returns anchor with QID")
+    func lookupChemistryReturnsAnchorWithQid() {
         let anchor = EideticLib.lookup("chemistry")
-        XCTAssertFalse(anchor.code.isEmpty)
+        #expect(!anchor.code.isEmpty)
         let qid = anchor.wikidataQID
-        XCTAssertNotNil(qid)
-        XCTAssertTrue((qid ?? "").hasPrefix("Q"), "Q-ID must start with Q")
+        #expect(qid != nil)
+        #expect((qid ?? "").hasPrefix("Q"), "Q-ID must start with Q")
     }
 
-    func testLookupNonsenseReturnsAnchorWithNilQid() {
+    @Test("lookup nonsense returns anchor with nil QID")
+    func lookupNonsenseReturnsAnchorWithNilQid() {
         let anchor = EideticLib.lookup("zxcvqwertyasdfgh")
-        XCTAssertEqual(anchor.code, "")
-        XCTAssertNil(anchor.wikidataQID)
+        #expect(anchor.code == "")
+        #expect(anchor.wikidataQID == nil)
     }
 }

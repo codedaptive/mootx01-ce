@@ -7,59 +7,66 @@
 // agrees with the reference on inputs that don't exercise language-
 // specific edge cases.
 
-import XCTest
+import Testing
 @testable import EideticLib
 
-final class SegmenterTests: XCTestCase {
+@Suite("Segmenter")
+struct SegmenterTests {
 
     // MARK: - Empty / single-sentence
 
-    func testEmptyInputReturnsEmpty() {
-        XCTAssertTrue(EideticLib.sentences("").isEmpty)
-        XCTAssertTrue(EideticLib.sentencesByDelimiter("").isEmpty)
+    @Test("empty input returns empty")
+    func emptyInputReturnsEmpty() {
+        #expect(EideticLib.sentences("").isEmpty)
+        #expect(EideticLib.sentencesByDelimiter("").isEmpty)
     }
 
-    func testSingleSentenceNoTerminatorReturnsFullInput() {
+    @Test("single sentence, no terminator, returns full input")
+    func singleSentenceNoTerminatorReturnsFullInput() {
         let text = "this is one fragment with no terminator"
         let segs = EideticLib.sentencesByDelimiter(text)
-        XCTAssertEqual(segs.count, 1)
-        XCTAssertEqual(String(segs[0]), text)
+        #expect(segs.count == 1)
+        #expect(String(segs[0]) == text)
     }
 
     // MARK: - Delimiter reference
 
-    func testDelimiterSplitsOnPeriodExclaimQuestion() {
+    @Test("delimiter splits on period, exclaim, question")
+    func delimiterSplitsOnPeriodExclaimQuestion() {
         let text = "First. Second! Third? Fourth"
         let segs = EideticLib.sentencesByDelimiter(text)
-        XCTAssertEqual(segs.count, 4)
-        XCTAssertEqual(String(segs[0]), "First.")
-        XCTAssertEqual(String(segs[1]), " Second!")
-        XCTAssertEqual(String(segs[2]), " Third?")
-        XCTAssertEqual(String(segs[3]), " Fourth")
+        #expect(segs.count == 4)
+        #expect(String(segs[0]) == "First.")
+        #expect(String(segs[1]) == " Second!")
+        #expect(String(segs[2]) == " Third?")
+        #expect(String(segs[3]) == " Fourth")
     }
 
-    func testDelimiterSplitsOnNewline() {
+    @Test("delimiter splits on newline")
+    func delimiterSplitsOnNewline() {
         let text = "Line one\nLine two\nLine three"
         let segs = EideticLib.sentencesByDelimiter(text)
-        XCTAssertEqual(segs.count, 3)
+        #expect(segs.count == 3)
         // The newline is preserved at the end of each split segment.
-        XCTAssertTrue(String(segs[0]).hasSuffix("\n"))
-        XCTAssertTrue(String(segs[1]).hasSuffix("\n"))
-        XCTAssertFalse(String(segs[2]).hasSuffix("\n"))
+        #expect(String(segs[0]).hasSuffix("\n"))
+        #expect(String(segs[1]).hasSuffix("\n"))
+        #expect(!String(segs[2]).hasSuffix("\n"))
     }
 
-    func testDelimiterTotalCoverage() {
+    @Test("delimiter total coverage")
+    func delimiterTotalCoverage() {
         // Segments must concatenate back to the original input
         // exactly: no bytes added, none dropped, none reordered.
         let text = "Alpha. Beta! Gamma? Delta\nEpsilon"
         let segs = EideticLib.sentencesByDelimiter(text)
         let rejoined = segs.map(String.init).joined()
-        XCTAssertEqual(rejoined, text)
+        #expect(rejoined == text)
     }
 
     // MARK: - Platform-routed entry agreement
 
-    func testRoutedAndReferenceAgreeOnSimpleInput() {
+    @Test("routed and reference agree on simple input")
+    func routedAndReferenceAgreeOnSimpleInput() {
         // Input free of language-specific edge cases (no abbreviations,
         // no quotation tricks). Both paths must produce the same
         // number of segments and the same concatenation. Apple's
@@ -69,35 +76,37 @@ final class SegmenterTests: XCTestCase {
         let text = "One sentence. Two sentences. Three sentences."
         let routed = EideticLib.sentences(text)
         let reference = EideticLib.sentencesByDelimiter(text)
-        XCTAssertEqual(routed.count, reference.count,
-                       "platform-routed and reference must agree on segment count for unambiguous input")
-        XCTAssertEqual(routed.map(String.init).joined(),
-                       reference.map(String.init).joined(),
-                       "both paths must concatenate to the same total coverage")
+        #expect(routed.count == reference.count,
+                "platform-routed and reference must agree on segment count for unambiguous input")
+        #expect(routed.map(String.init).joined() == reference.map(String.init).joined(),
+                "both paths must concatenate to the same total coverage")
     }
 
-    func testRoutedRoundTripsToInput() {
+    @Test("routed round-trips to input")
+    func routedRoundTripsToInput() {
         // The routed entry, like the reference, must produce
         // segments that concatenate back to the original input.
         let text = "Round trip. Round trip. Round trip."
         let segs = EideticLib.sentences(text)
-        XCTAssertEqual(segs.map(String.init).joined(), text)
+        #expect(segs.map(String.init).joined() == text)
     }
 
     // MARK: - Pathological inputs
 
-    func testInputWithOnlyTerminatorsProducesEmptyButCoveringSegments() {
+    @Test("input with only terminators produces empty but covering segments")
+    func inputWithOnlyTerminatorsProducesEmptyButCoveringSegments() {
         let text = "..."
         let segs = EideticLib.sentencesByDelimiter(text)
-        XCTAssertEqual(segs.count, 3)
-        for s in segs { XCTAssertEqual(String(s), ".") }
-        XCTAssertEqual(segs.map(String.init).joined(), text)
+        #expect(segs.count == 3)
+        for s in segs { #expect(String(s) == ".") }
+        #expect(segs.map(String.init).joined() == text)
     }
 
-    func testInputWithoutTerminatorYieldsSingleSegment() {
+    @Test("input without terminator yields single segment")
+    func inputWithoutTerminatorYieldsSingleSegment() {
         let text = "no terminators here"
         let routed = EideticLib.sentences(text)
-        XCTAssertEqual(routed.count, 1)
-        XCTAssertEqual(String(routed[0]), text)
+        #expect(routed.count == 1)
+        #expect(String(routed[0]) == text)
     }
 }
