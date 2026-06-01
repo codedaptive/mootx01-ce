@@ -42,6 +42,9 @@ use crate::estate::Estate;
 use crate::frames::{CaptureFrame, LearnFrame, MutationKind};
 use crate::provenance::Confirmation;
 use crate::recall_stream::RecallStream;
+use crate::tunnel::Tunnel;
+use crate::frames::TunnelCaptureFrame;
+
 use crate::recall_trace_item::RecallTraceItem;
 use crate::filter::RecallFrame;
 use crate::tunnel::Tunnel;
@@ -206,6 +209,93 @@ impl Estate {
         self.store.add_drawer(&drawer, now)?;
         Ok(drawer)
     }
+    // -----------------------------------------------------------------------
+    // capture (tunnel)
+    // -----------------------------------------------------------------------
+
+    /// File a new standalone **tunnel** (graph edge) into the estate.
+    ///
+    /// `capture` is legal on exactly two nouns — drawer and tunnel. Swift
+    /// overloads `capture` on the frame type; Rust cannot overload, so the
+    /// tunnel entry point is `capture_tunnel`.
+    ///
+    /// Byte-identical to the row the supersession cascade writes
+    /// (`add_drawer_with_cascade`): builds a `Tunnel` with the same all-zero
+    /// bitmap defaults and files it through `DrawerStore::add_tunnel`, a bare
+    /// row insert — exactly what the cascade does for its `supersedes`
+    /// tunnel. One tunnel shape, two entry points (mission VERB-CAP-01).
+    ///
+    /// # Genesis-event treatment
+    ///
+    /// Drawer capture emits a gated genesis `AuditEvent` (`gated_capture` →
+    /// `audit_gate::admit`). The supersession cascade does **not** emit such
+    /// an event for the tunnel it files — it inserts the tunnel row directly,
+    /// and `add_tunnel` does the same. Source is ground truth: to stay
+    /// byte-identical to what the cascade produces, standalone tunnel capture
+    /// matches the cascade and files via the bare-insert `add_tunnel`. (Doc/
+    /// source drift noted in the completion report.)
+    ///
+    /// `now` (epoch seconds) is threaded in per the deterministic-clock rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LocusKitError::InvalidContent` when either endpoint's
+    /// `wing`/`room`, or `label`, or `added_by` is empty.
+    pub fn capture_tunnel(
+        &self,
+        frame: TunnelCaptureFrame,
+        now: i64,
+    ) -> Result<Tunnel, LocusKitError> {
+        if frame.source_wing.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "sourceWing must not be empty".to_string(),
+            ));
+        }
+        if frame.source_room.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "sourceRoom must not be empty".to_string(),
+            ));
+        }
+        if frame.target_wing.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "targetWing must not be empty".to_string(),
+            ));
+        }
+        if frame.target_room.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "targetRoom must not be empty".to_string(),
+            ));
+        }
+        if frame.label.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "label must not be empty".to_string(),
+            ));
+        }
+        if frame.added_by.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "addedBy must not be empty".to_string(),
+            ));
+        }
+
+        // Bitmaps left at `Tunnel::new`'s all-zero defaults, byte-identical
+        // to the cascade's `Tunnel::new(...)` construction.
+        let mut tunnel = Tunnel::new(
+            Uuid::new_v4().to_string(),
+            frame.source_wing,
+            frame.source_room,
+            frame.target_wing,
+            frame.target_room,
+            frame.label,
+            frame.added_by,
+            now,
+        );
+        tunnel.kind = frame.kind;
+        tunnel.source_drawer_id = frame.source_drawer_id;
+        tunnel.target_drawer_id = frame.target_drawer_id;
+        self.store.add_tunnel(&tunnel)?;
+        Ok(tunnel)
+    }
+
 
     // -----------------------------------------------------------------------
     // recall
