@@ -206,7 +206,7 @@ same vector. `embedBatch` defaults to sequential `embed`.
 fusion are deterministic functions of their inputs. Time enters only as
 the `now`/HLC value the caller supplies to the chunker; no engine calls
 `Date()` for ordering logic except the chunker's HLC stamping helper,
-which takes wall-clock millis as an argument in the Rust port and
+which takes wall-clock millis as an argument in the Rust version and
 should be supplied by the caller for deterministic runs.
 
 ## § 6 — Error model (conceptual)
@@ -259,33 +259,3 @@ across ports (B-6, inherits SubstrateLib FloatSimHash parity).
 `BundleStore.schemaDeclaration` is `appendOnly`, and the sync manifest
 declares the same table with the `.appendOnly` conflict policy
 (I-2, § 5 B-5).
-
-## § 8 — Out of scope
-
-- Embedding storage, the ANN/HNSW index, kNN ordering, the parallel
-  VectorKit `EmbeddingProvider` → see `VECTORKIT_SPEC_v0.8.md`.
-- The `Storage` row-store, schema-declaration semantics, append-only
-  trigger generation → see `PERSISTENCEKIT_SPEC_v0.8.md`.
-- CloudKit zones and conflict-policy execution → see
-  `CONVERGENCEKIT_SPEC_v0.8.md`.
-- The `Engram` type, distance, and union → see `ENGRAMLIB_SPEC_v0.8.md`.
-- HLC generation and `FloatSimHash` math → see
-  `SUBSTRATELIB_SPEC_v0.8.md`.
-- KG facts, audit trail, tunnels, diary (content-for-memory) → see
-  `LOCUSKIT_SPEC_v0.8.md`.
-- Higher-level recall pipelines and reasoning → see NeuronKit and
-  `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md`.
-
-## § 9 — Open questions
-
-- A persistent (PersistenceKit-backed) BM25 posting list replaces the
-  in-memory `BM25Index` for estates beyond a few hundred thousand
-  chunks; deferred to v1.x (B-3).
-- Real BERT WordPiece / SentencePiece tokenizers replace the
-  `DeterministicTokenizer` stand-in once model bundles ship in the host
-  app; the provider seeds and protocol shapes are already stable
-  (I-8, INTERFACE § 2).
-
----
-
-*End of CorpusKit Specification v0.8.*
