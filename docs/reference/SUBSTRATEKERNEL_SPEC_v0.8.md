@@ -169,9 +169,10 @@ silicon):
 4. `SimdKernel` — portable SIMD via the Swift Numerics layer, fallback.
 5. `ScalarKernel` — always available, fallback.
 
-Rust port today exposes `ScalarKernel` plus portable SIMD via the
+Rust version today exposes `ScalarKernel` plus portable SIMD via the
 `simd-nightly` feature; NEON/BNNS/Metal Apple-specific backends are
-Swift-only by design.
+implemented in the Swift version; the Rust version targets the
+non-Apple ecosystem and does not provide them.
 
 ### § 5.4 BitField
 
@@ -228,25 +229,3 @@ gated by:
   on every candidate set, including tie-breaking order.
 
 The conformance vectors live in `tests/` directories of both legs.
-
-## § 8 — Out of scope
-
-- Float-input SimHash (`FloatSimHash`) — lives in SubstrateML.
-- Audit-log fold — lives in SubstrateML.
-- Verb mechanics — live in SubstrateLib.
-- Row-state automaton — lives in SubstrateLib.
-- AuditGate write gate — lives in SubstrateLib (it *calls* this
-  package's `BitField` and `SHA256` but is itself orchestration, not
-  hot-path).
-- Storage I/O — lives in PersistenceKit.
-
-## § 9 — Open questions
-
-- **Rust NEON support.** Today Rust uses portable SIMD only; ARM-
-  specific NEON is Swift-only. Whether to add a Rust NEON kernel via
-  `std::arch::aarch64` intrinsics is deferred until a Rust-host
-  performance pinch point appears.
-- **Metal kernel test budget.** Metal kernel conformance is gated in
-  CI but the gate is slower than other backends. Whether to
-  optionally tier the gate (full pass nightly, smoke pass per-commit)
-  is open.
