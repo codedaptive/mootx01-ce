@@ -99,6 +99,24 @@ public extension GeniusLocusKit {
         return rows
     }
 
+    // MARK: - recallTunnels
+
+    /// Recall the tunnels originating in `wing` from the estate addressed
+    /// by `handle` — the read over the estate's association graph.
+    ///
+    /// Resolves the handle through `estate(for:)` and returns the
+    /// non-tombstoned drawer-to-drawer tunnels whose source is `wing`,
+    /// in stable filed-at order. These edges are the graph the structural
+    /// reasoning-lens recipes (keystones, constellation, free association,
+    /// tunnel successor) read; the recipe layer never reaches the substrate
+    /// directly. Read-only; a wing with no tunnels reads empty.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func recallTunnels(_ handle: EstateHandle, wing: String) async throws -> [Tunnel] {
+        let estate = try estate(for: handle)
+        return try await estate.tunnelsFromWing(wing)
+    }
+
     // MARK: - mutate
 
     /// Apply a named mutation to a drawer in the estate addressed by
