@@ -1,6 +1,7 @@
 // BM25Tests.swift
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 @testable import CorpusKit
 import CorpusKitProviders
@@ -18,7 +19,8 @@ import CorpusKitProviders
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class BM25Tests: XCTestCase {
+@Suite("BM25Index")
+struct BM25Tests {
 
     func makeIndex() -> BM25Index {
         BM25Index(tokenizer: DeterministicTokenizer())
@@ -35,41 +37,41 @@ final class BM25Tests: XCTestCase {
         )
     }
 
-    func testEmptyIndexReturnsEmpty() async {
+    @Test func emptyIndexReturnsEmpty() async {
         let idx = makeIndex()
         let results = await idx.search("anything", limit: 10)
-        XCTAssertTrue(results.isEmpty)
+        #expect(results.isEmpty)
     }
 
-    func testFindsTermInIndexedChunk() async {
+    @Test func findsTermInIndexedChunk() async {
         let idx = makeIndex()
         let c1 = makeChunk("the quick brown fox jumps over the lazy dog")
         let c2 = makeChunk("a completely unrelated sentence about cats")
         await idx.index([c1, c2])
         let hits = await idx.search("fox", limit: 5)
-        XCTAssertFalse(hits.isEmpty)
-        XCTAssertEqual(hits.first?.0, c1.id, "fox-bearing chunk should rank first")
+        #expect(!hits.isEmpty)
+        #expect(hits.first?.0 == c1.id, "fox-bearing chunk should rank first")
     }
 
-    func testHigherTFRanksHigher() async {
+    @Test func higherTFRanksHigher() async {
         let idx = makeIndex()
         let c1 = makeChunk("cat cat cat cat cat")
         let c2 = makeChunk("cat and one other thing")
         await idx.index([c1, c2])
         let hits = await idx.search("cat", limit: 5)
-        XCTAssertEqual(hits.first?.0, c1.id, "higher TF should rank first")
+        #expect(hits.first?.0 == c1.id, "higher TF should rank first")
     }
 
-    func testRemoveCleansPostings() async {
+    @Test func removeCleansPostings() async {
         let idx = makeIndex()
         let c = makeChunk("ephemeral document content")
         await idx.index([c])
         let count1 = await idx.documentCount()
-        XCTAssertEqual(count1, 1)
+        #expect(count1 == 1)
         await idx.remove(c.id)
         let count2 = await idx.documentCount()
-        XCTAssertEqual(count2, 0)
+        #expect(count2 == 0)
         let hits = await idx.search("ephemeral", limit: 5)
-        XCTAssertTrue(hits.isEmpty)
+        #expect(hits.isEmpty)
     }
 }

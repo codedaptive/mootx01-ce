@@ -1,6 +1,7 @@
 // BundleStoreTests.swift
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import CorpusKit
 import PersistenceKit
@@ -19,7 +20,8 @@ import PersistenceKitInMemory
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class BundleStoreTests: XCTestCase {
+@Suite("BundleStore")
+struct BundleStoreTests {
 
     func makeStore() async throws -> BundleStore {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
@@ -40,33 +42,33 @@ final class BundleStoreTests: XCTestCase {
         )
     }
 
-    func testInsertAndGet() async throws {
+    @Test func insertAndGet() async throws {
         let store = try await makeStore()
         let chunk = makeChunk("hello world")
         try await store.insert([chunk])
         let fetched = try await store.get(id: chunk.id)
-        XCTAssertEqual(fetched?.text, "hello world")
-        XCTAssertEqual(fetched?.sourceID, "doc-A")
+        #expect(fetched?.text == "hello world")
+        #expect(fetched?.sourceID == "doc-A")
     }
 
-    func testGetMany() async throws {
+    @Test func getMany() async throws {
         let store = try await makeStore()
         let chunks = (0..<5).map { makeChunk("chunk \($0)") }
         try await store.insert(chunks)
         let ids = chunks.map { $0.id }
         let fetched = try await store.getMany(ids: ids)
-        XCTAssertEqual(fetched.count, 5)
+        #expect(fetched.count == 5)
     }
 
-    func testChunksForSource() async throws {
+    @Test func chunksForSource() async throws {
         let store = try await makeStore()
         let chunks = (0..<3).map { makeChunk("chunk \($0)") }
         try await store.insert(chunks)
         let forDoc = try await store.chunksForSource("doc-A")
-        XCTAssertEqual(forDoc.count, 3)
+        #expect(forDoc.count == 3)
     }
 
-    func testMetadataRoundtrip() async throws {
+    @Test func metadataRoundtrip() async throws {
         let store = try await makeStore()
         let c = Chunk(
             sourceID: "doc-B",
@@ -78,11 +80,11 @@ final class BundleStoreTests: XCTestCase {
         )
         try await store.insert([c])
         let fetched = try await store.get(id: c.id)
-        XCTAssertEqual(fetched?.metadata["author"], "bob")
-        XCTAssertEqual(fetched?.metadata["topic"], "test")
+        #expect(fetched?.metadata["author"] == "bob")
+        #expect(fetched?.metadata["topic"] == "test")
     }
 
-    func testReinsertSameIDIsIdempotentNoOp() async throws {
+    @Test func reinsertSameIDIsIdempotentNoOp() async throws {
         // The chunks table is append-only and content-addressed by id.
         // Re-inserting a chunk with an id already present is a no-op,
         // not an error: the first write wins and the duplicate is
@@ -105,48 +107,49 @@ final class BundleStoreTests: XCTestCase {
         try await store.insert([dup])
 
         let fetched = try await store.get(id: c.id)
-        XCTAssertEqual(fetched?.text, "original text")
+        #expect(fetched?.text == "original text")
         let n = try await store.count()
-        XCTAssertEqual(n, 1)
+        #expect(n == 1)
     }
 
-    func testCount() async throws {
+    @Test func count() async throws {
         let store = try await makeStore()
         let chunks = (0..<7).map { makeChunk("c\($0)") }
         try await store.insert(chunks)
         let n = try await store.count()
-        XCTAssertEqual(n, 7)
+        #expect(n == 7)
     }
+
     // MARK: - Content-addressed id (Step 3.5 follow-up)
 
-    func testDeriveIDMatchesCrossLanguageGroundTruth() {
+    @Test func deriveIDMatchesCrossLanguageGroundTruth() {
         // These expected values are the RFC 4122 v5 UUIDs computed by
         // the reference (Python uuid5 / Rust Uuid::new_v5) over the same
         // namespace and name encoding. Asserting the literal values here
         // and in the Rust parity test guarantees byte-identity across
         // the Swift and Rust ports by construction.
-        XCTAssertEqual(
-            Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "hello world").uuidString.lowercased(),
-            "e12ecb90-0ba9-588d-8d83-c0266f6aa2d5")
-        XCTAssertEqual(
-            Chunk.deriveID(sourceID: "doc-A", startOffset: 800, text: "second").uuidString.lowercased(),
-            "6f3a935a-cd10-5083-b143-f330be4d81da")
-        XCTAssertEqual(
-            Chunk.deriveID(sourceID: "src-E", startOffset: 0, text: "original").uuidString.lowercased(),
-            "dc121d31-5fec-5404-9208-01a11d044191")
+        #expect(
+            Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "hello world").uuidString.lowercased()
+            == "e12ecb90-0ba9-588d-8d83-c0266f6aa2d5")
+        #expect(
+            Chunk.deriveID(sourceID: "doc-A", startOffset: 800, text: "second").uuidString.lowercased()
+            == "6f3a935a-cd10-5083-b143-f330be4d81da")
+        #expect(
+            Chunk.deriveID(sourceID: "src-E", startOffset: 0, text: "original").uuidString.lowercased()
+            == "dc121d31-5fec-5404-9208-01a11d044191")
     }
 
-    func testDeriveIDIsContentSensitive() {
+    @Test func deriveIDIsContentSensitive() {
         // Different offset or different text yields a different id.
-        XCTAssertNotEqual(
-            Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "x"),
-            Chunk.deriveID(sourceID: "doc-A", startOffset: 1, text: "x"))
-        XCTAssertNotEqual(
-            Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "x"),
-            Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "y"))
+        #expect(
+            Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "x")
+            != Chunk.deriveID(sourceID: "doc-A", startOffset: 1, text: "x"))
+        #expect(
+            Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "x")
+            != Chunk.deriveID(sourceID: "doc-A", startOffset: 0, text: "y"))
     }
 
-    func testReingestionIsIdempotent() async throws {
+    @Test func reingestionIsIdempotent() async throws {
         // Re-chunking the same source text and re-inserting must not
         // grow the store: content-addressed ids make the second pass a
         // batch of duplicate-key no-ops. This is the guarantee the
@@ -162,11 +165,10 @@ final class BundleStoreTests: XCTestCase {
         let again = Chunk(
             sourceID: "doc-Z", startOffset: 0, length: 5, text: "hello",
             hlc: HLC(physicalTime: 999, logicalCount: 0, nodeID: 2))
-        XCTAssertEqual(c.id, again.id)
+        #expect(c.id == again.id)
         try await store.insert([again])
 
         let n = try await store.count()
-        XCTAssertEqual(n, 1)
+        #expect(n == 1)
     }
-
 }
