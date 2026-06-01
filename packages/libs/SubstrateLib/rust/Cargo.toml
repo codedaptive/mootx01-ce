@@ -1,15 +1,15 @@
 [package]
 name = "substrate-lib"
-version = "0.36.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Canonical scalar reference implementation of the GeniusLocus substrate primitives from GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36."
+description = "Canonical scalar reference implementation of the GeniusLocus substrate primitives from GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0."
 license = "MIT OR Apache-2.0"
 publish = false
 
 [lib]
 name = "substrate_lib"
-path = "lib.rs"
+path = "src/lib.rs"
 
 [features]
 # `simd-nightly` enables the portable-SIMD kernel backend via

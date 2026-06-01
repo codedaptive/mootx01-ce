@@ -21,34 +21,25 @@
 #![allow(clippy::too_many_arguments)]
 
 // === §4 Runtime layout ===
-#[path = "glref-rust-working_set.rs"]
 pub mod working_set;
-#[path = "glref-rust-sqlite_tail.rs"]
 pub mod sqlite_tail;
 
 // === §8 Algorithms — the audit write-gate (consumes substrate-kernel
 // bit_field/sha256 and substrate-types hlc) ===
-#[path = "glref-rust-audit_gate.rs"]
 pub mod audit_gate;
 
 // === §9 Row-state automaton + §10 Verbs (the orchestration surface) ===
-#[path = "glref-rust-row_state.rs"]
 pub mod row_state;
-#[path = "glref-rust-verbs.rs"]
 pub mod verbs;
 
 // === §11 CognitionKit ===
-#[path = "glref-rust-cognition_kit.rs"]
 pub mod cognition_kit;
 
 // === §13 Cognition Bundle ===
-#[path = "glref-rust-cognition_bundle.rs"]
 pub mod cognition_bundle;
 
 // === §14 ActuatorKit ===
-#[path = "glref-rust-actuator.rs"]
 pub mod actuator;
 
 // === §15 Dreaming daemon ===
-#[path = "glref-rust-dreaming.rs"]
 pub mod dreaming;
