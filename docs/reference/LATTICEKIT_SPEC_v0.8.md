@@ -143,21 +143,6 @@ shipped `LatticeCanonV1.json` and every entry's code is well-formed
 **C-4 (deterministic assembly):** two `Assembler` runs over identical
 inputs produce byte-identical canon output (I-4).
 
-> **Rust port:** pending. When it lands, the canon-lookup and code-grammar
+> **Rust version:** pending. When it lands, the canon-lookup and code-grammar
 > surface (Tier 1 of the INTERFACE) is the conformance target; the
-> editorial tooling stays Swift-only.
-
-## § 8 — Out of scope
-
-- Term resolution (text → code) → `EIDETICLIB_SPEC_v0.8.md`.
-- Storing classified content → `LOCUSKIT_SPEC_v0.8.md`.
-- Federation / ratification → `MDCC_ANNEX_SPEC_v0.1.md`.
-
-## § 9 — Open questions
-
-- The Rust port is not yet built; the canon format is the cross-port
-  contract when it lands.
-
----
-
-*End of LatticeKit Specification v0.8.*
+> editorial tooling is present in the Swift version and not yet in the Rust version.
