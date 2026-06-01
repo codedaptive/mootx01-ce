@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -33,7 +33,8 @@ import enum GeniusLocusKit.ProposalKind
 /// 4. The four emission classes are each accepted and routed per the
 ///    contract.
 /// 5. Determinism: same inputs in, same outputs out.
-final class StandingSignalSchedulerTests: XCTestCase {
+@Suite("GLK-04 standing-signals scheduler")
+struct StandingSignalSchedulerTests {
 
     // MARK: - Fixture
 
@@ -58,7 +59,8 @@ final class StandingSignalSchedulerTests: XCTestCase {
 
     // MARK: - 1. Registration
 
-    func testRegisteredSignalAppearsInStatus() async throws {
+    @Test
+    func registeredSignalAppearsInStatus() async throws {
         let (kit, handle) = try await openOneEstate()
         let spec = SignalSpec(
             name: "vector-similarity-test",
@@ -70,18 +72,19 @@ final class StandingSignalSchedulerTests: XCTestCase {
         let id = try await kit.registerStandingSignal(spec, in: handle, now: t0)
         let reports = try await kit.signalStatus(in: handle)
 
-        XCTAssertEqual(reports.count, 1)
-        XCTAssertEqual(reports.first?.signalID, id)
-        XCTAssertEqual(reports.first?.name, "vector-similarity-test")
-        XCTAssertEqual(reports.first?.triggerTag, "interval")
-        XCTAssertEqual(reports.first?.state, .idle)
-        XCTAssertEqual(reports.first?.emissionCount, 0)
-        XCTAssertEqual(reports.first?.concurrencyPolicy, .single)
+        #expect(reports.count == 1)
+        #expect(reports.first?.signalID == id)
+        #expect(reports.first?.name == "vector-similarity-test")
+        #expect(reports.first?.triggerTag == "interval")
+        #expect(reports.first?.state == .idle)
+        #expect(reports.first?.emissionCount == 0)
+        #expect(reports.first?.concurrencyPolicy == .single)
     }
 
     // MARK: - 2. Serial dispatch
 
-    func testTwoDueSignalsDispatchSeriallyInOneLane() async throws {
+    @Test
+    func twoDueSignalsDispatchSeriallyInOneLane() async throws {
         let (kit, handle) = try await openOneEstate()
         let spec1 = SignalSpec(
             name: "alpha",
@@ -122,24 +125,25 @@ final class StandingSignalSchedulerTests: XCTestCase {
         // the expected three jobs).
         let scheduler = try await kit.ensureScheduler(for: handle)
         let history = await scheduler.drainHistory()
-        XCTAssertEqual(history.count, 3, "single serial lane drains every enqueued job exactly once")
+        #expect(history.count == 3, "single serial lane drains every enqueued job exactly once")
         let alphaCount = history.filter { $0.signalID == alpha }.count
         let betaCount = history.filter { $0.signalID == beta }.count
-        XCTAssertEqual(alphaCount, 2)
-        XCTAssertEqual(betaCount, 1)
+        #expect(alphaCount == 2)
+        #expect(betaCount == 1)
 
         let reports = try await kit.signalStatus(in: handle)
         let alphaReport = reports.first(where: { $0.signalID == alpha })!
         let betaReport = reports.first(where: { $0.signalID == beta })!
-        XCTAssertEqual(alphaReport.emissionCount, 2)
-        XCTAssertEqual(betaReport.emissionCount, 1)
-        XCTAssertEqual(alphaReport.state, .lastRan)
-        XCTAssertEqual(betaReport.state, .lastRan)
+        #expect(alphaReport.emissionCount == 2)
+        #expect(betaReport.emissionCount == 1)
+        #expect(alphaReport.state == .lastRan)
+        #expect(betaReport.state == .lastRan)
     }
 
     // MARK: - 3. Status and subscribe
 
-    func testSubscribeDeliversEmissions() async throws {
+    @Test
+    func subscribeDeliversEmissions() async throws {
         let (kit, handle) = try await openOneEstate()
         let spec = SignalSpec(
             name: "diag",
@@ -170,17 +174,18 @@ final class StandingSignalSchedulerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
 
         let collected = await collector.values
-        XCTAssertEqual(collected, ["tick"])
+        #expect(collected == ["tick"])
 
         let reports = try await kit.signalStatus(in: handle)
-        XCTAssertEqual(reports.first?.emissionCount, 1)
-        XCTAssertEqual(reports.first?.recentDiagnostics.count, 1)
-        XCTAssertEqual(reports.first?.recentDiagnostics.first?.title, "tick")
+        #expect(reports.first?.emissionCount == 1)
+        #expect(reports.first?.recentDiagnostics.count == 1)
+        #expect(reports.first?.recentDiagnostics.first?.title == "tick")
     }
 
     // MARK: - 4. Four emission classes
 
-    func testProposeEmissionIsRoutedToProposeVerb() async throws {
+    @Test
+    func proposeEmissionIsRoutedToProposeVerb() async throws {
         let (kit, handle) = try await openOneEstate()
         let spec = SignalSpec(
             name: "propose-emitter",
@@ -193,7 +198,7 @@ final class StandingSignalSchedulerTests: XCTestCase {
         try await kit.signalTick(in: handle, now: t0.addingTimeInterval(5))
         let reports = try await kit.signalStatus(in: handle)
         let report = reports.first(where: { $0.signalID == id })!
-        XCTAssertEqual(report.recentOutcomes.count, 1)
+        #expect(report.recentOutcomes.count == 1)
         // GLK-02's propose verb today raises notSupportedByEstate;
         // the scheduler records that as `routedButVerbStubbed`. When
         // the Brain layer's verb body lands, this transitions to
@@ -201,13 +206,14 @@ final class StandingSignalSchedulerTests: XCTestCase {
         // they confirm the scheduler reached the verb boundary.
         switch report.recentOutcomes[0] {
         case .routed(let verb), .routedButVerbStubbed(let verb):
-            XCTAssertEqual(verb, "propose")
+            #expect(verb == "propose")
         default:
-            XCTFail("expected routed or routedButVerbStubbed, got \(report.recentOutcomes[0])")
+            Issue.record("expected routed or routedButVerbStubbed, got \(report.recentOutcomes[0])")
         }
     }
 
-    func testAssociateEmissionIsRoutedToAssociateVerb() async throws {
+    @Test
+    func associateEmissionIsRoutedToAssociateVerb() async throws {
         let (kit, handle) = try await openOneEstate()
         let spec = SignalSpec(
             name: "associate-emitter",
@@ -218,16 +224,17 @@ final class StandingSignalSchedulerTests: XCTestCase {
         let id = try await kit.registerStandingSignal(spec, in: handle, now: t0)
         try await kit.signalTick(in: handle, now: t0.addingTimeInterval(5))
         let report = try await kit.signalStatus(in: handle).first(where: { $0.signalID == id })!
-        XCTAssertEqual(report.recentOutcomes.count, 1)
+        #expect(report.recentOutcomes.count == 1)
         switch report.recentOutcomes[0] {
         case .routed(let verb), .routedButVerbStubbed(let verb):
-            XCTAssertEqual(verb, "associate")
+            #expect(verb == "associate")
         default:
-            XCTFail("expected routed or routedButVerbStubbed, got \(report.recentOutcomes[0])")
+            Issue.record("expected routed or routedButVerbStubbed, got \(report.recentOutcomes[0])")
         }
     }
 
-    func testMutateCandidateRoutesThroughPropose() async throws {
+    @Test
+    func mutateCandidateRoutesThroughPropose() async throws {
         let (kit, handle) = try await openOneEstate()
         let spec = SignalSpec(
             name: "mutate-candidate-emitter",
@@ -243,13 +250,14 @@ final class StandingSignalSchedulerTests: XCTestCase {
         // not mutate.
         switch report.recentOutcomes[0] {
         case .routed(let verb), .routedButVerbStubbed(let verb):
-            XCTAssertEqual(verb, "propose")
+            #expect(verb == "propose")
         default:
-            XCTFail("expected propose routing, got \(report.recentOutcomes[0])")
+            Issue.record("expected propose routing, got \(report.recentOutcomes[0])")
         }
     }
 
-    func testDiagnosticEmissionIsSurfacedViaSignalStatus() async throws {
+    @Test
+    func diagnosticEmissionIsSurfacedViaSignalStatus() async throws {
         let (kit, handle) = try await openOneEstate()
         let spec = SignalSpec(
             name: "diag-emitter",
@@ -265,14 +273,15 @@ final class StandingSignalSchedulerTests: XCTestCase {
         let report = try await kit.signalStatus(in: handle).first(where: { $0.signalID == id })!
         // Architecture spec §11.1: diagnostic is "not a verb call;
         // surfaced via `signal_status()`."
-        XCTAssertEqual(report.recentOutcomes, [.diagnosticRecorded])
-        XCTAssertEqual(report.recentDiagnostics.count, 1)
-        XCTAssertEqual(report.recentDiagnostics.first?.title, "first")
+        #expect(report.recentOutcomes == [.diagnosticRecorded])
+        #expect(report.recentDiagnostics.count == 1)
+        #expect(report.recentDiagnostics.first?.title == "first")
     }
 
     // MARK: - 5. Event trigger via requestFire
 
-    func testEventTriggerOnlyFiresOnRequest() async throws {
+    @Test
+    func eventTriggerOnlyFiresOnRequest() async throws {
         let (kit, handle) = try await openOneEstate()
         let spec = SignalSpec(
             name: "event-trigger",
@@ -289,17 +298,18 @@ final class StandingSignalSchedulerTests: XCTestCase {
         // would defeat the four-class trigger contract.
         try await kit.signalTick(in: handle, now: t0.addingTimeInterval(99))
         var report = try await kit.signalStatus(in: handle).first(where: { $0.signalID == id })!
-        XCTAssertEqual(report.emissionCount, 0)
+        #expect(report.emissionCount == 0)
 
         // requestFire reaches the same enqueue/drain pipeline.
         try await kit.signalRequestFire(id, in: handle, now: t0.addingTimeInterval(100))
         report = try await kit.signalStatus(in: handle).first(where: { $0.signalID == id })!
-        XCTAssertEqual(report.emissionCount, 1)
+        #expect(report.emissionCount == 1)
     }
 
     // MARK: - 6. Unregister and unknown-signal errors
 
-    func testSubscribeToUnknownSignalThrows() async throws {
+    @Test
+    func subscribeToUnknownSignalThrows() async throws {
         let (kit, handle) = try await openOneEstate()
         // Mint a scheduler against the handle so signalSubscribe gets
         // past the schedulerNotStarted guard and reaches the
@@ -310,19 +320,20 @@ final class StandingSignalSchedulerTests: XCTestCase {
         let bogus = SignalID(rawValue: "00000000-0000-0000-0000-000000000000")
         do {
             _ = try await kit.signalSubscribe(bogus, in: handle) { _ in }
-            XCTFail("expected schedulerSignalNotRegistered")
+            Issue.record("expected schedulerSignalNotRegistered")
         } catch GeniusLocusKitError.schedulerSignalNotRegistered(let id) {
-            XCTAssertEqual(id, bogus)
+            #expect(id == bogus)
         }
     }
 
-    func testStatusBeforeAnyRegistrationThrowsSchedulerNotStarted() async throws {
+    @Test
+    func statusBeforeAnyRegistrationThrowsSchedulerNotStarted() async throws {
         let (kit, handle) = try await openOneEstate()
         do {
             _ = try await kit.signalStatus(in: handle)
-            XCTFail("expected schedulerNotStarted")
+            Issue.record("expected schedulerNotStarted")
         } catch GeniusLocusKitError.schedulerNotStarted(let uuid) {
-            XCTAssertEqual(uuid, handle.estateUUID)
+            #expect(uuid == handle.estateUUID)
         }
     }
 
@@ -331,7 +342,8 @@ final class StandingSignalSchedulerTests: XCTestCase {
     /// Every named ProposalKind case round-trips through rawValue →
     /// init(rawValue:) back to the same case. The `other` escape hatch
     /// also round-trips so unknown labels survive a persistence cycle.
-    func testProposalKindRawValueRoundTrip() {
+    @Test
+    func proposalKindRawValueRoundTrip() {
         let cases: [(ProposalKind, String)] = [
             (.byReferenceDrift,   "by_reference_drift"),
             (.tournamentUpdate,   "tournament_update"),
@@ -343,22 +355,23 @@ final class StandingSignalSchedulerTests: XCTestCase {
             (.other("custom_label"), "custom_label"),
         ]
         for (kind, expectedRaw) in cases {
-            XCTAssertEqual(kind.rawValue, expectedRaw,
+            #expect(kind.rawValue == expectedRaw,
                 "rawValue for \(kind) should be \(expectedRaw)")
             let decoded = ProposalKind(rawValue: expectedRaw)
-            XCTAssertEqual(decoded, kind,
+            #expect(decoded == kind,
                 "round-trip failed for \(expectedRaw)")
         }
     }
 
     /// Unknown labels map to `.other(rawValue)` and preserve their
     /// content verbatim through the round-trip.
-    func testProposalKindUnknownLabelMapsToOther() {
+    @Test
+    func proposalKindUnknownLabelMapsToOther() {
         let unknown = ProposalKind(rawValue: "future_label")
         if case .other(let s) = unknown {
-            XCTAssertEqual(s, "future_label")
+            #expect(s == "future_label")
         } else {
-            XCTFail("expected .other for unknown label, got \(unknown)")
+            Issue.record("expected .other for unknown label, got \(unknown)")
         }
     }
 
@@ -366,7 +379,8 @@ final class StandingSignalSchedulerTests: XCTestCase {
     /// value. Verifies the single-value string container shape Swift
     /// uses matches what the Rust port's raw_value()/from_raw() contract
     /// produces.
-    func testProposalKindCodableRoundTrip() throws {
+    @Test
+    func proposalKindCodableRoundTrip() throws {
         let kinds: [ProposalKind] = [
             .byReferenceDrift, .tournamentUpdate, .miningPattern,
             .disciplineViolation, .mutateCandidate, .amend, .testPropose,
@@ -377,7 +391,7 @@ final class StandingSignalSchedulerTests: XCTestCase {
         for kind in kinds {
             let data = try encoder.encode(kind)
             let decoded = try decoder.decode(ProposalKind.self, from: data)
-            XCTAssertEqual(decoded, kind, "Codable round-trip failed for \(kind)")
+            #expect(decoded == kind, "Codable round-trip failed for \(kind)")
         }
     }
 }

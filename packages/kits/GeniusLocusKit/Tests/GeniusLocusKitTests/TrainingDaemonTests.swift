@@ -4,7 +4,7 @@
 // pipeline, and the training daemon registered against the GLK-04
 // scheduler.
 
-import XCTest
+import Testing
 import SubstrateTypes
 import Foundation
 import LocusKit
@@ -25,7 +25,8 @@ import PersistenceKitInMemory
 // ─────────────────────────────────────────────────────────────────
 @testable import GeniusLocusKit
 
-final class TrainingDaemonTests: XCTestCase {
+@Suite("Training daemon")
+struct TrainingDaemonTests {
 
     // MARK: - Fixtures
 
@@ -91,65 +92,71 @@ final class TrainingDaemonTests: XCTestCase {
 
     // MARK: - Gate
 
-    func testGateDormantBelowThreshold() {
+    @Test
+    func gateDormantBelowThreshold() {
         let gate = TrainingThresholdGate(transitionThreshold: 10)
         let log = makeCaptureLog(count: 4)
         let decision = gate.decide(log: log)
-        XCTAssertFalse(decision.isActive)
-        XCTAssertEqual(decision.transitionCount, 4)
-        XCTAssertEqual(decision.threshold, 10)
+        #expect(!decision.isActive)
+        #expect(decision.transitionCount == 4)
+        #expect(decision.threshold == 10)
         if case .dormant = decision {} else {
-            XCTFail("expected dormant, got \(decision)")
+            Issue.record("expected dormant, got \(decision)")
         }
     }
 
-    func testGateActiveAtThreshold() {
+    @Test
+    func gateActiveAtThreshold() {
         let gate = TrainingThresholdGate(transitionThreshold: 5)
         let log = makeCaptureLog(count: 5)
         let decision = gate.decide(log: log)
-        XCTAssertTrue(decision.isActive)
-        XCTAssertEqual(decision.transitionCount, 5)
-        XCTAssertEqual(decision.threshold, 5)
+        #expect(decision.isActive)
+        #expect(decision.transitionCount == 5)
+        #expect(decision.threshold == 5)
     }
 
-    func testGateActiveAboveThreshold() {
+    @Test
+    func gateActiveAboveThreshold() {
         let gate = TrainingThresholdGate(transitionThreshold: 3)
         let log = makeCaptureLog(count: 12)
-        XCTAssertTrue(gate.decide(log: log).isActive)
+        #expect(gate.decide(log: log).isActive)
     }
 
-    func testGateIgnoresReadOnlyVerbs() {
+    @Test
+    func gateIgnoresReadOnlyVerbs() {
         let gate = TrainingThresholdGate(transitionThreshold: 5)
         let (log, transitions) = makeMixedLog()
-        XCTAssertEqual(
-            TrainingThresholdGate.transitionCount(in: log),
-            transitions,
+        #expect(
+            TrainingThresholdGate.transitionCount(in: log) == transitions,
             "only state-changing verbs feed the transition count")
-        XCTAssertEqual(gate.decide(log: log).transitionCount, 5)
-        XCTAssertTrue(gate.decide(log: log).isActive,
-                      "5 state-changing verbs meets threshold 5")
+        #expect(gate.decide(log: log).transitionCount == 5)
+        #expect(gate.decide(log: log).isActive,
+                "5 state-changing verbs meets threshold 5")
     }
 
-    func testGateClampsNegativeThresholdToZero() {
+    @Test
+    func gateClampsNegativeThresholdToZero() {
         let gate = TrainingThresholdGate(transitionThreshold: -50)
-        XCTAssertEqual(gate.transitionThreshold, 0)
+        #expect(gate.transitionThreshold == 0)
         // Zero threshold always admits, even on an empty log.
-        XCTAssertTrue(gate.decide(log: UnifiedAuditLog()).isActive)
+        #expect(gate.decide(log: UnifiedAuditLog()).isActive)
     }
 
-    func testProvisionalDefaultMatchesDecisionRecord() {
+    @Test
+    func provisionalDefaultMatchesDecisionRecord() {
         // DECISION_TRAINING_DAEMON_THRESHOLD_2026-05-21 records the
         // provisional default at 500 transitions. The gate type
         // exposes that constant so callers can opt into the recommended
         // floor without hard-coding the number themselves.
-        XCTAssertEqual(TrainingThresholdGate.provisionalDefault, 500)
+        #expect(TrainingThresholdGate.provisionalDefault == 500)
         let gate = TrainingThresholdGate()
-        XCTAssertEqual(gate.transitionThreshold, 500)
+        #expect(gate.transitionThreshold == 500)
     }
 
     // MARK: - Enrichment pipeline
 
-    func testEnrichmentUpdatesMatricesFromAuditLog() {
+    @Test
+    func enrichmentUpdatesMatricesFromAuditLog() {
         let log = makeCaptureLog(count: 8)
         var tier = MatrixTier()
         var calibration = MatrixCalibrationRegistry()
@@ -157,16 +164,17 @@ final class TrainingDaemonTests: XCTestCase {
         let result = pipeline.run(log: log,
                                   tier: &tier,
                                   calibration: &calibration)
-        XCTAssertEqual(result.transitionsConsidered, 8)
-        XCTAssertGreaterThan(result.fCellsTouched, 0,
-                             "captures should land on the F matrix")
-        XCTAssertEqual(tier.liveRowCount, 8,
-                       "every capture row contributes to liveRowCount")
-        XCTAssertFalse(tier.fieldPresence.isEmpty,
-                       "field presence should be non-empty after enrichment")
+        #expect(result.transitionsConsidered == 8)
+        #expect(result.fCellsTouched > 0,
+                "captures should land on the F matrix")
+        #expect(tier.liveRowCount == 8,
+                "every capture row contributes to liveRowCount")
+        #expect(!tier.fieldPresence.isEmpty,
+                "field presence should be non-empty after enrichment")
     }
 
-    func testEnrichmentRespectsAlreadyProcessedWatermark() {
+    @Test
+    func enrichmentRespectsAlreadyProcessedWatermark() {
         // First pass: enrich the first 4 captures. Second pass over
         // the full 8-entry log should add the new 4 only.
         let initialLog = makeCaptureLog(count: 4)
@@ -176,7 +184,7 @@ final class TrainingDaemonTests: XCTestCase {
         let first = pipeline.run(log: initialLog,
                                  tier: &tier,
                                  calibration: &calibration)
-        XCTAssertEqual(first.transitionsConsidered, 4)
+        #expect(first.transitionsConsidered == 4)
         let priorRowCount = tier.liveRowCount
 
         let fullLog = makeCaptureLog(count: 8)
@@ -184,14 +192,15 @@ final class TrainingDaemonTests: XCTestCase {
                                   tier: &tier,
                                   calibration: &calibration,
                                   highWaterMark: first.highWaterMark)
-        XCTAssertEqual(second.transitionsConsidered, 4,
-                       "second pass should only see the tail entries")
-        XCTAssertEqual(tier.liveRowCount, priorRowCount + 4)
+        #expect(second.transitionsConsidered == 4,
+                "second pass should only see the tail entries")
+        #expect(tier.liveRowCount == priorRowCount + 4)
     }
 
     // MARK: - Daemon
 
-    func testDaemonDormantBelowThresholdProducesNoMatrixWork() async {
+    @Test
+    func daemonDormantBelowThresholdProducesNoMatrixWork() async {
         let log = makeCaptureLog(count: 3)
         var tier = MatrixTier()
         var calibration = MatrixCalibrationRegistry()
@@ -201,14 +210,15 @@ final class TrainingDaemonTests: XCTestCase {
             log: log,
             tier: &tier,
             calibration: &calibration)
-        XCTAssertFalse(tick.decision.isActive)
-        XCTAssertEqual(tick.passResult.transitionsConsidered, 0,
-                       "dormant daemon must do no enrichment work")
-        XCTAssertTrue(tier.fieldPresence.isEmpty)
-        XCTAssertEqual(tier.liveRowCount, 0)
+        #expect(!tick.decision.isActive)
+        #expect(tick.passResult.transitionsConsidered == 0,
+                "dormant daemon must do no enrichment work")
+        #expect(tier.fieldPresence.isEmpty)
+        #expect(tier.liveRowCount == 0)
     }
 
-    func testDaemonActiveAtThresholdFiresPipeline() async {
+    @Test
+    func daemonActiveAtThresholdFiresPipeline() async {
         let log = makeCaptureLog(count: 12)
         var tier = MatrixTier()
         var calibration = MatrixCalibrationRegistry()
@@ -218,12 +228,13 @@ final class TrainingDaemonTests: XCTestCase {
             log: log,
             tier: &tier,
             calibration: &calibration)
-        XCTAssertTrue(tick.decision.isActive)
-        XCTAssertEqual(tick.passResult.transitionsConsidered, 12)
-        XCTAssertEqual(tier.liveRowCount, 12)
+        #expect(tick.decision.isActive)
+        #expect(tick.passResult.transitionsConsidered == 12)
+        #expect(tier.liveRowCount == 12)
     }
 
-    func testDaemonSchedulerRegistrationFiresOnlyWhenAdmitted() async throws {
+    @Test
+    func daemonSchedulerRegistrationFiresOnlyWhenAdmitted() async throws {
         // Register the daemon as a standing signal with a short
         // interval, tick over time, and observe that a below-threshold
         // log does no enrichment while an above-threshold log does.
@@ -270,8 +281,8 @@ final class TrainingDaemonTests: XCTestCase {
         try await kit.signalTick(
             in: handle,
             now: Date(timeIntervalSince1970: 60))
-        XCTAssertEqual(tierBox.value.liveRowCount, 0,
-                       "below-threshold daemon must not enrich")
+        #expect(tierBox.value.liveRowCount == 0,
+                "below-threshold daemon must not enrich")
 
         // Push the log over the threshold and tick again — the daemon
         // crosses to active and the pipeline runs.
@@ -279,17 +290,17 @@ final class TrainingDaemonTests: XCTestCase {
         try await kit.signalTick(
             in: handle,
             now: Date(timeIntervalSince1970: 120))
-        XCTAssertEqual(tierBox.value.liveRowCount, 14,
-                       "above-threshold daemon must enrich on the next tick")
+        #expect(tierBox.value.liveRowCount == 14,
+                "above-threshold daemon must enrich on the next tick")
 
         // The scheduler-registered daemon produced two diagnostic
         // emissions across the two ticks (one per tick); both surface
         // on the signal's report.
         let status = try await kit.signalStatus(in: handle)
         let report = status.first(where: { $0.signalID == signalID })
-        XCTAssertNotNil(report)
-        XCTAssertEqual(report?.emissionCount, 2,
-                       "daemon emits one diagnostic per tick regardless of gate state")
+        #expect(report != nil)
+        #expect(report?.emissionCount == 2,
+                "daemon emits one diagnostic per tick regardless of gate state")
     }
 }
 
