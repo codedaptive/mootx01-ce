@@ -27,40 +27,12 @@ public enum EideticLib {
     // process). EideticLib holds no classification data of its own —
     // lookup delegates to FDC.encodeAnchor.
 
-    /// The bundled manifest for the MDCC default scheme. Derived from
-    /// LatticeLib's canon version rather than loaded from a JSON stub:
-    /// the manifest is scheme metadata, and the real canon lives in
-    /// LatticeLib.
-    private static let derivedLatticeManifest = LatticeSchemeManifest(
-        canonVersion: LatticeLib.canonVersion,
-        dataVersion: version,
-        // MDCC is original work; the scheme itself is unlicensed. The
-        // bundled leaves resolve against the CC0 MDCC canon. Foreign-
-        // licensed leaves are not part of this default scheme.
-        licenseNote: "MDCC scheme: original work, unlicensed; "
-            + "leaves resolve against the CC0 MDCC canon.",
-        offlineResolvable: true
-    )
-
-    /// The default classification scheme. Always `.mdcc`. MDCC
-    /// ships complete with the bundle and resolves offline.
-    /// Foreign schemes require activation consent — see
-    /// `activationConsent`.
-    public static let defaultScheme: ClassificationScheme = .mdcc
-
-    /// The manifest for the MDCC default scheme. Derived from the
-    /// bundled LatticeLib canon version; always present.
-    public static func defaultSchemeManifest() -> LatticeSchemeManifest? {
-        derivedLatticeManifest
-    }
-
-    /// Classifies a string against the MDCC code grammar without
-    /// consulting any canon. Returns whether the code is malformed,
-    /// well-formed-and-known (callers resolve the entry through
-    /// their bound LatticeLib canon), or well-formed-but-pending —
-    /// the valid-but-unknown state from the launch plan. Pending
-    /// codes round-trip intact and are queryable as pending until
-    /// the next canon pull resolves them.
+    /// Classifies a string against the FDC code grammar without
+    /// resolving it. Returns whether the code is malformed,
+    /// well-formed-and-known (the caller supplied it in `knownCodes`),
+    /// or well-formed-but-pending — the valid-but-unknown state from
+    /// the launch plan. Pending codes round-trip intact and are
+    /// queryable as pending until a caller learns them as known.
     ///
     /// The `knownCodes` set lets a caller carry the known/pending
     /// decision through EideticLib without EideticLib having to know
@@ -110,13 +82,6 @@ public enum EideticLib {
             dataVersion: FDC.dataVersion
         )
     }
-
-    /// The activation consent surface for foreign-data schemes.
-    /// Foreign sources cannot be fetched until consent has been
-    /// recorded for them. The gate is logged and unskippable: every
-    /// acceptance is a `ConsentRecord` in the ledger, and the
-    /// pipeline refuses to run without a matching record.
-    public static let activationConsent: ActivationConsent = ActivationConsent()
 }
 
 /// The result of a EideticLib lookup. Pure data, byte-identical

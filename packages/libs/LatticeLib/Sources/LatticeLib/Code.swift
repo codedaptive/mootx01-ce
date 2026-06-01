@@ -1,6 +1,6 @@
 // Code.swift
 //
-// MDCC code validity. A code is well-formed if it matches the integer-
+// FDC code validity. A code is well-formed if it matches the integer-
 // plus-optional-decimal-extension grammar:
 //
 //     code        := integer ( '.' digits )?
@@ -11,15 +11,16 @@
 // Each additional digit subdivides into ten — 540 -> 540.0 .. 540.9
 // -> 540.00 .. 540.99 and so on. v1 caps the extension length at
 // eight digits, which gives ten to the eighth distinct leaves per
-// spine code, far more than any plausible canon will reach. The cap
+// spine code, far more than any plausible signature set will reach. The cap
 // exists so the printable form fits in a reasonable column width
 // (twelve characters including the dot) and so encoders/decoders can
 // reason about an upper bound on string length.
 //
-// Validity does not imply presence in the canon. A well-formed code
-// may be valid-but-unknown — accepted by tooling, stored and
-// round-tripped intact, queryable as pending, resolved on the next
-// canon pull. See LatticeLib.entry(for:) for the resolution path.
+// Validity is purely grammatical: a well-formed code is accepted by
+// tooling, stored, and round-tripped intact regardless of whether any
+// term currently encodes to it. The known-vs-pending decision belongs
+// to the caller, which carries its own set of known codes — see
+// EideticLib.classifyLatticeCode(_:knownCodes:).
 
 import Foundation
 
@@ -29,7 +30,7 @@ public enum Code {
     /// The maximum number of digits permitted after the decimal point.
     public static let maxExtensionDigits: Int = 8
 
-    /// True if `code` matches the MDCC code grammar.
+    /// True if `code` matches the FDC code grammar.
     public static func isWellFormed(_ code: String) -> Bool {
         let parts = code.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
         guard let integerSub = parts.first else { return false }

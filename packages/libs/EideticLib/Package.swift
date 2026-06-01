@@ -1,15 +1,14 @@
 // swift-tools-version: 6.0
 //
 // EideticLib. A deterministic text-to-anchor utility: pass a term,
-// get back an MDCC code (resolved against the bundled MDCC canon
-// from LatticeLib) and the canon entry's Wikidata Q-ID. Pure Swift,
-// conformance-gated against the Rust port at rust/.
+// get back an FDC code and the dominant concept's Wikidata Q-ID,
+// resolved through LatticeLib's FDC engine. Pure Swift, conformance-
+// gated against the Rust port at rust/.
 //
 // EideticLib is a peer of the MOOTx01 substrate kits, not a member
 // of them. NeuronKit depends on EideticLib; EideticLib depends on
-// LatticeLib (the CC0/public-domain MDCC canon) and on no other kit.
-// The bundled classification data is CC0/MDCC only — no foreign-
-// licensed (CC-BY-SA) corpus ships in this package.
+// LatticeLib (the FDC engine and shared text primitives) and on no
+// other kit.
 
 import PackageDescription
 
