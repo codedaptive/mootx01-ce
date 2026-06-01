@@ -7,13 +7,14 @@
 // convention and the cross-backend conformance gate are also fixed
 // here.
 
-import XCTest
+import Testing
 @testable import SubstrateLib
 import SubstrateML
 import SubstrateKernel
 import SubstrateTypes
 
-final class CountVector256Tests: XCTestCase {
+@Suite("CountVector256 bundle algebra + count-fold")
+struct CountVector256Tests {
 
     // Deterministic pseudo-random fingerprints for property tests.
     private func fingerprints(seed: UInt64, count: Int) -> [Fingerprint256] {
@@ -32,32 +33,32 @@ final class CountVector256Tests: XCTestCase {
 
     // MARK: - Accumulation
 
-    func testAccumulateCountsSetBits() {
+    @Test func testAccumulateCountsSetBits() {
         var cv = CountVector256()
         var fp = Fingerprint256.zero
         fp = fp.with(bit: 0, set: true)
         fp = fp.with(bit: 64, set: true)    // first bit of block1
         fp = fp.with(bit: 255, set: true)   // top bit of block3
         cv.accumulate(fp)
-        XCTAssertEqual(cv.n, 1)
-        XCTAssertEqual(cv.counts[0], 1)
-        XCTAssertEqual(cv.counts[64], 1)
-        XCTAssertEqual(cv.counts[255], 1)
-        XCTAssertEqual(cv.counts[1], 0)
-        XCTAssertEqual(cv.counts.reduce(0, +), 3)
+        #expect(cv.n == 1)
+        #expect(cv.counts[0] == 1)
+        #expect(cv.counts[64] == 1)
+        #expect(cv.counts[255] == 1)
+        #expect(cv.counts[1] == 0)
+        #expect(cv.counts.reduce(0, +) == 3)
     }
 
-    func testEmptyVectorIsIdentity() {
+    @Test func testEmptyVectorIsIdentity() {
         let empty = CountVector256.zero
-        XCTAssertEqual(empty.n, 0)
-        XCTAssertEqual(empty.counts.reduce(0, +), 0)
-        XCTAssertEqual(empty.majorityVote(), Fingerprint256.zero)
-        XCTAssertEqual(empty.profile(), [Float](repeating: 0, count: 256))
+        #expect(empty.n == 0)
+        #expect(empty.counts.reduce(0, +) == 0)
+        #expect(empty.majorityVote() == Fingerprint256.zero)
+        #expect(empty.profile() == [Float](repeating: 0, count: 256))
     }
 
     // MARK: - Lossless composition (the load-bearing property)
 
-    func testTreeFoldEqualsDirectAccumulation() {
+    @Test func testTreeFoldEqualsDirectAccumulation() {
         // Split 300 members into three uneven groups, fold each group,
         // merge the partial vectors, and assert the result equals the
         // direct accumulation of all 300. This is the property
@@ -70,27 +71,27 @@ final class CountVector256Tests: XCTestCase {
         let g3 = CountVector256.fold(Array(all[255..<300]))
         let merged = g1 + g2 + g3
 
-        XCTAssertEqual(merged, direct)
-        XCTAssertEqual(merged.n, 300)
+        #expect(merged == direct)
+        #expect(merged.n == 300)
     }
 
-    func testMergeIsCommutativeAndAssociative() {
+    @Test func testMergeIsCommutativeAndAssociative() {
         let a = CountVector256.fold(fingerprints(seed: 1, count: 50))
         let b = CountVector256.fold(fingerprints(seed: 2, count: 70))
         let c = CountVector256.fold(fingerprints(seed: 3, count: 90))
-        XCTAssertEqual(a + b, b + a)                  // commutative
-        XCTAssertEqual((a + b) + c, a + (b + c))      // associative
+        #expect(a + b == b + a)                  // commutative
+        #expect((a + b) + c == a + (b + c))      // associative
     }
 
-    func testMergeWithIdentity() {
+    @Test func testMergeWithIdentity() {
         let a = CountVector256.fold(fingerprints(seed: 7, count: 33))
-        XCTAssertEqual(a + .zero, a)
-        XCTAssertEqual(CountVector256.zero + a, a)
+        #expect(a + .zero == a)
+        #expect(CountVector256.zero + a == a)
     }
 
     // MARK: - Majority-vote read and the strict tie convention
 
-    func testMajorityVoteStrictThreshold() {
+    @Test func testMajorityVoteStrictThreshold() {
         // Four members. Bit 0 set in 3 of 4 (majority, 2*3 > 4 -> set).
         // Bit 1 set in 2 of 4 (exact tie, 2*2 > 4 is false -> clear).
         // Bit 2 set in 1 of 4 (minority -> clear).
@@ -99,28 +100,28 @@ final class CountVector256Tests: XCTestCase {
         members[0] = members[0].with(bit: 1); members[1] = members[1].with(bit: 1)
         members[0] = members[0].with(bit: 2)
         let cv = CountVector256.fold(members)
-        XCTAssertEqual(cv.n, 4)
-        XCTAssertEqual(cv.counts[0], 3)
-        XCTAssertEqual(cv.counts[1], 2)
-        XCTAssertEqual(cv.counts[2], 1)
+        #expect(cv.n == 4)
+        #expect(cv.counts[0] == 3)
+        #expect(cv.counts[1] == 2)
+        #expect(cv.counts[2] == 1)
         let mv = cv.majorityVote()
-        XCTAssertTrue(mv.bit(at: 0), "strict majority sets the bit")
-        XCTAssertFalse(mv.bit(at: 1), "exact tie does not set the bit")
-        XCTAssertFalse(mv.bit(at: 2), "minority does not set the bit")
+        #expect(mv.bit(at: 0), "strict majority sets the bit")
+        #expect(!mv.bit(at: 1), "exact tie does not set the bit")
+        #expect(!mv.bit(at: 2), "minority does not set the bit")
     }
 
-    func testProfileIsCountOverN() {
+    @Test func testProfileIsCountOverN() {
         var members = [Fingerprint256](repeating: .zero, count: 5)
         for i in 0..<3 { members[i] = members[i].with(bit: 10) }   // 3 of 5
         let cv = CountVector256.fold(members)
         let p = cv.profile()
-        XCTAssertEqual(p[10], 0.6, accuracy: 1e-6)
-        XCTAssertEqual(p[11], 0.0, accuracy: 1e-6)
+        #expect(abs(p[10] - 0.6) <= 1e-6)
+        #expect(abs(p[11] - 0.0) <= 1e-6)
     }
 
     // MARK: - OR-reduce is the degenerate fold
 
-    func testMajorityVoteIsNotOrReduce() {
+    @Test func testMajorityVoteIsNotOrReduce() {
         // A bit set in a strict minority survives OR-reduce but not
         // majority-vote. This is why the stored object cannot be the
         // OR-reduced engram.
@@ -128,13 +129,13 @@ final class CountVector256Tests: XCTestCase {
         members[0] = members[0].with(bit: 99)                       // 1 of 5
         let cv = CountVector256.fold(members)
         let ored = ScalarKernel().orReduce256(members)
-        XCTAssertTrue(ored.bit(at: 99), "OR-reduce keeps any set bit")
-        XCTAssertFalse(cv.majorityVote().bit(at: 99), "majority drops the minority bit")
+        #expect(ored.bit(at: 99), "OR-reduce keeps any set bit")
+        #expect(!cv.majorityVote().bit(at: 99), "majority drops the minority bit")
     }
 
     // MARK: - Cross-backend conformance gate
 
-    func testCountFoldConformanceAcrossBackends() {
+    @Test func testCountFoldConformanceAcrossBackends() {
         // Every available kernel must produce a CountVector256
         // identical to the scalar reference. Backends that do not yet
         // override countFold256 inherit the reference and pass
@@ -145,22 +146,22 @@ final class CountVector256Tests: XCTestCase {
         for kind in [KernelKind.scalar, .simd, .bnns, .neon, .metal] {
             let k = PortableKernel.kernel(of: kind)
             let got = k.countFold256(inputs)
-            XCTAssertEqual(got, reference,
-                           "kernel \(kind.rawValue) diverged from scalar reference")
+            #expect(got == reference,
+                    "kernel \(kind.rawValue) diverged from scalar reference")
         }
     }
 
-    func testCountFoldBatchMatchesPerBatchFold() {
+    @Test func testCountFoldBatchMatchesPerBatchFold() {
         let b1 = fingerprints(seed: 11, count: 40)
         let b2 = fingerprints(seed: 22, count: 60)
         let batched = ScalarKernel().countFoldBatch(batches: [b1, b2])
-        XCTAssertEqual(batched.count, 2)
-        XCTAssertEqual(batched[0], CountVector256.fold(b1))
-        XCTAssertEqual(batched[1], CountVector256.fold(b2))
+        #expect(batched.count == 2)
+        #expect(batched[0] == CountVector256.fold(b1))
+        #expect(batched[1] == CountVector256.fold(b2))
     }
     // MARK: - SIMD count-fold equals the scalar reference (vectorization gate)
 
-    func testSimdCountFoldMatchesScalarAcrossSizes() {
+    @Test func testSimdCountFoldMatchesScalarAcrossSizes() {
         // The SIMD vertical counter must equal the scalar reference at
         // every size, including the sizes that cross a plane boundary
         // (a new high bit appears in some column's count): 1, 2, 3, a
@@ -172,16 +173,16 @@ final class CountVector256Tests: XCTestCase {
             let fps = fingerprints(seed: UInt64(nMembers) &* 0x100000001B3, count: nMembers)
             let ref = scalar.countFold256(fps)
             let got = simd.countFold256(fps)
-            XCTAssertEqual(got, ref, "SIMD diverged from scalar at n=\(nMembers)")
-            XCTAssertEqual(got.n, UInt32(nMembers))
+            #expect(got == ref, "SIMD diverged from scalar at n=\(nMembers)")
+            #expect(got.n == UInt32(nMembers))
         }
     }
 
-    func testSimdCountFoldEmpty() {
-        XCTAssertEqual(SimdKernel().countFold256([]), CountVector256.zero)
+    @Test func testSimdCountFoldEmpty() {
+        #expect(SimdKernel().countFold256([]) == CountVector256.zero)
     }
 
-    func testSimdCountFoldHighCountColumn() {
+    @Test func testSimdCountFoldHighCountColumn() {
         // A single column set in every member drives that column's
         // count to n, exercising the full plane stack while other
         // columns stay zero. Verifies the bit-sliced readout assembles
@@ -190,10 +191,10 @@ final class CountVector256Tests: XCTestCase {
         var members = [Fingerprint256](repeating: .zero, count: n)
         for i in 0..<n { members[i] = members[i].with(bit: 137, set: true) }
         let cv = SimdKernel().countFold256(members)
-        XCTAssertEqual(cv.counts[137], UInt32(n))
-        XCTAssertEqual(cv.counts[136], 0)
-        XCTAssertEqual(cv.counts[138], 0)
-        XCTAssertEqual(cv, ScalarKernel().countFold256(members))
+        #expect(cv.counts[137] == UInt32(n))
+        #expect(cv.counts[136] == 0)
+        #expect(cv.counts[138] == 0)
+        #expect(cv == ScalarKernel().countFold256(members))
     }
 
 }

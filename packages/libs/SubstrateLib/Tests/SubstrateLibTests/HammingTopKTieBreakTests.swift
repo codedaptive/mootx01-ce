@@ -7,13 +7,14 @@
 // required to preserve the row-index ascending tie-break. This
 // test pins that behavior so future algorithm tweaks can't drift.
 
-import XCTest
+import Testing
 @testable import SubstrateLib
 import SubstrateML
 import SubstrateKernel
 import SubstrateTypes
 
-final class HammingTopKTieBreakTests: XCTestCase {
+@Suite("Hamming top-K tie-break by index ascending")
+struct HammingTopKTieBreakTests {
 
     private let kernel = ScalarKernel()
 
@@ -21,7 +22,7 @@ final class HammingTopKTieBreakTests: XCTestCase {
     // Hamming distance to the probe. Verify the result orders
     // tied candidates by index ascending.
 
-    func testTiesBreakByIndexAscending() {
+    @Test func testTiesBreakByIndexAscending() {
         let probe = Fingerprint256.zero
         let candidates: [Fingerprint256] = [
             // index 0: distance 1
@@ -47,15 +48,15 @@ final class HammingTopKTieBreakTests: XCTestCase {
         // candidates by index ascending (1, 4). Index 7 falls off.
         let top = kernel.hammingTopK(probe: probe, candidates: candidates, k: 5)
 
-        XCTAssertEqual(top.count, 5)
-        XCTAssertEqual(top[0].index, 0); XCTAssertEqual(top[0].distance, 1)
-        XCTAssertEqual(top[1].index, 3); XCTAssertEqual(top[1].distance, 1)
-        XCTAssertEqual(top[2].index, 6); XCTAssertEqual(top[2].distance, 1)
-        XCTAssertEqual(top[3].index, 1); XCTAssertEqual(top[3].distance, 2)
-        XCTAssertEqual(top[4].index, 4); XCTAssertEqual(top[4].distance, 2)
+        #expect(top.count == 5)
+        #expect(top[0].index == 0); #expect(top[0].distance == 1)
+        #expect(top[1].index == 3); #expect(top[1].distance == 1)
+        #expect(top[2].index == 6); #expect(top[2].distance == 1)
+        #expect(top[3].index == 1); #expect(top[3].distance == 2)
+        #expect(top[4].index == 4); #expect(top[4].distance == 2)
     }
 
-    func testTopKEqualsFullSortPrefix() {
+    @Test func testTopKEqualsFullSortPrefix() {
         // For any random input, the heap-based result MUST equal
         // the deterministic full-sort + prefix result.
         var rng = SystemRandomNumberGenerator()
@@ -82,30 +83,30 @@ final class HammingTopKTieBreakTests: XCTestCase {
             return lhs.index < rhs.index
         }.prefix(13).map { (index: $0.index, distance: $0.distance) }
 
-        XCTAssertEqual(viaHeap.count, viaFullSort.count)
+        #expect(viaHeap.count == viaFullSort.count)
         for i in 0..<viaHeap.count {
-            XCTAssertEqual(viaHeap[i].index,    viaFullSort[i].index,
+            #expect(viaHeap[i].index == viaFullSort[i].index,
                 "mismatch at position \(i) — heap diverged from full sort")
-            XCTAssertEqual(viaHeap[i].distance, viaFullSort[i].distance)
+            #expect(viaHeap[i].distance == viaFullSort[i].distance)
         }
     }
 
-    func testKZeroReturnsEmpty() {
+    @Test func testKZeroReturnsEmpty() {
         let probe = Fingerprint256.zero
         let candidates = [
             Fingerprint256(block0: 1, block1: 2, block2: 3, block3: 4)
         ]
         let top = kernel.hammingTopK(probe: probe, candidates: candidates, k: 0)
-        XCTAssertTrue(top.isEmpty)
+        #expect(top.isEmpty)
     }
 
-    func testKLargerThanCandidatesReturnsAll() {
+    @Test func testKLargerThanCandidatesReturnsAll() {
         let probe = Fingerprint256.zero
         let candidates: [Fingerprint256] = [
             Fingerprint256(block0: 1, block1: 0, block2: 0, block3: 0),
             Fingerprint256(block0: 0, block1: 0, block2: 0, block3: 1),
         ]
         let top = kernel.hammingTopK(probe: probe, candidates: candidates, k: 10)
-        XCTAssertEqual(top.count, 2)
+        #expect(top.count == 2)
     }
 }
