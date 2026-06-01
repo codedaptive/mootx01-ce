@@ -106,8 +106,14 @@ impl ActionOutcomeMatrix {
 
     /// Best actions for the given outcome, ranked by Wilson lower
     /// bound. Ties broken by total count desc, then action asc.
+    ///
+    /// Returns `(action_kind, success_rate, wilson_lower_bound, total_count)`.
+    /// The wilson_lower_bound is the value used for ranking; surfacing it
+    /// prevents an order/value mismatch where results are ordered by Wilson
+    /// LB but callers only see the raw success_rate. Mirrors the Swift leg's
+    /// return shape exactly (cookbook conformance contract).
     pub fn top_actions(&self, outcome: u8, k: usize, min_observations: u32)
-                       -> Vec<(u8, f32, u32)> {
+                       -> Vec<(u8, f32, f32, u32)> {
         let mut filtered: Vec<(u8, f32, f32, u32)> = self.cells.iter()
             .filter(|(k, c)| k.outcome_category == outcome && c.total_count >= min_observations)
             .map(|(k, c)| (k.action_kind, c.success_rate(), c.wilson_lower_bound(), c.total_count))
@@ -119,11 +125,99 @@ impl ActionOutcomeMatrix {
         });
         filtered.into_iter()
             .take(k)
-            .map(|(act, rate, _wilson, count)| (act, rate, count))
             .collect()
     }
 
     pub fn populated_cell_count(&self) -> usize {
         self.cells.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hlc(t: i64) -> HLC { HLC { physical_time: t, logical_count: 0, node_id: 1 } }
+
+    #[test]
+    fn top_actions_returns_four_tuple() {
+        let mut m = ActionOutcomeMatrix::new();
+        m.observe(1, 0, true, hlc(1));
+        m.observe(1, 0, true, hlc(2));
+        let results = m.top_actions(0, 10, 1);
+        assert_eq!(results.len(), 1);
+        // Destructure to confirm the shape is (u8, f32, f32, u32).
+        let (act, rate, wilson_lb, count) = results[0];
+        assert_eq!(act, 1);
+        assert!((rate - 1.0_f32).abs() < 1e-6, "rate should be 1.0");
+        assert!(wilson_lb < rate, "Wilson LB must be < rate for finite n");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn top_actions_result_non_increasing_in_wilson_lb() {
+        // Three actions with identical raw rate (1.0) but different
+        // evidence depth — Wilson LB order must equal returned order.
+        let mut m = ActionOutcomeMatrix::new();
+        m.observe(10, 3, true, hlc(1));                                    // 1/1
+        for i in 0..5  { m.observe(11, 3, true, hlc(10 + i as i64)); }    // 5/5
+        for i in 0..20 { m.observe(12, 3, true, hlc(20 + i as i64)); }    // 20/20
+        let results = m.top_actions(3, 10, 1);
+        assert_eq!(results.len(), 3);
+        for i in 0..(results.len() - 1) {
+            let (_, _, wlb_i, _) = results[i];
+            let (_, _, wlb_next, _) = results[i + 1];
+            assert!(wlb_i >= wlb_next,
+                "result {i} wilson_lb {wlb_i} must be >= result {} wilson_lb {wlb_next}", i + 1);
+        }
+        // The returned wilson_lb must equal the cell's computed value.
+        for (act, rate, wilson_lb, count) in &results {
+            let key = ActionOutcomeKey::new(*act, 3);
+            let cell = m.cells[&key];
+            assert!((wilson_lb - cell.wilson_lower_bound()).abs() < 1e-6,
+                "returned wilson_lb must equal cell.wilson_lower_bound()");
+            assert!((rate - cell.success_rate()).abs() < 1e-6,
+                "returned rate must equal cell.success_rate()");
+            assert_eq!(*count, cell.total_count);
+        }
+    }
+
+    #[test]
+    fn top_actions_regression_wilson_order_differs_from_raw_rate_order() {
+        // Regression guard for the original defect: results sorted by Wilson
+        // LB but only raw rate returned, so order/value were mismatched.
+        //
+        // Action A (20): 1/1 — raw rate 1.0, thin evidence.
+        // Action B (21): 80/100 — raw rate 0.8, strong evidence.
+        // Raw-rate order: A > B. Wilson-LB order: B > A.
+        let mut m = ActionOutcomeMatrix::new();
+        m.observe(20, 8, true, hlc(1));
+        for i in 0..80  { m.observe(21, 8, true,  hlc(2 + i as i64)); }
+        for i in 0..20  { m.observe(21, 8, false, hlc(82 + i as i64)); }
+        let results = m.top_actions(8, 2, 1);
+        assert_eq!(results.len(), 2);
+        // B must rank first (higher Wilson LB).
+        assert_eq!(results[0].0, 21, "B must rank first by Wilson LB");
+        assert_eq!(results[1].0, 20, "A must rank second");
+        // Returned Wilson LBs are strictly ordered.
+        assert!(results[0].2 > results[1].2, "Wilson LBs must be strictly decreasing");
+        // Raw rate order is opposite — confirms divergence scenario.
+        assert!(results[0].1 < results[1].1,
+            "raw rate of B (0.8) must be less than A (1.0), confirming order/value divergence");
+    }
+
+    #[test]
+    fn top_actions_honors_k_and_min_observations() {
+        let mut m = ActionOutcomeMatrix::new();
+        m.observe(1, 7, true, hlc(1));
+        m.observe(2, 7, true, hlc(2));
+        m.observe(2, 7, true, hlc(3));
+        m.observe(3, 7, true, hlc(4));
+        // k = 1 caps the result.
+        assert_eq!(m.top_actions(7, 1, 1).len(), 1);
+        // min_observations = 2 filters single-observation cells.
+        let filtered = m.top_actions(7, 10, 2);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, 2);
     }
 }

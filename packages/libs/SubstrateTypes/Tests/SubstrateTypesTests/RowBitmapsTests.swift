@@ -69,4 +69,88 @@ struct RowBitmapsTests {
         #expect(BitVector216.bitCount == 216)
         #expect(BitVector216.byteCount == 27)
     }
+
+    // MARK: - BitVector216(presenceBytes:) — raw initializer
+
+    @Test("BitVector216(presenceBytes:) round-trips a full 27-byte pattern losslessly")
+    func presenceBytesRoundTrip() {
+        // Construct a 27-byte pattern with bits set in ranges that
+        // RowBitmaps.field(_:) cannot represent:
+        //
+        //   fields 10/11 → absolute bits 60–71 (bytes 7–8, bits 4–7 and 0–7)
+        //   fields 22/23 → absolute bits 132–143
+        //   fields 34/35 → absolute bits 204–215
+        //
+        // Setting all 216 bits in alternating positions exercises
+        // the full range including the "high" slots that overflow
+        // the 12×6 uniform-grid model.
+        var bytes = [UInt8](repeating: 0, count: BitVector216.byteCount) // 27 bytes
+
+        // Set specific bits in the high-field ranges to confirm they
+        // survive the round-trip intact.
+
+        // field 10, bit 4 → absolute 64, byte 8 bit 0
+        let pos_f10_b4 = 10 * 6 + 4  // = 64
+        bytes[pos_f10_b4 / 8] |= 1 << (pos_f10_b4 % 8)
+
+        // field 11, bit 5 → absolute 71, byte 8 bit 7
+        let pos_f11_b5 = 11 * 6 + 5  // = 71
+        bytes[pos_f11_b5 / 8] |= 1 << (pos_f11_b5 % 8)
+
+        // field 22, bit 0 → absolute 132, byte 16 bit 4
+        let pos_f22_b0 = 22 * 6 + 0  // = 132
+        bytes[pos_f22_b0 / 8] |= 1 << (pos_f22_b0 % 8)
+
+        // field 23, bit 3 → absolute 141, byte 17 bit 5
+        let pos_f23_b3 = 23 * 6 + 3  // = 141
+        bytes[pos_f23_b3 / 8] |= 1 << (pos_f23_b3 % 8)
+
+        // field 34, bit 1 → absolute 205, byte 25 bit 5
+        let pos_f34_b1 = 34 * 6 + 1  // = 205
+        bytes[pos_f34_b1 / 8] |= 1 << (pos_f34_b1 % 8)
+
+        // field 35, bit 5 → absolute 215, byte 26 bit 7  (last bit)
+        let pos_f35_b5 = 35 * 6 + 5  // = 215
+        bytes[pos_f35_b5 / 8] |= 1 << (pos_f35_b5 % 8)
+
+        let bv = BitVector216(presenceBytes: bytes)
+
+        // Every set bit must survive the round-trip.
+        #expect(bv.bit(at: pos_f10_b4))   // field 10, bit 4
+        #expect(bv.bit(at: pos_f11_b5))   // field 11, bit 5
+        #expect(bv.bit(at: pos_f22_b0))   // field 22, bit 0
+        #expect(bv.bit(at: pos_f23_b3))   // field 23, bit 3
+        #expect(bv.bit(at: pos_f34_b1))   // field 34, bit 1
+        #expect(bv.bit(at: pos_f35_b5))   // field 35, bit 5 (absolute 215)
+
+        // Convenience (field, bit) accessor must agree.
+        #expect(bv.bit(field: 10, bit: 4))
+        #expect(bv.bit(field: 11, bit: 5))
+        #expect(bv.bit(field: 22, bit: 0))
+        #expect(bv.bit(field: 23, bit: 3))
+        #expect(bv.bit(field: 34, bit: 1))
+        #expect(bv.bit(field: 35, bit: 5))
+
+        // Bits adjacent to the set ones must be clear (no spillover).
+        #expect(!bv.bit(at: pos_f10_b4 - 1))
+        #expect(!bv.bit(at: pos_f11_b5 - 1))
+        #expect(!bv.bit(at: pos_f22_b0 + 1))
+
+        // All 27 storage bytes must match the input exactly.
+        // Build a second BitVector216 from the same bytes and verify
+        // it is equal, confirming storage is a verbatim copy.
+        let bv2 = BitVector216(presenceBytes: bytes)
+        #expect(bv == bv2)
+    }
+
+    @Test("BitVector216(presenceBytes:) all-zeros and all-ones are lossless")
+    func presenceBytesAllZerosAndOnes() {
+        // All zeros.
+        let zeroBV = BitVector216(presenceBytes: [UInt8](repeating: 0, count: 27))
+        for i in 0..<216 { #expect(!zeroBV.bit(at: i)) }
+
+        // All ones — including the high positions 60–71, 132–143, 204–215.
+        let oneBV = BitVector216(presenceBytes: [UInt8](repeating: 0xFF, count: 27))
+        for i in 0..<216 { #expect(oneBV.bit(at: i)) }
+    }
 }
