@@ -76,7 +76,7 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
     ///
     /// For v1.0 pairing is in-process: both peers share a
     /// FederationRelay instance.
-    public func pair(with peer: FederationSyncEngine, via relay: FederationRelay, family: HyperplaneFamilySpec) async throws {
+    public func pair(with peer: FederationSyncEngine, via relay: any Relay, family: HyperplaneFamilySpec) async throws {
         try await stateActor.pair(with: peer.stateActor, via: relay, family: family)
     }
 
@@ -85,9 +85,21 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
     }
 }
 
-/// Shared in-process relay used by paired engines for v1.0.
-/// In production this would be replaced by a real transport.
-public final class FederationRelay: @unchecked Sendable {
+/// Transport abstraction for federated sync. Swapping the implementation
+/// swaps the transport without touching the engine; the in-process
+/// `FederationRelay` below serves local peering and tests, and a hosted
+/// HTTPS/gRPC relay (a third-party SyncServer) is a drop-in conformer —
+/// this protocol is that extension point.
+public protocol Relay: Sendable {
+    /// Deliver a signed message to a recipient's inbox.
+    func send(to recipient: Data, message: SignedMessage)
+    /// Drain (and clear) the recipient's pending inbound messages.
+    func drain(for recipient: Data) -> [SignedMessage]
+}
+
+/// Shared in-process relay used by paired engines for v1.0 (the
+/// local/test `Relay`). In production a hosted relay conforms instead.
+public final class FederationRelay: Relay, @unchecked Sendable {
     private let lock = NSLock()
     private var inboxes: [Data: [SignedMessage]] = [:]  // keyed by recipient public key
 
@@ -138,7 +150,7 @@ actor FederationStateActor {
     struct PairedPeer {
         let publicKey: Data
         weak var actor: FederationStateActor?
-        let relay: FederationRelay
+        let relay: any Relay
         let family: HyperplaneFamilySpec
     }
 
@@ -189,7 +201,7 @@ actor FederationStateActor {
         return .disabled
     }
 
-    func pair(with peerActor: FederationStateActor, via relay: FederationRelay, family: HyperplaneFamilySpec) async throws {
+    func pair(with peerActor: FederationStateActor, via relay: any Relay, family: HyperplaneFamilySpec) async throws {
         let peerPubKey = await peerActor.localIdentity.publicKey
         peers.append(PairedPeer(publicKey: peerPubKey, actor: peerActor, relay: relay, family: family))
         // Symmetric: register ourselves on the peer too.
@@ -197,7 +209,7 @@ actor FederationStateActor {
         emit(.peerConnected(identity: peerPubKey.base64EncodedString()))
     }
 
-    func acceptPeering(publicKey: Data, relay: FederationRelay, family: HyperplaneFamilySpec) {
+    func acceptPeering(publicKey: Data, relay: any Relay, family: HyperplaneFamilySpec) {
         peers.append(PairedPeer(publicKey: publicKey, actor: nil, relay: relay, family: family))
         emit(.peerConnected(identity: publicKey.base64EncodedString()))
     }

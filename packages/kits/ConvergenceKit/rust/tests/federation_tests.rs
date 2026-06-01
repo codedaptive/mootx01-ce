@@ -20,7 +20,7 @@ use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use substrate_types::hlc::HLC;
 use convergence_kit::{
     proposal_signing_bytes, verify_signature, ConflictPolicy, FederationRelay,
-    FederationSyncEngine, HyperplaneFamilySpec, LocalIdentity, PairingProposal, SyncDirection,
+    FederationSyncEngine, HyperplaneFamilySpec, LocalIdentity, PairingProposal, Relay, SyncDirection,
     SyncEngine, SyncEvent, SyncEventKind, SyncManifest, SyncRecord, SyncedTable,
 };
 use uuid::Uuid;

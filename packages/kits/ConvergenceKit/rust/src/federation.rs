@@ -112,9 +112,22 @@ fn canonical_record_bytes(record: &SyncRecord) -> SyncResult<Vec<u8>> {
     })
 }
 
-/// In-process federation relay. Federation engines register
-/// themselves; push delivers a signed record to every other
-/// registered peer's inbox. Pull drains the local inbox.
+/// Transport abstraction for federated sync. The engine moves signed
+/// records through a `Relay`; swapping the implementation swaps the
+/// transport without touching the engine. The in-process
+/// `FederationRelay` below serves local peering and tests; a hosted
+/// HTTPS/gRPC relay (a third-party SyncServer) is a drop-in `Relay`
+/// implementation — this trait is that extension point.
+pub trait Relay: Send + Sync {
+    /// Register a peer; returns the receiver its inbound records arrive on.
+    fn register(&self, identity: PeerIdentity) -> Receiver<SignedRecord>;
+    /// Deliver a signed record to every registered peer except `from`.
+    fn broadcast(&self, from: &PeerIdentity, envelope: SignedRecord);
+}
+
+/// In-process federation relay (the local/test `Relay`). Federation
+/// engines register themselves; push delivers a signed record to every
+/// other registered peer's inbox. Pull drains the local inbox.
 #[derive(Default)]
 pub struct FederationRelay {
     inboxes: Mutex<Vec<(PeerIdentity, Sender<SignedRecord>)>>,
@@ -124,17 +137,16 @@ impl FederationRelay {
     pub fn new() -> Self {
         FederationRelay::default()
     }
+}
 
-    pub fn register(
-        &self,
-        identity: PeerIdentity,
-    ) -> Receiver<SignedRecord> {
+impl Relay for FederationRelay {
+    fn register(&self, identity: PeerIdentity) -> Receiver<SignedRecord> {
         let (tx, rx) = channel();
         self.inboxes.lock().unwrap().push((identity, tx));
         rx
     }
 
-    pub fn broadcast(&self, from: &PeerIdentity, envelope: SignedRecord) {
+    fn broadcast(&self, from: &PeerIdentity, envelope: SignedRecord) {
         let inboxes = self.inboxes.lock().unwrap();
         for (id, tx) in inboxes.iter() {
             if id == from {
@@ -160,7 +172,8 @@ struct EngineState {
 
 pub struct FederationSyncEngine {
     identity: Arc<LocalIdentity>,
-    relay: Arc<FederationRelay>,
+    // Pluggable transport: in-process today, a hosted SyncServer relay later.
+    relay: Arc<dyn Relay>,
     peer_identity: PeerIdentity,
     // The engine owns its state directly; mutating verbs take `&mut self`.
     // (The relay is `Arc`-shared across peers, so it keeps its own lock.)
@@ -170,7 +183,7 @@ pub struct FederationSyncEngine {
 }
 
 impl FederationSyncEngine {
-    pub fn new(identity: Arc<LocalIdentity>, relay: Arc<FederationRelay>) -> Self {
+    pub fn new(identity: Arc<LocalIdentity>, relay: Arc<dyn Relay>) -> Self {
         let peer_identity = PeerIdentity::new(identity.public_key_bytes());
         FederationSyncEngine {
             identity,
