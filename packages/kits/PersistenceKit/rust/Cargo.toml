@@ -16,6 +16,9 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 uuid = { version = "1", features = ["v4"] }
 # SQLite backend: bundled compiles SQLite from source (no system dep).
 rusqlite = { version = "0.31", features = ["bundled"] }
+# sqlite-vec extension (vec0 virtual table) for the SQLite VectorIndex,
+# registered against rusqlite's bundled SQLite via auto-extension.
+sqlite-vec = "0.1"
 # ISO-8601 timestamp formatting for TEXT date columns (schema invariant).
 chrono = "0.4"
 # PostgreSQL backend: synchronous client (matches the sync Storage trait).
