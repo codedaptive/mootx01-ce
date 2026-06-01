@@ -1,6 +1,6 @@
 // WordClassTagger.swift
 //
-// The public Step 1 entry point: EideticLib.wordClass(_:) classifies a
+// The public Step 1 entry point: LatticeLib.wordClass(_:) classifies a
 // single token as .noun, .verb, or .other (cookbook §2.1, canonical
 // §3 Step 1). Implemented as an extension on the existing EideticLib
 // enum so EideticLib.swift stays untouched (mission Tier 3 invariant).
@@ -23,7 +23,7 @@ import LatticeLib
 import NaturalLanguage
 #endif
 
-public extension EideticLib {
+public extension LatticeLib {
 
     /// Classifies a single token under FDC encoder Step 1.
     ///

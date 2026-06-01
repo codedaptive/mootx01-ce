@@ -1,7 +1,7 @@
 // WordClassTaggerTests.swift
 //
 // Tests for FDC encoder Step 1 (cookbook §2): the shared-vector
-// conformance gate for EideticLib.wordClass(_:), the min_os_version
+// conformance gate for LatticeLib.wordClass(_:), the min_os_version
 // gate, and the novel-token cache submit-and-purge cycle. The shared
 // vectors at ../SharedVectors/word_class_vectors.json are the same
 // file the Rust port reads; any divergence between ports is a hard
@@ -67,7 +67,7 @@ struct WordClassSharedVectorTests {
         let file = try loadVectors()
         var failures: [String] = []
         for vector in file.vectors {
-            let actual = EideticLib.wordClass(vector.input)
+            let actual = LatticeLib.wordClass(vector.input)
             if actual != vector.expected {
                 failures.append(
                     "\(vector.id): expected \(vector.expected) got \(actual)"
@@ -84,12 +84,12 @@ struct WordClassSharedVectorTests {
 
     @Test("table-resident noun")
     func tableResidentNoun() {
-        #expect(EideticLib.wordClass("dinner") == .noun)
+        #expect(LatticeLib.wordClass("dinner") == .noun)
     }
 
     @Test("table-resident verb")
     func tableResidentVerb() {
-        #expect(EideticLib.wordClass("run") == .verb)
+        #expect(LatticeLib.wordClass("run") == .verb)
     }
 
     /// A preposition that must NOT be in the table falls to the tagger
@@ -98,12 +98,12 @@ struct WordClassSharedVectorTests {
     func tablePrepositionFallsToTaggerAsOther() {
         #expect(!WordClassTableCache.nounSet.contains("with"))
         #expect(!WordClassTableCache.verbSet.contains("with"))
-        #expect(EideticLib.wordClass("with") == .other)
+        #expect(LatticeLib.wordClass("with") == .other)
     }
 
     @Test("empty token is other")
     func emptyTokenIsOther() {
-        #expect(EideticLib.wordClass("") == .other)
+        #expect(LatticeLib.wordClass("") == .other)
     }
 
     /// Verb-then-noun ordering: "run" is in both sets, so it resolves
@@ -112,7 +112,7 @@ struct WordClassSharedVectorTests {
     func verbPrecedesNounForTokenInBothSets() {
         #expect(WordClassTableCache.verbSet.contains("run"))
         #expect(WordClassTableCache.nounSet.contains("run"))
-        #expect(EideticLib.wordClass("run") == .verb)
+        #expect(LatticeLib.wordClass("run") == .verb)
     }
 }
 
@@ -128,7 +128,7 @@ struct WordClassMinOSGateTests {
             majorVersion: 16, minorVersion: 9, patchVersion: 0
         )
         #expect(
-            !EideticLib.taggerEnabled(osVersion: belowMin, minOSVersion: "17.0")
+            !LatticeLib.taggerEnabled(osVersion: belowMin, minOSVersion: "17.0")
         )
     }
 
@@ -141,10 +141,10 @@ struct WordClassMinOSGateTests {
             majorVersion: 18, minorVersion: 2, patchVersion: 1
         )
         #expect(
-            EideticLib.taggerEnabled(osVersion: atMin, minOSVersion: "17.0")
+            LatticeLib.taggerEnabled(osVersion: atMin, minOSVersion: "17.0")
         )
         #expect(
-            EideticLib.taggerEnabled(osVersion: aboveMin, minOSVersion: "17.0")
+            LatticeLib.taggerEnabled(osVersion: aboveMin, minOSVersion: "17.0")
         )
     }
 
@@ -155,7 +155,7 @@ struct WordClassMinOSGateTests {
             majorVersion: 99, minorVersion: 0, patchVersion: 0
         )
         #expect(
-            !EideticLib.taggerEnabled(osVersion: any, minOSVersion: "")
+            !LatticeLib.taggerEnabled(osVersion: any, minOSVersion: "")
         )
     }
 }
