@@ -15,18 +15,16 @@ actor ObserverRegistry {
 
     func register(table: String, events: Set<StorageEvent>) -> AsyncStream<TableChange> {
         let id = UUID()
-        let stream = AsyncStream<TableChange>(bufferingPolicy: .bufferingOldest(1024)) { continuation in
-            let sub = Subscription(id: id, table: table, events: events, continuation: continuation)
-            Task { await self.add(sub) }  // actor hop; await is required
-            continuation.onTermination = { _ in
-                Task { await self.remove(id: id) }
-            }
+        let (stream, continuation) = AsyncStream<TableChange>.makeStream(bufferingPolicy: .bufferingOldest(1024))
+        // Register synchronously, before returning the stream. `register` is
+        // actor-isolated, so this is a direct ordered mutation — no fire-and-forget
+        // Task hop. A change notified immediately after observe() can no longer race
+        // ahead of the subscription being recorded.
+        subs[id] = Subscription(id: id, table: table, events: events, continuation: continuation)
+        continuation.onTermination = { _ in
+            Task { await self.remove(id: id) }
         }
         return stream
-    }
-
-    private func add(_ sub: Subscription) {
-        subs[sub.id] = sub
     }
 
     private func remove(id: UUID) {
