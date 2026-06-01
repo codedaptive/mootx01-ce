@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import LocusKit
 import PersistenceKit
@@ -25,7 +25,8 @@ import GeniusLocusKit
 ///   are integration-tested end-to-end through the public
 ///   `runTournament`, which calls the real NK-BR-01 `benchmark`. Estate
 ///   setup mirrors `NK_BR_01_BranchBenchmarkTests`.
-final class TournamentTests: XCTestCase {
+@Suite("Tournament scoring, gate, ranking, and I-16")
+struct TournamentTests {
 
     // MARK: - Deterministic time inputs (never the wall clock)
 
@@ -126,7 +127,8 @@ final class TournamentTests: XCTestCase {
 
     // MARK: - Test 1: disqualification gate excludes a silent-loss branch
 
-    func testDisqualificationGateExcludesSilentLossBranch() async throws {
+    @Test("disqualification gate excludes a silent-loss branch")
+    func disqualificationGateExcludesSilentLossBranch() async throws {
         let branch = try await deriveBranches(1)[0]
         let report = makeReport(branchID: branch.branchID, overlap: 0.9, mrr: 0.9, notFound: ["lost-concept"])
 
@@ -136,17 +138,18 @@ final class TournamentTests: XCTestCase {
             interval: fixedInterval
         )
 
-        XCTAssertEqual(result.disqualified.count, 1)
-        XCTAssertEqual(result.disqualified.first?.reason, .silentLoss(notFoundCount: 1))
-        XCTAssertEqual(result.disqualified.first?.branch.branchID, branch.branchID)
+        #expect(result.disqualified.count == 1)
+        #expect(result.disqualified.first?.reason == .silentLoss(notFoundCount: 1))
+        #expect(result.disqualified.first?.branch.branchID == branch.branchID)
         // Disqualified branch is absent from ranking and is not the winner.
-        XCTAssertTrue(result.ranking.isEmpty)
-        XCTAssertNil(result.winner)
+        #expect(result.ranking.isEmpty)
+        #expect(result.winner == nil)
     }
 
     // MARK: - Test 2: a zero-silent-loss branch survives and is ranked
 
-    func testZeroSilentLossBranchSurvivesAndRanks() async throws {
+    @Test("a zero-silent-loss branch survives and is ranked")
+    func zeroSilentLossBranchSurvivesAndRanks() async throws {
         // End-to-end through the real benchmark: one clean branch whose
         // corpus IDs equal its own drawer IDs recalls everything.
         let branch = try await deriveBranches(1)[0]
@@ -159,16 +162,17 @@ final class TournamentTests: XCTestCase {
             interval: fixedInterval
         )
 
-        XCTAssertTrue(result.disqualified.isEmpty)
-        XCTAssertEqual(result.ranking.count, 1)
-        XCTAssertEqual(result.ranking.first?.branch.branchID, branch.branchID)
-        XCTAssertTrue(result.ranking.first?.report.notFoundInBranch.isEmpty ?? false)
-        XCTAssertEqual(result.winner?.branch.branchID, branch.branchID)
+        #expect(result.disqualified.isEmpty)
+        #expect(result.ranking.count == 1)
+        #expect(result.ranking.first?.branch.branchID == branch.branchID)
+        #expect(result.ranking.first?.report.notFoundInBranch.isEmpty ?? false)
+        #expect(result.winner?.branch.branchID == branch.branchID)
     }
 
     // MARK: - Test 3: survivors rank descending by combined score
 
-    func testRankingIsDescendingByCombinedScore() async throws {
+    @Test("survivors rank descending by combined score")
+    func rankingIsDescendingByCombinedScore() async throws {
         let branches = try await deriveBranches(3)
         let high = branches[0]   // 1.0 * 1.0 = 1.00
         let mid = branches[1]    // 0.8 * 0.5 = 0.40
@@ -183,17 +187,18 @@ final class TournamentTests: XCTestCase {
 
         let result = NeuronKit.rankTournament(scored: scored, evaluatedAt: fixedNow, interval: fixedInterval)
 
-        XCTAssertEqual(result.ranking.map { $0.branch.branchID }, [high.branchID, mid.branchID, low.branchID])
+        #expect(result.ranking.map { $0.branch.branchID } == [high.branchID, mid.branchID, low.branchID])
         // Scores are strictly descending.
-        XCTAssertGreaterThan(result.ranking[0].combinedScore, result.ranking[1].combinedScore)
-        XCTAssertGreaterThan(result.ranking[1].combinedScore, result.ranking[2].combinedScore)
-        XCTAssertEqual(result.winner?.branch.branchID, result.ranking.first?.branch.branchID)
-        XCTAssertEqual(result.winner?.branch.branchID, high.branchID)
+        #expect(result.ranking[0].combinedScore > result.ranking[1].combinedScore)
+        #expect(result.ranking[1].combinedScore > result.ranking[2].combinedScore)
+        #expect(result.winner?.branch.branchID == result.ranking.first?.branch.branchID)
+        #expect(result.winner?.branch.branchID == high.branchID)
     }
 
     // MARK: - Test 4: ties break on branch identifier, deterministically
 
-    func testTieBreakIsStableAndDeterministic() async throws {
+    @Test("ties break on branch identifier, deterministically")
+    func tieBreakIsStableAndDeterministic() async throws {
         let branches = try await deriveBranches(2)
         // Equal combined scores (1.0 * 1.0 each) force the tie-break path.
         let scored: [(branch: any BranchHandle, report: BenchmarkReport)] = [
@@ -209,14 +214,15 @@ final class TournamentTests: XCTestCase {
         let firstRun = NeuronKit.rankTournament(scored: scored, evaluatedAt: fixedNow, interval: fixedInterval)
         let secondRun = NeuronKit.rankTournament(scored: scored, evaluatedAt: fixedNow, interval: fixedInterval)
 
-        XCTAssertEqual(firstRun.ranking.map { $0.branch.branchID }, expectedOrder)
+        #expect(firstRun.ranking.map { $0.branch.branchID } == expectedOrder)
         // Identical across two runs on the same input.
-        XCTAssertEqual(firstRun, secondRun)
+        #expect(firstRun == secondRun)
     }
 
     // MARK: - Test 5: every branch disqualified yields no winner
 
-    func testAllDisqualifiedYieldsNoWinner() async throws {
+    @Test("every branch disqualified yields no winner")
+    func allDisqualifiedYieldsNoWinner() async throws {
         let branches = try await deriveBranches(2)
         let scored: [(branch: any BranchHandle, report: BenchmarkReport)] = [
             (branch: branches[0], report: makeReport(branchID: branches[0].branchID, overlap: 0.5, mrr: 0.5, notFound: ["x"])),
@@ -225,15 +231,16 @@ final class TournamentTests: XCTestCase {
 
         let result = NeuronKit.rankTournament(scored: scored, evaluatedAt: fixedNow, interval: fixedInterval)
 
-        XCTAssertNil(result.winner)
-        XCTAssertTrue(result.ranking.isEmpty)
-        XCTAssertEqual(result.disqualified.count, 2)
-        XCTAssertEqual(result.disqualified[1].reason, .silentLoss(notFoundCount: 2))
+        #expect(result.winner == nil)
+        #expect(result.ranking.isEmpty)
+        #expect(result.disqualified.count == 2)
+        #expect(result.disqualified[1].reason == .silentLoss(notFoundCount: 2))
     }
 
     // MARK: - Test 6: empty input yields an empty advisory report
 
-    func testEmptyInputYieldsEmptyReport() async throws {
+    @Test("empty input yields an empty advisory report")
+    func emptyInputYieldsEmptyReport() async throws {
         // No branches → benchmark is never called; the corpus is inert.
         let corpus = ExternalCorpus(name: "empty-input", entries: [
             ExternalEntry(id: "c1", content: "alpha", tags: []),
@@ -246,16 +253,17 @@ final class TournamentTests: XCTestCase {
             interval: fixedInterval
         )
 
-        XCTAssertNil(result.winner)
-        XCTAssertTrue(result.ranking.isEmpty)
-        XCTAssertTrue(result.disqualified.isEmpty)
-        XCTAssertEqual(result.evaluatedAt, fixedNow)
-        XCTAssertEqual(result.interval, fixedInterval)
+        #expect(result.winner == nil)
+        #expect(result.ranking.isEmpty)
+        #expect(result.disqualified.isEmpty)
+        #expect(result.evaluatedAt == fixedNow)
+        #expect(result.interval == fixedInterval)
     }
 
     // MARK: - Test 7: I-16 — the tournament is advisory and mutates nothing
 
-    func testTournamentIsAdvisoryAndPerformsNoMutation() async throws {
+    @Test("I-16 — the tournament is advisory and mutates nothing")
+    func tournamentIsAdvisoryAndPerformsNoMutation() async throws {
         // Structural I-16 assertion. runTournament's only substrate touch
         // is the read-only benchmark (which drives only recall). The
         // promotion verb lives on the GeniusLocusKit surface
@@ -276,11 +284,11 @@ final class TournamentTests: XCTestCase {
             interval: fixedInterval
         )
 
-        XCTAssertEqual(branch.status, statusBefore,
+        #expect(branch.status == statusBefore,
             "runTournament must not transition branch status — winner is advisory (I-16)")
-        XCTAssertEqual(branch.status, .active)
+        #expect(branch.status == .active)
         let countAfter = try await branchRowCount(branch)
-        XCTAssertEqual(countBefore, countAfter,
+        #expect(countBefore == countAfter,
             "runTournament must issue no write verbs — branch drawer count must be unchanged")
     }
 }

@@ -7,7 +7,8 @@
 // file imports GeniusLocusKit and LocusKit only for the value types,
 // never for write paths).
 
-import XCTest
+import Testing
+import Foundation
 import GeniusLocusKit
 @testable import NeuronKit
 
@@ -18,94 +19,90 @@ import GeniusLocusKit
 // in this file means the NeuronKit paging type.
 private typealias NKRecallStream = RecallStream
 
-final class HybridRecallEngineTests: XCTestCase {
+@Suite("Hybrid recall engine — shingles, similarity, rerank")
+struct HybridRecallEngineTests {
 
     // MARK: - shingles
 
-    func testShinglesIsEmptyForEmptyInput() {
-        XCTAssertEqual(HybridRecallEngine.shingles(""), [])
+    @Test("shingles is empty for empty input")
+    func shinglesIsEmptyForEmptyInput() {
+        #expect(HybridRecallEngine.shingles("") == [])
     }
 
-    func testShinglesForShortInputReturnsWholeString() {
+    @Test("shingles for short input returns the whole string")
+    func shinglesForShortInputReturnsWholeString() {
         // Strings shorter than the 3-char window collapse to the
         // single shingle = the whole string (lowercased). Documented
         // edge case kept identical between Swift and Rust.
-        XCTAssertEqual(HybridRecallEngine.shingles("ab"), ["ab"])
-        XCTAssertEqual(HybridRecallEngine.shingles("AB"), ["ab"])
+        #expect(HybridRecallEngine.shingles("ab") == ["ab"])
+        #expect(HybridRecallEngine.shingles("AB") == ["ab"])
     }
 
-    func testShinglesWindowsAreThreeCharLowercased() {
-        XCTAssertEqual(
-            HybridRecallEngine.shingles("CAT"),
-            ["cat"]
-        )
-        XCTAssertEqual(
-            HybridRecallEngine.shingles("catdog"),
-            ["cat", "atd", "tdo", "dog"]
-        )
+    @Test("shingle windows are three-char lowercased")
+    func shinglesWindowsAreThreeCharLowercased() {
+        #expect(HybridRecallEngine.shingles("CAT") == ["cat"])
+        #expect(HybridRecallEngine.shingles("catdog") == ["cat", "atd", "tdo", "dog"])
     }
 
     // MARK: - shingleSimilarity
 
-    func testShingleSimilarityIdenticalIsOne() {
-        XCTAssertEqual(
-            HybridRecallEngine.shingleSimilarity("organic chemistry", "organic chemistry"),
-            1.0,
-            accuracy: 1e-6
-        )
+    @Test("identical strings have shingle similarity one")
+    func shingleSimilarityIdenticalIsOne() {
+        #expect(abs(HybridRecallEngine.shingleSimilarity("organic chemistry", "organic chemistry") - 1.0) <= 1e-6)
     }
 
-    func testShingleSimilarityDisjointIsZero() {
-        XCTAssertEqual(
-            HybridRecallEngine.shingleSimilarity("abcdef", "ghijkl"),
-            0.0,
-            accuracy: 1e-6
-        )
+    @Test("disjoint strings have shingle similarity zero")
+    func shingleSimilarityDisjointIsZero() {
+        #expect(abs(HybridRecallEngine.shingleSimilarity("abcdef", "ghijkl") - 0.0) <= 1e-6)
     }
 
-    func testShingleSimilarityIsSymmetric() {
+    @Test("shingle similarity is symmetric")
+    func shingleSimilarityIsSymmetric() {
         let a = "the organic chemistry of carbon"
         let b = "carbon-based organic compounds"
         let ab = HybridRecallEngine.shingleSimilarity(a, b)
         let ba = HybridRecallEngine.shingleSimilarity(b, a)
-        XCTAssertEqual(ab, ba, accuracy: 1e-6)
+        #expect(abs(ab - ba) <= 1e-6)
     }
 
     // MARK: - rerank
 
-    func testRerankEmptyInputReturnsEmpty() {
-        XCTAssertTrue(
-            HybridRecallEngine.rerank(drawers: [], tuning: .default).isEmpty
-        )
+    @Test("rerank of empty input returns empty")
+    func rerankEmptyInputReturnsEmpty() {
+        #expect(HybridRecallEngine.rerank(drawers: [], tuning: .default).isEmpty)
     }
 
-    func testRerankSingleDrawerIsIdentity() {
+    @Test("rerank of a single drawer is the identity")
+    func rerankSingleDrawerIsIdentity() {
         let d = makeDrawer(id: "1", content: "chemistry")
         let out = HybridRecallEngine.rerank(drawers: [d], tuning: .default)
-        XCTAssertEqual(out.map(\.id), ["1"])
+        #expect(out.map(\.id) == ["1"])
     }
 
-    func testRerankPreservesAllInputDrawers() {
+    @Test("rerank preserves all input drawers")
+    func rerankPreservesAllInputDrawers() {
         // C-8: MMR runs over the input set; every drawer must remain
         // present in the output (MMR reorders, it does not filter).
         let drawers = (1...5).map { i in
             makeDrawer(id: "\(i)", content: "drawer body number \(i)")
         }
         let out = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
-        XCTAssertEqual(Set(out.map(\.id)), Set(drawers.map(\.id)))
-        XCTAssertEqual(out.count, drawers.count)
+        #expect(Set(out.map(\.id)) == Set(drawers.map(\.id)))
+        #expect(out.count == drawers.count)
     }
 
-    func testRerankDeterministicAcrossInvocations() {
+    @Test("rerank is deterministic across invocations")
+    func rerankDeterministicAcrossInvocations() {
         let drawers = (0..<7).map { i in
             makeDrawer(id: "row-\(i)", content: "alpha beta gamma item \(i)")
         }
         let first = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
         let second = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
-        XCTAssertEqual(first.map(\.id), second.map(\.id))
+        #expect(first.map(\.id) == second.map(\.id))
     }
 
-    func testRerankWithLambdaOneIsRelevanceOnlyOrdering() {
+    @Test("rerank with lambda one is relevance-only ordering")
+    func rerankWithLambdaOneIsRelevanceOnlyOrdering() {
         // λ = 1.0 disables the diversity term entirely. With L₁ == L₂
         // (today's verb shape) the relevance term ties for every
         // drawer; ties break in stable input order. So the output
@@ -115,10 +112,11 @@ final class HybridRecallEngineTests: XCTestCase {
         }
         let tuning = RecallFrameTuning(mmrLambda: 1.0)
         let out = HybridRecallEngine.rerank(drawers: drawers, tuning: tuning)
-        XCTAssertEqual(out.map(\.id), drawers.map(\.id))
+        #expect(out.map(\.id) == drawers.map(\.id))
     }
 
-    func testRerankWithLambdaZeroFavoursDiversity() {
+    @Test("rerank with lambda zero favours diversity")
+    func rerankWithLambdaZeroFavoursDiversity() {
         // λ = 0.0 picks the maximally diverse remaining drawer at
         // each step. Two near-duplicate drawers and one disjoint
         // drawer — the disjoint drawer should be selected second
@@ -128,27 +126,30 @@ final class HybridRecallEngineTests: XCTestCase {
         let far   = makeDrawer(id: "far",    content: "zzz yyy xxx www")
         let tuning = RecallFrameTuning(mmrLambda: 0.0)
         let out = HybridRecallEngine.rerank(drawers: [near1, near2, far], tuning: tuning)
-        XCTAssertEqual(out.first?.id, "near-1")
-        XCTAssertEqual(out[1].id, "far")
-        XCTAssertEqual(out[2].id, "near-2")
+        #expect(out.first?.id == "near-1")
+        #expect(out[1].id == "far")
+        #expect(out[2].id == "near-2")
     }
 }
 
-final class RecallStreamTests: XCTestCase {
+@Suite("Recall stream paging")
+struct RecallStreamTests {
 
-    func testEmptyStreamEmitsOneFinalPage() async {
+    @Test("empty stream emits one final page")
+    func emptyStreamEmitsOneFinalPage() async {
         let stream = NKRecallStream(rows: [], pageSize: 50)
         var pages: [NKRecallStream.Page] = []
         for await page in stream {
             pages.append(page)
         }
-        XCTAssertEqual(pages.count, 1)
-        XCTAssertTrue(pages[0].rows.isEmpty)
-        XCTAssertTrue(pages[0].isLast)
-        XCTAssertEqual(pages[0].pageIndex, 0)
+        #expect(pages.count == 1)
+        #expect(pages[0].rows.isEmpty)
+        #expect(pages[0].isLast)
+        #expect(pages[0].pageIndex == 0)
     }
 
-    func testPagingHonoursPageSize() async {
+    @Test("paging honours the page size")
+    func pagingHonoursPageSize() async {
         let rows = (0..<25).map { i in
             makeDrawer(id: "\(i)", content: "row \(i)")
         }
@@ -157,17 +158,18 @@ final class RecallStreamTests: XCTestCase {
         for await page in stream {
             pages.append(page)
         }
-        XCTAssertEqual(pages.count, 3)
-        XCTAssertEqual(pages[0].rows.count, 10)
-        XCTAssertEqual(pages[1].rows.count, 10)
-        XCTAssertEqual(pages[2].rows.count, 5)
-        XCTAssertFalse(pages[0].isLast)
-        XCTAssertFalse(pages[1].isLast)
-        XCTAssertTrue(pages[2].isLast)
-        XCTAssertEqual(pages.map(\.pageIndex), [0, 1, 2])
+        #expect(pages.count == 3)
+        #expect(pages[0].rows.count == 10)
+        #expect(pages[1].rows.count == 10)
+        #expect(pages[2].rows.count == 5)
+        #expect(!pages[0].isLast)
+        #expect(!pages[1].isLast)
+        #expect(pages[2].isLast)
+        #expect(pages.map(\.pageIndex) == [0, 1, 2])
     }
 
-    func testPagingClampsNonPositivePageSize() async {
+    @Test("paging clamps a non-positive page size")
+    func pagingClampsNonPositivePageSize() async {
         // Page size < 1 would loop forever; the initializer clamps to
         // 1. Verified end-to-end here.
         let rows = (0..<3).map { i in
@@ -176,10 +178,11 @@ final class RecallStreamTests: XCTestCase {
         let stream = NKRecallStream(rows: rows, pageSize: 0)
         var pageCount = 0
         for await _ in stream { pageCount += 1 }
-        XCTAssertEqual(pageCount, 3)
+        #expect(pageCount == 3)
     }
 
-    func testMMRRerankObservedOnEveryPage() async {
+    @Test("MMR rerank is observed on every page")
+    func mmrRerankObservedOnEveryPage() async {
         // C-8: every emitted page is from the reranked sequence. The
         // engine reranks the full set before paging, so this holds by
         // construction — verified by checking the concatenation of
@@ -193,7 +196,7 @@ final class RecallStreamTests: XCTestCase {
         for await page in stream {
             emitted.append(contentsOf: page.rows)
         }
-        XCTAssertEqual(emitted.map(\.id), reranked.map(\.id))
+        #expect(emitted.map(\.id) == reranked.map(\.id))
     }
 }
 
