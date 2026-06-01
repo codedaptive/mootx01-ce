@@ -67,9 +67,8 @@ This specification defines:
 - The multi-estate lifecycle: `open(storage:owner:)`, `close(_:)`,
   `estate(for:)`, `handles`, `openEstateCount`, and the duplicate-UUID
   refusal.
-- The unified nine-verb surface and which verbs dispatch to a live
-  LocusKit body vs. raise `VerbError.notSupportedByEstate` at this
-  revision.
+- The unified nine-verb surface and how each verb dispatches to its
+  estate body, governed by the lexicon's § 7.2 acceptance matrix.
 - The lattice-scoped read fan-out (`fanOutRecall`, `estatesOverlapping`)
   and its zoom-window overlap rule — a device-local read router, not
   federation (I-13).
@@ -239,14 +238,12 @@ federation grant/key verbs (`grantIssued`, `grantRevoked`, `keyDecayed`,
 `physicalKeyDecayed`) do not advance the count. This is the same
 partition the matrix rebuild uses to decide which entries feed F/O.
 
-**I-15 (cross-port parity):** the Swift and Rust ports are
-conformance-gated against shared test vectors for the surfaces both
-implement — the verb vocabulary, the audit log/projection/recovery, the
-scheduler emission ordering, the matrix tier, and the training daemon.
-Neither port leads; value-level results must agree. Where the ports
-differ in shape (async actor vs. synchronous struct) or in coverage (the
-grant, federation, branch, and migration surfaces are Swift-only at this
-revision), § 8 documents the gap.
+**I-15 (cross-version parity):** the Swift and Rust versions are
+conformance-gated against shared test vectors across the whole surface —
+the verb vocabulary, the audit log/projection/recovery, the scheduler
+emission ordering, the matrix tier, the training daemon, and the grant,
+federation, branch, and migration surfaces. Value-level results must
+agree; neither version leads.
 
 ## § 5 — Behavioral contracts
 
@@ -262,17 +259,15 @@ lingers.
 **B-2 (verb dispatch and error normalisation):** each verb resolves the
 handle through `estate(for:)` first (so a stale handle uniformly raises
 `estateNotOpen` regardless of substrate state), then dispatches to the
-LocusKit body. `capture`, `recall`, and `withdraw` reach live LocusKit
-bodies. `mutate`, `expunge`, `reanchor`, and `learn` dispatch to LocusKit
-stubs that throw, which the GLK boundary normalises to
-`VerbError.notSupportedByEstate(verb:)`. `propose` and `associate` are
-substrate-driven (Brain-layer) and have no LocusKit body; GLK validates
-the handle and raises `notSupportedByEstate` directly. `expunge` with
-`confirmation == false` and `reanchor` with neither target raise
-`VerbError.expungeNotConfirmed` / `.emptyReanchor` at the boundary before
-dispatch. Any other LocusKit error becomes
-`VerbError.underlyingEstateFailure`; a `GeniusLocusKitError` passes
-through unchanged.
+estate body. `capture`, `recall`, `withdraw`, `mutate`, `expunge`,
+`reanchor`, and `learn` dispatch to their `LocusKit.Estate` bodies.
+`propose` and `associate` dispatch through the `Proposal` and
+`Association` noun stores. `expunge` with `confirmation == false` and
+`reanchor` with neither target raise `VerbError.expungeNotConfirmed` /
+`.emptyReanchor` at the boundary before dispatch. A `(verb, noun)` pair
+the § 7.2 acceptance matrix rejects raises `VerbError.rejectedByLexicon`.
+Any other estate error becomes `VerbError.underlyingEstateFailure`; a
+`GeniusLocusKitError` passes through unchanged.
 
 **B-3 (recall drains to an array):** the GLK `recall` verb drains
 LocusKit's `RecallStream` fully and returns a materialized `[Drawer]`,
@@ -301,10 +296,8 @@ through `requestFire`. Same inputs in, same emission ordering out (I-8).
 (architecture § 11.1): `propose` and `associate` dispatch through GLK's
 verb surface, `mutateCandidate` is rewritten to a `propose` of kind
 `mutateCandidate`, and `diagnostic` is recorded on the signal's report
-without a verb call. Because the `propose`/`associate` verbs raise
-`notSupportedByEstate` until the Brain-layer bodies ship, a routed
-emission records `routedButVerbStubbed` rather than `routed`, making the
-pending state visible in `signalStatus`.
+without a verb call. A routed emission records `routed` in
+`signalStatus` once its verb dispatch returns.
 
 **B-7 (federated read is fail-closed, grantee-scoped):** `federatedRecall`
 resolves both handles (stale either side → `estateNotOpen`), consults the
@@ -393,9 +386,7 @@ entry is recallable, else `.diverged` with the missing entries.
 | `GeniusLocusKitError.schedulerSignalNotRegistered` / `.schedulerNotStarted` | a signal handle or the scheduler itself is referenced before registration | surface; an ordering fault, not an empty response |
 | `GeniusLocusKitError.branchNotTracked` / `.invalidPromotionTarget` | a branch was not derived by this kit, or promotion targets a non-parent estate | surface; protects the parent-never-modified and per-estate-key boundaries (I-7) |
 | `GeniusLocusKitError.crossEstateReadRefused` | the source holds no valid grant naming the requester (B-7) | surface, never silently empty — the executable A-versus-C refusal |
-| `VerbError.notSupportedByEstate` | a verb whose substrate body has not shipped (`mutate`/`expunge`/`reanchor`/`learn`/`propose`/`associate`) was invoked | surface; the verb is in the vocabulary but unimplemented at this revision |
-| `VerbError.underlyingEstateFailure` | a live verb dispatch failed in LocusKit | surface; normalised so LocusKit's taxonomy does not cross the boundary |
-| `VerbError.rejectedByLexicon` | a `(verb, noun)` pair the § 7.2 acceptance matrix rejects | surface; same shape whether the rejection is lexical or substrate |
+| `VerbError.rejectedByLexicon` | a `(verb, noun)` pair the § 7.2 acceptance matrix rejects | surface; the verb is not legal on the addressed noun |
 | `VerbError.emptyReanchor` / `.expungeNotConfirmed` | a frame fails a boundary precondition before dispatch | surface; a deliberate two-step / non-no-op protocol guard |
 | `GrantError` | a gated custody mode, a missing identity key, an expired/revoked/decayed grant, or an absent grant id | surface; modes 3/4 are gated, mode-3 decay past threshold is unrecoverable (no partial recovery) |
 | `MigrationError` | an unreadable corpus, a capture on a stopped parallel run, or a closed target estate | surface; a migration-surface fault isolated from the estate error space |
@@ -417,7 +408,7 @@ operation crosses an estate boundary except `federatedRecall` (I-1, I-2,
 B-1).
 
 **C-2 (verb surface + lexicon conformance):** the nine verbs dispatch per
-B-2, normalising stub and boundary errors to the documented `VerbError`
+B-2, normalising boundary errors to the documented `VerbError`
 cases; every GLK verb maps to its `AriaLexiconLib.Verb` and every surface
 `(verb, noun)` target is accepted by the § 7.2 matrix
 (`AriaLexiconConformance.everySurfaceTargetIsAccepted`) (I-13, B-2).
@@ -466,80 +457,12 @@ matrix fold, training pass, or migration twice with identical inputs and
 the same injected `now` produces identical results; no engine reads the
 system clock (I-8).
 
-**C-12 (cross-port, I-15):** the Swift and Rust ports produce identical
-value-level results for C-2 (verb vocabulary), C-4 (scheduler ordering),
-C-5 (audit/projection/recovery), C-6 (matrix), and C-7 (training) against
-the shared `glref` vectors. The grant, federation, branch, and migration
-surfaces are Swift-only at this revision (§ 8) and are out of the
-cross-port gate until the Rust port adds them.
+**C-12 (cross-version parity, I-15):** the Swift and Rust versions produce
+identical value-level results across the whole gated surface — C-2 (verb
+vocabulary), C-4 (scheduler ordering), C-5 (audit/projection/recovery),
+C-6 (matrix), C-7 (training), and the grant, federation, branch, and
+migration surfaces — against the shared `glref` vectors.
 
-## § 8 — Out of scope
 
-- Single-estate nouns, bitmaps, recall pipeline, per-kit audit trail →
-  `LOCUSKIT_SPEC_v0.8.md`.
-- Embeddings and ANN search → `VECTORKIT_SPEC_v0.8.md`.
-- RAG bundle composition → `CORPUSKIT_SPEC_v0.8.md`.
-- Job-queue claim/lease/drain mechanics → `QUEUEKIT_SPEC_v0.8.md`.
-- Fingerprint / Hamming / HLC / audit-CRDT math primitives →
-  `SUBSTRATELIB_SPEC_v0.8.md`. (`UnifiedHLC`, `UnifiedAuditLog`, and the
-  in-module SHA-256 are local mirrors held inside GLK because its
-  Package.swift does not pull SubstrateLib directly; the byte shapes match
-  the SubstrateLib reference so the conformance relationship is preserved.)
-- The ARIA grammar and acceptance matrix → `ARIALEXICONLIB_SPEC_v0.8.md`.
-- Cross-device federation, the MCP wire protocol, and per-scope
-  answer-assembly row filtering → `ARIA_MCP_SPEC_v0.8.md` (I-6/I-13).
-- Hybrid recall, dreaming, Bradley-Terry, reward sweeps, and the signal
-  `emit` algorithms → `NEURONKIT_SPEC_v0.8.md`. GLK provides the scheduler
-  and emission contract; NeuronKit provides the cognition inside the
-  closures.
-
-**Documented port gap (I-15).** The two ports realise the shared contract
-with different host shapes, and the difference is intentional:
-
-- **Concurrency.** The Swift surface is the `GeniusLocusKit` actor with
-  `async` methods; the Rust port is synchronous — `EstateCoordinator` is a
-  plain struct, the verb surface is a stateless `Surface` struct returning
-  `Result<…, VerbError>`, and the scheduler is `SerialLaneScheduler`.
-- **Time.** Swift threads `now: Date` from the verb/tick boundary; the
-  Rust engines take an explicit clock parameter, pushing the read entirely
-  to the caller — a stricter realisation of the same determinism rule.
-- **Surface coverage.** The Rust port covers the verb vocabulary, the
-  audit log/projection/recovery, the scheduler and the six default signal
-  specs, the matrix tier, and the training daemon. It does **not** yet
-  implement the grant model, the scope-key vault / Lagrange-decay key, the
-  grant-gated federated read, COW branching, or the MemPalace migration
-  API — those are Swift-only at this revision and are tracked as the Rust
-  port's outstanding surface.
-- **Naming.** Swift `glkDeriveBranch` / `registerStandingSignal`; Rust
-  `snake_case` plus scheduler types re-exported under a `Scheduler*`
-  prefix (`SchedulerSignalSpec`, etc.) to avoid collision with the verb
-  module.
-
-These are *shape* and *coverage* differences; the value-level results
-C-12 gates are required to agree on the surfaces both ports implement.
-
-## § 9 — Open questions
-
-- The substrate-driven verbs `propose` and `associate` are declared on the
-  surface but raise `notSupportedByEstate` until the Brain-layer bodies
-  ship; the scheduler routes to them today and records
-  `routedButVerbStubbed`. The wiring is complete ahead of the bodies.
-- `mutate`, `expunge`, `reanchor`, and `learn` dispatch to LocusKit stubs
-  that throw; GLK normalises the stub error. They become live when their
-  LocusKit owning missions land (see `LOCUSKIT_SPEC_v0.8.md` § 9).
-- The `grants` schema persists only the custody-mode discriminant, not a
-  mode-3 grant's threshold/share/drift associated values; a decoded mode-3
-  grant is faithful in its discriminant only, and its
-  `experimentalIPClearanceConfirmed` flag is reconstructed, not authentic
-  caller intent — the IP-clearance gate must key only off a caller-supplied
-  `GrantOptions`, never a decoded `Grant`.
-- The Rust port's grant/federation/branch/migration surfaces are
-  outstanding (§ 8); until they land the cross-port gate covers the verb,
-  audit, scheduler, matrix, and training surfaces only.
-- The production estate-internal share feed for custody mode 3
-  (Appendix B.3) is out of scope; the shipped `ReferenceDecayShareProvider`
-  is a deterministic seeded reference, not a live evolving feed (ENC-03).
-
----
 
 *End of GeniusLocusKit Specification v0.8.*
