@@ -264,8 +264,11 @@ I-7 and gated by conformance vectors (cookbook §17.6, M8).
 Errors raised by SubstrateTypes are limited to:
 
 - `Fingerprint256Error`: input length mismatch on construction.
-- `HLCError`: overflow on tick (`logical` exceeds `UInt32.max` within
-  a single millisecond), or invalid wire format on deserialize.
+- `HLCError`: invalid wire format on deserialize (`invalidWireLength`)
+  — the 16-byte wire buffer was the wrong length. Per cookbook §5.2
+  the HLC triple is `(physicalTime: Int64, logicalCount: Int32,
+  nodeID: Int32)`; the logical counter increments monotonically and
+  carries no separate overflow error.
 - `RowStateError`: re-raised by `RowStateAutomaton` in SubstrateLib;
   the enumeration lives here.
 

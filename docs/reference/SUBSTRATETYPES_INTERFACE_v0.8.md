@@ -98,45 +98,44 @@ Hybrid Logical Clock. SPEC § 5.2.
 
 ```swift
 public struct HLC: Hashable, Sendable, Codable, Comparable {
-    public let physical: Int64    // milliseconds since Unix epoch
-    public let logical: UInt32
-    public let nodeID: UInt64
-    public init(physical: Int64, logical: UInt32, nodeID: UInt64)
+    public let physicalTime: Int64   // milliseconds since Unix epoch
+    public let logicalCount: Int32   // monotonic counter (cookbook §5.2)
+    public let nodeID: Int32         // per-replica identifier
+    public init(physicalTime: Int64, logicalCount: Int32, nodeID: Int32)
     public static func < (lhs: HLC, rhs: HLC) -> Bool
-    public func toString() -> String  // canonical wire format
-    public static func parse(_ s: String) throws -> HLC
+    public func wireBytes() -> [UInt8]            // 16-byte LE wire format
+    public init(wireBytes bytes: [UInt8]) throws  // throws on bad length
 }
 
 public struct HLCGenerator: Sendable {
-    public init(nodeID: UInt64)
+    public init(nodeID: Int32, lastPhysical: Int64 = 0, lastLogical: Int32 = 0)
     public mutating func send(now: Int64) -> HLC
-    public mutating func receive(_ external: HLC, now: Int64) -> HLC
+    public mutating func receive(remote: HLC, now: Int64) -> HLC
 }
 
 public enum HLCError: Error, Sendable, Equatable {
-    case overflow
-    case parseFailed(String)
+    case invalidWireLength(Int)
 }
 ```
 
 **Rust:**
 
 ```rust
-pub struct HLC { pub physical: i64, pub logical: u32, pub node_id: u64 }
+pub struct HLC { pub physical_time: i64, pub logical_count: i32, pub node_id: i32 }
 impl HLC {
-    pub fn new(physical: i64, logical: u32, node_id: u64) -> Self;
-    pub fn to_string(&self) -> String;
-    pub fn parse(s: &str) -> Result<Self, HLCError>;
+    pub fn new(physical_time: i64, logical_count: i32, node_id: i32) -> Self;
+    pub fn wire_bytes(&self) -> [u8; 16];
+    pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, HLCError>;
 }
 
 pub struct HLCGenerator { /* internal */ }
 impl HLCGenerator {
-    pub fn new(node_id: u64) -> Self;
+    pub fn new(node_id: i32) -> Self;
     pub fn send(&mut self, now: i64) -> HLC;
-    pub fn receive(&mut self, external: HLC, now: i64) -> HLC;
+    pub fn receive(&mut self, remote: HLC, now: i64) -> HLC;
 }
 
-pub enum HLCError { Overflow, ParseFailed(String) }
+pub enum HLCError { InvalidWireLength(usize) }
 ```
 
 ### `AuditEvent`
@@ -615,8 +614,7 @@ The package raises only these errors:
 | Error | Raised by | Cause |
 |---|---|---|
 | `Fingerprint256Error.invalidByteCount(expected: 32, got: N)` | `Fingerprint256(bytes:)` | byte input is not 32 bytes |
-| `HLCError.overflow` | `HLCGenerator.send` / `receive` | `logical` counter exceeded `UInt32.max` in a single millisecond |
-| `HLCError.parseFailed(String)` | `HLC.parse` | wire-format string did not match the canonical form |
+| `HLCError.invalidWireLength(Int)` | `HLC.init(wireBytes:)` / Rust `from_wire_bytes` | wire byte buffer was not the required 16-byte length |
 | `RowStateError.illegalTransition(RowState, RowVerb)` | `RowStateAutomaton.validate` (in SubstrateLib; the enum lives here) | the (prior state, verb) pair is absent from the transition table |
 | `RowStateError.forbiddenCombination(state:, fields:)` | `RowStateAutomaton.validate` (in SubstrateLib) | resulting bitmap violates I-22 |
 
