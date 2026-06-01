@@ -20,25 +20,40 @@ public enum FDC {
 
     /// Encode `text` to an FDC code, or `nil` for UNRESOLVED (or if the bundled
     /// artifacts are unavailable). Pure over the pinned artifacts.
-    public static func encode(_ text: String) -> String? { matcher?.encode(text) }
+    public static func encode(_ text: String) -> String? { bundle?.matcher.encode(text) }
+
+    /// Encode `text` and surface the dominant concept Q-ID of the input (see
+    /// `FDCMatcher.encodeAnchor`). Returns `(nil, nil)` if the artifacts are
+    /// unavailable. This is the entry point EideticLib uses to fill an Anchor.
+    public static func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?) {
+        bundle?.matcher.encodeAnchor(text) ?? (nil, nil)
+    }
 
     /// True when the bundled artifacts loaded and the engine is ready.
-    public static var isAvailable: Bool { matcher != nil }
+    public static var isAvailable: Bool { bundle != nil }
+
+    /// The bundled signatures version — the pinned-artifact version that
+    /// produced an encode answer. Callers record it as provenance.
+    public static var dataVersion: String { bundle?.version ?? "0.0.0-unavailable" }
 
     // MARK: - artifact loading (once per process)
 
     private struct SignaturesFile: Decodable {
         struct Entry: Decodable { let code: String; let terms: [String] }
+        let version: String
         let codes: [Entry]
     }
 
-    private static let matcher: FDCMatcher? = {
+    /// The matcher and the signatures version, loaded together once per
+    /// process so `dataVersion` and the matcher share a single parse.
+    private static let bundle: (matcher: FDCMatcher, version: String)? = {
         guard let lexicon: CanonicalizationLexicon = load("Lexicon"),
               let frame: FDCFrame = load("FDCFrame"),
               let sigs: SignaturesFile = load("FDCSignatures") else { return nil }
         var terms: [String: Set<String>] = [:]
         for e in sigs.codes { terms[e.code] = Set(e.terms) }
-        return FDCMatcher(lexicon: lexicon, frame: frame, signatures: terms, stopThreshold: stopThreshold)
+        let m = FDCMatcher(lexicon: lexicon, frame: frame, signatures: terms, stopThreshold: stopThreshold)
+        return (m, sigs.version)
     }()
 
     private static func load<T: Decodable>(_ name: String) -> T? {
