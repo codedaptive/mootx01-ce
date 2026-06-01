@@ -8,10 +8,12 @@
 //
 // The fetcher closure is the test seam — no real network is used.
 
-import XCTest
+import Testing
+import Foundation
 @testable import EideticLib
 
-final class ForeignSourcePipelineTests: XCTestCase {
+@Suite("Foreign source pipeline")
+struct ForeignSourcePipelineTests {
 
     // The known SHA-256 of the byte string "hello-world" so a
     // canned fetcher can pin a digest the pipeline will accept.
@@ -19,40 +21,41 @@ final class ForeignSourcePipelineTests: XCTestCase {
     private static let helloDigest =
         "afa27b44d43b02a9fea41d13cedc2e4016cfcf87c5dbf990e593669aa8ce286d"
 
-    /// Returns a fresh empty staging root and live destination,
-    /// cleaning up after the test.
-    private func makeWorkPaths() -> (staging: URL, live: URL) {
+    /// Returns a fresh empty staging root, live destination, and the
+    /// enclosing work root. Callers `defer` removal of `root` to clean
+    /// up after the test (swift-testing has no per-instance teardown hook).
+    private func makeWorkPaths() -> (staging: URL, live: URL, root: URL) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("gnomon-tests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(
             at: root,
             withIntermediateDirectories: true
         )
-        addTeardownBlock {
-            try? FileManager.default.removeItem(at: root)
-        }
         return (
             staging: root.appendingPathComponent("staging", isDirectory: true),
-            live: root.appendingPathComponent("payload.bin")
+            live: root.appendingPathComponent("payload.bin"),
+            root: root
         )
     }
 
-    func testSHA256AgreesWithKnownVector() {
+    @Test("SHA-256 agrees with known vector")
+    func sha256AgreesWithKnownVector() {
         // FIPS 180-4 test vector: "abc" -> ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
         let digest = ForeignSourcePipeline.sha256Hex(Data("abc".utf8))
-        XCTAssertEqual(
-            digest,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        #expect(
+            digest == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         )
     }
 
-    func testPipelineRefusesWithoutConsent() async {
+    @Test("pipeline refuses without consent")
+    func pipelineRefusesWithoutConsent() async {
         let consent = ActivationConsent()
         let pipeline = ForeignSourcePipeline(
             consent: consent,
             fetcher: { _ in Data("hello-world".utf8) }
         )
         let paths = makeWorkPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let source = PinnedSource(
             schemeID: "wikidata",
             url: URL(string: "https://example.invalid/payload")!,
@@ -65,21 +68,22 @@ final class ForeignSourcePipelineTests: XCTestCase {
                 liveDestination: paths.live,
                 stagingRoot: paths.staging
             )
-            XCTFail("Pipeline should refuse without consent")
+            Issue.record("Pipeline should refuse without consent")
         } catch let error as PipelineError {
             guard case .consentMissing(let schemeID) = error else {
-                XCTFail("Expected .consentMissing, got \(error)")
+                Issue.record("Expected .consentMissing, got \(error)")
                 return
             }
-            XCTAssertEqual(schemeID, "wikidata")
+            #expect(schemeID == "wikidata")
         } catch {
-            XCTFail("Unexpected error: \(error)")
+            Issue.record("Unexpected error: \(error)")
         }
         // No live file produced.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.live.path))
+        #expect(!FileManager.default.fileExists(atPath: paths.live.path))
     }
 
-    func testSuccessfulAssembly() async throws {
+    @Test("successful assembly")
+    func successfulAssembly() async throws {
         let consent = ActivationConsent()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         _ = await consent.accept(
@@ -92,6 +96,7 @@ final class ForeignSourcePipelineTests: XCTestCase {
             fetcher: { _ in Data("hello-world".utf8) }
         )
         let paths = makeWorkPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let source = PinnedSource(
             schemeID: "wikidata",
             url: URL(string: "https://example.invalid/payload")!,
@@ -103,12 +108,13 @@ final class ForeignSourcePipelineTests: XCTestCase {
             liveDestination: paths.live,
             stagingRoot: paths.staging
         )
-        XCTAssertEqual(result, paths.live)
+        #expect(result == paths.live)
         let onDisk = try Data(contentsOf: paths.live)
-        XCTAssertEqual(onDisk, Data("hello-world".utf8))
+        #expect(onDisk == Data("hello-world".utf8))
     }
 
-    func testUnreachableSourceFailsClean() async {
+    @Test("unreachable source fails clean")
+    func unreachableSourceFailsClean() async {
         let consent = ActivationConsent()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         _ = await consent.accept(
@@ -122,6 +128,7 @@ final class ForeignSourcePipelineTests: XCTestCase {
             fetcher: { _ in throw Boom() }
         )
         let paths = makeWorkPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let source = PinnedSource(
             schemeID: "wikidata",
             url: URL(string: "https://example.invalid/payload")!,
@@ -134,17 +141,17 @@ final class ForeignSourcePipelineTests: XCTestCase {
                 liveDestination: paths.live,
                 stagingRoot: paths.staging
             )
-            XCTFail("Unreachable source must raise")
+            Issue.record("Unreachable source must raise")
         } catch let error as PipelineError {
             guard case .sourceUnreachable = error else {
-                XCTFail("Expected .sourceUnreachable, got \(error)")
+                Issue.record("Expected .sourceUnreachable, got \(error)")
                 return
             }
         } catch {
-            XCTFail("Unexpected error: \(error)")
+            Issue.record("Unexpected error: \(error)")
         }
         // Clean failure: no live file and no leftover staging.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.live.path))
+        #expect(!FileManager.default.fileExists(atPath: paths.live.path))
         if FileManager.default.fileExists(atPath: paths.staging.path) {
             // The staging *root* may exist (we created its parent),
             // but no run-* directory should remain inside it.
@@ -152,12 +159,13 @@ final class ForeignSourcePipelineTests: XCTestCase {
                 at: paths.staging,
                 includingPropertiesForKeys: nil
             )
-            XCTAssertEqual(contents?.count ?? 0, 0,
+            #expect((contents?.count ?? 0) == 0,
                 "Staging should be cleaned of run directories")
         }
     }
 
-    func testFailedPromoteLeavesNoFile() async {
+    @Test("failed promote leaves no file")
+    func failedPromoteLeavesNoFile() async {
         // Promote fails when the destination directory is itself a
         // file. The pipeline must clean up staging AND leave no
         // file at liveDestination — confirming the placeholder-free
@@ -199,35 +207,36 @@ final class ForeignSourcePipelineTests: XCTestCase {
                 liveDestination: live,
                 stagingRoot: staging
             )
-            XCTFail("Promote into a blocked path must raise")
+            Issue.record("Promote into a blocked path must raise")
         } catch let error as PipelineError {
             guard case .assemblyWriteFailed = error else {
-                XCTFail("Expected .assemblyWriteFailed, got \(error)")
+                Issue.record("Expected .assemblyWriteFailed, got \(error)")
                 return
             }
         } catch {
-            XCTFail("Unexpected error: \(error)")
+            Issue.record("Unexpected error: \(error)")
         }
         // No file at live path; the blocker file is untouched.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: live.path))
+        #expect(!FileManager.default.fileExists(atPath: live.path))
         var isDir: ObjCBool = false
-        XCTAssertTrue(FileManager.default.fileExists(
+        #expect(FileManager.default.fileExists(
             atPath: blockerFile.path,
             isDirectory: &isDir
         ))
-        XCTAssertFalse(isDir.boolValue)
+        #expect(!isDir.boolValue)
         // Staging directory cleaned up (or never created).
         if FileManager.default.fileExists(atPath: staging.path) {
             let contents = try? FileManager.default.contentsOfDirectory(
                 at: staging,
                 includingPropertiesForKeys: nil
             )
-            XCTAssertEqual(contents?.count ?? 0, 0,
+            #expect((contents?.count ?? 0) == 0,
                 "Staging should be cleaned of run directories")
         }
     }
 
-    func testDigestMismatchFailsClean() async {
+    @Test("digest mismatch fails clean")
+    func digestMismatchFailsClean() async {
         let consent = ActivationConsent()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         _ = await consent.accept(
@@ -240,6 +249,7 @@ final class ForeignSourcePipelineTests: XCTestCase {
             fetcher: { _ in Data("hello-world".utf8) }
         )
         let paths = makeWorkPaths()
+        defer { try? FileManager.default.removeItem(at: paths.root) }
         let source = PinnedSource(
             schemeID: "wikidata",
             url: URL(string: "https://example.invalid/payload")!,
@@ -253,17 +263,17 @@ final class ForeignSourcePipelineTests: XCTestCase {
                 liveDestination: paths.live,
                 stagingRoot: paths.staging
             )
-            XCTFail("Digest mismatch must raise")
+            Issue.record("Digest mismatch must raise")
         } catch let error as PipelineError {
             guard case .digestMismatch(_, let expected, let actual) = error else {
-                XCTFail("Expected .digestMismatch, got \(error)")
+                Issue.record("Expected .digestMismatch, got \(error)")
                 return
             }
-            XCTAssertEqual(expected, String(repeating: "0", count: 64))
-            XCTAssertEqual(actual, Self.helloDigest)
+            #expect(expected == String(repeating: "0", count: 64))
+            #expect(actual == Self.helloDigest)
         } catch {
-            XCTFail("Unexpected error: \(error)")
+            Issue.record("Unexpected error: \(error)")
         }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.live.path))
+        #expect(!FileManager.default.fileExists(atPath: paths.live.path))
     }
 }

@@ -3,35 +3,40 @@
 // Verifies Part 1 of LAUNCH-03B: MDCC is the default scheme and
 // resolves offline with no fetch.
 
-import XCTest
+import Testing
 @testable import EideticLib
 
-final class SchemeTests: XCTestCase {
+@Suite("Classification scheme")
+struct SchemeTests {
 
-    func testDefaultSchemeIsMDCC() {
-        XCTAssertEqual(EideticLib.defaultScheme, .mdcc)
-        XCTAssertTrue(EideticLib.defaultScheme.isDefault)
+    @Test("default scheme is MDCC")
+    func defaultSchemeIsMDCC() {
+        #expect(EideticLib.defaultScheme == .mdcc)
+        #expect(EideticLib.defaultScheme.isDefault)
     }
 
-    func testForeignSchemeIsNotDefault() {
-        XCTAssertFalse(ClassificationScheme.foreign("wikidata").isDefault)
+    @Test("foreign scheme is not default")
+    func foreignSchemeIsNotDefault() {
+        #expect(!ClassificationScheme.foreign("wikidata").isDefault)
     }
 
-    func testBundledManifestLoadsOffline() {
+    @Test("bundled manifest loads offline")
+    func bundledManifestLoadsOffline() {
         let manifest = EideticLib.defaultSchemeManifest()
-        XCTAssertNotNil(manifest, "Default scheme manifest must ship in bundle")
+        #expect(manifest != nil, "Default scheme manifest must ship in bundle")
         guard let manifest else { return }
-        XCTAssertTrue(manifest.offlineResolvable)
-        XCTAssertFalse(manifest.canonVersion.isEmpty)
-        XCTAssertFalse(manifest.dataVersion.isEmpty)
-        XCTAssertFalse(manifest.licenseNote.isEmpty)
+        #expect(manifest.offlineResolvable)
+        #expect(!manifest.canonVersion.isEmpty)
+        #expect(!manifest.dataVersion.isEmpty)
+        #expect(!manifest.licenseNote.isEmpty)
     }
 
-    func testManifestCanonVersionMatchesMDCCv1() {
+    @Test("manifest canon version matches MDCC v1")
+    func manifestCanonVersionMatchesMDCCv1() {
         // The bundled MDCC default scheme manifest pins canon v1.
         // A canon-cut bump will require updating both this test and
         // the bundled JSON, by design.
         let manifest = EideticLib.defaultSchemeManifest()
-        XCTAssertEqual(manifest?.canonVersion, "v1")
+        #expect(manifest?.canonVersion == "v1")
     }
 }

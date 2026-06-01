@@ -4,18 +4,22 @@
 // runs without a recorded ConsentRecord, every acceptance is in
 // the ledger, and consent is per-scheme.
 
-import XCTest
+import Testing
+import Foundation
 @testable import EideticLib
 
-final class ConsentGateTests: XCTestCase {
+@Suite("Consent gate")
+struct ConsentGateTests {
 
-    func testGateDeniesWithoutConsent() async {
+    @Test("gate denies without consent")
+    func gateDeniesWithoutConsent() async {
         let gate = ActivationConsent()
         let granted = await gate.verifyConsent(forScheme: "wikidata")
-        XCTAssertFalse(granted)
+        #expect(!granted)
     }
 
-    func testAcceptanceIsRecordedInLedger() async {
+    @Test("acceptance is recorded in ledger")
+    func acceptanceIsRecordedInLedger() async {
         let gate = ActivationConsent()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let recorded = await gate.accept(
@@ -23,15 +27,16 @@ final class ConsentGateTests: XCTestCase {
             licenseTextDigest: "abc123",
             now: now
         )
-        XCTAssertEqual(recorded.schemeID, "wikidata")
-        XCTAssertEqual(recorded.licenseTextDigest, "abc123")
-        XCTAssertEqual(recorded.acceptedAt, now)
+        #expect(recorded.schemeID == "wikidata")
+        #expect(recorded.licenseTextDigest == "abc123")
+        #expect(recorded.acceptedAt == now)
 
         let granted = await gate.verifyConsent(forScheme: "wikidata")
-        XCTAssertTrue(granted)
+        #expect(granted)
     }
 
-    func testConsentIsPerScheme() async {
+    @Test("consent is per scheme")
+    func consentIsPerScheme() async {
         let gate = ActivationConsent()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         _ = await gate.accept(
@@ -42,11 +47,12 @@ final class ConsentGateTests: XCTestCase {
         // Granting Wikidata does not grant LCSH.
         let wikidata = await gate.verifyConsent(forScheme: "wikidata")
         let lcsh = await gate.verifyConsent(forScheme: "lcsh")
-        XCTAssertTrue(wikidata)
-        XCTAssertFalse(lcsh)
+        #expect(wikidata)
+        #expect(!lcsh)
     }
 
-    func testReAcceptanceUpdatesRecord() async {
+    @Test("re-acceptance updates record")
+    func reAcceptanceUpdatesRecord() async {
         let gate = ActivationConsent()
         let t1 = Date(timeIntervalSince1970: 1_700_000_000)
         let t2 = Date(timeIntervalSince1970: 1_800_000_000)
@@ -61,11 +67,12 @@ final class ConsentGateTests: XCTestCase {
             now: t2
         )
         let record = await gate.ledger.consent(forScheme: "ddc")
-        XCTAssertEqual(record?.licenseTextDigest, "digest-v2")
-        XCTAssertEqual(record?.acceptedAt, t2)
+        #expect(record?.licenseTextDigest == "digest-v2")
+        #expect(record?.acceptedAt == t2)
     }
 
-    func testLedgerRecordsAreCodable() throws {
+    @Test("ledger records are Codable")
+    func ledgerRecordsAreCodable() throws {
         let record = ConsentRecord(
             schemeID: "wikidata",
             licenseTextDigest: "abc123",
@@ -73,6 +80,6 @@ final class ConsentGateTests: XCTestCase {
         )
         let data = try JSONEncoder().encode(record)
         let decoded = try JSONDecoder().decode(ConsentRecord.self, from: data)
-        XCTAssertEqual(decoded, record)
+        #expect(decoded == record)
     }
 }
