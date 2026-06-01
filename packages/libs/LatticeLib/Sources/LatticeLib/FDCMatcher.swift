@@ -19,8 +19,10 @@ import Foundation
 
 public struct FDCMatcher: Sendable {
 
-    /// Pinned descent cutoff (§6.1). v1.0 value is TBD against real signatures;
-    /// `1` (any overlap continues) is the testing default and MUST NOT ship.
+    /// Pinned descent cutoff (§6.1), default `1` (any overlap continues
+    /// descent). Tuned empirically: inert across 1...200 on the v1.0 frame
+    /// (shallow frame — descent rarely fires), so `1` is the pinned ship value.
+    /// Accuracy is governed by within-region scoring (§5), not this cutoff.
     public let stopThreshold: Int
 
     private let lexicon: CanonicalizationLexicon

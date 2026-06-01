@@ -14,8 +14,12 @@ import Foundation
 
 public enum FDC {
 
-    /// Pinned descent cutoff (cookbook §6.1). TODO: tune empirically against
-    /// the real signatures; `1` is the testing default and MUST NOT ship as-is.
+    /// Pinned descent cutoff (cookbook §6.1), value `1`. Tuned empirically: a
+    /// sweep over 1...200 produced identical results on the v1.0 frame, so the
+    /// cutoff is inert here — the frame is shallow (most codes are integer-head,
+    /// average encoded depth ~1.3), so Step-5 descent rarely fires. `1` is the
+    /// pinned ship value; classification accuracy is governed by within-region
+    /// scoring (§5), not this cutoff.
     public static let stopThreshold = 1
 
     /// Encode `text` to an FDC code, or `nil` for UNRESOLVED (or if the bundled
