@@ -130,9 +130,14 @@ Documented as a conscious scope decision, not an oversight.
 - `docs/validation/**` — off-limits conformance harness. Untouched.
 - Any other package. Untouched.
 
-## Test verification (filled at completion)
+## Test verification (final)
 
-- `swift test`: exit 0, ≥33 `@Test` registered under the swift-testing runner.
-  To be recorded verbatim.
-- `cargo test`: exit 0, 4 passed (unchanged — Rust leg not touched). To be
-  recorded.
+- `cd packages/kits/QueueKit && swift test`: exit **0**. swift-testing runner:
+  **41 tests in 6 suites** (Conformance 6, FilesystemBackend 9, PersistenceKit 7,
+  SupportingType 9, FixtureGenerator 2, IdentifierType 8 = 41 `@Test`).
+  Verbatim tail: `Test run with 41 tests in 6 suites passed after 0.062 seconds.`
+  `import XCTest` remaining: **0**. Warnings (clean rebuild): **0**.
+  Registration delta: **0 → 41** (≥ 33 required).
+- `cd packages/kits/QueueKit/rust && cargo test`: exit **0**, **4 passed**
+  (`conformance.rs`, unchanged — Rust leg not touched).
+- Part 1 commit `9b0e919`; Part 2 commit `c100322`.
