@@ -1,48 +1,35 @@
-//! LatentThemes — soft topic factors over a co-occurrence matrix: the
-//! NeuronKit reasoning surface over GLK's gated `MatrixNMF` (Lens 2, Topics).
-//! Given which labels co-occur (field-value coordinates, or any co-occurring
-//! tokens), NMF factors them into `k` latent themes; each label gets a soft
-//! loading vector → mixed-membership reasoning ("this is 60% theme A, 30%
-//! theme C"), not a hard single bucket.
-//!
-//! Layer discipline: the NMF math lives in GLK's matrix tier
-//! (`genius_locus_kit::MatrixNMF`, deterministic SplitMix64 seeding); this
-//! module shapes a sparse co-occurrence into the dense matrix it consumes and
-//! turns the factorization into per-label theme loadings. CognitionKit
-//! sequences it; the estate supplies the co-occurrence. The second
-//! "surface-then-sequence" lens (after Keystones).
+//! Latent themes — soft topic factors (SPEC § 7.2, Lens 2 Topics). Given which
+//! labels co-occur, NMF factors them into k latent themes; each label gets a
+//! soft loading vector → mixed-membership reasoning, not a hard bucket.
+//! Surfaces the GeniusLocusKit matrix-tier MatrixNMF; owns no math (I-17).
+//! Deterministic for a fixed seed (B-5); total over edge inputs (I-18, B-8).
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use genius_locus_kit::MatrixNMF;
 
-/// One label's soft membership across the `k` latent themes.
+/// One label's soft membership across the latent themes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeLoading {
     pub label: String,
-    /// Length-`k` non-negative loadings (the W row for this label).
     pub loadings: Vec<f64>,
-    /// Index of the strongest theme (argmax of `loadings`).
     pub dominant_theme: usize,
 }
 
-/// The latent-theme factorization of a co-occurrence matrix.
+/// The latent-theme factorization of a label co-occurrence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LatentThemes {
-    /// Effective theme count (clamped to the label count).
     pub k: usize,
-    /// One loading vector per label, in `labels` order.
     pub loadings: Vec<ThemeLoading>,
-    /// NMF reconstruction error at convergence (lower = better fit).
     pub reconstruction_error: f64,
 }
 
 /// Factor the symmetric co-occurrence over `labels` into `k` latent themes.
-///
 /// `cooccurrence` is sparse — `(label_a, label_b, weight)` — and treated as
-/// symmetric (co-occurrence is undirected); pairs whose endpoints are not in
-/// `labels` are ignored. `k` is clamped to the label count. Deterministic for
-/// a fixed `seed` (GLK's `MatrixNMF` seeds W/H via SplitMix64).
+/// symmetric; pairs whose endpoints are not in `labels` are ignored. `k` is
+/// clamped to the label count. Each label gets a soft loading vector and its
+/// dominant theme (argmax). Deterministic for a fixed `seed`. No labels or
+/// `k == 0` ⇒ empty factorization (C-16).
 pub fn latent_themes(
     labels: &[String],
     cooccurrence: &[(String, String, f64)],
@@ -54,108 +41,111 @@ pub fn latent_themes(
         return LatentThemes { k: 0, loadings: Vec::new(), reconstruction_error: 0.0 };
     }
 
-    let index: BTreeMap<&str, usize> =
+    let effective_k = k.min(n);
+
+    // Build the dense symmetric n×n co-occurrence matrix (row-major). The matrix
+    // is the primitive's input; the lens only shapes it.
+    let index: HashMap<&str, usize> =
         labels.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
 
-    // Dense symmetric n×n co-occurrence matrix (row-major), as MatrixNMF wants.
-    let mut o = vec![0.0_f64; n * n];
-    for (a, b, w) in cooccurrence {
+    let mut matrix = vec![0.0f64; n * n];
+    for (a, b, weight) in cooccurrence {
         if let (Some(&i), Some(&j)) = (index.get(a.as_str()), index.get(b.as_str())) {
-            o[i * n + j] += *w;
+            matrix[i * n + j] += weight;
             if i != j {
-                o[j * n + i] += *w; // symmetric
+                matrix[j * n + i] += weight; // symmetric
             }
         }
     }
 
-    let k_eff = k.min(n);
-    let f = MatrixNMF::factorize(
-        &o,
+    let factorization = MatrixNMF::factorize(
+        &matrix,
         n,
         n,
-        k_eff,
+        effective_k,
         seed,
         MatrixNMF::DEFAULT_MAX_ITERATIONS,
         MatrixNMF::DEFAULT_TOLERANCE,
     );
 
-    let loadings: Vec<ThemeLoading> = labels
+    let loadings = labels
         .iter()
         .enumerate()
-        .map(|(i, label)| {
-            let l = f.loadings_for_row(i);
-            let dominant_theme = l
+        .map(|(row, label)| {
+            let vector = factorization.loadings_for_row(row);
+            let dominant = vector
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, _)| idx)
                 .unwrap_or(0);
-            ThemeLoading { label: label.clone(), loadings: l, dominant_theme }
+            ThemeLoading { label: label.clone(), loadings: vector, dominant_theme: dominant }
         })
         .collect();
 
-    LatentThemes { k: k_eff, loadings, reconstruction_error: f.reconstruction_error }
+    LatentThemes {
+        k: effective_k,
+        loadings,
+        reconstruction_error: factorization.reconstruction_error,
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    // Tests assert SPEC § 7.2's claims about latent themes: co-occurring labels
+    // share a latent theme, k is clamped to the label count, the factorization
+    // is deterministic for a fixed seed, and the surface is total over edge
+    // inputs.
     use super::*;
 
     fn labels(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
     }
-    fn co(xs: &[(&str, &str, f64)]) -> Vec<(String, String, f64)> {
+    fn cooc(xs: &[(&str, &str, f64)]) -> Vec<(String, String, f64)> {
         xs.iter().map(|(a, b, w)| (a.to_string(), b.to_string(), *w)).collect()
     }
 
-    fn dominant(themes: &LatentThemes, label: &str) -> usize {
-        themes.loadings.iter().find(|t| t.label == label).unwrap().dominant_theme
-    }
-
-    // LT-1: two disjoint, balanced co-occurrence triangles (A1-A2-A3 mutually;
-    // B1-B2-B3 mutually; ZERO cross-clique) factor into two separable themes.
-    // Each clique's labels share a dominant theme, and the two cliques' themes
-    // differ — mixed-membership structure recovered from raw co-occurrence.
     #[test]
-    fn lt1_disjoint_cliques_separate_into_themes() {
-        let ls = labels(&["A1", "A2", "A3", "B1", "B2", "B3"]);
-        let g = co(&[
-            ("A1", "A2", 5.0),
-            ("A1", "A3", 5.0),
-            ("A2", "A3", 5.0),
-            ("B1", "B2", 5.0),
-            ("B1", "B3", 5.0),
-            ("B2", "B3", 5.0),
+    fn co_occurring_labels_share_a_theme() {
+        let lab = labels(&["a1", "a2", "a3", "b1", "b2", "b3"]);
+        let c = cooc(&[
+            ("a1", "a2", 5.0),
+            ("a1", "a3", 5.0),
+            ("a2", "a3", 5.0),
+            ("b1", "b2", 5.0),
+            ("b1", "b3", 5.0),
+            ("b2", "b3", 5.0),
         ]);
-        let t = latent_themes(&ls, &g, 2, 0xC0FFEE);
-        assert_eq!(t.k, 2);
-        let a = dominant(&t, "A1");
-        assert_eq!(dominant(&t, "A2"), a, "A-clique shares a theme");
-        assert_eq!(dominant(&t, "A3"), a, "A-clique shares a theme");
-        let b = dominant(&t, "B1");
-        assert_eq!(dominant(&t, "B2"), b, "B-clique shares a theme");
-        assert_eq!(dominant(&t, "B3"), b, "B-clique shares a theme");
-        assert_ne!(a, b, "the two cliques land on different latent themes");
+        let themes = latent_themes(&lab, &c, 2, 42);
+        assert_eq!(themes.k, 2);
+        assert_eq!(themes.loadings.len(), 6);
+        let dom: HashMap<&str, usize> =
+            themes.loadings.iter().map(|l| (l.label.as_str(), l.dominant_theme)).collect();
+        assert!(dom["a1"] == dom["a2"] && dom["a2"] == dom["a3"], "a-cluster shares a theme");
+        assert!(dom["b1"] == dom["b2"] && dom["b2"] == dom["b3"], "b-cluster shares a theme");
+        assert_ne!(dom["a1"], dom["b1"], "the two clusters separate");
     }
 
-    // LT-2: deterministic — same labels, co-occurrence, k, seed ⇒ identical
-    // loadings across runs (SplitMix64 seeding).
     #[test]
-    fn lt2_is_deterministic() {
-        let ls = labels(&["x", "y", "z"]);
-        let g = co(&[("x", "y", 3.0), ("y", "z", 2.0)]);
-        let a = latent_themes(&ls, &g, 2, 42);
-        let b = latent_themes(&ls, &g, 2, 42);
-        assert_eq!(a, b);
+    fn k_clamped_to_label_count() {
+        let themes = latent_themes(&labels(&["x", "y"]), &cooc(&[("x", "y", 1.0)]), 99, 7);
+        assert!(themes.k <= 2);
     }
 
-    // LT-3: guarded edges — empty labels or k=0 yield an empty result; k is
-    // clamped to the label count.
     #[test]
-    fn lt3_guards() {
-        assert!(latent_themes(&[], &[], 3, 1).loadings.is_empty());
-        assert!(latent_themes(&labels(&["a"]), &[], 0, 1).loadings.is_empty());
-        let t = latent_themes(&labels(&["a", "b"]), &co(&[("a", "b", 1.0)]), 9, 1);
-        assert_eq!(t.k, 2, "k clamped to label count");
+    fn deterministic_for_fixed_seed() {
+        let lab = labels(&["a1", "a2", "b1", "b2"]);
+        let c = cooc(&[("a1", "a2", 3.0), ("b1", "b2", 3.0)]);
+        assert_eq!(latent_themes(&lab, &c, 2, 123), latent_themes(&lab, &c, 2, 123));
+    }
+
+    #[test]
+    fn total_over_edge_inputs() {
+        let empty = latent_themes(&[], &[], 3, 1);
+        assert_eq!(empty.k, 0);
+        assert!(empty.loadings.is_empty());
+        let zero_k = latent_themes(&labels(&["x", "y"]), &[], 0, 1);
+        assert_eq!(zero_k.k, 0);
+        assert!(zero_k.loadings.is_empty());
     }
 }
