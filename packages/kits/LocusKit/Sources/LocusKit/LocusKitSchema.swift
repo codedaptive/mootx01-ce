@@ -95,6 +95,7 @@ public enum LocusKitSchema {
                 kgFactsTable,
                 proposalsTable,
                 associationsTable,
+                learnedReferencesTable,
                 nodeBundlesTable,
                 containerFingerprintsTable,
                 recallTraceTable,
@@ -440,6 +441,46 @@ public enum LocusKitSchema {
         primaryKey: ["id"]
     )
 
+    // MARK: - learned_references
+    //
+    // LearnedReference persistence per mission NOUN-LRF-01, arch spec
+    // §7.8.2, and cookbook §2.4/§2.7. The substrate the grounding-driven
+    // `learn` verb writes to (learnedReference is the only noun accepting
+    // learn). Mirrors `associations` structurally — a required lattice
+    // anchor stored as the same four columns (udcCode TEXT NOT NULL
+    // DEFAULT '' + udcFacets + wikidataQID + wikidataQidsSecondary;
+    // `addLearnedReference` rejects an empty anchor before insert), three
+    // Int64 bitmap columns, and the Rev 1.0 soft-delete reservation. Two
+    // content columns replace the edge endpoints: `sourceCatalogID` (the
+    // SourceCatalogEntry reference, stored as an identifier the way
+    // kg_facts stores sourceDrawerID) and `handle` (the reference URI).
+    // No generated columns — the query paths are id, handle, source, and
+    // the lattice anchor, not a state cluster. Same headroom convention.
+    // The refresh_policy / drift_severity / mode / source operational
+    // axes (cookbook §2.4) live in operationalBitmap, not as columns.
+    static let learnedReferencesTable = TableDeclaration(
+        name: "learned_references",
+        columns: [
+            .text("id"),
+            .text("sourceCatalogID"),
+            .text("handle"),
+            .text("addedBy"),
+            .timestamp("filedAt"),
+            .timestamp("tombstonedAt", nullable: true),
+            .text("removedByBatch", nullable: true),
+            ColumnDeclaration(name: "udcCode", type: .text,
+                              nullable: false, defaultValue: .text("")),
+            .text("udcFacets", nullable: true),
+            .text("wikidataQID", nullable: true),
+            .text("wikidataQidsSecondary", nullable: true),
+            .bitmap("adjectiveBitmap"),
+            .bitmap("operationalBitmap"),
+            .bitmap("provenanceBitmap"),
+            .json("ext", nullable: true)
+        ],
+        primaryKey: ["id"]
+    )
+
     // MARK: - recall_trace
     //
     // RecallTraceItem persistence per NEURONKIT_SPEC §3.1. One row per
@@ -540,6 +581,12 @@ public enum LocusKitSchema {
         IndexDeclaration(name: "idx_associations_source", table: "associations", columns: ["sourceWing", "sourceRoom"]),
         IndexDeclaration(name: "idx_associations_target", table: "associations", columns: ["targetWing", "targetRoom"]),
         IndexDeclaration(name: "idx_associations_udcCode", table: "associations", columns: ["udcCode"]),
+        // learned_references — query paths: by handle (does this reference
+        // already exist?), by source (refresh sweep over one source's
+        // references), and by lattice anchor (anchor resolution).
+        IndexDeclaration(name: "idx_learned_references_handle", table: "learned_references", columns: ["handle"]),
+        IndexDeclaration(name: "idx_learned_references_source", table: "learned_references", columns: ["sourceCatalogID"]),
+        IndexDeclaration(name: "idx_learned_references_udcCode", table: "learned_references", columns: ["udcCode"]),
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration(name: "idx_recall_trace_target", table: "recall_trace", columns: ["target"]),

@@ -46,6 +46,7 @@ use crate::drawer::Drawer;
 // ─────────────────────────────────────────────────────────────────
 use substrate_lib::row_state::RowVerb;
 use crate::association::Association;
+use crate::learned_reference::LearnedReference;
 use crate::error::LocusKitError;
 use crate::estate_types::RowID;
 use crate::kg_fact::KGFact;
@@ -385,6 +386,35 @@ pub trait DrawerStore: Send + Sync {
         _wing: &str,
         _room: &str,
     ) -> Result<Vec<Association>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
+    // -----------------------------------------------------------------
+    // LearnedReference CRUD
+    // -----------------------------------------------------------------
+
+    /// Insert a learned reference. `handle` and `added_by` are required, and
+    /// the lattice anchor is required per cookbook §2.7 (I-16): an empty
+    /// `udc_code` is rejected with `LocusKitError::InvalidContent` before the
+    /// insert.
+    fn add_learned_reference(&self, _reference: &LearnedReference) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "add_learned_reference not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Fetch a learned reference by id. Returns `None` on miss.
+    fn get_learned_reference(&self, _id: &str) -> Result<Option<LearnedReference>, LocusKitError> {
+        Ok(None)
+    }
+
+    /// All non-tombstoned references learned from a source catalog entry,
+    /// ordered by `filed_at` ascending. Resolves through
+    /// `idx_learned_references_source`.
+    fn learned_references_from_source(
+        &self,
+        _source_catalog_id: &str,
+    ) -> Result<Vec<LearnedReference>, LocusKitError> {
         Ok(Vec::new())
     }
 
