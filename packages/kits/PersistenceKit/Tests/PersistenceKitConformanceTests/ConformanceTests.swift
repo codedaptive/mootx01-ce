@@ -2,12 +2,12 @@
 // Smoke test that ConformanceRunner itself compiles correctly.
 // Real backend runs live in each backend's test target.
 
-import XCTest
+import Testing
 import PersistenceKitConformance
 
-final class ConformanceTests: XCTestCase {
-    func testRunnerExists() {
+struct ConformanceTests {
+    @Test func runnerExists() {
         // Compilation is the test: ConformanceRunner is importable.
-        XCTAssertTrue(true)
+        #expect(Bool(true))
     }
 }

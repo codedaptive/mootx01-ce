@@ -1,13 +1,14 @@
 // SQLiteConformanceTests.swift
 // Runs the full ConformanceRunner fixture suite against SQLite.
 
-import XCTest
+import Testing
+import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
 import PersistenceKitConformance
 
-final class SQLiteConformanceTests: XCTestCase {
-    func testAllFixtures() async throws {
+struct SQLiteConformanceTests {
+    @Test func allFixtures() async throws {
         let runner = ConformanceRunner(backendName: "SQLite") {
             let dir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("storagekit-conf-\(UUID().uuidString)")
@@ -18,6 +19,6 @@ final class SQLiteConformanceTests: XCTestCase {
                 backend: .sqlite(url: file)
             ))
         }
-        try await runner.runAll(in: self)
+        try await runner.runAll()
     }
 }

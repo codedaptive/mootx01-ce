@@ -11,7 +11,8 @@
 //     plaintext mode against the same file sees ciphertext, not plaintext
 //     — proof the content is encrypted at rest.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitSQLite
@@ -29,7 +30,7 @@ import PersistenceKitSQLite
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class EncryptionWiringTests: XCTestCase {
+struct EncryptionWiringTests {
 
     /// A drawers-shaped schema with the nullable keyID column the mission
     /// adds, reduced to the columns these tests exercise.
@@ -68,7 +69,7 @@ final class EncryptionWiringTests: XCTestCase {
 
     /// Mode 1: content unchanged on read, no keyID written. This is the
     /// "null-key, no crypto applied" case from the mission.
-    func testPlaintextModeIsNoOp() async throws {
+    @Test func plaintextModeIsNoOp() async throws {
         let storage = try makeStorage(EstateEncryptionConfig(.plaintext), at: freshDBURL())
         try await storage.open(schema: makeSchema())
 
@@ -80,17 +81,17 @@ final class EncryptionWiringTests: XCTestCase {
             table: "drawers",
             where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
         )
-        XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0]["content"], .text("plain note"))
+        #expect(rows.count == 1)
+        #expect(rows[0]["content"] == .text("plain note"))
         // keyID is NULL: no crypto path ran.
-        XCTAssertEqual(rows[0]["keyID"] ?? .null, .null)
+        #expect((rows[0]["keyID"] ?? .null) == .null)
         await storage.close()
     }
 
     /// Mode 2: insert under an encrypting estate, read back the original
     /// plaintext, confirm keyID is the estate identifier, and confirm a
     /// plaintext-mode reader on the same file sees ciphertext at rest.
-    func testRowEncryptionRoundTripThroughStorage() async throws {
+    @Test func rowEncryptionRoundTripThroughStorage() async throws {
         let url = freshDBURL()
         let encryption = EstateEncryptionConfig(.rowEncryption)
         let storage = try makeStorage(encryption, at: url)
@@ -107,10 +108,10 @@ final class EncryptionWiringTests: XCTestCase {
             table: "drawers",
             where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
         )
-        XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0]["content"], .text(secret))
+        #expect(rows.count == 1)
+        #expect(rows[0]["content"] == .text(secret))
         // keyID carries the estate key identifier.
-        XCTAssertEqual(rows[0]["keyID"], .text(encryption.keyIdentifier!))
+        #expect(rows[0]["keyID"] == .text(encryption.keyIdentifier!))
         await storage.close()
 
         // A reader with no key (plaintext mode) sees ciphertext at rest:
@@ -121,9 +122,9 @@ final class EncryptionWiringTests: XCTestCase {
             table: "drawers",
             where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
         )
-        XCTAssertEqual(raw.count, 1)
-        XCTAssertNotEqual(raw[0]["content"], .text(secret),
-                          "content must be ciphertext at rest, not plaintext")
+        #expect(raw.count == 1)
+        #expect(raw[0]["content"] != .text(secret),
+                "content must be ciphertext at rest, not plaintext")
         await reader.close()
     }
 }

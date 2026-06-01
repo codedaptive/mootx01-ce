@@ -1,6 +1,6 @@
 // PersistenceKitCoreTypeTests.swift
 
-import XCTest
+import Testing
 import SubstrateTypes
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
@@ -17,52 +17,52 @@ import PersistenceKit
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class PersistenceKitCoreTypeTests: XCTestCase {
+struct PersistenceKitCoreTypeTests {
 
-    func testTypedValueEquality() {
-        XCTAssertEqual(TypedValue.int(42), TypedValue.int(42))
-        XCTAssertNotEqual(TypedValue.int(42), TypedValue.int(43))
-        XCTAssertNotEqual(TypedValue.int(42), TypedValue.bitmap(42))  // distinct semantic types
-        XCTAssertTrue(TypedValue.null.isNull)
-        XCTAssertFalse(TypedValue.int(0).isNull)
+    @Test func typedValueEquality() {
+        #expect(TypedValue.int(42) == TypedValue.int(42))
+        #expect(TypedValue.int(42) != TypedValue.int(43))
+        #expect(TypedValue.int(42) != TypedValue.bitmap(42))  // distinct semantic types
+        #expect(TypedValue.null.isNull)
+        #expect(!TypedValue.int(0).isNull)
     }
 
-    func testColumnOrdering() {
+    @Test func columnOrdering() {
         let a = Column(table: "drawers", name: "adjective")
         let b = Column(table: "drawers", name: "operational")
         let c = Column(table: "tunnels", name: "adjective")
-        XCTAssertLessThan(a, b)
-        XCTAssertLessThan(b, c)
+        #expect(a < b)
+        #expect(b < c)
     }
 
-    func testPredicateAllAndAny() {
+    @Test func predicateAllAndAny() {
         let p1: StoragePredicate = .eq(Column(table: "t", name: "c"), .int(1))
         let p2: StoragePredicate = .eq(Column(table: "t", name: "c"), .int(2))
 
         // .all([single]) → single
-        if case .eq = StoragePredicate.all([p1]) {} else { XCTFail("expected unwrapped") }
+        if case .eq = StoragePredicate.all([p1]) {} else { Issue.record("expected unwrapped") }
 
         // .all([]) → .isTrue
-        if case .isTrue = StoragePredicate.all([]) {} else { XCTFail("expected isTrue") }
+        if case .isTrue = StoragePredicate.all([]) {} else { Issue.record("expected isTrue") }
 
         // .any([]) → .isFalse
-        if case .isFalse = StoragePredicate.any([]) {} else { XCTFail("expected isFalse") }
+        if case .isFalse = StoragePredicate.any([]) {} else { Issue.record("expected isFalse") }
 
         // .all containing .isFalse → .isFalse
-        if case .isFalse = StoragePredicate.all([p1, .isFalse]) {} else { XCTFail("expected isFalse") }
+        if case .isFalse = StoragePredicate.all([p1, .isFalse]) {} else { Issue.record("expected isFalse") }
 
         // .any containing .isTrue → .isTrue
-        if case .isTrue = StoragePredicate.any([p1, .isTrue]) {} else { XCTFail("expected isTrue") }
+        if case .isTrue = StoragePredicate.any([p1, .isTrue]) {} else { Issue.record("expected isTrue") }
 
         // .all multi-non-trivial → .and
         if case .and(let xs) = StoragePredicate.all([p1, p2]) {
-            XCTAssertEqual(xs.count, 2)
+            #expect(xs.count == 2)
         } else {
-            XCTFail("expected .and")
+            Issue.record("expected .and")
         }
     }
 
-    func testSchemaDeclarationConstruction() {
+    @Test func schemaDeclarationConstruction() {
         let schema = SchemaDeclaration(
             kitID: "TestKit",
             version: 1,
@@ -74,19 +74,19 @@ final class PersistenceKitCoreTypeTests: XCTestCase {
                 )
             ]
         )
-        XCTAssertEqual(schema.kitID, "TestKit")
-        XCTAssertEqual(schema.tables.count, 1)
-        XCTAssertEqual(schema.tables[0].columns.count, 3)
+        #expect(schema.kitID == "TestKit")
+        #expect(schema.tables.count == 1)
+        #expect(schema.tables[0].columns.count == 3)
     }
 
-    func testStorageErrorEquality() {
-        XCTAssertEqual(
-            StorageError.schemaMismatch(expected: 1, actual: 2),
+    @Test func storageErrorEquality() {
+        #expect(
             StorageError.schemaMismatch(expected: 1, actual: 2)
+                == StorageError.schemaMismatch(expected: 1, actual: 2)
         )
-        XCTAssertNotEqual(
-            StorageError.schemaMismatch(expected: 1, actual: 2),
-            StorageError.schemaMismatch(expected: 1, actual: 3)
+        #expect(
+            StorageError.schemaMismatch(expected: 1, actual: 2)
+                != StorageError.schemaMismatch(expected: 1, actual: 3)
         )
     }
 }
