@@ -59,18 +59,20 @@ lib name `eidetic_lib`)
   `NovelTokenCache`, `PoolEntry`, `PoolSubmission`
 - `tests/word_class_conformance.rs`, `examples/benchmark.rs`, `Cargo.toml`
 
-The Rust version covers the building blocks (anchor, pipeline, wikidata,
-word-class); the lattice-resolution, scheme, and consent/foreign-source
-surfaces are present in the Swift version and not yet in the Rust version.
+Both versions expose the full surface: the term→Anchor lookup path, the
+deterministic linguistic pipeline (tokenizer, normalizer, stemmer,
+segmenter), lattice resolution, scheme management, the FDC word-class API,
+and the consent-gated foreign-source pipeline. The two ports produce
+byte-identical results for every shared input.
 
 ## § 2 — Public types
 
 This package has a large public surface; only the term→Anchor lookup path
 is consumed by other packages (NeuronKit, via `EideticLib.lookup` →
 `Anchor`). That path is documented in full as **Tier 1**. The remaining
-public surfaces — present and tested, but not yet consumed outside
-EideticLib's own tests — are listed in the **Tier 2** table of contents at
-the end of this section.
+public surfaces — fully built and tested, consumed by EideticLib's own
+pipeline — are listed in the **Tier 2** table of contents at the end of
+this section.
 
 ### Tier 1 — consumed surface
 
@@ -90,7 +92,8 @@ public struct Anchor: Equatable, Sendable, Codable {
 
     public init(mdccCode: String, wikidataQID: String?, confidence: UInt8, dataVersion: String)
 
-    /// Sentinel returned only when the bundled canon fails to load.
+    /// Sentinel returned only when the bundled canon fails to load
+    /// (a configuration error, not a lookup miss — see I-3).
     public static let notImplemented: Anchor   // dataVersion == "0.1.0-stub"
 }
 ```
@@ -167,9 +170,9 @@ public extension EideticLib {
 }
 ```
 
-**Rust:** the Rust version has no platform-acceleration today, so a
-single function suffices; it implements the canonical reference
-(byte-for-byte parity with Swift's `sentencesByDelimiter`).
+**Rust:** the Rust version implements the canonical reference
+(byte-for-byte parity with Swift's `sentencesByDelimiter`); on non-Apple
+hosts `sentences` and `sentencesByDelimiter` are the same deterministic path.
 
 ```rust
 pub fn sentences(text: &str) -> Vec<String>;   // in module eidetic_lib::segmenter
@@ -177,9 +180,10 @@ pub fn sentences(text: &str) -> Vec<String>;   // in module eidetic_lib::segment
 
 ### Tier 2 — additional public surface
 
-Fully public, exercised by EideticLib's own tests and the pending FDC
-runtime missions, but not (yet) referenced by any other package. Listed
-here by name + one-line + source file; signatures live at the cited file.
+Fully public and built in both versions, exercised by EideticLib's own
+pipeline and tests. Not directly referenced by other packages (which
+consume the Tier-1 `lookup` path). Listed here by name + one-line +
+source file; signatures live at the cited file.
 
 | Type / function | One-line | Source (Swift / Rust) |
 |---|---|---|
@@ -216,9 +220,9 @@ The lookup path. Behavioral contracts: SPEC § 5 (B-1…B-5).
 ### `lookup`
 
 Resolves a term to an `Anchor` deterministically and offline (SPEC § 4,
-I-1/I-2; pipeline B-1). The Swift version resolves real MDCC codes today; the
-Rust version returns the `not_implemented` sentinel pending the FDC runtime
-(SPEC § 9).
+I-1/I-2; pipeline B-1): tokenize → normalize → stem → resolve against the
+bundled MDCC canon, confirming the entry's CC0 Q-ID. Both versions resolve
+real MDCC codes against the loaded canon.
 
 **Swift:**
 
@@ -231,7 +235,7 @@ extension EideticLib {
 **Rust:**
 
 ```rust
-pub fn lookup(term: &str) -> Anchor;   // currently Anchor::not_implemented()
+pub fn lookup(term: &str) -> Anchor;
 ```
 
 ### `classifyLatticeCode`
@@ -250,7 +254,11 @@ extension EideticLib {
 }
 ```
 
-**Rust:** present in the Swift version and not yet in the Rust version.
+**Rust:**
+
+```rust
+pub fn classify_lattice_code(code: &str, known_codes: &HashSet<String>) -> LatticeCodeState;
+```
 
 ### `defaultSchemeManifest`
 
@@ -265,7 +273,11 @@ extension EideticLib {
 }
 ```
 
-**Rust:** not ported.
+**Rust:**
+
+```rust
+pub fn default_scheme_manifest() -> Option<LatticeSchemeManifest>;
+```
 
 ### `sentences` / `sentencesByDelimiter`
 
@@ -301,8 +313,16 @@ public enum PipelineError: Error, Sendable, Hashable {
 }
 ```
 
-**Rust:** the foreign-source pipeline is present in the Swift version and not yet in the Rust version; the Rust version exposes
-no error enum (its `lookup` is infallible and returns the sentinel).
+**Rust:**
+
+```rust
+pub enum PipelineError {
+    ConsentMissing { scheme_id: String },
+    SourceUnreachable { url: String, reason: String },
+    DigestMismatch { url: String, expected: String, actual: String },
+    AssemblyWriteFailed { reason: String },
+}
+```
 
 ## § 5 — Conformance test entry points
 
@@ -358,10 +378,10 @@ case .pending(let code):  // valid, resolves on the next canon pull
 ```rust
 use eidetic_lib::lookup;
 
-// Rust lookup returns the not_implemented sentinel until the FDC runtime
-// lands (GNO-FDC-06/07); the API surface is stable for integration.
 let anchor = lookup("organic chemistry research");
-assert_eq!(anchor.confidence, 0);
+// anchor.mdcc_code   — resolved MDCC code, or "" if nothing matched
+// anchor.wikidata_qid — the entry's CC0 Q-ID, or None
+// anchor.confidence  — 48 high / 32 medium / 16 low / 0 none
 ```
 
 ---
