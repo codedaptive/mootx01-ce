@@ -54,8 +54,7 @@ extension WordClassTable {
     /// Loads the table from the module's bundled resource at
     /// Resources/WordClassTable.json. Returns nil if the resource is
     /// missing or malformed; production code should treat that as a
-    /// build error since the JSON ships with the kit — the same
-    /// contract as `WikidataSubset.loadBundled()`.
+    /// build error since the JSON ships with the kit.
     public static func loadBundled() -> WordClassTable? {
         guard let url = Bundle.module.url(
             forResource: "WordClassTable",

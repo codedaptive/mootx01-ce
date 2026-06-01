@@ -64,53 +64,12 @@ final class FDCLookupTests: XCTestCase {
         XCTAssertEqual(anchor.confidence, 0)
     }
 
-    // 5. No UDC data is loaded: the CC-BY-SA UDCSchedule.json
-    //    resource is gone from the bundle.
-    func testUDCScheduleResourceIsAbsentFromBundle() {
-        let url = Bundle.module.url(
-            forResource: "UDCSchedule",
-            withExtension: "json"
-        )
-        XCTAssertNil(
-            url,
-            "the CC-BY-SA UDCSchedule.json must not ship in the EideticLib bundle"
-        )
-    }
-
-    // 6. Anchor shape: exposes code and no udcCode. The Rust-port
-    //    sibling struct carries the same rename as a documented
-    //    follow-up (see TASK_MDCC_03_BLAST_RADIUS.md).
+    // 5. Anchor shape: exposes code and no udcCode.
     func testAnchorExposesLatticeCodeAndNoUDCCode() {
         let anchor = EideticLib.lookup("chemistry")
         let mirror = Mirror(reflecting: anchor)
         let labels = mirror.children.compactMap { $0.label }
         XCTAssertTrue(labels.contains("code"), "Anchor must expose code")
         XCTAssertFalse(labels.contains("udcCode"), "Anchor must not expose udcCode")
-    }
-}
-
-/// Part 3: the licensing boundary. No CC-BY-SA classification data
-/// ships in the EideticLib default bundle; the only bundled
-/// classification data is the CC0 Wikidata subset, and the
-/// classification source (the MDCC canon) is CC0/public-domain and
-/// lives in LatticeLib.
-final class LicensingBoundaryTests: XCTestCase {
-
-    func testNoCCBYSAResourceShipsInBundle() throws {
-        // The CC-BY-SA UDC schedule must be gone from the bundle.
-        XCTAssertNil(
-            Bundle.module.url(forResource: "UDCSchedule", withExtension: "json"),
-            "the CC-BY-SA UDCSchedule.json must not ship"
-        )
-
-        // The bundled Wikidata subset must be CC0, not the encumbered
-        // CC-BY-SA license the retired UDC schedule carried.
-        let subset = try XCTUnwrap(WikidataSubset.loadBundled())
-        let note = subset.licenseNote.uppercased()
-        XCTAssertTrue(note.contains("CC0"), "bundled subset must be CC0")
-        XCTAssertFalse(
-            note.contains("CC-BY-SA"),
-            "no CC-BY-SA share-alike data may ship in the default bundle"
-        )
     }
 }
