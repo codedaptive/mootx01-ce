@@ -22,28 +22,29 @@
 // gate is enforced by running the reference test harness
 // against the SubstrateLib-built library externally.
 
-import XCTest
+import Testing
 @testable import SubstrateLib
 import SubstrateML
 import SubstrateKernel
 import SubstrateTypes
 
-final class SubstrateLibConformanceTests: XCTestCase {
+@Suite("SubstrateLib bit-identity conformance gate (I-19)")
+struct SubstrateLibConformanceTests {
 
     /// The same input bytes under the same hyperplane family
     /// MUST produce the same fingerprint.
-    func testFingerprintDeterminism() throws {
+    @Test func testFingerprintDeterminism() throws {
         let a = Fingerprint256(block0: 0xDEADBEEF, block1: 0xCAFEBABE,
                                block2: 0xFEEDFACE, block3: 0xBAADF00D)
         let b = Fingerprint256(block0: 0xDEADBEEF, block1: 0xCAFEBABE,
                                block2: 0xFEEDFACE, block3: 0xBAADF00D)
-        XCTAssertEqual(a, b)
+        #expect(a == b)
     }
 
     /// HLC equality must hold for identical components.
-    func testHLCDeterminism() throws {
+    @Test func testHLCDeterminism() throws {
         let hlc1 = HLC(physicalTime: 1_000_000, logicalCount: 0, nodeID: 1)
         let hlc2 = HLC(physicalTime: 1_000_000, logicalCount: 0, nodeID: 1)
-        XCTAssertEqual(hlc1, hlc2)
+        #expect(hlc1 == hlc2)
     }
 }

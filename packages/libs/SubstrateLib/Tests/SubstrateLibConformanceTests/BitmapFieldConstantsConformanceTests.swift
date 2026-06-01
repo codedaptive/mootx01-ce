@@ -17,13 +17,14 @@
 // (constant, expected, actual) triple per §2.8 row so the diff
 // against the cookbook is immediate.
 
-import XCTest
+import Testing
 @testable import SubstrateLib
 import SubstrateML
 import SubstrateKernel
 import SubstrateTypes
 
-final class BitmapFieldConstantsConformanceTests: XCTestCase {
+@Suite("Bitmap field constants — cookbook §2.8 verification table")
+struct BitmapFieldConstantsConformanceTests {
 
     /// Cookbook § 2.8 verification table, rows 1-10 (the State
     /// scale-gapped raw values). Each entry is (case, expected
@@ -50,7 +51,7 @@ final class BitmapFieldConstantsConformanceTests: XCTestCase {
     /// verification table. The test surfaces ALL mismatches in
     /// one run so a stale value triggers one focused failure
     /// rather than one-by-one whack-a-mole.
-    func testRowStateRawValuesMatchVerificationTable() {
+    @Test func testRowStateRawValuesMatchVerificationTable() {
         var mismatches: [String] = []
         for entry in Self.stateTable {
             if entry.state.rawValue != entry.expectedRaw {
@@ -58,19 +59,19 @@ final class BitmapFieldConstantsConformanceTests: XCTestCase {
                     "§2.8 row \(entry.row): RowState.\(entry.state) expected raw=\(entry.expectedRaw), got \(entry.state.rawValue)")
             }
         }
-        XCTAssertTrue(mismatches.isEmpty,
-            "RowState diverges from cookbook §2.8:\n" + mismatches.joined(separator: "\n"))
+        #expect(mismatches.isEmpty,
+            "RowState diverges from cookbook §2.8:\n\(mismatches.joined(separator: "\n"))")
     }
 
     /// The case set is exactly the ten cookbook §2.3 values —
     /// no more, no fewer. Catches accidental additions and
     /// catches accidental deletions.
-    func testRowStateCaseSetMatchesVerificationTable() {
+    @Test func testRowStateCaseSetMatchesVerificationTable() {
         let actual = Set(RowState.allCases.map(\.rawValue))
         let expected: Set<UInt8> = [0, 1, 2, 3, 16, 17, 18, 19, 32, 33]
-        XCTAssertEqual(actual, expected,
+        #expect(actual == expected,
             "RowState case set diverges from cookbook §2.3 — actual \(actual.sorted()), expected \(expected.sorted())")
-        XCTAssertEqual(RowState.allCases.count, 10,
+        #expect(RowState.allCases.count == 10,
             "RowState must have exactly 10 cases per cookbook §2.3")
     }
 
@@ -78,22 +79,22 @@ final class BitmapFieldConstantsConformanceTests: XCTestCase {
     /// `cluster(s) = (s >> 4) & 0x3` resolves to 0 (A), 1 (B),
     /// 2 (C). Verifies the encoding choice that motivated the
     /// raw values is internally consistent.
-    func testClusterPredicateResolvesCorrectly() {
+    @Test func testClusterPredicateResolvesCorrectly() {
         let clusterA: Set<RowState> = [.active, .pending, .contested, .accepted]
         let clusterB: Set<RowState> = [.superseded, .decayed, .withdrawn, .expired]
         let clusterC: Set<RowState> = [.rejected, .tombstoned]
 
         for s in clusterA {
             let cluster = (s.rawValue >> 4) & 0x3
-            XCTAssertEqual(cluster, 0, "\(s) should resolve to cluster A (0), got \(cluster)")
+            #expect(cluster == 0, "\(s) should resolve to cluster A (0), got \(cluster)")
         }
         for s in clusterB {
             let cluster = (s.rawValue >> 4) & 0x3
-            XCTAssertEqual(cluster, 1, "\(s) should resolve to cluster B (1), got \(cluster)")
+            #expect(cluster == 1, "\(s) should resolve to cluster B (1), got \(cluster)")
         }
         for s in clusterC {
             let cluster = (s.rawValue >> 4) & 0x3
-            XCTAssertEqual(cluster, 2, "\(s) should resolve to cluster C (2), got \(cluster)")
+            #expect(cluster == 2, "\(s) should resolve to cluster C (2), got \(cluster)")
         }
     }
 }
