@@ -94,7 +94,32 @@ ports encode the identical fixed vocabulary.
 - Part 1: `test(arialexiconlib): per-type swift-testing peer suites (Swift) — conversion already in tree`
 - Part 2: `test(arialexiconlib): Swift/Rust library-test parity confirmed`
 
-## Test verification (filled at completion)
+## Test verification (completion — commit `a7da90c`)
 
-- `swift test`: exit 0, NN passed (9 baseline + new). To be recorded.
-- `cargo test`: exit 0, 9 passed (unchanged — no Rust edit). To be recorded.
+- `swift test`: **exit 0**, **30 tests in 5 suites passed** (9 baseline + 21 new:
+  Acceptance 6, Noun 6, Verb 6, Adjective 3). Zero warnings (`swift build
+  --build-tests` clean; 0 `warning:` lines in test output).
+  Tail (verbatim): `Test run with 30 tests in 5 suites passed after 0.001 seconds.`
+- `cargo test`: **exit 0**, **9 passed** (unchanged — no Rust edit).
+  Tail (verbatim): `test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`.
+  Zero warnings.
+- `grep -rn "import XCTest" Tests/`: **no matches** (zero XCTest).
+
+### Parity confirmed (Swift superset of the 9 Rust behaviors)
+
+| Rust `#[test]` | Swift peer(s) |
+|---|---|
+| `verb_count_is_nine` | `VerbTests.verbCountIsNine`, `LexiconTests.verbCountIsNine` |
+| `verb_flows_partition` | `VerbTests.verbFlowsPartition` (+ `flowPartitionCounts`), `LexiconTests.verbFlowsPartition` |
+| `adjective_count_is_four` | `AdjectiveTests.adjectiveCountIsFour`, `LexiconTests.adjectiveCountIsFour` |
+| `drawer_is_primary` | `NounTests.drawerIsPrimary`, `LexiconTests.drawerIsPrimary` |
+| `non_drawer_shapes_have_roles` | `NounTests.nonDrawerShapesHaveRoles`, `LexiconTests.nonDrawerShapesHaveRoles` |
+| `acceptance_matrix` | `AcceptanceTests.matrixMatchesSpec`, `LexiconTests.acceptanceMatrix` |
+| `accepts_agrees` | `AcceptanceTests.acceptsAgrees`, `LexiconTests.acceptsAgrees` |
+| `verb_applicability` | `AcceptanceTests.verbApplicability`, `LexiconTests.verbApplicability` |
+| `grammar_stated` | `LexiconTests.grammarStated` |
+
+Every Rust behavior has ≥1 Swift peer; the Swift side adds type-local depth
+(allCases counts, declaration order, role/flow partitions, rawValue round-trips,
+exhaustive accepts↔verbs(for:) cross-check). No behavior missing → nothing to add
+in Part 2 beyond this confirmation. All 5 `Sources/` types have a peer suite.
