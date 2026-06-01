@@ -167,7 +167,7 @@ or an unresolved surface form.
 ### §3.1. Canonicalization Lexicon
 
 The lexicon is a flat map: `lemma -> conceptID`. It is built from two
-sources merged into one pinned snapshot (see §6.2 for the build
+sources merged into one pinned snapshot (see §3.1.1 for the build
 procedure):
 
 - **Wikidata alias table (CC0).** Aliases from Wikidata's `skos:altLabel`
@@ -180,6 +180,44 @@ procedure):
 
 The lexicon is language-scoped. The English lexicon ships by default.
 Additional language lexicons follow the same format; see CONTRIBUTING.
+
+### §3.1.1. Lexicon Build Procedure
+
+Produced by `LexiconBuilder` (LatticeLib), wrapped by the `lexicon-builder`
+maintainer CLI (`tools/seed-generator`). Inputs: the WordNet `dict/` index
+files and a Wikidata P8814 extraction TSV (columns: item, wn, label, alias).
+The build is pure and deterministic — same inputs yield a byte-identical
+artifact across runs and machines.
+
+1. **Parse Wikidata.** From each row take the Q-ID, the WordNet synset ID
+   (`<offset>-<pos>`, the value of property P8814), and the surface forms
+   (`rdfs:label` + `skos:altLabel`). Build `synset -> Q-ID` and the
+   `surface -> Q-ID` candidate list.
+2. **Parse WordNet.** From each `index.*` line take the lemma and its synset
+   offsets in frequency order (sense 0 = primary). Skip multi-word lemmas
+   (underscore). Each `(lemma, synsetID, senseIndex)` maps to the synset's
+   Q-ID where one exists (via P8814), else to `wn:<synsetID>`.
+3. **Derive keys.** For each surface form, key =
+   `Stemmer.stem(Normalizer.normalize(token))` — identical to the runtime
+   Step 2, so build-time and runtime keys agree bit-for-bit. Only single-token
+   surfaces are indexed (the runtime looks up one stemmed token at a time);
+   multi-word forms are skipped.
+4. **Resolve conflicts** — Wikidata-primary, WordNet-disambiguated (§2:
+   "Wikidata provides the concept IDs; WordNet fills the coverage gaps").
+   Deterministic and order-independent. A Q-ID is the concept identity whenever
+   one exists; the `wn:<synset>` fallback is used only when no sense of the word
+   maps to any Q-ID. Tiers, lowest wins:
+   1. A Q-ID reached via a **WordNet sense of the word** — frequency-ranked, so
+      WordNet disambiguates which Q-ID a common word means (`dog` → Q144, the
+      animal at sense 0, not the sausage sense). Ties: lowest sense rank, then
+      surface support, then lowest Q-number.
+   2. A Q-ID from a **Wikidata alias only** (no WordNet sense for the key —
+      named entities, multilingual). Ties: most support, then lowest Q-number.
+   3. A `wn:<synset>` fallback — only when no Q-ID exists for the concept.
+      Ties: lowest sense rank, then lowest synset ID.
+
+The pinned lexicon version is part of the agreement protocol (§3.2): two
+encoders must share it or their bags can diverge.
 
 ### §3.2. Algorithm
 
