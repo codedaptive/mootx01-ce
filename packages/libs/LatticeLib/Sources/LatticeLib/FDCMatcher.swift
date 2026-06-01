@@ -17,7 +17,7 @@
 
 import Foundation
 
-public struct FDCMatcher {
+public struct FDCMatcher: Sendable {
 
     /// Pinned descent cutoff (§6.1). v1.0 value is TBD against real signatures;
     /// `1` (any overlap continues) is the testing default and MUST NOT ship.
