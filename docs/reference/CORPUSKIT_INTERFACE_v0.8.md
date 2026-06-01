@@ -202,7 +202,9 @@ impl Default for BM25Parameters { /* 1.5 / 0.75 */ }
 ### `BM25Index`
 
 In-memory BM25 inverted index over chunk text (SPEC § 5, B-2, B-3). An
-`actor` in Swift; an interior-mutable struct in Rust.
+`actor` in Swift; in Rust, owned state with `&mut self` on the mutating
+verbs (`index_documents`, `remove`) and `&self` on reads (`search`,
+`document_count`).
 
 **Swift:**
 
@@ -220,14 +222,14 @@ public actor BM25Index {
 **Rust:**
 
 ```rust
-pub struct BM25Index { /* interior-mutable postings + stats */ }
+pub struct BM25Index { /* owned postings + stats */ }
 impl BM25Index {
     pub fn new(tokenizer: Arc<dyn Tokenizer>) -> Self;
     pub fn with_parameters(tokenizer: Arc<dyn Tokenizer>,
                            parameters: BM25Parameters) -> Self;
-    pub fn index_documents<'a, I>(&self, documents: I)
-        where I: IntoIterator<Item = &'a Chunk>;
-    pub fn remove(&self, doc_id: Uuid);
+    pub fn index_documents<'a, I>(&mut self, documents: I)
+        where I: IntoIterator<Item = (Uuid, &'a str)>;
+    pub fn remove(&mut self, doc_id: Uuid);
     pub fn search(&self, query: &str, limit: usize) -> Vec<(Uuid, f64)>;
     pub fn document_count(&self) -> usize;
 }

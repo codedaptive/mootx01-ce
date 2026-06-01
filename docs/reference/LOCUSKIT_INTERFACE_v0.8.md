@@ -90,12 +90,17 @@ public actor Estate {
     public func auditTrail(rowID: RowID) async throws -> [AuditRow]
     public func auditTrail(since: Date, until: Date? = nil) async throws -> [AuditRow]
     public func bitmapState(rowID: RowID, at timestamp: Date) async throws -> BitmapState
+
+    // Association graph (extension Estate, Estate.swift):
+    public func tunnelsFromWing(_ wing: String) async throws -> [Tunnel]
 }
 ```
 **Rust:** `pub struct Estate` with `open`, `create`, `close`, `manifest`,
 `estate_uuid`, and verbs `capture(frame, now: i64)`, `recall(frame, now: i64)`,
 `withdraw(...)`, `mutate(...)`, `expunge(...)`, `reanchor(...)`, `learn(...)`,
-each taking `now: i64`. All synchronous (SPEC § 8). `propose` / `associate`
+each taking `now: i64`, plus the association-graph read
+`tunnels_from_wing(wing: &str) -> Result<Vec<Tunnel>, LocusKitError>`.
+All synchronous (SPEC § 8). `propose` / `associate`
 are reached through the tunnel and KG-fact store paths, not as dedicated verb
 methods.
 

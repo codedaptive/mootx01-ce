@@ -287,9 +287,16 @@ cookbook §12.2.
 
 ### § 5.15 ActionOutcomeMatrix
 
-`ActionOutcomeKey(action:context:)` and `ActionOutcomeCell` —
-cookbook §6.5 causal matrix. The matrix accumulates outcome cells
-per action-context key.
+Cookbook §6.5 causal matrix. Keyed by `(actionKind, outcomeCategory)` —
+both 6-bit fields (bitmaps o07/o08). Each `ActionOutcomeCell` accumulates
+`successCount` and `totalCount` (plus `lastUpdateHLC`); the empirical
+`successRate` and a 95 % `wilsonLowerBound` are derived from those counts.
+`observe(action:outcome:success:at:)` records one observation.
+`topActions(forOutcome:k:minObservations:)` selects the best actions for an
+outcome ranked by the Wilson lower bound (so under-observed cells don't float
+to the top) and returns all four signals — `(action, rate, wilsonLowerBound,
+count)` — so callers rank and read from the same values rather than re-deriving
+a raw rate that would imply a different ordering.
 
 ### § 5.16 DPORReduction
 

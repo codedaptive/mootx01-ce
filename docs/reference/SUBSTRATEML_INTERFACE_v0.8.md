@@ -465,26 +465,56 @@ impl TierAscendingQuery { pub fn aggregate(&self, responses: &[PeerResponse]) ->
 
 SPEC § 5.15.
 
+The matrix is keyed by `(actionKind, outcomeCategory)` — both 6-bit fields
+(bitmaps o07/o08, each `< 64`). A cell counts successes against totals; the
+empirical `successRate` and a 95 % `wilsonLowerBound` are derived. `topActions`
+ranks by the Wilson lower bound (so under-observed cells don't float to the
+top) and returns all four signals together, so callers rank and read from the
+same values.
+
 ```swift
 public struct ActionOutcomeKey: Hashable, Comparable, Sendable {
-    public let actionType: UInt32
-    public let contextId: UInt32
+    public let actionKind: UInt8        // 6-bit field (bitmap o07), < 64
+    public let outcomeCategory: UInt8   // 6-bit field (bitmap o08), < 64
+    public init(actionKind: UInt8, outcomeCategory: UInt8)
+    public var packed: UInt16           // (actionKind << 8) | outcomeCategory
 }
 public struct ActionOutcomeCell: Equatable, Sendable {
-    public let positive: Int64
-    public let negative: Int64
+    public var successCount: UInt32
+    public var totalCount: UInt32
+    public var lastUpdateHLC: HLC
+    public var successRate: Float32       // successCount/totalCount; 0 when empty
+    public var wilsonLowerBound: Float32  // 95 % Wilson interval LB; always ≤ successRate
 }
 public struct ActionOutcomeMatrix: Sendable {
+    public private(set) var cells: [ActionOutcomeKey: ActionOutcomeCell]
     public init()
-    public mutating func record(key: ActionOutcomeKey, positive: Bool, weight: Int64 = 1)
-    public func cell(for key: ActionOutcomeKey) -> ActionOutcomeCell
+    public mutating func observe(action: UInt8, outcome: UInt8, success: Bool, at hlc: HLC)
+    public func successRate(action: UInt8, outcome: UInt8) -> Float32?
+    public func observationCount(action: UInt8, outcome: UInt8) -> UInt32
+    // Ranked by Wilson lower bound; ties broken by count desc, then action asc.
+    public func topActions(forOutcome outcome: UInt8, k: Int, minObservations: UInt32 = 1)
+        -> [(action: UInt8, rate: Float32, wilsonLowerBound: Float32, count: UInt32)]
 }
 ```
 
 ```rust
-pub struct ActionOutcomeKey { pub action_type: u32, pub context_id: u32 }
-pub struct ActionOutcomeCell { pub positive: i64, pub negative: i64 }
-pub struct ActionOutcomeMatrix { /* internal */ }
+pub struct ActionOutcomeKey { pub action_kind: u8, pub outcome_category: u8 }  // each < 64
+pub struct ActionOutcomeCell {
+    pub success_count: u32,
+    pub total_count: u32,
+    pub last_update_hlc: HLC,
+    // success_rate() and wilson_lower_bound() -> f32 are methods
+}
+pub struct ActionOutcomeMatrix { /* keyed (action_kind, outcome_category) cells */ }
+impl ActionOutcomeMatrix {
+    pub fn new() -> Self;
+    pub fn observe(&mut self, action: u8, outcome: u8, success: bool, hlc: HLC);
+    pub fn success_rate(&self, action: u8, outcome: u8) -> Option<f32>;
+    pub fn observation_count(&self, action: u8, outcome: u8) -> u32;
+    // Returns (action_kind, success_rate, wilson_lower_bound, total_count), Wilson-ranked.
+    pub fn top_actions(&self, outcome: u8, k: usize, min_observations: u32) -> Vec<(u8, f32, f32, u32)>;
+}
 ```
 
 ### `DPParameters`, `DPORReduction`

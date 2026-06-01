@@ -32,7 +32,8 @@ purpose: |
 - `Sources/ConvergenceKitCloudKit/` — `CloudKitSyncEngine`,
   `CKRecordMapping`, `DecodedRecord`
 - `Sources/ConvergenceKitFederation/` — `FederationSyncEngine`,
-  `FederationRelay`, `SignedMessage`, `LocalIdentity`, `PeerIdentity`,
+  `Relay` (transport protocol), `FederationRelay` (in-process `Relay`),
+  `SignedMessage`, `LocalIdentity`, `PeerIdentity`,
   `FederationSignature`, `HyperplaneFamilySpec`, `PairingProposal`,
   `PairingAcceptance`
 - `Tests/ConvergenceKitConformance/` — shared fixtures; per-backend test
@@ -50,8 +51,9 @@ Four library products: `ConvergenceKit`, `ConvergenceKitNone`,
   `FingerprintWire`, `SyncValueBox`, `SyncValueMap`
 - `src/engine.rs` — the `SyncEngine` trait
 - `src/none.rs` — `NoSyncEngine`
-- `src/federation.rs` — `FederationSyncEngine`, `FederationRelay`,
-  `SignedRecord`, `LocalIdentity`, `PeerIdentity`, `verify_signature`
+- `src/federation.rs` — `FederationSyncEngine`, `Relay` (transport
+  trait), `FederationRelay` (in-process `impl Relay`), `SignedRecord`,
+  `LocalIdentity`, `PeerIdentity`, `verify_signature`
 - `src/pairing.rs` — `HyperplaneFamilySpec`, `PairingProposal`,
   `PairingAcceptance`, `proposal_signing_bytes`
 
@@ -77,15 +79,18 @@ public protocol SyncEngine: Sendable {
 ```
 
 **Rust:** (synchronous, like PersistenceKit's port; `subscribe` returns
-an mpsc `Receiver` rather than an `AsyncStream`)
+an mpsc `Receiver` rather than an `AsyncStream`). The bound is `Send`,
+not `Send + Sync`: the engine owns `!Sync` mpsc ends and is driven through
+exclusive `&mut self`, so the mutating verbs take `&mut self` (only the
+read-only `state` is `&self`).
 
 ```rust
-pub trait SyncEngine: Send + Sync {
-    fn enable(&self, manifest: SyncManifest, storage: Arc<dyn Storage>) -> SyncResult<()>;
-    fn disable(&self) -> SyncResult<()>;
-    fn push(&self) -> SyncResult<SyncReceipt>;
-    fn pull(&self) -> SyncResult<SyncReceipt>;
-    fn subscribe(&self) -> std::sync::mpsc::Receiver<SyncEvent>;
+pub trait SyncEngine: Send {
+    fn enable(&mut self, manifest: SyncManifest, storage: Arc<dyn Storage>) -> SyncResult<()>;
+    fn disable(&mut self) -> SyncResult<()>;
+    fn push(&mut self) -> SyncResult<SyncReceipt>;
+    fn pull(&mut self) -> SyncResult<SyncReceipt>;
+    fn subscribe(&mut self) -> std::sync::mpsc::Receiver<SyncEvent>;
     fn state(&self) -> SyncState;
 }
 ```
@@ -360,12 +365,20 @@ public struct DecodedRecord: Sendable {
 ```swift
 public final class FederationSyncEngine: SyncEngine, Sendable {
     public init()
-    public func pair(with peer: FederationSyncEngine, via relay: FederationRelay,
+    public func pair(with peer: FederationSyncEngine, via relay: any Relay,
                      family: HyperplaneFamilySpec) async throws
     public var identity: LocalIdentity { get async }
 }
 
-public final class FederationRelay: @unchecked Sendable {
+// Transport abstraction (hosted-sync hook): the engine pairs over `any
+// Relay`, so a hosted HTTPS/gRPC SyncServer relay drops in with no engine
+// change. `FederationRelay` is the in-process implementation (local + tests).
+public protocol Relay: Sendable {
+    func send(to recipient: Data, message: SignedMessage)
+    func drain(for recipient: Data) -> [SignedMessage]
+}
+
+public final class FederationRelay: Relay, @unchecked Sendable {
     public init()
     public func send(to recipient: Data, message: SignedMessage)
     public func drain(for recipient: Data) -> [SignedMessage]
@@ -420,17 +433,27 @@ public struct PairingAcceptance: Sendable, Codable {
 ```rust
 pub struct FederationSyncEngine { /* … */ }
 impl FederationSyncEngine {
-    pub fn new(identity: Arc<LocalIdentity>, relay: Arc<FederationRelay>) -> Self;
+    pub fn new(identity: Arc<LocalIdentity>, relay: Arc<dyn Relay>) -> Self;
     pub fn peer_identity(&self) -> &PeerIdentity;
     /// Rust v1.0 outbox is explicit; observer-driven path is deferred (SPEC § 9).
     pub fn enqueue(&self, record: SyncRecord) -> SyncResult<()>;
 }
 
+// Transport abstraction (hosted-sync hook): the engine holds `Arc<dyn
+// Relay>`, so a hosted SyncServer relay drops in with no engine change.
+// `FederationRelay` is the in-process implementation (local + tests).
+pub trait Relay: Send + Sync {
+    fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedRecord>;
+    fn broadcast(&self, from: &PeerIdentity, envelope: SignedRecord);
+}
+
 pub struct FederationRelay { /* … */ }                         // also Default
 impl FederationRelay {
     pub fn new() -> Self;
-    pub fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedRecord>;
-    pub fn broadcast(&self, from: &PeerIdentity, envelope: SignedRecord);
+}
+impl Relay for FederationRelay {
+    fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedRecord>;
+    fn broadcast(&self, from: &PeerIdentity, envelope: SignedRecord);
 }
 
 pub struct SignedRecord {
@@ -580,9 +603,10 @@ Task {
     }
 }
 
-// Federation: pair two estates over an in-process relay.
+// Federation: pair two estates over a relay. `relay` is typed `any Relay`,
+// so a hosted SyncServer relay drops in here; FederationRelay is in-process.
 let a = FederationSyncEngine(), b = FederationSyncEngine()
-let relay = FederationRelay()
+let relay: any Relay = FederationRelay()
 try await a.pair(with: b, via: relay, family: HyperplaneFamilySpec(seed: 0x5EED))
 ```
 
