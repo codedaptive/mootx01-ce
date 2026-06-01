@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 import Foundation
 import AriaLexiconLib
 import GeniusLocusKit
@@ -11,7 +11,12 @@ import PersistenceKitInMemory
 /// tools/call against a live in-memory GeniusLocusKit estate. The
 /// tests construct the dispatcher directly (no stdio loop) and pass
 /// JSON-RPC requests through `ARIA_MCPDispatcher.handle(_:)`.
-final class ServerTests: XCTestCase {
+///
+/// `.serialized`: every case opens a live in-memory estate and drives
+/// the dispatcher end-to-end; preserve the one-at-a-time execution the
+/// suite ran under XCTest.
+@Suite("Server dispatch", .serialized)
+struct ServerTests {
 
     /// Build a dispatcher wired to a fresh in-memory estate. Each test
     /// gets its own kit so state does not leak between cases.
@@ -30,7 +35,7 @@ final class ServerTests: XCTestCase {
 
     // MARK: - initialize
 
-    func testInitializeReturnsServerInfo() async throws {
+    @Test func testInitializeReturnsServerInfo() async throws {
         let dispatcher = try await makeDispatcher()
         let request = JSONRPCRequest(
             id: .integer(1),
@@ -38,22 +43,22 @@ final class ServerTests: XCTestCase {
             params: .object(["protocolVersion": .string("2024-11-05")])
         )
         let rawResponse = await dispatcher.handle(request)
-        let response = try XCTUnwrap(rawResponse)
+        let response = try #require(rawResponse)
         guard case .result(let result) = response.payload else {
-            XCTFail("initialize returned error: \(response.payload)")
+            Issue.record("initialize returned error: \(response.payload)")
             return
         }
-        let object = try XCTUnwrap(result.objectValue)
-        XCTAssertEqual(object["protocolVersion"], .string("2024-11-05"))
-        let info = try XCTUnwrap(object["serverInfo"]?.objectValue)
-        XCTAssertEqual(info["name"], .string("ARIA_MCP"))
-        let capabilities = try XCTUnwrap(object["capabilities"]?.objectValue)
-        XCTAssertNotNil(capabilities["tools"])
+        let object = try #require(result.objectValue)
+        #expect(object["protocolVersion"] == .string("2024-11-05"))
+        let info = try #require(object["serverInfo"]?.objectValue)
+        #expect(info["name"] == .string("ARIA_MCP"))
+        let capabilities = try #require(object["capabilities"]?.objectValue)
+        #expect(capabilities["tools"] != nil)
     }
 
     // MARK: - ping
 
-    func testPingReturnsEmptyObject() async throws {
+    @Test func testPingReturnsEmptyObject() async throws {
         let dispatcher = try await makeDispatcher()
         let request = JSONRPCRequest(
             id: .integer(2),
@@ -61,17 +66,17 @@ final class ServerTests: XCTestCase {
             params: nil
         )
         let rawResponse = await dispatcher.handle(request)
-        let response = try XCTUnwrap(rawResponse)
+        let response = try #require(rawResponse)
         guard case .result(let result) = response.payload else {
-            XCTFail("ping returned error")
+            Issue.record("ping returned error")
             return
         }
-        XCTAssertEqual(result, .object([:]))
+        #expect(result == .object([:]))
     }
 
     // MARK: - notifications
 
-    func testNotificationProducesNoResponse() async throws {
+    @Test func testNotificationProducesNoResponse() async throws {
         let dispatcher = try await makeDispatcher()
         let notification = JSONRPCRequest(
             id: nil,
@@ -79,34 +84,34 @@ final class ServerTests: XCTestCase {
             params: nil
         )
         let response = await dispatcher.handle(notification)
-        XCTAssertNil(response)
+        #expect(response == nil)
     }
 
     // MARK: - tools/list
 
-    func testToolsListReturnsProjectedSurface() async throws {
+    @Test func testToolsListReturnsProjectedSurface() async throws {
         let dispatcher = try await makeDispatcher()
         let request = JSONRPCRequest(id: .integer(3), method: "tools/list", params: nil)
         let rawResponse = await dispatcher.handle(request)
-        let response = try XCTUnwrap(rawResponse)
+        let response = try #require(rawResponse)
         guard case .result(let result) = response.payload else {
-            XCTFail("tools/list returned error")
+            Issue.record("tools/list returned error")
             return
         }
-        let object = try XCTUnwrap(result.objectValue)
-        let tools = try XCTUnwrap(object["tools"]?.arrayValue)
-        XCTAssertFalse(tools.isEmpty)
+        let object = try #require(result.objectValue)
+        let tools = try #require(object["tools"]?.arrayValue)
+        #expect(!tools.isEmpty)
         let names = tools.compactMap { $0.objectValue?["name"]?.stringValue }
-        XCTAssertTrue(names.contains("moot_capture_drawer"))
-        XCTAssertTrue(names.contains("moot_drawer_recall"))
+        #expect(names.contains("moot_capture_drawer"))
+        #expect(names.contains("moot_drawer_recall"))
         // No substrate-driven verbs on the surface.
-        XCTAssertFalse(names.contains(where: { $0.hasPrefix("propose_") }))
-        XCTAssertFalse(names.contains(where: { $0.hasPrefix("associate_") }))
+        #expect(!names.contains(where: { $0.hasPrefix("propose_") }))
+        #expect(!names.contains(where: { $0.hasPrefix("associate_") }))
     }
 
     // MARK: - tools/call: capture then recall
 
-    func testCaptureThenRecallRoundTripsThroughTheServer() async throws {
+    @Test func testCaptureThenRecallRoundTripsThroughTheServer() async throws {
         let dispatcher = try await makeDispatcher()
 
         // Capture
@@ -125,13 +130,13 @@ final class ServerTests: XCTestCase {
             ])
         )
         let captureRaw = await dispatcher.handle(captureRequest)
-        let captureResponse = try XCTUnwrap(captureRaw)
+        let captureResponse = try #require(captureRaw)
         guard case .result(let captureResult) = captureResponse.payload else {
-            XCTFail("capture_drawer returned error: \(captureResponse.payload)")
+            Issue.record("capture_drawer returned error: \(captureResponse.payload)")
             return
         }
-        let captureObject = try XCTUnwrap(captureResult.objectValue)
-        XCTAssertEqual(captureObject["isError"], .bool(false))
+        let captureObject = try #require(captureResult.objectValue)
+        #expect(captureObject["isError"] == .bool(false))
 
         // Recall
         let recallRequest = JSONRPCRequest(
@@ -146,20 +151,20 @@ final class ServerTests: XCTestCase {
             ])
         )
         let recallRaw = await dispatcher.handle(recallRequest)
-        let recallResponse = try XCTUnwrap(recallRaw)
+        let recallResponse = try #require(recallRaw)
         guard case .result(let recallResult) = recallResponse.payload else {
-            XCTFail("drawer_recall returned error: \(recallResponse.payload)")
+            Issue.record("drawer_recall returned error: \(recallResponse.payload)")
             return
         }
-        let recallObject = try XCTUnwrap(recallResult.objectValue)
-        XCTAssertEqual(recallObject["isError"], .bool(false))
-        let content = try XCTUnwrap(recallObject["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue })
-        XCTAssertTrue(content.contains("aria-mcp end-to-end test row"))
+        let recallObject = try #require(recallResult.objectValue)
+        #expect(recallObject["isError"] == .bool(false))
+        let content = try #require(recallObject["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue })
+        #expect(content.contains("aria-mcp end-to-end test row"))
     }
 
     // MARK: - tools/call: stubbed verb surfaces as result-isError
 
-    func testStubbedVerbReturnsIsErrorResult() async throws {
+    @Test func testStubbedVerbReturnsIsErrorResult() async throws {
         let dispatcher = try await makeDispatcher()
         // expunge_drawer reaches the GLK boundary, the boundary
         // checks confirmation, dispatches to LocusKit's stub, and
@@ -179,18 +184,18 @@ final class ServerTests: XCTestCase {
             ])
         )
         let rawResponse = await dispatcher.handle(request)
-        let response = try XCTUnwrap(rawResponse)
+        let response = try #require(rawResponse)
         guard case .result(let result) = response.payload else {
-            XCTFail("stubbed expunge returned JSON-RPC error: \(response.payload)")
+            Issue.record("stubbed expunge returned JSON-RPC error: \(response.payload)")
             return
         }
-        let object = try XCTUnwrap(result.objectValue)
-        XCTAssertEqual(object["isError"], .bool(true))
+        let object = try #require(result.objectValue)
+        #expect(object["isError"] == .bool(true))
     }
 
     // MARK: - tools/call: unknown tool
 
-    func testUnknownToolReturnsMethodNotFoundError() async throws {
+    @Test func testUnknownToolReturnsMethodNotFoundError() async throws {
         let dispatcher = try await makeDispatcher()
         let request = JSONRPCRequest(
             id: .integer(30),
@@ -201,17 +206,17 @@ final class ServerTests: XCTestCase {
             ])
         )
         let rawResponse = await dispatcher.handle(request)
-        let response = try XCTUnwrap(rawResponse)
+        let response = try #require(rawResponse)
         guard case .error(let error) = response.payload else {
-            XCTFail("unknown tool did not produce JSON-RPC error")
+            Issue.record("unknown tool did not produce JSON-RPC error")
             return
         }
-        XCTAssertEqual(error.code, JSONRPCErrorCode.methodNotFound)
+        #expect(error.code == JSONRPCErrorCode.methodNotFound)
     }
 
     // MARK: - tools/call: malformed parameters
 
-    func testToolsCallWithoutNameReturnsInvalidParams() async throws {
+    @Test func testToolsCallWithoutNameReturnsInvalidParams() async throws {
         let dispatcher = try await makeDispatcher()
         let request = JSONRPCRequest(
             id: .integer(40),
@@ -219,25 +224,25 @@ final class ServerTests: XCTestCase {
             params: .object([:])
         )
         let rawResponse = await dispatcher.handle(request)
-        let response = try XCTUnwrap(rawResponse)
+        let response = try #require(rawResponse)
         guard case .error(let error) = response.payload else {
-            XCTFail("missing name did not produce JSON-RPC error")
+            Issue.record("missing name did not produce JSON-RPC error")
             return
         }
-        XCTAssertEqual(error.code, JSONRPCErrorCode.invalidParams)
+        #expect(error.code == JSONRPCErrorCode.invalidParams)
     }
 
     // MARK: - method not found
 
-    func testUnknownMethodReturnsMethodNotFound() async throws {
+    @Test func testUnknownMethodReturnsMethodNotFound() async throws {
         let dispatcher = try await makeDispatcher()
         let request = JSONRPCRequest(id: .integer(50), method: "nope/nope", params: nil)
         let rawResponse = await dispatcher.handle(request)
-        let response = try XCTUnwrap(rawResponse)
+        let response = try #require(rawResponse)
         guard case .error(let error) = response.payload else {
-            XCTFail("unknown method did not produce JSON-RPC error")
+            Issue.record("unknown method did not produce JSON-RPC error")
             return
         }
-        XCTAssertEqual(error.code, JSONRPCErrorCode.methodNotFound)
+        #expect(error.code == JSONRPCErrorCode.methodNotFound)
     }
 }
