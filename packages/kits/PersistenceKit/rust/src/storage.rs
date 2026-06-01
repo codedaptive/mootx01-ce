@@ -47,14 +47,23 @@ pub enum IsolationLevel {
     Serializable,
 }
 
-/// Storage trait. Mirror of Swift's Storage protocol with one
-/// adaptation: where Swift uses `transaction(_:)` with a closure
-/// returning `Sendable`, Rust's trait method takes `&dyn Fn`
-/// awkwardly across async boundaries. v1.0 of Rust persistence-kit
-/// omits the closure-based transaction in favor of explicit
-/// begin/commit/rollback on a future StorageTransaction trait;
-/// the InMemory backend treats every operation as auto-committed.
-/// Transaction support lands when the SQLite backend lands.
+/// The transactional view handed to a `Storage::transaction` block. Its
+/// stores participate in the active transaction; the unit commits or rolls
+/// back when the block returns. Mirrors Swift's `StorageTransaction` (minus
+/// the observer, which fires on commit).
+pub trait StorageTransaction {
+    fn row_store(&self) -> Arc<dyn RowStore>;
+    fn blob_store(&self) -> Arc<dyn BlobStore>;
+    fn vector_index(&self) -> Arc<dyn VectorIndex>;
+    fn audit_log(&self) -> Arc<dyn AuditLog>;
+}
+
+/// Storage trait. Mirror of Swift's Storage protocol. One adaptation:
+/// Swift's `transaction<T>(_:)` returns a generic value, but Rust's trait
+/// must stay object-safe (`dyn Storage` is used throughout), so the Rust
+/// `transaction` is non-generic — the block returns `StorageResult<()>`
+/// (Ok commits, Err rolls back) and surfaces results via its own closure
+/// environment.
 pub trait Storage: Send + Sync {
     fn configuration(&self) -> &EstateConfiguration;
     fn row_store(&self) -> Arc<dyn RowStore>;
@@ -76,4 +85,15 @@ pub trait Storage: Send + Sync {
     /// Apply migrations forward to the schema's declared version.
     /// Forward-only, fail-fast per Q4.
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()>;
+
+    /// Run `block` inside a transaction. The block receives a
+    /// `StorageTransaction` whose stores participate in the transaction;
+    /// returning `Ok(())` commits, returning `Err` rolls back and propagates
+    /// the error. Object-safe (no generic return): the block captures any
+    /// results through its own environment.
+    fn transaction(
+        &self,
+        isolation: IsolationLevel,
+        block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
+    ) -> StorageResult<()>;
 }

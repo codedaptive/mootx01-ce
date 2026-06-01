@@ -23,9 +23,10 @@ use uuid::Uuid;
 
 use crate::{
     AuditEvent, AuditLog, BackendConfiguration, BlobStore, ColumnType, DistanceMetric,
-    EstateConfiguration, IndexDeclaration, IndexParameters, OrderClause, OrderDirection, RowHandle,
-    RowKey, RowStore, SchemaDeclaration, SearchParameters, Storage, StorageError, StorageEvent,
-    StorageObserver, StoragePredicate, StorageResult, StorageRow, TableChange, TableDeclaration,
+    EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel, OrderClause,
+    OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters, Storage,
+    StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult, StorageRow,
+    StorageTransaction, TableChange, TableDeclaration,
     TypedValue, VectorIndex, VectorSearchResult,
 };
 
@@ -482,6 +483,61 @@ impl Storage for PostgresStorage {
     }
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         apply_schema(&mut self.inner.lock().unwrap(), schema)
+    }
+
+    fn transaction(
+        &self,
+        isolation: IsolationLevel,
+        block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
+    ) -> StorageResult<()> {
+        // The single pooled connection serializes all sub-store access, so the
+        // BEGIN…COMMIT bracket here and the block's per-call statements run on
+        // the same session in order. The `inner` lock is held only to issue
+        // each bracket statement and released before the block runs — the
+        // block's sub-stores re-lock per call, so holding it across `block`
+        // would deadlock against them.
+        let begin = match isolation {
+            IsolationLevel::ReadCommitted => "BEGIN ISOLATION LEVEL READ COMMITTED",
+            IsolationLevel::RepeatableRead => "BEGIN ISOLATION LEVEL REPEATABLE READ",
+            IsolationLevel::Serializable => "BEGIN ISOLATION LEVEL SERIALIZABLE",
+        };
+        self.inner
+            .lock()
+            .unwrap()
+            .client
+            .batch_execute(begin)
+            .map_err(|e| map_pg_err(e, "transaction"))?;
+        match block(self) {
+            Ok(()) => {
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .client
+                    .batch_execute("COMMIT")
+                    .map_err(|e| map_pg_err(e, "transaction"))?;
+                Ok(())
+            }
+            Err(e) => {
+                // Best-effort rollback; surface the block's error regardless.
+                let _ = self.inner.lock().unwrap().client.batch_execute("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+}
+
+impl StorageTransaction for PostgresStorage {
+    fn row_store(&self) -> Arc<dyn RowStore> {
+        Storage::row_store(self)
+    }
+    fn blob_store(&self) -> Arc<dyn BlobStore> {
+        Storage::blob_store(self)
+    }
+    fn vector_index(&self) -> Arc<dyn VectorIndex> {
+        Storage::vector_index(self)
+    }
+    fn audit_log(&self) -> Arc<dyn AuditLog> {
+        Storage::audit_log(self)
     }
 }
 

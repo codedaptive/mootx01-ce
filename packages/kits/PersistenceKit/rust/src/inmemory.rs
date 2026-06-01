@@ -17,7 +17,9 @@ use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use crate::row_store::RowStore;
 use crate::schema::{SchemaDeclaration, SchemaOperation, TableDeclaration};
 use crate::generated_column::GeneratedColumn;
-use crate::storage::{BackendConfiguration, EstateConfiguration, Storage};
+use crate::storage::{
+    BackendConfiguration, EstateConfiguration, IsolationLevel, Storage, StorageTransaction,
+};
 use crate::types::{Column, RowHandle, RowKey, StorageRow, TypedValue};
 use crate::vector_index::{
     DistanceMetric, IndexParameters, SearchParameters, VectorIndex, VectorSearchResult,
@@ -41,7 +43,7 @@ use substrate_types::hlc::HLC;
 
 // ----- internal state -----
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct State {
     schema_version: i32,
     tables: BTreeMap<String, Table>,
@@ -50,6 +52,7 @@ struct State {
     audit_events: Vec<AuditEvent>,
 }
 
+#[derive(Clone)]
 struct Table {
     declaration: TableDeclaration,
     rows: BTreeMap<RowKey, BTreeMap<String, TypedValue>>,
@@ -143,6 +146,38 @@ impl Storage for InMemoryStorage {
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         let mut state = self.state.lock().unwrap();
         apply_migrations_inner(&mut state, schema)
+    }
+
+    fn transaction(
+        &self,
+        _isolation: IsolationLevel,
+        block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
+    ) -> StorageResult<()> {
+        // No native transaction: snapshot the whole state and restore it if
+        // the block rolls back. (Single-threaded transaction semantics.)
+        let snapshot = self.state.lock().unwrap().clone();
+        match block(self) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                *self.state.lock().unwrap() = snapshot;
+                Err(e)
+            }
+        }
+    }
+}
+
+impl StorageTransaction for InMemoryStorage {
+    fn row_store(&self) -> Arc<dyn RowStore> {
+        Storage::row_store(self)
+    }
+    fn blob_store(&self) -> Arc<dyn BlobStore> {
+        Storage::blob_store(self)
+    }
+    fn vector_index(&self) -> Arc<dyn VectorIndex> {
+        Storage::vector_index(self)
+    }
+    fn audit_log(&self) -> Arc<dyn AuditLog> {
+        Storage::audit_log(self)
     }
 }
 
