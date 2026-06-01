@@ -11,11 +11,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use rusqlite::types::{Value as SqlValue, ValueRef};
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
@@ -346,10 +346,23 @@ pub struct SqliteStorage {
     observers: Arc<ObserverRegistry>,
 }
 
+/// Register the sqlite-vec extension (vec0 virtual table) with every SQLite
+/// connection opened in this process, so the VectorIndex's vec0 tables work.
+/// Idempotent; must run before opening a connection that uses vectors.
+fn register_sqlite_vec() {
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    });
+}
+
 impl SqliteStorage {
     /// Open (creating if absent) the SQLite database named by the
     /// configuration's `Sqlite` backend variant.
     pub fn new(config: EstateConfiguration) -> StorageResult<Self> {
+        register_sqlite_vec();
         let (path, busy) = match &config.backend {
             BackendConfiguration::Sqlite { path, busy_timeout_secs } => {
                 (path.clone(), *busy_timeout_secs)
@@ -422,7 +435,7 @@ impl Storage for SqliteStorage {
         Arc::new(SqliteBlobStore { inner: self.inner.clone() })
     }
     fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Arc::new(SqliteVectorIndex)
+        Arc::new(SqliteVectorIndex { inner: self.inner.clone() })
     }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
         Arc::new(SqliteAuditLog { inner: self.inner.clone() })
@@ -841,43 +854,160 @@ impl StorageObserver for SqliteObserver {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// VectorIndex — Phase-1 placeholder (sqlite-vec deferred to a follow-on).
-// Every call returns a reserved not-supported error rather than silently
-// succeeding.
+// VectorIndex — sqlite-vec backed (vec0 virtual table). Mirrors the Swift
+// SQLiteVectorIndex: a vec0 table holds embeddings keyed by rowid, and a
+// `_storagekit_vector_meta` table maps the caller's RowKey ↔ rowid.
+// Embeddings are little-endian f32 blobs (vec0's native format). Lazily
+// created on first add (dimension fixed from the first vector). vec0 uses
+// L2 by default.
 // ─────────────────────────────────────────────────────────────────────
 
-struct SqliteVectorIndex;
+struct SqliteVectorIndex {
+    inner: Arc<Mutex<Inner>>,
+}
 
-fn vector_unsupported<T>() -> StorageResult<T> {
-    Err(StorageError::BackendError {
-        underlying: "VectorIndex is not supported by the SQLite backend at Phase 1 (sqlite-vec deferred)".into(),
-    })
+const SVEC_TABLE: &str = "_storagekit_vectors";
+const SVEC_META: &str = "_storagekit_vector_meta";
+
+fn vec_blob(v: &[f32]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(v.len() * 4);
+    for f in v {
+        b.extend_from_slice(&f.to_le_bytes());
+    }
+    b
+}
+
+impl SqliteVectorIndex {
+    fn meta_exists(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [SVEC_META],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|o| o.is_some())
+        .unwrap_or(false)
+    }
+
+    fn rowid_for(conn: &Connection, key: RowKey) -> StorageResult<Option<i64>> {
+        conn.query_row(
+            &format!("SELECT \"vec_rowid\" FROM \"{SVEC_META}\" WHERE \"key\" = ?1"),
+            params_from_iter(vec![SqlValue::Text(key.to_string().to_uppercase())]),
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| map_sql_err(e, SVEC_META))
+    }
 }
 
 impl VectorIndex for SqliteVectorIndex {
-    fn add(&self, _key: RowKey, _vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
-        vector_unsupported()
+    fn add(&self, key: RowKey, vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+        let guard = self.inner.lock().unwrap();
+        let dim = vector.len();
+        guard
+            .conn
+            .execute_batch(&format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS \"{SVEC_TABLE}\" USING vec0(embedding float[{dim}]);\n\
+                 CREATE TABLE IF NOT EXISTS \"{SVEC_META}\" (\"key\" TEXT PRIMARY KEY, \"vec_rowid\" INTEGER NOT NULL, \"metadata_json\" TEXT NOT NULL DEFAULT '{{}}');"
+            ))
+            .map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+        let blob = vec_blob(vector);
+        match Self::rowid_for(&guard.conn, key)? {
+            Some(rowid) => {
+                guard.conn.execute(
+                    &format!("UPDATE \"{SVEC_TABLE}\" SET embedding = ?1 WHERE rowid = ?2"),
+                    params_from_iter(vec![SqlValue::Blob(blob), SqlValue::Integer(rowid)]),
+                ).map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+            }
+            None => {
+                guard.conn.execute(
+                    &format!("INSERT INTO \"{SVEC_TABLE}\" (embedding) VALUES (?1)"),
+                    params_from_iter(vec![SqlValue::Blob(blob)]),
+                ).map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+                let rowid = guard.conn.last_insert_rowid();
+                guard.conn.execute(
+                    &format!("INSERT INTO \"{SVEC_META}\" (\"key\", \"vec_rowid\") VALUES (?1, ?2)"),
+                    params_from_iter(vec![SqlValue::Text(key.to_string().to_uppercase()), SqlValue::Integer(rowid)]),
+                ).map_err(|e| map_sql_err(e, SVEC_META))?;
+            }
+        }
+        Ok(())
     }
-    fn update(&self, _key: RowKey, _vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
-        vector_unsupported()
+
+    fn update(&self, key: RowKey, vector: &[f32], metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+        self.add(key, vector, metadata)
     }
-    fn delete(&self, _key: RowKey) -> StorageResult<()> {
-        vector_unsupported()
+
+    fn delete(&self, key: RowKey) -> StorageResult<()> {
+        let guard = self.inner.lock().unwrap();
+        if !Self::meta_exists(&guard.conn) {
+            return Ok(());
+        }
+        if let Some(rowid) = Self::rowid_for(&guard.conn, key)? {
+            guard.conn.execute(
+                &format!("DELETE FROM \"{SVEC_TABLE}\" WHERE rowid = ?1"),
+                params_from_iter(vec![SqlValue::Integer(rowid)]),
+            ).map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+            guard.conn.execute(
+                &format!("DELETE FROM \"{SVEC_META}\" WHERE \"key\" = ?1"),
+                params_from_iter(vec![SqlValue::Text(key.to_string().to_uppercase())]),
+            ).map_err(|e| map_sql_err(e, SVEC_META))?;
+        }
+        Ok(())
     }
+
     fn knn(
         &self,
-        _query: &[f32],
-        _k: usize,
+        query: &[f32],
+        k: usize,
         _metric: DistanceMetric,
         _filter: Option<&StoragePredicate>,
         _search_parameters: Option<SearchParameters>,
     ) -> StorageResult<Vec<VectorSearchResult>> {
-        vector_unsupported()
+        let guard = self.inner.lock().unwrap();
+        if !Self::meta_exists(&guard.conn) {
+            return Ok(Vec::new());
+        }
+        // vec0 KNN: the `k = ?` constraint is required (not just LIMIT); the
+        // `distance` column is exposed on the match. L2 by default.
+        let sql = format!(
+            "SELECT m.\"key\", v.distance FROM \"{SVEC_TABLE}\" v \
+             JOIN \"{SVEC_META}\" m ON m.\"vec_rowid\" = v.rowid \
+             WHERE v.embedding MATCH ?1 AND k = ?2 ORDER BY v.distance"
+        );
+        let mut stmt = guard.conn.prepare(&sql).map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+        let out = stmt
+            .query_map(
+                params_from_iter(vec![SqlValue::Blob(vec_blob(query)), SqlValue::Integer(k as i64)]),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)),
+            )
+            .map_err(|e| map_sql_err(e, SVEC_TABLE))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+        Ok(out
+            .into_iter()
+            .map(|(key, distance)| VectorSearchResult {
+                key: Uuid::parse_str(&key).unwrap_or(Uuid::nil()),
+                distance: distance as f32,
+                metadata: BTreeMap::new(),
+            })
+            .collect())
     }
+
     fn reindex(&self, _parameters: IndexParameters) -> StorageResult<()> {
-        vector_unsupported()
+        // vec0 is updated incrementally; no separate build step.
+        Ok(())
     }
+
     fn count(&self) -> StorageResult<usize> {
-        vector_unsupported()
+        let guard = self.inner.lock().unwrap();
+        if !Self::meta_exists(&guard.conn) {
+            return Ok(0);
+        }
+        let n: i64 = guard
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM \"{SVEC_META}\""), [], |r| r.get(0))
+            .map_err(|e| map_sql_err(e, SVEC_META))?;
+        Ok(n as usize)
     }
 }

@@ -3,7 +3,7 @@
 
 mod conformance;
 
-use conformance::{run_all, Factory};
+use conformance::{run_all, vector_fixtures, Factory};
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use uuid::Uuid;
 
@@ -21,4 +21,5 @@ fn sqlite_conformance() {
         Box::new(SqliteStorage::new(config).expect("open sqlite storage")) as Box<dyn Storage>
     });
     run_all("SQLite", &factory);
+    vector_fixtures("SQLite", &factory);
 }
