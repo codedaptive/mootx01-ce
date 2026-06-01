@@ -108,7 +108,7 @@ GeniusLocusKit / CognitionKit  (reasoning + behaviour recipes)
 
 **Depends on:** LatticeKit (the bundled MDCC canon and its canon version;
 `LatticeCanon`, `LatticeEntry`). Foundation. No other Swift package; the
-Rust port depends only on `serde`, `serde_json`, `unicode-segmentation`,
+Rust version depends only on `serde`, `serde_json`, `unicode-segmentation`,
 `rust-stemmers`, and `aho-corasick`.
 
 **Consumed by:** NeuronKit (via `EideticLib.lookup` returning `Anchor`)
@@ -189,7 +189,7 @@ ships inside the binary.
 **I-13 (sentence segmentation parity):** `EideticLib.sentencesByDelimiter`
 (Swift) and `eidetic_lib::segmenter::sentences` (Rust) implement the same
 delimiter-based algorithm and produce byte-identical segmentation for
-every shared input. The Swift-only `EideticLib.sentences` is a platform-
+every shared input. The Apple-platform `EideticLib.sentences` is a platform-
 routed entry that may invoke `NLTokenizer(unit: .sentence)` on Apple
 when available; on Apple it MAY diverge from the canonical reference for
 language-specific edge cases (abbreviations, quotation handling), and
@@ -333,36 +333,3 @@ identical segment contents (B-10, I-13). The Swift routed entry
 `EideticLib.sentences` round-trips back to the original input on inputs
 that don't exercise language-specific edge cases. Verified in Swift
 `SegmenterTests` and Rust `tests/segmenter_tests.rs`.
-
-## § 8 — Out of scope
-
-- The MDCC canon contents, the authoritative `Code` grammar, canon
-  versioning → `LATTICEKIT_SPEC_v0.8.md`.
-- The `mdccCode` rung, the memory ladder, provenance fields →
-  `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md`.
-- Storage and indexing of anchors → `LOCUSKIT_SPEC_v0.8.md`,
-  `VECTORKIT_SPEC_v0.8.md`.
-- Calling `lookup` from the reasoning layer and recording the result →
-  `NEURONKIT_SPEC_v0.8.md`.
-- The fingerprint/Hamming math behind similarity → `SUBSTRATELIB_SPEC_v0.8.md`.
-
-## § 9 — Open questions
-
-- **Aliases.** `LatticeEntry` carries no aliases field, so resolution is
-  label-only (I-6); an aliases surface would improve recall and is recorded
-  as a follow-up in the MDCC canon work (TASK_MDCC_03).
-- **Rust lookup runtime.** The Rust `lookup` currently returns the
-  `not_implemented` sentinel; the deterministic FDC encoder runtime that
-  produces real Rust anchors lands in the FDC runtime missions
-  (GNO-FDC-06/07). The shared building blocks (tokenizer, normalizer,
-  stemmer, wikidata resolver, word-class) are ported and conformance-gated
-  today; the Swift port resolves real MDCC codes now.
-- **NFKC normalization.** `Normalizer` applies ASCII case-fold today; NFKC
-  composition is deferred until the corpus surfaces a case that needs it.
-- **HMM/Viterbi artifact.** The non-Apple novel-token tagger is a
-  deterministic `.other`-defaulting stub until the compiled Penn-Treebank
-  HMM/Viterbi artifact is bundled.
-
----
-
-*End of EideticLib Specification v0.8.*
