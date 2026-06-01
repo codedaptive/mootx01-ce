@@ -48,12 +48,15 @@ targets:
 
 - `src/storage.rs`, `row_store.rs`, `blob_store.rs`, `vector_index.rs`,
   `audit_log.rs`, `observer.rs`, `types.rs`, `predicate.rs`,
-  `schema.rs`, `generated_column.rs`, `error.rs`, `inmemory.rs`.
+  `schema.rs`, `generated_column.rs`, `error.rs`, `inmemory.rs`,
+  `sqlite.rs`, `postgres.rs`.
 - Traits are synchronous (`Result<T, StorageError>`); the Swift side is
   `async` because Swift actors require it, while the in-process Rust
-  backends do no real async I/O. The InMemory backend ships in both
-  ports at v0.8; the Rust SQLite backend is a declared follow-on (SPEC
-  I-10).
+  backends do no real async I/O. All three backends ship in both ports:
+  InMemory, SQLite (rusqlite "bundled" + sqlite-vec vectors), and
+  PostgreSQL (sync `postgres` crate + pgvector). The Rust transaction
+  surface (`Storage::transaction` + `StorageTransaction`) is implemented
+  across all three.
 
 Naming differs by port convention (Swift `insert(table:values:)` /
 `StoragePredicate.bitmaskAll`; Rust `insert(table, values)` /
@@ -121,9 +124,16 @@ pub trait Storage: Send + Sync {
     fn close(&self) -> StorageResult<()>;
     fn current_schema_version(&self) -> StorageResult<i32>;
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()>;
+    fn transaction(
+        &self,
+        isolation: IsolationLevel,
+        block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
+    ) -> StorageResult<()>;
 }
-// v0.8 Rust omits the closure-based transaction; the InMemory backend
-// auto-commits every operation. Transactions land with the SQLite backend.
+// Object-safety adaptation: `dyn Storage` is used throughout, so the Rust
+// `transaction` cannot be generic over a return type like Swift's. The block
+// returns `StorageResult<()>` — Ok commits, Err rolls back — and surfaces any
+// result through its own captured environment.
 ```
 
 #### `StorageTransaction`
@@ -140,8 +150,22 @@ public protocol StorageTransaction: Sendable {
 }
 public enum IsolationLevel: Sendable { case readCommitted, repeatableRead, serializable }
 ```
-**Rust:** `pub enum IsolationLevel { ReadCommitted, RepeatableRead, Serializable }`
-(transaction trait is a declared follow-on, SPEC I-10).
+**Rust:**
+
+```rust
+pub trait StorageTransaction {
+    fn row_store(&self) -> Arc<dyn RowStore>;
+    fn blob_store(&self) -> Arc<dyn BlobStore>;
+    fn vector_index(&self) -> Arc<dyn VectorIndex>;
+    fn audit_log(&self) -> Arc<dyn AuditLog>;
+}
+pub enum IsolationLevel { ReadCommitted, RepeatableRead, Serializable }
+```
+
+Each backend's storage type implements `StorageTransaction` by delegating to
+its own sub-stores; `transaction` brackets the block with the backend's
+native primitives (InMemory snapshot/restore, SQLite `BEGIN IMMEDIATE`,
+PostgreSQL `BEGIN ISOLATION LEVEL <level>`).
 
 #### `RowStore`
 
@@ -465,8 +489,11 @@ public final class PostgreSQLStorage: Storage, Sendable {
 ```
 **Rust:** `pub struct InMemoryStorage` with
 `new(configuration: EstateConfiguration)` and
-`with_estate(estate_id: Uuid)`. SQLite/PostgreSQL backends are a
-declared follow-on (SPEC I-10).
+`with_estate(estate_id: Uuid)`; `pub struct SqliteStorage` and
+`pub struct PostgresStorage`, each with
+`new(config: EstateConfiguration) -> StorageResult<Self>` (SQLite =
+rusqlite "bundled" + sqlite-vec; Postgres = sync `postgres` crate +
+pgvector, schema-per-estate).
 
 ### Tier 2 — broader package surface (table of contents)
 

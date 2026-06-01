@@ -162,10 +162,14 @@ with an explicit maximum and no auto-resize (Q6).
 
 **I-10 (cross-port parity):** the Rust version (`persistence-kit`) mirrors
 the value model, predicate algebra, schema declaration, and the five
-trait contracts case-for-case. The InMemory backend ships in both ports
-at v0.8; SQLite/PostgreSQL backends are Swift-side at v0.8, with the
-Rust SQLite backend as a declared follow-on (the trait surface is
-already defined).
+trait contracts case-for-case. All three backends ship in both ports —
+InMemory, SQLite (rusqlite "bundled" + sqlite-vec), and PostgreSQL (sync
+`postgres` crate + pgvector) — and both ports implement the transaction
+surface. The one port adaptation: Swift's `transaction<T>` returns a
+generic value, while Rust's must stay object-safe (`dyn Storage`), so the
+Rust block returns `StorageResult<()>` (Ok commits, Err rolls back) and
+surfaces results through its own captured environment. Observable
+conformance results match across ports (C-8), not byte-identical DBs.
 
 ## § 5 — Behavioral contracts
 
@@ -302,6 +306,12 @@ INSERT succeeds (B-8).
 **C-7 (date storage):** a round-tripped `TypedValue.timestamp` is stored
 as ISO-8601 text and reads back equal (I-3).
 
-**C-8 (cross-port parity):** the Swift and Rust InMemory backends agree
-on value round-trip, predicate evaluation, schema declaration, and audit
-ordering for every shared fixture (I-10).
+**C-8 (cross-port parity):** every backend — InMemory, SQLite, and
+PostgreSQL — produces identical observable results in the Swift and Rust
+ports for the same fixture sequence: value round-trip, predicate
+evaluation, schema declaration, blob I/O, audit ordering, generated
+columns, append-only enforcement, transaction commit/rollback, and (where
+a backend ships a VectorIndex) k-NN ordering. The Rust port proves this
+with a backend-agnostic conformance suite driven by a `Factory` over each
+backend; PostgreSQL runs against a live database when `PERSISTENCEKIT_PG_URL`
+is set (I-10).
