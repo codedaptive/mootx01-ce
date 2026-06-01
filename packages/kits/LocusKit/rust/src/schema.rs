@@ -64,6 +64,7 @@ pub fn schema() -> SchemaDeclaration {
             kg_facts_table(),
             proposals_table(),
             associations_table(),
+            learned_references_table(),
             node_bundles_table(),
             container_fingerprints_table(),
             recall_trace_table(),
@@ -405,6 +406,52 @@ fn associations_table() -> TableDeclaration {
 }
 
 // ---------------------------------------------------------------------------
+// learned_references
+// ---------------------------------------------------------------------------
+
+/// LearnedReference persistence per mission NOUN-LRF-01, arch spec §7.8.2,
+/// and cookbook §2.4/§2.7. The substrate the grounding-driven `learn` verb
+/// writes to (learnedReference is the only noun accepting learn). Mirrors
+/// `associations` structurally — a required lattice anchor stored as the
+/// same four columns (udcCode TEXT NOT NULL DEFAULT '' + udcFacets +
+/// wikidataQID + wikidataQidsSecondary; `add_learned_reference` rejects an
+/// empty anchor), three Int64 bitmap columns, and the Rev 1.0 soft-delete
+/// reservation. Two content columns replace the edge endpoints:
+/// `sourceCatalogID` (the SourceCatalogEntry reference, stored as an
+/// identifier the way kg_facts stores sourceDrawerID) and `handle` (the
+/// reference URI). No generated columns — the query paths are id, handle,
+/// source, and the lattice anchor. The refresh_policy / drift_severity /
+/// mode / source operational axes (cookbook §2.4) live in
+/// operationalBitmap, not as columns.
+fn learned_references_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "learned_references".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("id"),
+            ColumnDeclaration::text("sourceCatalogID"),
+            ColumnDeclaration::text("handle"),
+            ColumnDeclaration::text("addedBy"),
+            ColumnDeclaration::timestamp("filedAt"),
+            ColumnDeclaration::timestamp("tombstonedAt").nullable(),
+            ColumnDeclaration::text("removedByBatch").nullable(),
+            ColumnDeclaration::new("udcCode", ColumnType::Text)
+                .with_default(TypedValue::Text(String::new())),
+            ColumnDeclaration::text("udcFacets").nullable(),
+            ColumnDeclaration::text("wikidataQID").nullable(),
+            ColumnDeclaration::text("wikidataQidsSecondary").nullable(),
+            ColumnDeclaration::bitmap("adjectiveBitmap"),
+            ColumnDeclaration::bitmap("operationalBitmap"),
+            ColumnDeclaration::bitmap("provenanceBitmap"),
+            ColumnDeclaration::json("ext").nullable(),
+        ],
+        primary_key: vec!["id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // node_bundles
 // ---------------------------------------------------------------------------
 
@@ -615,6 +662,24 @@ fn indices() -> Vec<IndexDeclaration> {
             "associations",
             vec!["udcCode".to_string()],
         ),
+        // learned_references — query paths: by handle (does this reference
+        // already exist?), by source (refresh sweep over one source's
+        // references), and by lattice anchor (anchor resolution).
+        IndexDeclaration::new(
+            "idx_learned_references_handle",
+            "learned_references",
+            vec!["handle".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_learned_references_source",
+            "learned_references",
+            vec!["sourceCatalogID".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_learned_references_udcCode",
+            "learned_references",
+            vec!["udcCode".to_string()],
+        ),
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration::new(
@@ -670,6 +735,7 @@ mod tests {
                 "kg_facts",
                 "proposals",
                 "associations",
+                "learned_references",
                 "node_bundles",
                 "container_fingerprints",
                 "recall_trace",
@@ -890,6 +956,9 @@ mod tests {
                 "idx_associations_source",
                 "idx_associations_target",
                 "idx_associations_udcCode",
+                "idx_learned_references_handle",
+                "idx_learned_references_source",
+                "idx_learned_references_udcCode",
                 "idx_recall_trace_target",
                 "idx_recall_trace_recalledAt",
             ]
