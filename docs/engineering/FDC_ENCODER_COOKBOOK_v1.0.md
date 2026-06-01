@@ -35,10 +35,12 @@ platform and in both the Swift and Rust ports.
 
 ## §1. Pinned Artifacts
 
-Three static JSON artifacts ship in `Sources/EideticLib/Resources/`. All
-three are produced by the Seed Generator (`tools/seed-generator/`) and
-committed to the repository. EideticLib parses all three once on first
-use and caches the parsed result for the process lifetime.
+The pinned JSON artifacts ship in `Sources/LatticeLib/Resources/`:
+`FDCFrame.json`, `FDCSignatures.json`, `WordClassTable.json`, and the
+canonicalization `Lexicon.json` (§3.1). All are produced by the Seed
+Generator (`tools/seed-generator/`) and committed to the repository.
+LatticeLib's FDC runtime (`FDC`, `WordClassTableCache`) parses them once on
+first use and caches the parsed result for the process lifetime.
 
 ### §1.1. FDCFrame.json
 
@@ -61,23 +63,30 @@ decimal prefix equals `node` plus one additional segment.
 
 ### §1.2. FDCSignatures.json
 
-The weighted concept bag per FDC code. Schema:
+The per-code signature. The runtime matcher (§5.2/§6) tests term
+*membership* only, never the source weights, so the **bundled** artifact is
+the compact membership form — a sorted term list per code:
 
 ```json
 {
-  "signatures_version": "1.0.0",
+  "version": "1.0.0",
   "source_weights": { "label": 3, "title": 2, "article": 1 },
-  "signatures": {
-    "006.6": { "Q80006": 9, "Q7397": 6, "programming": 3, ... },
+  "codes": [
+    { "code": "006.6", "terms": ["Q7397", "Q80006", "graphics", ...] },
     ...
-  }
+  ]
 }
 ```
 
-Keys are concept IDs (Wikidata Q-IDs) or unresolved surface forms.
-Values are accumulated weights after source-type scaling and ancestor
-inheritance. A code's signature already includes its ancestors' terms;
-the descent step does not re-accumulate ancestors at runtime.
+Terms are concept IDs (Wikidata Q-IDs) or unresolved surface forms. Each
+code's term set already includes its ancestors' terms (build-time
+inheritance, §7.1); the descent step does not re-accumulate ancestors at
+runtime.
+
+The Seed Generator's intermediate `Data/FDCSignatures.json` is the *weighted*
+form (`{ "signatures": { code: { term: weight } } }`); `Data/_compact.sh`
+reduces it to the bundled membership form above. The SimHash fingerprint
+(§5.1) is not yet produced and is absent from both forms.
 
 ### §1.3. WordClassTable.json
 
@@ -223,8 +232,8 @@ encoders must share it or their bags can diverge.
 
 For each `(surface, n)` in `counts`:
 
-1. `lemma = lemmatize(surface)` — apply Porter2 stemming (same Snowball
-   implementation already in EideticLib's `Stemmer.swift`).
+1. `lemma = lemmatize(surface)` — apply Porter2 stemming (the Snowball
+   implementation in LatticeLib's `Stemmer.swift`).
 2. `concept = lexicon[lemma]` — exact lookup against the pinned lexicon.
 3. If `concept` is non-nil: `bag[concept] += n`.
 4. If `concept` is nil: `bag[surface] += n`. The surface form is kept as
@@ -274,12 +283,12 @@ cap. Pass the raw accumulated counts to Step 4.
 If `text.wordCount > LONG_INPUT_THRESHOLD` (default: 500 words):
 
 1. Compute a deterministic feature hash of `bag.keys()` using
-   `SubstrateLib.FloatSimHash` with a fixed seed (`FDC_ENCODER_SEED =
+   `SubstrateML.FloatSimHash` with a fixed seed (`FDC_ENCODER_SEED =
    0xFDC_EN_C0DE_2026`). The feature vector is the sorted concept IDs
    mapped to floats by a stable bijection (e.g., index in the sorted
    concept vocabulary).
 2. Compute the SimHash fingerprint: a 256-bit value from
-   `SubstrateLib.Fingerprint256`.
+   `SubstrateML.Fingerprint256`.
 3. Filter `signatures` to the subset whose pre-computed fingerprints are
    within `SIMHASH_HAMMING_THRESHOLD` (default: 64) bits of the input
    fingerprint.
@@ -289,15 +298,23 @@ For short input, pass all signatures to §5.2 directly. The pre-filter
 is a speed optimization only; it must not change which code is returned
 for any input. If in doubt, skip the pre-filter.
 
-Pre-computed signature fingerprints are stored in `FDCSignatures.json`
-alongside the concept bags (added field `fingerprint: String` per code,
-hex-encoded 256-bit value).
+The SimHash pre-filter is **not yet implemented**: no fingerprints are
+computed at build time and the runtime applies no pre-filter (it scores
+against all signatures, §5.2). When added, per-code fingerprints
+(hex-encoded 256-bit) ship alongside the term sets; until then this section
+is forward-looking.
 
 ### §5.2. Aho-Corasick Single-Pass Match
 
 Build the Aho-Corasick automaton once from all concept IDs and surface
 forms that appear in any code signature. Cache it for the process
 lifetime alongside the parsed artifacts (§1).
+
+LatticeLib (`FDCMatcher`) implements this as a single-pass inverted-index
+scan — a `term -> codes` index built once from the signatures, then for each
+bag term the codes carrying it are scored. This is the deterministic
+equivalent of the Aho-Corasick scan over concept-ID keys: both report exactly
+the signature terms present in the bag and the codes they belong to.
 
 For each call to `step4`:
 
@@ -406,8 +423,10 @@ For each FDC code `c`:
    Ancestors are processed root-first so the most specific code carries
    the full accumulated weight of its lineage.
 
-5. Compute the SimHash fingerprint of `sig[c]` (§5.1) and store it
-   alongside the bag.
+5. *(Deferred)* The SimHash fingerprint of `sig[c]` (§5.1) is not yet
+   computed; the current Seed Generator stops after ancestor inheritance.
+   When the pre-filter is implemented, the fingerprint is computed here and
+   stored alongside the bag.
 
 ### §7.1.1. Resolve-First Article Fill (gap codes)
 
@@ -438,10 +457,12 @@ items.
 
 LexRank reduces a Wikipedia article to its N most central sentences
 before Steps 1–3 run over the article. N defaults to 10 sentences.
-The LexRank implementation may be Python (`sumy` library, LexRank
-summarizer) or a Swift reimplementation; both produce the same
-algorithm. The output is a concatenation of the N selected sentences,
-passed as a single string to Steps 1–3.
+LexRank is implemented in Swift (`LatticeLib.LexRank`): NLTokenizer
+sentence segmentation → per-sentence TF vectors → cosine-similarity
+adjacency → `SubstrateML.EigenvalueCentrality` (the PageRank eigenvector)
+→ the top-N most central sentences in original order. No external
+summarizer and no Python. The output is the N selected sentences
+concatenated into a single string, passed to Steps 1–3.
 
 LexRank is run at Seed Generator time only. It is never invoked at
 runtime.
@@ -519,17 +540,19 @@ and a full conformance vector regeneration.
 
 | Component | Kit | Shipped |
 |---|---|---|
-| `encode()` runtime | EideticLib | Yes |
-| Static word-class table | EideticLib (resource) | Yes |
-| FDC frame | EideticLib (resource) | Yes |
-| Code signatures | EideticLib (resource) | Yes |
-| Aho-Corasick automaton | EideticLib (built at startup) | Yes |
-| Canonicalization lexicon | EideticLib (resource) | Yes |
-| SimHash pre-filter | SubstrateLib + EideticLib | Yes |
+| `encode()` runtime (`FDC` / `FDCMatcher`) | LatticeLib | Yes |
+| Static word-class table | LatticeLib (resource) | Yes |
+| FDC frame | LatticeLib (resource) | Yes |
+| Code signatures | LatticeLib (resource) | Yes |
+| Match index (inverted-index, §5.2) | LatticeLib (built at init) | Yes |
+| Canonicalization lexicon | LatticeLib (resource) | Yes |
+| Platform tagger fallback | LatticeLib (`NLTagger`, Apple) | Yes (Apple) |
+| Novel-token pool cache | LatticeLib | Yes (submit endpoint is a no-op stub) |
+| SimHash pre-filter | SubstrateML + LatticeLib | No (deferred, §5.1) |
 | Seed Generator | `tools/seed-generator/` | No (maintainer only) |
-| Pool reducer | `tools/pool-reducer/` | No (maintainer only) |
-| HMM/Viterbi tagger | EideticLib (bundled binary) | Yes (non-Apple) |
-| EW integration seam | EideticLib (toggle off) | No (pending license) |
+| Pool reducer | (not yet built) | No |
+| HMM/Viterbi tagger | LatticeLib | Stub (`.other`); real artifact pending (non-Apple) |
+| EW integration seam | LatticeLib (toggle off) | No (pending license) |
 
 Full rationale for each assignment is in
 `DECISION_FDC_ENCODER_KIT_PROVENANCE_2026-05-25.md`.
