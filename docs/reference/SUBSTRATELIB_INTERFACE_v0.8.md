@@ -110,6 +110,16 @@ public struct Substrate {
     // withdraw, expunge, recall, propose, associate, learn —
     // analogous signatures, each taking prior bitmaps + writes + HLC
     // + actor + vocabulary.
+
+    /// The named mutation operations the `mutate` verb dispatches on
+    /// (member enum of the verb driver). Raw values are the wire tokens.
+    public enum MutationKind: String {
+        case confirm, reject, contest, supersede
+        case automatedConfirm = "automated_confirm"
+        case decay, expire
+        case lineageAdvance = "lineage_advance"
+        case actuatorConfirm = "actuator_confirm"
+    }
 }
 ```
 
@@ -242,6 +252,23 @@ public enum AuditGate {
         hlc: HLC,
         actor: String
     ) -> Result<AuditEvent, AuditGateError>
+}
+
+/// The structured violation surface the gate's internal checks raise
+/// (distinct from `AuditGateError`, which is the public `admit` return).
+/// SPEC § 5.3.
+public enum GateViolation: Error, Sendable {
+    case undeclaredField(label: String)
+    case illegalValue(label: String, value: Int64)
+    case basisViolation(Error)
+    case stateInconsistentWithVerb(verb: String)
+}
+
+/// Vocabulary freeze/validation namespace. `freeze(union:)` validates a
+/// proposed slot set (no overlapping ranges, width/value consistency)
+/// and returns a frozen `Vocabulary` or a `VocabularyError`. SPEC § 5.3.
+public enum VocabularyValidator {
+    public static func freeze(union proposed: Set<FieldSlot>) -> Result<Vocabulary, VocabularyError>
 }
 ```
 
