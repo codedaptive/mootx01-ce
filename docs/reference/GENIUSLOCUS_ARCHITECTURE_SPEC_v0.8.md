@@ -486,11 +486,10 @@ contents are now MDCC codes.
 
 The two field names coexist deliberately: MDCC-03 renamed the
 reasoning-layer field but left the storage/wire field as a separate
-symbol (`udc_code`) to avoid a schema migration. Renaming the storage
-field to `mdcc_code` is a separate future migration; until it lands,
-treat `udc_code` (storage) and `mdccCode` (reasoning) as the **same
-depth coordinate under two names**, both `String`, neither
-compiler-policed against the other.
+symbol (`udc_code`) to avoid a schema migration. The storage field
+retains the `udc_code` name; `udc_code` (storage) and `mdccCode`
+(reasoning) are the **same depth coordinate under two names**, both
+`String`, neither compiler-policed against the other.
 
 ### 5.9 Manifest schema
 
@@ -513,7 +512,7 @@ active_storage_mode       integer  current L/Q/P configuration (bitmap)
 tables_present            string   comma-separated list of optional tables present
 created_at                string   ISO8601 timestamp
 last_modified             string   ISO8601 timestamp
-bitmap_layout_version     string   "v0.35" — adjective bitmap layout version
+bitmap_layout_version     string   "v1.0" — adjective bitmap layout version
 provenance_bitmap_version string   "v1.0" — provenance bitmap layout version
 ```
 
@@ -1662,18 +1661,6 @@ Migration from v1 to v2 (when the 4-bit field width or another constitutional-ad
 
 ---
 
-## 16. Open questions and deferred work
-
-Open questions are tracked in `OPEN_QUESTIONS_FOR_REFINEMENT.md`. v1.0 blockers identified at v0.35:
-
-- Q26 (non-contiguous filter compilation strategy)
-- Q31 (field width growth beyond 4 bits, constitutional-adjacent)
-- Q34 (minimum estate size for tiny-model training)
-
-This spec does not summarize the open-question list; consult the dedicated document.
-
----
-
 ## 17. Appendices
 
 ### A. Tunnel-kind catalog (v1)
@@ -1923,10 +1910,9 @@ Tool calls without a `schema_version` are rejected with
 with `SchemaVersionUnknown`.
 
 This is an ARIA_MCP-level contract, not a substrate-level contract. It lives
-in the ARIA_MCP spec (not yet authored) as its first invariant. It is
+in the ARIA_MCP spec as its first invariant. It is
 documented here because it was identified during GeniusLocusKit architecture
-review and must be carried into the ARIA_MCP spec when that document is
-written.
+review and is carried into the ARIA_MCP spec.
 
 **Strategic note:** This pattern directly enables future OB1 protocol
 compatibility. An ARIA_MCP adapter implementing the
