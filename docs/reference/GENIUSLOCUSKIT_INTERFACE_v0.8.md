@@ -117,6 +117,7 @@ public actor GeniusLocusKit {
     public func glkPromoteBranch(_ branch: any BranchHandle, replacing handle: EstateHandle) async throws
     @discardableResult
     public func glkMergeDrawers(_ drawerIDs: [RowID], from branch: any BranchHandle, into handle: EstateHandle) async throws -> MergeReport
+    public func branchHandle(for branchID: BranchID) -> (any BranchHandle)?    // read accessor: resolve a tracked branch by id (stateless ARIA_MCP recipe callers)
 
     // Standing-signals API (SignalAPI.swift / DefaultStandingSignals.swift) — SPEC B-5/B-6:
     public func registerStandingSignal(_ spec: SignalSpec, in handle: EstateHandle, now: Date) async throws -> SignalID
@@ -352,6 +353,22 @@ public struct DifferentialReport: Sendable {
 **Rust:** `pub trait BranchHandle`, `pub enum BranchStatus`, `pub struct
 MergeReport`, `BranchScore`, `DifferentialReport` mirror these in the
 `branch` module.
+
+The coordinator also exposes a read accessor resolving a tracked branch by
+id (branches are retained through every lifecycle state until the kit is
+released, I-15):
+
+```swift
+public func branchHandle(for branchID: BranchID) -> (any BranchHandle)?
+```
+Returns nil when no branch with that id was derived by this kit instance.
+Read-only — it neither mints nor mutates branch state; promotion / merge /
+discard remain the write surface. Supports stateless callers (notably the
+ARIA_MCP recipe surface, where a recipe's `run` and its human-confirmed
+promotion arrive as two separate `tools/call` invocations against one
+long-lived kit).
+**Rust:** `EstateCoordinator::branch_handle_for(branch_id: BranchId) ->
+Option<&EstateBranch>` (`branches.rs`).
 
 #### Unified audit log: `UnifiedAuditLog`, `UnifiedAuditEntry`, `UnifiedHLC`, `UnifiedAuditValue`, `UnifiedAuditVerb`, `AuditTier`, `AuditChainReport`, `AuditChainVerifier`
 
