@@ -4,7 +4,8 @@
 // instances paired via a shared FederationRelay. Records pushed
 // on one side appear on the other after pull.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import ConvergenceKit
 import ConvergenceKitFederation
@@ -24,7 +25,8 @@ import PersistenceKitInMemory
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class FederationPairingTests: XCTestCase {
+@Suite("Federation in-process pairing")
+struct FederationPairingTests {
 
     func makeStorage() async throws -> any Storage {
         let storage = InMemoryStorage(configuration: EstateConfiguration(
@@ -60,7 +62,8 @@ final class FederationPairingTests: XCTestCase {
         )
     }
 
-    func testInProcessPairingPushPull() async throws {
+    @Test("records written on A replicate to B after push/pull")
+    func inProcessPairingPushPull() async throws {
         let storageA = try await makeStorage()
         let storageB = try await makeStorage()
         let engineA = FederationSyncEngine()
@@ -89,19 +92,19 @@ final class FederationPairingTests: XCTestCase {
 
         // A pushes; B pulls.
         let pushReceipt = try await engineA.push()
-        XCTAssertGreaterThan(pushReceipt.pushed, 0, "A should have pushed at least one record")
+        #expect(pushReceipt.pushed > 0, "A should have pushed at least one record")
 
         let pullReceipt = try await engineB.pull()
-        XCTAssertGreaterThan(pullReceipt.pulled, 0, "B should have pulled at least one record")
+        #expect(pullReceipt.pulled > 0, "B should have pulled at least one record")
 
         // Verify the row exists on B.
         let rows = try await storageB.rowStore.query(
             table: "items",
             where: .eq(Column(table: "items", name: "id"), .uuid(rowID))
         )
-        XCTAssertEqual(rows.count, 1, "row should have replicated to B")
-        XCTAssertEqual(rows[0]["note"], .text("hello from A"))
-        XCTAssertEqual(rows[0]["flags"], .bitmap(0x01))
+        #expect(rows.count == 1, "row should have replicated to B")
+        #expect(rows[0]["note"] == .text("hello from A"))
+        #expect(rows[0]["flags"] == .bitmap(0x01))
 
         try await engineA.disable()
         try await engineB.disable()
