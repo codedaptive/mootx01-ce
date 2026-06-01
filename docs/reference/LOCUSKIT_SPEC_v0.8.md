@@ -171,11 +171,7 @@ never a file path. The kit depends only on the PersistenceKit protocol and
 never constructs a concrete backend; the caller owns the connection's
 lifecycle.
 
-**I-11 (cross-port parity):** the Swift and Rust ports are conformance-gated
-against shared behaviour. Where the ports differ in shape (async vs sync,
-SQLite vs in-memory store), the *value-level results* of capture, recall
-filtering, bitmap encode/decode, and XOR-fold reconstruction must agree.
-Neither port leads. See § 8 for the documented surface gap.
+**I-11 (cross-port parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and XOR-fold reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
 
 ## § 5 — Behavioral contracts
 
@@ -293,7 +289,7 @@ before touching storage (I-9, error model).
 same injected `now` produces identical stored rows and audit deltas; no
 engine reads the system clock internally (I-6).
 
-**C-7 (cross-port, I-11):** the Swift and Rust ports produce identical
+**C-7 (cross-port, I-11):** the Swift and Rust version produce identical
 value-level results for C-1…C-4 and C-6 against shared behaviour, allowing
 for the documented surface gap (§ 8). A value-level divergence fails the
 conformance gate.
@@ -313,34 +309,36 @@ conformance gate.
 - Hybrid recall, dreaming, maintenance, reward sweeps → NeuronKit.
 - The ARIA grammar the verbs realise → `ARIALEXICONLIB_SPEC_v0.8.md`.
 
-**Documented port gap (I-11).** The two ports realise the same contract with
-different host shapes, and the difference is intentional, not a defect:
+**Cross-version shape contract (I-11).** The Swift and Rust versions realise
+the same contract with different host shapes:
 
 - **Concurrency.** Swift verbs and stores are `actor`-isolated and `async`;
-  the Rust port is synchronous (`pub fn ... -> Result<...>`), serialising
+  the Rust version is synchronous (`pub fn ... -> Result<...>`), serialising
   access through the backend's internal mutex.
 - **Time.** Swift reads `Date()` once at the verb boundary (I-6) and threads
   it down; the Rust verbs take `now: i64` as an explicit parameter, pushing
   the clock read entirely to the caller — a stricter realisation of the same
   determinism rule.
 - **Store backends.** The Swift `DrawerStore` is a concrete actor over any
-  injected `Storage`. The Rust port models `DrawerStore` as a `trait` with
+  injected `Storage`. The Rust version models `DrawerStore` as a `trait` with
   `InMemoryDrawerStore` as the shipped implementation; a SQLite-backed Rust
-  store is not yet present, so the Rust port today exercises the in-memory
-  path only. The Rust port also surfaces helper shapes the Swift port keeps
+  store is not yet present, so the Rust version today exercises the in-memory
+  path only. The Rust version also surfaces helper shapes the Swift version keeps
   internal (`BitmapAuditPair`, `RoomBundle`, `RoomLevelEntry`).
 
 These are *shape* differences; the value-level results that C-7 gates are
 required to agree.
 
-## § 9 — Open questions
+## § 9 — Verb and coverage status
 
 - Five of the nine verbs ship at this revision (`capture`, `recall`,
   `withdraw`, plus `auditTrail`/`bitmapState` history). `mutate`, `expunge`,
   `reanchor`, and `learn` are declared and throw
   `LocusKitError.invalidContent` until their owning missions land
-  (`propose`/`associate` enter through the tunnel/KG paths). The `MutationKind`
-  vocabulary is fully specified ahead of the `mutate` implementation.
+  (`propose`/`associate` enter through the tunnel/KG paths; their noun value
+  types, operational accessors, and stores ship, but verb behaviour does
+  not). The `MutationKind` vocabulary is fully specified ahead of the
+  `mutate` implementation.
 - A SQLite-backed Rust `DrawerStore` is outstanding; until it lands the Rust
   conformance surface covers the in-memory store only (§ 8).
 - `provenance_audit` and `bitmap_audit` are separate trails; `bitmapState`
