@@ -9,20 +9,25 @@
 
 ---
 
-## Status: BLOCKED — DECISION REQUIRED
+## Status: COMPLETE
 
-The conversion is **complete and verified for correctness** (Adams PASS). Mission
-success criterion *"Swift leg green / `swift test` green"* is **NOT reliably met** because
-of a **single pre-existing flaky performance assertion** —
-`testFindNearestP99Under10MillisecondsOver10000VectorCorpus` — whose 50 ms P99 ceiling
-the mission explicitly forbids me to change ("preserve EVERY assertion"; "Do not change
-what is asserted"). 42 of 43 tests are reliably green. This is a genuine spec-vs-reality
-conflict that is Bob's / Skippy's to resolve, not Bilby's to paper over. Per the Standing
-Order — *"tests pass means exit 0 with a log"* — I will not write a `.done` signal for a
-suite that fails ~1 run in 3.
+The conversion is complete and verified (Smythe GREEN, Adams PASS ×2). `swift test` is
+now **reliably green** — 43 tests / 7 suites, exit 0, zero warnings, across 6 consecutive
+runs (Bilby ×5 + Adams ×1).
 
-**The conversion work is done, committed, and ready.** Only the perf-budget decision
-remains.
+**Resolution of the one blocker:** the mission initially went `.stuck` on a single
+pre-existing flaky perf assertion — `testFindNearestP99...<50ms` (~44 ms typical, ~12%
+headroom, P99 wall-clock noise crossed 50 ms on ~1 run in 3; flaky even under
+`--no-parallel`, so not a swift-testing-parallelism artifact). The mission forbade Bilby
+from changing the assertion, so the decision was escalated to Bob. **Bob (2026-05-31)
+approved raising the find-nearest P99 ceiling 50 ms → 75 ms** (commit `09e8c48`) — ~1.7×
+the ~44 ms typical, preserving a meaningful budget while removing the flake. Only that one
+threshold changed; end-to-end (100 ms / 50 ms) and storage-only (5 ms) budgets are
+untouched. Adams re-verified the delta: **PASS**.
+
+This was the correct sequence: Bilby did not silently retune an assertion the mission told
+him to preserve — he surfaced the conflict (`.stuck`), Bob decided, Bilby implemented the
+decision and re-verified.
 
 ---
 
@@ -86,9 +91,14 @@ targets. (find-nearest P99 that run: 44.782 ms.)
 - **Zero warnings.** ✅
 - 42 of 43 tests pass on **every** run.
 
-### Final — the blocking flake
+### Final — the (now resolved) marginal benchmark
 `testFindNearestP99Under10MillisecondsOver10000VectorCorpus` asserts
-`#expect(stats.p99Ms < 50.0)`. Measured find-nearest P99 across 9 runs:
+`#expect(stats.p99Ms < 75.0)` (raised from 50 ms by Bob's decision). **After the raise,
+6/6 runs green** — find-nearest P99: 45.0 / 51.6 / 53.3 / 47.2 / 45.6 (Bilby ×5) + 46.1
+(Adams) ms, all comfortably under 75 ms (worst case 53.3 ms = ~21 ms headroom).
+
+The history below is the 9-run data that justified the decision. Under the original 50 ms
+ceiling, measured find-nearest P99:
 
 | Execution mode | P99 (ms) | Result |
 |---|---|---|
@@ -175,17 +185,13 @@ being run repeatedly.
 
 ## Outstanding
 
-- **[BLOCKER — decision required]** find-nearest P99 < 50 ms is flaky on this host
-  (~33 % fail). I am forbidden to change the assertion. Resolution options for Bob/Skippy
-  (I can implement any in minutes, then re-verify and flip to `.done`):
-  1. **(recommended)** Raise the find-nearest P99 ceiling (e.g. 50 → 75 ms). One-line
-     assertion change; preserves a meaningful budget; the comment already frames 50 ms as a
-     soft, headroom-bearing choice. Forbidden for me to do unilaterally — needs your call.
-  2. Move the 4 wall-clock benchmarks out of the default `swift test` correctness gate
-     (separate benchmark target / `.disabled` by default / env-gated), keeping `swift test`
-     deterministic per the mission's "test the deterministic reference path" guidance.
-  3. Assert on the stable **median** (~43 ms) instead of P99 for find-nearest (keeps the
-     50 ms number; changes p99→median).
+- **[RESOLVED]** find-nearest P99 flakiness — Bob approved raising the ceiling 50 → 75 ms
+  (option 1 of the 3 presented). Implemented in `09e8c48`, Adams-re-verified, 6/6 runs
+  green. No longer blocking.
+- **[FOLLOW-ON, optional]** The other three options remain available if a future
+  deterministic-gate policy is wanted: (2) move the 4 wall-clock benchmarks out of the
+  default `swift test` gate; (3) assert on stable median instead of P99. Not needed for
+  this mission; noted for the perf-test-policy backlog.
 - **[INFO, pre-existing]** `CapturePathBenchmarkTests` doc comment says
   "Package.swift … declares only EngramLib as a dependency" — actual manifest declares four
   (EngramLib, SubstrateTypes, SubstrateML, PersistenceKit). The functional point (kernel
@@ -202,3 +208,5 @@ being run repeatedly.
 | `12582c5` | docs: mission + Smythe pre-flight (GREEN) + Blast Radius Report |
 | `1bfc2c1` | test(vectorkit): convert XCTest suites to swift-testing (assertions preserved) |
 | `b61d8e2` | test(vectorkit): per-type coverage gaps filled (Swift) |
+| `f2f0d40` | docs: completion report (initial — BLOCKED on flaky benchmark) |
+| `09e8c48` | test(vectorkit): raise find-nearest P99 ceiling 50→75ms (Bob-approved, de-flake) |
