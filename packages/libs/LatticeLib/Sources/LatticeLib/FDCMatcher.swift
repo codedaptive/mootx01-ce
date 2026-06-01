@@ -46,8 +46,18 @@ public struct FDCMatcher: Sendable {
 
     /// Encode `text` to an FDC code, or `nil` for UNRESOLVED. Never guesses.
     public func encode(_ text: String) -> String? {
+        encodeAnchor(text).code
+    }
+
+    /// Encode `text` and also surface the dominant concept of the input.
+    /// `code` is the FDC code (`nil` = UNRESOLVED). `conceptQID` is the
+    /// highest-weighted Wikidata Q-ID in the concept bag — "what the text is
+    /// most about" — or `nil` if the bag carries no Q-ID concept. One pass,
+    /// so EideticLib fills an Anchor's code + wikidataQID without re-bagging.
+    public func encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?) {
         let bag = BagBuilder.bag(text, lexicon: lexicon)
-        guard !bag.isEmpty else { return nil }
+        let qid = dominantQID(bag)              // independent of whether a code matches
+        guard !bag.isEmpty else { return (nil, qid) }
 
         // Step 4 — match + score (§5.2/§5.3).
         var score: [String: Int] = [:]
@@ -55,7 +65,7 @@ public struct FDCMatcher: Sendable {
             guard let codes = index[term] else { continue }
             for code in codes { score[code, default: 0] += n }
         }
-        guard !score.isEmpty else { return nil }   // §5.2.3 — UNRESOLVED, no guess
+        guard !score.isEmpty else { return (nil, qid) }   // §5.2.3 — UNRESOLVED, no guess
 
         // argmax: highest score, ties broken by lowest code lexicographically.
         var node = ""
@@ -80,6 +90,20 @@ public struct FDCMatcher: Sendable {
             guard let next = best else { break }
             node = next
         }
-        return node
+        return (node, qid)
+    }
+
+    /// The highest-count Wikidata Q-ID in `bag` (ties broken by lowest Q-ID
+    /// lexicographically, so the result is deterministic regardless of the
+    /// bag's dictionary iteration order). `nil` if the bag holds no Q-ID key.
+    private func dominantQID(_ bag: ConceptBag) -> String? {
+        var best: String?
+        var bestN = 0
+        for (k, n) in bag where k.hasPrefix("Q") {
+            if n > bestN || (n == bestN && (best == nil || k < best!)) {
+                best = k; bestN = n
+            }
+        }
+        return best
     }
 }

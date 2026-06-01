@@ -1,14 +1,15 @@
 // EideticLib.swift
 //
 // The deterministic text-to-anchor utility. Pass a term to
-// EideticLib.lookup; get back an Anchor with an MDCC code, the
-// canon entry's Wikidata Q-ID, a confidence, and the canon
-// version that produced the answer.
+// EideticLib.lookup; get back an Anchor with an FDC code, the
+// dominant concept's Wikidata Q-ID, a confidence, and the FDC
+// signatures version that produced the answer.
 //
-// lookup grounds a term against the default MDCC scheme by
-// resolving it through the bundled MDCC canon (from LatticeLib).
-// Network is never consulted. Determinism is guaranteed against
-// the pinned canon version recorded in LatticeLib's bundled canon.
+// lookup grounds a term through LatticeLib's FDC encoder
+// (FDC.encodeAnchor): the text is canonicalized to a concept bag
+// and matched against the pinned FDC signatures. Network is never
+// consulted; determinism is guaranteed against the pinned FDC
+// artifacts bundled in LatticeLib.
 
 import Foundation
 import LatticeLib
@@ -21,17 +22,10 @@ public enum EideticLib {
     /// The module version.
     public static let version: String = "0.1.0"
 
-    // Cached reference data. Parsed once on first access and
-    // reused for the lifetime of the process. The cache
-    // doesn't expire because the data is shipped as a build-
-    // time constant; if it could change, it wouldn't be safe
-    // to cache like this.
-    //
-    // The MDCC canon (CC0/public-domain) is the classification
-    // source. The Wikidata subset (CC0) confirms the canon
-    // entry's Q-ID anchor. No CC-BY-SA data is cached or bundled.
-    private static let cachedCanon: LatticeCanon? = LatticeLib.bundledCanon()
-    private static let cachedSubset: WikidataSubset? = WikidataSubset.loadBundled()
+    // Reference data is owned and cached by LatticeLib's FDC runtime
+    // (the pinned lexicon, frame, and signatures, parsed once per
+    // process). EideticLib holds no classification data of its own —
+    // lookup delegates to FDC.encodeAnchor.
 
     /// The bundled manifest for the MDCC default scheme. Derived from
     /// LatticeLib's canon version rather than loaded from a JSON stub:
@@ -85,49 +79,35 @@ public enum EideticLib {
     }
 
     /// Looks up the lattice anchor for a term. Deterministic
-    /// against the bundled MDCC canon.
+    /// against LatticeLib's pinned FDC artifacts.
     ///
-    /// Composes the pipeline: tokenize, normalize, stem, resolve
-    /// against the MDCC canon, then carry the resolved canon
-    /// entry's CC0 Wikidata Q-ID (confirmed against the bundled
-    /// CC0 subset).
+    /// Delegates to `FDC.encodeAnchor`: the term is canonicalized to a
+    /// concept bag and matched to an FDC code, and the bag's dominant
+    /// Wikidata Q-ID is carried as the anchor concept. No network.
     public static func lookup(_ term: String) -> Anchor {
-        guard let canon = cachedCanon else {
+        guard FDC.isAvailable else {
             return Anchor.notImplemented
         }
 
-        let tokens = Tokenizer.tokenize(term)
-        let normalized = tokens.map(Normalizer.normalize)
-        let stemmed = normalized.map(Stemmer.stem)
-
-        guard let resolution = LatticeResolver.resolve(
-            normalized: normalized,
-            stemmed: stemmed,
-            canon: canon
-        ) else {
-            // No canon match: empty anchor, never a fallback code.
+        let (code, qid) = FDC.encodeAnchor(term)
+        guard let code else {
+            // UNRESOLVED: empty anchor, never a fallback code.
             return Anchor(
                 code: "",
                 wikidataQID: nil,
                 confidence: 0,
-                dataVersion: canon.canonVersion
+                dataVersion: FDC.dataVersion
             )
         }
 
-        // The Q-ID step: the resolved canon entry's source identity
-        // is its CC0 Wikidata Q-ID. WikidataResolver confirms it
-        // against the bundled CC0 subset before surfacing it.
-        var qid: String? = resolution.sourceIdentity
-        if let subset = cachedSubset,
-           let entry = canon.entry(for: resolution.code) {
-            qid = WikidataResolver.resolve(entry: entry, subset: subset)?.qid
-        }
-
+        // FDC carries no calibrated confidence score; a resolved code
+        // is reported at `medium` (32 in the provenance confidence value
+        // set: 0=null, 16=low, 32=medium, 48=high, 56=verified).
         return Anchor(
-            code: resolution.code,
+            code: code,
             wikidataQID: qid,
-            confidence: resolution.confidence,
-            dataVersion: canon.canonVersion
+            confidence: 32,
+            dataVersion: FDC.dataVersion
         )
     }
 
@@ -143,12 +123,13 @@ public enum EideticLib {
 /// shape to the Rust port's `Anchor` struct.
 public struct Anchor: Equatable, Sendable, Codable {
 
-    /// The MDCC code resolved from the canon at the best-matching
-    /// entry. Empty string means no canon entry matched the term.
+    /// The FDC code matched for the term. Empty string means the
+    /// term was UNRESOLVED (no signature overlap) — never a guess.
     public let code: String
 
-    /// The Wikidata Q-ID for the primary concept (the resolved
-    /// canon entry's source identity), or nil if no entry matched.
+    /// The dominant concept's Wikidata Q-ID (the highest-weighted
+    /// Q-ID in the term's concept bag), or nil if the bag carried
+    /// no Q-ID concept.
     public let wikidataQID: String?
 
     /// Confidence packed into the substrate provenance
@@ -156,7 +137,7 @@ public struct Anchor: Equatable, Sendable, Codable {
     /// 48=high, 56=verified.
     public let confidence: UInt8
 
-    /// The MDCC canon version that produced this answer. Lets
+    /// The FDC signatures version that produced this answer. Lets
     /// callers record provenance per substrate invariant I-4.
     public let dataVersion: String
 

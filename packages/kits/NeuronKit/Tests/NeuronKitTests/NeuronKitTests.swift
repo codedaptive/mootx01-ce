@@ -4,36 +4,30 @@
 // each gets its own test file. This file holds the module-level
 // smoke tests.
 
-import Testing
-import Foundation
+import XCTest
 @testable import NeuronKit
 
-@Suite("NeuronKit module smoke tests")
-struct NeuronKitTests {
+final class NeuronKitTests: XCTestCase {
 
-    @Test("module version is pinned")
-    func moduleVersion() {
-        #expect(NeuronKit.version == "0.1.0")
+    func testModuleVersion() {
+        XCTAssertEqual(NeuronKit.version, "0.1.0")
     }
 
-    @Test("linguistic pipeline mode tracks the build configuration")
-    func linguisticPipelineModeBuildConfiguration() {
+    func testLinguisticPipelineModeBuildConfiguration() {
         let mode = NeuronKit.linguisticPipelineMode
         #if APPLE_NLP_ACCEL
-        #expect(mode == .appleNLAccel)
-        #expect(mode.rawValue == "apple-nl-accel")
+        XCTAssertEqual(mode, .appleNLAccel)
+        XCTAssertEqual(mode.rawValue, "apple-nl-accel")
         #else
-        #expect(mode == .deterministicReference)
-        #expect(mode.rawValue == "deterministic-reference")
+        XCTAssertEqual(mode, .deterministicReference)
+        XCTAssertEqual(mode.rawValue, "deterministic-reference")
         #endif
     }
 }
 
-@Suite("LatticeAnchorInference")
-struct LatticeAnchorInferenceTests {
+final class LatticeAnchorInferenceTests: XCTestCase {
 
-    @Test("inference round-trips through Codable")
-    func inferenceRoundTrip() throws {
+    func testInferenceRoundTrip() throws {
         let inference = LatticeAnchorInference(
             code: "004.42",
             wikidataQID: "Q21198",
@@ -45,55 +39,60 @@ struct LatticeAnchorInferenceTests {
         let data = try JSONEncoder().encode(inference)
         let decoded = try JSONDecoder().decode(LatticeAnchorInference.self, from: data)
 
-        #expect(decoded == inference)
+        XCTAssertEqual(decoded, inference)
     }
 
-    @Test("confidence levels match provenance field values")
-    func confidenceLevelsMatchProvenanceFieldValues() {
-        #expect(AnchorConfidence.null.rawValue == 0)
-        #expect(AnchorConfidence.low.rawValue == 16)
-        #expect(AnchorConfidence.medium.rawValue == 32)
-        #expect(AnchorConfidence.high.rawValue == 48)
-        #expect(AnchorConfidence.verified.rawValue == 56)
+    func testConfidenceLevelsMatchProvenanceFieldValues() {
+        XCTAssertEqual(AnchorConfidence.null.rawValue, 0)
+        XCTAssertEqual(AnchorConfidence.low.rawValue, 16)
+        XCTAssertEqual(AnchorConfidence.medium.rawValue, 32)
+        XCTAssertEqual(AnchorConfidence.high.rawValue, 48)
+        XCTAssertEqual(AnchorConfidence.verified.rawValue, 56)
     }
 
-    @Test("enrichment status values match cookbook §2.5")
-    func enrichmentStatusValuesMatchCookbookSection2_5() {
-        #expect(EnrichmentStatus.none.rawValue == 0)
-        #expect(EnrichmentStatus.qidPending.rawValue == 1)
-        #expect(EnrichmentStatus.qidCompleted.rawValue == 2)
-        #expect(EnrichmentStatus.closureCached.rawValue == 3)
+    func testEnrichmentStatusValuesMatchCookbookSection2_5() {
+        XCTAssertEqual(EnrichmentStatus.none.rawValue, 0)
+        XCTAssertEqual(EnrichmentStatus.qidPending.rawValue, 1)
+        XCTAssertEqual(EnrichmentStatus.qidCompleted.rawValue, 2)
+        XCTAssertEqual(EnrichmentStatus.closureCached.rawValue, 3)
     }
 }
 
-@Suite("inferLatticeAnchor")
-struct InferLatticeAnchorTests {
+final class InferLatticeAnchorTests: XCTestCase {
 
-    @Test("a nonsense term produces enrichment status none")
-    func nonsenseTermProducesEnrichmentStatusNone() {
-        // No canon match means empty MDCC code, which means
-        // enrichment_status = none (the substrate has not yet
-        // produced an anchor for this content).
-        let inference = NeuronKit.inferLatticeAnchor("qwertyzxcvb nonsense")
-        #expect(inference.code == "")
-        #expect(inference.wikidataQID == nil)
-        #expect(inference.enrichmentStatusBits == EnrichmentStatus.none.rawValue)
+    func testNonsenseTermProducesEnrichmentStatusNone() {
+        // An UNRESOLVED term (pure gibberish — no real tokens, so the
+        // concept bag is empty) yields an empty FDC code, which means
+        // enrichment_status = none (the substrate has not yet produced
+        // an anchor for this content). The term must contain no real
+        // words: any dictionary word (e.g. "nonsense") would resolve.
+        let inference = NeuronKit.inferLatticeAnchor("zxcvqwertyasdfgh qwertyzxcvb")
+        XCTAssertEqual(inference.code, "")
+        XCTAssertNil(inference.wikidataQID)
+        XCTAssertEqual(
+            inference.enrichmentStatusBits,
+            EnrichmentStatus.none.rawValue
+        )
     }
 
-    @Test("a chemistry term produces qidCompleted status")
-    func chemistryTermProducesQidCompletedStatus() {
-        // EideticLib resolves chemistry to an MDCC canon entry whose
-        // sourceIdentity is its Q-ID; MDCC code and Q-ID both
+    func testChemistryTermProducesQidCompletedStatus() {
+        // EideticLib resolves chemistry to an FDC code, and the input's
+        // dominant concept supplies the Q-ID; code and Q-ID both
         // populated means status = qidCompleted.
         let inference = NeuronKit.inferLatticeAnchor("chemistry")
-        #expect(!inference.code.isEmpty)
-        #expect(inference.wikidataQID != nil)
-        #expect(inference.enrichmentStatusBits == EnrichmentStatus.qidCompleted.rawValue)
+        XCTAssertFalse(inference.code.isEmpty)
+        XCTAssertNotNil(inference.wikidataQID)
+        XCTAssertEqual(
+            inference.enrichmentStatusBits,
+            EnrichmentStatus.qidCompleted.rawValue
+        )
     }
 
-    @Test("inference carries the current pipeline mode")
-    func inferenceCarriesCurrentPipelineMode() {
+    func testInferenceCarriesCurrentPipelineMode() {
         let inference = NeuronKit.inferLatticeAnchor("any term")
-        #expect(inference.pipelineMode == NeuronKit.linguisticPipelineMode)
+        XCTAssertEqual(
+            inference.pipelineMode,
+            NeuronKit.linguisticPipelineMode
+        )
     }
 }

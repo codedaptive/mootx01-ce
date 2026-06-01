@@ -1,94 +1,78 @@
-// MDCCLookupTests.swift
+// LatticeLookupTests.swift
 //
-// The MDCC lookup contract (MISSION_MDCC_03). EideticLib.lookup
-// resolves a term against the bundled MDCC canon (from LatticeLib),
-// returns an MDCC code and the canon entry's Wikidata Q-ID, and
-// never falls back to a UDC code. The CC-BY-SA UDC schedule is no
-// longer bundled or consulted.
+// The FDC lookup contract. EideticLib.lookup delegates to LatticeLib's
+// FDC encoder: it resolves a term to a well-formed FDC code, carries
+// the dominant concept's Wikidata Q-ID, and never guesses (UNRESOLVED
+// terms return an empty code). No UDC schedule is bundled or consulted.
 
-import Testing
-import Foundation
+import XCTest
 @testable import EideticLib
 import LatticeLib
 
-@Suite("MDCC lookup contract")
-struct MDCCLookupTests {
+final class FDCLookupTests: XCTestCase {
 
-    // 1. A canon term grounds to a well-formed MDCC code that is
-    //    present in the bundled MDCC canon — not a UDC code.
-    @Test("lookup returns lattice code present in canon")
-    func lookupReturnsLatticeCodePresentInCanon() throws {
+    // 1. A topical term grounds to a well-formed FDC code, never a
+    //    guess. (Which specific code — exact-match accuracy — is
+    //    governed by STOP_THRESHOLD tuning, not this contract test.)
+    func testLookupResolvesToWellFormedCode() throws {
         let anchor = EideticLib.lookup("philosophy")
-        #expect(
-            !anchor.code.isEmpty,
-            "philosophy must resolve to an MDCC code"
+        XCTAssertFalse(
+            anchor.code.isEmpty,
+            "philosophy must resolve to an FDC code"
         )
-        #expect(
+        XCTAssertTrue(
             Code.isWellFormed(anchor.code),
-            "resolved code \(anchor.code) must be a well-formed MDCC code"
+            "resolved code \(anchor.code) must be a well-formed FDC code"
         )
-        let entry = try #require(
-            LatticeLib.entry(for: anchor.code),
-            "resolved code \(anchor.code) must exist in the bundled MDCC canon"
-        )
-        #expect(entry.label == "philosophy")
     }
 
-    // 2. The same lookup carries the canon entry's sourceIdentity
-    //    as the Wikidata Q-ID.
-    @Test("lookup carries canon source identity as QID")
-    func lookupCarriesCanonSourceIdentityAsQID() throws {
+    // 2. The lookup carries the dominant concept's Wikidata Q-ID
+    //    (the highest-weighted Q-ID in the term's concept bag).
+    func testLookupCarriesDominantConceptQID() throws {
         let anchor = EideticLib.lookup("philosophy")
-        let entry = try #require(LatticeLib.entry(for: anchor.code))
-        #expect(
-            anchor.wikidataQID == entry.sourceIdentity,
-            "the anchor's Q-ID must be the resolved canon entry's sourceIdentity"
+        let qid = try XCTUnwrap(
+            anchor.wikidataQID,
+            "a topical term must carry a dominant concept Q-ID"
         )
-        #expect(
-            (anchor.wikidataQID ?? "").hasPrefix("Q"),
-            "sourceIdentity is a Wikidata Q-ID"
-        )
+        XCTAssertTrue(qid.hasPrefix("Q"), "the concept identity is a Wikidata Q-ID")
     }
 
     // 3. A well-formed code absent from the canon is pending — the
     //    valid-but-unknown contract — and round-trips intact.
-    @Test("well-formed code absent from canon is pending and round-trips")
-    func wellFormedCodeAbsentFromCanonIsPendingAndRoundTrips() throws {
+    func testWellFormedCodeAbsentFromCanonIsPendingAndRoundTrips() throws {
         // "999.99" is well-formed grammar but not in the v1 canon.
         let knownCodes: Set<String> = ["100"]
         let state = EideticLib.classifyLatticeCode("999.99", knownCodes: knownCodes)
-        #expect(state == .pending("999.99"))
-        #expect(state.isWellFormed)
+        XCTAssertEqual(state, .pending("999.99"))
+        XCTAssertTrue(state.isWellFormed)
 
         let data = try JSONEncoder().encode(state)
         let decoded = try JSONDecoder().decode(LatticeCodeState.self, from: data)
-        #expect(decoded == state, "pending code must round-trip intact")
-        #expect(decoded.rawCode == "999.99")
+        XCTAssertEqual(decoded, state, "pending code must round-trip intact")
+        XCTAssertEqual(decoded.rawCode, "999.99")
     }
 
-    // 4. A term with no canon match returns an empty MDCC code,
-    //    never a UDC fallback.
-    @Test("no canon match returns empty code, not UDC fallback")
-    func noCanonMatchReturnsEmptyCodeNotUDCFallback() {
+    // 4. An UNRESOLVED term (no signature overlap) returns an empty
+    //    code, nil Q-ID, zero confidence — never a guess.
+    func testUnresolvedTermReturnsEmptyAnchor() {
         let anchor = EideticLib.lookup("zxcvqwertyasdfgh")
-        #expect(
-            anchor.code == "",
-            "no canon match must yield an empty MDCC code, not a fallback"
+        XCTAssertEqual(
+            anchor.code, "",
+            "an unresolved term must yield an empty code, not a fallback"
         )
-        #expect(anchor.wikidataQID == nil)
-        #expect(anchor.confidence == 0)
+        XCTAssertNil(anchor.wikidataQID)
+        XCTAssertEqual(anchor.confidence, 0)
     }
 
     // 5. No UDC data is loaded: the CC-BY-SA UDCSchedule.json
     //    resource is gone from the bundle.
-    @Test("UDC schedule resource is absent from bundle")
-    func udcScheduleResourceIsAbsentFromBundle() {
+    func testUDCScheduleResourceIsAbsentFromBundle() {
         let url = Bundle.module.url(
             forResource: "UDCSchedule",
             withExtension: "json"
         )
-        #expect(
-            url == nil,
+        XCTAssertNil(
+            url,
             "the CC-BY-SA UDCSchedule.json must not ship in the EideticLib bundle"
         )
     }
@@ -96,13 +80,12 @@ struct MDCCLookupTests {
     // 6. Anchor shape: exposes code and no udcCode. The Rust-port
     //    sibling struct carries the same rename as a documented
     //    follow-up (see TASK_MDCC_03_BLAST_RADIUS.md).
-    @Test("anchor exposes lattice code and no udcCode")
-    func anchorExposesLatticeCodeAndNoUDCCode() {
+    func testAnchorExposesLatticeCodeAndNoUDCCode() {
         let anchor = EideticLib.lookup("chemistry")
         let mirror = Mirror(reflecting: anchor)
         let labels = mirror.children.compactMap { $0.label }
-        #expect(labels.contains("code"), "Anchor must expose code")
-        #expect(!labels.contains("udcCode"), "Anchor must not expose udcCode")
+        XCTAssertTrue(labels.contains("code"), "Anchor must expose code")
+        XCTAssertFalse(labels.contains("udcCode"), "Anchor must not expose udcCode")
     }
 }
 
@@ -111,24 +94,22 @@ struct MDCCLookupTests {
 /// classification data is the CC0 Wikidata subset, and the
 /// classification source (the MDCC canon) is CC0/public-domain and
 /// lives in LatticeLib.
-@Suite("Licensing boundary")
-struct LicensingBoundaryTests {
+final class LicensingBoundaryTests: XCTestCase {
 
-    @Test("no CC-BY-SA resource ships in bundle")
-    func noCCBYSAResourceShipsInBundle() throws {
+    func testNoCCBYSAResourceShipsInBundle() throws {
         // The CC-BY-SA UDC schedule must be gone from the bundle.
-        #expect(
-            Bundle.module.url(forResource: "UDCSchedule", withExtension: "json") == nil,
+        XCTAssertNil(
+            Bundle.module.url(forResource: "UDCSchedule", withExtension: "json"),
             "the CC-BY-SA UDCSchedule.json must not ship"
         )
 
         // The bundled Wikidata subset must be CC0, not the encumbered
         // CC-BY-SA license the retired UDC schedule carried.
-        let subset = try #require(WikidataSubset.loadBundled())
+        let subset = try XCTUnwrap(WikidataSubset.loadBundled())
         let note = subset.licenseNote.uppercased()
-        #expect(note.contains("CC0"), "bundled subset must be CC0")
-        #expect(
-            !note.contains("CC-BY-SA"),
+        XCTAssertTrue(note.contains("CC0"), "bundled subset must be CC0")
+        XCTAssertFalse(
+            note.contains("CC-BY-SA"),
             "no CC-BY-SA share-alike data may ship in the default bundle"
         )
     }
