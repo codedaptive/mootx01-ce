@@ -200,8 +200,8 @@ tokenized BM25 scoring — full BM25 is CorpusKit's.
 the row for that pair and is a no-op when no such row exists.
 
 **B-9 (filed-at fidelity):** `filedAt` is round-tripped through storage.
-The Swift port persists it as a TEXT ISO8601 timestamp (sub-millisecond
-precision is lost in the round trip); the Rust port carries it as `i64`
+The Swift version persists it as a TEXT ISO8601 timestamp (sub-millisecond
+precision is lost in the round trip); the Rust version carries it as `i64`
 Unix epoch seconds matching PersistenceKit's `TypedValue::Timestamp`.
 The caller supplies `filedAt` (determinism: time is passed in, never
 read inside the kit).
@@ -291,23 +291,3 @@ test. An empty element at position `i` in the input array yields
 B-11). Verified by `FloatSimHashEmbeddingProviderTests.testEmbedBatchDefaultImplHandlesMixedEmptyAndNonEmpty` (Swift)
 and `simhash_provider_tests::embed_batch_default_impl_handles_mixed_empty_and_non_empty`
 (Rust).
-
-## § 8 — Out of scope
-
-- Fingerprint blocks, kernels, dispatch, FloatSimHash math → `SUBSTRATELIB_SPEC_v0.8.md`.
-- Hamming distance, batch distance, the k-nearest primitive over engrams → `ENGRAMLIB_SPEC_v0.8.md`.
-- Storage backends (SQLite + sqlite-vec, PostgreSQL + pgvector, InMemory), backend selection, the `RowStore` / `VectorIndex` protocols → `PERSISTENCEKIT_SPEC_v0.8.md`.
-- Tokenization, model bundles, model-identity assignment, concrete text providers, BM25 keyword scoring, RAG bundle composition → CorpusKit.
-- Multi-estate coordination and the Brain layer → `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` and GeniusLocusKit.
-
-## § 9 — Open questions
-
-- `findNearest` is a linear Hamming scan over the model-scoped
-  partition. Migration to PersistenceKit's `VectorIndex` protocol
-  (sqlite-vec / pgvector ANN) is a follow-on; per the kit graph ADR the
-  public `findNearest` signature does not change when that lands, so
-  this spec's contracts (B-6, C-4) survive the swap.
-
----
-
-*End of VectorKit Specification v0.8.*
