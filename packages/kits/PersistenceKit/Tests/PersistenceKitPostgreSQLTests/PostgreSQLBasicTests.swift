@@ -1,9 +1,11 @@
 // PostgreSQLBasicTests.swift
 //
-// Gated on POSTGRES_TEST_URL env var. When absent, tests skip
-// (still pass) so CI without postgres remains green.
+// Gated on POSTGRES_TEST_URL env var. When absent, tests return early
+// (still pass) so CI without postgres remains green — the swift-testing
+// analogue of the prior XCTSkip.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitPostgreSQL
@@ -21,17 +23,14 @@ import PersistenceKitPostgreSQL
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class PostgreSQLBasicTests: XCTestCase {
+struct PostgreSQLBasicTests {
 
     func connectionString() -> String? {
         ProcessInfo.processInfo.environment["POSTGRES_TEST_URL"]
     }
 
-    func makeStorage() throws -> PostgreSQLStorage {
-        guard let cs = connectionString() else {
-            throw XCTSkip("POSTGRES_TEST_URL not set; skipping PostgreSQL backend tests")
-        }
-        return PostgreSQLStorage(configuration: EstateConfiguration(
+    func makeStorage(_ cs: String) -> PostgreSQLStorage {
+        PostgreSQLStorage(configuration: EstateConfiguration(
             estateID: UUID(),
             backend: .postgresql(connectionString: cs, poolSize: 2)
         ))
@@ -58,17 +57,19 @@ final class PostgreSQLBasicTests: XCTestCase {
         )
     }
 
-    func testOpenAndSchemaVersion() async throws {
-        let storage = try makeStorage()
+    @Test func openAndSchemaVersion() async throws {
+        guard let cs = connectionString() else { return }  // POSTGRES_TEST_URL not set
+        let storage = makeStorage(cs)
         let schema = makeSchema(suffix: "open_\(UUID().uuidString.prefix(8))")
         try await storage.open(schema: schema)
         let v = try await storage.currentSchemaVersion()
-        XCTAssertEqual(v, 1)
+        #expect(v == 1)
         await storage.close()
     }
 
-    func testInsertAndQuery() async throws {
-        let storage = try makeStorage()
+    @Test func insertAndQuery() async throws {
+        guard let cs = connectionString() else { return }  // POSTGRES_TEST_URL not set
+        let storage = makeStorage(cs)
         let suffix = "iq_\(UUID().uuidString.prefix(8))"
         let schema = makeSchema(suffix: suffix)
         try await storage.open(schema: schema)
@@ -91,7 +92,7 @@ final class PostgreSQLBasicTests: XCTestCase {
             table: table,
             where: .eq(Column(table: table, name: "row_id"), .uuid(rowID))
         )
-        XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0]["verbatim"], .text("hello pg"))
+        #expect(rows.count == 1)
+        #expect(rows[0]["verbatim"] == .text("hello pg"))
     }
 }
