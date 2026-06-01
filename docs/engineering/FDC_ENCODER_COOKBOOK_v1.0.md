@@ -237,6 +237,18 @@ collapse identically and the bags match. If lexicon versions differ, the
 bags can diverge. The lexicon version must be part of any shared
 agreement protocol.
 
+**Step 1 relaxation — entity recovery.** Step 1 normally keeps only nouns and
+verbs. Named entities (place names, organizations, specific works) are highly
+discriminative, but proper-noun POS tagging is unreliable and *diverges across
+platforms* (Apple `NLTagger` vs the non-Apple HMM/Viterbi tagger). So Step 1
+additionally keeps any token whose lemma resolves to a Wikidata **Q-ID** in the
+pinned lexicon. Crucially, that admission is decided from the pinned lexicon —
+deterministic and identical build-and-runtime — so it recovers entity coverage
+*without* weakening the agreement property; it actually removes those tokens
+from the platform-dependent tagger path. Tokens that are neither noun/verb nor a
+Q-ID concept are still dropped. (`wn:` fallback hits are not admitted by this
+rule — only Q-IDs, the named-entity identities.)
+
 ---
 
 ## §4. Step 3 — Weighted Concept Bag

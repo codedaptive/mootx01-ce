@@ -33,4 +33,12 @@ struct ConceptBagTests {
     func emptyText() {
         #expect(BagBuilder.bag("", lexicon: lexicon, keep: [.noun, .verb, .other]).isEmpty)
     }
+
+    @Test("a Q-ID concept is kept even when no word class is admitted (§3.2 relaxation)")
+    func qidOverridesPOS() {
+        // keep: [] -> the POS path admits nothing; only the lexicon-Q-ID path can.
+        let bag = BagBuilder.bag("cat zxcvbnm", lexicon: lexicon, keep: [])
+        #expect(bag["Q146"] == 1)     // "cat" -> Q146 admitted via the Q-ID override
+        #expect(bag["zxcvbnm"] == nil) // not noun/verb-kept and not a Q-ID -> dropped
+    }
 }
