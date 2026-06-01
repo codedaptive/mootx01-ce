@@ -59,9 +59,9 @@ lib name `eidetic_lib`)
   `NovelTokenCache`, `PoolEntry`, `PoolSubmission`
 - `tests/word_class_conformance.rs`, `examples/benchmark.rs`, `Cargo.toml`
 
-The Rust port covers the building blocks (anchor, pipeline, wikidata,
+The Rust version covers the building blocks (anchor, pipeline, wikidata,
 word-class); the lattice-resolution, scheme, and consent/foreign-source
-surfaces are Swift-only today (SPEC § 9, open questions).
+surfaces are present in the Swift version and not yet in the Rust version.
 
 ## § 2 — Public types
 
@@ -167,7 +167,7 @@ public extension EideticLib {
 }
 ```
 
-**Rust:** the Rust port has no platform-acceleration today, so a
+**Rust:** the Rust version has no platform-acceleration today, so a
 single function suffices; it implements the canonical reference
 (byte-for-byte parity with Swift's `sentencesByDelimiter`).
 
@@ -175,7 +175,7 @@ single function suffices; it implements the canonical reference
 pub fn sentences(text: &str) -> Vec<String>;   // in module eidetic_lib::segmenter
 ```
 
-### Tier 2 — present but not yet consumed by other packages
+### Tier 2 — additional public surface
 
 Fully public, exercised by EideticLib's own tests and the pending FDC
 runtime missions, but not (yet) referenced by any other package. Listed
@@ -216,8 +216,8 @@ The lookup path. Behavioral contracts: SPEC § 5 (B-1…B-5).
 ### `lookup`
 
 Resolves a term to an `Anchor` deterministically and offline (SPEC § 4,
-I-1/I-2; pipeline B-1). The Swift port resolves real MDCC codes today; the
-Rust port returns the `not_implemented` sentinel pending the FDC runtime
+I-1/I-2; pipeline B-1). The Swift version resolves real MDCC codes today; the
+Rust version returns the `not_implemented` sentinel pending the FDC runtime
 (SPEC § 9).
 
 **Swift:**
@@ -250,7 +250,7 @@ extension EideticLib {
 }
 ```
 
-**Rust:** not ported (Swift-only surface — SPEC § 9).
+**Rust:** present in the Swift version and not yet in the Rust version.
 
 ### `defaultSchemeManifest`
 
@@ -301,7 +301,7 @@ public enum PipelineError: Error, Sendable, Hashable {
 }
 ```
 
-**Rust:** the foreign-source pipeline is Swift-only; the Rust port exposes
+**Rust:** the foreign-source pipeline is present in the Swift version and not yet in the Rust version; the Rust version exposes
 no error enum (its `lookup` is infallible and returns the sentinel).
 
 ## § 5 — Conformance test entry points
