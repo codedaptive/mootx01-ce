@@ -330,6 +330,80 @@ CLEAN on anti-patterns.
 
 ### Systemic flags
 
-- A follow-up mission should fix the production race in `ObserverRegistry.register()`.
+- ~~A follow-up mission should fix the production race in `ObserverRegistry.register()`.
   The fix is structural (make `register` async and add the subscription synchronously
-  within the actor). Worth filing before the next release build.
+  within the actor). Worth filing before the next release build.~~
+  **RESOLVED in commit `0b68584`.** Path B (production fix) was authorized and applied.
+  Both races — registration and notification ordering — are fixed structurally.
+
+---
+
+## Verification Pass — 2026-05-31
+
+**Reviewer:** Adams
+**Trigger:** Bilby applied Path B (production fix, commit `0b68584`) after first-pass CHANGES-REQUIRED.
+
+### Fix Inspection (commit `0b68584`)
+
+**Files touched:** exactly 2 — both in `Sources/PersistenceKitInMemory/`.
+- `Sources/PersistenceKitInMemory/InMemoryObserver.swift`
+- `Sources/PersistenceKitInMemory/InMemoryStorage.swift`
+
+No other Sources, rust, Package.swift, docs, or validation files touched. Scope confined as authorized.
+
+**Race 1 — ObserverRegistry.register (registration race). FIXED.**
+`register()` now uses `AsyncStream.makeStream(bufferingPolicy:)` to obtain the continuation synchronously before returning, then adds the subscription directly to `subs[id]` within the actor-isolated function body — no `Task { await self.add(sub) }` hop. The subscription is recorded before the stream is returned to the caller. The `private func add(_:)` helper is deleted (no longer needed). Correct.
+
+**Race 2 — InMemoryStateActor.notify (ordering race). FIXED.**
+`notify()` is now `async` and `await registry.notify(change)` is called directly instead of `Task { await registry.notify(change) }`. All four mutation methods (`insertRow`, `upsertRow`, `updateRows`, `deleteRows`) are now `async throws` and call `await notify(...)`. Changes are delivered to observers in mutation order. Correct.
+
+**Callers compile correctly.**
+`InMemoryRowStore` calls `stateActor.insertRow/upsertRow/updateRows/deleteRows` with `try await` — all already async protocol methods. The actor methods becoming `async` is a valid propagation with no change to call sites. `InMemoryRowStore.swift` was not in the diff (not needed). Confirmed.
+
+**No assertion changed.**
+`InMemoryObserverTests.swift:66` — `#expect(changes[0].rowKey == id1)` — unchanged. The ordering assertion is intact and unmodified.
+
+**No collateral damage.**
+SQLite and PostgreSQL conformance tests are unaffected (they use their own backends; the InMemory actor changes have no cross-cutting effect). Full suite 83/83.
+
+**Pre-existing warning removed.**
+The `no 'async' operations within 'await'` compiler warning at `InMemoryObserver.swift:20` (flagged in first pass as load-bearing signal) is gone. `swift test 2>&1 | grep "warning:"` returns zero lines. Zero warnings total.
+
+**Residual note (INFO only).**
+`InMemoryObserver.observe()` still uses a bridge `Task` to hop onto the actor for `registry.register()` and forwards events through an outer stream. This is architecturally acceptable: `register()` is synchronous within the actor once the Task executes, and the 50ms sleep covers the scheduling window. The two races that caused the flake are both gone. This bridge is a cosmetic asymmetry, not a race condition.
+
+### Test Execution Verification — Verification Pass
+
+**Method:** B (re-run, 8 consecutive runs)
+
+**Bilby's claim:** "83 tests in 19 suites passed, exit 0, 12/12 consecutive runs"
+
+**Adams re-run tally — 8/8:**
+| Run | Result | Exit |
+|-----|--------|------|
+| 1 | 83 tests in 19 suites passed | 0 |
+| 2 | 83 tests in 19 suites passed | 0 |
+| 3 | 83 tests in 19 suites passed | 0 |
+| 4 | 83 tests in 19 suites passed | 0 |
+| 5 | 83 tests in 19 suites passed | 0 |
+| 6 | 83 tests in 19 suites passed | 0 |
+| 7 | 83 tests in 19 suites passed | 0 |
+| 8 | 83 tests in 19 suites passed | 0 |
+
+`insertNotification()` — previously failed ~1/5 runs — passed all 8 runs. Flake is gone.
+
+**Status: PASS — exit 0, 8/8 runs, 83 tests, zero failures, zero warnings.**
+
+### Verification Pass Findings
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| 1 (first pass) | ~~CRITICAL~~ | `insertNotification()` ordering race — production fix applied in `0b68584` | **CLOSED** |
+
+No new findings.
+
+### Final Status: PASS
+
+Zero CRITICAL findings. Tests verified passing 8/8 runs. Diff confined to authorized scope. No assertion weakened. No warnings. No collateral damage.
+
+Clean. Ship it.
