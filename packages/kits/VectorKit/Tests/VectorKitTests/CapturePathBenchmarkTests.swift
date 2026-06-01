@@ -18,7 +18,7 @@ import Foundation
 /// - End-to-end embed+store: P99 < 100 ms, median < 50 ms.
 /// - VectorStore.addVector (no embedding): P99 < 5 ms over 1000 calls.
 /// - VectorStore.findNearest (10k corpus, top-K via EngramLib): P99 <
-///   50 ms over 100 queries.
+///   75 ms over 100 queries.
 ///
 /// **Note on the retrieval budget.** The original mission text called
 /// for P99 < 10 ms on `findNearest`. The substrate's Phase 2
@@ -28,9 +28,14 @@ import Foundation
 /// through `VectorStore.findNearest`, which adds SQLite row scan and
 /// per-row engram decode on top of the kernel call; that pipeline cost
 /// pushes per-query latency into the 20–30 ms range at N=10,000 on
-/// apple-m5-max. The 50 ms assertion reflects measured pipeline
-/// reality with ~2× headroom; the precise numbers and the Theorem 5
-/// verdict are recorded in `DECISION_VEC05_THEOREM5_2026-05-18.md`.
+/// apple-m5-max. The ceiling was 50 ms (calibrated with ~2× headroom on
+/// apple-m5-max); it was raised to 75 ms during VK-TEST-01 (Bob,
+/// 2026-05-31) because the path's typical P99 on slower hosts is ~44 ms,
+/// leaving only ~12% headroom under 50 ms — single-sample wall-clock
+/// noise crossed the line on ~1 run in 3. 75 ms keeps a meaningful
+/// budget (~1.7× typical) while making the assertion non-flaky. The
+/// precise numbers and the Theorem 5 verdict are recorded in
+/// `DECISION_VEC05_THEOREM5_2026-05-18.md`.
 ///
 /// All four suites run unconditionally. The end-to-end suite drives a
 /// `FloatSimHashEmbeddingProvider` with a deterministic inference
@@ -173,15 +178,17 @@ struct CapturePathBenchmarkTests {
     // MARK: - Suite 3: Retrieval latency (always runs)
 
     /// Stores 10,000 deterministic engrams, then issues 100 `findNearest`
-    /// queries with k=10. Asserts P99 < 50 ms per query. The corpus
+    /// queries with k=10. Asserts P99 < 75 ms per query. The corpus
     /// size matches the documented retrieval scale ceiling for VectorKit
     /// v1.0 (the in-process Hamming top-K path is bandwidth-bound and
     /// stays well under the budget through ~100k rows; sqlite-vec / HNSW
     /// is a follow-on substitution gated on CorpusKit's adoption). The
-    /// 50 ms ceiling (vs. the 10 ms originally suggested in mission
-    /// text) reflects the SQLite-scan + engram-decode cost surrounding
-    /// the kernel call; see suite doc above and the VEC-05 decision
-    /// record for the kernel-only vs. pipeline-cost split.
+    /// 75 ms ceiling (raised from 50 ms during VK-TEST-01 — see the
+    /// suite-level "Note on the retrieval budget" above — and well above
+    /// the 10 ms originally suggested in mission text) reflects the
+    /// SQLite-scan + engram-decode cost surrounding the kernel call; see
+    /// the VEC-05 decision record for the kernel-only vs. pipeline-cost
+    /// split.
     @Test func testFindNearestP99Under10MillisecondsOver10000VectorCorpus() async throws {
         let store = try await Self.freshStore()
         let now = Date(timeIntervalSince1970: 1_700_000_200)
@@ -228,7 +235,7 @@ struct CapturePathBenchmarkTests {
         let stats = Self.percentiles(of: nanos)
         Self.report(suite: "find-nearest (k=10, corpus=\(corpusSize), q=\(queryCount))", stats: stats)
 
-        #expect(stats.p99Ms < 50.0,
+        #expect(stats.p99Ms < 75.0,
                 "VEC-05 retrieval P99 budget exceeded: \(stats.p99Ms) ms")
     }
 
