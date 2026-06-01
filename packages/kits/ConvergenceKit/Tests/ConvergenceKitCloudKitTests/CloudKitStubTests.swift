@@ -1,15 +1,16 @@
 // CloudKitStubTests.swift
-import XCTest
+import Testing
 import ConvergenceKit
 import ConvergenceKitCloudKit
 
-final class CloudKitStubTests: XCTestCase {
-    func testStubExists() async {
+@Suite("CloudKitSyncEngine stub")
+struct CloudKitStubTests {
+    @Test("engine starts disabled")
+    func stubExists() async {
         let engine = CloudKitSyncEngine()
-        if case .disabled = await engine.state {
-            // ok
-        } else {
-            XCTFail("expected disabled")
+        guard case .disabled = await engine.state else {
+            Issue.record("expected disabled")
+            return
         }
     }
 }
