@@ -18,7 +18,7 @@ fn empty_index_returns_empty_results() {
 
 #[test]
 fn single_document_match() {
-    let idx = make_index();
+    let mut idx = make_index();
     let id = Uuid::new_v4();
     idx.index_documents(vec![(id, "the quick brown fox jumps over the lazy dog")]);
     let results = idx.search("quick fox", 10);
@@ -29,7 +29,7 @@ fn single_document_match() {
 
 #[test]
 fn multiple_docs_rank_by_relevance() {
-    let idx = make_index();
+    let mut idx = make_index();
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
     let c = Uuid::new_v4();
@@ -47,7 +47,7 @@ fn multiple_docs_rank_by_relevance() {
 
 #[test]
 fn search_with_limit() {
-    let idx = make_index();
+    let mut idx = make_index();
     for i in 0..5 {
         let text = format!("keyword document {}", i);
         idx.index_documents(vec![(Uuid::new_v4(), text.as_str())]);
@@ -58,7 +58,7 @@ fn search_with_limit() {
 
 #[test]
 fn remove_drops_document_from_results() {
-    let idx = make_index();
+    let mut idx = make_index();
     let id = Uuid::new_v4();
     idx.index_documents(vec![(id, "removable content here")]);
     assert_eq!(idx.document_count(), 1);
@@ -70,7 +70,7 @@ fn remove_drops_document_from_results() {
 #[test]
 fn custom_bm25_parameters() {
     let tok = Arc::new(DeterministicTokenizer::new());
-    let idx = BM25Index::with_parameters(tok, BM25Parameters::new(2.0, 0.5));
+    let mut idx = BM25Index::with_parameters(tok, BM25Parameters::new(2.0, 0.5));
     let id = Uuid::new_v4();
     idx.index_documents(vec![(id, "custom parameters test")]);
     let results = idx.search("custom", 5);
@@ -79,7 +79,7 @@ fn custom_bm25_parameters() {
 
 #[test]
 fn query_with_no_matching_terms_returns_empty() {
-    let idx = make_index();
+    let mut idx = make_index();
     idx.index_documents(vec![(Uuid::new_v4(), "alpha beta gamma")]);
     let results = idx.search("zeta", 10);
     assert!(results.is_empty());
@@ -87,7 +87,7 @@ fn query_with_no_matching_terms_returns_empty() {
 
 #[test]
 fn empty_query_returns_empty_results() {
-    let idx = make_index();
+    let mut idx = make_index();
     idx.index_documents(vec![(Uuid::new_v4(), "alpha beta")]);
     let results = idx.search("", 10);
     assert!(results.is_empty());

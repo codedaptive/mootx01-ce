@@ -70,7 +70,7 @@ fn hybrid_recall_merges_vector_and_keyword_hits() {
 
     // Index BM25 over the chunks.
     let tokenizer = Arc::new(DeterministicTokenizer::new());
-    let bm25 = BM25Index::new(tokenizer);
+    let mut bm25 = BM25Index::new(tokenizer);
     bm25.index_documents(chunks.iter().map(|c| (c.id, c.text.as_str())));
 
     // Seed VectorStore with engrams whose Hamming distance to the

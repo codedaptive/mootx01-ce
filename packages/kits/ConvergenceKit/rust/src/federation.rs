@@ -162,9 +162,11 @@ pub struct FederationSyncEngine {
     identity: Arc<LocalIdentity>,
     relay: Arc<FederationRelay>,
     peer_identity: PeerIdentity,
-    state: Mutex<EngineState>,
+    // The engine owns its state directly; mutating verbs take `&mut self`.
+    // (The relay is `Arc`-shared across peers, so it keeps its own lock.)
+    state: EngineState,
     /// Subscribers receive SyncEvent on every push and pull.
-    subscribers: Mutex<Vec<Sender<SyncEvent>>>,
+    subscribers: Vec<Sender<SyncEvent>>,
 }
 
 impl FederationSyncEngine {
@@ -174,7 +176,7 @@ impl FederationSyncEngine {
             identity,
             relay,
             peer_identity,
-            state: Mutex::new(EngineState {
+            state: EngineState {
                 enabled: false,
                 manifest: None,
                 storage: None,
@@ -182,8 +184,8 @@ impl FederationSyncEngine {
                 last_pull_secs: None,
                 inbox: None,
                 outbox: Vec::new(),
-            }),
-            subscribers: Mutex::new(Vec::new()),
+            },
+            subscribers: Vec::new(),
         }
     }
 
@@ -195,62 +197,48 @@ impl FederationSyncEngine {
     /// StorageObserver-driven outbox the Swift side maintains;
     /// in Rust v1.0 callers enqueue explicitly while the
     /// observer-driven path is built.
-    pub fn enqueue(&self, record: SyncRecord) -> SyncResult<()> {
-        let mut state = self.state.lock().unwrap();
-        if !state.enabled {
+    pub fn enqueue(&mut self, record: SyncRecord) -> SyncResult<()> {
+        if !self.state.enabled {
             return Err(SyncError::NotEnabled);
         }
-        state.outbox.push(record);
+        self.state.outbox.push(record);
         Ok(())
     }
 
-    fn emit(&self, event: SyncEvent) {
-        let mut subs = self.subscribers.lock().unwrap();
-        let mut keep = Vec::with_capacity(subs.len());
-        for s in subs.iter() {
-            keep.push(s.send(event.clone()).is_ok());
-        }
-        let mut i = 0;
-        subs.retain(|_| {
-            let live = keep[i];
-            i += 1;
-            live
-        });
+    fn emit(&mut self, event: SyncEvent) {
+        // Send the event to every subscriber; drop any whose receiver
+        // has been released (send returns Err once the rx is gone).
+        self.subscribers.retain(|s| s.send(event.clone()).is_ok());
     }
 }
 
 impl SyncEngine for FederationSyncEngine {
-    fn enable(&self, manifest: SyncManifest, storage: Arc<dyn Storage>) -> SyncResult<()> {
-        let mut state = self.state.lock().unwrap();
-        if state.enabled {
+    fn enable(&mut self, manifest: SyncManifest, storage: Arc<dyn Storage>) -> SyncResult<()> {
+        if self.state.enabled {
             return Err(SyncError::AlreadyEnabled);
         }
         let inbox = self.relay.register(self.peer_identity.clone());
-        state.inbox = Some(inbox);
-        state.manifest = Some(manifest);
-        state.storage = Some(storage);
-        state.enabled = true;
+        self.state.inbox = Some(inbox);
+        self.state.manifest = Some(manifest);
+        self.state.storage = Some(storage);
+        self.state.enabled = true;
         Ok(())
     }
 
-    fn disable(&self) -> SyncResult<()> {
-        let mut state = self.state.lock().unwrap();
-        state.enabled = false;
-        state.manifest = None;
-        state.storage = None;
-        state.inbox = None;
-        state.outbox.clear();
+    fn disable(&mut self) -> SyncResult<()> {
+        self.state.enabled = false;
+        self.state.manifest = None;
+        self.state.storage = None;
+        self.state.inbox = None;
+        self.state.outbox.clear();
         Ok(())
     }
 
-    fn push(&self) -> SyncResult<SyncReceipt> {
-        let to_send: Vec<SyncRecord> = {
-            let mut state = self.state.lock().unwrap();
-            if !state.enabled {
-                return Err(SyncError::NotEnabled);
-            }
-            std::mem::take(&mut state.outbox)
-        };
+    fn push(&mut self) -> SyncResult<SyncReceipt> {
+        if !self.state.enabled {
+            return Err(SyncError::NotEnabled);
+        }
+        let to_send: Vec<SyncRecord> = std::mem::take(&mut self.state.outbox);
         let mut pushed = 0;
         for record in to_send {
             let bytes = canonical_record_bytes(&record)?;
@@ -264,34 +252,25 @@ impl SyncEngine for FederationSyncEngine {
             pushed += 1;
         }
         let receipt = SyncReceipt::now(pushed, 0, 0);
-        {
-            let mut state = self.state.lock().unwrap();
-            state.last_push_secs = Some(receipt.timestamp_secs);
-        }
+        self.state.last_push_secs = Some(receipt.timestamp_secs);
         self.emit(SyncEvent::PushCompleted {
             receipt: receipt.clone(),
         });
         Ok(receipt)
     }
 
-    fn pull(&self) -> SyncResult<SyncReceipt> {
-        let (manifest, inbox_avail) = {
-            let state = self.state.lock().unwrap();
-            if !state.enabled {
-                return Err(SyncError::NotEnabled);
-            }
-            (state.manifest.clone(), state.inbox.is_some())
-        };
-        if !inbox_avail {
+    fn pull(&mut self) -> SyncResult<SyncReceipt> {
+        if !self.state.enabled {
             return Err(SyncError::NotEnabled);
         }
-        let manifest = manifest.ok_or(SyncError::NotEnabled)?;
+        if self.state.inbox.is_none() {
+            return Err(SyncError::NotEnabled);
+        }
+        let manifest = self.state.manifest.clone().ok_or(SyncError::NotEnabled)?;
 
-        // Drain the inbox without holding the state lock across
-        // recv calls; we hold a separate sentinel.
+        // Drain the inbox into an owned buffer.
         let envelopes: Vec<SignedRecord> = {
-            let state = self.state.lock().unwrap();
-            let inbox = state.inbox.as_ref().unwrap();
+            let inbox = self.state.inbox.as_ref().unwrap();
             let mut out = Vec::new();
             while let Ok(env) = inbox.try_recv() {
                 out.push(env);
@@ -324,28 +303,24 @@ impl SyncEngine for FederationSyncEngine {
             pulled += 1;
         }
         let receipt = SyncReceipt::now(0, pulled, conflicts);
-        {
-            let mut state = self.state.lock().unwrap();
-            state.last_pull_secs = Some(receipt.timestamp_secs);
-        }
+        self.state.last_pull_secs = Some(receipt.timestamp_secs);
         self.emit(SyncEvent::RemoteChangesApplied { count: pulled });
         Ok(receipt)
     }
 
-    fn subscribe(&self) -> Receiver<SyncEvent> {
+    fn subscribe(&mut self) -> Receiver<SyncEvent> {
         let (tx, rx) = channel();
-        self.subscribers.lock().unwrap().push(tx);
+        self.subscribers.push(tx);
         rx
     }
 
     fn state(&self) -> SyncState {
-        let state = self.state.lock().unwrap();
-        if let Some(ref m) = state.manifest {
-            if state.enabled {
+        if let Some(ref m) = self.state.manifest {
+            if self.state.enabled {
                 return SyncState::Enabled {
                     zone: m.zone_identifier.clone(),
-                    last_push_secs: state.last_push_secs,
-                    last_pull_secs: state.last_pull_secs,
+                    last_push_secs: self.state.last_push_secs,
+                    last_pull_secs: self.state.last_pull_secs,
                 };
             }
         }
