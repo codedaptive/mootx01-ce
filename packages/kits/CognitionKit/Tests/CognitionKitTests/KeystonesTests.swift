@@ -7,10 +7,10 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import CognitionKit
 
-/// Keystones — structural reasoning lens (Lens 1). Reads a wing's
-/// drawer-to-drawer tunnel graph through GLK and ranks the load-bearing
-/// memories by eigenvalue centrality (NeuronKit `keystones`). Read-only;
-/// the conscious "spine of your thinking." Swift peer of `run_keystones`.
+/// Keystones — structure lens (category 1). Reads a wing's
+/// drawer-to-drawer tunnel graph and ranks the load-bearing memories by
+/// surfacing NeuronKit's eigenvalue-centrality keystones. Read-only;
+/// "the spine of your thinking." Swift peer of run_keystones.
 @Suite("KeystonesTests")
 struct KeystonesTests {
 
@@ -26,7 +26,6 @@ struct KeystonesTests {
         return (kit, handle)
     }
 
-    /// Seed one drawer-to-drawer tunnel in the wing (the graph the lens reads).
     private func addEdge(
         _ kit: GeniusLocusKit, _ handle: EstateHandle,
         src: String, tgt: String
@@ -40,8 +39,7 @@ struct KeystonesTests {
         _ = try await estate.capture(frame)
     }
 
-    // CK-KS-1: a star graph's hub surfaces as the top keystone end-to-end
-    // over a real estate — "the spine of your thinking."
+    // CK-KS-1: a star graph — the hub is the load-bearing memory; topK bounds.
     @Test("star hub is the keystone")
     func starHubIsTheKeystone() async throws {
         let (kit, handle) = try await openEstate()
@@ -50,18 +48,20 @@ struct KeystonesTests {
         try await addEdge(kit, handle, src: "hub", tgt: "s3")
         try await addEdge(kit, handle, src: "hub", tgt: "s4")
 
-        let top = try await Keystones.run(kit: kit, handle: handle, wing: Self.wing, topK: 3)
+        let top = try await Keystones.run(
+            kit: kit, handle: handle, wing: Self.wing, topK: 3)
+
         #expect(!top.isEmpty)
-        #expect(top.first?.id == "hub")
-        #expect(top.count <= 3)
+        #expect(top[0].id == "hub", "the hub is the load-bearing memory")
+        #expect(top.count <= 3, "topK bounds the result")
     }
 
-    // CK-KS-2: a wing with no tunnels yields an empty result — no graph,
-    // no keystones, no throw.
+    // CK-KS-2: a wing with no tunnels yields an empty result — no graph.
     @Test("empty wing has no keystones")
     func emptyWingHasNoKeystones() async throws {
         let (kit, handle) = try await openEstate()
-        let top = try await Keystones.run(kit: kit, handle: handle, wing: Self.wing, topK: 5)
+        let top = try await Keystones.run(
+            kit: kit, handle: handle, wing: Self.wing, topK: 5)
         #expect(top.isEmpty)
     }
 }
