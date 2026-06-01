@@ -28,9 +28,17 @@ let package = Package(
             targets: ["LatticeLib"]
         ),
     ],
+    dependencies: [
+        // SubstrateML provides EigenvalueCentrality (LexRank) and FloatSimHash
+        // (signature fingerprint). Substrate math is the right home for these.
+        .package(path: "../SubstrateML"),
+    ],
     targets: [
         .target(
             name: "LatticeLib",
+            dependencies: [
+                .product(name: "SubstrateML", package: "SubstrateML"),
+            ],
             resources: [
                 .process("Resources"),
             ]

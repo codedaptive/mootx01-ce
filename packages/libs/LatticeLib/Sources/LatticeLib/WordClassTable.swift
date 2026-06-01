@@ -12,7 +12,6 @@
 // the pinned snapshot; it never tags at table-build scale itself.
 
 import Foundation
-import LatticeLib
 
 /// The parsed word-class table with its pinned versioning metadata
 /// (cookbook §1.3 schema). Byte-identical shape to the Rust port's

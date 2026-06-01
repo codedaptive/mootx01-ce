@@ -17,7 +17,6 @@
 // lemmatization is Step 2 (cookbook §2.1 step 1 vs §3.2).
 
 import Foundation
-import LatticeLib
 
 #if canImport(NaturalLanguage)
 import NaturalLanguage
