@@ -160,7 +160,7 @@ stored column.
 instance for one estate. A PostgreSQL pool is per-estate, fixed-size,
 with an explicit maximum and no auto-resize (Q6).
 
-**I-10 (cross-port parity):** the Rust port (`persistence-kit`) mirrors
+**I-10 (cross-port parity):** the Rust version (`persistence-kit`) mirrors
 the value model, predicate algebra, schema declaration, and the five
 trait contracts case-for-case. The InMemory backend ships in both ports
 at v0.8; SQLite/PostgreSQL backends are Swift-side at v0.8, with the
@@ -305,36 +305,3 @@ as ISO-8601 text and reads back equal (I-3).
 **C-8 (cross-port parity):** the Swift and Rust InMemory backends agree
 on value round-trip, predicate evaluation, schema declaration, and audit
 ordering for every shared fixture (I-10).
-
-## § 8 — Out of scope
-
-- `AuditEvent`, `HLC`, `Fingerprint256` value definitions →
-  `SUBSTRATELIB_SPEC_v0.8.md`.
-- Audit-event generation, HLC assignment, CRDT projection →
-  GeniusLocusKit (`GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md`).
-- Sync / replication, outbound change forwarding → ConvergenceKit
-  (`CONVERGENCEKIT_SPEC_v0.8.md`).
-- Embedding generation and ANN ranking math → `VECTORKIT_SPEC_v0.8.md`
-  (PersistenceKit stores and searches vectors; it does not embed).
-- Schema content (which tables/columns each kit needs) → each consumer
-  kit's own spec.
-- The share-fence encryption and federation model → the federation
-  decision record; PersistenceKit owns only at-rest modes 1–3 (B-12).
-
-## § 9 — Open questions
-
-- PostgreSQL libpq client choice (PostgresNIO vs raw libpq) and the CI
-  test-harness shape are tracked in
-  `DECISION_STORAGEKIT_DESIGN_2026-05-19.md` § 12, not yet recorded as
-  separate ADRs.
-- Down-migrations (explicit reverse) remain deferred; v0.8 is
-  forward-only (I-7). A v1.x decision adds them if usage demands.
-- Encryption mode 4 (database + threshold) is deliberately absent from
-  the build; adding it is a reviewed act, not a silent enum extension.
-- The Rust SQLite/PostgreSQL backends are declared in the trait surface
-  but ship after v0.8; the InMemory backend is the cross-port reference
-  until then (I-10).
-
----
-
-*End of PersistenceKit Specification v0.8.*
