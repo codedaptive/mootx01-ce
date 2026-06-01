@@ -6,7 +6,7 @@
 // GeniusLocusKit estate (no mocks). Mirrors the MultiEstateRoutingTests
 // harness: recalls use unconfirmed so freshly-captured rows are visible.
 
-import XCTest
+import Testing
 import Foundation
 import AriaLexiconLib
 import GeniusLocusKit
@@ -17,7 +17,11 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
 
-final class RecipeToolsTests: XCTestCase {
+/// `.serialized`: every dispatch case opens a live in-memory estate and
+/// runs multi-step capture/run/confirm sequences; preserve the
+/// one-at-a-time execution the suite ran under XCTest.
+@Suite("Recipe tools", .serialized)
+struct RecipeToolsTests {
 
     // MARK: - Harness
 
@@ -42,13 +46,13 @@ final class RecipeToolsTests: XCTestCase {
 
     // MARK: - Projection
 
-    func testRecipeToolsAppearInProjectionWithRecipeProvenance() {
+    @Test func testRecipeToolsAppearInProjectionWithRecipeProvenance() {
         let tools = ToolProjection.tools()
         let recipeNames = tools
             .filter { if case .recipe = $0.provenance { return true } else { return false } }
             .map(\.name)
             .sorted()
-        XCTAssertEqual(recipeNames, [
+        #expect(recipeNames == [
             "moot_confirm_migration_promotion",
             "moot_grounded_synthesis",
             "moot_list_recipes",
@@ -56,7 +60,7 @@ final class RecipeToolsTests: XCTestCase {
         ])
     }
 
-    func testListRecipesDispatchEnumeratesCatalog() async throws {
+    @Test func testListRecipesDispatchEnumeratesCatalog() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "lr"))
@@ -64,29 +68,29 @@ final class RecipeToolsTests: XCTestCase {
 
         let result = try await dispatcher.dispatch(
             name: "moot_list_recipes", arguments: .object([:]))
-        let obj = try XCTUnwrap(result.objectValue)
-        XCTAssertEqual(obj["isError"]?.boolValue, false)
-        let text = try XCTUnwrap(
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         // The listing reflects the shipped catalog.
-        XCTAssertTrue(text.contains("grounded_synthesis"))
-        XCTAssertTrue(text.contains("migration_benchmark"))
-        XCTAssertTrue(text.contains("capabilities:"))
+        #expect(text.contains("grounded_synthesis"))
+        #expect(text.contains("migration_benchmark"))
+        #expect(text.contains("capabilities:"))
     }
 
-    func testRecipeToolsDoNotCollideWithLexiconNames() {
+    @Test func testRecipeToolsDoNotCollideWithLexiconNames() {
         // Recipe tools sit above the lexicon projection — no recipe name
         // parses back to a (verb, noun) lexicon pair.
         for tool in ToolProjection.tools() {
             guard case .recipe = tool.provenance else { continue }
-            XCTAssertNil(ToolDispatcher.parseToolName(tool.name),
-                         "recipe tool \(tool.name) must not parse as a lexicon pair")
+            #expect(ToolDispatcher.parseToolName(tool.name) == nil,
+                    "recipe tool \(tool.name) must not parse as a lexicon pair")
         }
     }
 
     // MARK: - grounded_synthesis dispatch
 
-    func testGroundedSynthesisDispatchReturnsContext() async throws {
+    @Test func testGroundedSynthesisDispatchReturnsContext() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "gs"))
@@ -106,18 +110,18 @@ final class RecipeToolsTests: XCTestCase {
             name: "moot_grounded_synthesis",
             arguments: .object(["filter": .string("unconfirmed")]))
 
-        let obj = try XCTUnwrap(result.objectValue)
-        XCTAssertEqual(obj["isError"]?.boolValue, false)
-        let text = try XCTUnwrap(
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        XCTAssertTrue(text.contains("grounded_synthesis: 3 drawer"))
-        XCTAssertTrue(text.contains("patterns:"))
-        XCTAssertTrue(text.contains("carbon"))
+        #expect(text.contains("grounded_synthesis: 3 drawer"))
+        #expect(text.contains("patterns:"))
+        #expect(text.contains("carbon"))
     }
 
     // MARK: - migration benchmark run → confirm, end to end
 
-    func testMigrationBenchmarkRunThenConfirmDispatch() async throws {
+    @Test func testMigrationBenchmarkRunThenConfirmDispatch() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "mb"))
@@ -155,26 +159,26 @@ final class RecipeToolsTests: XCTestCase {
 
         let runResult = try await dispatcher.dispatch(
             name: "moot_run_migration_benchmark", arguments: runArgs)
-        let runObj = try XCTUnwrap(runResult.objectValue)
-        XCTAssertEqual(runObj["isError"]?.boolValue, false)
-        let runText = try XCTUnwrap(
+        let runObj = try #require(runResult.objectValue)
+        #expect(runObj["isError"]?.boolValue == false)
+        let runText = try #require(
             runObj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         // Both clean plans survive and a winner is named.
-        XCTAssertTrue(runText.contains("winner: plan"))
-        XCTAssertTrue(runText.contains("rankings:"))
+        #expect(runText.contains("winner: plan"))
+        #expect(runText.contains("rankings:"))
 
         // Recover the winner + loser branch ids from the surfaced text the
         // way an MCP client would. The winner id appears twice (the
         // "winner:" line and its own ranking line), so dedup preserving
         // order: two distinct ranked branches → two unique ids.
         let ids = Self.uniqueUUIDs(in: runText)
-        XCTAssertEqual(ids.count, 2, "expected two distinct ranked branch ids in run output")
+        #expect(ids.count == 2, "expected two distinct ranked branch ids in run output")
 
         // The winner line names the winner id; confirm with that.
         let winnerLine = runText.split(separator: "\n").first { $0.contains("winner: plan") } ?? ""
-        let winner = try XCTUnwrap(Self.uuids(in: String(winnerLine)).first)
+        let winner = try #require(Self.uuids(in: String(winnerLine)).first)
         let losers = ids.filter { $0 != winner }
-        XCTAssertEqual(losers.count, 1, "expected exactly one loser branch")
+        #expect(losers.count == 1, "expected exactly one loser branch")
 
         let confirmArgs: JSONValue = .object([
             "winnerBranchID": .string(winner.uuidString),
@@ -182,16 +186,16 @@ final class RecipeToolsTests: XCTestCase {
         ])
         let confirmResult = try await dispatcher.dispatch(
             name: "moot_confirm_migration_promotion", arguments: confirmArgs)
-        let confirmObj = try XCTUnwrap(confirmResult.objectValue)
-        XCTAssertEqual(confirmObj["isError"]?.boolValue, false)
+        let confirmObj = try #require(confirmResult.objectValue)
+        #expect(confirmObj["isError"]?.boolValue == false)
 
         // The winner branch is now promoted.
         let resolved = await kit.branchHandle(for: winner)
-        let winnerBranch = try XCTUnwrap(resolved)
-        XCTAssertEqual(winnerBranch.status, .won)
+        let winnerBranch = try #require(resolved)
+        #expect(winnerBranch.status == .won)
     }
 
-    func testConfirmRefusesDisqualifiedWinner() async throws {
+    @Test func testConfirmRefusesDisqualifiedWinner() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "dq"))
@@ -207,13 +211,13 @@ final class RecipeToolsTests: XCTestCase {
         ])
         let result = try await dispatcher.dispatch(
             name: "moot_confirm_migration_promotion", arguments: confirmArgs)
-        let obj = try XCTUnwrap(result.objectValue)
-        XCTAssertEqual(obj["isError"]?.boolValue, true)
-        let text = try XCTUnwrap(
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == true)
+        let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        XCTAssertTrue(text.contains("silentConceptLoss"))
+        #expect(text.contains("silentConceptLoss"))
         // Never promoted.
-        XCTAssertEqual(branch.status, .active)
+        #expect(branch.status == .active)
     }
 
     // MARK: - helpers

@@ -1,4 +1,4 @@
-import XCTest
+import Testing
 @testable import AriaMCP
 
 /// Round-trip tests for the JSON-RPC envelope decoding and encoding.
@@ -6,61 +6,62 @@ import XCTest
 /// Cover the shapes Part 1 must accept: a normal request with an id,
 /// a notification (no id), a malformed envelope. These tests do not
 /// reach the dispatcher; they pin the wire types alone.
-final class JSONRPCTests: XCTestCase {
+@Suite("JSON-RPC envelope")
+struct JSONRPCTests {
 
-    func testDecodeRequestWithStringID() throws {
+    @Test func testDecodeRequestWithStringID() throws {
         let frame: JSONValue = .object([
             "jsonrpc": .string("2.0"),
             "id": .string("req-1"),
             "method": .string("ping"),
         ])
-        let request = try XCTUnwrap(JSONRPCRequest.decode(frame))
-        XCTAssertEqual(request.method, "ping")
-        XCTAssertEqual(request.id, .string("req-1"))
-        XCTAssertFalse(request.isNotification)
+        let request = try #require(JSONRPCRequest.decode(frame))
+        #expect(request.method == "ping")
+        #expect(request.id == .string("req-1"))
+        #expect(!request.isNotification)
     }
 
-    func testDecodeNotificationHasNoID() throws {
+    @Test func testDecodeNotificationHasNoID() throws {
         let frame: JSONValue = .object([
             "jsonrpc": .string("2.0"),
             "method": .string("notifications/initialized"),
         ])
-        let request = try XCTUnwrap(JSONRPCRequest.decode(frame))
-        XCTAssertTrue(request.isNotification)
-        XCTAssertNil(request.id)
+        let request = try #require(JSONRPCRequest.decode(frame))
+        #expect(request.isNotification)
+        #expect(request.id == nil)
     }
 
-    func testDecodeRejectsWrongVersion() {
+    @Test func testDecodeRejectsWrongVersion() {
         let frame: JSONValue = .object([
             "jsonrpc": .string("1.0"),
             "id": .integer(1),
             "method": .string("ping"),
         ])
-        XCTAssertNil(JSONRPCRequest.decode(frame))
+        #expect(JSONRPCRequest.decode(frame) == nil)
     }
 
-    func testResponseEncodingPreservesIDShape() throws {
+    @Test func testResponseEncodingPreservesIDShape() throws {
         let response = JSONRPCResponse.ok(.integer(42), .object(["ok": .bool(true)]))
         let encoded = response.asJSONValue
-        let object = try XCTUnwrap(encoded.objectValue)
-        XCTAssertEqual(object["id"], .integer(42))
-        XCTAssertEqual(object["jsonrpc"], .string("2.0"))
-        XCTAssertEqual(object["result"], .object(["ok": .bool(true)]))
+        let object = try #require(encoded.objectValue)
+        #expect(object["id"] == .integer(42))
+        #expect(object["jsonrpc"] == .string("2.0"))
+        #expect(object["result"] == .object(["ok": .bool(true)]))
     }
 
-    func testErrorResponseCarriesCodeAndMessage() throws {
+    @Test func testErrorResponseCarriesCodeAndMessage() throws {
         let response = JSONRPCResponse.failure(
             .null,
             JSONRPCError(code: JSONRPCErrorCode.methodNotFound, message: "no such method")
         )
-        let object = try XCTUnwrap(response.asJSONValue.objectValue)
-        XCTAssertEqual(object["id"], .null)
-        let errorObject = try XCTUnwrap(object["error"]?.objectValue)
-        XCTAssertEqual(errorObject["code"], .integer(Int64(JSONRPCErrorCode.methodNotFound)))
-        XCTAssertEqual(errorObject["message"], .string("no such method"))
+        let object = try #require(response.asJSONValue.objectValue)
+        #expect(object["id"] == .null)
+        let errorObject = try #require(object["error"]?.objectValue)
+        #expect(errorObject["code"] == .integer(Int64(JSONRPCErrorCode.methodNotFound)))
+        #expect(errorObject["message"] == .string("no such method"))
     }
 
-    func testJSONValueRoundTrip() throws {
+    @Test func testJSONValueRoundTrip() throws {
         let value: JSONValue = .object([
             "name": .string("aria-mcp"),
             "count": .integer(7),
@@ -71,6 +72,6 @@ final class JSONRPCTests: XCTestCase {
         ])
         let encoded = try value.encoded()
         let decoded = try JSONValue.parse(encoded)
-        XCTAssertEqual(decoded, value)
+        #expect(decoded == value)
     }
 }
