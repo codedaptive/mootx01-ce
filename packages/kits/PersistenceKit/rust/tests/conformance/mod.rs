@@ -5,22 +5,19 @@
 // Each backend test target supplies a factory `Fn() -> Box<dyn Storage>`
 // (a fresh, unopened storage) and calls `run_all(name, factory)`.
 //
-// Scope note: the Swift runner has nine groups. Two are intentionally
-// omitted here:
-//   - vector  — VectorIndex (sqlite-vec) is deferred to a follow-on; the
-//               Rust backends ship a placeholder VectorIndex in Phase 1.
-//   - transaction — the Rust `Storage` trait has no `transaction` method
-//               (pre-existing gap vs. Swift), so there is nothing to drive.
-// The remaining seven groups (schema, row, predicate, blob, audit,
-// generated-column, append-only) are the Phase-1 parity gate.
+// Scope note: the Swift runner has nine groups. `run_all` drives the eight
+// backend-universal groups (schema, row, predicate, blob, audit,
+// generated-column, append-only, transaction). The ninth — vector — is
+// exposed separately via `vector_fixtures`, because not every backend ships
+// a VectorIndex (InMemory and Postgres+pgvector do; SQLite rides sqlite-vec).
 
 #![allow(dead_code)] // each backend test binary uses a subset of helpers
 
 use std::collections::BTreeMap;
 use persistence_kit::{
     AuditEvent, Column, ColumnDeclaration, ColumnType, DistanceMetric, GeneratedColumn,
-    GeneratedExpression, IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration, Storage,
-    StorageError, StoragePredicate, TableDeclaration, TypedValue,
+    GeneratedExpression, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection,
+    SchemaDeclaration, Storage, StorageError, StoragePredicate, TableDeclaration, TypedValue,
 };
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
@@ -127,6 +124,58 @@ pub fn run_all(backend: &str, factory: &Factory) {
     audit_fixtures(backend, factory);
     generated_column_fixtures(backend, factory);
     append_only_fixtures(backend, factory);
+    transaction_fixtures(backend, factory);
+}
+
+/// Transaction fixtures — a committed block persists its writes; a block that
+/// returns `Err` rolls back, leaving the store untouched. Mirrors the Swift
+/// transaction group's commit/rollback assertions. The block drives its
+/// mutations through the `StorageTransaction` sub-stores (same session as the
+/// open BEGIN…COMMIT bracket).
+fn transaction_fixtures(backend: &str, factory: &Factory) {
+    let storage = factory();
+    storage.open(&test_schema()).expect("open");
+
+    fn make_row(name: &str) -> BTreeMap<String, TypedValue> {
+        let mut row: BTreeMap<String, TypedValue> = BTreeMap::new();
+        row.insert("id".into(), TypedValue::Uuid(Uuid::new_v4()));
+        row.insert("flags".into(), TypedValue::Bitmap(0));
+        row.insert("name".into(), TypedValue::Text(name.into()));
+        row.insert("count".into(), TypedValue::Int(1));
+        row.insert("created".into(), TypedValue::Timestamp(1_700_000_000));
+        row
+    }
+
+    // A committed transaction persists every write in the block.
+    storage
+        .transaction(IsolationLevel::Serializable, &mut |tx| {
+            let rows = tx.row_store();
+            rows.insert("items", make_row("committed-a"))?;
+            rows.insert("items", make_row("committed-b"))?;
+            Ok(())
+        })
+        .expect("commit");
+    assert_eq!(
+        storage.row_store().count("items", None).unwrap(),
+        2,
+        "{backend}: committed writes persist"
+    );
+
+    // A transaction whose block returns Err rolls back: its writes vanish and
+    // the error propagates to the caller.
+    let result = storage.transaction(IsolationLevel::Serializable, &mut |tx| {
+        let rows = tx.row_store();
+        rows.insert("items", make_row("rolled-back"))?;
+        Err(StorageError::BackendError { underlying: "intentional rollback".into() })
+    });
+    assert!(result.is_err(), "{backend}: rollback propagates the block error");
+    assert_eq!(
+        storage.row_store().count("items", None).unwrap(),
+        2,
+        "{backend}: rolled-back writes are discarded"
+    );
+
+    storage.close().unwrap();
 }
 
 /// Vector fixtures — separate from run_all (not every backend ships
