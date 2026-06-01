@@ -6,37 +6,37 @@
 // stable identifier. Mode 4 (database + threshold) is out of scope and
 // absent from the enum — guarded by an exhaustive switch below.
 
-import XCTest
+import Testing
 import PersistenceKit
 
-final class EncryptionModeTests: XCTestCase {
+struct EncryptionModeTests {
 
     /// Mode 1: plaintext stores neither a key nor an identifier.
-    func testPlaintextStoresNoKey() {
+    @Test func plaintextStoresNoKey() {
         let config = EstateEncryptionConfig(.plaintext)
-        XCTAssertEqual(config.mode, .plaintext)
-        XCTAssertNil(config.keyIdentifier)
+        #expect(config.mode == .plaintext)
+        #expect(config.keyIdentifier == nil)
         // `key` is package-scoped; the test target is in-package so it can
         // assert the key was not minted.
-        XCTAssertNil(config.key)
+        #expect(config.key == nil)
     }
 
     /// Mode 2: row encryption mints a fresh key and a stable identifier.
-    func testRowEncryptionGeneratesKeyAndIdentifier() {
+    @Test func rowEncryptionGeneratesKeyAndIdentifier() {
         let config = EstateEncryptionConfig(.rowEncryption)
-        XCTAssertEqual(config.mode, .rowEncryption)
-        XCTAssertNotNil(config.keyIdentifier)
-        XCTAssertFalse(config.keyIdentifier?.isEmpty ?? true)
-        XCTAssertNotNil(config.key)
+        #expect(config.mode == .rowEncryption)
+        #expect(config.keyIdentifier != nil)
+        #expect(!(config.keyIdentifier?.isEmpty ?? true))
+        #expect(config.key != nil)
     }
 
     /// Mode 3: full-database encryption mints a fresh key and identifier.
-    func testFullDatabaseGeneratesKeyAndIdentifier() {
+    @Test func fullDatabaseGeneratesKeyAndIdentifier() {
         let config = EstateEncryptionConfig(.fullDatabase)
-        XCTAssertEqual(config.mode, .fullDatabase)
-        XCTAssertNotNil(config.keyIdentifier)
-        XCTAssertFalse(config.keyIdentifier?.isEmpty ?? true)
-        XCTAssertNotNil(config.key)
+        #expect(config.mode == .fullDatabase)
+        #expect(config.keyIdentifier != nil)
+        #expect(!(config.keyIdentifier?.isEmpty ?? true))
+        #expect(config.key != nil)
     }
 
     /// Mode 4 (database + threshold) is explicitly out of scope for v1.0.
@@ -44,14 +44,14 @@ final class EncryptionModeTests: XCTestCase {
     /// is ever added to EncryptionMode, this test stops compiling and forces
     /// a deliberate review rather than silently shipping an unbuilt mode.
     /// It also confirms two distinct modes are not equal.
-    func testModeFourIsAbsentAndModesAreDistinct() {
+    @Test func modeFourIsAbsentAndModesAreDistinct() {
         for mode in [EncryptionMode.plaintext, .rowEncryption, .fullDatabase] {
             switch mode {
             case .plaintext, .rowEncryption, .fullDatabase:
                 break
             }
         }
-        XCTAssertNotEqual(EncryptionMode.plaintext, .rowEncryption)
-        XCTAssertNotEqual(EncryptionMode.rowEncryption, .fullDatabase)
+        #expect(EncryptionMode.plaintext != .rowEncryption)
+        #expect(EncryptionMode.rowEncryption != .fullDatabase)
     }
 }

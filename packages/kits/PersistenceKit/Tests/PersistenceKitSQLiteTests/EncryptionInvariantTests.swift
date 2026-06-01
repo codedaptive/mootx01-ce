@@ -20,7 +20,8 @@
 // PersistenceKitSQLite, where the guard lives. Editing Package.swift is forbidden,
 // so the test lives here in PersistenceKitSQLiteTests alongside EncryptionWiringTests.
 
-import XCTest
+import Testing
+import Foundation
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitSQLite
@@ -38,7 +39,7 @@ import PersistenceKitSQLite
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-final class EncryptionInvariantTests: XCTestCase {
+struct EncryptionInvariantTests {
 
     /// A drawers-shaped schema with the nullable keyID column, reduced to the
     /// columns these tests exercise (mirrors EncryptionWiringTests).
@@ -79,7 +80,7 @@ final class EncryptionInvariantTests: XCTestCase {
     /// upsertRow does not run the encryption seam, so without the structural
     /// guard this write lands as plaintext content + null keyID — exactly the
     /// unreadable-row hazard the mission closes.
-    func testContentUpsertWithoutKeyIDOnEncryptingEstateThrows() async throws {
+    @Test func contentUpsertWithoutKeyIDOnEncryptingEstateThrows() async throws {
         let storage = try makeStorage(EstateEncryptionConfig(.rowEncryption), at: freshDBURL())
         try await storage.open(schema: makeSchema())
 
@@ -89,10 +90,10 @@ final class EncryptionInvariantTests: XCTestCase {
                 values: ["id": .text("d1"), "content": .text("plaintext secret")],
                 conflictColumns: ["id"]
             )
-            XCTFail("expected the content/keyID invariant guard to throw on an unencrypted content write to an encrypting estate")
+            Issue.record("expected the content/keyID invariant guard to throw on an unencrypted content write to an encrypting estate")
         } catch let error as StorageError {
             guard case .constraintViolation = error else {
-                XCTFail("expected StorageError.constraintViolation, got \(error)")
+                Issue.record("expected StorageError.constraintViolation, got \(error)")
                 return
             }
         }
@@ -101,7 +102,7 @@ final class EncryptionInvariantTests: XCTestCase {
 
     /// Mode 1 (plaintext): the same content upsert is unaffected — it succeeds,
     /// reads back verbatim, and writes no keyID. Byte-identical to today.
-    func testPlaintextContentUpsertUnaffected() async throws {
+    @Test func plaintextContentUpsertUnaffected() async throws {
         let storage = try makeStorage(EstateEncryptionConfig(.plaintext), at: freshDBURL())
         try await storage.open(schema: makeSchema())
 
@@ -114,16 +115,16 @@ final class EncryptionInvariantTests: XCTestCase {
             table: "drawers",
             where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
         )
-        XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0]["content"], .text("plain note"))
-        XCTAssertEqual(rows[0]["keyID"] ?? .null, .null)
+        #expect(rows.count == 1)
+        #expect(rows[0]["content"] == .text("plain note"))
+        #expect((rows[0]["keyID"] ?? .null) == .null)
         await storage.close()
     }
 
     /// E-1 (update path): a content update on an encrypting estate must throw for the same
     /// reason as upsert — updateRows does not run the encryption seam, so a
     /// .text content update would persist plaintext with a null keyID.
-    func testContentUpdateOnEncryptingEstateThrows() async throws {
+    @Test func contentUpdateOnEncryptingEstateThrows() async throws {
         let storage = try makeStorage(EstateEncryptionConfig(.rowEncryption), at: freshDBURL())
         try await storage.open(schema: makeSchema())
 
@@ -133,10 +134,10 @@ final class EncryptionInvariantTests: XCTestCase {
                 values: ["content": .text("plaintext secret")],
                 where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
             )
-            XCTFail("expected the content/keyID invariant guard to throw on an unencrypted content update to an encrypting estate")
+            Issue.record("expected the content/keyID invariant guard to throw on an unencrypted content update to an encrypting estate")
         } catch let error as StorageError {
             guard case .constraintViolation = error else {
-                XCTFail("expected StorageError.constraintViolation, got \(error)")
+                Issue.record("expected StorageError.constraintViolation, got \(error)")
                 return
             }
         }
@@ -146,7 +147,7 @@ final class EncryptionInvariantTests: XCTestCase {
     /// The correct insert path on an encrypting estate is not disturbed by the
     /// guard: the encryption seam stamps a keyID before the guard runs, so the
     /// content round-trips and the row carries the estate key identifier.
-    func testEncryptingInsertStillSucceeds() async throws {
+    @Test func encryptingInsertStillSucceeds() async throws {
         let encryption = EstateEncryptionConfig(.rowEncryption)
         let storage = try makeStorage(encryption, at: freshDBURL())
         try await storage.open(schema: makeSchema())
@@ -159,9 +160,9 @@ final class EncryptionInvariantTests: XCTestCase {
             table: "drawers",
             where: .eq(Column(table: "drawers", name: "id"), .text("d1"))
         )
-        XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0]["content"], .text("the encrypted note"))
-        XCTAssertEqual(rows[0]["keyID"], .text(encryption.keyIdentifier!))
+        #expect(rows.count == 1)
+        #expect(rows[0]["content"] == .text("the encrypted note"))
+        #expect(rows[0]["keyID"] == .text(encryption.keyIdentifier!))
         await storage.close()
     }
 }

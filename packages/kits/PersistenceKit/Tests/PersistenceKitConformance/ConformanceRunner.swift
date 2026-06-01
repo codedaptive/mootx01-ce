@@ -4,7 +4,8 @@
 // Every backend produces identical observable results for the
 // same fixture sequence under a deterministic seed.
 
-import XCTest
+import Testing
+import Foundation
 import PersistenceKit
 import SubstrateTypes
 // ─────────────────────────────────────────────────────────────────
@@ -115,31 +116,31 @@ public struct ConformanceRunner {
 
     // MARK: - Fixture groups
 
-    public func runAll(in test: XCTestCase) async throws {
-        try await schemaFixtures(in: test)
-        try await rowFixtures(in: test)
-        try await predicateFixtures(in: test)
-        try await blobFixtures(in: test)
-        try await vectorFixtures(in: test)
-        try await auditFixtures(in: test)
-        try await transactionFixtures(in: test)
-        try await generatedColumnFixtures(in: test)
-        try await appendOnlyFixtures(in: test)
+    public func runAll() async throws {
+        try await schemaFixtures()
+        try await rowFixtures()
+        try await predicateFixtures()
+        try await blobFixtures()
+        try await vectorFixtures()
+        try await auditFixtures()
+        try await transactionFixtures()
+        try await generatedColumnFixtures()
+        try await appendOnlyFixtures()
     }
 
     // MARK: - Schema fixtures
 
-    func schemaFixtures(in test: XCTestCase) async throws {
+    func schemaFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.testSchema)
         let version = try await storage.currentSchemaVersion()
-        XCTAssertEqual(version, 1, "\(backendName): schema version after open")
+        #expect(version == 1, "\(backendName): schema version after open")
         await storage.close()
     }
 
     // MARK: - Row fixtures
 
-    func rowFixtures(in test: XCTestCase) async throws {
+    func rowFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.testSchema)
         defer { Task { await storage.close() } }
@@ -162,13 +163,13 @@ public struct ConformanceRunner {
         }
 
         let total = try await storage.rowStore.count(table: "items", where: nil)
-        XCTAssertEqual(total, 10, "\(backendName): count after 10 inserts")
+        #expect(total == 10, "\(backendName): count after 10 inserts")
 
         let active = try await storage.rowStore.count(
             table: "items",
             where: .eq(Column(table: "items", name: "active"), .bool(true))
         )
-        XCTAssertEqual(active, 5, "\(backendName): active=true count")
+        #expect(active == 5, "\(backendName): active=true count")
 
         let ordered = try await storage.rowStore.query(
             table: "items",
@@ -177,14 +178,14 @@ public struct ConformanceRunner {
             limit: 3,
             offset: nil
         )
-        XCTAssertEqual(ordered.count, 3, "\(backendName): limit honored")
-        XCTAssertEqual(ordered[0]["count"], .int(0), "\(backendName): ascending order")
-        XCTAssertEqual(ordered[2]["count"], .int(20), "\(backendName): ascending order tail")
+        #expect(ordered.count == 3, "\(backendName): limit honored")
+        #expect(ordered[0]["count"] == .int(0), "\(backendName): ascending order")
+        #expect(ordered[2]["count"] == .int(20), "\(backendName): ascending order tail")
     }
 
     // MARK: - Predicate fixtures
 
-    func predicateFixtures(in test: XCTestCase) async throws {
+    func predicateFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.testSchema)
         defer { Task { await storage.close() } }
@@ -206,22 +207,22 @@ public struct ConformanceRunner {
 
         // bitmaskAll
         let allBit0 = try await storage.rowStore.count(table: "items", where: .bitmaskAll(col, mask: 0x01))
-        XCTAssertEqual(allBit0, 4, "\(backendName): bitmaskAll 0x01 → 0x01,0x03,0x07,0x0F")
+        #expect(allBit0 == 4, "\(backendName): bitmaskAll 0x01 → 0x01,0x03,0x07,0x0F")
 
         let allBit012 = try await storage.rowStore.count(table: "items", where: .bitmaskAll(col, mask: 0x07))
-        XCTAssertEqual(allBit012, 2, "\(backendName): bitmaskAll 0x07 → 0x07,0x0F")
+        #expect(allBit012 == 2, "\(backendName): bitmaskAll 0x07 → 0x07,0x0F")
 
         // bitmaskAny
         let anyBit47 = try await storage.rowStore.count(table: "items", where: .bitmaskAny(col, mask: 0x90))
-        XCTAssertEqual(anyBit47, 2, "\(backendName): bitmaskAny 0x90 → 0x10,0x80")
+        #expect(anyBit47 == 2, "\(backendName): bitmaskAny 0x90 → 0x10,0x80")
 
         // bitmaskNone
         let noneHighBits = try await storage.rowStore.count(table: "items", where: .bitmaskNone(col, mask: 0xF0))
-        XCTAssertEqual(noneHighBits, 4, "\(backendName): bitmaskNone 0xF0 → 0x01,0x03,0x07,0x0F")
+        #expect(noneHighBits == 4, "\(backendName): bitmaskNone 0xF0 → 0x01,0x03,0x07,0x0F")
 
         // bitwiseEq
         let exactMatch = try await storage.rowStore.count(table: "items", where: .bitwiseEq(col, expected: 0x03, mask: 0x0F))
-        XCTAssertEqual(exactMatch, 1, "\(backendName): bitwiseEq exact 0x03")
+        #expect(exactMatch == 1, "\(backendName): bitwiseEq exact 0x03")
 
         // logical combinations
         let andCount = try await storage.rowStore.count(
@@ -231,7 +232,7 @@ public struct ConformanceRunner {
                 .bitmaskNone(col, mask: 0xF0)
             ])
         )
-        XCTAssertEqual(andCount, 4, "\(backendName): AND combination")
+        #expect(andCount == 4, "\(backendName): AND combination")
 
         let orCount = try await storage.rowStore.count(
             table: "items",
@@ -240,29 +241,29 @@ public struct ConformanceRunner {
                 .eq(col, .bitmap(0x80))
             ])
         )
-        XCTAssertEqual(orCount, 2, "\(backendName): OR combination")
+        #expect(orCount == 2, "\(backendName): OR combination")
 
         let notCount = try await storage.rowStore.count(
             table: "items",
             where: .not(.bitmaskAll(col, mask: 0x01))
         )
-        XCTAssertEqual(notCount, 2, "\(backendName): NOT combination")
+        #expect(notCount == 2, "\(backendName): NOT combination")
 
         // comparison
         let countCol = Column(table: "items", name: "count")
         let gt = try await storage.rowStore.count(table: "items", where: .gt(countCol, .int(10)))
-        XCTAssertEqual(gt, 3, "\(backendName): count > 10 → 0x0F=15, 0x10=16, 0x80=128")
+        #expect(gt == 3, "\(backendName): count > 10 → 0x0F=15, 0x10=16, 0x80=128")
 
         let inCount = try await storage.rowStore.count(
             table: "items",
             where: .in(col, [.bitmap(0x01), .bitmap(0x80)])
         )
-        XCTAssertEqual(inCount, 2, "\(backendName): IN")
+        #expect(inCount == 2, "\(backendName): IN")
     }
 
     // MARK: - Blob fixtures
 
-    func blobFixtures(in test: XCTestCase) async throws {
+    func blobFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.testSchema)
         defer { Task { await storage.close() } }
@@ -271,25 +272,25 @@ public struct ConformanceRunner {
         try await storage.blobStore.put(key: "test/binary", bytes: payload)
 
         let retrieved = try await storage.blobStore.get(key: "test/binary")
-        XCTAssertEqual(retrieved, payload, "\(backendName): blob round-trip preserves bytes")
+        #expect(retrieved == payload, "\(backendName): blob round-trip preserves bytes")
 
         let exists = try await storage.blobStore.exists(key: "test/binary")
-        XCTAssertTrue(exists, "\(backendName): blob exists after put")
+        #expect(exists, "\(backendName): blob exists after put")
 
         let size = try await storage.blobStore.size(key: "test/binary")
-        XCTAssertEqual(size, 8, "\(backendName): blob size matches payload")
+        #expect(size == 8, "\(backendName): blob size matches payload")
 
         try await storage.blobStore.delete(key: "test/binary")
         let afterDelete = try await storage.blobStore.exists(key: "test/binary")
-        XCTAssertFalse(afterDelete, "\(backendName): blob gone after delete")
+        #expect(!afterDelete, "\(backendName): blob gone after delete")
 
         let missing = try await storage.blobStore.get(key: "nonexistent")
-        XCTAssertNil(missing, "\(backendName): missing blob returns nil")
+        #expect(missing == nil, "\(backendName): missing blob returns nil")
     }
 
     // MARK: - Vector fixtures
 
-    func vectorFixtures(in test: XCTestCase) async throws {
+    func vectorFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.testSchema)
         defer { Task { await storage.close() } }
@@ -301,7 +302,7 @@ public struct ConformanceRunner {
         try await storage.vectorIndex.add(key: k4, vector: [0, 0, 1], metadata: [:])
 
         let count = try await storage.vectorIndex.count()
-        XCTAssertEqual(count, 4, "\(backendName): vector count")
+        #expect(count == 4, "\(backendName): vector count")
 
         let topK = try await storage.vectorIndex.knn(
             query: [1, 0, 0],
@@ -310,18 +311,18 @@ public struct ConformanceRunner {
             filter: nil,
             searchParameters: nil
         )
-        XCTAssertEqual(topK.count, 2, "\(backendName): kNN returns k results")
-        XCTAssertEqual(topK[0].key, k1, "\(backendName): exact match first")
-        XCTAssertEqual(topK[1].key, k3, "\(backendName): near match second")
+        #expect(topK.count == 2, "\(backendName): kNN returns k results")
+        #expect(topK[0].key == k1, "\(backendName): exact match first")
+        #expect(topK[1].key == k3, "\(backendName): near match second")
 
         try await storage.vectorIndex.delete(key: k1)
         let afterDelete = try await storage.vectorIndex.count()
-        XCTAssertEqual(afterDelete, 3, "\(backendName): count after delete")
+        #expect(afterDelete == 3, "\(backendName): count after delete")
     }
 
     // MARK: - Audit fixtures
 
-    func auditFixtures(in test: XCTestCase) async throws {
+    func auditFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.testSchema)
         defer { Task { await storage.close() } }
@@ -352,32 +353,32 @@ public struct ConformanceRunner {
 
         try await storage.auditLog.appendBatch(events)
         let count = try await storage.auditLog.count()
-        XCTAssertEqual(count, 5, "\(backendName): audit count after batch")
+        #expect(count == 5, "\(backendName): audit count after batch")
 
         // Idempotence: re-appending should not duplicate
         try await storage.auditLog.appendBatch(events)
         let countAfterReplay = try await storage.auditLog.count()
-        XCTAssertEqual(countAfterReplay, 5, "\(backendName): audit idempotent on (eventID, hlc)")
+        #expect(countAfterReplay == 5, "\(backendName): audit idempotent on (eventID, hlc)")
 
         // Per-row events
         let rowAEvents = try await storage.auditLog.eventsForRow(rowA)
-        XCTAssertEqual(rowAEvents.count, 3, "\(backendName): rowA has 3 events (i=0,2,4)")
+        #expect(rowAEvents.count == 3, "\(backendName): rowA has 3 events (i=0,2,4)")
 
         // HLC ordering
         for i in 0..<(rowAEvents.count - 1) {
-            XCTAssertLessThan(rowAEvents[i].hlc, rowAEvents[i + 1].hlc,
-                              "\(backendName): events ordered by HLC")
+            #expect(rowAEvents[i].hlc < rowAEvents[i + 1].hlc,
+                    "\(backendName): events ordered by HLC")
         }
 
         // Iterate after cursor
         let mid = HLC(physicalTime: Int64(1_700_000_002), logicalCount: 0, nodeID: 1)
         let after = try await storage.auditLog.iterate(after: mid, rowID: nil, limit: 100)
-        XCTAssertEqual(after.count, 2, "\(backendName): iterate after HLC=2 → events 3,4")
+        #expect(after.count == 2, "\(backendName): iterate after HLC=2 → events 3,4")
     }
 
     // MARK: - Transaction fixtures
 
-    func transactionFixtures(in test: XCTestCase) async throws {
+    func transactionFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.testSchema)
         defer { Task { await storage.close() } }
@@ -400,7 +401,7 @@ public struct ConformanceRunner {
             table: "items",
             where: .eq(Column(table: "items", name: "id"), .uuid(committedID))
         )
-        XCTAssertEqual(committedCount, 1, "\(backendName): committed row persists")
+        #expect(committedCount == 1, "\(backendName): committed row persists")
 
         // Rollback
         struct TestErr: Error {}
@@ -423,17 +424,17 @@ public struct ConformanceRunner {
         } catch is TestErr {
             threw = true
         }
-        XCTAssertTrue(threw, "\(backendName): transaction propagated error")
+        #expect(threw, "\(backendName): transaction propagated error")
         let rolledBackCount = try await storage.rowStore.count(
             table: "items",
             where: .eq(Column(table: "items", name: "id"), .uuid(rolledBackID))
         )
-        XCTAssertEqual(rolledBackCount, 0, "\(backendName): rolled-back row not persisted")
+        #expect(rolledBackCount == 0, "\(backendName): rolled-back row not persisted")
     }
 
     // MARK: - Generated column fixtures
 
-    func generatedColumnFixtures(in test: XCTestCase) async throws {
+    func generatedColumnFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.generatedSchema)
         defer { Task { await storage.close() } }
@@ -455,29 +456,29 @@ public struct ConformanceRunner {
             table: "gen_items",
             where: .eq(Column(table: "gen_items", name: "id"), .uuid(idA))
         )
-        XCTAssertEqual(rowsA.count, 1, "\(backendName): generated row A present")
-        XCTAssertEqual(rowsA[0]["low_nibble"], .int(0x5),
-                       "\(backendName): low_nibble of 0xA5")
-        XCTAssertEqual(rowsA[0]["high_nibble"], .int(0xA),
-                       "\(backendName): high_nibble of 0xA5")
-        XCTAssertEqual(rowsA[0]["has_bit7"], .bool(true),
-                       "\(backendName): has_bit7 of 0xA5")
+        #expect(rowsA.count == 1, "\(backendName): generated row A present")
+        #expect(rowsA[0]["low_nibble"] == .int(0x5),
+                "\(backendName): low_nibble of 0xA5")
+        #expect(rowsA[0]["high_nibble"] == .int(0xA),
+                "\(backendName): high_nibble of 0xA5")
+        #expect(rowsA[0]["has_bit7"] == .bool(true),
+                "\(backendName): has_bit7 of 0xA5")
 
         let rowsB = try await storage.rowStore.query(
             table: "gen_items",
             where: .eq(Column(table: "gen_items", name: "id"), .uuid(idB))
         )
-        XCTAssertEqual(rowsB[0]["low_nibble"], .int(0x2),
-                       "\(backendName): low_nibble of 0x42")
-        XCTAssertEqual(rowsB[0]["has_bit7"], .bool(false),
-                       "\(backendName): has_bit7 of 0x42")
+        #expect(rowsB[0]["low_nibble"] == .int(0x2),
+                "\(backendName): low_nibble of 0x42")
+        #expect(rowsB[0]["has_bit7"] == .bool(false),
+                "\(backendName): has_bit7 of 0x42")
 
         // The generated column is filterable like any other column.
         let lowIsFive = try await storage.rowStore.count(
             table: "gen_items",
             where: .eq(Column(table: "gen_items", name: "low_nibble"), .int(0x5))
         )
-        XCTAssertEqual(lowIsFive, 1, "\(backendName): filter on generated column")
+        #expect(lowIsFive == 1, "\(backendName): filter on generated column")
 
         // Updating the source column recomputes the generated value.
         _ = try await storage.rowStore.update(
@@ -489,15 +490,15 @@ public struct ConformanceRunner {
             table: "gen_items",
             where: .eq(Column(table: "gen_items", name: "id"), .uuid(idB))
         )
-        XCTAssertEqual(rowsBUpdated[0]["low_nibble"], .int(0xF),
-                       "\(backendName): generated value recomputed on update")
-        XCTAssertEqual(rowsBUpdated[0]["has_bit7"], .bool(false),
-                       "\(backendName): bit7 still clear after update to 0x0F")
+        #expect(rowsBUpdated[0]["low_nibble"] == .int(0xF),
+                "\(backendName): generated value recomputed on update")
+        #expect(rowsBUpdated[0]["has_bit7"] == .bool(false),
+                "\(backendName): bit7 still clear after update to 0x0F")
     }
 
     // MARK: - Append-only fixtures
 
-    func appendOnlyFixtures(in test: XCTestCase) async throws {
+    func appendOnlyFixtures() async throws {
         let storage = try await factory()
         try await storage.open(schema: Self.appendOnlySchema)
         defer { Task { await storage.close() } }
@@ -523,7 +524,7 @@ public struct ConformanceRunner {
         } catch {
             updateThrew = true
         }
-        XCTAssertTrue(updateThrew, "\(backendName): UPDATE rejected on append-only table")
+        #expect(updateThrew, "\(backendName): UPDATE rejected on append-only table")
 
         // DELETE must be rejected.
         var deleteThrew = false
@@ -535,16 +536,16 @@ public struct ConformanceRunner {
         } catch {
             deleteThrew = true
         }
-        XCTAssertTrue(deleteThrew, "\(backendName): DELETE rejected on append-only table")
+        #expect(deleteThrew, "\(backendName): DELETE rejected on append-only table")
 
         // Both rows survive: no mutation took effect.
         let total = try await storage.rowStore.count(table: "ledger", where: nil)
-        XCTAssertEqual(total, 2, "\(backendName): append-only rows intact after rejected mutations")
+        #expect(total == 2, "\(backendName): append-only rows intact after rejected mutations")
         let firstRow = try await storage.rowStore.query(
             table: "ledger",
             where: .eq(Column(table: "ledger", name: "id"), .uuid(id1))
         )
-        XCTAssertEqual(firstRow[0]["amount"], .int(100),
-                       "\(backendName): original value unchanged after rejected UPDATE")
+        #expect(firstRow[0]["amount"] == .int(100),
+                "\(backendName): original value unchanged after rejected UPDATE")
     }
 }
