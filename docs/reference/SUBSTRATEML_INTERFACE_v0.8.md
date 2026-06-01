@@ -171,6 +171,9 @@ public struct RhythmResult: Sendable, Hashable {
     public let dominantFrequencyHz: Double
     public let confidence: Double
 }
+public enum RhythmAnalysis {
+    public static func analyze(signal: [Double], samplingRate: Double) -> RhythmResult
+}
 ```
 
 ```rust
@@ -236,6 +239,9 @@ public enum LatticeDistance {
         wikidataAdjacency: (any WikidataAdjacencyProvider)?
     ) -> Double
 }
+public enum WikidataGraphDistance {
+    public static func distance(_ a: String, _ b: String, provider: any WikidataAdjacencyProvider) -> Double
+}
 ```
 
 ```rust
@@ -264,9 +270,11 @@ public enum CompositeDistance {
 pub fn composite_score(semantic: f64, temporal: f64, lattice: f64, weights: (f64, f64, f64)) -> f64;
 ```
 
-### `StreamSourceFlag`, `AmbientSampleRow`, `HealthKitSample`, `FeatureExtractors`
+### `StreamSourceFlag`, `AmbientSampleRow`, the five extractors + their samples, `FeatureExtractors`
 
-SPEC § 5.9.
+SPEC § 5.9. Five platform-specific extractor structs each take a typed
+`*Sample` and produce an `AmbientSampleRow`; `FeatureExtractors` is the
+namespace facade over them.
 
 ```swift
 public enum StreamSourceFlag: UInt8, Sendable {
@@ -278,7 +286,18 @@ public struct AmbientSampleRow: Sendable {
     public let payload: Data
     public let derivedFingerprint: Fingerprint256
 }
-public struct HealthKitSample: Sendable { /* … per cookbook §11.4 */ }
+// Typed per-source samples (each `Sendable`, per cookbook §11.4):
+public struct HealthKitSample: Sendable { /* … */ }
+public struct CoreLocationSample: Sendable { /* … */ }
+public struct EventKitSample: Sendable { /* … */ }
+public struct ScreenTimeSample: Sendable { /* … */ }
+public struct SystemTelemetrySample: Sendable { /* … */ }
+// Concrete extractor structs, one per source:
+public struct CoreLocationExtractor { /* extract(_:CoreLocationSample) -> AmbientSampleRow */ }
+public struct EventKitExtractor { /* extract(_:EventKitSample) -> AmbientSampleRow */ }
+public struct HealthKitExtractor { /* extract(_:HealthKitSample) -> AmbientSampleRow */ }
+public struct ScreenTimeExtractor { /* extract(_:ScreenTimeSample) -> AmbientSampleRow */ }
+public struct SystemTelemetryExtractor { /* extract(_:SystemTelemetrySample) -> AmbientSampleRow */ }
 public enum FeatureExtractors {
     public static func extractAmbientSample(source: StreamSourceFlag, rawRecord: Data, hlc: HLC) -> AmbientSampleRow
     public static func extractHealthKit(sample: HealthKitSample) -> AmbientSampleRow
@@ -288,6 +307,11 @@ public enum FeatureExtractors {
 ```rust
 pub enum StreamSourceFlag { CoreLocation, EventKit, HealthKit, ScreenTime, SystemTelemetry }
 pub struct AmbientSampleRow { /* same fields, snake_case */ }
+pub struct CoreLocationSample { /* … */ } pub struct EventKitSample { /* … */ }
+pub struct HealthKitSample { /* … */ } pub struct ScreenTimeSample { /* … */ }
+pub struct SystemTelemetrySample { /* … */ }
+pub struct CoreLocationExtractor; pub struct EventKitExtractor; pub struct HealthKitExtractor;
+pub struct ScreenTimeExtractor; pub struct SystemTelemetryExtractor;
 pub fn extract_ambient_sample(source: StreamSourceFlag, raw: &[u8], hlc: HLC) -> AmbientSampleRow;
 ```
 
@@ -361,6 +385,10 @@ public struct PairingRecord: Sendable, Equatable {
 public enum PairingHandshake {
     public static func generateNonce(now: HLC) -> PairingNonce
     public static func validate(nonce: PairingNonce, response: [UInt8]) -> Bool
+    // PairingAuditPayload — the audit record a handshake emits (nested):
+    public struct PairingAuditPayload: Sendable, Equatable {
+        public let peerId: String; public let nonce: PairingNonce; public let acceptedAt: HLC
+    }
 }
 ```
 
@@ -413,6 +441,16 @@ public struct TierAscendingQuery: Sendable {
     public let issuer: String
     public let issuedAt: HLC
     public func aggregate(_ responses: [PeerResponse]) -> Fingerprint256
+}
+public enum TierAscendingQueryProtocol {
+    // the wire-protocol namespace: request/response framing for a tier-ascending query
+    public static func frame(_ query: TierAscendingQuery) -> Data
+}
+public struct PrivacyLedger: Sendable {
+    // running record of what crossed estate/tier boundaries during a query (DP accounting)
+    public init()
+    public mutating func record(source: StreamSourceFlag, epsilonSpent: Double)
+    public var totalEpsilon: Double { get }
 }
 ```
 
