@@ -409,6 +409,31 @@ For each FDC code `c`:
 5. Compute the SimHash fingerprint of `sig[c]` (§5.1) and store it
    alongside the bag.
 
+### §7.1.1. Resolve-First Article Fill (gap codes)
+
+Some codes' LCSH headings do not auto-resolve to a Wikipedia title via the
+heading→title mapping (often because the FDC label carries no quoted LCSH
+heading at all). Without a title these codes get no `title_text` /
+`article_text`, leaving the signature as the label alone — too thin to be
+reachable at runtime.
+
+These gap codes are filled **resolve-first**: for each, an LLM proposes the
+single best-matching real Wikipedia article title, recorded in
+`Data/_gap_titles.tsv` (`code \t title`, committed as a frozen, auditable
+input). Each proposed title is validated by fetching its article extract
+(`Data/_pull_gap.sh`); only a title that returns no article would fall through
+to a generated description. The signature builder applies the map via a
+`code → title` override (`--gaptitles`), keyed by FDC code so it works
+regardless of the label's quoted-heading extraction.
+
+The model's role is limited to *selecting which Wikipedia article to pull* — no
+model-generated text enters a signature. Every shipped signature term remains
+sourced from the FDC label, the Wikipedia title, or the Wikipedia article body.
+This fill brought article-source coverage to all 1071 codes (from 793).
+Whether a now-reachable code is *selected accurately* is governed by
+`STOP_THRESHOLD` and score normalization (§5–§6), which remain pinned tuning
+items.
+
 ### §7.2. LexRank Article Reduction
 
 LexRank reduces a Wikipedia article to its N most central sentences
