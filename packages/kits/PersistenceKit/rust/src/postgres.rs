@@ -395,10 +395,12 @@ impl PostgresStorage {
         // analogue of SQLite's one-file-per-estate). The connection's
         // search_path is pinned to it for this storage's lifetime, so a
         // shared database holds many estates without table collisions.
+        // `public` stays on the path so shared extensions (e.g. pgvector)
+        // resolve.
         let ns = format!("pk_{}", config.estate_id.simple());
         client
             .batch_execute(&format!(
-                "CREATE SCHEMA IF NOT EXISTS \"{ns}\"; SET search_path TO \"{ns}\";"
+                "CREATE SCHEMA IF NOT EXISTS \"{ns}\"; SET search_path TO \"{ns}\", public;"
             ))
             .map_err(|e| StorageError::BackendError { underlying: format!("schema setup: {e}") })?;
         Ok(PostgresStorage {
@@ -451,7 +453,7 @@ impl Storage for PostgresStorage {
         Arc::new(PgBlobStore { inner: self.inner.clone() })
     }
     fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Arc::new(PgVectorIndex)
+        Arc::new(PgVectorIndex { inner: self.inner.clone() })
     }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
         Arc::new(PgAuditLog { inner: self.inner.clone() })
@@ -853,41 +855,119 @@ impl StorageObserver for PgObserver {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// VectorIndex — Phase-1 placeholder (deferred to the follow-on).
+// VectorIndex — pgvector-backed. Lazily creates "_storagekit_vectors" on
+// first add (dimension fixed from the first vector), mirroring the Swift
+// PostgreSQLVectorIndex. Vectors bind as text cast to `::vector`, so no
+// pgvector client crate is needed. The `vector` extension must already be
+// installed in the database (a DB-admin step; not created per-call since a
+// least-privilege role may lack CREATE EXTENSION). Lives in the estate's
+// schema via the connection search_path.
 // ─────────────────────────────────────────────────────────────────────
 
-struct PgVectorIndex;
+struct PgVectorIndex {
+    inner: Arc<Mutex<Inner>>,
+}
 
-fn vector_unsupported<T>() -> StorageResult<T> {
-    Err(StorageError::BackendError {
-        underlying: "VectorIndex is not supported by the PostgreSQL backend at Phase 1".into(),
-    })
+const VEC_TABLE: &str = "_storagekit_vectors";
+
+fn vector_literal(v: &[f32]) -> String {
+    format!("[{}]", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+}
+
+fn metric_op(m: DistanceMetric) -> &'static str {
+    match m {
+        DistanceMetric::Cosine => "<=>",
+        DistanceMetric::L2 => "<->",
+        DistanceMetric::Dot => "<#>",
+    }
+}
+
+impl PgVectorIndex {
+    fn table_exists(client: &mut Client) -> bool {
+        client
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&VEC_TABLE])
+            .ok()
+            .and_then(|r| r.try_get::<_, bool>(0).ok())
+            .unwrap_or(false)
+    }
 }
 
 impl VectorIndex for PgVectorIndex {
-    fn add(&self, _key: RowKey, _vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
-        vector_unsupported()
+    fn add(&self, key: RowKey, vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+        let mut guard = self.inner.lock().unwrap();
+        let dim = vector.len();
+        guard.client.batch_execute(&format!(
+            "CREATE TABLE IF NOT EXISTS \"{VEC_TABLE}\" (\"key\" TEXT PRIMARY KEY, \"embedding\" vector({dim}) NOT NULL, \"metadata_json\" TEXT NOT NULL DEFAULT '{{}}')"
+        )).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        // Inline the vector literal (digits/dots/commas only — safe): a bound
+        // `$n::vector` makes PG infer the param as type `vector`, which the
+        // text-based client can't serialize.
+        guard.client.execute(
+            &format!(
+                "INSERT INTO \"{VEC_TABLE}\" (\"key\", \"embedding\") VALUES ($1, '{}'::vector) \
+                 ON CONFLICT (\"key\") DO UPDATE SET \"embedding\" = excluded.embedding",
+                vector_literal(vector)
+            ),
+            &[&key.to_string().to_uppercase()],
+        ).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        Ok(())
     }
-    fn update(&self, _key: RowKey, _vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
-        vector_unsupported()
+    fn update(&self, key: RowKey, vector: &[f32], metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+        self.add(key, vector, metadata)
     }
-    fn delete(&self, _key: RowKey) -> StorageResult<()> {
-        vector_unsupported()
+    fn delete(&self, key: RowKey) -> StorageResult<()> {
+        let mut guard = self.inner.lock().unwrap();
+        if !Self::table_exists(&mut guard.client) {
+            return Ok(());
+        }
+        guard.client.execute(
+            &format!("DELETE FROM \"{VEC_TABLE}\" WHERE \"key\" = $1"),
+            &[&key.to_string().to_uppercase()],
+        ).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        Ok(())
     }
     fn knn(
         &self,
-        _query: &[f32],
-        _k: usize,
-        _metric: DistanceMetric,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
         _filter: Option<&StoragePredicate>,
         _search_parameters: Option<SearchParameters>,
     ) -> StorageResult<Vec<VectorSearchResult>> {
-        vector_unsupported()
+        let mut guard = self.inner.lock().unwrap();
+        if !Self::table_exists(&mut guard.client) {
+            return Ok(Vec::new());
+        }
+        let op = metric_op(metric);
+        let lit = vector_literal(query);
+        let sql = format!(
+            "SELECT \"key\", (\"embedding\" {op} '{lit}'::vector) AS distance FROM \"{VEC_TABLE}\" \
+             ORDER BY \"embedding\" {op} '{lit}'::vector LIMIT {k}"
+        );
+        let rows = guard.client.query(&sql, &[]).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        Ok(rows
+            .iter()
+            .map(|r| VectorSearchResult {
+                key: Uuid::parse_str(&r.get::<_, String>(0)).unwrap_or(Uuid::nil()),
+                distance: r.get::<_, f64>(1) as f32,
+                metadata: BTreeMap::new(),
+            })
+            .collect())
     }
     fn reindex(&self, _parameters: IndexParameters) -> StorageResult<()> {
-        vector_unsupported()
+        // Flat/sequential scan — no secondary index built at Phase 1.
+        Ok(())
     }
     fn count(&self) -> StorageResult<usize> {
-        vector_unsupported()
+        let mut guard = self.inner.lock().unwrap();
+        if !Self::table_exists(&mut guard.client) {
+            return Ok(0);
+        }
+        let n: i64 = guard
+            .client
+            .query_one(&format!("SELECT COUNT(*) FROM \"{VEC_TABLE}\""), &[])
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?
+            .get(0);
+        Ok(n as usize)
     }
 }

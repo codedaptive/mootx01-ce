@@ -18,9 +18,9 @@
 
 use std::collections::BTreeMap;
 use persistence_kit::{
-    AuditEvent, Column, ColumnDeclaration, GeneratedColumn, GeneratedExpression, ColumnType,
-    IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration, Storage, StorageError,
-    StoragePredicate, TableDeclaration, TypedValue,
+    AuditEvent, Column, ColumnDeclaration, ColumnType, DistanceMetric, GeneratedColumn,
+    GeneratedExpression, IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration, Storage,
+    StorageError, StoragePredicate, TableDeclaration, TypedValue,
 };
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
@@ -127,6 +127,36 @@ pub fn run_all(backend: &str, factory: &Factory) {
     audit_fixtures(backend, factory);
     generated_column_fixtures(backend, factory);
     append_only_fixtures(backend, factory);
+}
+
+/// Vector fixtures — separate from run_all (not every backend ships
+/// VectorIndex yet). Backends that do (InMemory, Postgres+pgvector) call it
+/// explicitly. Mirrors the Swift vectorFixtures group.
+pub fn vector_fixtures(backend: &str, factory: &Factory) {
+    let storage = factory();
+    storage.open(&test_schema()).expect("open");
+    let idx = storage.vector_index();
+
+    let k1 = Uuid::new_v4();
+    let k2 = Uuid::new_v4();
+    let k3 = Uuid::new_v4();
+    let k4 = Uuid::new_v4();
+    idx.add(k1, &[1.0, 0.0, 0.0], BTreeMap::new()).unwrap();
+    idx.add(k2, &[0.0, 1.0, 0.0], BTreeMap::new()).unwrap();
+    idx.add(k3, &[0.95, 0.05, 0.0], BTreeMap::new()).unwrap();
+    idx.add(k4, &[0.0, 0.0, 1.0], BTreeMap::new()).unwrap();
+
+    assert_eq!(idx.count().unwrap(), 4, "{backend}: vector count");
+
+    let top = idx.knn(&[1.0, 0.0, 0.0], 2, DistanceMetric::L2, None, None).unwrap();
+    assert_eq!(top.len(), 2, "{backend}: kNN returns k results");
+    assert_eq!(top[0].key, k1, "{backend}: exact match first");
+    assert_eq!(top[1].key, k3, "{backend}: near match second");
+
+    idx.delete(k1).unwrap();
+    assert_eq!(idx.count().unwrap(), 3, "{backend}: count after delete");
+
+    storage.close().unwrap();
 }
 
 fn schema_fixtures(backend: &str, factory: &Factory) {
