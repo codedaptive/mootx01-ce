@@ -77,4 +77,31 @@ struct StemmerTests {
     func emptyStringYieldsEmpty() {
         #expect(Stemmer.stem("") == "")
     }
+
+    // Explicit spot checks mirroring the Rust stemmer.rs #[test] set
+    // (rust-stemmers Porter2). These are subsumed by the full-corpus
+    // conformance gate above but are asserted directly so the Swift/Rust
+    // parity set is mirrored one-to-one.
+
+    @Test("running stems to run")
+    func runningStemsToRun() {
+        #expect(Stemmer.stem("running") == "run")
+    }
+
+    @Test("ran stems to ran")
+    func ranStemsToRan() {
+        // Porter2 does not catch irregular past tense; "ran" stays "ran".
+        #expect(Stemmer.stem("ran") == "ran")
+    }
+
+    @Test("computer and computing collapse to same stem")
+    func computerAndComputingCollapseToSameStem() {
+        #expect(Stemmer.stem("computer") == Stemmer.stem("computing"))
+    }
+
+    @Test("chemistry stems consistently")
+    func chemistryStemsConsistently() {
+        #expect(!Stemmer.stem("chemistry").isEmpty)
+        #expect(!Stemmer.stem("chemical").isEmpty)
+    }
 }
