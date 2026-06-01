@@ -447,4 +447,55 @@ mod tests {
         let err = coord.capture(&h, cap_frame("delta"), NOW).unwrap_err();
         assert_eq!(err, VerbDispatchError::EstateNotOpen { estate_uuid: h.estate_uuid });
     }
+
+    // -----------------------------------------------------------------
+    // recall_tunnels — coordinator-level read over the association graph.
+    // Mirrors Swift `RecallTunnelsTests` case-for-case.
+    // -----------------------------------------------------------------
+
+    fn tunnel_frame(
+        source: &str,
+        target: &str,
+        label: &str,
+    ) -> locus_kit::frames::TunnelCaptureFrame {
+        locus_kit::frames::TunnelCaptureFrame::new(source, "r1", target, "r2", label, "bilby")
+    }
+
+    // CO-7: tunnels captured into the estate are returned by the wing's read
+    // through the coordinator surface.
+    #[test]
+    fn co7_recall_tunnels_returns_outgoing() {
+        let (coord, h) = open_one();
+        let estate = coord.estate_for(&h).expect("estate");
+        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW).unwrap();
+        estate.capture_tunnel(tunnel_frame("study", "garden", "relates"), NOW + 1).unwrap();
+
+        let tunnels = coord.recall_tunnels(&h, "study").expect("recall_tunnels");
+        assert_eq!(tunnels.len(), 2);
+        let targets: std::collections::BTreeSet<&str> =
+            tunnels.iter().map(|t| t.target_wing.as_str()).collect();
+        assert_eq!(targets, ["garden", "kitchen"].into_iter().collect());
+        assert!(tunnels.iter().all(|t| t.source_wing == "study"));
+    }
+
+    // CO-8: a wing with no outgoing tunnels reads empty (never errors).
+    #[test]
+    fn co8_recall_tunnels_empty_for_unlinked_wing() {
+        let (coord, h) = open_one();
+        let estate = coord.estate_for(&h).expect("estate");
+        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW).unwrap();
+
+        let tunnels = coord.recall_tunnels(&h, "attic").expect("recall_tunnels");
+        assert!(tunnels.is_empty());
+    }
+
+    // CO-9: a verb on a closed handle surfaces EstateNotOpen, not an empty
+    // result — parity of the Swift stale-handle case.
+    #[test]
+    fn co9_recall_tunnels_on_closed_handle_is_estate_not_open() {
+        let (mut coord, h) = open_one();
+        coord.close(&h).expect("close");
+        let err = coord.recall_tunnels(&h, "study").unwrap_err();
+        assert_eq!(err, VerbDispatchError::EstateNotOpen { estate_uuid: h.estate_uuid });
+    }
 }
