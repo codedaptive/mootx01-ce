@@ -243,7 +243,8 @@ unparseable `min_os_version` disables the tagger (fail closed).
 tagged novel tokens and, exactly at `poolSubmitThreshold` (50), builds the
 wire payload, drains, and hands it to the injected submitter — fire-and-
 forget, outside the lock, never altering the returned `WordClass`. The
-default submitter is a no-op until the pool endpoint is wired.
+submitter is an injected `@Sendable` closure (cookbook § 2.2); the default
+is a no-op, so pool submission is opt-in by injecting a live submitter.
 
 **B-9 (assembly promotion):** on success `assemble` fetches the payload,
 verifies its SHA-256 against the pinned `expectedDigest`, writes it to a
