@@ -9,96 +9,98 @@
 // in Tests/SubstrateLibConformanceTests/, which exercise the
 // kit against the bit-identical fixtures from Phase 2 closure.
 
-import XCTest
+import Testing
 @testable import SubstrateLib
 import SubstrateML
 import SubstrateKernel
 import SubstrateTypes
+import Foundation
 
-final class SubstrateLibTests: XCTestCase {
+@Suite("SubstrateLib public-surface smoke tests")
+struct SubstrateLibTests {
 
     // MARK: - Fingerprint256
 
-    func testFingerprintConstruction() {
+    @Test func testFingerprintConstruction() {
         let fp = Fingerprint256(block0: 0x1, block1: 0x2, block2: 0x3, block3: 0x4)
-        XCTAssertEqual(fp.block0, 0x1)
-        XCTAssertEqual(fp.block1, 0x2)
-        XCTAssertEqual(fp.block2, 0x3)
-        XCTAssertEqual(fp.block3, 0x4)
+        #expect(fp.block0 == 0x1)
+        #expect(fp.block1 == 0x2)
+        #expect(fp.block2 == 0x3)
+        #expect(fp.block3 == 0x4)
     }
 
-    func testFingerprintEquality() {
+    @Test func testFingerprintEquality() {
         let a = Fingerprint256(block0: 0x1, block1: 0x2, block2: 0x3, block3: 0x4)
         let b = Fingerprint256(block0: 0x1, block1: 0x2, block2: 0x3, block3: 0x4)
         let c = Fingerprint256(block0: 0x1, block1: 0x2, block2: 0x3, block3: 0x5)
-        XCTAssertEqual(a, b)
-        XCTAssertNotEqual(a, c)
+        #expect(a == b)
+        #expect(a != c)
     }
 
     // MARK: - HLC
 
-    func testHLCConstruction() {
+    @Test func testHLCConstruction() {
         let hlc = HLC(physicalTime: 1_000_000, logicalCount: 0, nodeID: 1)
-        XCTAssertEqual(hlc.physicalTime, 1_000_000)
-        XCTAssertEqual(hlc.logicalCount, 0)
-        XCTAssertEqual(hlc.nodeID, 1)
+        #expect(hlc.physicalTime == 1_000_000)
+        #expect(hlc.logicalCount == 0)
+        #expect(hlc.nodeID == 1)
     }
 
-    func testHLCOrdering() {
+    @Test func testHLCOrdering() {
         let earlier = HLC(physicalTime: 1_000_000, logicalCount: 0, nodeID: 1)
         let later = HLC(physicalTime: 2_000_000, logicalCount: 0, nodeID: 1)
-        XCTAssertLessThan(earlier, later)
+        #expect(earlier < later)
     }
 
     // MARK: - RecallScore
 
-    func testRecallScore() {
+    @Test func testRecallScore() {
         let rowId = UUID()
         let score = RecallScore(rowId: rowId, score: 0.95)
-        XCTAssertEqual(score.rowId, rowId)
-        XCTAssertEqual(score.score, 0.95)
+        #expect(score.rowId == rowId)
+        #expect(score.score == 0.95)
     }
 
     // MARK: - RecallResult
 
-    func testRecallResultConstruction() {
+    @Test func testRecallResultConstruction() {
         let rowId = UUID()
         let scores = [RecallScore(rowId: rowId, score: 0.9)]
         let result = RecallResult(rows: scores, primitiveName: "test_primitive")
-        XCTAssertEqual(result.rows.count, 1)
-        XCTAssertEqual(result.primitiveName, "test_primitive")
-        XCTAssertNil(result.confidenceInterval)
+        #expect(result.rows.count == 1)
+        #expect(result.primitiveName == "test_primitive")
+        #expect(result.confidenceInterval == nil)
     }
 
     // MARK: - Hamming
 
-    func testHammingDistanceIdentity() {
+    @Test func testHammingDistanceIdentity() {
         let a = Fingerprint256(block0: 0xFFFF, block1: 0, block2: 0, block3: 0)
         let b = Fingerprint256(block0: 0xFFFF, block1: 0, block2: 0, block3: 0)
-        XCTAssertEqual(Hamming.distance(a, b), 0)
+        #expect(Hamming.distance(a, b) == 0)
     }
 
-    func testHammingDistanceMaxDifference() {
+    @Test func testHammingDistanceMaxDifference() {
         let zero = Fingerprint256(block0: 0, block1: 0, block2: 0, block3: 0)
         let allOnes = Fingerprint256(block0: .max, block1: .max, block2: .max, block3: .max)
-        XCTAssertEqual(Hamming.distance(zero, allOnes), 256)
+        #expect(Hamming.distance(zero, allOnes) == 256)
     }
 
     // MARK: - ORReduce
 
-    func testORReduceIdentity() {
+    @Test func testORReduceIdentity() {
         let fp = Fingerprint256(block0: 0x1, block1: 0, block2: 0, block3: 0)
         let reduced = ORReduce.reduce([fp])
-        XCTAssertEqual(reduced.block0, 0x1)
+        #expect(reduced.block0 == 0x1)
     }
 
-    func testORReduceCommutative() {
+    @Test func testORReduceCommutative() {
         let a = Fingerprint256(block0: 0x1, block1: 0x2, block2: 0, block3: 0)
         let b = Fingerprint256(block0: 0x4, block1: 0x8, block2: 0, block3: 0)
         let ab = ORReduce.reduce([a, b])
         let ba = ORReduce.reduce([b, a])
-        XCTAssertEqual(ab, ba)
-        XCTAssertEqual(ab.block0, 0x5)
-        XCTAssertEqual(ab.block1, 0xA)
+        #expect(ab == ba)
+        #expect(ab.block0 == 0x5)
+        #expect(ab.block1 == 0xA)
     }
 }
