@@ -4,6 +4,7 @@
 //! Jensen-Shannon and KL divergences quantify how far the second has moved
 //! from the first — "your interests shifted in April."
 //!
+//! Paired with the Swift version (`Sources/NeuronKit/Lenses/Drift.swift`).
 //! Layer B-1: the divergence math lives in SubstrateML; this shapes it into a
 //! reasoning result. CognitionKit sequences it (build the two distributions
 //! from the estate, then call this). The distributions must share support

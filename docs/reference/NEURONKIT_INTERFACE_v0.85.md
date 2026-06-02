@@ -67,6 +67,7 @@ purpose: |
   `learnedPreference`, `CategoryBias`, `PreferenceStrength`
 - `Sources/NeuronKit/Lenses/Anticipation.swift` — `anticipate`,
   `ActionObservation`, `ActionPrediction`
+- `Sources/NeuronKit/Lenses/Drift.swift` — `drift`, `DriftScore`
 - `Sources/NeuronKit/Dreaming/` — `DreamingDaemon`, `DreamingPolicy`
   (+ `DreamingPolicyStore`, `InMemoryDreamingPolicyStore`),
   `DreamingTriggerMode`, `RewardSource` (+ `RewardSourceKind`,
@@ -464,6 +465,12 @@ public struct ActionPrediction: Sendable, Equatable, Codable {
     public let count: UInt32                   // observations supporting this action
     public init(action: UInt8, successRate: Float, count: UInt32)
 }
+
+public struct DriftScore: Sendable, Equatable, Codable {
+    public let jensenShannon: Float            // symmetric, bounded — primary signal
+    public let klDivergence: Float             // D(p‖q), asymmetric
+    public init(jensenShannon: Float, klDivergence: Float)
+}
 ```
 
 **Rust:**
@@ -490,6 +497,9 @@ pub struct PreferenceStrength {
 // § 7.4 Prediction
 pub struct ActionObservation { pub action: u8, pub outcome: u8, pub success: bool }
 pub struct ActionPrediction { pub action: u8, pub success_rate: f32, pub count: u32 }
+
+// § 7.5 Surprise
+pub struct DriftScore { pub jensen_shannon: f32, pub kl_divergence: f32 }
 ```
 
 ### Dreaming daemon surface
@@ -819,6 +829,9 @@ extension NeuronKit {
     // § 7.4 Prediction.
     public static func anticipate(observations: [ActionObservation], targetOutcome: UInt8,
                                   k: Int, minObservations: UInt32) -> [ActionPrediction]
+
+    // § 7.5 Surprise.
+    public static func drift(from p: [Float], to q: [Float]) -> DriftScore
 }
 ```
 
