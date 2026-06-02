@@ -188,6 +188,12 @@ fn tool_name(verb: Verb, noun: Noun) -> String {
 }
 
 /// One-line description for a (verb, noun) tool. Mirrors `ToolProjection.description(verb:noun:)`.
+///
+/// Note: the v1 hand-written descriptor for capture/tunnel carried a
+/// Rust-only "(directed graph edge)" qualifier that diverged from the
+/// Swift template. Swift leads the wire, so this projection emits the
+/// Swift string for every pair — that one description deliberately
+/// changed when the projection replaced the hand-written functions.
 fn tool_description(verb: Verb, noun: Noun) -> String {
     match verb {
         Verb::Capture => format!("File a new {} into the estate.", noun.raw_value()),

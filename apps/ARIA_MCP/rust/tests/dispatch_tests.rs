@@ -1034,16 +1034,22 @@ fn tools_list_count_is_49() {
 }
 
 #[test]
-fn tools_list_existing_8_lexicon_tools_byte_identical() {
-    // Byte-identity gate for the v2b-p0 refactor: the 8 lexicon tools that
-    // shipped in v1 and v2b-p1 must appear in the list with byte-identical
-    // names, descriptions, and inputSchema required+property sets.
-    //
-    // This test corresponds to the "before/after byte-compare" gate in the
-    // v2b-p0 completion report. The 8 tools are:
+fn tools_list_existing_8_lexicon_tools_description_and_required_parity() {
+    // Parity gate for the v2b-p0 refactor: the 8 lexicon tools that shipped
+    // in v1 and v2b-p1 must appear in the list with these exact names,
+    // descriptions, and inputSchema required+property sets. The 8 tools are:
     //   moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel,
     //   moot_mutate_drawer, moot_withdraw_drawer, moot_expunge_drawer,
     //   moot_reanchor_drawer, moot_tunnel_recall.
+    //
+    // ONE deliberate description change vs the v1 hand-written descriptors:
+    // moot_capture_tunnel was "File a new tunnel (directed graph edge) into
+    // the estate." — a Rust-only qualifier that diverged from the Swift
+    // projection template ("File a new \(noun.rawValue) into the estate.",
+    // ToolProjection.swift description(verb:noun:)). Swift leads the wire,
+    // so the projection refactor restored the Swift string; the assertion
+    // below pins the Swift-aligned value. Everything else is byte-identical
+    // to the v2b-p1 baseline (Adams post-flight verified 7 of 8 unchanged).
     let tools = build_tool_list();
     let arr = tools
         .as_array()
@@ -1066,6 +1072,8 @@ fn tools_list_existing_8_lexicon_tools_byte_identical() {
             .unwrap(),
         "Read drawer rows back by filter."
     );
+    // Swift-aligned string (deliberate change from the v1 hand-written
+    // descriptor — see this test's doc comment).
     assert_eq!(
         by_name["moot_capture_tunnel"]["description"]
             .as_str()
