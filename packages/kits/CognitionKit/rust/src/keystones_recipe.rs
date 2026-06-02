@@ -3,11 +3,11 @@
 //! and ranks the load-bearing memories by eigenvalue centrality, returning
 //! the top-K.
 //!
-//! NET-NEW, Rust-first: there is no Swift `Keystones` recipe yet — this is the
-//! first reasoning lens chased BEYOND the shipped recipe set, proving the
+//! Co-authored with the Swift version (`Sources/CognitionKit/Keystones.swift`)
+//! — the first reasoning lens beyond the shipped recipe set, proving the
 //! through-line can grow new behaviour now that the foundation is real
-//! (real estate, real graph read, real gated centrality math). A Swift parity
-//! version follows the spec this establishes.
+//! (real estate, real graph read, real gated centrality math). Neither
+//! version leads; both follow the spec.
 //!
 //! Layer discipline: the recipe only SEQUENCES — it reads the graph via GLK
 //! (`recall_tunnels`) and ranks via NeuronKit (`keystones`, which surfaces

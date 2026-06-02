@@ -4,7 +4,7 @@
 //! `MatrixNMF`) into soft latent themes — the emergent topics in how the
 //! estate is filed, with mixed membership.
 //!
-//! NET-NEW, Rust-first (the second lens beyond the shipped recipe set, after
+//! Rust-only today (Swift version contracted, SPEC C-7; the second lens beyond the shipped recipe set, after
 //! Keystones). Layer discipline: the recipe SEQUENCES — recall via GLK, factor
 //! via NeuronKit. Read-only; no capability gate (a structural read + a
 //! reasoning surface, not a declared NeuronKitCapability function).

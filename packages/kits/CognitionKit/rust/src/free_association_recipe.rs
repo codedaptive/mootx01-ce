@@ -6,7 +6,8 @@
 //! (clusters) over the SAME graph read: this one is SEED-relative — personalized
 //! relevance, not a global property.
 //!
-//! NET-NEW, Rust-first. Pure CognitionKit sequencing: the tunnel graph via GLK
+//! Paired with the Swift version (`Sources/CognitionKit/FreeAssociation.swift`).
+//! Pure CognitionKit sequencing: the tunnel graph via GLK
 //! `recall_tunnels` (the accessor Keystones added) + NeuronKit
 //! `spreading_activation`. Read-only.
 //!

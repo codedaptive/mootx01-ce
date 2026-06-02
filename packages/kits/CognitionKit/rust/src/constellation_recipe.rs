@@ -4,7 +4,8 @@
 //! `constellations`). The companion to Keystones over the same graph: keystones
 //! finds the spine, constellation finds the constellations.
 //!
-//! NET-NEW, Rust-first (sixth lens). Pure CognitionKit sequencing: the tunnel
+//! Paired with the Swift version (`Sources/CognitionKit/Constellation.swift`).
+//! Pure CognitionKit sequencing: the tunnel
 //! graph via GLK `recall_tunnels` (the accessor Keystones added) + NeuronKit
 //! `constellations` (SubstrateML community detection). Read-only.
 
