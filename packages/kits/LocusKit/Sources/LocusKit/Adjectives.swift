@@ -66,10 +66,12 @@ import SubstrateLib
 // dependency graph points the other way). Touch one side and the
 // Guardian warns at your desk, before it ships.
 //
-// Test backstop: GuardianPairParityTests — also covers the I-22 and
-// S-1 single-value pairs (sensitivity.secret raw 48, exportability.
-// public_ raw 32, trust.canonical raw 3) which are enforced via
-// static test assertions rather than syntax-tree extraction.
+// Nine pairs total: six set-equality pairs (legalValues ↔ allCases)
+// and three singleton-raw pairs (single comparison literal ↔ single
+// case rawValue). The singleton-raw pairs cover the I-22/S-1 threshold
+// constants at RowStateAutomaton.swift.
+//
+// Test backstop: GuardianPairParityTests (CI-level pin for all nine).
 // ──────────────────────────────────────────────────────────────────────
 
 // @guardian-pair: state-basis State.allCases <-> AuditGate.basis[state].legalValues (raw set equality)
@@ -126,6 +128,7 @@ public enum State: Int, Sendable, Codable {
 }
 
 // @guardian-pair: trust-basis Trust.allCases <-> AuditGate.basis[trust].legalValues (raw set equality)
+// @guardian-pair: s1-trust-threshold trust < 3 <-> Trust.canonical (rawValue ==)
 /// Trust axis — how the substrate qualifies the row's reliability.
 /// Lives in bits 18–23 of `Drawer.adjectiveBitmap` (6 bits, 64
 /// values; 7 used at raws 0–6, 57 reserved). Per cookbook §2.3.
@@ -153,6 +156,7 @@ public enum Trust: Int, Sendable, Codable, Comparable {
 }
 
 // @guardian-pair: sensitivity-basis AdjectiveSensitivity.allCases <-> AuditGate.basis[sensitivity].legalValues (raw set equality)
+// @guardian-pair: i22-sensitivity-raw sensitivity == 48 <-> AdjectiveSensitivity.secret (rawValue ==)
 /// Sensitivity axis on the adjective bitmap — per-row access posture.
 /// Lives in bits 6–11 of `Drawer.adjectiveBitmap` (6 bits, 64 values).
 /// Per cookbook §2.3 / §2.8.
@@ -175,6 +179,7 @@ public enum AdjectiveSensitivity: Int, Sendable, Codable {
 }
 
 // @guardian-pair: exportability-basis AdjectiveExportability.allCases <-> AuditGate.basis[exportability].legalValues (raw set equality)
+// @guardian-pair: i22-exportability-raw exportability == 32 <-> AdjectiveExportability.public_ (rawValue ==)
 /// Exportability axis — whether a row may leave the local estate.
 /// Lives in bits 12–17 of `Drawer.adjectiveBitmap` (6 bits, 64
 /// values; 2 used, 62 reserved). Per cookbook §2.3.

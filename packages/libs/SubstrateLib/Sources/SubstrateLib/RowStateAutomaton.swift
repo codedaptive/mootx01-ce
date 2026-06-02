@@ -255,12 +255,11 @@ public enum ForbiddenCombinations {
         //   32 = AdjectiveExportability.public_.rawValue  (I-22 upper bound)
         //    3 = Trust.canonical.rawValue               (S-1 floor)
         //
-        // Checked via GuardianPairParityTests (static test assertions)
-        // rather than the Guardian's syntax-tree extraction (which
-        // compares integer-literal sets; single-value threshold checks
-        // are a set-of-one vs full-enum-set comparison and are more
-        // reliably expressed as test assertions). Test backstop:
-        // GuardianPairParityTests.
+        // Machine-watched: the Guardian's singleton-raw mode (GUARDIAN_002)
+        // extracts each literal below and compares it against the named
+        // enum case rawValue in LocusKit/Adjectives.swift. A mismatch
+        // is reported as a file:line warning at desk time.
+        // Test backstop: GuardianPairParityTests (CI-level pin).
         // ──────────────────────────────────────────────────────────────
         //
         // I-22 (cookbook § 2.3 / federation): a secret row can never be
@@ -269,9 +268,8 @@ public enum ForbiddenCombinations {
         // raw 32). Centralized here (M1/I-25) so the write gate enforces it
         // on every mutation, not only where a consumer remembers to call a
         // separate validator.
-        // raw 48 = AdjectiveSensitivity.secret; raw 32 =
-        // AdjectiveExportability.public_; LocusKit/Adjectives.swift is the
-        // source of truth (cannot import: SubstrateLib sits below LocusKit).
+        // @guardian-pair: i22-sensitivity-raw sensitivity == 48 <-> AdjectiveSensitivity.secret (rawValue ==)
+        // @guardian-pair: i22-exportability-raw exportability == 32 <-> AdjectiveExportability.public_ (rawValue ==)
         let sensitivity = (fields.adjective >> 6) & 0x3F
         let exportability = (fields.adjective >> 12) & 0x3F
         if sensitivity == 48 && exportability == 32 {
@@ -286,6 +284,7 @@ public enum ForbiddenCombinations {
             // raw 3 = Trust.canonical; LocusKit/Adjectives.swift is the
             // source of truth (cannot import: layer below LocusKit).
             let trust = (fields.adjective >> 18) & 0x3F
+            // @guardian-pair: s1-trust-threshold trust < 3 <-> Trust.canonical (rawValue ==)
             if trust < 3 {
                 throw RowStateError.violatesInvariant(
                     "S-1: accepted row must have trust ≥ canonical")
