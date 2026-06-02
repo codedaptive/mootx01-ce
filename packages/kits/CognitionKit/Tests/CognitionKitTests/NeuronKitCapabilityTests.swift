@@ -51,6 +51,18 @@ struct CapabilityGateTests {
         }
     }
 
+    @Test("capability metadata is declared")
+    func capabilityMetadataIsDeclared() {
+        // Wire rawValues must match the Rust serde renames byte-for-byte
+        // so the capability gate is identical across the two versions.
+        #expect(NeuronKitCapability.associationRuleMining.rawValue == "associationRuleMining")
+        #expect(NeuronKitCapability.formalConceptAnalysis.rawValue == "formalConceptAnalysis")
+        // Both new capabilities appear in allCases and therefore in
+        // shippedNeuronKitCapabilities.
+        #expect(NeuronKitCapability.allCases.contains(.associationRuleMining))
+        #expect(NeuronKitCapability.allCases.contains(.formalConceptAnalysis))
+    }
+
     @Test("RecipeError is equatable and described")
     func recipeErrorIsEquatableAndDescribed() {
         let err = RecipeError.silentConceptLoss(
