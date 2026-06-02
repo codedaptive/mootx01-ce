@@ -67,7 +67,8 @@ use substrate_lib::row_state::RowVerb;
 /// Every method below has a default impl so minimal fakes (LP-1B
 /// `FakeStore`, future net-new test stubs) compile without overriding
 /// what they do not exercise. Production backends — the LP-1E
-/// `InMemoryDrawerStore` is the first — override every method.
+/// `InMemoryDrawerStore` and the `SqliteDrawerStore` newtype over it —
+/// override every method.
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
     // -----------------------------------------------------------------
