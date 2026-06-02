@@ -343,6 +343,10 @@ pub fn run_trust_grounded_synthesis(
 
 ### Associative (category 7)
 
+Swift versions shipped: `PartialCueRecall` (an unknown anchor throws
+the typed `AnchorNotInRecalledSetError` — the Swift face of the fault
+the Rust version reports through its `Substrate` arm, § 4).
+
 ```rust
 pub enum CueMode { FeelsLike, AboutThis, FromThen }
 pub struct CueMatch { pub id: String, pub score: f64 }

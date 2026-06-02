@@ -4,7 +4,8 @@
 //! that are ABOUT the same concept, or that are FROM the same period. The cue
 //! is one drawer; the lens is which facet you match on.
 //!
-//! Rust-only today (Swift version contracted, SPEC C-7). Sequencing: recall via GLK, compute each
+//! Paired with the Swift version (`Sources/CognitionKit/PartialCueRecall.swift`).
+//! Sequencing: recall via GLK, compute each
 //! drawer's 4-block fingerprint via LocusKit's `EstateFingerprintFamilies`,
 //! and rank by NeuronKit `partial_recall` (SubstrateML PartialStateRecall).
 //! The estate-free String drawer ids are mapped to the recall primitive's
