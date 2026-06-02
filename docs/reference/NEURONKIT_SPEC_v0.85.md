@@ -407,6 +407,17 @@ is used for every observation (recency/decay is a separate concern,
 handled by theme weather). Result:
 `[ActionPrediction { action, successRate, count }]`.
 
+### § 7.5 — Surprise lenses (what doesn't fit)
+
+**Drift — distributional shift between two windows.** Surfaces
+SubstrateML's `InformationTheory`. Given two distributions over the same
+aligned support (same length — the caller normalizes and aligns them),
+reports the Jensen-Shannon divergence (symmetric, bounded; 0 = identical,
+growing with separation — the primary drift signal) and the KL divergence
+D(p‖q) (asymmetric — how surprising the second window is under the
+first). "Your interests shifted in April." Result:
+`DriftScore { jensenShannon, klDivergence }`.
+
 ## § 8 — The surface-then-sequence archetype
 
 Every lens in § 7 is built to one archetype, and the archetype is itself
