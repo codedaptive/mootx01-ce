@@ -809,8 +809,8 @@ fn evaluate_predicate(predicate: &StoragePredicate, row: &BTreeMap<String, Typed
         StoragePredicate::Not(inner) => !evaluate_predicate(inner, row),
         StoragePredicate::IsTrue => true,
         StoragePredicate::IsFalse => false,
-        StoragePredicate::Eq(col, value) => row.get(&col.name).map_or(false, |v| v == value),
-        StoragePredicate::Neq(col, value) => row.get(&col.name).map_or(false, |v| v != value),
+        StoragePredicate::Eq(col, value) => row.get(&col.name) == Some(value),
+        StoragePredicate::Neq(col, value) => row.get(&col.name).is_some_and(|v| v != value),
         StoragePredicate::Lt(col, value) => {
             compare(row.get(&col.name), value, std::cmp::Ordering::Less)
         }
@@ -824,10 +824,10 @@ fn evaluate_predicate(predicate: &StoragePredicate, row: &BTreeMap<String, Typed
             .map_or(true, |v| matches!(v, TypedValue::Null)),
         StoragePredicate::IsNotNull(col) => row
             .get(&col.name)
-            .map_or(false, |v| !matches!(v, TypedValue::Null)),
+            .is_some_and(|v| !matches!(v, TypedValue::Null)),
         StoragePredicate::In(col, values) => row
             .get(&col.name)
-            .map_or(false, |v| values.iter().any(|x| x == v)),
+            .is_some_and(|v| values.iter().any(|x| x == v)),
         StoragePredicate::Like(col, pattern) => match row.get(&col.name) {
             Some(TypedValue::Text(s)) => like_match(s, pattern),
             _ => false,

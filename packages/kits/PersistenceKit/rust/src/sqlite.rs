@@ -391,8 +391,18 @@ pub struct SqliteStorage {
 fn register_sqlite_vec() {
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
+        // Cast sqlite3_vec_init to the entry-point signature
+        // sqlite3_auto_extension expects; the explicit annotation pins
+        // the source/target types (clippy missing_transmute_annotations).
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *const i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(
+            sqlite_vec::sqlite3_vec_init as *const ()
         )));
     });
 }

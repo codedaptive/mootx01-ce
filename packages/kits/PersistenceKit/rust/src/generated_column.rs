@@ -151,13 +151,7 @@ impl GeneratedExpression {
 pub fn integer_value(value: Option<&TypedValue>) -> i64 {
     match value {
         Some(TypedValue::Int(i)) | Some(TypedValue::Bitmap(i)) => *i,
-        Some(TypedValue::Bool(b)) => {
-            if *b {
-                1
-            } else {
-                0
-            }
-        }
+        Some(TypedValue::Bool(b)) if *b => 1,
         Some(TypedValue::Hlc(h)) => h.packed() as i64,
         _ => 0,
     }
