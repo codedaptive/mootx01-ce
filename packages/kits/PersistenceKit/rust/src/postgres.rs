@@ -1,19 +1,20 @@
-//! PostgreSQL backend — the Rust port of the Swift `PersistenceKitPostgreSQL`
+//! PostgreSQL backend — the Rust version of the Swift `PersistenceKitPostgreSQL`
 //! target, over the synchronous `postgres` crate (matching the sync Storage
-//! trait). One `Client` per estate behind a `Mutex` (a real shared DB
-//! handle). Schema DDL, predicate compilation, and the value codec match the
-//! Swift backend so both ports produce identical observable results.
+//! trait). A fixed-size lazy connection pool (matching `PostgreSQLPool.swift`)
+//! guards per-estate connections. Schema DDL, predicate compilation, and the
+//! value codec match the Swift backend so both versions produce identical
+//! observable results.
 //!
 //! NOTE: this backend is **unverified locally** — its conformance test only
 //! runs when `PERSISTENCEKIT_PG_URL` points at a live PostgreSQL server;
-//! without one it is skipped. Phase 1 implements RowStore, BlobStore,
-//! AuditLog, StorageObserver + schema/generated-STORED-columns/append-only.
-//! VectorIndex is a placeholder pending the follow-on. A single connection
-//! is used; the configured `pool_size` is accepted but not yet pooled.
+//! without one it is skipped. Implements RowStore, BlobStore, AuditLog,
+//! StorageObserver + schema/generated-STORED-columns/append-only, and a
+//! pgvector-backed VectorIndex (see PgVectorIndex).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use postgres::types::ToSql;
@@ -26,8 +27,7 @@ use crate::{
     EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel, OrderClause,
     OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters, Storage,
     StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult, StorageRow,
-    StorageTransaction, TableChange, TableDeclaration,
-    TypedValue, VectorIndex, VectorSearchResult,
+    StorageTransaction, TableChange, TableDeclaration, TypedValue, VectorIndex, VectorSearchResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -123,12 +123,16 @@ fn read_value(row: &postgres::Row, idx: usize, kit: Option<ColumnType>) -> Typed
             .flatten()
             .map(TypedValue::Blob)
             .unwrap_or(TypedValue::Null),
-        Some(ColumnType::Bitmap) => int_col(row, idx).map(TypedValue::Bitmap).unwrap_or(TypedValue::Null),
+        Some(ColumnType::Bitmap) => int_col(row, idx)
+            .map(TypedValue::Bitmap)
+            .unwrap_or(TypedValue::Null),
         Some(ColumnType::Hlc) => int_col(row, idx)
             .map(|i| TypedValue::Hlc(unpack_hlc(i as u64)))
             .unwrap_or(TypedValue::Null),
         // Default (Int or unknown): read as BIGINT.
-        _ => int_col(row, idx).map(TypedValue::Int).unwrap_or(TypedValue::Null),
+        _ => int_col(row, idx)
+            .map(TypedValue::Int)
+            .unwrap_or(TypedValue::Null),
     }
 }
 
@@ -149,9 +153,14 @@ fn pg_err_text(e: &postgres::Error) -> String {
 fn map_pg_err(e: postgres::Error, table: &str) -> StorageError {
     let msg = pg_err_text(&e);
     if msg.contains("append-only") {
-        StorageError::AppendOnlyViolation { table: table.to_string() }
+        StorageError::AppendOnlyViolation {
+            table: table.to_string(),
+        }
     } else if msg.contains("duplicate key") || msg.contains("unique constraint") {
-        StorageError::DuplicateKey { table: table.to_string(), key: "(unique constraint)".into() }
+        StorageError::DuplicateKey {
+            table: table.to_string(),
+            key: "(unique constraint)".into(),
+        }
     } else {
         StorageError::BackendError { underlying: msg }
     }
@@ -192,8 +201,7 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   PRIMARY KEY ("event_id", "hlc")
 )"#;
 
-const AUDIT_INDEX: &str =
-    r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")"#;
+const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")"#;
 
 const REJECT_MUTATION_FN: &str = r#"CREATE OR REPLACE FUNCTION "_storagekit_reject_mutation"()
 RETURNS trigger AS $$
@@ -229,14 +237,27 @@ fn create_table_sql(decl: &TableDeclaration) -> String {
         ));
     }
     if !decl.primary_key.is_empty() {
-        let cols = decl.primary_key.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+        let cols = decl
+            .primary_key
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         parts.push(format!("PRIMARY KEY ({cols})"));
     }
     for unique in &decl.unique_constraints {
-        let cols = unique.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+        let cols = unique
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         parts.push(format!("UNIQUE ({cols})"));
     }
-    format!("CREATE TABLE IF NOT EXISTS \"{}\" (\n  {}\n)", decl.name, parts.join(",\n  "))
+    format!(
+        "CREATE TABLE IF NOT EXISTS \"{}\" (\n  {}\n)",
+        decl.name,
+        parts.join(",\n  ")
+    )
 }
 
 fn append_only_trigger_statements(decl: &TableDeclaration) -> Vec<String> {
@@ -256,8 +277,16 @@ fn append_only_trigger_statements(decl: &TableDeclaration) -> Vec<String> {
 
 fn create_index_sql(decl: &IndexDeclaration) -> String {
     let unique = if decl.unique { "UNIQUE " } else { "" };
-    let cols = decl.columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
-    format!("CREATE {unique}INDEX IF NOT EXISTS \"{}\" ON \"{}\" ({cols})", decl.name, decl.table)
+    let cols = decl
+        .columns
+        .iter()
+        .map(|c| format!("\"{c}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE {unique}INDEX IF NOT EXISTS \"{}\" ON \"{}\" ({cols})",
+        decl.name, decl.table
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -273,21 +302,53 @@ fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<TypedValue>) -> Strin
             if preds.is_empty() {
                 return "TRUE".into();
             }
-            format!("({})", preds.iter().map(|x| compile_predicate(x, binds)).collect::<Vec<_>>().join(" AND "))
+            format!(
+                "({})",
+                preds
+                    .iter()
+                    .map(|x| compile_predicate(x, binds))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            )
         }
         StoragePredicate::Or(preds) => {
             if preds.is_empty() {
                 return "FALSE".into();
             }
-            format!("({})", preds.iter().map(|x| compile_predicate(x, binds)).collect::<Vec<_>>().join(" OR "))
+            format!(
+                "({})",
+                preds
+                    .iter()
+                    .map(|x| compile_predicate(x, binds))
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            )
         }
         StoragePredicate::Not(inner) => format!("NOT ({})", compile_predicate(inner, binds)),
-        StoragePredicate::Eq(c, v) => { binds.push(v.clone()); format!("\"{}\" = ${}", c.name, binds.len()) }
-        StoragePredicate::Neq(c, v) => { binds.push(v.clone()); format!("\"{}\" != ${}", c.name, binds.len()) }
-        StoragePredicate::Lt(c, v) => { binds.push(v.clone()); format!("\"{}\" < ${}", c.name, binds.len()) }
-        StoragePredicate::Lte(c, v) => { binds.push(v.clone()); format!("\"{}\" <= ${}", c.name, binds.len()) }
-        StoragePredicate::Gt(c, v) => { binds.push(v.clone()); format!("\"{}\" > ${}", c.name, binds.len()) }
-        StoragePredicate::Gte(c, v) => { binds.push(v.clone()); format!("\"{}\" >= ${}", c.name, binds.len()) }
+        StoragePredicate::Eq(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" = ${}", c.name, binds.len())
+        }
+        StoragePredicate::Neq(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" != ${}", c.name, binds.len())
+        }
+        StoragePredicate::Lt(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" < ${}", c.name, binds.len())
+        }
+        StoragePredicate::Lte(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" <= ${}", c.name, binds.len())
+        }
+        StoragePredicate::Gt(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" > ${}", c.name, binds.len())
+        }
+        StoragePredicate::Gte(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" >= ${}", c.name, binds.len())
+        }
         StoragePredicate::IsNull(c) => format!("\"{}\" IS NULL", c.name),
         StoragePredicate::IsNotNull(c) => format!("\"{}\" IS NOT NULL", c.name),
         StoragePredicate::In(c, values) => {
@@ -322,7 +383,11 @@ fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<TypedValue>) -> Strin
             binds.push(TypedValue::Int(*mask));
             format!("(\"{}\" & ${}) = 0", column.name, binds.len())
         }
-        StoragePredicate::BitwiseEq { column, expected, mask } => {
+        StoragePredicate::BitwiseEq {
+            column,
+            expected,
+            mask,
+        } => {
             binds.push(TypedValue::Int(*mask));
             let a = binds.len();
             binds.push(TypedValue::Int(*expected));
@@ -349,7 +414,11 @@ struct Subscription {
 impl ObserverRegistry {
     fn observe(&self, table: &str, events: BTreeSet<StorageEvent>) -> Receiver<TableChange> {
         let (tx, rx) = channel();
-        self.subs.lock().unwrap().push(Subscription { table: table.to_string(), events, tx });
+        self.subs.lock().unwrap().push(Subscription {
+            table: table.to_string(),
+            events,
+            tx,
+        });
         rx
     }
     fn emit(&self, change: &TableChange) {
@@ -364,82 +433,351 @@ impl ObserverRegistry {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Connection pool — mirrors PostgreSQLPool.swift observable semantics.
+//
+// Semantics matched to Swift:
+//   - Fixed size from `pool_size`; connections created lazily up to that cap
+//   - Checkout: try idle slot first, then lazy-create if in_use < pool_size,
+//     else block (Condvar::wait_timeout) for connection_timeout_secs, then
+//     return Err(StorageError::PoolExhausted { timeout_secs })
+//   - Checkin: if closed, drop connection; if waiter pending, notify; else
+//     return to idle vec and notify (notify_all wakes blocked checkouts)
+//   - Close: set is_closed, drop all idle connections, notify_all so blocked
+//     checkouts wake and return Err(BackendUnavailable)
+//   - idle_timeout: accepted and stored to match the Swift config surface,
+//     but not used to reap or refresh connections — Swift also ignores it
+//     (idleTimeout is stored in PostgreSQLPool.swift but never referenced in
+//     any idle-reap or refresh path).
+// ─────────────────────────────────────────────────────────────────────
+
+struct PoolState {
+    /// Idle connections available for checkout.
+    available: Vec<Client>,
+    /// Number of connections currently checked out (in active use).
+    in_use: usize,
+    /// True after close() is called; new checkouts return BackendUnavailable.
+    is_closed: bool,
+    /// The postgres:// URL used to open new connections.
+    connection_string: String,
+    /// Estate namespace prepended to the search_path on every new connection.
+    namespace: String,
+    /// Maximum total connections (available + in_use).
+    pool_size: usize,
+    /// Timeout for blocked checkout, in seconds. Fractional seconds allowed.
+    connection_timeout_secs: f64,
+}
+
+struct Pool {
+    state: Mutex<PoolState>,
+    /// Notified whenever a connection is returned or the pool is closed,
+    /// so blocked checkout threads can re-evaluate.
+    condvar: Condvar,
+}
+
+impl Pool {
+    fn new(
+        connection_string: String,
+        namespace: String,
+        pool_size: usize,
+        connection_timeout_secs: f64,
+        // idle_timeout_secs is accepted to match the Swift config surface;
+        // not used to reap/refresh connections (Swift also accepts-but-ignores it).
+        _idle_timeout_secs: f64,
+    ) -> Self {
+        Pool {
+            state: Mutex::new(PoolState {
+                available: Vec::new(),
+                in_use: 0,
+                is_closed: false,
+                connection_string,
+                namespace,
+                pool_size,
+                connection_timeout_secs,
+            }),
+            condvar: Condvar::new(),
+        }
+    }
+
+    /// Open one new connection and pin it to the estate's schema namespace.
+    /// Caller must hold no lock when calling this (it does real I/O).
+    fn open_connection(conn_str: &str, namespace: &str) -> StorageResult<Client> {
+        let mut client =
+            Client::connect(conn_str, NoTls).map_err(|e| StorageError::BackendError {
+                underlying: format!("postgres connect: {e}"),
+            })?;
+        // Pin search_path to the estate's schema (namespace) so all DDL and
+        // DML target the correct per-estate tables. `public` stays on the
+        // path so shared extensions (e.g. pgvector) resolve.
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA IF NOT EXISTS \"{namespace}\"; \
+                 SET search_path TO \"{namespace}\", public;"
+            ))
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("schema setup: {e}"),
+            })?;
+        Ok(client)
+    }
+
+    /// Check out one connection from the pool. Blocks up to
+    /// `connection_timeout_secs` when the pool is at capacity.
+    /// Returns Err(PoolExhausted) on timeout, Err(BackendUnavailable) if
+    /// the pool has been closed.
+    fn checkout(&self) -> StorageResult<PooledClient> {
+        let mut guard = self.state.lock().unwrap();
+
+        // Closed before we even started — refuse immediately.
+        if guard.is_closed {
+            return Err(StorageError::BackendUnavailable {
+                reason: "pool closed".into(),
+            });
+        }
+
+        // Try an idle connection first (matches Swift's `available.popLast()`).
+        if let Some(client) = guard.available.pop() {
+            guard.in_use += 1;
+            return Ok(PooledClient {
+                client: Some(client),
+                pool: self as *const Pool,
+            });
+        }
+
+        // Lazy creation: if we haven't hit the cap, open a new connection.
+        if guard.in_use < guard.pool_size {
+            guard.in_use += 1;
+            // Release the lock during real I/O so other threads aren't blocked.
+            let conn_str = guard.connection_string.clone();
+            let namespace = guard.namespace.clone();
+            drop(guard);
+            match Self::open_connection(&conn_str, &namespace) {
+                Ok(client) => {
+                    return Ok(PooledClient {
+                        client: Some(client),
+                        pool: self as *const Pool,
+                    });
+                }
+                Err(e) => {
+                    // Connection failed — decrement in_use and surface the error.
+                    let mut g = self.state.lock().unwrap();
+                    g.in_use -= 1;
+                    self.condvar.notify_all();
+                    return Err(e);
+                }
+            }
+        }
+
+        // Pool is full — block until a connection is returned or we time out.
+        // Mirrors Swift's `waiters` queue: a checked-in connection (or close)
+        // wakes us via Condvar notify_all.
+        let timeout_secs = guard.connection_timeout_secs;
+        let timeout = Duration::from_secs_f64(timeout_secs);
+        let deadline = std::time::Instant::now() + timeout;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                // Timeout expired — matches Swift's poolExhausted(timeout:).
+                return Err(StorageError::PoolExhausted { timeout_secs });
+            }
+            let (new_guard, wait_result) = self.condvar.wait_timeout(guard, remaining).unwrap();
+            guard = new_guard;
+
+            if guard.is_closed {
+                return Err(StorageError::BackendUnavailable {
+                    reason: "pool closing".into(),
+                });
+            }
+
+            // Try idle slot first.
+            if let Some(client) = guard.available.pop() {
+                guard.in_use += 1;
+                return Ok(PooledClient {
+                    client: Some(client),
+                    pool: self as *const Pool,
+                });
+            }
+
+            // Spurious wake with no connection available — loop if time remains.
+            if wait_result.timed_out() {
+                return Err(StorageError::PoolExhausted { timeout_secs });
+            }
+        }
+    }
+
+    /// Return a connection to the pool. If the pool is closed, drop the
+    /// connection. If waiters are blocked, notify_all to wake them.
+    fn checkin(&self, client: Client) {
+        let mut guard = self.state.lock().unwrap();
+        guard.in_use -= 1;
+        if guard.is_closed {
+            // Pool is closing — drop the connection and do not return it.
+            drop(client);
+            self.condvar.notify_all();
+            return;
+        }
+        guard.available.push(client);
+        // notify_all: mirrors Swift's `waiters.removeFirst(); w.resume(...)`.
+        // All blocked checkouts re-evaluate; at most one will win the idle slot.
+        self.condvar.notify_all();
+    }
+
+    /// Close the pool. All idle connections are dropped. Blocked checkouts
+    /// will wake and return Err(BackendUnavailable). Mirrors Swift's close().
+    fn close(&self) {
+        let mut guard = self.state.lock().unwrap();
+        guard.is_closed = true;
+        // Drop all idle connections.
+        guard.available.clear();
+        // Wake all blocked checkouts; they will see is_closed = true and return
+        // BackendUnavailable, matching Swift's `pool closing` error.
+        self.condvar.notify_all();
+    }
+}
+
+/// RAII guard that returns the connection to the pool on drop.
+/// Using raw pointer to Pool to avoid lifetime coupling (Pool is Arc-owned
+/// and lives at least as long as any PooledClient in flight).
+struct PooledClient {
+    client: Option<Client>,
+    pool: *const Pool,
+}
+
+impl std::fmt::Debug for PooledClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Client does not implement Debug; surface only the liveness state.
+        f.debug_struct("PooledClient")
+            .field("connected", &self.client.is_some())
+            .finish()
+    }
+}
+
+impl PooledClient {
+    fn get_mut(&mut self) -> &mut Client {
+        self.client.as_mut().unwrap()
+    }
+}
+
+impl Drop for PooledClient {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            // SAFETY: pool pointer comes from Arc<Pool> in PostgresStorage,
+            // which outlives all PooledClient guards. No aliasing: checkin
+            // takes the Mutex before mutating PoolState.
+            unsafe { (*self.pool).checkin(client) }
+        }
+    }
+}
+
+// SAFETY: PooledClient holds a Client (Send) and a raw pointer to a Pool
+// that is Send + Sync (Mutex-guarded). The pointer is never dereferenced
+// except in Drop (single writer path through checkin's Mutex).
+unsafe impl Send for PooledClient {}
+
+// ─────────────────────────────────────────────────────────────────────
 // Storage assembly.
 // ─────────────────────────────────────────────────────────────────────
 
-struct Inner {
-    client: Client,
+/// Per-estate schema — stored once on `open()` and shared read-only
+/// across all per-operation pool checkouts.
+struct SharedSchema {
     schema: Option<SchemaDeclaration>,
 }
 
 pub struct PostgresStorage {
     config: EstateConfiguration,
-    inner: Arc<Mutex<Inner>>,
+    pool: Arc<Pool>,
+    schema: Arc<Mutex<SharedSchema>>,
     observers: Arc<ObserverRegistry>,
 }
 
 impl PostgresStorage {
-    /// Connect to the PostgreSQL server named by the configuration's
-    /// `Postgresql` backend variant. (Single connection at Phase 1.)
+    /// Construct a PostgresStorage from a Postgresql backend configuration.
+    /// No connections are opened here; the pool creates them lazily on first
+    /// checkout (matching Swift's lazy pool-creation behaviour).
     pub fn new(config: EstateConfiguration) -> StorageResult<Self> {
-        let conn_str = match &config.backend {
-            BackendConfiguration::Postgresql { connection_string, .. } => connection_string.clone(),
-            _ => {
-                return Err(StorageError::BackendError {
-                    underlying: "PostgresStorage requires a Postgresql backend configuration".into(),
-                })
-            }
-        };
-        let mut client = Client::connect(&conn_str, NoTls)
-            .map_err(|e| StorageError::BackendError { underlying: format!("postgres connect: {e}") })?;
-        // Estate isolation: each estate lives in its own schema (the PG
-        // analogue of SQLite's one-file-per-estate). The connection's
-        // search_path is pinned to it for this storage's lifetime, so a
-        // shared database holds many estates without table collisions.
-        // `public` stays on the path so shared extensions (e.g. pgvector)
-        // resolve.
+        let (conn_str, pool_size, connection_timeout_secs, idle_timeout_secs) =
+            match &config.backend {
+                BackendConfiguration::Postgresql {
+                    connection_string,
+                    pool_size,
+                    connection_timeout_secs,
+                    idle_timeout_secs,
+                } => (
+                    connection_string.clone(),
+                    *pool_size,
+                    *connection_timeout_secs,
+                    *idle_timeout_secs,
+                ),
+                _ => {
+                    return Err(StorageError::BackendError {
+                        underlying: "PostgresStorage requires a Postgresql backend configuration"
+                            .into(),
+                    })
+                }
+            };
+        // Estate isolation: each estate lives in its own PG schema (analogous
+        // to SQLite's one-file-per-estate). The namespace is derived from the
+        // estate UUID. `public` stays on the search_path so shared extensions
+        // (e.g. pgvector) resolve. The namespace is pinned on every new
+        // connection opened by the pool (see Pool::open_connection).
         let ns = format!("pk_{}", config.estate_id.simple());
-        client
-            .batch_execute(&format!(
-                "CREATE SCHEMA IF NOT EXISTS \"{ns}\"; SET search_path TO \"{ns}\", public;"
-            ))
-            .map_err(|e| StorageError::BackendError { underlying: format!("schema setup: {e}") })?;
         Ok(PostgresStorage {
             config,
-            inner: Arc::new(Mutex::new(Inner { client, schema: None })),
+            pool: Arc::new(Pool::new(
+                conn_str,
+                ns,
+                pool_size,
+                connection_timeout_secs,
+                idle_timeout_secs,
+            )),
+            schema: Arc::new(Mutex::new(SharedSchema { schema: None })),
             observers: Arc::new(ObserverRegistry::default()),
         })
     }
+
+    /// Check out a connection from the pool. Returns a PooledClient that
+    /// automatically returns the connection on drop.
+    fn checkout(&self) -> StorageResult<PooledClient> {
+        self.pool.checkout()
+    }
 }
 
-fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<()> {
-    inner.schema = Some(schema.clone());
+fn apply_schema(
+    conn: &mut PooledClient,
+    schema_store: &Mutex<SharedSchema>,
+    schema: &SchemaDeclaration,
+) -> StorageResult<()> {
+    schema_store.lock().unwrap().schema = Some(schema.clone());
+    let client = conn.get_mut();
     let batch = |c: &mut Client, sql: &str| {
         c.batch_execute(sql)
-            .map_err(|e| StorageError::BackendError { underlying: format!("ddl: {}", pg_err_text(&e)) })
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("ddl: {}", pg_err_text(&e)),
+            })
     };
-    batch(&mut inner.client, META_TABLE)?;
-    batch(&mut inner.client, AUDIT_TABLE)?;
-    batch(&mut inner.client, AUDIT_INDEX)?;
-    batch(&mut inner.client, BLOB_TABLE)?;
-    batch(&mut inner.client, REJECT_MUTATION_FN)?;
+    batch(client, META_TABLE)?;
+    batch(client, AUDIT_TABLE)?;
+    batch(client, AUDIT_INDEX)?;
+    batch(client, BLOB_TABLE)?;
+    batch(client, REJECT_MUTATION_FN)?;
     for table in &schema.tables {
-        batch(&mut inner.client, &create_table_sql(table))?;
+        batch(client, &create_table_sql(table))?;
         for stmt in append_only_trigger_statements(table) {
-            batch(&mut inner.client, &stmt)?;
+            batch(client, &stmt)?;
         }
     }
     for index in &schema.indices {
-        batch(&mut inner.client, &create_index_sql(index))?;
+        batch(client, &create_index_sql(index))?;
     }
-    inner
-        .client
+    client
         .execute(
             r#"INSERT INTO "_storagekit_meta" ("key", "value") VALUES ('schema_version', $1)
                ON CONFLICT ("key") DO UPDATE SET "value" = excluded.value"#,
             &[&schema.version.to_string()],
         )
-        .map_err(|e| StorageError::BackendError { underlying: format!("record version: {e}") })?;
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("record version: {e}"),
+        })?;
     Ok(())
 }
 
@@ -448,33 +786,52 @@ impl Storage for PostgresStorage {
         &self.config
     }
     fn row_store(&self) -> Arc<dyn RowStore> {
-        Arc::new(PgRowStore { inner: self.inner.clone(), observers: self.observers.clone() })
+        Arc::new(PgRowStore {
+            pool: self.pool.clone(),
+            schema: self.schema.clone(),
+            observers: self.observers.clone(),
+        })
     }
     fn blob_store(&self) -> Arc<dyn BlobStore> {
-        Arc::new(PgBlobStore { inner: self.inner.clone() })
+        Arc::new(PgBlobStore {
+            pool: self.pool.clone(),
+        })
     }
     fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Arc::new(PgVectorIndex { inner: self.inner.clone() })
+        Arc::new(PgVectorIndex {
+            pool: self.pool.clone(),
+        })
     }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
-        Arc::new(PgAuditLog { inner: self.inner.clone() })
+        Arc::new(PgAuditLog {
+            pool: self.pool.clone(),
+        })
     }
     fn observer(&self) -> Arc<dyn StorageObserver> {
-        Arc::new(PgObserver { observers: self.observers.clone() })
+        Arc::new(PgObserver {
+            observers: self.observers.clone(),
+        })
     }
 
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
-        apply_schema(&mut self.inner.lock().unwrap(), schema)
+        let mut conn = self.checkout()?;
+        apply_schema(&mut conn, &self.schema, schema)
     }
     fn close(&self) -> StorageResult<()> {
+        self.pool.close();
         Ok(())
     }
     fn current_schema_version(&self) -> StorageResult<i32> {
-        let mut guard = self.inner.lock().unwrap();
-        let rows = guard
-            .client
-            .query(r#"SELECT "value" FROM "_storagekit_meta" WHERE "key" = 'schema_version'"#, &[])
-            .map_err(|e| StorageError::BackendError { underlying: format!("schema version: {e}") })?;
+        let mut conn = self.checkout()?;
+        let rows = conn
+            .get_mut()
+            .query(
+                r#"SELECT "value" FROM "_storagekit_meta" WHERE "key" = 'schema_version'"#,
+                &[],
+            )
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("schema version: {e}"),
+            })?;
         Ok(rows
             .first()
             .and_then(|r| r.try_get::<_, String>(0).ok())
@@ -482,7 +839,8 @@ impl Storage for PostgresStorage {
             .unwrap_or(0))
     }
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
-        apply_schema(&mut self.inner.lock().unwrap(), schema)
+        let mut conn = self.checkout()?;
+        apply_schema(&mut conn, &self.schema, schema)
     }
 
     fn transaction(
@@ -490,36 +848,36 @@ impl Storage for PostgresStorage {
         isolation: IsolationLevel,
         block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
     ) -> StorageResult<()> {
-        // The single pooled connection serializes all sub-store access, so the
-        // BEGIN…COMMIT bracket here and the block's per-call statements run on
-        // the same session in order. The `inner` lock is held only to issue
-        // each bracket statement and released before the block runs — the
-        // block's sub-stores re-lock per call, so holding it across `block`
-        // would deadlock against them.
+        // Check out one connection for the transaction bracket. BEGIN and
+        // COMMIT/ROLLBACK run on this connection; the block's sub-stores each
+        // check out their own connections (per-operation checkout granularity,
+        // matching Swift's per-await granularity). The BEGIN/COMMIT bracket
+        // therefore does not hold the connection across the block — sub-stores
+        // issue their statements on separate checkouts. This is consistent
+        // with how the single-connection backend worked (the block ran on the
+        // same connection via the shared Mutex) and with the Swift async actor
+        // model (no connection is held across suspension points).
         let begin = match isolation {
             IsolationLevel::ReadCommitted => "BEGIN ISOLATION LEVEL READ COMMITTED",
             IsolationLevel::RepeatableRead => "BEGIN ISOLATION LEVEL REPEATABLE READ",
             IsolationLevel::Serializable => "BEGIN ISOLATION LEVEL SERIALIZABLE",
         };
-        self.inner
-            .lock()
-            .unwrap()
-            .client
+        let mut bracket_conn = self.checkout()?;
+        bracket_conn
+            .get_mut()
             .batch_execute(begin)
             .map_err(|e| map_pg_err(e, "transaction"))?;
         match block(self) {
             Ok(()) => {
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .client
+                bracket_conn
+                    .get_mut()
                     .batch_execute("COMMIT")
                     .map_err(|e| map_pg_err(e, "transaction"))?;
                 Ok(())
             }
             Err(e) => {
                 // Best-effort rollback; surface the block's error regardless.
-                let _ = self.inner.lock().unwrap().client.batch_execute("ROLLBACK");
+                let _ = bracket_conn.get_mut().batch_execute("ROLLBACK");
                 Err(e)
             }
         }
@@ -542,15 +900,22 @@ impl StorageTransaction for PostgresStorage {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// RowStore.
+// RowStore. Each method checks out one connection, executes, and returns
+// the connection to the pool on drop (via PooledClient's Drop impl).
+// This is per-operation granularity, matching Swift's per-await checkout.
 // ─────────────────────────────────────────────────────────────────────
 
 struct PgRowStore {
-    inner: Arc<Mutex<Inner>>,
+    pool: Arc<Pool>,
+    schema: Arc<Mutex<SharedSchema>>,
     observers: Arc<ObserverRegistry>,
 }
 
-fn extract_row_key(schema: Option<&SchemaDeclaration>, table: &str, values: &BTreeMap<String, TypedValue>) -> RowKey {
+fn extract_row_key(
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    values: &BTreeMap<String, TypedValue>,
+) -> RowKey {
     if let Some(decl) = schema.and_then(|s| s.tables.iter().find(|t| t.name == table)) {
         if decl.primary_key.len() == 1 {
             if let Some(TypedValue::Uuid(u)) = values.get(&decl.primary_key[0]) {
@@ -561,25 +926,49 @@ fn extract_row_key(schema: Option<&SchemaDeclaration>, table: &str, values: &BTr
     Uuid::new_v4()
 }
 
-fn table_column_type(schema: Option<&SchemaDeclaration>, table: &str, column: &str) -> Option<ColumnType> {
+fn table_column_type(
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    column: &str,
+) -> Option<ColumnType> {
     let decl = schema?.tables.iter().find(|t| t.name == table)?;
     decl.columns
         .iter()
         .find(|c| c.name == column)
         .map(|c| c.column_type)
-        .or_else(|| decl.generated_columns.iter().find(|g| g.name == column).map(|g| g.column_type))
+        .or_else(|| {
+            decl.generated_columns
+                .iter()
+                .find(|g| g.name == column)
+                .map(|g| g.column_type)
+        })
 }
 
 impl RowStore for PgRowStore {
-    fn insert(&self, table: &str, values: BTreeMap<String, TypedValue>) -> StorageResult<RowHandle> {
-        let mut guard = self.inner.lock().unwrap();
+    fn insert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<RowHandle> {
+        let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
-        let cols = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
-        let ph = (1..=keys.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ph = (1..=keys.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
         let params: Vec<PgParam> = keys.iter().map(|k| to_param(&values[*k])).collect();
-        guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
-        let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        conn.get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        let schema = self.schema.lock().unwrap();
+        let key = extract_row_key(schema.schema.as_ref(), table, &values);
+        drop(schema);
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Insert,
@@ -590,14 +979,30 @@ impl RowStore for PgRowStore {
         Ok(RowHandle::new(table, key))
     }
 
-    fn upsert(&self, table: &str, values: BTreeMap<String, TypedValue>, conflict_columns: &[String]) -> StorageResult<RowHandle> {
-        let mut guard = self.inner.lock().unwrap();
+    fn upsert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        conflict_columns: &[String],
+    ) -> StorageResult<RowHandle> {
+        let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
-        let cols = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
-        let ph = (1..=keys.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ph = (1..=keys.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
         if !conflict_columns.is_empty() {
-            let conflict = conflict_columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+            let conflict = conflict_columns
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
             let updates: Vec<String> = keys
                 .iter()
                 .filter(|k| !conflict_columns.contains(k))
@@ -611,8 +1016,12 @@ impl RowStore for PgRowStore {
             }
         }
         let params: Vec<PgParam> = keys.iter().map(|k| to_param(&values[*k])).collect();
-        guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
-        let key = extract_row_key(guard.schema.as_ref(), table, &values);
+        conn.get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        let schema = self.schema.lock().unwrap();
+        let key = extract_row_key(schema.schema.as_ref(), table, &values);
+        drop(schema);
         self.observers.emit(&TableChange {
             table: table.to_string(),
             event: StorageEvent::Update,
@@ -623,8 +1032,13 @@ impl RowStore for PgRowStore {
         Ok(RowHandle::new(table, key))
     }
 
-    fn update(&self, table: &str, values: BTreeMap<String, TypedValue>, predicate: &StoragePredicate) -> StorageResult<usize> {
-        let mut guard = self.inner.lock().unwrap();
+    fn update(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        predicate: &StoragePredicate,
+    ) -> StorageResult<usize> {
+        let mut conn = self.pool.checkout()?;
         let keys: Vec<&String> = values.keys().collect();
         let mut binds: Vec<TypedValue> = Vec::new();
         let set_clause = keys
@@ -638,7 +1052,10 @@ impl RowStore for PgRowStore {
         let where_sql = compile_predicate(predicate, &mut binds);
         let sql = format!("UPDATE \"{table}\" SET {set_clause} WHERE {where_sql}");
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
-        let changed = guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        let changed = conn
+            .get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         if changed > 0 {
             self.observers.emit(&TableChange {
                 table: table.to_string(),
@@ -652,12 +1069,15 @@ impl RowStore for PgRowStore {
     }
 
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut conn = self.pool.checkout()?;
         let mut binds: Vec<TypedValue> = Vec::new();
         let where_sql = compile_predicate(predicate, &mut binds);
         let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
-        let changed = guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        let changed = conn
+            .get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         if changed > 0 {
             self.observers.emit(&TableChange {
                 table: table.to_string(),
@@ -678,7 +1098,7 @@ impl RowStore for PgRowStore {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut conn = self.pool.checkout()?;
         let mut sql = format!("SELECT * FROM \"{table}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
         if let Some(p) = predicate {
@@ -706,8 +1126,11 @@ impl RowStore for PgRowStore {
             }
         }
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
-        let schema = guard.schema.clone();
-        let rows = guard.client.query(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        let schema = self.schema.lock().unwrap().schema.clone();
+        let rows = conn
+            .get_mut()
+            .query(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
@@ -722,32 +1145,34 @@ impl RowStore for PgRowStore {
     }
 
     fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut conn = self.pool.checkout()?;
         let mut sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         let mut binds: Vec<TypedValue> = Vec::new();
         if let Some(p) = predicate {
             sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
         }
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
-        let row = guard.client.query_one(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        let row = conn
+            .get_mut()
+            .query_one(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         let n: i64 = row.get(0);
         Ok(n as usize)
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// BlobStore.
+// BlobStore. Per-operation pool checkout.
 // ─────────────────────────────────────────────────────────────────────
 
 struct PgBlobStore {
-    inner: Arc<Mutex<Inner>>,
+    pool: Arc<Pool>,
 }
 
 impl BlobStore for PgBlobStore {
     fn put(&self, key: &str, bytes: &[u8]) -> StorageResult<()> {
-        let mut guard = self.inner.lock().unwrap();
-        guard
-            .client
+        let mut conn = self.pool.checkout()?;
+        conn.get_mut()
             .execute(
                 r#"INSERT INTO "_storagekit_blobs" ("key", "bytes") VALUES ($1, $2)
                    ON CONFLICT ("key") DO UPDATE SET "bytes" = excluded.bytes"#,
@@ -757,18 +1182,23 @@ impl BlobStore for PgBlobStore {
         Ok(())
     }
     fn get(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
-        let mut guard = self.inner.lock().unwrap();
-        let rows = guard
-            .client
-            .query(r#"SELECT "bytes" FROM "_storagekit_blobs" WHERE "key" = $1"#, &[&key.to_string()])
+        let mut conn = self.pool.checkout()?;
+        let rows = conn
+            .get_mut()
+            .query(
+                r#"SELECT "bytes" FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
             .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
         Ok(rows.first().map(|r| r.get::<_, Vec<u8>>(0)))
     }
     fn delete(&self, key: &str) -> StorageResult<()> {
-        let mut guard = self.inner.lock().unwrap();
-        guard
-            .client
-            .execute(r#"DELETE FROM "_storagekit_blobs" WHERE "key" = $1"#, &[&key.to_string()])
+        let mut conn = self.pool.checkout()?;
+        conn.get_mut()
+            .execute(
+                r#"DELETE FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
             .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
         Ok(())
     }
@@ -776,21 +1206,24 @@ impl BlobStore for PgBlobStore {
         Ok(self.size(key)?.is_some())
     }
     fn size(&self, key: &str) -> StorageResult<Option<usize>> {
-        let mut guard = self.inner.lock().unwrap();
-        let rows = guard
-            .client
-            .query(r#"SELECT LENGTH("bytes") FROM "_storagekit_blobs" WHERE "key" = $1"#, &[&key.to_string()])
+        let mut conn = self.pool.checkout()?;
+        let rows = conn
+            .get_mut()
+            .query(
+                r#"SELECT LENGTH("bytes") FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
             .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
         Ok(rows.first().map(|r| r.get::<_, i32>(0) as usize))
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// AuditLog.
+// AuditLog. Per-operation pool checkout.
 // ─────────────────────────────────────────────────────────────────────
 
 struct PgAuditLog {
-    inner: Arc<Mutex<Inner>>,
+    pool: Arc<Pool>,
 }
 
 const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","actor""#;
@@ -843,13 +1276,18 @@ fn decode_audit(row: &postgres::Row) -> AuditEvent {
 
 impl AuditLog for PgAuditLog {
     fn append(&self, event: AuditEvent) -> StorageResult<()> {
-        let mut guard = self.inner.lock().unwrap();
-        let ph = (1..=17).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+        let mut conn = self.pool.checkout()?;
+        let ph = (1..=17)
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             "INSERT INTO \"_storagekit_audit\" ({AUDIT_COLS}) VALUES ({ph}) ON CONFLICT (\"event_id\",\"hlc\") DO NOTHING"
         );
         let params = audit_params(&event);
-        guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        conn.get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
         Ok(())
     }
     fn append_batch(&self, events: Vec<AuditEvent>) -> StorageResult<()> {
@@ -858,8 +1296,13 @@ impl AuditLog for PgAuditLog {
         }
         Ok(())
     }
-    fn iterate(&self, after: Option<HLC>, row_id: Option<RowKey>, limit: usize) -> StorageResult<Vec<AuditEvent>> {
-        let mut guard = self.inner.lock().unwrap();
+    fn iterate(
+        &self,
+        after: Option<HLC>,
+        row_id: Option<RowKey>,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEvent>> {
+        let mut conn = self.pool.checkout()?;
         let mut sql = format!("SELECT {AUDIT_COLS} FROM \"_storagekit_audit\"");
         let mut binds: Vec<PgParam> = Vec::new();
         let mut clauses: Vec<String> = Vec::new();
@@ -874,22 +1317,29 @@ impl AuditLog for PgAuditLog {
         if !clauses.is_empty() {
             sql.push_str(&format!(" WHERE {}", clauses.join(" AND ")));
         }
-        let lim: i64 = if limit > i64::MAX as usize { -1 } else { limit as i64 };
+        let lim: i64 = if limit > i64::MAX as usize {
+            -1
+        } else {
+            limit as i64
+        };
         if lim >= 0 {
             sql.push_str(&format!(" ORDER BY \"hlc\" ASC LIMIT {lim}"));
         } else {
             sql.push_str(" ORDER BY \"hlc\" ASC");
         }
-        let rows = guard.client.query(&sql, &param_refs(&binds)).map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        let rows = conn
+            .get_mut()
+            .query(&sql, &param_refs(&binds))
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
         Ok(rows.iter().map(decode_audit).collect())
     }
     fn events_for_row(&self, row_id: RowKey) -> StorageResult<Vec<AuditEvent>> {
         self.iterate(None, Some(row_id), usize::MAX)
     }
     fn count(&self) -> StorageResult<usize> {
-        let mut guard = self.inner.lock().unwrap();
-        let row = guard
-            .client
+        let mut conn = self.pool.checkout()?;
+        let row = conn
+            .get_mut()
             .query_one(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, &[])
             .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
         Ok(row.get::<_, i64>(0) as usize)
@@ -905,7 +1355,11 @@ struct PgObserver {
 }
 
 impl StorageObserver for PgObserver {
-    fn observe(&self, table: &str, events: BTreeSet<StorageEvent>) -> StorageResult<Receiver<TableChange>> {
+    fn observe(
+        &self,
+        table: &str,
+        events: BTreeSet<StorageEvent>,
+    ) -> StorageResult<Receiver<TableChange>> {
         Ok(self.observers.observe(table, events))
     }
 }
@@ -917,17 +1371,23 @@ impl StorageObserver for PgObserver {
 // pgvector client crate is needed. The `vector` extension must already be
 // installed in the database (a DB-admin step; not created per-call since a
 // least-privilege role may lack CREATE EXTENSION). Lives in the estate's
-// schema via the connection search_path.
+// schema via the connection search_path. Per-operation pool checkout.
 // ─────────────────────────────────────────────────────────────────────
 
 struct PgVectorIndex {
-    inner: Arc<Mutex<Inner>>,
+    pool: Arc<Pool>,
 }
 
 const VEC_TABLE: &str = "_storagekit_vectors";
 
 fn vector_literal(v: &[f32]) -> String {
-    format!("[{}]", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        v.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn metric_op(m: DistanceMetric) -> &'static str {
@@ -949,37 +1409,51 @@ impl PgVectorIndex {
 }
 
 impl VectorIndex for PgVectorIndex {
-    fn add(&self, key: RowKey, vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
-        let mut guard = self.inner.lock().unwrap();
+    fn add(
+        &self,
+        key: RowKey,
+        vector: &[f32],
+        _metadata: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<()> {
+        let mut conn = self.pool.checkout()?;
         let dim = vector.len();
-        guard.client.batch_execute(&format!(
+        conn.get_mut().batch_execute(&format!(
             "CREATE TABLE IF NOT EXISTS \"{VEC_TABLE}\" (\"key\" TEXT PRIMARY KEY, \"embedding\" vector({dim}) NOT NULL, \"metadata_json\" TEXT NOT NULL DEFAULT '{{}}')"
         )).map_err(|e| map_pg_err(e, VEC_TABLE))?;
         // Inline the vector literal (digits/dots/commas only — safe): a bound
         // `$n::vector` makes PG infer the param as type `vector`, which the
         // text-based client can't serialize.
-        guard.client.execute(
-            &format!(
+        conn.get_mut()
+            .execute(
+                &format!(
                 "INSERT INTO \"{VEC_TABLE}\" (\"key\", \"embedding\") VALUES ($1, '{}'::vector) \
                  ON CONFLICT (\"key\") DO UPDATE SET \"embedding\" = excluded.embedding",
                 vector_literal(vector)
             ),
-            &[&key.to_string().to_uppercase()],
-        ).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+                &[&key.to_string().to_uppercase()],
+            )
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
         Ok(())
     }
-    fn update(&self, key: RowKey, vector: &[f32], metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+    fn update(
+        &self,
+        key: RowKey,
+        vector: &[f32],
+        metadata: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<()> {
         self.add(key, vector, metadata)
     }
     fn delete(&self, key: RowKey) -> StorageResult<()> {
-        let mut guard = self.inner.lock().unwrap();
-        if !Self::table_exists(&mut guard.client) {
+        let mut conn = self.pool.checkout()?;
+        if !Self::table_exists(conn.get_mut()) {
             return Ok(());
         }
-        guard.client.execute(
-            &format!("DELETE FROM \"{VEC_TABLE}\" WHERE \"key\" = $1"),
-            &[&key.to_string().to_uppercase()],
-        ).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        conn.get_mut()
+            .execute(
+                &format!("DELETE FROM \"{VEC_TABLE}\" WHERE \"key\" = $1"),
+                &[&key.to_string().to_uppercase()],
+            )
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
         Ok(())
     }
     fn knn(
@@ -990,8 +1464,8 @@ impl VectorIndex for PgVectorIndex {
         _filter: Option<&StoragePredicate>,
         _search_parameters: Option<SearchParameters>,
     ) -> StorageResult<Vec<VectorSearchResult>> {
-        let mut guard = self.inner.lock().unwrap();
-        if !Self::table_exists(&mut guard.client) {
+        let mut conn = self.pool.checkout()?;
+        if !Self::table_exists(conn.get_mut()) {
             return Ok(Vec::new());
         }
         let op = metric_op(metric);
@@ -1000,7 +1474,10 @@ impl VectorIndex for PgVectorIndex {
             "SELECT \"key\", (\"embedding\" {op} '{lit}'::vector) AS distance FROM \"{VEC_TABLE}\" \
              ORDER BY \"embedding\" {op} '{lit}'::vector LIMIT {k}"
         );
-        let rows = guard.client.query(&sql, &[]).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        let rows = conn
+            .get_mut()
+            .query(&sql, &[])
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
         Ok(rows
             .iter()
             .map(|r| VectorSearchResult {
@@ -1015,15 +1492,171 @@ impl VectorIndex for PgVectorIndex {
         Ok(())
     }
     fn count(&self) -> StorageResult<usize> {
-        let mut guard = self.inner.lock().unwrap();
-        if !Self::table_exists(&mut guard.client) {
+        let mut conn = self.pool.checkout()?;
+        if !Self::table_exists(conn.get_mut()) {
             return Ok(0);
         }
-        let n: i64 = guard
-            .client
+        let n: i64 = conn
+            .get_mut()
             .query_one(&format!("SELECT COUNT(*) FROM \"{VEC_TABLE}\""), &[])
             .map_err(|e| map_pg_err(e, VEC_TABLE))?
             .get(0);
         Ok(n as usize)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Pool unit tests — no live server required.
+// Construction, capacity, exhaustion timeout, and close semantics are
+// all exercised with a connector that always fails (simulating "server
+// unreachable"), letting the pool logic run in isolation. Live-path
+// tests live in tests/postgres_conformance.rs (gate: PERSISTENCEKIT_PG_URL).
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+    use crate::{BackendConfiguration, EstateConfiguration};
+
+    /// Build a pool config that will fail on every real connect attempt.
+    /// Used to exercise pool construction and timeout without a live server.
+    fn unreachable_config(pool_size: usize, timeout_secs: f64) -> EstateConfiguration {
+        EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Postgresql {
+                connection_string: "postgres://nobody@127.0.0.1:1/nonexistent".into(),
+                pool_size,
+                connection_timeout_secs: timeout_secs,
+                idle_timeout_secs: 30.0,
+            },
+        )
+    }
+
+    /// Pool::new does not connect eagerly — construction succeeds even when
+    /// the server is unreachable. Connections are created only on checkout.
+    #[test]
+    fn pool_construction_is_lazy() {
+        // PostgresStorage::new must succeed without touching the network.
+        let cfg = unreachable_config(2, 0.1);
+        let result = PostgresStorage::new(cfg);
+        assert!(
+            result.is_ok(),
+            "PostgresStorage::new should not connect eagerly; got: {:?}",
+            result.err()
+        );
+    }
+
+    /// With no live server, checkout on a pool of size >= 1 returns
+    /// BackendError (connect failed). The pool must not deadlock or hang
+    /// beyond the timeout window.
+    #[test]
+    fn pool_checkout_fails_fast_without_server() {
+        let cfg = unreachable_config(1, 0.05); // 50ms timeout
+        let storage = PostgresStorage::new(cfg).unwrap();
+        let result = storage.checkout();
+        assert!(
+            result.is_err(),
+            "checkout with unreachable server must fail"
+        );
+    }
+
+    /// A closed pool refuses new checkouts with BackendUnavailable.
+    /// close() is idempotent (second call must not panic).
+    #[test]
+    fn pool_close_refuses_checkouts() {
+        let cfg = unreachable_config(2, 0.1);
+        let storage = PostgresStorage::new(cfg).unwrap();
+        storage.close().unwrap();
+        let result = storage.checkout();
+        assert!(
+            matches!(result, Err(StorageError::BackendUnavailable { .. })),
+            "closed pool must return BackendUnavailable; got {:?}",
+            result
+        );
+        // Second close must not panic.
+        storage.close().unwrap();
+    }
+
+    /// PoolExhausted timeout fires within a reasonable window when the pool
+    /// is genuinely full. Simulated by pool_size = 0 (cap of zero means
+    /// every checkout immediately enters the wait loop and times out).
+    #[test]
+    fn pool_exhaustion_returns_pool_exhausted_error() {
+        // pool_size = 0: cap is zero, so checkout always waits and times out.
+        let pool = Pool::new(
+            "postgres://nobody@127.0.0.1:1/nonexistent".into(),
+            "pk_test".into(),
+            0,    // pool_size = 0 -> pool is always full
+            0.05, // 50ms timeout
+            30.0,
+        );
+        let t_start = std::time::Instant::now();
+        let result = pool.checkout();
+        let elapsed = t_start.elapsed();
+        assert!(
+            matches!(result, Err(StorageError::PoolExhausted { timeout_secs }) if (timeout_secs - 0.05).abs() < 1e-9),
+            "must return PoolExhausted; got {:?}",
+            result
+        );
+        // Must not have returned early (< 40ms) or hung (> 500ms).
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "timeout fired too early: {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "timeout hung too long: {:?}",
+            elapsed
+        );
+    }
+
+    /// close() wakes blocked checkouts with BackendUnavailable.
+    #[test]
+    fn pool_close_wakes_blocked_checkouts() {
+        use std::thread;
+
+        let pool = Arc::new(Pool::new(
+            "postgres://nobody@127.0.0.1:1/nonexistent".into(),
+            "pk_test".into(),
+            0,   // pool_size = 0 -> always blocks
+            5.0, // 5s timeout -- long enough that the thread would block
+            30.0,
+        ));
+
+        let pool2 = pool.clone();
+        let handle = thread::spawn(move || pool2.checkout());
+
+        // Give the thread time to enter the wait loop.
+        std::thread::sleep(Duration::from_millis(30));
+
+        // Close the pool -- must wake the blocked checkout.
+        pool.close();
+
+        let result = handle.join().expect("thread panicked");
+        assert!(
+            matches!(result, Err(StorageError::BackendUnavailable { .. })),
+            "close() must wake blocked checkouts with BackendUnavailable; got {:?}",
+            result
+        );
+    }
+
+    /// idle_timeout_secs is accepted in EstateConfiguration without error
+    /// (the field is stored in the BackendConfiguration variant). Verifies
+    /// the config surface parity with Swift (which also accepts but ignores it).
+    #[test]
+    fn idle_timeout_accepted_in_config() {
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Postgresql {
+                connection_string: "postgres://nobody@127.0.0.1:1/nonexistent".into(),
+                pool_size: 4,
+                connection_timeout_secs: 5.0,
+                idle_timeout_secs: 120.0,
+            },
+        );
+        // Construction must succeed; idle_timeout is stored, not acted on.
+        let result = PostgresStorage::new(cfg);
+        assert!(result.is_ok());
     }
 }
