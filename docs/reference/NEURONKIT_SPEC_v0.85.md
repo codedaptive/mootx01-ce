@@ -485,6 +485,17 @@ importing new math into NeuronKit.
 
 ## § 9 — Conformance requirements
 
+**C-0 (lens shared-vector gate):** every reasoning-lens operation in
+§ 7 must reproduce, bit-for-bit, the expected outputs recorded in the
+single shared artifact
+`Tests/NeuronKitTests/Fixtures/lens_vectors.json`. Both versions read
+that one file (Swift `LensVectorConformanceTests`, Rust
+`rust/tests/lens_conformance.rs`); floats travel as bit-pattern hex so
+equality is exact. The artifact is re-recorded only from the Swift
+version (the design surface) after a deliberate behavioral change — a
+verify-mode mismatch is a cross-version drift signal, never something
+to silence by re-recording.
+
 **C-1 (dreaming cadence):** the dreaming daemon fires a cycle once its
 configured `tickIntervalMs` has elapsed since the last tick (the spec's
 ±10% jitter tolerance is satisfied exactly: the scheduler fires as soon

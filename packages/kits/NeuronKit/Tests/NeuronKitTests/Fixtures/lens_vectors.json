@@ -1,0 +1,739 @@
+{
+  "anomalies" : [
+    {
+      "flagged" : [
+        {
+          "index" : 4,
+          "zScore" : "0x40000000"
+        }
+      ],
+      "threshold" : "0x3fc00000",
+      "values" : [
+        "0x41200000",
+        "0x41200000",
+        "0x41200000",
+        "0x41200000",
+        "0x42c80000"
+      ]
+    },
+    {
+      "flagged" : [
+        {
+          "index" : 4,
+          "zScore" : "0xbffe3ecf"
+        }
+      ],
+      "threshold" : "0x3fc00000",
+      "values" : [
+        "0x41100000",
+        "0x41200000",
+        "0x41100000",
+        "0x41200000",
+        "0x00000000"
+      ]
+    }
+  ],
+  "anticipate" : [
+    {
+      "k" : 5,
+      "minObservations" : 1,
+      "observations" : [
+        {
+          "action" : 0,
+          "outcome" : 1,
+          "success" : true
+        },
+        {
+          "action" : 0,
+          "outcome" : 1,
+          "success" : true
+        },
+        {
+          "action" : 0,
+          "outcome" : 1,
+          "success" : true
+        },
+        {
+          "action" : 0,
+          "outcome" : 1,
+          "success" : false
+        },
+        {
+          "action" : 1,
+          "outcome" : 1,
+          "success" : true
+        },
+        {
+          "action" : 1,
+          "outcome" : 1,
+          "success" : false
+        },
+        {
+          "action" : 1,
+          "outcome" : 1,
+          "success" : false
+        },
+        {
+          "action" : 1,
+          "outcome" : 1,
+          "success" : false
+        }
+      ],
+      "predictions" : [
+        {
+          "action" : 0,
+          "count" : 4,
+          "successRate" : "0x3e99ecf7"
+        },
+        {
+          "action" : 1,
+          "count" : 4,
+          "successRate" : "0x3d3ab872"
+        }
+      ],
+      "targetOutcome" : 1
+    }
+  ],
+  "constellations" : [
+    {
+      "communities" : [
+        [
+          "A1",
+          "A2",
+          "A3"
+        ],
+        [
+          "B1",
+          "B2",
+          "B3"
+        ]
+      ],
+      "edges" : [
+        [
+          "A1",
+          "A2"
+        ],
+        [
+          "A1",
+          "A3"
+        ],
+        [
+          "A2",
+          "A3"
+        ],
+        [
+          "B1",
+          "B2"
+        ],
+        [
+          "B1",
+          "B3"
+        ],
+        [
+          "B2",
+          "B3"
+        ]
+      ],
+      "maxPasses" : 10,
+      "nodeIDs" : [
+        "A1",
+        "A2",
+        "A3",
+        "B1",
+        "B2",
+        "B3"
+      ]
+    }
+  ],
+  "drift" : [
+    {
+      "jensenShannon" : "0x00000000",
+      "klDivergence" : "0x00000000",
+      "p" : [
+        "0x3f000000",
+        "0x3e99999a",
+        "0x3e4ccccd"
+      ],
+      "q" : [
+        "0x3f000000",
+        "0x3e99999a",
+        "0x3e4ccccd"
+      ]
+    },
+    {
+      "jensenShannon" : "0x3ee4e60a",
+      "klDivergence" : "0x40066667",
+      "p" : [
+        "0x3f4ccccd",
+        "0x3dcccccd",
+        "0x3dcccccd"
+      ],
+      "q" : [
+        "0x3dcccccd",
+        "0x3dcccccd",
+        "0x3f4ccccd"
+      ]
+    }
+  ],
+  "keystones" : [
+    {
+      "edges" : [
+        [
+          "hub",
+          "s1"
+        ],
+        [
+          "hub",
+          "s2"
+        ],
+        [
+          "hub",
+          "s3"
+        ],
+        [
+          "hub",
+          "s4"
+        ]
+      ],
+      "nodeIDs" : [
+        "hub",
+        "s1",
+        "s2",
+        "s3",
+        "s4"
+      ],
+      "ranked" : [
+        {
+          "centrality" : "0x3fe6a09eb5ddfeb7",
+          "id" : "hub"
+        },
+        {
+          "centrality" : "0x3fd6a09e172077cc",
+          "id" : "s1"
+        },
+        {
+          "centrality" : "0x3fd6a09e172077cc",
+          "id" : "s2"
+        },
+        {
+          "centrality" : "0x3fd6a09e172077cc",
+          "id" : "s3"
+        },
+        {
+          "centrality" : "0x3fd6a09e172077cc",
+          "id" : "s4"
+        }
+      ],
+      "topK" : 5
+    },
+    {
+      "edges" : [
+        [
+          "a",
+          "b"
+        ],
+        [
+          "a",
+          "bridge"
+        ],
+        [
+          "b",
+          "bridge"
+        ],
+        [
+          "bridge",
+          "c"
+        ],
+        [
+          "bridge",
+          "d"
+        ],
+        [
+          "c",
+          "d"
+        ]
+      ],
+      "nodeIDs" : [
+        "a",
+        "b",
+        "bridge",
+        "c",
+        "d"
+      ],
+      "ranked" : [
+        {
+          "centrality" : "0x3fe3b174d17a79c4",
+          "id" : "bridge"
+        },
+        {
+          "centrality" : "0x3fd938fab5d5d133",
+          "id" : "a"
+        },
+        {
+          "centrality" : "0x3fd938fab5d5d133",
+          "id" : "b"
+        },
+        {
+          "centrality" : "0x3fd938fab5d5d133",
+          "id" : "c"
+        },
+        {
+          "centrality" : "0x3fd938fab5d5d133",
+          "id" : "d"
+        }
+      ],
+      "topK" : 5
+    }
+  ],
+  "latentThemes" : [
+    {
+      "cooccurrence" : [
+        {
+          "labelA" : "a1",
+          "labelB" : "a2",
+          "weight" : "0x4014000000000000"
+        },
+        {
+          "labelA" : "a1",
+          "labelB" : "a3",
+          "weight" : "0x4014000000000000"
+        },
+        {
+          "labelA" : "a2",
+          "labelB" : "a3",
+          "weight" : "0x4014000000000000"
+        },
+        {
+          "labelA" : "b1",
+          "labelB" : "b2",
+          "weight" : "0x4014000000000000"
+        },
+        {
+          "labelA" : "b1",
+          "labelB" : "b3",
+          "weight" : "0x4014000000000000"
+        },
+        {
+          "labelA" : "b2",
+          "labelB" : "b3",
+          "weight" : "0x4014000000000000"
+        }
+      ],
+      "k" : 2,
+      "labels" : [
+        "a1",
+        "a2",
+        "a3",
+        "b1",
+        "b2",
+        "b3"
+      ],
+      "loadings" : [
+        {
+          "dominantTheme" : 0,
+          "label" : "a1",
+          "loadings" : [
+            "0x3feabf13d47ab78d",
+            "0x3ee4af3464c0bab1"
+          ]
+        },
+        {
+          "dominantTheme" : 0,
+          "label" : "a2",
+          "loadings" : [
+            "0x3feabf11b9c5b39b",
+            "0x3eec09d4ba9c6a03"
+          ]
+        },
+        {
+          "dominantTheme" : 0,
+          "label" : "a3",
+          "loadings" : [
+            "0x3feabf095cb6b412",
+            "0x3ef8549fbf0ed01c"
+          ]
+        },
+        {
+          "dominantTheme" : 1,
+          "label" : "b1",
+          "loadings" : [
+            "0x04c87080e04b4a84",
+            "0x3ff09bfd1b9f8c94"
+          ]
+        },
+        {
+          "dominantTheme" : 1,
+          "label" : "b2",
+          "loadings" : [
+            "0x0616f13cb4c1b2df",
+            "0x3ff09bfaf7ab5cdf"
+          ]
+        },
+        {
+          "dominantTheme" : 1,
+          "label" : "b3",
+          "loadings" : [
+            "0x05e89806275258e3",
+            "0x3ff09bfbeb8cb9e5"
+          ]
+        }
+      ],
+      "reconstructionError" : "0x405900000060aded",
+      "resultK" : 2,
+      "seed" : 42
+    }
+  ],
+  "learnedPreference" : [
+    {
+      "records" : [
+        {
+          "dismissals" : 0,
+          "endorsements" : 3,
+          "label" : "kept"
+        },
+        {
+          "dismissals" : 0,
+          "endorsements" : 0,
+          "label" : "untouched"
+        },
+        {
+          "dismissals" : 3,
+          "endorsements" : 0,
+          "label" : "dropped"
+        }
+      ],
+      "strengths" : [
+        {
+          "confidenceHigh" : "0x400c9f023b580c63",
+          "confidenceLow" : "0xbfe9c2fcf3b7b6de",
+          "dismissals" : 0,
+          "endorsements" : 3,
+          "label" : "kept",
+          "strength" : "0x3ff62e42fe6a1eab"
+        },
+        {
+          "confidenceHigh" : "0x40062cc4315a12b0",
+          "confidenceLow" : "0xc0062cc431246cc2",
+          "dismissals" : 0,
+          "endorsements" : 0,
+          "label" : "untouched",
+          "strength" : "0x3e0ad2f67fb6981e"
+        },
+        {
+          "confidenceHigh" : "0x3fe9c2fcf364780c",
+          "confidenceLow" : "0xc00c9f023bbcba9c",
+          "dismissals" : 3,
+          "endorsements" : 0,
+          "label" : "dropped",
+          "strength" : "0xbff62e42fee39c9a"
+        }
+      ]
+    }
+  ],
+  "mindOverlap" : [
+    {
+      "delta" : "0x3eb0c6f7a0b5ed8d",
+      "epsilon" : "0x4014000000000000",
+      "fingerprintsA" : [
+        [
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0xffffffffffffffff",
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ],
+      "fingerprintsB" : [
+        [
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0xffffffffffffffff",
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ],
+      "kAnonymity" : 1,
+      "overlap" : "0x3ff0000000000000",
+      "seed" : 43981,
+      "summaryA" : [
+        "0xffffffffffffffff",
+        "0x8ed39d443ab9f07d",
+        "0x0000000000000000",
+        "0x0000000000000000"
+      ],
+      "summaryB" : [
+        "0xffffffffffffffff",
+        "0x8ed39d443ab9f07d",
+        "0x0000000000000000",
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "delta" : "0x3eb0c6f7a0b5ed8d",
+      "epsilon" : "0x4020000000000000",
+      "fingerprintsA" : [
+        [
+          "0xffffffffffffffff",
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ],
+      "fingerprintsB" : [
+        [
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0xffffffffffffffff",
+          "0xffffffffffffffff"
+        ]
+      ],
+      "kAnonymity" : 1,
+      "overlap" : "0x3fe1555555555556",
+      "seed" : 17,
+      "summaryA" : [
+        "0x4556d1be68916281",
+        "0x89a734bca6fa1b0c",
+        "0x0000000000000000",
+        "0x0000000000000000"
+      ],
+      "summaryB" : [
+        "0x0000000000000000",
+        "0x0000000000000000",
+        "0x6a89fd1be820c387",
+        "0x41a358ace10ed632"
+      ]
+    }
+  ],
+  "partialRecall" : [
+    {
+      "anchor" : [
+        "0xffffffffffffffff",
+        "0x0000000000000000",
+        "0x0000000000000000",
+        "0x0000000000000000"
+      ],
+      "differBlocks" : [
+        1
+      ],
+      "k" : 2,
+      "matchBlocks" : [
+        0
+      ],
+      "matches" : [
+        {
+          "row" : 0,
+          "score" : "0x3ff0000000000000"
+        },
+        {
+          "row" : 1,
+          "score" : "0x0000000000000000"
+        }
+      ],
+      "rows" : [
+        [
+          "0xffffffffffffffff",
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ]
+    },
+    {
+      "anchor" : [
+        "0xffffffffffffffff",
+        "0xffffffffffffffff",
+        "0x0000000000000000",
+        "0x0000000000000000"
+      ],
+      "differBlocks" : [
+        0
+      ],
+      "k" : 1,
+      "matchBlocks" : [
+        1
+      ],
+      "matches" : [
+        {
+          "row" : 0,
+          "score" : "0x3ff0000000000000"
+        }
+      ],
+      "rows" : [
+        [
+          "0x0000000000000000",
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0xffffffffffffffff",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ]
+    }
+  ],
+  "representationBias" : [
+    {
+      "biases" : [
+        {
+          "bias" : "0x3fdddddddddddddf",
+          "estateShare" : "0x3fe999999999999a",
+          "label" : "philosophy",
+          "referenceShare" : "0x3fd5555555555555"
+        },
+        {
+          "bias" : "0xbfc1111111111110",
+          "estateShare" : "0x3fc999999999999a",
+          "label" : "cooking",
+          "referenceShare" : "0x3fd5555555555555"
+        },
+        {
+          "bias" : "0xbfd5555555555555",
+          "estateShare" : "0x0000000000000000",
+          "label" : "finance",
+          "referenceShare" : "0x3fd5555555555555"
+        }
+      ],
+      "estate" : [
+        {
+          "label" : "philosophy",
+          "mass" : "0x4010000000000000"
+        },
+        {
+          "label" : "cooking",
+          "mass" : "0x3ff0000000000000"
+        }
+      ],
+      "reference" : [
+        {
+          "label" : "philosophy",
+          "mass" : "0x3ff0000000000000"
+        },
+        {
+          "label" : "cooking",
+          "mass" : "0x3ff0000000000000"
+        },
+        {
+          "label" : "finance",
+          "mass" : "0x3ff0000000000000"
+        }
+      ]
+    }
+  ],
+  "shingleSimilarity" : [
+    {
+      "a" : "the organic chemistry of carbon",
+      "b" : "carbon-based organic compounds",
+      "similarity" : "0x3e888889"
+    },
+    {
+      "a" : "organic chemistry",
+      "b" : "organic chemistry",
+      "similarity" : "0x3f800000"
+    },
+    {
+      "a" : "abcdef",
+      "b" : "ghijkl",
+      "similarity" : "0x00000000"
+    }
+  ],
+  "spreadingActivation" : [
+    {
+      "activations" : [
+        {
+          "activation" : "0x3fdd78d4fdf3b646",
+          "node" : 1
+        },
+        {
+          "activation" : "0x3fc90624dd2f1aa0",
+          "node" : 2
+        }
+      ],
+      "adjacency" : [
+        [
+          {
+            "node" : 1,
+            "weight" : "0x3ff0000000000000"
+          }
+        ],
+        [
+          {
+            "node" : 0,
+            "weight" : "0x3ff0000000000000"
+          },
+          {
+            "node" : 2,
+            "weight" : "0x3ff0000000000000"
+          }
+        ],
+        [
+          {
+            "node" : 1,
+            "weight" : "0x3ff0000000000000"
+          }
+        ],
+        [
+          {
+            "node" : 4,
+            "weight" : "0x3ff0000000000000"
+          }
+        ],
+        [
+          {
+            "node" : 3,
+            "weight" : "0x3ff0000000000000"
+          }
+        ]
+      ],
+      "k" : 10,
+      "restartProb" : "0x3fc3333333333333",
+      "rngSeed" : 11259375,
+      "seed" : 0,
+      "walkLength" : 20000
+    }
+  ],
+  "themeWeather" : [
+    {
+      "categories" : [
+        {
+          "category" : "rising",
+          "rawCount" : "0x4024000000000000",
+          "weightedMass" : "0x4022000000000000"
+        },
+        {
+          "category" : "fading",
+          "rawCount" : "0x4024000000000000",
+          "weightedMass" : "0x3ff0000000000000"
+        }
+      ],
+      "momenta" : [
+        {
+          "category" : "rising",
+          "momentum" : "0x3fd999999999999a"
+        },
+        {
+          "category" : "fading",
+          "momentum" : "0xbfd999999999999a"
+        }
+      ]
+    }
+  ]
+}
