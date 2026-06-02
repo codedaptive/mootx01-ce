@@ -119,6 +119,9 @@ pub fn mine_association_rules(
     active_row_count: i64,
     thresholds: MiningThresholds,
 ) -> Vec<AssociationRule> {
+    // Two-pass over the same canonical scan, kept in one body so the
+    // conformance-critical control flow (guard order, gate order,
+    // emission order) reads top to bottom in both ports.
     // N <= 0: no population to measure support against.
     if active_row_count <= 0 {
         return Vec::new();
