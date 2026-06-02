@@ -238,9 +238,11 @@ binding; the catalog descriptor matches the Swift values (§ 7).
 
 The fourteen lens recipes. **Rust signatures are shipped** in
 `packages/kits/CognitionKit/rust/src/*_recipe.rs`. The **Swift versions are
-the contracted target (SPEC C-7) and are not yet authored** — each must be
-written before its lens can graduate into the catalog (SPEC § 8). They are
-listed here as the surface both versions must converge on.
+the contracted target (SPEC C-7)** and land lens by lens — each category
+below notes which Swift versions are shipped (in
+`Sources/CognitionKit/`); the rest are not yet authored. Both versions of
+a lens must exist before it can graduate into the catalog (SPEC § 8). The
+signatures are listed here as the surface both versions must converge on.
 
 Every lens `run_*` takes the estate coordinator and handle, a recall frame
 or wing/anchor, lens-specific parameters, and (where it recalls) a `now`;
@@ -248,6 +250,8 @@ each returns its reasoning result or a `RecipeRunError` (read-only;
 SPEC § 5, I-6).
 
 ### Structure (category 1)
+
+Swift versions shipped: `Keystones`, `Constellation`, `FreeAssociation`.
 
 ```rust
 pub fn run_keystones(
@@ -337,6 +341,8 @@ pub fn run_partial_cue_recall(
 ```
 
 ### Prediction (category 8)
+
+Swift versions shipped: `TunnelSuccessor`.
 
 ```rust
 pub fn run_anticipate(
