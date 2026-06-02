@@ -733,253 +733,216 @@ Higher-level filter handles compile to short sequences of these primitives.
 
 ### 7.8 Kit interface methods
 
-The kit publishes the following Swift handles. Method signatures use `async throws` where appropriate; error types are the categories from § 8.1. Type names are spec-canonical; an implementation may use different surface names provided the semantics are equivalent.
+This section defines the kit's operations and value types as a language-agnostic contract: the operations, their inputs, their results, and their semantics. The idiomatic per-language bindings — the actual Swift and Rust signatures — live in `GENIUSLOCUSKIT_INTERFACE_v0.8.md`. Error categories are from § 8.1. Type names are spec-canonical; an implementation may use different surface names provided the semantics are equivalent. The substrate prescribes no specific API object shape: whether a binding models the connection as an actor, a handle, or a handle-plus-coordinator is a binding choice, not part of this contract.
 
-#### 7.8.1 Estate (top-level handle)
+#### 7.8.1 Estate connection (top-level)
 
-An `Estate` is the application's connection to a single GeniusLocus. Opening an estate loads the manifest and validates bitmap-layout-version compatibility. Closing flushes pending writes.
+An estate connection is the application's link to a single GeniusLocus. Opening an estate loads the manifest and validates bitmap-layout-version compatibility; closing flushes pending writes.
 
-```swift
-public actor Estate {
-    public static func open(
-        path: URL,
-        owner: OwnerCredentials
-    ) async throws -> Estate
+**Lifecycle operations**
 
-    public static func create(
-        path: URL,
-        owner: OwnerCredentials,
-        manifest: ManifestValues
-    ) async throws -> Estate
+| Operation | Inputs | Result | Notes |
+|---|---|---|---|
+| open | estate location, owner credentials | open connection | loads and validates the manifest |
+| create | estate location, owner credentials, manifest values | open connection | initializes a new estate |
+| close | — | — | flushes pending writes |
+| manifest | — | manifest values | current estate configuration |
+| estate identifier | — | estate UUID | stable estate identity |
 
-    public func close() async throws
+**Verb operations** — the nine verbs (§ 4.2). Frames are defined in § 7.8.3; the verb-noun acceptance matrix is § 7.2; flow classes are § 4.3.
 
-    public var manifest: ManifestValues { get async }
-    public var estateUUID: UUID { get }
-
-    // The nine verbs
-    public func capture(_ frame: CaptureFrame) async throws -> Drawer
-    public func reanchor(_ rowID: RowID, to: ReanchorTarget) async throws
-    public func mutate(_ rowID: RowID, kind: MutationKind, payload: MutationPayload?) async throws
-    public func withdraw(_ rowID: RowID, reason: String?) async throws
-    public func expunge(_ rowID: RowID, reason: String, confirmation: ExpungeConfirmation) async throws
-    public func recall(_ frame: RecallFrame) -> RecallStream
-    public func learn(_ frame: LearnFrame) async throws -> LearnedReference
-
-    // propose and associate are substrate-emitted (§ 4.3); applications subscribe via the standing-signals API
-
-    // Estate-level computations
-    public func latticeFootprint() async throws -> LatticeFootprint
-    public func fingerprint(scope: FingerprintScope) async throws -> Int64
-    public func diversityScore(scope: FingerprintScope) async throws -> Int
-}
-```
+| Verb | Input | Result | Flow |
+|---|---|---|---|
+| capture | CaptureFrame | the created Drawer | caller-driven |
+| reanchor | row + reanchor target | acknowledgement | caller-driven |
+| mutate | row + MutationKind (+ payload) | acknowledgement | caller-driven |
+| withdraw | row (+ reason) | acknowledgement | caller-driven |
+| expunge | row + reason + confirmation | acknowledgement | caller-driven |
+| recall | RecallFrame | a paged row result (§ 7.8.4) | caller-driven |
+| learn | LearnFrame | the created LearnedReference | grounding-driven |
+| propose | — | substrate-emitted (§ 4.3); consumed via the standing-signals API (§ 7.8.5) | substrate-driven |
+| associate | — | substrate-emitted (§ 4.3); consumed via the standing-signals API (§ 7.8.5) | substrate-driven |
 
 #### 7.8.2 Drawer, Tunnel, KGFact, LearnedReference (row handles)
 
-Row handles expose the row's bitmap state, structured-row fields, and (on demand) blob content. Row handles are read-only views; mutations go through the Estate's verbs.
+Row handles expose the row's bitmap state, structured-row fields, and (on demand) blob content. Row handles are read-only views; mutations go through the verbs. Every row carries the three Int64 bitmap columns (§ 5.4) — `adjective`, `operational`, `provenance` — and creation/update timestamps stored as ISO8601 text (§ 5). Field-level adjective accessors (`state`, `trust`, `sensitivity`, `exportability`) are derived from the adjective bitmap (§ 5.5); a caller never reads bitmap integers directly (§ 7.9).
 
-```swift
-public struct Drawer {
-    public let rowID: RowID
-    public let lineageID: LineageID
-    public let adjectiveBitmap: Int64
-    public let operationalBitmap: Int64
-    public let provenanceBitmap: Int64
-    public let createdAt: Date
-    public let updatedAt: Date
-    public let latticeAnchor: LatticeAnchor
+**Drawer** — the primary content row.
 
-    // On-demand hydration
-    public func content() async throws -> String   // verbatim, rung 1
-    public func kgFacts() async throws -> [KGFact] // rung 1.5
-    public func precis() async throws -> String?   // rung 2
-    public func vector() async throws -> Vector?   // rung 3
-    public func theme() async throws -> String?    // rung 4
-    public func laneTag() async throws -> String?  // rung 5
+| Field | Meaning |
+|---|---|
+| row identifier | the row's stable ID |
+| lineage identifier | groups versions of the same content (§ I-1) |
+| adjective / operational / provenance bitmaps | the three Int64 columns (§ 5.4) |
+| created / updated timestamps | ISO8601 text |
+| lattice anchor | UDC code (+ optional Wikidata Q-ID) (§ 5.8) |
 
-    // Field-level accessors derived from bitmaps
-    public var state: State { get }
-    public var trust: Trust { get }
-    public var sensitivity: Sensitivity { get }
-    public var exportability: Exportability { get }
-}
+On-demand hydration yields the six rungs (Appendix E): verbatim content (rung 1), KG facts (rung 1.5), précis (rung 2), vector (rung 3), theme (rung 4), lane tag (rung 5). The précis, vector, theme, and lane forms may be absent until enrichment produces them.
 
-public struct Tunnel {
-    public let tunnelID: TunnelID
-    public let source: RowID
-    public let target: RowID
-    public let kind: TunnelKind
-    public let adjectiveBitmap: Int64
-    public let operationalBitmap: Int64
-    public let provenanceBitmap: Int64
-    public let createdAt: Date
-}
+**Tunnel** — a directional or bidirectional relationship between two rows.
 
-public struct KGFact {
-    public let rowID: RowID
-    public let subject: String
-    public let predicate: String
-    public let object: String
-    public let sourceDrawer: RowID
-    public let adjectiveBitmap: Int64
-    public let operationalBitmap: Int64
-    public let provenanceBitmap: Int64
-}
+| Field | Meaning |
+|---|---|
+| tunnel identifier | the tunnel's stable ID |
+| source, target | the two related rows |
+| kind | the relationship kind (Appendix A) |
+| adjective / operational / provenance bitmaps | the three Int64 columns |
+| created timestamp | ISO8601 text |
 
-public struct LearnedReference {
-    public let rowID: RowID
-    public let source: SourceCatalogEntry
-    public let handle: String
-    public let mode: LearnMode
-    public let adjectiveBitmap: Int64
-    public let operationalBitmap: Int64
-    public let provenanceBitmap: Int64
-}
-```
+**KGFact** — a subject-predicate-object triple (rung 1.5).
+
+| Field | Meaning |
+|---|---|
+| row identifier | the fact's stable ID |
+| subject, predicate, object | the triple |
+| source drawer | the drawer the fact was extracted from |
+| adjective / operational / provenance bitmaps | the three Int64 columns |
+
+**LearnedReference** — a canonical external reference brought in via `learn`.
+
+| Field | Meaning |
+|---|---|
+| row identifier | the reference's stable ID |
+| source | the source-catalog entry (Appendix B) |
+| handle | the reference's identifier within that source |
+| mode | the learn mode (e.g. by-reference) |
+| adjective / operational / provenance bitmaps | the three Int64 columns |
 
 #### 7.8.3 Frames
 
 Frames are value types carrying a verb's slots (§ 7.1). They are built by the application and passed to the corresponding verb method.
 
-```swift
-public struct CaptureFrame {
-    public var content: String
-    public var channel: CaptureChannel
-    public var sensitivity: Sensitivity = .normal
-    public var kind: ContentKind = .prose
-    public var lineageID: LineageID? = nil      // present ⇒ supersedes prior version
-    public var room: RoomID
-    public var latticeAnchor: LatticeAnchor
-}
+**CaptureFrame**
 
-public struct RecallFrame {
-    public var filterChain: [Filter]            // at least one
-    public var hydrationLevel: HydrationLevel = .structured
-    public var limit: Int? = nil
-    public var ordering: Ordering = .byCaptureTimeDesc
-    public var asOf: Date? = nil                // historical reconstruction (§ 6.8)
-}
+| Slot | Domain | Default | Notes |
+|---|---|---|---|
+| content | text | — | the verbatim content |
+| channel | capture channel (Appendix F) | — | how the content was captured |
+| sensitivity | sensitivity value | normal | — |
+| kind | content kind (Appendix G) | prose | — |
+| lineage identifier | optional | absent | present ⇒ supersedes the prior version |
+| room | room identifier | — | placement |
+| lattice anchor | UDC (+ optional Q-ID) | — | § 5.8 |
 
-public struct LearnFrame {
-    public var source: SourceCatalogEntry
-    public var handle: String
-    public var mode: LearnMode = .byReference
-    public var refreshPolicy: RefreshPolicy = .weekly
-}
+**RecallFrame**
 
-public enum MutationKind {
-    case confirm, reject, contest, resolve, supersede, revive, accept
-    case correctSensitivity(Sensitivity)
-    case correctTrust(Trust)
-}
-```
+| Slot | Domain | Default | Notes |
+|---|---|---|---|
+| filter chain | ordered list of filters (§ 7.9.1) | — | at least one; interpreted as a top-level conjunction (§ 7.9.1) |
+| hydration level | structured / full / bitmap-only | structured | — |
+| limit | optional count | none | — |
+| ordering | ordering mode | by-capture-time descending | — |
+| as-of | optional timestamp | absent | historical reconstruction (§ 6.8) |
 
-`MutationKind` cases are named operations. Callers do not pass bitmap fields or values; they pass intent (`.confirm`, `.contest`, `.correctSensitivity(.elevated)`). The evaluator translates intent into bitmap mutations.
+**LearnFrame**
 
-#### 7.8.4 RecallStream
+| Slot | Domain | Default | Notes |
+|---|---|---|---|
+| source | source-catalog entry (Appendix B) | — | — |
+| handle | identifier within the source | — | — |
+| mode | learn mode | by-reference | — |
+| refresh policy | refresh cadence | weekly | — |
 
-`recall` returns a `RecallStream`: an async sequence of pages of row handles. The first page is synchronous (§ 7.4); subsequent pages are produced on demand.
+**MutationKind** — named mutation operations carried by `mutate`. Two kinds carry an axis value; the rest are bare:
 
-```swift
-public struct RecallStream: AsyncSequence {
-    public typealias Element = RecallPage
+| Kind | Argument | Semantics |
+|---|---|---|
+| confirm, reject, contest, resolve, supersede, revive, accept | — | named state/provenance transitions (§ 6.2) |
+| correct-sensitivity | a sensitivity value | re-set the sensitivity axis |
+| correct-trust | a trust value | re-set the trust axis |
 
-    public func makeAsyncIterator() -> AsyncIterator
+`MutationKind` values are named operations. Callers do not pass bitmap fields or values; they pass intent (confirm, contest, correct-sensitivity(elevated)). The evaluator translates intent into bitmap mutations.
 
-    public struct RecallPage {
-        public let rows: [Drawer]                // or [Tunnel], [KGFact], etc., per recall scope
-        public let pageIndex: Int
-        public let isLast: Bool
-    }
-}
-```
+#### 7.8.4 Recall result
 
-A caller wanting all results across pages collects them; a caller wanting just the first page reads `iterator.next()` once and stops.
+`recall` returns a paged sequence of row handles. The contract: the first page is available synchronously (§ 7.4); subsequent pages are produced on demand. Each page carries:
+
+| Field | Meaning |
+|---|---|
+| rows | the page's row handles (Drawers, or Tunnels / KGFacts etc. per recall scope) |
+| page index | the page's position in the sequence |
+| is-last | whether this is the final page |
+
+How a binding surfaces the paging is a binding choice — an async sequence of pages (so a caller can stop after the first page) or a materialized collection are both conforming, provided the first page is available synchronously and later pages are not computed until requested.
 
 #### 7.8.5 Standing-signals API
 
 Applications register custom signals, inspect signal status, and subscribe to emissions.
 
-```swift
-public extension Estate {
-    func registerStandingSignal(_ spec: SignalSpec) async throws -> SignalID
-    func signalStatus() async throws -> [SignalReport]
-    func signalSubscribe(_ signalID: SignalID, callback: @escaping (SignalEmission) -> Void) async throws
-    func signalUnsubscribe(_ signalID: SignalID) async throws
-}
+**Operations**
 
-public struct SignalSpec {
-    public var name: String
-    public var trigger: SignalTrigger      // .event, .interval(seconds), .condition(predicate)
-    public var resourceCost: ResourceCostEstimate
-    public var freshnessTarget: TimeInterval
-    public var concurrencyPolicy: ConcurrencyPolicy
-    public var emit: (SignalContext) async -> [SignalEmission]
-}
+| Operation | Inputs | Result |
+|---|---|---|
+| register standing signal | a signal spec | a signal identifier |
+| signal status | — | per-signal status reports |
+| signal subscribe | a signal identifier + an emission callback | — |
+| signal unsubscribe | a signal identifier | — |
 
-public enum SignalEmission {
-    case propose(ProposalFrame)
-    case associate(AssociationFrame)
-    case mutateCandidate(rowID: RowID, kind: MutationKind)
-    case diagnostic(DiagnosticReport)
-}
-```
+**Signal spec** — the declaration registered for a standing signal:
 
-#### 7.8.6 Migration API (MemPalace replacement)
+| Slot | Domain | Notes |
+|---|---|---|
+| name | text | — |
+| trigger | event / interval(seconds) / condition(predicate) | when the signal fires |
+| resource cost | cost estimate | scheduling budget |
+| freshness target | duration | acceptable staleness |
+| concurrency policy | concurrency mode | overlap behavior |
+| emit | a function from a signal context to a list of emissions | the signal's body |
 
-MemPalace migration is a native feature (§ 11 standing signals; § 15.1 kit composition). The migration API is exposed at the Estate level.
+**Signal emission** — what a fired signal produces (one of):
 
-```swift
-public extension Estate {
-    static func importFromMemPalace(
-        memPalaceExport: URL,
-        targetPath: URL,
-        owner: OwnerCredentials,
-        report: inout MigrationReport
-    ) async throws -> Estate
+| Emission | Payload | Maps to |
+|---|---|---|
+| propose | a proposal frame | the `propose` verb (§ 4.3) |
+| associate | an association frame | the `associate` verb (§ 4.3) |
+| mutate-candidate | a row + MutationKind | a suggested mutation |
+| diagnostic | a diagnostic report | an operational report |
 
-    func runParallel(
-        withMemPalace memPalaceConnection: MemPalaceConnection,
-        captureForwarding: ParallelCaptureMode
-    ) async throws -> ParallelRunHandle
+#### 7.8.6 Migration API
 
-    func verifyMigration(
-        against memPalaceExport: URL
-    ) async throws -> MigrationVerification
-}
+External-corpus migration is a native feature (§ 11 standing signals; § 15.1 kit composition). The migration operations are exposed at the estate level and ingest a source corpus through a neutral export format.
 
-public struct MigrationReport {
-    public var rowsImported: Int
-    public var rowsByNoun: [Noun: Int]
-    public var unmappedConcepts: [UnmappedConcept]   // never silent loss
-    public var warnings: [MigrationWarning]
-}
-```
+**Operations**
+
+| Operation | Inputs | Result |
+|---|---|---|
+| import-from-corpus | an external corpus export, a target estate location, owner credentials | a new estate + a migration report |
+| run-parallel | a live source connection, a capture-forwarding mode | a parallel-run handle |
+| verify-migration | an external corpus export to verify against | a migration verification |
+
+**Migration report**
+
+| Field | Meaning |
+|---|---|
+| rows imported | total rows imported |
+| rows by noun | per-noun import counts |
+| unmapped concepts | concepts that could not be mapped — **never silent loss** |
+| warnings | non-fatal migration warnings |
 
 #### 7.8.7 Audit and history
 
 Audit-row inspection and historical-state reconstruction.
 
-```swift
-public extension Estate {
-    func auditTrail(rowID: RowID) async throws -> [AuditRow]
-    func auditTrail(since: Date, until: Date?) async throws -> [AuditRow]
-    func bitmapState(rowID: RowID, at: Date) async throws -> BitmapState
-}
+**Operations**
 
-public struct AuditRow {
-    public let auditID: Int64
-    public let rowID: RowID
-    public let timestamp: Date
-    public let actor: AuditActor
-    public let beforeBitmap: Int64
-    public let afterBitmap: Int64
-    public let bitmapColumn: BitmapColumn   // .adjective, .operational, .provenance
-    public let reason: String
-    public let isTombstoned: Bool
-}
-```
+| Operation | Inputs | Result |
+|---|---|---|
+| audit trail (by row) | a row identifier | that row's audit rows |
+| audit trail (by time) | a since timestamp + optional until timestamp | audit rows in the window |
+| bitmap state at time | a row identifier + a timestamp | the row's reconstructed bitmap state at that time (§ 6.8) |
+
+**Audit row** — an immutable record of one bitmap mutation (§ I-2):
+
+| Field | Meaning |
+|---|---|
+| audit identifier | the audit row's ID |
+| row identifier | the row mutated |
+| timestamp | when (ISO8601 text) |
+| actor | who/what made the change |
+| before / after bitmap | the column's value before and after |
+| bitmap column | which column: adjective / operational / provenance |
+| reason | the recorded reason |
+| is-tombstoned | whether the audit row has been tombstoned (§ I-6) |
 
 #### 7.8.8 Method-level invariants
 
@@ -1002,76 +965,97 @@ The bitmap evaluator compiles a `RecallFrame.filterChain` into a sequence of ope
 
 #### 7.9.1 Filter algebra
 
-A `Filter` is one of:
+A filter is one of the named queries below. Each filter is either a bare named query or carries a domain-meaningful argument; **no filter takes a raw bit position, mask, or threshold integer**. The integers from §§ 5.5–5.7 are the evaluator's private translation table, not the caller's vocabulary.
 
-```swift
-public indirect enum Filter {
-    // State queries (named, not numeric)
-    case currentlyBelieve            // state-cluster know-now
-    case usedToBelieve               // state-cluster knew-past
-    case knewOnceAndErased           // state-cluster terminal
-    case state(State)                // exact state value, e.g. .active, .contested
-    case stateInCluster(StateCluster)
+**State queries**
 
-    // Trust queries
-    case trustworthy                 // default-served trust threshold
-    case requiresConfirmation        // trust above threshold
-    case trust(Trust)                // exact trust value, e.g. .verbatim, .canonical
-    case trustAtMost(Trust)
+| Filter | Argument | Semantics |
+|---|---|---|
+| currently-believe | — | state-cluster know-now |
+| used-to-believe | — | state-cluster knew-past |
+| knew-once-and-erased | — | state-cluster terminal |
+| state | a state value (e.g. active, contested) | exact state value |
+| state-in-cluster | a state cluster | membership in a cluster |
 
-    // Sensitivity queries
-    case sensitivity(Sensitivity)    // exact sensitivity value
-    case sensitivityAtMost(Sensitivity)
+**Trust queries**
 
-    // Exportability queries
-    case exportable                  // exportability == public
-    case private_                    // exportability == private
+| Filter | Argument | Semantics |
+|---|---|---|
+| trustworthy | — | at or below the default-served trust threshold |
+| requires-confirmation | — | trust above the threshold |
+| trust | a trust value (e.g. verbatim, canonical) | exact trust value |
+| trust-at-most | a trust value | trust no greater than the value |
 
-    // Provenance queries
-    case userConfirmed               // confirmation ≥ user_confirmed
-    case modelConfirmedOnly          // confirmation == model_confirmed (excludes user_confirmed)
-    case unconfirmed                 // confirmation == unconfirmed
-    case sourceType(SourceType)
-    case channel(ProvenanceChannel)
-    case confidenceAtLeast(Confidence)
+**Sensitivity queries**
 
-    // Operational queries (per-noun, named)
-    case captureChannel(CaptureChannel)
-    case contentKind(ContentKind)
-    case hasFeatureFlag(FeatureFlag)
-    case proposalKind(ProposalKind)
-    case targetObjectType(TargetObjectType)
-    case associationSignalSource(AssociationSignalSource)
-    case decayClass(DecayClass)
-    case refreshPolicy(RefreshPolicy)
-    case driftSeverity(DriftSeverity)
-    case learnMode(LearnMode)
-    case sourceCatalogEntry(SourceCatalogEntry)
+| Filter | Argument | Semantics |
+|---|---|---|
+| sensitivity | a sensitivity value | exact sensitivity value |
+| sensitivity-at-most | a sensitivity value | sensitivity no greater than the value |
 
-    // Structural queries
-    case inRoom(RoomID)
-    case inWing(WingID)
-    case lineageID(LineageID)
-    case createdAfter(Date)
-    case createdBefore(Date)
-    case latticeAnchor(LatticeAnchor)
-    case latticeUnder(udcPrefix: String)
-    case wikidataConcept(WikidataQID)
+**Exportability queries**
 
-    // Content queries
-    case contentMatches(String)
-    case nearVector(Vector, count: Int)
+| Filter | Argument | Semantics |
+|---|---|---|
+| exportable | — | exportability is public |
+| private | — | exportability is private |
 
-    // Composition
-    case all([Filter])     // AND
-    case any([Filter])     // OR
-    case not(Filter)
-}
-```
+**Provenance queries**
 
-No case takes a raw bit position, mask, or threshold integer. Every case is either a named enum value (`.active`, `.verbatim`, `.elevated`) or a domain-meaningful argument (a date, a room ID, a vector). The integers from §§ 5.5–5.7 are the evaluator's private translation table, not the caller's vocabulary.
+| Filter | Argument | Semantics |
+|---|---|---|
+| user-confirmed | — | confirmation ≥ user-confirmed |
+| model-confirmed-only | — | confirmation is exactly model-confirmed (excludes user-confirmed) |
+| unconfirmed | — | confirmation is unconfirmed |
+| source-type | a source type | exact source type |
+| channel | a provenance channel | exact provenance channel |
+| confidence-at-least | a confidence value | confidence at or above the value |
 
-A `RecallFrame.filterChain` is a `[Filter]` interpreted as `Filter.all(filterChain)` — implicit conjunction at the top level.
+**Operational queries** (per-noun, named)
+
+| Filter | Argument |
+|---|---|
+| capture-channel | a capture channel |
+| content-kind | a content kind |
+| has-feature-flag | a feature flag |
+| proposal-kind | a proposal kind |
+| target-object-type | a target object type |
+| association-signal-source | an association signal source |
+| decay-class | a decay class |
+| refresh-policy | a refresh policy |
+| drift-severity | a drift severity |
+| learn-mode | a learn mode |
+| source-catalog-entry | a source-catalog entry |
+
+**Structural queries**
+
+| Filter | Argument |
+|---|---|
+| in-room | a room identifier |
+| in-wing | a wing identifier |
+| lineage | a lineage identifier |
+| created-after | a timestamp |
+| created-before | a timestamp |
+| lattice-anchor | a lattice anchor |
+| lattice-under | a UDC prefix |
+| wikidata-concept | a Wikidata Q-ID |
+
+**Content queries**
+
+| Filter | Argument |
+|---|---|
+| content-matches | a text query |
+| near-vector | a vector + a count |
+
+**Composition**
+
+| Filter | Argument | Semantics |
+|---|---|---|
+| all | a list of filters | conjunction (AND) |
+| any | a list of filters | disjunction (OR) |
+| not | a filter | negation |
+
+Every filter is either a named value (active, verbatim, elevated) or a domain-meaningful argument (a timestamp, a room identifier, a vector). A recall frame's filter chain is interpreted as `all(chain)` — implicit conjunction at the top level.
 
 #### 7.9.2 Filter compilation
 
@@ -1137,18 +1121,13 @@ When `RecallFrame.asOf` is non-nil, the evaluator reconstructs each row's bitmap
 
 #### 7.9.7 Worked example
 
-A caller invokes:
+A caller invokes `recall` with a frame whose filter chain is:
 
-```swift
-let stream = estate.recall(RecallFrame(
-    filterChain: [
-        .inRoom(RoomID("family/connie")),
-        .currentlyBelieve,
-        .trustworthy
-    ],
-    limit: 50,
-    ordering: .byCaptureTimeDesc
-))
+```
+recall(RecallFrame
+    filter chain: [ in-room("family/connie"), currently-believe, trustworthy ]
+    limit:        50
+    ordering:     by-capture-time descending )
 ```
 
 No bit positions, no thresholds, no masks. The caller asks for currently-believed trustworthy rows in the family/connie room.
@@ -1199,8 +1178,8 @@ A conforming evaluator processes this internally as follows. The evaluator's bit
 [Ordering, pagination, hydration]
   Sort passing rows by capture_time descending.
   Apply limit: take first 50.
-  Hydrate at .structured level (default).
-  Return RecallStream.RecallPage.
+  Hydrate at structured level (default).
+  Return the first recall page (§ 7.8.4).
 ```
 
 The internal threshold integers (`< 3`, `< 4`, `>= 2`) are derived from the bitmap layouts in §§ 5.5–5.7 and the state-cluster topology in § 6.1. They are the evaluator's compilation output, not the caller's input.
@@ -1604,16 +1583,11 @@ t=1d  user reviews; mutate(P1, kind=confirm)
 
 A caller asks for currently-believed trustworthy drawers in a specific room, sorted by recency.
 
-```swift
-let stream = estate.recall(RecallFrame(
-    filterChain: [
-        .inRoom(RoomID("family/connie")),
-        .currentlyBelieve,
-        .trustworthy
-    ],
-    limit: 50,
-    ordering: .byCaptureTimeDesc
-))
+```
+recall(RecallFrame
+    filter chain: [ in-room("family/connie"), currently-believe, trustworthy ]
+    limit:        50
+    ordering:     by-capture-time descending )
 ```
 
 The caller expresses intent in named filters. The evaluator (§ 7.9) compiles those filters to bitmap operations against the layouts in §§ 5.5–5.7, applies fingerprint pruning, then executes per-row evaluation:
@@ -1778,57 +1752,43 @@ content database as separate tables, not as rows in the drawers table. They
 are not subject to the adjective/operational/provenance bitmap triple — they
 are trace infrastructure, not content.
 
-**RecallTrace** — one row per RecallStream invocation:
+**RecallTrace** — one row per recall invocation:
 
-```swift
-struct RecallTrace {
-    let traceID: UUID           // primary key
-    let estateID: UUID          // which estate was queried
-    let query: String           // the RecallFrame query text
-    let schemaVersion: String   // e.g. "geniuslocus.recall.v1"
-    let responsePolicy: Data    // JSON: mmrLambda, bm25Weight, pageSize, active filters
-    let createdAt: Date
-}
-```
+| Field | Domain | Meaning |
+|---|---|---|
+| trace identifier | UUID | primary key |
+| estate identifier | UUID | which estate was queried |
+| query | text | the recall frame's query text |
+| schema version | text | e.g. `geniuslocus.recall.v1` |
+| response policy | JSON | mmr-lambda, bm25-weight, page-size, active filters |
+| created timestamp | ISO8601 text | — |
 
-**RecallTraceItem** — one row per drawer surfaced in any RecallStream page:
+**RecallTraceItem** — one row per drawer surfaced in any recall page:
 
-```swift
-struct RecallTraceItem {
-    let itemID: UUID
-    let traceID: UUID           // FK → RecallTrace
-    let drawerID: UUID          // FK → drawers (SET NULL on expunge)
-    let rank: Int               // position in the page (1-indexed)
-    let bm25Score: Float?       // nil if BM25 path not used
-    let vectorSimilarity: Float?
-    let rrfScore: Float?
-    let mmrScore: Float?
-    let returned: Bool          // false if filtered by write policy or sensitivity
-    var used: Bool?             // nil until caller reports; true = acted on
-    var ignoredReason: String?  // non-nil when used == false
-    let createdAt: Date
-}
-```
+| Field | Domain | Meaning |
+|---|---|---|
+| item identifier | UUID | primary key |
+| trace identifier | UUID | FK → RecallTrace |
+| drawer identifier | UUID | FK → drawers (set null on expunge) |
+| rank | integer | position in the page (1-indexed) |
+| bm25 score | optional float | absent if the BM25 path was not used |
+| vector similarity | optional float | — |
+| rrf score | optional float | — |
+| mmr score | optional float | — |
+| returned | boolean | false if filtered by write policy or sensitivity |
+| used | optional boolean | absent until the caller reports; true = acted on |
+| ignored reason | optional text | present when used is false |
+| created timestamp | ISO8601 text | — |
 
 **Schema:** Two `CREATE TABLE IF NOT EXISTS` statements in LocusKit's
 DrawerStore. Idempotent migration via `CREATE TABLE IF NOT EXISTS` for fresh
 databases and `ALTER TABLE` guards for upgrade.
 
-**Trace emission:** `recall()` creates one RecallTrace row at invocation and
-one RecallTraceItem row per drawer in every page it emits. The traceID is
-returned to the caller in the RecallStream header.
+**Trace emission:** `recall` creates one RecallTrace row at invocation and
+one RecallTraceItem row per drawer in every page it emits. The trace identifier
+is returned to the caller in the recall result header (§ 7.8.4).
 
-**Usage reporting:** Callers report which items they acted on via:
-
-```swift
-public extension Estate {
-    func reportRecallUsage(
-        traceID: UUID,
-        used: [UUID],                          // drawerIDs acted on
-        ignored: [(UUID, reason: String)]      // drawerIDs passed over, with reason
-    ) async throws
-}
-```
+**Usage reporting:** Callers report which items they acted on via a `report-recall-usage` operation taking a trace identifier, the list of drawer identifiers acted on (`used`), and the list of drawer identifiers passed over each with a reason (`ignored`).
 
 **Why this matters:** RecallTraceItem.used is the primary reward signal for
 the dreaming daemon's learning cycle. It replaces the vague "recallPrecision
@@ -1869,20 +1829,14 @@ by dumping raw agent output directly into the substrate.
 receives a `WriteViolation` error and the row is not written. The
 `WritePolicyWarning` is emitted for user actors.
 
-**Estate verb addition:**
+**Capture verb addition:** `capture` enforces the write policy before persisting. For an `mcp_agent` or `substrate_daemon` actor, blocked content fails with a `WriteViolation` (one of the categories below) and the row is not written; for a `user` actor, a `WritePolicyWarning` is emitted and capture proceeds.
 
-```swift
-// capture() now enforces write policy before persisting:
-// - mcp_agent / substrate_daemon: throws WriteViolation if blocked
-// - user: emits WritePolicyWarning, proceeds
-
-public enum WriteViolation: Error {
-    case rawTranscript(length: Int)
-    case reasoningDump(indicators: [String])
-    case secretDetected(pattern: String)
-    case oversizedCode(length: Int, threshold: Int)
-}
-```
+| WriteViolation category | Carries |
+|---|---|
+| raw-transcript | the offending length |
+| reasoning-dump | the matched indicators |
+| secret-detected | the matched pattern |
+| oversized-code | the length and the configured threshold |
 
 **Conformance addition (§ 13.2, item 18):** A conforming implementation
 rejects a capture from an `mcp_agent` actor carrying raw transcript content

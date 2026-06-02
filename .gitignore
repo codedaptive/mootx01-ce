@@ -38,6 +38,7 @@ Icon
 *.binary
 *.db
 .obsidian/
+.codegraph
 
 # Zip files
 *.zip
