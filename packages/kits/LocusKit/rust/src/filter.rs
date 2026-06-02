@@ -255,7 +255,10 @@ mod tests {
         let f = Filter::All(vec![
             Filter::Trustworthy,
             Filter::Not(Box::new(Filter::Unconfirmed)),
-            Filter::Any(vec![Filter::InRoom("kitchen".to_string()), Filter::InRoom("study".to_string())]),
+            Filter::Any(vec![
+                Filter::InRoom("kitchen".to_string()),
+                Filter::InRoom("study".to_string()),
+            ]),
         ]);
         // Shape check: cloning preserves equality.
         assert_eq!(f.clone(), f);

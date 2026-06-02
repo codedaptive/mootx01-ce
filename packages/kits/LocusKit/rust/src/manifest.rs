@@ -247,8 +247,14 @@ mod tests {
     /// Every optional key's `as_str` matches the spec.
     #[test]
     fn optional_keys_raw_strings() {
-        assert_eq!(ManifestKey::FederationGroupID.as_str(), "federation_group_id");
-        assert_eq!(ManifestKey::MiningPatternsHash.as_str(), "mining_patterns_hash");
+        assert_eq!(
+            ManifestKey::FederationGroupID.as_str(),
+            "federation_group_id"
+        );
+        assert_eq!(
+            ManifestKey::MiningPatternsHash.as_str(),
+            "mining_patterns_hash"
+        );
         assert_eq!(ManifestKey::TinyModelID.as_str(), "tiny_model_id");
         assert_eq!(
             ManifestKey::TinyModelTrainingCorpusSize.as_str(),

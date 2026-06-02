@@ -117,9 +117,9 @@ pub enum Channel {
     DreamAssociation = 7,
     DreamMiningResult = 8,
     // raws 9–14 reserved per cookbook §2.5
-    DeviceSensor = 15,        // NEW
-    ActuatorOutcome = 16,     // NEW
-    // raws 17–63 reserved
+    DeviceSensor = 15, // NEW
+    ActuatorOutcome = 16, // NEW
+                       // raws 17–63 reserved
 }
 
 impl Channel {
@@ -163,10 +163,10 @@ impl Channel {
 pub enum Confirmation {
     Unconfirmed = 0,
     UserConfirmed = 1,
-    AutomatedConfirmed = 2,    // F13: was v0.35 `ModelConfirmed`
-    PeerConfirmed = 3,         // NEW: cross-estate confirmation
-    ActuatorConfirmed = 4,     // NEW
-    // raws 5–63 reserved
+    AutomatedConfirmed = 2, // F13: was v0.35 `ModelConfirmed`
+    PeerConfirmed = 3,      // NEW: cross-estate confirmation
+    ActuatorConfirmed = 4,  // NEW
+                            // raws 5–63 reserved
 }
 
 impl Confirmation {
@@ -203,11 +203,11 @@ impl Confirmation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i64)]
 pub enum Confidence {
-    Null = 0,          // F13: was `Unknown` in v0.35
+    Null = 0, // F13: was `Unknown` in v0.35
     Low = 16,
     Medium = 32,
     High = 48,
-    Verified = 56,     // F13: was `Certain` in v0.35
+    Verified = 56, // F13: was `Certain` in v0.35
 }
 
 impl Confidence {
@@ -437,7 +437,10 @@ mod tests {
             Confidence::High,
             Confidence::Verified,
         ];
-        let filtered: Vec<_> = values.iter().filter(|&&c| c >= Confidence::Medium).collect();
+        let filtered: Vec<_> = values
+            .iter()
+            .filter(|&&c| c >= Confidence::Medium)
+            .collect();
         assert_eq!(filtered.len(), 3); // Medium, High, Verified
     }
 

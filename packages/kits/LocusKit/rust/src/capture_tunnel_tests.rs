@@ -31,8 +31,12 @@ fn sample_frame() -> TunnelCaptureFrame {
 
 fn drawer_frame(content: &str, lineage: Uuid) -> CaptureFrame {
     let mut f = CaptureFrame::new(
-        content, CaptureChannel::Typed, "test-room",
-        LatticeAnchor::udc("004"), "test-agent", "minilm-v6",
+        content,
+        CaptureChannel::Typed,
+        "test-room",
+        LatticeAnchor::udc("004"),
+        "test-agent",
+        "minilm-v6",
     );
     f.lineage_id = Some(lineage);
     f
@@ -74,14 +78,20 @@ fn byte_identical_to_cascade() {
     let (estate, store) = make_estate_with_store();
     let lineage = Uuid::new_v4();
     let first = estate.capture(drawer_frame("v1", lineage), NOW).unwrap();
-    let second = estate.capture(drawer_frame("v2", lineage), NOW + 100).unwrap();
+    let second = estate
+        .capture(drawer_frame("v2", lineage), NOW + 100)
+        .unwrap();
     let cascade_tunnel = store
         .get_tunnel(&format!("supersedes:{}:{}", second.id, first.id))
-        .unwrap().unwrap();
+        .unwrap()
+        .unwrap();
     let mut frame = TunnelCaptureFrame::new(
-        second.wing.clone(), second.room.clone(),
-        first.wing.clone(), first.room.clone(),
-        "supersedes", "test-agent",
+        second.wing.clone(),
+        second.room.clone(),
+        first.wing.clone(),
+        first.room.clone(),
+        "supersedes",
+        "test-agent",
     );
     frame.kind = TunnelKind::Supersedes;
     frame.source_drawer_id = Some(second.id.clone());
@@ -96,8 +106,14 @@ fn byte_identical_to_cascade() {
     assert_eq!(standalone.label, cascade_tunnel.label);
     assert_eq!(standalone.kind, cascade_tunnel.kind);
     assert_eq!(standalone.adjective_bitmap, cascade_tunnel.adjective_bitmap);
-    assert_eq!(standalone.operational_bitmap, cascade_tunnel.operational_bitmap);
-    assert_eq!(standalone.provenance_bitmap, cascade_tunnel.provenance_bitmap);
+    assert_eq!(
+        standalone.operational_bitmap,
+        cascade_tunnel.operational_bitmap
+    );
+    assert_eq!(
+        standalone.provenance_bitmap,
+        cascade_tunnel.provenance_bitmap
+    );
     assert_eq!(standalone.tombstoned_at, cascade_tunnel.tombstoned_at);
     assert_eq!(standalone.removed_by_batch, cascade_tunnel.removed_by_batch);
 }
@@ -160,14 +176,38 @@ fn assert_invalid(frame: TunnelCaptureFrame) {
 }
 
 #[test]
-fn rejects_empty_source_wing() { let mut f = sample_frame(); f.source_wing = String::new(); assert_invalid(f); }
+fn rejects_empty_source_wing() {
+    let mut f = sample_frame();
+    f.source_wing = String::new();
+    assert_invalid(f);
+}
 #[test]
-fn rejects_empty_source_room() { let mut f = sample_frame(); f.source_room = String::new(); assert_invalid(f); }
+fn rejects_empty_source_room() {
+    let mut f = sample_frame();
+    f.source_room = String::new();
+    assert_invalid(f);
+}
 #[test]
-fn rejects_empty_target_wing() { let mut f = sample_frame(); f.target_wing = String::new(); assert_invalid(f); }
+fn rejects_empty_target_wing() {
+    let mut f = sample_frame();
+    f.target_wing = String::new();
+    assert_invalid(f);
+}
 #[test]
-fn rejects_empty_target_room() { let mut f = sample_frame(); f.target_room = String::new(); assert_invalid(f); }
+fn rejects_empty_target_room() {
+    let mut f = sample_frame();
+    f.target_room = String::new();
+    assert_invalid(f);
+}
 #[test]
-fn rejects_empty_label() { let mut f = sample_frame(); f.label = String::new(); assert_invalid(f); }
+fn rejects_empty_label() {
+    let mut f = sample_frame();
+    f.label = String::new();
+    assert_invalid(f);
+}
 #[test]
-fn rejects_empty_added_by() { let mut f = sample_frame(); f.added_by = String::new(); assert_invalid(f); }
+fn rejects_empty_added_by() {
+    let mut f = sample_frame();
+    f.added_by = String::new();
+    assert_invalid(f);
+}

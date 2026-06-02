@@ -205,10 +205,16 @@ mod tests {
         assert_eq!(AssociationSignalSources::CO_RECALL.raw_value(), 1 << 0);
         assert_eq!(AssociationSignalSources::CO_CONFIRMED.raw_value(), 1 << 1);
         assert_eq!(AssociationSignalSources::DREAM_PAIRING.raw_value(), 1 << 2);
-        assert_eq!(AssociationSignalSources::VECTOR_SIMILARITY.raw_value(), 1 << 3);
+        assert_eq!(
+            AssociationSignalSources::VECTOR_SIMILARITY.raw_value(),
+            1 << 3
+        );
         assert_eq!(AssociationSignalSources::SHARED_ENTITY.raw_value(), 1 << 4);
         assert_eq!(AssociationSignalSources::EXPLICIT_HUMAN.raw_value(), 1 << 5);
-        assert_eq!(AssociationSignalSources::FINGERPRINT_SIMILARITY.raw_value(), 1 << 6);
+        assert_eq!(
+            AssociationSignalSources::FINGERPRINT_SIMILARITY.raw_value(),
+            1 << 6
+        );
         assert_eq!(AssociationSignalSources::CROSS_ESTATE.raw_value(), 1 << 7);
         assert_eq!(AssociationSignalSources::CROSS_TIER.raw_value(), 1 << 8);
         assert_eq!(AssociationSignalSources::ACTION_OUTCOME.raw_value(), 1 << 9);
@@ -251,7 +257,10 @@ mod tests {
     fn decay_class_decodes_scale_gapped_raws() {
         assert_eq!(a_with(0).decay_class(), AssociationDecayClass::Pinned);
         assert_eq!(a_with(16 << 12).decay_class(), AssociationDecayClass::Slow);
-        assert_eq!(a_with(32 << 12).decay_class(), AssociationDecayClass::Normal);
+        assert_eq!(
+            a_with(32 << 12).decay_class(),
+            AssociationDecayClass::Normal
+        );
         assert_eq!(a_with(48 << 12).decay_class(), AssociationDecayClass::Fast);
     }
 

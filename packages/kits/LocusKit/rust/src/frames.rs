@@ -14,7 +14,6 @@ use crate::filter::LineageID;
 use crate::provenance::{Channel, Sensitivity, SourceType};
 use crate::tunnel_operational::TunnelKind;
 
-
 // MARK: - CaptureFrame
 
 /// Slots for the `capture` verb. Per spec § 7.1 and § 7.8.3.
@@ -221,7 +220,9 @@ pub struct LearnFrame {
 impl LearnFrame {
     /// Create a `LearnFrame` with the given source handle.
     pub fn new(handle: impl Into<String>) -> Self {
-        Self { handle: handle.into() }
+        Self {
+            handle: handle.into(),
+        }
     }
 }
 

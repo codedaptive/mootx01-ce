@@ -76,7 +76,11 @@ pub enum ThresholdOp {
 pub fn threshold_compare(bitmap: i64, mask: i64, shift: i32, op: ThresholdOp, value: i64) -> bool {
     // F18 atomic centralization: `mask` is high-aligned; width = popcount(mask).
     // A zero mask yields field 0, preserving the prior `(bitmap & 0) >> s`.
-    let field = if mask == 0 { 0 } else { bit_field::extract_field(bitmap, shift as u32, bit_field::popcount(mask) as u32) };
+    let field = if mask == 0 {
+        0
+    } else {
+        bit_field::extract_field(bitmap, shift as u32, bit_field::popcount(mask) as u32)
+    };
     match op {
         ThresholdOp::LessThan => field < value,
         ThresholdOp::LessThanOrEqual => field <= value,
@@ -98,7 +102,9 @@ pub fn shift_extract(bitmap: i64, shift: i32, mask: i64) -> i64 {
     // F18 atomic centralization: route through substrate parametric primitive.
     // `mask` is low-aligned; width = popcount(mask). A zero mask is the
     // "no field" degenerate case — the façade defines it as 0.
-    if mask == 0 { return 0; }
+    if mask == 0 {
+        return 0;
+    }
     bit_field::extract_field(bitmap, shift as u32, bit_field::popcount(mask) as u32)
 }
 
@@ -135,8 +141,20 @@ mod tests {
 
     #[test]
     fn threshold_less_than_or_equal() {
-        assert!(threshold_compare(0x3, 0xF, 0, ThresholdOp::LessThanOrEqual, 3));
-        assert!(!threshold_compare(0x4, 0xF, 0, ThresholdOp::LessThanOrEqual, 3));
+        assert!(threshold_compare(
+            0x3,
+            0xF,
+            0,
+            ThresholdOp::LessThanOrEqual,
+            3
+        ));
+        assert!(!threshold_compare(
+            0x4,
+            0xF,
+            0,
+            ThresholdOp::LessThanOrEqual,
+            3
+        ));
     }
 
     #[test]
@@ -165,5 +183,4 @@ mod tests {
         // Trailing high bits do not leak in.
         assert_eq!(shift_extract(0x30 | (1 << 30), 4, 0xF), 3);
     }
-
 }
