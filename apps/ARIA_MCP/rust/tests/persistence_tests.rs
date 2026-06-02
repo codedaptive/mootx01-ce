@@ -1,0 +1,224 @@
+//! Persistence integration tests — SQLite estate backend.
+//!
+//! Tests the SQLite-backed `EstateRegistry` constructor and the persistence
+//! round-trip at the dispatch layer. These tests are isolated from the
+//! dispatch suite (tests/dispatch_tests.rs) to avoid edit contention with
+//! a queued mission that owns that file's next edit.
+//!
+//! # Isolation
+//!
+//! Each test creates a uniquely-named SQLite database under `std::env::temp_dir()`
+//! and removes it on completion. No `tempfile` crate is needed — the same
+//! approach used by LocusKit's own SQLite conformance tests.
+//!
+//! # Round-trip shape
+//!
+//! The critical persistence invariant: a drawer captured through the dispatch
+//! layer survives a registry drop and is recoverable by a second registry
+//! opened at the same path. This exercises the full WAL flush path
+//! (capture_drawer → SQLite write → process-level drop → reopen → drawer_recall).
+
+use std::collections::BTreeMap;
+
+use aria_mcp::{dispatch::dispatch_tool, estate_registry::EstateRegistry, jsonrpc::JsonValue};
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Helper: build a BTreeMap<String, JsonValue> from key-value pairs.
+// ---------------------------------------------------------------------------
+
+macro_rules! args {
+    () => { BTreeMap::new() };
+    ( $( $k:expr => $v:expr ),+ $(,)? ) => {{
+        let mut m = BTreeMap::new();
+        $( m.insert($k.to_string(), JsonValue::from(serde_json::json!($v))); )+
+        m
+    }};
+}
+
+/// Generate a unique temp-dir path for a SQLite estate. The file does not
+/// exist yet; it will be created by `new_sqlite`. On test teardown, the
+/// caller removes the file with `std::fs::remove_file`.
+fn temp_sqlite_path(label: &str) -> String {
+    let name = format!("aria_mcp_persist_{}_{}.sqlite", label, Uuid::new_v4());
+    std::env::temp_dir()
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Extract content[0].text from a dispatch result.
+fn content_text(result: &serde_json::Value) -> &str {
+    result["content"][0]["text"].as_str().unwrap_or("")
+}
+
+// ---------------------------------------------------------------------------
+// Estate-registry unit tests — new_sqlite
+// ---------------------------------------------------------------------------
+
+/// `new_sqlite` opens a fresh database and returns a working registry.
+/// The default estate is accessible via the resolve path (absent estateID).
+#[test]
+fn new_sqlite_opens_fresh_database() {
+    let path = temp_sqlite_path("fresh");
+    let registry = EstateRegistry::new_sqlite(&path, "test-owner")
+        .expect("new_sqlite must succeed on a fresh path");
+
+    // Resolving with no estateID should return the default estate — if
+    // resolve returns Ok, the estate is alive and in the registry.
+    let empty_args: BTreeMap<String, JsonValue> = BTreeMap::new();
+    let result = registry.resolve(&empty_args, "estateID");
+    assert!(
+        result.is_ok(),
+        "resolve with absent estateID must return the default estate"
+    );
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `new_sqlite` on an existing database reopens it without error.
+/// This exercises the "create if absent, reopen otherwise" contract.
+#[test]
+fn new_sqlite_reopens_existing_database() {
+    let path = temp_sqlite_path("reopen");
+
+    // First open creates the database.
+    let _first = EstateRegistry::new_sqlite(&path, "test-owner").expect("first open must succeed");
+    drop(_first);
+
+    // Second open at the same path must succeed — no "already exists" error.
+    let second = EstateRegistry::new_sqlite(&path, "test-owner");
+    assert!(
+        second.is_ok(),
+        "second open of existing database must succeed"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `new_sqlite` on an invalid path (directory does not exist) returns Err,
+/// not a panic. The caller (`ServerConfig::from_env`) creates parent dirs
+/// before calling `new_sqlite`; this test verifies the error surface for
+/// callers that do NOT pre-create dirs (i.e., `register_sqlite`).
+#[test]
+fn new_sqlite_on_nonexistent_parent_returns_err() {
+    // A deeply nested path whose parents don't exist.
+    let path = std::env::temp_dir()
+        .join(format!("aria_mcp_no_such_dir_{}", Uuid::new_v4()))
+        .join("sub")
+        .join("estate.sqlite")
+        .to_string_lossy()
+        .into_owned();
+
+    let result = EstateRegistry::new_sqlite(&path, "test-owner");
+    assert!(
+        result.is_err(),
+        "new_sqlite on missing parent dir must return Err, not panic"
+    );
+    // No cleanup needed — the file was never created.
+}
+
+// ---------------------------------------------------------------------------
+// Persistence round-trip — dispatch layer
+// ---------------------------------------------------------------------------
+
+/// Full persistence round-trip: capture a drawer via dispatch, drop the
+/// registry (flushes WAL to main file), open a new registry at the same
+/// path, and verify the drawer is recoverable via moot_drawer_recall.
+///
+/// This is the canonical SQLite persistence invariant for the server: data
+/// filed during one server process survives restart and is visible to the
+/// next process opening the same path.
+#[test]
+fn persistence_round_trip_capture_then_reopen_then_recall() {
+    let path = temp_sqlite_path("roundtrip");
+
+    // --- Pass 1: capture a drawer. ---
+    let captured_id = {
+        let registry =
+            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-1 open must succeed");
+
+        let a = args![
+            "content" => "persistent content for round-trip test",
+            "room" => "persistence-room",
+            "udcCode" => "000.001",
+            "addedBy" => "test-agent",
+            "embeddingModelID" => "test-model"
+        ];
+        let result =
+            dispatch_tool("moot_capture_drawer", &a, &registry).expect("capture must succeed");
+        let text = content_text(&result);
+        assert!(
+            text.starts_with("captured drawer "),
+            "capture result must start with drawer id prefix; got: {text}"
+        );
+
+        // Parse the drawer id from "captured drawer <id>\nroom: ...\nscheme: ..."
+        let id_line = text.lines().next().unwrap_or("");
+        let id = id_line
+            .strip_prefix("captured drawer ")
+            .unwrap_or("")
+            .to_owned();
+        assert!(!id.is_empty(), "captured drawer id must be non-empty");
+        id
+        // registry drops here — SQLite WAL should flush to main file.
+    };
+
+    // --- Pass 2: open a new registry at the same path and recall. ---
+    {
+        let registry2 =
+            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-2 reopen must succeed");
+
+        let recall_a = args!["limit" => 10];
+        let recall_result = dispatch_tool("moot_drawer_recall", &recall_a, &registry2)
+            .expect("recall must succeed");
+        let recall_text = content_text(&recall_result);
+
+        assert!(
+            recall_text.starts_with("recalled 1 drawer(s)"),
+            "reopen must find exactly one persisted drawer; got: {recall_text}"
+        );
+        assert!(
+            recall_text.contains(&captured_id),
+            "recalled result must include the captured drawer id {captured_id}; got: {recall_text}"
+        );
+        assert!(
+            recall_text.contains("persistent content"),
+            "recalled result must include drawer content; got: {recall_text}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Register an additional SQLite estate via `register_sqlite` and verify
+/// it is reachable through the `estateID` routing path.
+#[test]
+fn register_sqlite_estate_is_routable_by_estate_id() {
+    let default_path = temp_sqlite_path("register_default");
+    let extra_path = temp_sqlite_path("register_extra");
+
+    let mut registry = EstateRegistry::new_sqlite(&default_path, "default-owner")
+        .expect("default sqlite open must succeed");
+
+    let extra_uuid = registry
+        .register_sqlite(&extra_path, "extra-owner")
+        .expect("register_sqlite must succeed");
+
+    // Resolve by the extra estate's UUID — must find it.
+    let args = args!["estateID" => extra_uuid.to_string().as_str()];
+    let result = registry.resolve(&args, "estateID");
+    assert!(
+        result.is_ok(),
+        "registered sqlite estate must be resolvable by UUID"
+    );
+    assert_eq!(
+        result.unwrap().estate_id,
+        extra_uuid,
+        "resolved estate_id must match the registered UUID"
+    );
+
+    let _ = std::fs::remove_file(&default_path);
+    let _ = std::fs::remove_file(&extra_path);
+}

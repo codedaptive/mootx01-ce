@@ -15,10 +15,15 @@
 //!
 //! # ServerConfig
 //!
-//! `ServerConfig::default_inmemory()` opens one in-memory estate and
-//! constructs the estate registry the dispatcher uses. This is the v1
-//! test seam — persistent storage backends are v2 work, noted in the
-//! README as a v1 boundary.
+//! Two constructors select the backend at startup:
+//! - `from_env()` — reads `ARIA_MCP_SQLITE_PATH` from the environment.
+//!   Present and non-empty → SQLite-backed default estate at that path.
+//!   Absent or empty → in-memory estate (identical to v1.0 behavior).
+//!   `from_env()` is the production entry point; `main.rs` calls it.
+//! - `default_inmemory()` — unconditionally in-memory; preserved for tests.
+//!
+//! Wire surface (tools, schemas, JSON-RPC methods) is unchanged regardless
+//! of which backend is selected. Persistence is server-internal only.
 
 use std::io::{BufRead, BufReader, Read, Write};
 
@@ -28,9 +33,8 @@ use crate::estate_registry::EstateRegistry;
 /// Configuration for a server run. Carries the estate registry the
 /// dispatcher will route tool calls against.
 ///
-/// `default_inmemory()` is the v1 path: one in-memory default estate,
-/// no CLI arguments, no persistent storage. The README documents this
-/// as the explicit v1 boundary.
+/// Build via `from_env()` for production (env-var-selected backend) or
+/// `default_inmemory()` for tests (unconditionally in-memory).
 pub struct ServerConfig {
     pub registry: EstateRegistry,
     pub server_name: String,
@@ -38,8 +42,70 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    /// Construct a server config by reading `ARIA_MCP_SQLITE_PATH` from the
+    /// environment.
+    ///
+    /// Behavior table:
+    /// | Env var state       | Backend                          |
+    /// |---------------------|----------------------------------|
+    /// | Absent or empty     | In-memory (ephemeral, v1 default)|
+    /// | Present, non-empty  | SQLite at the specified path     |
+    /// | Present, unusable   | Exit 1 with clear stderr message |
+    ///
+    /// Parent directories of the SQLite path are created if missing.
+    /// If directory creation fails, the server exits with a nonzero code
+    /// and a clear stderr message naming the path.
+    ///
+    /// Wire surface (tools, schemas, JSON-RPC) is unchanged for both backends.
+    pub fn from_env() -> Self {
+        let sqlite_path = std::env::var("ARIA_MCP_SQLITE_PATH")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let registry = match sqlite_path {
+            None => {
+                eprintln!("aria-mcp: ARIA_MCP_SQLITE_PATH not set — using in-memory estate");
+                EstateRegistry::new_inmemory()
+            }
+            Some(path) => {
+                // Create parent directories if they do not exist. Missing parents
+                // are a common operator error (the path is new or the mount is
+                // stale); failing fast here with a clear message is better than
+                // a cryptic SQLite "unable to open database" error.
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            eprintln!(
+                                "aria-mcp: cannot create parent directories for {path:?}: {e}"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                eprintln!("aria-mcp: opening SQLite estate at {path:?}");
+                match EstateRegistry::new_sqlite(&path, "aria-mcp-default") {
+                    Ok(reg) => {
+                        eprintln!("aria-mcp: SQLite estate ready at {path:?}");
+                        reg
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        };
+
+        ServerConfig {
+            registry,
+            server_name: "ARIA_MCP_Rust".to_owned(),
+            server_version: "0.1.0".to_owned(),
+        }
+    }
+
     /// Construct the default in-memory server: one in-memory estate as the
-    /// default, no persistent storage. v1 production path and test seam.
+    /// default, no persistent storage. Preserved for tests that need a
+    /// predictable in-memory estate regardless of the environment.
     pub fn default_inmemory() -> Self {
         ServerConfig {
             registry: EstateRegistry::new_inmemory(),

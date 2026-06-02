@@ -113,12 +113,25 @@ AriaLexicon acceptance matrix) but has no live handler — calling it returns
 methodNotFound on the Swift side. The Rust server is ahead here: the coordinator's
 `recall_tunnels(handle, wing)` executes against the live estate.
 
-## Behavioral Facts
+## Persistence
 
-**In-memory estates only.** The server opens one in-memory estate at startup as
-the default. Additional in-memory estates can be registered; all are ephemeral and
-discarded when the server exits. Persistent storage backends (SQLite, CloudKit)
-require wiring the `DrawerStore` trait to a persistence backend — out of scope here.
+The server selects its storage backend from the environment at startup:
+
+| `ARIA_MCP_SQLITE_PATH` state | Backend | Notes |
+|---|---|---|
+| Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
+| Present, non-empty | SQLite at that path | WAL-mode, durable across restarts |
+| Present, path unusable | — | Exit 1 with clear stderr message |
+
+Parent directories of the SQLite path are created automatically if missing.
+
+Persistence is **server-internal only** — the JSON-RPC wire surface (tools,
+schemas, methods) is completely unchanged for both backends. Clients do not
+need to know or care which backend is in use.
+
+CloudKit and live federation fan-out remain future work.
+
+## Behavioral Facts
 
 **moot_confirm_migration_promotion is fully wired.** The confirm step dispatches
 `confirm_migration_promotion_by_id`, the id-addressed overload that works across
