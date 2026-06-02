@@ -87,11 +87,15 @@ pub fn run_free_association(
 
     // Deterministic walk seed from the seed drawer id (no clock).
     let rng_seed = substrate_types::fnv::hash64(seed_drawer_id);
-    let activated = spreading_activation(&adjacency, seed_idx, walk_length, RESTART_PROB, rng_seed, k);
+    let activated =
+        spreading_activation(&adjacency, seed_idx, walk_length, RESTART_PROB, rng_seed, k);
 
     Ok(activated
         .into_iter()
-        .map(|a| Association { drawer_id: nodes[a.node].clone(), activation: a.activation })
+        .map(|a| Association {
+            drawer_id: nodes[a.node].clone(),
+            activation: a.activation,
+        })
         .collect())
 }
 
@@ -117,7 +121,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -158,11 +164,25 @@ mod tests {
         assert!(ids.contains(&"A"), "the directly-tunneled memory surfaces");
         assert!(ids.contains(&"C"), "the two-hop memory surfaces, weaker");
         assert!(!ids.contains(&"S"), "the seed is not its own association");
-        assert!(!ids.contains(&"D") && !ids.contains(&"E"), "the disconnected component never surfaces");
+        assert!(
+            !ids.contains(&"D") && !ids.contains(&"E"),
+            "the disconnected component never surfaces"
+        );
 
-        let a = assoc.iter().find(|x| x.drawer_id == "A").unwrap().activation;
-        let c = assoc.iter().find(|x| x.drawer_id == "C").unwrap().activation;
-        assert!(a > c, "direct neighbor outranks the two-hop memory: {a} vs {c}");
+        let a = assoc
+            .iter()
+            .find(|x| x.drawer_id == "A")
+            .unwrap()
+            .activation;
+        let c = assoc
+            .iter()
+            .find(|x| x.drawer_id == "C")
+            .unwrap()
+            .activation;
+        assert!(
+            a > c,
+            "direct neighbor outranks the two-hop memory: {a} vs {c}"
+        );
     }
 
     // CK-FA-2: a seed that no tunnel touches has no associations (guarded).

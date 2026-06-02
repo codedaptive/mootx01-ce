@@ -61,7 +61,10 @@ pub fn run_drift(
 
     if bc == 0 || ac == 0 {
         return Ok(DriftOutput {
-            drift: DriftScore { jensen_shannon: 0.0, kl_divergence: 0.0 },
+            drift: DriftScore {
+                jensen_shannon: 0.0,
+                kl_divergence: 0.0,
+            },
             before_count: bc,
             after_count: ac,
         });
@@ -76,7 +79,11 @@ pub fn run_drift(
     let p = normalized(&vocab, &before, bc);
     let q = normalized(&vocab, &after, ac);
 
-    Ok(DriftOutput { drift: drift(&p, &q), before_count: bc, after_count: ac })
+    Ok(DriftOutput {
+        drift: drift(&p, &q),
+        before_count: bc,
+        after_count: ac,
+    })
 }
 
 #[cfg(test)]
@@ -100,7 +107,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, 1_000, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -136,7 +145,11 @@ mod tests {
         }
         let out = run_drift(&coord, &h, all(), SPLIT, 3_000).expect("drift");
         assert_eq!((out.before_count, out.after_count), (3, 3));
-        assert!(out.drift.jensen_shannon > 0.5, "a full room shift is high drift, got {}", out.drift.jensen_shannon);
+        assert!(
+            out.drift.jensen_shannon > 0.5,
+            "a full room shift is high drift, got {}",
+            out.drift.jensen_shannon
+        );
     }
 
     // CK-DR-2: same rooms across the split — no drift.
@@ -146,6 +159,10 @@ mod tests {
         capture_at(&coord, &h, "study", 1_000);
         capture_at(&coord, &h, "study", 2_000);
         let out = run_drift(&coord, &h, all(), SPLIT, 3_000).expect("drift");
-        assert!(out.drift.jensen_shannon.abs() < 1e-5, "stable filing ⇒ no drift, got {}", out.drift.jensen_shannon);
+        assert!(
+            out.drift.jensen_shannon.abs() < 1e-5,
+            "stable filing ⇒ no drift, got {}",
+            out.drift.jensen_shannon
+        );
     }
 }

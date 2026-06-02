@@ -265,7 +265,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -317,8 +319,20 @@ mod tests {
     fn co_occurring_labels_produce_rules() {
         let (coord, h) = coord_with_estate();
         for _ in 0..4 {
-            capture_drawer(&coord, &h, "study", ContentKind::Prose, CaptureChannel::Typed);
-            capture_drawer(&coord, &h, "work", ContentKind::Code, CaptureChannel::Voiced);
+            capture_drawer(
+                &coord,
+                &h,
+                "study",
+                ContentKind::Prose,
+                CaptureChannel::Typed,
+            );
+            capture_drawer(
+                &coord,
+                &h,
+                "work",
+                ContentKind::Code,
+                CaptureChannel::Voiced,
+            );
         }
         let out = run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
         assert!(!out.rules.is_empty());
@@ -335,7 +349,13 @@ mod tests {
     #[test]
     fn labels_use_canonical_swift_names() {
         let (coord, h) = coord_with_estate();
-        capture_drawer(&coord, &h, "study", ContentKind::Prose, CaptureChannel::ImportedFile);
+        capture_drawer(
+            &coord,
+            &h,
+            "study",
+            ContentKind::Prose,
+            CaptureChannel::ImportedFile,
+        );
         let out = run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
         // All antecedent/consequent strings use the canonical vocabulary.
         let all_labels: Vec<&str> = out
@@ -346,13 +366,25 @@ mod tests {
         // "importedFile" (Swift camelCase), NOT "ImportedFile" (Rust PascalCase).
         for label in all_labels {
             if label.starts_with("channel:") {
-                assert!(!label.contains("ImportedFile"), "must use Swift camelCase: {label}");
-                assert!(label.contains("importedFile"), "must use Swift camelCase: {label}");
+                assert!(
+                    !label.contains("ImportedFile"),
+                    "must use Swift camelCase: {label}"
+                );
+                assert!(
+                    label.contains("importedFile"),
+                    "must use Swift camelCase: {label}"
+                );
             }
             if label.starts_with("kind:") {
                 // "prose" not "Prose"
-                assert!(!label.chars().nth(5).map(|c| c.is_uppercase()).unwrap_or(false),
-                    "kind label must be lowercase: {label}");
+                assert!(
+                    !label
+                        .chars()
+                        .nth(5)
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false),
+                    "kind label must be lowercase: {label}"
+                );
             }
         }
     }
@@ -361,15 +393,31 @@ mod tests {
     #[test]
     fn high_threshold_filters_rules() {
         let (coord, h) = coord_with_estate();
-        capture_drawer(&coord, &h, "rare", ContentKind::Prose, CaptureChannel::Typed);
+        capture_drawer(
+            &coord,
+            &h,
+            "rare",
+            ContentKind::Prose,
+            CaptureChannel::Typed,
+        );
         for _ in 0..3 {
-            capture_drawer(&coord, &h, "common", ContentKind::Prose, CaptureChannel::Typed);
+            capture_drawer(
+                &coord,
+                &h,
+                "common",
+                ContentKind::Prose,
+                CaptureChannel::Typed,
+            );
         }
         let all = run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
         let high = run_association_rules(
-            &coord, &h, unconfirmed(),
-            MiningThresholds::new(0.9, 0.9), NOW,
-        ).unwrap();
+            &coord,
+            &h,
+            unconfirmed(),
+            MiningThresholds::new(0.9, 0.9),
+            NOW,
+        )
+        .unwrap();
         assert!(high.rules.len() <= all.rules.len());
     }
 
@@ -378,11 +426,25 @@ mod tests {
     fn rules_are_deterministic() {
         let (coord, h) = coord_with_estate();
         for _ in 0..3 {
-            capture_drawer(&coord, &h, "study", ContentKind::Prose, CaptureChannel::Typed);
-            capture_drawer(&coord, &h, "work", ContentKind::Code, CaptureChannel::Voiced);
+            capture_drawer(
+                &coord,
+                &h,
+                "study",
+                ContentKind::Prose,
+                CaptureChannel::Typed,
+            );
+            capture_drawer(
+                &coord,
+                &h,
+                "work",
+                ContentKind::Code,
+                CaptureChannel::Voiced,
+            );
         }
-        let first = run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
-        let second = run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
+        let first =
+            run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
+        let second =
+            run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
         assert_eq!(first.rules.len(), second.rules.len());
         for (a, b) in first.rules.iter().zip(second.rules.iter()) {
             assert_eq!(a.antecedent, b.antecedent);
@@ -409,10 +471,12 @@ mod tests {
             );
         }
 
-        let out =
-            run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
+        let out = run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
 
-        assert!(out.label_overflow, "more than 64 distinct labels flags the cap");
+        assert!(
+            out.label_overflow,
+            "more than 64 distinct labels flags the cap"
+        );
         assert_eq!(out.drawer_count, 70);
         assert!(
             !out.rules.is_empty(),

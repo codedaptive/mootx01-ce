@@ -71,7 +71,10 @@ where
 
     if ac == 0 || bc == 0 {
         return Ok(EstateDivergence {
-            divergence: DriftScore { jensen_shannon: 0.0, kl_divergence: 0.0 },
+            divergence: DriftScore {
+                jensen_shannon: 0.0,
+                kl_divergence: 0.0,
+            },
             a_count: ac,
             b_count: bc,
         });
@@ -87,7 +90,11 @@ where
     let p = normalized(&vocab, &a_rooms, ac);
     let q = normalized(&vocab, &b_rooms, bc);
 
-    Ok(EstateDivergence { divergence: drift(&p, &q), a_count: ac, b_count: bc })
+    Ok(EstateDivergence {
+        divergence: drift(&p, &q),
+        a_count: ac,
+        b_count: bc,
+    })
 }
 
 #[cfg(test)]
@@ -110,7 +117,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap()
+        coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap()
     }
 
     fn capture(coord: &EstateCoordinator, h: &EstateHandle, room: &str) {
@@ -147,7 +156,11 @@ mod tests {
         }
         let mo = run_estate_divergence(&coord, &a, &b, all, NOW).expect("overlap");
         assert_eq!((mo.a_count, mo.b_count), (3, 3));
-        assert!(mo.divergence.jensen_shannon > 0.5, "disjoint minds diverge, got {}", mo.divergence.jensen_shannon);
+        assert!(
+            mo.divergence.jensen_shannon > 0.5,
+            "disjoint minds diverge, got {}",
+            mo.divergence.jensen_shannon
+        );
     }
 
     // CK-MO-2: two estates organized the same way converge (near-zero divergence).
@@ -159,6 +172,10 @@ mod tests {
         capture(&coord, &a, "philosophy");
         capture(&coord, &b, "philosophy");
         let mo = run_estate_divergence(&coord, &a, &b, all, NOW).expect("overlap");
-        assert!(mo.divergence.jensen_shannon.abs() < 1e-5, "aligned minds converge, got {}", mo.divergence.jensen_shannon);
+        assert!(
+            mo.divergence.jensen_shannon.abs() < 1e-5,
+            "aligned minds converge, got {}",
+            mo.divergence.jensen_shannon
+        );
     }
 }
