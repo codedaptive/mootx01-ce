@@ -17,14 +17,16 @@
 
 use std::sync::OnceLock;
 use crate::fdc_frame::FdcFrame;
-use crate::fdc_matcher::FdcMatcher;
+use crate::fdc_matcher::{FdcMatcher, ScoreMode};
 use crate::fdc_signatures::FdcSignatures;
 use crate::lexicon::CanonicalizationLexicon;
 use crate::word_class_table::WordClassTableCache;
 
 // Pinned descent cutoff (cookbook §6.1). 1 = any overlap continues descent.
-// TODO: tune empirically against real signatures; 1 is the testing default
-// and MUST NOT ship as-is (matching the Swift FDCRuntime.swift TODO comment).
+// Tuned empirically: a sweep over 1...200 produced identical results on the
+// v1.0 frame (shallow frame — descent rarely fires), so the cutoff is inert
+// here. `1` is the pinned ship value; classification accuracy is governed by
+// within-region scoring (§5), not this cutoff. Mirrors Swift FDCRuntime.swift.
 const STOP_THRESHOLD: usize = 1;
 
 /// The bundled artifacts and the assembled matcher — loaded once per process.
@@ -58,7 +60,20 @@ fn get_bundle() -> Option<&'static Bundle> {
         let table = WordClassTableCache::from_json(TABLE_JSON)?;
 
         let version = signatures.version.clone();
-        let matcher = FdcMatcher::new(lexicon, frame, table, &signatures, STOP_THRESHOLD);
+        // The runtime ships ScoreMode::Idf (Mission #4 Phase B.2): IDF-weighting
+        // the overlap — penalizing concept terms common across many signatures,
+        // rewarding distinctive ones — improved within-region code selection
+        // over raw overlap on the v1.0 frame. Mirrors Swift FDCRuntime.swift
+        // which passes `.idf` to FDCMatcher at construction time. The matcher
+        // default stays Raw; the runtime opts in here.
+        let matcher = FdcMatcher::new_with_mode(
+            lexicon,
+            frame,
+            table,
+            &signatures,
+            STOP_THRESHOLD,
+            ScoreMode::Idf,
+        );
 
         Some(Bundle { matcher, version })
     }).as_ref()
