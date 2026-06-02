@@ -34,9 +34,10 @@
 //! # Surface boundary
 //!
 //! See README.md for the full tool list (49 tools after v2b-p2) and what is
-//! out of scope (persistent storage backends, live federation fan-out, and
-//! live learn + non-drawer recall behavior — those tools are advertised and
-//! refuse honestly until their kit surfaces land).
+//! out of scope (live federation fan-out, and live learn + non-drawer recall
+//! behavior — those tools are advertised and refuse honestly until their kit
+//! surfaces land). SQLite persistence is now supported via `ARIA_MCP_SQLITE_PATH`;
+//! CloudKit and federation remain future work.
 
 pub mod dispatch;
 pub mod dispatcher;
