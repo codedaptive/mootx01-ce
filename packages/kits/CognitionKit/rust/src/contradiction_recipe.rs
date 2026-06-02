@@ -4,9 +4,10 @@
 //! anomalously LOW (a negative-z outlier) — the memory in tension with the
 //! rest. The estate notices when something doesn't belong.
 //!
-//! Rust-only today (Swift version contracted, SPEC C-7). Pure CognitionKit sequencing: recall via
-//! GLK + NeuronKit `shingle_similarity` (cohesion) + NeuronKit `anomalies`
-//! (which surfaces SubstrateML's AnomalyDetection). Read-only.
+//! Paired with the Swift version (`Sources/CognitionKit/Contradiction.swift`).
+//! Pure CognitionKit sequencing: recall via GLK + NeuronKit
+//! `shingle_similarity` (cohesion) + NeuronKit `anomalies` (which surfaces
+//! SubstrateML's AnomalyDetection). Read-only.
 
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
