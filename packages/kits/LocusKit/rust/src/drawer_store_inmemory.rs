@@ -1989,10 +1989,7 @@ impl InMemoryDrawerStore {
     /// `now` seeds the `created_at` / `last_modified` manifest rows on
     /// first open.  `hlc` is an optional injected `HLCGenerator`; pass
     /// `None` to create a top-level estate that owns its own clock.
-    pub fn new(
-        now: i64,
-        hlc: Option<HLCGenerator>,
-    ) -> Result<Self, LocusKitError> {
+    pub fn new(now: i64, hlc: Option<HLCGenerator>) -> Result<Self, LocusKitError> {
         let estate_id = Uuid::new_v4();
         let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(estate_id));
         let inner = DrawerStoreCore::new(storage, now, hlc)?;
@@ -2043,10 +2040,17 @@ impl DrawerStore for InMemoryDrawerStore {
     fn drawers_in_wing(&self, wing: &str) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.drawers_in_wing(wing)
     }
-    fn drawers_in_wing_room(&self, wing: &str, room: &str) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+    fn drawers_in_wing_room(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.drawers_in_wing_room(wing, room)
     }
-    fn drawers_by_source(&self, source_file: &str) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+    fn drawers_by_source(
+        &self,
+        source_file: &str,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.drawers_by_source(source_file)
     }
     fn all_drawers(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
@@ -2055,23 +2059,71 @@ impl DrawerStore for InMemoryDrawerStore {
     fn drawer_ids(&self) -> Result<Vec<crate::estate_types::RowID>, LocusKitError> {
         self.inner.drawer_ids()
     }
-    fn mutate_provenance(&self, drawer_id: &str, new_provenance: i64, changed_by: &str, reason: Option<&str>, now: i64) -> Result<(), LocusKitError> {
-        self.inner.mutate_provenance(drawer_id, new_provenance, changed_by, reason, now)
+    fn mutate_provenance(
+        &self,
+        drawer_id: &str,
+        new_provenance: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .mutate_provenance(drawer_id, new_provenance, changed_by, reason, now)
     }
-    fn mutate_adjective(&self, drawer_id: &str, new_adjective: i64, changed_by: &str, reason: Option<&str>, now: i64) -> Result<(), LocusKitError> {
-        self.inner.mutate_adjective(drawer_id, new_adjective, changed_by, reason, now)
+    fn mutate_adjective(
+        &self,
+        drawer_id: &str,
+        new_adjective: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .mutate_adjective(drawer_id, new_adjective, changed_by, reason, now)
     }
-    fn mutate_operational(&self, drawer_id: &str, new_operational: i64, changed_by: &str, reason: Option<&str>, now: i64) -> Result<(), LocusKitError> {
-        self.inner.mutate_operational(drawer_id, new_operational, changed_by, reason, now)
+    fn mutate_operational(
+        &self,
+        drawer_id: &str,
+        new_operational: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .mutate_operational(drawer_id, new_operational, changed_by, reason, now)
     }
-    fn mutate_state(&self, drawer_id: &str, new_state: crate::adjectives::State, via: substrate_lib::row_state::RowVerb, changed_by: &str, reason: Option<&str>, now: i64) -> Result<(), LocusKitError> {
-        self.inner.mutate_state(drawer_id, new_state, via, changed_by, reason, now)
+    fn mutate_state(
+        &self,
+        drawer_id: &str,
+        new_state: crate::adjectives::State,
+        via: substrate_lib::row_state::RowVerb,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .mutate_state(drawer_id, new_state, via, changed_by, reason, now)
     }
-    fn expunge_gated(&self, drawer_id: &str, changed_by: &str, reason: Option<&str>, now: i64) -> Result<(), LocusKitError> {
+    fn expunge_gated(
+        &self,
+        drawer_id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
         self.inner.expunge_gated(drawer_id, changed_by, reason, now)
     }
-    fn reanchor_gated(&self, drawer_id: &str, to_room: Option<&str>, to_lattice: Option<crate::estate_types::LatticeAnchor>, changed_by: &str, reason: Option<&str>, now: i64) -> Result<(), LocusKitError> {
-        self.inner.reanchor_gated(drawer_id, to_room, to_lattice, changed_by, reason, now)
+    fn reanchor_gated(
+        &self,
+        drawer_id: &str,
+        to_room: Option<&str>,
+        to_lattice: Option<crate::estate_types::LatticeAnchor>,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .reanchor_gated(drawer_id, to_room, to_lattice, changed_by, reason, now)
     }
     fn add_tunnel(&self, tunnel: &crate::tunnel::Tunnel) -> Result<(), LocusKitError> {
         self.inner.add_tunnel(tunnel)
@@ -2082,7 +2134,11 @@ impl DrawerStore for InMemoryDrawerStore {
     fn tunnels_from_wing(&self, wing: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.tunnels_from_wing(wing)
     }
-    fn tunnels_from_wing_room(&self, wing: &str, room: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+    fn tunnels_from_wing_room(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.tunnels_from_wing_room(wing, room)
     }
     fn tunnels_to_wing(&self, wing: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
@@ -2094,7 +2150,10 @@ impl DrawerStore for InMemoryDrawerStore {
     fn get_kg_fact(&self, id: &str) -> Result<Option<crate::kg_fact::KGFact>, LocusKitError> {
         self.inner.get_kg_fact(id)
     }
-    fn kg_facts_for_drawer(&self, source_drawer_id: &str) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
+    fn kg_facts_for_drawer(
+        &self,
+        source_drawer_id: &str,
+    ) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
         self.inner.kg_facts_for_drawer(source_drawer_id)
     }
     fn add_proposal(&self, proposal: &crate::proposal::Proposal) -> Result<(), LocusKitError> {
@@ -2103,61 +2162,114 @@ impl DrawerStore for InMemoryDrawerStore {
     fn get_proposal(&self, id: &str) -> Result<Option<crate::proposal::Proposal>, LocusKitError> {
         self.inner.get_proposal(id)
     }
-    fn proposals_for_target(&self, target_row_id: &str) -> Result<Vec<crate::proposal::Proposal>, LocusKitError> {
+    fn proposals_for_target(
+        &self,
+        target_row_id: &str,
+    ) -> Result<Vec<crate::proposal::Proposal>, LocusKitError> {
         self.inner.proposals_for_target(target_row_id)
     }
-    fn add_association(&self, association: &crate::association::Association) -> Result<(), LocusKitError> {
+    fn add_association(
+        &self,
+        association: &crate::association::Association,
+    ) -> Result<(), LocusKitError> {
         self.inner.add_association(association)
     }
-    fn get_association(&self, id: &str) -> Result<Option<crate::association::Association>, LocusKitError> {
+    fn get_association(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::association::Association>, LocusKitError> {
         self.inner.get_association(id)
     }
-    fn associations_from(&self, wing: &str, room: &str) -> Result<Vec<crate::association::Association>, LocusKitError> {
+    fn associations_from(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::association::Association>, LocusKitError> {
         self.inner.associations_from(wing, room)
     }
-    fn associations_to(&self, wing: &str, room: &str) -> Result<Vec<crate::association::Association>, LocusKitError> {
+    fn associations_to(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::association::Association>, LocusKitError> {
         self.inner.associations_to(wing, room)
     }
-    fn add_learned_reference(&self, reference: &crate::learned_reference::LearnedReference) -> Result<(), LocusKitError> {
+    fn add_learned_reference(
+        &self,
+        reference: &crate::learned_reference::LearnedReference,
+    ) -> Result<(), LocusKitError> {
         self.inner.add_learned_reference(reference)
     }
-    fn get_learned_reference(&self, id: &str) -> Result<Option<crate::learned_reference::LearnedReference>, LocusKitError> {
+    fn get_learned_reference(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::learned_reference::LearnedReference>, LocusKitError> {
         self.inner.get_learned_reference(id)
     }
-    fn learned_references_from_source(&self, source_catalog_id: &str) -> Result<Vec<crate::learned_reference::LearnedReference>, LocusKitError> {
+    fn learned_references_from_source(
+        &self,
+        source_catalog_id: &str,
+    ) -> Result<Vec<crate::learned_reference::LearnedReference>, LocusKitError> {
         self.inner.learned_references_from_source(source_catalog_id)
     }
     fn add_diary_entry(&self, entry: &crate::diary_entry::DiaryEntry) -> Result<(), LocusKitError> {
         self.inner.add_diary_entry(entry)
     }
-    fn get_diary_entry(&self, id: &str) -> Result<Option<crate::diary_entry::DiaryEntry>, LocusKitError> {
+    fn get_diary_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::diary_entry::DiaryEntry>, LocusKitError> {
         self.inner.get_diary_entry(id)
     }
-    fn read_diary(&self, agent_name: &str, last_n: usize) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
+    fn read_diary(
+        &self,
+        agent_name: &str,
+        last_n: usize,
+    ) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
         self.inner.read_diary(agent_name, last_n)
     }
-    fn read_diary_in_wing(&self, agent_name: &str, wing: &str, last_n: usize) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
+    fn read_diary_in_wing(
+        &self,
+        agent_name: &str,
+        wing: &str,
+        last_n: usize,
+    ) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
         self.inner.read_diary_in_wing(agent_name, wing, last_n)
     }
-    fn insert_recall_trace(&self, item: &crate::recall_trace_item::RecallTraceItem) -> Result<(), LocusKitError> {
+    fn insert_recall_trace(
+        &self,
+        item: &crate::recall_trace_item::RecallTraceItem,
+    ) -> Result<(), LocusKitError> {
         self.inner.insert_recall_trace(item)
     }
-    fn get_recall_trace(&self, id: &str) -> Result<Option<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
+    fn get_recall_trace(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
         self.inner.get_recall_trace(id)
     }
-    fn recall_trace_since(&self, since: &str) -> Result<Vec<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
+    fn recall_trace_since(
+        &self,
+        since: &str,
+    ) -> Result<Vec<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
         self.inner.recall_trace_since(since)
     }
     fn mark_recall_trace_used(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
         self.inner.mark_recall_trace_used(id, now)
     }
-    fn audit_events_for_row(&self, row_id: &str) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+    fn audit_events_for_row(
+        &self,
+        row_id: &str,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
         self.inner.audit_events_for_row(row_id)
     }
     fn list_wings(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
         self.inner.list_wings()
     }
-    fn list_rooms(&self, wing: Option<&str>) -> Result<Vec<crate::summaries::RoomSummary>, LocusKitError> {
+    fn list_rooms(
+        &self,
+        wing: Option<&str>,
+    ) -> Result<Vec<crate::summaries::RoomSummary>, LocusKitError> {
         self.inner.list_rooms(wing)
     }
     fn taxonomy(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
@@ -3093,7 +3205,8 @@ mod tests {
         // (pub(crate)) because InMemoryDrawerStore::new always allocates a
         // fresh storage.  This is the only scenario that needs the bare core.
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store_a = DrawerStoreCore::new(Arc::clone(&storage) as Arc<dyn Storage>, NOW, None).unwrap();
+        let store_a =
+            DrawerStoreCore::new(Arc::clone(&storage) as Arc<dyn Storage>, NOW, None).unwrap();
         let uuid_a = store_a.read_manifest().unwrap().estate_uuid;
         // Second open must see the same estate_uuid written by the first.
         let store_b = DrawerStoreCore::new(storage as Arc<dyn Storage>, NOW + 1, None).unwrap();
@@ -3113,7 +3226,10 @@ mod tests {
         let manifest_uuid = Uuid::parse_str(&store.read_manifest().unwrap().estate_uuid).unwrap();
         let row = Uuid::parse_str(&tid("d1")).unwrap();
         let events = store.storage().audit_log().events_for_row(row).unwrap();
-        assert!(!events.is_empty(), "capture must emit a genesis audit event");
+        assert!(
+            !events.is_empty(),
+            "capture must emit a genesis audit event"
+        );
         assert_eq!(
             events[0].estate_uuid, manifest_uuid,
             "audit event estate uuid must equal the manifest estate uuid on first open"
@@ -3440,7 +3556,11 @@ mod tests {
         );
         let row = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
         let events = store.storage().audit_log().events_for_row(row).unwrap();
-        assert_eq!(events.len(), 1, "only the genesis capture event; the rejected mutation appended nothing");
+        assert_eq!(
+            events.len(),
+            1,
+            "only the genesis capture event; the rejected mutation appended nothing"
+        );
         assert_eq!(events[0].verb, "capture");
     }
 

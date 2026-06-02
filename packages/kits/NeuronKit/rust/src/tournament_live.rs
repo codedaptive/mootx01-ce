@@ -226,8 +226,7 @@ mod tests {
         // The Swift model: mint the branch through the kit's verb.
         // InMemoryDrawerStore::new allocates InMemoryStorage internally.
         let mut coord = EstateCoordinator::new();
-        let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+        let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
         let h = coord
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .unwrap();
