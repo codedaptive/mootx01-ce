@@ -99,10 +99,11 @@ const T_RECALL_TRACE: &str = "recall_trace";
 
 /// Concrete `DrawerStore` impl backed by a persistence-kit `Storage`.
 ///
-/// Today this is the in-memory test fixture and the substrate the
-/// Estate verbs run against. The same struct will sit in front of the
-/// future SQLite backend once persistence-kit's `Sqlite` variant ships:
-/// the trait surface here is the contract, not the backend identity.
+/// This struct fronts both `InMemoryStorage` (test fixture and
+/// in-memory estates) and, via the `SqliteDrawerStore` newtype,
+/// `SqliteStorage` (durable estates): the trait surface here is the
+/// contract, not the backend identity. All verb logic lives once, in
+/// this delegation core.
 pub struct InMemoryDrawerStore {
     storage: Arc<dyn Storage>,
     /// Monotonic audit-id counter. SQLite would assign these as the
