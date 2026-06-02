@@ -5,7 +5,10 @@
 // GeniusLocus bitmap layout: LocusKit declares functional columns
 // such as the state cluster `(adjective_bitmap & 0xF)` or a
 // six-bit field extract `(adjective_bitmap >> 6) & 0x3F`, then
-// indexes them with an ordinary IndexDeclaration.
+// indexes them with an ordinary IndexDeclaration. (Field semantics:
+// LocusKit/Adjectives.swift is the source of truth for the adjective
+// axes; PersistenceKit cannot import it — LocusKit depends on
+// PersistenceKit — so this file sees only the raw bit algebra.)
 //
 // Why structured, not a SQL string. A SQL-text generated column
 // would be the same anti-pattern as SchemaOperation.custom: it
