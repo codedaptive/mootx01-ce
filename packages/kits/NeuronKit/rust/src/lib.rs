@@ -46,6 +46,7 @@ pub mod dreaming_decision;
 pub mod dreaming_cycle;
 pub mod maintenance_decision;
 pub mod maintenance_cycle;
+pub mod association_rule_mining;
 
 pub use lattice_anchor::{
     AnchorConfidence, EnrichmentStatus, LatticeAnchorInference,
