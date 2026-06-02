@@ -54,15 +54,19 @@
 //! - `bundle_materializer` — Materializes Bundle A from an active drawer
 //!   slice via `EstateFingerprintFamilies` + a `SubstrateKernel`
 //!
-//! DrawerStore concrete impl, the bitmap query engine, and the
-//! supporting frame / filter types (landed LP-1E):
+//! DrawerStore concrete impls, the bitmap query engine, and the
+//! supporting frame / filter types (landed LP-1E + LP-1F SQLite):
 //!
 //! - `drawer_store` — extended `DrawerStore` trait with the verb-surface
 //!   methods (drawer CRUD, supersession cascade, mutation paths,
 //!   tunnel / kg-fact / diary CRUD, recall trace, audit reads, summary)
 //! - `drawer_store_inmemory` — concrete `InMemoryDrawerStore` over
 //!   persistence-kit `InMemoryStorage` with v1 manifest defaults at
-//!   construction
+//!   construction (test fixture; no persistence across process restarts)
+//! - `drawer_store_sqlite` — concrete `SqliteDrawerStore` over
+//!   persistence-kit `SqliteStorage` (WAL-mode, durable across restarts);
+//!   delegates all verb logic through `InMemoryDrawerStore`'s
+//!   `Arc<dyn Storage>` abstraction with zero code duplication
 //! - `bitmap_ops` — § 7.7 bitmap operator primitives (and-mask,
 //!   threshold-compare, XOR, shift-extract, SIMD-ballot,
 //!   Hamming distance)
@@ -87,9 +91,11 @@
 //! The LP-0 vector runner (`tests/lp0_vectors.rs`) exercises the full
 //! port end-to-end against the canonical conformance vectors.
 //!
-//! A SQLite-backed `DrawerStore` lands when persistence-kit's `Sqlite`
-//! backend ships; the in-memory `InMemoryDrawerStore` is the current
-//! concrete implementation.
+//! Two concrete `DrawerStore` implementations ship: `InMemoryDrawerStore`
+//! (test fixture, non-persistent) and `SqliteDrawerStore` (WAL-mode
+//! SQLite, durable). Both delegate through the same `Arc<dyn Storage>`
+//! abstraction; `SqliteDrawerStore` is a thin constructor newtype over
+//! `InMemoryDrawerStore` backed by persistence-kit's `SqliteStorage`.
 
 pub mod adjectives;
 pub mod association;
@@ -112,6 +118,7 @@ pub mod drawer_operational;
 pub mod drawer_state_validator;
 pub mod drawer_store;
 pub mod drawer_store_inmemory;
+pub mod drawer_store_sqlite;
 pub mod error;
 pub mod estate;
 pub mod estate_audit;
