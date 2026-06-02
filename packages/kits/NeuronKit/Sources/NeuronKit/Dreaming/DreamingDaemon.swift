@@ -38,7 +38,7 @@ import GeniusLocusKit
 import LocusKit
 
 /// Read surface the dreaming daemon mines (NEURONKIT_SPEC § 3.1 tick
-/// steps 1–2 and 5). Net-new seam; the production adapter binds it to
+/// steps 1–2 and 5). Dependency seam; the production adapter binds it to
 /// estate reads when the GLK surface exposes them. All three reads are
 /// pure inputs — the daemon mutates nothing through this protocol.
 public protocol DreamingSubstrateReader: Sendable {

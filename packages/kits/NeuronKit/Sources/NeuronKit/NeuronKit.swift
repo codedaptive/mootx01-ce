@@ -114,7 +114,7 @@ public extension NeuronKit {
 // MARK: - Reasoning surface: branch ops + migration benchmark (§ 4.3, § 4.7)
 
 // The COW branch operations and the migration recall-fidelity benchmark
-// roll up into the public `NeuronKit` enum through net-new extension
+// roll up into the public `NeuronKit` enum through dedicated extension
 // files rather than inline here, to keep this roll-up file declaration-
 // free:
 //
