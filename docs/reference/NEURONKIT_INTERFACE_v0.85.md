@@ -68,6 +68,7 @@ purpose: |
 - `Sources/NeuronKit/Lenses/Anticipation.swift` — `anticipate`,
   `ActionObservation`, `ActionPrediction`
 - `Sources/NeuronKit/Lenses/Drift.swift` — `drift`, `DriftScore`
+- `Sources/NeuronKit/Lenses/AnomalyScan.swift` — `anomalies`, `Anomaly`
 - `Sources/NeuronKit/Dreaming/` — `DreamingDaemon`, `DreamingPolicy`
   (+ `DreamingPolicyStore`, `InMemoryDreamingPolicyStore`),
   `DreamingTriggerMode`, `RewardSource` (+ `RewardSourceKind`,
@@ -471,6 +472,12 @@ public struct DriftScore: Sendable, Equatable, Codable {
     public let klDivergence: Float             // D(p‖q), asymmetric
     public init(jensenShannon: Float, klDivergence: Float)
 }
+
+public struct Anomaly: Sendable, Equatable, Codable {
+    public let index: Int                      // position in the input series
+    public let zScore: Float                   // signed — negative = below the mean
+    public init(index: Int, zScore: Float)
+}
 ```
 
 **Rust:**
@@ -500,6 +507,7 @@ pub struct ActionPrediction { pub action: u8, pub success_rate: f32, pub count: 
 
 // § 7.5 Surprise
 pub struct DriftScore { pub jensen_shannon: f32, pub kl_divergence: f32 }
+pub struct Anomaly { pub index: usize, pub z_score: f32 }
 ```
 
 ### Dreaming daemon surface
@@ -832,6 +840,7 @@ extension NeuronKit {
 
     // § 7.5 Surprise.
     public static func drift(from p: [Float], to q: [Float]) -> DriftScore
+    public static func anomalies(values: [Float], threshold: Float) -> [Anomaly]
 }
 ```
 
