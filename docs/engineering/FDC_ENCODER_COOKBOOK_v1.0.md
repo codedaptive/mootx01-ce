@@ -36,7 +36,7 @@ as the Anchor's `wikidataQID`. There is no "trail" return.
 
 Pure function. No I/O. No clock. No RNG. No network. No learned model.
 Same input and same pinned artifacts yield bit-identical output on every
-platform and in both the Swift and Rust ports.
+platform and in both the Swift and Rust versions.
 
 ---
 
@@ -364,7 +364,7 @@ ranking** (the §6.1 cutoff still gates on the raw integer overlap, so its
 meaning is mode-independent). The matcher *default* stays `.raw` (the literal
 sum above). **Determinism:** the IDF-weighted sums are accumulated in sorted
 term order (float addition is non-associative), keeping the result bit-identical
-across runs and across the Swift/Rust ports. The full scoring spec is in
+across runs and across the Swift and Rust versions. The full scoring spec is in
 `FDC_ENCODER_CANONICAL_v1.0.md` §5.
 
 ---
@@ -397,7 +397,7 @@ frame: a sweep over 1…200 against the shipped signatures produced identical
 results. The frame is shallow — most codes are integer-head, average encoded
 depth ~1.3 — so the Step-5 descent rarely fires and the cutoff value does not
 change the outcome. Accuracy is governed by the within-region IDF scoring
-(§5.3), not this cutoff. It is committed as the named constant `1` in both ports
+(§5.3), not this cutoff. It is committed as the named constant `1` in both versions
 (`FDC.stopThreshold` / `STOP_THRESHOLD`) and the resolution is recorded in
 `FDC_ENCODER_CANONICAL_v1.0.md` §5. The cutoff compares against the **raw integer
 overlap** (`Σ bag[t]`), so its meaning is independent of the §5.3 score mode.
@@ -475,7 +475,10 @@ single best-matching real Wikipedia article title, recorded in
 `Data/_gap_titles.tsv` (`code \t title`, committed as a frozen, auditable
 input). Each proposed title is validated by fetching its article extract
 (`Data/_pull_gap.sh`); only a title that returns no article would fall through
-to a generated description. The signature builder applies the map via a
+to a generated description — a designed fallback that is NOT implemented in
+the shipped signature builder and never fired: the one miss in the v1.0 build
+(012 -> "Biobibliography") was re-resolved to a real article ("Bibliography")
+instead. The signature builder applies the map via a
 `code → title` override (`--gaptitles`), keyed by FDC code so it works
 regardless of the label's quoted-heading extraction.
 
@@ -524,12 +527,12 @@ bundled compiled artifact versioned separately.
 
 ## §8. Cross-Platform Conformance
 
-The shipped conformance property is **Swift-scalar == Rust-scalar**: both ports
+The shipped conformance property is **Swift-scalar == Rust-scalar**: both versions
 produce identical `encode` / `encodeAnchor` output for identical input and
 identical pinned artifacts. This is a pure string/concept-ID algorithm — there
-is no Metal or BLAS dimension and no SIMD kernel to conform; the only cross-port
+is no Metal or BLAS dimension and no SIMD kernel to conform; the only cross-version
 determinism concern is float-summation order in the IDF scoring (§5.3), which
-both ports pin by summing in sorted term order.
+both versions pin by summing in sorted term order.
 
 Conformance is enforced by a committed fixture
 (`rust/tests/fixtures/fdc_conformance.json`, **52/52 passing**), each entry an
@@ -542,7 +545,7 @@ input with its expected code:
 ]
 ```
 
-Any divergence between ports is a hard conformance failure and blocks release.
+Any divergence between versions is a hard conformance failure and blocks release.
 
 The cross-platform-*guaranteed* surface is the static word-class table plus the
 pinned lexicon and signatures: any token resolved through them is bit-identical
