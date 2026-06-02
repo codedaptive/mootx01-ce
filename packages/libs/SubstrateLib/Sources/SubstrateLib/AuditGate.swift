@@ -109,12 +109,27 @@ public struct Vocabulary: Sendable {
         // only its declared raws, so the gate refuses a non-scale-gapped
         // sensitivity/trust the way it refuses an undeclared field. State
         // additionally gets the verb-consistency check in `admit`.
+        //
+        // ──────────────────────────────────────────────────────────────
+        // Quis custodiet ipsos custodes? Who watches the watchmen's
+        // bitmaps? The SwiftSyntax Guardian does — tools/guardian.
+        //
+        // The four legalValues sets below duplicate facts owned in
+        // LocusKit (cannot import: this tier sits below LocusKit).
+        // Touch one side and the Guardian warns at your desk, before
+        // it ships. Test backstop: GuardianPairParityTests.
+        // ──────────────────────────────────────────────────────────────
+        //
+        // @guardian-pair: state-basis AuditGate.basis[state].legalValues <-> State.allCases (raw set equality)
         FieldSlot(column: .adjective, shift: 0,  width: 6, label: "state",
                   legalValues: [0,1,2,3,16,17,18,19,32,33]),
+        // @guardian-pair: sensitivity-basis AuditGate.basis[sensitivity].legalValues <-> AdjectiveSensitivity.allCases (raw set equality)
         FieldSlot(column: .adjective, shift: 6,  width: 6, label: "sensitivity",
                   legalValues: [0,16,32,48]),
+        // @guardian-pair: exportability-basis AuditGate.basis[exportability].legalValues <-> AdjectiveExportability.allCases (raw set equality)
         FieldSlot(column: .adjective, shift: 12, width: 6, label: "exportability",
                   legalValues: [0,32]),
+        // @guardian-pair: trust-basis AuditGate.basis[trust].legalValues <-> Trust.allCases (raw set equality)
         FieldSlot(column: .adjective, shift: 18, width: 6, label: "trust",
                   legalValues: [0,1,2,3,4,5,6]),
         // flags: a 3-bit bitset spanning adjective bits 24-26, any
