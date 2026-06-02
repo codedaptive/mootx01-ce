@@ -37,7 +37,6 @@ use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use locus_kit::kg_fact::KGFact;
 use locus_kit::tunnel::Tunnel;
-use persistence_kit::inmemory::InMemoryStorage;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;

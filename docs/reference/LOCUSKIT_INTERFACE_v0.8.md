@@ -478,12 +478,15 @@ public actor DrawerStore {
     // … full CRUD + audit surface, see DrawerStore.swift
 }
 ```
-**Rust:** `pub trait DrawerStore: Send + Sync` implemented by two types:
+**Rust:** `pub trait DrawerStore: Send + Sync` implemented by three types:
 `DrawerStoreCore` (storage-agnostic verb-logic core — `pub(crate)` constructor,
-kit-internal only) and `InMemoryDrawerStore` (public newtype for the in-memory
-backend, wraps `DrawerStoreCore` over `InMemoryStorage`). Backend identity is
-structurally visible at every construction site and deliberately erased at the
-trait surface. A future `SqliteDrawerStore` newtype slots in symmetrically.
+kit-internal only), `InMemoryDrawerStore` (public newtype for the in-memory
+backend, wraps `DrawerStoreCore` over `InMemoryStorage`; a `with_storage`
+variant serves shared-storage scenarios such as GLK parity tests and the
+reopen-idempotency test), and `SqliteDrawerStore` (public newtype for the
+durable backend, wraps `DrawerStoreCore` over `SqliteStorage`). Backend
+identity is structurally visible at every construction site and deliberately
+erased at the trait surface.
 Methods are synchronous and take `now: i64`. The Swift `DrawerStore` is a
 concrete actor over any injected `Storage` (SQLite in production); the Rust
 version realises the same store contract through the trait (SPEC § 8).
