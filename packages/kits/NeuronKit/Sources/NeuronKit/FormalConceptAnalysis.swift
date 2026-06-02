@@ -212,6 +212,90 @@ public struct FormalContext: Sendable {
     }
 }
 
+// MARK: - Bounded concept miner
+
+/// Bounded concept mining over a materialized `FormalContext`.
+///
+/// "Bounded" is the contract, not a tuning detail: the miner seeds
+/// only from frequent single attributes (support ≥ `minSupport`),
+/// takes ONE closure per seed, deduplicates by intent, and truncates
+/// to `maxConcepts` — it never enumerates the full concept lattice,
+/// and it computes no stability (see `FormalConcept.stability`).
+/// Cost is O(|attributes| × closure), closure being plain bitset
+/// intersections — polynomial, no exponential path.
+///
+/// Deterministic by construction: seeds are visited in the context's
+/// sorted attribute order, and the result ordering is fully
+/// specified (support desc, then intent size asc, then lexicographic
+/// intent), so equal inputs yield identical output across runs and
+/// across the Swift and Rust versions.
+public struct BoundedConceptMiner: Sendable {
+    /// Minimum extent size for a seed attribute and for an emitted
+    /// concept. Values below 1 are clamped to 1 (an empty-extent
+    /// concept is never emitted).
+    public let minSupport: Int
+    /// Maximum intent size of an emitted concept; closures larger
+    /// than this are skipped.
+    public let maxIntentSize: Int
+    /// Maximum number of concepts returned (post-sort truncation).
+    public let maxConcepts: Int
+
+    public init(minSupport: Int, maxIntentSize: Int, maxConcepts: Int) {
+        self.minSupport = minSupport
+        self.maxIntentSize = maxIntentSize
+        self.maxConcepts = maxConcepts
+    }
+
+    /// Mines bounded concepts from `context`. Returns concepts sorted
+    /// by support descending, then intent size ascending, then
+    /// lexicographic intent (the stable key), truncated to
+    /// `maxConcepts`.
+    public func mine(context: FormalContext) -> [FormalConcept] {
+        guard maxConcepts > 0, maxIntentSize > 0, context.rowCount > 0 else {
+            return []
+        }
+        let support = Swift.max(1, minSupport)
+
+        // Seed pass: one closure per frequent single attribute,
+        // deduplicated by intent. Sorted-attribute iteration order
+        // makes the dedup map's insertion history deterministic.
+        var byIntent: [[FormalAttribute]: FormalConcept] = [:]
+        for a in 0..<context.attributes.count {
+            let rows = context.rowsBits(ofAttributeAt: a)
+            if rows.popcount < support { continue }
+
+            // closure([seed]) — extent is exactly the seed's rows
+            // (single-attribute intent), so the closure is one
+            // intent-derivation over that row bitset.
+            let intent = context.intentAttributes(ofRowBits: rows)
+            if intent.count > maxIntentSize { continue }
+            if byIntent[intent] != nil { continue }
+
+            byIntent[intent] = FormalConcept(
+                extent: rows.setBits.map { FormalContext.RowID($0) },
+                intent: intent,
+                support: rows.popcount,
+                stability: nil
+            )
+        }
+
+        // Fully-specified ordering: support desc, intent size asc,
+        // then lexicographic intent as the stable key.
+        var concepts = Array(byIntent.values)
+        concepts.sort { lhs, rhs in
+            if lhs.support != rhs.support { return lhs.support > rhs.support }
+            if lhs.intent.count != rhs.intent.count {
+                return lhs.intent.count < rhs.intent.count
+            }
+            return lhs.intent.lexicographicallyPrecedes(rhs.intent)
+        }
+        if concepts.count > maxConcepts {
+            concepts.removeLast(concepts.count - maxConcepts)
+        }
+        return concepts
+    }
+}
+
 // MARK: - Bitset
 
 /// Minimal fixed-width bitset over `UInt64` words. Internal so the
