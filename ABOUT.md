@@ -10,7 +10,7 @@ ARIA is the language inside the product. ARIA expands as Augmented Recall and In
 
 ---
 
-##You've had the moment.
+## You've had the moment.
 
 You're three weeks into a project with your AI. You've explained the same constraint four times. You explain it a fifth, and it nods, and on the next prompt it forgets again. Or you come back to the chat that solved the problem last Tuesday and it doesn't know you. Or you switch tools because the new one is supposedly better, and you realize you have to start over. Every preference, every piece of context, every thing your last AI finally understood, gone.
 
