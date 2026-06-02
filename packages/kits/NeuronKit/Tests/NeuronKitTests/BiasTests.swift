@@ -9,8 +9,8 @@ import Testing
 // forwards the fitter's typed error only on the baseline-sentinel name (C-16,
 // § 6).
 
-@Suite("Preference lenses (SPEC § 7.3)")
-struct PreferenceLensTests {
+@Suite("Bias lenses (SPEC § 7.3)")
+struct BiasTests {
 
     // MARK: representationBias — distributional
 

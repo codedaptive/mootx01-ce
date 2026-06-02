@@ -7,8 +7,8 @@ import Testing
 // don't outrank a well-evidenced action. Pure, deterministic (B-5, I-18); total
 // over edge inputs (B-8, C-16).
 
-@Suite("Prediction lens (SPEC § 7.4)")
-struct PredictionLensTests {
+@Suite("Anticipation lens (SPEC § 7.4)")
+struct AnticipationTests {
 
     private func obs(_ action: UInt8, _ outcome: UInt8, _ success: Bool, _ n: Int) -> [ActionObservation] {
         Array(repeating: ActionObservation(action: action, outcome: outcome, success: success), count: n)

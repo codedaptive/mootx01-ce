@@ -2,6 +2,10 @@
 //
 // Conformance, determinism, and convergence tests for the
 // Bradley-Terry batch MLE ranker (mission NK-BT-01).
+// Covers (peer-file mirror): Tournament/BradleyTerry.swift,
+// Tournament/BradleyTerryScore.swift, Tournament/PairwiseOutcome.swift
+// — the score and outcome value types are exercised through the fitter
+// they exist for.
 
 import Testing
 import Foundation
