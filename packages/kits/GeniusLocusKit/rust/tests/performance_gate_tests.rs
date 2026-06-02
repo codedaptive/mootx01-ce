@@ -8,13 +8,15 @@
 //                                       a Mac-headroom ceiling)
 //   enrichment throughput ≥ 60 drawers/hour (Mac floor)
 //
-// The Rust capture path on the GeniusLocusKit scaffold does not call
-// into a live LocusKit Rust port — that port has not landed — so the
-// capture-side measurement times the substrate primitives the Rust
-// kit owns today: building a `CaptureFrame` and emitting an
-// equivalent audit entry into the unified log. The enrichment
-// measurement times `EnrichmentPipeline::run`, the same surface the
-// Swift fixture measures.
+// The Rust capture path on the GeniusLocusKit scaffold does not
+// call through to a live locus_kit::Estate — the GLK verb bodies
+// have not yet been wired to dispatch through LocusKit (which is
+// fully shipped at 503 tests). The capture-side measurement times
+// the substrate primitives the Rust kit owns end-to-end today:
+// building a `CaptureFrame` and emitting an equivalent audit entry
+// into the unified log. The enrichment measurement times
+// `EnrichmentPipeline::run`, the same surface the Swift fixture
+// measures.
 //
 // Both gates carry the same intent as the Swift fixture: assert with
 // huge headroom, surface the measured figure in the test output.
@@ -141,8 +143,8 @@ fn theorem_5_enrichment_throughput_clears_mac_floor() {
 
 /// Build one CaptureFrame and append the equivalent unified audit
 /// entry to a fresh log. The cost the Rust kit can measure end-to-end
-/// today; downstream missions that wire the LocusKit Rust port will
-/// replace the body with the live capture verb dispatch.
+/// today; downstream missions that wire the GLK verb bodies to a live
+/// locus_kit::Estate will replace the body with live capture dispatch.
 fn synthesise_capture(index: i64) -> UnifiedAuditLog {
     let udc_codes = ["004", "100", "300", "500", "684.08"];
     let rooms = ["work", "research", "personal", "ops", "scratch"];

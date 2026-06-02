@@ -2,11 +2,12 @@
 // composition fixtures. The Swift reference is
 // `Tests/GeniusLocusKitTests/CompositionConformanceTests.swift`.
 //
-// The Rust port does not yet wrap a live LocusKit estate — the
-// `EstateCoordinator` carries a scaffold `EstateState` with the
-// manifest fields the kit needs for fan-out routing, but verb
-// dispatch is not yet wired. The composition fixtures therefore
-// exercise the surfaces the Rust kit owns end-to-end today:
+// The `EstateCoordinator` carries `EstateState` with manifest fields
+// for fan-out routing, but verb dispatch has not yet been wired
+// through to a live locus_kit::Estate (LocusKit Rust is fully shipped
+// at 503 tests; the verb-wiring layer is the remaining gap). The
+// composition fixtures therefore exercise the surfaces GLK owns
+// end-to-end today:
 //
 //   - Multi-estate coordinator open/close, handle issuance,
 //     fan-out routing by lattice overlap (GLK-01 surface).
@@ -16,9 +17,9 @@
 //     threshold gate (GLK-07).
 //
 // The verb-surface composition slice from the Swift fixture has no
-// Rust analogue today because the LocusKit Rust port has not landed;
-// the parity audit knows about this scaffold gap and the Rust mirror
-// will gain that slice when the port ships.
+// Rust analogue today because the GLK verb bodies have not yet been
+// wired to dispatch through a live locus_kit::Estate; that wiring
+// is the next downstream mission and will complete the slice.
 
 use genius_locus_kit::audit::{
     AuditProjectionFold, AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog,
