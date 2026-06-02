@@ -351,7 +351,7 @@ pub fn run_partial_cue_recall(
 
 ### Prediction (category 8)
 
-Swift versions shipped: `TunnelSuccessor`.
+Swift versions shipped: `TunnelSuccessor`, `Anticipate`.
 
 ```rust
 pub fn run_anticipate(

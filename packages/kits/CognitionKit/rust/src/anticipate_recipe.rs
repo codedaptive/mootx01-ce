@@ -5,8 +5,9 @@
 //! (SubstrateML's action-outcome matrix). "To reach Y, you tend to do X."
 //!
 //! This is the REAL action-outcome lens — the learned T-matrix — not the
-//! explicit-tunnel successor signal in `tunnel_successor_recipe`. Rust-only today
-//! (Swift version contracted, SPEC C-7). Read-only; capability gate on Synthesize? No — it sequences a
+//! explicit-tunnel successor signal in `tunnel_successor_recipe`. Paired
+//! with the Swift version (`Sources/CognitionKit/Anticipate.swift`).
+//! Read-only; capability gate on Synthesize? No — it sequences a
 //! recall + the action-outcome model, neither a declared NeuronKitCapability.
 //!
 //! The SUCCESS signal is user-confirmation, now a LIVE event source: the
