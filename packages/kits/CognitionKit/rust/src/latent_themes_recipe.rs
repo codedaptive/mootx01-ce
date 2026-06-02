@@ -77,7 +77,10 @@ fn field_value_labels(d: &Drawer) -> Vec<String> {
         format!("room:{}", d.room),
         format!("kind:{}", kind_label(d.content_kind())),
         format!("channel:{}", channel_label(d.capture_channel())),
-        format!("sensitivity:{}", sensitivity_label(d.adjective_sensitivity())),
+        format!(
+            "sensitivity:{}",
+            sensitivity_label(d.adjective_sensitivity())
+        ),
     ];
     fv.sort();
     fv.dedup();
@@ -117,7 +120,12 @@ pub fn run_latent_themes(
     let cooccurrence: Vec<(String, String, f64)> =
         cooc.into_iter().map(|((a, b), w)| (a, b, w)).collect();
 
-    Ok(latent_themes(&label_vec, &cooccurrence, k, LATENT_THEMES_SEED))
+    Ok(latent_themes(
+        &label_vec,
+        &cooccurrence,
+        k,
+        LATENT_THEMES_SEED,
+    ))
 }
 
 #[cfg(test)]
@@ -142,7 +150,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -180,7 +190,11 @@ mod tests {
     }
 
     fn dominant(t: &LatentThemes, label: &str) -> usize {
-        t.loadings.iter().find(|l| l.label == label).unwrap().dominant_theme
+        t.loadings
+            .iter()
+            .find(|l| l.label == label)
+            .unwrap()
+            .dominant_theme
     }
 
     // CK-LT-1: two FULLY DISJOINT metadata regimes across the recalled set —
@@ -194,14 +208,22 @@ mod tests {
         let (coord, h) = coord_with_parent();
         for _ in 0..3 {
             capture(
-                &coord, &h, "study", ContentKind::Prose,
-                CaptureChannel::Typed, AdjectiveSensitivity::Normal,
+                &coord,
+                &h,
+                "study",
+                ContentKind::Prose,
+                CaptureChannel::Typed,
+                AdjectiveSensitivity::Normal,
             );
         }
         for _ in 0..3 {
             capture(
-                &coord, &h, "work", ContentKind::Code,
-                CaptureChannel::Voiced, AdjectiveSensitivity::Elevated,
+                &coord,
+                &h,
+                "work",
+                ContentKind::Code,
+                CaptureChannel::Voiced,
+                AdjectiveSensitivity::Elevated,
             );
         }
 
@@ -209,10 +231,17 @@ mod tests {
         assert_eq!(t.k, 2);
         // The study/prose field-values cluster together, distinct from work/code.
         let study = dominant(&t, "room:study");
-        assert_eq!(dominant(&t, "kind:prose"), study, "study & prose share a theme");
+        assert_eq!(
+            dominant(&t, "kind:prose"),
+            study,
+            "study & prose share a theme"
+        );
         let work = dominant(&t, "room:work");
         assert_eq!(dominant(&t, "kind:code"), work, "work & code share a theme");
-        assert_ne!(study, work, "the two filing regimes are different latent themes");
+        assert_ne!(
+            study, work,
+            "the two filing regimes are different latent themes"
+        );
     }
 
     // CK-LT-2: an empty estate yields no themes — guarded, no panic.

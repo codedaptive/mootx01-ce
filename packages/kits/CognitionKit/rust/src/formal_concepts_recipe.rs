@@ -102,10 +102,8 @@ pub fn run_formal_concepts(
     }
 
     // 2. Build FormalContext: one row per drawer.
-    let rows: Vec<Vec<FormalAttribute>> = drawers
-        .iter()
-        .map(|d| formal_attributes_for_drawer(d))
-        .collect();
+    let rows: Vec<Vec<FormalAttribute>> =
+        drawers.iter().map(formal_attributes_for_drawer).collect();
     let context = FormalContext::new(&rows);
 
     // 3. Mine bounded concepts.
@@ -221,7 +219,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -269,10 +269,22 @@ mod tests {
     fn two_cohorts_yield_concepts() {
         let (coord, h) = coord_with_estate();
         for _ in 0..3 {
-            capture_drawer(&coord, &h, "study", ContentKind::Prose, CaptureChannel::Typed);
+            capture_drawer(
+                &coord,
+                &h,
+                "study",
+                ContentKind::Prose,
+                CaptureChannel::Typed,
+            );
         }
         for _ in 0..2 {
-            capture_drawer(&coord, &h, "work", ContentKind::Code, CaptureChannel::Voiced);
+            capture_drawer(
+                &coord,
+                &h,
+                "work",
+                ContentKind::Code,
+                CaptureChannel::Voiced,
+            );
         }
         let out = run_formal_concepts(
             &coord,
@@ -295,7 +307,13 @@ mod tests {
     #[test]
     fn attribute_values_use_swift_canonical_names() {
         let (coord, h) = coord_with_estate();
-        capture_drawer(&coord, &h, "lab", ContentKind::StructuredJson, CaptureChannel::ImportedFile);
+        capture_drawer(
+            &coord,
+            &h,
+            "lab",
+            ContentKind::StructuredJson,
+            CaptureChannel::ImportedFile,
+        );
         let out = run_formal_concepts(&coord, &h, unconfirmed(), default_miner(), NOW).unwrap();
         // At least one concept (the single-drawer-singleton at min_support=1).
         assert!(!out.concepts.is_empty());
@@ -303,12 +321,21 @@ mod tests {
             for intent_str in &concept.intent {
                 // Swift names: "structuredJSON" not "StructuredJson", "importedFile" not "ImportedFile".
                 if intent_str.contains("kind=") {
-                    assert!(!intent_str.contains("StructuredJson"), "must use Swift name: {intent_str}");
+                    assert!(
+                        !intent_str.contains("StructuredJson"),
+                        "must use Swift name: {intent_str}"
+                    );
                 }
                 if intent_str.contains("channel=") {
-                    assert!(!intent_str.contains("ImportedFile"), "must use Swift name: {intent_str}");
+                    assert!(
+                        !intent_str.contains("ImportedFile"),
+                        "must use Swift name: {intent_str}"
+                    );
                     // Positive check.
-                    assert!(intent_str.contains("importedFile"), "must use Swift name: {intent_str}");
+                    assert!(
+                        intent_str.contains("importedFile"),
+                        "must use Swift name: {intent_str}"
+                    );
                 }
             }
         }
@@ -319,7 +346,13 @@ mod tests {
     fn concept_extent_has_drawer_ids() {
         let (coord, h) = coord_with_estate();
         for _ in 0..2 {
-            capture_drawer(&coord, &h, "study", ContentKind::Prose, CaptureChannel::Typed);
+            capture_drawer(
+                &coord,
+                &h,
+                "study",
+                ContentKind::Prose,
+                CaptureChannel::Typed,
+            );
         }
         let out = run_formal_concepts(&coord, &h, unconfirmed(), default_miner(), NOW).unwrap();
         assert!(!out.concepts.is_empty());
@@ -333,8 +366,20 @@ mod tests {
     fn concepts_are_deterministic() {
         let (coord, h) = coord_with_estate();
         for _ in 0..3 {
-            capture_drawer(&coord, &h, "study", ContentKind::Prose, CaptureChannel::Typed);
-            capture_drawer(&coord, &h, "work", ContentKind::Code, CaptureChannel::Voiced);
+            capture_drawer(
+                &coord,
+                &h,
+                "study",
+                ContentKind::Prose,
+                CaptureChannel::Typed,
+            );
+            capture_drawer(
+                &coord,
+                &h,
+                "work",
+                ContentKind::Code,
+                CaptureChannel::Voiced,
+            );
         }
         let first = run_formal_concepts(&coord, &h, unconfirmed(), default_miner(), NOW).unwrap();
         let second = run_formal_concepts(&coord, &h, unconfirmed(), default_miner(), NOW).unwrap();

@@ -41,7 +41,10 @@ pub fn run_contradiction(
         .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
     let n = drawers.len();
     if n < 3 {
-        return Ok(ContradictionOutput { outliers: Vec::new(), considered: n });
+        return Ok(ContradictionOutput {
+            outliers: Vec::new(),
+            considered: n,
+        });
     }
 
     // Per-drawer cohesion: mean shingle-similarity to every other drawer.
@@ -63,7 +66,10 @@ pub fn run_contradiction(
         .map(|a| drawers[a.index].id.clone())
         .collect();
 
-    Ok(ContradictionOutput { outliers, considered: n })
+    Ok(ContradictionOutput {
+        outliers,
+        considered: n,
+    })
 }
 
 #[cfg(test)]
@@ -87,7 +93,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -125,7 +133,11 @@ mod tests {
         // z ≈ -1.73, while a coherent set's small spread cannot exceed it.
         let out = run_contradiction(&coord, &h, all(), 1.5, NOW).expect("contradiction");
         assert_eq!(out.considered, 4);
-        assert!(out.outliers.contains(&odd), "the unrelated memory is the odd-one-out: {:?}", out.outliers);
+        assert!(
+            out.outliers.contains(&odd),
+            "the unrelated memory is the odd-one-out: {:?}",
+            out.outliers
+        );
     }
 
     // CK-CN-2: a coherent set (identical content ⇒ uniform cohesion, zero
@@ -137,6 +149,10 @@ mod tests {
         capture(&coord, &h, "the quick brown fox jumps");
         capture(&coord, &h, "the quick brown fox jumps");
         let out = run_contradiction(&coord, &h, all(), 1.5, NOW).expect("contradiction");
-        assert!(out.outliers.is_empty(), "a coherent set has no odd-one-out: {:?}", out.outliers);
+        assert!(
+            out.outliers.is_empty(),
+            "a coherent set has no odd-one-out: {:?}",
+            out.outliers
+        );
     }
 }

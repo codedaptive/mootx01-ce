@@ -31,56 +31,60 @@
 //! Conformance: each module's `#[cfg(test)]` block fits the same
 //! fixtures as the Swift `*Tests` and asserts identical results.
 
+pub mod anticipate_recipe;
+pub mod association_rules_recipe;
+pub mod bias_recipe;
 pub mod capability;
-pub mod error;
 pub mod catalog;
-pub mod migration_ranking;
-pub mod migration_orchestration;
-pub mod migration_live;
+pub mod constellation_recipe;
+pub mod contradiction_recipe;
+pub mod drift_recipe;
+pub mod error;
+pub mod estate_divergence_recipe;
+pub mod feels_like_recipe;
+pub mod formal_concepts_recipe;
+pub mod free_association_recipe;
 pub mod grounded_synthesis;
 pub mod keystones_recipe;
 pub mod latent_themes_recipe;
-pub mod trust_lens_recipe;
-pub mod drift_recipe;
-pub mod contradiction_recipe;
-pub mod constellation_recipe;
-pub mod free_association_recipe;
-pub mod theme_weather_recipe;
-pub mod feels_like_recipe;
-pub mod tunnel_successor_recipe;
-pub mod estate_divergence_recipe;
-pub mod anticipate_recipe;
+pub mod migration_live;
+pub mod migration_orchestration;
+pub mod migration_ranking;
 pub mod mind_overlap_recipe;
-pub mod bias_recipe;
-pub mod association_rules_recipe;
-pub mod formal_concepts_recipe;
+pub mod theme_weather_recipe;
+pub mod trust_lens_recipe;
+pub mod tunnel_successor_recipe;
 
-pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
-pub use error::{RecipeError, RecipeRunError, SubstrateError};
+pub use anticipate_recipe::run_anticipate;
+pub use association_rules_recipe::{
+    run_association_rules, AssociationRuleResult, AssociationRulesOutput,
+};
+pub use bias_recipe::{run_bias, BiasReport};
+pub use capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
 pub use catalog::{recipe_catalog, recipe_descriptor, recipe_names, RecipeDescriptor};
-pub use migration_ranking::{
-    first_duplicate, lost_concepts, partition_origin, rank,
-    DisqualifiedCore, PlanOutcome, RankedPlan, RankingResult,
-};
-pub use migration_orchestration::{
-    run_migration_benchmark, BenchmarkOutcome, CorpusEntry, CoreReport, OriginEntry, PlanInput,
-    PlanResultCore, RecipeSubstrate,
-};
-pub use migration_live::{confirm_migration_promotion, LiveRecipeSubstrate};
+pub use constellation_recipe::run_constellation;
+pub use contradiction_recipe::{run_contradiction, ContradictionOutput};
+pub use drift_recipe::{run_drift, DriftOutput};
+pub use error::{RecipeError, RecipeRunError, SubstrateError};
+pub use estate_divergence_recipe::{run_estate_divergence, EstateDivergence};
+pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
+pub use formal_concepts_recipe::{run_formal_concepts, FormalConceptResult, FormalConceptsOutput};
+pub use free_association_recipe::{run_free_association, Association};
 pub use grounded_synthesis::{run_grounded_synthesis, GroundedOutput};
 pub use keystones_recipe::run_keystones;
 pub use latent_themes_recipe::run_latent_themes;
-pub use trust_lens_recipe::{run_trust_grounded_synthesis, TrustGroundedOutput};
-pub use drift_recipe::{run_drift, DriftOutput};
-pub use contradiction_recipe::{run_contradiction, ContradictionOutput};
-pub use constellation_recipe::run_constellation;
-pub use free_association_recipe::{run_free_association, Association};
-pub use theme_weather_recipe::run_theme_weather;
-pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
-pub use tunnel_successor_recipe::{run_tunnel_successor, Successor};
-pub use estate_divergence_recipe::{run_estate_divergence, EstateDivergence};
-pub use anticipate_recipe::run_anticipate;
+pub use migration_live::{
+    confirm_migration_promotion, confirm_migration_promotion_by_id, LiveRecipeSubstrate,
+};
+pub use migration_orchestration::{
+    run_migration_benchmark, BenchmarkOutcome, CoreReport, CorpusEntry, OriginEntry, PlanInput,
+    PlanResultCore, RecipeSubstrate,
+};
+pub use migration_ranking::{
+    first_duplicate, lost_concepts, partition_origin, rank, DisqualifiedCore, PlanOutcome,
+    RankedPlan, RankingResult,
+};
 pub use mind_overlap_recipe::{run_mind_overlap, MindOverlap};
-pub use bias_recipe::{run_bias, BiasReport};
-pub use association_rules_recipe::{run_association_rules, AssociationRuleResult, AssociationRulesOutput};
-pub use formal_concepts_recipe::{run_formal_concepts, FormalConceptResult, FormalConceptsOutput};
+pub use theme_weather_recipe::run_theme_weather;
+pub use trust_lens_recipe::{run_trust_grounded_synthesis, TrustGroundedOutput};
+pub use tunnel_successor_recipe::{run_tunnel_successor, Successor};

@@ -95,7 +95,12 @@ pub fn run_anticipate(
         })
         .collect();
 
-    Ok(anticipate(&observations, target_outcome, k, min_observations))
+    Ok(anticipate(
+        &observations,
+        target_outcome,
+        k,
+        min_observations,
+    ))
 }
 
 #[cfg(test)]
@@ -119,11 +124,18 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
-    fn capture(coord: &EstateCoordinator, h: &EstateHandle, channel: CaptureChannel, kind: ContentKind) -> String {
+    fn capture(
+        coord: &EstateCoordinator,
+        h: &EstateHandle,
+        channel: CaptureChannel,
+        kind: ContentKind,
+    ) -> String {
         let mut frame = CaptureFrame::new(
             "content",
             channel,
@@ -160,10 +172,16 @@ mod tests {
         let code = ContentKind::Code.raw_value() as u8;
         let pred = run_anticipate(&coord, &h, all(), code, 5, 1, NOW).expect("anticipate");
         let typed = CaptureChannel::Typed.raw_value() as u8;
-        assert!(pred.iter().any(|p| p.action == typed), "Typed captures produced the Code outcome");
+        assert!(
+            pred.iter().any(|p| p.action == typed),
+            "Typed captures produced the Code outcome"
+        );
         // The Voiced→Prose action should NOT appear under the Code outcome.
         let voiced = CaptureChannel::Voiced.raw_value() as u8;
-        assert!(!pred.iter().any(|p| p.action == voiced), "Voiced led to Prose, not Code");
+        assert!(
+            !pred.iter().any(|p| p.action == voiced),
+            "Voiced led to Prose, not Code"
+        );
     }
 
     // CK-AC-2: an outcome never produced yields no predictions (guarded).
@@ -189,14 +207,18 @@ mod tests {
         for i in 0..4 {
             let id = capture(&coord, &h, CaptureChannel::Typed, ContentKind::Code);
             if i < 3 {
-                coord.mutate(&h, &id, MutationKind::Confirm, None).expect("confirm");
+                coord
+                    .mutate(&h, &id, MutationKind::Confirm, None)
+                    .expect("confirm");
             }
         }
         // Voiced→Code ×4, confirm 1 (1/4 succeed).
         for i in 0..4 {
             let id = capture(&coord, &h, CaptureChannel::Voiced, ContentKind::Code);
             if i < 1 {
-                coord.mutate(&h, &id, MutationKind::Confirm, None).expect("confirm");
+                coord
+                    .mutate(&h, &id, MutationKind::Confirm, None)
+                    .expect("confirm");
             }
         }
 
@@ -205,10 +227,24 @@ mod tests {
         let voiced = CaptureChannel::Voiced.raw_value() as u8;
         let pred = run_anticipate(&coord, &h, all(), code, 5, 1, NOW).expect("anticipate");
 
-        assert_eq!(pred[0].action, typed, "the more-confirmed action leads for the Code outcome");
-        let t = pred.iter().find(|p| p.action == typed).expect("typed predicted");
-        let v = pred.iter().find(|p| p.action == voiced).expect("voiced predicted");
-        assert!(t.success_rate > v.success_rate, "Typed {} > Voiced {}", t.success_rate, v.success_rate);
+        assert_eq!(
+            pred[0].action, typed,
+            "the more-confirmed action leads for the Code outcome"
+        );
+        let t = pred
+            .iter()
+            .find(|p| p.action == typed)
+            .expect("typed predicted");
+        let v = pred
+            .iter()
+            .find(|p| p.action == voiced)
+            .expect("voiced predicted");
+        assert!(
+            t.success_rate > v.success_rate,
+            "Typed {} > Voiced {}",
+            t.success_rate,
+            v.success_rate
+        );
         // Both action→outcome cells saw all four observations (confirmed +
         // unconfirmed unioned), so the rate is differentiation, not coverage.
         assert_eq!(t.count, 4);
