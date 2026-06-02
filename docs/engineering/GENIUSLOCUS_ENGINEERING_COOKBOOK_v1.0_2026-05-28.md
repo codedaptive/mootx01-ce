@@ -7,7 +7,8 @@ date: 2026-05-28
 revision: 2026-06-02 — added §3.7.1 (hyperplane family
           generation) and §12.2.1 (pairing seed derivation);
           pure additions, execution-verified against the
-          committed conformance vectors (40/40, 32/32)
+          committed conformance vectors (40/40, 32/32); FNV-16
+          truncation made explicit in §3.3/§3.4 (low 16 of hash64)
 supersedes: GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36_2026-05-16.md
 purpose: dense mathematical and computational specification for the
          GeniusLocus substrate at v1.0. Math-first, annotation only
@@ -748,8 +749,10 @@ post-creation (see §16.1).
 
 Input vector w: concatenation of
 - 16 bits: UDC code prefix bucket (4-digit prefix hashed via
-  Fowler-Noll-Vo-1a to 16 bits)
-- 16 bits: Q-ID direct hash (FNV-1a of the Q-ID integer to 16 bits)
+  Fowler-Noll-Vo-1a; "to 16 bits" means the LOW 16 bits of the 64-bit
+  FNV-1a hash, `hash64 & 0xFFFF` — never an XOR-fold)
+- 16 bits: Q-ID direct hash (FNV-1a of the Q-ID integer; low 16 bits
+  of the 64-bit hash, `hash64 & 0xFFFF`)
 - 32 bits: Q-ID subclass closure hash (XOR of FNV-1a of each
   closure member's Q-ID, weighted by 1/depth, truncated to 32 bits)
 
@@ -768,7 +771,8 @@ block.
 ### §3.4. Block 2 — Lineage + temporal
 
 Input vector x: concatenation of
-- 16 bits: lineage_id direct hash (FNV-1a, 16 bits)
+- 16 bits: lineage_id direct hash (FNV-1a; low 16 bits of the 64-bit
+  hash, `hash64 & 0xFFFF`)
 - 8 bits: capture-week bucket (weeks since 2020-01-01 modulo 256)
 - 8 bits: defer-pattern hash (FNV-1a of defer-count sequence
   truncated to 8 bits; null/zero when no deferrals)
