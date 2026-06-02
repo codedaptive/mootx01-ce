@@ -37,6 +37,19 @@ import SubstrateLib
 /// bits 28–63 reserved
 /// ```
 ///
+/// `Trust`, `AdjectiveSensitivity`, and `AdjectiveExportability` in
+/// this file are the single source of truth for the three adjective
+/// level axes (trust, sensitivity, exportability) across all kits —
+/// NeuronKit, GeniusLocusKit, and every other LocusKit consumer reads
+/// these enums rather than declaring its own. Layers *below* LocusKit
+/// (SubstrateLib, SubstrateTypes, PersistenceKit) cannot import these
+/// enums — the dependency graph points the other way — so they carry
+/// the raw-integer encoding as the cross-layer contract: the numeric
+/// encoding is the contract; the enum names are documentation (the
+/// same stance `ForbiddenCombinationValidator.swift` documents about
+/// itself). Any new representation of these axes must either import
+/// these enums or carry a one-line citation back to this file.
+///
 /// The pattern matches `Provenance.swift` exactly: named-enum
 /// accessors decode each axis from a single Int64 column with a
 /// safe fallback to the zero case when an unrecognised raw value
@@ -123,8 +136,10 @@ public enum Trust: Int, Sendable, Codable, Comparable {
 /// Lives in bits 6–11 of `Drawer.adjectiveBitmap` (6 bits, 64 values).
 /// Per cookbook §2.3 / §2.8.
 ///
-/// Distinct from `Sensitivity` on the provenance bitmap (which is a
-/// 2-bit contiguous encoding at bits 16–17 of the provenance column).
+/// Distinct from `Sensitivity` on the provenance bitmap — that is
+/// sensitivity *at capture*, a 6-bit scale-gapped encoding at bits
+/// 30–35 of the provenance column that deliberately mirrors these
+/// raw values (see `Provenance.swift`).
 /// The adjective sensitivity is a scale-gapped encoding: cases sit at
 /// 0/16/32/48 (cookbook §2.3 scale-gapped) to leave room for
 /// intermediate tiers without disturbing equality or ordering masks.
