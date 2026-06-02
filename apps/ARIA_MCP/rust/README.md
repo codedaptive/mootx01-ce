@@ -46,9 +46,9 @@ Tool names, descriptions, and input schemas are **byte-identical** to the Swift
 server for every tool that exists in both. Internal architecture is idiomatic
 Rust; this is not a transliteration of the Swift code.
 
-## v1 Surface
+## Tool Surface (28 tools after v2b-p1)
 
-### Recipe tools (moot_list_recipes + 2 foundational)
+### Recipe tools (moot_list_recipes + 3 foundational)
 
 | Tool | Description |
 |---|---|
@@ -74,7 +74,7 @@ to the Swift server's catalog strings, guaranteed by the conformance anchor in
 
 ### v1 lexicon minimum
 
-Three tools so an agent can put real data in front of the lenses:
+Three tools for putting real data in front of the lenses:
 
 | Tool | Description |
 |---|---|
@@ -85,12 +85,36 @@ Three tools so an agent can put real data in front of the lenses:
 Argument names are wire-identical to the Swift server (content, room, udcCode,
 addedBy, embeddingModelID, filter, limit, ordering, hydrationLevel).
 
-## v1 Boundaries (Behavioral Facts, Not Deferrals)
+### v2b-p1 drawer lifecycle verbs and tunnel recall
 
-**In-memory estates only.** v1 opens one in-memory estate at startup as the
-default. Additional in-memory estates can be registered; all are ephemeral and
+Five tools completing the drawer lifecycle surface and exposing the tunnel graph
+read-out:
+
+| Tool | Description | Required args |
+|---|---|---|
+| `moot_mutate_drawer` | Apply a named mutation (confirm, reject, contest, …) | `rowID`, `kind` |
+| `moot_withdraw_drawer` | Move a drawer to withdrawn state | `rowID` |
+| `moot_expunge_drawer` | Hard-erase a drawer (irreversible) | `rowID`, `reason`, `confirmation: true` |
+| `moot_reanchor_drawer` | Move room and/or UDC anchor | `rowID` (+ at least one of `toRoom`, `toUDC`) |
+| `moot_tunnel_recall` | Read outgoing tunnels from a wing | `wing` |
+
+Error discipline for lifecycle verbs: domain refusals (NotSupportedByEstate,
+ExpungeNotConfirmed, EmptyReanchor) surface as `isError: true` tool results, NOT
+JSONRPCError transport faults — matching the Swift ToolDispatcher's VerbError
+discipline. Out-of-band faults (missing required args, unknown estate) remain
+JSONRPCError INVALID_PARAMS.
+
+Note on `moot_tunnel_recall`: the Swift server advertises this tool (via the
+AriaLexicon acceptance matrix) but has no live handler — calling it returns
+methodNotFound on the Swift side. The Rust server is ahead here: the coordinator's
+`recall_tunnels(handle, wing)` executes against the live estate.
+
+## Behavioral Facts
+
+**In-memory estates only.** The server opens one in-memory estate at startup as
+the default. Additional in-memory estates can be registered; all are ephemeral and
 discarded when the server exits. Persistent storage backends (SQLite, CloudKit)
-require wiring the `DrawerStore` trait to a persistence backend — that is v2 work.
+require wiring the `DrawerStore` trait to a persistence backend — out of scope here.
 
 **moot_confirm_migration_promotion is fully wired.** The confirm step dispatches
 `confirm_migration_promotion_by_id`, the id-addressed overload that works across
@@ -99,15 +123,8 @@ minted branches; the run result text carries the branch ids the caller needs.
 Required: `winnerBranchID` (UUID). Optional: `discardBranchIDs`,
 `disqualifiedBranchIDs` (arrays of UUID strings).
 
-**Full lexicon projection is out of scope for v1.** The Swift server projects the
-full AriaLexicon acceptance matrix (mutate, withdraw, expunge, reanchor, learn,
-cross_estate_recall, federation). v1 ships the minimum three tools an agent needs
-to put data in front of the lenses. The full lexicon is the v2 surface; it follows
-the same pattern as the three v1 tools.
-
-**Federation tool (moot_cross_estate_recall) is out of scope for v1.** The
-federated recall surface requires the grant model and the federation authorization
-layer — v2.
+**Federation tool (moot_cross_estate_recall) is out of scope.** The federated
+recall surface requires the grant model and the federation authorization layer.
 
 ## Architecture
 
@@ -120,7 +137,10 @@ stdin (newline-delimited JSON)
                     └─► dispatch::dispatch_tool
                           ├─► recipe_tools  (moot_list_recipes, moot_grounded_synthesis, …)
                           ├─► lens_tools    (moot_keystones … moot_estate_divergence)
-                          └─► lexicon_tools (moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel)
+                          └─► lexicon_tools (moot_capture_drawer, moot_drawer_recall,
+                                             moot_capture_tunnel, moot_mutate_drawer,
+                                             moot_withdraw_drawer, moot_expunge_drawer,
+                                             moot_reanchor_drawer, moot_tunnel_recall)
 
 stdout (newline-delimited JSON responses)
 ```
