@@ -3,8 +3,9 @@
 //! (raw count) to its recent attention (decay-weighted mass by capture time)
 //! via NeuronKit `theme_weather` — momentum, not just presence.
 //!
-//! Rust-only today (Swift version contracted, SPEC C-7). Pure CognitionKit sequencing: recall via
-//! GLK + NeuronKit recency_weight/theme_weather (SubstrateML decay). Read-only.
+//! Paired with the Swift version (`Sources/CognitionKit/ThemeWeather.swift`).
+//! Pure CognitionKit sequencing: recall via GLK + NeuronKit
+//! recency_weight/theme_weather (SubstrateML decay). Read-only.
 
 use std::collections::BTreeMap;
 

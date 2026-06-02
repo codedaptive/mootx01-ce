@@ -272,6 +272,8 @@ pub fn run_free_association(
 
 ### Topics (category 2)
 
+Swift versions shipped: `ThemeWeather`.
+
 ```rust
 pub fn run_latent_themes(
     coord: &EstateCoordinator, handle: &EstateHandle,
