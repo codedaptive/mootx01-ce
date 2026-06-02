@@ -37,10 +37,10 @@ use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use locus_kit::kg_fact::KGFact;
 use locus_kit::tunnel::Tunnel;
+use persistence_kit::inmemory::InMemoryStorage;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
-use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -86,7 +86,12 @@ fn run_vector_file(file_name: &str) {
     for case in cases {
         let case_id = case["id"].as_str().unwrap_or("?");
         let description = case["description"].as_str().unwrap_or("");
-        run_case(case_id, description, &case["inputs"]["ops"], &case["expected_output"]["observations"]);
+        run_case(
+            case_id,
+            description,
+            &case["inputs"]["ops"],
+            &case["expected_output"]["observations"],
+        );
     }
 }
 
@@ -106,7 +111,9 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
     )
     .unwrap();
 
-    let ops = ops.as_array().unwrap_or_else(|| panic!("[{}] ops is not an array", case_id));
+    let ops = ops
+        .as_array()
+        .unwrap_or_else(|| panic!("[{}] ops is not an array", case_id));
     let obs = observations
         .as_array()
         .unwrap_or_else(|| panic!("[{}] observations is not an array", case_id));
@@ -117,8 +124,11 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
     let mut obs_cursor: usize = 0;
 
     // Base timestamp incremented per op so every op has a distinct `now`.
+    // The increment pattern is intentional — `now` carries a real epoch value,
+    // not just an iteration index. The allow suppresses the loop-counter lint.
     let mut now: i64 = 1_700_000_001;
 
+    #[allow(clippy::explicit_counter_loop)]
     for op_val in ops {
         let op_kind = op_val["op"]
             .as_str()
@@ -142,9 +152,7 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 );
                 let drawer = estate
                     .capture(frame, now)
-                    .unwrap_or_else(|e| {
-                        panic!("[{}] capture failed: {:?}", case_id, e)
-                    });
+                    .unwrap_or_else(|e| panic!("[{}] capture failed: {:?}", case_id, e));
 
                 // Assert the expected_output.observations entry for this capture.
                 let obs_entry = &obs[obs_cursor];
@@ -153,29 +161,37 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "captured",
                     "[{}] observation kind mismatch at cursor {}; desc={}",
-                    case_id, obs_cursor - 1, description
+                    case_id,
+                    obs_cursor - 1,
+                    description
                 );
                 assert_eq!(
                     drawer.content,
                     obs_entry["expectContent"].as_str().unwrap_or(""),
-                    "[{}] captured content mismatch", case_id
+                    "[{}] captured content mismatch",
+                    case_id
                 );
                 assert_eq!(
                     drawer.room,
                     obs_entry["expectRoom"].as_str().unwrap_or(""),
-                    "[{}] captured room mismatch", case_id
+                    "[{}] captured room mismatch",
+                    case_id
                 );
                 assert_eq!(
                     drawer.udc_code,
                     obs_entry["expectUDC"].as_str().unwrap_or(""),
-                    "[{}] captured udc_code mismatch", case_id
+                    "[{}] captured udc_code mismatch",
+                    case_id
                 );
                 let expect_active = obs_entry["expectStateActive"].as_bool().unwrap_or(true);
                 let state = State::from_raw(drawer.adjective_bitmap & 0xF);
                 assert_eq!(
                     state == State::Active,
                     expect_active,
-                    "[{}] captured state active={} expected={}", case_id, state == State::Active, expect_active
+                    "[{}] captured state active={} expected={}",
+                    case_id,
+                    state == State::Active,
+                    expect_active
                 );
 
                 captured.push(drawer);
@@ -184,7 +200,8 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
             "peek" => {
                 let idx = usize_field(op_val, "drawerIndex", case_id);
                 let drawer_id = &captured[idx].id;
-                let result = store.get_drawer(drawer_id)
+                let result = store
+                    .get_drawer(drawer_id)
                     .unwrap_or_else(|e| panic!("[{}] peek store error: {:?}", case_id, e));
 
                 let obs_entry = &obs[obs_cursor];
@@ -192,19 +209,25 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "peeked",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let expect_found = obs_entry["found"].as_bool().unwrap_or(true);
                 assert_eq!(
                     result.is_some(),
                     expect_found,
-                    "[{}] peek found={} expected={}", case_id, result.is_some(), expect_found
+                    "[{}] peek found={} expected={}",
+                    case_id,
+                    result.is_some(),
+                    expect_found
                 );
                 if let Some(d) = &result {
                     if let Some(expected_content) = obs_entry["expectContent"].as_str() {
                         assert_eq!(
                             d.content, expected_content,
-                            "[{}] peek content mismatch", case_id
+                            "[{}] peek content mismatch",
+                            case_id
                         );
                     }
                     if let Some(expect_active) = obs_entry["expectStateActive"].as_bool() {
@@ -212,7 +235,10 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                         assert_eq!(
                             state == State::Active,
                             expect_active,
-                            "[{}] peek state active={} expected={}", case_id, state == State::Active, expect_active
+                            "[{}] peek state active={} expected={}",
+                            case_id,
+                            state == State::Active,
+                            expect_active
                         );
                     }
                 }
@@ -231,7 +257,9 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "withdrew",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
             }
 
@@ -250,21 +278,29 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "recalled",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let expect_count = usize_field(obs_entry, "expectCount", case_id);
                 assert_eq!(
-                    rows.len(), expect_count,
-                    "[{}] recallAll count: got {} expected {}", case_id, rows.len(), expect_count
+                    rows.len(),
+                    expect_count,
+                    "[{}] recallAll count: got {} expected {}",
+                    case_id,
+                    rows.len(),
+                    expect_count
                 );
                 if let Some(first_content) = obs_entry["expectFirstContent"].as_str() {
                     assert!(
                         !rows.is_empty(),
-                        "[{}] recallAll expectFirstContent but rows empty", case_id
+                        "[{}] recallAll expectFirstContent but rows empty",
+                        case_id
                     );
                     assert_eq!(
                         rows[0].content, first_content,
-                        "[{}] recallAll first content mismatch", case_id
+                        "[{}] recallAll first content mismatch",
+                        case_id
                     );
                 }
             }
@@ -287,12 +323,18 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "recallPaged",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let expect_total = usize_field(obs_entry, "expectTotal", case_id);
                 assert_eq!(
-                    rows.len(), expect_total,
-                    "[{}] recallPaged total: got {} expected {}", case_id, rows.len(), expect_total
+                    rows.len(),
+                    expect_total,
+                    "[{}] recallPaged total: got {} expected {}",
+                    case_id,
+                    rows.len(),
+                    expect_total
                 );
                 if let Some(expect_contents) = obs_entry["expectContents"].as_array() {
                     let got_contents: Vec<&str> = rows.iter().map(|d| d.content.as_str()).collect();
@@ -302,7 +344,8 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                         .collect();
                     assert_eq!(
                         got_contents, want_contents,
-                        "[{}] recallPaged contents ordering mismatch", case_id
+                        "[{}] recallPaged contents ordering mismatch",
+                        case_id
                     );
                 }
             }
@@ -315,9 +358,7 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 let target_room = str_field(op_val, "targetRoom", case_id);
                 let label = str_field(op_val, "label", case_id);
                 let added_by = str_field(op_val, "addedBy", case_id);
-                let filed_at = op_val["filedAtEpoch"]
-                    .as_i64()
-                    .unwrap_or(now);
+                let filed_at = op_val["filedAtEpoch"].as_i64().unwrap_or(now);
 
                 let tunnel = Tunnel::new(
                     id.to_string(),
@@ -338,10 +379,16 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "tunnelAdded",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let expect_id = obs_entry["id"].as_str().unwrap_or("");
-                assert_eq!(tunnel.id, expect_id, "[{}] tunnelAdded id mismatch", case_id);
+                assert_eq!(
+                    tunnel.id, expect_id,
+                    "[{}] tunnelAdded id mismatch",
+                    case_id
+                );
             }
 
             "tunnelsFromRoom" => {
@@ -356,7 +403,9 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "traversed",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let empty_arr: Vec<Value> = vec![];
                 let expect_ids: Vec<&str> = obs_entry["expectIds"]
@@ -368,7 +417,8 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 let got_ids: Vec<&str> = tunnels.iter().map(|t| t.id.as_str()).collect();
                 assert_eq!(
                     got_ids, expect_ids,
-                    "[{}] tunnelsFromRoom ids mismatch", case_id
+                    "[{}] tunnelsFromRoom ids mismatch",
+                    case_id
                 );
             }
 
@@ -383,7 +433,9 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "traversed",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let empty_arr: Vec<Value> = vec![];
                 let expect_ids: Vec<&str> = obs_entry["expectIds"]
@@ -395,7 +447,8 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 let got_ids: Vec<&str> = tunnels.iter().map(|t| t.id.as_str()).collect();
                 assert_eq!(
                     got_ids, expect_ids,
-                    "[{}] tunnelsFromWing ids mismatch", case_id
+                    "[{}] tunnelsFromWing ids mismatch",
+                    case_id
                 );
             }
 
@@ -410,7 +463,9 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "traversed",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let empty_arr: Vec<Value> = vec![];
                 let expect_ids: Vec<&str> = obs_entry["expectIds"]
@@ -422,7 +477,8 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 let got_ids: Vec<&str> = tunnels.iter().map(|t| t.id.as_str()).collect();
                 assert_eq!(
                     got_ids, expect_ids,
-                    "[{}] tunnelsToWing ids mismatch", case_id
+                    "[{}] tunnelsToWing ids mismatch",
+                    case_id
                 );
             }
 
@@ -452,7 +508,9 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "kgFactAdded",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let expect_id = obs_entry["id"].as_str().unwrap_or("");
                 assert_eq!(fact.id, expect_id, "[{}] kgFactAdded id mismatch", case_id);
@@ -470,7 +528,9 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 assert_eq!(
                     obs_entry["kind"].as_str().unwrap_or(""),
                     "kgFactList",
-                    "[{}] observation kind mismatch at cursor {}", case_id, obs_cursor - 1
+                    "[{}] observation kind mismatch at cursor {}",
+                    case_id,
+                    obs_cursor - 1
                 );
                 let empty_arr: Vec<Value> = vec![];
                 let expect_ids: Vec<&str> = obs_entry["expectIds"]
@@ -482,7 +542,8 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 let got_ids: Vec<&str> = facts.iter().map(|f| f.id.as_str()).collect();
                 assert_eq!(
                     got_ids, expect_ids,
-                    "[{}] kgFactsForDrawer ids mismatch", case_id
+                    "[{}] kgFactsForDrawer ids mismatch",
+                    case_id
                 );
             }
 
@@ -551,6 +612,5 @@ fn str_field<'a>(v: &'a Value, field: &str, case_id: &str) -> &'a str {
 fn usize_field(v: &Value, field: &str, case_id: &str) -> usize {
     v[field]
         .as_u64()
-        .unwrap_or_else(|| panic!("[{}] missing numeric field '{}'", case_id, field))
-        as usize
+        .unwrap_or_else(|| panic!("[{}] missing numeric field '{}'", case_id, field)) as usize
 }

@@ -49,17 +49,17 @@
 #[repr(i64)]
 pub enum State {
     // Cluster A — active / becoming.
-    Active    = 0,
-    Pending   = 1,
+    Active = 0,
+    Pending = 1,
     Contested = 2,
-    Accepted  = 3,
+    Accepted = 3,
     // Cluster B — superseded / historical (boundary at 16).
     Superseded = 16,
-    Decayed    = 17,
-    Withdrawn  = 18,
-    Expired    = 19,
+    Decayed = 17,
+    Withdrawn = 18,
+    Expired = 19,
     // Cluster C — terminal (boundary at 32).
-    Rejected   = 32,
+    Rejected = 32,
     Tombstoned = 33,
     // Raw values 4–15, 20–31, 34–63 are reserved per cookbook §2.3
     // for per-cluster growth.
@@ -102,7 +102,10 @@ impl State {
     /// (§11.5 active centroid) and any recall path that wants the
     /// "currently believed" set.
     pub fn is_cluster_a(self) -> bool {
-        matches!(self, State::Active | State::Pending | State::Contested | State::Accepted)
+        matches!(
+            self,
+            State::Active | State::Pending | State::Contested | State::Accepted
+        )
     }
 }
 
@@ -124,14 +127,14 @@ impl State {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i64)]
 pub enum Trust {
-    Verbatim  = 0,
-    Observed  = 1,
-    Imported  = 2,
+    Verbatim = 0,
+    Observed = 1,
+    Imported = 2,
     Canonical = 3,
-    Derived   = 4,
-    Proposed  = 5,
-    Ambient   = 6,   // NEW in v0.6 per cookbook §2.3
-    // Raw values 7–63 are reserved for future trust tiers.
+    Derived = 4,
+    Proposed = 5,
+    Ambient = 6, // NEW in v0.6 per cookbook §2.3
+                 // Raw values 7–63 are reserved for future trust tiers.
 }
 
 impl Trust {
@@ -270,24 +273,28 @@ mod tests {
     #[test]
     fn state_raw_values_match_cookbook_section_2_3() {
         // Cluster A — active / becoming.
-        assert_eq!(State::Active.raw_value(),    0);
-        assert_eq!(State::Pending.raw_value(),   1);
+        assert_eq!(State::Active.raw_value(), 0);
+        assert_eq!(State::Pending.raw_value(), 1);
         assert_eq!(State::Contested.raw_value(), 2);
-        assert_eq!(State::Accepted.raw_value(),  3);
+        assert_eq!(State::Accepted.raw_value(), 3);
         // Cluster B — superseded / historical.
         assert_eq!(State::Superseded.raw_value(), 16);
-        assert_eq!(State::Decayed.raw_value(),    17);
-        assert_eq!(State::Withdrawn.raw_value(),  18);
-        assert_eq!(State::Expired.raw_value(),    19);
+        assert_eq!(State::Decayed.raw_value(), 17);
+        assert_eq!(State::Withdrawn.raw_value(), 18);
+        assert_eq!(State::Expired.raw_value(), 19);
         // Cluster C — terminal.
-        assert_eq!(State::Rejected.raw_value(),   32);
+        assert_eq!(State::Rejected.raw_value(), 32);
         assert_eq!(State::Tombstoned.raw_value(), 33);
     }
 
     #[test]
     fn state_roundtrip_all_ten_cases() {
         for v in [0i64, 1, 2, 3, 16, 17, 18, 19, 32, 33] {
-            assert_eq!(State::from_raw(v).raw_value(), v, "round-trip failed for raw {v}");
+            assert_eq!(
+                State::from_raw(v).raw_value(),
+                v,
+                "round-trip failed for raw {v}"
+            );
         }
     }
 
@@ -297,8 +304,11 @@ mod tests {
     fn state_reserved_falls_back_to_active() {
         // Per-cluster gaps and beyond-spec values.
         for v in [4i64, 15, 20, 31, 34, 63, -1, 100] {
-            assert_eq!(State::from_raw(v), State::Active,
-                "expected Active fallback for raw {v}");
+            assert_eq!(
+                State::from_raw(v),
+                State::Active,
+                "expected Active fallback for raw {v}"
+            );
         }
     }
 
@@ -306,14 +316,36 @@ mod tests {
     /// 0=Cluster A, 1=Cluster B, 2=Cluster C.
     #[test]
     fn state_cluster_predicate() {
-        for s in [State::Active, State::Pending, State::Contested, State::Accepted] {
-            assert_eq!((s.raw_value() >> 4) & 0x3, 0, "{s:?} should be in Cluster A");
+        for s in [
+            State::Active,
+            State::Pending,
+            State::Contested,
+            State::Accepted,
+        ] {
+            assert_eq!(
+                (s.raw_value() >> 4) & 0x3,
+                0,
+                "{s:?} should be in Cluster A"
+            );
         }
-        for s in [State::Superseded, State::Decayed, State::Withdrawn, State::Expired] {
-            assert_eq!((s.raw_value() >> 4) & 0x3, 1, "{s:?} should be in Cluster B");
+        for s in [
+            State::Superseded,
+            State::Decayed,
+            State::Withdrawn,
+            State::Expired,
+        ] {
+            assert_eq!(
+                (s.raw_value() >> 4) & 0x3,
+                1,
+                "{s:?} should be in Cluster B"
+            );
         }
         for s in [State::Rejected, State::Tombstoned] {
-            assert_eq!((s.raw_value() >> 4) & 0x3, 2, "{s:?} should be in Cluster C");
+            assert_eq!(
+                (s.raw_value() >> 4) & 0x3,
+                2,
+                "{s:?} should be in Cluster C"
+            );
         }
     }
 
@@ -321,19 +353,23 @@ mod tests {
 
     #[test]
     fn trust_raw_values() {
-        assert_eq!(Trust::Verbatim.raw_value(),  0);
-        assert_eq!(Trust::Observed.raw_value(),  1);
-        assert_eq!(Trust::Imported.raw_value(),  2);
+        assert_eq!(Trust::Verbatim.raw_value(), 0);
+        assert_eq!(Trust::Observed.raw_value(), 1);
+        assert_eq!(Trust::Imported.raw_value(), 2);
         assert_eq!(Trust::Canonical.raw_value(), 3);
-        assert_eq!(Trust::Derived.raw_value(),   4);
-        assert_eq!(Trust::Proposed.raw_value(),  5);
-        assert_eq!(Trust::Ambient.raw_value(),   6);   // NEW in v0.6
+        assert_eq!(Trust::Derived.raw_value(), 4);
+        assert_eq!(Trust::Proposed.raw_value(), 5);
+        assert_eq!(Trust::Ambient.raw_value(), 6); // NEW in v0.6
     }
 
     #[test]
     fn trust_roundtrip_all_seven_cases() {
         for v in 0i64..=6 {
-            assert_eq!(Trust::from_raw(v).raw_value(), v, "round-trip failed for raw {v}");
+            assert_eq!(
+                Trust::from_raw(v).raw_value(),
+                v,
+                "round-trip failed for raw {v}"
+            );
         }
     }
 
@@ -357,13 +393,13 @@ mod tests {
         assert!(Trust::Proposed < Trust::Ambient);
         // Transitivity spot-check
         assert!(Trust::Verbatim < Trust::Ambient);
-        assert!(!(Trust::Proposed < Trust::Canonical));
+        assert!(Trust::Proposed >= Trust::Canonical);
     }
 
     #[test]
     fn trust_filter_example() {
         // Retrieval-layer pattern: "only drawers with trust >= Canonical"
-        let values = vec![
+        let values = [
             Trust::Verbatim,
             Trust::Observed,
             Trust::Canonical,
@@ -378,10 +414,10 @@ mod tests {
 
     #[test]
     fn adjective_sensitivity_raw_values_match_cookbook() {
-        assert_eq!(AdjectiveSensitivity::Normal.raw_value(),     0);
-        assert_eq!(AdjectiveSensitivity::Elevated.raw_value(),   16);
+        assert_eq!(AdjectiveSensitivity::Normal.raw_value(), 0);
+        assert_eq!(AdjectiveSensitivity::Elevated.raw_value(), 16);
         assert_eq!(AdjectiveSensitivity::Restricted.raw_value(), 32);
-        assert_eq!(AdjectiveSensitivity::Secret.raw_value(),     48);
+        assert_eq!(AdjectiveSensitivity::Secret.raw_value(), 48);
     }
 
     #[test]
@@ -407,13 +443,19 @@ mod tests {
     #[test]
     fn adjective_exportability_raw_values_match_cookbook() {
         assert_eq!(AdjectiveExportability::Private.raw_value(), 0);
-        assert_eq!(AdjectiveExportability::Public.raw_value(),  32);
+        assert_eq!(AdjectiveExportability::Public.raw_value(), 32);
     }
 
     #[test]
     fn adjective_exportability_roundtrip() {
-        assert_eq!(AdjectiveExportability::from_raw(0), AdjectiveExportability::Private);
-        assert_eq!(AdjectiveExportability::from_raw(32), AdjectiveExportability::Public);
+        assert_eq!(
+            AdjectiveExportability::from_raw(0),
+            AdjectiveExportability::Private
+        );
+        assert_eq!(
+            AdjectiveExportability::from_raw(32),
+            AdjectiveExportability::Public
+        );
     }
 
     #[test]

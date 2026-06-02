@@ -121,25 +121,49 @@ mod tests {
 
     #[test]
     fn drawer_not_found() {
-        let err = LocusKitError::DrawerNotFound { id: "d-001".to_string() };
-        assert_eq!(err, LocusKitError::DrawerNotFound { id: "d-001".to_string() });
+        let err = LocusKitError::DrawerNotFound {
+            id: "d-001".to_string(),
+        };
+        assert_eq!(
+            err,
+            LocusKitError::DrawerNotFound {
+                id: "d-001".to_string()
+            }
+        );
     }
 
     #[test]
     fn tunnel_not_found() {
-        let err = LocusKitError::TunnelNotFound { id: "t-001".to_string() };
-        assert_eq!(err, LocusKitError::TunnelNotFound { id: "t-001".to_string() });
+        let err = LocusKitError::TunnelNotFound {
+            id: "t-001".to_string(),
+        };
+        assert_eq!(
+            err,
+            LocusKitError::TunnelNotFound {
+                id: "t-001".to_string()
+            }
+        );
     }
 
     #[test]
     fn diary_entry_not_found() {
-        let err = LocusKitError::DiaryEntryNotFound { id: "de-001".to_string() };
-        assert_eq!(err, LocusKitError::DiaryEntryNotFound { id: "de-001".to_string() });
+        let err = LocusKitError::DiaryEntryNotFound {
+            id: "de-001".to_string(),
+        };
+        assert_eq!(
+            err,
+            LocusKitError::DiaryEntryNotFound {
+                id: "de-001".to_string()
+            }
+        );
     }
 
     #[test]
     fn schema_too_new() {
-        let err = LocusKitError::SchemaTooNew { found: 5, expected: 3 };
+        let err = LocusKitError::SchemaTooNew {
+            found: 5,
+            expected: 3,
+        };
         match &err {
             LocusKitError::SchemaTooNew { found, expected } => {
                 assert_eq!(*found, 5);
@@ -183,14 +207,29 @@ mod tests {
         // Confirm no two different cases compare equal — basic sanity check.
         let variants: Vec<LocusKitError> = vec![
             LocusKitError::DatabaseUnavailable("x".to_string()),
-            LocusKitError::DrawerNotFound { id: "x".to_string() },
-            LocusKitError::TunnelNotFound { id: "x".to_string() },
-            LocusKitError::DiaryEntryNotFound { id: "x".to_string() },
-            LocusKitError::RecallTraceItemNotFound { id: "x".to_string() },
+            LocusKitError::DrawerNotFound {
+                id: "x".to_string(),
+            },
+            LocusKitError::TunnelNotFound {
+                id: "x".to_string(),
+            },
+            LocusKitError::DiaryEntryNotFound {
+                id: "x".to_string(),
+            },
+            LocusKitError::RecallTraceItemNotFound {
+                id: "x".to_string(),
+            },
             LocusKitError::SqliteError("x".to_string()),
-            LocusKitError::SchemaTooNew { found: 1, expected: 0 },
+            LocusKitError::SchemaTooNew {
+                found: 1,
+                expected: 0,
+            },
             LocusKitError::InvalidContent("x".to_string()),
-            LocusKitError::DisciplineViolation { from: 0, to: 1, reason: "x".to_string() },
+            LocusKitError::DisciplineViolation {
+                from: 0,
+                to: 1,
+                reason: "x".to_string(),
+            },
         ];
         assert_eq!(variants.len(), 9);
         for (i, a) in variants.iter().enumerate() {

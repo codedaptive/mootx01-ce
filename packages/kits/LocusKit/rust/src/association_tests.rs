@@ -95,7 +95,11 @@ fn lattice_anchor_required_rejects_empty() {
     let mut a = sample("a1", "room-a", "room-b", NOW);
     a.lattice_anchor = LatticeAnchor::udc("");
     let err = store.add_association(&a).unwrap_err();
-    assert!(matches!(err, LocusKitError::InvalidContent(_)), "got {:?}", err);
+    assert!(
+        matches!(err, LocusKitError::InvalidContent(_)),
+        "got {:?}",
+        err
+    );
     // The rejected association must not have landed.
     assert_eq!(store.get_association("a1").unwrap(), None);
 }
@@ -103,10 +107,18 @@ fn lattice_anchor_required_rejects_empty() {
 #[test]
 fn associations_from_filters_source_and_orders() {
     let store = open_store();
-    store.add_association(&sample("a-late", "r", "room-b", NOW + 300)).unwrap();
-    store.add_association(&sample("a-early", "r", "room-b", NOW + 100)).unwrap();
-    store.add_association(&sample("a-mid", "r", "room-b", NOW + 200)).unwrap();
-    store.add_association(&sample("a-other", "other", "room-b", NOW + 150)).unwrap();
+    store
+        .add_association(&sample("a-late", "r", "room-b", NOW + 300))
+        .unwrap();
+    store
+        .add_association(&sample("a-early", "r", "room-b", NOW + 100))
+        .unwrap();
+    store
+        .add_association(&sample("a-mid", "r", "room-b", NOW + 200))
+        .unwrap();
+    store
+        .add_association(&sample("a-other", "other", "room-b", NOW + 150))
+        .unwrap();
 
     let here = store.associations_from("wing-a", "r").unwrap();
     let other = store.associations_from("wing-a", "other").unwrap();
@@ -119,9 +131,15 @@ fn associations_from_filters_source_and_orders() {
 #[test]
 fn associations_to_filters_target() {
     let store = open_store();
-    store.add_association(&sample("a1", "room-a", "tr", NOW + 100)).unwrap();
-    store.add_association(&sample("a2", "room-a", "tr", NOW + 200)).unwrap();
-    store.add_association(&sample("a3", "room-a", "elsewhere", NOW + 150)).unwrap();
+    store
+        .add_association(&sample("a1", "room-a", "tr", NOW + 100))
+        .unwrap();
+    store
+        .add_association(&sample("a2", "room-a", "tr", NOW + 200))
+        .unwrap();
+    store
+        .add_association(&sample("a3", "room-a", "elsewhere", NOW + 150))
+        .unwrap();
 
     let to_tr = store.associations_to("wing-b", "tr").unwrap();
     let to_tr_ids: Vec<&str> = to_tr.iter().map(|a| a.id.as_str()).collect();
@@ -169,11 +187,22 @@ fn table_isolation_does_not_touch_tunnels() {
         NOW,
     );
     store.add_tunnel(&t).unwrap();
-    store.add_association(&sample("a-iso", "room-a", "room-b", NOW)).unwrap();
+    store
+        .add_association(&sample("a-iso", "room-a", "room-b", NOW))
+        .unwrap();
 
     // Tunnel surface unaffected by the association write.
-    assert_eq!(store.tunnels_from_wing_room("wing-a", "room-a").unwrap().len(), 1);
-    assert_eq!(store.associations_from("wing-a", "room-a").unwrap().len(), 1);
+    assert_eq!(
+        store
+            .tunnels_from_wing_room("wing-a", "room-a")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.associations_from("wing-a", "room-a").unwrap().len(),
+        1
+    );
     // And the association did not leak into the tunnel fetch.
     assert_eq!(store.get_tunnel("a-iso").unwrap(), None);
 }

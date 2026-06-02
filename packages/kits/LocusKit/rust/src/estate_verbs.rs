@@ -39,14 +39,14 @@ use crate::bitmap_evaluator::BitmapEvaluator;
 use crate::drawer::Drawer;
 use crate::error::LocusKitError;
 use crate::estate::Estate;
+use crate::frames::TunnelCaptureFrame;
 use crate::frames::{CaptureFrame, LearnFrame, MutationKind};
 use crate::provenance::Confirmation;
 use crate::recall_stream::RecallStream;
 use crate::tunnel::Tunnel;
-use crate::frames::TunnelCaptureFrame;
 
-use crate::recall_trace_item::RecallTraceItem;
 use crate::filter::RecallFrame;
+use crate::recall_trace_item::RecallTraceItem;
 use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -134,12 +134,12 @@ impl Estate {
         //   bits 0–3  capture_channel (contiguous raw 0..4)
         //   bits 4–7  content_kind    (contiguous raw 0..5)
         // Per DrawerOperational.swift / spec § 5.6.
-        let op_bitmap =
-            bit_field::write_field(
-                frame.kind.raw_value(),
-                bit_field::write_field(frame.channel.raw_value(), 0, 0, 6),
-                6, 6,
-            );
+        let op_bitmap = bit_field::write_field(
+            frame.kind.raw_value(),
+            bit_field::write_field(frame.channel.raw_value(), 0, 0, 6),
+            6,
+            6,
+        );
 
         // Adjective bitmap assembly:
         //   bits 0–3  state             (default 0 = Active)
@@ -163,9 +163,11 @@ impl Estate {
             bit_field::write_field(
                 frame.provenance_channel.raw_value(),
                 bit_field::write_field(frame.source_type.raw_value(), 0, 0, 6),
-                6, 6,
+                6,
+                6,
             ),
-            30, 6,
+            30,
+            6,
         );
 
         // Derive the default wing from the manifest owner identifier.
@@ -295,7 +297,6 @@ impl Estate {
         Ok(tunnel)
     }
 
-
     // -----------------------------------------------------------------------
     // recall
     // -----------------------------------------------------------------------
@@ -339,8 +340,8 @@ impl Estate {
 
         // Run the four-tier bitmap evaluator pipeline. Errors collapse to
         // an empty result — recall is non-throwing per spec § 7.8.1.
-        let filtered: Vec<Drawer> = BitmapEvaluator::evaluate(&frame, &live, self.store.as_ref())
-            .unwrap_or_default();
+        let filtered: Vec<Drawer> =
+            BitmapEvaluator::evaluate(&frame, &live, self.store.as_ref()).unwrap_or_default();
 
         // Stamp one RecallTraceItem per returned row.
         // `recalled_at` is stored as TEXT ISO8601 per the fleet date rule.
@@ -350,8 +351,8 @@ impl Estate {
                 Uuid::new_v4().to_string(),
                 drawer.id.clone(),
                 recalled_at.clone(),
-                None,   // ordered-by-capture-time recalls carry no score
-                0,      // operational_bitmap = 0 (used = false)
+                None, // ordered-by-capture-time recalls carry no score
+                0,    // operational_bitmap = 0 (used = false)
             );
             // Silence errors — a storage fault must not break the recall result.
             let _ = self.store.insert_recall_trace(&trace);
@@ -410,12 +411,12 @@ impl Estate {
         reason: Option<&str>,
         now: i64,
     ) -> Result<(), LocusKitError> {
-        let drawer = self
-            .store
-            .get_drawer(row_id)?
-            .ok_or_else(|| LocusKitError::DrawerNotFound {
-                id: row_id.to_string(),
-            })?;
+        let drawer =
+            self.store
+                .get_drawer(row_id)?
+                .ok_or_else(|| LocusKitError::DrawerNotFound {
+                    id: row_id.to_string(),
+                })?;
 
         let _ = &drawer;
 
@@ -503,7 +504,8 @@ impl Estate {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        self.store.expunge_gated(row_id, &changed_by, reason_opt, now)
+        self.store
+            .expunge_gated(row_id, &changed_by, reason_opt, now)
     }
 
     // -----------------------------------------------------------------------
@@ -540,12 +542,11 @@ impl Estate {
     ) -> Result<(), LocusKitError> {
         match kind {
             MutationKind::Confirm => {
-                let drawer = self
-                    .store
-                    .get_drawer(row_id)?
-                    .ok_or_else(|| LocusKitError::DrawerNotFound {
+                let drawer = self.store.get_drawer(row_id)?.ok_or_else(|| {
+                    LocusKitError::DrawerNotFound {
                         id: row_id.to_string(),
-                    })?;
+                    }
+                })?;
 
                 // Confirmation lives in provenance bits 18–23; write_field
                 // clears that field and ORs in UserConfirmed, leaving the
@@ -695,7 +696,20 @@ fn epoch_to_components(epoch: i64) -> (i64, i64, i64, i64, i64, i64) {
         days -= days_in_year;
         year += 1;
     }
-    let months = [31i64, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31i64,
+        if is_leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month: i64 = 1;
     for days_in_month in &months {
         if days < *days_in_month {
@@ -722,22 +736,15 @@ mod tests {
     use crate::drawer_store_inmemory::InMemoryDrawerStore;
     use crate::estate_types::{LatticeAnchor, OwnerCredentials};
     use crate::filter::Filter;
-    use std::sync::Arc;
     use persistence_kit::inmemory::InMemoryStorage;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     fn make_estate() -> Estate {
         let storage: Arc<dyn persistence_kit::storage::Storage> =
             Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(
-            InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap(),
-        );
-        Estate::create(
-            store,
-            OwnerCredentials::new("owner"),
-            None,
-        )
-        .unwrap()
+        let store = Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
+        Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
     }
 
     fn basic_capture(estate: &Estate, content: &str, room: &str) -> Drawer {
@@ -777,7 +784,7 @@ mod tests {
             "content",
             CaptureChannel::Typed,
             "room",
-            LatticeAnchor::udc(""),   // empty UDC code — violates I-5
+            LatticeAnchor::udc(""), // empty UDC code — violates I-5
             "alice",
             "test-v1",
         );
@@ -819,7 +826,11 @@ mod tests {
         let estate = make_estate();
         basic_capture(&estate, "alpha", "den");
         basic_capture(&estate, "beta", "den");
-        let frame = RecallFrame::new(vec![Filter::InRoom("den".to_string()), Filter::CurrentlyBelieve, Filter::Unconfirmed]);
+        let frame = RecallFrame::new(vec![
+            Filter::InRoom("den".to_string()),
+            Filter::CurrentlyBelieve,
+            Filter::Unconfirmed,
+        ]);
         let stream = estate.recall(frame, 1_700_000_002);
         let rows = stream.collect_all();
         assert_eq!(rows.len(), 2);
@@ -832,7 +843,11 @@ mod tests {
         let d2 = basic_capture(&estate, "gone", "hall");
         estate.withdraw(&d2.id, None, 1_700_000_003).unwrap();
 
-        let frame = RecallFrame::new(vec![Filter::InRoom("hall".to_string()), Filter::CurrentlyBelieve, Filter::Unconfirmed]);
+        let frame = RecallFrame::new(vec![
+            Filter::InRoom("hall".to_string()),
+            Filter::CurrentlyBelieve,
+            Filter::Unconfirmed,
+        ]);
         let stream = estate.recall(frame, 1_700_000_004);
         let rows = stream.collect_all();
         assert_eq!(rows.len(), 1);
@@ -844,7 +859,9 @@ mod tests {
     #[test]
     fn withdraw_not_found_returns_error() {
         let estate = make_estate();
-        let err = estate.withdraw("no-such-id", None, 1_700_000_000).unwrap_err();
+        let err = estate
+            .withdraw("no-such-id", None, 1_700_000_000)
+            .unwrap_err();
         assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
     }
 
@@ -852,7 +869,9 @@ mod tests {
     fn withdraw_transitions_state_to_withdrawn() {
         let estate = make_estate();
         let d = basic_capture(&estate, "will be withdrawn", "office");
-        estate.withdraw(&d.id, Some("test reason"), 1_700_000_002).unwrap();
+        estate
+            .withdraw(&d.id, Some("test reason"), 1_700_000_002)
+            .unwrap();
         let updated = estate.store.get_drawer(&d.id).unwrap().unwrap();
         let state = State::from_raw(updated.adjective_bitmap & 0x3F);
         assert_eq!(state, State::Withdrawn);
@@ -867,20 +886,27 @@ mod tests {
         // Freshly captured rows are Unconfirmed.
         assert_eq!(drawer.confirmation(), Confirmation::Unconfirmed);
 
-        estate.mutate(&drawer.id, MutationKind::Confirm, None).unwrap();
+        estate
+            .mutate(&drawer.id, MutationKind::Confirm, None)
+            .unwrap();
 
         // Re-read: the confirmation axis is now UserConfirmed and every
         // other axis is preserved (room/state unchanged).
         let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
         assert_eq!(after.confirmation(), Confirmation::UserConfirmed);
         assert_eq!(after.room, "study");
-        assert_eq!(State::from_raw(after.adjective_bitmap & 0x3F), State::Active);
+        assert_eq!(
+            State::from_raw(after.adjective_bitmap & 0x3F),
+            State::Active
+        );
     }
 
     #[test]
     fn mutate_confirm_missing_row_returns_not_found() {
         let estate = make_estate();
-        let err = estate.mutate("no-such-id", MutationKind::Confirm, None).unwrap_err();
+        let err = estate
+            .mutate("no-such-id", MutationKind::Confirm, None)
+            .unwrap_err();
         assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
     }
 
@@ -890,7 +916,9 @@ mod tests {
         // it returns InvalidContent (GLK remaps to NotSupportedByEstate).
         let estate = make_estate();
         let drawer = basic_capture(&estate, "x", "r");
-        let err = estate.mutate(&drawer.id, MutationKind::Reject, None).unwrap_err();
+        let err = estate
+            .mutate(&drawer.id, MutationKind::Reject, None)
+            .unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
     }
 
@@ -919,9 +947,7 @@ mod tests {
     fn reanchor_to_new_room_updates_room() {
         let estate = make_estate();
         let d = basic_capture(&estate, "content", "original-room");
-        estate
-            .reanchor(&d.id, Some("new-room"), None)
-            .unwrap();
+        estate.reanchor(&d.id, Some("new-room"), None).unwrap();
         let updated = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(updated.room, "new-room");
         // Bitmaps unchanged.
@@ -961,8 +987,11 @@ mod tests {
         let estate = make_estate();
         let d = basic_capture(&estate, "to be expunged", "office");
         let err = estate.expunge(&d.id, "", false).unwrap_err();
-        assert!(matches!(err, LocusKitError::InvalidContent(_)),
-            "expected InvalidContent for confirmation=false, got {:?}", err);
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(_)),
+            "expected InvalidContent for confirmation=false, got {:?}",
+            err
+        );
         // State unchanged.
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.adjective_bitmap & 0x3F, State::Active.raw_value());
@@ -976,8 +1005,11 @@ mod tests {
         estate.expunge(&d.id, "operator request", true).unwrap();
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
-        assert_ne!(after.adjective_bitmap & (1 << 26), 0,
-            "dreaming_recalc_required must be set on tombstone via expunge");
+        assert_ne!(
+            after.adjective_bitmap & (1 << 26),
+            0,
+            "dreaming_recalc_required must be set on tombstone via expunge"
+        );
         assert_eq!(after.content, "");
         assert!(after.tombstoned_at.is_some());
     }
@@ -1006,8 +1038,12 @@ mod tests {
     #[test]
     fn tunnels_from_wing_returns_outgoing() {
         let estate = make_estate();
-        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), 1_700_000_001).unwrap();
-        estate.capture_tunnel(tunnel_frame("study", "garden", "relates"), 1_700_000_002).unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "kitchen", "links"), 1_700_000_001)
+            .unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "garden", "relates"), 1_700_000_002)
+            .unwrap();
 
         let tunnels = estate.tunnels_from_wing("study").unwrap();
         assert_eq!(tunnels.len(), 2);
@@ -1020,7 +1056,9 @@ mod tests {
     #[test]
     fn tunnels_from_wing_is_empty_for_unlinked_wing() {
         let estate = make_estate();
-        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), 1_700_000_001).unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "kitchen", "links"), 1_700_000_001)
+            .unwrap();
 
         let tunnels = estate.tunnels_from_wing("attic").unwrap();
         assert!(tunnels.is_empty());
@@ -1029,8 +1067,12 @@ mod tests {
     #[test]
     fn tunnels_from_wing_is_scoped_to_source_wing() {
         let estate = make_estate();
-        estate.capture_tunnel(tunnel_frame("study", "kitchen", "a"), 1_700_000_001).unwrap();
-        estate.capture_tunnel(tunnel_frame("garden", "kitchen", "b"), 1_700_000_002).unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "kitchen", "a"), 1_700_000_001)
+            .unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("garden", "kitchen", "b"), 1_700_000_002)
+            .unwrap();
 
         let from_study = estate.tunnels_from_wing("study").unwrap();
         assert_eq!(from_study.len(), 1);

@@ -82,6 +82,11 @@ impl ManifestKey {
     /// `None` for unrecognised strings, matching the Swift fallible
     /// `ManifestKey(rawValue:)` initialiser — the caller decides how to
     /// surface forward-schema rows.
+    ///
+    /// Returns `Option<ManifestKey>` rather than `Result<_, _>`, so this
+    /// does not implement `std::str::FromStr` (different return type).
+    /// The `#[allow]` suppresses the lint that warns about the similar name.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<ManifestKey> {
         Some(match s {
             "manifest_version" => ManifestKey::ManifestVersion,
@@ -247,8 +252,14 @@ mod tests {
     /// Every optional key's `as_str` matches the spec.
     #[test]
     fn optional_keys_raw_strings() {
-        assert_eq!(ManifestKey::FederationGroupID.as_str(), "federation_group_id");
-        assert_eq!(ManifestKey::MiningPatternsHash.as_str(), "mining_patterns_hash");
+        assert_eq!(
+            ManifestKey::FederationGroupID.as_str(),
+            "federation_group_id"
+        );
+        assert_eq!(
+            ManifestKey::MiningPatternsHash.as_str(),
+            "mining_patterns_hash"
+        );
         assert_eq!(ManifestKey::TinyModelID.as_str(), "tiny_model_id");
         assert_eq!(
             ManifestKey::TinyModelTrainingCorpusSize.as_str(),
