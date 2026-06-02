@@ -123,6 +123,10 @@ public enum ToolProjection {
         // exposes. Appended after the federation tool so the lexicon
         // projection's byte-for-byte conformance is untouched.
         out.append(contentsOf: RecipeTools.tools())
+        // The reasoning-lens tools — one hard-bound tool per cataloged
+        // lens recipe (LENS_DISCOVERABILITY_DECISION v2.0: listing and
+        // invokability ship together).
+        out.append(contentsOf: LensTools.tools())
         return out
     }
 

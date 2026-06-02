@@ -138,6 +138,14 @@ public struct ToolDispatcher: Sendable {
                     name: name, args: args, kit: kit, defaultHandle: handle,
                     resolveHandle: resolveHandle)
             }
+            // Reasoning-lens tools: one hard-bound tool per cataloged
+            // lens recipe, matched by name above the lexicon projection
+            // like the recipe tools (LENS_DISCOVERABILITY_DECISION v2.0).
+            if LensTools.isLensTool(name) {
+                return try await LensTools.dispatch(
+                    name: name, args: args, kit: kit, defaultHandle: handle,
+                    resolveHandle: resolveHandle)
+            }
             guard let (verb, noun) = parseToolName(name) else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.methodNotFound,
