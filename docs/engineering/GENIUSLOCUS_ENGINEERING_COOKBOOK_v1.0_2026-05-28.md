@@ -4,6 +4,10 @@ version: 1.0
 status: ratified
 author: Bob Pankratz (via/ claude)
 date: 2026-05-28
+revision: 2026-06-02 — added §3.7.1 (hyperplane family
+          generation) and §12.2.1 (pairing seed derivation);
+          pure additions, execution-verified against the
+          committed conformance vectors (40/40, 32/32)
 supersedes: GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36_2026-05-16.md
 purpose: dense mathematical and computational specification for the
          GeniusLocus substrate at v1.0. Math-first, annotation only
@@ -878,6 +882,207 @@ Each is set via pairing handshake (§12.2) and is itself immutable
 after handshake. Dissolution adds `dissolved_at` timestamp; the
 seed is retained in the manifest for asOf-recall reconstruction
 but no longer used for new fingerprints.
+
+### §3.7.1. Hyperplane family generation
+
+§3.6 specifies the per-block SimHash math (the ±1 hyperplane dot product
+reduced to popcount form) and §3.7 names the manifest slot
+`hyperplane_seeds.H_n`. This subsection specifies the missing link: how
+a single u64 **hyperplane seed** deterministically generates the family
+of 64 ±1-valued hyperplanes for one block. The procedure is integer-only
+and platform-independent; two implementations producing the same seed
+produce byte-identical families and therefore byte-identical
+fingerprints.
+
+The pipeline is three stages: **expand** the u64 seed to a 32-byte seed,
+**initialize** a SplitMix64 generator from those 32 bytes, then **draw**
+the 64 planes with a fixed two-draws-per-bit discipline.
+
+#### Constants (hex)
+
+| Constant | Value | Role |
+|---|---|---|
+| SplitMix64 increment ("golden gamma") | `0x9E3779B97F4A7C15` | added to state before each `next()` |
+| SplitMix64 mix multiplier 1 | `0xBF58476D1CE4E5B9` | first avalanche multiply |
+| SplitMix64 mix multiplier 2 | `0x94D049BB133111EB` | second avalanche multiply |
+| 64-bit mask | `0xFFFFFFFFFFFFFFFF` (`2^64 - 1`) | wrap every arithmetic op to u64 |
+
+All arithmetic is modulo `2^64`. Rust wraps natively
+(`wrapping_add` / `wrapping_mul`); a port in Python/Go/JS **MUST** mask
+each add and each multiply with `& 0xFFFFFFFFFFFFFFFF` or the family
+diverges silently.
+
+#### Stage 0 — the SplitMix64 `next()` step
+
+One `next()` step advances the state and returns one u64 draw. It is the
+sole randomness primitive used everywhere below.
+
+```
+function splitmix64_next(state: u64) -> (state: u64, output: u64):
+    state = (state + 0x9E3779B97F4A7C15) mod 2^64        # advance by golden gamma
+    z = state
+    z = ((z XOR (z >> 30)) * 0xBF58476D1CE4E5B9) mod 2^64
+    z = ((z XOR (z >> 27)) * 0x94D049BB133111EB) mod 2^64
+    z = z XOR (z >> 31)                                   # final avalanche shift
+    return (state, z mod 2^64)
+```
+
+Two disciplines a port MUST honor (these are the exact omissions that
+produced byte-wrong-but-plausible ports):
+
+1. **The draw is a hash *of* the state; it never *becomes* the state.**
+   The running state advances only by `+0x9E3779B97F4A7C15` each call.
+   Do not feed the returned `z` back as the next state.
+2. **Do not drop the final avalanche shift `z ^= z >> 31`.** It is the
+   last line of the mix and is load-bearing.
+
+#### Stage 1 — expand the u64 seed to 32 bytes (`expand_seed_to_32`)
+
+The manifest stores a u64 hyperplane seed; the generator needs 32 seed
+bytes. The expansion is **four** SplitMix64 `next()` rounds carried over
+a single running state initialized to the seed. Round *i* (i = 0..3)
+contributes 8 little-endian bytes at offset `8*i`.
+
+```
+function expand_seed_to_32(seed: u64) -> bytes(32):
+    out = bytes(32)
+    state = seed                                  # mod 2^64
+    for i in 0..4:                                # exactly four rounds
+        (state, z) = splitmix64_next(state)       # state carries across rounds
+        out[8*i .. 8*i+8] = z.to_le_bytes()       # 8 little-endian bytes
+    return out
+```
+
+It is **four** rounds, not one. Each round's 8-byte little-endian output
+`z.to_le_bytes()` is written contiguously, lowest-offset round first.
+
+#### Stage 2 — initialize SplitMix64 from the 32-byte seed
+
+The generator that draws the planes is seeded from those 32 bytes by
+reading them as four little-endian u64 words `w0..w3` and folding `w1..w3`
+into `w0`:
+
+```
+function splitmix64_init(seed32: bytes(32)) -> u64:    # returns initial state
+    s = le_u64(seed32[0 .. 8])                          # word 0 is the base
+    for chunk in 1..4:                                  # words 1, 2, 3
+        w = le_u64(seed32[8*chunk .. 8*chunk+8])
+        s = s XOR ((w + 0x9E3779B97F4A7C15) mod 2^64)
+    return s mod 2^64
+```
+
+Word 0 is taken verbatim; words 1, 2, 3 are each offset by the golden
+gamma and XOR-folded in. This is **not** symmetric with Stage 1 — word 0
+gets no `+gamma`; the other three do.
+
+#### Stage 3 — draw the 64 planes (the two-draws-per-bit discipline)
+
+A block has `input_bit_length` bits (192 for block 0, 64 for blocks
+1..3) and `word_count = ceil(input_bit_length / 64)` u64 words. Each
+plane is two bitmasks of `word_count` words: `positive_mask` marks the
++1 positions, `negative_mask` marks the −1 positions; a 0 in both marks
+an inactive (zero-weight) position.
+
+The **iteration order is fixed and a port MUST reproduce the exact PRNG
+call sequence**: plane index `k` is the **outer** loop (0..63 ascending),
+bit index is the **inner** loop (0..input_bit_length−1 ascending). For
+every (plane, bit) the generator is consulted in this order:
+
+- **Draw 1 — density gate.** `r = next()`. If `r` clears the activity
+  test the position is active; otherwise it is inactive and the bit is
+  skipped.
+- **Draw 2 — sign.** Drawn **only when the position is active**:
+  `sign = next()`. If `sign & 1 == 1` the position is +1 (set the bit in
+  `positive_mask`); else it is −1 (set the bit in `negative_mask`).
+
+```
+function generate_family(seed: u64, input_bit_length: int,
+                         density: f64) -> planes[64]:
+    word_count = ceil(input_bit_length / 64)
+    seed32 = expand_seed_to_32(seed)
+    state  = splitmix64_init(seed32)
+
+    no_gate   = (density >= 1.0)                         # see density rule
+    threshold = (u64::MAX as f64 * density) as u64       # = floor((2^64 - 1) * density)
+
+    planes = []
+    for k in 0..64:                                      # OUTER: plane index
+        pos = [0u64; word_count]
+        neg = [0u64; word_count]
+        for bit in 0..input_bit_length:                 # INNER: bit index
+            (state, r) = splitmix64_next(state)          # DRAW 1: density gate
+            active = no_gate OR (r < threshold)
+            if active:
+                (state, sign) = splitmix64_next(state)   # DRAW 2: sign (active only)
+                if sign & 1 == 1:
+                    pos[bit / 64] |= 1 << (bit mod 64)   # +1 position
+                else:
+                    neg[bit / 64] |= 1 << (bit mod 64)   # -1 position
+        planes.push((pos, neg))
+    return planes
+```
+
+**Density gating rule.** `density` is an f64 in `(0, 1]` controlling the
+fraction of non-zero (±1) positions per plane.
+
+- **`density >= 1.0` is a hard no-gate case:** every position is active,
+  and the density-gate draw (`r`) is **still consumed** to keep the PRNG
+  call sequence identical to the gated path — its value is simply
+  ignored. (At density exactly 1.0 the naive `r < threshold` test would
+  miss the single bit pattern `r == u64::MAX`, since the f64 cast of
+  `u64::MAX * 1.0` saturates back to `u64::MAX`; the explicit no-gate
+  branch removes that one-in-2^64 asymmetry.) **All committed
+  conformance vectors use density = 1.0**, so the no-gate path is the
+  exercised path.
+- **`density < 1.0`:** `threshold = (u64::MAX as f64 * density) as u64`,
+  i.e. `floor((2^64 − 1) * density)` — note `2^64 − 1`, **not** `2^64`.
+  A position is active iff its first draw `r < threshold`. (No committed
+  vectors exercise this branch yet; the formula is fixed so a port is
+  forward-compatible.)
+
+**Mask word/bit ordering.** Bit `b` of the input lives in word
+`b / 64` at bit position `b mod 64` (little-endian within the word: bit 0
+is the least-significant bit of word 0). The plane masks use the
+identical layout, so `positive_mask[b/64]` bit `b mod 64` lines up with
+input word `b/64` bit `b mod 64`. Word 0 holds bits 0..63, word 1 holds
+bits 64..127, word 2 holds bits 128..191 (block 0 only).
+
+**`block_index` semantics.** `block_index` (0..3) is **informational
+only** for these conformance vectors and does **not** enter the seed
+math. The harness and the Tier-1 reference both call
+`expand_seed_to_32(hyperplane_seed)` on the bare per-case seed; the seed
+already differs per block in the committed cases. `block_index` selects
+the canonical input width (192 for block 0, 64 for blocks 1..3) and
+routes the family to the correct fingerprint block, but it is never
+mixed into the seed used to draw the planes. (A separate manifest path,
+`block_families` / `diversified_seed`, *does* diversify one base seed
+across four blocks by FNV-mixing the block index before expansion; that
+path is **not** what the simhash conformance vectors exercise and is out
+of scope for §3.6/§3.7.1 — keep them distinct.)
+
+#### Stage 4 — compute the block (§3.6 recap)
+
+With the 64 planes built, the 64-bit output follows §3.6 exactly. Pad the
+input vector `v` to `word_count` words with zeros. For each plane `k`
+(0..63):
+
+```
+p = sum over words i of popcount(v[i] & pos_mask_k[i])
+n = sum over words i of popcount(v[i] & neg_mask_k[i])
+if p > n: set bit k of result        # strict greater-than; ties (p == n) leave bit clear
+```
+
+The result is the u64 block value. Ties (`p == n`, includes the
+all-inactive plane) resolve to 0 — the comparison is strict `>`.
+
+#### Serialization
+
+Where committed or transmitted as bytes, the u64 block value and the u64
+hyperplane seed are rendered **little-endian** (`to_le_bytes()`). The
+conformance vectors store both `hyperplane_seed` and `block_value` as
+little-endian hex; decode with `int.from_bytes(bytes, "little")`. The f64
+`hyperplane_density` is stored as its little-endian IEEE-754 bit pattern
+(`0x000000000000f03f` = 1.0).
 
 ### §3.8. Cross-noun fingerprint compatibility (I-17)
 
@@ -2814,6 +3019,105 @@ PairingScope = household | fleet | company | industry | msp
 Transport: AirDrop, QR code, CloudKit shared zone, or signed-cert
 exchange. Pick one per deployment; v1 defaults to QR code for
 simplicity.
+
+### §12.2.1. Pairing seed derivation
+
+The shared hyperplane family of a pairing (§12.2) is generated
+deterministically from a single u64 **pairing seed**. Both estates
+compute the identical seed from the same three inputs, so neither side
+needs to transmit the family itself — only the 32-byte nonce crosses the
+wire. The seed feeds `expand_seed_64` → `block_families` (§3.7) to
+produce the four shared hyperplane blocks.
+
+**Inputs.**
+
+- `nonce` — 32 bytes, the freshly exchanged pairing nonce.
+- `estate_a`, `estate_b` — the two 16-byte estate UUIDs. Order of the
+  two arguments does **not** affect the result (see *Symmetry* below);
+  this realizes the symmetry requirement of the pairing algebra (I-23,
+  §12.1).
+
+**Algorithm.** A single FNV-1a running hash is initialized once, fed the
+32 nonce bytes in file order, then fed the 16 bytes of the
+**lexicographically smaller** estate UUID, in file order. The final
+64-bit accumulator **is** the pairing seed. There is no truncation,
+fold, or post-mix.
+
+```
+function pairing_seed(nonce: bytes(32),
+                      estate_a: bytes(16),
+                      estate_b: bytes(16)) -> u64:
+    # 1. Lexicographic unsigned-byte comparison picks the lower UUID.
+    #    Both UUIDs are exactly 16 bytes, so this is a plain byte-array
+    #    compare: compare byte 0, then byte 1, ... first differing byte
+    #    (as unsigned 0..255) decides; equal arrays are equal.
+    lower = estate_a if estate_a <= estate_b else estate_b
+
+    # 2. FNV-1a, 64-bit. Offset basis and prime are the standard
+    #    FNV-1a-64 constants.
+    h = 0xCBF29CE484222325          # FNV-1a-64 offset basis
+    for b in nonce:                 # all 32 nonce bytes, file order
+        h = h XOR b                 # XOR the byte into the low 8 bits
+        h = (h * 0x00000100000001B3) mod 2^64   # FNV-1a-64 prime, wrap to u64
+    for b in lower:                 # all 16 bytes of the lower UUID, file order
+        h = h XOR b
+        h = (h * 0x00000100000001B3) mod 2^64
+
+    # 3. The accumulator is the seed. No truncation.
+    return h
+```
+
+**Exact constants (hex).**
+
+| Constant | Value |
+|---|---|
+| FNV-1a-64 offset basis | `0xCBF29CE484222325` |
+| FNV-1a-64 prime | `0x00000100000001B3` |
+| Modulus (multiply wraps) | `2^64` (`& 0xFFFFFFFFFFFFFFFF`) |
+
+**Byte order and operation order — the federation-critical details.**
+
+1. **Hash order is nonce-then-lower-UUID, never the reverse.** The 32
+   nonce bytes are consumed first, then the 16 UUID bytes. Swapping the
+   two segments produces a different, wrong seed.
+2. **Bytes are consumed in file order** (index 0 first) for both
+   segments. The nonce and the UUID are byte arrays on the wire; they
+   are fed in array order. No endianness reinterpretation of either
+   segment occurs before hashing — they are byte streams, not integers.
+3. **FNV-1a order is XOR-then-multiply** (the *-1a* variant), per byte,
+   for every one of the 48 bytes (32 + 16).
+4. **All arithmetic is modulo 2^64.** Rust wraps natively
+   (`wrapping_mul`); a port in Python/Go/JS MUST mask each multiply to
+   64 bits (`& 0xFFFFFFFFFFFFFFFF`) or the seed diverges silently.
+5. **No truncation or fold.** Unlike the lattice/channel FNV uses
+   (§3.3, §3.5) that truncate FNV-1a to 16/8 bits, the pairing seed is
+   the *full* 64-bit accumulator. Do not apply `& 0xFFFF`.
+6. **Serialization is little-endian u64.** Where the seed is committed
+   or transmitted as bytes (e.g. conformance vectors), it is the
+   little-endian rendering of the u64 (`seed.to_le_bytes()`).
+
+**Symmetry.** Because the hash consumes `min(estate_a, estate_b)` rather
+than a fixed argument position, `pairing_seed(n, A, B)` equals
+`pairing_seed(n, B, A)` for all `n, A, B`. This is what makes the shared
+family bit-comparable regardless of which estate initiated the
+handshake.
+
+**Edge cases.**
+
+- **Equal identifiers** (`estate_a == estate_b`): the comparison
+  `estate_a <= estate_b` is true, so `estate_a` is selected; since the
+  two arrays are byte-identical the choice is immaterial and the seed is
+  well-defined. This is the reflexive case of the pairing algebra (I-23,
+  §12.1): an estate's seed with itself.
+- **Length differences:** none possible. The nonce is always exactly 32
+  bytes and each estate UUID is always exactly 16 bytes; both are
+  fixed-width in the data model. A port should `assert len(nonce) == 32`
+  and `assert len(uuid) == 16` rather than handle variable lengths. The
+  lexicographic compare is therefore always between two equal-length
+  16-byte arrays — Rust's `[u8; 16] <= [u8; 16]` and Python's
+  `bytes <= bytes` agree exactly here.
+- **All-zero nonce or UUID:** no special-casing; zero bytes XOR/multiply
+  through the FNV-1a accumulator like any other byte value.
 
 ### §12.3. Tier contribution fingerprints
 
