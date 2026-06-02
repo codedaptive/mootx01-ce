@@ -75,29 +75,55 @@ fn theorem_4_model_version_upgrade_preserves_every_transition() {
     let row_c = row(3);
     let mut log = UnifiedAuditLog::new();
 
-    log.add(entry(1, UnifiedAuditVerb::Capture, row_a,
-                  "provenance.model_version",
-                  UnifiedAuditValue::StringValue("v1".to_string())));
-    log.add(entry(2, UnifiedAuditVerb::Capture, row_b,
-                  "provenance.model_version",
-                  UnifiedAuditValue::StringValue("v1".to_string())));
-    log.add(entry(3, UnifiedAuditVerb::Capture, row_c,
-                  "provenance.model_version",
-                  UnifiedAuditValue::StringValue("v1".to_string())));
+    log.add(entry(
+        1,
+        UnifiedAuditVerb::Capture,
+        row_a,
+        "provenance.model_version",
+        UnifiedAuditValue::StringValue("v1".to_string()),
+    ));
+    log.add(entry(
+        2,
+        UnifiedAuditVerb::Capture,
+        row_b,
+        "provenance.model_version",
+        UnifiedAuditValue::StringValue("v1".to_string()),
+    ));
+    log.add(entry(
+        3,
+        UnifiedAuditVerb::Capture,
+        row_c,
+        "provenance.model_version",
+        UnifiedAuditValue::StringValue("v1".to_string()),
+    ));
 
-    log.add(entry(10, UnifiedAuditVerb::Migrate, row_a,
-                  "provenance.model_version",
-                  UnifiedAuditValue::StringValue("v2".to_string())));
-    log.add(entry(11, UnifiedAuditVerb::Migrate, row_b,
-                  "provenance.model_version",
-                  UnifiedAuditValue::StringValue("v2".to_string())));
-    log.add(entry(12, UnifiedAuditVerb::Migrate, row_c,
-                  "provenance.model_version",
-                  UnifiedAuditValue::StringValue("v2".to_string())));
+    log.add(entry(
+        10,
+        UnifiedAuditVerb::Migrate,
+        row_a,
+        "provenance.model_version",
+        UnifiedAuditValue::StringValue("v2".to_string()),
+    ));
+    log.add(entry(
+        11,
+        UnifiedAuditVerb::Migrate,
+        row_b,
+        "provenance.model_version",
+        UnifiedAuditValue::StringValue("v2".to_string()),
+    ));
+    log.add(entry(
+        12,
+        UnifiedAuditVerb::Migrate,
+        row_c,
+        "provenance.model_version",
+        UnifiedAuditValue::StringValue("v2".to_string()),
+    ));
 
     let pre = AuditProjectionFold::project_as_of(&log, hlc(9));
     for r in [row_a, row_b, row_c] {
-        let proj = pre.row(AuditTier::Locus, r).expect("row present pre-upgrade");
+        let proj = pre
+            .row(AuditTier::Locus, r)
+            .expect("row present pre-upgrade");
         assert_eq!(
             proj.fields.get("provenance.model_version"),
             Some(&UnifiedAuditValue::StringValue("v1".to_string()))
@@ -126,7 +152,9 @@ fn theorem_4_model_version_upgrade_preserves_every_transition() {
 
     let post = AuditProjectionFold::project(&log);
     for r in [row_a, row_b, row_c] {
-        let proj = post.row(AuditTier::Locus, r).expect("row present post-upgrade");
+        let proj = post
+            .row(AuditTier::Locus, r)
+            .expect("row present post-upgrade");
         assert_eq!(
             proj.fields.get("provenance.model_version"),
             Some(&UnifiedAuditValue::StringValue("v2".to_string()))
@@ -187,24 +215,47 @@ fn theorem_7_first_class_corrections_four_version_lifecycle() {
     let target = row(1);
     let mut log = UnifiedAuditLog::new();
 
-    log.add(entry(1, UnifiedAuditVerb::Capture, target, "provenance",
-                  UnifiedAuditValue::StringValue("captured".to_string())));
-    log.add(entry(2, UnifiedAuditVerb::Mutate, target, "provenance",
-                  UnifiedAuditValue::StringValue("user-confirmed".to_string())));
-    log.add(entry(3, UnifiedAuditVerb::Mutate, target, "provenance",
-                  UnifiedAuditValue::StringValue("user-corrected".to_string())));
-    log.add(entry(4, UnifiedAuditVerb::Mutate, target, "provenance",
-                  UnifiedAuditValue::StringValue("agent-contested".to_string())));
+    log.add(entry(
+        1,
+        UnifiedAuditVerb::Capture,
+        target,
+        "provenance",
+        UnifiedAuditValue::StringValue("captured".to_string()),
+    ));
+    log.add(entry(
+        2,
+        UnifiedAuditVerb::Mutate,
+        target,
+        "provenance",
+        UnifiedAuditValue::StringValue("user-confirmed".to_string()),
+    ));
+    log.add(entry(
+        3,
+        UnifiedAuditVerb::Mutate,
+        target,
+        "provenance",
+        UnifiedAuditValue::StringValue("user-corrected".to_string()),
+    ));
+    log.add(entry(
+        4,
+        UnifiedAuditVerb::Mutate,
+        target,
+        "provenance",
+        UnifiedAuditValue::StringValue("agent-contested".to_string()),
+    ));
 
     assert_eq!(log.count(), 4);
     assert_eq!(log.entries_for_row(target, AuditTier::Locus).len(), 4);
 
     let current = AuditProjectionFold::project(&log);
     assert_eq!(
-        current.row(AuditTier::Locus, target)
+        current
+            .row(AuditTier::Locus, target)
             .and_then(|r| r.fields.get("provenance"))
             .cloned(),
-        Some(UnifiedAuditValue::StringValue("agent-contested".to_string()))
+        Some(UnifiedAuditValue::StringValue(
+            "agent-contested".to_string()
+        ))
     );
 
     let expected = [
@@ -220,7 +271,9 @@ fn theorem_7_first_class_corrections_four_version_lifecycle() {
                 .and_then(|r| r.fields.get("provenance"))
                 .cloned(),
             Some(UnifiedAuditValue::StringValue(label.to_string())),
-            "asOf step {} should read '{}'", step, label
+            "asOf step {} should read '{}'",
+            step,
+            label
         );
     }
 
@@ -306,8 +359,7 @@ fn theorem_8_provenance_confirmed_bit_selects_exactly_confirmed_rows() {
         "exactly the ten confirmed rows match the bitmap predicate"
     );
 
-    let confirmed_ids: std::collections::BTreeSet<_> =
-        confirmed.iter().map(|r| r.row_id).collect();
+    let confirmed_ids: std::collections::BTreeSet<_> = confirmed.iter().map(|r| r.row_id).collect();
     let expected_confirmed: std::collections::BTreeSet<_> =
         confirmed_rows.iter().copied().collect();
     assert_eq!(confirmed_ids, expected_confirmed);

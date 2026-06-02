@@ -22,8 +22,7 @@
 use std::time::Instant;
 
 use genius_locus_kit::audit::{
-    AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue,
-    UnifiedAuditVerb,
+    AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
 };
 use genius_locus_kit::matrix::{MatrixCalibrationRegistry, MatrixTier};
 use genius_locus_kit::training::EnrichmentPipeline;
@@ -115,7 +114,10 @@ fn theorem_5_enrichment_throughput_clears_mac_floor() {
         result.transitions_considered as usize, sample_count,
         "pipeline must enrich every capture in the synthetic log"
     );
-    assert!(elapsed_secs > 0.0, "elapsed must be positive; guards div-by-zero");
+    assert!(
+        elapsed_secs > 0.0,
+        "elapsed must be positive; guards div-by-zero"
+    );
 
     let drawers_per_second = sample_count as f64 / elapsed_secs;
     let drawers_per_hour = drawers_per_second * 3600.0;

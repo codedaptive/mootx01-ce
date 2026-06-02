@@ -141,6 +141,7 @@ pub struct UnifiedAuditEntry {
     pub origin_row_id: Option<EntryUUID>,
 }
 
+#[allow(clippy::too_many_arguments)] // wire-encoding functions require all fields; grouping would obscure the byte-identical contract
 impl UnifiedAuditEntry {
     pub fn new(
         tier: AuditTier,
@@ -231,7 +232,9 @@ pub struct UnifiedAuditLog {
 
 impl UnifiedAuditLog {
     pub fn new() -> Self {
-        Self { entries: BTreeMap::new() }
+        Self {
+            entries: BTreeMap::new(),
+        }
     }
 
     pub fn with_entries<I: IntoIterator<Item = UnifiedAuditEntry>>(entries: I) -> Self {
@@ -252,8 +255,12 @@ impl UnifiedAuditLog {
         }
     }
 
-    pub fn count(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     pub fn ordered_entries(&self) -> Vec<UnifiedAuditEntry> {
         let mut entries: Vec<_> = self.entries.values().cloned().collect();

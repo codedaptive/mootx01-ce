@@ -33,14 +33,9 @@ impl MatrixCalibrationCurve {
         }
     }
 
-    pub fn record(
-        &mut self,
-        claimed_confidence: f32,
-        outcome: MatrixCalibrationOutcome,
-    ) {
+    pub fn record(&mut self, claimed_confidence: f32, outcome: MatrixCalibrationOutcome) {
         let clamped = claimed_confidence.clamp(0.0, 0.99999);
-        let idx = ((clamped * Self::BUCKET_COUNT as f32) as usize)
-            .min(Self::BUCKET_COUNT - 1);
+        let idx = ((clamped * Self::BUCKET_COUNT as f32) as usize).min(Self::BUCKET_COUNT - 1);
         let bucket = &mut self.buckets[idx];
         let old_count = bucket.count as f32;
         bucket.count = bucket.count.saturating_add(1);
@@ -49,14 +44,12 @@ impl MatrixCalibrationCurve {
             MatrixCalibrationOutcome::Failure => 0.0,
         };
         // Running mean: new = (old * (n-1) + outcome) / n.
-        bucket.success_rate =
-            (bucket.success_rate * old_count + outcome_bit) / bucket.count as f32;
+        bucket.success_rate = (bucket.success_rate * old_count + outcome_bit) / bucket.count as f32;
     }
 
     pub fn calibrate(&self, claimed_confidence: f32) -> f32 {
         let clamped = claimed_confidence.clamp(0.0, 0.99999);
-        let idx = ((clamped * Self::BUCKET_COUNT as f32) as usize)
-            .min(Self::BUCKET_COUNT - 1);
+        let idx = ((clamped * Self::BUCKET_COUNT as f32) as usize).min(Self::BUCKET_COUNT - 1);
         let bucket = &self.buckets[idx];
         if bucket.count > 0 {
             bucket.success_rate
@@ -89,10 +82,7 @@ impl MatrixCalibrationRegistry {
         claimed_confidence: f32,
         outcome: MatrixCalibrationOutcome,
     ) {
-        let curve = self
-            .curves
-            .entry(model_id.to_string())
-            .or_insert_with(MatrixCalibrationCurve::new);
+        let curve = self.curves.entry(model_id.to_string()).or_default();
         curve.record(claimed_confidence, outcome);
     }
 

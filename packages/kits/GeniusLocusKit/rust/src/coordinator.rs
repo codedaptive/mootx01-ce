@@ -88,10 +88,15 @@ impl From<VerbError> for VerbDispatchError {
 fn remap(verb: &str, error: LocusKitError) -> VerbError {
     if let LocusKitError::InvalidContent(detail) = &error {
         if detail.contains("not yet implemented") {
-            return VerbError::NotSupportedByEstate { verb: verb.to_string() };
+            return VerbError::NotSupportedByEstate {
+                verb: verb.to_string(),
+            };
         }
     }
-    VerbError::UnderlyingEstateFailure { verb: verb.to_string(), reason: format!("{error:?}") }
+    VerbError::UnderlyingEstateFailure {
+        verb: verb.to_string(),
+        reason: format!("{error:?}"),
+    }
 }
 
 /// The coordinator. Owns the registry of currently-open estates and is the
@@ -113,7 +118,10 @@ pub struct EstateCoordinator {
 impl EstateCoordinator {
     /// Construct a coordinator with empty estate and branch registries.
     pub fn new() -> Self {
-        Self { registry: HashMap::new(), branches: HashMap::new() }
+        Self {
+            registry: HashMap::new(),
+            branches: HashMap::new(),
+        }
     }
 
     /// Number of estates currently open.
@@ -143,8 +151,10 @@ impl EstateCoordinator {
         zoom_window_low: i64,
         zoom_window_high: i64,
     ) -> Result<EstateHandle, GeniusLocusKitError> {
-        let estate = Estate::open(store, owner)
-            .map_err(|e| GeniusLocusKitError::EstateOpenFailed { detail: format!("{e:?}") })?;
+        let estate =
+            Estate::open(store, owner).map_err(|e| GeniusLocusKitError::EstateOpenFailed {
+                detail: format!("{e:?}"),
+            })?;
         let estate_uuid: EstateUuid = estate.estate_uuid().into_bytes();
         let handle = EstateHandle::new(estate_uuid, zoom_window_low, zoom_window_high)?;
         if self.registry.contains_key(&handle) {
@@ -158,7 +168,9 @@ impl EstateCoordinator {
     /// subsequent `estate_for` lookups return `EstateNotOpen`.
     pub fn close(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
         if self.registry.remove(handle).is_none() {
-            return Err(GeniusLocusKitError::EstateNotOpen { estate_uuid: handle.estate_uuid });
+            return Err(GeniusLocusKitError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            });
         }
         Ok(())
     }
@@ -169,7 +181,9 @@ impl EstateCoordinator {
     pub fn estate_for(&self, handle: &EstateHandle) -> Result<&Estate, GeniusLocusKitError> {
         self.registry
             .get(handle)
-            .ok_or(GeniusLocusKitError::EstateNotOpen { estate_uuid: handle.estate_uuid })
+            .ok_or(GeniusLocusKitError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            })
     }
 
     // Internal: resolve to an estate, mapping the not-open case into the
@@ -178,7 +192,9 @@ impl EstateCoordinator {
     fn estate_for_verb(&self, handle: &EstateHandle) -> Result<&Estate, VerbDispatchError> {
         self.registry
             .get(handle)
-            .ok_or(VerbDispatchError::EstateNotOpen { estate_uuid: handle.estate_uuid })
+            .ok_or(VerbDispatchError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            })
     }
 
     // MARK: - capture
@@ -193,7 +209,9 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<Drawer, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.capture(frame, now).map_err(|e| remap("capture", e).into())
+        estate
+            .capture(frame, now)
+            .map_err(|e| remap("capture", e).into())
     }
 
     // MARK: - recall
@@ -243,7 +261,9 @@ impl EstateCoordinator {
         payload: Option<&str>,
     ) -> Result<(), VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.mutate(row_id, kind, payload).map_err(|e| remap("mutate", e).into())
+        estate
+            .mutate(row_id, kind, payload)
+            .map_err(|e| remap("mutate", e).into())
     }
 
     // MARK: - withdraw
@@ -258,7 +278,9 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<(), VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.withdraw(row_id, reason, now).map_err(|e| remap("withdraw", e).into())
+        estate
+            .withdraw(row_id, reason, now)
+            .map_err(|e| remap("withdraw", e).into())
     }
 
     // MARK: - expunge
@@ -274,7 +296,10 @@ impl EstateCoordinator {
         confirmation: bool,
     ) -> Result<(), VerbDispatchError> {
         if !confirmation {
-            return Err(VerbError::ExpungeNotConfirmed { row_id: row_id.to_string() }.into());
+            return Err(VerbError::ExpungeNotConfirmed {
+                row_id: row_id.to_string(),
+            }
+            .into());
         }
         let estate = self.estate_for_verb(handle)?;
         estate
@@ -296,7 +321,10 @@ impl EstateCoordinator {
         to_lattice: Option<LatticeAnchor>,
     ) -> Result<(), VerbDispatchError> {
         if to_room.is_none() && to_lattice.is_none() {
-            return Err(VerbError::EmptyReanchor { row_id: row_id.to_string() }.into());
+            return Err(VerbError::EmptyReanchor {
+                row_id: row_id.to_string(),
+            }
+            .into());
         }
         let estate = self.estate_for_verb(handle)?;
         estate
@@ -374,10 +402,15 @@ mod tests {
     fn co2_withdraw_transitions_state() {
         let (coord, h) = open_one();
         let stored = coord.capture(&h, cap_frame("beta"), NOW).expect("capture");
-        coord.withdraw(&h, &stored.id, Some("obsolete"), NOW).expect("withdraw");
+        coord
+            .withdraw(&h, &stored.id, Some("obsolete"), NOW)
+            .expect("withdraw");
         // The row is no longer in the unconfirmed set after withdrawal.
         let rows = coord.recall(&h, unconfirmed(), NOW).expect("recall");
-        assert!(rows.iter().all(|r| r.id != stored.id), "withdrawn row left the set");
+        assert!(
+            rows.iter().all(|r| r.id != stored.id),
+            "withdrawn row left the set"
+        );
     }
 
     // CO-3: expunge without confirmation is refused at the boundary; the
@@ -401,7 +434,9 @@ mod tests {
         let err = coord.reanchor(&h, "row-1", None, None).unwrap_err();
         assert_eq!(
             err,
-            VerbDispatchError::Verb(VerbError::EmptyReanchor { row_id: "row-1".to_string() })
+            VerbDispatchError::Verb(VerbError::EmptyReanchor {
+                row_id: "row-1".to_string()
+            })
         );
     }
 
@@ -430,11 +465,17 @@ mod tests {
     #[test]
     fn co5b_state_axis_mutate_is_not_supported() {
         let (coord, h) = open_one();
-        let stored = coord.capture(&h, cap_frame("epsilon"), NOW).expect("capture");
-        let err = coord.mutate(&h, &stored.id, MutationKind::Reject, None).unwrap_err();
+        let stored = coord
+            .capture(&h, cap_frame("epsilon"), NOW)
+            .expect("capture");
+        let err = coord
+            .mutate(&h, &stored.id, MutationKind::Reject, None)
+            .unwrap_err();
         assert_eq!(
             err,
-            VerbDispatchError::Verb(VerbError::NotSupportedByEstate { verb: "mutate".to_string() })
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "mutate".to_string()
+            })
         );
     }
 
@@ -445,7 +486,12 @@ mod tests {
         let (mut coord, h) = open_one();
         coord.close(&h).expect("close");
         let err = coord.capture(&h, cap_frame("delta"), NOW).unwrap_err();
-        assert_eq!(err, VerbDispatchError::EstateNotOpen { estate_uuid: h.estate_uuid });
+        assert_eq!(
+            err,
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
     }
 
     // -----------------------------------------------------------------
@@ -467,8 +513,12 @@ mod tests {
     fn co7_recall_tunnels_returns_outgoing() {
         let (coord, h) = open_one();
         let estate = coord.estate_for(&h).expect("estate");
-        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW).unwrap();
-        estate.capture_tunnel(tunnel_frame("study", "garden", "relates"), NOW + 1).unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW)
+            .unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "garden", "relates"), NOW + 1)
+            .unwrap();
 
         let tunnels = coord.recall_tunnels(&h, "study").expect("recall_tunnels");
         assert_eq!(tunnels.len(), 2);
@@ -483,7 +533,9 @@ mod tests {
     fn co8_recall_tunnels_empty_for_unlinked_wing() {
         let (coord, h) = open_one();
         let estate = coord.estate_for(&h).expect("estate");
-        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW).unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW)
+            .unwrap();
 
         let tunnels = coord.recall_tunnels(&h, "attic").expect("recall_tunnels");
         assert!(tunnels.is_empty());
@@ -496,6 +548,11 @@ mod tests {
         let (mut coord, h) = open_one();
         coord.close(&h).expect("close");
         let err = coord.recall_tunnels(&h, "study").unwrap_err();
-        assert_eq!(err, VerbDispatchError::EstateNotOpen { estate_uuid: h.estate_uuid });
+        assert_eq!(
+            err,
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
     }
 }

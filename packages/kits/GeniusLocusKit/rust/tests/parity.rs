@@ -13,9 +13,7 @@
 
 use std::sync::Arc;
 
-use genius_locus_kit::{
-    EstateCoordinator, EstateHandle, GeniusLocusKitError, LatticeRegion,
-};
+use genius_locus_kit::{EstateCoordinator, EstateHandle, GeniusLocusKitError, LatticeRegion};
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
@@ -65,17 +63,20 @@ fn close_leaves_remaining_handles_live() {
     let (mut coord, h_low, h_mid, h_high) = open_three_estates();
     coord.close(&h_mid).expect("close mid");
     assert_eq!(coord.open_estate_count(), 2);
-    let live: std::collections::HashSet<EstateHandle> =
-        coord.handles().into_iter().collect();
+    let live: std::collections::HashSet<EstateHandle> = coord.handles().into_iter().collect();
     assert!(live.contains(&h_low));
     assert!(live.contains(&h_high));
     assert!(!live.contains(&h_mid));
 
     // Stale handle lookup raises EstateNotOpen.
-    let err = coord.estate_for(&h_mid).err().expect("expected EstateNotOpen");
+    let err = coord
+        .estate_for(&h_mid)
+        .expect_err("expected EstateNotOpen");
     assert_eq!(
         err,
-        GeniusLocusKitError::EstateNotOpen { estate_uuid: h_mid.estate_uuid }
+        GeniusLocusKitError::EstateNotOpen {
+            estate_uuid: h_mid.estate_uuid
+        }
     );
 }
 
@@ -93,9 +94,13 @@ fn duplicate_open_is_rejected() {
         .expect("first open");
     let err = coord
         .open(store.clone(), OwnerCredentials::new("owner"), 0, 10)
-        .err()
-        .expect("expected DuplicateEstate");
-    assert_eq!(err, GeniusLocusKitError::DuplicateEstate { estate_uuid: h.estate_uuid });
+        .expect_err("expected DuplicateEstate");
+    assert_eq!(
+        err,
+        GeniusLocusKitError::DuplicateEstate {
+            estate_uuid: h.estate_uuid
+        }
+    );
 }
 
 #[test]
@@ -136,8 +141,7 @@ fn inverted_region_throws() {
     let (coord, ..) = open_three_estates();
     let err = coord
         .estates_overlapping(LatticeRegion::new(10, 4))
-        .err()
-        .expect("expected InvalidLatticeRegion");
+        .expect_err("expected InvalidLatticeRegion");
     assert_eq!(
         err,
         GeniusLocusKitError::InvalidLatticeRegion { low: 10, high: 4 }
@@ -153,8 +157,5 @@ fn fan_out_returns_contribution_per_overlapping_estate() {
     assert_eq!(contributions.len(), 2);
     let handles: std::collections::HashSet<EstateHandle> =
         contributions.iter().map(|c| c.handle).collect();
-    assert_eq!(
-        handles,
-        std::collections::HashSet::from([h_low, h_mid])
-    );
+    assert_eq!(handles, std::collections::HashSet::from([h_low, h_mid]));
 }

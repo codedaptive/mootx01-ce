@@ -34,8 +34,12 @@ impl TrainingThresholdDecision {
 
     pub fn transition_count(&self) -> i64 {
         match self {
-            TrainingThresholdDecision::Dormant { transition_count, .. } => *transition_count,
-            TrainingThresholdDecision::Active { transition_count, .. } => *transition_count,
+            TrainingThresholdDecision::Dormant {
+                transition_count, ..
+            } => *transition_count,
+            TrainingThresholdDecision::Active {
+                transition_count, ..
+            } => *transition_count,
         }
     }
 
