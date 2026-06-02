@@ -15,9 +15,9 @@
 //!
 //! ## Runner semantics
 //!
-//! Each case gets a fresh estate (InMemoryStorage + InMemoryDrawerStore +
-//! Estate::create). A `Vec<Drawer>` tracks captured drawers so
-//! `drawerIndex` ops can reference them by position. A typed
+//! Each case gets a fresh estate (InMemoryDrawerStore — which allocates its
+//! own InMemoryStorage — + Estate::create). A `Vec<Drawer>` tracks captured
+//! drawers so `drawerIndex` ops can reference them by position. A typed
 //! `Arc<InMemoryDrawerStore>` is kept alongside the `Estate` for direct
 //! store access (tunnels, kg_facts, peek) — mirrors the Swift test runner
 //! which holds both `estate` and `store` separately.
@@ -41,7 +41,6 @@ use persistence_kit::inmemory::InMemoryStorage;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Test entry points — one per vector file
@@ -99,11 +98,10 @@ fn run_vector_file(file_name: &str) {
 /// arrays must have matching lengths (one observation per op result, but
 /// the schema allows ops that produce no observation — we track a cursor).
 fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value) {
-    // Fresh estate for each case.
-    let storage: Arc<dyn persistence_kit::storage::Storage> =
-        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    // Fresh estate for each case — InMemoryDrawerStore allocates its own
+    // InMemoryStorage internally; backend identity is visible at the type.
     let store: Arc<InMemoryDrawerStore> =
-        Arc::new(InMemoryDrawerStore::new(Arc::clone(&storage), 1_700_000_000, None).unwrap());
+        Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap());
     let estate = Estate::create(
         Arc::clone(&store) as Arc<dyn DrawerStore>,
         OwnerCredentials::new("owner"),

@@ -122,7 +122,7 @@ impl CaptureFrame {
 /// There are deliberately no content, lattice-anchor, or embedding slots,
 /// and the three bitmaps are not exposed — standalone capture zero-inits
 /// them, byte-identical to the tunnel the supersession cascade writes in
-/// `InMemoryDrawerStore::add_drawer_with_cascade`. One tunnel shape, two
+/// `DrawerStoreCore::add_drawer_with_cascade`. One tunnel shape, two
 /// entry points (mission VERB-CAP-01).
 #[derive(Debug, Clone)]
 pub struct TunnelCaptureFrame {

@@ -597,8 +597,11 @@ impl BitmapEvaluator {
                     .iter()
                     .any(|f| Self::evaluate_structured(f, drawer))
             }
-            Filter::Not(f) if Self::is_structural_filter(f) => {
-                !Self::evaluate_structured(f, drawer)
+            // Not(f): if f is not a structural filter it passes at this tier
+            // (bitmap/content filters evaluate to true here); if f IS structural,
+            // the Not inverts the structural evaluation.
+            Filter::Not(f) => {
+                !Self::is_structural_filter(f) || !Self::evaluate_structured(f, drawer)
             }
             // Bitmap and content cases pass at this tier.
             _ => true,
@@ -721,10 +724,10 @@ impl BitmapEvaluator {
     fn sort(mut drawers: Vec<Drawer>, ordering: Ordering) -> Vec<Drawer> {
         match ordering {
             Ordering::ByCaptureTimeDesc => {
-                drawers.sort_by_key(|b| std::cmp::Reverse(b.filed_at));
+                drawers.sort_by_key(|d| std::cmp::Reverse(d.filed_at));
             }
             Ordering::ByCaptureTimeAsc => {
-                drawers.sort_by_key(|a| a.filed_at);
+                drawers.sort_by_key(|d| d.filed_at);
             }
             Ordering::ByRoomAsc => {
                 drawers.sort_by(|a, b| a.room.cmp(&b.room));
@@ -750,15 +753,15 @@ mod tests {
     use crate::drawer_operational::DrawerFeatureFlags;
     use crate::drawer_store_inmemory::InMemoryDrawerStore;
     use crate::provenance::{Channel, Confidence, Confirmation, SourceType};
-    use persistence_kit::inmemory::InMemoryStorage;
     use std::sync::Arc;
     use uuid::Uuid;
 
     const NOW: i64 = 1_700_000_000;
 
     fn make_store() -> Arc<InMemoryDrawerStore> {
-        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap())
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally —
+        // backend identity is visible at the type, not the argument.
+        Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap())
     }
 
     fn base_drawer(id: &str) -> Drawer {

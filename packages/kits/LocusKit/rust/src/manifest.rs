@@ -83,6 +83,7 @@ impl ManifestKey {
     /// `ManifestKey(rawValue:)` initialiser — the caller decides how to
     /// surface forward-schema rows.
     ///
+    /// Named `from_str` by cross-leg convention (mirrors Swift `init(rawValue:)`).
     /// Returns `Option<ManifestKey>` rather than `Result<_, _>`, so this
     /// does not implement `std::str::FromStr` (different return type).
     /// The `#[allow]` suppresses the lint that warns about the similar name.

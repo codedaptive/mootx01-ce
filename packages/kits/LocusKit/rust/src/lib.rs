@@ -60,13 +60,12 @@
 //! - `drawer_store` — extended `DrawerStore` trait with the verb-surface
 //!   methods (drawer CRUD, supersession cascade, mutation paths,
 //!   tunnel / kg-fact / diary CRUD, recall trace, audit reads, summary)
-//! - `drawer_store_inmemory` — concrete `InMemoryDrawerStore` over
-//!   persistence-kit `InMemoryStorage` with v1 manifest defaults at
-//!   construction (test fixture; no persistence across process restarts)
-//! - `drawer_store_sqlite` — concrete `SqliteDrawerStore` over
-//!   persistence-kit `SqliteStorage` (WAL-mode, durable across restarts);
-//!   delegates all verb logic through `InMemoryDrawerStore`'s
-//!   `Arc<dyn Storage>` abstraction with zero code duplication
+//! - `drawer_store_inmemory` — `DrawerStoreCore` (storage-agnostic verb-logic
+//!   core, pub(crate)) + `InMemoryDrawerStore` (public newtype over the
+//!   in-memory backend, test fixture, no persistence across process restarts)
+//! - `drawer_store_sqlite` — `SqliteDrawerStore` (public newtype over
+//!   `DrawerStoreCore` backed by persistence-kit `SqliteStorage`;
+//!   WAL-mode, durable across restarts)
 //! - `bitmap_ops` — § 7.7 bitmap operator primitives (and-mask,
 //!   threshold-compare, XOR, shift-extract, SIMD-ballot,
 //!   Hamming distance)
@@ -92,10 +91,9 @@
 //! port end-to-end against the canonical conformance vectors.
 //!
 //! Two concrete `DrawerStore` implementations ship: `InMemoryDrawerStore`
-//! (test fixture, non-persistent) and `SqliteDrawerStore` (WAL-mode
-//! SQLite, durable). Both delegate through the same `Arc<dyn Storage>`
-//! abstraction; `SqliteDrawerStore` is a thin constructor newtype over
-//! `InMemoryDrawerStore` backed by persistence-kit's `SqliteStorage`.
+//! (ephemeral/test fixture) and `SqliteDrawerStore` (WAL-mode SQLite,
+//! durable). Both are thin newtypes over `DrawerStoreCore` (the shared
+//! verb-logic core), each wrapping the appropriate persistence-kit backend.
 
 pub mod adjectives;
 pub mod association;
