@@ -1,12 +1,18 @@
-//! v1 lexicon minimum: moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel.
+//! v2b-p1 lexicon surface: moot_capture_drawer, moot_drawer_recall,
+//! moot_capture_tunnel, moot_mutate_drawer, moot_withdraw_drawer,
+//! moot_expunge_drawer, moot_reanchor_drawer, moot_tunnel_recall.
 //!
-//! Mirrors the Swift `ToolDispatcher.runCaptureDrawer` and `runRecallDrawer`
-//! argument names and behavior. These three tools give an agent on the Rust
-//! server the ability to put real data in front of the lenses.
+//! Mirrors the Swift `ToolDispatcher.runCaptureDrawer`, `runRecallDrawer`,
+//! `runMutate`, `runWithdraw`, `runExpunge`, `runReanchor` argument names and
+//! behavior. The five new tools (v2b-p1) give an agent the full drawer
+//! lifecycle surface plus the tunnel graph read-out.
 //!
-//! The full lexicon projection (mutate, withdraw, expunge, reanchor, learn,
-//! cross_estate_recall, federation) is explicitly OUT of this mission's scope.
-//! It is listed in the README as the v1 boundary.
+//! Domain errors (NotSupportedByEstate, ExpungeNotConfirmed, EmptyReanchor,
+//! UnderlyingEstateFailure) surface as `error_result` tool responses (isError:
+//! true), NOT as JSONRPCError transport faults — matching the Swift
+//! ToolDispatcher's VerbError discipline (ToolDispatch.swift:184-192). Only
+//! out-of-band conditions (missing required args, unknown estate, malformed
+//! args) surface as JSONRPCError.
 //!
 //! Arg names are wire-identical to the Swift server for the tools that appear
 //! in both (content, room, udcCode, addedBy, embeddingModelID, classificationScheme,
@@ -30,16 +36,22 @@ use locus_kit::{
     drawer_operational::{CaptureChannel, ContentKind},
     estate_types::LatticeAnchor,
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
-    frames::{CaptureFrame, TunnelCaptureFrame},
+    frames::{CaptureFrame, MutationKind, TunnelCaptureFrame},
 };
 
-use crate::dispatch::{require_string, text_result};
+use crate::dispatch::{error_result, require_string, text_result};
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
 const CAPTURE_DRAWER: &str = "moot_capture_drawer";
 const RECALL_DRAWER: &str = "moot_drawer_recall";
 const CAPTURE_TUNNEL: &str = "moot_capture_tunnel";
+// v2b-p1: drawer lifecycle verbs + tunnel graph read.
+const MUTATE_DRAWER: &str = "moot_mutate_drawer";
+const WITHDRAW_DRAWER: &str = "moot_withdraw_drawer";
+const EXPUNGE_DRAWER: &str = "moot_expunge_drawer";
+const REANCHOR_DRAWER: &str = "moot_reanchor_drawer";
+const TUNNEL_RECALL: &str = "moot_tunnel_recall";
 
 /// The classification scheme a lattice-anchor code belongs to.
 ///
@@ -67,9 +79,19 @@ impl ClassificationScheme {
     }
 }
 
-/// True when `name` is one of the v1 lexicon minimum tools.
+/// True when `name` is one of the lexicon tools (v1 minimum + v2b-p1 additions).
 pub fn is_lexicon_tool(name: &str) -> bool {
-    matches!(name, CAPTURE_DRAWER | RECALL_DRAWER | CAPTURE_TUNNEL)
+    matches!(
+        name,
+        CAPTURE_DRAWER
+            | RECALL_DRAWER
+            | CAPTURE_TUNNEL
+            | MUTATE_DRAWER
+            | WITHDRAW_DRAWER
+            | EXPUNGE_DRAWER
+            | REANCHOR_DRAWER
+            | TUNNEL_RECALL
+    )
 }
 
 /// Dispatch a lexicon tool call.
@@ -84,6 +106,11 @@ pub fn dispatch(
         CAPTURE_DRAWER => run_capture_drawer(args, &mut coord, estate),
         RECALL_DRAWER => run_recall_drawer(args, &coord, estate),
         CAPTURE_TUNNEL => run_capture_tunnel(args, &mut coord, estate),
+        MUTATE_DRAWER => run_mutate_drawer(args, &coord, estate),
+        WITHDRAW_DRAWER => run_withdraw_drawer(args, &coord, estate),
+        EXPUNGE_DRAWER => run_expunge_drawer(args, &coord, estate),
+        REANCHOR_DRAWER => run_reanchor_drawer(args, &coord, estate),
+        TUNNEL_RECALL => run_tunnel_recall(args, &coord, estate),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown lexicon tool: {name}"),
@@ -239,6 +266,144 @@ fn run_capture_tunnel(
 }
 
 // ---------------------------------------------------------------------------
+// moot_mutate_drawer  (v2b-p1)
+// ---------------------------------------------------------------------------
+
+/// Apply a named mutation to a drawer. The Confirm kind transitions the row's
+/// confirmation axis to UserConfirmed. State-axis kinds (Reject, Contest,
+/// Resolve, Supersede, Revive) are not yet wired in LocusKit and return
+/// NotSupportedByEstate, surfaced as an error_result per the Swift
+/// ToolDispatcher VerbError discipline (ToolDispatch.swift:184-192).
+fn run_mutate_drawer(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let row_id = require_string(args, "rowID")?;
+    let kind_name = require_string(args, "kind")?;
+    let kind = decode_mutation_kind(kind_name)?;
+    let payload = args.get("payload").and_then(|v| v.as_str());
+
+    match coord.mutate(&estate.handle, row_id, kind, payload) {
+        Ok(()) => Ok(text_result(&format!(
+            "mutated drawer {row_id} ({kind_name})"
+        ))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// moot_withdraw_drawer  (v2b-p1)
+// ---------------------------------------------------------------------------
+
+/// Move a drawer's state to withdrawn. Parity of the Swift
+/// `ToolDispatcher.runWithdraw`. VerbErrors surface as error_result.
+fn run_withdraw_drawer(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let row_id = require_string(args, "rowID")?;
+    let reason = args.get("reason").and_then(|v| v.as_str());
+
+    let now = crate::dispatch::wall_now();
+    match coord.withdraw(&estate.handle, row_id, reason, now) {
+        Ok(()) => Ok(text_result(&format!("withdrew drawer {row_id}"))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// moot_expunge_drawer  (v2b-p1)
+// ---------------------------------------------------------------------------
+
+/// Tombstone a drawer and zeroize its content. Requires `confirmation: true`;
+/// expunge with confirmation omitted or false is refused without reaching the
+/// estate — matching the coordinator's boundary guard and the Swift
+/// `ToolDispatcher.runExpunge` behavior. VerbErrors surface as error_result.
+fn run_expunge_drawer(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let row_id = require_string(args, "rowID")?;
+    let reason = require_string(args, "reason")?;
+    // Absent or non-boolean confirmation is treated as false per the Swift side
+    // (ToolDispatch.swift:327: `args["confirmation"]?.boolValue ?? false`).
+    let confirmation = args
+        .get("confirmation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    match coord.expunge(&estate.handle, row_id, reason, confirmation) {
+        Ok(()) => Ok(text_result(&format!("expunged drawer {row_id}"))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// moot_reanchor_drawer  (v2b-p1)
+// ---------------------------------------------------------------------------
+
+/// Move a drawer's room and/or lattice anchor. An empty reanchor (neither
+/// toRoom nor toUDC supplied) is refused at the coordinator boundary without
+/// reaching the estate — parity of the Swift `ToolDispatcher.runReanchor`
+/// boundary guard. VerbErrors surface as error_result.
+fn run_reanchor_drawer(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let row_id = require_string(args, "rowID")?;
+    let to_room = args.get("toRoom").and_then(|v| v.as_str());
+    let to_udc = args.get("toUDC").and_then(|v| v.as_str());
+    let to_lattice = to_udc.map(LatticeAnchor::udc);
+
+    match coord.reanchor(&estate.handle, row_id, to_room, to_lattice) {
+        Ok(()) => Ok(text_result(&format!("reanchored drawer {row_id}"))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// moot_tunnel_recall  (v2b-p1)
+// ---------------------------------------------------------------------------
+
+/// Read the tunnels originating in `wing` from the estate. The wing is the
+/// graph partition: outgoing edges from that wing's drawers. Returns all
+/// tunnels in insertion order (the coordinator delegates to
+/// `Estate::tunnels_from_wing`). VerbErrors surface as error_result.
+fn run_tunnel_recall(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let wing = require_string(args, "wing")?;
+
+    match coord.recall_tunnels(&estate.handle, wing) {
+        Ok(tunnels) => {
+            let header = format!("recalled {} tunnel(s) from wing {wing}", tunnels.len());
+            let lines: Vec<String> = tunnels
+                .iter()
+                .take(50) // cap at 50 per the Swift server's discipline on wide recalls
+                .map(|t| {
+                    format!(
+                        "{}  {} -> {}/{}",
+                        t.id, t.source_wing, t.target_wing, t.target_room
+                    )
+                })
+                .collect();
+            let body = std::iter::once(header)
+                .chain(lines)
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(text_result(&body))
+        }
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Argument decoders (lexicon-specific)
 // ---------------------------------------------------------------------------
 
@@ -253,6 +418,28 @@ fn decode_classification_scheme(name: Option<&str>) -> Result<ClassificationSche
         Some(unknown) => Err(JSONRPCError::new(
             JSONRPCErrorCode::INVALID_PARAMS,
             format!("Unknown classification scheme: {unknown}"),
+        )),
+    }
+}
+
+/// Decode a mutation kind from its wire name. Wire names match the Swift
+/// `decodeMutationKind` argument names (ToolDispatch.swift). CorrectSensitivity
+/// and CorrectTrust are not exposed on the MCP surface (they require typed
+/// companion args; a future schema extension can add them). An unknown kind
+/// is an invalidParams transport fault — the caller supplied a bad value,
+/// not a substrate refusal.
+fn decode_mutation_kind(name: &str) -> Result<MutationKind, JSONRPCError> {
+    match name {
+        "confirm" => Ok(MutationKind::Confirm),
+        "reject" => Ok(MutationKind::Reject),
+        "contest" => Ok(MutationKind::Contest),
+        "resolve" => Ok(MutationKind::Resolve),
+        "supersede" => Ok(MutationKind::Supersede),
+        "revive" => Ok(MutationKind::Revive),
+        "accept" => Ok(MutationKind::Accept),
+        unknown => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Unknown mutation kind: {unknown}"),
         )),
     }
 }

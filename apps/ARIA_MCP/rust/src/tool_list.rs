@@ -1,23 +1,24 @@
 //! Tool list projection — builds the `tools/list` response body.
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
-//! `LensTools.tools()` composition. The Rust server does not have a
-//! lexicon-projection loop (the full lexicon surface is a v2 item — see
-//! README); v1 ships the capture/recall lexicon minimum (Part 5) plus all
-//! recipe and lens tools.
+//! `LensTools.tools()` composition. The Rust server does not use a
+//! lexicon-projection loop; each tool is described by its own function
+//! so the diff from each mission is small and reviewable.
 //!
 //! Tool names, descriptions, and inputSchema fields are wire-identical to
 //! the Swift server for every tool that appears in both. The catalog
 //! descriptions for the lens tools come directly from `recipe_catalog()` so
 //! they stay in lockstep with the Swift catalog's byte-identical strings.
 //!
-//! # Tool ordering
+//! # Tool ordering (28 tools after v2b-p1)
 //!
 //! moot_list_recipes, then the 16 lens tools in catalog order (14 reasoning
-//! and 2 analytics), then the 2 foundational recipe tools
-//! (grounded_synthesis, run_migration_benchmark,
-//! confirm_migration_promotion), then the v1 lexicon minimum
-//! (moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel).
+//! and 2 analytics), then the 3 foundational recipe tools
+//! (grounded_synthesis, run_migration_benchmark, confirm_migration_promotion),
+//! then the v1 lexicon minimum (moot_capture_drawer, moot_drawer_recall,
+//! moot_capture_tunnel), then the v2b-p1 drawer lifecycle verbs and tunnel
+//! recall (moot_mutate_drawer, moot_withdraw_drawer, moot_expunge_drawer,
+//! moot_reanchor_drawer, moot_tunnel_recall).
 
 use serde_json::json;
 
@@ -48,6 +49,13 @@ pub fn build_tool_list() -> serde_json::Value {
     tools.push(capture_drawer_tool());
     tools.push(recall_drawer_tool());
     tools.push(capture_tunnel_tool());
+
+    // 5. v2b-p1 drawer lifecycle verbs and tunnel recall.
+    tools.push(mutate_drawer_tool());
+    tools.push(withdraw_drawer_tool());
+    tools.push(expunge_drawer_tool());
+    tools.push(reanchor_drawer_tool());
+    tools.push(tunnel_recall_tool());
 
     json!(tools)
 }
@@ -381,6 +389,105 @@ fn capture_tunnel_tool() -> serde_json::Value {
                 "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
             }),
             json!(["sourceWing", "sourceRoom", "targetWing", "targetRoom", "kind", "addedBy"])
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
+// v2b-p1 drawer lifecycle verbs and tunnel recall
+// ---------------------------------------------------------------------------
+
+/// moot_mutate_drawer — Apply a named mutation to a drawer.
+/// Schema mirrors Swift ToolProjection.inputSchema(.mutate, .drawer):
+/// rowID (required), kind (required), payload (optional).
+fn mutate_drawer_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_mutate_drawer",
+        "description": "Apply a named mutation to a drawer.",
+        "inputSchema": object_schema(
+            json!({
+                "rowID": string_schema("Row identifier of the drawer."),
+                "kind": string_schema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept."),
+                "payload": string_schema("Optional free-text payload."),
+                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
+            }),
+            json!(["rowID", "kind"])
+        )
+    })
+}
+
+/// moot_withdraw_drawer — Withdraw a drawer from active circulation.
+/// Schema mirrors Swift ToolProjection.inputSchema(.withdraw, .drawer):
+/// rowID (required), reason (optional).
+fn withdraw_drawer_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_withdraw_drawer",
+        "description": "Withdraw a drawer from active circulation.",
+        "inputSchema": object_schema(
+            json!({
+                "rowID": string_schema("Row identifier of the drawer."),
+                "reason": string_schema("Optional free-text justification."),
+                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
+            }),
+            json!(["rowID"])
+        )
+    })
+}
+
+/// moot_expunge_drawer — Hard-erase a drawer (irreversible).
+/// Schema mirrors Swift ToolProjection.inputSchema(.expunge, .drawer):
+/// rowID (required), reason (required), confirmation (required bool).
+fn expunge_drawer_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_expunge_drawer",
+        "description": "Hard-erase a drawer (irreversible).",
+        "inputSchema": object_schema(
+            json!({
+                "rowID": string_schema("Row identifier of the drawer."),
+                "reason": string_schema("Required free-text justification."),
+                "confirmation": { "type": "boolean", "description": "Must be true; expunge is irreversible." },
+                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
+            }),
+            json!(["rowID", "reason", "confirmation"])
+        )
+    })
+}
+
+/// moot_reanchor_drawer — Move where a drawer sits in structure.
+/// Schema mirrors Swift ToolProjection.inputSchema(.reanchor, .drawer):
+/// rowID (required), toRoom (optional), toUDC (optional).
+fn reanchor_drawer_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_reanchor_drawer",
+        "description": "Move where a drawer sits in structure.",
+        "inputSchema": object_schema(
+            json!({
+                "rowID": string_schema("Row identifier of the drawer."),
+                "toRoom": string_schema("Optional target room."),
+                "toUDC": string_schema("Optional target UDC code."),
+                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
+            }),
+            json!(["rowID"])
+        )
+    })
+}
+
+/// moot_tunnel_recall — Read tunnel rows back by filter.
+/// Schema: wing (required — the graph partition to read outgoing edges from),
+/// estateID (optional). The coordinator's recall_tunnels(handle, wing) is the
+/// dispatch target; the Swift server advertises this tool but has no live
+/// handler (falls through to methodNotFound), so the Rust server is ahead
+/// on this tool. Wire name follows noun_verb convention (same as drawer_recall).
+fn tunnel_recall_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_tunnel_recall",
+        "description": "Read tunnel rows back by filter.",
+        "inputSchema": object_schema(
+            json!({
+                "wing": string_schema("Wing to read outgoing tunnels from."),
+                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
+            }),
+            json!(["wing"])
         )
     })
 }
