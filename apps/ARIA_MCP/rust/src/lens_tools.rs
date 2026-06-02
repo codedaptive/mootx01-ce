@@ -336,8 +336,7 @@ pub fn dispatch(
             )];
             if out.label_overflow {
                 lines.push(
-                    "note: label vocabulary was capped at 64; some labels were dropped"
-                        .to_owned(),
+                    "note: label vocabulary was capped at 64; some labels were dropped".to_owned(),
                 );
             }
             for rule in &out.rules {
@@ -372,7 +371,10 @@ pub fn dispatch(
             for (i, concept) in out.concepts.iter().enumerate() {
                 lines.push(format!("  concept {}: support={}", i + 1, concept.support));
                 lines.push(format!("    intent: {}", concept.intent.join(", ")));
-                lines.push(format!("    extent: {} drawer(s)", concept.extent_drawer_ids.len()));
+                lines.push(format!(
+                    "    extent: {} drawer(s)",
+                    concept.extent_drawer_ids.len()
+                ));
             }
             Ok(text_result(&lines.join("\n")))
         }
