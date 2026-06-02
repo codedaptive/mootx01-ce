@@ -224,15 +224,13 @@ fn grounded_synthesis_with_unknown_estate_returns_invalid_params() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. moot_run_migration_benchmark happy path + moot_confirm_migration_promotion
+// 4. moot_run_migration_benchmark + moot_confirm_migration_promotion
 // ---------------------------------------------------------------------------
 
-#[test]
-fn run_migration_benchmark_happy_path_returns_rankings() {
-    let registry = EstateRegistry::new_inmemory();
-
-    // Build the entries and plans arrays using serde_json::json! (nested objects
-    // cannot use the args! macro due to Rust's block-expression ambiguity).
+/// Helper: build and dispatch moot_run_migration_benchmark with two entries
+/// and one plan, returning the result text. Shared by confirm tests that
+/// need a real run first.
+fn run_benchmark_for_confirm(registry: &EstateRegistry) -> (String, String) {
     let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
     a.insert(
         "corpusName".into(),
@@ -247,20 +245,37 @@ fn run_migration_benchmark_happy_path_returns_rankings() {
     );
     a.insert(
         "plans".into(),
-        JsonValue::from(serde_json::json!([
-            {
-                "name": "plan-alpha",
-                "room": "test-room",
-                "latticeCode": "000.000",
-                "embeddingModelID": "test-model"
-            }
-        ])),
+        JsonValue::from(serde_json::json!([{
+            "name": "plan-alpha",
+            "room": "test-room",
+            "latticeCode": "000.000",
+            "embeddingModelID": "test-model"
+        }])),
     );
-
-    let result = dispatch_tool("moot_run_migration_benchmark", &a, &registry)
+    let result = dispatch_tool("moot_run_migration_benchmark", &a, registry)
         .expect("run_migration_benchmark must succeed");
-    assert!(is_success(&result));
-    let text = content_text(&result);
+    assert!(is_success(&result), "run must succeed; got: {result:?}");
+    let text = content_text(&result).to_owned();
+
+    // Parse the winner branch id from: "winner: plan 'plan-alpha' branch <UUID>"
+    let winner_bid = text
+        .lines()
+        .find(|l| l.starts_with("winner: plan "))
+        .and_then(|l| l.split_whitespace().last())
+        .expect("winner line must carry branch id")
+        .to_owned();
+
+    // Collect ranking branch ids from: "  - plan-alpha [<UUID>] score=..."
+    // Exclude the winner from discardBranchIDs — caller may pass it separately.
+    (winner_bid, text)
+}
+
+#[test]
+fn run_migration_benchmark_happy_path_returns_rankings() {
+    // Dispatches moot_run_migration_benchmark and verifies the result structure.
+    // Exercises the full live substrate path: derive → capture → benchmark.
+    let registry = EstateRegistry::new_inmemory();
+    let (winner_bid, text) = run_benchmark_for_confirm(&registry);
     assert!(
         text.contains("run_migration_benchmark:"),
         "result should contain benchmark header; got: {text}"
@@ -269,32 +284,161 @@ fn run_migration_benchmark_happy_path_returns_rankings() {
         text.contains("rankings:"),
         "result should contain rankings section; got: {text}"
     );
+    assert!(
+        !winner_bid.is_empty(),
+        "winner branch id must be present; got: {text}"
+    );
 }
 
 #[test]
-fn confirm_migration_promotion_returns_documented_informational_error() {
-    // The confirm tool is advertised in tools/list and receives calls.
-    // It must return isError:true (informational tool-level error) explaining
-    // the v1 boundary — NOT a transport fault (JSONRPCError). This is the
-    // documented behavior from the README and mission spec.
+fn confirm_migration_promotion_success_end_to_end() {
+    // Full two-call pattern: run_migration_benchmark then confirm with the
+    // branch ids parsed from the run result. Confirms is_success and the
+    // promoted/discarded count text.
     let registry = EstateRegistry::new_inmemory();
-    let a = args![
-        "winnerBranchID" => "00000000-0000-0000-0000-000000000001"
-    ];
+    let (winner_bid, _text) = run_benchmark_for_confirm(&registry);
+
+    // Only one plan so no discard ids (the other plans list is empty).
+    let mut confirm_args: BTreeMap<String, JsonValue> = BTreeMap::new();
+    confirm_args.insert(
+        "winnerBranchID".into(),
+        JsonValue::from(serde_json::json!(winner_bid)),
+    );
+    confirm_args.insert(
+        "discardBranchIDs".into(),
+        JsonValue::from(serde_json::json!([])),
+    );
+    confirm_args.insert(
+        "disqualifiedBranchIDs".into(),
+        JsonValue::from(serde_json::json!([])),
+    );
+
+    let result = dispatch_tool("moot_confirm_migration_promotion", &confirm_args, &registry)
+        .expect("confirm must not throw transport fault");
+    assert!(
+        is_success(&result),
+        "confirm must be a success result; got: {result:?}"
+    );
+    let confirm_text = content_text(&result);
+    assert!(
+        confirm_text.contains("confirm_migration_promotion:"),
+        "success text must name the tool; got: {confirm_text}"
+    );
+    assert!(
+        confirm_text.contains(&winner_bid),
+        "success text must mention promoted branch id; got: {confirm_text}"
+    );
+    assert!(
+        confirm_text.contains("discarded"),
+        "success text must mention discard count; got: {confirm_text}"
+    );
+}
+
+#[test]
+fn confirm_migration_promotion_disqualified_winner_returns_tool_error() {
+    // Passing the winner's id in disqualifiedBranchIDs triggers C-5 guard →
+    // isError:true tool result (not a transport fault).
+    let registry = EstateRegistry::new_inmemory();
+    let (winner_bid, _text) = run_benchmark_for_confirm(&registry);
+
+    let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
+    a.insert(
+        "winnerBranchID".into(),
+        JsonValue::from(serde_json::json!(winner_bid.clone())),
+    );
+    a.insert(
+        "discardBranchIDs".into(),
+        JsonValue::from(serde_json::json!([])),
+    );
+    // Treat winner as disqualified.
+    a.insert(
+        "disqualifiedBranchIDs".into(),
+        JsonValue::from(serde_json::json!([winner_bid])),
+    );
+
     let result = dispatch_tool("moot_confirm_migration_promotion", &a, &registry)
-        .expect("confirm_migration_promotion must not throw transport fault");
+        .expect("disqualified winner must return tool error, not transport fault");
     assert!(
         is_tool_error(&result),
-        "confirm_migration_promotion must return isError:true; got: {result:?}"
+        "disqualified winner must be isError:true; got: {result:?}"
     );
     let text = content_text(&result);
     assert!(
-        text.contains("moot_confirm_migration_promotion"),
-        "error message should name the tool; got: {text}"
+        text.to_lowercase().contains("silentconceptloss") || text.contains("lost"),
+        "error text should indicate silent concept loss; got: {text}"
     );
+}
+
+#[test]
+fn confirm_migration_promotion_unknown_winner_returns_tool_error() {
+    // An id that was never minted by the coordinator triggers UserConfirmationRequired
+    // (guard 2) → isError:true tool result.
+    let registry = EstateRegistry::new_inmemory();
+    let unknown_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
+    a.insert(
+        "winnerBranchID".into(),
+        JsonValue::from(serde_json::json!(unknown_id)),
+    );
+    a.insert(
+        "discardBranchIDs".into(),
+        JsonValue::from(serde_json::json!([])),
+    );
+    a.insert(
+        "disqualifiedBranchIDs".into(),
+        JsonValue::from(serde_json::json!([])),
+    );
+
+    let result = dispatch_tool("moot_confirm_migration_promotion", &a, &registry)
+        .expect("unknown winner must return tool error, not transport fault");
     assert!(
-        text.contains("v1"),
-        "error message should reference the v1 boundary; got: {text}"
+        is_tool_error(&result),
+        "unknown winner must be isError:true; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains("unknown branch") || text.contains("userConfirmationRequired"),
+        "error text should indicate unknown branch; got: {text}"
+    );
+}
+
+#[test]
+fn confirm_migration_promotion_malformed_winner_returns_invalid_params() {
+    // A winnerBranchID that is not a valid UUID string must produce a
+    // JSONRPCError with INVALID_PARAMS code (transport-level fault), not
+    // a tool result — parsing happens before any dispatch.
+    let registry = EstateRegistry::new_inmemory();
+    let mut a: BTreeMap<String, JsonValue> = BTreeMap::new();
+    a.insert(
+        "winnerBranchID".into(),
+        JsonValue::from(serde_json::json!("not-a-uuid")),
+    );
+
+    let err = dispatch_tool("moot_confirm_migration_promotion", &a, &registry)
+        .expect_err("malformed winnerBranchID must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "malformed winnerBranchID must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+#[test]
+fn confirm_migration_promotion_missing_winner_returns_invalid_params() {
+    // Omitting winnerBranchID entirely must produce a JSONRPCError
+    // INVALID_PARAMS (required argument missing).
+    let registry = EstateRegistry::new_inmemory();
+    let a: BTreeMap<String, JsonValue> = BTreeMap::new();
+
+    let err = dispatch_tool("moot_confirm_migration_promotion", &a, &registry)
+        .expect_err("missing winnerBranchID must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "missing winnerBranchID must map to INVALID_PARAMS; got code {}",
+        err.code
     );
 }
 

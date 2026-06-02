@@ -92,12 +92,12 @@ default. Additional in-memory estates can be registered; all are ephemeral and
 discarded when the server exits. Persistent storage backends (SQLite, CloudKit)
 require wiring the `DrawerStore` trait to a persistence backend — that is v2 work.
 
-**moot_confirm_migration_promotion is advertised but returns an informational
-error.** The confirm step requires the `CoreReport` produced by
-`moot_run_migration_benchmark`. The server is stateless across tool calls; without
-session state it cannot retain the report between the run and confirm calls.
-Persistent session state is a v2 feature. The tool is listed in `tools/list` so
-agents can discover it; calling it returns a clear explanation of the v1 boundary.
+**moot_confirm_migration_promotion is fully wired.** The confirm step dispatches
+`confirm_migration_promotion_by_id`, the id-addressed overload that works across
+the stateless run→confirm boundary. The server's in-memory coordinator retains all
+minted branches; the run result text carries the branch ids the caller needs.
+Required: `winnerBranchID` (UUID). Optional: `discardBranchIDs`,
+`disqualifiedBranchIDs` (arrays of UUID strings).
 
 **Full lexicon projection is out of scope for v1.** The Swift server projects the
 full AriaLexicon acceptance matrix (mutate, withdraw, expunge, reanchor, learn,
