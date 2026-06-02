@@ -14,7 +14,38 @@ struct RecipeCatalogTests {
 
     @Test("catalog lists all shipped recipes")
     func catalogListsAllShippedRecipes() {
-        #expect(RecipeCatalog.names.sorted() == ["grounded_synthesis", "migration_benchmark"])
+        // Both versions of every recipe ship, so every recipe registers
+        // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational
+        // recipes plus the 14 reasoning lenses.
+        #expect(RecipeCatalog.names.sorted() == [
+            "anticipate",
+            "bias",
+            "constellation",
+            "contradiction",
+            "drift",
+            "estate_divergence",
+            "free_association",
+            "grounded_synthesis",
+            "keystones",
+            "latent_themes",
+            "migration_benchmark",
+            "mind_overlap",
+            "partial_cue_recall",
+            "theme_weather",
+            "trust_grounded_synthesis",
+            "tunnel_successor",
+        ])
+    }
+
+    @Test("lens descriptors carry their capability gates")
+    func lensDescriptorsCarryCapabilityGates() throws {
+        // trust_grounded_synthesis sequences NeuronKit synthesize and
+        // declares it; the other lenses sequence no declared capability
+        // and register with an empty set.
+        let trust = try #require(RecipeCatalog.descriptor(named: "trust_grounded_synthesis"))
+        #expect(trust.requiredCapabilities == [.synthesize])
+        let keystones = try #require(RecipeCatalog.descriptor(named: "keystones"))
+        #expect(keystones.requiredCapabilities.isEmpty)
     }
 
     @Test("descriptor matches live recipe metadata")

@@ -429,8 +429,9 @@ pub fn recipe_names() -> Vec<String>;
 
 The descriptor strings and field shape match across versions byte-for-byte
 (SPEC § 8, C-8). The catalog lists exactly the recipes present in both
-versions — today **grounded_synthesis** and **migration_benchmark**; a lens
-recipe enters only when both versions land together (SPEC § 8).
+versions — the 2 foundational recipes plus all 14 reasoning lenses
+(LENS_DISCOVERABILITY_DECISION v2.0); a recipe enters when both
+versions land together, with its MCP tool in the same change (SPEC § 8).
 
 ---
 
