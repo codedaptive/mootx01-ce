@@ -12,24 +12,27 @@
 //! list of survivors. Never promotes. Returns branch ids in the result text so a
 //! caller can pass them to the confirm tool.
 //!
-//! # moot_confirm_migration_promotion — v1 behavioral boundary
+//! # moot_confirm_migration_promotion
 //!
-//! The tool is advertised in tools/list and receives calls. It returns an
-//! informational error_result (isError true) explaining the v1 boundary:
-//! `confirm_migration_promotion` requires the live `CoreReport` produced by
-//! `run_migration_benchmark`; the stateless server cannot retain that object
-//! across tool calls. The README documents this gap as a v1 behavioral fact.
-//! Persistent session state (needed to bridge run→confirm without re-running the
-//! benchmark) is out of scope for v1.
+//! Dispatches `confirm_migration_promotion_by_id` — the id-addressed form of the
+//! human-gated promotion step. The server is stateless across tool calls; the
+//! two-call pattern (run then confirm) works because the coordinator retains all
+//! minted branches in memory, and the run result text carries the branch ids the
+//! caller needs. Required: `winnerBranchID` (UUID string). Optional:
+//! `discardBranchIDs` and `disqualifiedBranchIDs` (arrays of UUID strings). Mirrors
+//! the Swift server's confirm handler contract and the Swift
+//! `MigrationBenchmark.confirmPromotion` by-id overload as the behavioral reference.
 
 use std::collections::BTreeMap;
 
 use cognition_kit::{recipe_catalog, run_grounded_synthesis, OriginEntry, PlanInput};
+use genius_locus_kit::branches::BranchId;
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
 };
 use neuron_kit::RecallFrameTuning;
+use uuid::Uuid;
 
 use crate::dispatch::{error_result, require_string, text_result};
 use crate::estate_registry::EstateRegistry;
@@ -220,27 +223,95 @@ fn run_migration_benchmark_tool(
 }
 
 // ---------------------------------------------------------------------------
-// moot_confirm_migration_promotion — v1 gap
+// moot_confirm_migration_promotion
 // ---------------------------------------------------------------------------
 
 fn run_confirm_promotion_tool(
-    _args: &BTreeMap<String, JsonValue>,
-    _registry: &EstateRegistry,
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    // v1 behavioral gap: confirm_migration_promotion requires the CoreReport
-    // produced by run_migration_benchmark. The server is stateless across
-    // tool calls so the report cannot be retained between the run and confirm
-    // calls without session state. Persistent session state is a v2 feature.
-    //
-    // The tool is advertised in tools/list so agents can discover it; calling
-    // it returns this informational error_result. The README documents this
-    // gap plainly as a v1 boundary fact.
-    Ok(error_result(
-        "moot_confirm_migration_promotion: v1 behavioral boundary — the confirm step requires \
-        the CoreReport produced by moot_run_migration_benchmark, which the stateless server cannot \
-        retain across tool calls. Persistent session state (required to bridge run→confirm) is a \
-        v2 feature. See the README for the full v1 boundary description.",
-    ))
+    // Parse winnerBranchID — required UUID string. Missing or malformed →
+    // invalidParams (transport-level fault, mirrors server's existing pattern).
+    let winner_str = require_string(args, "winnerBranchID")?;
+    let winner_bid: BranchId = Uuid::parse_str(winner_str).map_err(|_| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Malformed winnerBranchID (not a UUID): {winner_str}"),
+        )
+    })?;
+
+    // Parse optional discardBranchIDs — array of UUID strings; malformed
+    // element → invalidParams.
+    let discard_bids = parse_uuid_array(args, "discardBranchIDs")?;
+
+    // Parse optional disqualifiedBranchIDs — same shape.
+    let disqualified_bids = parse_uuid_array(args, "disqualifiedBranchIDs")?;
+
+    // Resolve estate — absent estateID → default estate (v1 single-estate path).
+    let estate = registry.resolve(args, "estateID")?;
+    let now = crate::dispatch::wall_now();
+    let mut coord = estate.coord.lock().unwrap();
+
+    // Dispatch the by-id overload. RecipeError results surface as isError:true
+    // tool results (lens-refusal discipline: call id kept). Substrate errors
+    // surface as tool errors too — the coordinator failure detail is informative.
+    match cognition_kit::migration_live::confirm_migration_promotion_by_id(
+        &mut coord,
+        winner_bid,
+        &discard_bids,
+        &disqualified_bids,
+        &estate.handle,
+        now,
+    ) {
+        Ok(()) => {
+            // Mirror the Swift server's success text shape.
+            let body = format!(
+                "confirm_migration_promotion: promoted {}; discarded {} branch(es).",
+                winner_str,
+                discard_bids
+                    .iter()
+                    .filter(|&&bid| bid != winner_bid)
+                    .count(),
+            );
+            Ok(text_result(&body))
+        }
+        // RecipeError results (SilentConceptLoss, UserConfirmationRequired) and
+        // substrate errors surface as isError:true so the client keeps the call id.
+        Err(e) => Ok(error_result(&format!("{e}"))),
+    }
+}
+
+/// Parse an optional array of UUID strings from `args[key]`.
+/// Absent key → empty vec. Malformed element → invalidParams.
+fn parse_uuid_array(
+    args: &BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Vec<BranchId>, JSONRPCError> {
+    let Some(val) = args.get(key) else {
+        return Ok(vec![]);
+    };
+    let arr = val.as_array().ok_or_else(|| {
+        JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("{key} must be an array of UUID strings"),
+        )
+    })?;
+    arr.iter()
+        .map(|v| {
+            let s = v.as_str().ok_or_else(|| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("each element of {key} must be a UUID string"),
+                )
+            })?;
+            Uuid::parse_str(s).map_err(|_| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("Malformed UUID in {key}: {s}"),
+                )
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

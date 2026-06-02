@@ -35,7 +35,8 @@ pub fn run_theme_weather(
     for d in &drawers {
         let elapsed = (now - d.filed_at).max(0) as f64;
         *raw.entry(d.room.clone()).or_insert(0.0) += 1.0;
-        *weighted.entry(d.room.clone()).or_insert(0.0) += recency_weight(elapsed, half_life_seconds);
+        *weighted.entry(d.room.clone()).or_insert(0.0) +=
+            recency_weight(elapsed, half_life_seconds);
     }
 
     let cats: Vec<(String, f64, f64)> = raw
@@ -67,7 +68,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, 1, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -105,7 +108,10 @@ mod tests {
         let w = run_theme_weather(&coord, &h, all(), HALF_LIFE, NOW).expect("weather");
         assert_eq!(w[0].category, "rising", "the recent room is hottest");
         assert!(w[0].momentum > 0.0, "rising is heating");
-        assert!(w.iter().find(|m| m.category == "fading").unwrap().momentum < 0.0, "fading is cooling");
+        assert!(
+            w.iter().find(|m| m.category == "fading").unwrap().momentum < 0.0,
+            "fading is cooling"
+        );
     }
 
     // CK-TW-2: an empty estate yields no momentum (guarded).

@@ -23,9 +23,7 @@
 //! adapter conforming to `RecipeSubstrate` is a future bridge.
 
 use crate::error::{RecipeError, RecipeRunError, SubstrateError};
-use crate::migration_ranking::{
-    lost_concepts, rank, DisqualifiedCore, PlanOutcome, RankedPlan,
-};
+use crate::migration_ranking::{lost_concepts, rank, DisqualifiedCore, PlanOutcome, RankedPlan};
 
 /// One origin reference entry — `(id, content)`, estate-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,7 +238,8 @@ mod tests {
         ) -> Result<String, SubstrateError> {
             let n = *self.capture_count.get(branch_id).unwrap_or(&0);
             self.capture_count.insert(branch_id.to_string(), n + 1);
-            self.calls.push(format!("capture:{}:{}", branch_id, content));
+            self.calls
+                .push(format!("capture:{}:{}", branch_id, content));
             Ok(format!("drawer-{}-{}", branch_id, n))
         }
 
@@ -317,12 +316,20 @@ mod tests {
         );
         assert!(report.disqualified.is_empty());
         assert_eq!(
-            report.rankings.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            report
+                .rankings
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["flat", "nested"]
         );
         assert_eq!(report.winner, Some("flat".to_string()));
         assert_eq!(
-            report.plan_results.iter().map(|p| p.branch_id.as_str()).collect::<Vec<_>>(),
+            report
+                .plan_results
+                .iter()
+                .map(|p| p.branch_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["branch-flat", "branch-nested"]
         );
         assert!((report.plan_results[0].recall_overlap - 1.0).abs() < 1e-6);
@@ -350,10 +357,17 @@ mod tests {
         assert!(report.rankings.is_empty());
         assert_eq!(report.winner, None);
         assert_eq!(
-            report.disqualified.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            report
+                .disqualified
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["only"]
         );
-        assert_eq!(report.disqualified[0].lost_concepts, vec!["blank".to_string()]);
+        assert_eq!(
+            report.disqualified[0].lost_concepts,
+            vec!["blank".to_string()]
+        );
     }
 
     // SEAM-3 — benchmark marks one captured entry unrecallable
@@ -378,7 +392,11 @@ mod tests {
         );
         assert!(report.rankings.is_empty());
         assert_eq!(
-            report.disqualified.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            report
+                .disqualified
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["p"]
         );
         // "beta" captured second -> minted id "drawer-branch-p-1".

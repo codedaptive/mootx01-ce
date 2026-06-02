@@ -90,7 +90,10 @@ pub fn run_partial_cue_recall(
         id_by_index.push(d.id.clone());
     }
     let anchor_fp = anchor_fp.ok_or_else(|| {
-        SubstrateError::new("anchor", format!("anchor drawer '{anchor_id}' not in recalled set"))
+        SubstrateError::new(
+            "anchor",
+            format!("anchor drawer '{anchor_id}' not in recalled set"),
+        )
     })?;
 
     let (match_blocks, differ_blocks) = mode.blocks();
@@ -98,7 +101,10 @@ pub fn run_partial_cue_recall(
 
     Ok(ranked
         .into_iter()
-        .map(|(rid, score)| CueMatch { id: id_by_index[rid.0 as usize].clone(), score })
+        .map(|(rid, score)| CueMatch {
+            id: id_by_index[rid.0 as usize].clone(),
+            score,
+        })
         .collect())
 }
 
@@ -123,7 +129,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -152,15 +160,31 @@ mod tests {
     #[test]
     fn ck_fl1_runs_and_excludes_anchor() {
         let (coord, h) = coord_with_parent();
-        let anchor = capture(&coord, &h, "the spec for the lattice anchor system", "study");
-        let b = capture(&coord, &h, "another note about lattice anchors and codes", "study");
+        let anchor = capture(
+            &coord,
+            &h,
+            "the spec for the lattice anchor system",
+            "study",
+        );
+        let b = capture(
+            &coord,
+            &h,
+            "another note about lattice anchors and codes",
+            "study",
+        );
         let c = capture(&coord, &h, "grocery list eggs milk bread", "kitchen");
 
         let out = run_partial_cue_recall(&coord, &h, all(), &anchor, CueMode::FeelsLike, 5, NOW)
             .expect("feels-like");
         let ids: Vec<&String> = out.iter().map(|m| &m.id).collect();
-        assert!(!ids.contains(&&anchor), "the anchor is never ranked against itself");
-        assert!(ids.contains(&&b) && ids.contains(&&c), "every other memory is ranked");
+        assert!(
+            !ids.contains(&&anchor),
+            "the anchor is never ranked against itself"
+        );
+        assert!(
+            ids.contains(&&b) && ids.contains(&&c),
+            "every other memory is ranked"
+        );
         assert_eq!(out.len(), 2);
     }
 
@@ -170,8 +194,12 @@ mod tests {
     fn ck_fl2_unknown_anchor_errors() {
         let (coord, h) = coord_with_parent();
         capture(&coord, &h, "only memory", "study");
-        let err = run_partial_cue_recall(&coord, &h, all(), "no-such-id", CueMode::AboutThis, 5, NOW)
-            .unwrap_err();
-        assert!(matches!(err, RecipeRunError::Substrate(_)), "unknown anchor is a substrate error, got {err:?}");
+        let err =
+            run_partial_cue_recall(&coord, &h, all(), "no-such-id", CueMode::AboutThis, 5, NOW)
+                .unwrap_err();
+        assert!(
+            matches!(err, RecipeRunError::Substrate(_)),
+            "unknown anchor is a substrate error, got {err:?}"
+        );
     }
 }

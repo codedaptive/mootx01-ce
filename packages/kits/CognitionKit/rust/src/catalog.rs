@@ -248,14 +248,23 @@ mod tests {
     fn lens_descriptors_carry_capability_gates() {
         // Mirrors Swift `lensDescriptorsCarryCapabilityGates`.
         let trust = recipe_descriptor("trust_grounded_synthesis").unwrap();
-        assert_eq!(trust.required_capabilities, vec![NeuronKitCapability::Synthesize]);
+        assert_eq!(
+            trust.required_capabilities,
+            vec![NeuronKitCapability::Synthesize]
+        );
         let keystones = recipe_descriptor("keystones").unwrap();
         assert!(keystones.required_capabilities.is_empty());
         // Analytics lenses carry their capability requirements.
         let ar = recipe_descriptor("association_rules").unwrap();
-        assert_eq!(ar.required_capabilities, vec![NeuronKitCapability::AssociationRuleMining]);
+        assert_eq!(
+            ar.required_capabilities,
+            vec![NeuronKitCapability::AssociationRuleMining]
+        );
         let fca = recipe_descriptor("formal_concepts").unwrap();
-        assert_eq!(fca.required_capabilities, vec![NeuronKitCapability::FormalConceptAnalysis]);
+        assert_eq!(
+            fca.required_capabilities,
+            vec![NeuronKitCapability::FormalConceptAnalysis]
+        );
     }
 
     #[test]

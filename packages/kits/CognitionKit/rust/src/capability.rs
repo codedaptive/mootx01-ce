@@ -109,11 +109,7 @@ mod tests {
 
     #[test]
     fn all_shipped_capabilities_available_by_default() {
-        assert!(verify_capabilities(
-            &NeuronKitCapability::ALL,
-            &shipped_capabilities()
-        )
-        .is_ok());
+        assert!(verify_capabilities(&NeuronKitCapability::ALL, &shipped_capabilities()).is_ok());
         assert_eq!(shipped_capabilities(), NeuronKitCapability::ALL.to_vec());
     }
 
@@ -170,8 +166,14 @@ mod tests {
             (NeuronKitCapability::PromoteBranch, "promoteBranch"),
             (NeuronKitCapability::Benchmark, "benchmark"),
             (NeuronKitCapability::RunTournament, "runTournament"),
-            (NeuronKitCapability::AssociationRuleMining, "associationRuleMining"),
-            (NeuronKitCapability::FormalConceptAnalysis, "formalConceptAnalysis"),
+            (
+                NeuronKitCapability::AssociationRuleMining,
+                "associationRuleMining",
+            ),
+            (
+                NeuronKitCapability::FormalConceptAnalysis,
+                "formalConceptAnalysis",
+            ),
         ];
         for (cap, raw) in pairs {
             assert_eq!(cap.raw_value(), raw);

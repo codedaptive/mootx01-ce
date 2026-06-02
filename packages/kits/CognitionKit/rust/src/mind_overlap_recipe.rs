@@ -93,10 +93,18 @@ where
     let (summary_b, bc) = summarize(handle_b)?;
 
     if ac == 0 || bc == 0 {
-        return Ok(MindOverlap { overlap: 0.0, a_count: ac, b_count: bc });
+        return Ok(MindOverlap {
+            overlap: 0.0,
+            a_count: ac,
+            b_count: bc,
+        });
     }
 
-    Ok(MindOverlap { overlap: summary_overlap(summary_a, summary_b), a_count: ac, b_count: bc })
+    Ok(MindOverlap {
+        overlap: summary_overlap(summary_a, summary_b),
+        a_count: ac,
+        b_count: bc,
+    })
 }
 
 #[cfg(test)]
@@ -122,7 +130,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::from_bytes(uuid)));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap()
+        coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap()
     }
 
     // The fingerprint encodes the LATTICE anchor (concept block), structure,
@@ -172,7 +182,10 @@ mod tests {
             capture(&coord, &a, &format!("philosophy note {i}"), "study", u);
             capture(&coord, &twin, &format!("philosophy note {i}"), "study", u);
         }
-        for (i, u) in ["600", "610", "620", "630", "640", "650"].iter().enumerate() {
+        for (i, u) in ["600", "610", "620", "630", "640", "650"]
+            .iter()
+            .enumerate()
+        {
             capture(&coord, &other, &format!("cooking note {i}"), "kitchen", u);
         }
 

@@ -55,7 +55,10 @@ pub fn run_grounded_synthesis(
     // B-5: verify capabilities before any substrate touch. A capability gate
     // failure propagates as RecipeRunError::Recipe.
     verify_capabilities(
-        &[NeuronKitCapability::HybridRecall, NeuronKitCapability::Synthesize],
+        &[
+            NeuronKitCapability::HybridRecall,
+            NeuronKitCapability::Synthesize,
+        ],
         &shipped_capabilities(),
     )?;
 
@@ -70,7 +73,10 @@ pub fn run_grounded_synthesis(
     //    caller's recall frame governs which rows surface.
     let rows: Vec<DrawerRow> = drawers
         .iter()
-        .map(|d| DrawerRow { id: d.id.clone(), content: d.content.clone() })
+        .map(|d| DrawerRow {
+            id: d.id.clone(),
+            content: d.content.clone(),
+        })
         .collect();
     let meta_by_id: HashMap<String, DrawerRowMeta> = drawers
         .iter()
@@ -96,11 +102,18 @@ pub fn run_grounded_synthesis(
 
     // 3. Synthesize over the full reranked set as one terminal page
     //    (read-only, C-9 — no estate write).
-    let page = RecallPage { rows: reranked, page_index: 0, is_last: true };
+    let page = RecallPage {
+        rows: reranked,
+        page_index: 0,
+        is_last: true,
+    };
     let drawer_count = page.rows.len();
     let context = synthesize(&page, &meta);
 
-    Ok(GroundedOutput { context, drawer_count })
+    Ok(GroundedOutput {
+        context,
+        drawer_count,
+    })
 }
 
 #[cfg(test)]
@@ -125,7 +138,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         for c in contents {
             let frame = CaptureFrame::new(
                 *c,
@@ -161,7 +176,10 @@ mod tests {
             run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW)
                 .expect("run");
         assert_eq!(out.drawer_count, 3, "all recalled rows feed synthesis");
-        assert!(!out.context.summary.is_empty(), "a grounded document is produced");
+        assert!(
+            !out.context.summary.is_empty(),
+            "a grounded document is produced"
+        );
         // Active recalled rows are currently believed ⇒ full success rate.
         assert_eq!(out.context.success_rate, 1.0);
     }
@@ -185,10 +203,16 @@ mod tests {
         // Directly exercise the gate the recipe runs first: a host offering
         // only hybridRecall cannot satisfy GroundedSynthesis.
         let err = verify_capabilities(
-            &[NeuronKitCapability::HybridRecall, NeuronKitCapability::Synthesize],
+            &[
+                NeuronKitCapability::HybridRecall,
+                NeuronKitCapability::Synthesize,
+            ],
             &[NeuronKitCapability::HybridRecall],
         )
         .unwrap_err();
-        assert_eq!(err, RecipeError::MissingCapability(NeuronKitCapability::Synthesize));
+        assert_eq!(
+            err,
+            RecipeError::MissingCapability(NeuronKitCapability::Synthesize)
+        );
     }
 }

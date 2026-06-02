@@ -206,7 +206,10 @@ mod tests {
         ];
         let r = rank(&outcomes);
         assert_eq!(
-            r.rankings.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            r.rankings
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["alpha", "bravo", "charlie", "delta"]
         );
         assert_eq!(r.winner, Some("alpha".to_string()));
@@ -222,11 +225,17 @@ mod tests {
         ];
         let r = rank(&outcomes);
         assert_eq!(
-            r.rankings.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            r.rankings
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["clean"]
         );
         assert_eq!(
-            r.disqualified.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            r.disqualified
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["lossy"]
         );
         assert_eq!(r.disqualified[0].lost_concepts, s(&["x"]));
@@ -243,7 +252,10 @@ mod tests {
         ];
         let r = rank(&outcomes);
         assert_eq!(
-            r.rankings.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            r.rankings
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["high", "mid", "low"]
         );
         assert!((r.rankings[0].combined_score - 0.8).abs() < 1e-6);
