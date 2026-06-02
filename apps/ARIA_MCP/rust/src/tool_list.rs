@@ -1,26 +1,372 @@
 //! Tool list projection — builds the `tools/list` response body.
 //!
 //! Mirrors the Swift `ToolProjection.tools()` + `RecipeTools.tools()` +
-//! `LensTools.tools()` composition. The Rust server does not use a
-//! lexicon-projection loop; each tool is described by its own function
-//! so the diff from each mission is small and reviewable.
+//! `LensTools.tools()` composition. Lexicon tools are now built from a
+//! programmatic (verb × noun) matrix loop, mirroring the shape of
+//! `ToolProjection.tools()` in Swift — outer loop over nouns in
+//! `Noun.allCases` order, inner loop over verbs in `Verb.allCases` order,
+//! keeping only pairs the acceptance matrix accepts and that are
+//! caller-surfaced (verb.flow != substrateDriven, matching
+//! `ToolProjection.surfaces(_:)`). Per-verb schema builders (`lexicon_schema`)
+//! mirror `ToolProjection.inputSchema(verb:noun:)`.
 //!
-//! Tool names, descriptions, and inputSchema fields are wire-identical to
-//! the Swift server for every tool that appears in both. The catalog
-//! descriptions for the lens tools come directly from `recipe_catalog()` so
-//! they stay in lockstep with the Swift catalog's byte-identical strings.
+//! The recipe/lens tools append after the lexicon loop, unchanged.
 //!
-//! # Tool ordering (28 tools after v2b-p1)
+//! Wire identity: tool names, descriptions, and inputSchema key names are
+//! byte-identical to the Swift server for every matching tool. The
+//! `estateID` optional field is added to every lexicon tool schema via
+//! `with_estate_id`, mirroring `ToolProjection.withEstateID(_:)`.
 //!
-//! moot_list_recipes, then the 16 lens tools in catalog order (14 reasoning
-//! and 2 analytics), then the 3 foundational recipe tools
-//! (grounded_synthesis, run_migration_benchmark, confirm_migration_promotion),
-//! then the v1 lexicon minimum (moot_capture_drawer, moot_drawer_recall,
-//! moot_capture_tunnel), then the v2b-p1 drawer lifecycle verbs and tunnel
-//! recall (moot_mutate_drawer, moot_withdraw_drawer, moot_expunge_drawer,
-//! moot_reanchor_drawer, moot_tunnel_recall).
+//! # Acceptance matrix (AriaLexicon.Acceptance.verbs(for:))
+//!
+//! | Noun             | Accepted + surfaced verbs (excludes propose, associate) |
+//! |------------------|----------------------------------------------------------|
+//! | drawer           | capture, reanchor, mutate, withdraw, expunge, recall     |
+//! | tunnel           | capture, mutate, withdraw, expunge, recall               |
+//! | kgFact           | mutate, withdraw, expunge, recall                       |
+//! | vector           | (none)                                                  |
+//! | diaryEntry       | recall                                                  |
+//! | proposal         | mutate, withdraw, expunge, recall                       |
+//! | association      | mutate, expunge, recall                                 |
+//! | learnedReference | learn, mutate, withdraw, expunge, recall                |
+//!
+//! # Tool naming convention (ToolProjection.toolName(verb:noun:))
+//!
+//! - recall verb → `moot_{noun}_recall`  (noun_verb form; recall is the read verb)
+//! - every other surfaced verb → `moot_{verb}_{noun}` (verb_noun form)
+//!
+//! # Ordering (49 tools after v2b-p2)
+//!
+//! moot_list_recipes, then 16 lens tools in catalog order (14 reasoning + 2 analytics),
+//! then 3 foundational recipe tools (grounded_synthesis, run_migration_benchmark,
+//! confirm_migration_promotion), then the lexicon projection loop (28 tools,
+//! outer noun in allCases order, inner verb in allCases order, accepted +
+//! surfaced only), then moot_cross_estate_recall.
 
 use serde_json::json;
+
+// ---------------------------------------------------------------------------
+// Lexicon vocabulary constants (mirrors AriaLexicon Noun + Verb allCases)
+// ---------------------------------------------------------------------------
+
+/// Nouns in `Noun.allCases` declaration order. Mirrors Swift `Noun.swift`.
+/// Vector is included but accepts no surfaced verbs, so it produces no tools.
+const NOUNS: &[Noun] = &[
+    Noun::Drawer,
+    Noun::Tunnel,
+    Noun::KgFact,
+    Noun::Vector,
+    Noun::DiaryEntry,
+    Noun::Proposal,
+    Noun::Association,
+    Noun::LearnedReference,
+];
+
+/// Verbs in `Verb.allCases` declaration order. Mirrors Swift `Verb.swift`.
+/// Propose and associate are substrate-driven and excluded by `is_surfaced`.
+const VERBS: &[Verb] = &[
+    Verb::Capture,
+    Verb::Reanchor,
+    Verb::Mutate,
+    Verb::Withdraw,
+    Verb::Expunge,
+    Verb::Recall,
+    Verb::Propose,
+    Verb::Associate,
+    Verb::Learn,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Noun {
+    Drawer,
+    Tunnel,
+    KgFact,
+    Vector,
+    DiaryEntry,
+    Proposal,
+    Association,
+    LearnedReference,
+}
+
+impl Noun {
+    /// Wire-format noun name — matches Swift `Noun.rawValue` exactly.
+    fn raw_value(self) -> &'static str {
+        match self {
+            Noun::Drawer => "drawer",
+            Noun::Tunnel => "tunnel",
+            Noun::KgFact => "kgFact",
+            Noun::Vector => "vector",
+            Noun::DiaryEntry => "diaryEntry",
+            Noun::Proposal => "proposal",
+            Noun::Association => "association",
+            Noun::LearnedReference => "learnedReference",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Capture,
+    Reanchor,
+    Mutate,
+    Withdraw,
+    Expunge,
+    Recall,
+    Propose,
+    Associate,
+    Learn,
+}
+
+impl Verb {
+    /// Wire-format verb name — matches Swift `Verb.rawValue` exactly.
+    fn raw_value(self) -> &'static str {
+        match self {
+            Verb::Capture => "capture",
+            Verb::Reanchor => "reanchor",
+            Verb::Mutate => "mutate",
+            Verb::Withdraw => "withdraw",
+            Verb::Expunge => "expunge",
+            Verb::Recall => "recall",
+            Verb::Propose => "propose",
+            Verb::Associate => "associate",
+            Verb::Learn => "learn",
+        }
+    }
+
+    /// Whether this verb participates in the MCP tool surface.
+    /// Propose and associate are substrate-driven and surface as notifications,
+    /// not callable tools. Mirrors `ToolProjection.surfaces(_:)` in Swift.
+    fn is_surfaced(self) -> bool {
+        !matches!(self, Verb::Propose | Verb::Associate)
+    }
+}
+
+/// Whether `noun` accepts `verb`. Mirrors `AriaLexicon.Acceptance.accepts(_:_:)`.
+/// Inline data — same closed sets as Swift `Acceptance.verbs(for:)`.
+fn accepts(noun: Noun, verb: Verb) -> bool {
+    match noun {
+        Noun::Drawer => matches!(
+            verb,
+            Verb::Capture
+                | Verb::Reanchor
+                | Verb::Mutate
+                | Verb::Withdraw
+                | Verb::Expunge
+                | Verb::Recall
+        ),
+        Noun::Tunnel => matches!(
+            verb,
+            Verb::Capture | Verb::Mutate | Verb::Withdraw | Verb::Expunge | Verb::Recall
+        ),
+        Noun::KgFact => matches!(
+            verb,
+            Verb::Mutate | Verb::Withdraw | Verb::Expunge | Verb::Recall
+        ),
+        Noun::Vector => false,
+        Noun::DiaryEntry => matches!(verb, Verb::Recall),
+        Noun::Proposal => matches!(
+            verb,
+            Verb::Mutate | Verb::Withdraw | Verb::Expunge | Verb::Recall
+        ),
+        Noun::Association => matches!(verb, Verb::Mutate | Verb::Expunge | Verb::Recall),
+        Noun::LearnedReference => matches!(
+            verb,
+            Verb::Learn | Verb::Mutate | Verb::Withdraw | Verb::Expunge | Verb::Recall
+        ),
+    }
+}
+
+/// MCP tool name for a (verb, noun) pair. Mirrors `ToolProjection.toolName(verb:noun:)`:
+/// recall is the query verb (noun_verb form); every other surfaced verb is an action
+/// (verb_noun form). The `moot_` namespace prefix marks the tool surface as MOOTx01's.
+fn tool_name(verb: Verb, noun: Noun) -> String {
+    if verb == Verb::Recall {
+        format!("moot_{}_{}", noun.raw_value(), verb.raw_value())
+    } else {
+        format!("moot_{}_{}", verb.raw_value(), noun.raw_value())
+    }
+}
+
+/// One-line description for a (verb, noun) tool. Mirrors `ToolProjection.description(verb:noun:)`.
+fn tool_description(verb: Verb, noun: Noun) -> String {
+    match verb {
+        Verb::Capture => format!("File a new {} into the estate.", noun.raw_value()),
+        Verb::Recall => format!("Read {} rows back by filter.", noun.raw_value()),
+        Verb::Mutate => format!("Apply a named mutation to a {}.", noun.raw_value()),
+        Verb::Withdraw => format!("Withdraw a {} from active circulation.", noun.raw_value()),
+        Verb::Expunge => format!("Hard-erase a {} (irreversible).", noun.raw_value()),
+        Verb::Reanchor => format!("Move where a {} sits in structure.", noun.raw_value()),
+        Verb::Learn => format!("Ingest a canonical external {}.", noun.raw_value()),
+        // Propose and associate do not surface — filtered before this call.
+        Verb::Propose | Verb::Associate => {
+            format!(
+                "Substrate-driven verb on {} (not callable as a tool).",
+                noun.raw_value()
+            )
+        }
+    }
+}
+
+/// Build the per-verb input schema for a (verb, noun) tool. Mirrors
+/// `ToolProjection.inputSchema(verb:noun:)` in Swift. The `estateID` optional
+/// is added by `with_estate_id` after this call, matching `withEstateID(_:)`.
+///
+/// Schemas are intentionally minimal — they match the verb frame slot sets.
+/// Required / optional split and field types are wire-identical to Swift.
+fn lexicon_schema(verb: Verb, noun: Noun) -> serde_json::Value {
+    match verb {
+        Verb::Capture if noun == Noun::Drawer => object_schema(
+            json!({
+                "content": string_schema("Verbatim content to file."),
+                "room": string_schema("Room within the estate."),
+                // Arg name stays udcCode for wire compatibility; renaming it is a
+                // separate storage migration (§5.8 dual-scheme model), out of scope here.
+                "udcCode": string_schema("Lattice anchor classification code (e.g. \"000.000\"), interpreted under classificationScheme."),
+                "classificationScheme": string_schema("Optional classification scheme for the anchor code: \"udc\" (default) or \"mdcc\". Omitting it preserves UDC behavior."),
+                "addedBy": string_schema("Actor identifier filed with the row."),
+                "embeddingModelID": string_schema("Embedding model the row tags vectors with."),
+                "channel": string_schema("Capture channel: typed, voiced, ocr, importedFile, sensor."),
+                "sensitivity": string_schema("Sensitivity tier: normal, elevated, restricted, secret."),
+                "kind": string_schema("Content kind: prose, code, transcript, list, structuredJSON, imageCaption.")
+            }),
+            json!(["content", "room", "udcCode", "addedBy", "embeddingModelID"]),
+        ),
+        Verb::Capture if noun == Noun::Tunnel => object_schema(
+            json!({
+                "sourceWing": string_schema("Wing of the source drawer."),
+                "sourceRoom": string_schema("Room of the source drawer."),
+                "targetWing": string_schema("Wing of the target drawer."),
+                "targetRoom": string_schema("Room of the target drawer."),
+                "kind": string_schema("Tunnel kind: relates, precedes, contradicts, supports, refines, exemplifies, extends."),
+                "addedBy": string_schema("Actor identifier filed with the tunnel."),
+                "sourceDrawerID": string_schema("Optional source drawer id (drawer-to-drawer edge)."),
+                "targetDrawerID": string_schema("Optional target drawer id.")
+            }),
+            json!([
+                "sourceWing",
+                "sourceRoom",
+                "targetWing",
+                "targetRoom",
+                "kind",
+                "addedBy"
+            ]),
+        ),
+        // Recall schemas: the standard recall arguments (filter/limit/ordering/
+        // hydrationLevel) match Swift ToolProjection.inputSchema(.recall, .drawer).
+        // Noun-specific args (e.g. wing for tunnel_recall) are grounded in the
+        // actual Rust coordinator interface because the Swift server has no live
+        // handler for these tools and falls through to methodNotFound with an empty
+        // schema. Flagged as Swift-side reconciliation items in the v2b-p2 report.
+        Verb::Recall if noun == Noun::Drawer => object_schema(
+            json!({
+                "filter": string_schema("Filter kind: unconfirmed, userConfirmed, exportable, contained."),
+                "limit": integer_schema("Max rows to return."),
+                "ordering": string_schema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc."),
+                "hydrationLevel": string_schema("Hydration: structured (default), full, bitmapOnly.")
+            }),
+            json!([]),
+        ),
+        Verb::Recall if noun == Noun::Tunnel => object_schema(
+            // wing is the graph partition argument the coordinator's recall_tunnels
+            // requires. The Swift server advertises this tool but has no live handler;
+            // schema is grounded in the Rust coordinator interface. (Swift reconciliation
+            // item: wire Swift's schema to match once the Swift handler lands.)
+            json!({
+                "wing": string_schema("Wing to read outgoing tunnels from.")
+            }),
+            json!(["wing"]),
+        ),
+        Verb::Recall => object_schema(
+            // Generic recall schema for kgFact, diaryEntry, proposal, association,
+            // learnedReference. Swift has no live handler for these; schema is grounded
+            // in the standard recall frame shape. (Swift reconciliation item per v2b-p2.)
+            json!({
+                "filter": string_schema("Filter kind: unconfirmed, userConfirmed, exportable, contained."),
+                "limit": integer_schema("Max rows to return."),
+                "ordering": string_schema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc."),
+                "hydrationLevel": string_schema("Hydration: structured (default), full, bitmapOnly.")
+            }),
+            json!([]),
+        ),
+        Verb::Mutate => object_schema(
+            json!({
+                "rowID": string_schema(format!("Row identifier of the {}.", noun.raw_value()).as_str()),
+                "kind": string_schema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept."),
+                "payload": string_schema("Optional free-text payload.")
+            }),
+            json!(["rowID", "kind"]),
+        ),
+        Verb::Withdraw => object_schema(
+            json!({
+                "rowID": string_schema(format!("Row identifier of the {}.", noun.raw_value()).as_str()),
+                "reason": string_schema("Optional free-text justification.")
+            }),
+            json!(["rowID"]),
+        ),
+        Verb::Expunge => object_schema(
+            json!({
+                "rowID": string_schema(format!("Row identifier of the {}.", noun.raw_value()).as_str()),
+                "reason": string_schema("Required free-text justification."),
+                "confirmation": boolean_schema("Must be true; expunge is irreversible.")
+            }),
+            json!(["rowID", "reason", "confirmation"]),
+        ),
+        Verb::Reanchor => object_schema(
+            json!({
+                "rowID": string_schema(format!("Row identifier of the {}.", noun.raw_value()).as_str()),
+                "toRoom": string_schema("Optional target room."),
+                "toUDC": string_schema("Optional target UDC code.")
+            }),
+            json!(["rowID"]),
+        ),
+        Verb::Learn => object_schema(
+            json!({
+                "handle": string_schema("Source handle naming the reference to learn.")
+            }),
+            json!(["handle"]),
+        ),
+        // capture for non-drawer/tunnel nouns: not in the acceptance matrix, so this
+        // arm only fires if a future noun gains capture. Return empty object so
+        // tools/list still encodes; dispatcher refuses with methodNotFound until
+        // a schema is added.
+        _ => object_schema(json!({}), json!([])),
+    }
+}
+
+/// Add the optional `estateID` field to a lexicon tool's schema. Mirrors
+/// `ToolProjection.withEstateID(_:)`. Returns the schema unchanged if it is
+/// not an object schema with a properties map (the empty-fallback schema).
+///
+/// Description is wire-identical to the v2b-p1 Rust server's per-tool estateID
+/// strings: "Optional UUID of the open estate to target. Omit for the default
+/// estate." — matching the eight previously-shipped tools byte for byte.
+/// (The Swift withEstateID uses "Omit to target the default estate; never
+/// required." — flagged as Swift-side reconciliation item in the v2b-p2 report.)
+fn with_estate_id(schema: serde_json::Value) -> serde_json::Value {
+    let estate_desc = "Optional UUID of the open estate to target. Omit for the default estate.";
+    match schema {
+        serde_json::Value::Object(mut obj) => {
+            if let Some(serde_json::Value::Object(mut props)) = obj.remove("properties") {
+                props.insert("estateID".to_string(), string_schema(estate_desc));
+                obj.insert("properties".to_string(), serde_json::Value::Object(props));
+            }
+            serde_json::Value::Object(obj)
+        }
+        other => other,
+    }
+}
+
+/// Build a single lexicon tool descriptor from a (verb, noun) pair.
+fn lexicon_tool(verb: Verb, noun: Noun) -> serde_json::Value {
+    let name = tool_name(verb, noun);
+    let description = tool_description(verb, noun);
+    let schema = with_estate_id(lexicon_schema(verb, noun));
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": schema
+    })
+}
 
 /// Build the full `tools/list` tool array as a `serde_json::Value`.
 /// Called once at startup and cached in `Dispatcher`.
@@ -45,17 +391,22 @@ pub fn build_tool_list() -> serde_json::Value {
     tools.push(run_migration_benchmark_tool());
     tools.push(confirm_migration_promotion_tool());
 
-    // 4. v1 lexicon minimum.
-    tools.push(capture_drawer_tool());
-    tools.push(recall_drawer_tool());
-    tools.push(capture_tunnel_tool());
+    // 4. Lexicon projection loop: outer noun in Noun.allCases order, inner verb in
+    //    Verb.allCases order, keeping only pairs the acceptance matrix accepts and
+    //    that are caller-surfaced (verb.is_surfaced()). Mirrors the Swift
+    //    ToolProjection.tools() loop body. Each (verb, noun) pair becomes one tool
+    //    via lexicon_tool().
+    for &noun in NOUNS {
+        for &verb in VERBS {
+            if accepts(noun, verb) && verb.is_surfaced() {
+                tools.push(lexicon_tool(verb, noun));
+            }
+        }
+    }
 
-    // 5. v2b-p1 drawer lifecycle verbs and tunnel recall.
-    tools.push(mutate_drawer_tool());
-    tools.push(withdraw_drawer_tool());
-    tools.push(expunge_drawer_tool());
-    tools.push(reanchor_drawer_tool());
-    tools.push(tunnel_recall_tool());
+    // 5. Federation tool — sits above the lexicon projection; dispatched by name.
+    //    Matches ToolProjection.federationTool() in Swift.
+    tools.push(cross_estate_recall_tool());
 
     json!(tools)
 }
@@ -327,167 +678,34 @@ fn confirm_migration_promotion_tool() -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Lexicon minimum (v1 capture/recall surface)
+// Federation tool — sits above the lexicon projection; dispatched by name.
+// Mirrors ToolProjection.federationTool() in Swift.
 // ---------------------------------------------------------------------------
 
-fn capture_drawer_tool() -> serde_json::Value {
+/// The `cross_estate_recall` tool descriptor. This tool has no (verb, noun)
+/// pair — it is a federation-surface read that fans across open estates the
+/// caller is entitled to read. The Rust GLK fan_out is a scaffold with no
+/// grant model; the tool is advertised but the dispatcher returns error_result
+/// ("not yet implemented: federation requires the grant model") for every
+/// call. Per DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §13 this is the
+/// correct A-versus-C refusal discipline at the MCP boundary.
+///
+/// Schema mirrors ToolProjection.federationTool() exactly: requesterEstateID
+/// required; filter, limit, ordering, hydrationLevel optional; no estateID
+/// (the call fans across estates rather than targeting one).
+fn cross_estate_recall_tool() -> serde_json::Value {
     json!({
-        "name": "moot_capture_drawer",
-        "description": "File a new drawer into the estate.",
+        "name": "moot_cross_estate_recall",
+        "description": "Grant-authorized cross-estate federated read: fans across the locally-open estates the requester is entitled to read and returns per-estate contributions, each narrowed to its grant's scope.",
         "inputSchema": object_schema(
             json!({
-                "content": string_schema("Verbatim content to file."),
-                "room": string_schema("Room within the estate."),
-                // The anchor code is interpreted under classificationScheme below.
-                // The arg name stays udcCode for wire compatibility; renaming it is
-                // a separate storage migration (§5.8 dual-scheme model), out of scope here.
-                "udcCode": string_schema("Lattice anchor classification code (e.g. \"000.000\"), interpreted under classificationScheme."),
-                "classificationScheme": string_schema("Optional classification scheme for the anchor code: \"udc\" (default) or \"mdcc\". Omitting it preserves UDC behavior."),
-                "addedBy": string_schema("Actor identifier filed with the row."),
-                "embeddingModelID": string_schema("Embedding model the row tags vectors with."),
-                "channel": string_schema("Capture channel: typed, voiced, ocr, importedFile, sensor."),
-                "sensitivity": string_schema("Sensitivity tier: normal, elevated, restricted, secret."),
-                "kind": string_schema("Content kind: prose, code, transcript, list, structuredJSON, imageCaption."),
-                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
-            }),
-            json!(["content", "room", "udcCode", "addedBy", "embeddingModelID"])
-        )
-    })
-}
-
-fn recall_drawer_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_drawer_recall",
-        "description": "Read drawer rows back by filter.",
-        "inputSchema": object_schema(
-            json!({
+                "requesterEstateID": string_schema("UUID of the requesting (caller) estate; the grant gate is evaluated against it. Must name an open estate."),
                 "filter": string_schema("Filter kind: unconfirmed, userConfirmed, exportable, contained."),
-                "limit": integer_schema("Max rows to return."),
+                "limit": integer_schema("Max rows per estate to return."),
                 "ordering": string_schema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc."),
-                "hydrationLevel": string_schema("Hydration: structured (default), full, bitmapOnly."),
-                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
+                "hydrationLevel": string_schema("Hydration: structured (default), full, bitmapOnly.")
             }),
-            json!([])
-        )
-    })
-}
-
-fn capture_tunnel_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_capture_tunnel",
-        "description": "File a new tunnel (directed graph edge) into the estate.",
-        "inputSchema": object_schema(
-            json!({
-                "sourceWing": string_schema("Wing of the source drawer."),
-                "sourceRoom": string_schema("Room of the source drawer."),
-                "targetWing": string_schema("Wing of the target drawer."),
-                "targetRoom": string_schema("Room of the target drawer."),
-                "kind": string_schema("Tunnel kind: relates, precedes, contradicts, supports, refines, exemplifies, extends."),
-                "addedBy": string_schema("Actor identifier filed with the tunnel."),
-                "sourceDrawerID": string_schema("Optional source drawer id (drawer-to-drawer edge)."),
-                "targetDrawerID": string_schema("Optional target drawer id."),
-                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
-            }),
-            json!(["sourceWing", "sourceRoom", "targetWing", "targetRoom", "kind", "addedBy"])
-        )
-    })
-}
-
-// ---------------------------------------------------------------------------
-// v2b-p1 drawer lifecycle verbs and tunnel recall
-// ---------------------------------------------------------------------------
-
-/// moot_mutate_drawer — Apply a named mutation to a drawer.
-/// Schema mirrors Swift ToolProjection.inputSchema(.mutate, .drawer):
-/// rowID (required), kind (required), payload (optional).
-fn mutate_drawer_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_mutate_drawer",
-        "description": "Apply a named mutation to a drawer.",
-        "inputSchema": object_schema(
-            json!({
-                "rowID": string_schema("Row identifier of the drawer."),
-                "kind": string_schema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept."),
-                "payload": string_schema("Optional free-text payload."),
-                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
-            }),
-            json!(["rowID", "kind"])
-        )
-    })
-}
-
-/// moot_withdraw_drawer — Withdraw a drawer from active circulation.
-/// Schema mirrors Swift ToolProjection.inputSchema(.withdraw, .drawer):
-/// rowID (required), reason (optional).
-fn withdraw_drawer_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_withdraw_drawer",
-        "description": "Withdraw a drawer from active circulation.",
-        "inputSchema": object_schema(
-            json!({
-                "rowID": string_schema("Row identifier of the drawer."),
-                "reason": string_schema("Optional free-text justification."),
-                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
-            }),
-            json!(["rowID"])
-        )
-    })
-}
-
-/// moot_expunge_drawer — Hard-erase a drawer (irreversible).
-/// Schema mirrors Swift ToolProjection.inputSchema(.expunge, .drawer):
-/// rowID (required), reason (required), confirmation (required bool).
-fn expunge_drawer_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_expunge_drawer",
-        "description": "Hard-erase a drawer (irreversible).",
-        "inputSchema": object_schema(
-            json!({
-                "rowID": string_schema("Row identifier of the drawer."),
-                "reason": string_schema("Required free-text justification."),
-                "confirmation": { "type": "boolean", "description": "Must be true; expunge is irreversible." },
-                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
-            }),
-            json!(["rowID", "reason", "confirmation"])
-        )
-    })
-}
-
-/// moot_reanchor_drawer — Move where a drawer sits in structure.
-/// Schema mirrors Swift ToolProjection.inputSchema(.reanchor, .drawer):
-/// rowID (required), toRoom (optional), toUDC (optional).
-fn reanchor_drawer_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_reanchor_drawer",
-        "description": "Move where a drawer sits in structure.",
-        "inputSchema": object_schema(
-            json!({
-                "rowID": string_schema("Row identifier of the drawer."),
-                "toRoom": string_schema("Optional target room."),
-                "toUDC": string_schema("Optional target UDC code."),
-                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
-            }),
-            json!(["rowID"])
-        )
-    })
-}
-
-/// moot_tunnel_recall — Read tunnel rows back by filter.
-/// Schema: wing (required — the graph partition to read outgoing edges from),
-/// estateID (optional). The coordinator's recall_tunnels(handle, wing) is the
-/// dispatch target; the Swift server advertises this tool but has no live
-/// handler (falls through to methodNotFound), so the Rust server is ahead
-/// on this tool. Wire name follows noun_verb convention (same as drawer_recall).
-fn tunnel_recall_tool() -> serde_json::Value {
-    json!({
-        "name": "moot_tunnel_recall",
-        "description": "Read tunnel rows back by filter.",
-        "inputSchema": object_schema(
-            json!({
-                "wing": string_schema("Wing to read outgoing tunnels from."),
-                "estateID": string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
-            }),
-            json!(["wing"])
+            json!(["requesterEstateID"])
         )
     })
 }
@@ -515,4 +733,8 @@ fn integer_schema(description: &str) -> serde_json::Value {
 
 fn number_schema(description: &str) -> serde_json::Value {
     json!({ "type": "number", "description": description })
+}
+
+fn boolean_schema(description: &str) -> serde_json::Value {
+    json!({ "type": "boolean", "description": description })
 }

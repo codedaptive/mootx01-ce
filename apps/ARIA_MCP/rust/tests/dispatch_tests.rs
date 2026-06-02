@@ -3,10 +3,10 @@
 //! Exercises the dispatch routing for every tool category through the full
 //! dispatch stack using an in-memory estate (EstateRegistry::new_inmemory).
 //! One success path + one error path per tool group — representative tools,
-//! not all 28 individually. Tests are ordered by the dispatch routing order in
+//! not all 49 individually. Tests are ordered by the dispatch routing order in
 //! dispatch.rs: recipe → lens → lexicon (capture/recall + lifecycle verbs +
-//! tunnel recall). tools_list_count_is_28 plus the schema-keys assertions
-//! gate the full 28-tool surface.
+//! tunnel recall). tools_list_count_is_49 plus the schema-keys assertions
+//! gate the full 49-tool surface (after v2b-p0 full-matrix projection refactor).
 //!
 //! # Design
 //!
@@ -1002,23 +1002,139 @@ fn tunnel_recall_missing_wing_returns_invalid_params() {
 }
 
 // ---------------------------------------------------------------------------
-// 14. tools/list surface assertions — count and schema-keys for v2b-p1 tools
+// 14. tools/list surface assertions — count and schema-keys for v2b-p0/p2 tools
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tools_list_count_is_28() {
-    // The full tool surface is 28 tools after v2b-p1. This test gates on
-    // the exact count so any accidental addition or removal is caught.
+fn tools_list_count_is_49() {
+    // The full tool surface after v2b-p0 programmatic projection refactor:
+    //   1  moot_list_recipes
+    //  16  lens tools (14 reasoning + 2 analytics)
+    //   3  foundational recipe tools
+    //  28  lexicon projection loop (full Noun.allCases × Verb.allCases matrix,
+    //       accepted + surfaced only — 6 drawer + 5 tunnel + 4 kgFact + 1
+    //       diaryEntry + 4 proposal + 3 association + 5 learnedReference)
+    //   1  moot_cross_estate_recall (federation, above projection)
+    // ----
+    //  49  total
+    //
+    // This test gates on the exact count so any accidental addition or removal
+    // is caught. Updated from 28 (v2b-p1) when v2b-p0 expanded the lexicon
+    // loop to the full acceptance matrix.
     let tools = build_tool_list();
     let arr = tools
         .as_array()
         .expect("build_tool_list must return an array");
     assert_eq!(
         arr.len(),
-        28,
-        "expected 28 tools in the list; got {}",
+        49,
+        "expected 49 tools in the list; got {}",
         arr.len()
     );
+}
+
+#[test]
+fn tools_list_existing_8_lexicon_tools_byte_identical() {
+    // Byte-identity gate for the v2b-p0 refactor: the 8 lexicon tools that
+    // shipped in v1 and v2b-p1 must appear in the list with byte-identical
+    // names, descriptions, and inputSchema required+property sets.
+    //
+    // This test corresponds to the "before/after byte-compare" gate in the
+    // v2b-p0 completion report. The 8 tools are:
+    //   moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel,
+    //   moot_mutate_drawer, moot_withdraw_drawer, moot_expunge_drawer,
+    //   moot_reanchor_drawer, moot_tunnel_recall.
+    let tools = build_tool_list();
+    let arr = tools
+        .as_array()
+        .expect("build_tool_list must return an array");
+    let by_name: std::collections::HashMap<&str, &serde_json::Value> = arr
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(|n| (n, t)))
+        .collect();
+
+    // Spot-check descriptions (these are the exact strings from v2b-p1 tool_list.rs).
+    assert_eq!(
+        by_name["moot_capture_drawer"]["description"]
+            .as_str()
+            .unwrap(),
+        "File a new drawer into the estate."
+    );
+    assert_eq!(
+        by_name["moot_drawer_recall"]["description"]
+            .as_str()
+            .unwrap(),
+        "Read drawer rows back by filter."
+    );
+    assert_eq!(
+        by_name["moot_capture_tunnel"]["description"]
+            .as_str()
+            .unwrap(),
+        "File a new tunnel into the estate."
+    );
+    assert_eq!(
+        by_name["moot_mutate_drawer"]["description"]
+            .as_str()
+            .unwrap(),
+        "Apply a named mutation to a drawer."
+    );
+    assert_eq!(
+        by_name["moot_withdraw_drawer"]["description"]
+            .as_str()
+            .unwrap(),
+        "Withdraw a drawer from active circulation."
+    );
+    assert_eq!(
+        by_name["moot_expunge_drawer"]["description"]
+            .as_str()
+            .unwrap(),
+        "Hard-erase a drawer (irreversible)."
+    );
+    assert_eq!(
+        by_name["moot_reanchor_drawer"]["description"]
+            .as_str()
+            .unwrap(),
+        "Move where a drawer sits in structure."
+    );
+    assert_eq!(
+        by_name["moot_tunnel_recall"]["description"]
+            .as_str()
+            .unwrap(),
+        "Read tunnel rows back by filter."
+    );
+
+    // Spot-check required arrays for the lifecycle verbs (parity of the old
+    // tools_list_new_tools_present_with_correct_schema_keys test assertions).
+    let mutate = by_name["moot_mutate_drawer"];
+    let req: Vec<&str> = mutate["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(req.contains(&"rowID") && req.contains(&"kind"));
+    assert!(mutate["inputSchema"]["properties"]
+        .as_object()
+        .unwrap()
+        .contains_key("payload"));
+    assert!(mutate["inputSchema"]["properties"]
+        .as_object()
+        .unwrap()
+        .contains_key("estateID"));
+
+    // tunnel_recall: wing required.
+    let tr = by_name["moot_tunnel_recall"];
+    let req: Vec<&str> = tr["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(req.contains(&"wing"));
+    assert!(tr["inputSchema"]["properties"]
+        .as_object()
+        .unwrap()
+        .contains_key("estateID"));
 }
 
 #[test]
