@@ -106,3 +106,4 @@ focused on the work. That covers it.
 *This document describes the contribution process before 1.0. It will be
 revised at the 1.0 release to cover the pull-request workflow, the CLA,
 and the security contact in full.*
+
