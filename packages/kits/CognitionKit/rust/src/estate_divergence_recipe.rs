@@ -11,6 +11,7 @@
 //! non-private, same-device divergence, useful in its own right but not the
 //! federated lens. Named for what it actually does.
 //!
+//! Paired with the Swift version (`Sources/CognitionKit/EstateDivergence.swift`).
 //! Pure CognitionKit sequencing: recall each estate via GLK + NeuronKit drift
 //! (SubstrateML InformationTheory). Read-only.
 
