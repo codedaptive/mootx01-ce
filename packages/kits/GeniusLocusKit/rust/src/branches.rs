@@ -26,7 +26,6 @@ use locus_kit::estate_types::{EstateError, LatticeAnchor, OwnerCredentials};
 use locus_kit::filter::Filter;
 use locus_kit::filter::{HydrationLevel, Ordering, RecallFrame};
 use locus_kit::frames::CaptureFrame;
-use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
 
 use crate::coordinator::EstateCoordinator;
@@ -156,10 +155,10 @@ impl EstateBranch {
     }
 
     /// Build a fresh, isolated in-memory branch estate (owner encodes the
-    /// branch id, matching the Swift `branch-<uuid>`).
+    /// branch id, matching the Swift `branch-<uuid>`).  InMemoryDrawerStore
+    /// allocates its own InMemoryStorage; backend identity is at the type.
     fn new_branch_estate(branch_id: BranchId, now: i64) -> Result<Estate, BranchError> {
-        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(InMemoryDrawerStore::new(storage, now, None)?);
+        let store = Arc::new(InMemoryDrawerStore::new(now, None)?);
         let owner = OwnerCredentials::new(format!("branch-{branch_id}"));
         Ok(Estate::create(store, owner, None)?)
     }
@@ -425,9 +424,8 @@ mod tests {
     /// row contents. Returns (coordinator, parent handle).
     fn coord_with_parent(contents: &[&str]) -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
-        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally.
+        let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
         let handle = coord
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .unwrap();

@@ -1,21 +1,39 @@
-//! Concrete persistence-kit-backed `DrawerStore` impl. Ports
-//! `DrawerStore.swift`.
+//! Drawer-store implementations backed by persistence-kit `Storage`.
+//! Ports `DrawerStore.swift`.
 //!
-//! Wraps a `persistence_kit::Storage` and implements the full LocusKit
-//! verb surface — drawer CRUD, supersession cascade, bitmap mutation
-//! paths (with their audit-row writes), tunnel / kg-fact / diary CRUD,
-//! the recall-trace surface, the audit reads, and the summary
-//! projections.
+//! ## Architecture — core + two newtypes
+//!
+//! Backend identity is **structurally visible at every construction site**
+//! and **deliberately erased at the trait surface**.  The module exposes:
+//!
+//! - [`DrawerStoreCore`] — the storage-agnostic verb-logic core over
+//!   `Arc<dyn Storage>`.  Its constructor is `pub(crate)` — no external
+//!   crate may construct a bare storage-unknown core.  Kit-internal code
+//!   (e.g. tests that share a single `InMemoryStorage` across two opens)
+//!   may call `DrawerStoreCore::new` directly.
+//!
+//! - [`InMemoryDrawerStore`] — thin public newtype wrapping
+//!   `DrawerStoreCore` over an `InMemoryStorage` backend.  This is what
+//!   every external construction site names.  Its constructor allocates
+//!   the `InMemoryStorage` internally so callers name their backend in
+//!   the type.
+//!
+//! - [`SqliteDrawerStore`] (future) — symmetric newtype over a
+//!   `SqliteStorage` backend; slots in without touching the core.
+//!
+//! The Swift parallel is the single storage-parameterised `actor
+//! DrawerStore` — no per-backend types exist on the Swift side, so only
+//! the shared trait name `DrawerStore` is cross-leg-meaningful and it
+//! does NOT change here.  This split is Rust-internal.
 //!
 //! ## Swift-to-Rust shape changes
 //!
-//! - Swift `public actor DrawerStore` → Rust sync `struct
-//!   InMemoryDrawerStore`. The persistence-kit Rust trait surface is sync;
-//!   the underlying `InMemoryStorage` backend serialises access via an
-//!   internal `Mutex`, which gives every multi-step path the
-//!   atomicity the Swift `storage.transaction(isolation:)` provides.
-//!   Same shape as `ContainerFingerprintStore` (LP-1C) and
-//!   `NodeBundleStore` (LP-1D).
+//! - Swift `public actor DrawerStore` → Rust sync `DrawerStoreCore`. The
+//!   persistence-kit Rust trait surface is sync; the underlying
+//!   `InMemoryStorage` backend serialises access via an internal `Mutex`,
+//!   which gives every multi-step path the atomicity the Swift
+//!   `storage.transaction(isolation:)` provides.  Same shape as
+//!   `ContainerFingerprintStore` (LP-1C) and `NodeBundleStore` (LP-1D).
 //! - Swift `async throws` → `Result<T, LocusKitError>`.
 //! - Swift `Date` everywhere → Rust `i64` epoch-seconds parameter on
 //!   every mutation method, threading the deterministic-clock rule
@@ -39,6 +57,7 @@
 use crate::adjectives::State;
 use crate::diary_entry::DiaryEntry;
 use crate::drawer::Drawer;
+use persistence_kit::inmemory::InMemoryStorage;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -97,14 +116,23 @@ const T_RECALL_TRACE: &str = "recall_trace";
 // Construction
 // ---------------------------------------------------------------------------
 
-/// Concrete `DrawerStore` impl backed by a persistence-kit `Storage`.
+/// Storage-agnostic verb-logic core over `Arc<dyn Storage>`.
 ///
-/// This struct fronts both `InMemoryStorage` (test fixture and
-/// in-memory estates) and, via the `SqliteDrawerStore` newtype,
-/// `SqliteStorage` (durable estates): the trait surface here is the
-/// contract, not the backend identity. All verb logic lives once, in
-/// this delegation core.
-pub struct InMemoryDrawerStore {
+/// Implements the full LocusKit `DrawerStore` trait: drawer CRUD, bitmap
+/// mutation paths, tunnel / kg-fact / diary CRUD, recall-trace, audit
+/// reads, and summary projections. All verb logic lives once here; backend
+/// identity lives at the construction boundary — callers use the typed
+/// newtypes (`InMemoryDrawerStore`, `SqliteDrawerStore`) rather than
+/// constructing this core directly.
+///
+/// This struct fronts both `InMemoryStorage` (ephemeral estates, test
+/// fixtures) and `SqliteStorage` (durable WAL-mode estates), via the
+/// respective newtype constructors. The trait surface is the contract;
+/// the backend is invisible to verb logic.
+///
+/// `pub(crate)` constructor: external crates must go through a newtype
+/// so that the backend is always named at the construction site.
+pub struct DrawerStoreCore {
     storage: Arc<dyn Storage>,
     /// Monotonic audit-id counter. SQLite would assign these as the
     /// integer primary key (rowid); the InMemory backend has no such
@@ -124,16 +152,20 @@ pub struct InMemoryDrawerStore {
     estate_uuid: Uuid,
 }
 
-impl InMemoryDrawerStore {
-    /// Open the store over a `Storage` handle. Opens the LocusKit
-    /// schema (idempotent — re-opening an existing estate is a no-op
-    /// for tables, generated columns, and indices) and writes the v1
-    /// manifest defaults using `INSERT OR IGNORE` semantics (values
-    /// written on a prior open stay authoritative).
+impl DrawerStoreCore {
+    /// Open the core over a `Storage` handle. Opens the LocusKit schema
+    /// (idempotent — re-opening an existing estate is a no-op for tables,
+    /// generated columns, and indices) and writes the v1 manifest defaults
+    /// using `INSERT OR IGNORE` semantics (values written on a prior open
+    /// stay authoritative).
     ///
     /// `now` is the deterministic clock value used to seed the
     /// `created_at` and `last_modified` manifest rows on first open.
-    pub fn new(
+    ///
+    /// `pub(crate)`: external callers must go through `InMemoryDrawerStore`
+    /// or another backend-typed newtype so the backend is always visible at
+    /// the construction site.
+    pub(crate) fn new(
         storage: Arc<dyn Storage>,
         now: i64,
         hlc: Option<HLCGenerator>,
@@ -146,7 +178,7 @@ impl InMemoryDrawerStore {
         let seed_vocab = crate::vocabulary::frozen().map_err(|e| {
             LocusKitError::InvalidContent(format!("LocusKit vocabulary failed to freeze: {:?}", e))
         })?;
-        let mut store = InMemoryDrawerStore {
+        let mut store = DrawerStoreCore {
             storage,
             // Temporary; replaced below once the manifest exists.
             hlc: Mutex::new(HLCGenerator::new(0)),
@@ -621,7 +653,7 @@ impl InMemoryDrawerStore {
 // DrawerStore trait impl
 // ---------------------------------------------------------------------------
 
-impl DrawerStore for InMemoryDrawerStore {
+impl DrawerStore for DrawerStoreCore {
     fn read_manifest(&self) -> Result<ManifestValues, LocusKitError> {
         let row_store = self.storage.row_store();
         let rows = row_store
@@ -1929,6 +1961,323 @@ impl DrawerStore for InMemoryDrawerStore {
 }
 
 // ---------------------------------------------------------------------------
+// InMemoryDrawerStore — thin public newtype for the in-memory backend
+// ---------------------------------------------------------------------------
+
+/// Public newtype fronting `DrawerStoreCore` over an `InMemoryStorage`
+/// backend.
+///
+/// This is what every construction site that wants an in-memory estate
+/// names.  The backend (`InMemoryStorage`) is allocated here, making the
+/// backend identity visible at the type level rather than buried in a
+/// runtime argument.
+///
+/// Symmetric with the future `SqliteDrawerStore` newtype: each newtype
+/// names its backend, constructs it, and delegates every `DrawerStore`
+/// method to the shared `DrawerStoreCore`.
+pub struct InMemoryDrawerStore {
+    inner: DrawerStoreCore,
+}
+
+impl InMemoryDrawerStore {
+    /// Open a new in-memory estate.
+    ///
+    /// Allocates an `InMemoryStorage` backend tagged with a fresh estate
+    /// UUID, then delegates to `DrawerStoreCore::new` which opens the
+    /// LocusKit schema and writes v1 manifest defaults.
+    ///
+    /// `now` seeds the `created_at` / `last_modified` manifest rows on
+    /// first open.  `hlc` is an optional injected `HLCGenerator`; pass
+    /// `None` to create a top-level estate that owns its own clock.
+    pub fn new(now: i64, hlc: Option<HLCGenerator>) -> Result<Self, LocusKitError> {
+        let estate_id = Uuid::new_v4();
+        let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(estate_id));
+        let inner = DrawerStoreCore::new(storage, now, hlc)?;
+        Ok(InMemoryDrawerStore { inner })
+    }
+
+    /// Open a new in-memory estate over an externally-supplied
+    /// `InMemoryStorage`.
+    ///
+    /// Use this variant when you need to share a single `InMemoryStorage`
+    /// across two `DrawerStoreCore` opens (e.g. to verify manifest
+    /// idempotency across re-opens).  For all other in-memory construction
+    /// sites, prefer `new(now, hlc)`.
+    pub fn with_storage(
+        storage: Arc<InMemoryStorage>,
+        now: i64,
+        hlc: Option<HLCGenerator>,
+    ) -> Result<Self, LocusKitError> {
+        let inner = DrawerStoreCore::new(storage as Arc<dyn Storage>, now, hlc)?;
+        Ok(InMemoryDrawerStore { inner })
+    }
+
+    /// Kit-internal accessor — the underlying persistence-kit `Storage`
+    /// handle.  `#[cfg(test)]` only: used by inline tests that need to
+    /// verify audit-log contents directly through the storage handle.
+    #[cfg(test)]
+    pub(crate) fn storage(&self) -> &Arc<dyn Storage> {
+        &self.inner.storage
+    }
+}
+
+impl DrawerStore for InMemoryDrawerStore {
+    fn read_manifest(&self) -> Result<crate::manifest::ManifestValues, LocusKitError> {
+        self.inner.read_manifest()
+    }
+    fn set_meta(&self, key: &str, value: &str) -> Result<(), LocusKitError> {
+        self.inner.set_meta(key, value)
+    }
+    fn get_meta(&self, key: &str) -> Result<Option<String>, LocusKitError> {
+        self.inner.get_meta(key)
+    }
+    fn add_drawer(&self, drawer: &crate::drawer::Drawer, now: i64) -> Result<(), LocusKitError> {
+        self.inner.add_drawer(drawer, now)
+    }
+    fn get_drawer(&self, id: &str) -> Result<Option<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.get_drawer(id)
+    }
+    fn drawers_in_wing(&self, wing: &str) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.drawers_in_wing(wing)
+    }
+    fn drawers_in_wing_room(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.drawers_in_wing_room(wing, room)
+    }
+    fn drawers_by_source(
+        &self,
+        source_file: &str,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.drawers_by_source(source_file)
+    }
+    fn all_drawers(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.all_drawers()
+    }
+    fn drawer_ids(&self) -> Result<Vec<crate::estate_types::RowID>, LocusKitError> {
+        self.inner.drawer_ids()
+    }
+    fn mutate_provenance(
+        &self,
+        drawer_id: &str,
+        new_provenance: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .mutate_provenance(drawer_id, new_provenance, changed_by, reason, now)
+    }
+    fn mutate_adjective(
+        &self,
+        drawer_id: &str,
+        new_adjective: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .mutate_adjective(drawer_id, new_adjective, changed_by, reason, now)
+    }
+    fn mutate_operational(
+        &self,
+        drawer_id: &str,
+        new_operational: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .mutate_operational(drawer_id, new_operational, changed_by, reason, now)
+    }
+    fn mutate_state(
+        &self,
+        drawer_id: &str,
+        new_state: crate::adjectives::State,
+        via: substrate_lib::row_state::RowVerb,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .mutate_state(drawer_id, new_state, via, changed_by, reason, now)
+    }
+    fn expunge_gated(
+        &self,
+        drawer_id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.expunge_gated(drawer_id, changed_by, reason, now)
+    }
+    fn reanchor_gated(
+        &self,
+        drawer_id: &str,
+        to_room: Option<&str>,
+        to_lattice: Option<crate::estate_types::LatticeAnchor>,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .reanchor_gated(drawer_id, to_room, to_lattice, changed_by, reason, now)
+    }
+    fn add_tunnel(&self, tunnel: &crate::tunnel::Tunnel) -> Result<(), LocusKitError> {
+        self.inner.add_tunnel(tunnel)
+    }
+    fn get_tunnel(&self, id: &str) -> Result<Option<crate::tunnel::Tunnel>, LocusKitError> {
+        self.inner.get_tunnel(id)
+    }
+    fn tunnels_from_wing(&self, wing: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        self.inner.tunnels_from_wing(wing)
+    }
+    fn tunnels_from_wing_room(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        self.inner.tunnels_from_wing_room(wing, room)
+    }
+    fn tunnels_to_wing(&self, wing: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        self.inner.tunnels_to_wing(wing)
+    }
+    fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
+        self.inner.add_kg_fact(fact)
+    }
+    fn get_kg_fact(&self, id: &str) -> Result<Option<crate::kg_fact::KGFact>, LocusKitError> {
+        self.inner.get_kg_fact(id)
+    }
+    fn kg_facts_for_drawer(
+        &self,
+        source_drawer_id: &str,
+    ) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
+        self.inner.kg_facts_for_drawer(source_drawer_id)
+    }
+    fn add_proposal(&self, proposal: &crate::proposal::Proposal) -> Result<(), LocusKitError> {
+        self.inner.add_proposal(proposal)
+    }
+    fn get_proposal(&self, id: &str) -> Result<Option<crate::proposal::Proposal>, LocusKitError> {
+        self.inner.get_proposal(id)
+    }
+    fn proposals_for_target(
+        &self,
+        target_row_id: &str,
+    ) -> Result<Vec<crate::proposal::Proposal>, LocusKitError> {
+        self.inner.proposals_for_target(target_row_id)
+    }
+    fn add_association(
+        &self,
+        association: &crate::association::Association,
+    ) -> Result<(), LocusKitError> {
+        self.inner.add_association(association)
+    }
+    fn get_association(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::association::Association>, LocusKitError> {
+        self.inner.get_association(id)
+    }
+    fn associations_from(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::association::Association>, LocusKitError> {
+        self.inner.associations_from(wing, room)
+    }
+    fn associations_to(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Vec<crate::association::Association>, LocusKitError> {
+        self.inner.associations_to(wing, room)
+    }
+    fn add_learned_reference(
+        &self,
+        reference: &crate::learned_reference::LearnedReference,
+    ) -> Result<(), LocusKitError> {
+        self.inner.add_learned_reference(reference)
+    }
+    fn get_learned_reference(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::learned_reference::LearnedReference>, LocusKitError> {
+        self.inner.get_learned_reference(id)
+    }
+    fn learned_references_from_source(
+        &self,
+        source_catalog_id: &str,
+    ) -> Result<Vec<crate::learned_reference::LearnedReference>, LocusKitError> {
+        self.inner.learned_references_from_source(source_catalog_id)
+    }
+    fn add_diary_entry(&self, entry: &crate::diary_entry::DiaryEntry) -> Result<(), LocusKitError> {
+        self.inner.add_diary_entry(entry)
+    }
+    fn get_diary_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::diary_entry::DiaryEntry>, LocusKitError> {
+        self.inner.get_diary_entry(id)
+    }
+    fn read_diary(
+        &self,
+        agent_name: &str,
+        last_n: usize,
+    ) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
+        self.inner.read_diary(agent_name, last_n)
+    }
+    fn read_diary_in_wing(
+        &self,
+        agent_name: &str,
+        wing: &str,
+        last_n: usize,
+    ) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
+        self.inner.read_diary_in_wing(agent_name, wing, last_n)
+    }
+    fn insert_recall_trace(
+        &self,
+        item: &crate::recall_trace_item::RecallTraceItem,
+    ) -> Result<(), LocusKitError> {
+        self.inner.insert_recall_trace(item)
+    }
+    fn get_recall_trace(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
+        self.inner.get_recall_trace(id)
+    }
+    fn recall_trace_since(
+        &self,
+        since: &str,
+    ) -> Result<Vec<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
+        self.inner.recall_trace_since(since)
+    }
+    fn mark_recall_trace_used(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
+        self.inner.mark_recall_trace_used(id, now)
+    }
+    fn audit_events_for_row(
+        &self,
+        row_id: &str,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.inner.audit_events_for_row(row_id)
+    }
+    fn list_wings(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
+        self.inner.list_wings()
+    }
+    fn list_rooms(
+        &self,
+        wing: Option<&str>,
+    ) -> Result<Vec<crate::summaries::RoomSummary>, LocusKitError> {
+        self.inner.list_rooms(wing)
+    }
+    fn taxonomy(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
+        self.inner.taxonomy()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Row encode helpers
 // ---------------------------------------------------------------------------
 
@@ -2579,7 +2928,7 @@ fn i64_value_of(v: Option<&TypedValue>) -> i64 {
         Some(TypedValue::Int(i)) | Some(TypedValue::Bitmap(i)) | Some(TypedValue::Timestamp(i)) => {
             *i
         }
-        Some(TypedValue::Bool(b)) if *b => 1,
+        Some(TypedValue::Bool(b)) => i64::from(*b),
         _ => 0,
     }
 }
@@ -2776,13 +3125,14 @@ mod tests {
     use crate::adjectives::{AdjectiveExportability, AdjectiveSensitivity, State, Trust};
     use crate::estate::Estate;
     use crate::estate_types::OwnerCredentials;
-    use persistence_kit::inmemory::InMemoryStorage;
 
     const NOW: i64 = 1_700_000_000;
 
+    // open_store returns InMemoryDrawerStore — the public newtype.  Tests
+    // that need to share storage across two opens use DrawerStoreCore::new
+    // directly (it is pub(crate) and therefore reachable here).
     fn open_store() -> InMemoryDrawerStore {
-        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        InMemoryDrawerStore::new(storage, NOW, None).unwrap()
+        InMemoryDrawerStore::new(NOW, None).unwrap()
     }
 
     /// Deterministic test UUID from a short label, so tests can keep
@@ -2851,11 +3201,15 @@ mod tests {
 
     #[test]
     fn manifest_defaults_preserved_across_reopen() {
+        // Two opens share one InMemoryStorage — requires DrawerStoreCore::new
+        // (pub(crate)) because InMemoryDrawerStore::new always allocates a
+        // fresh storage.  This is the only scenario that needs the bare core.
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store_a = InMemoryDrawerStore::new(storage.clone(), NOW, None).unwrap();
+        let store_a =
+            DrawerStoreCore::new(Arc::clone(&storage) as Arc<dyn Storage>, NOW, None).unwrap();
         let uuid_a = store_a.read_manifest().unwrap().estate_uuid;
-        // Second open must see the same estate_uuid.
-        let store_b = InMemoryDrawerStore::new(storage, NOW + 1, None).unwrap();
+        // Second open must see the same estate_uuid written by the first.
+        let store_b = DrawerStoreCore::new(storage as Arc<dyn Storage>, NOW + 1, None).unwrap();
         let uuid_b = store_b.read_manifest().unwrap().estate_uuid;
         assert_eq!(uuid_a, uuid_b);
     }
@@ -2871,7 +3225,7 @@ mod tests {
         store.add_drawer(&d, NOW).unwrap();
         let manifest_uuid = Uuid::parse_str(&store.read_manifest().unwrap().estate_uuid).unwrap();
         let row = Uuid::parse_str(&tid("d1")).unwrap();
-        let events = store.storage.audit_log().events_for_row(row).unwrap();
+        let events = store.storage().audit_log().events_for_row(row).unwrap();
         assert!(
             !events.is_empty(),
             "capture must emit a genesis audit event"
@@ -3066,7 +3420,7 @@ mod tests {
         // The flip went through the gate → one audit event for the
         // predecessor with after-state superseded (bitmap_audit retired).
         let prow = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
-        let events = store.storage.audit_log().events_for_row(prow).unwrap();
+        let events = store.storage().audit_log().events_for_row(prow).unwrap();
         assert_eq!(events.len(), 2); // predecessor's capture + the supersede flip
         assert_eq!(events[0].verb, "capture");
         assert_eq!(
@@ -3123,7 +3477,7 @@ mod tests {
         );
         // Gate appended one event carrying the provenance write.
         let row = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
-        let events = store.storage.audit_log().events_for_row(row).unwrap();
+        let events = store.storage().audit_log().events_for_row(row).unwrap();
         assert_eq!(events.len(), 2); // capture + provenance mutation
         assert_eq!(events[1].after_provenance, prov);
     }
@@ -3155,7 +3509,7 @@ mod tests {
         // One audit event whose after-adjective carries the trust write
         // (the gate appended it; bitmap_audit is retired for this path).
         let row = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
-        let events = store.storage.audit_log().events_for_row(row).unwrap();
+        let events = store.storage().audit_log().events_for_row(row).unwrap();
         assert_eq!(events.len(), 2); // capture (genesis) + the adjective mutation
         assert_eq!(events[0].verb, "capture");
         assert_eq!(
@@ -3201,7 +3555,7 @@ mod tests {
             0
         );
         let row = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
-        let events = store.storage.audit_log().events_for_row(row).unwrap();
+        let events = store.storage().audit_log().events_for_row(row).unwrap();
         assert_eq!(
             events.len(),
             1,
@@ -3234,7 +3588,7 @@ mod tests {
         );
         // Gate appended one event carrying the operational write.
         let row = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
-        let events = store.storage.audit_log().events_for_row(row).unwrap();
+        let events = store.storage().audit_log().events_for_row(row).unwrap();
         assert_eq!(events.len(), 2); // capture + operational mutation
         assert_eq!(events[1].after_operational, 0x100);
     }

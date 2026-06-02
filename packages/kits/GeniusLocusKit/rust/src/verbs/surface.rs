@@ -1,13 +1,14 @@
 // surface.rs — Rust mirror of the GLK unified verb surface.
 //
-// The Rust scaffold cannot actually dispatch verbs against an estate
-// because the LocusKit Rust port has not yet shipped. What the
+// The Rust scaffold does not yet dispatch verbs through a live
+// locus_kit::Estate — LocusKit Rust is fully shipped (503 tests)
+// but the GLK verb-body wiring has not yet been done. What the
 // scaffold delivers is the *shape* of the surface: a Surface type
 // that owns the per-handle dispatch site, the VerbError taxonomy
 // callers must branch on, the boundary-side guards (empty reanchor,
 // unconfirmed expunge), and the identity-by-name mapping the
 // AriaLexicon conformance gates on. Downstream missions wire the
-// dispatch to a real Rust Estate when that port lands.
+// dispatch through to a real Estate.
 //
 // The Swift surface lives in
 // `Sources/GeniusLocusKit/Verbs/VerbSurface.swift`; verb method names
@@ -84,10 +85,10 @@ impl Surface {
 
     // MARK: - capture
 
-    /// File a new drawer. Scaffold: the LocusKit Rust port is not
-    /// present so the call shape exists but the dispatch raises
-    /// `NotSupportedByEstate("capture")`. Downstream missions
-    /// replace this body with a live dispatch when the port ships.
+    /// File a new drawer. Scaffold: GLK verb dispatch to a live
+    /// `locus_kit::Estate` has not yet been wired; the call shape
+    /// exists and raises `NotSupportedByEstate("capture")` until a
+    /// downstream mission wires the dispatch.
     pub fn capture(&self, _frame: CaptureFrame) -> Result<RowId, VerbError> {
         Err(VerbError::NotSupportedByEstate {
             verb: "capture".into(),

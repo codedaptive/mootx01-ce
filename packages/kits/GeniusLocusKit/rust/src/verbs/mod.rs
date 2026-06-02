@@ -9,10 +9,10 @@
 // or an acceptance row, the Rust mirror must follow.
 //
 // What this scaffold does NOT do: dispatch verbs against a live
-// estate. The LocusKit Rust port is not yet present, so the
-// `Surface` type here is a no-op placeholder that the parity test
-// inspects by name rather than by behavior. Downstream missions wire
-// the dispatch when the Rust port lands.
+// locus_kit::Estate. LocusKit Rust is fully shipped (503 tests);
+// the `Surface` type here is a no-op placeholder that the parity
+// test inspects by name rather than by behavior. Downstream missions
+// wire the verb dispatch through to a live Estate.
 
 pub mod frames;
 pub mod lexicon;

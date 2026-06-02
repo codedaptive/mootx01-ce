@@ -108,8 +108,6 @@ mod tests {
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
     use locus_kit::estate_types::OwnerCredentials;
     use locus_kit::tunnel::Tunnel;
-    use persistence_kit::inmemory::InMemoryStorage;
-    use uuid::Uuid;
 
     const NOW: i64 = 1_700_000_000;
     const WING: &str = "study";
@@ -118,9 +116,8 @@ mod tests {
 
     fn coord_with_parent() -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
-        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally.
+        let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
         let h = coord
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .unwrap();

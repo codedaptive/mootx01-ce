@@ -1,27 +1,39 @@
-//! SQLite-backed `DrawerStore` impl.
+//! SQLite-backed `DrawerStore` implementation.
 //!
-//! `SqliteDrawerStore` is a thin constructor wrapper around
-//! `InMemoryDrawerStore`. All verb logic — drawer CRUD, supersession
-//! cascade, bitmap mutation paths, tunnel / kg-fact / diary CRUD,
-//! recall trace, audit reads, and summary projections — lives once in
-//! `InMemoryDrawerStore`, which delegates every operation through the
-//! `Arc<dyn Storage>` abstraction layer. Because `SqliteStorage`
-//! implements the same `Storage` trait as `InMemoryStorage`, the
-//! entire verb surface works without duplication: `SqliteDrawerStore`
-//! merely constructs a `SqliteStorage` and hands it to
-//! `InMemoryDrawerStore::new`.
+//! `SqliteDrawerStore` is a thin public newtype over `DrawerStoreCore` backed
+//! by a `SqliteStorage` handle. All verb logic — drawer CRUD, supersession
+//! cascade, bitmap mutation paths, tunnel / kg-fact / diary CRUD, recall
+//! trace, audit reads, and summary projections — lives once in
+//! `DrawerStoreCore`, which delegates every operation through its
+//! `Arc<dyn Storage>` handle. Because `SqliteStorage` and `InMemoryStorage`
+//! both implement the same `Storage` trait, the entire verb surface works
+//! without duplication.
+//!
+//! ## Backend-identity rule
+//!
+//! `SqliteDrawerStore` constructs a `SqliteStorage` and hands it directly to
+//! `DrawerStoreCore::new`. It does NOT wrap `InMemoryDrawerStore` — that
+//! newtype allocates `InMemoryStorage` internally and wrapping it would be
+//! semantically wrong (an in-memory estate inside a durable one). Backend
+//! identity is visible at the construction site:
+//!
+//! - `InMemoryDrawerStore` = ephemeral, in-process `InMemoryStorage`
+//! - `SqliteDrawerStore` = durable WAL-mode `SqliteStorage`
+//!
+//! Both newtypes delegate through the same `DrawerStoreCore`, so verb
+//! behaviour is byte-identical across backends.
 //!
 //! ## Why a newtype rather than a type alias
 //!
-//! A type alias (`type SqliteDrawerStore = InMemoryDrawerStore`) would
-//! expose the in-memory constructor as the public API. A newtype hides
-//! the inner type, enforces the SQLite-specific constructor
-//! (`from_path`), and lets callers import `SqliteDrawerStore` without
-//! coupling to `InMemoryDrawerStore`'s existence.
+//! A type alias (`type SqliteDrawerStore = InMemoryDrawerStore`) would expose
+//! the in-memory constructor as the public API. A newtype hides the inner
+//! type, enforces the SQLite-specific constructor (`from_path`), and lets
+//! callers import `SqliteDrawerStore` without coupling to
+//! `DrawerStoreCore`'s or `InMemoryDrawerStore`'s existence.
 //!
 //! ## Schema invariants
 //!
-//! Inherited from `InMemoryDrawerStore`:
+//! Inherited from `DrawerStoreCore`:
 //! - Dates stored as TEXT ISO-8601 (never REAL). PersistenceKit's
 //!   SQLite backend serialises `TypedValue::Timestamp` as an ISO-8601
 //!   string via its `iso8601()` helper; the schema declares those
@@ -41,7 +53,7 @@
 //! `SqliteStorage`; no additional locking is needed here.
 
 use crate::drawer_store::DrawerStore;
-use crate::drawer_store_inmemory::InMemoryDrawerStore;
+use crate::drawer_store_inmemory::DrawerStoreCore;
 use crate::error::LocusKitError;
 use persistence_kit::storage::{BackendConfiguration, EstateConfiguration};
 use persistence_kit::SqliteStorage;
@@ -49,17 +61,18 @@ use std::sync::Arc;
 use substrate_types::hlc::HLCGenerator;
 use uuid::Uuid;
 
-/// WAL-mode SQLite-backed `DrawerStore`. Durable across process
-/// restarts. Constructed from a filesystem path; the database file is
-/// created if absent. Multiple opens of the same path share the
-/// physical WAL log; the single-connection-per-estate model means only
-/// one `SqliteDrawerStore` should hold a path at any time (sqlite
-/// serialises writes via its own locking when journal_mode=WAL).
+/// WAL-mode SQLite-backed `DrawerStore`. Durable across process restarts.
+/// Constructed from a filesystem path; the database file is created if
+/// absent. Multiple opens of the same path share the physical WAL log; the
+/// single-connection-per-estate model means only one `SqliteDrawerStore`
+/// should hold a path at any time (SQLite serialises writes via its own
+/// locking when journal_mode=WAL).
 ///
-/// All verb behaviour is identical to `InMemoryDrawerStore` — this
-/// type delegates through the same `InMemoryDrawerStore` infrastructure
-/// backed by a `SqliteStorage` handle rather than `InMemoryStorage`.
-pub struct SqliteDrawerStore(InMemoryDrawerStore);
+/// All verb behaviour is identical to `InMemoryDrawerStore` — this type
+/// wraps `DrawerStoreCore` directly with a `SqliteStorage` backend, not the
+/// `InMemoryDrawerStore` newtype (which allocates `InMemoryStorage`
+/// internally and would be semantically wrong here).
+pub struct SqliteDrawerStore(DrawerStoreCore);
 
 impl SqliteDrawerStore {
     /// Open (creating if absent) the SQLite estate at `path`.
@@ -79,11 +92,11 @@ impl SqliteDrawerStore {
         hlc: Option<HLCGenerator>,
         busy_timeout_secs: f64,
     ) -> Result<Self, LocusKitError> {
-        // A fresh estate_id is minted here; the manifest stores the
-        // canonical estate uuid (written once on first open) so this
+        // A fresh estate_id is minted here; the manifest stores the canonical
+        // estate uuid (written once on first open by DrawerStoreCore) so this
         // transient id is used only to satisfy the EstateConfiguration
-        // constructor — the InMemoryDrawerStore overwrites estate_uuid
-        // from the manifest after population.
+        // constructor — the core overwrites estate_uuid from the manifest after
+        // population.
         let config = EstateConfiguration::new(
             Uuid::new_v4(),
             BackendConfiguration::Sqlite {
@@ -93,13 +106,19 @@ impl SqliteDrawerStore {
         );
         let storage = SqliteStorage::new(config)
             .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
-        let inner = InMemoryDrawerStore::new(Arc::new(storage), now, hlc)?;
-        Ok(SqliteDrawerStore(inner))
+        // DrawerStoreCore::new is pub(crate) — accessible here because
+        // drawer_store_sqlite is in the same LocusKit crate. External crates
+        // must use SqliteDrawerStore::from_path so the backend is always named
+        // at the construction site.
+        let core = DrawerStoreCore::new(Arc::new(storage), now, hlc)?;
+        Ok(SqliteDrawerStore(core))
     }
 }
 
 // ---------------------------------------------------------------------------
-// DrawerStore delegation — all methods forward to the inner store.
+// DrawerStore delegation — all methods forward to DrawerStoreCore.
+// The `DrawerStoreCore` type implements `DrawerStore` directly, so this
+// delegation is a zero-overhead forward through the newtype wrapper.
 // ---------------------------------------------------------------------------
 
 impl DrawerStore for SqliteDrawerStore {

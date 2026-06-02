@@ -22,15 +22,13 @@ use crate::error::LocusKitError;
 use crate::estate_types::LatticeAnchor;
 use crate::proposal::Proposal;
 use crate::proposal_operational::ProposalTargetObjectType;
-use persistence_kit::inmemory::InMemoryStorage;
-use std::sync::Arc;
-use uuid::Uuid;
 
 const NOW: i64 = 1_700_000_000;
 
 fn open_store() -> InMemoryDrawerStore {
-    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-    InMemoryDrawerStore::new(storage, NOW, None).unwrap()
+    // InMemoryDrawerStore::new allocates InMemoryStorage internally —
+    // backend identity is visible at the type, not the argument.
+    InMemoryDrawerStore::new(NOW, None).unwrap()
 }
 
 fn sample(id: &str, target: &str, filed_at: i64) -> Proposal {

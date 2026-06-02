@@ -10,8 +10,8 @@ use crate::coordinator::GeniusLocusKitError;
 /// Stable identifier for an opened estate, drawn from the manifest's
 /// `estate_uuid`. The Rust scaffold uses a `[u8; 16]` byte
 /// representation so the type stays dependency-free; downstream
-/// missions can swap in a `uuid::Uuid` when the LocusKit Rust port
-/// is wired through.
+/// missions wiring GLK verb dispatch through locus_kit::Estate can
+/// swap this for `uuid::Uuid` at that point.
 pub type EstateUuid = [u8; 16];
 
 /// Identifies one estate opened through the coordinator. Cloneable

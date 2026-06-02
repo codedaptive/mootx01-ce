@@ -57,17 +57,14 @@ mod tests {
     use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
     use locus_kit::filter::{Filter, HydrationLevel, Ordering};
     use locus_kit::frames::CaptureFrame;
-    use persistence_kit::inmemory::InMemoryStorage;
-    use uuid::Uuid;
 
     const HALF_LIFE: f64 = 2_000.0;
     const NOW: i64 = 10_000;
 
     fn coord_with_parent() -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
-        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(storage, 1, None).unwrap());
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally.
+        let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(1, None).unwrap());
         let h = coord
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .unwrap();
