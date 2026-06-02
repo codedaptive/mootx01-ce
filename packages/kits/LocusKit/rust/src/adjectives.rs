@@ -393,13 +393,13 @@ mod tests {
         assert!(Trust::Proposed < Trust::Ambient);
         // Transitivity spot-check
         assert!(Trust::Verbatim < Trust::Ambient);
-        assert!(!(Trust::Proposed < Trust::Canonical));
+        assert!(Trust::Proposed >= Trust::Canonical);
     }
 
     #[test]
     fn trust_filter_example() {
         // Retrieval-layer pattern: "only drawers with trust >= Canonical"
-        let values = vec![
+        let values = [
             Trust::Verbatim,
             Trust::Observed,
             Trust::Canonical,
