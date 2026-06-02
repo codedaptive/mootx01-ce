@@ -73,6 +73,8 @@ public enum NeuronKitCapability: String, Sendable, Hashable, CaseIterable, Codab
     case promoteBranch
     case benchmark
     case runTournament
+    case associationRuleMining   // mineAssociationRules
+    case formalConceptAnalysis   // BoundedConceptMiner.mine
 }
 
 public let shippedNeuronKitCapabilities: Set<NeuronKitCapability>
@@ -88,6 +90,7 @@ public func verifyCapabilities(
 ```rust
 pub enum NeuronKitCapability {
     HybridRecall, Synthesize, DeriveBranch, PromoteBranch, Benchmark, RunTournament,
+    AssociationRuleMining, FormalConceptAnalysis,
 }
 impl NeuronKitCapability { pub fn raw_value(&self) -> &'static str; }
 
@@ -236,13 +239,13 @@ binding; the catalog descriptor matches the Swift values (§ 7).
 
 ## § 6 — Reasoning-lens recipes (SPEC § 4.2)
 
-The fourteen lens recipes. **Both versions are shipped**: Rust in
-`packages/kits/CognitionKit/rust/src/*_recipe.rs`, Swift in
-`Sources/CognitionKit/` (SPEC C-7 satisfied) — each category below
-names its Swift entry points. A lens still graduates into the catalog
-only via the graduation gate (SPEC § 8 — a named consumer and the MCP
-tool land with the catalog entry in one change). The signatures are
-listed here as the surface both versions converge on.
+The fourteen reasoning-lens recipes plus two analytics recipes. **Both versions
+are shipped**: Rust in `packages/kits/CognitionKit/rust/src/*_recipe.rs`, Swift
+in `Sources/CognitionKit/` (SPEC C-7 satisfied) — each category below names its
+Swift entry points. Per `LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02`, a recipe
+graduates into the catalog only when both versions ship in the same change, with
+the MCP tool landing in the same commit. The analytics recipes (association_rules,
+formal_concepts) ship both legs as of AR_FCA_CAPABILITY_001.
 
 Every lens `run_*` takes the estate coordinator and handle, a recall frame
 or wing/anchor, lens-specific parameters, and (where it recalls) a `now`;
@@ -393,6 +396,102 @@ pub fn run_estate_divergence<F: Fn() -> RecallFrame>(
 ) -> Result<EstateDivergence, RecipeRunError>;
 ```
 
+### Analytics (category 10) — both versions shipped (AR_FCA_CAPABILITY_001)
+
+**Swift**
+
+```swift
+public struct AssociationRuleResult: Sendable, Equatable {
+    public let antecedent: String     // label string, e.g. "room:study"
+    public let consequent: String     // label string, e.g. "kind:prose"
+    public let support: Double
+    public let confidence: Double
+    public let lift: Double
+    public let conviction: Double     // +infinity when confidence == 1
+    public let leverage: Double
+}
+
+public struct AssociationRules: Recipe {
+    public struct Input: Sendable {
+        public let frame: RecallFrame
+        public let thresholds: MiningThresholds
+        public init(frame: RecallFrame, thresholds: MiningThresholds)
+    }
+    public struct Output: Sendable {
+        public let rules: [AssociationRuleResult]  // ascending packed label-index order
+        public let drawerCount: Int
+        public let labelOverflow: Bool             // true if >64 unique labels were capped
+    }
+    public let name = "association_rules"
+    public let version = "1.0.0"
+    public let requiredCapabilities = [.associationRuleMining]
+    public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
+}
+
+public struct FormalConceptResult: Sendable, Equatable {
+    public let intent: [String]               // "{ns}.{key}={value}" strings, sorted
+    public let extentDrawerIDs: [String]      // drawer IDs, row-index ascending
+    public let support: Int
+}
+
+public struct FormalConcepts: Recipe {
+    public struct Input: Sendable {
+        public let frame: RecallFrame
+        public let miner: BoundedConceptMiner
+        public init(frame: RecallFrame, miner: BoundedConceptMiner)
+    }
+    public struct Output: Sendable {
+        public let concepts: [FormalConceptResult]   // support desc, intent size asc, lexicographic
+        public let drawerCount: Int
+    }
+    public let name = "formal_concepts"
+    public let version = "1.0.0"
+    public let requiredCapabilities = [.formalConceptAnalysis]
+    public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
+}
+```
+
+**Rust**
+
+```rust
+pub struct AssociationRuleResult {
+    pub antecedent: String, pub consequent: String,
+    pub support: f64, pub confidence: f64,
+    pub lift: f64, pub conviction: f64, pub leverage: f64,
+}
+pub struct AssociationRulesOutput {
+    pub rules: Vec<AssociationRuleResult>,
+    pub drawer_count: usize,
+    pub label_overflow: bool,
+}
+pub fn run_association_rules(
+    coord: &EstateCoordinator, handle: &EstateHandle,
+    frame: RecallFrame, thresholds: MiningThresholds, now: i64,
+) -> Result<AssociationRulesOutput, RecipeRunError>;
+
+pub struct FormalConceptResult {
+    pub intent: Vec<String>,              // "{ns}.{key}={value}", sorted
+    pub extent_drawer_ids: Vec<String>,
+    pub support: usize,
+}
+pub struct FormalConceptsOutput {
+    pub concepts: Vec<FormalConceptResult>,
+    pub drawer_count: usize,
+}
+pub fn run_formal_concepts(
+    coord: &EstateCoordinator, handle: &EstateHandle,
+    frame: RecallFrame, miner: BoundedConceptMiner, now: i64,
+) -> Result<FormalConceptsOutput, RecipeRunError>;
+```
+
+The label vocabulary contract (canonical in both versions): each drawer
+contributes four categorical labels using **lowercase camelCase Swift case
+names** as the canonical substrate vocabulary (§ 4.2 of the SPEC). Format:
+`"kind:{caseName}"`, `"channel:{caseName}"`, `"sensitivity:{caseName}"`,
+`"room:{roomString}"`. Labels are sorted alphabetically; up to 64 distinct
+labels are indexed (MatrixO 6-bit field constraint). The Rust version uses
+the same lowercase strings — NOT the Rust PascalCase Debug names.
+
 ## § 7 — The catalog (SPEC § 8)
 
 **Swift**
@@ -429,9 +528,9 @@ pub fn recipe_names() -> Vec<String>;
 
 The descriptor strings and field shape match across versions byte-for-byte
 (SPEC § 8, C-8). The catalog lists exactly the recipes present in both
-versions — the 2 foundational recipes plus all 14 reasoning lenses
-(LENS_DISCOVERABILITY_DECISION v2.0); a recipe enters when both
-versions land together, with its MCP tool in the same change (SPEC § 8).
+versions — the 2 foundational recipes plus all 14 reasoning lenses plus the
+2 analytics lenses (LENS_DISCOVERABILITY_DECISION v2.0); a recipe enters when
+both versions land together, with its MCP tool in the same change (SPEC § 8).
 
 ---
 

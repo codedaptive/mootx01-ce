@@ -12,7 +12,7 @@ use crate::error::RecipeError;
 use serde::{Deserialize, Serialize};
 
 /// A NeuronKit reasoning capability a recipe sequences. Each case names a
-/// NeuronKit surface that is actually shipped in the Swift version. The
+/// NeuronKit surface that is actually shipped in both versions. The
 /// `serde` rename gives each case the SAME string the Swift `String`
 /// rawValue uses, so the wire shape is identical across versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -29,20 +29,34 @@ pub enum NeuronKitCapability {
     Benchmark,
     #[serde(rename = "runTournament")]
     RunTournament,
+    /// `mine_association_rules(matrix, active_row_count, thresholds)` —
+    /// pairwise association-rule mining over the co-occurrence matrix O.
+    /// A recipe builds a `MatrixO` from the recalled drawer set and
+    /// delegates all rule-metric computation here.
+    #[serde(rename = "associationRuleMining")]
+    AssociationRuleMining,
+    /// `BoundedConceptMiner::mine(context)` — bounded formal concept
+    /// analysis over a materialized `FormalContext`. A recipe builds the
+    /// context from the recalled drawer set's field-value attributes and
+    /// delegates all closure/dedup/ordering logic here.
+    #[serde(rename = "formalConceptAnalysis")]
+    FormalConceptAnalysis,
 }
 
 impl NeuronKitCapability {
     /// Declaration order — MUST match the Swift `allCases` order. The
     /// capability gate walks this order and reports the first required
-    /// capability that is unavailable, so two versions agree on which one
-    /// they name.
-    pub const ALL: [NeuronKitCapability; 6] = [
+    /// capability that is unavailable, so both versions agree on which
+    /// one they name.
+    pub const ALL: [NeuronKitCapability; 8] = [
         NeuronKitCapability::HybridRecall,
         NeuronKitCapability::Synthesize,
         NeuronKitCapability::DeriveBranch,
         NeuronKitCapability::PromoteBranch,
         NeuronKitCapability::Benchmark,
         NeuronKitCapability::RunTournament,
+        NeuronKitCapability::AssociationRuleMining,
+        NeuronKitCapability::FormalConceptAnalysis,
     ];
 
     /// The capability's stable string identifier — identical to the Swift
@@ -55,6 +69,8 @@ impl NeuronKitCapability {
             NeuronKitCapability::PromoteBranch => "promoteBranch",
             NeuronKitCapability::Benchmark => "benchmark",
             NeuronKitCapability::RunTournament => "runTournament",
+            NeuronKitCapability::AssociationRuleMining => "associationRuleMining",
+            NeuronKitCapability::FormalConceptAnalysis => "formalConceptAnalysis",
         }
     }
 }
@@ -154,9 +170,22 @@ mod tests {
             (NeuronKitCapability::PromoteBranch, "promoteBranch"),
             (NeuronKitCapability::Benchmark, "benchmark"),
             (NeuronKitCapability::RunTournament, "runTournament"),
+            (NeuronKitCapability::AssociationRuleMining, "associationRuleMining"),
+            (NeuronKitCapability::FormalConceptAnalysis, "formalConceptAnalysis"),
         ];
         for (cap, raw) in pairs {
             assert_eq!(cap.raw_value(), raw);
         }
+    }
+
+    #[test]
+    fn new_capabilities_appear_in_all_and_shipped() {
+        // AR and FCA cases are in declaration order after runTournament,
+        // present in ALL, and covered by shipped_capabilities().
+        assert!(NeuronKitCapability::ALL.contains(&NeuronKitCapability::AssociationRuleMining));
+        assert!(NeuronKitCapability::ALL.contains(&NeuronKitCapability::FormalConceptAnalysis));
+        assert!(shipped_capabilities().contains(&NeuronKitCapability::AssociationRuleMining));
+        assert!(shipped_capabilities().contains(&NeuronKitCapability::FormalConceptAnalysis));
+        assert_eq!(NeuronKitCapability::ALL.len(), 8);
     }
 }

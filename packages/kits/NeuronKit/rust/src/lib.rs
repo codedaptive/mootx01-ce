@@ -4,7 +4,8 @@
 //! maintenance, standing-signals scheduler, SolverBandit,
 //! audit-chain monitor) and reasoning functions (hybrid recall,
 //! MMR diversification, ContextSynthesizer, branch derivation,
-//! tournament scoring) per NEURONKIT_SPEC_v0.1.md.
+//! tournament scoring, association-rule mining,
+//! bounded formal concept analysis) per NEURONKIT_SPEC_v0.85.md.
 //!
 //! First reasoning surface: the lattice-anchor inference path.
 //! NeuronKit composes EideticLib's deterministic `lookup` and
@@ -80,6 +81,15 @@ pub use partial_recall::{
 pub use anticipation::{anticipate, ActionObservation, ActionPrediction};
 pub use mind_overlap::{dp_summary, summary_overlap};
 pub use bias::{learned_preference, representation_bias, CategoryBias, PreferenceStrength};
+pub use association_rule_mining::{
+    mine_association_rules, AssociationRule, Item, MiningThresholds,
+};
+pub use formal_concept_analysis::{
+    BoundedConceptMiner, FormalAttribute, FormalConcept, FormalContext,
+};
+/// Re-export the `formal_concept_analysis` module as `fca` so CognitionKit
+/// recipes can reference it via `neuron_kit::fca::...` if preferred.
+pub use formal_concept_analysis as fca;
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,

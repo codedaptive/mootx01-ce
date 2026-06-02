@@ -18,11 +18,11 @@
 //!    sequence gated SubstrateML math into estate-level reasoning
 //!    (Keystones, LatentThemes, TrustLens, Drift, Contradiction,
 //!    Constellation, ThemeWeather, FeelsLike, TunnelSuccessor,
-//!    EstateDivergence, Anticipate, MindOverlap, Bias, FreeAssociation).
-//!    Every lens recipe is paired with a Swift version in
-//!    `Sources/CognitionKit/` (SPEC C-7 satisfied) and registered in
-//!    BOTH versions' catalogs with byte-identical descriptors, per
-//!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md`
+//!    EstateDivergence, Anticipate, MindOverlap, Bias, FreeAssociation,
+//!    AssociationRules, FormalConcepts). Every lens recipe is paired with
+//!    a Swift version in `Sources/CognitionKit/` (SPEC C-7 satisfied) and
+//!    registered in BOTH versions' catalogs with byte-identical descriptors,
+//!    per `docs/engineering/LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md`
 //!    (the catalog lists what ships in both versions).
 //!
 //! Determinism: every function here is a pure function of its inputs.
@@ -52,6 +52,8 @@ pub mod estate_divergence_recipe;
 pub mod anticipate_recipe;
 pub mod mind_overlap_recipe;
 pub mod bias_recipe;
+pub mod association_rules_recipe;
+pub mod formal_concepts_recipe;
 
 pub use capability::{verify_capabilities, NeuronKitCapability, shipped_capabilities};
 pub use error::{RecipeError, RecipeRunError, SubstrateError};
@@ -80,3 +82,5 @@ pub use estate_divergence_recipe::{run_estate_divergence, EstateDivergence};
 pub use anticipate_recipe::run_anticipate;
 pub use mind_overlap_recipe::{run_mind_overlap, MindOverlap};
 pub use bias_recipe::{run_bias, BiasReport};
+pub use association_rules_recipe::{run_association_rules, AssociationRuleResult, AssociationRulesOutput};
+pub use formal_concepts_recipe::{run_formal_concepts, FormalConceptResult, FormalConceptsOutput};

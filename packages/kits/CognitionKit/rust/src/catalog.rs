@@ -175,6 +175,23 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![],
         },
+        // Analytics lenses.
+        RecipeDescriptor {
+            name: "association_rules".into(),
+            version: "1.0.0".into(),
+            description:
+                "Recall a frame, project each drawer's categorical facets into a co-occurrence matrix, and mine pairwise association rules."
+                    .into(),
+            required_capabilities: vec![NeuronKitCapability::AssociationRuleMining],
+        },
+        RecipeDescriptor {
+            name: "formal_concepts".into(),
+            version: "1.0.0".into(),
+            description:
+                "Recall a frame, build a formal context where each drawer is a row with its categorical facets as attributes, and mine bounded formal concepts."
+                    .into(),
+            required_capabilities: vec![NeuronKitCapability::FormalConceptAnalysis],
+        },
     ]
 }
 
@@ -199,18 +216,20 @@ mod tests {
     fn catalog_lists_all_shipped_recipes() {
         // Both versions of every recipe ship, so every recipe registers
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational
-        // recipes plus the 14 reasoning lenses.
+        // recipes plus the 14 reasoning lenses plus the 2 analytics lenses.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
             names,
             vec![
                 "anticipate",
+                "association_rules",
                 "bias",
                 "constellation",
                 "contradiction",
                 "drift",
                 "estate_divergence",
+                "formal_concepts",
                 "free_association",
                 "grounded_synthesis",
                 "keystones",
@@ -232,6 +251,11 @@ mod tests {
         assert_eq!(trust.required_capabilities, vec![NeuronKitCapability::Synthesize]);
         let keystones = recipe_descriptor("keystones").unwrap();
         assert!(keystones.required_capabilities.is_empty());
+        // Analytics lenses carry their capability requirements.
+        let ar = recipe_descriptor("association_rules").unwrap();
+        assert_eq!(ar.required_capabilities, vec![NeuronKitCapability::AssociationRuleMining]);
+        let fca = recipe_descriptor("formal_concepts").unwrap();
+        assert_eq!(fca.required_capabilities, vec![NeuronKitCapability::FormalConceptAnalysis]);
     }
 
     #[test]
@@ -274,5 +298,40 @@ mod tests {
         // The capability wire form matches the Swift Codable rawValue.
         assert!(json.contains("\"hybridRecall\""));
         assert!(json.contains("\"requiredCapabilities\""));
+    }
+
+    #[test]
+    fn association_rules_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift AssociationRules recipe metadata.
+        let d = recipe_descriptor("association_rules").unwrap();
+        assert_eq!(d.version, "1.0.0");
+        assert_eq!(
+            d.description,
+            "Recall a frame, project each drawer's categorical facets into a co-occurrence matrix, and mine pairwise association rules."
+        );
+        assert_eq!(
+            d.required_capabilities,
+            vec![NeuronKitCapability::AssociationRuleMining]
+        );
+        // Wire form uses the serde rename (Swift rawValue).
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"associationRuleMining\""));
+    }
+
+    #[test]
+    fn formal_concepts_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift FormalConcepts recipe metadata.
+        let d = recipe_descriptor("formal_concepts").unwrap();
+        assert_eq!(d.version, "1.0.0");
+        assert_eq!(
+            d.description,
+            "Recall a frame, build a formal context where each drawer is a row with its categorical facets as attributes, and mine bounded formal concepts."
+        );
+        assert_eq!(
+            d.required_capabilities,
+            vec![NeuronKitCapability::FormalConceptAnalysis]
+        );
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"formalConceptAnalysis\""));
     }
 }

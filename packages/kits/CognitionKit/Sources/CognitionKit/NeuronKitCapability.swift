@@ -10,12 +10,14 @@
 // Each case names a NeuronKit surface that is ACTUALLY SHIPPED in
 // `packages/kits/NeuronKit/Sources/NeuronKit/` (verified against source,
 // not the v0.8 spec body which reads as if some are deferred):
-//   - hybridRecall       → HybridRecall.swift (free function)
-//   - synthesize         → ContextSynthesizer.synthesize (enum static)
-//   - deriveBranch       → BranchOps.swift (NeuronKit static)
-//   - promoteBranch      → BranchOps.swift (NeuronKit static)
-//   - benchmark          → BenchmarkAlgorithm.swift (NeuronKit static)
-//   - runTournament      → Tournament.swift (NeuronKit static)
+//   - hybridRecall          → HybridRecall.swift (free function)
+//   - synthesize            → ContextSynthesizer.synthesize (enum static)
+//   - deriveBranch          → BranchOps.swift (NeuronKit static)
+//   - promoteBranch         → BranchOps.swift (NeuronKit static)
+//   - benchmark             → BenchmarkAlgorithm.swift (NeuronKit static)
+//   - runTournament         → Tournament.swift (NeuronKit static)
+//   - associationRuleMining → AssociationRuleMining.swift (free function)
+//   - formalConceptAnalysis → FormalConceptAnalysis.swift (BoundedConceptMiner)
 //
 // The enum is intentionally a closed set of *shipped* capabilities.
 // Capabilities that exist only in the stale v0.1 spec (elicitFraming,
@@ -53,6 +55,18 @@ public enum NeuronKitCapability: String, Sendable, Hashable, CaseIterable, Codab
     /// `NeuronKit.runTournament(branches:against:baseline:queries:evaluatedAt:interval:)`
     /// — benchmark + zero-silent-loss gate + survivor ranking.
     case runTournament
+
+    /// `mineAssociationRules(matrix:activeRowCount:thresholds:)` — pairwise
+    /// association-rule mining over the co-occurrence matrix O. A recipe
+    /// builds a `MatrixO` from the recalled drawer set's field-value
+    /// co-occurrence and delegates all rule-metric computation here.
+    case associationRuleMining
+
+    /// `BoundedConceptMiner.mine(context:)` — bounded formal concept analysis
+    /// over a materialized `FormalContext`. A recipe builds the context from
+    /// the recalled drawer set's field-value attributes (one row per drawer)
+    /// and delegates all closure/dedup/ordering logic here.
+    case formalConceptAnalysis
 }
 
 /// The full set of NeuronKit capabilities shipped in the current

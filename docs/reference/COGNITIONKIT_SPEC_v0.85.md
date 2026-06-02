@@ -11,7 +11,7 @@ relates_to:
   - NEURONKIT_SPEC_v0.85.md  (the reasoning surface every recipe sequences — daemons, reasoning functions, the lens taxonomy)
   - GENIUSLOCUSKIT_SPEC_v0.8.md  (the estate verb surface and branch COW verbs recipes dispatch through)
   - GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md  (the substrate contract; the active/subconscious control path)
-  - LENS_DISCOVERABILITY_DECISION_v1.0.md  (the catalog-graduation criteria for a lens recipe)
+  - LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md  (the catalog-graduation criteria for a lens recipe; supersedes v1.0)
 purpose: |
   CognitionKit is the conscious mind of the MOOTx01 substrate: the
   behaviour-recipe layer that sequences NeuronKit reasoning and
@@ -357,6 +357,25 @@ own identities, not a restatement of them.
   surface NeuronKit's drift between their distributions. "How two estates'
   distributions differ."
 
+### Analytics (category 10) — over the recalled set's co-occurrence structure
+
+- **Association rules** — recall a frame, project each drawer's categorical
+  facets (kind, channel, sensitivity, room) into the co-occurrence matrix O
+  using a per-call label vocabulary (canonical lowercase camelCase Swift
+  case names, ≤64 labels), and surface NeuronKit's `mineAssociationRules`
+  pairwise rule mining with the five standard metrics (support, confidence,
+  lift, conviction, leverage). "What co-occurs with what across the
+  recalled drawers." The label vocabulary is per-call and deterministic;
+  rules are relabeled to string antecedents and consequents before return.
+
+- **Formal concepts** — recall a frame, build a `FormalContext` where each
+  drawer is one row and its categorical facets (kind, channel, sensitivity,
+  room) are its `FormalAttribute` triples (namespace "locus", key = axis
+  name, value = canonical lowercase camelCase Swift case name), and surface
+  NeuronKit's `BoundedConceptMiner`. "What maximal attribute closures — the
+  hidden cohorts — emerge from the recalled drawer set." Concept extents are
+  relabeled to drawer IDs before return.
+
 ## § 5 — The read-sequence-shape archetype
 
 Every lens recipe in § 4.2 is built to one archetype, and the archetype is
@@ -469,7 +488,10 @@ the listing never advertises a behaviour an agent cannot reach. Caveats
 are retired rather than relabeled (a recipe registers under its honest
 name for what it actually computes). A recipe registered in the catalog
 is registered in both versions or in neither — the anchor never sees a
-recipe present in one version and absent from the other.
+recipe present in one version and absent from the other. The catalog
+currently lists **18 recipes**: the 2 foundational recipes (grounded_synthesis,
+migration_benchmark), the 14 reasoning lenses, and the 2 analytics lenses
+(association_rules, formal_concepts).
 
 ## § 9 — Invariants
 

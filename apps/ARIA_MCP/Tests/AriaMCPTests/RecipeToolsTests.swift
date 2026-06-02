@@ -54,12 +54,14 @@ struct RecipeToolsTests {
             .sorted()
         #expect(recipeNames == [
             "moot_anticipate",
+            "moot_association_rules",
             "moot_bias",
             "moot_confirm_migration_promotion",
             "moot_constellation",
             "moot_contradiction",
             "moot_drift",
             "moot_estate_divergence",
+            "moot_formal_concepts",
             "moot_free_association",
             "moot_grounded_synthesis",
             "moot_keystones",
@@ -232,6 +234,90 @@ struct RecipeToolsTests {
         #expect(text.contains("silentConceptLoss"))
         // Never promoted.
         #expect(branch.status == .active)
+    }
+
+    // MARK: - association_rules dispatch
+
+    @Test func testAssociationRulesDispatchReturnsOutput() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ar-dispatch"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        // Capture some drawers so there's co-occurrence to mine.
+        for _ in 0..<3 {
+            _ = try await dispatcher.dispatch(
+                name: "moot_capture_drawer",
+                arguments: .object([
+                    "content": .string("study content"),
+                    "room": .string("study"),
+                    "udcCode": .string("000"),
+                    "addedBy": .string("test"),
+                    "embeddingModelID": .string("test-v1"),
+                ]))
+        }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_association_rules",
+            arguments: .object(["filter": .string("unconfirmed")]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.contains("association_rules:"))
+        #expect(text.contains("drawer(s)"))
+    }
+
+    @Test func testAssociationRulesAppearsInListRecipes() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "ar-list"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_list_recipes", arguments: .object([:]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.contains("association_rules"))
+        #expect(text.contains("formal_concepts"))
+    }
+
+    // MARK: - formal_concepts dispatch
+
+    @Test func testFormalConceptsDispatchReturnsOutput() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "fc-dispatch"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        for _ in 0..<2 {
+            _ = try await dispatcher.dispatch(
+                name: "moot_capture_drawer",
+                arguments: .object([
+                    "content": .string("study content"),
+                    "room": .string("study"),
+                    "udcCode": .string("000"),
+                    "addedBy": .string("test"),
+                    "embeddingModelID": .string("test-v1"),
+                ]))
+        }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_formal_concepts",
+            arguments: .object([
+                "filter": .string("unconfirmed"),
+                "minSupport": .integer(1),
+                "maxIntentSize": .integer(8),
+                "maxConcepts": .integer(10),
+            ]))
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.contains("formal_concepts:"))
+        #expect(text.contains("drawer(s)"))
     }
 
     // MARK: - helpers

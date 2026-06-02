@@ -7,7 +7,11 @@
 // RecipeTools: provenance `.recipe`, matched by name above the lexicon
 // projection, no generic run-by-name dispatcher.
 //
-// Tool stem = catalog name: moot_keystones … moot_estate_divergence.
+// Tool stem = catalog name: moot_keystones … moot_formal_concepts.
+// The 14 reasoning lenses span structure, topic, preference, surprise,
+// grounding/trust, associative, prediction, and federated categories.
+// The 2 analytics lenses (moot_association_rules, moot_formal_concepts)
+// follow in catalog order.
 // The two federated lenses take a second estate via `estateIDB`,
 // resolved through the dispatcher's own estate registry exactly like
 // `estateID`.
@@ -29,6 +33,7 @@ enum LensTools {
         "moot_drift", "moot_contradiction", "moot_trust_grounded_synthesis",
         "moot_partial_cue_recall", "moot_anticipate", "moot_tunnel_successor",
         "moot_mind_overlap", "moot_estate_divergence",
+        "moot_association_rules", "moot_formal_concepts",
     ]
 
     /// True when `name` is one of the lens tools dispatched by name.
@@ -207,6 +212,34 @@ enum LensTools {
                     ],
                     required: ["estateIDB"]),
                 provenance: .recipe),
+            // Analytics lenses.
+            ProjectedTool(
+                name: "moot_association_rules",
+                description: "Recall a frame, project each drawer's categorical facets into a co-occurrence matrix, and mine pairwise association rules.",
+                inputSchema: objectSchema(
+                    properties: [
+                        "filter": filterSchema,
+                        "limit": integerSchema("Max drawers to recall."),
+                        "minSupport": .object(["type": .string("number"), "description": .string("Minimum rule support (0..1). Default 0.")]),
+                        "minConfidence": .object(["type": .string("number"), "description": .string("Minimum rule confidence (0..1). Default 0.")]),
+                        "estateID": estateIDSchema,
+                    ],
+                    required: []),
+                provenance: .recipe),
+            ProjectedTool(
+                name: "moot_formal_concepts",
+                description: "Recall a frame, build a formal context where each drawer is a row with its categorical facets as attributes, and mine bounded formal concepts.",
+                inputSchema: objectSchema(
+                    properties: [
+                        "filter": filterSchema,
+                        "limit": integerSchema("Max drawers to recall."),
+                        "minSupport": integerSchema("Minimum concept extent size. Default 1."),
+                        "maxIntentSize": integerSchema("Maximum concept intent size. Default 8."),
+                        "maxConcepts": integerSchema("Maximum concepts returned. Default 20."),
+                        "estateID": estateIDSchema,
+                    ],
+                    required: []),
+                provenance: .recipe),
         ]
     }
 
@@ -359,6 +392,65 @@ enum LensTools {
             a=\(out.aCount) drawer(s), b=\(out.bCount) drawer(s)
             """)
 
+        case "moot_association_rules":
+            let filter = decodeFilter(args["filter"]?.stringValue)
+            let limit = args["limit"]?.integerValue.map(Int.init)
+            let minSupport = doubleArg(args["minSupport"]) ?? 0.0
+            let minConfidence = doubleArg(args["minConfidence"]) ?? 0.0
+            let arFrame = LocusKit.RecallFrame(
+                filterChain: [filter],
+                hydrationLevel: .structured,
+                limit: limit,
+                ordering: .byCaptureTimeDesc)
+            let arOut = try await AssociationRules().run(
+                input: .init(
+                    frame: arFrame,
+                    thresholds: MiningThresholds(minSupport: minSupport, minConfidence: minConfidence)),
+                estate: handle, kit: kit)
+            var arLines = [
+                "association_rules: \(arOut.rules.count) rule(s) from \(arOut.drawerCount) drawer(s)",
+            ]
+            if arOut.labelOverflow {
+                arLines.append("note: label vocabulary was capped at 64; some labels were dropped")
+            }
+            for rule in arOut.rules {
+                arLines.append(
+                    "  \(rule.antecedent) → \(rule.consequent): "
+                    + "sup=\(String(format: "%.3f", rule.support)) "
+                    + "conf=\(String(format: "%.3f", rule.confidence)) "
+                    + "lift=\(String(format: "%.3f", rule.lift))")
+            }
+            return ToolDispatcher.textResult(arLines.joined(separator: "\n"))
+
+        case "moot_formal_concepts":
+            let fcFilter = decodeFilter(args["filter"]?.stringValue)
+            let fcLimit = args["limit"]?.integerValue.map(Int.init)
+            let minSupport = args["minSupport"]?.integerValue.map(Int.init) ?? 1
+            let maxIntentSize = args["maxIntentSize"]?.integerValue.map(Int.init) ?? 8
+            let maxConcepts = args["maxConcepts"]?.integerValue.map(Int.init) ?? 20
+            let fcFrame = LocusKit.RecallFrame(
+                filterChain: [fcFilter],
+                hydrationLevel: .structured,
+                limit: fcLimit,
+                ordering: .byCaptureTimeDesc)
+            let fcOut = try await FormalConcepts().run(
+                input: .init(
+                    frame: fcFrame,
+                    miner: BoundedConceptMiner(
+                        minSupport: minSupport,
+                        maxIntentSize: maxIntentSize,
+                        maxConcepts: maxConcepts)),
+                estate: handle, kit: kit)
+            var fcLines = [
+                "formal_concepts: \(fcOut.concepts.count) concept(s) from \(fcOut.drawerCount) drawer(s)",
+            ]
+            for (i, concept) in fcOut.concepts.enumerated() {
+                fcLines.append("  concept \(i + 1): support=\(concept.support)")
+                fcLines.append("    intent: \(concept.intent.joined(separator: ", "))")
+                fcLines.append("    extent: \(concept.extentDrawerIDs.count) drawer(s)")
+            }
+            return ToolDispatcher.textResult(fcLines.joined(separator: "\n"))
+
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -479,6 +571,29 @@ enum LensTools {
         default: filter = .unconfirmed
         }
         return LocusKit.RecallFrame(filterChain: [filter])
+    }
+
+    /// Decode a filter kind string to a `LocusKit.Filter`. Used by the
+    /// analytics lenses that take an explicit filter + limit frame.
+    private static func decodeFilter(_ name: String?) -> LocusKit.Filter {
+        switch name {
+        case "userConfirmed": return .userConfirmed
+        case "exportable": return .exportable
+        case "contained": return .contained
+        case "currentlyBelieve": return .currentlyBelieve
+        default: return .unconfirmed
+        }
+    }
+
+    /// Extract a `Double` from a `.double` or `.integer` JSON value.
+    /// Returns `nil` for absent or non-numeric values.
+    private static func doubleArg(_ value: JSONValue?) -> Double? {
+        guard let value else { return nil }
+        switch value {
+        case .double(let d): return d
+        case .integer(let i): return Double(i)
+        default: return nil
+        }
     }
 
     // MARK: - Result shaping
