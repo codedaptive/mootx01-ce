@@ -85,10 +85,10 @@ impl Surface {
 
     // MARK: - capture
 
-    /// File a new drawer. Scaffold: the LocusKit Rust port is not
-    /// present so the call shape exists but the dispatch raises
-    /// `NotSupportedByEstate("capture")`. Downstream missions
-    /// replace this body with a live dispatch when the port ships.
+    /// File a new drawer. Scaffold: GLK verb dispatch to a live
+    /// `locus_kit::Estate` has not yet been wired; the call shape
+    /// exists and raises `NotSupportedByEstate("capture")` until a
+    /// downstream mission wires the dispatch.
     pub fn capture(&self, _frame: CaptureFrame) -> Result<RowId, VerbError> {
         Err(VerbError::NotSupportedByEstate {
             verb: "capture".into(),
