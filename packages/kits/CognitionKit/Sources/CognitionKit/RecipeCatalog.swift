@@ -56,12 +56,81 @@ public struct RecipeDescriptor: Sendable, Equatable, Codable {
 /// tool surface and any in-process enumerator read from here.
 public enum RecipeCatalog {
 
-    /// Every shipped recipe's descriptor, in stable declaration order.
-    /// A new recipe is added here once and becomes discoverable
-    /// everywhere that reads the catalog.
+    /// Every shipped recipe's descriptor, in stable declaration order:
+    /// the foundational recipes first, then the reasoning lenses by
+    /// category. A recipe registers when both its versions ship
+    /// (LENS_DISCOVERABILITY_DECISION v2.0) — added here once, it
+    /// becomes discoverable everywhere that reads the catalog. The lens
+    /// entry points are static namespaces, so their descriptors are
+    /// declared literally; descriptor strings match `catalog.rs`
+    /// byte-for-byte (the conformance anchor).
     public static let all: [RecipeDescriptor] = [
         RecipeDescriptor(GroundedSynthesis()),
         RecipeDescriptor(MigrationBenchmark()),
+        // Structure lenses.
+        RecipeDescriptor(
+            name: "keystones", version: "1.0.0",
+            description: "Reasoning lens: rank a wing's load-bearing memories by centrality over its drawer-to-drawer tunnel graph.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "constellation", version: "1.0.0",
+            description: "Reasoning lens: recover the emergent communities of a wing's drawer-to-drawer tunnel graph.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "free_association", version: "1.0.0",
+            description: "Reasoning lens: from a seed memory, walk the wing's tunnel graph with restart and rank the memories the walk keeps landing on.",
+            requiredCapabilities: []),
+        // Topic lenses.
+        RecipeDescriptor(
+            name: "theme_weather", version: "1.0.0",
+            description: "Reasoning lens: per-room momentum — recent attention share vs historical share; what's rising and what's fading.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "latent_themes", version: "1.0.0",
+            description: "Reasoning lens: factor the recalled set's metadata co-occurrence into soft latent themes — the emergent topics in how the estate is filed.",
+            requiredCapabilities: []),
+        // Preference lens.
+        RecipeDescriptor(
+            name: "bias", version: "1.0.0",
+            description: "Reasoning lens: representation bias vs a reference, per-room dismissal rates, and learned preference from real curation choices.",
+            requiredCapabilities: []),
+        // Surprise lenses.
+        RecipeDescriptor(
+            name: "drift", version: "1.0.0",
+            description: "Reasoning lens: how far the room distribution after a split instant has drifted from the distribution before it.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "contradiction", version: "1.0.0",
+            description: "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the odd-ones-out.",
+            requiredCapabilities: []),
+        // Grounding / trust lens.
+        RecipeDescriptor(
+            name: "trust_grounded_synthesis", version: "1.0.0",
+            description: "Reasoning lens: recall, rank by provenance trust (canonical and user above derived), and synthesize the trust-ordered set.",
+            requiredCapabilities: [.synthesize]),
+        // Associative lens.
+        RecipeDescriptor(
+            name: "partial_cue_recall", version: "1.0.0",
+            description: "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching.",
+            requiredCapabilities: []),
+        // Prediction lenses.
+        RecipeDescriptor(
+            name: "anticipate", version: "1.0.0",
+            description: "Reasoning lens: learn which capture actions tend to reach a target outcome, ranked by conservative success rate.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "tunnel_successor", version: "1.0.0",
+            description: "Reasoning lens: the memories an anchor points onward to by explicit tunnels, ranked by frequency.",
+            requiredCapabilities: []),
+        // Federated lenses.
+        RecipeDescriptor(
+            name: "mind_overlap", version: "1.0.0",
+            description: "Reasoning lens (federated): privacy-preserving overlap of two estates via differentially-private fingerprint summaries.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "estate_divergence", version: "1.0.0",
+            description: "Reasoning lens (federated): how two estates' room distributions diverge, by Jensen-Shannon divergence.",
+            requiredCapabilities: []),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

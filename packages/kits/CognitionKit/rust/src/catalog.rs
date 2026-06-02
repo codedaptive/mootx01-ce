@@ -55,6 +55,126 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                 NeuronKitCapability::PromoteBranch,
             ],
         },
+        // Structure lenses.
+        RecipeDescriptor {
+            name: "keystones".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: rank a wing's load-bearing memories by centrality over its drawer-to-drawer tunnel graph."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "constellation".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: recover the emergent communities of a wing's drawer-to-drawer tunnel graph."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "free_association".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: from a seed memory, walk the wing's tunnel graph with restart and rank the memories the walk keeps landing on."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        // Topic lenses.
+        RecipeDescriptor {
+            name: "theme_weather".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: per-room momentum — recent attention share vs historical share; what's rising and what's fading."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "latent_themes".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: factor the recalled set's metadata co-occurrence into soft latent themes — the emergent topics in how the estate is filed."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        // Preference lens.
+        RecipeDescriptor {
+            name: "bias".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: representation bias vs a reference, per-room dismissal rates, and learned preference from real curation choices."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        // Surprise lenses.
+        RecipeDescriptor {
+            name: "drift".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: how far the room distribution after a split instant has drifted from the distribution before it."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "contradiction".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the odd-ones-out."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        // Grounding / trust lens.
+        RecipeDescriptor {
+            name: "trust_grounded_synthesis".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: recall, rank by provenance trust (canonical and user above derived), and synthesize the trust-ordered set."
+                    .into(),
+            required_capabilities: vec![NeuronKitCapability::Synthesize],
+        },
+        // Associative lens.
+        RecipeDescriptor {
+            name: "partial_cue_recall".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        // Prediction lenses.
+        RecipeDescriptor {
+            name: "anticipate".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: learn which capture actions tend to reach a target outcome, ranked by conservative success rate."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "tunnel_successor".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: the memories an anchor points onward to by explicit tunnels, ranked by frequency."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        // Federated lenses.
+        RecipeDescriptor {
+            name: "mind_overlap".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens (federated): privacy-preserving overlap of two estates via differentially-private fingerprint summaries."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "estate_divergence".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens (federated): how two estates' room distributions diverge, by Jensen-Shannon divergence."
+                    .into(),
+            required_capabilities: vec![],
+        },
     ]
 }
 
@@ -77,9 +197,41 @@ mod tests {
 
     #[test]
     fn catalog_lists_all_shipped_recipes() {
+        // Both versions of every recipe ship, so every recipe registers
+        // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational
+        // recipes plus the 14 reasoning lenses.
         let mut names = recipe_names();
         names.sort();
-        assert_eq!(names, vec!["grounded_synthesis", "migration_benchmark"]);
+        assert_eq!(
+            names,
+            vec![
+                "anticipate",
+                "bias",
+                "constellation",
+                "contradiction",
+                "drift",
+                "estate_divergence",
+                "free_association",
+                "grounded_synthesis",
+                "keystones",
+                "latent_themes",
+                "migration_benchmark",
+                "mind_overlap",
+                "partial_cue_recall",
+                "theme_weather",
+                "trust_grounded_synthesis",
+                "tunnel_successor",
+            ]
+        );
+    }
+
+    #[test]
+    fn lens_descriptors_carry_capability_gates() {
+        // Mirrors Swift `lensDescriptorsCarryCapabilityGates`.
+        let trust = recipe_descriptor("trust_grounded_synthesis").unwrap();
+        assert_eq!(trust.required_capabilities, vec![NeuronKitCapability::Synthesize]);
+        let keystones = recipe_descriptor("keystones").unwrap();
+        assert!(keystones.required_capabilities.is_empty());
     }
 
     #[test]

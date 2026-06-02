@@ -20,10 +20,10 @@
 //!    Constellation, ThemeWeather, FeelsLike, TunnelSuccessor,
 //!    EstateDivergence, Anticipate, MindOverlap, Bias, FreeAssociation).
 //!    Every lens recipe is paired with a Swift version in
-//!    `Sources/CognitionKit/` (SPEC C-7 satisfied). None are registered
-//!    in the `catalog` yet — a lens registers in BOTH versions' catalogs
-//!    or in neither, per the graduation gate in
-//!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v1.0_2026-05-31.md`.
+//!    `Sources/CognitionKit/` (SPEC C-7 satisfied) and registered in
+//!    BOTH versions' catalogs with byte-identical descriptors, per
+//!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md`
+//!    (the catalog lists what ships in both versions).
 //!
 //! Determinism: every function here is a pure function of its inputs.
 //! No clock, no randomness, no unordered iteration that reaches output.

@@ -461,12 +461,15 @@ match across the Swift and Rust versions byte-for-byte, so a descriptor
 round-trips identically across the versions' wire shapes. The catalog
 therefore lists exactly the recipes that exist in both versions.
 
-A lens recipe **graduates** into the catalog only when, per
-`LENS_DISCOVERABILITY_DECISION_v1.0`: it has a named consumer; its caveats
-are retired rather than relabeled; it fits the descriptor model; and both
-versions of the recipe land together, so the anchor never sees a recipe
-present in one version and absent from the other. A recipe registered in
-the catalog is registered in both versions or in neither.
+A recipe **registers** in the catalog when both its versions ship, per
+`LENS_DISCOVERABILITY_DECISION_v2.0`: the catalog lists every recipe
+that exists in both versions — the normal registry posture — and a
+registered recipe ships its dedicated MCP tool in the same change, so
+the listing never advertises a behaviour an agent cannot reach. Caveats
+are retired rather than relabeled (a recipe registers under its honest
+name for what it actually computes). A recipe registered in the catalog
+is registered in both versions or in neither — the anchor never sees a
+recipe present in one version and absent from the other.
 
 ## § 9 — Invariants
 
