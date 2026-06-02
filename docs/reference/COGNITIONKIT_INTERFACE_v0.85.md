@@ -317,6 +317,8 @@ pub fn run_contradiction(
 
 ### Grounding / trust (category 6)
 
+Swift versions shipped: `TrustLens`.
+
 ```rust
 pub struct TrustGroundedOutput {
     pub context: ContextDocument,

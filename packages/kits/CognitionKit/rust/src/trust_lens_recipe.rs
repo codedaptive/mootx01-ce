@@ -5,10 +5,10 @@
 //! memories ground the context first. The estate reasons about which of its
 //! own memories to lean on.
 //!
-//! Rust-only today (Swift version contracted, SPEC C-7). PURE CognitionKit sequencing: recall
-//! via GLK + the drawer provenance accessors (existing) + NeuronKit
-//! `synthesize` (existing). Zero new substrate, zero new NeuronKit surface.
-//! Read-only.
+//! Paired with the Swift version (`Sources/CognitionKit/TrustLens.swift`).
+//! PURE CognitionKit sequencing: recall via GLK + the drawer provenance
+//! accessors (existing) + NeuronKit `synthesize` (existing). Zero new
+//! substrate, zero new NeuronKit surface. Read-only.
 //!
 //! Trust signal: `source_type` is used (it is settable at capture and varies),
 //! not `confirmation` — the user-confirmed tier can only be reached through
