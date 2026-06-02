@@ -131,6 +131,9 @@ public enum RecipeCatalog {
             name: "estate_divergence", version: "1.0.0",
             description: "Reasoning lens (federated): how two estates' room distributions diverge, by Jensen-Shannon divergence.",
             requiredCapabilities: []),
+        // Analytics lenses.
+        RecipeDescriptor(AssociationRules()),
+        RecipeDescriptor(FormalConcepts()),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

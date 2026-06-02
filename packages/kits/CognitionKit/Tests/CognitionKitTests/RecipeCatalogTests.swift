@@ -16,14 +16,16 @@ struct RecipeCatalogTests {
     func catalogListsAllShippedRecipes() {
         // Both versions of every recipe ship, so every recipe registers
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational
-        // recipes plus the 14 reasoning lenses.
+        // recipes plus the 14 reasoning lenses plus the 2 analytics lenses.
         #expect(RecipeCatalog.names.sorted() == [
             "anticipate",
+            "association_rules",
             "bias",
             "constellation",
             "contradiction",
             "drift",
             "estate_divergence",
+            "formal_concepts",
             "free_association",
             "grounded_synthesis",
             "keystones",
@@ -46,6 +48,11 @@ struct RecipeCatalogTests {
         #expect(trust.requiredCapabilities == [.synthesize])
         let keystones = try #require(RecipeCatalog.descriptor(named: "keystones"))
         #expect(keystones.requiredCapabilities.isEmpty)
+        // Analytics lenses carry their respective capability requirements.
+        let ar = try #require(RecipeCatalog.descriptor(named: "association_rules"))
+        #expect(ar.requiredCapabilities == [.associationRuleMining])
+        let fca = try #require(RecipeCatalog.descriptor(named: "formal_concepts"))
+        #expect(fca.requiredCapabilities == [.formalConceptAnalysis])
     }
 
     @Test("descriptor matches live recipe metadata")
