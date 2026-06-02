@@ -285,12 +285,12 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
     public let profileID: UUID
     public let name: String
     public let framingParameters: [String: String]   // [String: Any] narrowed for Codable
-    public let scoringBreakdown: [String: Float]
-    public let preferenceWeights: [String: Float]
+    public let scoringBreakdown: [String: Double]
+    public let preferenceWeights: [String: Double]
     public let createdAt: Date                        // caller-supplied; stored ISO8601 TEXT
     public let trainingEligible: Bool                 // value-type Bool; not a SQLite entity (B-1)
     public init(profileID: UUID = UUID(), name: String, framingParameters: [String: String],
-                scoringBreakdown: [String: Float], preferenceWeights: [String: Float],
+                scoringBreakdown: [String: Double], preferenceWeights: [String: Double],
                 createdAt: Date, trainingEligible: Bool = false)
 }
 ```
@@ -301,8 +301,8 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
 pub struct ScenarioProfile {
     pub profile_id: String, pub name: String,
     pub framing_parameters: BTreeMap<String, String>,
-    pub scoring_breakdown: BTreeMap<String, f32>,
-    pub preference_weights: BTreeMap<String, f32>,
+    pub scoring_breakdown: BTreeMap<String, f64>,
+    pub preference_weights: BTreeMap<String, f64>,
     pub created_at: String,            // ISO8601
     pub training_eligible: bool,
 }   // ScenarioProfile::new(...)

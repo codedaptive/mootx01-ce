@@ -50,12 +50,12 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
     /// Per-signal breakdown of the tournament's scoring. Keys are the
     /// signal names (e.g., "averageReward"); values are the numeric
     /// score the tournament observed.
-    public let scoringBreakdown: [String: Float]
+    public let scoringBreakdown: [String: Double]
 
     /// User-tunable preference weights applied on top of the scoring
     /// breakdown. Spec § 4.6 — saved here so future runs can replay
     /// the preference signal without rebuilding it.
-    public let preferenceWeights: [String: Float]
+    public let preferenceWeights: [String: Double]
 
     /// Wall-clock at which the profile was saved. Carried by the
     /// caller; the substrate stores it as ISO8601 TEXT per the fleet
@@ -72,8 +72,8 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
         profileID: UUID = UUID(),
         name: String,
         framingParameters: [String: String],
-        scoringBreakdown: [String: Float],
-        preferenceWeights: [String: Float],
+        scoringBreakdown: [String: Double],
+        preferenceWeights: [String: Double],
         createdAt: Date,
         trainingEligible: Bool = false
     ) {
