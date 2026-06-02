@@ -87,10 +87,8 @@ data integrity, the federation trust boundary, the access perimeter, or
 the chain-of-custody guarantees — report it privately rather than opening
 a public issue.
 
-> **Security contact:** _to be published._ Until a dedicated security
-> contact is listed here, send security reports through the private
-> channel noted in the repository's security policy, or contact the
-> maintainers directly rather than filing a public issue.
+> **Security contact:** see [SECURITY.md](SECURITY.md) for the private
+> reporting channels and what to expect after you report.
 
 We will acknowledge a security report, work the problem privately, and
 coordinate disclosure once a fix has tested out and shipped to the
