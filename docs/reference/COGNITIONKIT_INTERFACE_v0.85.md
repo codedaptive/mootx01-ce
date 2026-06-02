@@ -308,6 +308,9 @@ pub fn run_bias(
 
 ### Surprise (category 5)
 
+Swift versions shipped: `Drift` (`splitAt`/window math over `Date`,
+matching the Swift capture surface).
+
 ```rust
 pub struct DriftOutput { pub drift: DriftScore, pub before_count: usize, pub after_count: usize }
 pub fn run_drift(
