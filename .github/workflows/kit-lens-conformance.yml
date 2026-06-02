@@ -28,6 +28,19 @@ on:
 
 jobs:
 
+  mirrored-vector-audit:
+    name: Mirrored-literal divergence audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reports any legacy by-copy conformance family whose mirrored
+      # tables diverged, and keeps the unmigrated-family inventory
+      # visible on every run. Flip to --strict once all families have
+      # migrated to the shared artifact (SPEC § 9 C-0).
+      - name: check-mirrored-vectors
+        run: python3 docs/validation/substrate_math_performance/test-harness/check-mirrored-vectors.py
+
   swift-kits:
     name: Swift legs — NeuronKit + CognitionKit
     runs-on: macos-14
