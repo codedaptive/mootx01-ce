@@ -16,7 +16,7 @@
 //! moot_list_recipes, then the 14 lens tools (catalog order), then the
 //! 2 foundational recipe tools (grounded_synthesis, run_migration_benchmark,
 //! confirm_migration_promotion), then the v1 lexicon minimum
-//! (moot_capture_drawer, moot_recall_drawer, moot_capture_tunnel).
+//! (moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel).
 
 use serde_json::json;
 
@@ -308,7 +308,11 @@ fn capture_drawer_tool() -> serde_json::Value {
             json!({
                 "content": string_schema("Verbatim content to file."),
                 "room": string_schema("Room within the estate."),
-                "udcCode": string_schema("Lattice anchor classification code (e.g. \"000.000\")."),
+                // The anchor code is interpreted under classificationScheme below.
+                // The arg name stays udcCode for wire compatibility; renaming it is
+                // a separate storage migration (§5.8 dual-scheme model), out of scope here.
+                "udcCode": string_schema("Lattice anchor classification code (e.g. \"000.000\"), interpreted under classificationScheme."),
+                "classificationScheme": string_schema("Optional classification scheme for the anchor code: \"udc\" (default) or \"mdcc\". Omitting it preserves UDC behavior."),
                 "addedBy": string_schema("Actor identifier filed with the row."),
                 "embeddingModelID": string_schema("Embedding model the row tags vectors with."),
                 "channel": string_schema("Capture channel: typed, voiced, ocr, importedFile, sensor."),

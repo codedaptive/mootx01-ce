@@ -5,33 +5,22 @@
 //! throw `JSONRPCError`; recipe-level refusals come back as `error_result` (isError
 //! true) so the client keeps the call id.
 //!
-//! # Two-call run→confirm pattern
+//! # moot_run_migration_benchmark
 //!
-//! MCP `tools/call` is stateless across invocations. The run tool surfaces branch
-//! *ids* in its result; the confirm tool takes those ids and re-resolves them
-//! through the long-lived coordinator's branch registry. This matches the Swift
-//! `RecipeTools.swift` two-call run→confirm pattern exactly.
+//! Derives one COW branch per candidate plan, populates each from the origin corpus,
+//! benchmarks recall fidelity with the zero-silent-loss gate, and returns a ranked
+//! list of survivors. Never promotes. Returns branch ids in the result text so a
+//! caller can pass them to the confirm tool.
 //!
-//! # confirm_migration_promotion: winner by name
+//! # moot_confirm_migration_promotion — v1 behavioral boundary
 //!
-//! The Rust `confirm_migration_promotion` takes `winner_plan_name` (a string plan
-//! name) and a reference to the `CoreReport`. Because the server is stateless
-//! across calls, we cannot hold the `CoreReport` between calls. For v1 the confirm
-//! tool re-runs the benchmark with the same corpus/plans to regenerate the report,
-//! then immediately promotes the winner. This is honest behavior documented in the
-//! README as a v1 behavioral fact. The confirm call is idempotent because the
-//! branch registry is stable.
-//!
-//! UPDATE: on inspecting the Rust `confirm_migration_promotion` signature more
-//! carefully — it takes `winner_plan_name: &str` and `report: &CoreReport`.
-//! For v1 we map `winnerBranchID` (UUID) back to a plan name by searching the
-//! registry, which requires having the report. Since the server is stateless, we
-//! document the gap: `moot_confirm_migration_promotion` is delivered as
-//! `run-only` for v1 (the confirm step needs the live report object). The README
-//! documents this gap plainly. The `moot_confirm_migration_promotion` tool IS
-//! advertised in tools/list but returns an explicit informational error explaining
-//! the v1 boundary, per the mission's instruction to "document the gap as a
-//! behavioral fact in the README and your report."
+//! The tool is advertised in tools/list and receives calls. It returns an
+//! informational error_result (isError true) explaining the v1 boundary:
+//! `confirm_migration_promotion` requires the live `CoreReport` produced by
+//! `run_migration_benchmark`; the stateless server cannot retain that object
+//! across tool calls. The README documents this gap as a v1 behavioral fact.
+//! Persistent session state (needed to bridge run→confirm without re-running the
+//! benchmark) is out of scope for v1.
 
 use std::collections::BTreeMap;
 
