@@ -275,6 +275,20 @@ public enum ToolProjection {
                 ],
                 required: []
             )
+        case (.recall, .tunnel):
+            // Read outgoing tunnel edges by source wing.
+            // GeniusLocusKit.recallTunnels(_:wing:) is the dispatch target —
+            // verified in GeniusLocusKit/Verbs/VerbSurface.swift:115.
+            // Wire name is moot_tunnel_recall (noun_verb, same as drawer_recall).
+            // Schema matches the Rust leg (rust/src/tool_list.rs tunnel_recall_tool):
+            // wing is the single required argument. estateID is injected by the
+            // withEstateID wrapper in make(verb:noun:) — not declared here.
+            return objectSchema(
+                properties: [
+                    "wing": stringSchema("Wing to read outgoing tunnels from."),
+                ],
+                required: ["wing"]
+            )
         case (.mutate, _):
             return objectSchema(
                 properties: [

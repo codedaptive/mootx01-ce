@@ -163,6 +163,8 @@ public struct ToolDispatcher: Sendable {
                 return try await runCaptureDrawer(args)
             case (.recall, .drawer):
                 return try await runRecallDrawer(args)
+            case (.recall, .tunnel):
+                return try await runRecallTunnel(args)
             case (.mutate, _):
                 return try await runMutate(args, noun: noun)
             case (.withdraw, _):
@@ -174,6 +176,10 @@ public struct ToolDispatcher: Sendable {
             case (.learn, _):
                 return try await runLearn(args, noun: noun)
             default:
+                // All acceptance-matrix (verb, noun) pairs that surface as tools
+                // should have an explicit arm above. This arm fires only when a
+                // new (verb, noun) pair is accepted by the lexicon but has not
+                // yet been wired to a handler — a missing arm, not a caller error.
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.methodNotFound,
                     message: "No handler bound for tool \(name)"
@@ -297,6 +303,29 @@ public struct ToolDispatcher: Sendable {
             "\(drawer.id)  [\(drawer.room)]  \(drawer.content.prefix(80))"
         }
         let header = "recalled \(rows.count) drawer(s)"
+        let body = ([header] + lines).joined(separator: "\n")
+        return Self.textResult(body)
+    }
+
+    /// Handle moot_tunnel_recall: read the outgoing tunnel edges whose source
+    /// wing matches the required `wing` argument.
+    ///
+    /// Dispatches to `GeniusLocusKit.recallTunnels(_:wing:)` — the graph-read
+    /// method verified in GeniusLocusKit/Verbs/VerbSurface.swift:115 that
+    /// returns all non-tombstoned tunnels originating from `wing` in stable
+    /// filed-at order. A wing with no tunnels returns an empty list, not an
+    /// error. `wing` is required; its absence is an out-of-band `invalidParams`
+    /// consistent with the other required-arg decoders.
+    private func runRecallTunnel(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let wing = try requireString(args, "wing")
+        let tunnels = try await kit.recallTunnels(handle, wing: wing)
+        // Cap the body at 50 rows, matching the drawer recall cap discipline
+        // so wide tunnel reads do not push the response past JSON-RPC sanity.
+        let lines = tunnels.prefix(50).map { tunnel -> String in
+            "\(tunnel.id)  [\(tunnel.sourceWing)/\(tunnel.sourceRoom)]→[\(tunnel.targetWing)/\(tunnel.targetRoom)]  \(tunnel.label)"
+        }
+        let header = "recalled \(tunnels.count) tunnel(s) from wing \(wing)"
         let body = ([header] + lines).joined(separator: "\n")
         return Self.textResult(body)
     }
