@@ -1,11 +1,20 @@
-//! v2b-p1 lexicon surface: moot_capture_drawer, moot_drawer_recall,
-//! moot_capture_tunnel, moot_mutate_drawer, moot_withdraw_drawer,
-//! moot_expunge_drawer, moot_reanchor_drawer, moot_tunnel_recall.
+//! v2b-p2 lexicon surface: full AriaLexicon acceptance-matrix fan-out.
 //!
-//! Mirrors the Swift `ToolDispatcher.runCaptureDrawer`, `runRecallDrawer`,
-//! `runMutate`, `runWithdraw`, `runExpunge`, `runReanchor` argument names and
-//! behavior. The five new tools (v2b-p1) give an agent the full drawer
-//! lifecycle surface plus the tunnel graph read-out.
+//! Extends v2b-p1 (moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel,
+//! moot_mutate_drawer, moot_withdraw_drawer, moot_expunge_drawer,
+//! moot_reanchor_drawer, moot_tunnel_recall) with the remaining 20 projected
+//! lexicon tools plus the moot_cross_estate_recall federation stub.
+//!
+//! New tool groups:
+//!   tunnel lifecycle: moot_mutate_tunnel, moot_withdraw_tunnel, moot_expunge_tunnel
+//!   kgFact: moot_mutate_kgFact, moot_withdraw_kgFact, moot_expunge_kgFact, moot_kgFact_recall
+//!   diaryEntry: moot_diaryEntry_recall
+//!   proposal: moot_mutate_proposal, moot_withdraw_proposal, moot_expunge_proposal, moot_proposal_recall
+//!   association: moot_mutate_association, moot_expunge_association, moot_association_recall
+//!   learnedReference: moot_learn_learnedReference, moot_mutate_learnedReference,
+//!                     moot_withdraw_learnedReference, moot_expunge_learnedReference,
+//!                     moot_learnedReference_recall
+//!   federation: moot_cross_estate_recall (scaffold — grant model not yet built)
 //!
 //! Domain errors (NotSupportedByEstate, ExpungeNotConfirmed, EmptyReanchor,
 //! UnderlyingEstateFailure) surface as `error_result` tool responses (isError:
@@ -16,7 +25,21 @@
 //!
 //! Arg names are wire-identical to the Swift server for the tools that appear
 //! in both (content, room, udcCode, addedBy, embeddingModelID, classificationScheme,
-//! filter, limit, ordering, hydrationLevel).
+//! filter, limit, ordering, hydrationLevel, rowID, kind, reason, confirmation).
+//!
+//! # Swift-side reconciliation items
+//!
+//! The Swift server has no live handlers for the following tools; they fall
+//! through to methodNotFound. The Rust server surfaces error_result instead
+//! (better client experience). Each item below is flagged for Swift parity once
+//! the Swift handlers land:
+//!   - All recall tools for non-drawer nouns (kgFact, diaryEntry, proposal,
+//!     association, learnedReference): Rust returns NotSupportedByEstate because
+//!     the DrawerStore trait lacks all-rows accessors for these types.
+//!   - moot_learn_learnedReference: both sides return NotSupportedByEstate.
+//!   - moot_cross_estate_recall: the Rust GLK fan_out has no grant model;
+//!     advertised but returns "not yet implemented: federation requires the grant
+//!     model". The Swift side DOES have a live handler (but no test estate grants).
 //!
 //! # classificationScheme
 //!
@@ -43,6 +66,7 @@ use crate::dispatch::{error_result, require_string, text_result};
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
+// v1 lexicon minimum.
 const CAPTURE_DRAWER: &str = "moot_capture_drawer";
 const RECALL_DRAWER: &str = "moot_drawer_recall";
 const CAPTURE_TUNNEL: &str = "moot_capture_tunnel";
@@ -52,6 +76,30 @@ const WITHDRAW_DRAWER: &str = "moot_withdraw_drawer";
 const EXPUNGE_DRAWER: &str = "moot_expunge_drawer";
 const REANCHOR_DRAWER: &str = "moot_reanchor_drawer";
 const TUNNEL_RECALL: &str = "moot_tunnel_recall";
+// v2b-p2: full acceptance-matrix fan-out.
+const MUTATE_TUNNEL: &str = "moot_mutate_tunnel";
+const WITHDRAW_TUNNEL: &str = "moot_withdraw_tunnel";
+const EXPUNGE_TUNNEL: &str = "moot_expunge_tunnel";
+const MUTATE_KG_FACT: &str = "moot_mutate_kgFact";
+const WITHDRAW_KG_FACT: &str = "moot_withdraw_kgFact";
+const EXPUNGE_KG_FACT: &str = "moot_expunge_kgFact";
+const KG_FACT_RECALL: &str = "moot_kgFact_recall";
+const DIARY_ENTRY_RECALL: &str = "moot_diaryEntry_recall";
+const MUTATE_PROPOSAL: &str = "moot_mutate_proposal";
+const WITHDRAW_PROPOSAL: &str = "moot_withdraw_proposal";
+const EXPUNGE_PROPOSAL: &str = "moot_expunge_proposal";
+const PROPOSAL_RECALL: &str = "moot_proposal_recall";
+const MUTATE_ASSOCIATION: &str = "moot_mutate_association";
+const EXPUNGE_ASSOCIATION: &str = "moot_expunge_association";
+const ASSOCIATION_RECALL: &str = "moot_association_recall";
+const LEARN_LEARNED_REFERENCE: &str = "moot_learn_learnedReference";
+const MUTATE_LEARNED_REFERENCE: &str = "moot_mutate_learnedReference";
+const WITHDRAW_LEARNED_REFERENCE: &str = "moot_withdraw_learnedReference";
+const EXPUNGE_LEARNED_REFERENCE: &str = "moot_expunge_learnedReference";
+const LEARNED_REFERENCE_RECALL: &str = "moot_learnedReference_recall";
+/// Federation tool name. Sits above the lexicon projection; dispatched by name
+/// via the top-level dispatch.rs router (not through is_lexicon_tool).
+pub const CROSS_ESTATE_RECALL: &str = "moot_cross_estate_recall";
 
 /// The classification scheme a lattice-anchor code belongs to.
 ///
@@ -79,18 +127,49 @@ impl ClassificationScheme {
     }
 }
 
-/// True when `name` is one of the lexicon tools (v1 minimum + v2b-p1 additions).
+/// True when `name` is one of the lexicon tools (v1, v2b-p1, v2b-p2).
+/// The federation tool `moot_cross_estate_recall` is NOT included here —
+/// it is dispatched by name in `dispatch.rs` before the lexicon check,
+/// matching the Swift ToolDispatcher's routing order for above-projection tools.
 pub fn is_lexicon_tool(name: &str) -> bool {
     matches!(
         name,
+        // v1
         CAPTURE_DRAWER
             | RECALL_DRAWER
             | CAPTURE_TUNNEL
+            // v2b-p1
             | MUTATE_DRAWER
             | WITHDRAW_DRAWER
             | EXPUNGE_DRAWER
             | REANCHOR_DRAWER
             | TUNNEL_RECALL
+            // v2b-p2: tunnel lifecycle
+            | MUTATE_TUNNEL
+            | WITHDRAW_TUNNEL
+            | EXPUNGE_TUNNEL
+            // v2b-p2: kgFact
+            | MUTATE_KG_FACT
+            | WITHDRAW_KG_FACT
+            | EXPUNGE_KG_FACT
+            | KG_FACT_RECALL
+            // v2b-p2: diaryEntry
+            | DIARY_ENTRY_RECALL
+            // v2b-p2: proposal
+            | MUTATE_PROPOSAL
+            | WITHDRAW_PROPOSAL
+            | EXPUNGE_PROPOSAL
+            | PROPOSAL_RECALL
+            // v2b-p2: association
+            | MUTATE_ASSOCIATION
+            | EXPUNGE_ASSOCIATION
+            | ASSOCIATION_RECALL
+            // v2b-p2: learnedReference
+            | LEARN_LEARNED_REFERENCE
+            | MUTATE_LEARNED_REFERENCE
+            | WITHDRAW_LEARNED_REFERENCE
+            | EXPUNGE_LEARNED_REFERENCE
+            | LEARNED_REFERENCE_RECALL
     )
 }
 
@@ -103,14 +182,47 @@ pub fn dispatch(
     let estate = registry.resolve(args, "estateID")?;
     let mut coord = estate.coord.lock().unwrap();
     match name {
+        // v1 lexicon minimum.
         CAPTURE_DRAWER => run_capture_drawer(args, &mut coord, estate),
         RECALL_DRAWER => run_recall_drawer(args, &coord, estate),
         CAPTURE_TUNNEL => run_capture_tunnel(args, &mut coord, estate),
+        // v2b-p1: drawer lifecycle verbs + tunnel recall.
         MUTATE_DRAWER => run_mutate_drawer(args, &coord, estate),
         WITHDRAW_DRAWER => run_withdraw_drawer(args, &coord, estate),
         EXPUNGE_DRAWER => run_expunge_drawer(args, &coord, estate),
         REANCHOR_DRAWER => run_reanchor_drawer(args, &coord, estate),
         TUNNEL_RECALL => run_tunnel_recall(args, &coord, estate),
+        // v2b-p2: tunnel lifecycle. Routes through the drawer path — the
+        // estate's mutate/withdraw/expunge verbs address rows by ID; a
+        // non-drawer row ID surfaces DrawerNotFound → UnderlyingEstateFailure,
+        // which is the correct observable behavior at this stage. Mirrors the
+        // Swift ToolDispatcher's noun-agnostic routing for these verbs.
+        MUTATE_TUNNEL => run_noun_mutate(args, &coord, estate, "tunnel"),
+        WITHDRAW_TUNNEL => run_noun_withdraw(args, &coord, estate, "tunnel"),
+        EXPUNGE_TUNNEL => run_noun_expunge(args, &coord, estate, "tunnel"),
+        // v2b-p2: kgFact lifecycle and recall.
+        MUTATE_KG_FACT => run_noun_mutate(args, &coord, estate, "kgFact"),
+        WITHDRAW_KG_FACT => run_noun_withdraw(args, &coord, estate, "kgFact"),
+        EXPUNGE_KG_FACT => run_noun_expunge(args, &coord, estate, "kgFact"),
+        KG_FACT_RECALL => run_kg_fact_recall(&coord, estate),
+        // v2b-p2: diaryEntry recall (read-only; no lifecycle verbs on the surface).
+        DIARY_ENTRY_RECALL => run_diary_entry_recall(&coord, estate),
+        // v2b-p2: proposal lifecycle and recall.
+        MUTATE_PROPOSAL => run_noun_mutate(args, &coord, estate, "proposal"),
+        WITHDRAW_PROPOSAL => run_noun_withdraw(args, &coord, estate, "proposal"),
+        EXPUNGE_PROPOSAL => run_noun_expunge(args, &coord, estate, "proposal"),
+        PROPOSAL_RECALL => run_proposal_recall(&coord, estate),
+        // v2b-p2: association lifecycle (no withdraw — not in acceptance matrix)
+        // and recall.
+        MUTATE_ASSOCIATION => run_noun_mutate(args, &coord, estate, "association"),
+        EXPUNGE_ASSOCIATION => run_noun_expunge(args, &coord, estate, "association"),
+        ASSOCIATION_RECALL => run_association_recall(&coord, estate),
+        // v2b-p2: learnedReference learn + lifecycle + recall.
+        LEARN_LEARNED_REFERENCE => run_learn_learned_reference(args, &coord, estate),
+        MUTATE_LEARNED_REFERENCE => run_noun_mutate(args, &coord, estate, "learnedReference"),
+        WITHDRAW_LEARNED_REFERENCE => run_noun_withdraw(args, &coord, estate, "learnedReference"),
+        EXPUNGE_LEARNED_REFERENCE => run_noun_expunge(args, &coord, estate, "learnedReference"),
+        LEARNED_REFERENCE_RECALL => run_learned_reference_recall(&coord, estate),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown lexicon tool: {name}"),
@@ -523,3 +635,191 @@ fn decode_ordering(name: Option<&str>) -> Result<Ordering, JSONRPCError> {
 // TunnelCaptureFrame uses the kind string as a label directly; TunnelKind is
 // set on the frame separately if the caller wants typed semantics. For v1 the
 // label is sufficient and the kind defaults to References (the frame default).
+
+// ---------------------------------------------------------------------------
+// v2b-p2 generic noun runners — mutate / withdraw / expunge
+// ---------------------------------------------------------------------------
+//
+// These runners handle mutate, withdraw, and expunge for non-drawer nouns
+// (tunnel, kgFact, proposal, learnedReference, association). The underlying
+// EstateCoordinator verbs (mutate/withdraw/expunge) address rows by ID and
+// operate on the drawer table. For non-drawer row IDs the estate returns
+// DrawerNotFound → VerbError::UnderlyingEstateFailure → error_result.
+//
+// This is the correct observable behavior at the current stage of the
+// substrate: these tools are advertised, the dispatch reaches the substrate,
+// and the substrate reports that the row is not in the drawer table. Mirror
+// of the Swift ToolDispatcher's noun-agnostic routing (runMutate/runWithdraw/
+// runExpunge are called for all nouns without discrimination).
+
+/// Apply a named mutation to any noun that accepts mutate. `noun_name` is
+/// used in the success result text (e.g. "mutated tunnel {id} (confirm)").
+fn run_noun_mutate(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+    noun_name: &str,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let row_id = require_string(args, "rowID")?;
+    let kind_name = require_string(args, "kind")?;
+    let kind = decode_mutation_kind(kind_name)?;
+    let payload = args.get("payload").and_then(|v| v.as_str());
+
+    match coord.mutate(&estate.handle, row_id, kind, payload) {
+        Ok(()) => Ok(text_result(&format!(
+            "mutated {noun_name} {row_id} ({kind_name})"
+        ))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+/// Withdraw any noun that accepts withdraw. `noun_name` is used in result text.
+fn run_noun_withdraw(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+    noun_name: &str,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let row_id = require_string(args, "rowID")?;
+    let reason = args.get("reason").and_then(|v| v.as_str());
+
+    let now = crate::dispatch::wall_now();
+    match coord.withdraw(&estate.handle, row_id, reason, now) {
+        Ok(()) => Ok(text_result(&format!("withdrew {noun_name} {row_id}"))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+/// Hard-erase any noun that accepts expunge. Requires confirmation == true;
+/// expunge without confirmation is refused before reaching the estate,
+/// matching the coordinator boundary guard and the Swift ToolDispatcher
+/// discipline. `noun_name` is used in result text.
+fn run_noun_expunge(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+    noun_name: &str,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let row_id = require_string(args, "rowID")?;
+    let reason = require_string(args, "reason")?;
+    // Absent or non-boolean confirmation is treated as false — matches
+    // Swift ToolDispatch.swift:327 `args["confirmation"]?.boolValue ?? false`.
+    let confirmation = args
+        .get("confirmation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    match coord.expunge(&estate.handle, row_id, reason, confirmation) {
+        Ok(()) => Ok(text_result(&format!("expunged {noun_name} {row_id}"))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v2b-p2 recall stubs — non-drawer nouns
+// ---------------------------------------------------------------------------
+//
+// The DrawerStore trait has no all-rows accessors for kg_facts, diary_entries,
+// proposals, associations, or learned_references (only by-source filtered
+// queries exist). Until the trait gains unconstrained accessors, each recall
+// surfaces error_result with NotSupportedByEstate. Advertised honestly so
+// clients can see the tool exists; the MCP error surface (isError: true with
+// the reason) is better than the Swift server's methodNotFound for these tools.
+
+/// Recall kg-fact rows. Stub: returns NotSupportedByEstate because the
+/// DrawerStore trait has no all_kg_facts() accessor.
+fn run_kg_fact_recall(
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    match coord.recall_kg_facts(&estate.handle) {
+        Ok(facts) => {
+            let header = format!("recalled {} kg_fact(s)", facts.len());
+            Ok(text_result(&header))
+        }
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+/// Recall diary-entry rows. Stub: returns NotSupportedByEstate because the
+/// DrawerStore trait has no unconstrained diary-entries accessor.
+fn run_diary_entry_recall(
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    match coord.recall_diary_entries(&estate.handle) {
+        Ok(entries) => {
+            let header = format!("recalled {} diaryEntry(s)", entries.len());
+            Ok(text_result(&header))
+        }
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+/// Recall proposal rows. Stub: returns NotSupportedByEstate because the
+/// DrawerStore trait has no all_proposals() accessor.
+fn run_proposal_recall(
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    match coord.recall_proposals(&estate.handle) {
+        Ok(proposals) => {
+            let header = format!("recalled {} proposal(s)", proposals.len());
+            Ok(text_result(&header))
+        }
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+/// Recall association rows. Stub: returns NotSupportedByEstate because the
+/// DrawerStore trait has no all_associations() accessor.
+fn run_association_recall(
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    match coord.recall_associations(&estate.handle) {
+        Ok(associations) => {
+            let header = format!("recalled {} association(s)", associations.len());
+            Ok(text_result(&header))
+        }
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+/// Recall learned-reference rows. Stub: returns NotSupportedByEstate because
+/// the DrawerStore trait has no all_learned_references() accessor.
+fn run_learned_reference_recall(
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    match coord.recall_learned_references(&estate.handle) {
+        Ok(refs) => {
+            let header = format!("recalled {} learnedReference(s)", refs.len());
+            Ok(text_result(&header))
+        }
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v2b-p2 learn_learnedReference
+// ---------------------------------------------------------------------------
+
+/// Ingest a learned reference. Dispatches to the coordinator's learn stub,
+/// which raises NotSupportedByEstate (Brain layer not yet present). Mirrors
+/// the Swift ToolDispatcher.runLearn behavior: the tool is callable, reaches
+/// the substrate boundary, and the substrate reports not-supported.
+fn run_learn_learned_reference(
+    args: &BTreeMap<String, JsonValue>,
+    coord: &EstateCoordinator,
+    estate: &crate::estate_registry::OpenEstate,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let source_handle = require_string(args, "handle")?;
+
+    match coord.learn(&estate.handle, source_handle) {
+        Ok(()) => Ok(text_result(&format!(
+            "learned learnedReference {source_handle}"
+        ))),
+        Err(e) => Ok(error_result(&format!("{e:?}"))),
+    }
+}
