@@ -343,11 +343,11 @@ fn lexicon_schema(verb: Verb, noun: Noun) -> serde_json::Value {
 /// `ToolProjection.withEstateID(_:)`. Returns the schema unchanged if it is
 /// not an object schema with a properties map (the empty-fallback schema).
 ///
-/// Description is wire-identical to the v2b-p1 Rust server's per-tool estateID
-/// strings: "Optional UUID of the open estate to target. Omit for the default
-/// estate." — matching the eight previously-shipped tools byte for byte.
-/// (The Swift withEstateID uses "Omit to target the default estate; never
-/// required." — flagged as Swift-side reconciliation item in the v2b-p2 report.)
+/// Description is wire-identical to Swift: "Optional UUID of the open estate
+/// to target. Omit for the default estate." — the single house string for
+/// every single-estate tool on both legs (Swift's lexicon wrapper carried a
+/// longer variant until the 2026-06-02 harmonization; the two-estate lens
+/// tools deliberately use the "estate A" wording instead).
 fn with_estate_id(schema: serde_json::Value) -> serde_json::Value {
     let estate_desc = "Optional UUID of the open estate to target. Omit for the default estate.";
     match schema {

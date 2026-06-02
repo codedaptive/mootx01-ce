@@ -189,7 +189,7 @@ public enum ToolProjection {
             return schema
         }
         properties["estateID"] = stringSchema(
-            "Optional UUID of the open estate to target. Omit to target the default estate; never required."
+            "Optional UUID of the open estate to target. Omit for the default estate."
         )
         object["properties"] = .object(properties)
         return .object(object)
