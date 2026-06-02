@@ -7,6 +7,7 @@
 //! concept" vs "memories FROM this period" — three different recalls from one
 //! cue. The match/differ split scores "similar in X, different in Y".
 //!
+//! Paired with the Swift version (`Sources/NeuronKit/Lenses/PartialRecall.swift`).
 //! Layer B-1: the block-Hamming math lives in SubstrateML; this is a thin
 //! surface. CognitionKit sequences it (compute the fingerprints, pick blocks).
 
