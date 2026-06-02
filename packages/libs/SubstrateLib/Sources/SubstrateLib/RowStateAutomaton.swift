@@ -249,6 +249,9 @@ public enum ForbiddenCombinations {
         // raw 32). Centralized here (M1/I-25) so the write gate enforces it
         // on every mutation, not only where a consumer remembers to call a
         // separate validator.
+        // raw 48 = AdjectiveSensitivity.secret; raw 32 =
+        // AdjectiveExportability.public_; LocusKit/Adjectives.swift is the
+        // source of truth (cannot import: SubstrateLib sits below LocusKit).
         let sensitivity = (fields.adjective >> 6) & 0x3F
         let exportability = (fields.adjective >> 12) & 0x3F
         if sensitivity == 48 && exportability == 32 {
@@ -260,6 +263,8 @@ public enum ForbiddenCombinations {
         // Adjective bits 18-23 encode trust (6-bit per §2.3);
         // canonical = raw 3 per the §2.8 verification table.
         if state == .accepted {
+            // raw 3 = Trust.canonical; LocusKit/Adjectives.swift is the
+            // source of truth (cannot import: layer below LocusKit).
             let trust = (fields.adjective >> 18) & 0x3F
             if trust < 3 {
                 throw RowStateError.violatesInvariant(
@@ -294,6 +299,8 @@ public enum ForbiddenCombinations {
         // accepted rows must have sensitivity ≤ elevated (raw 16
         // per the §2.8 verification table; the "shareable" tier).
         if state == .accepted {
+            // raw 16 = AdjectiveSensitivity.elevated; LocusKit/Adjectives.swift
+            // is the source of truth (cannot import: layer below LocusKit).
             let sens = (fields.adjective >> 6) & 0x3F
             if sens > 16 {
                 throw RowStateError.violatesInvariant(
