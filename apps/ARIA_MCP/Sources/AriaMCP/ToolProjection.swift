@@ -265,6 +265,27 @@ public enum ToolProjection {
                 ],
                 required: ["content", "room", "udcCode", "addedBy", "embeddingModelID"]
             )
+        case (.capture, .tunnel):
+            // File a new directed-graph edge (tunnel) into the estate.
+            // Schema is wire-identical to the Rust leg (rust/src/tool_list.rs
+            // lexicon_schema Verb::Capture Noun::Tunnel): same property keys,
+            // same required array. sourceDrawerID and targetDrawerID are optional
+            // — they pin the edge to specific drawer rows. kind is the relation
+            // label (free-form string); TunnelCaptureFrame uses it as label.
+            // estateID is injected by withEstateID in make(verb:noun:) — not here.
+            return objectSchema(
+                properties: [
+                    "sourceWing": stringSchema("Wing of the source drawer."),
+                    "sourceRoom": stringSchema("Room of the source drawer."),
+                    "targetWing": stringSchema("Wing of the target drawer."),
+                    "targetRoom": stringSchema("Room of the target drawer."),
+                    "kind": stringSchema("Tunnel kind: relates, precedes, contradicts, supports, refines, exemplifies, extends."),
+                    "addedBy": stringSchema("Actor identifier filed with the tunnel."),
+                    "sourceDrawerID": stringSchema("Optional source drawer id (drawer-to-drawer edge)."),
+                    "targetDrawerID": stringSchema("Optional target drawer id."),
+                ],
+                required: ["sourceWing", "sourceRoom", "targetWing", "targetRoom", "kind", "addedBy"]
+            )
         case (.recall, .drawer):
             return objectSchema(
                 properties: [
@@ -330,6 +351,25 @@ public enum ToolProjection {
                     "handle": stringSchema("Source handle naming the reference to learn."),
                 ],
                 required: ["handle"]
+            )
+        case (.recall, _):
+            // Generic recall schema for kgFact, diaryEntry, proposal, association,
+            // and learnedReference. Mirrors the Rust leg's generic recall arm
+            // (rust/src/tool_list.rs lexicon_schema Verb::Recall default arm):
+            // same four optional frame-shape fields, empty required array.
+            // The dispatcher surfaces an honest honest-refusal (isError true)
+            // for each of these nouns — the substrate lacks estate-wide accessors
+            // for them. Schema is grounded so tools/list is informative rather
+            // than advertising an empty fallback object, removing the empty-schema
+            // divergence Adams documented for these six projected-but-dead tools.
+            return objectSchema(
+                properties: [
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained."),
+                    "limit": integerSchema("Max rows to return."),
+                    "ordering": stringSchema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc."),
+                    "hydrationLevel": stringSchema("Hydration: structured (default), full, bitmapOnly."),
+                ],
+                required: []
             )
         default:
             // propose and associate are filtered out above, so this
