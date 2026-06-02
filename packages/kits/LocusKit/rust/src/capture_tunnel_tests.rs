@@ -11,16 +11,15 @@ use crate::estate::Estate;
 use crate::estate_types::{LatticeAnchor, OwnerCredentials};
 use crate::frames::{CaptureFrame, TunnelCaptureFrame};
 use crate::tunnel_operational::TunnelKind;
-use persistence_kit::inmemory::InMemoryStorage;
 use std::sync::Arc;
 use uuid::Uuid;
 
 const NOW: i64 = 1_700_000_000;
 
 fn make_estate_with_store() -> (Estate, Arc<InMemoryDrawerStore>) {
-    let storage: Arc<dyn persistence_kit::storage::Storage> =
-        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-    let store = Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
+    // InMemoryDrawerStore::new allocates InMemoryStorage internally —
+    // backend identity is visible at the type, not the argument.
+    let store = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
     let estate = Estate::create(store.clone(), OwnerCredentials::new("owner"), None).unwrap();
     (estate, store)
 }

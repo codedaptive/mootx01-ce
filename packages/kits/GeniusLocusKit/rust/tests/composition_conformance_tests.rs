@@ -53,8 +53,8 @@ use substrate_types::hlc::HLC;
 
 /// Open one estate over a fresh in-memory store whose estate UUID is fixed
 /// from `uuid_bytes`, so the handle UUID (derived from the opened estate) is
-/// deterministic. The registry holds the real `locus_kit::Estate`, so `open`
-/// takes a store + owner exactly as the Swift actor's `open(storage:owner:)`.
+/// deterministic. Uses `InMemoryDrawerStore::with_storage` to pin the estate
+/// UUID; all other construction sites use `InMemoryDrawerStore::new`.
 fn open_estate(
     coord: &mut EstateCoordinator,
     uuid_bytes: EstateUuid,
@@ -62,7 +62,7 @@ fn open_estate(
     high: i64,
 ) -> EstateHandle {
     let storage = Arc::new(InMemoryStorage::with_estate(Uuid::from_bytes(uuid_bytes)));
-    let store = Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
+    let store = Arc::new(InMemoryDrawerStore::with_storage(storage, 1_700_000_000, None).unwrap());
     coord
         .open(store, OwnerCredentials::new("owner"), low, high)
         .expect("open succeeds")

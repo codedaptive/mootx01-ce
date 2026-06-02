@@ -37,7 +37,9 @@ purpose: |
 
 - `src/` — one module per Swift file (`drawer.rs`, `estate.rs`,
   `estate_verbs.rs`, `filter.rs`, …) plus `drawer_store_inmemory.rs`
-  (crate `locus-kit`).
+  (crate `locus-kit`). `drawer_store_inmemory.rs` contains `DrawerStoreCore`
+  (storage-agnostic verb-logic core, `pub(crate)` constructor) and the
+  public `InMemoryDrawerStore` newtype that wraps it.
 
 Naming differs by port convention (Swift `addDrawer` / `bitmapAuditTrail`;
 Rust `add_drawer` / `bitmap_audit_trail`). The two ports also differ in
@@ -476,8 +478,13 @@ public actor DrawerStore {
     // … full CRUD + audit surface, see DrawerStore.swift
 }
 ```
-**Rust:** `pub trait DrawerStore: Send + Sync` with `InMemoryDrawerStore`;
-methods are synchronous and take `now: i64`. The Swift `DrawerStore` is a
+**Rust:** `pub trait DrawerStore: Send + Sync` implemented by two types:
+`DrawerStoreCore` (storage-agnostic verb-logic core — `pub(crate)` constructor,
+kit-internal only) and `InMemoryDrawerStore` (public newtype for the in-memory
+backend, wraps `DrawerStoreCore` over `InMemoryStorage`). Backend identity is
+structurally visible at every construction site and deliberately erased at the
+trait surface. A future `SqliteDrawerStore` newtype slots in symmetrically.
+Methods are synchronous and take `now: i64`. The Swift `DrawerStore` is a
 concrete actor over any injected `Storage` (SQLite in production); the Rust
 version realises the same store contract through the trait (SPEC § 8).
 
@@ -524,8 +531,10 @@ cited file.
 - **Taxonomy summaries:** `WingSummary`, `RoomSummary` (computed
   `GROUP BY` projections; no wings/rooms table) — `Summaries.swift`.
 - **Rust-only helper shapes:** `BitmapAuditPair`, `RoomBundle`,
-  `RoomLevelEntry`, `InMemoryDrawerStore` — present in the Rust version where
-  the Swift version keeps the equivalent internal (SPEC § 8).
+  `RoomLevelEntry`, `InMemoryDrawerStore` (public newtype for the in-memory
+  backend), `DrawerStoreCore` (kit-internal storage-agnostic core,
+  `pub(crate)`) — present in the Rust version where the Swift version keeps
+  the equivalent internal (SPEC § 8).
 
 ## § 3 — Public functions
 

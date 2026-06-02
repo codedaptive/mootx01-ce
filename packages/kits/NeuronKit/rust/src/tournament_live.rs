@@ -140,8 +140,6 @@ mod tests {
     use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
     use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
     use locus_kit::frames::CaptureFrame;
-    use persistence_kit::inmemory::InMemoryStorage;
-    use uuid::Uuid;
 
     const NOW: i64 = 1_700_000_000;
 
@@ -226,10 +224,10 @@ mod tests {
     #[test]
     fn tr5_run_tournament_end_to_end() {
         // The Swift model: mint the branch through the kit's verb.
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally.
         let mut coord = EstateCoordinator::new();
-        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
+            Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
         let h = coord
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .unwrap();
