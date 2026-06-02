@@ -54,8 +54,10 @@ pub fn run_tunnel_successor(
         }
     }
 
-    let mut ranked: Vec<Successor> =
-        counts.into_iter().map(|(id, weight)| Successor { id, weight }).collect();
+    let mut ranked: Vec<Successor> = counts
+        .into_iter()
+        .map(|(id, weight)| Successor { id, weight })
+        .collect();
     ranked.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.id.cmp(&b.id)));
     ranked.truncate(k);
     Ok(ranked)
@@ -81,7 +83,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 

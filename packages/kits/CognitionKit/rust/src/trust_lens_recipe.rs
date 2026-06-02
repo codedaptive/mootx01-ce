@@ -81,12 +81,18 @@ pub fn run_trust_grounded_synthesis(
             .then(a.id.cmp(&b.id))
     });
 
-    let high_trust_count = drawers.iter().filter(|d| is_high_trust(d.source_type())).count();
+    let high_trust_count = drawers
+        .iter()
+        .filter(|d| is_high_trust(d.source_type()))
+        .count();
     let ranked_ids: Vec<String> = drawers.iter().map(|d| d.id.clone()).collect();
 
     let rows: Vec<DrawerRow> = drawers
         .iter()
-        .map(|d| DrawerRow { id: d.id.clone(), content: d.content.clone() })
+        .map(|d| DrawerRow {
+            id: d.id.clone(),
+            content: d.content.clone(),
+        })
         .collect();
     let meta: Vec<DrawerRowMeta> = drawers
         .iter()
@@ -97,10 +103,18 @@ pub fn run_trust_grounded_synthesis(
         })
         .collect();
 
-    let page = RecallPage { rows, page_index: 0, is_last: true };
+    let page = RecallPage {
+        rows,
+        page_index: 0,
+        is_last: true,
+    };
     let context = synthesize(&page, &meta);
 
-    Ok(TrustGroundedOutput { context, ranked_ids, high_trust_count })
+    Ok(TrustGroundedOutput {
+        context,
+        ranked_ids,
+        high_trust_count,
+    })
 }
 
 #[cfg(test)]
@@ -125,12 +139,19 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
     /// Capture a drawer with a given source type; return its minted id.
-    fn capture(coord: &EstateCoordinator, h: &EstateHandle, content: &str, st: SourceType) -> String {
+    fn capture(
+        coord: &EstateCoordinator,
+        h: &EstateHandle,
+        content: &str,
+        st: SourceType,
+    ) -> String {
         let mut frame = CaptureFrame::new(
             content,
             CaptureChannel::Typed,
@@ -165,9 +186,15 @@ mod tests {
         assert_eq!(out.ranked_ids.len(), 4);
         // The two highest-ranked memories are the canonical ones.
         let top2: HashSet<&String> = out.ranked_ids[0..2].iter().collect();
-        assert!(top2.contains(&c1) && top2.contains(&c2), "canonical memories rank first");
+        assert!(
+            top2.contains(&c1) && top2.contains(&c2),
+            "canonical memories rank first"
+        );
         assert_eq!(out.high_trust_count, 2, "two canonical = two high-trust");
-        assert!(!out.context.summary.is_empty(), "a grounded document is produced");
+        assert!(
+            !out.context.summary.is_empty(),
+            "a grounded document is produced"
+        );
     }
 
     // CK-TR-2: an empty estate yields an empty ranking and zero high-trust —

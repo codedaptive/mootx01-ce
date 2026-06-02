@@ -81,7 +81,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 

@@ -107,7 +107,10 @@ impl SubstrateError {
     /// Construct a substrate error from an operation name and any displayable
     /// underlying cause.
     pub fn new(operation: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self { operation: operation.into(), detail: detail.into() }
+        Self {
+            operation: operation.into(),
+            detail: detail.into(),
+        }
     }
 }
 

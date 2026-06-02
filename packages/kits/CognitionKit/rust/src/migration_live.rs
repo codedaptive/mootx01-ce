@@ -111,10 +111,9 @@ impl RecipeSubstrate for LiveRecipeSubstrate<'_> {
         // The branch id was minted by `derive_branch` on this same adapter,
         // so a missing mapping is an internal invariant violation, not a
         // substrate failure — surface it as one for a uniform error channel.
-        let bid = *self
-            .branch_ids
-            .get(branch_id)
-            .ok_or_else(|| SubstrateError::new("capture", format!("untracked branch id {branch_id}")))?;
+        let bid = *self.branch_ids.get(branch_id).ok_or_else(|| {
+            SubstrateError::new("capture", format!("untracked branch id {branch_id}"))
+        })?;
         let branch = self
             .coord
             .branch_handle_for(bid)
@@ -130,10 +129,9 @@ impl RecipeSubstrate for LiveRecipeSubstrate<'_> {
         branch_id: &str,
         corpus: &[CorpusEntry],
     ) -> Result<BenchmarkOutcome, SubstrateError> {
-        let bid = *self
-            .branch_ids
-            .get(branch_id)
-            .ok_or_else(|| SubstrateError::new("benchmark", format!("untracked branch id {branch_id}")))?;
+        let bid = *self.branch_ids.get(branch_id).ok_or_else(|| {
+            SubstrateError::new("benchmark", format!("untracked branch id {branch_id}"))
+        })?;
         let branch = self
             .coord
             .branch_handle_for(bid)
@@ -157,6 +155,65 @@ impl RecipeSubstrate for LiveRecipeSubstrate<'_> {
 fn parse_branch_id(s: &str) -> Result<BranchId, SubstrateError> {
     Uuid::parse_str(s)
         .map_err(|e| SubstrateError::new("promote_branch", format!("bad branch id '{s}': {e}")))
+}
+
+/// Confirm promotion of a winning branch by id, discarding the losers — the
+/// id-addressed form of the human-gated second step (spec B-3). Intended for
+/// stateless callers (such as the MCP two-call pattern) that carry the branch
+/// ids emitted by `run_migration_benchmark` rather than the `CoreReport`
+/// object itself. Parity of the Swift `MigrationBenchmark.confirmPromotion`
+/// by-id overload; the cross-version behavioral contract is maintained there.
+///
+/// Guard order mirrors the Swift reference:
+///   1. C-5: `winner_branch_id` in `disqualified_branch_ids` →
+///      `RecipeError::SilentConceptLoss { branch_id: winner id string,
+///      lost_concepts: vec![] }` (the by-id shape carries no lost-concept
+///      detail — callers echo ids from the run report, not concept lists).
+///   2. Resolve: `coord.branch_handle_for(winner_branch_id)` → `None` →
+///      `RecipeError::UserConfirmationRequired { action: "promote unknown
+///      branch <id>" }`.
+///   3. `coord.glk_promote_branch(winner_branch_id, handle, now)`, mapped
+///      exactly as the report-based path maps it.
+///   4. Discard loop over `discard_branch_ids` skipping ids equal to the
+///      winner and skipping unresolvable ids silently (parity of the
+///      report-based path's discard behaviour).
+pub fn confirm_migration_promotion_by_id(
+    coord: &mut EstateCoordinator,
+    winner_branch_id: BranchId,
+    discard_branch_ids: &[BranchId],
+    disqualified_branch_ids: &[BranchId],
+    handle: &EstateHandle,
+    now: i64,
+) -> Result<(), RecipeRunError> {
+    // Guard 1 — C-5: a disqualified branch is never promoted.
+    // The by-id shape carries no lost-concept detail; callers hold ids only.
+    if disqualified_branch_ids.contains(&winner_branch_id) {
+        return Err(RecipeError::SilentConceptLoss {
+            branch_id: winner_branch_id.to_string(),
+            lost_concepts: vec![],
+        }
+        .into());
+    }
+
+    // Guard 2 — resolve: an id the coordinator does not hold is unknown.
+    coord.branch_handle_for(winner_branch_id).ok_or_else(|| {
+        RecipeError::UserConfirmationRequired {
+            action: format!("promote unknown branch {winner_branch_id}"),
+        }
+    })?;
+
+    // Guard 3 — promote.
+    coord
+        .glk_promote_branch(winner_branch_id, handle, now)
+        .map_err(|e| SubstrateError::new("promote_branch", format!("{e:?}")))?;
+
+    // Guard 4 — discard loop; winner and unresolvable ids skipped silently.
+    for &bid in discard_branch_ids {
+        if bid != winner_branch_id {
+            let _ = coord.glk_discard_branch(bid);
+        }
+    }
+    Ok(())
 }
 
 /// Confirm promotion of the winning plan's branch into the estate and discard
@@ -183,7 +240,11 @@ pub fn confirm_migration_promotion(
 ) -> Result<(), RecipeRunError> {
     // C-5: never promote a disqualified plan. The branch id comes from
     // plan_results (DisqualifiedCore carries only name + lost_concepts).
-    if let Some(dq) = report.disqualified.iter().find(|d| d.name == winner_plan_name) {
+    if let Some(dq) = report
+        .disqualified
+        .iter()
+        .find(|d| d.name == winner_plan_name)
+    {
         let branch_id = report
             .plan_results
             .iter()
@@ -251,7 +312,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -268,7 +331,10 @@ mod tests {
     fn origin(entries: &[(&str, &str)]) -> Vec<OriginEntry> {
         entries
             .iter()
-            .map(|(id, c)| OriginEntry { id: id.to_string(), content: c.to_string() })
+            .map(|(id, c)| OriginEntry {
+                id: id.to_string(),
+                content: c.to_string(),
+            })
             .collect()
     }
 
@@ -285,7 +351,10 @@ mod tests {
         let report = run_migration_benchmark(&mut sub, &plans, &origin).expect("run");
 
         assert_eq!(report.winner.as_deref(), Some("flat"), "clean plan wins");
-        assert!(report.disqualified.is_empty(), "nothing lost ⇒ not disqualified");
+        assert!(
+            report.disqualified.is_empty(),
+            "nothing lost ⇒ not disqualified"
+        );
         assert_eq!(report.plan_results.len(), 1);
         let pr = &report.plan_results[0];
         assert!(pr.lost.is_empty(), "no concept lost");
@@ -309,7 +378,9 @@ mod tests {
         assert_eq!(report.disqualified.len(), 1);
         assert_eq!(report.disqualified[0].name, "flat");
         assert!(
-            report.disqualified[0].lost_concepts.contains(&"e3".to_string()),
+            report.disqualified[0]
+                .lost_concepts
+                .contains(&"e3".to_string()),
             "the dropped concept is the C-13 loss: {:?}",
             report.disqualified[0].lost_concepts
         );
@@ -382,5 +453,188 @@ mod tests {
             }
             other => panic!("expected UserConfirmationRequired, got {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // By-id overload tests (confirm_migration_promotion_by_id)
+    // -------------------------------------------------------------------------
+
+    // CK-LIVE-6: success — run the benchmark, pull winner branch id, call the
+    // by-id overload with correct ids, assert Ok and the promoted rows appear
+    // in the parent estate. Same assertion style as CK-LIVE-3.
+    #[test]
+    fn ck_live6_by_id_success_promotes_winner_into_parent() {
+        let (mut coord, h) = coord_with_parent();
+        let plans = vec![plan("flat")];
+        let origin = origin(&[("e1", "alpha"), ("e2", "beta")]);
+
+        let report = {
+            let mut sub = LiveRecipeSubstrate::new(&mut coord, h, NOW);
+            run_migration_benchmark(&mut sub, &plans, &origin).expect("run")
+        };
+        assert_eq!(report.winner.as_deref(), Some("flat"));
+
+        // Pull winner branch id from the report.
+        let winner_id_str = report
+            .plan_results
+            .iter()
+            .find(|p| p.name == "flat")
+            .map(|p| p.branch_id.clone())
+            .expect("flat plan result");
+        let winner_bid: BranchId = Uuid::parse_str(&winner_id_str).expect("uuid");
+
+        // Parent is empty before confirmation.
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 0);
+
+        confirm_migration_promotion_by_id(
+            &mut coord,
+            winner_bid,
+            &[], // no other branches to discard
+            &[], // no disqualified ids
+            &h,
+            NOW,
+        )
+        .expect("by-id promote");
+
+        // The two migrated concepts appear in the parent estate after promotion.
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 2);
+    }
+
+    // CK-LIVE-7: winner id is in the disqualified set → SilentConceptLoss (C-5).
+    // The by-id shape returns an empty lost_concepts vec (no concept detail
+    // available from ids alone).
+    #[test]
+    fn ck_live7_by_id_disqualified_winner_is_silent_concept_loss() {
+        let (mut coord, h) = coord_with_parent();
+        let plans = vec![plan("flat")];
+        let origin = origin(&[("e1", "alpha"), ("e3", "")]); // e3 dropped → disqualified
+
+        let report = {
+            let mut sub = LiveRecipeSubstrate::new(&mut coord, h, NOW);
+            run_migration_benchmark(&mut sub, &plans, &origin).expect("run")
+        };
+
+        let winner_id_str = report
+            .plan_results
+            .iter()
+            .find(|p| p.name == "flat")
+            .map(|p| p.branch_id.clone())
+            .expect("flat plan result");
+        let winner_bid: BranchId = Uuid::parse_str(&winner_id_str).expect("uuid");
+
+        // Treat winner as disqualified — passes the id in disqualified_branch_ids.
+        let err = confirm_migration_promotion_by_id(
+            &mut coord,
+            winner_bid,
+            &[],
+            &[winner_bid], // winner is disqualified
+            &h,
+            NOW,
+        )
+        .unwrap_err();
+
+        match err {
+            RecipeRunError::Recipe(RecipeError::SilentConceptLoss {
+                branch_id,
+                lost_concepts,
+            }) => {
+                // branch_id is the winner's UUID string; lost_concepts is empty
+                // because the by-id path carries no concept detail.
+                assert_eq!(branch_id, winner_id_str);
+                assert!(
+                    lost_concepts.is_empty(),
+                    "by-id path carries no lost-concept detail; got: {lost_concepts:?}"
+                );
+            }
+            other => panic!("expected SilentConceptLoss, got {other:?}"),
+        }
+        // Nothing was promoted.
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 0);
+    }
+
+    // CK-LIVE-8: a random UUID not in the coordinator's registry →
+    // UserConfirmationRequired (guard 2 fires before glk_promote_branch).
+    #[test]
+    fn ck_live8_by_id_unknown_winner_requires_confirmation() {
+        let (mut coord, h) = coord_with_parent();
+        let unknown_bid = Uuid::new_v4(); // not minted by any derive
+
+        let err = confirm_migration_promotion_by_id(&mut coord, unknown_bid, &[], &[], &h, NOW)
+            .unwrap_err();
+
+        match err {
+            RecipeRunError::Recipe(RecipeError::UserConfirmationRequired { action }) => {
+                assert!(
+                    action.contains(&unknown_bid.to_string()),
+                    "action should name the unknown id; got: {action}"
+                );
+            }
+            other => panic!("expected UserConfirmationRequired, got {other:?}"),
+        }
+    }
+
+    // CK-LIVE-7b: guard ORDER proof — a winner id that is BOTH unknown to
+    // the coordinator AND in the disqualified set raises SilentConceptLoss,
+    // not UserConfirmationRequired: the C-5 membership guard runs before
+    // id resolution (an inverted implementation would resolve first, get
+    // None, and raise the wrong variant).
+    #[test]
+    fn ck_live7b_by_id_disqualified_unknown_winner_is_still_concept_loss() {
+        let (mut coord, h) = coord_with_parent();
+        let unknown_bid = Uuid::new_v4(); // never minted, AND disqualified
+
+        let err = confirm_migration_promotion_by_id(
+            &mut coord,
+            unknown_bid,
+            &[],
+            &[unknown_bid],
+            &h,
+            NOW,
+        )
+        .unwrap_err();
+
+        match err {
+            RecipeRunError::Recipe(RecipeError::SilentConceptLoss { branch_id, .. }) => {
+                assert_eq!(branch_id, unknown_bid.to_string());
+            }
+            other => panic!("expected SilentConceptLoss (C-5 precedes resolution), got {other:?}"),
+        }
+    }
+
+    // CK-LIVE-9: a bogus id in discard_branch_ids is skipped silently —
+    // the overall call still returns Ok.
+    #[test]
+    fn ck_live9_by_id_bogus_discard_id_is_skipped_silently() {
+        let (mut coord, h) = coord_with_parent();
+        let plans = vec![plan("flat")];
+        let origin = origin(&[("e1", "alpha")]);
+
+        let report = {
+            let mut sub = LiveRecipeSubstrate::new(&mut coord, h, NOW);
+            run_migration_benchmark(&mut sub, &plans, &origin).expect("run")
+        };
+
+        let winner_id_str = report
+            .plan_results
+            .iter()
+            .find(|p| p.name == "flat")
+            .map(|p| p.branch_id.clone())
+            .expect("flat plan result");
+        let winner_bid: BranchId = Uuid::parse_str(&winner_id_str).expect("uuid");
+        let bogus_bid = Uuid::new_v4(); // not tracked by coordinator
+
+        // Include one bogus discard id — must not error.
+        confirm_migration_promotion_by_id(
+            &mut coord,
+            winner_bid,
+            &[bogus_bid], // bogus; glk_discard_branch will return Err, skipped
+            &[],
+            &h,
+            NOW,
+        )
+        .expect("bogus discard id must be skipped silently");
+
+        // Promotion still happened.
+        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 1);
     }
 }

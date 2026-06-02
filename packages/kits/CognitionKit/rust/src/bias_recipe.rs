@@ -99,7 +99,8 @@ pub fn run_bias(
     let active_counts = room_counts(&active);
     let biases = representation_bias(&active_counts, reference);
     let biased_for: Vec<CategoryBias> = biases.iter().filter(|b| b.bias > 0.0).cloned().collect();
-    let biased_against: Vec<CategoryBias> = biases.iter().filter(|b| b.bias < 0.0).cloned().collect();
+    let biased_against: Vec<CategoryBias> =
+        biases.iter().filter(|b| b.bias < 0.0).cloned().collect();
 
     // Dismissal: withdrawn / (active + withdrawn) per room.
     let active_by_room: BTreeMap<String, f64> = active_counts.iter().cloned().collect();
@@ -112,7 +113,9 @@ pub fn run_bias(
         })
         .collect();
     dismissal.sort_by(|x, y| {
-        y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| x.0.cmp(&y.0))
+        y.1.partial_cmp(&x.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| x.0.cmp(&y.0))
     });
 
     // Learned preference: per-room curation record (confirmations as
@@ -135,7 +138,12 @@ pub fn run_bias(
     let learned = learned_preference(&records)
         .map_err(|e| SubstrateError::new("learned_preference", format!("{e:?}")))?;
 
-    Ok(BiasReport { biased_for, biased_against, dismissal, learned })
+    Ok(BiasReport {
+        biased_for,
+        biased_against,
+        dismissal,
+        learned,
+    })
 }
 
 #[cfg(test)]
@@ -158,7 +166,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         (coord, h)
     }
 
@@ -191,8 +201,14 @@ mod tests {
         let reference = reference(&[("philosophy", 1.0), ("cooking", 1.0), ("finance", 1.0)]);
 
         let report = run_bias(&coord, &h, &reference, NOW).expect("bias");
-        assert!(report.biased_for.iter().any(|b| b.label == "philosophy"), "over-weighted → for");
-        assert!(report.biased_against.iter().any(|b| b.label == "finance"), "never-captured → against");
+        assert!(
+            report.biased_for.iter().any(|b| b.label == "philosophy"),
+            "over-weighted → for"
+        );
+        assert!(
+            report.biased_against.iter().any(|b| b.label == "finance"),
+            "never-captured → against"
+        );
         // finance is the most-avoided (last by bias).
         assert_eq!(report.biased_against.last().unwrap().label, "finance");
     }
@@ -206,12 +222,18 @@ mod tests {
         let _r2 = capture(&coord, &h, "doubts");
         capture(&coord, &h, "doubts");
         // Withdraw one of the "doubts" memories.
-        coord.withdraw(&h, &r1, Some("reconsidered"), NOW).expect("withdraw");
+        coord
+            .withdraw(&h, &r1, Some("reconsidered"), NOW)
+            .expect("withdraw");
 
         let report = run_bias(&coord, &h, &reference(&[("doubts", 1.0)]), NOW).expect("bias");
         let doubts = report.dismissal.iter().find(|(room, _)| room == "doubts");
         assert!(doubts.is_some(), "the withdrawn room shows dismissal");
-        assert!(doubts.unwrap().1 > 0.0, "dismissal rate is positive: {:?}", doubts);
+        assert!(
+            doubts.unwrap().1 > 0.0,
+            "dismissal rate is positive: {:?}",
+            doubts
+        );
     }
 
     // CK-BI-3: learned preference reads real curation choices end-to-end —
@@ -224,12 +246,16 @@ mod tests {
         // "kept": captured then confirmed (endorsed).
         for _ in 0..3 {
             let id = capture(&coord, &h, "kept");
-            coord.mutate(&h, &id, MutationKind::Confirm, None).expect("confirm");
+            coord
+                .mutate(&h, &id, MutationKind::Confirm, None)
+                .expect("confirm");
         }
         // "dropped": captured then withdrawn (dismissed).
         for _ in 0..3 {
             let id = capture(&coord, &h, "dropped");
-            coord.withdraw(&h, &id, Some("reconsidered"), NOW).expect("withdraw");
+            coord
+                .withdraw(&h, &id, Some("reconsidered"), NOW)
+                .expect("withdraw");
         }
         // "untouched": captured and left alone (no curation signal).
         capture(&coord, &h, "untouched");
@@ -240,14 +266,30 @@ mod tests {
 
         // Endorsed leads, dismissed trails, neutral sits between.
         let order: Vec<&str> = learned.iter().map(|p| p.label.as_str()).collect();
-        assert_eq!(order, vec!["kept", "untouched", "dropped"], "curation orders preference");
+        assert_eq!(
+            order,
+            vec!["kept", "untouched", "dropped"],
+            "curation orders preference"
+        );
 
         let kept = learned.iter().find(|p| p.label == "kept").unwrap();
         let dropped = learned.iter().find(|p| p.label == "dropped").unwrap();
         let untouched = learned.iter().find(|p| p.label == "untouched").unwrap();
-        assert!(kept.strength > 0.0, "confirmed room preferred: {}", kept.strength);
-        assert!(dropped.strength < 0.0, "withdrawn room disfavored: {}", dropped.strength);
-        assert!(untouched.strength.abs() < 1e-6, "uncurated room neutral: {}", untouched.strength);
+        assert!(
+            kept.strength > 0.0,
+            "confirmed room preferred: {}",
+            kept.strength
+        );
+        assert!(
+            dropped.strength < 0.0,
+            "withdrawn room disfavored: {}",
+            dropped.strength
+        );
+        assert!(
+            untouched.strength.abs() < 1e-6,
+            "uncurated room neutral: {}",
+            untouched.strength
+        );
         // The raw curation counts round-tripped through the recall frames.
         assert_eq!(kept.endorsements, 3);
         assert_eq!(dropped.dismissals, 3);
