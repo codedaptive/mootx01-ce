@@ -5,13 +5,16 @@
 //! malformed `estateID` is an `invalidParams` error, consistent with the
 //! Swift dispatcher's `resolveHandle(_:)` behavior.
 //!
-//! # v1 boundary
+//! # Backend constructors
 //!
-//! v1 supports in-memory estates only. The server opens one in-memory
-//! estate at startup (the default). Additional in-memory estates can be
-//! registered via `register()` (the test seam). Persistent storage
-//! backends (SQLite, CloudKit) are v2 work — stated plainly as a
-//! behavioral fact of v1 in the README.
+//! Two backend shapes are available:
+//! - **In-memory** (`new_inmemory`, `register_inmemory`): ephemeral, discarded
+//!   on process exit. Used by default when `ARIA_MCP_SQLITE_PATH` is unset.
+//! - **SQLite** (`new_sqlite`, `register_sqlite`): WAL-mode durable estate
+//!   at a caller-supplied filesystem path. Database file is created if absent.
+//!   Persistence is server-internal — no wire change; the JSON-RPC surface is
+//!   identical for both backends. See `server::ServerConfig::from_env` for how
+//!   the env var selects between them at startup.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +23,7 @@ use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
@@ -32,6 +36,12 @@ const DEFAULT_OWNER: &str = "aria-mcp-default";
 // are ephemeral and discarded when the server exits; using a fixed value
 // keeps test behavior deterministic.
 const INIT_NOW: i64 = 1_700_000_000;
+
+// Default busy-timeout for SQLite estates: 5.0 seconds. Single-process
+// server model means concurrent writers are unlikely, but the timeout
+// prevents instant failure if a background tool call and the startup
+// open race on the same file.
+const SQLITE_BUSY_TIMEOUT_SECS: f64 = 5.0;
 
 /// An opened estate in the registry: coordinator + handle pair.
 ///
@@ -50,7 +60,9 @@ pub struct OpenEstate {
 /// The estate registry the dispatcher uses to resolve `estateID` arguments.
 ///
 /// One default estate; zero or more additional estates keyed by UUID.
-/// All estates are in-memory for v1 (see module-level doc for the boundary).
+/// The default estate is either in-memory (when `ARIA_MCP_SQLITE_PATH` is
+/// unset) or SQLite-backed (when the env var is set) — selection happens in
+/// `ServerConfig::from_env`. Wire surface is identical for both backends.
 pub struct EstateRegistry {
     /// The default estate — targeted when a tool call omits `estateID`.
     pub default: OpenEstate,
@@ -63,7 +75,8 @@ pub struct EstateRegistry {
 
 impl EstateRegistry {
     /// Construct a registry with one new in-memory default estate.
-    /// This is the v1 production and test path.
+    ///
+    /// Used when `ARIA_MCP_SQLITE_PATH` is absent — behavior identical to v1.
     pub fn new_inmemory() -> Self {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         let estate_id = Uuid::new_v4();
@@ -89,6 +102,58 @@ impl EstateRegistry {
         }
     }
 
+    /// Construct a registry with one SQLite-backed default estate at `path`.
+    ///
+    /// The database file is created if absent. Parent directories must exist
+    /// (the caller — typically `ServerConfig::from_env` — creates them before
+    /// calling here). Opens with WAL mode and a 5-second busy timeout so
+    /// concurrent tool calls on the same estate serialize without instant
+    /// failure.
+    ///
+    /// `owner` identifies the estate in log messages and audit records; use
+    /// `DEFAULT_OWNER` (`"aria-mcp-default"`) for the production default estate.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` with a human-readable message if `SqliteDrawerStore`
+    /// cannot open the path (bad path, permission denied, corrupt database). The
+    /// caller should print this to stderr and exit with a nonzero code.
+    pub fn new_sqlite(path: &str, owner: &str) -> Result<Self, String> {
+        let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            SqliteDrawerStore::from_path(path, INIT_NOW, None, SQLITE_BUSY_TIMEOUT_SECS)
+                .map_err(|e| format!("aria-mcp: cannot open SQLite estate at {path:?}: {e}"))?,
+        );
+        // The estate_id is minted inside SqliteDrawerStore::from_path and stored
+        // in the manifest as a UUID string. We read it back and parse it so our
+        // registry UUID matches what the store considers canonical across restarts.
+        let estate_id = {
+            let manifest = store
+                .read_manifest()
+                .map_err(|e| format!("aria-mcp: cannot read estate manifest from {path:?}: {e}"))?;
+            Uuid::parse_str(&manifest.estate_uuid).map_err(|e| {
+                format!("aria-mcp: manifest estate_uuid is not a valid UUID at {path:?}: {e}")
+            })?
+        };
+        let handle = coord
+            .lock()
+            .unwrap()
+            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .expect("default sqlite estate open must succeed");
+        let default_estate = OpenEstate {
+            coord: Arc::clone(&coord),
+            handle,
+            estate_id,
+        };
+        let mut extras = HashMap::new();
+        extras.insert(estate_id, default_estate.clone());
+        Ok(EstateRegistry {
+            default: default_estate,
+            extras,
+            coord,
+        })
+    }
+
     /// Register an additional in-memory estate. Returns its UUID.
     /// Used by the `moot_open_estate` test seam and integration tests.
     pub fn register_inmemory(&mut self, owner: &str) -> Uuid {
@@ -109,6 +174,38 @@ impl EstateRegistry {
         };
         self.extras.insert(estate_id, estate);
         estate_id
+    }
+
+    /// Register an additional SQLite-backed estate at `path`. Returns its UUID.
+    ///
+    /// Same open semantics as `new_sqlite`: WAL mode, 5-second busy timeout,
+    /// database created if absent. Returns `Err(String)` on open failure.
+    pub fn register_sqlite(&mut self, path: &str, owner: &str) -> Result<Uuid, String> {
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            SqliteDrawerStore::from_path(path, INIT_NOW, None, SQLITE_BUSY_TIMEOUT_SECS)
+                .map_err(|e| format!("aria-mcp: cannot open SQLite estate at {path:?}: {e}"))?,
+        );
+        let estate_id = {
+            let manifest = store
+                .read_manifest()
+                .map_err(|e| format!("aria-mcp: cannot read estate manifest from {path:?}: {e}"))?;
+            Uuid::parse_str(&manifest.estate_uuid).map_err(|e| {
+                format!("aria-mcp: manifest estate_uuid is not a valid UUID at {path:?}: {e}")
+            })?
+        };
+        let handle = self
+            .coord
+            .lock()
+            .unwrap()
+            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .expect("additional sqlite estate open must succeed");
+        let estate = OpenEstate {
+            coord: Arc::clone(&self.coord),
+            handle,
+            estate_id,
+        };
+        self.extras.insert(estate_id, estate);
+        Ok(estate_id)
     }
 
     /// Resolve the estate targeted by a tool call's `estateID` argument.
