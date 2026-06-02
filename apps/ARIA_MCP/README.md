@@ -41,6 +41,34 @@ ARIA_MCP is a boundary, not a processing layer. It does not implement algorithms
 - MCP server via stdio or SSE transport
 - Swift 6 strict concurrency
 
+## Persistence
+
+The server selects its storage backend from the environment at startup:
+
+| `ARIA_MCP_SQLITE_PATH` state | Backend | Notes |
+|---|---|---|
+| Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
+| Present, non-empty | SQLite at that path | WAL-mode, durable across restarts |
+| Present, path unusable | — | Exit 1 with clear stderr message |
+
+Parent directories of the SQLite path are created automatically if missing.
+
+Persistence is **server-internal only** — the JSON-RPC wire surface (tools, schemas, methods) is completely unchanged for both backends. Clients do not need to know or care which backend is active.
+
+CloudKit and live federation fan-out remain future work.
+
+### Example
+
+```sh
+# Ephemeral (default — no env var needed)
+aria-mcp
+
+# Durable SQLite at a specific path
+ARIA_MCP_SQLITE_PATH=/var/lib/aria-mcp/estate.sqlite aria-mcp
+```
+
+The Swift and Rust servers read the same `ARIA_MCP_SQLITE_PATH` variable and implement the same three-state behavior table above. Convergence is by output comparison only; there are no cross-language calls.
+
 ## Build order
 
 ARIA_MCP builds in **Phase 4**, last. It sits on top of GeniusLocusKit and wraps it. Build GeniusLocusKit first.
