@@ -1,16 +1,19 @@
 //! Dispatch-surface integration tests — Rust version.
 //!
-//! Exercises all 28 tools through the full dispatch stack using an in-memory
-//! estate (EstateRegistry::new_inmemory). One success path + one error path per
-//! tool group. Tests are ordered by the dispatch routing order in dispatch.rs:
-//! recipe → lens → lexicon (v1 minimum + v2b-p1 lifecycle verbs + tunnel recall).
-//! A tools/list count and schema-keys assertion verifies the full 28-tool surface.
+//! Exercises the dispatch routing for every tool category through the full
+//! dispatch stack using an in-memory estate (EstateRegistry::new_inmemory).
+//! One success path + one error path per tool group — representative tools,
+//! not all 28 individually. Tests are ordered by the dispatch routing order in
+//! dispatch.rs: recipe → lens → lexicon (capture/recall + lifecycle verbs +
+//! tunnel recall). tools_list_count_is_28 plus the schema-keys assertions
+//! gate the full 28-tool surface.
 //!
 //! # Design
 //!
 //! Tests call aria_mcp::dispatch::dispatch_tool directly (not through the stdio
-//! framing loop) — the dispatch layer is what Adams' finding targets. The estate
-//! registry is constructed fresh per group so each group starts with a clean estate.
+//! framing loop) — dispatch routing is the surface under test; framing has its
+//! own suite. The estate registry is constructed fresh per group so each group
+//! starts with a clean estate.
 //!
 //! # Result shape conventions
 //!
