@@ -33,7 +33,9 @@ pub fn constellations(
     max_passes: usize,
 ) -> Constellation {
     if node_ids.is_empty() {
-        return Constellation { communities: Vec::new() };
+        return Constellation {
+            communities: Vec::new(),
+        };
     }
 
     let adjacency = structure_graph::build(node_ids, edges);
@@ -68,7 +70,9 @@ mod tests {
         xs.iter().map(|s| s.to_string()).collect()
     }
     fn edges(xs: &[(&str, &str)]) -> Vec<(String, String)> {
-        xs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        xs.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     #[test]
@@ -98,8 +102,16 @@ mod tests {
             ("B1", "B3"),
             ("B2", "B3"),
         ]);
-        let forward = constellations(&ids(&["A1", "A2", "A3", "B1", "B2", "B3"]), &g, DEFAULT_MAX_PASSES);
-        let shuffled = constellations(&ids(&["B3", "A2", "B1", "A3", "A1", "B2"]), &g, DEFAULT_MAX_PASSES);
+        let forward = constellations(
+            &ids(&["A1", "A2", "A3", "B1", "B2", "B3"]),
+            &g,
+            DEFAULT_MAX_PASSES,
+        );
+        let shuffled = constellations(
+            &ids(&["B3", "A2", "B1", "A3", "A1", "B2"]),
+            &g,
+            DEFAULT_MAX_PASSES,
+        );
         assert_eq!(forward, shuffled);
         for group in &forward.communities {
             let mut sorted = group.clone();
@@ -109,11 +121,16 @@ mod tests {
         let firsts: Vec<&String> = forward.communities.iter().map(|g| &g[0]).collect();
         let mut sorted_firsts = firsts.clone();
         sorted_firsts.sort();
-        assert_eq!(firsts, sorted_firsts, "communities ordered by smallest member");
+        assert_eq!(
+            firsts, sorted_firsts,
+            "communities ordered by smallest member"
+        );
     }
 
     #[test]
     fn total_over_edge_inputs() {
-        assert!(constellations(&[], &[], DEFAULT_MAX_PASSES).communities.is_empty());
+        assert!(constellations(&[], &[], DEFAULT_MAX_PASSES)
+            .communities
+            .is_empty());
     }
 }

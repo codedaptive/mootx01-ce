@@ -12,8 +12,11 @@ use std::collections::HashMap;
 /// endpoints the same node) and an edge with an endpoint not in `node_ids`
 /// contribute nothing; each surviving pair adds a symmetric edge.
 pub fn build(node_ids: &[String], edges: &[(String, String)]) -> Vec<Vec<(usize, f64)>> {
-    let index: HashMap<&str, usize> =
-        node_ids.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = node_ids
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
 
     let mut adjacency: Vec<Vec<(usize, f64)>> = vec![Vec::new(); node_ids.len()];
     for (a, b) in edges {
@@ -39,7 +42,9 @@ mod tests {
         xs.iter().map(|s| s.to_string()).collect()
     }
     fn edges(xs: &[(&str, &str)]) -> Vec<(String, String)> {
-        xs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        xs.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     #[test]
@@ -61,7 +66,10 @@ mod tests {
     fn absent_endpoint_edge_contributes_nothing() {
         let nodes = ids(&["a", "b"]);
         let clean = build(&nodes, &edges(&[("a", "b")]));
-        let noisy = build(&nodes, &edges(&[("a", "b"), ("a", "ghost"), ("ghost", "b")]));
+        let noisy = build(
+            &nodes,
+            &edges(&[("a", "b"), ("a", "ghost"), ("ghost", "b")]),
+        );
         assert_eq!(noisy, clean);
     }
 

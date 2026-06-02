@@ -99,7 +99,11 @@ pub struct DreamingPolicy {
 impl Default for DreamingPolicy {
     /// Spec defaults (NEURONKIT_SPEC § 3.1).
     fn default() -> Self {
-        Self { min_success_rate: 0.6, min_confidence: 0.7, min_attempts: 5 }
+        Self {
+            min_success_rate: 0.6,
+            min_confidence: 0.7,
+            min_attempts: 5,
+        }
     }
 }
 
@@ -125,7 +129,11 @@ pub struct RecallTraceRewardSource;
 
 impl RewardSource for RecallTraceRewardSource {
     fn reward(&self, item: &RecallTraceItem) -> f32 {
-        if item.used { 1.0 } else { 0.0 }
+        if item.used {
+            1.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -195,8 +203,11 @@ impl DreamingDaemon {
         let candidates_considered = observations.len();
 
         // Step 5 (prep): existing drawer-to-drawer tunnel keys.
-        let existing_tunnel_keys: BTreeSet<String> =
-            reader.existing_tunnels().iter().filter_map(tunnel_key).collect();
+        let existing_tunnel_keys: BTreeSet<String> = reader
+            .existing_tunnels()
+            .iter()
+            .filter_map(tunnel_key)
+            .collect();
 
         // Steps 3-6: delegate every decision to the pure core.
         let decision_obs: Vec<dreaming_decision::Observation> = observations
@@ -278,11 +289,15 @@ mod tests {
         tunnels: Vec<TunnelLink>,
     }
     impl DreamingSubstrateReader for FakeReader {
-        fn recent_recall_traces(&self) -> Vec<RecallTraceItem> { self.traces.clone() }
+        fn recent_recall_traces(&self) -> Vec<RecallTraceItem> {
+            self.traces.clone()
+        }
         fn co_occurrence_observations(&self) -> Vec<CoOccurrenceObservation> {
             self.observations.clone()
         }
-        fn existing_tunnels(&self) -> Vec<TunnelLink> { self.tunnels.clone() }
+        fn existing_tunnels(&self) -> Vec<TunnelLink> {
+            self.tunnels.clone()
+        }
     }
 
     /// Records what the cycle wrote, like the Swift RecordingSink.
@@ -292,12 +307,19 @@ mod tests {
         diaries: Vec<DreamingDiaryEntry>,
     }
     impl DreamingProposalSink for RecordingSink {
-        fn propose(&mut self, frame: ProposeFrameOut) { self.proposals.push(frame); }
-        fn record_cycle_diary(&mut self, entry: DreamingDiaryEntry) { self.diaries.push(entry); }
+        fn propose(&mut self, frame: ProposeFrameOut) {
+            self.proposals.push(frame);
+        }
+        fn record_cycle_diary(&mut self, entry: DreamingDiaryEntry) {
+            self.diaries.push(entry);
+        }
     }
 
     fn trace(target: &str, used: bool) -> RecallTraceItem {
-        RecallTraceItem { target: target.to_string(), used }
+        RecallTraceItem {
+            target: target.to_string(),
+            used,
+        }
     }
     fn obs(a: &str, b: &str, attempts: i64, ev: &[&str]) -> CoOccurrenceObservation {
         CoOccurrenceObservation {
@@ -308,7 +330,10 @@ mod tests {
         }
     }
     fn link(a: &str, b: &str) -> TunnelLink {
-        TunnelLink { source_drawer_id: Some(a.to_string()), target_drawer_id: Some(b.to_string()) }
+        TunnelLink {
+            source_drawer_id: Some(a.to_string()),
+            target_drawer_id: Some(b.to_string()),
+        }
     }
 
     // DC-1: a strong, novel candidate is proposed; report + reward map and
@@ -383,7 +408,11 @@ mod tests {
             tunnels: vec![],
         };
         let second = d.run_cycle(&r2, &RecallTraceRewardSource, &mut sink);
-        assert_eq!(second.proposals_emitted.len(), 0, "B-4 suppresses the re-proposal");
+        assert_eq!(
+            second.proposals_emitted.len(),
+            0,
+            "B-4 suppresses the re-proposal"
+        );
         assert_eq!(second.suppressed_duplicates, 1);
         assert!(
             second.candidate_scores[&key] >= 0.7,

@@ -303,7 +303,11 @@ mod tests {
             assert_close(rule.support, 2.0 / 4.0, "support");
             assert_close(rule.confidence, 2.0 / 3.0, "confidence");
             assert_close(rule.lift, 8.0 / 9.0, "lift");
-            assert_close(rule.leverage, 2.0 / 4.0 - (3.0 / 4.0) * (3.0 / 4.0), "leverage");
+            assert_close(
+                rule.leverage,
+                2.0 / 4.0 - (3.0 / 4.0) * (3.0 / 4.0),
+                "leverage",
+            );
             assert_close(
                 rule.conviction,
                 (1.0 - 3.0 / 4.0) / (1.0 - 2.0 / 3.0),
@@ -337,8 +341,7 @@ mod tests {
     #[test]
     fn min_support_gates() {
         // support .4 (A↔B pair) passes 0.3; support .2 (A↔C) dropped.
-        let out =
-            mine_association_rules(&main_matrix(), 10, MiningThresholds::new(0.3, 0.0));
+        let out = mine_association_rules(&main_matrix(), 10, MiningThresholds::new(0.3, 0.0));
         let pairs: Vec<(Item, Item)> = out.iter().map(|r| (r.antecedent, r.consequent)).collect();
         assert_eq!(pairs, vec![(item_a(), item_b()), (item_b(), item_a())]);
     }
@@ -347,8 +350,7 @@ mod tests {
     fn min_confidence_gates() {
         // confidence: A→B 4/7 (drop), A→C 2/7 (drop),
         //             B→A 4/6 (pass), C→A 1.0 (pass).
-        let out =
-            mine_association_rules(&main_matrix(), 10, MiningThresholds::new(0.0, 0.6));
+        let out = mine_association_rules(&main_matrix(), 10, MiningThresholds::new(0.0, 0.6));
         let pairs: Vec<(Item, Item)> = out.iter().map(|r| (r.antecedent, r.consequent)).collect();
         assert_eq!(pairs, vec![(item_b(), item_a()), (item_c(), item_a())]);
     }

@@ -22,9 +22,7 @@
 //! Determinism: no clock, no RNG. The daemon carries `cycle_count`; all
 //! time-derived inputs (ages, the audit verdict) arrive through the seam.
 
-use crate::maintenance_decision::{
-    self, AgedRow, AuditVerdict, Category, DriftRow,
-};
+use crate::maintenance_decision::{self, AgedRow, AuditVerdict, Category, DriftRow};
 
 /// A proposal the sink receives. No Rust `ProposeFrame` estate type exists
 /// (propose is Brain-layer); `kind` is the proposal-kind tag.
@@ -143,7 +141,11 @@ pub struct MaintenanceDaemon {
 
 impl MaintenanceDaemon {
     pub fn new(policy: MaintenancePolicy) -> Self {
-        Self { policy, proposed_keys: std::collections::BTreeSet::new(), cycle_count: 0 }
+        Self {
+            policy,
+            proposed_keys: std::collections::BTreeSet::new(),
+            cycle_count: 0,
+        }
     }
 
     /// Run one maintenance cycle (steps 0-6) against the seams. Mirrors
@@ -179,10 +181,7 @@ impl MaintenanceDaemon {
             let frame = ProposeFrameOut {
                 target: d.target.clone(),
                 kind: kind_tag(d.category).to_string(),
-                justification: format!(
-                    "maintenance: {:?} on {} {}",
-                    d.category, d.target, detail
-                ),
+                justification: format!("maintenance: {:?} on {} {}", d.category, d.target, detail),
             };
             sink.propose(frame.clone());
             proposals_emitted.push(frame);
@@ -234,7 +233,9 @@ mod tests {
         scan: MaintenanceScan,
     }
     impl MaintenanceSubstrateReader for FakeReader {
-        fn scan(&self) -> MaintenanceScan { self.scan.clone() }
+        fn scan(&self) -> MaintenanceScan {
+            self.scan.clone()
+        }
     }
 
     #[derive(Default)]
@@ -243,16 +244,33 @@ mod tests {
         diaries: Vec<MaintenanceDiaryEntry>,
     }
     impl MaintenanceProposalSink for RecordingSink {
-        fn propose(&mut self, frame: ProposeFrameOut) { self.proposals.push(frame); }
-        fn record_cycle_diary(&mut self, entry: MaintenanceDiaryEntry) { self.diaries.push(entry); }
+        fn propose(&mut self, frame: ProposeFrameOut) {
+            self.proposals.push(frame);
+        }
+        fn record_cycle_diary(&mut self, entry: MaintenanceDiaryEntry) {
+            self.diaries.push(entry);
+        }
     }
 
-    fn aged(id: &str, age: f64) -> AgedRow { AgedRow { id: id.to_string(), age_seconds: age } }
-    fn drift(key: &str, f: f32) -> DriftRow { DriftRow { key: key.to_string(), drift_fraction: f } }
+    fn aged(id: &str, age: f64) -> AgedRow {
+        AgedRow {
+            id: id.to_string(),
+            age_seconds: age,
+        }
+    }
+    fn drift(key: &str, f: f32) -> DriftRow {
+        DriftRow {
+            key: key.to_string(),
+            drift_fraction: f,
+        }
+    }
 
     fn full_scan() -> MaintenanceScan {
         MaintenanceScan {
-            audit: Some(AuditVerdict { valid: true, first_broken_at_millis: None }),
+            audit: Some(AuditVerdict {
+                valid: true,
+                first_broken_at_millis: None,
+            }),
             forbidden_drawer_ids: vec!["d-forbidden".to_string()],
             aged_active: vec![aged("d-old", 3_000_000.0), aged("d-forbidden", 1.0)],
             aged_tombstoned: vec![aged("d-tomb", 700_000.0)],
@@ -278,7 +296,11 @@ mod tests {
         assert_eq!(report.by_reference_drifts, 1);
         assert!(report.audit_checked);
         // decay + tombstone both map to the mutateCandidate kind.
-        let mutate = report.proposals_emitted.iter().filter(|f| f.kind == "mutateCandidate").count();
+        let mutate = report
+            .proposals_emitted
+            .iter()
+            .filter(|f| f.kind == "mutateCandidate")
+            .count();
         assert_eq!(mutate, 2);
         assert_eq!(sink.diaries.len(), 1);
         assert_eq!(sink.diaries[0].wing, "wing_maintenance-daemon");
@@ -294,7 +316,10 @@ tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0"
     #[test]
     fn mc2_tampered_audit_emits_integrity() {
         let scan = MaintenanceScan {
-            audit: Some(AuditVerdict { valid: false, first_broken_at_millis: Some(2000) }),
+            audit: Some(AuditVerdict {
+                valid: false,
+                first_broken_at_millis: Some(2000),
+            }),
             ..MaintenanceScan::default()
         };
         let reader = FakeReader { scan };

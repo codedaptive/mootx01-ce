@@ -64,7 +64,10 @@ pub fn representation_bias(
     let estate_shares = shares(estate);
     let reference_shares = shares(reference);
 
-    let labels: BTreeSet<&String> = estate_shares.keys().chain(reference_shares.keys()).collect();
+    let labels: BTreeSet<&String> = estate_shares
+        .keys()
+        .chain(reference_shares.keys())
+        .collect();
     if labels.is_empty() {
         return Vec::new();
     }
@@ -74,7 +77,12 @@ pub fn representation_bias(
         .map(|label| {
             let e = *estate_shares.get(label).unwrap_or(&0.0);
             let r = *reference_shares.get(label).unwrap_or(&0.0);
-            CategoryBias { label: label.clone(), estate_share: e, reference_share: r, bias: e - r }
+            CategoryBias {
+                label: label.clone(),
+                estate_share: e,
+                reference_share: r,
+                bias: e - r,
+            }
         })
         .collect();
     out.sort_by(|a, b| {
@@ -114,10 +122,20 @@ pub fn learned_preference(
     let mut outcomes: Vec<PairwiseOutcome> = Vec::with_capacity(records.len() * 2);
     for (label, endorsements, dismissals) in records {
         if label == PREFERENCE_BASELINE {
-            return Err(TournamentError::SelfPairing(PREFERENCE_BASELINE.to_string()));
+            return Err(TournamentError::SelfPairing(
+                PREFERENCE_BASELINE.to_string(),
+            ));
         }
-        outcomes.push(PairwiseOutcome::new(label, PREFERENCE_BASELINE, endorsements + 1));
-        outcomes.push(PairwiseOutcome::new(PREFERENCE_BASELINE, label, dismissals + 1));
+        outcomes.push(PairwiseOutcome::new(
+            label,
+            PREFERENCE_BASELINE,
+            endorsements + 1,
+        ));
+        outcomes.push(PairwiseOutcome::new(
+            PREFERENCE_BASELINE,
+            label,
+            dismissals + 1,
+        ));
     }
 
     // Surface the gated fitter (I-17).
@@ -129,14 +147,17 @@ pub fn learned_preference(
         .find(|s| s.competitor_id == PREFERENCE_BASELINE)
         .map(|s| s.strength)
         .unwrap_or(0.0);
-    let counts: HashMap<&str, (i64, i64)> =
-        records.iter().map(|(l, e, d)| (l.as_str(), (*e, *d))).collect();
+    let counts: HashMap<&str, (i64, i64)> = records
+        .iter()
+        .map(|(l, e, d)| (l.as_str(), (*e, *d)))
+        .collect();
 
     let mut rooms: Vec<PreferenceStrength> = fitted
         .iter()
         .filter(|s| s.competitor_id != PREFERENCE_BASELINE)
         .map(|s| {
-            let (endorsements, dismissals) = *counts.get(s.competitor_id.as_str()).unwrap_or(&(0, 0));
+            let (endorsements, dismissals) =
+                *counts.get(s.competitor_id.as_str()).unwrap_or(&(0, 0));
             PreferenceStrength {
                 label: s.competitor_id.clone(),
                 strength: s.strength - baseline_strength,
@@ -223,8 +244,16 @@ mod tests {
         let r = records(&[("alwaysKept", 5, 0), ("alwaysTossed", 0, 5)]);
         let prefs = learned_preference(&r).unwrap();
         assert_eq!(prefs.len(), 2);
-        let kept = prefs.iter().find(|p| p.label == "alwaysKept").unwrap().strength;
-        let tossed = prefs.iter().find(|p| p.label == "alwaysTossed").unwrap().strength;
+        let kept = prefs
+            .iter()
+            .find(|p| p.label == "alwaysKept")
+            .unwrap()
+            .strength;
+        let tossed = prefs
+            .iter()
+            .find(|p| p.label == "alwaysTossed")
+            .unwrap()
+            .strength;
         assert!(kept > tossed);
     }
 
@@ -233,7 +262,10 @@ mod tests {
         let r = records(&[("barelyTouched", 1, 1), ("stronglyLoved", 20, 0)]);
         let prefs = learned_preference(&r).unwrap();
         let barely = prefs.iter().find(|p| p.label == "barelyTouched").unwrap();
-        assert!(barely.strength.abs() < 0.5, "near neutral with little signal");
+        assert!(
+            barely.strength.abs() < 0.5,
+            "near neutral with little signal"
+        );
     }
 
     #[test]
@@ -250,6 +282,11 @@ mod tests {
     #[test]
     fn baseline_sentinel_name_errors() {
         let r = records(&[(PREFERENCE_BASELINE, 3, 1)]);
-        assert_eq!(learned_preference(&r), Err(TournamentError::SelfPairing(PREFERENCE_BASELINE.to_string())));
+        assert_eq!(
+            learned_preference(&r),
+            Err(TournamentError::SelfPairing(
+                PREFERENCE_BASELINE.to_string()
+            ))
+        );
     }
 }
