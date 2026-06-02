@@ -236,13 +236,13 @@ binding; the catalog descriptor matches the Swift values (§ 7).
 
 ## § 6 — Reasoning-lens recipes (SPEC § 4.2)
 
-The fourteen lens recipes. **Rust signatures are shipped** in
-`packages/kits/CognitionKit/rust/src/*_recipe.rs`. The **Swift versions are
-the contracted target (SPEC C-7)** and land lens by lens — each category
-below notes which Swift versions are shipped (in
-`Sources/CognitionKit/`); the rest are not yet authored. Both versions of
-a lens must exist before it can graduate into the catalog (SPEC § 8). The
-signatures are listed here as the surface both versions must converge on.
+The fourteen lens recipes. **Both versions are shipped**: Rust in
+`packages/kits/CognitionKit/rust/src/*_recipe.rs`, Swift in
+`Sources/CognitionKit/` (SPEC C-7 satisfied) — each category below
+names its Swift entry points. A lens still graduates into the catalog
+only via the graduation gate (SPEC § 8 — a named consumer and the MCP
+tool land with the catalog entry in one change). The signatures are
+listed here as the surface both versions converge on.
 
 Every lens `run_*` takes the estate coordinator and handle, a recall frame
 or wing/anchor, lens-specific parameters, and (where it recalls) a `now`;

@@ -19,13 +19,10 @@
 //!    (Keystones, LatentThemes, TrustLens, Drift, Contradiction,
 //!    Constellation, ThemeWeather, FeelsLike, TunnelSuccessor,
 //!    EstateDivergence, Anticipate, MindOverlap, Bias, FreeAssociation).
-//!    Keystones, Constellation, FreeAssociation, TunnelSuccessor,
-//!    TrustLens, ThemeWeather, LatentThemes, Bias, and Anticipate are
-//!    paired with Swift versions in `Sources/CognitionKit/`; Drift,
-//!    Contradiction, FeelsLike, MindOverlap, and EstateDivergence are
-//!    Rust-only today, with the Swift versions contracted (SPEC C-7).
-//!    None are registered in the `catalog` yet — a lens registers in
-//!    BOTH versions' catalogs or in neither, per the graduation gate in
+//!    Every lens recipe is paired with a Swift version in
+//!    `Sources/CognitionKit/` (SPEC C-7 satisfied). None are registered
+//!    in the `catalog` yet — a lens registers in BOTH versions' catalogs
+//!    or in neither, per the graduation gate in
 //!    `docs/engineering/LENS_DISCOVERABILITY_DECISION_v1.0_2026-05-31.md`.
 //!
 //! Determinism: every function here is a pure function of its inputs.
