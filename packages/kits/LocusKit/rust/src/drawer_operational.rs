@@ -60,8 +60,8 @@ pub enum CaptureChannel {
     Ocr = 2,
     ImportedFile = 3,
     Sensor = 4,
-    Actuator = 5,    // NEW in v0.6 per cookbook §2.4
-    // Raw values 6–63 are reserved for future capture channels.
+    Actuator = 5, // NEW in v0.6 per cookbook §2.4
+                  // Raw values 6–63 are reserved for future capture channels.
 }
 
 impl CaptureChannel {
@@ -103,8 +103,8 @@ pub enum ContentKind {
     List = 3,
     StructuredJson = 4,
     ImageCaption = 5,
-    FingerprintOnly = 6,    // NEW in v0.6 per cookbook §2.4 / §2.5
-    // Raw values 7–63 are reserved for future kinds.
+    FingerprintOnly = 6, // NEW in v0.6 per cookbook §2.4 / §2.5
+                         // Raw values 7–63 are reserved for future kinds.
 }
 
 impl ContentKind {
@@ -201,9 +201,11 @@ impl Drawer {
     /// colliding with the provenance-bitmap `sensitivity()` accessor.
     pub fn adjective_sensitivity(&self) -> crate::adjectives::AdjectiveSensitivity {
         // Cookbook §2.3: adjective sensitivity at bits 6-11 of adjective_bitmap.
-        crate::adjectives::AdjectiveSensitivity::from_raw(
-            bit_field::extract_field(self.adjective_bitmap, 6, 6),
-        )
+        crate::adjectives::AdjectiveSensitivity::from_raw(bit_field::extract_field(
+            self.adjective_bitmap,
+            6,
+            6,
+        ))
     }
 
     /// The feature-flag region of `operational_bitmap` masked to bits
@@ -256,7 +258,7 @@ mod tests {
         assert_eq!(CaptureChannel::Ocr.raw_value(), 2);
         assert_eq!(CaptureChannel::ImportedFile.raw_value(), 3);
         assert_eq!(CaptureChannel::Sensor.raw_value(), 4);
-        assert_eq!(CaptureChannel::Actuator.raw_value(), 5);   // NEW in v0.6
+        assert_eq!(CaptureChannel::Actuator.raw_value(), 5); // NEW in v0.6
     }
 
     #[test]
@@ -282,7 +284,7 @@ mod tests {
         assert_eq!(ContentKind::List.raw_value(), 3);
         assert_eq!(ContentKind::StructuredJson.raw_value(), 4);
         assert_eq!(ContentKind::ImageCaption.raw_value(), 5);
-        assert_eq!(ContentKind::FingerprintOnly.raw_value(), 6);   // NEW in v0.6
+        assert_eq!(ContentKind::FingerprintOnly.raw_value(), 6); // NEW in v0.6
     }
 
     #[test]
@@ -303,13 +305,13 @@ mod tests {
     fn feature_flag_constants_match_bit_positions() {
         // Cookbook §2.4: feature_flags at bits 12-23.
         assert_eq!(DrawerFeatureFlags::HAS_ATTACHMENTS, 1 << 12);
-        assert_eq!(DrawerFeatureFlags::HAS_VOICE,       1 << 13);
-        assert_eq!(DrawerFeatureFlags::HAS_IMAGE,       1 << 14);
-        assert_eq!(DrawerFeatureFlags::HAS_LINKS,       1 << 15);
-        assert_eq!(DrawerFeatureFlags::IS_PINNED,       1 << 16);
-        assert_eq!(DrawerFeatureFlags::IS_KEYSTONE,     1 << 17);   // NEW
-        assert_eq!(DrawerFeatureFlags::IS_LOCKED_ZONE,  1 << 18);   // NEW
-        assert_eq!(DrawerFeatureFlags::FIELD_MASK,      0xFFF000);
+        assert_eq!(DrawerFeatureFlags::HAS_VOICE, 1 << 13);
+        assert_eq!(DrawerFeatureFlags::HAS_IMAGE, 1 << 14);
+        assert_eq!(DrawerFeatureFlags::HAS_LINKS, 1 << 15);
+        assert_eq!(DrawerFeatureFlags::IS_PINNED, 1 << 16);
+        assert_eq!(DrawerFeatureFlags::IS_KEYSTONE, 1 << 17); // NEW
+        assert_eq!(DrawerFeatureFlags::IS_LOCKED_ZONE, 1 << 18); // NEW
+        assert_eq!(DrawerFeatureFlags::FIELD_MASK, 0xFFF000);
     }
 
     #[test]
@@ -334,8 +336,14 @@ mod tests {
         let mut d = sample();
         d.operational_bitmap = DrawerFeatureFlags::HAS_VOICE | DrawerFeatureFlags::IS_PINNED;
         let flags = d.feature_flags();
-        assert_eq!(flags & DrawerFeatureFlags::HAS_VOICE, DrawerFeatureFlags::HAS_VOICE);
-        assert_eq!(flags & DrawerFeatureFlags::IS_PINNED, DrawerFeatureFlags::IS_PINNED);
+        assert_eq!(
+            flags & DrawerFeatureFlags::HAS_VOICE,
+            DrawerFeatureFlags::HAS_VOICE
+        );
+        assert_eq!(
+            flags & DrawerFeatureFlags::IS_PINNED,
+            DrawerFeatureFlags::IS_PINNED
+        );
         // Other regions are masked out.
         d.operational_bitmap = (1 << 30) | DrawerFeatureFlags::HAS_VOICE;
         assert_eq!(d.feature_flags(), DrawerFeatureFlags::HAS_VOICE);

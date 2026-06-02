@@ -38,7 +38,9 @@ pub struct OwnerCredentials {
 impl OwnerCredentials {
     /// Create credentials with the given identifier.
     pub fn new(owner_identifier: impl Into<String>) -> Self {
-        Self { owner_identifier: owner_identifier.into() }
+        Self {
+            owner_identifier: owner_identifier.into(),
+        }
     }
 }
 
@@ -136,7 +138,11 @@ impl std::fmt::Display for EstateError {
             EstateError::SubstrateUnavailable(msg) => {
                 write!(f, "SubstrateUnavailable: {}", msg)
             }
-            EstateError::ManifestMismatch { key, found, expected } => {
+            EstateError::ManifestMismatch {
+                key,
+                found,
+                expected,
+            } => {
                 write!(
                     f,
                     "ManifestMismatch: key='{}' found='{}' expected='{}'",
@@ -199,7 +205,10 @@ mod tests {
     #[test]
     fn estate_error_substrate_unavailable() {
         let err = EstateError::SubstrateUnavailable("disk full".to_string());
-        assert_eq!(err, EstateError::SubstrateUnavailable("disk full".to_string()));
+        assert_eq!(
+            err,
+            EstateError::SubstrateUnavailable("disk full".to_string())
+        );
     }
 
     #[test]
@@ -210,7 +219,11 @@ mod tests {
             expected: "1".to_string(),
         };
         match &err {
-            EstateError::ManifestMismatch { key, found, expected } => {
+            EstateError::ManifestMismatch {
+                key,
+                found,
+                expected,
+            } => {
                 assert_eq!(key, "bitmap_layout_version");
                 assert_eq!(found, "2");
                 assert_eq!(expected, "1");
@@ -221,6 +234,9 @@ mod tests {
 
     #[test]
     fn estate_error_empty_owner_identifier() {
-        assert_eq!(EstateError::EmptyOwnerIdentifier, EstateError::EmptyOwnerIdentifier);
+        assert_eq!(
+            EstateError::EmptyOwnerIdentifier,
+            EstateError::EmptyOwnerIdentifier
+        );
     }
 }

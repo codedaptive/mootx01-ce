@@ -231,13 +231,12 @@ impl Estate {
         store: Arc<dyn DrawerStore>,
         manifest: ManifestValues,
     ) -> Result<Estate, EstateError> {
-        let uuid = Uuid::parse_str(&manifest.estate_uuid).map_err(|_| {
-            EstateError::ManifestMismatch {
+        let uuid =
+            Uuid::parse_str(&manifest.estate_uuid).map_err(|_| EstateError::ManifestMismatch {
                 key: ManifestKey::EstateUUID.as_str().to_string(),
                 found: manifest.estate_uuid.clone(),
                 expected: "<valid UUID string>".to_string(),
-            }
-        })?;
+            })?;
         Ok(Estate {
             store,
             estate_uuid: uuid,
@@ -372,7 +371,11 @@ mod tests {
         ));
         let err = Estate::open(store, OwnerCredentials::new("alice")).unwrap_err();
         match err {
-            EstateError::ManifestMismatch { key, found, expected } => {
+            EstateError::ManifestMismatch {
+                key,
+                found,
+                expected,
+            } => {
                 assert_eq!(key, "bitmap_layout_version");
                 assert_eq!(found, "v0.99");
                 assert_eq!(expected, "v1.0");

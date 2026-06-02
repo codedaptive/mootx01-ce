@@ -33,7 +33,9 @@
 //!   in SQLite).
 //! - `UUID lineageID` → `uuid::Uuid lineage_id`. Same value semantics.
 
-use crate::provenance::{Channel, Confidence, Confirmation, EnrichmentStatus, Sensitivity, SourceType, CaptureChannel};
+use crate::provenance::{
+    CaptureChannel, Channel, Confidence, Confirmation, EnrichmentStatus, Sensitivity, SourceType,
+};
 use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -289,7 +291,15 @@ mod tests {
     use super::*;
 
     fn sample() -> Drawer {
-        Drawer::new("d1", "hello", "study", "notes", "alice", 1_700_000_000, "test-v1")
+        Drawer::new(
+            "d1",
+            "hello",
+            "study",
+            "notes",
+            "alice",
+            1_700_000_000,
+            "test-v1",
+        )
     }
 
     #[test]
@@ -379,9 +389,9 @@ mod tests {
     fn future_version_raw_values_fail_safe() {
         // Reserved raws must decode to safe fallbacks per cookbook §2.5.
         let mut d = sample();
-        d.provenance = 0x3F;          // bits 0–5 = 63, reserved SourceType
+        d.provenance = 0x3F; // bits 0–5 = 63, reserved SourceType
         assert_eq!(d.source_type(), SourceType::User);
-        d.provenance = 0x3F << 18;    // bits 18–23 = 63, reserved Confirmation
+        d.provenance = 0x3F << 18; // bits 18–23 = 63, reserved Confirmation
         assert_eq!(d.confirmation(), Confirmation::Unconfirmed);
     }
 }
@@ -404,7 +414,10 @@ mod sealed_bit_tests {
     #[test]
     fn sealed_independent_of_trust() {
         let adj = bit_field::write_field(3, 0, 18, 6); // canonical
-        assert!(!bit_field::extract_flag(adj, 27), "trust set must not set seal");
+        assert!(
+            !bit_field::extract_flag(adj, 27),
+            "trust set must not set seal"
+        );
         let sealed = bit_field::write_flag(true, adj, 27);
         assert!(bit_field::extract_flag(sealed, 27));
         assert_eq!((sealed >> 18) & 0x3F, 3, "sealing must not disturb trust");
@@ -413,6 +426,9 @@ mod sealed_bit_tests {
     #[test]
     fn bit_27_does_not_collide_with_bit_26() {
         let only_seal = bit_field::write_flag(true, 0, 27);
-        assert!(!bit_field::extract_flag(only_seal, 26), "27 must not read as 26");
+        assert!(
+            !bit_field::extract_flag(only_seal, 26),
+            "27 must not read as 26"
+        );
     }
 }

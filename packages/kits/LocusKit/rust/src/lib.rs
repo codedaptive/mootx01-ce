@@ -99,10 +99,6 @@ mod association_tests;
 #[cfg(test)]
 mod capture_tunnel_tests;
 
-pub mod estate_audit;
-pub mod estate_verbs;
-pub mod frames;
-pub mod recall_stream;
 pub mod audit_types;
 pub mod bitmap_evaluator;
 pub mod bitmap_ops;
@@ -118,10 +114,13 @@ pub mod drawer_store;
 pub mod drawer_store_inmemory;
 pub mod error;
 pub mod estate;
+pub mod estate_audit;
 pub mod estate_types;
+pub mod estate_verbs;
 pub mod filter;
 pub mod fingerprint256_adapters;
 pub mod forbidden_combination_validator;
+pub mod frames;
 pub mod kg_fact;
 pub mod kg_fact_operational;
 pub mod learned_reference;
@@ -136,6 +135,7 @@ mod proposal_tests;
 pub mod provenance;
 #[cfg(test)]
 mod reanchor_tests;
+pub mod recall_stream;
 pub mod recall_trace_item;
 pub mod schema;
 pub mod summaries;

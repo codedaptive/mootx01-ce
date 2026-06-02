@@ -37,7 +37,7 @@ pub struct RecallTraceItem {
 
     /// When the recall that produced this row was executed.
     /// Stored as TEXT ISO8601 in SQLite (fleet date-storage rule).
-    pub recalled_at: String,  // ISO8601 string; matching SQLite TEXT storage
+    pub recalled_at: String, // ISO8601 string; matching SQLite TEXT storage
 
     /// Similarity score assigned by the recall, if available. `None`
     /// means the recall did not produce a score for this row.
@@ -51,7 +51,7 @@ pub struct RecallTraceItem {
 impl RecallTraceItem {
     /// Bit 0 of `operational_bitmap`: the row was consumed by the two-source
     /// reward path. Mirrors `RecallTraceItem.flagUsed` in Swift.
-    pub const FLAG_USED: i64 = 1 << 0;   // bit 0
+    pub const FLAG_USED: i64 = 1 << 0; // bit 0
 
     /// Create a new `RecallTraceItem`.
     ///
@@ -181,13 +181,7 @@ mod tests {
 
     #[test]
     fn fields_round_trip_through_new() {
-        let item = RecallTraceItem::new(
-            "t-id",
-            "d-target",
-            "2024-06-15T10:30:00Z",
-            Some(0.875),
-            0,
-        );
+        let item = RecallTraceItem::new("t-id", "d-target", "2024-06-15T10:30:00Z", Some(0.875), 0);
         assert_eq!(item.id, "t-id");
         assert_eq!(item.target, "d-target");
         assert_eq!(item.recalled_at, "2024-06-15T10:30:00Z");
@@ -197,13 +191,7 @@ mod tests {
 
     #[test]
     fn score_none_round_trips() {
-        let item = RecallTraceItem::new(
-            "t-nil",
-            "d-nil",
-            "2024-01-01T00:00:00Z",
-            None,
-            0,
-        );
+        let item = RecallTraceItem::new("t-nil", "d-nil", "2024-01-01T00:00:00Z", None, 0);
         assert!(item.score.is_none());
     }
 }

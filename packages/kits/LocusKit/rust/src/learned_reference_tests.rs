@@ -92,7 +92,11 @@ fn lattice_anchor_required_rejects_empty() {
     let mut r = sample("lr1", "cat-a", NOW);
     r.lattice_anchor = LatticeAnchor::udc("");
     let err = store.add_learned_reference(&r).unwrap_err();
-    assert!(matches!(err, LocusKitError::InvalidContent(_)), "got {:?}", err);
+    assert!(
+        matches!(err, LocusKitError::InvalidContent(_)),
+        "got {:?}",
+        err
+    );
     // The rejected reference must not have landed.
     assert_eq!(store.get_learned_reference("lr1").unwrap(), None);
 }
@@ -105,16 +109,27 @@ fn content_fields_survive_round_trip() {
     store.add_learned_reference(&r).unwrap();
     let loaded = store.get_learned_reference("lr1").unwrap().unwrap();
     assert_eq!(loaded.source_catalog_id, "catalog:wikipedia/en");
-    assert_eq!(loaded.handle, "https://en.wikipedia.org/wiki/Memory_palace#History");
+    assert_eq!(
+        loaded.handle,
+        "https://en.wikipedia.org/wiki/Memory_palace#History"
+    );
 }
 
 #[test]
 fn learned_references_from_source_filters_and_orders() {
     let store = open_store();
-    store.add_learned_reference(&sample("r-late", "cat-a", NOW + 300)).unwrap();
-    store.add_learned_reference(&sample("r-early", "cat-a", NOW + 100)).unwrap();
-    store.add_learned_reference(&sample("r-mid", "cat-a", NOW + 200)).unwrap();
-    store.add_learned_reference(&sample("r-other", "cat-b", NOW + 150)).unwrap();
+    store
+        .add_learned_reference(&sample("r-late", "cat-a", NOW + 300))
+        .unwrap();
+    store
+        .add_learned_reference(&sample("r-early", "cat-a", NOW + 100))
+        .unwrap();
+    store
+        .add_learned_reference(&sample("r-mid", "cat-a", NOW + 200))
+        .unwrap();
+    store
+        .add_learned_reference(&sample("r-other", "cat-b", NOW + 150))
+        .unwrap();
 
     let cat_a = store.learned_references_from_source("cat-a").unwrap();
     let cat_b = store.learned_references_from_source("cat-b").unwrap();
@@ -144,7 +159,10 @@ fn tombstoned_excluded_from_source_lookup_but_fetchable_by_id() {
 #[test]
 fn get_miss_returns_none() {
     let store = open_store();
-    assert_eq!(store.get_learned_reference("no-such-reference").unwrap(), None);
+    assert_eq!(
+        store.get_learned_reference("no-such-reference").unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -163,7 +181,9 @@ fn table_isolation_does_not_touch_associations() {
         NOW,
     );
     store.add_association(&a).unwrap();
-    store.add_learned_reference(&sample("lr-iso", "cat-a", NOW)).unwrap();
+    store
+        .add_learned_reference(&sample("lr-iso", "cat-a", NOW))
+        .unwrap();
 
     // Association surface unaffected by the learned-reference write.
     assert_eq!(store.get_association("a-iso").unwrap(), Some(a));

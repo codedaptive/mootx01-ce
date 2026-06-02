@@ -94,7 +94,11 @@ fn lattice_anchor_required_rejects_empty() {
     let mut p = sample("p1", "d1", NOW);
     p.lattice_anchor = LatticeAnchor::udc("");
     let err = store.add_proposal(&p).unwrap_err();
-    assert!(matches!(err, LocusKitError::InvalidContent(_)), "got {:?}", err);
+    assert!(
+        matches!(err, LocusKitError::InvalidContent(_)),
+        "got {:?}",
+        err
+    );
     // The rejected proposal must not have landed.
     assert_eq!(store.get_proposal("p1").unwrap(), None);
 }
@@ -112,10 +116,18 @@ fn empty_target_allowed_for_brand_new_object() {
 #[test]
 fn proposals_for_target_filters_and_orders() {
     let store = open_store();
-    store.add_proposal(&sample("p-late", "d1", NOW + 300)).unwrap();
-    store.add_proposal(&sample("p-early", "d1", NOW + 100)).unwrap();
-    store.add_proposal(&sample("p-mid", "d1", NOW + 200)).unwrap();
-    store.add_proposal(&sample("p-other", "d2", NOW + 150)).unwrap();
+    store
+        .add_proposal(&sample("p-late", "d1", NOW + 300))
+        .unwrap();
+    store
+        .add_proposal(&sample("p-early", "d1", NOW + 100))
+        .unwrap();
+    store
+        .add_proposal(&sample("p-mid", "d1", NOW + 200))
+        .unwrap();
+    store
+        .add_proposal(&sample("p-other", "d2", NOW + 150))
+        .unwrap();
 
     let d1 = store.proposals_for_target("d1").unwrap();
     let d2 = store.proposals_for_target("d2").unwrap();

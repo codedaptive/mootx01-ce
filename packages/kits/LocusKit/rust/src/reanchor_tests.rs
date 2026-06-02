@@ -16,13 +16,13 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::drawer_operational::CaptureChannel;
     use crate::drawer_store::DrawerStore;
     use crate::drawer_store_inmemory::InMemoryDrawerStore;
     use crate::error::LocusKitError;
     use crate::estate::Estate;
     use crate::estate_types::{LatticeAnchor, OwnerCredentials};
     use crate::frames::CaptureFrame;
-    use crate::drawer_operational::CaptureChannel;
     use persistence_kit::inmemory::InMemoryStorage;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -40,13 +40,16 @@ mod tests {
     fn make_estate() -> Estate {
         let storage: Arc<dyn persistence_kit::storage::Storage> =
             Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(
-            InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap(),
-        );
+        let store = Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
         Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
     }
 
-    fn basic_capture(estate: &Estate, content: &str, room: &str, udc: &str) -> crate::drawer::Drawer {
+    fn basic_capture(
+        estate: &Estate,
+        content: &str,
+        room: &str,
+        udc: &str,
+    ) -> crate::drawer::Drawer {
         let frame = CaptureFrame::new(
             content,
             CaptureChannel::Typed,
@@ -88,8 +91,8 @@ mod tests {
     fn reanchor_gated_room_move_bitmaps_unchanged() {
         let estate = make_estate();
         let d = basic_capture(&estate, "bitmap preserve", "room-orig", "000.000");
-        let before_adj  = d.adjective_bitmap;
-        let before_op   = d.operational_bitmap;
+        let before_adj = d.adjective_bitmap;
+        let before_op = d.operational_bitmap;
         let before_prov = d.provenance;
 
         estate
@@ -136,13 +139,20 @@ mod tests {
     fn reanchor_gated_lattice_move_bitmaps_unchanged() {
         let estate = make_estate();
         let d = basic_capture(&estate, "lattice bitmap", "room-y", "001.000");
-        let before_adj  = d.adjective_bitmap;
-        let before_op   = d.operational_bitmap;
+        let before_adj = d.adjective_bitmap;
+        let before_op = d.operational_bitmap;
         let before_prov = d.provenance;
 
         estate
             .store
-            .reanchor_gated(&d.id, None, Some(LatticeAnchor::udc("003.000")), "test", None, 1_700_000_500)
+            .reanchor_gated(
+                &d.id,
+                None,
+                Some(LatticeAnchor::udc("003.000")),
+                "test",
+                None,
+                1_700_000_500,
+            )
             .unwrap();
 
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
@@ -179,7 +189,14 @@ mod tests {
     fn reanchor_gated_absent_row_returns_not_found() {
         let store = make_store();
         let err = store
-            .reanchor_gated(ID_ABSENT, Some("new-room"), None, "test", None, 1_700_000_100)
+            .reanchor_gated(
+                ID_ABSENT,
+                Some("new-room"),
+                None,
+                "test",
+                None,
+                1_700_000_100,
+            )
             .unwrap_err();
         assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
     }
@@ -199,7 +216,9 @@ mod tests {
     #[test]
     fn estate_reanchor_nonexistent_row_returns_not_found() {
         let estate = make_estate();
-        let err = estate.reanchor(ID_ABSENT, Some("new-room"), None).unwrap_err();
+        let err = estate
+            .reanchor(ID_ABSENT, Some("new-room"), None)
+            .unwrap_err();
         assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
     }
 
@@ -231,8 +250,8 @@ mod tests {
     fn estate_reanchor_bitmaps_preserved() {
         let estate = make_estate();
         let d = basic_capture(&estate, "bitmaps via estate", "room-a", "000.000");
-        let before_adj  = d.adjective_bitmap;
-        let before_op   = d.operational_bitmap;
+        let before_adj = d.adjective_bitmap;
+        let before_op = d.operational_bitmap;
         let before_prov = d.provenance;
 
         estate.reanchor(&d.id, Some("new-room"), None).unwrap();
@@ -250,7 +269,9 @@ mod tests {
         let count_before = audit_event_count(estate.store.as_ref(), &d.id);
         assert_eq!(count_before, 1); // genesis
 
-        estate.reanchor(&d.id, Some("audit-moved-room"), None).unwrap();
+        estate
+            .reanchor(&d.id, Some("audit-moved-room"), None)
+            .unwrap();
 
         let count_after = audit_event_count(estate.store.as_ref(), &d.id);
         assert_eq!(count_after, 2); // genesis + reanchor

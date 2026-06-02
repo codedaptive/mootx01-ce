@@ -44,18 +44,18 @@ use crate::drawer::Drawer;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::row_state::RowVerb;
+use crate::adjectives::State;
 use crate::association::Association;
-use crate::learned_reference::LearnedReference;
 use crate::error::LocusKitError;
 use crate::estate_types::RowID;
 use crate::kg_fact::KGFact;
+use crate::learned_reference::LearnedReference;
 use crate::manifest::ManifestValues;
 use crate::proposal::Proposal;
 use crate::recall_trace_item::RecallTraceItem;
 use crate::summaries::{RoomSummary, WingSummary};
-use crate::adjectives::State;
 use crate::tunnel::Tunnel;
+use substrate_lib::row_state::RowVerb;
 
 /// Contract every LocusKit storage backend conforms to.
 ///
@@ -313,10 +313,7 @@ pub trait DrawerStore: Send + Sync {
     /// All facts from a source drawer whose state cluster is below 7
     /// (excludes the rejected/accepted/tombstoned post-resolution
     /// states), ordered by `filed_at` ascending.
-    fn kg_facts_for_drawer(
-        &self,
-        _source_drawer_id: &str,
-    ) -> Result<Vec<KGFact>, LocusKitError> {
+    fn kg_facts_for_drawer(&self, _source_drawer_id: &str) -> Result<Vec<KGFact>, LocusKitError> {
         Ok(Vec::new())
     }
 
@@ -342,10 +339,7 @@ pub trait DrawerStore: Send + Sync {
 
     /// All proposals targeting a given row, ordered by `filed_at`
     /// ascending. Resolves through the `idx_proposals_target` index.
-    fn proposals_for_target(
-        &self,
-        _target_row_id: &str,
-    ) -> Result<Vec<Proposal>, LocusKitError> {
+    fn proposals_for_target(&self, _target_row_id: &str) -> Result<Vec<Proposal>, LocusKitError> {
         Ok(Vec::new())
     }
 
@@ -381,11 +375,7 @@ pub trait DrawerStore: Send + Sync {
 
     /// All non-tombstoned associations to a target wing/room pair, ordered
     /// by `filed_at` ascending. Resolves through `idx_associations_target`.
-    fn associations_to(
-        &self,
-        _wing: &str,
-        _room: &str,
-    ) -> Result<Vec<Association>, LocusKitError> {
+    fn associations_to(&self, _wing: &str, _room: &str) -> Result<Vec<Association>, LocusKitError> {
         Ok(Vec::new())
     }
 
@@ -458,20 +448,14 @@ pub trait DrawerStore: Send + Sync {
     // -----------------------------------------------------------------
 
     /// Insert a recall-trace row.
-    fn insert_recall_trace(
-        &self,
-        _item: &RecallTraceItem,
-    ) -> Result<(), LocusKitError> {
+    fn insert_recall_trace(&self, _item: &RecallTraceItem) -> Result<(), LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "insert_recall_trace not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
     /// Fetch a recall-trace row by id. Returns `None` on miss.
-    fn get_recall_trace(
-        &self,
-        _id: &str,
-    ) -> Result<Option<RecallTraceItem>, LocusKitError> {
+    fn get_recall_trace(&self, _id: &str) -> Result<Option<RecallTraceItem>, LocusKitError> {
         Ok(None)
     }
 
@@ -480,10 +464,7 @@ pub trait DrawerStore: Send + Sync {
     /// matching the schema's TEXT timestamp; the in-memory store
     /// compares strings lexicographically, which is correct for the
     /// canonical ISO8601 format the schema enforces.
-    fn recall_trace_since(
-        &self,
-        _since: &str,
-    ) -> Result<Vec<RecallTraceItem>, LocusKitError> {
+    fn recall_trace_since(&self, _since: &str) -> Result<Vec<RecallTraceItem>, LocusKitError> {
         Ok(Vec::new())
     }
 
