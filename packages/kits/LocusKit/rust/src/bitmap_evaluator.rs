@@ -597,12 +597,8 @@ impl BitmapEvaluator {
                     .iter()
                     .any(|f| Self::evaluate_structured(f, drawer))
             }
-            Filter::Not(f) => {
-                if Self::is_structural_filter(f) {
-                    !Self::evaluate_structured(f, drawer)
-                } else {
-                    true
-                }
+            Filter::Not(f) if Self::is_structural_filter(f) => {
+                !Self::evaluate_structured(f, drawer)
             }
             // Bitmap and content cases pass at this tier.
             _ => true,
@@ -725,10 +721,10 @@ impl BitmapEvaluator {
     fn sort(mut drawers: Vec<Drawer>, ordering: Ordering) -> Vec<Drawer> {
         match ordering {
             Ordering::ByCaptureTimeDesc => {
-                drawers.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+                drawers.sort_by_key(|b| std::cmp::Reverse(b.filed_at));
             }
             Ordering::ByCaptureTimeAsc => {
-                drawers.sort_by(|a, b| a.filed_at.cmp(&b.filed_at));
+                drawers.sort_by_key(|a| a.filed_at);
             }
             Ordering::ByRoomAsc => {
                 drawers.sort_by(|a, b| a.room.cmp(&b.room));
@@ -793,7 +789,8 @@ mod tests {
         let store = make_store();
         let d = base_drawer("d1");
         let frame = make_frame(vec![]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d.clone()], store.as_ref()).unwrap();
+        let result =
+            BitmapEvaluator::evaluate(&frame, std::slice::from_ref(&d), store.as_ref()).unwrap();
         assert_eq!(result.len(), 1);
     }
 

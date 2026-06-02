@@ -82,6 +82,11 @@ impl ManifestKey {
     /// `None` for unrecognised strings, matching the Swift fallible
     /// `ManifestKey(rawValue:)` initialiser — the caller decides how to
     /// surface forward-schema rows.
+    ///
+    /// Returns `Option<ManifestKey>` rather than `Result<_, _>`, so this
+    /// does not implement `std::str::FromStr` (different return type).
+    /// The `#[allow]` suppresses the lint that warns about the similar name.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<ManifestKey> {
         Some(match s {
             "manifest_version" => ManifestKey::ManifestVersion,

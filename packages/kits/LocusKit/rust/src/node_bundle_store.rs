@@ -83,6 +83,11 @@ impl BundleKind {
     /// Parse the column value back into a `BundleKind`. Returns `None`
     /// for any other string so callers can surface the corrupt-row
     /// case rather than silently coercing.
+    ///
+    /// Returns `Option<BundleKind>` rather than `Result<_, _>`, so this
+    /// does not implement `std::str::FromStr` (different return type).
+    /// The `#[allow]` suppresses the lint that warns about the similar name.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<BundleKind> {
         match s {
             "A" => Some(BundleKind::ActiveA),

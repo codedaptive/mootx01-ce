@@ -2578,13 +2578,7 @@ fn i64_value_of(v: Option<&TypedValue>) -> i64 {
         Some(TypedValue::Int(i)) | Some(TypedValue::Bitmap(i)) | Some(TypedValue::Timestamp(i)) => {
             *i
         }
-        Some(TypedValue::Bool(b)) => {
-            if *b {
-                1
-            } else {
-                0
-            }
-        }
+        Some(TypedValue::Bool(b)) if *b => 1,
         _ => 0,
     }
 }
@@ -2811,6 +2805,9 @@ mod tests {
             bytes[(i + 7) % 16] ^= ((h >> 32) & 0xff) as u8;
         }
         // Mix the hash across all bytes so short labels differ well.
+        // The loop uses `i` both to read and write bytes[i], so a direct
+        // iterator would need split borrows. The range loop is correct here.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..16 {
             h ^= bytes[i] as u64;
             h = h.wrapping_mul(0x100000001b3);
@@ -3422,7 +3419,7 @@ mod tests {
     #[test]
     fn diary_round_trip_and_lastn_ordering() {
         let store = open_store();
-        let mut e1 = DiaryEntry {
+        let e1 = DiaryEntry {
             id: "e1".to_string(),
             agent_name: "skippy".to_string(),
             entry: "first".to_string(),

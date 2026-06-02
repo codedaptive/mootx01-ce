@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn confidence_filter_example() {
-        let values = vec![
+        let values = [
             Confidence::Null,
             Confidence::Low,
             Confidence::Medium,
