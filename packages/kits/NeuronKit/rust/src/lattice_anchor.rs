@@ -127,8 +127,7 @@ mod tests {
             pipeline_mode: LinguisticPipelineMode::DeterministicReference,
         };
         let json = serde_json::to_string(&inference).expect("serialize");
-        let decoded: LatticeAnchorInference =
-            serde_json::from_str(&json).expect("deserialize");
+        let decoded: LatticeAnchorInference = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, inference);
     }
 

@@ -122,10 +122,7 @@ pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning) -> Vec<DrawerRo
 
     // Normalise RRF into [0, 1]. Fall back to 0.5 when every value is
     // equal (single-row or degenerate input).
-    let max_rrf = rrf_score
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max_rrf = rrf_score.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let min_rrf = rrf_score.iter().copied().fold(f32::INFINITY, f32::min);
     let range = max_rrf - min_rrf;
     let relevance = |idx: usize| -> f32 {
@@ -244,8 +241,10 @@ mod tests {
 
     #[test]
     fn shingles_windows_are_three_char_lowercased() {
-        let expected: std::collections::BTreeSet<String> =
-            ["cat", "atd", "tdo", "dog"].iter().map(|s| s.to_string()).collect();
+        let expected: std::collections::BTreeSet<String> = ["cat", "atd", "tdo", "dog"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(shingles("catdog"), expected);
     }
 
@@ -265,8 +264,14 @@ mod tests {
 
     #[test]
     fn shingle_similarity_symmetric() {
-        let ab = shingle_similarity("the organic chemistry of carbon", "carbon-based organic compounds");
-        let ba = shingle_similarity("carbon-based organic compounds", "the organic chemistry of carbon");
+        let ab = shingle_similarity(
+            "the organic chemistry of carbon",
+            "carbon-based organic compounds",
+        );
+        let ba = shingle_similarity(
+            "carbon-based organic compounds",
+            "the organic chemistry of carbon",
+        );
         assert!((ab - ba).abs() < 1e-6);
     }
 
@@ -281,7 +286,10 @@ mod tests {
     fn rerank_single_drawer_is_identity() {
         let drawers = vec![d("1", "chemistry")];
         let out = rerank(&drawers, &RecallFrameTuning::default());
-        assert_eq!(out.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec!["1"]);
+        assert_eq!(
+            out.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            vec!["1"]
+        );
     }
 
     #[test]
@@ -290,10 +298,8 @@ mod tests {
             .map(|i| d(&format!("{}", i), &format!("drawer body number {}", i)))
             .collect();
         let out = rerank(&drawers, &RecallFrameTuning::default());
-        let in_ids: std::collections::BTreeSet<_> =
-            drawers.iter().map(|r| r.id.clone()).collect();
-        let out_ids: std::collections::BTreeSet<_> =
-            out.iter().map(|r| r.id.clone()).collect();
+        let in_ids: std::collections::BTreeSet<_> = drawers.iter().map(|r| r.id.clone()).collect();
+        let out_ids: std::collections::BTreeSet<_> = out.iter().map(|r| r.id.clone()).collect();
         assert_eq!(in_ids, out_ids);
         assert_eq!(out.len(), drawers.len());
     }
@@ -301,7 +307,12 @@ mod tests {
     #[test]
     fn rerank_deterministic_across_invocations() {
         let drawers: Vec<DrawerRow> = (0..7)
-            .map(|i| d(&format!("row-{}", i), &format!("alpha beta gamma item {}", i)))
+            .map(|i| {
+                d(
+                    &format!("row-{}", i),
+                    &format!("alpha beta gamma item {}", i),
+                )
+            })
             .collect();
         let first = rerank(&drawers, &RecallFrameTuning::default());
         let second = rerank(&drawers, &RecallFrameTuning::default());

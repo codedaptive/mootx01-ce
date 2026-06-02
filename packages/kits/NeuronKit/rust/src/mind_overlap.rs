@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use substrate_ml::dp_or_reduce::{DPParameters, DPORReduction};
+use substrate_ml::dp_or_reduce::{DPORReduction, DPParameters};
 use substrate_ml::partial_state_recall::PartialStateRecall;
 use substrate_types::fingerprint256::Fingerprint256;
 
@@ -69,11 +69,17 @@ mod tests {
     // same DP aggregate — overlap with itself is total (deterministic DP).
     #[test]
     fn mo1_same_set_same_seed_full_overlap() {
-        let set = vec![fp([true, false, false, false]), fp([true, true, false, false])];
+        let set = vec![
+            fp([true, false, false, false]),
+            fp([true, true, false, false]),
+        ];
         let a = dp_summary(&set, 5.0, 1e-6, 1, 0xABCD);
         let b = dp_summary(&set, 5.0, 1e-6, 1, 0xABCD);
         assert_eq!(a, b, "same set + seed ⇒ same DP aggregate");
-        assert!((summary_overlap(a, b) - 1.0).abs() < 1e-9, "self-overlap is total");
+        assert!(
+            (summary_overlap(a, b) - 1.0).abs() < 1e-9,
+            "self-overlap is total"
+        );
     }
 
     // MO-2: disjoint fingerprint spaces reduce to different aggregates and

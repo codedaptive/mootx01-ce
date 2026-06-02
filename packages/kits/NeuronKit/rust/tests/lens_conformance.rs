@@ -56,7 +56,12 @@ fn fp_of(blocks: &[String]) -> Fingerprint256 {
     }
 }
 fn blocks_of(fp: Fingerprint256) -> Vec<String> {
-    vec![hexu64(fp.block0), hexu64(fp.block1), hexu64(fp.block2), hexu64(fp.block3)]
+    vec![
+        hexu64(fp.block0),
+        hexu64(fp.block1),
+        hexu64(fp.block2),
+        hexu64(fp.block3),
+    ]
 }
 
 #[derive(Deserialize)]
@@ -314,8 +319,16 @@ fn lenses_reproduce_shared_vectors() {
         let p: Vec<f32> = c.p.iter().map(|s| f32_of(s)).collect();
         let q: Vec<f32> = c.q.iter().map(|s| f32_of(s)).collect();
         let out = drift(&p, &q);
-        assert_eq!(hex32(out.jensen_shannon), c.jensen_shannon, "drift jensen_shannon");
-        assert_eq!(hex32(out.kl_divergence), c.kl_divergence, "drift kl_divergence");
+        assert_eq!(
+            hex32(out.jensen_shannon),
+            c.jensen_shannon,
+            "drift jensen_shannon"
+        );
+        assert_eq!(
+            hex32(out.kl_divergence),
+            c.kl_divergence,
+            "drift kl_divergence"
+        );
     }
 
     for c in &v.anomalies {
@@ -329,19 +342,29 @@ fn lenses_reproduce_shared_vectors() {
     }
 
     for c in &v.keystones {
-        let edges: Vec<(String, String)> =
-            c.edges.iter().map(|e| (e[0].clone(), e[1].clone())).collect();
+        let edges: Vec<(String, String)> = c
+            .edges
+            .iter()
+            .map(|e| (e[0].clone(), e[1].clone()))
+            .collect();
         let out = keystones(&c.node_ids, &edges, c.top_k);
         assert_eq!(out.len(), c.ranked.len(), "keystones count");
         for (got, want) in out.iter().zip(&c.ranked) {
             assert_eq!(got.id, want.id, "keystone id");
-            assert_eq!(hex64(got.centrality), want.centrality, "keystone centrality");
+            assert_eq!(
+                hex64(got.centrality),
+                want.centrality,
+                "keystone centrality"
+            );
         }
     }
 
     for c in &v.constellations {
-        let edges: Vec<(String, String)> =
-            c.edges.iter().map(|e| (e[0].clone(), e[1].clone())).collect();
+        let edges: Vec<(String, String)> = c
+            .edges
+            .iter()
+            .map(|e| (e[0].clone(), e[1].clone()))
+            .collect();
         let out = constellations(&c.node_ids, &edges, c.max_passes);
         assert_eq!(out.communities, c.communities, "constellation communities");
     }
@@ -353,7 +376,12 @@ fn lenses_reproduce_shared_vectors() {
             .map(|row| row.iter().map(|e| (e.node, f64_of(&e.weight))).collect())
             .collect();
         let out = spreading_activation(
-            &adjacency, c.seed, c.walk_length, f64_of(&c.restart_prob), c.rng_seed, c.k,
+            &adjacency,
+            c.seed,
+            c.walk_length,
+            f64_of(&c.restart_prob),
+            c.rng_seed,
+            c.k,
         );
         assert_eq!(out.len(), c.activations.len(), "activation count");
         for (got, want) in out.iter().zip(&c.activations) {
@@ -366,7 +394,13 @@ fn lenses_reproduce_shared_vectors() {
         let categories: Vec<(String, f64, f64)> = c
             .categories
             .iter()
-            .map(|m| (m.category.clone(), f64_of(&m.raw_count), f64_of(&m.weighted_mass)))
+            .map(|m| {
+                (
+                    m.category.clone(),
+                    f64_of(&m.raw_count),
+                    f64_of(&m.weighted_mass),
+                )
+            })
             .collect();
         let out = theme_weather(&categories);
         assert_eq!(out.len(), c.momenta.len(), "momentum count");
@@ -399,16 +433,26 @@ fn lenses_reproduce_shared_vectors() {
     }
 
     for c in &v.representation_bias {
-        let estate: Vec<(String, f64)> =
-            c.estate.iter().map(|m| (m.label.clone(), f64_of(&m.mass))).collect();
-        let reference: Vec<(String, f64)> =
-            c.reference.iter().map(|m| (m.label.clone(), f64_of(&m.mass))).collect();
+        let estate: Vec<(String, f64)> = c
+            .estate
+            .iter()
+            .map(|m| (m.label.clone(), f64_of(&m.mass)))
+            .collect();
+        let reference: Vec<(String, f64)> = c
+            .reference
+            .iter()
+            .map(|m| (m.label.clone(), f64_of(&m.mass)))
+            .collect();
         let out = representation_bias(&estate, &reference);
         assert_eq!(out.len(), c.biases.len(), "bias count");
         for (got, want) in out.iter().zip(&c.biases) {
             assert_eq!(got.label, want.label, "bias label");
             assert_eq!(hex64(got.estate_share), want.estate_share, "estate share");
-            assert_eq!(hex64(got.reference_share), want.reference_share, "reference share");
+            assert_eq!(
+                hex64(got.reference_share),
+                want.reference_share,
+                "reference share"
+            );
             assert_eq!(hex64(got.bias), want.bias, "bias");
         }
     }
@@ -424,8 +468,16 @@ fn lenses_reproduce_shared_vectors() {
         for (got, want) in out.iter().zip(&c.strengths) {
             assert_eq!(got.label, want.label, "strength label");
             assert_eq!(hex64(got.strength), want.strength, "strength");
-            assert_eq!(hex64(got.confidence_low), want.confidence_low, "confidence low");
-            assert_eq!(hex64(got.confidence_high), want.confidence_high, "confidence high");
+            assert_eq!(
+                hex64(got.confidence_low),
+                want.confidence_low,
+                "confidence low"
+            );
+            assert_eq!(
+                hex64(got.confidence_high),
+                want.confidence_high,
+                "confidence high"
+            );
             assert_eq!(got.endorsements, want.endorsements, "endorsements");
             assert_eq!(got.dismissals, want.dismissals, "dismissals");
         }
@@ -435,7 +487,11 @@ fn lenses_reproduce_shared_vectors() {
         let observations: Vec<ActionObservation> = c
             .observations
             .iter()
-            .map(|o| ActionObservation { action: o.action, outcome: o.outcome, success: o.success })
+            .map(|o| ActionObservation {
+                action: o.action,
+                outcome: o.outcome,
+                success: o.success,
+            })
             .collect();
         let out = anticipate(&observations, c.target_outcome, c.k, c.min_observations);
         assert_eq!(out.len(), c.predictions.len(), "prediction count");
@@ -468,16 +524,34 @@ fn lenses_reproduce_shared_vectors() {
     for c in &v.mind_overlap {
         let fps_a: Vec<Fingerprint256> = c.fingerprints_a.iter().map(|b| fp_of(b)).collect();
         let fps_b: Vec<Fingerprint256> = c.fingerprints_b.iter().map(|b| fp_of(b)).collect();
-        let summary_a =
-            dp_summary(&fps_a, f64_of(&c.epsilon), f64_of(&c.delta), c.k_anonymity, c.seed);
-        let summary_b =
-            dp_summary(&fps_b, f64_of(&c.epsilon), f64_of(&c.delta), c.k_anonymity, c.seed);
+        let summary_a = dp_summary(
+            &fps_a,
+            f64_of(&c.epsilon),
+            f64_of(&c.delta),
+            c.k_anonymity,
+            c.seed,
+        );
+        let summary_b = dp_summary(
+            &fps_b,
+            f64_of(&c.epsilon),
+            f64_of(&c.delta),
+            c.k_anonymity,
+            c.seed,
+        );
         assert_eq!(blocks_of(summary_a), c.summary_a, "summary A");
         assert_eq!(blocks_of(summary_b), c.summary_b, "summary B");
-        assert_eq!(hex64(summary_overlap(summary_a, summary_b)), c.overlap, "overlap");
+        assert_eq!(
+            hex64(summary_overlap(summary_a, summary_b)),
+            c.overlap,
+            "overlap"
+        );
     }
 
     for c in &v.shingle_similarity {
-        assert_eq!(hex32(shingle_similarity(&c.a, &c.b)), c.similarity, "shingle similarity");
+        assert_eq!(
+            hex32(shingle_similarity(&c.a, &c.b)),
+            c.similarity,
+            "shingle similarity"
+        );
     }
 }
