@@ -12,11 +12,27 @@
 // `encode` is a pure function of the input text and the pinned artifacts —
 // the agreement property.
 //
+// SCORING MODES
+// FDCMatcher supports four ScoreMode variants (mirrors Swift FDCMatcher.ScoreMode):
+//   Raw:       Σ_{t∈O} bag[t]                            (default; ship behavior)
+//   Idf:       Σ_{t∈O} bag[t] · idf(t)
+//   Cosine:    (Σ_{t∈O} bag[t]) / sqrt(|sig|)
+//   IdfCosine: (Σ_{t∈O} bag[t] · idf(t)) / sqrt(Σ_{t∈sig} idf(t)²)
+// where idf(t) = ln(N / df(t)), N = total code signatures, df(t) = # signatures
+// containing t. The bag-side norm is dropped (constant across codes for a fixed
+// query; cannot change any argmax). Per-signature norms are precomputed at init.
+//
 // DETERMINISM GUARANTEES
 // - argmax tie-break: highest score wins; ties broken by lowest code
 //   lexicographically. Same rule as Swift.
-// - frame descent tie-break: highest overlap wins; ties broken by lowest code
-//   lexicographically. Same rule as Swift.
+// - frame descent tie-break: highest mode score wins; ties broken by lowest
+//   code lexicographically. Same rule as Swift.
+// - Sorted summation: floating-point addition is non-associative. Swift sums
+//   idf² terms (init) and numerator overlap (score) in SORTED term order to
+//   produce a deterministic result regardless of hash iteration order. Rust
+//   mirrors this: all f64 sums over term sets are computed in sorted order.
+// - The descent cutoff (stop_threshold) is compared against the RAW integer
+//   overlap, not the normalized score — mode-independent, as in Swift.
 // - No HashMap iteration order dependencies: ties are resolved by explicit
 //   comparison, not by iteration order.
 
@@ -27,9 +43,32 @@ use crate::lexicon::CanonicalizationLexicon;
 use crate::word_class_table::WordClassTableCache;
 use crate::fdc_signatures::FdcSignatures;
 
+/// Scoring mode applied to both the Step-4 argmax and the Step-5 descent
+/// ranking. Mirrors `FDCMatcher.ScoreMode` in Swift exactly.
+///
+/// The descent cutoff (`stop_threshold`) is always compared against the RAW
+/// integer overlap regardless of mode — only the ranking of candidates that
+/// clear the cutoff uses `score()`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScoreMode {
+    /// Σ bag[t] over the overlap. Integral, order-independent, reproduces the
+    /// original ship behavior.
+    Raw,
+    /// Σ bag[t]·idf(t) over the overlap. IDF-weighted: distinctive terms
+    /// (few signatures) contribute more than common terms.
+    Idf,
+    /// (Σ bag[t]) / sqrt(|sig|). Penalizes big signatures.
+    Cosine,
+    /// (Σ bag[t]·idf(t)) / sqrt(Σ_{t∈sig} idf(t)²). Combined IDF + signature
+    /// L2 normalization.
+    IdfCosine,
+}
+
 pub struct FdcMatcher {
     /// Pinned descent cutoff (cookbook §6.1). v1.0 default is 1.
     pub stop_threshold: usize,
+    /// Active scoring mode. Default is Raw (reproduces original ship behavior).
+    pub score_mode: ScoreMode,
     lexicon: CanonicalizationLexicon,
     frame: FdcFrame,
     table: WordClassTableCache,
@@ -37,6 +76,16 @@ pub struct FdcMatcher {
     sig_terms: HashMap<String, std::collections::HashSet<String>>,
     /// term -> sorted list of codes (inverted index)
     index: HashMap<String, Vec<String>>,
+    /// term -> ln(N / df(t)) — precomputed IDF over the code signatures.
+    /// idf[t] = 0 for a term present in every signature. Only non-trivial for
+    /// ScoreMode::Idf and ScoreMode::IdfCosine, but always precomputed so the
+    /// init path is branch-free (cost: one pass over df at construction time).
+    idf: HashMap<String, f64>,
+    /// code -> sqrt(|sig|) — precomputed for ScoreMode::Cosine.
+    sig_norm: HashMap<String, f64>,
+    /// code -> sqrt(Σ_{t∈sig} idf(t)²) — precomputed for ScoreMode::IdfCosine.
+    /// Summed in SORTED term order to match Swift's deterministic init.
+    sig_idf_norm: HashMap<String, f64>,
 }
 
 impl FdcMatcher {
@@ -46,6 +95,17 @@ impl FdcMatcher {
         table: WordClassTableCache,
         signatures: &FdcSignatures,
         stop_threshold: usize,
+    ) -> Self {
+        Self::new_with_mode(lexicon, frame, table, signatures, stop_threshold, ScoreMode::Raw)
+    }
+
+    pub fn new_with_mode(
+        lexicon: CanonicalizationLexicon,
+        frame: FdcFrame,
+        table: WordClassTableCache,
+        signatures: &FdcSignatures,
+        stop_threshold: usize,
+        score_mode: ScoreMode,
     ) -> Self {
         let sig_terms = signatures.sig_terms.clone();
 
@@ -61,14 +121,131 @@ impl FdcMatcher {
             codes.sort();
         }
 
+        // IDF over the code signatures: df(t) = # signatures containing t,
+        // N = total code signatures. idf(t) = ln(N / df(t)).
+        // A term in every signature carries idf 0; a term in one signature
+        // carries ln(N). Precomputed for all modes (cost: one df pass at init).
+        let n = sig_terms.len() as f64;
+        let mut df: HashMap<String, usize> = HashMap::new();
+        for (_, terms) in &sig_terms {
+            for t in terms {
+                *df.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut idf: HashMap<String, f64> = HashMap::with_capacity(df.len());
+        for (t, d) in &df {
+            idf.insert(t.clone(), if *d > 0 { (n / *d as f64).ln() } else { 0.0 });
+        }
+
+        // Per-signature norms (big-signature penalty).
+        //   sig_norm[code]     = sqrt(|sig|)             for ScoreMode::Cosine
+        //   sig_idf_norm[code] = sqrt(Σ idf(t)²)         for ScoreMode::IdfCosine
+        //
+        // The IDF norm sum MUST be in SORTED term order: floating-point addition
+        // is non-associative, and HashSet iteration order is randomized. Sorting
+        // pins the result to match Swift's init (which does `terms.sorted()`).
+        let mut sig_norm: HashMap<String, f64> = HashMap::with_capacity(sig_terms.len());
+        let mut sig_idf_norm: HashMap<String, f64> = HashMap::with_capacity(sig_terms.len());
+        for (code, terms) in &sig_terms {
+            sig_norm.insert(
+                code.clone(),
+                if terms.is_empty() { 0.0 } else { (terms.len() as f64).sqrt() },
+            );
+            // Collect terms into a sorted Vec, then sum idf(t)² in that order.
+            let mut sorted_terms: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+            sorted_terms.sort_unstable();
+            let mut ss = 0.0f64;
+            for t in &sorted_terms {
+                let w = idf.get(*t).copied().unwrap_or(0.0);
+                ss += w * w;
+            }
+            sig_idf_norm.insert(code.clone(), if ss > 0.0 { ss.sqrt() } else { 0.0 });
+        }
+
         FdcMatcher {
             stop_threshold,
+            score_mode,
             lexicon,
             frame,
             table,
             sig_terms,
             index,
+            idf,
+            sig_norm,
+            sig_idf_norm,
         }
+    }
+
+    /// Score `code`'s overlap with `bag` under the active `score_mode`. The
+    /// numerator is summed over the overlap (terms shared between bag and the
+    /// code's membership signature) in SORTED term order for determinism.
+    /// The denominator is the mode's signature-side normalization (1.0 for
+    /// Raw/Idf). Returns 0.0 when there is no overlap.
+    ///
+    /// Used for BOTH the Step-4 argmax and the Step-5 descent ranking so both
+    /// are scored on one footing — mirrors Swift `FDCMatcher.score(code:bag:)`.
+    fn score(&self, code: &str, bag: &ConceptBag) -> f64 {
+        let terms = match self.sig_terms.get(code) {
+            Some(t) => t,
+            None => return 0.0,
+        };
+        // Compute the overlap in SORTED term order: floating-point addition is
+        // non-associative, so a fixed summation order is required for IDF modes
+        // to be bit-reproducible (bag's HashMap iteration order is randomized).
+        // For Raw the sum is integral and order-independent, but we use the same
+        // sorted path for uniformity — mirroring Swift's score() function.
+        let mut overlap: Vec<&str> = terms
+            .iter()
+            .filter(|t| bag.contains_key(t.as_str()))
+            .map(|t| t.as_str())
+            .collect();
+        overlap.sort_unstable();
+
+        let mut num = 0.0f64;
+        match self.score_mode {
+            ScoreMode::Raw | ScoreMode::Cosine => {
+                // Raw numerator: Σ bag[t] over the overlap.
+                for t in &overlap {
+                    num += *bag.get(*t).unwrap_or(&0) as f64;
+                }
+            }
+            ScoreMode::Idf | ScoreMode::IdfCosine => {
+                // IDF-weighted numerator: Σ bag[t]·idf(t) over the overlap.
+                for t in &overlap {
+                    let n = *bag.get(*t).unwrap_or(&0) as f64;
+                    let w = self.idf.get(*t).copied().unwrap_or(0.0);
+                    num += n * w;
+                }
+            }
+        }
+        match self.score_mode {
+            ScoreMode::Raw | ScoreMode::Idf => num,
+            ScoreMode::Cosine => {
+                let d = self.sig_norm.get(code).copied().unwrap_or(0.0);
+                if d > 0.0 { num / d } else { num }
+            }
+            ScoreMode::IdfCosine => {
+                let d = self.sig_idf_norm.get(code).copied().unwrap_or(0.0);
+                if d > 0.0 { num / d } else { num }
+            }
+        }
+    }
+
+    /// The RAW integer overlap Σ bag[t] over (bag ∩ sig), used for the
+    /// mode-independent descent cutoff comparison (stop_threshold). Mirrors
+    /// Swift `FDCMatcher.rawOverlap(code:bag:)`.
+    fn raw_overlap(&self, code: &str, bag: &ConceptBag) -> usize {
+        let terms = match self.sig_terms.get(code) {
+            Some(t) => t,
+            None => return 0,
+        };
+        let mut o = 0usize;
+        for (term, n) in bag {
+            if terms.contains(term.as_str()) {
+                o += n;
+            }
+        }
+        o
     }
 
     /// Encode `text` to an FDC code, or None for UNRESOLVED. Never guesses.
@@ -88,55 +265,67 @@ impl FdcMatcher {
             return (None, qid);
         }
 
-        // Step 4 — match + score (§5.2/§5.3).
-        let mut score: HashMap<String, usize> = HashMap::new();
-        for (term, n) in &bag {
-            if let Some(codes) = self.index.get(term) {
+        // Step 4 — match + score (§5.2/§5.3). The inverted index gives the
+        // set of candidate codes (any code sharing ≥1 bag term); each candidate
+        // is then scored under the active mode. For Raw the score is exactly
+        // Σ bag[t] (integers held in f64 — comparisons exact), reproducing the
+        // original ship behavior.
+        let mut candidate_set: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (term, _) in &bag {
+            if let Some(codes) = self.index.get(term.as_str()) {
                 for code in codes {
-                    *score.entry(code.clone()).or_insert(0) += n;
+                    candidate_set.insert(code.clone());
                 }
             }
         }
 
-        if score.is_empty() {
+        if candidate_set.is_empty() {
             return (None, qid); // §5.2.3 — UNRESOLVED, no guess
         }
 
+        // Sorted so the scan order is deterministic regardless of HashSet
+        // hashing. This matters for the normalized modes: two codes can carry
+        // equal (or float-rounding-equal) scores, and the lowest-code tie-break
+        // only holds if the scan visits codes in a fixed order.
+        let mut candidates: Vec<String> = candidate_set.into_iter().collect();
+        candidates.sort();
+
         // argmax: highest score, ties broken by lowest code lexicographically.
         let mut node = String::new();
-        let mut node_score = 0usize;
-        for (code, &s) in &score {
+        let mut node_score = -f64::MAX;
+        for code in &candidates {
+            let s = self.score(code, &bag);
             if s > node_score || (s == node_score && (node.is_empty() || code < &node)) {
                 node = code.clone();
                 node_score = s;
             }
         }
 
-        // Step 5 — frame descent (§6.1).
+        // Step 5 — frame descent (§6.1). A child must clear the RAW overlap
+        // cutoff (mode-independent) to be a candidate; among those, the highest
+        // mode score wins (ties -> lowest code). Scoring the descent under the
+        // same mode as the argmax keeps both on one footing.
         loop {
             let children = self.frame.children(&node);
             let mut best: Option<String> = None;
-            let mut best_overlap = 0usize;
+            let mut best_score = 0.0f64;
 
             for child in children {
-                let terms = match self.sig_terms.get(&child.code) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                let mut overlap = 0usize;
-                for (term, n) in &bag {
-                    if terms.contains(term) {
-                        overlap += n;
-                    }
-                }
-                if overlap < self.stop_threshold {
+                if self.sig_terms.get(&child.code).is_none() {
                     continue;
                 }
-                if overlap > best_overlap
-                    || (overlap == best_overlap && (best.is_none() || child.code < *best.as_ref().unwrap()))
+                // Cutoff check uses raw integer overlap — mode-independent.
+                if self.raw_overlap(&child.code, &bag) < self.stop_threshold {
+                    continue;
+                }
+                let s = self.score(&child.code, &bag);
+                if best.is_none()
+                    || s > best_score
+                    || (s == best_score && child.code < *best.as_ref().unwrap())
                 {
                     best = Some(child.code.clone());
-                    best_overlap = overlap;
+                    best_score = s;
                 }
             }
 
