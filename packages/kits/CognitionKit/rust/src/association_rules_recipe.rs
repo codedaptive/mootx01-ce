@@ -389,4 +389,34 @@ mod tests {
             assert_eq!(a.consequent, b.consequent);
         }
     }
+
+    // CK-AR-OV: more than 64 distinct labels trips the documented cap.
+    // 70 unique rooms (+ kind/channel labels shared by every drawer)
+    // exceed the 64-label table; the recipe flags the overflow AND still
+    // mines rules over the kept labels — the sorted table keeps the
+    // channel:/kind: labels (they precede room:* alphabetically), which
+    // co-occur in every drawer.
+    #[test]
+    fn label_overflow_is_flagged_and_rules_still_mine() {
+        let (coord, h) = coord_with_estate();
+        for i in 0..70 {
+            capture_drawer(
+                &coord,
+                &h,
+                &format!("room{i:02}"),
+                ContentKind::Prose,
+                CaptureChannel::Typed,
+            );
+        }
+
+        let out =
+            run_association_rules(&coord, &h, unconfirmed(), zero_thresholds(), NOW).unwrap();
+
+        assert!(out.label_overflow, "more than 64 distinct labels flags the cap");
+        assert_eq!(out.drawer_count, 70);
+        assert!(
+            !out.rules.is_empty(),
+            "rules still mine over the kept (sorted-first-64) labels"
+        );
+    }
 }

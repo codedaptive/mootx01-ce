@@ -167,3 +167,31 @@ struct AssociationRulesTests {
         }
     }
 }
+
+extension AssociationRulesTests {
+
+    // CK-AR-OV: more than 64 distinct labels trips the documented cap.
+    // 70 unique rooms (+ kind:prose + channel:typed shared by every
+    // drawer) exceed the 64-label table; the recipe flags the overflow
+    // AND still mines rules over the kept labels — the sorted table
+    // keeps channel:/kind: labels (they precede room:* alphabetically),
+    // which co-occur in every drawer.
+    @Test("label overflow past 64 is flagged and rules still mine")
+    func labelOverflowIsFlaggedAndRulesStillMine() async throws {
+        let (kit, handle) = try await openEstate()
+        for i in 0..<70 {
+            try await capture(kit, handle, room: String(format: "room%02d", i))
+        }
+
+        let input = AssociationRules.Input(
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            thresholds: .init(minSupport: 0.0, minConfidence: 0.0))
+        let out = try await AssociationRules().run(
+            input: input, estate: handle, kit: kit)
+
+        #expect(out.labelOverflow, "more than 64 distinct labels flags the cap")
+        #expect(out.drawerCount == 70)
+        #expect(!out.rules.isEmpty,
+                "rules still mine over the kept (sorted-first-64) labels")
+    }
+}
