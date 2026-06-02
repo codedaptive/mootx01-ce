@@ -47,13 +47,13 @@ use crate::schema;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_types::fingerprint256::Fingerprint256;
-use substrate_types::or_reduce;
-use std::sync::Arc;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use persistence_kit::storage::Storage;
 use persistence_kit::types::{Column, StorageRow, TypedValue};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::or_reduce;
 
 // MARK: - ContainerFingerprint
 
@@ -74,7 +74,11 @@ impl ContainerFingerprint {
     };
 
     pub fn new(adjective: i64, operational: i64, provenance: i64) -> Self {
-        ContainerFingerprint { adjective, operational, provenance }
+        ContainerFingerprint {
+            adjective,
+            operational,
+            provenance,
+        }
     }
 
     /// The OR of two container fingerprints, used to roll rooms up to
@@ -161,8 +165,14 @@ impl ContainerFingerprintStore {
     ) -> Result<Option<ContainerFingerprint>, LocusKitError> {
         let row_store = self.storage.row_store();
         let predicate = StoragePredicate::all(vec![
-            StoragePredicate::Eq(Column::new(TABLE, "wing"), TypedValue::Text(wing.to_string())),
-            StoragePredicate::Eq(Column::new(TABLE, "room"), TypedValue::Text(room.to_string())),
+            StoragePredicate::Eq(
+                Column::new(TABLE, "wing"),
+                TypedValue::Text(wing.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new(TABLE, "room"),
+                TypedValue::Text(room.to_string()),
+            ),
         ]);
         let rows = row_store
             .query(TABLE, Some(&predicate), &[], Some(1), None)
@@ -264,7 +274,10 @@ impl ContainerFingerprintStore {
     ) -> Result<ContainerFingerprint, LocusKitError> {
         let row_store = self.storage.row_store();
         let predicate = StoragePredicate::all(vec![
-            StoragePredicate::Eq(Column::new(TABLE, "wing"), TypedValue::Text(wing.to_string())),
+            StoragePredicate::Eq(
+                Column::new(TABLE, "wing"),
+                TypedValue::Text(wing.to_string()),
+            ),
             StoragePredicate::Not(Box::new(StoragePredicate::Eq(
                 Column::new(TABLE, "room"),
                 TypedValue::Text(Self::WING_ROLLUP_ROOM.to_string()),
@@ -284,11 +297,7 @@ impl ContainerFingerprintStore {
     /// Rebuild every container from the full active drawer set, so the
     /// aggregate covers all active rows. Called on open to make an
     /// existing estate's aggregate complete and therefore sound.
-    pub fn rebuild_all(
-        &self,
-        active_drawers: &[Drawer],
-        now: i64,
-    ) -> Result<(), LocusKitError> {
+    pub fn rebuild_all(&self, active_drawers: &[Drawer], now: i64) -> Result<(), LocusKitError> {
         // Group by (wing, room).
         let mut by_container: BTreeMap<String, BTreeMap<String, Vec<&Drawer>>> = BTreeMap::new();
         for d in active_drawers {
@@ -330,14 +339,13 @@ impl ContainerFingerprintStore {
             "operationalOR".to_string(),
             TypedValue::Bitmap(fp.operational),
         );
-        values.insert("provenanceOR".to_string(), TypedValue::Bitmap(fp.provenance));
+        values.insert(
+            "provenanceOR".to_string(),
+            TypedValue::Bitmap(fp.provenance),
+        );
         values.insert("updatedAt".to_string(), TypedValue::Timestamp(now));
         row_store
-            .upsert(
-                TABLE,
-                values,
-                &["wing".to_string(), "room".to_string()],
-            )
+            .upsert(TABLE, values, &["wing".to_string(), "room".to_string()])
             .map(|_| ())
             .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))
     }
@@ -513,18 +521,9 @@ mod tests {
         store.rebuild_all(&actives, 10).unwrap();
 
         // Each room-level row carries the OR of its drawers.
-        assert_eq!(
-            store.get("w1", "rA").unwrap().unwrap().adjective,
-            0b0001
-        );
-        assert_eq!(
-            store.get("w1", "rB").unwrap().unwrap().adjective,
-            0b0010
-        );
-        assert_eq!(
-            store.get("w2", "rC").unwrap().unwrap().adjective,
-            0b0100
-        );
+        assert_eq!(store.get("w1", "rA").unwrap().unwrap().adjective, 0b0001);
+        assert_eq!(store.get("w1", "rB").unwrap().unwrap().adjective, 0b0010);
+        assert_eq!(store.get("w2", "rC").unwrap().unwrap().adjective, 0b0100);
         // Wing rollups OR the room-level rows.
         assert_eq!(store.get("w1", "").unwrap().unwrap().adjective, 0b0011);
         assert_eq!(store.get("w2", "").unwrap().unwrap().adjective, 0b0100);

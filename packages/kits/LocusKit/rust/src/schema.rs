@@ -36,7 +36,9 @@
 //! diary bitmap columns; see each table's section comment.
 
 use persistence_kit::generated_column::{GeneratedColumn, GeneratedExpression};
-use persistence_kit::schema::{ColumnDeclaration, IndexDeclaration, SchemaDeclaration, TableDeclaration};
+use persistence_kit::schema::{
+    ColumnDeclaration, IndexDeclaration, SchemaDeclaration, TableDeclaration,
+};
 use persistence_kit::types::{ColumnType, TypedValue};
 
 /// The kit identifier recorded in PersistenceKit's migrations table.
@@ -196,8 +198,7 @@ fn tunnels_table() -> TableDeclaration {
             ColumnDeclaration::timestamp("filedAt"),
             ColumnDeclaration::timestamp("tombstonedAt").nullable(),
             ColumnDeclaration::text("removedByBatch").nullable(),
-            ColumnDeclaration::new("kind_id", ColumnType::Int)
-                .with_default(TypedValue::Int(1)),
+            ColumnDeclaration::new("kind_id", ColumnType::Int).with_default(TypedValue::Int(1)),
             ColumnDeclaration::bitmap("adjectiveBitmap"),
             ColumnDeclaration::bitmap("operationalBitmap"),
             ColumnDeclaration::bitmap("provenanceBitmap"),
@@ -572,10 +573,26 @@ fn indices() -> Vec<IndexDeclaration> {
             "drawers",
             vec!["wing".to_string(), "room".to_string()],
         ),
-        IndexDeclaration::new("idx_drawers_sourceFile", "drawers", vec!["sourceFile".to_string()]),
-        IndexDeclaration::new("idx_drawers_tombstoned", "drawers", vec!["tombstonedAt".to_string()]),
-        IndexDeclaration::new("idx_drawers_lineageID", "drawers", vec!["lineageID".to_string()]),
-        IndexDeclaration::new("idx_drawers_udcCode", "drawers", vec!["udcCode".to_string()]),
+        IndexDeclaration::new(
+            "idx_drawers_sourceFile",
+            "drawers",
+            vec!["sourceFile".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_drawers_tombstoned",
+            "drawers",
+            vec!["tombstonedAt".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_drawers_lineageID",
+            "drawers",
+            vec!["lineageID".to_string()],
+        ),
+        IndexDeclaration::new(
+            "idx_drawers_udcCode",
+            "drawers",
+            vec!["udcCode".to_string()],
+        ),
         // bit-range functional indices, now on generated columns
         IndexDeclaration::new(
             "idx_drawers_provenance_source",
@@ -805,7 +822,10 @@ mod tests {
             .find(|g| g.name == "g_state_cluster")
             .unwrap();
         let mut row = BTreeMap::new();
-        row.insert("adjectiveBitmap".to_string(), TypedValue::Bitmap(0xFFFF_FFF5));
+        row.insert(
+            "adjectiveBitmap".to_string(),
+            TypedValue::Bitmap(0xFFFF_FFF5),
+        );
         assert_eq!(cluster.expression.evaluate(&row), 0x35);
     }
 
@@ -888,7 +908,14 @@ mod tests {
         let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["id", "target", "recalledAt", "score", "operationalBitmap", "ext"]
+            vec![
+                "id",
+                "target",
+                "recalledAt",
+                "score",
+                "operationalBitmap",
+                "ext"
+            ]
         );
     }
 
@@ -976,9 +1003,6 @@ mod tests {
             .iter()
             .find(|g| g.name == "g_provenance_confirmation")
             .unwrap();
-        assert_eq!(
-            conf.expression.render_sql(),
-            "((\"provenance\" >> 4) & 7)"
-        );
+        assert_eq!(conf.expression.render_sql(), "((\"provenance\" >> 4) & 7)");
     }
 }

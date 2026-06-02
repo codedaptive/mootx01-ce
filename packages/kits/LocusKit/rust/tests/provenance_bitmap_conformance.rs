@@ -42,21 +42,31 @@ fn source_type_raw_values_match_cookbook() {
         if source.raw_value() != expected {
             mismatches.push(format!(
                 "SourceType::{:?} expected raw={}, got {}",
-                source, expected, source.raw_value()
+                source,
+                expected,
+                source.raw_value()
             ));
         }
     }
-    assert!(mismatches.is_empty(),
-        "SourceType diverges from cookbook §2.5:\n{}", mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "SourceType diverges from cookbook §2.5:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 #[test]
 fn source_type_field_position_bits_0_5() {
     for &(source, expected) in SOURCE_TYPE_TABLE {
-        let bitmap: i64 = expected;  // bits 0-5
+        let bitmap: i64 = expected; // bits 0-5
         let extracted = bitmap & 0x3F;
-        assert_eq!(SourceType::from_raw(extracted), source,
-            "provenance={} should decode to {:?}", bitmap, source);
+        assert_eq!(
+            SourceType::from_raw(extracted),
+            source,
+            "provenance={} should decode to {:?}",
+            bitmap,
+            source
+        );
     }
 }
 
@@ -85,12 +95,17 @@ fn channel_raw_values_match_cookbook() {
         if channel.raw_value() != expected {
             mismatches.push(format!(
                 "Channel::{:?} expected raw={}, got {}",
-                channel, expected, channel.raw_value()
+                channel,
+                expected,
+                channel.raw_value()
             ));
         }
     }
-    assert!(mismatches.is_empty(),
-        "Channel diverges from cookbook §2.5:\n{}", mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "Channel diverges from cookbook §2.5:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 #[test]
@@ -98,8 +113,14 @@ fn channel_field_position_bits_6_11() {
     for &(channel, expected) in CHANNEL_TABLE {
         let bitmap: i64 = expected << 6;
         let extracted = (bitmap >> 6) & 0x3F;
-        assert_eq!(Channel::from_raw(extracted), channel,
-            "provenance={} ({} << 6) should decode to {:?}", bitmap, expected, channel);
+        assert_eq!(
+            Channel::from_raw(extracted),
+            channel,
+            "provenance={} ({} << 6) should decode to {:?}",
+            bitmap,
+            expected,
+            channel
+        );
     }
 }
 
@@ -122,12 +143,17 @@ fn confirmation_raw_values_match_cookbook() {
         if confirmation.raw_value() != expected {
             mismatches.push(format!(
                 "Confirmation::{:?} expected raw={}, got {}",
-                confirmation, expected, confirmation.raw_value()
+                confirmation,
+                expected,
+                confirmation.raw_value()
             ));
         }
     }
-    assert!(mismatches.is_empty(),
-        "Confirmation diverges from cookbook §2.5:\n{}", mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "Confirmation diverges from cookbook §2.5:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 #[test]
@@ -135,8 +161,14 @@ fn confirmation_field_position_bits_18_23() {
     for &(confirmation, expected) in CONFIRMATION_TABLE {
         let bitmap: i64 = expected << 18;
         let extracted = (bitmap >> 18) & 0x3F;
-        assert_eq!(Confirmation::from_raw(extracted), confirmation,
-            "provenance={} ({} << 18) should decode to {:?}", bitmap, expected, confirmation);
+        assert_eq!(
+            Confirmation::from_raw(extracted),
+            confirmation,
+            "provenance={} ({} << 18) should decode to {:?}",
+            bitmap,
+            expected,
+            confirmation
+        );
     }
 }
 
@@ -159,12 +191,17 @@ fn confidence_raw_values_scale_gapped_per_cookbook() {
         if confidence.raw_value() != expected {
             mismatches.push(format!(
                 "Confidence::{:?} expected raw={}, got {}",
-                confidence, expected, confidence.raw_value()
+                confidence,
+                expected,
+                confidence.raw_value()
             ));
         }
     }
-    assert!(mismatches.is_empty(),
-        "Confidence diverges from cookbook §2.5:\n{}", mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "Confidence diverges from cookbook §2.5:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 #[test]
@@ -172,8 +209,14 @@ fn confidence_field_position_bits_24_29() {
     for &(confidence, expected) in CONFIDENCE_TABLE {
         let bitmap: i64 = expected << 24;
         let extracted = (bitmap >> 24) & 0x3F;
-        assert_eq!(Confidence::from_raw(extracted), confidence,
-            "provenance={} ({} << 24) should decode to {:?}", bitmap, expected, confidence);
+        assert_eq!(
+            Confidence::from_raw(extracted),
+            confidence,
+            "provenance={} ({} << 24) should decode to {:?}",
+            bitmap,
+            expected,
+            confidence
+        );
     }
 }
 
@@ -195,12 +238,17 @@ fn sensitivity_raw_values_mirror_adjective_per_cookbook() {
         if sensitivity.raw_value() != expected {
             mismatches.push(format!(
                 "Sensitivity::{:?} expected raw={}, got {}",
-                sensitivity, expected, sensitivity.raw_value()
+                sensitivity,
+                expected,
+                sensitivity.raw_value()
             ));
         }
     }
-    assert!(mismatches.is_empty(),
-        "Sensitivity diverges from cookbook §2.5:\n{}", mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "Sensitivity diverges from cookbook §2.5:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 #[test]
@@ -208,8 +256,14 @@ fn sensitivity_field_position_bits_30_35() {
     for &(sensitivity, expected) in SENSITIVITY_TABLE {
         let bitmap: i64 = expected << 30;
         let extracted = (bitmap >> 30) & 0x3F;
-        assert_eq!(Sensitivity::from_raw(extracted), sensitivity,
-            "provenance={} ({} << 30) should decode to {:?}", bitmap, expected, sensitivity);
+        assert_eq!(
+            Sensitivity::from_raw(extracted),
+            sensitivity,
+            "provenance={} ({} << 30) should decode to {:?}",
+            bitmap,
+            expected,
+            sensitivity
+        );
     }
 }
 
@@ -231,12 +285,17 @@ fn enrichment_status_raw_values_match_cookbook() {
         if enrichment.raw_value() != expected {
             mismatches.push(format!(
                 "EnrichmentStatus::{:?} expected raw={}, got {}",
-                enrichment, expected, enrichment.raw_value()
+                enrichment,
+                expected,
+                enrichment.raw_value()
             ));
         }
     }
-    assert!(mismatches.is_empty(),
-        "EnrichmentStatus diverges from cookbook §2.5:\n{}", mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "EnrichmentStatus diverges from cookbook §2.5:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 #[test]
@@ -244,8 +303,14 @@ fn enrichment_status_field_position_bits_36_41() {
     for &(enrichment, expected) in ENRICHMENT_TABLE {
         let bitmap: i64 = expected << 36;
         let extracted = (bitmap >> 36) & 0x3F;
-        assert_eq!(EnrichmentStatus::from_raw(extracted), enrichment,
-            "provenance={} ({} << 36) should decode to {:?}", bitmap, expected, enrichment);
+        assert_eq!(
+            EnrichmentStatus::from_raw(extracted),
+            enrichment,
+            "provenance={} ({} << 36) should decode to {:?}",
+            bitmap,
+            expected,
+            enrichment
+        );
     }
 }
 
@@ -264,8 +329,17 @@ fn composite_provenance_roundtrip() {
 
     assert_eq!(SourceType::from_raw(raw & 0x3F), SourceType::Observed);
     assert_eq!(Channel::from_raw((raw >> 6) & 0x3F), Channel::McpAgent);
-    assert_eq!(Confirmation::from_raw((raw >> 18) & 0x3F), Confirmation::UserConfirmed);
+    assert_eq!(
+        Confirmation::from_raw((raw >> 18) & 0x3F),
+        Confirmation::UserConfirmed
+    );
     assert_eq!(Confidence::from_raw((raw >> 24) & 0x3F), Confidence::High);
-    assert_eq!(Sensitivity::from_raw((raw >> 30) & 0x3F), Sensitivity::Elevated);
-    assert_eq!(EnrichmentStatus::from_raw((raw >> 36) & 0x3F), EnrichmentStatus::QidCompleted);
+    assert_eq!(
+        Sensitivity::from_raw((raw >> 30) & 0x3F),
+        Sensitivity::Elevated
+    );
+    assert_eq!(
+        EnrichmentStatus::from_raw((raw >> 36) & 0x3F),
+        EnrichmentStatus::QidCompleted
+    );
 }

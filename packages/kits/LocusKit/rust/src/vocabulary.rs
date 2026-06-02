@@ -22,19 +22,67 @@ use substrate_lib::audit_gate::{freeze, Column, FieldSlot, Vocabulary, Vocabular
 pub fn union_slots() -> Vec<FieldSlot> {
     vec![
         // operational bitmap (cookbook §2.4)
-        FieldSlot::with_values(Column::Operational, 0, 6, "capture_channel", &[0, 1, 2, 3, 4, 5]),
-        FieldSlot::with_values(Column::Operational, 6, 6, "content_kind", &[0, 1, 2, 3, 4, 5, 6]),
+        FieldSlot::with_values(
+            Column::Operational,
+            0,
+            6,
+            "capture_channel",
+            &[0, 1, 2, 3, 4, 5],
+        ),
+        FieldSlot::with_values(
+            Column::Operational,
+            6,
+            6,
+            "content_kind",
+            &[0, 1, 2, 3, 4, 5, 6],
+        ),
         FieldSlot::new(Column::Operational, 12, 12, "feature_flags"),
         FieldSlot::new(Column::Operational, 24, 1, "state_extension"),
         FieldSlot::new(Column::Operational, 25, 1, "lineage_clustering"),
         // provenance bitmap (cookbook §2.5)
-        FieldSlot::with_values(Column::Provenance, 0, 6, "source_type", &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
-        FieldSlot::with_values(Column::Provenance, 6, 6, "channel", &[0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16]),
-        FieldSlot::with_values(Column::Provenance, 12, 6, "prov_capture_channel", &[0, 1, 2, 3, 4, 5]),
+        FieldSlot::with_values(
+            Column::Provenance,
+            0,
+            6,
+            "source_type",
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        ),
+        FieldSlot::with_values(
+            Column::Provenance,
+            6,
+            6,
+            "channel",
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16],
+        ),
+        FieldSlot::with_values(
+            Column::Provenance,
+            12,
+            6,
+            "prov_capture_channel",
+            &[0, 1, 2, 3, 4, 5],
+        ),
         FieldSlot::with_values(Column::Provenance, 18, 6, "confirmation", &[0, 1, 2, 3, 4]),
-        FieldSlot::with_values(Column::Provenance, 24, 6, "confidence", &[0, 16, 32, 48, 56]),
-        FieldSlot::with_values(Column::Provenance, 30, 6, "sensitivity_at_capture", &[0, 16, 32, 48]),
-        FieldSlot::with_values(Column::Provenance, 36, 6, "enrichment_status", &[0, 1, 2, 3]),
+        FieldSlot::with_values(
+            Column::Provenance,
+            24,
+            6,
+            "confidence",
+            &[0, 16, 32, 48, 56],
+        ),
+        FieldSlot::with_values(
+            Column::Provenance,
+            30,
+            6,
+            "sensitivity_at_capture",
+            &[0, 16, 32, 48],
+        ),
+        FieldSlot::with_values(
+            Column::Provenance,
+            36,
+            6,
+            "enrichment_status",
+            &[0, 1, 2, 3],
+        ),
     ]
 }
 
@@ -49,6 +97,9 @@ mod tests {
 
     #[test]
     fn vocabulary_freezes_clean() {
-        assert!(frozen().is_ok(), "LocusKit union must freeze without overlap/collision");
+        assert!(
+            frozen().is_ok(),
+            "LocusKit union must freeze without overlap/collision"
+        );
     }
 }

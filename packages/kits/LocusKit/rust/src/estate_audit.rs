@@ -45,7 +45,10 @@ impl Estate {
     ///
     /// Returns `LocusKitError::DatabaseUnavailable` or
     /// `LocusKitError::SqliteError` if the substrate query fails.
-    pub fn audit_trail(&self, row_id: &str) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+    pub fn audit_trail(
+        &self,
+        row_id: &str,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
         // The row's sealed audit events in HLC order — the audit-log
         // source of truth (DECISION_CLOCK_TRIANGLE_TIME_MODEL). Events
         // are snapshots, not deltas. The cross-row wall-clock window form
@@ -75,7 +78,9 @@ impl Estate {
             &events,
             as_of,
         )
-        .ok_or_else(|| LocusKitError::DrawerNotFound { id: row_id.to_string() })?;
+        .ok_or_else(|| LocusKitError::DrawerNotFound {
+            id: row_id.to_string(),
+        })?;
 
         Ok(BitmapState {
             row_id: row_id.to_string(),
@@ -100,16 +105,14 @@ mod tests {
     use crate::estate::Estate;
     use crate::estate_types::{LatticeAnchor, OwnerCredentials};
     use crate::frames::CaptureFrame;
-    use std::sync::Arc;
     use persistence_kit::inmemory::InMemoryStorage;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     fn make_estate() -> Estate {
         let storage: Arc<dyn persistence_kit::storage::Storage> =
             Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(
-            InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap(),
-        );
+        let store = Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
         Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
     }
 
@@ -151,7 +154,10 @@ mod tests {
         assert_eq!(trail[0].verb, "capture");
         assert_eq!(trail[0].after_bitmaps.0 & 0x3F, State::Active.raw_value());
         assert_eq!(trail[1].verb, "retract");
-        assert_eq!(trail[1].after_bitmaps.0 & 0x3F, State::Withdrawn.raw_value());
+        assert_eq!(
+            trail[1].after_bitmaps.0 & 0x3F,
+            State::Withdrawn.raw_value()
+        );
     }
 
     // --- bitmap_state ---
@@ -162,9 +168,15 @@ mod tests {
         // A valid-but-absent UUID: no events for it → DrawerNotFound.
         // (A non-UUID id is a different, louder contract error.)
         let err = estate
-            .bitmap_state("99999999-9999-4999-8999-999999999999", substrate_types::hlc::HLC::new(1_700_000_000, 0, 0))
+            .bitmap_state(
+                "99999999-9999-4999-8999-999999999999",
+                substrate_types::hlc::HLC::new(1_700_000_000, 0, 0),
+            )
             .unwrap_err();
-        assert!(matches!(err, crate::error::LocusKitError::DrawerNotFound { .. }));
+        assert!(matches!(
+            err,
+            crate::error::LocusKitError::DrawerNotFound { .. }
+        ));
     }
 
     #[test]
@@ -176,7 +188,10 @@ mod tests {
         let err = estate
             .bitmap_state(&id, substrate_types::hlc::HLC::new(1_700_000_050, 0, 0))
             .unwrap_err();
-        assert!(matches!(err, crate::error::LocusKitError::DrawerNotFound { .. }));
+        assert!(matches!(
+            err,
+            crate::error::LocusKitError::DrawerNotFound { .. }
+        ));
     }
 
     #[test]

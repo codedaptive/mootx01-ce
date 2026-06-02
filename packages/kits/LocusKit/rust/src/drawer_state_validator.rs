@@ -31,7 +31,9 @@ use crate::error::LocusKitError;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::row_state::{transition, validate as sl_validate, BitmapFields, RowState, RowStateError, RowVerb};
+use substrate_lib::row_state::{
+    transition, validate as sl_validate, BitmapFields, RowState, RowStateError, RowVerb,
+};
 
 /// Validate a proposed state transition.
 ///
@@ -55,7 +57,8 @@ pub fn validate(from: State, to: State, via: RowVerb) -> Result<(), LocusKitErro
                 to: to.raw_value(),
                 reason: format!(
                     "internal: cannot bridge State::{:?} (raw {}) to RowState",
-                    from, from.raw_value()
+                    from,
+                    from.raw_value()
                 ),
             });
         }
@@ -119,7 +122,8 @@ pub fn validate_with_fields(
                 to: to.raw_value(),
                 reason: format!(
                     "internal: cannot bridge State::{:?} (raw {}) to RowState",
-                    from, from.raw_value()
+                    from,
+                    from.raw_value()
                 ),
             });
         }
@@ -131,10 +135,7 @@ pub fn validate_with_fields(
             return Err(LocusKitError::DisciplineViolation {
                 from: from.raw_value(),
                 to: to.raw_value(),
-                reason: format!(
-                    "no legal transition {:?} via {:?} in cookbook §9.2",
-                    s, v
-                ),
+                reason: format!("no legal transition {:?} via {:?} in cookbook §9.2", s, v),
             });
         }
         Err(RowStateError::ViolatesInvariant(msg)) => {
@@ -289,8 +290,11 @@ mod tests {
             LocusKitError::DisciplineViolation { from, to, reason } => {
                 assert_eq!(from, State::Active.raw_value());
                 assert_eq!(to, State::Pending.raw_value());
-                assert!(reason.contains("§9.2"),
-                    "reason should reference cookbook §9.2: got {:?}", reason);
+                assert!(
+                    reason.contains("§9.2"),
+                    "reason should reference cookbook §9.2: got {:?}",
+                    reason
+                );
             }
             other => panic!("expected DisciplineViolation, got {:?}", other),
         }

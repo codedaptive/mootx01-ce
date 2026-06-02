@@ -141,8 +141,8 @@ mod tests {
             AdjectiveSensitivity::Elevated,
             AdjectiveSensitivity::Restricted,
         ] {
-            let bitmap = (sens.raw_value() << 6)
-                | (AdjectiveExportability::Public.raw_value() << 12);
+            let bitmap =
+                (sens.raw_value() << 6) | (AdjectiveExportability::Public.raw_value() << 12);
             assert!(
                 validate(bitmap).is_ok(),
                 "sens={:?} + exportable must be legal",

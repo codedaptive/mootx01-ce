@@ -55,11 +55,7 @@ pub struct RoomSummary {
 }
 
 impl RoomSummary {
-    pub fn new(
-        wing: impl Into<String>,
-        name: impl Into<String>,
-        drawer_count: i64,
-    ) -> Self {
+    pub fn new(wing: impl Into<String>, name: impl Into<String>, drawer_count: i64) -> Self {
         Self {
             wing: wing.into(),
             name: name.into(),

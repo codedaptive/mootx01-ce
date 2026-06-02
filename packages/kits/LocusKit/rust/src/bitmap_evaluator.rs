@@ -73,13 +73,13 @@ use crate::provenance::Confirmation;
 
 // Adjective bitmap (Drawer::adjective_bitmap, cookbook §2.3).
 // F11 cascade (2026-05-27): 4-bit → 6-bit fields per I-15.
-const ADJ_STATE_MASK: i64 = 0x3F;          // bits 0–5
+const ADJ_STATE_MASK: i64 = 0x3F; // bits 0–5
 const ADJ_STATE_SHIFT: i32 = 0;
-const ADJ_SENS_MASK: i64 = 0x3F << 6;      // 0xFC0,    bits 6–11
+const ADJ_SENS_MASK: i64 = 0x3F << 6; // 0xFC0,    bits 6–11
 const ADJ_SENS_SHIFT: i32 = 6;
-const ADJ_EXPORT_MASK: i64 = 0x3F << 12;   // 0x3F000,  bits 12–17
+const ADJ_EXPORT_MASK: i64 = 0x3F << 12; // 0x3F000,  bits 12–17
 const ADJ_EXPORT_SHIFT: i32 = 12;
-const ADJ_TRUST_MASK: i64 = 0x3F << 18;    // 0xFC0000, bits 18–23
+const ADJ_TRUST_MASK: i64 = 0x3F << 18; // 0xFC0000, bits 18–23
 const ADJ_TRUST_SHIFT: i32 = 18;
 
 // State cluster predicate per cookbook §2.3:
@@ -92,7 +92,7 @@ const STATE_CLUSTER_MASK: i64 = 0x3;
 const STATE_CLUSTER_A: i64 = 0;
 const STATE_CLUSTER_B: i64 = 1;
 const STATE_CLUSTER_C: i64 = 2;
-const STATE_TOMBSTONE: i64 = 33;           // State::Tombstoned per cookbook §2.3
+const STATE_TOMBSTONE: i64 = 33; // State::Tombstoned per cookbook §2.3
 
 // Trust threshold (§ 6.4): `trust < 4` is trustworthy.
 // Cookbook §2.3 trust raws 0–6 are contiguous; threshold unchanged.
@@ -182,13 +182,21 @@ impl BitmapEvaluator {
             };
             let (adj, op, prov) = if frame.as_of.is_some() {
                 match projected_for_as_of {
-                    Some(p) => (p.adjective_bitmap, p.operational_bitmap, p.provenance_bitmap),
+                    Some(p) => (
+                        p.adjective_bitmap,
+                        p.operational_bitmap,
+                        p.provenance_bitmap,
+                    ),
                     // No events at or before as_of — the row had no state
                     // yet; skip it from the historical view.
                     None => continue,
                 }
             } else {
-                (drawer.adjective_bitmap, drawer.operational_bitmap, drawer.provenance)
+                (
+                    drawer.adjective_bitmap,
+                    drawer.operational_bitmap,
+                    drawer.provenance,
+                )
             };
             if Self::evaluate_bitmap_tier(&chain, adj, op, prov) {
                 candidates.push(drawer.clone());
@@ -294,9 +302,7 @@ impl BitmapEvaluator {
     fn is_bitmap_sensitivity_filter(f: &Filter) -> bool {
         match f {
             Filter::Sensitivity(_) | Filter::SensitivityAtMost(_) => true,
-            Filter::All(fs) | Filter::Any(fs) => {
-                fs.iter().any(Self::is_bitmap_sensitivity_filter)
-            }
+            Filter::All(fs) | Filter::Any(fs) => fs.iter().any(Self::is_bitmap_sensitivity_filter),
             Filter::Not(inner) => Self::is_bitmap_sensitivity_filter(inner),
             _ => false,
         }
@@ -349,8 +355,7 @@ impl BitmapEvaluator {
             Filter::All(fs) => fs.iter().any(|f| Self::container_provably_excludes(f, fp)),
             // Disjunction: excluded only if every disjunct is unsatisfiable.
             Filter::Any(fs) => {
-                !fs.is_empty()
-                    && fs.iter().all(|f| Self::container_provably_excludes(f, fp))
+                !fs.is_empty() && fs.iter().all(|f| Self::container_provably_excludes(f, fp))
             }
             // `Not`, threshold, value, and structured filters give no
             // sound exclusion from an OR fingerprint.
@@ -430,9 +435,7 @@ impl BitmapEvaluator {
             // `provenance`); Filter cases route to the adjective axis
             // per spec § 7.9.2 because that is the access-gate-relevant
             // tier.
-            Filter::Sensitivity(s) => {
-                and_mask(adj, ADJ_SENS_MASK, s.raw_value() << ADJ_SENS_SHIFT)
-            }
+            Filter::Sensitivity(s) => and_mask(adj, ADJ_SENS_MASK, s.raw_value() << ADJ_SENS_SHIFT),
             Filter::SensitivityAtMost(s) => threshold_compare(
                 adj,
                 ADJ_SENS_MASK,
@@ -583,8 +586,10 @@ impl BitmapEvaluator {
                 .filter(|f| Self::is_structural_filter(f))
                 .all(|f| Self::evaluate_structured(f, drawer)),
             Filter::Any(fs) => {
-                let structural: Vec<&Filter> =
-                    fs.iter().filter(|f| Self::is_structural_filter(f)).collect();
+                let structural: Vec<&Filter> = fs
+                    .iter()
+                    .filter(|f| Self::is_structural_filter(f))
+                    .collect();
                 if structural.is_empty() {
                     return true;
                 }
@@ -592,12 +597,8 @@ impl BitmapEvaluator {
                     .iter()
                     .any(|f| Self::evaluate_structured(f, drawer))
             }
-            Filter::Not(f) => {
-                if Self::is_structural_filter(f) {
-                    !Self::evaluate_structured(f, drawer)
-                } else {
-                    true
-                }
+            Filter::Not(f) if Self::is_structural_filter(f) => {
+                !Self::evaluate_structured(f, drawer)
             }
             // Bitmap and content cases pass at this tier.
             _ => true,
@@ -703,12 +704,14 @@ impl BitmapEvaluator {
     ) -> Result<Option<substrate_ml::audit_log_fold::ProjectedRowState>, LocusKitError> {
         let uuid = crate::drawer_store_inmemory::require_uuid(row_id, "rowID")?;
         let events = store.audit_events_for_row(row_id)?;
-        Ok(substrate_ml::audit_log_fold::AuditLogFold::project_state_at(
-            substrate_lib::verbs::RowId(uuid.as_u128()),
-            substrate_lib::verbs::NounType::Drawer,
-            &events,
-            as_of,
-        ))
+        Ok(
+            substrate_ml::audit_log_fold::AuditLogFold::project_state_at(
+                substrate_lib::verbs::RowId(uuid.as_u128()),
+                substrate_lib::verbs::NounType::Drawer,
+                &events,
+                as_of,
+            ),
+        )
     }
 
     // -----------------------------------------------------------------
@@ -718,10 +721,10 @@ impl BitmapEvaluator {
     fn sort(mut drawers: Vec<Drawer>, ordering: Ordering) -> Vec<Drawer> {
         match ordering {
             Ordering::ByCaptureTimeDesc => {
-                drawers.sort_by(|a, b| b.filed_at.cmp(&a.filed_at));
+                drawers.sort_by_key(|b| std::cmp::Reverse(b.filed_at));
             }
             Ordering::ByCaptureTimeAsc => {
-                drawers.sort_by(|a, b| a.filed_at.cmp(&b.filed_at));
+                drawers.sort_by_key(|a| a.filed_at);
             }
             Ordering::ByRoomAsc => {
                 drawers.sort_by(|a, b| a.room.cmp(&b.room));
@@ -747,8 +750,8 @@ mod tests {
     use crate::drawer_operational::DrawerFeatureFlags;
     use crate::drawer_store_inmemory::InMemoryDrawerStore;
     use crate::provenance::{Channel, Confidence, Confirmation, SourceType};
-    use std::sync::Arc;
     use persistence_kit::inmemory::InMemoryStorage;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     const NOW: i64 = 1_700_000_000;
@@ -786,7 +789,8 @@ mod tests {
         let store = make_store();
         let d = base_drawer("d1");
         let frame = make_frame(vec![]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d.clone()], store.as_ref()).unwrap();
+        let result =
+            BitmapEvaluator::evaluate(&frame, std::slice::from_ref(&d), store.as_ref()).unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -937,8 +941,8 @@ mod tests {
     fn source_type_filter() {
         let store = make_store();
         let mut d = base_drawer("d");
-        d.provenance |= SourceType::Canonical.raw_value();   // F13: was SourceType::Instruction in v0.35
-        let frame = make_frame(vec![Filter::SourceType(SourceType::Canonical)]);   // F13
+        d.provenance |= SourceType::Canonical.raw_value(); // F13: was SourceType::Instruction in v0.35
+        let frame = make_frame(vec![Filter::SourceType(SourceType::Canonical)]); // F13
         let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
         assert_eq!(result.len(), 1);
     }
@@ -947,11 +951,11 @@ mod tests {
     fn channel_filter_uses_canonical_six_bit_field() {
         let store = make_store();
         let mut d = base_drawer("d");
-        d.provenance |= Channel::McpAgent.raw_value() << 6;   // F13: cookbook §2.5 bits 6-11
-        // Carry-over from BitmapEvaluator.swift:86: the mask/shift is
-        // 0xFC00 / 10, not the older 0x7000 / 12. This test asserts
-        // the Rust port matches the canonical encoding.
-        let frame = make_frame(vec![Filter::Channel(Channel::McpAgent)]);   // F13
+        d.provenance |= Channel::McpAgent.raw_value() << 6; // F13: cookbook §2.5 bits 6-11
+                                                            // Carry-over from BitmapEvaluator.swift:86: the mask/shift is
+                                                            // 0xFC00 / 10, not the older 0x7000 / 12. This test asserts
+                                                            // the Rust port matches the canonical encoding.
+        let frame = make_frame(vec![Filter::Channel(Channel::McpAgent)]); // F13
         let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
         assert_eq!(result.len(), 1);
     }
@@ -960,7 +964,7 @@ mod tests {
     fn confidence_at_least_filter() {
         let store = make_store();
         let mut hi = base_drawer("hi");
-        hi.provenance |= Confidence::High.raw_value() << 24;       // cookbook §2.5 bits 24-29
+        hi.provenance |= Confidence::High.raw_value() << 24; // cookbook §2.5 bits 24-29
         let mut low = base_drawer("low");
         low.provenance |= Confidence::Low.raw_value() << 24;
         let frame = make_frame(vec![Filter::ConfidenceAtLeast(Confidence::Medium)]);
@@ -1011,7 +1015,8 @@ mod tests {
         let mut s = base_drawer("s");
         s.room = "study".to_string();
         let frame = make_frame(vec![Filter::InRoom("kitchen".to_string())]);
-        let result = BitmapEvaluator::evaluate(&frame, &[k.clone(), s.clone()], store.as_ref()).unwrap();
+        let result =
+            BitmapEvaluator::evaluate(&frame, &[k.clone(), s.clone()], store.as_ref()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "k");
     }
@@ -1207,7 +1212,6 @@ mod tests {
         };
         assert!(BitmapEvaluator::container_survives(&chain, empty_fp));
     }
-
 
     // -----------------------------------------------------------------
     // Ordering

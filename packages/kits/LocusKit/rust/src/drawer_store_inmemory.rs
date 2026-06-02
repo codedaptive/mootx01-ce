@@ -52,17 +52,12 @@ use crate::drawer::Drawer;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_lib::row_state::BitmapFields;
-use substrate_lib::row_state::RowVerb;
-use substrate_types::hlc::HLCGenerator;
-use substrate_lib::audit_gate;
-use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use crate::association::Association;
-use crate::learned_reference::LearnedReference;
 use crate::drawer_store::DrawerStore;
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
 use crate::kg_fact::KGFact;
+use crate::learned_reference::LearnedReference;
 use crate::manifest::{ManifestKey, ManifestValues};
 use crate::proposal::Proposal;
 use crate::recall_trace_item::RecallTraceItem;
@@ -70,14 +65,19 @@ use crate::schema;
 use crate::summaries::{RoomSummary, WingSummary};
 use crate::tunnel::Tunnel;
 use crate::tunnel_operational::TunnelKind;
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::Mutex;
+use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use persistence_kit::storage::Storage;
 use persistence_kit::types::{Column, StorageRow, TypedValue};
-use uuid::Uuid;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::Mutex;
 use substrate_kernel::bit_field;
+use substrate_lib::audit_gate;
+use substrate_lib::row_state::BitmapFields;
+use substrate_lib::row_state::RowVerb;
+use substrate_types::hlc::HLCGenerator;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Table names
@@ -171,14 +171,20 @@ impl InMemoryDrawerStore {
     /// Read + parse the estate uuid manifest value, or None. Mirrors
     /// Swift `resolveEstateUuid`.
     fn resolve_estate_uuid(&self) -> Option<Uuid> {
-        let rows = self.storage.row_store().query(
-            T_MANIFEST,
-            Some(&StoragePredicate::Eq(
-                Column::new(T_MANIFEST, "key"),
-                TypedValue::Text("estate_uuid".to_string()),
-            )),
-            &[], Some(1), None,
-        ).ok()?;
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_MANIFEST,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_MANIFEST, "key"),
+                    TypedValue::Text("estate_uuid".to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .ok()?;
         match rows.first().and_then(|r| r.get("value")) {
             Some(TypedValue::Text(s)) => Uuid::parse_str(s).ok(),
             _ => None,
@@ -394,7 +400,6 @@ impl InMemoryDrawerStore {
         Ok(())
     }
 
-
     /// Read a single bitmap column for a drawer, returning
     /// `LocusKitError::DrawerNotFound` when the row is absent.
     /// Centralises the prior-value read shared by every mutation path.
@@ -413,11 +418,9 @@ impl InMemoryDrawerStore {
                 None,
             )
             .map_err(map_storage_err)?;
-        let row = rows
-            .first()
-            .ok_or_else(|| LocusKitError::DrawerNotFound {
-                id: drawer_id.to_string(),
-            })?;
+        let row = rows.first().ok_or_else(|| LocusKitError::DrawerNotFound {
+            id: drawer_id.to_string(),
+        })?;
         Ok(i64_value_of(row.get(column)))
     }
 
@@ -432,7 +435,9 @@ impl InMemoryDrawerStore {
                     Column::new(T_DRAWERS, "id"),
                     TypedValue::Text(drawer_id.to_string()),
                 )),
-                &[], Some(1), None,
+                &[],
+                Some(1),
+                None,
             )
             .map_err(map_storage_err)?;
         let row = rows.first().ok_or_else(|| LocusKitError::DrawerNotFound {
@@ -515,7 +520,10 @@ impl InMemoryDrawerStore {
             changed_by,
         )
         .map_err(|v| {
-            LocusKitError::InvalidContent(format!("{:?} mutation rejected by gate: {:?}", column, v))
+            LocusKitError::InvalidContent(format!(
+                "{:?} mutation rejected by gate: {:?}",
+                column, v
+            ))
         })?;
 
         // Materialized projection: write the merged column back.
@@ -560,7 +568,8 @@ impl InMemoryDrawerStore {
         // Adjective: all basis slots, state INCLUDED (capture sets it).
         for slot in audit_gate::basis() {
             if matches!(slot.column, audit_gate::Column::Adjective) {
-                let value = bit_field::extract_field(drawer.adjective_bitmap, slot.shift, slot.width);
+                let value =
+                    bit_field::extract_field(drawer.adjective_bitmap, slot.shift, slot.width);
                 writes.push(audit_gate::FieldWrite { slot, value });
             }
         }
@@ -605,8 +614,6 @@ impl InMemoryDrawerStore {
             .map_err(map_storage_err)?;
         Ok(())
     }
-
-
 }
 
 // ---------------------------------------------------------------------------
@@ -839,10 +846,7 @@ impl DrawerStore for InMemoryDrawerStore {
                         Column::new(T_DRAWERS, "chunkIndex"),
                         OrderDirection::Ascending,
                     ),
-                    OrderClause::new(
-                        Column::new(T_DRAWERS, "filedAt"),
-                        OrderDirection::Ascending,
-                    ),
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
                 ],
                 None,
                 None,
@@ -893,7 +897,13 @@ impl DrawerStore for InMemoryDrawerStore {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
         let _ = reason;
-        self.gated_column_write(drawer_id, audit_gate::Column::Provenance, new_provenance, changed_by, now)
+        self.gated_column_write(
+            drawer_id,
+            audit_gate::Column::Provenance,
+            new_provenance,
+            changed_by,
+            now,
+        )
     }
 
     fn mutate_adjective(
@@ -909,7 +919,13 @@ impl DrawerStore for InMemoryDrawerStore {
         let _ = reason;
         // I-22 (secret+exportable) is enforced inside the gate's basis
         // check now (SubstrateLib), so no separate validator is needed.
-        self.gated_column_write(drawer_id, audit_gate::Column::Adjective, new_adjective, changed_by, now)
+        self.gated_column_write(
+            drawer_id,
+            audit_gate::Column::Adjective,
+            new_adjective,
+            changed_by,
+            now,
+        )
     }
 
     fn mutate_operational(
@@ -923,7 +939,13 @@ impl DrawerStore for InMemoryDrawerStore {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
         let _ = reason;
-        self.gated_column_write(drawer_id, audit_gate::Column::Operational, new_operational, changed_by, now)
+        self.gated_column_write(
+            drawer_id,
+            audit_gate::Column::Operational,
+            new_operational,
+            changed_by,
+            now,
+        )
     }
 
     fn mutate_state(
@@ -955,7 +977,13 @@ impl DrawerStore for InMemoryDrawerStore {
         let prior_state = State::from_raw(bit_field::extract_field(prior_bitmap, 0, 6));
         let new_bitmap = bit_field::write_field(new_state.raw_value(), prior_bitmap, 0, 6);
 
-        let _ = (prior_operational, prior_provenance, prior_state, new_bitmap, reason);
+        let _ = (
+            prior_operational,
+            prior_provenance,
+            prior_state,
+            new_bitmap,
+            reason,
+        );
 
         // Route through the substrate write gate (DECISION_CLOCK_TRIANGLE_
         // TIME_MODEL): RMW the state field into the snapshot, run the
@@ -973,8 +1001,12 @@ impl DrawerStore for InMemoryDrawerStore {
         let udc = self.read_drawer_udc(drawer_id)?;
         let anchor = substrate_lib::verbs::LatticeAnchor::udc(&udc);
         let state_slot = audit_gate::FieldSlot::with_values(
-            audit_gate::Column::Adjective, 0, 6, "state",
-            &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33]);
+            audit_gate::Column::Adjective,
+            0,
+            6,
+            "state",
+            &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33],
+        );
         // One tick per logical mutation.
         let stamp = self.hlc.lock().unwrap().send(now);
         let event = audit_gate::admit(
@@ -984,12 +1016,18 @@ impl DrawerStore for InMemoryDrawerStore {
             via,
             Some(prior),
             Some(anchor),
-            &[audit_gate::FieldWrite { slot: state_slot, value: new_state.raw_value() }],
+            &[audit_gate::FieldWrite {
+                slot: state_slot,
+                value: new_state.raw_value(),
+            }],
             anchor,
             &self.vocabulary,
             stamp,
             changed_by,
-        ).map_err(|v| LocusKitError::InvalidContent(format!("state mutation rejected by gate: {:?}", v)))?;
+        )
+        .map_err(|v| {
+            LocusKitError::InvalidContent(format!("state mutation rejected by gate: {:?}", v))
+        })?;
 
         // Materialized projection: write the merged snapshot to the live
         // drawers row. Append the sealed event to the audit log (truth).
@@ -1045,15 +1083,18 @@ impl DrawerStore for InMemoryDrawerStore {
         // Two FieldWrites in one admit call.
         // 1) State slot: shift 0, width 6 → 33 (tombstoned).
         let state_slot = audit_gate::FieldSlot::with_values(
-            audit_gate::Column::Adjective, 0, 6, "state",
-            &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33]);
+            audit_gate::Column::Adjective,
+            0,
+            6,
+            "state",
+            &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33],
+        );
         // 2) Flags slot: shift 24, width 3 (F17.2 widening, commit
         //    5a8ea56). Bit 24 = state_extension; bit 25 =
         //    lineage_clustering; bit 26 = dreaming_recalc_required.
         //    Expunge sets bit 26 (the third bit of the 3-bit field,
         //    raw value 0b100) while preserving bits 24-25.
-        let flags_slot = audit_gate::FieldSlot::new(
-            audit_gate::Column::Adjective, 24, 3, "flags");
+        let flags_slot = audit_gate::FieldSlot::new(audit_gate::Column::Adjective, 24, 3, "flags");
         let prior_flags_value = bit_field::extract_field(prior_bitmap, 24, 3);
         let new_flags_value = (prior_flags_value & 0b011) | 0b100;
 
@@ -1080,7 +1121,8 @@ impl DrawerStore for InMemoryDrawerStore {
             &self.vocabulary,
             stamp,
             changed_by,
-        ).map_err(|v| LocusKitError::InvalidContent(format!("expunge rejected by gate: {:?}", v)))?;
+        )
+        .map_err(|v| LocusKitError::InvalidContent(format!("expunge rejected by gate: {:?}", v)))?;
 
         // Materialized projection: write the merged adjective snapshot,
         // zero the content blob, stamp tombstonedAt — all in the same
@@ -1093,17 +1135,11 @@ impl DrawerStore for InMemoryDrawerStore {
             "adjectiveBitmap".to_string(),
             TypedValue::Bitmap(event.after_bitmaps.0),
         );
-        update_vals.insert(
-            "content".to_string(),
-            TypedValue::Text(String::new()),
-        );
+        update_vals.insert("content".to_string(), TypedValue::Text(String::new()));
         // tombstonedAt is a Timestamp column (i64 millis since epoch);
         // opt_int_value_of accepts TypedValue::Timestamp. Writing as
         // TypedValue::Text would silently parse back to None.
-        update_vals.insert(
-            "tombstonedAt".to_string(),
-            TypedValue::Timestamp(now),
-        );
+        update_vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
         row_store
             .update(
                 T_DRAWERS,
@@ -1118,11 +1154,11 @@ impl DrawerStore for InMemoryDrawerStore {
             .audit_log()
             .append(pk_audit_event_from(&event))
             .map_err(map_storage_err)?;
-        let _ = reason;   // reason is captured in audit verb context;
-                          // no separate audit-row column today, but the
-                          // parameter is retained for future ProvFrame
-                          // composition (cookbook §10.5 names a `reason`
-                          // arg on the verb signature).
+        let _ = reason; // reason is captured in audit verb context;
+                        // no separate audit-row column today, but the
+                        // parameter is retained for future ProvFrame
+                        // composition (cookbook §10.5 names a `reason`
+                        // arg on the verb signature).
         Ok(())
     }
 
@@ -1180,29 +1216,41 @@ impl DrawerStore for InMemoryDrawerStore {
             &self.vocabulary,
             stamp,
             changed_by,
-        ).map_err(|v| LocusKitError::InvalidContent(format!("reanchor rejected by gate: {:?}", v)))?;
+        )
+        .map_err(|v| {
+            LocusKitError::InvalidContent(format!("reanchor rejected by gate: {:?}", v))
+        })?;
 
         // Materialized projection: update placement columns + append the
         // sealed event. Bitmaps are unchanged by a reanchor.
         let row_store = self.storage.row_store();
         let mut update_vals = BTreeMap::new();
         if let Some(ref new_lat) = to_lattice {
-            update_vals.insert("udcCode".to_string(), TypedValue::Text(new_lat.udc_code.clone()));
+            update_vals.insert(
+                "udcCode".to_string(),
+                TypedValue::Text(new_lat.udc_code.clone()),
+            );
             update_vals.insert(
                 "udcFacets".to_string(),
-                new_lat.udc_facets.as_deref()
+                new_lat
+                    .udc_facets
+                    .as_deref()
                     .map(|s| TypedValue::Text(s.to_string()))
                     .unwrap_or(TypedValue::Null),
             );
             update_vals.insert(
                 "wikidataQID".to_string(),
-                new_lat.wikidata_qid.as_deref()
+                new_lat
+                    .wikidata_qid
+                    .as_deref()
                     .map(|s| TypedValue::Text(s.to_string()))
                     .unwrap_or(TypedValue::Null),
             );
             update_vals.insert(
                 "wikidataQidsSecondary".to_string(),
-                new_lat.wikidata_qids_secondary.as_deref()
+                new_lat
+                    .wikidata_qids_secondary
+                    .as_deref()
                     .map(|s| TypedValue::Text(s.to_string()))
                     .unwrap_or(TypedValue::Null),
             );
@@ -1226,7 +1274,7 @@ impl DrawerStore for InMemoryDrawerStore {
             .audit_log()
             .append(pk_audit_event_from(&event))
             .map_err(map_storage_err)?;
-        let _ = (reason, after_udc);   // retained for future ProvFrame composition
+        let _ = (reason, after_udc); // retained for future ProvFrame composition
         Ok(())
     }
 
@@ -1290,11 +1338,7 @@ impl DrawerStore for InMemoryDrawerStore {
         Ok(rows.iter().map(tunnel_from_row).collect())
     }
 
-    fn tunnels_from_wing_room(
-        &self,
-        wing: &str,
-        room: &str,
-    ) -> Result<Vec<Tunnel>, LocusKitError> {
+    fn tunnels_from_wing_room(&self, wing: &str, room: &str) -> Result<Vec<Tunnel>, LocusKitError> {
         let rows = self
             .storage
             .row_store()
@@ -1380,10 +1424,7 @@ impl DrawerStore for InMemoryDrawerStore {
         Ok(rows.first().map(kg_fact_from_row))
     }
 
-    fn kg_facts_for_drawer(
-        &self,
-        source_drawer_id: &str,
-    ) -> Result<Vec<KGFact>, LocusKitError> {
+    fn kg_facts_for_drawer(&self, source_drawer_id: &str) -> Result<Vec<KGFact>, LocusKitError> {
         let rows = self
             .storage
             .row_store()
@@ -1444,10 +1485,7 @@ impl DrawerStore for InMemoryDrawerStore {
         Ok(rows.first().map(proposal_from_row))
     }
 
-    fn proposals_for_target(
-        &self,
-        target_row_id: &str,
-    ) -> Result<Vec<Proposal>, LocusKitError> {
+    fn proposals_for_target(&self, target_row_id: &str) -> Result<Vec<Proposal>, LocusKitError> {
         let rows = self
             .storage
             .row_store()
@@ -1481,7 +1519,10 @@ impl DrawerStore for InMemoryDrawerStore {
         validate_non_empty(&association.target_room, "targetRoom")?;
         validate_non_empty(&association.label, "label")?;
         validate_non_empty(&association.added_by, "addedBy")?;
-        validate_non_empty(&association.lattice_anchor.udc_code, "latticeAnchor.udcCode")?;
+        validate_non_empty(
+            &association.lattice_anchor.udc_code,
+            "latticeAnchor.udcCode",
+        )?;
         self.storage
             .row_store()
             .insert(T_ASSOCIATIONS, association_values(association))
@@ -1507,11 +1548,7 @@ impl DrawerStore for InMemoryDrawerStore {
         Ok(rows.first().map(association_from_row))
     }
 
-    fn associations_from(
-        &self,
-        wing: &str,
-        room: &str,
-    ) -> Result<Vec<Association>, LocusKitError> {
+    fn associations_from(&self, wing: &str, room: &str) -> Result<Vec<Association>, LocusKitError> {
         let rows = self
             .storage
             .row_store()
@@ -1539,11 +1576,7 @@ impl DrawerStore for InMemoryDrawerStore {
         Ok(rows.iter().map(association_from_row).collect())
     }
 
-    fn associations_to(
-        &self,
-        wing: &str,
-        room: &str,
-    ) -> Result<Vec<Association>, LocusKitError> {
+    fn associations_to(&self, wing: &str, room: &str) -> Result<Vec<Association>, LocusKitError> {
         let rows = self
             .storage
             .row_store()
@@ -1761,10 +1794,7 @@ impl DrawerStore for InMemoryDrawerStore {
         Ok(rows.first().map(recall_trace_from_row))
     }
 
-    fn recall_trace_since(
-        &self,
-        since: &str,
-    ) -> Result<Vec<RecallTraceItem>, LocusKitError> {
+    fn recall_trace_since(&self, since: &str) -> Result<Vec<RecallTraceItem>, LocusKitError> {
         let rows = self
             .storage
             .row_store()
@@ -1788,9 +1818,7 @@ impl DrawerStore for InMemoryDrawerStore {
     fn mark_recall_trace_used(&self, id: &str, _now: i64) -> Result<(), LocusKitError> {
         let item = self
             .get_recall_trace(id)?
-            .ok_or_else(|| LocusKitError::RecallTraceItemNotFound {
-                id: id.to_string(),
-            })?;
+            .ok_or_else(|| LocusKitError::RecallTraceItemNotFound { id: id.to_string() })?;
         if item.used() {
             // Idempotent — already-marked rows skip the update.
             return Ok(());
@@ -1814,7 +1842,6 @@ impl DrawerStore for InMemoryDrawerStore {
     // Audit reads
     // -----------------------------------------------------------------
 
-
     fn audit_events_for_row(
         &self,
         row_id: &str,
@@ -1827,8 +1854,6 @@ impl DrawerStore for InMemoryDrawerStore {
             .map_err(map_storage_err)?;
         Ok(pk_events.iter().map(substrate_audit_event_from).collect())
     }
-
-
 
     // -----------------------------------------------------------------
     // Summary surface
@@ -2279,7 +2304,9 @@ fn recall_trace_values(item: &RecallTraceItem) -> BTreeMap<String, TypedValue> {
     );
     m.insert(
         "score".to_string(),
-        item.score.map(TypedValue::Float).unwrap_or(TypedValue::Null),
+        item.score
+            .map(TypedValue::Float)
+            .unwrap_or(TypedValue::Null),
     );
     m.insert(
         "operationalBitmap".to_string(),
@@ -2348,9 +2375,18 @@ fn learned_reference_values(reference: &LearnedReference) -> BTreeMap<String, Ty
         "sourceCatalogID".to_string(),
         TypedValue::Text(reference.source_catalog_id.clone()),
     );
-    m.insert("handle".to_string(), TypedValue::Text(reference.handle.clone()));
-    m.insert("addedBy".to_string(), TypedValue::Text(reference.added_by.clone()));
-    m.insert("filedAt".to_string(), TypedValue::Timestamp(reference.filed_at));
+    m.insert(
+        "handle".to_string(),
+        TypedValue::Text(reference.handle.clone()),
+    );
+    m.insert(
+        "addedBy".to_string(),
+        TypedValue::Text(reference.added_by.clone()),
+    );
+    m.insert(
+        "filedAt".to_string(),
+        TypedValue::Timestamp(reference.filed_at),
+    );
     m.insert(
         "tombstonedAt".to_string(),
         reference
@@ -2542,13 +2578,7 @@ fn i64_value_of(v: Option<&TypedValue>) -> i64 {
         Some(TypedValue::Int(i)) | Some(TypedValue::Bitmap(i)) | Some(TypedValue::Timestamp(i)) => {
             *i
         }
-        Some(TypedValue::Bool(b)) => {
-            if *b {
-                1
-            } else {
-                0
-            }
-        }
+        Some(TypedValue::Bool(b)) if *b => 1,
         _ => 0,
     }
 }
@@ -2715,7 +2745,11 @@ fn pk_audit_event_from(e: &substrate_lib::verbs::AuditEvent) -> PkAuditEvent {
 /// fields are all-or-nothing (a snapshot event either has a prior or is
 /// the first event), mirrored here.
 pub(crate) fn substrate_audit_event_from(e: &PkAuditEvent) -> substrate_lib::verbs::AuditEvent {
-    let before = match (e.before_adjective, e.before_operational, e.before_provenance) {
+    let before = match (
+        e.before_adjective,
+        e.before_operational,
+        e.before_provenance,
+    ) {
         (Some(a), Some(o), Some(p)) => Some((a, o, p)),
         _ => None,
     };
@@ -2727,7 +2761,8 @@ pub(crate) fn substrate_audit_event_from(e: &PkAuditEvent) -> substrate_lib::ver
         verb: e.verb.clone(),
         before_bitmaps: before,
         after_bitmaps: (e.after_adjective, e.after_operational, e.after_provenance),
-        before_lattice_anchor: e.before_lattice_anchor
+        before_lattice_anchor: e
+            .before_lattice_anchor
             .map(|a| substrate_lib::verbs::LatticeAnchor::new(a, 0)),
         after_lattice_anchor: substrate_lib::verbs::LatticeAnchor::new(e.after_lattice_anchor, 0),
         actor: e.actor.clone(),
@@ -2770,6 +2805,9 @@ mod tests {
             bytes[(i + 7) % 16] ^= ((h >> 32) & 0xff) as u8;
         }
         // Mix the hash across all bytes so short labels differ well.
+        // The loop uses `i` both to read and write bytes[i], so a direct
+        // iterator would need split borrows. The range loop is correct here.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..16 {
             h ^= bytes[i] as u64;
             h = h.wrapping_mul(0x100000001b3);
@@ -2830,11 +2868,13 @@ mod tests {
         let store = open_store();
         let d = sample_drawer("d1", "w", "k", "hi");
         store.add_drawer(&d, NOW).unwrap();
-        let manifest_uuid =
-            Uuid::parse_str(&store.read_manifest().unwrap().estate_uuid).unwrap();
+        let manifest_uuid = Uuid::parse_str(&store.read_manifest().unwrap().estate_uuid).unwrap();
         let row = Uuid::parse_str(&tid("d1")).unwrap();
         let events = store.storage.audit_log().events_for_row(row).unwrap();
-        assert!(!events.is_empty(), "capture must emit a genesis audit event");
+        assert!(
+            !events.is_empty(),
+            "capture must emit a genesis audit event"
+        );
         assert_eq!(
             events[0].estate_uuid, manifest_uuid,
             "audit event estate uuid must equal the manifest estate uuid on first open"
@@ -2910,7 +2950,11 @@ mod tests {
             LocusKitError::InvalidContent(msg) => {
                 // The gate's prior==None branch runs ForbiddenCombinations,
                 // catching I-22 (secret + exportable) on the capture event.
-                assert!(msg.contains("I-22"), "expected I-22 gate rejection, got: {}", msg);
+                assert!(
+                    msg.contains("I-22"),
+                    "expected I-22 gate rejection, got: {}",
+                    msg
+                );
             }
             other => panic!("expected InvalidContent (gate rejection), got {:?}", other),
         }
@@ -2977,8 +3021,12 @@ mod tests {
     #[test]
     fn drawer_ids_returns_every_drawer_id() {
         let store = open_store();
-        store.add_drawer(&sample_drawer("a", "w", "k", "one"), NOW).unwrap();
-        store.add_drawer(&sample_drawer("b", "w", "k", "two"), NOW).unwrap();
+        store
+            .add_drawer(&sample_drawer("a", "w", "k", "one"), NOW)
+            .unwrap();
+        store
+            .add_drawer(&sample_drawer("b", "w", "k", "two"), NOW)
+            .unwrap();
         let mut ids = store.drawer_ids().unwrap();
         ids.sort();
         let mut want = vec![tid("a"), tid("b")];
@@ -3005,8 +3053,14 @@ mod tests {
         store.add_drawer(&next, NOW + 100).unwrap();
 
         // Predecessor state nibble flipped to Superseded (raw 16).
-        let p_back = store.get_drawer("11111111-1111-4111-8111-111111111111").unwrap().unwrap();
-        assert_eq!(p_back.adjective_bitmap & 0x3F, State::Superseded.raw_value());
+        let p_back = store
+            .get_drawer("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            p_back.adjective_bitmap & 0x3F,
+            State::Superseded.raw_value()
+        );
 
         // The flip went through the gate → one audit event for the
         // predecessor with after-state superseded (bitmap_audit retired).
@@ -3014,16 +3068,28 @@ mod tests {
         let events = store.storage.audit_log().events_for_row(prow).unwrap();
         assert_eq!(events.len(), 2); // predecessor's capture + the supersede flip
         assert_eq!(events[0].verb, "capture");
-        assert_eq!(events[1].after_adjective & 0x3F, State::Superseded.raw_value());
+        assert_eq!(
+            events[1].after_adjective & 0x3F,
+            State::Superseded.raw_value()
+        );
 
         // Directional supersedes tunnel exists from new → prior.
         let tunnel = store
-            .get_tunnel(&format!("supersedes:{}:{}", "22222222-2222-4222-8222-222222222222", "11111111-1111-4111-8111-111111111111"))
+            .get_tunnel(&format!(
+                "supersedes:{}:{}",
+                "22222222-2222-4222-8222-222222222222", "11111111-1111-4111-8111-111111111111"
+            ))
             .unwrap()
             .unwrap();
         assert_eq!(tunnel.kind, TunnelKind::Supersedes);
-        assert_eq!(tunnel.source_drawer_id.as_deref(), Some("22222222-2222-4222-8222-222222222222"));
-        assert_eq!(tunnel.target_drawer_id.as_deref(), Some("11111111-1111-4111-8111-111111111111"));
+        assert_eq!(
+            tunnel.source_drawer_id.as_deref(),
+            Some("22222222-2222-4222-8222-222222222222")
+        );
+        assert_eq!(
+            tunnel.target_drawer_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
     }
 
     // -----------------------------------------------------------------
@@ -3038,9 +3104,22 @@ mod tests {
         // source_type=2 | channel=1 | confidence=16 — all gate-legal.
         let prov: i64 = 0x10000042;
         store
-            .mutate_provenance("11111111-1111-4111-8111-111111111111", prov, "alice", Some("test"), NOW + 1)
+            .mutate_provenance(
+                "11111111-1111-4111-8111-111111111111",
+                prov,
+                "alice",
+                Some("test"),
+                NOW + 1,
+            )
             .unwrap();
-        assert_eq!(store.get_drawer("11111111-1111-4111-8111-111111111111").unwrap().unwrap().provenance, prov);
+        assert_eq!(
+            store
+                .get_drawer("11111111-1111-4111-8111-111111111111")
+                .unwrap()
+                .unwrap()
+                .provenance,
+            prov
+        );
         // Gate appended one event carrying the provenance write.
         let row = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
         let events = store.storage.audit_log().events_for_row(row).unwrap();
@@ -3056,10 +3135,20 @@ mod tests {
         // Trust at bits 18-23 (cookbook §2.3); canonical = raw 3.
         let trust_canonical = Trust::Canonical.raw_value() << 18;
         store
-            .mutate_adjective("11111111-1111-4111-8111-111111111111", trust_canonical, "alice", Some("uplift"), NOW + 1)
+            .mutate_adjective(
+                "11111111-1111-4111-8111-111111111111",
+                trust_canonical,
+                "alice",
+                Some("uplift"),
+                NOW + 1,
+            )
             .unwrap();
         assert_eq!(
-            store.get_drawer("11111111-1111-4111-8111-111111111111").unwrap().unwrap().adjective_bitmap,
+            store
+                .get_drawer("11111111-1111-4111-8111-111111111111")
+                .unwrap()
+                .unwrap()
+                .adjective_bitmap,
             trust_canonical
         );
         // One audit event whose after-adjective carries the trust write
@@ -3068,7 +3157,10 @@ mod tests {
         let events = store.storage.audit_log().events_for_row(row).unwrap();
         assert_eq!(events.len(), 2); // capture (genesis) + the adjective mutation
         assert_eq!(events[0].verb, "capture");
-        assert_eq!((events[1].after_adjective >> 18) & 0x3F, Trust::Canonical.raw_value());
+        assert_eq!(
+            (events[1].after_adjective >> 18) & 0x3F,
+            Trust::Canonical.raw_value()
+        );
     }
 
     #[test]
@@ -3078,19 +3170,42 @@ mod tests {
         store.add_drawer(&d, NOW).unwrap();
         let bad = (AdjectiveSensitivity::Secret.raw_value() << 6)
             | (AdjectiveExportability::Public.raw_value() << 12);
-        let err = store.mutate_adjective("11111111-1111-4111-8111-111111111111", bad, "alice", None, NOW + 1).unwrap_err();
+        let err = store
+            .mutate_adjective(
+                "11111111-1111-4111-8111-111111111111",
+                bad,
+                "alice",
+                None,
+                NOW + 1,
+            )
+            .unwrap_err();
         match err {
             LocusKitError::InvalidContent(msg) => {
-                assert!(msg.contains("I-22"), "expected I-22 gate rejection, got: {}", msg);
+                assert!(
+                    msg.contains("I-22"),
+                    "expected I-22 gate rejection, got: {}",
+                    msg
+                );
             }
             other => panic!("expected InvalidContent (gate rejection), got {:?}", other),
         }
         // Drawer unchanged; the rejected mutation appended NO new event,
         // but the genesis capture event remains (it is the only event).
-        assert_eq!(store.get_drawer("11111111-1111-4111-8111-111111111111").unwrap().unwrap().adjective_bitmap, 0);
+        assert_eq!(
+            store
+                .get_drawer("11111111-1111-4111-8111-111111111111")
+                .unwrap()
+                .unwrap()
+                .adjective_bitmap,
+            0
+        );
         let row = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
         let events = store.storage.audit_log().events_for_row(row).unwrap();
-        assert_eq!(events.len(), 1, "only the genesis capture event; the rejected mutation appended nothing");
+        assert_eq!(
+            events.len(),
+            1,
+            "only the genesis capture event; the rejected mutation appended nothing"
+        );
         assert_eq!(events[0].verb, "capture");
     }
 
@@ -3100,10 +3215,20 @@ mod tests {
         let d = sample_drawer("11111111-1111-4111-8111-111111111111", "w", "k", "hi");
         store.add_drawer(&d, NOW).unwrap();
         store
-            .mutate_operational("11111111-1111-4111-8111-111111111111", 0x100, "alice", None, NOW + 1)
+            .mutate_operational(
+                "11111111-1111-4111-8111-111111111111",
+                0x100,
+                "alice",
+                None,
+                NOW + 1,
+            )
             .unwrap();
         assert_eq!(
-            store.get_drawer("11111111-1111-4111-8111-111111111111").unwrap().unwrap().operational_bitmap,
+            store
+                .get_drawer("11111111-1111-4111-8111-111111111111")
+                .unwrap()
+                .unwrap()
+                .operational_bitmap,
             0x100
         );
         // Gate appended one event carrying the operational write.
@@ -3120,12 +3245,25 @@ mod tests {
         d.adjective_bitmap = Trust::Canonical.raw_value() << 18; // state=Active=0, trust=Canonical (cookbook §2.3)
         store.add_drawer(&d, NOW).unwrap();
         store
-            .mutate_state("11111111-1111-4111-8111-111111111111", State::Contested, RowVerb::Contest, "alice", None, NOW + 1)
+            .mutate_state(
+                "11111111-1111-4111-8111-111111111111",
+                State::Contested,
+                RowVerb::Contest,
+                "alice",
+                None,
+                NOW + 1,
+            )
             .unwrap();
-        let back = store.get_drawer("11111111-1111-4111-8111-111111111111").unwrap().unwrap();
+        let back = store
+            .get_drawer("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .unwrap();
         // Upper axes preserved, state flipped.
         assert_eq!(back.adjective_bitmap & 0x3F, State::Contested.raw_value());
-        assert_eq!((back.adjective_bitmap >> 18) & 0x3F, Trust::Canonical.raw_value());
+        assert_eq!(
+            (back.adjective_bitmap >> 18) & 0x3F,
+            Trust::Canonical.raw_value()
+        );
     }
 
     #[test]
@@ -3146,8 +3284,11 @@ mod tests {
             .unwrap_err();
         match err {
             LocusKitError::InvalidContent(msg) => {
-                assert!(msg.contains("IllegalTransition"),
-                    "expected gate IllegalTransition, got: {}", msg);
+                assert!(
+                    msg.contains("IllegalTransition"),
+                    "expected gate IllegalTransition, got: {}",
+                    msg
+                );
             }
             other => panic!("expected InvalidContent (gate rejection), got {:?}", other),
         }
@@ -3182,16 +3323,23 @@ mod tests {
             LocusKitError::InvalidContent(msg) => {
                 assert!(
                     msg.contains("S-1"),
-                    "expected S-1 invariant violation via gate, got: {}", msg
+                    "expected S-1 invariant violation via gate, got: {}",
+                    msg
                 );
             }
             other => panic!("expected InvalidContent (gate rejection), got {:?}", other),
         }
 
         // Row state unchanged after rejected mutation.
-        let back = store.get_drawer("11111111-1111-4111-8111-111111111111").unwrap().unwrap();
+        let back = store
+            .get_drawer("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .unwrap();
         assert_eq!(back.adjective_bitmap & 0x3F, State::Active.raw_value());
-        assert_eq!((back.adjective_bitmap >> 18) & 0x3F, Trust::Observed.raw_value());
+        assert_eq!(
+            (back.adjective_bitmap >> 18) & 0x3F,
+            Trust::Observed.raw_value()
+        );
     }
 
     #[test]
@@ -3213,9 +3361,15 @@ mod tests {
             )
             .unwrap();
 
-        let back = store.get_drawer("22222222-2222-4222-8222-222222222222").unwrap().unwrap();
+        let back = store
+            .get_drawer("22222222-2222-4222-8222-222222222222")
+            .unwrap()
+            .unwrap();
         assert_eq!(back.adjective_bitmap & 0x3F, State::Accepted.raw_value());
-        assert_eq!((back.adjective_bitmap >> 18) & 0x3F, Trust::Canonical.raw_value());
+        assert_eq!(
+            (back.adjective_bitmap >> 18) & 0x3F,
+            Trust::Canonical.raw_value()
+        );
     }
 
     // -----------------------------------------------------------------
@@ -3265,7 +3419,7 @@ mod tests {
     #[test]
     fn diary_round_trip_and_lastn_ordering() {
         let store = open_store();
-        let mut e1 = DiaryEntry {
+        let e1 = DiaryEntry {
             id: "e1".to_string(),
             agent_name: "skippy".to_string(),
             entry: "first".to_string(),
@@ -3317,7 +3471,9 @@ mod tests {
         // Idempotent.
         store.mark_recall_trace_used("trace-1", NOW + 6).unwrap();
         // Missing id surfaces RecallTraceItemNotFound.
-        let err = store.mark_recall_trace_used("missing", NOW + 7).unwrap_err();
+        let err = store
+            .mark_recall_trace_used("missing", NOW + 7)
+            .unwrap_err();
         match err {
             LocusKitError::RecallTraceItemNotFound { id } => assert_eq!(id, "missing"),
             other => panic!("expected RecallTraceItemNotFound, got {:?}", other),
@@ -3327,31 +3483,15 @@ mod tests {
     #[test]
     fn recall_trace_since_filters_and_orders_ascending() {
         let store = open_store();
-        let early = RecallTraceItem::new(
-            "early",
-            "d-a",
-            "2024-01-01T00:00:00.000Z",
-            None,
-            0,
-        );
-        let mid = RecallTraceItem::new(
-            "mid",
-            "d-b",
-            "2024-06-01T00:00:00.000Z",
-            None,
-            0,
-        );
-        let late = RecallTraceItem::new(
-            "late",
-            "d-c",
-            "2024-12-01T00:00:00.000Z",
-            None,
-            0,
-        );
+        let early = RecallTraceItem::new("early", "d-a", "2024-01-01T00:00:00.000Z", None, 0);
+        let mid = RecallTraceItem::new("mid", "d-b", "2024-06-01T00:00:00.000Z", None, 0);
+        let late = RecallTraceItem::new("late", "d-c", "2024-12-01T00:00:00.000Z", None, 0);
         store.insert_recall_trace(&early).unwrap();
         store.insert_recall_trace(&late).unwrap();
         store.insert_recall_trace(&mid).unwrap();
-        let rows = store.recall_trace_since("2024-06-01T00:00:00.000Z").unwrap();
+        let rows = store
+            .recall_trace_since("2024-06-01T00:00:00.000Z")
+            .unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["mid", "late"]);
     }
@@ -3360,8 +3500,6 @@ mod tests {
     // Audit reads
     // -----------------------------------------------------------------
 
-
-
     // -----------------------------------------------------------------
     // Summary surface
     // -----------------------------------------------------------------
@@ -3369,9 +3507,15 @@ mod tests {
     #[test]
     fn list_wings_and_list_rooms() {
         let store = open_store();
-        store.add_drawer(&sample_drawer("d1", "w1", "k", "a"), NOW).unwrap();
-        store.add_drawer(&sample_drawer("d2", "w1", "study", "b"), NOW).unwrap();
-        store.add_drawer(&sample_drawer("d3", "w2", "lab", "c"), NOW).unwrap();
+        store
+            .add_drawer(&sample_drawer("d1", "w1", "k", "a"), NOW)
+            .unwrap();
+        store
+            .add_drawer(&sample_drawer("d2", "w1", "study", "b"), NOW)
+            .unwrap();
+        store
+            .add_drawer(&sample_drawer("d3", "w2", "lab", "c"), NOW)
+            .unwrap();
         let wings = store.list_wings().unwrap();
         assert_eq!(wings.len(), 2);
         assert_eq!(wings[0].name, "w1");
@@ -3388,7 +3532,9 @@ mod tests {
     #[test]
     fn taxonomy_equals_list_wings_for_now() {
         let store = open_store();
-        store.add_drawer(&sample_drawer("d1", "w1", "k", "a"), NOW).unwrap();
+        store
+            .add_drawer(&sample_drawer("d1", "w1", "k", "a"), NOW)
+            .unwrap();
         assert_eq!(store.taxonomy().unwrap(), store.list_wings().unwrap());
     }
 
@@ -3422,11 +3568,19 @@ mod tests {
     #[test]
     fn expunge_gated_tombstones_sets_bit_26_zeros_content_stamps_tombstoned_at() {
         let store = open_store();
-        let d = sample_drawer("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "w", "k", "content-aaaa");
+        let d = sample_drawer(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "w",
+            "k",
+            "content-aaaa",
+        );
         store.add_drawer(&d, NOW).unwrap();
 
         // Before: active, content non-empty, no tombstone, bit 26 clear.
-        let before = store.get_drawer("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap().unwrap();
+        let before = store
+            .get_drawer("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap();
         assert_eq!(before.adjective_bitmap & 0x3F, State::Active.raw_value());
         assert_eq!(before.content, "content-aaaa");
         assert!(before.tombstoned_at.is_none());
@@ -3441,12 +3595,18 @@ mod tests {
             )
             .unwrap();
 
-        let after = store.get_drawer("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap().unwrap();
+        let after = store
+            .get_drawer("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap();
         assert_eq!(after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
         assert_eq!(after.content, "");
         assert!(after.tombstoned_at.is_some());
-        assert_ne!(after.adjective_bitmap & (1 << 26), 0,
-            "dreaming_recalc_required (bit 26) must be set on tombstone via expunge");
+        assert_ne!(
+            after.adjective_bitmap & (1 << 26),
+            0,
+            "dreaming_recalc_required (bit 26) must be set on tombstone via expunge"
+        );
     }
 
     #[test]
@@ -3467,7 +3627,10 @@ mod tests {
                 NOW + 500,
             )
             .unwrap();
-        let after = store.get_drawer("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap().unwrap();
+        let after = store
+            .get_drawer("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap();
         assert_ne!(after.adjective_bitmap & (1 << 24), 0);
         assert_ne!(after.adjective_bitmap & (1 << 25), 0);
         assert_ne!(after.adjective_bitmap & (1 << 26), 0);
@@ -3504,16 +3667,22 @@ mod tests {
             .unwrap_err();
         match err {
             LocusKitError::InvalidContent(msg) => {
-                assert!(msg.contains("IllegalTransition")
+                assert!(
+                    msg.contains("IllegalTransition")
                         || msg.contains("illegalTransition")
                         || msg.contains("basisViolation"),
-                    "expected gate rejection from S-3, got: {}", msg);
+                    "expected gate rejection from S-3, got: {}",
+                    msg
+                );
             }
             other => panic!("expected InvalidContent (gate rejection), got {:?}", other),
         }
 
         // Row state must be unchanged; bit 26 must still be clear.
-        let after = store.get_drawer("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap().unwrap();
+        let after = store
+            .get_drawer("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+            .unwrap()
+            .unwrap();
         assert_eq!(after.adjective_bitmap & 0x3F, State::Accepted.raw_value());
         assert_eq!(after.adjective_bitmap & (1 << 26), 0);
     }

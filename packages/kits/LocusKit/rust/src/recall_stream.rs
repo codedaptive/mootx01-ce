@@ -162,7 +162,15 @@ mod tests {
     use crate::filter::HydrationLevel;
 
     fn make_drawer(id: &str, content: &str) -> Drawer {
-        Drawer::new(id, content, "wing", "room", "alice", 1_700_000_000, "test-v1")
+        Drawer::new(
+            id,
+            content,
+            "wing",
+            "room",
+            "alice",
+            1_700_000_000,
+            "test-v1",
+        )
     }
 
     // --- Default page size ---

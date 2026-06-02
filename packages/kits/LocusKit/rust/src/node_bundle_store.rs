@@ -38,11 +38,11 @@
 
 use crate::error::LocusKitError;
 use crate::schema;
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use persistence_kit::storage::Storage;
 use persistence_kit::types::{Column, StorageRow, TypedValue};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -83,6 +83,11 @@ impl BundleKind {
     /// Parse the column value back into a `BundleKind`. Returns `None`
     /// for any other string so callers can surface the corrupt-row
     /// case rather than silently coercing.
+    ///
+    /// Returns `Option<BundleKind>` rather than `Result<_, _>`, so this
+    /// does not implement `std::str::FromStr` (different return type).
+    /// The `#[allow]` suppresses the lint that warns about the similar name.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<BundleKind> {
         match s {
             "A" => Some(BundleKind::ActiveA),
@@ -150,12 +155,7 @@ impl NodeBundleStore {
         let mut counts = [0u32; 256];
         for (j, slot) in counts.iter_mut().enumerate() {
             let off = j * 4;
-            *slot = u32::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-            ]);
+            *slot = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
         }
         Ok(CountVector256::from_parts(counts, n))
     }
@@ -211,8 +211,14 @@ impl NodeBundleStore {
     ) -> Result<Option<CountVector256>, LocusKitError> {
         let row_store = self.storage.row_store();
         let predicate = StoragePredicate::all(vec![
-            StoragePredicate::Eq(Column::new(TABLE, "wing"), TypedValue::Text(wing.to_string())),
-            StoragePredicate::Eq(Column::new(TABLE, "room"), TypedValue::Text(room.to_string())),
+            StoragePredicate::Eq(
+                Column::new(TABLE, "wing"),
+                TypedValue::Text(wing.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new(TABLE, "room"),
+                TypedValue::Text(room.to_string()),
+            ),
             StoragePredicate::Eq(
                 Column::new(TABLE, "bundleKind"),
                 TypedValue::Text(kind.as_str().to_string()),
@@ -231,14 +237,13 @@ impl NodeBundleStore {
     /// wing-level roll-up row (`room == ""`). Used by the wing
     /// roll-up. Returned ordered by `room` ascending, matching Swift's
     /// `OrderClause(... .ascending)`.
-    pub fn rooms(
-        &self,
-        wing: &str,
-        kind: BundleKind,
-    ) -> Result<Vec<RoomBundle>, LocusKitError> {
+    pub fn rooms(&self, wing: &str, kind: BundleKind) -> Result<Vec<RoomBundle>, LocusKitError> {
         let row_store = self.storage.row_store();
         let predicate = StoragePredicate::all(vec![
-            StoragePredicate::Eq(Column::new(TABLE, "wing"), TypedValue::Text(wing.to_string())),
+            StoragePredicate::Eq(
+                Column::new(TABLE, "wing"),
+                TypedValue::Text(wing.to_string()),
+            ),
             StoragePredicate::Eq(
                 Column::new(TABLE, "bundleKind"),
                 TypedValue::Text(kind.as_str().to_string()),
@@ -350,10 +355,7 @@ mod tests {
 
     #[test]
     fn decode_counts_round_trips_through_encode() {
-        let cv = cv_with(
-            &[(0, 1), (1, 2), (2, 3), (255, u32::MAX)],
-            17,
-        );
+        let cv = cv_with(&[(0, 1), (1, 2), (2, 3), (255, u32::MAX)], 17);
         let bytes = NodeBundleStore::encode_counts(&cv);
         let back = NodeBundleStore::decode_counts(&bytes, 17).unwrap();
         assert_eq!(back, cv);
@@ -405,10 +407,7 @@ mod tests {
         let cv_b = cv_with(&[(1, 2)], 3);
         s.put("w", "r", BundleKind::ActiveA, &cv_a, 1).unwrap();
         s.put("w", "r", BundleKind::DepartedB, &cv_b, 2).unwrap();
-        assert_eq!(
-            s.get("w", "r", BundleKind::ActiveA).unwrap().unwrap(),
-            cv_a
-        );
+        assert_eq!(s.get("w", "r", BundleKind::ActiveA).unwrap().unwrap(), cv_a);
         assert_eq!(
             s.get("w", "r", BundleKind::DepartedB).unwrap().unwrap(),
             cv_b

@@ -327,12 +327,18 @@ mod tests {
             assert_eq!(p_with(raw << 6).target_object_type(), expected);
         }
         // Reserved raw 7 falls back to Drawer.
-        assert_eq!(p_with(7 << 6).target_object_type(), ProposalTargetObjectType::Drawer);
+        assert_eq!(
+            p_with(7 << 6).target_object_type(),
+            ProposalTargetObjectType::Drawer
+        );
     }
 
     #[test]
     fn confirmation_source_decodes_bits_twelve_through_seventeen() {
-        assert_eq!(p_with(0).confirmation_source(), ProposalConfirmationSource::Human);
+        assert_eq!(
+            p_with(0).confirmation_source(),
+            ProposalConfirmationSource::Human
+        );
         assert_eq!(
             p_with(1 << 12).confirmation_source(),
             ProposalConfirmationSource::Agent
@@ -381,8 +387,14 @@ mod tests {
 
     #[test]
     fn confidence_bucket_decodes_scale_gapped_raws() {
-        assert_eq!(p_with(0).confidence_bucket(), ProposalConfidenceBucket::Null);
-        assert_eq!(p_with(8 << 24).confidence_bucket(), ProposalConfidenceBucket::Low);
+        assert_eq!(
+            p_with(0).confidence_bucket(),
+            ProposalConfidenceBucket::Null
+        );
+        assert_eq!(
+            p_with(8 << 24).confidence_bucket(),
+            ProposalConfidenceBucket::Low
+        );
         assert_eq!(
             p_with(16 << 24).confidence_bucket(),
             ProposalConfidenceBucket::Medium

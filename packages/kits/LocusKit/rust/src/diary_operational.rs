@@ -299,10 +299,7 @@ mod tests {
             DiaryActorClass::SubstrateDaemon
         );
         assert_eq!(e_with(2 << 7).actor_class(), DiaryActorClass::McpAgent);
-        assert_eq!(
-            e_with(3 << 7).actor_class(),
-            DiaryActorClass::MigrationTool
-        );
+        assert_eq!(e_with(3 << 7).actor_class(), DiaryActorClass::MigrationTool);
         assert_eq!(
             e_with(4 << 7).actor_class(),
             DiaryActorClass::FederationPeer

@@ -83,7 +83,10 @@ impl EstateFingerprintFamilies {
         // Density 1.0 matches the Swift default. Diverging here would
         // silently produce incompatible fingerprints across the two ports.
         let families = HyperplaneFamily::block_families(&base, 1.0);
-        EstateFingerprintFamilies { families, estate_uuid }
+        EstateFingerprintFamilies {
+            families,
+            estate_uuid,
+        }
     }
 
     /// Derive the 32-byte base seed from the estate UUID. The same UUID
@@ -91,7 +94,10 @@ impl EstateFingerprintFamilies {
     /// per block, so two replicas of an estate agree and the four
     /// families stay independent. Mirrors the Swift `baseSeed`.
     pub fn base_seed(estate_uuid: &str) -> [u8; 32] {
-        HyperplaneFamily::expand_seed_64(substrate_types::fnv::hash64(&format!("GLfp-base:{}", estate_uuid)))
+        HyperplaneFamily::expand_seed_64(substrate_types::fnv::hash64(&format!(
+            "GLfp-base:{}",
+            estate_uuid
+        )))
     }
 
     /// The estate-UUID hash byte that block 3 carries (cookbook § 3.5).
@@ -179,7 +185,11 @@ pub fn capture_week_bucket(filed_at: i64) -> u8 {
 /// the UDC code, with non-digit separators stripped. "613.71" keys on
 /// "6137".
 pub fn udc_prefix_hash(udc_code: &str) -> u16 {
-    let digits: String = udc_code.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
+    let digits: String = udc_code
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(4)
+        .collect();
     substrate_types::fnv::hash16(&digits)
 }
 
@@ -196,7 +206,13 @@ mod tests {
 
     fn sample(udc: &str) -> Drawer {
         let mut d = Drawer::new(
-            "d1", "hello", "study", "notes", "alice", 1_700_000_000, "test-v1",
+            "d1",
+            "hello",
+            "study",
+            "notes",
+            "alice",
+            1_700_000_000,
+            "test-v1",
         );
         d.udc_code = udc.to_string();
         d
@@ -213,13 +229,19 @@ mod tests {
     #[test]
     fn udc_prefix_hash_strips_separators() {
         // "613.71" -> "6137"
-        assert_eq!(udc_prefix_hash("613.71"), substrate_types::fnv::hash16("6137"));
+        assert_eq!(
+            udc_prefix_hash("613.71"),
+            substrate_types::fnv::hash16("6137")
+        );
     }
 
     #[test]
     fn udc_prefix_hash_caps_at_four_digits() {
         // "1234567" -> "1234"
-        assert_eq!(udc_prefix_hash("1234567"), substrate_types::fnv::hash16("1234"));
+        assert_eq!(
+            udc_prefix_hash("1234567"),
+            substrate_types::fnv::hash16("1234")
+        );
     }
 
     #[test]
@@ -373,6 +395,9 @@ mod tests {
     #[test]
     fn estate_uuid_byte_is_low_byte_of_fnv() {
         let fam = EstateFingerprintFamilies::new(UUID_A);
-        assert_eq!(fam.estate_uuid_byte(), substrate_types::fnv::hash64(UUID_A) as u8);
+        assert_eq!(
+            fam.estate_uuid_byte(),
+            substrate_types::fnv::hash64(UUID_A) as u8
+        );
     }
 }

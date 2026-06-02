@@ -51,8 +51,8 @@ use crate::node_bundle_store::{BundleKind, NodeBundleStore};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_types::count_vector::CountVector256;
 use substrate_kernel::kernel::SubstrateKernel;
+use substrate_types::count_vector::CountVector256;
 
 /// Recomputes Bundle A from a node's active drawer set.
 ///
@@ -76,7 +76,11 @@ impl<'a, K: SubstrateKernel> BundleMaterializer<'a, K> {
         families: &'a EstateFingerprintFamilies,
         kernel: K,
     ) -> Self {
-        BundleMaterializer { bundles, families, kernel }
+        BundleMaterializer {
+            bundles,
+            families,
+            kernel,
+        }
     }
 
     /// Recompute Bundle A for one room: fold the supplied active
@@ -115,11 +119,7 @@ impl<'a, K: SubstrateKernel> BundleMaterializer<'a, K> {
     /// this equals the direct fold of every active drawer in the wing,
     /// so callers may materialize rooms in any order and roll up
     /// afterward. Returns the wing-level count-vector.
-    pub fn roll_up_wing(
-        &self,
-        wing: &str,
-        now: i64,
-    ) -> Result<CountVector256, LocusKitError> {
+    pub fn roll_up_wing(&self, wing: &str, now: i64) -> Result<CountVector256, LocusKitError> {
         let rooms = self.bundles.rooms(wing, BundleKind::ActiveA)?;
         let mut acc = CountVector256::zero();
         for entry in &rooms {
@@ -144,8 +144,8 @@ impl<'a, K: SubstrateKernel> BundleMaterializer<'a, K> {
 mod tests {
     use super::*;
     use crate::drawer::Drawer;
-    use std::sync::Arc;
     use persistence_kit::inmemory::InMemoryStorage;
+    use std::sync::Arc;
     use substrate_kernel::kernel::ScalarKernel;
     use uuid::Uuid;
 
@@ -186,10 +186,7 @@ mod tests {
         let direct = kernel.count_fold_256(&fps);
         assert_eq!(cv, direct);
 
-        let stored = bundles
-            .get("w", "r", BundleKind::ActiveA)
-            .unwrap()
-            .unwrap();
+        let stored = bundles.get("w", "r", BundleKind::ActiveA).unwrap().unwrap();
         assert_eq!(stored, cv);
     }
 
@@ -205,10 +202,7 @@ mod tests {
         assert_eq!(cv.n(), 0);
         assert_eq!(cv, CountVector256::zero());
 
-        let stored = bundles
-            .get("w", "r", BundleKind::ActiveA)
-            .unwrap()
-            .unwrap();
+        let stored = bundles.get("w", "r", BundleKind::ActiveA).unwrap().unwrap();
         assert_eq!(stored, CountVector256::zero());
     }
 
@@ -274,10 +268,7 @@ mod tests {
         let cv2 = m.materialize_room("w", "r", &[&d1], 2).unwrap();
 
         assert_eq!(cv2.n(), 1);
-        let stored = bundles
-            .get("w", "r", BundleKind::ActiveA)
-            .unwrap()
-            .unwrap();
+        let stored = bundles.get("w", "r", BundleKind::ActiveA).unwrap().unwrap();
         assert_eq!(stored, cv2);
     }
 }

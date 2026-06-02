@@ -305,14 +305,35 @@ mod tests {
 
     #[test]
     fn source_decodes_contiguous() {
-        assert_eq!(with_op(0 << 13).acquisition_source(), LearnedReferenceSource::User);
-        assert_eq!(with_op(1 << 13).acquisition_source(), LearnedReferenceSource::Federation);
-        assert_eq!(with_op(2 << 13).acquisition_source(), LearnedReferenceSource::HouseholdPairing);
-        assert_eq!(with_op(3 << 13).acquisition_source(), LearnedReferenceSource::FleetPairing);
-        assert_eq!(with_op(4 << 13).acquisition_source(), LearnedReferenceSource::TierInheritance);
-        assert_eq!(with_op(5 << 13).acquisition_source(), LearnedReferenceSource::PairedEstate);
+        assert_eq!(
+            with_op(0 << 13).acquisition_source(),
+            LearnedReferenceSource::User
+        );
+        assert_eq!(
+            with_op(1 << 13).acquisition_source(),
+            LearnedReferenceSource::Federation
+        );
+        assert_eq!(
+            with_op(2 << 13).acquisition_source(),
+            LearnedReferenceSource::HouseholdPairing
+        );
+        assert_eq!(
+            with_op(3 << 13).acquisition_source(),
+            LearnedReferenceSource::FleetPairing
+        );
+        assert_eq!(
+            with_op(4 << 13).acquisition_source(),
+            LearnedReferenceSource::TierInheritance
+        );
+        assert_eq!(
+            with_op(5 << 13).acquisition_source(),
+            LearnedReferenceSource::PairedEstate
+        );
         // reserved raw falls back to User
-        assert_eq!(with_op(6 << 13).acquisition_source(), LearnedReferenceSource::User);
+        assert_eq!(
+            with_op(6 << 13).acquisition_source(),
+            LearnedReferenceSource::User
+        );
     }
 
     #[test]
