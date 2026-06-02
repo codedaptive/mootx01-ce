@@ -985,9 +985,10 @@ fn lenses_reproduce_shared_vectors() {
     }
 
     // context_synthesizer: build DrawerRow + DrawerRowMeta slices from the
-    // artifact's row inputs. The Rust loader derives is_currently_believed
-    // from adjectiveBitmap bits 0..<3 (state cluster per LocusKit docs;
-    // state .active = 0 in bits 0-2 = currently believed). No source changes.
+    // artifact's row inputs. The loader derives is_currently_believed from
+    // adjectiveBitmap via the State cluster formula documented on the meta
+    // construction below: (state_raw >> 4) & 0x3 == 0 (Cluster A — matches
+    // LocusKit's shipped Drawer.isCurrentlyBelieved). No source changes.
     for c in &v.context_synthesizer {
         let rows: Vec<DrawerRow> = c
             .rows
