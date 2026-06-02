@@ -144,10 +144,7 @@ impl StorageRow {
 
     pub fn from_pairs(pairs: impl IntoIterator<Item = (impl Into<String>, TypedValue)>) -> Self {
         StorageRow {
-            values: pairs
-                .into_iter()
-                .map(|(k, v)| (k.into(), v))
-                .collect(),
+            values: pairs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
         }
     }
 

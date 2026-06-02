@@ -26,8 +26,7 @@ use crate::{
     EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel, OrderClause,
     OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters, Storage,
     StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult, StorageRow,
-    StorageTransaction, TableChange, TableDeclaration,
-    TypedValue, VectorIndex, VectorSearchResult,
+    StorageTransaction, TableChange, TableDeclaration, TypedValue, VectorIndex, VectorSearchResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -123,12 +122,16 @@ fn read_value(row: &postgres::Row, idx: usize, kit: Option<ColumnType>) -> Typed
             .flatten()
             .map(TypedValue::Blob)
             .unwrap_or(TypedValue::Null),
-        Some(ColumnType::Bitmap) => int_col(row, idx).map(TypedValue::Bitmap).unwrap_or(TypedValue::Null),
+        Some(ColumnType::Bitmap) => int_col(row, idx)
+            .map(TypedValue::Bitmap)
+            .unwrap_or(TypedValue::Null),
         Some(ColumnType::Hlc) => int_col(row, idx)
             .map(|i| TypedValue::Hlc(unpack_hlc(i as u64)))
             .unwrap_or(TypedValue::Null),
         // Default (Int or unknown): read as BIGINT.
-        _ => int_col(row, idx).map(TypedValue::Int).unwrap_or(TypedValue::Null),
+        _ => int_col(row, idx)
+            .map(TypedValue::Int)
+            .unwrap_or(TypedValue::Null),
     }
 }
 
@@ -149,9 +152,14 @@ fn pg_err_text(e: &postgres::Error) -> String {
 fn map_pg_err(e: postgres::Error, table: &str) -> StorageError {
     let msg = pg_err_text(&e);
     if msg.contains("append-only") {
-        StorageError::AppendOnlyViolation { table: table.to_string() }
+        StorageError::AppendOnlyViolation {
+            table: table.to_string(),
+        }
     } else if msg.contains("duplicate key") || msg.contains("unique constraint") {
-        StorageError::DuplicateKey { table: table.to_string(), key: "(unique constraint)".into() }
+        StorageError::DuplicateKey {
+            table: table.to_string(),
+            key: "(unique constraint)".into(),
+        }
     } else {
         StorageError::BackendError { underlying: msg }
     }
@@ -192,8 +200,7 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   PRIMARY KEY ("event_id", "hlc")
 )"#;
 
-const AUDIT_INDEX: &str =
-    r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")"#;
+const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")"#;
 
 const REJECT_MUTATION_FN: &str = r#"CREATE OR REPLACE FUNCTION "_storagekit_reject_mutation"()
 RETURNS trigger AS $$
@@ -229,14 +236,27 @@ fn create_table_sql(decl: &TableDeclaration) -> String {
         ));
     }
     if !decl.primary_key.is_empty() {
-        let cols = decl.primary_key.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+        let cols = decl
+            .primary_key
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         parts.push(format!("PRIMARY KEY ({cols})"));
     }
     for unique in &decl.unique_constraints {
-        let cols = unique.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+        let cols = unique
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         parts.push(format!("UNIQUE ({cols})"));
     }
-    format!("CREATE TABLE IF NOT EXISTS \"{}\" (\n  {}\n)", decl.name, parts.join(",\n  "))
+    format!(
+        "CREATE TABLE IF NOT EXISTS \"{}\" (\n  {}\n)",
+        decl.name,
+        parts.join(",\n  ")
+    )
 }
 
 fn append_only_trigger_statements(decl: &TableDeclaration) -> Vec<String> {
@@ -256,8 +276,16 @@ fn append_only_trigger_statements(decl: &TableDeclaration) -> Vec<String> {
 
 fn create_index_sql(decl: &IndexDeclaration) -> String {
     let unique = if decl.unique { "UNIQUE " } else { "" };
-    let cols = decl.columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
-    format!("CREATE {unique}INDEX IF NOT EXISTS \"{}\" ON \"{}\" ({cols})", decl.name, decl.table)
+    let cols = decl
+        .columns
+        .iter()
+        .map(|c| format!("\"{c}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "CREATE {unique}INDEX IF NOT EXISTS \"{}\" ON \"{}\" ({cols})",
+        decl.name, decl.table
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -273,21 +301,53 @@ fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<TypedValue>) -> Strin
             if preds.is_empty() {
                 return "TRUE".into();
             }
-            format!("({})", preds.iter().map(|x| compile_predicate(x, binds)).collect::<Vec<_>>().join(" AND "))
+            format!(
+                "({})",
+                preds
+                    .iter()
+                    .map(|x| compile_predicate(x, binds))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            )
         }
         StoragePredicate::Or(preds) => {
             if preds.is_empty() {
                 return "FALSE".into();
             }
-            format!("({})", preds.iter().map(|x| compile_predicate(x, binds)).collect::<Vec<_>>().join(" OR "))
+            format!(
+                "({})",
+                preds
+                    .iter()
+                    .map(|x| compile_predicate(x, binds))
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            )
         }
         StoragePredicate::Not(inner) => format!("NOT ({})", compile_predicate(inner, binds)),
-        StoragePredicate::Eq(c, v) => { binds.push(v.clone()); format!("\"{}\" = ${}", c.name, binds.len()) }
-        StoragePredicate::Neq(c, v) => { binds.push(v.clone()); format!("\"{}\" != ${}", c.name, binds.len()) }
-        StoragePredicate::Lt(c, v) => { binds.push(v.clone()); format!("\"{}\" < ${}", c.name, binds.len()) }
-        StoragePredicate::Lte(c, v) => { binds.push(v.clone()); format!("\"{}\" <= ${}", c.name, binds.len()) }
-        StoragePredicate::Gt(c, v) => { binds.push(v.clone()); format!("\"{}\" > ${}", c.name, binds.len()) }
-        StoragePredicate::Gte(c, v) => { binds.push(v.clone()); format!("\"{}\" >= ${}", c.name, binds.len()) }
+        StoragePredicate::Eq(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" = ${}", c.name, binds.len())
+        }
+        StoragePredicate::Neq(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" != ${}", c.name, binds.len())
+        }
+        StoragePredicate::Lt(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" < ${}", c.name, binds.len())
+        }
+        StoragePredicate::Lte(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" <= ${}", c.name, binds.len())
+        }
+        StoragePredicate::Gt(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" > ${}", c.name, binds.len())
+        }
+        StoragePredicate::Gte(c, v) => {
+            binds.push(v.clone());
+            format!("\"{}\" >= ${}", c.name, binds.len())
+        }
         StoragePredicate::IsNull(c) => format!("\"{}\" IS NULL", c.name),
         StoragePredicate::IsNotNull(c) => format!("\"{}\" IS NOT NULL", c.name),
         StoragePredicate::In(c, values) => {
@@ -322,7 +382,11 @@ fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<TypedValue>) -> Strin
             binds.push(TypedValue::Int(*mask));
             format!("(\"{}\" & ${}) = 0", column.name, binds.len())
         }
-        StoragePredicate::BitwiseEq { column, expected, mask } => {
+        StoragePredicate::BitwiseEq {
+            column,
+            expected,
+            mask,
+        } => {
             binds.push(TypedValue::Int(*mask));
             let a = binds.len();
             binds.push(TypedValue::Int(*expected));
@@ -349,7 +413,11 @@ struct Subscription {
 impl ObserverRegistry {
     fn observe(&self, table: &str, events: BTreeSet<StorageEvent>) -> Receiver<TableChange> {
         let (tx, rx) = channel();
-        self.subs.lock().unwrap().push(Subscription { table: table.to_string(), events, tx });
+        self.subs.lock().unwrap().push(Subscription {
+            table: table.to_string(),
+            events,
+            tx,
+        });
         rx
     }
     fn emit(&self, change: &TableChange) {
@@ -383,15 +451,20 @@ impl PostgresStorage {
     /// `Postgresql` backend variant. (Single connection at Phase 1.)
     pub fn new(config: EstateConfiguration) -> StorageResult<Self> {
         let conn_str = match &config.backend {
-            BackendConfiguration::Postgresql { connection_string, .. } => connection_string.clone(),
+            BackendConfiguration::Postgresql {
+                connection_string, ..
+            } => connection_string.clone(),
             _ => {
                 return Err(StorageError::BackendError {
-                    underlying: "PostgresStorage requires a Postgresql backend configuration".into(),
+                    underlying: "PostgresStorage requires a Postgresql backend configuration"
+                        .into(),
                 })
             }
         };
-        let mut client = Client::connect(&conn_str, NoTls)
-            .map_err(|e| StorageError::BackendError { underlying: format!("postgres connect: {e}") })?;
+        let mut client =
+            Client::connect(&conn_str, NoTls).map_err(|e| StorageError::BackendError {
+                underlying: format!("postgres connect: {e}"),
+            })?;
         // Estate isolation: each estate lives in its own schema (the PG
         // analogue of SQLite's one-file-per-estate). The connection's
         // search_path is pinned to it for this storage's lifetime, so a
@@ -403,10 +476,15 @@ impl PostgresStorage {
             .batch_execute(&format!(
                 "CREATE SCHEMA IF NOT EXISTS \"{ns}\"; SET search_path TO \"{ns}\", public;"
             ))
-            .map_err(|e| StorageError::BackendError { underlying: format!("schema setup: {e}") })?;
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("schema setup: {e}"),
+            })?;
         Ok(PostgresStorage {
             config,
-            inner: Arc::new(Mutex::new(Inner { client, schema: None })),
+            inner: Arc::new(Mutex::new(Inner {
+                client,
+                schema: None,
+            })),
             observers: Arc::new(ObserverRegistry::default()),
         })
     }
@@ -416,7 +494,9 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     inner.schema = Some(schema.clone());
     let batch = |c: &mut Client, sql: &str| {
         c.batch_execute(sql)
-            .map_err(|e| StorageError::BackendError { underlying: format!("ddl: {}", pg_err_text(&e)) })
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("ddl: {}", pg_err_text(&e)),
+            })
     };
     batch(&mut inner.client, META_TABLE)?;
     batch(&mut inner.client, AUDIT_TABLE)?;
@@ -439,7 +519,9 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
                ON CONFLICT ("key") DO UPDATE SET "value" = excluded.value"#,
             &[&schema.version.to_string()],
         )
-        .map_err(|e| StorageError::BackendError { underlying: format!("record version: {e}") })?;
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("record version: {e}"),
+        })?;
     Ok(())
 }
 
@@ -448,19 +530,30 @@ impl Storage for PostgresStorage {
         &self.config
     }
     fn row_store(&self) -> Arc<dyn RowStore> {
-        Arc::new(PgRowStore { inner: self.inner.clone(), observers: self.observers.clone() })
+        Arc::new(PgRowStore {
+            inner: self.inner.clone(),
+            observers: self.observers.clone(),
+        })
     }
     fn blob_store(&self) -> Arc<dyn BlobStore> {
-        Arc::new(PgBlobStore { inner: self.inner.clone() })
+        Arc::new(PgBlobStore {
+            inner: self.inner.clone(),
+        })
     }
     fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Arc::new(PgVectorIndex { inner: self.inner.clone() })
+        Arc::new(PgVectorIndex {
+            inner: self.inner.clone(),
+        })
     }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
-        Arc::new(PgAuditLog { inner: self.inner.clone() })
+        Arc::new(PgAuditLog {
+            inner: self.inner.clone(),
+        })
     }
     fn observer(&self) -> Arc<dyn StorageObserver> {
-        Arc::new(PgObserver { observers: self.observers.clone() })
+        Arc::new(PgObserver {
+            observers: self.observers.clone(),
+        })
     }
 
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
@@ -473,8 +566,13 @@ impl Storage for PostgresStorage {
         let mut guard = self.inner.lock().unwrap();
         let rows = guard
             .client
-            .query(r#"SELECT "value" FROM "_storagekit_meta" WHERE "key" = 'schema_version'"#, &[])
-            .map_err(|e| StorageError::BackendError { underlying: format!("schema version: {e}") })?;
+            .query(
+                r#"SELECT "value" FROM "_storagekit_meta" WHERE "key" = 'schema_version'"#,
+                &[],
+            )
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("schema version: {e}"),
+            })?;
         Ok(rows
             .first()
             .and_then(|r| r.try_get::<_, String>(0).ok())
@@ -550,7 +648,11 @@ struct PgRowStore {
     observers: Arc<ObserverRegistry>,
 }
 
-fn extract_row_key(schema: Option<&SchemaDeclaration>, table: &str, values: &BTreeMap<String, TypedValue>) -> RowKey {
+fn extract_row_key(
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    values: &BTreeMap<String, TypedValue>,
+) -> RowKey {
     if let Some(decl) = schema.and_then(|s| s.tables.iter().find(|t| t.name == table)) {
         if decl.primary_key.len() == 1 {
             if let Some(TypedValue::Uuid(u)) = values.get(&decl.primary_key[0]) {
@@ -561,24 +663,47 @@ fn extract_row_key(schema: Option<&SchemaDeclaration>, table: &str, values: &BTr
     Uuid::new_v4()
 }
 
-fn table_column_type(schema: Option<&SchemaDeclaration>, table: &str, column: &str) -> Option<ColumnType> {
+fn table_column_type(
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    column: &str,
+) -> Option<ColumnType> {
     let decl = schema?.tables.iter().find(|t| t.name == table)?;
     decl.columns
         .iter()
         .find(|c| c.name == column)
         .map(|c| c.column_type)
-        .or_else(|| decl.generated_columns.iter().find(|g| g.name == column).map(|g| g.column_type))
+        .or_else(|| {
+            decl.generated_columns
+                .iter()
+                .find(|g| g.name == column)
+                .map(|g| g.column_type)
+        })
 }
 
 impl RowStore for PgRowStore {
-    fn insert(&self, table: &str, values: BTreeMap<String, TypedValue>) -> StorageResult<RowHandle> {
+    fn insert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<RowHandle> {
         let mut guard = self.inner.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
-        let cols = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
-        let ph = (1..=keys.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ph = (1..=keys.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
         let params: Vec<PgParam> = keys.iter().map(|k| to_param(&values[*k])).collect();
-        guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        guard
+            .client
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
         self.observers.emit(&TableChange {
             table: table.to_string(),
@@ -590,14 +715,30 @@ impl RowStore for PgRowStore {
         Ok(RowHandle::new(table, key))
     }
 
-    fn upsert(&self, table: &str, values: BTreeMap<String, TypedValue>, conflict_columns: &[String]) -> StorageResult<RowHandle> {
+    fn upsert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        conflict_columns: &[String],
+    ) -> StorageResult<RowHandle> {
         let mut guard = self.inner.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
-        let cols = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
-        let ph = (1..=keys.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ph = (1..=keys.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
         if !conflict_columns.is_empty() {
-            let conflict = conflict_columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+            let conflict = conflict_columns
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
             let updates: Vec<String> = keys
                 .iter()
                 .filter(|k| !conflict_columns.contains(k))
@@ -611,7 +752,10 @@ impl RowStore for PgRowStore {
             }
         }
         let params: Vec<PgParam> = keys.iter().map(|k| to_param(&values[*k])).collect();
-        guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        guard
+            .client
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
         self.observers.emit(&TableChange {
             table: table.to_string(),
@@ -623,7 +767,12 @@ impl RowStore for PgRowStore {
         Ok(RowHandle::new(table, key))
     }
 
-    fn update(&self, table: &str, values: BTreeMap<String, TypedValue>, predicate: &StoragePredicate) -> StorageResult<usize> {
+    fn update(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        predicate: &StoragePredicate,
+    ) -> StorageResult<usize> {
         let mut guard = self.inner.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
         let mut binds: Vec<TypedValue> = Vec::new();
@@ -638,7 +787,10 @@ impl RowStore for PgRowStore {
         let where_sql = compile_predicate(predicate, &mut binds);
         let sql = format!("UPDATE \"{table}\" SET {set_clause} WHERE {where_sql}");
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
-        let changed = guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        let changed = guard
+            .client
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         if changed > 0 {
             self.observers.emit(&TableChange {
                 table: table.to_string(),
@@ -657,7 +809,10 @@ impl RowStore for PgRowStore {
         let where_sql = compile_predicate(predicate, &mut binds);
         let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
-        let changed = guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        let changed = guard
+            .client
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         if changed > 0 {
             self.observers.emit(&TableChange {
                 table: table.to_string(),
@@ -707,7 +862,10 @@ impl RowStore for PgRowStore {
         }
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
         let schema = guard.schema.clone();
-        let rows = guard.client.query(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        let rows = guard
+            .client
+            .query(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
@@ -729,7 +887,10 @@ impl RowStore for PgRowStore {
             sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
         }
         let params: Vec<PgParam> = binds.iter().map(to_param).collect();
-        let row = guard.client.query_one(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, table))?;
+        let row = guard
+            .client
+            .query_one(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
         let n: i64 = row.get(0);
         Ok(n as usize)
     }
@@ -760,7 +921,10 @@ impl BlobStore for PgBlobStore {
         let mut guard = self.inner.lock().unwrap();
         let rows = guard
             .client
-            .query(r#"SELECT "bytes" FROM "_storagekit_blobs" WHERE "key" = $1"#, &[&key.to_string()])
+            .query(
+                r#"SELECT "bytes" FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
             .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
         Ok(rows.first().map(|r| r.get::<_, Vec<u8>>(0)))
     }
@@ -768,7 +932,10 @@ impl BlobStore for PgBlobStore {
         let mut guard = self.inner.lock().unwrap();
         guard
             .client
-            .execute(r#"DELETE FROM "_storagekit_blobs" WHERE "key" = $1"#, &[&key.to_string()])
+            .execute(
+                r#"DELETE FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
             .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
         Ok(())
     }
@@ -779,7 +946,10 @@ impl BlobStore for PgBlobStore {
         let mut guard = self.inner.lock().unwrap();
         let rows = guard
             .client
-            .query(r#"SELECT LENGTH("bytes") FROM "_storagekit_blobs" WHERE "key" = $1"#, &[&key.to_string()])
+            .query(
+                r#"SELECT LENGTH("bytes") FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
             .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
         Ok(rows.first().map(|r| r.get::<_, i32>(0) as usize))
     }
@@ -844,12 +1014,18 @@ fn decode_audit(row: &postgres::Row) -> AuditEvent {
 impl AuditLog for PgAuditLog {
     fn append(&self, event: AuditEvent) -> StorageResult<()> {
         let mut guard = self.inner.lock().unwrap();
-        let ph = (1..=17).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+        let ph = (1..=17)
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
             "INSERT INTO \"_storagekit_audit\" ({AUDIT_COLS}) VALUES ({ph}) ON CONFLICT (\"event_id\",\"hlc\") DO NOTHING"
         );
         let params = audit_params(&event);
-        guard.client.execute(&sql, &param_refs(&params)).map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        guard
+            .client
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
         Ok(())
     }
     fn append_batch(&self, events: Vec<AuditEvent>) -> StorageResult<()> {
@@ -858,7 +1034,12 @@ impl AuditLog for PgAuditLog {
         }
         Ok(())
     }
-    fn iterate(&self, after: Option<HLC>, row_id: Option<RowKey>, limit: usize) -> StorageResult<Vec<AuditEvent>> {
+    fn iterate(
+        &self,
+        after: Option<HLC>,
+        row_id: Option<RowKey>,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEvent>> {
         let mut guard = self.inner.lock().unwrap();
         let mut sql = format!("SELECT {AUDIT_COLS} FROM \"_storagekit_audit\"");
         let mut binds: Vec<PgParam> = Vec::new();
@@ -874,13 +1055,20 @@ impl AuditLog for PgAuditLog {
         if !clauses.is_empty() {
             sql.push_str(&format!(" WHERE {}", clauses.join(" AND ")));
         }
-        let lim: i64 = if limit > i64::MAX as usize { -1 } else { limit as i64 };
+        let lim: i64 = if limit > i64::MAX as usize {
+            -1
+        } else {
+            limit as i64
+        };
         if lim >= 0 {
             sql.push_str(&format!(" ORDER BY \"hlc\" ASC LIMIT {lim}"));
         } else {
             sql.push_str(" ORDER BY \"hlc\" ASC");
         }
-        let rows = guard.client.query(&sql, &param_refs(&binds)).map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        let rows = guard
+            .client
+            .query(&sql, &param_refs(&binds))
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
         Ok(rows.iter().map(decode_audit).collect())
     }
     fn events_for_row(&self, row_id: RowKey) -> StorageResult<Vec<AuditEvent>> {
@@ -905,7 +1093,11 @@ struct PgObserver {
 }
 
 impl StorageObserver for PgObserver {
-    fn observe(&self, table: &str, events: BTreeSet<StorageEvent>) -> StorageResult<Receiver<TableChange>> {
+    fn observe(
+        &self,
+        table: &str,
+        events: BTreeSet<StorageEvent>,
+    ) -> StorageResult<Receiver<TableChange>> {
         Ok(self.observers.observe(table, events))
     }
 }
@@ -927,7 +1119,13 @@ struct PgVectorIndex {
 const VEC_TABLE: &str = "_storagekit_vectors";
 
 fn vector_literal(v: &[f32]) -> String {
-    format!("[{}]", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+    format!(
+        "[{}]",
+        v.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn metric_op(m: DistanceMetric) -> &'static str {
@@ -949,7 +1147,12 @@ impl PgVectorIndex {
 }
 
 impl VectorIndex for PgVectorIndex {
-    fn add(&self, key: RowKey, vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+    fn add(
+        &self,
+        key: RowKey,
+        vector: &[f32],
+        _metadata: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<()> {
         let mut guard = self.inner.lock().unwrap();
         let dim = vector.len();
         guard.client.batch_execute(&format!(
@@ -958,17 +1161,25 @@ impl VectorIndex for PgVectorIndex {
         // Inline the vector literal (digits/dots/commas only — safe): a bound
         // `$n::vector` makes PG infer the param as type `vector`, which the
         // text-based client can't serialize.
-        guard.client.execute(
-            &format!(
+        guard
+            .client
+            .execute(
+                &format!(
                 "INSERT INTO \"{VEC_TABLE}\" (\"key\", \"embedding\") VALUES ($1, '{}'::vector) \
                  ON CONFLICT (\"key\") DO UPDATE SET \"embedding\" = excluded.embedding",
                 vector_literal(vector)
             ),
-            &[&key.to_string().to_uppercase()],
-        ).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+                &[&key.to_string().to_uppercase()],
+            )
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
         Ok(())
     }
-    fn update(&self, key: RowKey, vector: &[f32], metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+    fn update(
+        &self,
+        key: RowKey,
+        vector: &[f32],
+        metadata: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<()> {
         self.add(key, vector, metadata)
     }
     fn delete(&self, key: RowKey) -> StorageResult<()> {
@@ -976,10 +1187,13 @@ impl VectorIndex for PgVectorIndex {
         if !Self::table_exists(&mut guard.client) {
             return Ok(());
         }
-        guard.client.execute(
-            &format!("DELETE FROM \"{VEC_TABLE}\" WHERE \"key\" = $1"),
-            &[&key.to_string().to_uppercase()],
-        ).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        guard
+            .client
+            .execute(
+                &format!("DELETE FROM \"{VEC_TABLE}\" WHERE \"key\" = $1"),
+                &[&key.to_string().to_uppercase()],
+            )
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
         Ok(())
     }
     fn knn(
@@ -1000,7 +1214,10 @@ impl VectorIndex for PgVectorIndex {
             "SELECT \"key\", (\"embedding\" {op} '{lit}'::vector) AS distance FROM \"{VEC_TABLE}\" \
              ORDER BY \"embedding\" {op} '{lit}'::vector LIMIT {k}"
         );
-        let rows = guard.client.query(&sql, &[]).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        let rows = guard
+            .client
+            .query(&sql, &[])
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
         Ok(rows
             .iter()
             .map(|r| VectorSearchResult {

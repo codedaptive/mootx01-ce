@@ -6,11 +6,8 @@ use crate::types::{RowHandle, StorageRow, TypedValue};
 use std::collections::BTreeMap;
 
 pub trait RowStore: Send + Sync {
-    fn insert(
-        &self,
-        table: &str,
-        values: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<RowHandle>;
+    fn insert(&self, table: &str, values: BTreeMap<String, TypedValue>)
+        -> StorageResult<RowHandle>;
 
     fn upsert(
         &self,
@@ -26,11 +23,7 @@ pub trait RowStore: Send + Sync {
         predicate: &StoragePredicate,
     ) -> StorageResult<usize>;
 
-    fn delete(
-        &self,
-        table: &str,
-        predicate: &StoragePredicate,
-    ) -> StorageResult<usize>;
+    fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize>;
 
     fn query(
         &self,
@@ -41,9 +34,5 @@ pub trait RowStore: Send + Sync {
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>>;
 
-    fn count(
-        &self,
-        table: &str,
-        predicate: Option<&StoragePredicate>,
-    ) -> StorageResult<usize>;
+    fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize>;
 }

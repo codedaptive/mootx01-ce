@@ -1,8 +1,8 @@
 //! Schema declaration types: SchemaDeclaration, TableDeclaration,
 //! ColumnDeclaration, IndexDeclaration, Migration, SchemaOperation.
 
-use crate::types::{ColumnType, TypedValue};
 use crate::generated_column::GeneratedColumn;
+use crate::types::{ColumnType, TypedValue};
 
 #[derive(Debug, Clone)]
 pub struct SchemaDeclaration {
@@ -14,11 +14,7 @@ pub struct SchemaDeclaration {
 }
 
 impl SchemaDeclaration {
-    pub fn new(
-        kit_id: impl Into<String>,
-        version: i32,
-        tables: Vec<TableDeclaration>,
-    ) -> Self {
+    pub fn new(kit_id: impl Into<String>, version: i32, tables: Vec<TableDeclaration>) -> Self {
         SchemaDeclaration {
             kit_id: kit_id.into(),
             version,
@@ -120,17 +116,39 @@ impl ColumnDeclaration {
     }
 
     // Convenience constructors mirroring Swift extensions.
-    pub fn uuid(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Uuid) }
-    pub fn bitmap(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Bitmap) }
-    pub fn text(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Text) }
-    pub fn timestamp(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Timestamp) }
-    pub fn int(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Int) }
-    pub fn float(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Float) }
-    pub fn bool_col(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Bool) }
-    pub fn blob(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Blob) }
-    pub fn json(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Json) }
-    pub fn hlc(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Hlc) }
-    pub fn fingerprint(name: impl Into<String>) -> Self { Self::new(name, ColumnType::Fingerprint) }
+    pub fn uuid(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Uuid)
+    }
+    pub fn bitmap(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Bitmap)
+    }
+    pub fn text(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Text)
+    }
+    pub fn timestamp(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Timestamp)
+    }
+    pub fn int(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Int)
+    }
+    pub fn float(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Float)
+    }
+    pub fn bool_col(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Bool)
+    }
+    pub fn blob(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Blob)
+    }
+    pub fn json(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Json)
+    }
+    pub fn hlc(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Hlc)
+    }
+    pub fn fingerprint(name: impl Into<String>) -> Self {
+        Self::new(name, ColumnType::Fingerprint)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -142,11 +160,7 @@ pub struct IndexDeclaration {
 }
 
 impl IndexDeclaration {
-    pub fn new(
-        name: impl Into<String>,
-        table: impl Into<String>,
-        columns: Vec<String>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, table: impl Into<String>, columns: Vec<String>) -> Self {
         IndexDeclaration {
             name: name.into(),
             table: table.into(),
@@ -171,13 +185,30 @@ pub struct Migration {
 #[derive(Debug, Clone)]
 pub enum SchemaOperation {
     CreateTable(TableDeclaration),
-    DropTable { name: String },
-    AddColumn { table: String, column: ColumnDeclaration },
-    DropColumn { table: String, column_name: String },
-    RenameColumn { table: String, from: String, to: String },
+    DropTable {
+        name: String,
+    },
+    AddColumn {
+        table: String,
+        column: ColumnDeclaration,
+    },
+    DropColumn {
+        table: String,
+        column_name: String,
+    },
+    RenameColumn {
+        table: String,
+        from: String,
+        to: String,
+    },
     AddIndex(IndexDeclaration),
-    DropIndex { name: String },
+    DropIndex {
+        name: String,
+    },
     /// Per-backend SQL escape hatch. Optional strings for each
     /// backend keep the migration portable.
-    Custom { sqlite: Option<String>, postgresql: Option<String> },
+    Custom {
+        sqlite: Option<String>,
+        postgresql: Option<String>,
+    },
 }

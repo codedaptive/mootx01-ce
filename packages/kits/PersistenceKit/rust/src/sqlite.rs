@@ -24,8 +24,7 @@ use crate::{
     EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel, OrderClause,
     OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters, Storage,
     StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult, StorageRow,
-    StorageTransaction, TableChange, TableDeclaration,
-    TypedValue, VectorIndex, VectorSearchResult,
+    StorageTransaction, TableChange, TableDeclaration, TypedValue, VectorIndex, VectorSearchResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -117,9 +116,14 @@ fn read_value(vref: ValueRef, kit: Option<ColumnType>) -> TypedValue {
 fn map_sql_err(e: rusqlite::Error, table: &str) -> StorageError {
     let msg = e.to_string();
     if msg.contains("append-only") {
-        StorageError::AppendOnlyViolation { table: table.to_string() }
+        StorageError::AppendOnlyViolation {
+            table: table.to_string(),
+        }
     } else if msg.contains("UNIQUE") {
-        StorageError::DuplicateKey { table: table.to_string(), key: "(unique constraint)".into() }
+        StorageError::DuplicateKey {
+            table: table.to_string(),
+            key: "(unique constraint)".into(),
+        }
     } else {
         StorageError::BackendError { underlying: msg }
     }
@@ -165,8 +169,7 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   PRIMARY KEY ("event_id", "hlc")
 )"#;
 
-const AUDIT_INDEX: &str =
-    r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")"#;
+const AUDIT_INDEX: &str = r#"CREATE INDEX IF NOT EXISTS "_storagekit_audit_row_hlc" ON "_storagekit_audit" ("row_id", "hlc")"#;
 
 fn create_table_sql(decl: &TableDeclaration) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -196,7 +199,11 @@ fn create_table_sql(decl: &TableDeclaration) -> String {
         parts.push(format!("PRIMARY KEY ({cols})"));
     }
     for unique in &decl.unique_constraints {
-        let cols = unique.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+        let cols = unique
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         parts.push(format!("UNIQUE ({cols})"));
     }
     format!(
@@ -225,7 +232,12 @@ fn append_only_triggers(decl: &TableDeclaration) -> Vec<String> {
 
 fn create_index_sql(decl: &IndexDeclaration) -> String {
     let unique = if decl.unique { "UNIQUE " } else { "" };
-    let cols = decl.columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+    let cols = decl
+        .columns
+        .iter()
+        .map(|c| format!("\"{c}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "CREATE {unique}INDEX IF NOT EXISTS \"{}\" ON \"{}\" ({cols})",
         decl.name, decl.table
@@ -255,12 +267,30 @@ fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<SqlValue>) -> String 
             format!("({})", parts.join(" OR "))
         }
         StoragePredicate::Not(inner) => format!("NOT ({})", compile_predicate(inner, binds)),
-        StoragePredicate::Eq(c, v) => { binds.push(to_sql(v)); format!("\"{}\" = ?", c.name) }
-        StoragePredicate::Neq(c, v) => { binds.push(to_sql(v)); format!("\"{}\" != ?", c.name) }
-        StoragePredicate::Lt(c, v) => { binds.push(to_sql(v)); format!("\"{}\" < ?", c.name) }
-        StoragePredicate::Lte(c, v) => { binds.push(to_sql(v)); format!("\"{}\" <= ?", c.name) }
-        StoragePredicate::Gt(c, v) => { binds.push(to_sql(v)); format!("\"{}\" > ?", c.name) }
-        StoragePredicate::Gte(c, v) => { binds.push(to_sql(v)); format!("\"{}\" >= ?", c.name) }
+        StoragePredicate::Eq(c, v) => {
+            binds.push(to_sql(v));
+            format!("\"{}\" = ?", c.name)
+        }
+        StoragePredicate::Neq(c, v) => {
+            binds.push(to_sql(v));
+            format!("\"{}\" != ?", c.name)
+        }
+        StoragePredicate::Lt(c, v) => {
+            binds.push(to_sql(v));
+            format!("\"{}\" < ?", c.name)
+        }
+        StoragePredicate::Lte(c, v) => {
+            binds.push(to_sql(v));
+            format!("\"{}\" <= ?", c.name)
+        }
+        StoragePredicate::Gt(c, v) => {
+            binds.push(to_sql(v));
+            format!("\"{}\" > ?", c.name)
+        }
+        StoragePredicate::Gte(c, v) => {
+            binds.push(to_sql(v));
+            format!("\"{}\" >= ?", c.name)
+        }
         StoragePredicate::IsNull(c) => format!("\"{}\" IS NULL", c.name),
         StoragePredicate::IsNotNull(c) => format!("\"{}\" IS NOT NULL", c.name),
         StoragePredicate::In(c, values) => {
@@ -290,7 +320,11 @@ fn compile_predicate(p: &StoragePredicate, binds: &mut Vec<SqlValue>) -> String 
             binds.push(SqlValue::Integer(*mask));
             format!("(\"{}\" & ?) = 0", column.name)
         }
-        StoragePredicate::BitwiseEq { column, expected, mask } => {
+        StoragePredicate::BitwiseEq {
+            column,
+            expected,
+            mask,
+        } => {
             binds.push(SqlValue::Integer(*mask));
             binds.push(SqlValue::Integer(*expected));
             format!("(\"{}\" & ?) = ?", column.name)
@@ -317,7 +351,11 @@ struct Subscription {
 impl ObserverRegistry {
     fn observe(&self, table: &str, events: BTreeSet<StorageEvent>) -> Receiver<TableChange> {
         let (tx, rx) = channel();
-        self.subs.lock().unwrap().push(Subscription { table: table.to_string(), events, tx });
+        self.subs.lock().unwrap().push(Subscription {
+            table: table.to_string(),
+            events,
+            tx,
+        });
         rx
     }
 
@@ -365,22 +403,26 @@ impl SqliteStorage {
     pub fn new(config: EstateConfiguration) -> StorageResult<Self> {
         register_sqlite_vec();
         let (path, busy) = match &config.backend {
-            BackendConfiguration::Sqlite { path, busy_timeout_secs } => {
-                (path.clone(), *busy_timeout_secs)
-            }
+            BackendConfiguration::Sqlite {
+                path,
+                busy_timeout_secs,
+            } => (path.clone(), *busy_timeout_secs),
             _ => {
                 return Err(StorageError::BackendError {
                     underlying: "SqliteStorage requires a Sqlite backend configuration".into(),
                 })
             }
         };
-        let conn = Connection::open(&path)
-            .map_err(|e| StorageError::BackendError { underlying: format!("sqlite open: {e}") })?;
+        let conn = Connection::open(&path).map_err(|e| StorageError::BackendError {
+            underlying: format!("sqlite open: {e}"),
+        })?;
         let _ = conn.busy_timeout(Duration::from_secs_f64(busy));
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
         )
-        .map_err(|e| StorageError::BackendError { underlying: format!("sqlite pragmas: {e}") })?;
+        .map_err(|e| StorageError::BackendError {
+            underlying: format!("sqlite pragmas: {e}"),
+        })?;
         Ok(SqliteStorage {
             config,
             inner: Arc::new(Mutex::new(Inner { conn, schema: None })),
@@ -396,7 +438,9 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     let conn = &inner.conn;
     let exec = |sql: &str| {
         conn.execute_batch(sql)
-            .map_err(|e| StorageError::BackendError { underlying: format!("ddl: {e}") })
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("ddl: {e}"),
+            })
     };
     exec(MIGRATIONS_TABLE)?;
     exec(AUDIT_TABLE)?;
@@ -430,19 +474,30 @@ impl Storage for SqliteStorage {
         &self.config
     }
     fn row_store(&self) -> Arc<dyn RowStore> {
-        Arc::new(SqliteRowStore { inner: self.inner.clone(), observers: self.observers.clone() })
+        Arc::new(SqliteRowStore {
+            inner: self.inner.clone(),
+            observers: self.observers.clone(),
+        })
     }
     fn blob_store(&self) -> Arc<dyn BlobStore> {
-        Arc::new(SqliteBlobStore { inner: self.inner.clone() })
+        Arc::new(SqliteBlobStore {
+            inner: self.inner.clone(),
+        })
     }
     fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Arc::new(SqliteVectorIndex { inner: self.inner.clone() })
+        Arc::new(SqliteVectorIndex {
+            inner: self.inner.clone(),
+        })
     }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
-        Arc::new(SqliteAuditLog { inner: self.inner.clone() })
+        Arc::new(SqliteAuditLog {
+            inner: self.inner.clone(),
+        })
     }
     fn observer(&self) -> Arc<dyn StorageObserver> {
-        Arc::new(SqliteObserver { observers: self.observers.clone() })
+        Arc::new(SqliteObserver {
+            observers: self.observers.clone(),
+        })
     }
 
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
@@ -455,10 +510,14 @@ impl Storage for SqliteStorage {
         let guard = self.inner.lock().unwrap();
         let v: i64 = guard
             .conn
-            .query_row(r#"SELECT MAX("version") FROM "_storagekit_migrations""#, [], |r| {
-                r.get::<_, Option<i64>>(0).map(|o| o.unwrap_or(0))
-            })
-            .map_err(|e| StorageError::BackendError { underlying: format!("schema version: {e}") })?;
+            .query_row(
+                r#"SELECT MAX("version") FROM "_storagekit_migrations""#,
+                [],
+                |r| r.get::<_, Option<i64>>(0).map(|o| o.unwrap_or(0)),
+            )
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("schema version: {e}"),
+            })?;
         Ok(v as i32)
     }
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
@@ -526,7 +585,11 @@ struct SqliteRowStore {
 
 /// Resolve the row's primary key: a single-column UUID primary key reads
 /// the UUID from the row; anything else gets a fresh v4.
-fn extract_row_key(schema: Option<&SchemaDeclaration>, table: &str, values: &BTreeMap<String, TypedValue>) -> RowKey {
+fn extract_row_key(
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    values: &BTreeMap<String, TypedValue>,
+) -> RowKey {
     if let Some(decl) = schema.and_then(|s| s.tables.iter().find(|t| t.name == table)) {
         if decl.primary_key.len() == 1 {
             if let Some(TypedValue::Uuid(u)) = values.get(&decl.primary_key[0]) {
@@ -537,24 +600,44 @@ fn extract_row_key(schema: Option<&SchemaDeclaration>, table: &str, values: &BTr
     Uuid::new_v4()
 }
 
-fn table_column_type(schema: Option<&SchemaDeclaration>, table: &str, column: &str) -> Option<ColumnType> {
+fn table_column_type(
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    column: &str,
+) -> Option<ColumnType> {
     let decl = schema?.tables.iter().find(|t| t.name == table)?;
     decl.columns
         .iter()
         .find(|c| c.name == column)
         .map(|c| c.column_type)
-        .or_else(|| decl.generated_columns.iter().find(|g| g.name == column).map(|g| g.column_type))
+        .or_else(|| {
+            decl.generated_columns
+                .iter()
+                .find(|g| g.name == column)
+                .map(|g| g.column_type)
+        })
 }
 
 impl RowStore for SqliteRowStore {
-    fn insert(&self, table: &str, values: BTreeMap<String, TypedValue>) -> StorageResult<RowHandle> {
+    fn insert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<RowHandle> {
         let guard = self.inner.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
-        let cols = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let ph = vec!["?"; keys.len()].join(", ");
         let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
         let binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
-        guard.conn.execute(&sql, params_from_iter(binds)).map_err(|e| map_sql_err(e, table))?;
+        guard
+            .conn
+            .execute(&sql, params_from_iter(binds))
+            .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
         self.observers.emit(&TableChange {
             table: table.to_string(),
@@ -566,14 +649,27 @@ impl RowStore for SqliteRowStore {
         Ok(RowHandle::new(table, key))
     }
 
-    fn upsert(&self, table: &str, values: BTreeMap<String, TypedValue>, conflict_columns: &[String]) -> StorageResult<RowHandle> {
+    fn upsert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        conflict_columns: &[String],
+    ) -> StorageResult<RowHandle> {
         let guard = self.inner.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
-        let cols = keys.iter().map(|k| format!("\"{k}\"")).collect::<Vec<_>>().join(", ");
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let ph = vec!["?"; keys.len()].join(", ");
         let mut sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
         if !conflict_columns.is_empty() {
-            let conflict = conflict_columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+            let conflict = conflict_columns
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
             let updates: Vec<String> = keys
                 .iter()
                 .filter(|k| !conflict_columns.contains(k))
@@ -587,7 +683,10 @@ impl RowStore for SqliteRowStore {
             }
         }
         let binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
-        guard.conn.execute(&sql, params_from_iter(binds)).map_err(|e| map_sql_err(e, table))?;
+        guard
+            .conn
+            .execute(&sql, params_from_iter(binds))
+            .map_err(|e| map_sql_err(e, table))?;
         let key = extract_row_key(guard.schema.as_ref(), table, &values);
         self.observers.emit(&TableChange {
             table: table.to_string(),
@@ -599,14 +698,26 @@ impl RowStore for SqliteRowStore {
         Ok(RowHandle::new(table, key))
     }
 
-    fn update(&self, table: &str, values: BTreeMap<String, TypedValue>, predicate: &StoragePredicate) -> StorageResult<usize> {
+    fn update(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        predicate: &StoragePredicate,
+    ) -> StorageResult<usize> {
         let guard = self.inner.lock().unwrap();
         let keys: Vec<&String> = values.keys().collect();
-        let set_clause = keys.iter().map(|k| format!("\"{k}\" = ?")).collect::<Vec<_>>().join(", ");
+        let set_clause = keys
+            .iter()
+            .map(|k| format!("\"{k}\" = ?"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut binds: Vec<SqlValue> = keys.iter().map(|k| to_sql(&values[*k])).collect();
         let where_sql = compile_predicate(predicate, &mut binds);
         let sql = format!("UPDATE \"{table}\" SET {set_clause} WHERE {where_sql}");
-        let changed = guard.conn.execute(&sql, params_from_iter(binds)).map_err(|e| map_sql_err(e, table))?;
+        let changed = guard
+            .conn
+            .execute(&sql, params_from_iter(binds))
+            .map_err(|e| map_sql_err(e, table))?;
         if changed > 0 {
             self.observers.emit(&TableChange {
                 table: table.to_string(),
@@ -624,7 +735,10 @@ impl RowStore for SqliteRowStore {
         let mut binds: Vec<SqlValue> = Vec::new();
         let where_sql = compile_predicate(predicate, &mut binds);
         let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
-        let changed = guard.conn.execute(&sql, params_from_iter(binds)).map_err(|e| map_sql_err(e, table))?;
+        let changed = guard
+            .conn
+            .execute(&sql, params_from_iter(binds))
+            .map_err(|e| map_sql_err(e, table))?;
         if changed > 0 {
             self.observers.emit(&TableChange {
                 table: table.to_string(),
@@ -673,9 +787,14 @@ impl RowStore for SqliteRowStore {
             }
         }
 
-        let mut stmt = guard.conn.prepare(&sql).map_err(|e| map_sql_err(e, table))?;
+        let mut stmt = guard
+            .conn
+            .prepare(&sql)
+            .map_err(|e| map_sql_err(e, table))?;
         let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-        let mut rows = stmt.query(params_from_iter(binds)).map_err(|e| map_sql_err(e, table))?;
+        let mut rows = stmt
+            .query(params_from_iter(binds))
+            .map_err(|e| map_sql_err(e, table))?;
         let mut out: Vec<StorageRow> = Vec::new();
         while let Some(row) = rows.next().map_err(|e| map_sql_err(e, table))? {
             let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
@@ -720,7 +839,10 @@ impl BlobStore for SqliteBlobStore {
             .execute(
                 r#"INSERT INTO "_storagekit_blobs" ("key", "bytes") VALUES (?, ?)
                    ON CONFLICT("key") DO UPDATE SET "bytes" = excluded.bytes"#,
-                params_from_iter(vec![SqlValue::Text(key.to_string()), SqlValue::Blob(bytes.to_vec())]),
+                params_from_iter(vec![
+                    SqlValue::Text(key.to_string()),
+                    SqlValue::Blob(bytes.to_vec()),
+                ]),
             )
             .map_err(|e| map_sql_err(e, "_storagekit_blobs"))?;
         Ok(())
@@ -838,7 +960,10 @@ impl AuditLog for SqliteAuditLog {
             "INSERT INTO \"_storagekit_audit\" ({AUDIT_COLS}) VALUES ({}) ON CONFLICT(\"event_id\",\"hlc\") DO NOTHING",
             vec!["?"; 17].join(", ")
         );
-        guard.conn.execute(&sql, params_from_iter(audit_binds(&event))).map_err(|e| map_sql_err(e, "_storagekit_audit"))?;
+        guard
+            .conn
+            .execute(&sql, params_from_iter(audit_binds(&event)))
+            .map_err(|e| map_sql_err(e, "_storagekit_audit"))?;
         Ok(())
     }
     fn append_batch(&self, events: Vec<AuditEvent>) -> StorageResult<()> {
@@ -847,7 +972,12 @@ impl AuditLog for SqliteAuditLog {
         }
         Ok(())
     }
-    fn iterate(&self, after: Option<HLC>, row_id: Option<RowKey>, limit: usize) -> StorageResult<Vec<AuditEvent>> {
+    fn iterate(
+        &self,
+        after: Option<HLC>,
+        row_id: Option<RowKey>,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEvent>> {
         let guard = self.inner.lock().unwrap();
         let mut sql = format!("SELECT {AUDIT_COLS} FROM \"_storagekit_audit\"");
         let mut binds: Vec<SqlValue> = Vec::new();
@@ -866,9 +996,16 @@ impl AuditLog for SqliteAuditLog {
         // SQLite LIMIT is an i64; usize::MAX (the "unbounded" sentinel from
         // events_for_row) overflows it, so map any out-of-range limit to the
         // SQLite "no limit" form (-1).
-        let lim: i64 = if limit > i64::MAX as usize { -1 } else { limit as i64 };
+        let lim: i64 = if limit > i64::MAX as usize {
+            -1
+        } else {
+            limit as i64
+        };
         sql.push_str(&format!(" ORDER BY \"hlc\" ASC LIMIT {lim}"));
-        let mut stmt = guard.conn.prepare(&sql).map_err(|e| map_sql_err(e, "_storagekit_audit"))?;
+        let mut stmt = guard
+            .conn
+            .prepare(&sql)
+            .map_err(|e| map_sql_err(e, "_storagekit_audit"))?;
         let events = stmt
             .query_map(params_from_iter(binds), decode_audit)
             .map_err(|e| map_sql_err(e, "_storagekit_audit"))?
@@ -883,7 +1020,9 @@ impl AuditLog for SqliteAuditLog {
         let guard = self.inner.lock().unwrap();
         let n: i64 = guard
             .conn
-            .query_row(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, [], |r| r.get(0))
+            .query_row(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, [], |r| {
+                r.get(0)
+            })
             .map_err(|e| map_sql_err(e, "_storagekit_audit"))?;
         Ok(n as usize)
     }
@@ -898,7 +1037,11 @@ struct SqliteObserver {
 }
 
 impl StorageObserver for SqliteObserver {
-    fn observe(&self, table: &str, events: BTreeSet<StorageEvent>) -> StorageResult<Receiver<TableChange>> {
+    fn observe(
+        &self,
+        table: &str,
+        events: BTreeSet<StorageEvent>,
+    ) -> StorageResult<Receiver<TableChange>> {
         Ok(self.observers.observe(table, events))
     }
 }
@@ -951,7 +1094,12 @@ impl SqliteVectorIndex {
 }
 
 impl VectorIndex for SqliteVectorIndex {
-    fn add(&self, key: RowKey, vector: &[f32], _metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+    fn add(
+        &self,
+        key: RowKey,
+        vector: &[f32],
+        _metadata: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<()> {
         let guard = self.inner.lock().unwrap();
         let dim = vector.len();
         guard
@@ -964,27 +1112,46 @@ impl VectorIndex for SqliteVectorIndex {
         let blob = vec_blob(vector);
         match Self::rowid_for(&guard.conn, key)? {
             Some(rowid) => {
-                guard.conn.execute(
-                    &format!("UPDATE \"{SVEC_TABLE}\" SET embedding = ?1 WHERE rowid = ?2"),
-                    params_from_iter(vec![SqlValue::Blob(blob), SqlValue::Integer(rowid)]),
-                ).map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+                guard
+                    .conn
+                    .execute(
+                        &format!("UPDATE \"{SVEC_TABLE}\" SET embedding = ?1 WHERE rowid = ?2"),
+                        params_from_iter(vec![SqlValue::Blob(blob), SqlValue::Integer(rowid)]),
+                    )
+                    .map_err(|e| map_sql_err(e, SVEC_TABLE))?;
             }
             None => {
-                guard.conn.execute(
-                    &format!("INSERT INTO \"{SVEC_TABLE}\" (embedding) VALUES (?1)"),
-                    params_from_iter(vec![SqlValue::Blob(blob)]),
-                ).map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+                guard
+                    .conn
+                    .execute(
+                        &format!("INSERT INTO \"{SVEC_TABLE}\" (embedding) VALUES (?1)"),
+                        params_from_iter(vec![SqlValue::Blob(blob)]),
+                    )
+                    .map_err(|e| map_sql_err(e, SVEC_TABLE))?;
                 let rowid = guard.conn.last_insert_rowid();
-                guard.conn.execute(
-                    &format!("INSERT INTO \"{SVEC_META}\" (\"key\", \"vec_rowid\") VALUES (?1, ?2)"),
-                    params_from_iter(vec![SqlValue::Text(key.to_string().to_uppercase()), SqlValue::Integer(rowid)]),
-                ).map_err(|e| map_sql_err(e, SVEC_META))?;
+                guard
+                    .conn
+                    .execute(
+                        &format!(
+                            "INSERT INTO \"{SVEC_META}\" (\"key\", \"vec_rowid\") VALUES (?1, ?2)"
+                        ),
+                        params_from_iter(vec![
+                            SqlValue::Text(key.to_string().to_uppercase()),
+                            SqlValue::Integer(rowid),
+                        ]),
+                    )
+                    .map_err(|e| map_sql_err(e, SVEC_META))?;
             }
         }
         Ok(())
     }
 
-    fn update(&self, key: RowKey, vector: &[f32], metadata: BTreeMap<String, TypedValue>) -> StorageResult<()> {
+    fn update(
+        &self,
+        key: RowKey,
+        vector: &[f32],
+        metadata: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<()> {
         self.add(key, vector, metadata)
     }
 
@@ -994,14 +1161,20 @@ impl VectorIndex for SqliteVectorIndex {
             return Ok(());
         }
         if let Some(rowid) = Self::rowid_for(&guard.conn, key)? {
-            guard.conn.execute(
-                &format!("DELETE FROM \"{SVEC_TABLE}\" WHERE rowid = ?1"),
-                params_from_iter(vec![SqlValue::Integer(rowid)]),
-            ).map_err(|e| map_sql_err(e, SVEC_TABLE))?;
-            guard.conn.execute(
-                &format!("DELETE FROM \"{SVEC_META}\" WHERE \"key\" = ?1"),
-                params_from_iter(vec![SqlValue::Text(key.to_string().to_uppercase())]),
-            ).map_err(|e| map_sql_err(e, SVEC_META))?;
+            guard
+                .conn
+                .execute(
+                    &format!("DELETE FROM \"{SVEC_TABLE}\" WHERE rowid = ?1"),
+                    params_from_iter(vec![SqlValue::Integer(rowid)]),
+                )
+                .map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+            guard
+                .conn
+                .execute(
+                    &format!("DELETE FROM \"{SVEC_META}\" WHERE \"key\" = ?1"),
+                    params_from_iter(vec![SqlValue::Text(key.to_string().to_uppercase())]),
+                )
+                .map_err(|e| map_sql_err(e, SVEC_META))?;
         }
         Ok(())
     }
@@ -1025,10 +1198,16 @@ impl VectorIndex for SqliteVectorIndex {
              JOIN \"{SVEC_META}\" m ON m.\"vec_rowid\" = v.rowid \
              WHERE v.embedding MATCH ?1 AND k = ?2 ORDER BY v.distance"
         );
-        let mut stmt = guard.conn.prepare(&sql).map_err(|e| map_sql_err(e, SVEC_TABLE))?;
+        let mut stmt = guard
+            .conn
+            .prepare(&sql)
+            .map_err(|e| map_sql_err(e, SVEC_TABLE))?;
         let out = stmt
             .query_map(
-                params_from_iter(vec![SqlValue::Blob(vec_blob(query)), SqlValue::Integer(k as i64)]),
+                params_from_iter(vec![
+                    SqlValue::Blob(vec_blob(query)),
+                    SqlValue::Integer(k as i64),
+                ]),
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)),
             )
             .map_err(|e| map_sql_err(e, SVEC_TABLE))?
@@ -1056,7 +1235,9 @@ impl VectorIndex for SqliteVectorIndex {
         }
         let n: i64 = guard
             .conn
-            .query_row(&format!("SELECT COUNT(*) FROM \"{SVEC_META}\""), [], |r| r.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM \"{SVEC_META}\""), [], |r| {
+                r.get(0)
+            })
             .map_err(|e| map_sql_err(e, SVEC_META))?;
         Ok(n as usize)
     }

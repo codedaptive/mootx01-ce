@@ -29,10 +29,23 @@ pub enum StoragePredicate {
     Like(Column, String),
 
     // Bitmap (Int64 / Bitmap columns only)
-    BitmaskAll { column: Column, mask: i64 },
-    BitmaskAny { column: Column, mask: i64 },
-    BitmaskNone { column: Column, mask: i64 },
-    BitwiseEq { column: Column, expected: i64, mask: i64 },
+    BitmaskAll {
+        column: Column,
+        mask: i64,
+    },
+    BitmaskAny {
+        column: Column,
+        mask: i64,
+    },
+    BitmaskNone {
+        column: Column,
+        mask: i64,
+    },
+    BitwiseEq {
+        column: Column,
+        expected: i64,
+        mask: i64,
+    },
 }
 
 impl StoragePredicate {
