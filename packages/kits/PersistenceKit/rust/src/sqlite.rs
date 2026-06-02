@@ -1,8 +1,8 @@
-//! SQLite backend — the Rust port of the Swift `PersistenceKitSQLite`
+//! SQLite backend — the Rust version of the Swift `PersistenceKitSQLite`
 //! target. One `rusqlite::Connection` per estate, serialized behind a
 //! `Mutex` (a real shared DB handle, not an actor emulation). Schema
 //! DDL, the closed predicate algebra, and the value codec match the
-//! Swift backend so both ports produce identical observable results.
+//! Swift backend so both versions produce identical observable results.
 //!
 //! Phase 1 implements RowStore, BlobStore, AuditLog, and StorageObserver
 //! plus schema/migrations/generated-columns/append-only. VectorIndex is

@@ -24,14 +24,16 @@ impl EstateConfiguration {
 #[derive(Debug, Clone)]
 pub enum BackendConfiguration {
     InMemory,
-    /// SQLite backend, deferred to a follow-on R-mission. The
-    /// variant is reserved so EstateConfiguration's enum is the
-    /// stable shape it will be at v1.0.
+    /// SQLite backend (sqlite.rs) — WAL-mode rusqlite over a
+    /// filesystem path; the durable backend behind SqliteDrawerStore
+    /// and the servers' ARIA_MCP_SQLITE_PATH configuration.
     Sqlite {
         path: String,
         busy_timeout_secs: f64,
     },
-    /// PostgreSQL backend, deferred. Reserved variant.
+    /// PostgreSQL backend (postgres.rs) — synchronous postgres
+    /// crate, one client per estate; conformance verified against a
+    /// live server via PERSISTENCEKIT_PG_URL.
     Postgresql {
         connection_string: String,
         pool_size: usize,
