@@ -47,11 +47,16 @@ The server selects its storage backend from the environment at startup:
 
 | `ARIA_MCP_SQLITE_PATH` state | Backend | Notes |
 |---|---|---|
-| Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
+| Absent or empty (`""`) | In-memory (default) | Ephemeral; discarded on exit |
 | Present, non-empty | SQLite at that path | WAL-mode, durable across restarts |
 | Present, path unusable | — | Exit 1 with clear stderr message |
 
-Parent directories of the SQLite path are created automatically if missing.
+The value is read exactly as set — no trimming. A whitespace-only value is
+treated as a path attempt and fails fast, not a silent in-memory fallback
+(byte-for-byte parity with the Rust server's env handling). Parent
+directories of the SQLite path are created automatically if missing; a bare
+filename (no directory component) skips creation and resolves against the
+working directory.
 
 Persistence is **server-internal only** — the JSON-RPC wire surface (tools, schemas, methods) is completely unchanged for both backends. Clients do not need to know or care which backend is active.
 

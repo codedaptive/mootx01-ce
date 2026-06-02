@@ -195,4 +195,33 @@ struct PersistenceTests {
             _ = try SQLiteStorage(configuration: configuration)
         }
     }
+
+    // MARK: - Bare-filename edge case (Rust parity)
+
+    /// A bare filename (no directory component) needs no parent-directory
+    /// creation — the startup guard skips createDirectory entirely, exact
+    /// parity with the Rust server's empty-parent guard. SQLiteStorage must
+    /// open such a path directly. Serialized: resolves against the process
+    /// working directory.
+    @Test func testBareFilenameNeedsNoParentCreation() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PersistenceTests-bare-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let saved = FileManager.default.currentDirectoryPath
+        defer { _ = FileManager.default.changeCurrentDirectoryPath(saved) }
+        #expect(FileManager.default.changeCurrentDirectoryPath(dir.path))
+
+        // Mirror the startup guard: a bare name contains no "/", so no
+        // directory is created — the storage opens against the cwd.
+        let bareName = "estate.sqlite"
+        #expect(!bareName.contains("/"))
+        let configuration = EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: URL(fileURLWithPath: bareName), busyTimeout: 5.0)
+        )
+        #expect(throws: Never.self) {
+            _ = try SQLiteStorage(configuration: configuration)
+        }
+        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent(bareName).path))
+    }
 }

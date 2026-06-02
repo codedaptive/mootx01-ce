@@ -37,9 +37,11 @@ struct AriaMCPMain {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-owner")
 
-        // Read the path variable. Treat whitespace-only as absent.
-        let rawPath = ProcessInfo.processInfo.environment["ARIA_MCP_SQLITE_PATH"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // Read the path variable. No trimming — exact parity with the Rust
+        // server's from_env (present and non-empty means the operator
+        // intended SQLite; a whitespace-only value is a config error that
+        // fails fast below, not a silent fallback to in-memory).
+        let rawPath = ProcessInfo.processInfo.environment["ARIA_MCP_SQLITE_PATH"] ?? ""
 
         let storage: any Storage
 
@@ -57,21 +59,25 @@ struct AriaMCPMain {
             Logging.stderr.log("ARIA_MCP starting (stdio, SQLite backend: \(rawPath))")
 
             // Create parent directories so the caller does not need to
-            // pre-create them. FileManager.createDirectory is idempotent
-            // when withIntermediateDirectories: true.
-            let parentDir = dbURL.deletingLastPathComponent()
-            do {
-                try FileManager.default.createDirectory(
-                    at: parentDir,
-                    withIntermediateDirectories: true,
-                    attributes: nil
-                )
-            } catch {
-                fputs(
-                    "ARIA_MCP fatal: cannot create parent directory '\(parentDir.path)': \(error)\n",
-                    stderr
-                )
-                exit(1)
+            // pre-create them. Bare filenames (no directory component) skip
+            // creation entirely — exact parity with the Rust server's
+            // empty-parent guard (server.rs from_env) — so a read-only cwd
+            // does not fail a path that needs no directory created.
+            if rawPath.contains("/") {
+                let parentDir = dbURL.deletingLastPathComponent()
+                do {
+                    try FileManager.default.createDirectory(
+                        at: parentDir,
+                        withIntermediateDirectories: true,
+                        attributes: nil
+                    )
+                } catch {
+                    fputs(
+                        "ARIA_MCP fatal: cannot create parent directory '\(parentDir.path)': \(error)\n",
+                        stderr
+                    )
+                    exit(1)
+                }
             }
 
             // Construct the SQLite storage. busyTimeout of 5.0 seconds is
