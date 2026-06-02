@@ -7,10 +7,11 @@
 //! `Storage` (PersistenceKit) handle. The Rust port keeps the contract
 //! and the concrete implementation separate: the trait is the surface
 //! consumers (`Estate`, the bitmap evaluator) program against, and one
-//! concrete impl per backend lives next to it. LP-1E ships the
-//! persistence-kit-backed `InMemoryDrawerStore` (see
-//! [`crate::drawer_store_inmemory`]); the future SQLite-backed
-//! `SqliteDrawerStore` slots in by implementing the same trait.
+//! concrete impl per backend lives next to it. Two concrete impls ship:
+//! - [`crate::drawer_store_inmemory`] — `InMemoryDrawerStore` over
+//!   `InMemoryStorage` (test fixture, no persistence across process runs)
+//! - [`crate::drawer_store_sqlite`] — `SqliteDrawerStore` over
+//!   `SqliteStorage` (WAL-mode SQLite, durable across restarts)
 //!
 //! ## Trait surface
 //!
