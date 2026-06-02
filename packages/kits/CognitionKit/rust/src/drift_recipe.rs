@@ -4,7 +4,7 @@
 //! far the after-window has drifted (Jensen-Shannon / KL via NeuronKit
 //! `drift`). "Your filing shifted across April."
 //!
-//! NET-NEW, Rust-first (fourth lens). Pure CognitionKit sequencing: recall via
+//! Rust-only today (Swift version contracted, SPEC C-7). Pure CognitionKit sequencing: recall via
 //! GLK + NeuronKit drift (which surfaces SubstrateML's InformationTheory).
 //! Read-only.
 

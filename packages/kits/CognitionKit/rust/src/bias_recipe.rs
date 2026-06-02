@@ -12,7 +12,7 @@
 //!     captured heavily but never confirmed ranks high in representation yet
 //!     low here — "what you actually keep vs what merely accumulates."
 //!
-//! NET-NEW, Rust-first (the real Lens 4). Pure CognitionKit sequencing: three
+//! Rust-only today (Swift version contracted, SPEC C-7); the real Lens 4. Pure CognitionKit sequencing: three
 //! recalls via GLK (active + confirmed + withdrawn) + NeuronKit
 //! `representation_bias` and `learned_preference`. Read-only.
 //!

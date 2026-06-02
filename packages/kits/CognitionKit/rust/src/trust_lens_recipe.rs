@@ -5,7 +5,7 @@
 //! memories ground the context first. The estate reasons about which of its
 //! own memories to lean on.
 //!
-//! NET-NEW, Rust-first (the third lens). PURE CognitionKit sequencing: recall
+//! Rust-only today (Swift version contracted, SPEC C-7). PURE CognitionKit sequencing: recall
 //! via GLK + the drawer provenance accessors (existing) + NeuronKit
 //! `synthesize` (existing). Zero new substrate, zero new NeuronKit surface.
 //! Read-only.

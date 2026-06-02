@@ -8,8 +8,8 @@
 //! other's content.
 //!
 //! This is the REAL MindOverlap, distinct from `estate_divergence_recipe`
-//! (which reads both estates' room distributions directly). NET-NEW,
-//! Rust-first. Read-only.
+//! (which reads both estates' room distributions directly). Rust-only today
+//! (Swift version contracted, SPEC C-7). Read-only.
 //!
 //! The shared family + shared DP seed are derived deterministically from both
 //! estate UUIDs (the role the pairing handshake plays — a shared nonce so both

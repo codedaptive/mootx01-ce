@@ -4,7 +4,7 @@
 //! anomalously LOW (a negative-z outlier) — the memory in tension with the
 //! rest. The estate notices when something doesn't belong.
 //!
-//! NET-NEW, Rust-first (fifth lens). Pure CognitionKit sequencing: recall via
+//! Rust-only today (Swift version contracted, SPEC C-7). Pure CognitionKit sequencing: recall via
 //! GLK + NeuronKit `shingle_similarity` (cohesion) + NeuronKit `anomalies`
 //! (which surfaces SubstrateML's AnomalyDetection). Read-only.
 
