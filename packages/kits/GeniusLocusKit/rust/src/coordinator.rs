@@ -331,6 +331,128 @@ impl EstateCoordinator {
             .reanchor(row_id, to_room, to_lattice)
             .map_err(|e| remap("reanchor", e).into())
     }
+
+    // MARK: - learn
+
+    /// Ingest a learned reference into the estate addressed by `handle`.
+    ///
+    /// `learn` is grounding-driven per AriaLexicon's flow taxonomy. The
+    /// underlying `Estate::learn` is a stub that returns `InvalidContent`
+    /// ("learn not yet implemented"); `remap` turns that into
+    /// `VerbError::NotSupportedByEstate { verb: "learn" }` — parity of the
+    /// Swift GLK surface, which raises `VerbError.notSupportedByEstate(verb:
+    /// "learn")` until the Brain layer ships.
+    ///
+    /// Validates the handle first so a stale handle raises
+    /// `EstateNotOpen` uniformly, matching the other verbs.
+    pub fn learn(
+        &self,
+        handle: &EstateHandle,
+        _source_handle: &str,
+    ) -> Result<(), VerbDispatchError> {
+        // Validate handle before attempting dispatch — stale handle must raise
+        // EstateNotOpen, not NotSupportedByEstate.
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "learn".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_kg_facts
+
+    /// Recall kg-fact rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has no `all_kg_facts()` accessor (only
+    /// `kg_facts_for_drawer(source_drawer_id)`, a filtered query). Until the
+    /// trait gains an all-facts read path, this method returns
+    /// `NotSupportedByEstate` so the MCP surface advertises the tool honestly
+    /// without pretending it works. (Swift reconciliation item: the Swift server
+    /// also has no live `kgFact_recall` handler — it falls through to
+    /// methodNotFound. Rust surfaces error_result instead.)
+    pub fn recall_kg_facts(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::kg_fact::KGFact>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_kg_facts".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_diary_entries
+
+    /// Recall diary-entry rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has `read_diary(agent_name, last_n)` (by-agent
+    /// filtered query) but no all-entries read path. Returns
+    /// `NotSupportedByEstate` until the trait gains an unconstrained accessor.
+    pub fn recall_diary_entries(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::diary_entry::DiaryEntry>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_diary_entries".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_proposals
+
+    /// Recall proposal rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has `proposals_for_target(target_row_id)` but
+    /// no all-proposals read path. Returns `NotSupportedByEstate` until the
+    /// trait gains an unconstrained accessor.
+    pub fn recall_proposals(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::proposal::Proposal>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_proposals".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_associations
+
+    /// Recall association rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has `associations_from(wing, room)` and
+    /// `associations_to(wing, room)` (filtered queries) but no all-associations
+    /// read path. Returns `NotSupportedByEstate` until the trait gains an
+    /// unconstrained accessor.
+    pub fn recall_associations(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::association::Association>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_associations".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_learned_references
+
+    /// Recall learned-reference rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has `learned_references_from_source(source_catalog_id)`
+    /// (filtered by catalog entry) but no all-references read path. Returns
+    /// `NotSupportedByEstate` until the trait gains an unconstrained accessor.
+    pub fn recall_learned_references(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::learned_reference::LearnedReference>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_learned_references".to_string(),
+        }
+        .into())
+    }
 }
 
 #[cfg(test)]
@@ -550,6 +672,142 @@ mod tests {
         let err = coord.recall_tunnels(&h, "study").unwrap_err();
         assert_eq!(
             err,
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // v2b-p2 stub verb methods — learn and non-drawer recall.
+    // Each method validates the handle first (stale handle → EstateNotOpen)
+    // then returns NotSupportedByEstate so the MCP surface advertises the
+    // tool honestly without pretending it works.
+    // -----------------------------------------------------------------
+
+    // CO-10: learn raises NotSupportedByEstate — the Brain layer has not
+    // shipped, parity of Swift GLK.learn raising the same.
+    #[test]
+    fn co10_learn_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.learn(&h, "some-handle").unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "learn".to_string()
+            })
+        );
+    }
+
+    // CO-11: recall_kg_facts raises NotSupportedByEstate — no all-facts
+    // DrawerStore accessor exists yet.
+    #[test]
+    fn co11_recall_kg_facts_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_kg_facts(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_kg_facts".to_string()
+            })
+        );
+    }
+
+    // CO-12: recall_diary_entries raises NotSupportedByEstate — no
+    // all-entries DrawerStore accessor exists yet.
+    #[test]
+    fn co12_recall_diary_entries_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_diary_entries(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_diary_entries".to_string()
+            })
+        );
+    }
+
+    // CO-13: recall_proposals raises NotSupportedByEstate — no all-proposals
+    // DrawerStore accessor exists yet.
+    #[test]
+    fn co13_recall_proposals_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_proposals(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_proposals".to_string()
+            })
+        );
+    }
+
+    // CO-14: recall_associations raises NotSupportedByEstate — no
+    // all-associations DrawerStore accessor exists yet.
+    #[test]
+    fn co14_recall_associations_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_associations(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_associations".to_string()
+            })
+        );
+    }
+
+    // CO-15: recall_learned_references raises NotSupportedByEstate — no
+    // all-references DrawerStore accessor exists yet.
+    #[test]
+    fn co15_recall_learned_references_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_learned_references(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_learned_references".to_string()
+            })
+        );
+    }
+
+    // CO-16: stub verbs on a closed handle raise EstateNotOpen, not
+    // NotSupportedByEstate — handle validation runs first.
+    #[test]
+    fn co16_stubs_on_closed_handle_raise_estate_not_open() {
+        let (mut coord, h) = open_one();
+        coord.close(&h).expect("close");
+
+        assert_eq!(
+            coord.learn(&h, "h").unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_kg_facts(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_diary_entries(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_proposals(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_associations(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_learned_references(&h).unwrap_err(),
             VerbDispatchError::EstateNotOpen {
                 estate_uuid: h.estate_uuid
             }
