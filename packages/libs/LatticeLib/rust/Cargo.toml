@@ -1,0 +1,23 @@
+[package]
+name = "lattice-lib"
+version = "0.1.0"
+edition = "2021"
+description = "FDC runtime encoder — Rust port of LatticeLib (Swift leads, Rust follows)"
+
+# This crate is a library + integration test. There is no Metal / BLAS / NEON
+# dimension for the FDC algorithm: it is a pure string/bag computation. The
+# conformance contract is Swift-scalar <-> Rust-scalar only. See the
+# CONFORMANCE section in src/lib.rs for the rationale.
+
+[lib]
+name = "lattice_lib"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-segmentation = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
