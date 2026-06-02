@@ -1,3 +1,5 @@
+> **SUPERSEDED (MDCC→FDC migration, A2).** The MDCC machinery this document describes was removed; the shipped classifier is the FDC encoder — see `docs/reference/FDC_ENCODER_CANONICAL_v1.0.md` and `docs/engineering/FDC_ENCODER_COOKBOOK_v1.0.md`. Retained for history only.
+
 ---
 status: draft
 authors: Bob Pankratz (via/ claude)

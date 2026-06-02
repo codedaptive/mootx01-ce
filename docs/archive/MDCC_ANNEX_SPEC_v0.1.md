@@ -1,3 +1,5 @@
+> **SUPERSEDED (MDCC→FDC migration, A2).** The MDCC machinery this document describes was removed; the shipped classifier is the FDC encoder — see `docs/reference/FDC_ENCODER_CANONICAL_v1.0.md` and `docs/engineering/FDC_ENCODER_COOKBOOK_v1.0.md`. The annex mechanism (ReservedRanges) was removed; an FDC-native annex is a future redesign, not current. Retained for history only.
+
 # MDCC Annex System
 
 ## Status

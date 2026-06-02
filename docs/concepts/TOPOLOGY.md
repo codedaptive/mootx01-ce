@@ -8,7 +8,7 @@ version: 1.0
 
 # MOOTx01 Topology
 
-A readable front door to the repository. Read this once and you should know what the two products are, how the kits stack, what MDCC is, what the license shape is, how a developer reaches the substrate, and how an existing app adopts it. Engineering detail lives in `docs/reference/` and `docs/concepts/MOOTX01_AND_ARIA_CANON.md`; this document is the map.
+A readable front door to the repository. Read this once and you should know what the two products are, how the kits stack, what FDC is, what the license shape is, how a developer reaches the substrate, and how an existing app adopts it. Engineering detail lives in `docs/reference/` and `docs/concepts/MOOTX01_AND_ARIA_CANON.md`; this document is the map.
 
 ## The two products
 
@@ -38,12 +38,12 @@ Standalone substrate
     VectorKit          On-device embeddings + nearest-neighbour search (HNSW)
 
 Grounding
-    EideticLib          Text-to-anchor: tokenize, normalize, stem, gazetteer,
-                       classify (MDCC), resolve (Wikidata Q-ID). Standalone
-                       peer of the substrate kits, no substrate dependency.
-    LatticeKit            Moot Decimal Classification Codes: the assembler that
-                       builds the canon from Wikidata CC0, the in-memory
-                       canon, and the lookup surface EideticLib consumes.
+    EideticLib          Text-to-anchor: delegates to LatticeLib's FDC encoder
+                       to classify (FDC code) and resolve (Wikidata Q-ID).
+                       Standalone peer of the substrate kits, no substrate dependency.
+    LatticeLib            Free Decimal Correspondence (FDC): the encoder
+                       (FDCMatcher / FDCRuntime) plus the FDC frame and
+                       signatures, the classification surface EideticLib consumes.
 
 Typed math
     EngramLib          Typed 256-bit Engram API over SubstrateLib
@@ -77,11 +77,11 @@ Foundation
 
 ### How the layers compose
 
-Foundation has eight kits: the four-package substrate (SubstrateTypes → SubstrateKernel → SubstrateML → SubstrateLib, the latter an umbrella that re-exports the first three), PersistenceKit, QueueKit and ConvergenceKit (peers that share SubstrateLib and chain QueueKit and ConvergenceKit on top of PersistenceKit), and the zero-dependency AriaLexiconLib. The pre-Phase-6 description ("five peer kits with no inter-dependencies") no longer holds: PersistenceKit takes SubstrateLib and SubstrateTypes; ConvergenceKit and QueueKit take SubstrateLib and PersistenceKit; the substrate split itself defines an internal ordering. The Foundation still bottoms out at SubstrateTypes and AriaLexiconLib, neither of which has any dependency. EngramLib lifts SubstrateLib's bytes into a typed 256-bit Engram. EideticLib sits beside the substrate as a standalone grounding utility: it produces anchors (MDCC code + Wikidata Q-ID + confidence) and is consumed by the layers above without being part of them — it imports no substrate kit and is licensed independently.
+Foundation has eight kits: the four-package substrate (SubstrateTypes → SubstrateKernel → SubstrateML → SubstrateLib, the latter an umbrella that re-exports the first three), PersistenceKit, QueueKit and ConvergenceKit (peers that share SubstrateLib and chain QueueKit and ConvergenceKit on top of PersistenceKit), and the zero-dependency AriaLexiconLib. The pre-Phase-6 description ("five peer kits with no inter-dependencies") no longer holds: PersistenceKit takes SubstrateLib and SubstrateTypes; ConvergenceKit and QueueKit take SubstrateLib and PersistenceKit; the substrate split itself defines an internal ordering. The Foundation still bottoms out at SubstrateTypes and AriaLexiconLib, neither of which has any dependency. EngramLib lifts SubstrateLib's bytes into a typed 256-bit Engram. EideticLib sits beside the substrate as a standalone grounding utility: it produces anchors (FDC code + Wikidata Q-ID + confidence) via LatticeLib's FDC encoder and is consumed by the layers above without being part of them — it imports no substrate kit and is licensed independently.
 
 Standalone substrate is three usable estates in their own right: LocusKit for spatial memory and the knowledge graph, VectorKit for on-device semantic search, CorpusKit for content-plus-vector bundles. Each is shippable on its own.
 
-The grounding pair, LatticeKit and EideticLib, sits beside the substrate rather than under it. LatticeKit is the code-and-data side: the assembler that produces an MDCC canon from the Wikidata CC0 dump, the canon's in-memory representation, and the fast-codes and slow-docs distribution surfaces (`docs/concepts/LAUNCH_PLAN.md` §MDCC). EideticLib is the lookup side: a deterministic tokenize → normalize → stem → gazetteer-match → classify → resolve pipeline that consumes the MDCC canon and emits an anchor (MDCC code + Wikidata Q-ID + confidence) for a term. Both ship with frozen reference snapshots so they work out of the box; neither imports a substrate kit.
+The grounding pair, LatticeLib and EideticLib, sits beside the substrate rather than under it. LatticeLib is the code-and-data side: the FDC encoder (`FDCMatcher` / `FDCRuntime`) plus the FDC frame and signatures it matches against. EideticLib is the lookup side: `EideticLib.lookup` delegates to LatticeLib's `FDC.encodeAnchor`, canonicalizing a term to a concept bag, matching it against the pinned FDC signatures, and emitting an anchor (FDC code + dominant Wikidata Q-ID + confidence). Both ship with frozen FDC reference artifacts so they work out of the box; neither imports a substrate kit.
 
 GeniusLocusKit is the composition layer and the write surface. It unifies LocusKit and CorpusKit (which itself sits over VectorKit) into one estate, exposes the nine verbs of the ARIA grammar against that estate, coordinates persistence through QueueKit over PersistenceKit, and runs the Brain layer: standing-signal daemons (dreaming, maintenance, vector-similarity, decay-sweep, byReference-validity, end-of-day-tournament), the matrix tier (F/C/O/T families with calibration and NMF), and a training daemon gated by manifest-set transition counts.
 
@@ -93,17 +93,13 @@ A single MOOTx01 instance runs in GLK mode. The write surface is always GLK; eve
 
 At the API layer an operator may configure many separate instances of different kinds (for example three CorpusKit, two LocusKit, three GeniusLocus) and route each call to the database it belongs to. That route-to-the-right-database behaviour is an API-layer concern, not something inside a single instance.
 
-## MDCC, the classification spine
+## FDC, the classification spine
 
-**MDCC**, Moot Decimal Classification Codes, is MOOTx01's own original decimal classification system. The notation is Dewey-like — a code's structure encodes where a concept sits in the tree — but it is original work, not DDC (which is owned and licensed). The name is unambiguously ours, so it can be opened and adopted; people adopt a named system, not an internal scheme.
+**FDC**, Free Decimal Correspondence, is the public-domain decimal classification frame MOOTx01 adopted as its v1.0 classifier. The notation is Dewey-like — a code's structure encodes where a concept sits in the tree — and it carries no license, so it can be opened, adopted, and federated freely. (An earlier MOOT-original taxonomy, MDCC, was removed in the MDCC→FDC migration; FDC is the shipped scheme.)
 
-MDCC is built clean. Notation and hierarchy are authored original work and carry no license. Leaves are populated by mapping to Wikidata CC0 entities, with US-government public-domain authorities leaning structure where useful. The build is a long batch run over the Wikidata CC0 dump.
+The engine lives in **LatticeLib**: the FDC encoder (`FDCMatcher` / `FDCRuntime`), the FDC frame (the code tree), and the FDC signatures (the weighted concept-to-code mapping the matcher scores against). The full encoder pipeline is documented in `docs/reference/FDC_ENCODER_CANONICAL_v1.0.md`.
 
-Three design decisions made before the run hold all the quality: the top-of-tree notation spine (editorial human judgment), the rule for collapsing Wikidata's multi-parent graph into a single-parent tree, and a stable keying scheme so a concept keeps its code across reruns. MDCC v1 is numbered with held-open reserved ranges from the start, so curated additions later have a home without renumbering.
-
-Governance is quarterly canonization with two distribution channels: a fast channel for the codes themselves and a slower channel for the documented canon. Free for everyone to use, with a public place to request additions.
-
-EideticLib consumes MDCC. The private MDCC scheme is the default and ships complete, no fetch, working out of the box. For any data under a foreign license (attribution, share-alike), the user opts in at activation, is shown the licenses, agrees, and only then does the app download and assemble the sources on the user's own machine. Foreign-licensed data never ships inside the core. EideticLib also carries the valid-but-unknown-code state: a well-formed MDCC code the instance does not yet recognize is stored and round-tripped intact, queryable as pending, and resolved on the next pull or canon.
+EideticLib consumes FDC. `EideticLib.lookup` delegates to `FDC.encodeAnchor`: a term is canonicalized to a concept bag, the bag is matched against the pinned FDC signatures, and the result is an anchor — an FDC code plus the bag's dominant Wikidata Q-ID. Resolution is offline and deterministic against the pinned FDC artifacts; the network is never consulted. EideticLib also carries the valid-but-unknown-code state: a well-formed FDC code the instance does not yet recognize is stored and round-tripped intact, queryable as pending, and resolved once it is learned.
 
 ## The license shape
 

@@ -40,7 +40,7 @@ Every element of the MCP surface traces to a grammar element. A tool exists beca
 
 This is what "the API uses the same semantics, known at design time" means. The acceptance matrix is the contract. A caller does not discover at runtime whether learn applies to a drawer; the matrix says it does not, and the generated surface reflects that before the first call. The projection is generated from AriaLexiconLib and conformance-gated, so the surface never drifts from the grammar because it is not maintained separately from it.
 
-The `capture_drawer` tool, whose frame carries a lattice-anchor classification code, surfaces an optional `classificationScheme` discriminator alongside that code, with values `udc` (default) and `mdcc`. It lets a caller declare whether the anchor code is a UDC code or an MDCC code, expressing the dual-scheme model (architecture spec §5.8). The discriminator is optional and defaults to `udc`, so a caller that omits it gets the original UDC behavior and nothing breaks; the boundary validates the declared scheme and rejects an unrecognized value as `invalidParams`. The anchor argument keeps its `udcCode` name for wire compatibility; renaming the storage field is a separate migration outside this projection.
+The `capture_drawer` tool's frame carries a single lattice-anchor classification code: an FDC (Free Decimal Correspondence) code, the classifier the substrate adopted as its v1.0 scheme. There is no scheme discriminator — the earlier dual-scheme model was removed in the MDCC→FDC migration (A2), and FDC is now the only scheme. The anchor argument keeps its `udcCode` name for wire compatibility; renaming the storage field is a separate migration outside this projection.
 
 ## § 3. Instance mode, API mode, and the dispatch path
 
