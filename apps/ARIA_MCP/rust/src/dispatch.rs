@@ -2,10 +2,11 @@
 //!
 //! Mirrors the Swift `ToolDispatcher.dispatch(name:arguments:)` routing
 //! order:
-//!   1. Recipe tools (moot_list_recipes, moot_grounded_synthesis, …)
-//!   2. Lens tools (moot_keystones … moot_estate_divergence)
-//!   3. Lexicon tools (moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel)
-//!   4. Unknown tool → methodNotFound error
+//!   1. Federation tools (moot_cross_estate_recall — above the lexicon projection)
+//!   2. Recipe tools (moot_list_recipes, moot_grounded_synthesis, …)
+//!   3. Lens tools (moot_keystones … moot_estate_divergence)
+//!   4. Lexicon tools (28 tools after v2b-p2 full-matrix fan-out)
+//!   5. Unknown tool → methodNotFound error
 //!
 //! Out-of-band faults (unknown tool, missing required argument, malformed
 //! UUID) surface as `JSONRPCError` (thrown as Err). Substrate-level
@@ -25,19 +26,29 @@ pub fn dispatch_tool(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
-    // 1. Recipe tools
+    // 1. Federation tools — sit above the lexicon projection, dispatched by name.
+    //    moot_cross_estate_recall is a scaffold: the Rust GLK fan_out has no grant
+    //    model yet. The tool is advertised in tools/list so clients know it exists;
+    //    every call returns error_result per the A-versus-C refusal discipline
+    //    (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §13).
+    if name == crate::lexicon_tools::CROSS_ESTATE_RECALL {
+        return Ok(error_result(
+            "not yet implemented: federation requires the grant model",
+        ));
+    }
+    // 2. Recipe tools
     if crate::recipe_tools::is_recipe_tool(name) {
         return crate::recipe_tools::dispatch(name, args, registry);
     }
-    // 2. Lens tools
+    // 3. Lens tools
     if crate::lens_tools::is_lens_tool(name) {
         return crate::lens_tools::dispatch(name, args, registry);
     }
-    // 3. Lexicon minimum
+    // 4. Lexicon tools (v1 + v2b-p1 + v2b-p2 full matrix)
     if crate::lexicon_tools::is_lexicon_tool(name) {
         return crate::lexicon_tools::dispatch(name, args, registry);
     }
-    // 4. Unknown
+    // 5. Unknown
     Err(JSONRPCError::new(
         JSONRPCErrorCode::METHOD_NOT_FOUND,
         format!("Unknown tool: {name}"),

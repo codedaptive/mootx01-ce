@@ -39,69 +39,55 @@
 #![deny(rust_2018_idioms)]
 #![deny(unused_must_use)]
 
-pub mod handle;
-pub mod coordinator;
-pub mod fan_out;
-pub mod verbs;
-pub mod branches;
 pub mod audit;
 pub mod brain;
+pub mod branches;
+pub mod coordinator;
+pub mod fan_out;
+pub mod handle;
 pub mod matrix;
 pub mod training;
+pub mod verbs;
 
-pub use handle::EstateHandle;
-pub use coordinator::{EstateCoordinator, GeniusLocusKitError, VerbDispatchError};
-pub use fan_out::{LatticeRegion, EstateRecallContribution};
-pub use verbs::{
-    Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LearnFrame,
-    LatticeAnchor, MutateFrame, MutationKind, Noun, NounRole, ProposeFrame,
-    ReanchorFrame, RecallFrame, Surface, SurfaceTarget, Verb, VerbError, VerbFlow,
-    WithdrawFrame, VERB_NAMES,
-};
 pub use audit::{
-    AuditProjectionFold, AuditRecovery, AuditRecoveryDivergence, AuditRecoveryResult,
-    AuditTier, RowMismatch, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue,
-    UnifiedAuditVerb, UnifiedProjection, UnifiedProjectionKey,
-    UnifiedRowProjection,
+    AuditProjectionFold, AuditRecovery, AuditRecoveryDivergence, AuditRecoveryResult, AuditTier,
+    RowMismatch, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
+    UnifiedProjection, UnifiedProjectionKey, UnifiedRowProjection,
 };
 pub use brain::scheduler::{
-    AssociationFrame as SchedulerAssociationFrame,
+    trigger_tag as scheduler_trigger_tag, AssociationFrame as SchedulerAssociationFrame,
     ConcurrencyPolicy as SchedulerConcurrencyPolicy,
     ConditionPredicate as SchedulerConditionPredicate,
-    DiagnosticReport as SchedulerDiagnosticReport,
-    Dispatcher as SchedulerDispatcher,
-    MutationKind as SchedulerMutationKind,
-    NoopDispatcher as SchedulerNoopDispatcher,
-    ProposalFrame as SchedulerProposalFrame,
-    ProposalKind as SchedulerProposalKind,
-    ResourceCostEstimate as SchedulerResourceCostEstimate,
-    SchedulerError,
-    SerialLaneScheduler,
-    SignalContext as SchedulerSignalContext,
-    SignalEmission as SchedulerSignalEmission,
-    SignalID as SchedulerSignalID,
-    SignalReport as SchedulerSignalReport,
-    SignalRouteOutcome as SchedulerSignalRouteOutcome,
-    SignalSpec as SchedulerSignalSpec,
-    SignalState as SchedulerSignalState,
-    SignalTrigger as SchedulerSignalTrigger,
-    SubscriptionID as SchedulerSubscriptionID,
-    EMISSION_CLASS_TAGS,
-    trigger_tag as scheduler_trigger_tag,
+    DiagnosticReport as SchedulerDiagnosticReport, Dispatcher as SchedulerDispatcher,
+    MutationKind as SchedulerMutationKind, NoopDispatcher as SchedulerNoopDispatcher,
+    ProposalFrame as SchedulerProposalFrame, ProposalKind as SchedulerProposalKind,
+    ResourceCostEstimate as SchedulerResourceCostEstimate, SchedulerError, SerialLaneScheduler,
+    SignalContext as SchedulerSignalContext, SignalEmission as SchedulerSignalEmission,
+    SignalID as SchedulerSignalID, SignalReport as SchedulerSignalReport,
+    SignalRouteOutcome as SchedulerSignalRouteOutcome, SignalSpec as SchedulerSignalSpec,
+    SignalState as SchedulerSignalState, SignalTrigger as SchedulerSignalTrigger,
+    SubscriptionID as SchedulerSubscriptionID, EMISSION_CLASS_TAGS,
 };
+pub use brain::signals::{
+    default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
+    DecaySweepSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
+    VectorSimilaritySignal,
+};
+pub use coordinator::{EstateCoordinator, GeniusLocusKitError, VerbDispatchError};
+pub use fan_out::{EstateRecallContribution, LatticeRegion};
+pub use handle::EstateHandle;
 pub use matrix::{
     MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationOutcome,
     MatrixCalibrationRegistry, MatrixCoOccurKey, MatrixFieldCell, MatrixNMF,
     MatrixNMFFactorization, MatrixPersistenceBackend, MatrixPersistenceError,
-    MatrixPersistenceMode, MatrixSnapshot, MatrixTemporalKey, MatrixTier,
-    MatrixValueCoord,
-};
-pub use brain::signals::{
-    ByReferenceValiditySignal, DecaySweepSignal, DreamingSignal, EndOfDayTournamentSignal,
-    MaintenanceSignal, VectorSimilaritySignal,
-    default_standing_signal_names, default_standing_signal_specs,
+    MatrixPersistenceMode, MatrixSnapshot, MatrixTemporalKey, MatrixTier, MatrixValueCoord,
 };
 pub use training::{
     EnrichmentPassResult, EnrichmentPipeline, TrainingDaemon, TrainingDaemonReport,
     TrainingDaemonTick, TrainingThresholdDecision, TrainingThresholdGate,
+};
+pub use verbs::{
+    Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame,
+    MutateFrame, MutationKind, Noun, NounRole, ProposeFrame, ReanchorFrame, RecallFrame, Surface,
+    SurfaceTarget, Verb, VerbError, VerbFlow, WithdrawFrame, VERB_NAMES,
 };
