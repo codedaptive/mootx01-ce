@@ -22,7 +22,7 @@
 // so identical engrams score 1.0 and bit-inverses score 0.0. The
 // engine is pure data-in / data-out — no Drawer, no estate, no clocks,
 // no randomness — so the Swift conformance tests and the future Rust
-// port exercise identical math against shared vectors, matching the
+// version exercise identical math against shared vectors, matching the
 // `HybridRecallEngine` pattern already in the kit.
 
 import EngramLib
@@ -51,7 +51,7 @@ import EngramLib
 ///   - fingerprint: per-candidate engram derivation owned by the caller.
 /// - Returns: up to `k` candidates in MMR selection order. Ties are
 ///   broken by ascending input index, so the result is deterministic
-///   and reproducible across the Swift and Rust ports.
+///   and reproducible across the Swift and Rust versions.
 public func mmrRank(
     candidates: [Drawer],
     query: Engram,
@@ -74,7 +74,7 @@ public func mmrRank(
 }
 
 /// Pure MMR selection over engram fingerprints. Internal so the Swift
-/// conformance tests and the Rust port run identical math against the
+/// conformance tests and the Rust version run identical math against the
 /// same vectors; the public `mmrRank` is the Drawer-facing wrapper.
 ///
 /// No Drawer, no estate, no clocks, no randomness — every output is a
@@ -84,7 +84,7 @@ internal enum MMREngine {
     /// Maximum Hamming distance between two 256-bit engrams. EngramLib
     /// guarantees `distance(_:_:)` returns 0...256, so dividing by this
     /// maps any distance into [0, 1]. Named rather than inlined so the
-    /// normalisation basis is explicit and the Rust port uses the same
+    /// normalisation basis is explicit and the Rust version uses the same
     /// constant.
     private static let maxEngramDistance: Float = 256.0
 
@@ -109,7 +109,7 @@ internal enum MMREngine {
     /// Tie-break: candidates are scanned in ascending input-index order
     /// and a strictly-greater (`>`) comparison keeps the earliest
     /// candidate when scores are equal. Equal scores therefore resolve
-    /// to ascending input index, which the Rust port must reproduce.
+    /// to ascending input index, which the Rust version must reproduce.
     static func select(
         fingerprints: [Engram],
         query: Engram,

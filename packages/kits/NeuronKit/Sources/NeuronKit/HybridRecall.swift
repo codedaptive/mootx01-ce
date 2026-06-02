@@ -196,14 +196,14 @@ public struct RecallStream: AsyncSequence, Sendable {
 }
 
 /// Internal reranking engine. Exposed at module scope so the Swift
-/// conformance tests and the Rust port exercise the same deterministic
+/// conformance tests and the Rust version exercise the same deterministic
 /// math against shared vectors. The engine is pure data-in, data-out;
 /// no substrate access, no clocks, no randomness.
 internal enum HybridRecallEngine {
 
     /// Apply RRF fusion (k = `tuning.rrfK`) and MMR rerank
     /// (λ = `tuning.mmrLambda`) to `drawers` and return the reranked
-    /// list. Pure function — deterministic across Swift and Rust ports.
+    /// list. Pure function — deterministic across Swift and Rust versions.
     static func rerank(drawers: [Drawer], tuning: RecallFrameTuning) -> [Drawer] {
         guard !drawers.isEmpty else { return [] }
 
@@ -232,7 +232,7 @@ internal enum HybridRecallEngine {
         // Sim(d, dⱼ) is the deterministic shingle-overlap similarity
         // between two drawers' verbatim content — vector-free because
         // the wrapper has no embedding access under B-1, but stable
-        // and conformance-testable across ports.
+        // and conformance-testable across versions.
         let lambda = tuning.mmrLambda
         let maxRRF = rrfScore.values.max() ?? 1.0
         let minRRF = rrfScore.values.min() ?? 0.0
@@ -254,7 +254,7 @@ internal enum HybridRecallEngine {
             var bestIdx = -1
             var bestScore: Float = -.infinity
             // Iterate in stable order (input order) so ties break
-            // deterministically — bit-identical across ports.
+            // deterministically — bit-identical across versions.
             for idx in drawers.indices where remaining.contains(idx) {
                 let rel = relevance(idx)
                 let maxSim: Float
@@ -283,7 +283,7 @@ internal enum HybridRecallEngine {
 
     /// Deterministic Jaccard similarity over 3-character lowercase
     /// shingles. Pure text math — no locale-sensitive transforms, no
-    /// stemming, no tokeniser. The Rust port computes the same value
+    /// stemming, no tokeniser. The Rust version computes the same value
     /// for every shared test vector.
     static func shingleSimilarity(_ a: String, _ b: String) -> Float {
         let sa = shingles(a)

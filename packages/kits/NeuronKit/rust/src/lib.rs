@@ -104,11 +104,11 @@ pub use maintenance_cycle::{
 /// schema version.
 pub const VERSION: &str = "0.1.0";
 
-/// The compile-time mode of the linguistic pipeline. Rust port
+/// The compile-time mode of the linguistic pipeline. Rust version
 /// always uses the deterministic reference; the Apple
 /// NaturalLanguage acceleration path is Swift-only per
 /// MISSION_AE_02_APPLE_NL_ACCEL.md. Federation-disabled mode
-/// does not apply to the Rust port.
+/// does not apply to the Rust version.
 pub const fn linguistic_pipeline_mode() -> LinguisticPipelineMode {
     LinguisticPipelineMode::DeterministicReference
 }
@@ -170,7 +170,7 @@ mod tests {
         // term currently infers an empty anchor with status None.
         // When the FDC encoder lands, this becomes the
         // "chemistry => QidCompleted" parity assertion the Swift
-        // port already makes.
+        // version already makes.
         let inference = infer_lattice_anchor("chemistry");
         assert_eq!(inference.code, "");
         assert!(inference.wikidata_qid.is_none());

@@ -323,7 +323,7 @@ public actor DreamingDaemon {
         // The actor only gathers seam inputs and enacts the result; the
         // contrastive score, EWC++ blend, duplicate suppression, and
         // confidence-AND-attempts gate all live in `DreamingDecision` so
-        // the math is portable and conformance-gated against the Rust port
+        // the math is portable and conformance-gated against the Rust version
         // (NeuronKit/rust/src/dreaming_decision.rs). See DreamingDecision.swift.
         let outcome = DreamingDecision.decide(
             observations: observations.map {
@@ -393,7 +393,7 @@ public actor DreamingDaemon {
         )
     }
 
-    // MARK: - Pure helpers (deterministic; Rust port matches)
+    // MARK: - Pure helpers (deterministic; Rust version matches)
 
     /// The agent name the cycle diary entries are filed under.
     static let agentName = "dreaming-daemon"
@@ -405,7 +405,7 @@ public actor DreamingDaemon {
     /// Canonical, order-independent key for a candidate endpoint pair, so
     /// A↔B and B↔A collapse to one candidate (matches the Tunnel
     /// symmetric-id spirit). Delegates to the portable `DreamingDecision`
-    /// core so the actor and the Rust port share one definition.
+    /// core so the actor and the Rust version share one definition.
     static func candidateKey(_ a: RowID, _ b: RowID) -> String {
         DreamingDecision.candidateKey(a, b)
     }

@@ -1,9 +1,9 @@
-//! ContextSynthesizer Rust port. Pure synthesis over a recall page —
+//! ContextSynthesizer Rust version. Pure synthesis over a recall page —
 //! reads only, produces a `ContextDocument` matching the Swift
 //! `ContextSynthesisEngine` byte-for-byte against shared vectors.
 //!
 //! Per NEURONKIT_SPEC § 4.2 the synthesizer is reads-only and writes
-//! nothing to the substrate (C-9). The Rust port mirrors this by
+//! nothing to the substrate (C-9). The Rust version mirrors this by
 //! exposing only a pure function over a recall page; no estate
 //! handle, no IO, no clocks.
 
@@ -23,9 +23,9 @@ pub struct ContextDocument {
 }
 
 /// Optional row-level metadata the Rust engine consumes alongside
-/// `DrawerRow`. The Swift port reads these straight off
+/// `DrawerRow`. The Swift version reads these straight off
 /// `LocusKit.Drawer`; the Rust engine accepts them as a parallel
-/// vector so the port can be exercised without the full LocusKit
+/// vector so the version can be exercised without the full LocusKit
 /// Rust type. Empty (or shorter than `rows`) means "treat as default
 /// (active state, default wing/room)".
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ pub struct DrawerRowMeta {
     pub room: String,
     /// Whether the drawer is "currently believed" per the LocusKit
     /// adjective-state cluster. The Swift engine reads
-    /// `drawer.isCurrentlyBelieved`; the Rust port accepts the
+    /// `drawer.isCurrentlyBelieved`; the Rust version accepts the
     /// pre-computed boolean.
     pub is_currently_believed: bool,
 }

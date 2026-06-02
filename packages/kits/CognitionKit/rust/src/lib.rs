@@ -1,11 +1,11 @@
 //! CognitionKit — the behaviour-recipe layer of the MOOTx01 substrate
-//! (Rust port).
+//! (Rust version).
 //!
 //! This crate is the Rust side of the Swift `CognitionKit` package.
 //! CognitionKit implements no algorithms itself — recipes SEQUENCE
 //! NeuronKit reasoning and GeniusLocusKit verbs. Three layers live here:
 //!
-//! 1. **Swift-paired decision cores + estate-driven recipes** (`neither port
+//! 1. **Swift-paired decision cores + estate-driven recipes** (`neither version
 //!    leads`, gated against shared fixtures): the capability set + gate
 //!    (`capability`), the error model (`error`), the catalog/descriptor
 //!    self-discovery surface (`catalog`), the migration ranking decision core

@@ -16,7 +16,7 @@
 //! shapes + an `AuditVerdict`). The write seam's `propose` is the
 //! Brain-layer verb, `NotSupportedByEstate` in both languages until the
 //! Brain layer ships — so a live proposal adapter waits on the same
-//! architectural boundary in both, not on this port. The orchestration is
+//! architectural boundary in both, not on this version. The orchestration is
 //! gated with deterministic fakes mirroring the Swift MaintenanceDaemonTests.
 //!
 //! Determinism: no clock, no RNG. The daemon carries `cycle_count`; all

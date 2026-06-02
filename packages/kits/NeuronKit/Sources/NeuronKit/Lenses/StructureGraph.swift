@@ -13,7 +13,7 @@ enum StructureGraph {
 
     /// Build the undirected, unit-weight adjacency over `nodeIDs` from drawer-id
     /// `edges`. Node `i` is the node at `nodeIDs[i]` (input order fixes the
-    /// index space deterministically, so the result is port-stable). A self-loop
+    /// index space deterministically, so the result is version-stable). A self-loop
     /// (both endpoints the same node) and an edge with an endpoint not in
     /// `nodeIDs` contribute nothing. Each surviving pair adds a symmetric edge.
     static func build(nodeIDs: [String], edges: [(String, String)]) -> Adjacency {

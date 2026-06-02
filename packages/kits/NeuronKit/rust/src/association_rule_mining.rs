@@ -1,8 +1,8 @@
 //! Pairwise association-rule mining over the co-occurrence matrix O
-//! (cookbook § 6.3) — Rust port of the Swift `AssociationRuleEngine` /
+//! (cookbook § 6.3) — Rust version of the Swift `AssociationRuleEngine` /
 //! `mineAssociationRules` in
 //! `NeuronKit/Sources/NeuronKit/AssociationRuleMining.swift`. Per
-//! CLAUDE.md neither port leads; both run identical math and are gated
+//! CLAUDE.md neither version leads; both run identical math and are gated
 //! against the same hand-computed in-code vectors (the
 //! `MMRRank` / `mmr_rank.rs` conformance pattern).
 //!
@@ -30,7 +30,7 @@
 //! Determinism: no clock, no randomness. Rules emit in ascending
 //! packed `(antecedent, consequent)` key order — which is exactly the
 //! canonical `entries()` order of `MatrixO` — reproduced bit-for-bit
-//! across ports.
+//! across versions.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -41,7 +41,7 @@ use substrate_types::MatrixO;
 ///
 /// Ordering is on the packed key `(field << 8) | value`, mirroring
 /// `CooccurrenceKey`'s packed ordering so rule emission order is
-/// fully specified and identical across the Swift and Rust ports.
+/// fully specified and identical across the Swift and Rust versions.
 /// (The derived lexicographic `Ord` over `(field, value)` is the
 /// same total order as `packed()`; `packed()` is kept as the
 /// documented basis.)
@@ -121,7 +121,7 @@ pub fn mine_association_rules(
 ) -> Vec<AssociationRule> {
     // Two-pass over the same canonical scan, kept in one body so the
     // conformance-critical control flow (guard order, gate order,
-    // emission order) reads top to bottom in both ports.
+    // emission order) reads top to bottom in both versions.
     // N <= 0: no population to measure support against.
     if active_row_count <= 0 {
         return Vec::new();

@@ -2,11 +2,11 @@
 //
 // Conformance fixtures for the pure recall-fidelity scoring core
 // (NEURONKIT_SPEC § 4.7). These exact inputs and expected metrics are
-// mirrored by the Rust port's `benchmark_scoring` tests
-// (NeuronKit/rust/src/benchmark_scoring.rs) — both ports run the identical
+// mirrored by the Rust version's `benchmark_scoring` tests
+// (NeuronKit/rust/src/benchmark_scoring.rs) — both versions run the identical
 // math and must agree. The live `benchmark(...)` end-to-end path keeps its
 // own coverage in NK_BR_01_BranchBenchmarkTests; this file pins the
-// extracted math directly, which is the cross-port gate.
+// extracted math directly, which is the cross-version gate.
 
 import Testing
 @testable import NeuronKit

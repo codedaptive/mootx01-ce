@@ -12,7 +12,7 @@
 //! the Rust `Estate` today. The WRITE seam's `propose` is the Brain-layer
 //! verb, which raises `NotSupportedByEstate` in BOTH the Rust and Swift GLK
 //! surfaces until the Brain layer ships — so a live proposal adapter waits
-//! on the same architectural boundary in both languages, not on this port.
+//! on the same architectural boundary in both languages, not on this version.
 //! The orchestration itself is pure of that boundary: it talks to the
 //! `DreamingSubstrateReader` / `DreamingProposalSink` / `RewardSource`
 //! traits, exactly as the Swift actor talks to its protocols, and is gated

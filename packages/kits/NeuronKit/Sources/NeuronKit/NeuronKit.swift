@@ -136,7 +136,7 @@ public extension NeuronKit {
 /// accordingly.
 public enum LinguisticPipelineMode: String, Sendable, Codable {
     /// Deterministic in-tree pipeline. Cross-language conformance
-    /// guaranteed against the Rust port. Federation-compatible.
+    /// guaranteed against the Rust version. Federation-compatible.
     case deterministicReference = "deterministic-reference"
 
     /// Apple NaturalLanguage acceleration path. Swift-only.

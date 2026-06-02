@@ -36,7 +36,7 @@
 // Pure engine, mirroring `MMRRank`: `MatrixO` + active row count +
 // thresholds in, ranked `[AssociationRule]` out. No estate, no
 // clocks, no randomness — invariant B-1 (no substrate access) holds,
-// and the Swift and Rust ports (`rust/src/association_rule_mining.rs`)
+// and the Swift and Rust versions (`rust/src/association_rule_mining.rs`)
 // run identical math against identical in-code vectors.
 
 import SubstrateTypes
@@ -46,7 +46,7 @@ import SubstrateTypes
 ///
 /// `Comparable` on the packed key `(field << 8) | value`, mirroring
 /// `CooccurrenceKey`'s packed ordering so rule emission order is
-/// fully specified and identical across the Swift and Rust ports.
+/// fully specified and identical across the Swift and Rust versions.
 public struct Item: Hashable, Comparable, Sendable, Codable {
     public let field: UInt8
     public let value: UInt8
@@ -130,7 +130,7 @@ public struct MiningThresholds: Equatable, Sendable, Codable {
 /// - Returns: rules sorted ascending on the packed
 ///   `(antecedent, consequent)` key. The pair is unique per rule, so
 ///   the order is total — no residual ties — and identical across
-///   the Swift and Rust ports.
+///   the Swift and Rust versions.
 public func mineAssociationRules(
     matrix: MatrixO,
     activeRowCount: Int64,
@@ -144,7 +144,7 @@ public func mineAssociationRules(
 }
 
 /// Pure pairwise rule-mining core. Internal so the Swift conformance
-/// tests and the Rust port run identical math against the same
+/// tests and the Rust version run identical math against the same
 /// vectors; the public `mineAssociationRules` is the thin wrapper.
 ///
 /// No estate, no clocks, no randomness — every output is a
@@ -166,7 +166,7 @@ internal enum AssociationRuleEngine {
     ) -> [AssociationRule] {
         // Two-pass over the same canonical scan, kept in one body so
         // the conformance-critical control flow (guard order, gate
-        // order, emission order) reads top to bottom in both ports.
+        // order, emission order) reads top to bottom in both versions.
         // N <= 0: no population to measure support against.
         guard activeRowCount > 0 else { return [] }
         let n = Double(activeRowCount)

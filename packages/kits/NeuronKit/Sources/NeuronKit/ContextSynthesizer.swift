@@ -19,7 +19,7 @@ import LocusKit
 /// Ephemeral context document produced by `ContextSynthesizer`. Per
 /// spec § 4.2 — handed to a foundation model, never written to the
 /// substrate, never persisted. Equatable for test conformance and
-/// snapshot parity against the Rust port.
+/// snapshot parity against the Rust version.
 public struct ContextDocument: Sendable, Equatable, Codable {
 
     /// Short prose summary of the recalled set (one or two sentences).
@@ -35,7 +35,7 @@ public struct ContextDocument: Sendable, Equatable, Codable {
     /// Proportion of recalled drawers whose adjective-bitmap `state`
     /// is the "currently believed" cluster per LocusKit spec § 6.1.
     /// In [0, 1]; reported as Float so the round-trip is identical
-    /// to the Rust f32 port.
+    /// to the Rust f32 version.
     public let successRate: Float
 
     /// Mean reward across the recalled set. Drawer.reward is not a
@@ -97,7 +97,7 @@ public enum ContextSynthesizer {
 }
 
 /// Pure synthesis engine. Module-internal so the Swift conformance
-/// tests and the Rust port exercise the same deterministic math
+/// tests and the Rust version exercise the same deterministic math
 /// against shared vectors. No `async`, no estate handle — just the
 /// drawer rows.
 internal enum ContextSynthesisEngine {
@@ -161,7 +161,7 @@ internal enum ContextSynthesisEngine {
         }
         // Order: count desc, then first-seen asc (stable). Use the
         // token string as a final tiebreaker so output is identical
-        // across language ports even when counts and first-seen ties
+        // across language versions even when counts and first-seen ties
         // align.
         let ordered = counts.keys.sorted { lhs, rhs in
             let cl = counts[lhs] ?? 0
@@ -234,7 +234,7 @@ internal enum ContextSynthesisEngine {
 
     /// Lowercase alphanumeric tokens. Splits on any non-letter,
     /// non-digit character so behaviour is locale-free and identical
-    /// across ports for the ASCII conformance vectors used in tests.
+    /// across versions for the ASCII conformance vectors used in tests.
     static func tokens(_ s: String) -> [String] {
         s.lowercased()
             .split(whereSeparator: { !($0.isLetter || $0.isNumber) })

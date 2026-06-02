@@ -63,7 +63,7 @@ public protocol RecipeSubstrate: AnyObject {
 }
 
 /// Portable migration-benchmark orchestration over the `RecipeSubstrate`
-/// seam. All types here are identity-free value types so the Rust port
+/// seam. All types here are identity-free value types so the Rust version
 /// mirrors them exactly.
 public enum MigrationOrchestration {
 

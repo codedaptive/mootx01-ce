@@ -8,9 +8,9 @@
 // which makes Hamming distance-to-query equal to a candidate's bit
 // popcount, and every relevance/similarity term is hand-computable.
 //
-// These tests are the Rust port's conformance contract too: the
+// These tests are the Rust version's conformance contract too: the
 // greedy selection order and the input-index tie-break documented
-// here must reproduce bit-identically across ports.
+// here must reproduce bit-identically across versions.
 
 import Testing
 import Foundation

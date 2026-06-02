@@ -4,7 +4,7 @@
 // tick (NEURONKIT_SPEC § 3.1 steps 3–6), factored out of `DreamingDaemon`
 // so it is a pure function of pre-gathered inputs — no actor, no seam I/O,
 // no clock, no `Date()`. This is the Swift side of NeuronKit's Rust-parity
-// Bucket A; the Rust port at `NeuronKit/rust/src/dreaming_decision.rs`
+// Bucket A; the Rust version at `NeuronKit/rust/src/dreaming_decision.rs`
 // implements the same logic and both gate on shared fixtures.
 //
 // What stays in the actor: the async seam reads (recall traces,
@@ -24,7 +24,7 @@
 import Foundation
 
 /// Pure dreaming-cycle decision logic shared by the Swift `DreamingDaemon`
-/// and the Rust port. Identity-free (`RowID` is its `String` alias); no
+/// and the Rust version. Identity-free (`RowID` is its `String` alias); no
 /// substrate types appear in the signatures.
 public enum DreamingDecision {
 

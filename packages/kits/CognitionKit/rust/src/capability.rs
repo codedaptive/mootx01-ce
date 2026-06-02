@@ -1,20 +1,20 @@
 //! NeuronKit capability set + the pre-execution capability gate.
 //!
-//! Rust port of the Swift `NeuronKitCapability` enum and
+//! Rust version of the Swift `NeuronKitCapability` enum and
 //! `verifyCapabilities(required:available:)` in
 //! `CognitionKit/Sources/CognitionKit/NeuronKitCapability.swift`.
 //! Per COGNITIONKIT_SPEC § 2 / B-5, a recipe verifies its declared
 //! capabilities are available BEFORE any execution begins, and the gate
 //! reports the FIRST missing capability in declaration order so the
-//! failure is deterministic across ports.
+//! failure is deterministic across versions.
 
 use crate::error::RecipeError;
 use serde::{Deserialize, Serialize};
 
 /// A NeuronKit reasoning capability a recipe sequences. Each case names a
-/// NeuronKit surface that is actually shipped in the Swift port. The
+/// NeuronKit surface that is actually shipped in the Swift version. The
 /// `serde` rename gives each case the SAME string the Swift `String`
-/// rawValue uses, so the wire shape is identical across ports.
+/// rawValue uses, so the wire shape is identical across versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NeuronKitCapability {
     #[serde(rename = "hybridRecall")]
@@ -34,7 +34,7 @@ pub enum NeuronKitCapability {
 impl NeuronKitCapability {
     /// Declaration order — MUST match the Swift `allCases` order. The
     /// capability gate walks this order and reports the first required
-    /// capability that is unavailable, so two ports agree on which one
+    /// capability that is unavailable, so two versions agree on which one
     /// they name.
     pub const ALL: [NeuronKitCapability; 6] = [
         NeuronKitCapability::HybridRecall,
