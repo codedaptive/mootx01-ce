@@ -20,8 +20,8 @@
 //! ## Rust vs Swift shape differences
 //!
 //! - Swift `Estate` is an `actor`; Rust `Estate` is a `Clone + Send + Sync`
-//!   struct. The concrete `DrawerStore` impl (InMemoryDrawerStore's internal
-//!   Mutex) provides the same serialisation guarantee.
+//!   struct. The concrete `DrawerStore` impl (`DrawerStoreCore`'s internal
+//!   `Mutex`) provides the same serialisation guarantee.
 //! - `async throws -> T` → `Result<T, LocusKitError>` or plain return.
 //! - Swift `recall` is non-throwing and returns a `RecallStream`; the Rust
 //!   port mirrors that: evaluate errors collapse to an empty row set, and
@@ -736,14 +736,12 @@ mod tests {
     use crate::drawer_store_inmemory::InMemoryDrawerStore;
     use crate::estate_types::{LatticeAnchor, OwnerCredentials};
     use crate::filter::Filter;
-    use persistence_kit::inmemory::InMemoryStorage;
     use std::sync::Arc;
-    use uuid::Uuid;
 
     fn make_estate() -> Estate {
-        let storage: Arc<dyn persistence_kit::storage::Storage> =
-            Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally —
+        // backend identity is visible at the type, not the argument.
+        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap());
         Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
     }
 

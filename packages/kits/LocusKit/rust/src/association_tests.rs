@@ -20,15 +20,13 @@ use crate::drawer_store::DrawerStore;
 use crate::drawer_store_inmemory::InMemoryDrawerStore;
 use crate::error::LocusKitError;
 use crate::estate_types::LatticeAnchor;
-use persistence_kit::inmemory::InMemoryStorage;
-use std::sync::Arc;
-use uuid::Uuid;
 
 const NOW: i64 = 1_700_000_000;
 
 fn open_store() -> InMemoryDrawerStore {
-    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-    InMemoryDrawerStore::new(storage, NOW, None).unwrap()
+    // InMemoryDrawerStore::new allocates InMemoryStorage internally —
+    // backend identity is visible at the type, not the argument.
+    InMemoryDrawerStore::new(NOW, None).unwrap()
 }
 
 fn sample(id: &str, source_room: &str, target_room: &str, filed_at: i64) -> Association {

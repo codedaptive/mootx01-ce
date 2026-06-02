@@ -84,6 +84,7 @@ impl BundleKind {
     /// for any other string so callers can surface the corrupt-row
     /// case rather than silently coercing.
     ///
+    /// Named `from_str` by cross-leg convention (mirrors Swift `init(rawValue:)`).
     /// Returns `Option<BundleKind>` rather than `Result<_, _>`, so this
     /// does not implement `std::str::FromStr` (different return type).
     /// The `#[allow]` suppresses the lint that warns about the similar name.

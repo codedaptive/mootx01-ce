@@ -7,7 +7,9 @@
 //! `Storage` (PersistenceKit) handle. The Rust port keeps the contract
 //! and the concrete implementation separate: the trait is the surface
 //! consumers (`Estate`, the bitmap evaluator) program against, and one
-//! concrete impl per backend lives next to it. Two concrete impls ship:
+//! concrete newtype per backend lives next to it. Two newtypes ship over
+//! [`DrawerStoreCore`](crate::drawer_store_inmemory::DrawerStoreCore)
+//! (the storage-agnostic verb-logic core):
 //! - [`crate::drawer_store_inmemory`] — `InMemoryDrawerStore` over
 //!   `InMemoryStorage` (test fixture, no persistence across process runs)
 //! - [`crate::drawer_store_sqlite`] — `SqliteDrawerStore` over
@@ -67,8 +69,8 @@ use substrate_lib::row_state::RowVerb;
 /// Every method below has a default impl so minimal fakes (LP-1B
 /// `FakeStore`, future net-new test stubs) compile without overriding
 /// what they do not exercise. Production backends — the LP-1E
-/// `InMemoryDrawerStore` and the `SqliteDrawerStore` newtype over it —
-/// override every method.
+/// `InMemoryDrawerStore` and `SqliteDrawerStore` (both wrapping
+/// `DrawerStoreCore`) — override every method.
 #[allow(clippy::too_many_arguments)]
 pub trait DrawerStore: Send + Sync {
     // -----------------------------------------------------------------

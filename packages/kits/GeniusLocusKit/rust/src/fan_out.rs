@@ -25,11 +25,12 @@ impl LatticeRegion {
     }
 }
 
-/// One estate's contribution to a fan-out recall. The Rust scaffold
-/// returns drawer-id placeholders (`Vec<String>`) instead of full
-/// Drawer values because the LocusKit Rust port has not yet shipped;
-/// the parity test fills these with synthetic ids and verifies the
-/// routing decision rather than the per-drawer payload.
+/// One estate's contribution to a fan-out recall. The GLK fan-out
+/// returns drawer-id strings (not full `Drawer` values) because the
+/// GLK verb bodies have not yet been wired to dispatch through a
+/// live `locus_kit::Estate`; the parity test verifies the routing
+/// decision (which estates are selected) rather than the per-drawer
+/// payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EstateRecallContribution {
     pub handle: EstateHandle,
@@ -67,13 +68,12 @@ impl EstateCoordinator {
         Ok(out)
     }
 
-    /// Fan-out recall scaffold. Without the LocusKit Rust port, the
-    /// coordinator cannot actually issue a recall verb against each
-    /// estate; it returns a contribution per overlapping handle with
+    /// Fan-out recall scaffold. The GLK verb bodies have not yet been
+    /// wired to dispatch through a live `locus_kit::Estate`, so the
+    /// coordinator returns a contribution per overlapping handle with
     /// an empty `drawer_ids` list, which the parity test asserts
-    /// against the per-handle expectation. The function exists so
-    /// downstream missions land the live recall delegation behind a
-    /// stable signature.
+    /// against the per-handle expectation. The function exists so the
+    /// live recall delegation lands behind a stable signature.
     pub fn fan_out_recall(
         &self,
         region: LatticeRegion,

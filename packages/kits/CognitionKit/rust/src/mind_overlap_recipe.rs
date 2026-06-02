@@ -125,11 +125,12 @@ mod tests {
 
     // Fixed UUID per estate so the shared family + DP seed are deterministic
     // (the Laplace noise is seeded from the estate UUIDs — random UUIDs would
-    // make the noise, and the test, flaky).
+    // make the noise, and the test, flaky). Uses `with_storage` to pin the
+    // estate UUID; all other construction sites use `InMemoryDrawerStore::new`.
     fn open_estate(coord: &mut EstateCoordinator, uuid: [u8; 16]) -> EstateHandle {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::from_bytes(uuid)));
         let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
+            Arc::new(InMemoryDrawerStore::with_storage(storage, NOW, None).unwrap());
         coord
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .unwrap()

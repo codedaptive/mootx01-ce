@@ -3,10 +3,12 @@
 // Shared vectors below mirror the Swift `VerbSurfaceTests.swift`
 // AriaLexicon assertions. The unit of conformance is the (verb, noun)
 // acceptance matrix and the nine-verb method-name set, not the
-// per-drawer dispatch payload — the LocusKit Rust port has not
-// shipped, so per-drawer parity is out of scope here. When the Swift
-// surface changes a verb name, an acceptance row, or the surface
-// target list, this file must change in lock-step.
+// per-drawer dispatch payload. Per-drawer parity is out of scope
+// here because the GLK verb bodies have not yet been wired to
+// dispatch through a live locus_kit::Estate (LocusKit Rust is fully
+// shipped; the verb-wiring layer is the remaining gap). When the
+// Swift surface changes a verb name, an acceptance row, or the
+// surface target list, this file must change in lock-step.
 
 use genius_locus_kit::{
     Acceptance, AssociateFrame, ExpungeFrame, Noun, ProposeFrame, ReanchorFrame,

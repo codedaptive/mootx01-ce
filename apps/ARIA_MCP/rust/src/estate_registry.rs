@@ -25,7 +25,6 @@ use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
-use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
 
 // Compile-time constant for the default estate owner identifier — stable
@@ -80,9 +79,10 @@ impl EstateRegistry {
     pub fn new_inmemory() -> Self {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         let estate_id = Uuid::new_v4();
-        let storage = Arc::new(InMemoryStorage::with_estate(estate_id));
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally;
+        // backend identity is visible at the type, not the argument.
         let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(storage, INIT_NOW, None).unwrap());
+            Arc::new(InMemoryDrawerStore::new(INIT_NOW, None).unwrap());
         let handle = coord
             .lock()
             .unwrap()
@@ -158,9 +158,9 @@ impl EstateRegistry {
     /// Used by the `moot_open_estate` test seam and integration tests.
     pub fn register_inmemory(&mut self, owner: &str) -> Uuid {
         let estate_id = Uuid::new_v4();
-        let storage = Arc::new(InMemoryStorage::with_estate(estate_id));
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally.
         let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(storage, INIT_NOW, None).unwrap());
+            Arc::new(InMemoryDrawerStore::new(INIT_NOW, None).unwrap());
         let handle = self
             .coord
             .lock()

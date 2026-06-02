@@ -23,24 +23,20 @@ mod tests {
     use crate::estate::Estate;
     use crate::estate_types::{LatticeAnchor, OwnerCredentials};
     use crate::frames::CaptureFrame;
-    use persistence_kit::inmemory::InMemoryStorage;
     use std::sync::Arc;
-    use uuid::Uuid;
 
     // -----------------------------------------------------------------------
     // Fixture helpers
     // -----------------------------------------------------------------------
 
     fn make_store() -> Arc<InMemoryDrawerStore> {
-        let storage: Arc<dyn persistence_kit::storage::Storage> =
-            Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap())
+        // InMemoryDrawerStore::new allocates InMemoryStorage internally —
+        // backend identity is visible at the type, not the argument.
+        Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap())
     }
 
     fn make_estate() -> Estate {
-        let storage: Arc<dyn persistence_kit::storage::Storage> =
-            Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-        let store = Arc::new(InMemoryDrawerStore::new(storage, 1_700_000_000, None).unwrap());
+        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap());
         Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
     }
 

@@ -130,10 +130,10 @@ pub enum ConcurrencyPolicy {
 }
 
 /// Mirrors Swift's `MutationKind`. The two associated-value cases
-/// carry stringly-typed payloads in the Rust port; the conformance
+/// carry stringly-typed payloads in this GLK scaffold; the conformance
 /// gate checks the case-tag and (where applicable) the payload
-/// vocabulary rather than the substrate-level enum, because LocusKit
-/// Rust has not shipped.
+/// vocabulary. Verb-wiring missions can reference locus_kit adjective
+/// enum types directly once dispatch is wired through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutationKind {
     Confirm,
