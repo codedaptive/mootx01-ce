@@ -18,8 +18,9 @@
 //!                                         ├─► recipe_tools
 //!                                         ├─► lens_tools
 //!                                         └─► lexicon_tools
-//!                                               ├─► capture_drawer
-//!                                               └─► recall_drawer
+//!                                               ├─► capture_drawer / drawer_recall / capture_tunnel
+//!                                               └─► mutate_drawer / withdraw_drawer / expunge_drawer
+//!                                                   / reanchor_drawer / tunnel_recall
 //! stdout (newline-delimited JSON responses)
 //! ```
 //!
@@ -30,11 +31,10 @@
 //! JSON-RPC methods, the same tool names, the same tool descriptions —
 //! but each is a complete, independent vertical using its own kit stack.
 //!
-//! # v1 boundary
+//! # Surface boundary
 //!
-//! See README.md for the explicit list of what ships in v1 and what is
-//! out of scope (persistent storage backends, federation tools,
-//! full lexicon projection beyond capture/recall).
+//! See README.md for the full tool list (28 tools after v2b-p1) and what is
+//! out of scope (persistent storage backends, federation tools, learn verb).
 
 pub mod dispatch;
 pub mod dispatcher;

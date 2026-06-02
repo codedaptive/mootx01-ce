@@ -1,9 +1,10 @@
 //! Dispatch-surface integration tests — Rust version.
 //!
-//! Exercises the 17 non-routing tools through the full dispatch stack using an
-//! in-memory estate (EstateRegistry::new_inmemory). One success path + one error
-//! path per tool group. Tests are ordered by the dispatch routing order in
-//! dispatch.rs: recipe → lens → lexicon.
+//! Exercises all 28 tools through the full dispatch stack using an in-memory
+//! estate (EstateRegistry::new_inmemory). One success path + one error path per
+//! tool group. Tests are ordered by the dispatch routing order in dispatch.rs:
+//! recipe → lens → lexicon (v1 minimum + v2b-p1 lifecycle verbs + tunnel recall).
+//! A tools/list count and schema-keys assertion verifies the full 28-tool surface.
 //!
 //! # Design
 //!
@@ -24,6 +25,7 @@ use aria_mcp::{
     dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
     jsonrpc::{JSONRPCErrorCode, JsonValue},
+    tool_list::build_tool_list,
 };
 
 // ---------------------------------------------------------------------------
@@ -675,4 +677,490 @@ fn formal_concepts_with_unknown_estate_returns_invalid_params() {
         "unknown estateID must map to INVALID_PARAMS; got code {}",
         err.code
     );
+}
+
+// ---------------------------------------------------------------------------
+// 9. moot_mutate_drawer (v2b-p1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mutate_drawer_confirm_transitions_confirmation_axis() {
+    // Confirm is the one mutation kind that is live end-to-end: the coordinator
+    // dispatches it to the estate and the row's confirmation axis moves to
+    // UserConfirmed. Success result: isError false, text contains the row id.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "confirm mutation target", "study");
+    assert!(!row_id.is_empty(), "capture must return a row id");
+
+    let a = args!["rowID" => row_id.as_str(), "kind" => "confirm"];
+    let result = dispatch_tool("moot_mutate_drawer", &a, &registry).expect("mutate must not throw");
+    assert!(
+        is_success(&result),
+        "confirm mutation must be a success result; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains(&row_id),
+        "success text must include the row id; got: {text}"
+    );
+    assert!(
+        text.contains("confirm"),
+        "success text must include the mutation kind; got: {text}"
+    );
+}
+
+#[test]
+fn mutate_drawer_unknown_kind_returns_invalid_params() {
+    // An unrecognized mutation kind is an invalidParams transport fault —
+    // the call never reached the substrate.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "kind check target", "study");
+
+    let a = args!["rowID" => row_id.as_str(), "kind" => "not-a-real-kind"];
+    let err = dispatch_tool("moot_mutate_drawer", &a, &registry)
+        .expect_err("unknown kind must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "unknown mutation kind must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+#[test]
+fn mutate_drawer_missing_kind_returns_invalid_params() {
+    // Omitting the required `kind` field is an invalidParams transport fault.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "missing kind target", "study");
+
+    let a = args!["rowID" => row_id.as_str()];
+    let err = dispatch_tool("moot_mutate_drawer", &a, &registry)
+        .expect_err("missing kind must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "missing kind must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. moot_withdraw_drawer (v2b-p1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn withdraw_drawer_removes_row_from_unconfirmed_set() {
+    // Withdraw transitions the row's state so it no longer appears in the
+    // unconfirmed recall set. Success result: isError false, text contains
+    // the row id.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "withdraw target content", "lab");
+
+    let a = args!["rowID" => row_id.as_str(), "reason" => "obsolete"];
+    let result =
+        dispatch_tool("moot_withdraw_drawer", &a, &registry).expect("withdraw must not throw");
+    assert!(
+        is_success(&result),
+        "withdraw must be a success result; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains(&row_id),
+        "success text must include the row id; got: {text}"
+    );
+
+    // Verify the row left the unconfirmed recall set.
+    let recall_result =
+        dispatch_tool("moot_drawer_recall", &args![], &registry).expect("recall must succeed");
+    let recall_text = content_text(&recall_result);
+    assert!(
+        !recall_text.contains(&row_id),
+        "withdrawn row must not appear in unconfirmed recall; got: {recall_text}"
+    );
+}
+
+#[test]
+fn withdraw_drawer_missing_row_id_returns_invalid_params() {
+    // Omitting rowID is an invalidParams transport fault — required arg missing.
+    let registry = EstateRegistry::new_inmemory();
+    let a = args!["reason" => "test"];
+    let err = dispatch_tool("moot_withdraw_drawer", &a, &registry)
+        .expect_err("missing rowID must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "missing rowID must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. moot_expunge_drawer (v2b-p1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn expunge_drawer_with_confirmation_true_succeeds() {
+    // Expunge with confirmation:true reaches the estate and tombstones the row.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "expunge target content", "archive");
+
+    let a = args!["rowID" => row_id.as_str(), "reason" => "gdpr erasure", "confirmation" => true];
+    let result =
+        dispatch_tool("moot_expunge_drawer", &a, &registry).expect("expunge must not throw");
+    assert!(
+        is_success(&result),
+        "expunge with confirmation must be a success result; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains(&row_id),
+        "success text must include the row id; got: {text}"
+    );
+}
+
+#[test]
+fn expunge_drawer_without_confirmation_returns_tool_error() {
+    // Expunge with confirmation:false is refused at the coordinator boundary
+    // without touching the estate — ExpungeNotConfirmed → error_result (isError
+    // true), NOT a JSONRPCError transport fault.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "expunge guard target", "archive");
+
+    let a = args!["rowID" => row_id.as_str(), "reason" => "test", "confirmation" => false];
+    let result = dispatch_tool("moot_expunge_drawer", &a, &registry)
+        .expect("unconfirmed expunge must return tool error, not transport fault");
+    assert!(
+        is_tool_error(&result),
+        "expunge without confirmation must be isError:true; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        !text.is_empty(),
+        "error result must carry a message; got empty text"
+    );
+    // The coordinator's boundary guard message includes the row id so the caller
+    // can correlate the refusal to the specific row.
+    assert!(
+        text.contains(&row_id) || text.contains("ExpungeNotConfirmed"),
+        "refusal message should identify the row or the guard; got: {text}"
+    );
+}
+
+#[test]
+fn expunge_drawer_missing_reason_returns_invalid_params() {
+    // `reason` is required for expunge (mandatory justification for the
+    // irreversible action). Missing it is an invalidParams transport fault.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "reason check target", "archive");
+
+    let a = args!["rowID" => row_id.as_str(), "confirmation" => true];
+    let err = dispatch_tool("moot_expunge_drawer", &a, &registry)
+        .expect_err("missing reason must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "missing reason must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. moot_reanchor_drawer (v2b-p1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reanchor_drawer_to_new_room_succeeds() {
+    // Reanchor with toRoom moves the drawer's room. Success result: isError
+    // false, text contains the row id.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "reanchor target content", "old-room");
+
+    let a = args!["rowID" => row_id.as_str(), "toRoom" => "new-room"];
+    let result =
+        dispatch_tool("moot_reanchor_drawer", &a, &registry).expect("reanchor must not throw");
+    assert!(
+        is_success(&result),
+        "reanchor must be a success result; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains(&row_id),
+        "success text must include the row id; got: {text}"
+    );
+}
+
+#[test]
+fn reanchor_drawer_empty_reanchor_returns_tool_error() {
+    // Reanchor with neither toRoom nor toUDC is refused at the coordinator
+    // boundary — EmptyReanchor → error_result (isError true), NOT a transport
+    // fault.
+    let registry = EstateRegistry::new_inmemory();
+    let row_id = capture_one_drawer(&registry, "empty reanchor target", "room-a");
+
+    let a = args!["rowID" => row_id.as_str()];
+    let result = dispatch_tool("moot_reanchor_drawer", &a, &registry)
+        .expect("empty reanchor must return tool error, not transport fault");
+    assert!(
+        is_tool_error(&result),
+        "empty reanchor must be isError:true; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        !text.is_empty(),
+        "error result must carry a message; got empty text"
+    );
+}
+
+#[test]
+fn reanchor_drawer_missing_row_id_returns_invalid_params() {
+    // Omitting rowID is an invalidParams transport fault.
+    let registry = EstateRegistry::new_inmemory();
+    let a = args!["toRoom" => "somewhere"];
+    let err = dispatch_tool("moot_reanchor_drawer", &a, &registry)
+        .expect_err("missing rowID must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "missing rowID must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. moot_tunnel_recall (v2b-p1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tunnel_recall_returns_outgoing_tunnels_for_wing() {
+    // Capture a tunnel and then recall it by wing. The result should report the
+    // count. Success result: isError false, text starts with the count line.
+    let registry = EstateRegistry::new_inmemory();
+
+    // Capture a tunnel connecting two wings.
+    let a = args![
+        "sourceWing" => "alpha-wing",
+        "sourceRoom" => "room-a",
+        "targetWing" => "beta-wing",
+        "targetRoom" => "room-b",
+        "kind" => "relates",
+        "addedBy" => "test-agent"
+    ];
+    let t_result =
+        dispatch_tool("moot_capture_tunnel", &a, &registry).expect("capture_tunnel must succeed");
+    assert!(is_success(&t_result), "tunnel capture should succeed");
+
+    // Recall tunnels originating from alpha-wing.
+    let recall_a = args!["wing" => "alpha-wing"];
+    let result = dispatch_tool("moot_tunnel_recall", &recall_a, &registry)
+        .expect("tunnel_recall must succeed");
+    assert!(
+        is_success(&result),
+        "tunnel_recall must be a success result; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.starts_with("recalled 1 tunnel(s) from wing alpha-wing"),
+        "result must report the tunnel count and wing; got: {text}"
+    );
+}
+
+#[test]
+fn tunnel_recall_empty_wing_returns_zero_tunnels() {
+    // Recalling from a wing with no outgoing tunnels returns a zero-count result,
+    // not an error.
+    let registry = EstateRegistry::new_inmemory();
+    let a = args!["wing" => "unlinked-wing"];
+    let result =
+        dispatch_tool("moot_tunnel_recall", &a, &registry).expect("tunnel_recall must succeed");
+    assert!(
+        is_success(&result),
+        "tunnel_recall on empty wing must be a success result; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.starts_with("recalled 0 tunnel(s)"),
+        "empty wing result must report zero tunnels; got: {text}"
+    );
+}
+
+#[test]
+fn tunnel_recall_missing_wing_returns_invalid_params() {
+    // Omitting the required `wing` argument is an invalidParams transport fault.
+    let registry = EstateRegistry::new_inmemory();
+    let a = args![];
+    let err = dispatch_tool("moot_tunnel_recall", &a, &registry)
+        .expect_err("missing wing must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "missing wing must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 14. tools/list surface assertions — count and schema-keys for v2b-p1 tools
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tools_list_count_is_28() {
+    // The full tool surface is 28 tools after v2b-p1. This test gates on
+    // the exact count so any accidental addition or removal is caught.
+    let tools = build_tool_list();
+    let arr = tools
+        .as_array()
+        .expect("build_tool_list must return an array");
+    assert_eq!(
+        arr.len(),
+        28,
+        "expected 28 tools in the list; got {}",
+        arr.len()
+    );
+}
+
+#[test]
+fn tools_list_new_tools_present_with_correct_schema_keys() {
+    // Verify the 5 new v2b-p1 tools appear in tools/list with the correct
+    // required-array contents and key presence.
+    let tools = build_tool_list();
+    let arr = tools
+        .as_array()
+        .expect("build_tool_list must return an array");
+
+    // Index tools by name for O(1) lookup.
+    let by_name: std::collections::HashMap<&str, &serde_json::Value> = arr
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(|n| (n, t)))
+        .collect();
+
+    // moot_mutate_drawer: required = ["rowID", "kind"]
+    {
+        let tool = by_name
+            .get("moot_mutate_drawer")
+            .expect("moot_mutate_drawer must be in list");
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .expect("required must be array");
+        let req: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            req.contains(&"rowID"),
+            "mutate_drawer required must include rowID; got: {req:?}"
+        );
+        assert!(
+            req.contains(&"kind"),
+            "mutate_drawer required must include kind; got: {req:?}"
+        );
+        let props = tool["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties must be object");
+        assert!(
+            props.contains_key("payload"),
+            "mutate_drawer must have payload property"
+        );
+        assert!(
+            props.contains_key("estateID"),
+            "mutate_drawer must have estateID property"
+        );
+    }
+
+    // moot_withdraw_drawer: required = ["rowID"]
+    {
+        let tool = by_name
+            .get("moot_withdraw_drawer")
+            .expect("moot_withdraw_drawer must be in list");
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .expect("required must be array");
+        let req: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            req.contains(&"rowID"),
+            "withdraw_drawer required must include rowID; got: {req:?}"
+        );
+        let props = tool["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties must be object");
+        assert!(
+            props.contains_key("reason"),
+            "withdraw_drawer must have reason property"
+        );
+    }
+
+    // moot_expunge_drawer: required = ["rowID", "reason", "confirmation"]
+    {
+        let tool = by_name
+            .get("moot_expunge_drawer")
+            .expect("moot_expunge_drawer must be in list");
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .expect("required must be array");
+        let req: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            req.contains(&"rowID"),
+            "expunge_drawer required must include rowID; got: {req:?}"
+        );
+        assert!(
+            req.contains(&"reason"),
+            "expunge_drawer required must include reason; got: {req:?}"
+        );
+        assert!(
+            req.contains(&"confirmation"),
+            "expunge_drawer required must include confirmation; got: {req:?}"
+        );
+        // confirmation must be boolean type.
+        let conf_type = tool["inputSchema"]["properties"]["confirmation"]["type"]
+            .as_str()
+            .unwrap_or("");
+        assert_eq!(
+            conf_type, "boolean",
+            "confirmation must be boolean type; got: {conf_type}"
+        );
+    }
+
+    // moot_reanchor_drawer: required = ["rowID"]
+    {
+        let tool = by_name
+            .get("moot_reanchor_drawer")
+            .expect("moot_reanchor_drawer must be in list");
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .expect("required must be array");
+        let req: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            req.contains(&"rowID"),
+            "reanchor_drawer required must include rowID; got: {req:?}"
+        );
+        let props = tool["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties must be object");
+        assert!(
+            props.contains_key("toRoom"),
+            "reanchor_drawer must have toRoom property"
+        );
+        assert!(
+            props.contains_key("toUDC"),
+            "reanchor_drawer must have toUDC property"
+        );
+    }
+
+    // moot_tunnel_recall: required = ["wing"]
+    {
+        let tool = by_name
+            .get("moot_tunnel_recall")
+            .expect("moot_tunnel_recall must be in list");
+        let required = tool["inputSchema"]["required"]
+            .as_array()
+            .expect("required must be array");
+        let req: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            req.contains(&"wing"),
+            "tunnel_recall required must include wing; got: {req:?}"
+        );
+        let props = tool["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties must be object");
+        assert!(
+            props.contains_key("estateID"),
+            "tunnel_recall must have estateID property"
+        );
+    }
 }
