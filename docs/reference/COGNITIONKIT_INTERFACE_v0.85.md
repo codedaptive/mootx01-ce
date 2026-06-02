@@ -411,6 +411,12 @@ public struct AssociationRuleResult: Sendable, Equatable {
     public let leverage: Double
 }
 
+// N-semantics (MATRIX_ACCESSOR_DECISION v1.0): the recipe folds its
+// co-occurrence from the RECALLED drawers — N = recalled drawer count, a
+// snapshot over the recalled frame, NOT estate-lifetime decayed history.
+// The recall filter chain is therefore the sensitivity/clearance gate for
+// the mined matrix. A live-tier variant, if ever wanted, is a NEW-named
+// recipe behind a clearance-partitioned tier — never a source switch here.
 public struct AssociationRules: Recipe {
     public struct Input: Sendable {
         public let frame: RecallFrame

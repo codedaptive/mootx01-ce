@@ -167,9 +167,14 @@ Test run with 44 tests in 7 suites passed after 0.037 seconds.
 
 ## Follow-up List
 
-1. **GLK matrix accessor mission** — add a public read accessor on GeniusLocusKit/EstateCoordinator
-   that exposes the MatrixTier's coOccurrence and liveRowCount. Enables live-matrix semantics with
-   decay history for the AssociationRules recipe. Blast radius: GLK package (both legs).
+1. **GLK matrix accessor — AMENDED TO A BLOCKED FINDING** (independent Kong
+   re-adjudication, MATRIX_ACCESSOR_DECISION_v1.0_2026-06-02): the tier and its
+   EnrichmentPipeline fold have zero sensitivity awareness, so an accessor at
+   the recipe surface would leak co-occurrence contributed by rows the caller's
+   clearance-bounded recall is forbidden to see. Blocked until the tier is
+   clearance-partitioned; any live-tier capability then ships as a NEW-named
+   recipe (e.g. accumulated_association_rules), never a source switch. As
+   originally written, this follow-up builds the leak — do not execute it.
 
 2. **Rust MCP server tools for moot_association_rules and moot_formal_concepts** — sequenced
    AFTER ARIA_MCP_RUST_001 merges. That mission is building the Rust MCP server right now.
