@@ -65,6 +65,17 @@ struct HybridRecallEngineTests {
         #expect(abs(ab - ba) <= 1e-6)
     }
 
+    // The PUBLIC surface (the Rust version's pub shingle_similarity has
+    // always been public; the contradiction recipe is the named Swift
+    // consumer). It is the engine's value, surfaced.
+    @Test("public shingleSimilarity matches the engine")
+    func publicShingleSimilarityMatchesEngine() {
+        let a = "the organic chemistry of carbon"
+        let b = "carbon-based organic compounds"
+        #expect(NeuronKit.shingleSimilarity(a, b) == HybridRecallEngine.shingleSimilarity(a, b))
+        #expect(abs(NeuronKit.shingleSimilarity(a, a) - 1.0) <= 1e-6)
+    }
+
     // MARK: - rerank
 
     @Test("rerank of empty input returns empty")
