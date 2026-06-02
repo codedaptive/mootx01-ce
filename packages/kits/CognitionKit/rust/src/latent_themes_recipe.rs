@@ -146,8 +146,7 @@ mod tests {
     fn coord_with_parent() -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
         // InMemoryDrawerStore::new allocates InMemoryStorage internally.
-        let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+        let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
         let h = coord
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .unwrap();

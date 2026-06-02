@@ -467,8 +467,7 @@ mod tests {
     fn open_one() -> (EstateCoordinator, EstateHandle) {
         let mut coord = EstateCoordinator::new();
         // InMemoryDrawerStore::new allocates InMemoryStorage internally.
-        let store: Arc<dyn DrawerStore> =
-            Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+        let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
         let handle = coord
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .expect("open");

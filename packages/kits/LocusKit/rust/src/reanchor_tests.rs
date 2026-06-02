@@ -23,7 +23,6 @@ mod tests {
     use crate::estate::Estate;
     use crate::estate_types::{LatticeAnchor, OwnerCredentials};
     use crate::frames::CaptureFrame;
-    use crate::drawer_operational::CaptureChannel;
     use std::sync::Arc;
 
     // -----------------------------------------------------------------------
