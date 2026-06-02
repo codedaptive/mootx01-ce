@@ -4,22 +4,28 @@ import GeniusLocusKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
+import PersistenceKitSQLite
 
 // Entry point for the ARIA_MCP stdio server.
 //
-// Opens a single GeniusLocusKit estate (an in-memory backend for the
-// LAUNCH-04 transactional spike per LAUNCH_PLAN.md) and runs the
-// JSON-RPC loop until stdin closes. Per ARIA_MCP_SPEC_v0.2 §5, stdout
-// is reserved for JSON-RPC frames; any human-readable logging routes
-// through Logging.stderr. The startup banner is therefore written to
-// stderr only.
+// Backend selection is driven by the ARIA_MCP_SQLITE_PATH environment
+// variable, matching the Rust v2a-server's behavior exactly:
 //
-// Estate backend: in-memory for the launch spike. The mission scope
-// is "wrap GeniusLocusKit and project AriaLexicon over MCP"; a
-// persistent SQLite backend lights up at v1.0 once the installer
-// landed in MISSION_LAUNCH_05 is wired through. The estate's UUID is
-// fresh each run so the spike serves one ephemeral estate per
-// process, matching the v1.0 "owner-by-default" credential model.
+//   ARIA_MCP_SQLITE_PATH absent or empty → InMemoryStorage (ephemeral,
+//     discarded on exit; byte-identical to prior behavior).
+//
+//   ARIA_MCP_SQLITE_PATH present and non-empty → SQLiteStorage at that
+//     path (WAL-mode, durable across restarts). Parent directories are
+//     created automatically. An unusable path (creation failure) causes
+//     a clear stderr message and a nonzero exit; no half-open estate
+//     state is left behind.
+//
+// The JSON-RPC wire surface (tools, schemas, methods) is unchanged for
+// both backends. Clients do not need to know or care which backend is
+// active.
+//
+// Per ARIA_MCP_SPEC_v0.2 §5, stdout is reserved for JSON-RPC frames;
+// all logging routes through Logging.stderr.
 
 @main
 struct AriaMCPMain {
@@ -28,15 +34,71 @@ struct AriaMCPMain {
     }
 
     static func run() async {
-        Logging.stderr.log("ARIA_MCP starting (stdio, in-memory backend)")
-
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-owner")
-        let configuration = EstateConfiguration(estateID: UUID(), backend: .inMemory)
-        let storage = InMemoryStorage(configuration: configuration)
+
+        // Read the path variable. Treat whitespace-only as absent.
+        let rawPath = ProcessInfo.processInfo.environment["ARIA_MCP_SQLITE_PATH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        let storage: any Storage
+
+        if rawPath.isEmpty {
+            // Absent or empty → in-memory ephemeral estate.
+            // The estate UUID is fresh each run so the server serves one
+            // ephemeral estate per process, matching the v1.0 owner-by-
+            // default credential model.
+            Logging.stderr.log("ARIA_MCP starting (stdio, in-memory backend)")
+            let configuration = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+            storage = InMemoryStorage(configuration: configuration)
+        } else {
+            // Non-empty path → SQLite-backed durable estate.
+            let dbURL = URL(fileURLWithPath: rawPath)
+            Logging.stderr.log("ARIA_MCP starting (stdio, SQLite backend: \(rawPath))")
+
+            // Create parent directories so the caller does not need to
+            // pre-create them. FileManager.createDirectory is idempotent
+            // when withIntermediateDirectories: true.
+            let parentDir = dbURL.deletingLastPathComponent()
+            do {
+                try FileManager.default.createDirectory(
+                    at: parentDir,
+                    withIntermediateDirectories: true,
+                    attributes: nil
+                )
+            } catch {
+                fputs(
+                    "ARIA_MCP fatal: cannot create parent directory '\(parentDir.path)': \(error)\n",
+                    stderr
+                )
+                exit(1)
+            }
+
+            // Construct the SQLite storage. busyTimeout of 5.0 seconds is
+            // the PersistenceKitSQLite default; sufficient for a single-
+            // process server with no concurrent writers.
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: dbURL, busyTimeout: 5.0)
+            )
+            do {
+                storage = try SQLiteStorage(configuration: configuration)
+            } catch {
+                fputs(
+                    "ARIA_MCP fatal: cannot open SQLite at '\(rawPath)': \(error)\n",
+                    stderr
+                )
+                exit(1)
+            }
+        }
 
         let handle: EstateHandle
         do {
+            // Estate.create opens the schema idempotently (DrawerStore uses
+            // upsert for manifest keys), so calling it on an existing SQLite
+            // file is safe: it re-stamps owner_identifier and leaves all
+            // other manifest values intact. The subsequent kit.open validates
+            // the bitmap layout version and issues the EstateHandle.
             _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
             handle = try await kit.open(storage: storage, owner: owner)
         } catch {
