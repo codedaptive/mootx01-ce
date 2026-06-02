@@ -11,7 +11,8 @@
 //! lens; named for what it actually computes.
 //!
 //! Pure CognitionKit sequencing over GLK `recall_tunnels` (the directed
-//! edges). Read-only.
+//! edges). Read-only. Paired with the Swift version
+//! (`Sources/CognitionKit/TunnelSuccessor.swift`).
 
 use std::collections::BTreeMap;
 
