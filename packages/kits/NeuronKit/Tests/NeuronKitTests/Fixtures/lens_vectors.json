@@ -94,6 +94,242 @@
       "targetOutcome" : 1
     }
   ],
+  "associationRuleMining" : [
+    {
+      "activeRowCount" : 4,
+      "minConfidence" : 0,
+      "minSupport" : 0,
+      "rows" : [
+        [
+          {
+            "field" : 0,
+            "value" : 1
+          },
+          {
+            "field" : 5,
+            "value" : 3
+          }
+        ],
+        [
+          {
+            "field" : 0,
+            "value" : 1
+          },
+          {
+            "field" : 5,
+            "value" : 3
+          }
+        ],
+        [
+          {
+            "field" : 0,
+            "value" : 1
+          }
+        ],
+        [
+          {
+            "field" : 5,
+            "value" : 3
+          }
+        ]
+      ],
+      "rules" : [
+        {
+          "antecedentField" : 0,
+          "antecedentValue" : 1,
+          "confidence" : "0x3fe5555555555555",
+          "consequentField" : 5,
+          "consequentValue" : 3,
+          "conviction" : "0x3fe7ffffffffffff",
+          "leverage" : "0xbfb0000000000000",
+          "lift" : "0x3fec71c71c71c71c",
+          "support" : "0x3fe0000000000000"
+        },
+        {
+          "antecedentField" : 5,
+          "antecedentValue" : 3,
+          "confidence" : "0x3fe5555555555555",
+          "consequentField" : 0,
+          "consequentValue" : 1,
+          "conviction" : "0x3fe7ffffffffffff",
+          "leverage" : "0xbfb0000000000000",
+          "lift" : "0x3fec71c71c71c71c",
+          "support" : "0x3fe0000000000000"
+        }
+      ]
+    }
+  ],
+  "benchmarkScoring" : [
+    {
+      "expectedIDs" : [
+        "a",
+        "b",
+        "c"
+      ],
+      "foundPerQuery" : [
+        [
+          "a"
+        ],
+        [
+          "b"
+        ],
+        [
+          "c"
+        ]
+      ],
+      "meanReciprocalRank" : "0x3f800000",
+      "newInBranch" : [
+
+      ],
+      "notFoundInBranch" : [
+
+      ],
+      "queryCount" : 3,
+      "recallOverlap" : "0x3f800000",
+      "recallPrecision" : "0x3f800000"
+    },
+    {
+      "expectedIDs" : [
+        "a",
+        "b"
+      ],
+      "foundPerQuery" : [
+        [
+          "a"
+        ],
+        [
+
+        ]
+      ],
+      "meanReciprocalRank" : "0x3f000000",
+      "newInBranch" : [
+
+      ],
+      "notFoundInBranch" : [
+        "b"
+      ],
+      "queryCount" : 2,
+      "recallOverlap" : "0x3f000000",
+      "recallPrecision" : "0x3f800000"
+    },
+    {
+      "expectedIDs" : [
+        "a",
+        "b"
+      ],
+      "foundPerQuery" : [
+        [
+          "x",
+          "a"
+        ],
+        [
+          "b",
+          "y"
+        ]
+      ],
+      "meanReciprocalRank" : "0x3f400000",
+      "newInBranch" : [
+        "x",
+        "y"
+      ],
+      "notFoundInBranch" : [
+
+      ],
+      "queryCount" : 2,
+      "recallOverlap" : "0x3f000000",
+      "recallPrecision" : "0x3f000000"
+    },
+    {
+      "expectedIDs" : [
+
+      ],
+      "foundPerQuery" : [
+
+      ],
+      "meanReciprocalRank" : "0x00000000",
+      "newInBranch" : [
+
+      ],
+      "notFoundInBranch" : [
+
+      ],
+      "queryCount" : 0,
+      "recallOverlap" : "0x00000000",
+      "recallPrecision" : "0x00000000"
+    },
+    {
+      "expectedIDs" : [
+        "a",
+        "b"
+      ],
+      "foundPerQuery" : [
+        [
+          "a",
+          "b"
+        ],
+        [
+
+        ]
+      ],
+      "meanReciprocalRank" : "0x3f000000",
+      "newInBranch" : [
+
+      ],
+      "notFoundInBranch" : [
+
+      ],
+      "queryCount" : 2,
+      "recallOverlap" : "0x3f800000",
+      "recallPrecision" : "0x3f800000"
+    }
+  ],
+  "bradleyTerry" : [
+    {
+      "outcomes" : [
+        {
+          "count" : 3,
+          "loser" : "B",
+          "winner" : "A"
+        },
+        {
+          "count" : 3,
+          "loser" : "C",
+          "winner" : "B"
+        },
+        {
+          "count" : 3,
+          "loser" : "C",
+          "winner" : "A"
+        },
+        {
+          "count" : 1,
+          "loser" : "A",
+          "winner" : "C"
+        }
+      ],
+      "scores" : [
+        {
+          "competitorID" : "A",
+          "confidenceHigh" : "0x400b1c4058fc4ca7",
+          "confidenceLow" : "0xbfee1a6817430984",
+          "strength" : "0x3ff395a6532b8a46"
+        },
+        {
+          "competitorID" : "B",
+          "confidenceHigh" : "0x3ffe8d6613e7015d",
+          "confidenceLow" : "0xbffe8d6613592c09",
+          "strength" : "0x3e11baaa7fd8b5a8"
+        },
+        {
+          "competitorID" : "C",
+          "confidenceHigh" : "0x3fee1a681756a892",
+          "confidenceLow" : "0xc00b1c4059481f14",
+          "strength" : "0xbff395a6537274ef"
+        }
+      ],
+      "tolerance" : "1e-6"
+    }
+  ],
   "constellations" : [
     {
       "communities" : [
@@ -145,6 +381,75 @@
       ]
     }
   ],
+  "contextSynthesizer" : [
+    {
+      "keyInsights" : [
+        "carbon organic compounds",
+        "organic chemistry carbon",
+        "physics waves photons"
+      ],
+      "patterns" : [
+        "carbon",
+        "organic",
+        "compounds",
+        "chemistry",
+        "physics"
+      ],
+      "recommendationsCount" : 5,
+      "rows" : [
+        {
+          "adjectiveBitmap" : 0,
+          "content" : "carbon organic compounds",
+          "room" : "r1",
+          "wing" : "alpha"
+        },
+        {
+          "adjectiveBitmap" : 0,
+          "content" : "organic chemistry carbon",
+          "room" : "r2",
+          "wing" : "alpha"
+        },
+        {
+          "adjectiveBitmap" : 0,
+          "content" : "physics waves photons",
+          "room" : "r1",
+          "wing" : "beta"
+        }
+      ],
+      "successRate" : "0x3f800000",
+      "summary" : "3 drawers; dominant wing alpha; dominant room r1."
+    },
+    {
+      "keyInsights" : [
+        "alpha beta gamma delta echo",
+        "withdrawn item here"
+      ],
+      "patterns" : [
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+        "echo"
+      ],
+      "recommendationsCount" : 5,
+      "rows" : [
+        {
+          "adjectiveBitmap" : 0,
+          "content" : "alpha beta gamma delta echo",
+          "room" : "r1",
+          "wing" : "w1"
+        },
+        {
+          "adjectiveBitmap" : 2,
+          "content" : "withdrawn item here",
+          "room" : "r1",
+          "wing" : "w1"
+        }
+      ],
+      "successRate" : "0x3f800000",
+      "summary" : "2 drawers; dominant wing w1; dominant room r1."
+    }
+  ],
   "drift" : [
     {
       "jensenShannon" : "0x00000000",
@@ -175,6 +480,323 @@
       ]
     }
   ],
+  "formalConceptAnalysis" : [
+    {
+      "concepts" : [
+        {
+          "extent" : [
+            0,
+            1,
+            2
+          ],
+          "intent" : [
+            {
+              "key" : "color",
+              "namespace" : "adj",
+              "value" : "red"
+            },
+            {
+              "key" : "size",
+              "namespace" : "adj",
+              "value" : "large"
+            }
+          ],
+          "support" : 3
+        },
+        {
+          "extent" : [
+            3,
+            4
+          ],
+          "intent" : [
+            {
+              "key" : "color",
+              "namespace" : "adj",
+              "value" : "blue"
+            },
+            {
+              "key" : "size",
+              "namespace" : "adj",
+              "value" : "small"
+            }
+          ],
+          "support" : 2
+        }
+      ],
+      "maxConcepts" : 8,
+      "maxIntentSize" : 8,
+      "minSupport" : 2,
+      "rows" : [
+        [
+          {
+            "key" : "color",
+            "namespace" : "adj",
+            "value" : "red"
+          },
+          {
+            "key" : "size",
+            "namespace" : "adj",
+            "value" : "large"
+          }
+        ],
+        [
+          {
+            "key" : "color",
+            "namespace" : "adj",
+            "value" : "red"
+          },
+          {
+            "key" : "size",
+            "namespace" : "adj",
+            "value" : "large"
+          }
+        ],
+        [
+          {
+            "key" : "color",
+            "namespace" : "adj",
+            "value" : "red"
+          },
+          {
+            "key" : "size",
+            "namespace" : "adj",
+            "value" : "large"
+          }
+        ],
+        [
+          {
+            "key" : "color",
+            "namespace" : "adj",
+            "value" : "blue"
+          },
+          {
+            "key" : "size",
+            "namespace" : "adj",
+            "value" : "small"
+          }
+        ],
+        [
+          {
+            "key" : "color",
+            "namespace" : "adj",
+            "value" : "blue"
+          },
+          {
+            "key" : "size",
+            "namespace" : "adj",
+            "value" : "small"
+          }
+        ],
+        [
+          {
+            "key" : "shape",
+            "namespace" : "adj",
+            "value" : "round"
+          }
+        ]
+      ]
+    }
+  ],
+  "hybridRecall" : {
+    "pagingCases" : [
+      {
+        "pageSize" : 10,
+        "pages" : [
+          {
+            "ids" : [
+              "0",
+              "1",
+              "2",
+              "3",
+              "4",
+              "5",
+              "6",
+              "7",
+              "8",
+              "9"
+            ],
+            "isLast" : false,
+            "pageIndex" : 0
+          },
+          {
+            "ids" : [
+              "10",
+              "11",
+              "12",
+              "13",
+              "14",
+              "15",
+              "16",
+              "17",
+              "18",
+              "19"
+            ],
+            "isLast" : false,
+            "pageIndex" : 1
+          },
+          {
+            "ids" : [
+              "20",
+              "21",
+              "22",
+              "23",
+              "24"
+            ],
+            "isLast" : true,
+            "pageIndex" : 2
+          }
+        ],
+        "rows" : [
+          {
+            "content" : "row 0",
+            "id" : "0"
+          },
+          {
+            "content" : "row 1",
+            "id" : "1"
+          },
+          {
+            "content" : "row 2",
+            "id" : "2"
+          },
+          {
+            "content" : "row 3",
+            "id" : "3"
+          },
+          {
+            "content" : "row 4",
+            "id" : "4"
+          },
+          {
+            "content" : "row 5",
+            "id" : "5"
+          },
+          {
+            "content" : "row 6",
+            "id" : "6"
+          },
+          {
+            "content" : "row 7",
+            "id" : "7"
+          },
+          {
+            "content" : "row 8",
+            "id" : "8"
+          },
+          {
+            "content" : "row 9",
+            "id" : "9"
+          },
+          {
+            "content" : "row 10",
+            "id" : "10"
+          },
+          {
+            "content" : "row 11",
+            "id" : "11"
+          },
+          {
+            "content" : "row 12",
+            "id" : "12"
+          },
+          {
+            "content" : "row 13",
+            "id" : "13"
+          },
+          {
+            "content" : "row 14",
+            "id" : "14"
+          },
+          {
+            "content" : "row 15",
+            "id" : "15"
+          },
+          {
+            "content" : "row 16",
+            "id" : "16"
+          },
+          {
+            "content" : "row 17",
+            "id" : "17"
+          },
+          {
+            "content" : "row 18",
+            "id" : "18"
+          },
+          {
+            "content" : "row 19",
+            "id" : "19"
+          },
+          {
+            "content" : "row 20",
+            "id" : "20"
+          },
+          {
+            "content" : "row 21",
+            "id" : "21"
+          },
+          {
+            "content" : "row 22",
+            "id" : "22"
+          },
+          {
+            "content" : "row 23",
+            "id" : "23"
+          },
+          {
+            "content" : "row 24",
+            "id" : "24"
+          }
+        ]
+      }
+    ],
+    "rerankCases" : [
+      {
+        "drawers" : [
+          {
+            "content" : "the quick brown fox",
+            "id" : "near-1"
+          },
+          {
+            "content" : "the quick brown foxx",
+            "id" : "near-2"
+          },
+          {
+            "content" : "zzz yyy xxx www",
+            "id" : "far"
+          }
+        ],
+        "expectedOrder" : [
+          "near-1",
+          "far",
+          "near-2"
+        ],
+        "mmrLambda" : 0
+      },
+      {
+        "drawers" : [
+          {
+            "content" : "organic chemistry carbon",
+            "id" : "d0"
+          },
+          {
+            "content" : "organic chemistry",
+            "id" : "d1"
+          },
+          {
+            "content" : "physics waves photons",
+            "id" : "d2"
+          }
+        ],
+        "expectedOrder" : [
+          "d0",
+          "d1",
+          "d2"
+        ],
+        "mmrLambda" : 0.7
+      }
+    ]
+  },
   "keystones" : [
     {
       "edges" : [
@@ -514,6 +1136,137 @@
       ]
     }
   ],
+  "mmrRank" : [
+    {
+      "candidates" : [
+        {
+          "blockBits" : [
+            40,
+            0,
+            0,
+            0
+          ],
+          "id" : "A"
+        },
+        {
+          "blockBits" : [
+            44,
+            0,
+            0,
+            0
+          ],
+          "id" : "B"
+        },
+        {
+          "blockBits" : [
+            0,
+            64,
+            16,
+            0
+          ],
+          "id" : "C"
+        }
+      ],
+      "expectedIDs" : [
+        "A",
+        "C",
+        "B"
+      ],
+      "expectedIndices" : [
+        0,
+        2,
+        1
+      ],
+      "k" : 3,
+      "lambda" : 0.7
+    },
+    {
+      "candidates" : [
+        {
+          "blockBits" : [
+            40,
+            0,
+            0,
+            0
+          ],
+          "id" : "A"
+        },
+        {
+          "blockBits" : [
+            44,
+            0,
+            0,
+            0
+          ],
+          "id" : "B"
+        },
+        {
+          "blockBits" : [
+            0,
+            64,
+            16,
+            0
+          ],
+          "id" : "C"
+        }
+      ],
+      "expectedIDs" : [
+        "A",
+        "B",
+        "C"
+      ],
+      "expectedIndices" : [
+        0,
+        1,
+        2
+      ],
+      "k" : 3,
+      "lambda" : 1
+    },
+    {
+      "candidates" : [
+        {
+          "blockBits" : [
+            40,
+            0,
+            0,
+            0
+          ],
+          "id" : "A"
+        },
+        {
+          "blockBits" : [
+            44,
+            0,
+            0,
+            0
+          ],
+          "id" : "B"
+        },
+        {
+          "blockBits" : [
+            0,
+            64,
+            16,
+            0
+          ],
+          "id" : "C"
+        }
+      ],
+      "expectedIDs" : [
+        "A",
+        "C",
+        "B"
+      ],
+      "expectedIndices" : [
+        0,
+        2,
+        1
+      ],
+      "k" : 3,
+      "lambda" : 0
+    }
+  ],
   "partialRecall" : [
     {
       "anchor" : [
@@ -636,6 +1389,27 @@
           "mass" : "0x3ff0000000000000"
         }
       ]
+    }
+  ],
+  "scenarioProfile" : [
+    {
+      "canonicalJson" : "{\"createdAt\":\"2023-11-14T22:13:20Z\",\"framingParameters\":{\"focus\":\"P0\",\"horizon\":\"1d\"},\"name\":\"morning planning\",\"preferenceWeights\":{\"averageReward\":0.5,\"proposalAcceptanceRate\":0.5},\"profileID\":\"12345678-1234-1234-1234-123456789012\",\"scoringBreakdown\":{\"averageReward\":0.42000002,\"proposalAcceptanceRate\":0.60999995},\"trainingEligible\":true}",
+      "createdAt" : "2023-11-14T22:13:20Z",
+      "framingParameters" : {
+        "focus" : "P0",
+        "horizon" : "1d"
+      },
+      "name" : "morning planning",
+      "preferenceWeights" : {
+        "averageReward" : 0.5,
+        "proposalAcceptanceRate" : 0.5
+      },
+      "profileID" : "12345678-1234-1234-1234-123456789012",
+      "scoringBreakdown" : {
+        "averageReward" : 0.42000002,
+        "proposalAcceptanceRate" : 0.60999995
+      },
+      "trainingEligible" : true
     }
   ],
   "shingleSimilarity" : [

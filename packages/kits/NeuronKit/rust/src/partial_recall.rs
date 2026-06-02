@@ -74,8 +74,18 @@ mod tests {
             // differ → low score.
             (RowId(2), fp([true, false, false, false])),
         ];
-        let out = partial_recall(anchor, &rows, &blocks(&[BLOCK_STRUCTURE]), &blocks(&[BLOCK_CONCEPT]), 2);
-        assert_eq!(out[0].0, RowId(1), "structurally-alike-but-conceptually-different ranks first");
+        let out = partial_recall(
+            anchor,
+            &rows,
+            &blocks(&[BLOCK_STRUCTURE]),
+            &blocks(&[BLOCK_CONCEPT]),
+            2,
+        );
+        assert_eq!(
+            out[0].0,
+            RowId(1),
+            "structurally-alike-but-conceptually-different ranks first"
+        );
         assert!(out[0].1 > out[1].1);
     }
 
@@ -90,9 +100,29 @@ mod tests {
             // matches structure, differs concept.
             (RowId(11), fp([true, false, false, false])),
         ];
-        let about = partial_recall(anchor, &rows, &blocks(&[BLOCK_CONCEPT]), &blocks(&[BLOCK_STRUCTURE]), 1);
-        assert_eq!(about[0].0, RowId(10), "ABOUT-this-concept surfaces the concept match");
-        let feels = partial_recall(anchor, &rows, &blocks(&[BLOCK_STRUCTURE]), &blocks(&[BLOCK_CONCEPT]), 1);
-        assert_eq!(feels[0].0, RowId(11), "FEELS-like-this surfaces the structure match");
+        let about = partial_recall(
+            anchor,
+            &rows,
+            &blocks(&[BLOCK_CONCEPT]),
+            &blocks(&[BLOCK_STRUCTURE]),
+            1,
+        );
+        assert_eq!(
+            about[0].0,
+            RowId(10),
+            "ABOUT-this-concept surfaces the concept match"
+        );
+        let feels = partial_recall(
+            anchor,
+            &rows,
+            &blocks(&[BLOCK_STRUCTURE]),
+            &blocks(&[BLOCK_CONCEPT]),
+            1,
+        );
+        assert_eq!(
+            feels[0].0,
+            RowId(11),
+            "FEELS-like-this surfaces the structure match"
+        );
     }
 }

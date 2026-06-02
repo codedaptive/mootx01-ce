@@ -37,7 +37,10 @@ pub fn anomalies(values: &[f32], threshold: f32) -> Vec<Anomaly> {
     for (i, &v) in values.iter().enumerate() {
         let z = AnomalyDetection::z_score(v, mean, std);
         if AnomalyDetection::is_anomalous(z, threshold) {
-            out.push(Anomaly { index: i, z_score: z });
+            out.push(Anomaly {
+                index: i,
+                z_score: z,
+            });
         }
     }
     out
@@ -63,7 +66,10 @@ mod tests {
     fn an2_low_outlier_is_negative_z() {
         let v = [9.0_f32, 10.0, 9.0, 10.0, 0.0];
         let a = anomalies(&v, 1.5);
-        assert!(a.iter().any(|x| x.index == 4 && x.z_score < 0.0), "the low outlier is below the mean");
+        assert!(
+            a.iter().any(|x| x.index == 4 && x.z_score < 0.0),
+            "the low outlier is below the mean"
+        );
     }
 
     // AN-3: a flat series has no outliers (guarded zero-spread).

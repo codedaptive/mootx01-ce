@@ -47,7 +47,10 @@ pub fn spreading_activation(
         .iter()
         .enumerate()
         .filter(|&(node, &c)| node != seed && c > 0) // exclude the seed itself
-        .map(|(node, &c)| Activation { node, activation: c as f64 / steps })
+        .map(|(node, &c)| Activation {
+            node,
+            activation: c as f64 / steps,
+        })
         .collect();
 
     ranked.sort_by(|a, b| {
@@ -86,8 +89,15 @@ mod tests {
         let a1 = act.iter().find(|a| a.node == 1).unwrap().activation;
         let a2 = act.iter().find(|a| a.node == 2).unwrap().activation;
         assert!(a1 > a2, "direct neighbor outranks two-hop node");
-        assert!(act.iter().all(|a| a.node != 3 && a.node != 4), "disconnected component never activates");
-        assert!(act.iter().all(|a| a.activation >= 0.0 && a.activation <= 1.0), "activation is a fraction");
+        assert!(
+            act.iter().all(|a| a.node != 3 && a.node != 4),
+            "disconnected component never activates"
+        );
+        assert!(
+            act.iter()
+                .all(|a| a.activation >= 0.0 && a.activation <= 1.0),
+            "activation is a fraction"
+        );
     }
 
     #[test]
@@ -118,7 +128,13 @@ mod tests {
     #[test]
     fn total_over_edge_inputs() {
         let adj: Vec<Vec<(usize, f64)>> = vec![vec![(1, 1.0)], vec![(0, 1.0)]];
-        assert!(spreading_activation(&adj, 5, LEN, RESTART, RNG, 10).is_empty(), "out-of-range seed");
-        assert!(spreading_activation(&adj, 0, 0, RESTART, RNG, 10).is_empty(), "zero-length walk");
+        assert!(
+            spreading_activation(&adj, 5, LEN, RESTART, RNG, 10).is_empty(),
+            "out-of-range seed"
+        );
+        assert!(
+            spreading_activation(&adj, 0, 0, RESTART, RNG, 10).is_empty(),
+            "zero-length walk"
+        );
     }
 }

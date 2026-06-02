@@ -1,0 +1,248 @@
+{
+  "firstDuplicate" : [
+    {
+      "names" : [
+        "a",
+        "b",
+        "c"
+      ]
+    },
+    {
+      "expected" : "x",
+      "names" : [
+        "x",
+        "y",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "names" : [
+
+      ]
+    }
+  ],
+  "lostConcepts" : [
+    {
+      "dropped" : [
+        "b"
+      ],
+      "expected" : [
+        "a",
+        "b"
+      ],
+      "notFound" : [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "dropped" : [
+
+      ],
+      "expected" : [
+
+      ],
+      "notFound" : [
+
+      ]
+    },
+    {
+      "dropped" : [
+        "z",
+        "m"
+      ],
+      "expected" : [
+        "a",
+        "m",
+        "z"
+      ],
+      "notFound" : [
+        "m",
+        "a"
+      ]
+    }
+  ],
+  "migrationRank" : [
+    {
+      "expectedDisqualified" : [
+
+      ],
+      "expectedRankings" : [
+        {
+          "combinedScore" : "0x3f800000",
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "alpha",
+          "recallOverlap" : "0x3f800000"
+        },
+        {
+          "combinedScore" : "0x3f800000",
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "bravo",
+          "recallOverlap" : "0x3f800000"
+        },
+        {
+          "combinedScore" : "0x3f800000",
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "charlie",
+          "recallOverlap" : "0x3f800000"
+        },
+        {
+          "combinedScore" : "0x3f800000",
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "delta",
+          "recallOverlap" : "0x3f800000"
+        }
+      ],
+      "expectedWinner" : "alpha",
+      "outcomes" : [
+        {
+          "lost" : [
+
+          ],
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "delta",
+          "recallOverlap" : "0x3f800000"
+        },
+        {
+          "lost" : [
+
+          ],
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "alpha",
+          "recallOverlap" : "0x3f800000"
+        },
+        {
+          "lost" : [
+
+          ],
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "charlie",
+          "recallOverlap" : "0x3f800000"
+        },
+        {
+          "lost" : [
+
+          ],
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "bravo",
+          "recallOverlap" : "0x3f800000"
+        }
+      ]
+    },
+    {
+      "expectedDisqualified" : [
+        {
+          "lostConcepts" : [
+            "x"
+          ],
+          "name" : "lossy"
+        }
+      ],
+      "expectedRankings" : [
+        {
+          "combinedScore" : "0x3f800000",
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "clean",
+          "recallOverlap" : "0x3f800000"
+        }
+      ],
+      "expectedWinner" : "clean",
+      "outcomes" : [
+        {
+          "lost" : [
+
+          ],
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "clean",
+          "recallOverlap" : "0x3f800000"
+        },
+        {
+          "lost" : [
+            "x"
+          ],
+          "meanReciprocalRank" : "0x3f000000",
+          "name" : "lossy",
+          "recallOverlap" : "0x3f000000"
+        }
+      ]
+    },
+    {
+      "expectedDisqualified" : [
+
+      ],
+      "expectedRankings" : [
+        {
+          "combinedScore" : "0x3f4ccccd",
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "high",
+          "recallOverlap" : "0x3f4ccccd"
+        },
+        {
+          "combinedScore" : "0x3ecccccd",
+          "meanReciprocalRank" : "0x3f4ccccd",
+          "name" : "mid",
+          "recallOverlap" : "0x3f000000"
+        },
+        {
+          "combinedScore" : "0x3dcccccd",
+          "meanReciprocalRank" : "0x3f000000",
+          "name" : "low",
+          "recallOverlap" : "0x3e4ccccd"
+        }
+      ],
+      "expectedWinner" : "high",
+      "outcomes" : [
+        {
+          "lost" : [
+
+          ],
+          "meanReciprocalRank" : "0x3f000000",
+          "name" : "low",
+          "recallOverlap" : "0x3e4ccccd"
+        },
+        {
+          "lost" : [
+
+          ],
+          "meanReciprocalRank" : "0x3f800000",
+          "name" : "high",
+          "recallOverlap" : "0x3f4ccccd"
+        },
+        {
+          "lost" : [
+
+          ],
+          "meanReciprocalRank" : "0x3f4ccccd",
+          "name" : "mid",
+          "recallOverlap" : "0x3f000000"
+        }
+      ]
+    }
+  ],
+  "partitionOrigin" : [
+    {
+      "entries" : [
+        {
+          "content" : "hi",
+          "id" : "a"
+        },
+        {
+          "content" : "   ",
+          "id" : "b"
+        },
+        {
+          "content" : "yo",
+          "id" : "c"
+        }
+      ],
+      "expectedDropped" : [
+        "b"
+      ],
+      "expectedMigratable" : [
+        "a",
+        "c"
+      ]
+    }
+  ]
+}

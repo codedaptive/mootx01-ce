@@ -40,7 +40,11 @@ mod tests {
     fn dr1_identical_is_zero_drift() {
         let p = [0.5_f32, 0.3, 0.2];
         let d = drift(&p, &p);
-        assert!(d.jensen_shannon.abs() < 1e-5, "no shift ⇒ no drift, got {}", d.jensen_shannon);
+        assert!(
+            d.jensen_shannon.abs() < 1e-5,
+            "no shift ⇒ no drift, got {}",
+            d.jensen_shannon
+        );
     }
 
     // DR-2: a clear shift registers more drift than a slight one — JS grows
@@ -52,7 +56,10 @@ mod tests {
         let big = [0.1_f32, 0.1, 0.8];
         let ds = drift(&p, &slight).jensen_shannon;
         let db = drift(&p, &big).jensen_shannon;
-        assert!(db > ds, "a larger shift drifts more: big {db} vs slight {ds}");
+        assert!(
+            db > ds,
+            "a larger shift drifts more: big {db} vs slight {ds}"
+        );
     }
 
     // DR-3: maximally disjoint distributions drift the most (mass moved to a
@@ -62,6 +69,10 @@ mod tests {
         let p = [1.0_f32, 0.0];
         let q = [0.0_f32, 1.0];
         let d = drift(&p, &q);
-        assert!(d.jensen_shannon > 0.5, "disjoint support is high drift, got {}", d.jensen_shannon);
+        assert!(
+            d.jensen_shannon > 0.5,
+            "disjoint support is high drift, got {}",
+            d.jensen_shannon
+        );
     }
 }

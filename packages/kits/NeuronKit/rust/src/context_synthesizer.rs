@@ -90,8 +90,12 @@ fn meta_or_default(meta: &[DrawerRowMeta], idx: usize) -> DrawerRowMeta {
 /// across runs.
 pub fn make_summary(rows: &[DrawerRow], meta: &[DrawerRowMeta]) -> String {
     let count = rows.len();
-    let wings: Vec<String> = (0..rows.len()).map(|i| meta_or_default(meta, i).wing).collect();
-    let rooms: Vec<String> = (0..rows.len()).map(|i| meta_or_default(meta, i).room).collect();
+    let wings: Vec<String> = (0..rows.len())
+        .map(|i| meta_or_default(meta, i).wing)
+        .collect();
+    let rooms: Vec<String> = (0..rows.len())
+        .map(|i| meta_or_default(meta, i).room)
+        .collect();
     let top_wing = most_frequent(&wings).unwrap_or_else(|| "(no wing)".to_string());
     let top_room = most_frequent(&rooms).unwrap_or_else(|| "(no room)".to_string());
     format!(
@@ -152,7 +156,9 @@ pub fn currently_believed_rate(rows: &[DrawerRow], meta: &[DrawerRowMeta]) -> f3
 /// Recommendations from the top patterns; neutral fallback if none.
 pub fn make_recommendations(patterns: &[String]) -> Vec<String> {
     if patterns.is_empty() {
-        return vec!["No dominant pattern detected; consider broadening the recall frame.".to_string()];
+        return vec![
+            "No dominant pattern detected; consider broadening the recall frame.".to_string(),
+        ];
     }
     patterns
         .iter()
@@ -234,7 +240,11 @@ mod tests {
 
     #[test]
     fn empty_page_produces_empty_document() {
-        let page = RecallPage { rows: vec![], page_index: 0, is_last: true };
+        let page = RecallPage {
+            rows: vec![],
+            page_index: 0,
+            is_last: true,
+        };
         let doc = synthesize(&page, &[]);
         assert_eq!(doc.summary, "");
         assert!(doc.patterns.is_empty());
@@ -252,9 +262,16 @@ mod tests {
             meta("alpha", "r2", true),
             meta("beta", "r1", true),
         ];
-        let page = RecallPage { rows, page_index: 0, is_last: true };
+        let page = RecallPage {
+            rows,
+            page_index: 0,
+            is_last: true,
+        };
         let doc = synthesize(&page, &m);
-        assert_eq!(doc.summary, "3 drawers; dominant wing alpha; dominant room r1.");
+        assert_eq!(
+            doc.summary,
+            "3 drawers; dominant wing alpha; dominant room r1."
+        );
     }
 
     #[test]
@@ -264,7 +281,11 @@ mod tests {
             row("organic chemistry carbon"),
             row("physics waves photons"),
         ];
-        let page = RecallPage { rows, page_index: 0, is_last: true };
+        let page = RecallPage {
+            rows,
+            page_index: 0,
+            is_last: true,
+        };
         let doc = synthesize(&page, &[]);
         assert_eq!(
             doc.patterns,
@@ -275,7 +296,11 @@ mod tests {
     #[test]
     fn recommendations_match_pattern_count() {
         let rows = vec![row("alpha beta gamma delta")];
-        let page = RecallPage { rows, page_index: 0, is_last: true };
+        let page = RecallPage {
+            rows,
+            page_index: 0,
+            is_last: true,
+        };
         let doc = synthesize(&page, &[]);
         assert_eq!(doc.recommendations.len(), doc.patterns.len());
     }
@@ -283,7 +308,11 @@ mod tests {
     #[test]
     fn no_pattern_produces_neutral_recommendation() {
         let rows = vec![row("a bb ccc")];
-        let page = RecallPage { rows, page_index: 0, is_last: true };
+        let page = RecallPage {
+            rows,
+            page_index: 0,
+            is_last: true,
+        };
         let doc = synthesize(&page, &[]);
         assert!(doc.patterns.is_empty());
         assert_eq!(doc.recommendations.len(), 1);
@@ -298,7 +327,11 @@ mod tests {
             row("three\nthree body"),
             row("four — should not appear"),
         ];
-        let page = RecallPage { rows, page_index: 0, is_last: true };
+        let page = RecallPage {
+            rows,
+            page_index: 0,
+            is_last: true,
+        };
         let doc = synthesize(&page, &[]);
         assert_eq!(doc.key_insights, vec!["line one", "single line", "three"]);
     }
@@ -311,7 +344,11 @@ mod tests {
             meta("w", "r", true),
             meta("w", "r", false),
         ];
-        let page = RecallPage { rows, page_index: 0, is_last: true };
+        let page = RecallPage {
+            rows,
+            page_index: 0,
+            is_last: true,
+        };
         let doc = synthesize(&page, &m);
         assert!((doc.success_rate - (2.0 / 3.0)).abs() < 1e-6);
     }

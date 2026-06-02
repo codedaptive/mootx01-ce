@@ -38,15 +38,22 @@ pub fn latent_themes(
 ) -> LatentThemes {
     let n = labels.len();
     if n == 0 || k == 0 {
-        return LatentThemes { k: 0, loadings: Vec::new(), reconstruction_error: 0.0 };
+        return LatentThemes {
+            k: 0,
+            loadings: Vec::new(),
+            reconstruction_error: 0.0,
+        };
     }
 
     let effective_k = k.min(n);
 
     // Build the dense symmetric n×n co-occurrence matrix (row-major). The matrix
     // is the primitive's input; the lens only shapes it.
-    let index: HashMap<&str, usize> =
-        labels.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
 
     let mut matrix = vec![0.0f64; n * n];
     for (a, b, weight) in cooccurrence {
@@ -79,7 +86,11 @@ pub fn latent_themes(
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, _)| idx)
                 .unwrap_or(0);
-            ThemeLoading { label: label.clone(), loadings: vector, dominant_theme: dominant }
+            ThemeLoading {
+                label: label.clone(),
+                loadings: vector,
+                dominant_theme: dominant,
+            }
         })
         .collect();
 
@@ -102,7 +113,9 @@ mod tests {
         xs.iter().map(|s| s.to_string()).collect()
     }
     fn cooc(xs: &[(&str, &str, f64)]) -> Vec<(String, String, f64)> {
-        xs.iter().map(|(a, b, w)| (a.to_string(), b.to_string(), *w)).collect()
+        xs.iter()
+            .map(|(a, b, w)| (a.to_string(), b.to_string(), *w))
+            .collect()
     }
 
     #[test]
@@ -119,10 +132,19 @@ mod tests {
         let themes = latent_themes(&lab, &c, 2, 42);
         assert_eq!(themes.k, 2);
         assert_eq!(themes.loadings.len(), 6);
-        let dom: HashMap<&str, usize> =
-            themes.loadings.iter().map(|l| (l.label.as_str(), l.dominant_theme)).collect();
-        assert!(dom["a1"] == dom["a2"] && dom["a2"] == dom["a3"], "a-cluster shares a theme");
-        assert!(dom["b1"] == dom["b2"] && dom["b2"] == dom["b3"], "b-cluster shares a theme");
+        let dom: HashMap<&str, usize> = themes
+            .loadings
+            .iter()
+            .map(|l| (l.label.as_str(), l.dominant_theme))
+            .collect();
+        assert!(
+            dom["a1"] == dom["a2"] && dom["a2"] == dom["a3"],
+            "a-cluster shares a theme"
+        );
+        assert!(
+            dom["b1"] == dom["b2"] && dom["b2"] == dom["b3"],
+            "b-cluster shares a theme"
+        );
         assert_ne!(dom["a1"], dom["b1"], "the two clusters separate");
     }
 
@@ -136,7 +158,10 @@ mod tests {
     fn deterministic_for_fixed_seed() {
         let lab = labels(&["a1", "a2", "b1", "b2"]);
         let c = cooc(&[("a1", "a2", 3.0), ("b1", "b2", 3.0)]);
-        assert_eq!(latent_themes(&lab, &c, 2, 123), latent_themes(&lab, &c, 2, 123));
+        assert_eq!(
+            latent_themes(&lab, &c, 2, 123),
+            latent_themes(&lab, &c, 2, 123)
+        );
     }
 
     #[test]

@@ -54,7 +54,11 @@ pub struct PairwiseOutcome {
 impl PairwiseOutcome {
     /// A record with an explicit count.
     pub fn new(winner: &str, loser: &str, count: i64) -> Self {
-        Self { winner: winner.to_string(), loser: loser.to_string(), count }
+        Self {
+            winner: winner.to_string(),
+            loser: loser.to_string(),
+            count,
+        }
     }
 
     /// A single comparison (`count == 1`) — the Swift default.
@@ -219,11 +223,9 @@ pub fn bradley_terry(
     }
 
     // 8. Rank strongest first; ties by ascending ID (total, deterministic).
-    scores.sort_by(|lhs, rhs| {
-        match rhs.strength.partial_cmp(&lhs.strength) {
-            Some(std::cmp::Ordering::Equal) | None => lhs.competitor_id.cmp(&rhs.competitor_id),
-            Some(order) => order,
-        }
+    scores.sort_by(|lhs, rhs| match rhs.strength.partial_cmp(&lhs.strength) {
+        Some(std::cmp::Ordering::Equal) | None => lhs.competitor_id.cmp(&rhs.competitor_id),
+        Some(order) => order,
     });
     Ok(scores)
 }
@@ -252,9 +254,9 @@ fn reachable_count(n: usize, has_edge: impl Fn(usize, usize) -> bool) -> usize {
     visited[0] = true;
     let mut reached = 1;
     while let Some(vertex) = stack.pop() {
-        for neighbour in 0..n {
-            if !visited[neighbour] && has_edge(vertex, neighbour) {
-                visited[neighbour] = true;
+        for (neighbour, seen) in visited.iter_mut().enumerate() {
+            if !*seen && has_edge(vertex, neighbour) {
+                *seen = true;
                 reached += 1;
                 stack.push(neighbour);
             }
@@ -289,8 +291,13 @@ mod tests {
     fn conformance_matches_swift_port_to_tolerance() {
         let scores = bradley_terry(&dominance_ladder()).unwrap();
         let tol = 1e-6;
-        assert_eq!(scores.iter().map(|s| s.competitor_id.as_str()).collect::<Vec<_>>(),
-                   vec!["A", "B", "C"]);
+        assert_eq!(
+            scores
+                .iter()
+                .map(|s| s.competitor_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "C"]
+        );
 
         assert!((scores[0].strength - 1.2240355728942105).abs() < tol);
         assert!((scores[0].confidence_low - (-0.9407234625180512)).abs() < tol);
@@ -307,16 +314,20 @@ mod tests {
 
     #[test]
     fn same_inputs_produce_identical_scores() {
-        assert_eq!(bradley_terry(&dominance_ladder()).unwrap(),
-                   bradley_terry(&dominance_ladder()).unwrap());
+        assert_eq!(
+            bradley_terry(&dominance_ladder()).unwrap(),
+            bradley_terry(&dominance_ladder()).unwrap()
+        );
     }
 
     #[test]
     fn ranking_is_invariant_to_input_order() {
         let mut reversed = dominance_ladder();
         reversed.reverse();
-        assert_eq!(bradley_terry(&dominance_ladder()).unwrap(),
-                   bradley_terry(&reversed).unwrap());
+        assert_eq!(
+            bradley_terry(&dominance_ladder()).unwrap(),
+            bradley_terry(&reversed).unwrap()
+        );
     }
 
     #[test]
@@ -330,7 +341,11 @@ mod tests {
     #[test]
     fn every_score_has_finite_ci_bracketing_strength() {
         for s in bradley_terry(&dominance_ladder()).unwrap() {
-            assert!(s.strength.is_finite() && s.confidence_low.is_finite() && s.confidence_high.is_finite());
+            assert!(
+                s.strength.is_finite()
+                    && s.confidence_low.is_finite()
+                    && s.confidence_high.is_finite()
+            );
             assert!(s.confidence_low <= s.strength && s.strength <= s.confidence_high);
         }
     }
@@ -358,16 +373,25 @@ mod tests {
             PairwiseOutcome::new("B", "A", 2),
         ];
         let mut expanded = Vec::new();
-        for _ in 0..5 { expanded.push(PairwiseOutcome::single("A", "B")); }
-        for _ in 0..2 { expanded.push(PairwiseOutcome::single("B", "A")); }
-        assert_eq!(bradley_terry(&aggregated).unwrap(),
-                   bradley_terry(&expanded).unwrap());
+        for _ in 0..5 {
+            expanded.push(PairwiseOutcome::single("A", "B"));
+        }
+        for _ in 0..2 {
+            expanded.push(PairwiseOutcome::single("B", "A"));
+        }
+        assert_eq!(
+            bradley_terry(&aggregated).unwrap(),
+            bradley_terry(&expanded).unwrap()
+        );
     }
 
     #[test]
     fn self_pairing_errors() {
         let bad = vec![PairwiseOutcome::single("A", "A")];
-        assert_eq!(bradley_terry(&bad), Err(TournamentError::SelfPairing("A".to_string())));
+        assert_eq!(
+            bradley_terry(&bad),
+            Err(TournamentError::SelfPairing("A".to_string()))
+        );
     }
 
     #[test]
@@ -383,7 +407,10 @@ mod tests {
             PairwiseOutcome::single("C", "D"),
             PairwiseOutcome::single("D", "C"),
         ];
-        assert_eq!(bradley_terry(&islands), Err(TournamentError::DisconnectedComparisonGraph));
+        assert_eq!(
+            bradley_terry(&islands),
+            Err(TournamentError::DisconnectedComparisonGraph)
+        );
     }
 
     #[test]
@@ -393,6 +420,9 @@ mod tests {
             PairwiseOutcome::single("B", "C"),
             PairwiseOutcome::single("A", "C"),
         ];
-        assert_eq!(bradley_terry(&pure), Err(TournamentError::DisconnectedComparisonGraph));
+        assert_eq!(
+            bradley_terry(&pure),
+            Err(TournamentError::DisconnectedComparisonGraph)
+        );
     }
 }

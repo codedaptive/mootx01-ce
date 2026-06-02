@@ -74,7 +74,11 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],
-            path: "Tests/CognitionKitTests"
+            path: "Tests/CognitionKitTests",
+            // Shared conformance vectors — one artifact read by the Swift
+            // CognitionVectorConformanceTests suite AND by
+            // rust/tests/cognition_conformance.rs (BYCOPY_MIGRATION_001).
+            resources: [.copy("Fixtures")]
         ),
     ]
 )
