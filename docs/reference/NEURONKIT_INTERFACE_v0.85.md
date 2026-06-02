@@ -71,6 +71,8 @@ purpose: |
 - `Sources/NeuronKit/Lenses/AnomalyScan.swift` — `anomalies`, `Anomaly`
 - `Sources/NeuronKit/Lenses/PartialRecall.swift` — `partialRecall`,
   `FingerprintBlock`, `PartialMatch`
+- `Sources/NeuronKit/Lenses/MindOverlap.swift` — `dpSummary`,
+  `summaryOverlap`
 - `Sources/NeuronKit/Dreaming/` — `DreamingDaemon`, `DreamingPolicy`
   (+ `DreamingPolicyStore`, `InMemoryDreamingPolicyStore`),
   `DreamingTriggerMode`, `RewardSource` (+ `RewardSourceKind`,
@@ -867,6 +869,11 @@ extension NeuronKit {
         differBlocks: Set<FingerprintBlock>,
         k: Int
     ) -> [PartialMatch]
+
+    // § 7.7 Federated.
+    public static func dpSummary(fingerprints: [Fingerprint256], epsilon: Double,
+                                 delta: Double, kAnonymity: Int, seed: UInt64) -> Fingerprint256
+    public static func summaryOverlap(_ a: Fingerprint256, _ b: Fingerprint256) -> Double
 }
 ```
 

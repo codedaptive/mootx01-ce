@@ -6,6 +6,7 @@
 //! would cross a federation boundary. "Where two minds converge vs diverge,
 //! computed without either reading the other's content" — the moat.
 //!
+//! Paired with the Swift version (`Sources/NeuronKit/Lenses/MindOverlap.swift`).
 //! Layer B-1: the DP-OR-reduce + Hamming math live in SubstrateML; this shapes
 //! a fingerprint set into a private aggregate and two aggregates into an
 //! overlap score. CognitionKit sequences it (fingerprint each estate under a
