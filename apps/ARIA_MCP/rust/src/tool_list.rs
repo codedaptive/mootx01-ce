@@ -209,6 +209,27 @@ fn lens_input_schema(tool_name: &str) -> serde_json::Value {
             }),
             json!(["estateIDB"]),
         ),
+        "moot_association_rules" => object_schema(
+            json!({
+                "filter": filter_schema,
+                "limit": integer_schema("Max drawers to recall."),
+                "minSupport": number_schema("Minimum rule support (0..1). Default 0."),
+                "minConfidence": number_schema("Minimum rule confidence (0..1). Default 0."),
+                "estateID": estate_id
+            }),
+            json!([]),
+        ),
+        "moot_formal_concepts" => object_schema(
+            json!({
+                "filter": filter_schema,
+                "limit": integer_schema("Max drawers to recall."),
+                "minSupport": integer_schema("Minimum concept extent size. Default 1."),
+                "maxIntentSize": integer_schema("Maximum concept intent size. Default 8."),
+                "maxConcepts": integer_schema("Maximum concepts returned. Default 20."),
+                "estateID": estate_id
+            }),
+            json!([]),
+        ),
         _ => object_schema(json!({}), json!([])),
     }
 }

@@ -1,8 +1,13 @@
-//! Reasoning-lens tool surface — the 14 hard-bound lens tools.
+//! Reasoning-lens tool surface — the 16 hard-bound lens tools.
 //!
 //! Mirrors Swift `LensTools.swift`. One arm per cataloged lens recipe;
 //! each arm calls its `run_*` function directly (no generic run-by-name
 //! dispatcher). Tool names are `moot_<catalog_name>`.
+//!
+//! Includes the 14 reasoning lenses (structure, topic, preference, surprise,
+//! grounding/trust, associative, prediction, federated) and the 2 analytics
+//! lenses (moot_association_rules, moot_formal_concepts) that are cataloged
+//! by AR_FCA_CAPABILITY_001.
 //!
 //! Arg surfaces mirror the Swift LensTools schemas. The `now: i64` that
 //! the Rust `run_*` functions require is supplied by `crate::dispatch::wall_now()`;
@@ -17,12 +22,13 @@
 use std::collections::BTreeMap;
 
 use cognition_kit::{
-    run_anticipate, run_bias, run_constellation, run_contradiction, run_drift,
-    run_estate_divergence, run_free_association, run_keystones, run_latent_themes,
-    run_mind_overlap, run_partial_cue_recall, run_theme_weather, run_trust_grounded_synthesis,
-    run_tunnel_successor, CueMode,
+    run_anticipate, run_association_rules, run_bias, run_constellation, run_contradiction,
+    run_drift, run_estate_divergence, run_formal_concepts, run_free_association, run_keystones,
+    run_latent_themes, run_mind_overlap, run_partial_cue_recall, run_theme_weather,
+    run_trust_grounded_synthesis, run_tunnel_successor, CueMode,
 };
 use locus_kit::drawer_operational::ContentKind;
+use neuron_kit::{BoundedConceptMiner, MiningThresholds};
 
 use crate::dispatch::{
     error_result, opt_float, opt_integer, recall_frame, require_string, text_result, wall_now,
@@ -30,7 +36,7 @@ use crate::dispatch::{
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
-/// The 14 lens tool names.
+/// The 16 lens tool names — 14 reasoning lenses plus 2 analytics lenses.
 const LENS_TOOLS: &[&str] = &[
     "moot_keystones",
     "moot_constellation",
@@ -46,6 +52,9 @@ const LENS_TOOLS: &[&str] = &[
     "moot_tunnel_successor",
     "moot_mind_overlap",
     "moot_estate_divergence",
+    // Analytics lenses (AR_FCA_CAPABILITY_001).
+    "moot_association_rules",
+    "moot_formal_concepts",
 ];
 
 /// True when `name` is one of the lens tools.
@@ -305,6 +314,67 @@ pub fn dispatch(
                 out.divergence.jensen_shannon, out.divergence.kl_divergence,
                 out.a_count, out.b_count
             )))
+        }
+
+        "moot_association_rules" => {
+            // Analytics lens: recall drawers, project categorical facets into
+            // a co-occurrence matrix, mine pairwise association rules. Mirrors
+            // Swift `LensTools.dispatch` case "moot_association_rules".
+            let frame = recall_frame(args);
+            let min_support = opt_float(args, "minSupport", 0.0);
+            let min_confidence = opt_float(args, "minConfidence", 0.0);
+            let thresholds = MiningThresholds {
+                min_support,
+                min_confidence,
+            };
+            let out = run_association_rules(&coord, &estate.handle, frame, thresholds, now)
+                .map_err(lens_error)?;
+            let mut lines = vec![format!(
+                "association_rules: {} rule(s) from {} drawer(s)",
+                out.rules.len(),
+                out.drawer_count
+            )];
+            if out.label_overflow {
+                lines.push(
+                    "note: label vocabulary was capped at 64; some labels were dropped"
+                        .to_owned(),
+                );
+            }
+            for rule in &out.rules {
+                lines.push(format!(
+                    "  {} → {}: sup={:.3} conf={:.3} lift={:.3}",
+                    rule.antecedent, rule.consequent, rule.support, rule.confidence, rule.lift
+                ));
+            }
+            Ok(text_result(&lines.join("\n")))
+        }
+
+        "moot_formal_concepts" => {
+            // Analytics lens: recall drawers, build a formal context, mine
+            // bounded formal concepts. Mirrors Swift `LensTools.dispatch`
+            // case "moot_formal_concepts".
+            let frame = recall_frame(args);
+            let min_support = opt_integer(args, "minSupport", 1) as usize;
+            let max_intent_size = opt_integer(args, "maxIntentSize", 8) as usize;
+            let max_concepts = opt_integer(args, "maxConcepts", 20) as usize;
+            let miner = BoundedConceptMiner {
+                min_support,
+                max_intent_size,
+                max_concepts,
+            };
+            let out = run_formal_concepts(&coord, &estate.handle, frame, miner, now)
+                .map_err(lens_error)?;
+            let mut lines = vec![format!(
+                "formal_concepts: {} concept(s) from {} drawer(s)",
+                out.concepts.len(),
+                out.drawer_count
+            )];
+            for (i, concept) in out.concepts.iter().enumerate() {
+                lines.push(format!("  concept {}: support={}", i + 1, concept.support));
+                lines.push(format!("    intent: {}", concept.intent.join(", ")));
+                lines.push(format!("    extent: {} drawer(s)", concept.extent_drawer_ids.len()));
+            }
+            Ok(text_result(&lines.join("\n")))
         }
 
         _ => Err(JSONRPCError::new(
