@@ -1,0 +1,67 @@
+# Kit lens conformance — both legs against the shared vector artifact
+#
+# NeuronKit and CognitionKit ship co-authored Swift and Rust versions
+# (STANDARD_CODE_AUTHORING_PRACTICE). The reasoning-lens surface is
+# gated by ONE committed artifact —
+# packages/kits/NeuronKit/Tests/NeuronKitTests/Fixtures/lens_vectors.json
+# — read by the Swift LensVectorConformanceTests suite and the Rust
+# rust/tests/lens_conformance.rs integration test. Any divergence
+# between the legs (or from the recorded vectors) fails the PR.
+#
+# The full kit test suites run here too: the per-file behavioral
+# mirrors are part of the same contract.
+
+name: Kit lens conformance
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kits/NeuronKit/**'
+      - 'packages/kits/CognitionKit/**'
+      - '.github/workflows/kit-lens-conformance.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/kits/NeuronKit/**'
+      - 'packages/kits/CognitionKit/**'
+  workflow_dispatch:
+
+jobs:
+
+  swift-kits:
+    name: Swift legs — NeuronKit + CognitionKit
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: NeuronKit swift test (includes the shared-vector gate)
+        working-directory: packages/kits/NeuronKit
+        run: swift test
+
+      - name: CognitionKit swift test
+        working-directory: packages/kits/CognitionKit
+        run: swift test
+
+  rust-kits:
+    name: Rust legs — neuron-kit + cognition-kit
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: neuron-kit cargo test (includes the shared-vector gate)
+        working-directory: packages/kits/NeuronKit/rust
+        run: cargo test
+
+      - name: cognition-kit cargo test
+        working-directory: packages/kits/CognitionKit/rust
+        run: cargo test

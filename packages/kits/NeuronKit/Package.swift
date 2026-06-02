@@ -89,7 +89,11 @@ let package = Package(
         ),
         .testTarget(
             name: "NeuronKitTests",
-            dependencies: ["NeuronKit", .product(name: "SubstrateTypes", package: "SubstrateTypes")]
+            dependencies: ["NeuronKit", .product(name: "SubstrateTypes", package: "SubstrateTypes")],
+            // Shared conformance vectors — one artifact read by this
+            // suite AND rust/tests/lens_conformance.rs (QueueKit's
+            // Fixtures pattern).
+            resources: [.copy("Fixtures")]
         ),
     ]
 )
