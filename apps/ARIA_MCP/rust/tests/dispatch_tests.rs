@@ -329,8 +329,8 @@ fn confirm_migration_promotion_success_end_to_end() {
         "success text must mention promoted branch id; got: {confirm_text}"
     );
     assert!(
-        confirm_text.contains("discarded"),
-        "success text must mention discard count; got: {confirm_text}"
+        confirm_text.contains("discarded 0 branch(es)"),
+        "zero-discard case must report an exact zero count; got: {confirm_text}"
     );
 }
 

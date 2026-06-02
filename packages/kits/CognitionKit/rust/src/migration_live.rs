@@ -573,6 +573,34 @@ mod tests {
         }
     }
 
+    // CK-LIVE-7b: guard ORDER proof — a winner id that is BOTH unknown to
+    // the coordinator AND in the disqualified set raises SilentConceptLoss,
+    // not UserConfirmationRequired: the C-5 membership guard runs before
+    // id resolution (an inverted implementation would resolve first, get
+    // None, and raise the wrong variant).
+    #[test]
+    fn ck_live7b_by_id_disqualified_unknown_winner_is_still_concept_loss() {
+        let (mut coord, h) = coord_with_parent();
+        let unknown_bid = Uuid::new_v4(); // never minted, AND disqualified
+
+        let err = confirm_migration_promotion_by_id(
+            &mut coord,
+            unknown_bid,
+            &[],
+            &[unknown_bid],
+            &h,
+            NOW,
+        )
+        .unwrap_err();
+
+        match err {
+            RecipeRunError::Recipe(RecipeError::SilentConceptLoss { branch_id, .. }) => {
+                assert_eq!(branch_id, unknown_bid.to_string());
+            }
+            other => panic!("expected SilentConceptLoss (C-5 precedes resolution), got {other:?}"),
+        }
+    }
+
     // CK-LIVE-9: a bogus id in discard_branch_ids is skipped silently —
     // the overall call still returns Ok.
     #[test]

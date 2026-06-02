@@ -55,7 +55,7 @@ Rust; this is not a transliteration of the Swift code.
 | `moot_list_recipes` | Enumerate catalog: name, version, description, required capabilities |
 | `moot_grounded_synthesis` | Hybrid-recall + synthesize into a grounded context document |
 | `moot_run_migration_benchmark` | Derive COW branches per plan, benchmark, rank survivors |
-| `moot_confirm_migration_promotion` | v1 boundary — see below |
+| `moot_confirm_migration_promotion` | Promote a winning branch by id; discard losers (human-confirmed write) |
 
 ### 14 reasoning-lens tools
 
