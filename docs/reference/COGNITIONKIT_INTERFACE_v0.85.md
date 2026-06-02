@@ -371,6 +371,10 @@ pub fn run_tunnel_successor(
 
 ### Federated (category 9)
 
+Swift versions shipped: `EstateDivergenceLens` (takes one `RecallFrame`
+value for both recalls; the Rust `make_frame` closure exists for
+ownership reasons, not contract).
+
 ```rust
 pub struct MindOverlap { pub overlap: f64, pub a_count: usize, pub b_count: usize }
 pub fn run_mind_overlap<F: Fn() -> RecallFrame>(
