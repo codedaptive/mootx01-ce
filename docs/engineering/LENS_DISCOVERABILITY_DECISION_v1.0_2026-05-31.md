@@ -1,7 +1,8 @@
 ---
 id: LENS_DISCOVERABILITY_DECISION_v1.0_2026-05-31
 date: 2026-05-31
-status: decision
+status: superseded
+superseded_by: LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02
 scope: packages/kits/CognitionKit, packages/kits/NeuronKit, apps/ARIA_MCP
 ---
 
