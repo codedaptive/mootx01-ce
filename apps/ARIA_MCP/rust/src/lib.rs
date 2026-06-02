@@ -33,8 +33,10 @@
 //!
 //! # Surface boundary
 //!
-//! See README.md for the full tool list (28 tools after v2b-p1) and what is
-//! out of scope (persistent storage backends, federation tools, learn verb).
+//! See README.md for the full tool list (49 tools after v2b-p2) and what is
+//! out of scope (persistent storage backends, live federation fan-out, and
+//! live learn + non-drawer recall behavior — those tools are advertised and
+//! refuse honestly until their kit surfaces land).
 
 pub mod dispatch;
 pub mod dispatcher;

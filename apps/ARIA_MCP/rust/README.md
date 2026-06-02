@@ -42,11 +42,15 @@ The server implements JSON-RPC 2.0 over newline-delimited stdio:
 | `tools/list` | Return all tool descriptors |
 | `tools/call` | Dispatch a named tool |
 
-Tool names, descriptions, and input schemas are **byte-identical** to the Swift
-server for every tool that exists in both. Internal architecture is idiomatic
-Rust; this is not a transliteration of the Swift code.
+Tool names and descriptions are **byte-identical** to the Swift server for
+every tool. Input schemas are byte-identical for every tool with a live Swift
+handler; where Swift still projects an empty default schema (the non-drawer
+recall tools — a known Swift-side reconciliation item), this server grounds
+the schema in the actual coordinator interface, the precedent set by
+moot_tunnel_recall. Internal architecture is idiomatic Rust; this is not a
+transliteration of the Swift code.
 
-## Tool Surface (28 tools after v2b-p1)
+## Tool Surface (49 tools after v2b-p2)
 
 ### Recipe tools (moot_list_recipes + 3 foundational)
 
