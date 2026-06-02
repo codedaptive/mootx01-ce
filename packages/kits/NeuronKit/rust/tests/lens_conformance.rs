@@ -463,14 +463,14 @@ struct ScenarioProfileCase {
     profile_i_d: String,
     name: String,
     framing_parameters: std::collections::BTreeMap<String, String>,
-    scoring_breakdown: std::collections::BTreeMap<String, f32>,
-    preference_weights: std::collections::BTreeMap<String, f32>,
+    scoring_breakdown: std::collections::BTreeMap<String, f64>,
+    preference_weights: std::collections::BTreeMap<String, f64>,
     created_at: String,
     training_eligible: bool,
-    // Swift-produced canonical JSON for documentation. Not compared byte-for-byte in
-    // the Rust verifier because Swift and Rust use different field naming conventions
-    // (camelCase vs snake_case). The Rust leg does its own round-trip instead.
-    #[allow(dead_code)]
+    // Swift-produced canonical sorted-keys JSON. Since SCENARIO_WIRE_PARITY_001
+    // (serde rename_all = camelCase + the explicit profileID rename), both legs
+    // share the Swift Codable camelCase wire vocabulary, and the Rust verifier
+    // compares its own sorted-keys encoding against this byte-for-byte.
     canonical_json: String,
 }
 
@@ -948,10 +948,10 @@ fn lenses_reproduce_shared_vectors() {
         }
     }
 
-    // scenario_profile: verify round-trip fidelity for each case.
-    // The Rust ScenarioProfile uses snake_case field names in JSON (different
-    // from Swift's camelCase), so canonical_json holds the Swift-produced JSON
-    // for documentation only — the Rust verifier does its own round-trip.
+    // scenario_profile: both legs share the Swift Codable camelCase wire
+    // vocabulary (SCENARIO_WIRE_PARITY_001), so the Rust sorted-keys encoding
+    // must reproduce the Swift-recorded canonical_json byte-for-byte — the
+    // cross-leg wire assertion the old per-leg round-trip could not make.
     for c in &v.scenario_profile {
         let profile = ScenarioProfile::new(
             c.profile_i_d.clone(),
@@ -962,8 +962,16 @@ fn lenses_reproduce_shared_vectors() {
             c.created_at.clone(),
             c.training_eligible,
         );
+        // Sorted-keys encoding via serde_json::Value (BTreeMap-backed object
+        // keys) — the Rust analog of Swift's .sortedKeys.
+        let value = serde_json::to_value(&profile).expect("scenario profile to_value");
+        let canonical = serde_json::to_string(&value).expect("scenario profile serialize");
+        assert_eq!(
+            canonical, c.canonical_json,
+            "sp cross-leg wire bytes (camelCase sorted keys)"
+        );
         // Round-trip through Rust JSON and verify field values are preserved.
-        let json = serde_json::to_string(&profile).expect("scenario profile serialize");
+        let json = canonical.clone();
         let decoded: ScenarioProfile =
             serde_json::from_str(&json).expect("scenario profile deserialize");
         assert_eq!(decoded.profile_id, profile.profile_id, "sp profile_id");

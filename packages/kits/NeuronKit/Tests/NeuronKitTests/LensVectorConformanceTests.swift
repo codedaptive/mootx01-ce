@@ -226,17 +226,17 @@ private struct LensVectors: Codable {
         var rules: [Rule]
     }
 
-    // scenario_profile: inputs = plain field values; canonicalJson carries the
-    // Swift sorted-keys encoding for documentation. The legs' wire keys differ
-    // today (Swift Codable camelCase vs Rust serde snake_case), so each leg
-    // verifies its OWN encode/decode round-trip; cross-leg byte comparison is
-    // not asserted. (Wire-parity fix queued: SCENARIO_WIRE_PARITY_001.)
+    // scenario_profile: inputs = plain field values; canonicalJson is the
+    // Swift sorted-keys encoding and BOTH legs must reproduce it byte-for-byte
+    // (SCENARIO_WIRE_PARITY_001: shared camelCase wire vocabulary via serde
+    // renames; Double/f64 values — the shortest-roundtrip f64 text is the
+    // Swift/Rust/Go three-leg fixed point).
     struct ScenarioProfileCase: Codable {
         let profileID: String
         let name: String
         let framingParameters: [String: String]
-        let scoringBreakdown: [String: Float]  // f32 values via hex
-        let preferenceWeights: [String: Float] // f32 values via hex
+        let scoringBreakdown: [String: Double]   // f64 — the three-leg wire fixed point
+        let preferenceWeights: [String: Double]  // (Swift/Rust/Go shortest-roundtrip agree)
         let createdAt: String                  // ISO8601 string
         let trainingEligible: Bool
         var canonicalJson: String              // sorted-keys JSON, set by RECORD mode
@@ -656,8 +656,8 @@ struct LensVectorConformanceTests {
         // .iso8601 date strategy. The ISO8601 date strategy encodes Date as a
         // string rather than a Unix timestamp Double, matching the Rust
         // ScenarioProfile.created_at: String field. The recorded canonicalJson
-        // is the Swift encoding; the Rust leg round-trips its own wire shape
-        // (snake_case keys) rather than byte-comparing against it.
+        // is the Swift sorted-keys encoding, which the Rust leg byte-compares
+        // against (shared camelCase wire vocabulary since wire parity landed).
         v.scenarioProfile = vectors.scenarioProfile.map { c in
             var c = c
             let profile = ScenarioProfile(
@@ -672,8 +672,8 @@ struct LensVectorConformanceTests {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             // Use ISO8601 date encoding so Date serializes as a string,
-            // matching the Rust side's String field shape (the key casing
-            // still differs across legs; see the section comment above).
+            // matching the Rust side's String field; keys and values are
+            // byte-identical across legs (see the section comment above).
             encoder.dateEncodingStrategy = .iso8601
             let data = try! encoder.encode(profile)
             c.canonicalJson = String(data: data, encoding: .utf8) ?? ""
