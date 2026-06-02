@@ -46,8 +46,8 @@ pub trait Dispatcher: Send + Sync {
 /// Default dispatcher that mimics GLK-02's substrate-stub behaviour:
 /// every propose/associate call is acknowledged but reported as
 /// `routed_but_verb_stubbed`. The parity test uses this so the Rust
-/// surface matches the Swift surface where LocusKit's Brain-layer
-/// bodies have not yet shipped.
+/// surface matches the Swift surface where the GLK verb-body wiring
+/// to locus_kit::Estate has not yet been completed.
 pub struct NoopDispatcher;
 
 impl Dispatcher for NoopDispatcher {

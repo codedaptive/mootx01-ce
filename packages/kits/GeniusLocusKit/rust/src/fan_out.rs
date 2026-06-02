@@ -25,11 +25,12 @@ impl LatticeRegion {
     }
 }
 
-/// One estate's contribution to a fan-out recall. The Rust scaffold
-/// returns drawer-id placeholders (`Vec<String>`) instead of full
-/// Drawer values because the LocusKit Rust port has not yet shipped;
-/// the parity test fills these with synthetic ids and verifies the
-/// routing decision rather than the per-drawer payload.
+/// One estate's contribution to a fan-out recall. The GLK fan-out
+/// returns drawer-id strings (not full `Drawer` values) because the
+/// GLK verb bodies have not yet been wired to dispatch through a
+/// live `locus_kit::Estate`; the parity test verifies the routing
+/// decision (which estates are selected) rather than the per-drawer
+/// payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EstateRecallContribution {
     pub handle: EstateHandle,

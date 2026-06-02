@@ -4,9 +4,11 @@
 // reference exercises in CrossEstateOverlapTests.swift. The vector
 // set is small (three estates at fixed zoom windows; queries at four
 // canonical regions) because the conformance unit here is the
-// overlap predicate, not the per-drawer recall payload — the
-// LocusKit Rust port has not yet shipped, so per-drawer parity is
-// out of scope for this scaffold mission.
+// overlap predicate, not the per-drawer recall payload. Per-drawer
+// parity is out of scope here because the GLK verb bodies have not
+// yet been wired to dispatch through a live locus_kit::Estate
+// (LocusKit Rust is fully shipped at 503 tests; the verb-wiring layer
+// is the remaining gap).
 //
 // Whenever the Swift predicate changes, this file must change with
 // it; the parity gate exists precisely to catch drift between ports.

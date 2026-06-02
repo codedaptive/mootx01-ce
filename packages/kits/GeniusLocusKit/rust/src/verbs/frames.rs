@@ -1,10 +1,10 @@
 // frames.rs — Rust mirror of the verb frames the GLK surface accepts.
 //
 // Slot sets and field names match the Swift `Frames.swift` in
-// `Sources/GeniusLocusKit/Verbs/`. The Rust port stays string-typed
-// for ids and content because the LocusKit Rust port has not yet
-// shipped a Drawer / RowID nominal type; downstream missions tighten
-// the types when the port lands.
+// `Sources/GeniusLocusKit/Verbs/`. These GLK-level frames use
+// string-typed ids and i64 raw enum values; downstream missions
+// wiring the GLK verb bodies through to locus_kit::Estate can tighten
+// to the LocusKit nominal types at that point.
 
 /// A row's stable identifier. Mirrors `LocusKit.RowID = String` in
 /// Swift.
@@ -37,9 +37,9 @@ impl LatticeAnchor {
 
 /// Named mutation operations for `mutate`. Mirrors
 /// `LocusKit.MutationKind`. The Swift variant carries associated
-/// values for `correctSensitivity` and `correctTrust`; the Rust port
-/// matches without committing to the sensitivity / trust enum
-/// taxonomy until those land in the Rust LocusKit port.
+/// values for `correctSensitivity` and `correctTrust`; this GLK
+/// frame keeps them as raw i64 values to stay independent of the
+/// locus_kit adjective enum types until verb dispatch is wired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutationKind {
     Confirm,
@@ -62,9 +62,9 @@ pub enum MutationKind {
 pub struct CaptureFrame {
     pub content: String,
     /// Capture channel raw value (typed=0, voiced=1, ocr=2,
-    /// imported_file=3, sensor=4). Numeric here so the Rust port can
-    /// move forward before the LocusKit Rust `CaptureChannel` enum
-    /// lands.
+    /// imported_file=3, sensor=4). Kept as i64 raw value here so
+    /// this GLK frame stays independent of locus_kit::CaptureChannel;
+    /// verb-wiring missions can reference the locus_kit type directly.
     pub channel: i64,
     /// Content kind raw value (prose=0, code=1, transcript=2, list=3,
     /// structured_json=4, image_caption=5).
@@ -79,14 +79,14 @@ pub struct CaptureFrame {
 }
 
 /// Recall frame. Slot names mirror Swift `RecallFrame`. The filter
-/// chain is a free-form string list at this scaffold tier; downstream
-/// missions replace it with the Filter enum when the Rust port
-/// publishes the Filter taxonomy.
+/// chain is a free-form string list at this GLK scaffold tier;
+/// downstream missions wiring GLK verb dispatch through locus_kit
+/// replace this with the typed `locus_kit::filter::Filter` sum-type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecallFrame {
-    /// Filter chain — opaque string tokens for now; the Rust LocusKit
-    /// port will swap this for the typed Filter sum-type when it lands.
-    /// Empty chain is illegal per `LocusKit.BitmapEvaluator` § 7.9.1.
+    /// Filter chain — opaque string tokens at this GLK scaffold tier;
+    /// verb-wiring missions swap this for `locus_kit::filter::Filter`
+    /// values. Empty chain is illegal per spec § 7.9.1.
     pub filter_chain: Vec<String>,
     pub hydration_level: HydrationLevel,
     pub limit: Option<i64>,
@@ -114,8 +114,8 @@ pub enum Ordering {
     ByRoomAsc,
 }
 
-/// Learn frame. Mirrors `LocusKit.LearnFrame`. Full slot set lands
-/// in the Rust port of LOCI_V035_19.
+/// Learn frame. Mirrors `LocusKit.LearnFrame`. Full slot set is
+/// wired when the GLK learn verb body is connected to locus_kit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnFrame {
     pub handle: String,
