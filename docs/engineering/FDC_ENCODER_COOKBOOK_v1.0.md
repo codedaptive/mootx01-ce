@@ -3,7 +3,8 @@ title: FDC Encoder Engineering Cookbook
 version: 1.0
 status: implementation-grade specification
 author: MOOTx01 maintainers
-date: 2026-05-25
+date: 2026-06-01
+revision_note: revised to shipped reality (idf scoring, encode/encodeAnchor, inert STOP_THRESHOLD, Swift↔Rust scalar conformance)
 relates_to:
   - docs/reference/FDC_ENCODER_CANONICAL_v1.0.md (canonical spec; the contract)
   - docs/decisions/DECISION_FDC_ENCODER_KIT_PROVENANCE_2026-05-25.md (kit ownership)
@@ -23,9 +24,15 @@ Where this document is silent, the canonical spec applies. Where they
 conflict, this document is wrong and the canonical spec governs — file
 a bug.
 
-**One function. One path.**
+**One bagging pass. Two entry points.**
 
-    encode(text: String) -> (FDCCode | UNRESOLVED, trail: [(FDCCode, Weight)])
+    FDC.encode(text: String)       -> FDCCode?                    // nil == UNRESOLVED
+    FDC.encodeAnchor(text: String) -> (code: FDCCode?, conceptQID: String?)
+
+`encode` is the thin form (`encodeAnchor(text).code`). `encodeAnchor` also
+surfaces the dominant concept Q-ID — the highest-weighted Wikidata Q-ID in the
+concept bag (ties → lowest Q-ID), or `nil` — which `EideticLib.lookup` carries
+as the Anchor's `wikidataQID`. There is no "trail" return.
 
 Pure function. No I/O. No clock. No RNG. No network. No learned model.
 Same input and same pinned artifacts yield bit-identical output on every
@@ -333,8 +340,9 @@ For each call to `step4`:
 ### §5.3. Score Representation
 
 Ties are broken by lowest code value string-lexicographically (e.g., `"100"`
-beats `"200"`). The trail returned with the result is `score` sorted descending
-by weight.
+beats `"200"`). The argmax winner is the returned code; there is no score-sorted
+"trail" in the shipped surface (the extra `encodeAnchor` returns is the dominant
+concept Q-ID, §0).
 
 **Shipped scoring — IDF-weighted (Mission #4).** The raw-overlap sum above
 (`score[code] += bag[term]`) lets codes with large signatures win on breadth.
@@ -384,12 +392,15 @@ loop:
 return node
 ```
 
-`STOP_THRESHOLD` is a pinned parameter. Its value is unspecified in v1.0
-and must be determined empirically once the Seed Generator produces real
-signatures. It is committed as a named constant in both ports and
-documented in `FDC_ENCODER_CANONICAL_v1.0.md` §5 when resolved. Until
-resolved, implementations may default to `1` (any overlap continues
-descent) for testing purposes only; this default must not ship.
+`STOP_THRESHOLD` is **pinned at 1** and is **empirically inert** on the v1.0
+frame: a sweep over 1…200 against the shipped signatures produced identical
+results. The frame is shallow — most codes are integer-head, average encoded
+depth ~1.3 — so the Step-5 descent rarely fires and the cutoff value does not
+change the outcome. Accuracy is governed by the within-region IDF scoring
+(§5.3), not this cutoff. It is committed as the named constant `1` in both ports
+(`FDC.stopThreshold` / `STOP_THRESHOLD`) and the resolution is recorded in
+`FDC_ENCODER_CANONICAL_v1.0.md` §5. The cutoff compares against the **raw integer
+overlap** (`Σ bag[t]`), so its meaning is independent of the §5.3 score mode.
 
 ### §6.2. Children Derivation
 
@@ -513,24 +524,32 @@ bundled compiled artifact versioned separately.
 
 ## §8. Cross-Platform Conformance
 
-The Swift and Rust ports must produce bit-identical `encode` output for
-identical input and identical pinned artifacts. Conformance is enforced
-by shared test vectors in `Tests/SharedVectors/encode_vectors.json`:
+The shipped conformance property is **Swift-scalar == Rust-scalar**: both ports
+produce identical `encode` / `encodeAnchor` output for identical input and
+identical pinned artifacts. This is a pure string/concept-ID algorithm — there
+is no Metal or BLAS dimension and no SIMD kernel to conform; the only cross-port
+determinism concern is float-summation order in the IDF scoring (§5.3), which
+both ports pin by summing in sorted term order.
+
+Conformance is enforced by a committed fixture
+(`rust/tests/fixtures/fdc_conformance.json`, **52/52 passing**), each entry an
+input with its expected code:
 
 ```json
 [
-  {
-    "input": "Dinner with my wife at Guidos",
-    "expected_code": "642",
-    "expected_trail_top": { "code": "642", "weight": 3 }
-  },
+  { "input": "Dinner with my wife at Guidos", "expected_code": "642" },
   ...
 ]
 ```
 
-Any divergence between ports is a hard conformance failure and blocks
-release. The test harness runs both ports against every vector and
-diffs the output.
+Any divergence between ports is a hard conformance failure and blocks release.
+
+The cross-platform-*guaranteed* surface is the static word-class table plus the
+pinned lexicon and signatures: any token resolved through them is bit-identical
+everywhere. Novel-token tagging is platform-divergent **by design** (Apple
+`NLTagger` vs the non-Apple HMM/Viterbi stub) and is deliberately kept off the
+agreement-bearing path; the §3.2 Q-ID relaxation further moves named entities
+onto the deterministic lexicon path.
 
 Conformance also applies across lexicon versions: a vector produced
 against lexicon v1.0 must continue to pass against lexicon v1.0
@@ -546,15 +565,16 @@ are retained.
 | `SOURCE_WEIGHTS.label` | 3 | Highest; FDC label is most precise |
 | `SOURCE_WEIGHTS.title` | 2 | Medium; article title is authoritative |
 | `SOURCE_WEIGHTS.article` | 1 | Lowest; article is broad |
-| `LONG_INPUT_THRESHOLD` | 500 words | SimHash pre-filter gate |
-| `SIMHASH_HAMMING_THRESHOLD` | 64 bits | Pre-filter candidate distance |
-| `FDC_ENCODER_SEED` | `0xFDC_EN_C0DE_2026` | SimHash projection seed |
+| `LONG_INPUT_THRESHOLD` | 500 words | SimHash pre-filter gate (deferred, §5.1) |
+| `SIMHASH_HAMMING_THRESHOLD` | 64 bits | Pre-filter candidate distance (deferred, §5.1) |
+| `FDC_ENCODER_SEED` | `0xFDC_EN_C0DE_2026` | SimHash projection seed (deferred, §5.1) |
 | `LEXRANK_SENTENCE_COUNT` | 10 | Sentences retained per article |
 | `POOL_SUBMIT_THRESHOLD` | 50 entries | Novel-token cache flush trigger |
-| `STOP_THRESHOLD` | TBD | Empirical; blocks v1.0 ship |
+| `STOP_THRESHOLD` | 1 | Pinned; empirically inert on the v1.0 frame (§6.1) |
 
-`STOP_THRESHOLD` is the one unresolved constant. All others are fixed
-and must not be changed without a new version of `FDCSignatures.json`
+`STOP_THRESHOLD` is resolved (pinned at `1`, §6.1). The three SimHash constants
+back a deferred pre-filter (§5.1) and are not yet load-bearing. All values are
+fixed and must not be changed without a new version of `FDCSignatures.json`
 and a full conformance vector regeneration.
 
 ---
