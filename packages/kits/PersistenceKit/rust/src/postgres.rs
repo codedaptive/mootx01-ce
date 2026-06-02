@@ -919,6 +919,14 @@ impl Storage for PostgresStorage {
                 Ok(())
             }
             Err(block_err) => {
+                // Release ctx FIRST: locals live to end of scope, not end of
+                // match arm, so ctx.conn still holds an Arc clone here. With
+                // ctx dropped, `shared` is the sole holder and the
+                // try_unwrap below is guaranteed to succeed on the discard
+                // path (Adams re-review Finding #1: without this drop,
+                // try_unwrap failed silently and the broken connection was
+                // checked back in via PooledClient::drop).
+                drop(ctx);
                 // Best-effort ROLLBACK on the bracket connection.
                 // If ROLLBACK fails the connection is in an unknown state;
                 // discard it (do not return to pool) — matching Swift's
@@ -926,16 +934,21 @@ impl Storage for PostgresStorage {
                 // being put back into the pool.
                 let rollback_result = shared.lock().unwrap().get_mut().batch_execute("ROLLBACK");
                 if rollback_result.is_err() {
-                    // Extract the client from the shared Arc so we can call
-                    // discard(). This is safe: the block has returned, so
-                    // ctx and all its sub-stores have been dropped; no other
-                    // holder of `shared` remains.
-                    if let Ok(guard) = Arc::try_unwrap(shared) {
-                        // Move the PooledClient out via discard() which
-                        // notifies the pool of the freed slot without
-                        // returning the broken connection to the available list.
-                        let conn = guard.into_inner().unwrap();
-                        conn.discard();
+                    match Arc::try_unwrap(shared) {
+                        Ok(guard) => {
+                            // Move the PooledClient out via discard() which
+                            // notifies the pool of the freed slot without
+                            // returning the broken connection to the
+                            // available list.
+                            let conn = guard.into_inner().unwrap();
+                            conn.discard();
+                        }
+                        // Unreachable with ctx dropped above; kept total so
+                        // a future refactor that revives a clone cannot
+                        // silently recycle a broken connection again.
+                        Err(_) => unreachable!(
+                            "transaction rollback-failure discard: ctx dropped, shared must be sole Arc holder"
+                        ),
                     }
                 }
                 // Surface the block's error regardless of rollback success.
