@@ -1,0 +1,99 @@
+// fdc_runtime.rs — Runtime FDC entry point
+//
+// Port of FDCRuntime.swift. Loads the bundled pinned artifacts (Lexicon.json,
+// FDCFrame.json, FDCSignatures.json, WordClassTable.json) once per process
+// via `include_bytes!` and exposes `Fdc::encode(text) -> Option<String>`.
+//
+// The Swift runtime loads via `Bundle.module.url(forResource:...)`. The Rust
+// equivalent is `include_bytes!` at compile time — same pinning guarantee,
+// zero runtime I/O.
+//
+// Artifact paths are relative to this source file (the macro resolves
+// relative to the source file location, not the crate root). The JSON files
+// live at:
+//   ../../Sources/LatticeLib/Resources/{Lexicon,FDCFrame,FDCSignatures,WordClassTable}.json
+// which is correct for the position of this file at
+//   packages/libs/LatticeLib/rust/src/fdc_runtime.rs
+
+use std::sync::OnceLock;
+use crate::fdc_frame::FdcFrame;
+use crate::fdc_matcher::FdcMatcher;
+use crate::fdc_signatures::FdcSignatures;
+use crate::lexicon::CanonicalizationLexicon;
+use crate::word_class_table::WordClassTableCache;
+
+// Pinned descent cutoff (cookbook §6.1). 1 = any overlap continues descent.
+// TODO: tune empirically against real signatures; 1 is the testing default
+// and MUST NOT ship as-is (matching the Swift FDCRuntime.swift TODO comment).
+const STOP_THRESHOLD: usize = 1;
+
+/// The bundled artifacts and the assembled matcher — loaded once per process.
+struct Bundle {
+    matcher: FdcMatcher,
+    version: String,
+}
+
+static BUNDLE: OnceLock<Option<Bundle>> = OnceLock::new();
+
+fn get_bundle() -> Option<&'static Bundle> {
+    BUNDLE.get_or_init(|| {
+        // Embed the JSON artifacts at compile time.
+        // Paths are relative to this source file.
+        const LEXICON_JSON: &[u8] = include_bytes!(
+            "../../Sources/LatticeLib/Resources/Lexicon.json"
+        );
+        const FRAME_JSON: &[u8] = include_bytes!(
+            "../../Sources/LatticeLib/Resources/FDCFrame.json"
+        );
+        const SIGS_JSON: &[u8] = include_bytes!(
+            "../../Sources/LatticeLib/Resources/FDCSignatures.json"
+        );
+        const TABLE_JSON: &[u8] = include_bytes!(
+            "../../Sources/LatticeLib/Resources/WordClassTable.json"
+        );
+
+        let lexicon = CanonicalizationLexicon::from_json(LEXICON_JSON)?;
+        let frame = FdcFrame::from_json(FRAME_JSON)?;
+        let signatures = FdcSignatures::from_json(SIGS_JSON)?;
+        let table = WordClassTableCache::from_json(TABLE_JSON)?;
+
+        let version = signatures.version.clone();
+        let matcher = FdcMatcher::new(lexicon, frame, table, &signatures, STOP_THRESHOLD);
+
+        Some(Bundle { matcher, version })
+    }).as_ref()
+}
+
+/// The runtime FDC encoder. All entry points are free functions delegating to
+/// the bundle singleton, matching the Swift `FDC` enum's static interface.
+pub struct Fdc;
+
+impl Fdc {
+    /// Encode `text` to an FDC code, or None for UNRESOLVED (or if the bundled
+    /// artifacts are unavailable). Pure over the pinned artifacts.
+    pub fn encode(text: &str) -> Option<String> {
+        get_bundle().and_then(|b| b.matcher.encode(text))
+    }
+
+    /// Encode `text` and surface the dominant concept Q-ID.
+    /// Returns (code, conceptQID). Returns (None, None) if artifacts unavailable.
+    pub fn encode_anchor(text: &str) -> (Option<String>, Option<String>) {
+        match get_bundle() {
+            Some(b) => b.matcher.encode_anchor(text),
+            None => (None, None),
+        }
+    }
+
+    /// True when the bundled artifacts loaded and the engine is ready.
+    pub fn is_available() -> bool {
+        get_bundle().is_some()
+    }
+
+    /// The bundled signatures version — the pinned-artifact version that
+    /// produced an encode answer.
+    pub fn data_version() -> &'static str {
+        get_bundle()
+            .map(|b| b.version.as_str())
+            .unwrap_or("0.0.0-unavailable")
+    }
+}
