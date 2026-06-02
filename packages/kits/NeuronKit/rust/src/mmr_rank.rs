@@ -226,7 +226,7 @@ mod tests {
         // Two identical fingerprints + λ=1.0: equal relevance, so the
         // ascending-index tie-break keeps index 0 before index 1.
         let fp = low_bits(10);
-        let fps = [fp.clone(), fp.clone()];
+        let fps = [fp, fp];
         let order = mmr_select(&fps, &query(), 1.0, 2);
         assert_eq!(order, vec![0, 1]);
     }

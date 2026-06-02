@@ -326,8 +326,10 @@ mod tests {
         let drawers: Vec<DrawerRow> = (0..4)
             .map(|i| d(&format!("id-{}", i), &format!("content {}", i)))
             .collect();
-        let mut tuning = RecallFrameTuning::default();
-        tuning.mmr_lambda = 1.0;
+        let tuning = RecallFrameTuning {
+            mmr_lambda: 1.0,
+            ..Default::default()
+        };
         let out = rerank(&drawers, &tuning);
         let out_ids: Vec<_> = out.iter().map(|r| r.id.clone()).collect();
         let in_ids: Vec<_> = drawers.iter().map(|r| r.id.clone()).collect();
@@ -341,8 +343,10 @@ mod tests {
             d("near-2", "the quick brown foxx"),
             d("far", "zzz yyy xxx www"),
         ];
-        let mut tuning = RecallFrameTuning::default();
-        tuning.mmr_lambda = 0.0;
+        let tuning = RecallFrameTuning {
+            mmr_lambda: 0.0,
+            ..Default::default()
+        };
         let out = rerank(&drawers, &tuning);
         let ids: Vec<_> = out.iter().map(|r| r.id.clone()).collect();
         assert_eq!(ids, vec!["near-1", "far", "near-2"]);

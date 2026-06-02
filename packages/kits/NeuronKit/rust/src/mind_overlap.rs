@@ -57,9 +57,7 @@ mod tests {
         let mut bits = vec![false; 256];
         for (b, &on) in blocks.iter().enumerate() {
             if on {
-                for i in (b * 64)..((b + 1) * 64) {
-                    bits[i] = true;
-                }
+                bits[b * 64..(b + 1) * 64].fill(true);
             }
         }
         Fingerprint256::from_bits(&bits)
