@@ -1,5 +1,5 @@
 //! The maintenance daemon's per-cycle ORCHESTRATION (NEURONKIT_SPEC § 3.2
-//! + § 3.5 steps 0-6) over seam traits, the Rust parity of the Swift
+//! and § 3.5 steps 0-6) over seam traits, the Rust parity of the Swift
 //! `MaintenanceDaemon` actor's `runCycle`. Where `maintenance_decision`
 //! owns the DECISIONS (key formats, scan order, thresholds, B-4 dedup),
 //! this module owns the SEQUENCE: read the gathered scan inputs from the

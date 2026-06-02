@@ -120,7 +120,7 @@ pub fn mmr_select(fingerprints: &[Engram], query: &Engram, lambda: f32, k: i64) 
 pub fn mmr_rank(fingerprints: &[Engram], query: &Engram, lambda: f32, k: i64) -> Vec<Engram> {
     mmr_select(fingerprints, query, lambda, k)
         .into_iter()
-        .map(|i| fingerprints[i].clone())
+        .map(|i| fingerprints[i])
         .collect()
 }
 

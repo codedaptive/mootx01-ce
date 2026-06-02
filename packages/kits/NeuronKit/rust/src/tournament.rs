@@ -254,9 +254,9 @@ fn reachable_count(n: usize, has_edge: impl Fn(usize, usize) -> bool) -> usize {
     visited[0] = true;
     let mut reached = 1;
     while let Some(vertex) = stack.pop() {
-        for neighbour in 0..n {
-            if !visited[neighbour] && has_edge(vertex, neighbour) {
-                visited[neighbour] = true;
+        for (neighbour, seen) in visited.iter_mut().enumerate() {
+            if !*seen && has_edge(vertex, neighbour) {
+                *seen = true;
                 reached += 1;
                 stack.push(neighbour);
             }
