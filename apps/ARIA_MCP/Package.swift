@@ -65,6 +65,9 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                // SQLite backend: selected at runtime via ARIA_MCP_SQLITE_PATH.
+                // Present and non-empty → SQLiteStorage; absent/empty → InMemoryStorage.
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
             ],
             path: "Sources/aria-mcp"
         ),
@@ -79,6 +82,8 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                // SQLite backend: needed for the persistence round-trip tests.
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
             ],
             path: "Tests/AriaMCPTests"
         ),
