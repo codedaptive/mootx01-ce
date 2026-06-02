@@ -48,9 +48,16 @@ items are now resolved:
   now also enforced mechanically by the authoring standard and the
   shared-vector gate.
 - **The catalog parity assert** (`catalog.rs` ↔ `RecipeCatalog.all`,
-  byte-for-byte) stays the conformance anchor.
-- **No second Rust-only registry.** Rust callers don't need one; MCP
-  links Swift only.
+  byte-for-byte) stays the conformance anchor — and `recipe_catalog()`
+  is not a mirror for the assert's sake alone: it is the discovery
+  surface the Rust MCP server reads, exactly as the Swift catalog
+  serves ARIA_MCP.
+- **No FFI, ever (immutable law).** Rust never calls Swift binaries;
+  Swift never calls Rust. The corollary: each language stack must be a
+  COMPLETE vertical — kits, catalog, and MCP server. The Swift vertical
+  is whole (ARIA_MCP). The Rust vertical's server is the contracted
+  missing piece; until it ships, the Rust legs execute only under
+  `cargo test`, and that is a tracked shortfall, not doctrine.
 - **Caveats retired, not relabeled.** A recipe registers under its
   honest name for what it actually computes (the
   Anticipate/MindOverlap proxy scar still applies).
@@ -77,3 +84,7 @@ requirements are now structural:
 3. Any FUTURE recipe follows the same rule: it registers (both
    catalogs + MCP tool, one change) when both legs ship — not before,
    and not later.
+4. The Rust MCP server (the Rust vertical's counterpart to ARIA_MCP,
+   linking the Rust kits and reading `recipe_catalog()`) is contracted
+   work. When it ships, the per-recipe tool rule applies to it
+   identically.
