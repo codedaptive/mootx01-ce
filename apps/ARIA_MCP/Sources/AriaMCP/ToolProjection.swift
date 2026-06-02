@@ -357,7 +357,7 @@ public enum ToolProjection {
             // and learnedReference. Mirrors the Rust leg's generic recall arm
             // (rust/src/tool_list.rs lexicon_schema Verb::Recall default arm):
             // same four optional frame-shape fields, empty required array.
-            // The dispatcher surfaces an honest honest-refusal (isError true)
+            // The dispatcher surfaces an honest refusal (isError true)
             // for each of these nouns — the substrate lacks estate-wide accessors
             // for them. Schema is grounded so tools/list is informative rather
             // than advertising an empty fallback object, removing the empty-schema
