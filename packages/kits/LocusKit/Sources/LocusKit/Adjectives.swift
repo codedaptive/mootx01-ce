@@ -56,6 +56,25 @@ import SubstrateLib
 /// appears (which can happen when a future-version row encodes a
 /// case that does not exist in this build).
 
+// ──────────────────────────────────────────────────────────────────────
+// Quis custodiet ipsos custodes? Who watches the watchmen's bitmaps?
+// The SwiftSyntax Guardian does — tools/guardian.
+//
+// The four enums below are the canonical source of truth for the
+// adjective-level axes. SubstrateLib carries duplicate raw-integer
+// encodings of the legal value sets (it cannot import LocusKit: the
+// dependency graph points the other way). Touch one side and the
+// Guardian warns at your desk, before it ships.
+//
+// Test backstop: GuardianPairParityTests — also covers the I-22 and
+// S-1 single-value pairs (sensitivity.secret raw 48, exportability.
+// public_ raw 32, trust.canonical raw 3) which are enforced via
+// static test assertions rather than syntax-tree extraction.
+// ──────────────────────────────────────────────────────────────────────
+
+// @guardian-pair: state-basis State.allCases <-> AuditGate.basis[state].legalValues (raw set equality)
+// @guardian-pair: drawerstore-mutate-state State.allCases <-> DrawerStore.mutateState.stateSlot.legalValues (raw set equality)
+// @guardian-pair: drawerstore-expunge-state State.allCases <-> DrawerStore.expungeGated.stateSlot.legalValues (raw set equality)
 /// State axis — where the row sits in the AI's epistemic timeline.
 /// Lives in bits 0–5 of `Drawer.adjectiveBitmap` (6 bits, 64 values;
 /// 10 used at scale-gapped raws, 54 reserved). Per cookbook §2.3 /
@@ -106,6 +125,7 @@ public enum State: Int, Sendable, Codable {
     }
 }
 
+// @guardian-pair: trust-basis Trust.allCases <-> AuditGate.basis[trust].legalValues (raw set equality)
 /// Trust axis — how the substrate qualifies the row's reliability.
 /// Lives in bits 18–23 of `Drawer.adjectiveBitmap` (6 bits, 64
 /// values; 7 used at raws 0–6, 57 reserved). Per cookbook §2.3.
@@ -132,6 +152,7 @@ public enum Trust: Int, Sendable, Codable, Comparable {
     }
 }
 
+// @guardian-pair: sensitivity-basis AdjectiveSensitivity.allCases <-> AuditGate.basis[sensitivity].legalValues (raw set equality)
 /// Sensitivity axis on the adjective bitmap — per-row access posture.
 /// Lives in bits 6–11 of `Drawer.adjectiveBitmap` (6 bits, 64 values).
 /// Per cookbook §2.3 / §2.8.
@@ -153,6 +174,7 @@ public enum AdjectiveSensitivity: Int, Sendable, Codable {
     case secret = 48
 }
 
+// @guardian-pair: exportability-basis AdjectiveExportability.allCases <-> AuditGate.basis[exportability].legalValues (raw set equality)
 /// Exportability axis — whether a row may leave the local estate.
 /// Lives in bits 12–17 of `Drawer.adjectiveBitmap` (6 bits, 64
 /// values; 2 used, 62 reserved). Per cookbook §2.3.

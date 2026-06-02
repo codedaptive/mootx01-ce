@@ -502,6 +502,18 @@ public actor DrawerStore {
         let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
         let estate = estateUuid
         let vocab = vocabulary
+        // ──────────────────────────────────────────────────────────────
+        // Quis custodiet ipsos custodes? Who watches the watchmen's
+        // bitmaps? The SwiftSyntax Guardian does — tools/guardian.
+        //
+        // The stateSlot legalValues below duplicate the State enum raws
+        // from LocusKit/Adjectives.swift. DrawerStore cannot use State
+        // directly because FieldSlot takes Set<Int64>, not Set<State>.
+        // Touch one side and the Guardian warns at your desk, before it
+        // ships. Test backstop: GuardianPairParityTests.
+        //
+        // @guardian-pair: drawerstore-mutate-state DrawerStore.mutateState.stateSlot.legalValues <-> State.allCases (raw set equality)
+        // ──────────────────────────────────────────────────────────────
         let stateSlot = FieldSlot(column: .adjective, shift: 0, width: 6,
                                   label: "state",
                                   legalValues: [0, 1, 2, 3, 16, 17, 18, 19, 32, 33])
@@ -598,6 +610,15 @@ public actor DrawerStore {
         let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
         let estate = estateUuid
         let vocab = vocabulary
+        // ──────────────────────────────────────────────────────────────
+        // Quis custodiet ipsos custodes? Who watches the watchmen's
+        // bitmaps? The SwiftSyntax Guardian does — tools/guardian.
+        //
+        // Same stateSlot legalValues as mutateState — duplicates the
+        // State enum raws. Test backstop: GuardianPairParityTests.
+        //
+        // @guardian-pair: drawerstore-expunge-state DrawerStore.expungeGated.stateSlot.legalValues <-> State.allCases (raw set equality)
+        // ──────────────────────────────────────────────────────────────
         let stateSlot = FieldSlot(column: .adjective, shift: 0, width: 6,
                                   label: "state",
                                   legalValues: [0, 1, 2, 3, 16, 17, 18, 19, 32, 33])

@@ -243,6 +243,26 @@ public enum ForbiddenCombinations {
     /// state-extension and lineage-clustering flags at bits 24-25.
     public static func check(state: RowState,
                               fields: BitmapFields) throws {
+        // ──────────────────────────────────────────────────────────────
+        // Quis custodiet ipsos custodes? Who watches the watchmen's
+        // bitmaps? The SwiftSyntax Guardian does — tools/guardian.
+        //
+        // The raw integer literals below (48, 32, 3) duplicate facts
+        // owned in LocusKit/Adjectives.swift (cannot import: this tier
+        // sits below LocusKit). These three values are the I-22 and S-1
+        // invariant thresholds:
+        //   48 = AdjectiveSensitivity.secret.rawValue  (I-22 lower bound)
+        //   32 = AdjectiveExportability.public_.rawValue  (I-22 upper bound)
+        //    3 = Trust.canonical.rawValue               (S-1 floor)
+        //
+        // Checked via GuardianPairParityTests (static test assertions)
+        // rather than the Guardian's syntax-tree extraction (which
+        // compares integer-literal sets; single-value threshold checks
+        // are a set-of-one vs full-enum-set comparison and are more
+        // reliably expressed as test assertions). Test backstop:
+        // GuardianPairParityTests.
+        // ──────────────────────────────────────────────────────────────
+        //
         // I-22 (cookbook § 2.3 / federation): a secret row can never be
         // exportable. State-independent — holds for every row. Sensitivity
         // at bits 6-11 (secret = raw 48), exportability at 12-17 (public =
