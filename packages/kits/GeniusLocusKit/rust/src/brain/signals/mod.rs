@@ -13,18 +13,18 @@
 // drain ordering — not the substrate-level work the bodies will do
 // when the Brain layer's verb bodies land.
 
+pub mod by_reference_validity;
+pub mod decay_sweep;
+pub mod default_set;
 pub mod dreaming;
+pub mod end_of_day_tournament;
 pub mod maintenance;
 pub mod vector_similarity;
-pub mod decay_sweep;
-pub mod by_reference_validity;
-pub mod end_of_day_tournament;
-pub mod default_set;
 
+pub use by_reference_validity::ByReferenceValiditySignal;
+pub use decay_sweep::DecaySweepSignal;
+pub use default_set::{default_standing_signal_names, default_standing_signal_specs};
 pub use dreaming::DreamingSignal;
+pub use end_of_day_tournament::EndOfDayTournamentSignal;
 pub use maintenance::MaintenanceSignal;
 pub use vector_similarity::VectorSimilaritySignal;
-pub use decay_sweep::DecaySweepSignal;
-pub use by_reference_validity::ByReferenceValiditySignal;
-pub use end_of_day_tournament::EndOfDayTournamentSignal;
-pub use default_set::{default_standing_signal_names, default_standing_signal_specs};

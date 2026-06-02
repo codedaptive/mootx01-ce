@@ -89,6 +89,8 @@ struct SignalRecord {
     emission_count: u64,
     recent_diagnostics: Vec<DiagnosticReport>,
     recent_outcomes: Vec<SignalRouteOutcome>,
+    #[allow(clippy::type_complexity)]
+    // subscriber closure type is intentional — factoring into a type alias would obscure the contract
     subscribers: HashMap<SubscriptionID, Box<dyn Fn(&SignalEmission) + Send + Sync>>,
 }
 
@@ -175,7 +177,11 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
 
     /// Architecture spec §7.8.5 `signal_subscribe`. Returns a
     /// SubscriptionID the caller passes to `unsubscribe`.
-    pub fn subscribe<F>(&mut self, id: &SignalID, callback: F) -> Result<SubscriptionID, SchedulerError>
+    pub fn subscribe<F>(
+        &mut self,
+        id: &SignalID,
+        callback: F,
+    ) -> Result<SubscriptionID, SchedulerError>
     where
         F: Fn(&SignalEmission) + Send + Sync + 'static,
     {
@@ -232,10 +238,14 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
     }
 
     fn is_due(&self, id: &SignalID, now_nanos: i64) -> bool {
-        let Some(record) = self.signals.get(id) else { return false };
+        let Some(record) = self.signals.get(id) else {
+            return false;
+        };
         match &record.spec.trigger {
             SignalTrigger::Interval { seconds } => {
-                let Some(last) = record.last_run_at else { return true };
+                let Some(last) = record.last_run_at else {
+                    return true;
+                };
                 let elapsed_nanos = now_nanos.saturating_sub(last);
                 Duration::from_nanos(elapsed_nanos.max(0) as u64) >= *seconds
             }

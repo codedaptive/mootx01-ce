@@ -38,8 +38,15 @@ impl Verb {
     /// All nine verbs in declaration order. Mirrors
     /// `Verb.allCases` in Swift.
     pub const ALL: [Verb; 9] = [
-        Verb::Capture, Verb::Reanchor, Verb::Mutate, Verb::Withdraw,
-        Verb::Expunge, Verb::Recall, Verb::Propose, Verb::Associate, Verb::Learn,
+        Verb::Capture,
+        Verb::Reanchor,
+        Verb::Mutate,
+        Verb::Withdraw,
+        Verb::Expunge,
+        Verb::Recall,
+        Verb::Propose,
+        Verb::Associate,
+        Verb::Learn,
     ];
 
     /// Lower-case method-name representation used by the surface's
@@ -62,8 +69,12 @@ impl Verb {
     /// Who initiates the verb. Mirrors `AriaLexicon.Verb.flow`.
     pub fn flow(self) -> VerbFlow {
         match self {
-            Verb::Capture | Verb::Reanchor | Verb::Mutate
-            | Verb::Withdraw | Verb::Expunge | Verb::Recall => VerbFlow::CallerDriven,
+            Verb::Capture
+            | Verb::Reanchor
+            | Verb::Mutate
+            | Verb::Withdraw
+            | Verb::Expunge
+            | Verb::Recall => VerbFlow::CallerDriven,
             Verb::Propose | Verb::Associate => VerbFlow::SubstrateDriven,
             Verb::Learn => VerbFlow::GroundingDriven,
         }
@@ -95,8 +106,13 @@ pub enum Noun {
 impl Noun {
     /// All eight nouns in declaration order.
     pub const ALL: [Noun; 8] = [
-        Noun::Drawer, Noun::Tunnel, Noun::KgFact, Noun::Vector,
-        Noun::DiaryEntry, Noun::Proposal, Noun::Association,
+        Noun::Drawer,
+        Noun::Tunnel,
+        Noun::KgFact,
+        Noun::Vector,
+        Noun::DiaryEntry,
+        Noun::Proposal,
+        Noun::Association,
         Noun::LearnedReference,
     ];
 
@@ -135,8 +151,10 @@ pub enum Adjective {
 
 impl Adjective {
     pub const ALL: [Adjective; 4] = [
-        Adjective::State, Adjective::Trust,
-        Adjective::Sensitivity, Adjective::Exportability,
+        Adjective::State,
+        Adjective::Trust,
+        Adjective::Sensitivity,
+        Adjective::Exportability,
     ];
 }
 
@@ -151,32 +169,38 @@ impl Acceptance {
     pub fn verbs(noun: Noun) -> &'static [Verb] {
         match noun {
             Noun::Drawer => &[
-                Verb::Capture, Verb::Reanchor, Verb::Mutate,
-                Verb::Withdraw, Verb::Expunge, Verb::Recall,
+                Verb::Capture,
+                Verb::Reanchor,
+                Verb::Mutate,
+                Verb::Withdraw,
+                Verb::Expunge,
+                Verb::Recall,
             ],
             Noun::Tunnel => &[
-                Verb::Capture, Verb::Mutate, Verb::Withdraw,
-                Verb::Expunge, Verb::Recall,
+                Verb::Capture,
+                Verb::Mutate,
+                Verb::Withdraw,
+                Verb::Expunge,
+                Verb::Recall,
             ],
-            Noun::KgFact => &[
-                Verb::Mutate, Verb::Withdraw, Verb::Expunge, Verb::Recall,
-            ],
+            Noun::KgFact => &[Verb::Mutate, Verb::Withdraw, Verb::Expunge, Verb::Recall],
             Noun::Vector => &[],
             Noun::DiaryEntry => &[Verb::Recall],
-            Noun::Proposal => &[
-                Verb::Mutate, Verb::Withdraw, Verb::Expunge, Verb::Recall,
-            ],
+            Noun::Proposal => &[Verb::Mutate, Verb::Withdraw, Verb::Expunge, Verb::Recall],
             Noun::Association => &[Verb::Mutate, Verb::Expunge, Verb::Recall],
             Noun::LearnedReference => &[
-                Verb::Learn, Verb::Mutate, Verb::Withdraw,
-                Verb::Expunge, Verb::Recall,
+                Verb::Learn,
+                Verb::Mutate,
+                Verb::Withdraw,
+                Verb::Expunge,
+                Verb::Recall,
             ],
         }
     }
 
     /// Whether a shape accepts a verb.
     pub fn accepts(noun: Noun, verb: Verb) -> bool {
-        Self::verbs(noun).iter().any(|v| *v == verb)
+        Self::verbs(noun).contains(&verb)
     }
 }
 
@@ -196,17 +220,40 @@ impl SurfaceTarget {
     /// that accepts them, because both verbs create products without
     /// targeting an existing instance of a noun.
     pub const ALL: [SurfaceTarget; 7] = [
-        SurfaceTarget { verb: Verb::Capture, noun: Noun::Drawer },
-        SurfaceTarget { verb: Verb::Recall, noun: Noun::Drawer },
-        SurfaceTarget { verb: Verb::Mutate, noun: Noun::Drawer },
-        SurfaceTarget { verb: Verb::Withdraw, noun: Noun::Drawer },
-        SurfaceTarget { verb: Verb::Expunge, noun: Noun::Drawer },
-        SurfaceTarget { verb: Verb::Reanchor, noun: Noun::Drawer },
-        SurfaceTarget { verb: Verb::Learn, noun: Noun::LearnedReference },
+        SurfaceTarget {
+            verb: Verb::Capture,
+            noun: Noun::Drawer,
+        },
+        SurfaceTarget {
+            verb: Verb::Recall,
+            noun: Noun::Drawer,
+        },
+        SurfaceTarget {
+            verb: Verb::Mutate,
+            noun: Noun::Drawer,
+        },
+        SurfaceTarget {
+            verb: Verb::Withdraw,
+            noun: Noun::Drawer,
+        },
+        SurfaceTarget {
+            verb: Verb::Expunge,
+            noun: Noun::Drawer,
+        },
+        SurfaceTarget {
+            verb: Verb::Reanchor,
+            noun: Noun::Drawer,
+        },
+        SurfaceTarget {
+            verb: Verb::Learn,
+            noun: Noun::LearnedReference,
+        },
     ];
 
     /// True when every surface target is in the §7.2 matrix.
     pub fn every_target_accepted() -> bool {
-        Self::ALL.iter().all(|t| Acceptance::accepts(t.noun, t.verb))
+        Self::ALL
+            .iter()
+            .all(|t| Acceptance::accepts(t.noun, t.verb))
     }
 }

@@ -20,9 +20,7 @@ use std::collections::HashMap;
 // ─────────────────────────────────────────────────────────────────
 use substrate_types::hlc::HLC;
 
-use crate::audit::{
-    AuditTier, EntryUUID, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
-};
+use crate::audit::{AuditTier, EntryUUID, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb};
 
 // MARK: - Coordinate types
 
@@ -177,10 +175,7 @@ impl MatrixTier {
         if coords.len() >= 2 {
             for i in 0..(coords.len() - 1) {
                 for j in (i + 1)..coords.len() {
-                    let key = MatrixCoOccurKey::new(
-                        coords[i].clone(),
-                        coords[j].clone(),
-                    );
+                    let key = MatrixCoOccurKey::new(coords[i].clone(), coords[j].clone());
                     add_signed(&mut self.co_occurrence, key, delta);
                 }
             }
@@ -200,8 +195,7 @@ impl MatrixTier {
         delta_minutes: u32,
         delta: i64,
     ) {
-        if delta_minutes == 0 || delta_minutes > Self::TEMPORAL_WINDOW_MINUTES
-        {
+        if delta_minutes == 0 || delta_minutes > Self::TEMPORAL_WINDOW_MINUTES {
             return;
         }
         let bucket = Self::lag_bucket_for_minutes(delta_minutes);
@@ -224,12 +218,7 @@ impl MatrixTier {
 
     /// Apply lazy multiplicative decay per cookbook §6.8. F and C do
     /// not decay; O half-life is 365 days; T half-life is 90 days.
-    pub fn apply_decay(
-        &mut self,
-        elapsed_days: f64,
-        o_half_life_days: f64,
-        t_half_life_days: f64,
-    ) {
+    pub fn apply_decay(&mut self, elapsed_days: f64, o_half_life_days: f64, t_half_life_days: f64) {
         if elapsed_days < 1.0 {
             return;
         }
@@ -269,8 +258,7 @@ impl MatrixTier {
         // (tier, row, hlc) bundle key.
         type RowKey = (AuditTier, EntryUUID, HLC);
         let mut bundle: HashMap<RowKey, Vec<(String, u64)>> = HashMap::new();
-        let mut value_bundle: HashMap<RowKey, Vec<MatrixValueCoord>> =
-            HashMap::new();
+        let mut value_bundle: HashMap<RowKey, Vec<MatrixValueCoord>> = HashMap::new();
         let mut bundle_sign: HashMap<RowKey, i64> = HashMap::new();
         let mut bundle_order: Vec<RowKey> = Vec::new();
 
@@ -281,8 +269,7 @@ impl MatrixTier {
                 UnifiedAuditVerb::Capture => Some(1),
                 UnifiedAuditVerb::Expunge => Some(-1),
                 UnifiedAuditVerb::Withdraw => {
-                    tier.live_row_count =
-                        (tier.live_row_count - 1).max(0);
+                    tier.live_row_count = (tier.live_row_count - 1).max(0);
                     None
                 }
                 _ => None,
@@ -290,24 +277,25 @@ impl MatrixTier {
             let Some(s) = sign else { continue };
 
             if !bundle_sign.contains_key(&key) {
-                bundle_order.push(key.clone());
+                bundle_order.push(key);
             }
-            bundle_sign.insert(key.clone(), s);
+            bundle_sign.insert(key, s);
 
             match &entry.after_value {
                 UnifiedAuditValue::Bitmap(v) => {
                     bundle
-                        .entry(key.clone())
+                        .entry(key)
                         .or_default()
                         .push((entry.field_path.clone(), *v));
                 }
                 _ => {
-                    value_bundle.entry(key.clone()).or_default().push(
-                        MatrixValueCoord::new(
+                    value_bundle
+                        .entry(key)
+                        .or_default()
+                        .push(MatrixValueCoord::new(
                             entry.field_path.clone(),
                             entry.after_value.clone(),
-                        ),
-                    );
+                        ));
                 }
             }
         }
@@ -323,11 +311,7 @@ impl MatrixTier {
     }
 }
 
-fn add_signed<K: std::hash::Hash + Eq>(
-    map: &mut HashMap<K, i64>,
-    key: K,
-    delta: i64,
-) {
+fn add_signed<K: std::hash::Hash + Eq>(map: &mut HashMap<K, i64>, key: K, delta: i64) {
     let next = map.get(&key).copied().unwrap_or(0) + delta;
     if next > 0 {
         map.insert(key, next);

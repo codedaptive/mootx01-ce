@@ -16,8 +16,10 @@ pub mod projection;
 pub mod recovery;
 
 pub use log::{
-    AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue,
-    UnifiedAuditVerb, sha256,
+    sha256, AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue,
+    UnifiedAuditVerb,
 };
-pub use projection::{AuditProjectionFold, UnifiedProjection, UnifiedProjectionKey, UnifiedRowProjection};
+pub use projection::{
+    AuditProjectionFold, UnifiedProjection, UnifiedProjectionKey, UnifiedRowProjection,
+};
 pub use recovery::{AuditRecovery, AuditRecoveryDivergence, AuditRecoveryResult, RowMismatch};

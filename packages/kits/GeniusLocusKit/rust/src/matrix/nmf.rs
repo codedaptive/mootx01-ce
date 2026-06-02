@@ -18,11 +18,7 @@ pub struct MatrixNMFFactorization {
 impl MatrixNMFFactorization {
     pub fn loadings_for_row(&self, row: usize) -> Vec<f64> {
         assert!(row < self.rows, "row out of range");
-        let mut out = vec![0.0; self.k];
-        for j in 0..self.k {
-            out[j] = self.w[row * self.k + j];
-        }
-        out
+        (0..self.k).map(|j| self.w[row * self.k + j]).collect()
     }
 }
 
@@ -46,14 +42,8 @@ impl MatrixNMF {
         assert!(k > 0, "k must be positive");
 
         let mut rng = SplitMix64 { state: seed };
-        let mut w = vec![0.0_f64; rows * k];
-        let mut h = vec![0.0_f64; k * cols];
-        for i in 0..w.len() {
-            w[i] = rng.next_unit_nonneg();
-        }
-        for i in 0..h.len() {
-            h[i] = rng.next_unit_nonneg();
-        }
+        let mut w: Vec<f64> = (0..rows * k).map(|_| rng.next_unit_nonneg()).collect();
+        let mut h: Vec<f64> = (0..k * cols).map(|_| rng.next_unit_nonneg()).collect();
 
         let mut last_error = f64::INFINITY;
 
@@ -96,8 +86,12 @@ impl MatrixNMF {
 // MARK: - Dense linear-algebra helpers
 
 fn mat_mul_transpose_left(
-    a: &[f64], arows: usize, acols: usize,
-    b: &[f64], brows: usize, bcols: usize,
+    a: &[f64],
+    arows: usize,
+    acols: usize,
+    b: &[f64],
+    brows: usize,
+    bcols: usize,
 ) -> Vec<f64> {
     assert_eq!(arows, brows, "mat_mul_transpose_left inner-dim mismatch");
     let mut out = vec![0.0; acols * bcols];
@@ -114,8 +108,12 @@ fn mat_mul_transpose_left(
 }
 
 fn mat_mul_transpose_right(
-    a: &[f64], arows: usize, acols: usize,
-    b: &[f64], brows: usize, bcols: usize,
+    a: &[f64],
+    arows: usize,
+    acols: usize,
+    b: &[f64],
+    brows: usize,
+    bcols: usize,
 ) -> Vec<f64> {
     assert_eq!(acols, bcols, "mat_mul_transpose_right inner-dim mismatch");
     let mut out = vec![0.0; arows * brows];
@@ -132,8 +130,12 @@ fn mat_mul_transpose_right(
 }
 
 fn mat_mul(
-    a: &[f64], arows: usize, acols: usize,
-    b: &[f64], brows: usize, bcols: usize,
+    a: &[f64],
+    arows: usize,
+    acols: usize,
+    b: &[f64],
+    brows: usize,
+    bcols: usize,
 ) -> Vec<f64> {
     assert_eq!(acols, brows, "mat_mul inner-dim mismatch");
     let mut out = vec![0.0; arows * bcols];
@@ -149,10 +151,7 @@ fn mat_mul(
     out
 }
 
-fn frobenius_squared(
-    o: &[f64], rows: usize, cols: usize,
-    w: &[f64], h: &[f64], k: usize,
-) -> f64 {
+fn frobenius_squared(o: &[f64], rows: usize, cols: usize, w: &[f64], h: &[f64], k: usize) -> f64 {
     let mut err = 0.0;
     for i in 0..rows {
         for j in 0..cols {

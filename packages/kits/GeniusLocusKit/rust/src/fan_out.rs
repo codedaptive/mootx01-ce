@@ -56,9 +56,7 @@ impl EstateCoordinator {
         let mut out: Vec<EstateHandle> = self
             .handles()
             .into_iter()
-            .filter(|h| {
-                h.zoom_window_low <= region.high && h.zoom_window_high >= region.low
-            })
+            .filter(|h| h.zoom_window_low <= region.high && h.zoom_window_high >= region.low)
             .collect();
         // Sort by UUID so the parity test sees a deterministic order
         // across runs. The Swift surface leaves order unspecified;

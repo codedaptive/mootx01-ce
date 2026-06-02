@@ -206,14 +206,14 @@ impl ProposalKind {
     /// used in conformance vectors. Matches Swift's `rawValue`.
     pub fn raw_value(&self) -> &str {
         match self {
-            ProposalKind::ByReferenceDrift   => "by_reference_drift",
-            ProposalKind::TournamentUpdate   => "tournament_update",
-            ProposalKind::MiningPattern      => "mining_pattern",
+            ProposalKind::ByReferenceDrift => "by_reference_drift",
+            ProposalKind::TournamentUpdate => "tournament_update",
+            ProposalKind::MiningPattern => "mining_pattern",
             ProposalKind::DisciplineViolation => "discipline_violation",
-            ProposalKind::MutateCandidate    => "mutate_candidate",
-            ProposalKind::Amend              => "amend",
-            ProposalKind::TestPropose        => "test_propose",
-            ProposalKind::Other(s)           => s.as_str(),
+            ProposalKind::MutateCandidate => "mutate_candidate",
+            ProposalKind::Amend => "amend",
+            ProposalKind::TestPropose => "test_propose",
+            ProposalKind::Other(s) => s.as_str(),
         }
     }
 
@@ -223,14 +223,14 @@ impl ProposalKind {
     /// non-`Other` variant.
     pub fn from_raw(s: &str) -> Self {
         match s {
-            "by_reference_drift"   => ProposalKind::ByReferenceDrift,
-            "tournament_update"    => ProposalKind::TournamentUpdate,
-            "mining_pattern"       => ProposalKind::MiningPattern,
+            "by_reference_drift" => ProposalKind::ByReferenceDrift,
+            "tournament_update" => ProposalKind::TournamentUpdate,
+            "mining_pattern" => ProposalKind::MiningPattern,
             "discipline_violation" => ProposalKind::DisciplineViolation,
-            "mutate_candidate"     => ProposalKind::MutateCandidate,
-            "amend"                => ProposalKind::Amend,
-            "test_propose"         => ProposalKind::TestPropose,
-            other                  => ProposalKind::Other(other.to_string()),
+            "mutate_candidate" => ProposalKind::MutateCandidate,
+            "amend" => ProposalKind::Amend,
+            "test_propose" => ProposalKind::TestPropose,
+            other => ProposalKind::Other(other.to_string()),
         }
     }
 }
@@ -302,6 +302,8 @@ pub struct SignalSpec {
     pub resource_cost: ResourceCostEstimate,
     pub freshness_target: Duration,
     pub concurrency_policy: ConcurrencyPolicy,
+    #[allow(clippy::type_complexity)]
+    // emit closure type is intentional — factoring it into a type alias would obscure the contract
     pub emit: Arc<dyn Fn(&SignalContext) -> Vec<SignalEmission> + Send + Sync>,
 }
 

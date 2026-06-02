@@ -32,21 +32,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use genius_locus_kit::{
-    EMISSION_CLASS_TAGS, SchedulerNoopDispatcher,
-    SerialLaneScheduler,
-    SchedulerSignalEmission as SignalEmission,
-    SchedulerSignalSpec as SignalSpec,
-    SchedulerSignalTrigger as SignalTrigger,
-    SchedulerProposalFrame as ProposalFrame,
-    SchedulerProposalKind as ProposalKind,
-    SchedulerAssociationFrame as AssociationFrame,
-    SchedulerDiagnosticReport as DiagnosticReport,
-    SchedulerMutationKind as MutationKind,
+    SchedulerAssociationFrame as AssociationFrame, SchedulerConcurrencyPolicy as ConcurrencyPolicy,
+    SchedulerDiagnosticReport as DiagnosticReport, SchedulerError,
+    SchedulerMutationKind as MutationKind, SchedulerNoopDispatcher,
+    SchedulerProposalFrame as ProposalFrame, SchedulerProposalKind as ProposalKind,
     SchedulerResourceCostEstimate as ResourceCostEstimate,
-    SchedulerConcurrencyPolicy as ConcurrencyPolicy,
-    SchedulerSignalState as SignalState,
-    SchedulerSignalRouteOutcome as SignalRouteOutcome,
-    SchedulerError,
+    SchedulerSignalEmission as SignalEmission, SchedulerSignalRouteOutcome as SignalRouteOutcome,
+    SchedulerSignalSpec as SignalSpec, SchedulerSignalState as SignalState,
+    SchedulerSignalTrigger as SignalTrigger, SerialLaneScheduler, EMISSION_CLASS_TAGS,
 };
 
 fn make_scheduler() -> SerialLaneScheduler<SchedulerNoopDispatcher> {
@@ -209,7 +202,10 @@ fn diagnostic_emission_is_recorded_in_status() {
     let id = s.register(spec, t0());
     s.tick(t0() + 5_000_000_000);
     let report = s.report().into_iter().find(|r| r.signal_id == id).unwrap();
-    assert_eq!(report.recent_outcomes, vec![SignalRouteOutcome::DiagnosticRecorded]);
+    assert_eq!(
+        report.recent_outcomes,
+        vec![SignalRouteOutcome::DiagnosticRecorded]
+    );
     assert_eq!(report.recent_diagnostics.len(), 1);
     assert_eq!(report.recent_diagnostics[0].title, "first");
 }
@@ -240,8 +236,7 @@ fn propose_emission_routes_through_propose_verb() {
     // NoopDispatcher mimics GLK-02's substrate-stub behaviour →
     // RoutedButVerbStubbed { verb: "propose" }.
     match &report.recent_outcomes[0] {
-        SignalRouteOutcome::Routed { verb }
-        | SignalRouteOutcome::RoutedButVerbStubbed { verb } => {
+        SignalRouteOutcome::Routed { verb } | SignalRouteOutcome::RoutedButVerbStubbed { verb } => {
             assert_eq!(verb, "propose");
         }
         other => panic!("expected routed/routed_but_stubbed, got {:?}", other),
@@ -272,8 +267,7 @@ fn associate_emission_routes_through_associate_verb() {
     let report = s.report().into_iter().find(|r| r.signal_id == id).unwrap();
     assert_eq!(report.recent_outcomes.len(), 1);
     match &report.recent_outcomes[0] {
-        SignalRouteOutcome::Routed { verb }
-        | SignalRouteOutcome::RoutedButVerbStubbed { verb } => {
+        SignalRouteOutcome::Routed { verb } | SignalRouteOutcome::RoutedButVerbStubbed { verb } => {
             assert_eq!(verb, "associate");
         }
         other => panic!("expected routed/routed_but_stubbed, got {:?}", other),
@@ -304,8 +298,7 @@ fn mutate_candidate_routes_through_propose() {
     // §11.1: mutate_candidate is routed through `propose`, so the
     // outcome verb is propose, not mutate.
     match &report.recent_outcomes[0] {
-        SignalRouteOutcome::Routed { verb }
-        | SignalRouteOutcome::RoutedButVerbStubbed { verb } => {
+        SignalRouteOutcome::Routed { verb } | SignalRouteOutcome::RoutedButVerbStubbed { verb } => {
             assert_eq!(verb, "propose");
         }
         other => panic!("expected propose routing, got {:?}", other),
@@ -361,21 +354,29 @@ fn subscribe_to_unknown_signal_returns_not_registered() {
 #[test]
 fn proposal_kind_raw_value_round_trip() {
     let cases: &[(&str, ProposalKind)] = &[
-        ("by_reference_drift",   ProposalKind::ByReferenceDrift),
-        ("tournament_update",    ProposalKind::TournamentUpdate),
-        ("mining_pattern",       ProposalKind::MiningPattern),
+        ("by_reference_drift", ProposalKind::ByReferenceDrift),
+        ("tournament_update", ProposalKind::TournamentUpdate),
+        ("mining_pattern", ProposalKind::MiningPattern),
         ("discipline_violation", ProposalKind::DisciplineViolation),
-        ("mutate_candidate",     ProposalKind::MutateCandidate),
-        ("amend",                ProposalKind::Amend),
-        ("test_propose",         ProposalKind::TestPropose),
+        ("mutate_candidate", ProposalKind::MutateCandidate),
+        ("amend", ProposalKind::Amend),
+        ("test_propose", ProposalKind::TestPropose),
     ];
     for (raw, expected) in cases {
         // raw_value() → wire string
-        assert_eq!(expected.raw_value(), *raw,
-            "raw_value mismatch for {:?}", expected);
+        assert_eq!(
+            expected.raw_value(),
+            *raw,
+            "raw_value mismatch for {:?}",
+            expected
+        );
         // from_raw() → back to enum case
-        assert_eq!(&ProposalKind::from_raw(raw), expected,
-            "from_raw round-trip failed for {}", raw);
+        assert_eq!(
+            &ProposalKind::from_raw(raw),
+            expected,
+            "from_raw round-trip failed for {}",
+            raw
+        );
     }
 }
 

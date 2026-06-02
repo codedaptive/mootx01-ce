@@ -61,8 +61,12 @@ pub struct UnifiedProjection {
 }
 
 impl UnifiedProjection {
-    pub fn count(&self) -> usize { self.rows.len() }
-    pub fn is_empty(&self) -> bool { self.rows.is_empty() }
+    pub fn count(&self) -> usize {
+        self.rows.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
 
     pub fn row(&self, tier: AuditTier, row_id: EntryUUID) -> Option<&UnifiedRowProjection> {
         self.rows.get(&UnifiedProjectionKey { tier, row_id })
@@ -96,20 +100,20 @@ impl AuditProjectionFold {
                 .or_insert_with(|| UnifiedRowProjection::fresh(entry.tier, entry.row_id));
             // Last-writer-wins per field-path; HLC order makes this
             // deterministic across replicas (cookbook §5.3).
-            state.fields.insert(entry.field_path.clone(), entry.after_value.clone());
+            state
+                .fields
+                .insert(entry.field_path.clone(), entry.after_value.clone());
             state.last_hlc = entry.hlc;
             state.last_verb = entry.verb;
             match entry.verb {
                 UnifiedAuditVerb::Withdraw => state.withdrawn = true,
                 UnifiedAuditVerb::Expunge => state.expunged = true,
-                UnifiedAuditVerb::Capture => {
+                UnifiedAuditVerb::Capture if !state.expunged => {
                     // Re-capture after expunge would be a new instance
                     // with a new UUID in the substrate; if this row has
                     // already been expunged, the projection leaves the
                     // tombstone flag in place.
-                    if !state.expunged {
-                        state.withdrawn = false;
-                    }
+                    state.withdrawn = false;
                 }
                 _ => {}
             }

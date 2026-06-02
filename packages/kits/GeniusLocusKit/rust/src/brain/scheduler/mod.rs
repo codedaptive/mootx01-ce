@@ -7,10 +7,10 @@ pub mod schedule;
 pub mod serial_lane;
 
 pub use api::{
-    AssociationFrame, ConcurrencyPolicy, ConditionPredicate, DiagnosticReport,
-    MutationKind, ProposalFrame, ProposalKind, ResourceCostEstimate, SignalContext,
-    SignalEmission, SignalID, SignalReport, SignalRouteOutcome, SignalSpec, SignalState,
-    SignalTrigger, SubscriptionID, trigger_tag, EMISSION_CLASS_TAGS,
+    trigger_tag, AssociationFrame, ConcurrencyPolicy, ConditionPredicate, DiagnosticReport,
+    MutationKind, ProposalFrame, ProposalKind, ResourceCostEstimate, SignalContext, SignalEmission,
+    SignalID, SignalReport, SignalRouteOutcome, SignalSpec, SignalState, SignalTrigger,
+    SubscriptionID, EMISSION_CLASS_TAGS,
 };
 pub use schedule::SchedulerError;
 pub use serial_lane::{Dispatcher, NoopDispatcher, SerialLaneScheduler};
