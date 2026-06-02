@@ -5,7 +5,9 @@
 // order-independent.
 
 use super::log::{AuditTier, UnifiedAuditEntry, UnifiedAuditLog};
-use super::projection::{AuditProjectionFold, UnifiedProjection, UnifiedProjectionKey, UnifiedRowProjection};
+use super::projection::{
+    AuditProjectionFold, UnifiedProjection, UnifiedProjectionKey, UnifiedRowProjection,
+};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -66,7 +68,9 @@ pub struct AuditRecoveryDivergence {
 }
 
 impl AuditRecoveryDivergence {
-    pub fn is_empty(&self) -> bool { self.mismatches.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.mismatches.is_empty()
+    }
 }
 
 pub struct AuditRecovery;
@@ -110,7 +114,11 @@ impl AuditRecovery {
             let r = rebuilt.rows.get(&key).cloned();
             let e = reference.rows.get(&key).cloned();
             if r != e {
-                mismatches.push(RowMismatch { key, expected: e, rebuilt: r });
+                mismatches.push(RowMismatch {
+                    key,
+                    expected: e,
+                    rebuilt: r,
+                });
             }
         }
         AuditRecoveryDivergence { mismatches }

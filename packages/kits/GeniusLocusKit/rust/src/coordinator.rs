@@ -88,10 +88,15 @@ impl From<VerbError> for VerbDispatchError {
 fn remap(verb: &str, error: LocusKitError) -> VerbError {
     if let LocusKitError::InvalidContent(detail) = &error {
         if detail.contains("not yet implemented") {
-            return VerbError::NotSupportedByEstate { verb: verb.to_string() };
+            return VerbError::NotSupportedByEstate {
+                verb: verb.to_string(),
+            };
         }
     }
-    VerbError::UnderlyingEstateFailure { verb: verb.to_string(), reason: format!("{error:?}") }
+    VerbError::UnderlyingEstateFailure {
+        verb: verb.to_string(),
+        reason: format!("{error:?}"),
+    }
 }
 
 /// The coordinator. Owns the registry of currently-open estates and is the
@@ -113,7 +118,10 @@ pub struct EstateCoordinator {
 impl EstateCoordinator {
     /// Construct a coordinator with empty estate and branch registries.
     pub fn new() -> Self {
-        Self { registry: HashMap::new(), branches: HashMap::new() }
+        Self {
+            registry: HashMap::new(),
+            branches: HashMap::new(),
+        }
     }
 
     /// Number of estates currently open.
@@ -143,8 +151,10 @@ impl EstateCoordinator {
         zoom_window_low: i64,
         zoom_window_high: i64,
     ) -> Result<EstateHandle, GeniusLocusKitError> {
-        let estate = Estate::open(store, owner)
-            .map_err(|e| GeniusLocusKitError::EstateOpenFailed { detail: format!("{e:?}") })?;
+        let estate =
+            Estate::open(store, owner).map_err(|e| GeniusLocusKitError::EstateOpenFailed {
+                detail: format!("{e:?}"),
+            })?;
         let estate_uuid: EstateUuid = estate.estate_uuid().into_bytes();
         let handle = EstateHandle::new(estate_uuid, zoom_window_low, zoom_window_high)?;
         if self.registry.contains_key(&handle) {
@@ -158,7 +168,9 @@ impl EstateCoordinator {
     /// subsequent `estate_for` lookups return `EstateNotOpen`.
     pub fn close(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
         if self.registry.remove(handle).is_none() {
-            return Err(GeniusLocusKitError::EstateNotOpen { estate_uuid: handle.estate_uuid });
+            return Err(GeniusLocusKitError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            });
         }
         Ok(())
     }
@@ -169,7 +181,9 @@ impl EstateCoordinator {
     pub fn estate_for(&self, handle: &EstateHandle) -> Result<&Estate, GeniusLocusKitError> {
         self.registry
             .get(handle)
-            .ok_or(GeniusLocusKitError::EstateNotOpen { estate_uuid: handle.estate_uuid })
+            .ok_or(GeniusLocusKitError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            })
     }
 
     // Internal: resolve to an estate, mapping the not-open case into the
@@ -178,7 +192,9 @@ impl EstateCoordinator {
     fn estate_for_verb(&self, handle: &EstateHandle) -> Result<&Estate, VerbDispatchError> {
         self.registry
             .get(handle)
-            .ok_or(VerbDispatchError::EstateNotOpen { estate_uuid: handle.estate_uuid })
+            .ok_or(VerbDispatchError::EstateNotOpen {
+                estate_uuid: handle.estate_uuid,
+            })
     }
 
     // MARK: - capture
@@ -193,7 +209,9 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<Drawer, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.capture(frame, now).map_err(|e| remap("capture", e).into())
+        estate
+            .capture(frame, now)
+            .map_err(|e| remap("capture", e).into())
     }
 
     // MARK: - recall
@@ -243,7 +261,9 @@ impl EstateCoordinator {
         payload: Option<&str>,
     ) -> Result<(), VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.mutate(row_id, kind, payload).map_err(|e| remap("mutate", e).into())
+        estate
+            .mutate(row_id, kind, payload)
+            .map_err(|e| remap("mutate", e).into())
     }
 
     // MARK: - withdraw
@@ -258,7 +278,9 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<(), VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.withdraw(row_id, reason, now).map_err(|e| remap("withdraw", e).into())
+        estate
+            .withdraw(row_id, reason, now)
+            .map_err(|e| remap("withdraw", e).into())
     }
 
     // MARK: - expunge
@@ -274,7 +296,10 @@ impl EstateCoordinator {
         confirmation: bool,
     ) -> Result<(), VerbDispatchError> {
         if !confirmation {
-            return Err(VerbError::ExpungeNotConfirmed { row_id: row_id.to_string() }.into());
+            return Err(VerbError::ExpungeNotConfirmed {
+                row_id: row_id.to_string(),
+            }
+            .into());
         }
         let estate = self.estate_for_verb(handle)?;
         estate
@@ -296,12 +321,137 @@ impl EstateCoordinator {
         to_lattice: Option<LatticeAnchor>,
     ) -> Result<(), VerbDispatchError> {
         if to_room.is_none() && to_lattice.is_none() {
-            return Err(VerbError::EmptyReanchor { row_id: row_id.to_string() }.into());
+            return Err(VerbError::EmptyReanchor {
+                row_id: row_id.to_string(),
+            }
+            .into());
         }
         let estate = self.estate_for_verb(handle)?;
         estate
             .reanchor(row_id, to_room, to_lattice)
             .map_err(|e| remap("reanchor", e).into())
+    }
+
+    // MARK: - learn
+
+    /// Ingest a learned reference into the estate addressed by `handle`.
+    ///
+    /// `learn` is grounding-driven per AriaLexicon's flow taxonomy. The
+    /// underlying `Estate::learn` is a stub that returns `InvalidContent`
+    /// ("learn not yet implemented"); `remap` turns that into
+    /// `VerbError::NotSupportedByEstate { verb: "learn" }` — parity of the
+    /// Swift GLK surface, which raises `VerbError.notSupportedByEstate(verb:
+    /// "learn")` until the Brain layer ships.
+    ///
+    /// Validates the handle first so a stale handle raises
+    /// `EstateNotOpen` uniformly, matching the other verbs.
+    pub fn learn(
+        &self,
+        handle: &EstateHandle,
+        _source_handle: &str,
+    ) -> Result<(), VerbDispatchError> {
+        // Validate handle before attempting dispatch — stale handle must raise
+        // EstateNotOpen, not NotSupportedByEstate.
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "learn".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_kg_facts
+
+    /// Recall kg-fact rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has no `all_kg_facts()` accessor (only
+    /// `kg_facts_for_drawer(source_drawer_id)`, a filtered query). Until the
+    /// trait gains an all-facts read path, this method returns
+    /// `NotSupportedByEstate` so the MCP surface advertises the tool honestly
+    /// without pretending it works. (Swift reconciliation item: the Swift server
+    /// also has no live `kgFact_recall` handler — it falls through to
+    /// methodNotFound. Rust surfaces error_result instead.)
+    pub fn recall_kg_facts(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::kg_fact::KGFact>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_kg_facts".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_diary_entries
+
+    /// Recall diary-entry rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has `read_diary(agent_name, last_n)` (by-agent
+    /// filtered query) but no all-entries read path. Returns
+    /// `NotSupportedByEstate` until the trait gains an unconstrained accessor.
+    pub fn recall_diary_entries(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::diary_entry::DiaryEntry>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_diary_entries".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_proposals
+
+    /// Recall proposal rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has `proposals_for_target(target_row_id)` but
+    /// no all-proposals read path. Returns `NotSupportedByEstate` until the
+    /// trait gains an unconstrained accessor.
+    pub fn recall_proposals(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::proposal::Proposal>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_proposals".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_associations
+
+    /// Recall association rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has `associations_from(wing, room)` and
+    /// `associations_to(wing, room)` (filtered queries) but no all-associations
+    /// read path. Returns `NotSupportedByEstate` until the trait gains an
+    /// unconstrained accessor.
+    pub fn recall_associations(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::association::Association>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_associations".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - recall_learned_references
+
+    /// Recall learned-reference rows for the estate addressed by `handle`.
+    ///
+    /// Stub: the DrawerStore trait has `learned_references_from_source(source_catalog_id)`
+    /// (filtered by catalog entry) but no all-references read path. Returns
+    /// `NotSupportedByEstate` until the trait gains an unconstrained accessor.
+    pub fn recall_learned_references(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::learned_reference::LearnedReference>, VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall_learned_references".to_string(),
+        }
+        .into())
     }
 }
 
@@ -374,10 +524,15 @@ mod tests {
     fn co2_withdraw_transitions_state() {
         let (coord, h) = open_one();
         let stored = coord.capture(&h, cap_frame("beta"), NOW).expect("capture");
-        coord.withdraw(&h, &stored.id, Some("obsolete"), NOW).expect("withdraw");
+        coord
+            .withdraw(&h, &stored.id, Some("obsolete"), NOW)
+            .expect("withdraw");
         // The row is no longer in the unconfirmed set after withdrawal.
         let rows = coord.recall(&h, unconfirmed(), NOW).expect("recall");
-        assert!(rows.iter().all(|r| r.id != stored.id), "withdrawn row left the set");
+        assert!(
+            rows.iter().all(|r| r.id != stored.id),
+            "withdrawn row left the set"
+        );
     }
 
     // CO-3: expunge without confirmation is refused at the boundary; the
@@ -401,7 +556,9 @@ mod tests {
         let err = coord.reanchor(&h, "row-1", None, None).unwrap_err();
         assert_eq!(
             err,
-            VerbDispatchError::Verb(VerbError::EmptyReanchor { row_id: "row-1".to_string() })
+            VerbDispatchError::Verb(VerbError::EmptyReanchor {
+                row_id: "row-1".to_string()
+            })
         );
     }
 
@@ -430,11 +587,17 @@ mod tests {
     #[test]
     fn co5b_state_axis_mutate_is_not_supported() {
         let (coord, h) = open_one();
-        let stored = coord.capture(&h, cap_frame("epsilon"), NOW).expect("capture");
-        let err = coord.mutate(&h, &stored.id, MutationKind::Reject, None).unwrap_err();
+        let stored = coord
+            .capture(&h, cap_frame("epsilon"), NOW)
+            .expect("capture");
+        let err = coord
+            .mutate(&h, &stored.id, MutationKind::Reject, None)
+            .unwrap_err();
         assert_eq!(
             err,
-            VerbDispatchError::Verb(VerbError::NotSupportedByEstate { verb: "mutate".to_string() })
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "mutate".to_string()
+            })
         );
     }
 
@@ -445,7 +608,12 @@ mod tests {
         let (mut coord, h) = open_one();
         coord.close(&h).expect("close");
         let err = coord.capture(&h, cap_frame("delta"), NOW).unwrap_err();
-        assert_eq!(err, VerbDispatchError::EstateNotOpen { estate_uuid: h.estate_uuid });
+        assert_eq!(
+            err,
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
     }
 
     // -----------------------------------------------------------------
@@ -467,8 +635,12 @@ mod tests {
     fn co7_recall_tunnels_returns_outgoing() {
         let (coord, h) = open_one();
         let estate = coord.estate_for(&h).expect("estate");
-        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW).unwrap();
-        estate.capture_tunnel(tunnel_frame("study", "garden", "relates"), NOW + 1).unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW)
+            .unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "garden", "relates"), NOW + 1)
+            .unwrap();
 
         let tunnels = coord.recall_tunnels(&h, "study").expect("recall_tunnels");
         assert_eq!(tunnels.len(), 2);
@@ -483,7 +655,9 @@ mod tests {
     fn co8_recall_tunnels_empty_for_unlinked_wing() {
         let (coord, h) = open_one();
         let estate = coord.estate_for(&h).expect("estate");
-        estate.capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW).unwrap();
+        estate
+            .capture_tunnel(tunnel_frame("study", "kitchen", "links"), NOW)
+            .unwrap();
 
         let tunnels = coord.recall_tunnels(&h, "attic").expect("recall_tunnels");
         assert!(tunnels.is_empty());
@@ -496,6 +670,147 @@ mod tests {
         let (mut coord, h) = open_one();
         coord.close(&h).expect("close");
         let err = coord.recall_tunnels(&h, "study").unwrap_err();
-        assert_eq!(err, VerbDispatchError::EstateNotOpen { estate_uuid: h.estate_uuid });
+        assert_eq!(
+            err,
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // v2b-p2 stub verb methods — learn and non-drawer recall.
+    // Each method validates the handle first (stale handle → EstateNotOpen)
+    // then returns NotSupportedByEstate so the MCP surface advertises the
+    // tool honestly without pretending it works.
+    // -----------------------------------------------------------------
+
+    // CO-10: learn raises NotSupportedByEstate — the Brain layer has not
+    // shipped, parity of Swift GLK.learn raising the same.
+    #[test]
+    fn co10_learn_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.learn(&h, "some-handle").unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "learn".to_string()
+            })
+        );
+    }
+
+    // CO-11: recall_kg_facts raises NotSupportedByEstate — no all-facts
+    // DrawerStore accessor exists yet.
+    #[test]
+    fn co11_recall_kg_facts_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_kg_facts(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_kg_facts".to_string()
+            })
+        );
+    }
+
+    // CO-12: recall_diary_entries raises NotSupportedByEstate — no
+    // all-entries DrawerStore accessor exists yet.
+    #[test]
+    fn co12_recall_diary_entries_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_diary_entries(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_diary_entries".to_string()
+            })
+        );
+    }
+
+    // CO-13: recall_proposals raises NotSupportedByEstate — no all-proposals
+    // DrawerStore accessor exists yet.
+    #[test]
+    fn co13_recall_proposals_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_proposals(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_proposals".to_string()
+            })
+        );
+    }
+
+    // CO-14: recall_associations raises NotSupportedByEstate — no
+    // all-associations DrawerStore accessor exists yet.
+    #[test]
+    fn co14_recall_associations_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_associations(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_associations".to_string()
+            })
+        );
+    }
+
+    // CO-15: recall_learned_references raises NotSupportedByEstate — no
+    // all-references DrawerStore accessor exists yet.
+    #[test]
+    fn co15_recall_learned_references_raises_not_supported() {
+        let (coord, h) = open_one();
+        let err = coord.recall_learned_references(&h).unwrap_err();
+        assert_eq!(
+            err,
+            VerbDispatchError::Verb(VerbError::NotSupportedByEstate {
+                verb: "recall_learned_references".to_string()
+            })
+        );
+    }
+
+    // CO-16: stub verbs on a closed handle raise EstateNotOpen, not
+    // NotSupportedByEstate — handle validation runs first.
+    #[test]
+    fn co16_stubs_on_closed_handle_raise_estate_not_open() {
+        let (mut coord, h) = open_one();
+        coord.close(&h).expect("close");
+
+        assert_eq!(
+            coord.learn(&h, "h").unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_kg_facts(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_diary_entries(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_proposals(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_associations(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
+        assert_eq!(
+            coord.recall_learned_references(&h).unwrap_err(),
+            VerbDispatchError::EstateNotOpen {
+                estate_uuid: h.estate_uuid
+            }
+        );
     }
 }

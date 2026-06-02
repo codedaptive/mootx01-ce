@@ -16,10 +16,10 @@
 // and the daemon's tick output match the Swift reference for the
 // same inputs.
 
+pub mod daemon;
 pub mod gate;
 pub mod pipeline;
-pub mod daemon;
 
+pub use daemon::{TrainingDaemon, TrainingDaemonReport, TrainingDaemonTick};
 pub use gate::{TrainingThresholdDecision, TrainingThresholdGate};
 pub use pipeline::{EnrichmentPassResult, EnrichmentPipeline};
-pub use daemon::{TrainingDaemon, TrainingDaemonReport, TrainingDaemonTick};

@@ -9,9 +9,7 @@
 
 use std::collections::HashMap;
 
-use crate::audit::{
-    AuditTier, EntryUUID, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
-};
+use crate::audit::{AuditTier, EntryUUID, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb};
 use crate::matrix::{MatrixCalibrationRegistry, MatrixTier, MatrixValueCoord};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -137,24 +135,25 @@ impl EnrichmentPipeline {
             };
 
             if !bundle_sign.contains_key(&key) {
-                bundle_order.push(key.clone());
+                bundle_order.push(key);
             }
-            bundle_sign.insert(key.clone(), s);
+            bundle_sign.insert(key, s);
 
             match &entry.after_value {
                 UnifiedAuditValue::Bitmap(v) => {
                     bitmap_bundle
-                        .entry(key.clone())
+                        .entry(key)
                         .or_default()
                         .push((entry.field_path.clone(), *v));
                 }
                 _ => {
-                    value_bundle.entry(key.clone()).or_default().push(
-                        MatrixValueCoord::new(
+                    value_bundle
+                        .entry(key)
+                        .or_default()
+                        .push(MatrixValueCoord::new(
                             entry.field_path.clone(),
                             entry.after_value.clone(),
-                        ),
-                    );
+                        ));
                 }
             }
         }
@@ -163,7 +162,7 @@ impl EnrichmentPipeline {
         // to preserve insertion order; within identical HLCs the
         // capture order matters and a HashMap iteration would
         // otherwise be nondeterministic.
-        bundle_order.sort_by(|a, b| a.2.cmp(&b.2));
+        bundle_order.sort_by_key(|a| a.2);
         for key in &bundle_order {
             let sign = match bundle_sign.get(key) {
                 Some(s) => *s,

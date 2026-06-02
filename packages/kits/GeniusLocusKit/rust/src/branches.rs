@@ -85,16 +85,24 @@ pub enum BranchError {
     EstateNotOpen,
     /// The branch was not minted by this coordinator (parity of
     /// `GeniusLocusKitError.branchNotTracked`).
-    NotTracked { branch_id: BranchId },
+    NotTracked {
+        branch_id: BranchId,
+    },
     /// The promotion/merge target is not the branch's parent estate (E-2).
-    PromotionTargetMismatch { branch_id: BranchId },
+    PromotionTargetMismatch {
+        branch_id: BranchId,
+    },
 }
 
 impl From<EstateError> for BranchError {
-    fn from(e: EstateError) -> Self { BranchError::Estate(e) }
+    fn from(e: EstateError) -> Self {
+        BranchError::Estate(e)
+    }
 }
 impl From<LocusKitError> for BranchError {
-    fn from(e: LocusKitError) -> Self { BranchError::Locus(e) }
+    fn from(e: LocusKitError) -> Self {
+        BranchError::Locus(e)
+    }
 }
 
 /// A read-write COW branch backed by a fresh in-memory estate. Minted and
@@ -186,15 +194,21 @@ impl EstateBranch {
     }
 
     /// Current lifecycle status.
-    pub fn status(&self) -> BranchStatus { self.status }
+    pub fn status(&self) -> BranchStatus {
+        self.status
+    }
 
     /// The parent estate's UUID — used by the coordinator's E-2 guard to
     /// confirm a promotion/merge targets the branch's actual parent.
-    pub(crate) fn parent_estate_uuid(&self) -> Uuid { self.parent_estate.estate_uuid() }
+    pub(crate) fn parent_estate_uuid(&self) -> Uuid {
+        self.parent_estate.estate_uuid()
+    }
 
     /// The branch estate (read-only) — the coordinator reads it to derive a
     /// child branch (branch-of-branch).
-    pub(crate) fn branch_estate(&self) -> &Estate { &self.branch_estate }
+    pub(crate) fn branch_estate(&self) -> &Estate {
+        &self.branch_estate
+    }
 
     /// Capture a new drawer into this branch estate only. The parent is
     /// untouched (I-15).
@@ -222,12 +236,16 @@ impl EstateBranch {
 
     /// Compare the current branch state to the derivation snapshot.
     pub fn compare_to_parent(&self, now: i64) -> DifferentialReport {
-        let current_ids: BTreeSet<String> =
-            self.recall(now).into_iter().map(|d| d.id).collect();
-        let new_in_branch: Vec<String> =
-            current_ids.difference(&self.snapshot_ids).cloned().collect();
-        let withdrawn_in_branch: Vec<String> =
-            self.snapshot_ids.difference(&current_ids).cloned().collect();
+        let current_ids: BTreeSet<String> = self.recall(now).into_iter().map(|d| d.id).collect();
+        let new_in_branch: Vec<String> = current_ids
+            .difference(&self.snapshot_ids)
+            .cloned()
+            .collect();
+        let withdrawn_in_branch: Vec<String> = self
+            .snapshot_ids
+            .difference(&current_ids)
+            .cloned()
+            .collect();
         DifferentialReport {
             new_in_branch,
             modified_in_branch: Vec::new(),
@@ -245,7 +263,8 @@ impl EstateBranch {
             .filter(|row| !self.snapshot_ids.contains(&row.id))
             .collect();
         for row in &new_rows {
-            self.parent_estate.capture(Self::capture_frame_from(row), now)?;
+            self.parent_estate
+                .capture(Self::capture_frame_from(row), now)?;
         }
         self.status = BranchStatus::Won;
         Ok(new_rows.len())
@@ -264,14 +283,19 @@ impl EstateBranch {
         for id in drawer_ids {
             match rows.iter().find(|r| &r.id == id) {
                 Some(row) => {
-                    self.parent_estate.capture(Self::capture_frame_from(row), now)?;
+                    self.parent_estate
+                        .capture(Self::capture_frame_from(row), now)?;
                     merged.push(id.clone());
                 }
                 None => skipped.push(id.clone()),
             }
         }
         self.status = BranchStatus::Merged;
-        Ok(MergeReport { merged, conflicts: Vec::new(), skipped })
+        Ok(MergeReport {
+            merged,
+            conflicts: Vec::new(),
+            skipped,
+        })
     }
 }
 
@@ -288,7 +312,9 @@ impl EstateCoordinator {
         handle: &EstateHandle,
         now: i64,
     ) -> Result<BranchId, BranchError> {
-        let parent = self.estate_for(handle).map_err(|_| BranchError::EstateNotOpen)?;
+        let parent = self
+            .estate_for(handle)
+            .map_err(|_| BranchError::EstateNotOpen)?;
         let snapshot_rows = EstateBranch::recall_all(parent, now);
         let branch = EstateBranch::build(name.into(), parent.clone(), &snapshot_rows, 1, now)?;
         let id = branch.branch_id;
@@ -304,10 +330,12 @@ impl EstateCoordinator {
         parent_branch_id: BranchId,
         now: i64,
     ) -> Result<BranchId, BranchError> {
-        let parent_branch = self
-            .branches
-            .get(&parent_branch_id)
-            .ok_or(BranchError::NotTracked { branch_id: parent_branch_id })?;
+        let parent_branch =
+            self.branches
+                .get(&parent_branch_id)
+                .ok_or(BranchError::NotTracked {
+                    branch_id: parent_branch_id,
+                })?;
         let snapshot_rows = EstateBranch::recall_all(parent_branch.branch_estate(), now);
         let parent_estate = parent_branch.branch_estate().clone();
         let depth = parent_branch.lineage_depth + 1;
@@ -400,7 +428,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let handle = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let handle = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         for c in contents {
             let frame = CaptureFrame::new(
                 *c,
@@ -425,7 +455,12 @@ mod tests {
             "bob",
             "test-v1",
         );
-        coord.branch_handle_for(branch_id).unwrap().capture(frame, NOW).unwrap().id
+        coord
+            .branch_handle_for(branch_id)
+            .unwrap()
+            .capture(frame, NOW)
+            .unwrap()
+            .id
     }
 
     // BR-1: glk_derive_branch snapshots all parent rows; the parent is
@@ -435,7 +470,11 @@ mod tests {
         let (mut coord, h) = coord_with_parent(&["alpha", "beta"]);
         let bid = coord.glk_derive_branch("b1", &h, NOW).unwrap();
         let branch = coord.branch_handle_for(bid).unwrap();
-        assert_eq!(branch.recall(NOW).len(), 2, "branch starts with the 2 parent rows");
+        assert_eq!(
+            branch.recall(NOW).len(),
+            2,
+            "branch starts with the 2 parent rows"
+        );
         assert_eq!(branch.lineage_depth, 1);
         assert_eq!(branch.status(), BranchStatus::Active);
         // I-15: parent unchanged by derivation.
@@ -461,7 +500,11 @@ mod tests {
         let diff = branch.compare_to_parent(NOW);
         assert_eq!(diff.new_in_branch.len(), 1);
         assert!(diff.withdrawn_in_branch.is_empty());
-        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 1, "I-15: parent untouched");
+        assert_eq!(
+            coord.recall(&h, all_frame(), NOW).unwrap().len(),
+            1,
+            "I-15: parent untouched"
+        );
     }
 
     // BR-3: promote moves only post-derivation rows into the parent; status
@@ -474,8 +517,15 @@ mod tests {
         branch_capture(&coord, bid, "delta");
         let promoted = coord.glk_promote_branch(bid, &h, NOW).unwrap();
         assert_eq!(promoted, 2);
-        assert_eq!(coord.branch_handle_for(bid).unwrap().status(), BranchStatus::Won);
-        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 3, "parent + 2 promoted");
+        assert_eq!(
+            coord.branch_handle_for(bid).unwrap().status(),
+            BranchStatus::Won
+        );
+        assert_eq!(
+            coord.recall(&h, all_frame(), NOW).unwrap().len(),
+            3,
+            "parent + 2 promoted"
+        );
     }
 
     // BR-4: merge cherry-picks by id; unknown ids skipped; status -> Merged.
@@ -490,8 +540,15 @@ mod tests {
             .unwrap();
         assert_eq!(report.merged, vec![g]);
         assert_eq!(report.skipped, vec!["no-such-id".to_string()]);
-        assert_eq!(coord.branch_handle_for(bid).unwrap().status(), BranchStatus::Merged);
-        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 2, "parent + 1 merged");
+        assert_eq!(
+            coord.branch_handle_for(bid).unwrap().status(),
+            BranchStatus::Merged
+        );
+        assert_eq!(
+            coord.recall(&h, all_frame(), NOW).unwrap().len(),
+            2,
+            "parent + 1 merged"
+        );
     }
 
     // BR-5: branch-of-branch increments lineage depth and snapshots the
@@ -504,7 +561,11 @@ mod tests {
         let b2 = coord.glk_derive_branch_from_branch("b2", b1, NOW).unwrap();
         let child = coord.branch_handle_for(b2).unwrap();
         assert_eq!(child.lineage_depth, 2);
-        assert_eq!(child.recall(NOW).len(), 2, "child snapshots parent branch's 2 rows");
+        assert_eq!(
+            child.recall(NOW).len(),
+            2,
+            "child snapshots parent branch's 2 rows"
+        );
     }
 
     // BR-6: discard retains rows; parent untouched. And an untracked branch
@@ -515,9 +576,20 @@ mod tests {
         let bid = coord.glk_derive_branch("b6", &h, NOW).unwrap();
         branch_capture(&coord, bid, "gamma");
         coord.glk_discard_branch(bid).unwrap();
-        assert_eq!(coord.branch_handle_for(bid).unwrap().status(), BranchStatus::Discarded);
-        assert_eq!(coord.branch_handle_for(bid).unwrap().recall(NOW).len(), 2, "rows retained");
-        assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 1, "I-15: parent untouched");
+        assert_eq!(
+            coord.branch_handle_for(bid).unwrap().status(),
+            BranchStatus::Discarded
+        );
+        assert_eq!(
+            coord.branch_handle_for(bid).unwrap().recall(NOW).len(),
+            2,
+            "rows retained"
+        );
+        assert_eq!(
+            coord.recall(&h, all_frame(), NOW).unwrap().len(),
+            1,
+            "I-15: parent untouched"
+        );
 
         let bogus = Uuid::new_v4();
         match coord.glk_promote_branch(bogus, &h, NOW) {

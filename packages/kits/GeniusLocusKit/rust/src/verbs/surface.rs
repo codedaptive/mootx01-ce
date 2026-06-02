@@ -15,8 +15,8 @@
 // the parity test asserts the name set.
 
 use crate::verbs::frames::{
-    AssociateFrame, CaptureFrame, ExpungeFrame, LearnFrame, MutateFrame,
-    ProposeFrame, ReanchorFrame, RecallFrame, RowId, WithdrawFrame,
+    AssociateFrame, CaptureFrame, ExpungeFrame, LearnFrame, MutateFrame, ProposeFrame,
+    ReanchorFrame, RecallFrame, RowId, WithdrawFrame,
 };
 
 /// The nine verb method names the GLK surface publishes. Order
@@ -24,8 +24,15 @@ use crate::verbs::frames::{
 /// `glkMethodNames` array, which is the authoritative method-name
 /// enumeration on the Swift side.
 pub const VERB_NAMES: [&str; 9] = [
-    "capture", "recall", "mutate", "withdraw", "expunge",
-    "reanchor", "learn", "propose", "associate",
+    "capture",
+    "recall",
+    "mutate",
+    "withdraw",
+    "expunge",
+    "reanchor",
+    "learn",
+    "propose",
+    "associate",
 ];
 
 /// Errors raised by the GeniusLocusKit unified verb surface. Mirrors
@@ -71,7 +78,9 @@ impl Surface {
     /// Construct a new surface. Stateless today; the constructor
     /// exists so call sites read the same as the Swift `GeniusLocusKit()`
     /// initialiser.
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 
     // MARK: - capture
 
@@ -80,7 +89,9 @@ impl Surface {
     /// `NotSupportedByEstate("capture")`. Downstream missions
     /// replace this body with a live dispatch when the port ships.
     pub fn capture(&self, _frame: CaptureFrame) -> Result<RowId, VerbError> {
-        Err(VerbError::NotSupportedByEstate { verb: "capture".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "capture".into(),
+        })
     }
 
     // MARK: - recall
@@ -89,43 +100,59 @@ impl Surface {
     /// `NotSupportedByEstate("recall")` for the same reason as
     /// `capture`.
     pub fn recall(&self, _frame: RecallFrame) -> Result<Vec<RowId>, VerbError> {
-        Err(VerbError::NotSupportedByEstate { verb: "recall".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "recall".into(),
+        })
     }
 
     // MARK: - mutate
 
     pub fn mutate(&self, _frame: MutateFrame) -> Result<(), VerbError> {
-        Err(VerbError::NotSupportedByEstate { verb: "mutate".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "mutate".into(),
+        })
     }
 
     // MARK: - withdraw
 
     pub fn withdraw(&self, _frame: WithdrawFrame) -> Result<(), VerbError> {
-        Err(VerbError::NotSupportedByEstate { verb: "withdraw".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "withdraw".into(),
+        })
     }
 
     // MARK: - expunge
 
     pub fn expunge(&self, frame: ExpungeFrame) -> Result<(), VerbError> {
         if !frame.confirmation {
-            return Err(VerbError::ExpungeNotConfirmed { row_id: frame.row_id });
+            return Err(VerbError::ExpungeNotConfirmed {
+                row_id: frame.row_id,
+            });
         }
-        Err(VerbError::NotSupportedByEstate { verb: "expunge".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "expunge".into(),
+        })
     }
 
     // MARK: - reanchor
 
     pub fn reanchor(&self, frame: ReanchorFrame) -> Result<(), VerbError> {
         if frame.to_room.is_none() && frame.to_lattice.is_none() {
-            return Err(VerbError::EmptyReanchor { row_id: frame.row_id });
+            return Err(VerbError::EmptyReanchor {
+                row_id: frame.row_id,
+            });
         }
-        Err(VerbError::NotSupportedByEstate { verb: "reanchor".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "reanchor".into(),
+        })
     }
 
     // MARK: - learn
 
     pub fn learn(&self, _frame: LearnFrame) -> Result<(), VerbError> {
-        Err(VerbError::NotSupportedByEstate { verb: "learn".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "learn".into(),
+        })
     }
 
     // MARK: - propose
@@ -134,17 +161,23 @@ impl Surface {
     /// scaffold, matching the Swift surface's behavior until the
     /// Brain layer ships.
     pub fn propose(&self, _frame: ProposeFrame) -> Result<(), VerbError> {
-        Err(VerbError::NotSupportedByEstate { verb: "propose".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "propose".into(),
+        })
     }
 
     // MARK: - associate
 
     /// Brain-layer verb. Always raises `NotSupportedByEstate`.
     pub fn associate(&self, _frame: AssociateFrame) -> Result<(), VerbError> {
-        Err(VerbError::NotSupportedByEstate { verb: "associate".into() })
+        Err(VerbError::NotSupportedByEstate {
+            verb: "associate".into(),
+        })
     }
 }
 
 impl Default for Surface {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

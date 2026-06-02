@@ -27,12 +27,12 @@ use genius_locus_kit::audit::{
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::fan_out::LatticeRegion;
 use genius_locus_kit::handle::{EstateHandle, EstateUuid};
+use genius_locus_kit::matrix::{MatrixCalibrationRegistry, MatrixTier};
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
 use persistence_kit::inmemory::InMemoryStorage;
 use std::sync::Arc;
 use uuid::Uuid;
-use genius_locus_kit::matrix::{MatrixCalibrationRegistry, MatrixTier};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -46,10 +46,8 @@ use genius_locus_kit::matrix::{MatrixCalibrationRegistry, MatrixTier};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
+use genius_locus_kit::training::{EnrichmentPipeline, TrainingDaemon, TrainingThresholdGate};
 use substrate_types::hlc::HLC;
-use genius_locus_kit::training::{
-    EnrichmentPipeline, TrainingDaemon, TrainingThresholdGate,
-};
 
 // MARK: - Multi-estate fan-out by lattice overlap
 
@@ -125,25 +123,72 @@ fn unified_audit_projection_and_enrichment_fold_both_tiers() {
     let rag_b = row_uuid(4);
     let locus_c = row_uuid(5);
 
-    fn add(log: &mut UnifiedAuditLog, tier: AuditTier, step: i64,
-           verb: UnifiedAuditVerb, row: EntryUUID,
-           path: &str, after: UnifiedAuditValue) {
+    fn add(
+        log: &mut UnifiedAuditLog,
+        tier: AuditTier,
+        step: i64,
+        verb: UnifiedAuditVerb,
+        row: EntryUUID,
+        path: &str,
+        after: UnifiedAuditValue,
+    ) {
         log.add(UnifiedAuditEntry::new(
-            tier, HLC::new(step, 0, 1), verb, row,
-            path.to_string(), UnifiedAuditValue::Null, after, None,
+            tier,
+            HLC::new(step, 0, 1),
+            verb,
+            row,
+            path.to_string(),
+            UnifiedAuditValue::Null,
+            after,
+            None,
         ));
     }
 
-    add(&mut log, AuditTier::Locus, 1, UnifiedAuditVerb::Capture, locus_a,
-        "tag_bits", UnifiedAuditValue::Bitmap(0x01));
-    add(&mut log, AuditTier::Rag,   2, UnifiedAuditVerb::Capture, rag_a,
-        "tag_bits", UnifiedAuditValue::Bitmap(0x02));
-    add(&mut log, AuditTier::Locus, 3, UnifiedAuditVerb::Capture, locus_b,
-        "tag_bits", UnifiedAuditValue::Bitmap(0x04));
-    add(&mut log, AuditTier::Rag,   4, UnifiedAuditVerb::Capture, rag_b,
-        "tag_bits", UnifiedAuditValue::Bitmap(0x08));
-    add(&mut log, AuditTier::Locus, 5, UnifiedAuditVerb::Capture, locus_c,
-        "tag_bits", UnifiedAuditValue::Bitmap(0x10));
+    add(
+        &mut log,
+        AuditTier::Locus,
+        1,
+        UnifiedAuditVerb::Capture,
+        locus_a,
+        "tag_bits",
+        UnifiedAuditValue::Bitmap(0x01),
+    );
+    add(
+        &mut log,
+        AuditTier::Rag,
+        2,
+        UnifiedAuditVerb::Capture,
+        rag_a,
+        "tag_bits",
+        UnifiedAuditValue::Bitmap(0x02),
+    );
+    add(
+        &mut log,
+        AuditTier::Locus,
+        3,
+        UnifiedAuditVerb::Capture,
+        locus_b,
+        "tag_bits",
+        UnifiedAuditValue::Bitmap(0x04),
+    );
+    add(
+        &mut log,
+        AuditTier::Rag,
+        4,
+        UnifiedAuditVerb::Capture,
+        rag_b,
+        "tag_bits",
+        UnifiedAuditValue::Bitmap(0x08),
+    );
+    add(
+        &mut log,
+        AuditTier::Locus,
+        5,
+        UnifiedAuditVerb::Capture,
+        locus_c,
+        "tag_bits",
+        UnifiedAuditValue::Bitmap(0x10),
+    );
 
     let projection = AuditProjectionFold::project(&log);
     assert_eq!(projection.count(), 5);
@@ -155,8 +200,10 @@ fn unified_audit_projection_and_enrichment_fold_both_tiers() {
     let pipeline = EnrichmentPipeline::new();
     let result = pipeline.run(&log, &mut tier, &mut calibration, HLC::new(0, 0, 0));
     assert_eq!(result.transitions_considered, 5);
-    assert_eq!(tier.live_row_count, 5,
-               "enrichment folds every capture across both tiers");
+    assert_eq!(
+        tier.live_row_count, 5,
+        "enrichment folds every capture across both tiers"
+    );
     assert!(!tier.field_presence.is_empty());
 }
 
@@ -190,8 +237,10 @@ fn training_daemon_composes_with_enrichment_and_gate() {
     }
     let tick_a = daemon.run_once(&log, &mut tier, &mut calibration);
     assert!(!tick_a.decision.is_active());
-    assert_eq!(tier.live_row_count, 0,
-               "below-threshold daemon must not enrich");
+    assert_eq!(
+        tier.live_row_count, 0,
+        "below-threshold daemon must not enrich"
+    );
 
     // Grow the log past the threshold and tick again — gate active.
     for i in 4..10u16 {
@@ -208,8 +257,10 @@ fn training_daemon_composes_with_enrichment_and_gate() {
     }
     let tick_b = daemon.run_once(&log, &mut tier, &mut calibration);
     assert!(tick_b.decision.is_active());
-    assert_eq!(tier.live_row_count, 10,
-               "above-threshold daemon must enrich on the next tick");
+    assert_eq!(
+        tier.live_row_count, 10,
+        "above-threshold daemon must enrich on the next tick"
+    );
 }
 
 // MARK: - Helpers

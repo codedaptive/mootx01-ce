@@ -21,13 +21,12 @@
 use substrate_types::hlc::HLC;
 
 use genius_locus_kit::audit::{
-    AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue,
-    UnifiedAuditVerb,
+    AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
 };
 use genius_locus_kit::matrix::{
-    MatrixCalibrationOutcome, MatrixCalibrationRegistry, MatrixCoOccurKey,
-    MatrixFieldCell, MatrixNMF, MatrixPersistenceBackend, MatrixPersistenceMode,
-    MatrixTier, MatrixValueCoord, MatrixTemporalKey,
+    MatrixCalibrationOutcome, MatrixCalibrationRegistry, MatrixCoOccurKey, MatrixFieldCell,
+    MatrixNMF, MatrixPersistenceBackend, MatrixPersistenceMode, MatrixTemporalKey, MatrixTier,
+    MatrixValueCoord,
 };
 
 fn hlc(p: i64) -> HLC {
@@ -50,18 +49,8 @@ fn capture(row: EntryUUID, field: &str, v: UnifiedAuditValue, h: HLC) -> Unified
 #[test]
 fn field_presence_counts_set_bits() {
     let mut tier = MatrixTier::new();
-    tier.apply_capture(
-        &[("bitmap.adjective".to_string(), 0b1001)],
-        &[],
-        hlc(10),
-        1,
-    );
-    tier.apply_capture(
-        &[("bitmap.adjective".to_string(), 0b1001)],
-        &[],
-        hlc(11),
-        1,
-    );
+    tier.apply_capture(&[("bitmap.adjective".to_string(), 0b1001)], &[], hlc(10), 1);
+    tier.apply_capture(&[("bitmap.adjective".to_string(), 0b1001)], &[], hlc(11), 1);
     let bit0 = MatrixFieldCell::new("bitmap.adjective", 0);
     let bit3 = MatrixFieldCell::new("bitmap.adjective", 3);
     let bit1 = MatrixFieldCell::new("bitmap.adjective", 1);
@@ -128,6 +117,8 @@ fn temporal_lag_bucketing() {
 fn rebuild_from_audit_log_equals_incremental() {
     let row_a = EntryUUID([1; 16]);
     let row_b = EntryUUID([2; 16]);
+    // Type alias for clarity — suppresses the type_complexity lint for this capture bundle.
+    #[allow(clippy::type_complexity)]
     let captures: Vec<(EntryUUID, Vec<(String, u64)>, HLC)> = vec![
         (
             row_a,
@@ -207,15 +198,13 @@ fn snapshotted_mode_round_trips_exactly() {
         hlc(20),
     ));
 
-    let backend = MatrixPersistenceBackend::new(
-        MatrixPersistenceMode::Snapshotted { file: tmp.clone() },
-    );
+    let backend =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
     let snap1 = backend
         .rebuild(&log, MatrixCalibrationRegistry::new())
         .unwrap();
-    let backend2 = MatrixPersistenceBackend::new(
-        MatrixPersistenceMode::Snapshotted { file: tmp.clone() },
-    );
+    let backend2 =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
     let loaded = backend2.load().unwrap().expect("snapshot present");
     assert_eq!(loaded.tier, snap1.tier);
     assert_eq!(loaded.calibration, snap1.calibration);
@@ -254,11 +243,12 @@ fn persistence_modes_agree_on_tier() {
     ));
 
     let mem = MatrixPersistenceBackend::new(MatrixPersistenceMode::InMemory);
-    let snap = MatrixPersistenceBackend::new(
-        MatrixPersistenceMode::Snapshotted { file: tmp.clone() },
-    );
+    let snap =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
     let mem_out = mem.rebuild(&log, MatrixCalibrationRegistry::new()).unwrap();
-    let snap_out = snap.rebuild(&log, MatrixCalibrationRegistry::new()).unwrap();
+    let snap_out = snap
+        .rebuild(&log, MatrixCalibrationRegistry::new())
+        .unwrap();
     assert_eq!(mem_out.tier, snap_out.tier);
 }
 
@@ -278,8 +268,13 @@ fn calibration_deflates_overconfidence() {
 #[test]
 fn nmf_approximates_input_matrix() {
     let o: [f64; 9] = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0];
+    #[allow(clippy::unusual_byte_groupings)]
     let f = MatrixNMF::factorize(&o, 3, 3, 1, 0xC0FFEE_BABE_BEEF, 200, 1e-9);
-    assert!(f.reconstruction_error < 1e-3, "err {}", f.reconstruction_error);
+    assert!(
+        f.reconstruction_error < 1e-3,
+        "err {}",
+        f.reconstruction_error
+    );
     assert_eq!(f.loadings_for_row(0).len(), 1);
 }
 

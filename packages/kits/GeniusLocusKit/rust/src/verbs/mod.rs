@@ -19,9 +19,8 @@ pub mod lexicon;
 pub mod surface;
 
 pub use frames::{
-    AssociateFrame, CaptureFrame, ExpungeFrame, LearnFrame, LatticeAnchor,
-    MutateFrame, MutationKind, ProposeFrame, ReanchorFrame, RecallFrame,
-    WithdrawFrame,
+    AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame, MutateFrame,
+    MutationKind, ProposeFrame, ReanchorFrame, RecallFrame, WithdrawFrame,
 };
 pub use lexicon::{Acceptance, Adjective, Noun, NounRole, SurfaceTarget, Verb, VerbFlow};
 pub use surface::{Surface, VerbError, VERB_NAMES};

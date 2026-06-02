@@ -9,9 +9,8 @@
 // target list, this file must change in lock-step.
 
 use genius_locus_kit::{
-    Acceptance, AssociateFrame, ExpungeFrame, Noun, ProposeFrame,
-    ReanchorFrame, SchedulerProposalKind as ProposalKind, Surface, SurfaceTarget,
-    Verb, VerbError, VERB_NAMES,
+    Acceptance, AssociateFrame, ExpungeFrame, Noun, ProposeFrame, ReanchorFrame,
+    SchedulerProposalKind as ProposalKind, Surface, SurfaceTarget, Verb, VerbError, VERB_NAMES,
 };
 
 /// `Verb` enumerates exactly the nine cases the Swift mirror does, in
@@ -21,8 +20,15 @@ use genius_locus_kit::{
 fn verb_count_and_names_match_swift() {
     assert_eq!(Verb::ALL.len(), 9);
     let expected: [&str; 9] = [
-        "capture", "reanchor", "mutate", "withdraw", "expunge",
-        "recall", "propose", "associate", "learn",
+        "capture",
+        "reanchor",
+        "mutate",
+        "withdraw",
+        "expunge",
+        "recall",
+        "propose",
+        "associate",
+        "learn",
     ];
     for (verb, name) in Verb::ALL.iter().zip(expected.iter()) {
         assert_eq!(verb.name(), *name);
@@ -35,8 +41,15 @@ fn verb_count_and_names_match_swift() {
 fn surface_verb_names_match_swift() {
     assert_eq!(VERB_NAMES.len(), 9);
     let expected: [&str; 9] = [
-        "capture", "recall", "mutate", "withdraw", "expunge",
-        "reanchor", "learn", "propose", "associate",
+        "capture",
+        "recall",
+        "mutate",
+        "withdraw",
+        "expunge",
+        "reanchor",
+        "learn",
+        "propose",
+        "associate",
     ];
     for (got, want) in VERB_NAMES.iter().zip(expected.iter()) {
         assert_eq!(got, want);
@@ -58,19 +71,28 @@ fn acceptance_matrix_matches_swift() {
     use Noun::*;
     use Verb::*;
     let table: [(Noun, &[Verb]); 8] = [
-        (Drawer, &[Capture, Reanchor, Mutate, Withdraw, Expunge, Recall]),
+        (
+            Drawer,
+            &[Capture, Reanchor, Mutate, Withdraw, Expunge, Recall],
+        ),
         (Tunnel, &[Capture, Mutate, Withdraw, Expunge, Recall]),
         (KgFact, &[Mutate, Withdraw, Expunge, Recall]),
         (Vector, &[]),
         (DiaryEntry, &[Recall]),
         (Proposal, &[Mutate, Withdraw, Expunge, Recall]),
         (Association, &[Mutate, Expunge, Recall]),
-        (LearnedReference, &[Learn, Mutate, Withdraw, Expunge, Recall]),
+        (
+            LearnedReference,
+            &[Learn, Mutate, Withdraw, Expunge, Recall],
+        ),
     ];
     for (noun, expected) in table.iter() {
         let got = Acceptance::verbs(*noun);
-        assert_eq!(got, *expected,
-            "acceptance row for {:?} drifted from Swift", noun);
+        assert_eq!(
+            got, *expected,
+            "acceptance row for {:?} drifted from Swift",
+            noun
+        );
     }
 }
 
@@ -80,8 +102,11 @@ fn acceptance_matrix_matches_swift() {
 #[test]
 fn vector_rejects_every_verb() {
     for verb in Verb::ALL.iter() {
-        assert!(!Acceptance::accepts(Noun::Vector, *verb),
-            "Vector should reject {:?}", verb);
+        assert!(
+            !Acceptance::accepts(Noun::Vector, *verb),
+            "Vector should reject {:?}",
+            verb
+        );
     }
 }
 
@@ -157,6 +182,9 @@ fn associate_raises_not_supported() {
     };
     match s.associate(frame).unwrap_err() {
         VerbError::NotSupportedByEstate { verb } => assert_eq!(verb, "associate"),
-        other => panic!("expected NotSupportedByEstate('associate'), got {:?}", other),
+        other => panic!(
+            "expected NotSupportedByEstate('associate'), got {:?}",
+            other
+        ),
     }
 }

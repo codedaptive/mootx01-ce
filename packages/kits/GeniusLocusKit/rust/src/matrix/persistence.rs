@@ -18,9 +18,9 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use crate::audit::UnifiedAuditLog;
 use super::calibration::MatrixCalibrationRegistry;
 use super::matrix::MatrixTier;
+use crate::audit::UnifiedAuditLog;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -118,19 +118,14 @@ impl MatrixPersistenceBackend {
                     return Ok(None);
                 }
                 let mut f = fs::File::open(file).map_err(|e| {
-                    MatrixPersistenceError::SnapshotDecodeFailed(format!(
-                        "read failed: {e}"
-                    ))
+                    MatrixPersistenceError::SnapshotDecodeFailed(format!("read failed: {e}"))
                 })?;
                 let mut bytes = Vec::new();
                 f.read_to_end(&mut bytes).map_err(|e| {
-                    MatrixPersistenceError::SnapshotDecodeFailed(format!(
-                        "read failed: {e}"
-                    ))
+                    MatrixPersistenceError::SnapshotDecodeFailed(format!("read failed: {e}"))
                 })?;
                 let snap = decode_snapshot(&bytes)?;
-                if snap.schema_version != MatrixSnapshot::CURRENT_SCHEMA_VERSION
-                {
+                if snap.schema_version != MatrixSnapshot::CURRENT_SCHEMA_VERSION {
                     return Err(MatrixPersistenceError::SchemaVersionMismatch {
                         found: snap.schema_version,
                         expected: MatrixSnapshot::CURRENT_SCHEMA_VERSION,
@@ -154,17 +149,13 @@ impl MatrixPersistenceBackend {
                         ))
                     })?;
                     f.write_all(&bytes).map_err(|e| {
-                        MatrixPersistenceError::SnapshotEncodeFailed(format!(
-                            "write failed: {e}"
-                        ))
+                        MatrixPersistenceError::SnapshotEncodeFailed(format!("write failed: {e}"))
                     })?;
                     f.sync_all().ok();
                 }
                 let _ = fs::remove_file(file);
                 fs::rename(&tmp, file).map_err(|e| {
-                    MatrixPersistenceError::SnapshotEncodeFailed(format!(
-                        "rename failed: {e}"
-                    ))
+                    MatrixPersistenceError::SnapshotEncodeFailed(format!("rename failed: {e}"))
                 })?;
                 Ok(())
             }
@@ -197,9 +188,7 @@ impl MatrixPersistenceBackend {
 // state, not on-disk bytes.
 
 fn encode_snapshot(s: &MatrixSnapshot) -> Vec<u8> {
-    use super::matrix::{
-        MatrixCoOccurKey, MatrixFieldCell, MatrixTemporalKey, MatrixValueCoord,
-    };
+    use super::matrix::{MatrixCoOccurKey, MatrixFieldCell, MatrixTemporalKey, MatrixValueCoord};
     use crate::audit::UnifiedAuditValue;
 
     fn put_u32(out: &mut Vec<u8>, v: u32) {
@@ -258,8 +247,7 @@ fn encode_snapshot(s: &MatrixSnapshot) -> Vec<u8> {
     put_i32(&mut out, s.tier.last_hlc.node_id);
 
     // F
-    let mut fcells: Vec<(&MatrixFieldCell, &i64)> =
-        s.tier.field_presence.iter().collect();
+    let mut fcells: Vec<(&MatrixFieldCell, &i64)> = s.tier.field_presence.iter().collect();
     fcells.sort_by(|a, b| {
         a.0.field_path
             .cmp(&b.0.field_path)
@@ -273,8 +261,7 @@ fn encode_snapshot(s: &MatrixSnapshot) -> Vec<u8> {
     }
 
     // O
-    let mut okeys: Vec<(&MatrixCoOccurKey, &i64)> =
-        s.tier.co_occurrence.iter().collect();
+    let mut okeys: Vec<(&MatrixCoOccurKey, &i64)> = s.tier.co_occurrence.iter().collect();
     okeys.sort_by(|a, b| {
         a.0.a
             .field_path
@@ -289,8 +276,7 @@ fn encode_snapshot(s: &MatrixSnapshot) -> Vec<u8> {
     }
 
     // T
-    let mut tkeys: Vec<(&MatrixTemporalKey, &i64)> =
-        s.tier.temporal_causality.iter().collect();
+    let mut tkeys: Vec<(&MatrixTemporalKey, &i64)> = s.tier.temporal_causality.iter().collect();
     tkeys.sort_by(|a, b| {
         a.0.source
             .field_path
@@ -327,8 +313,7 @@ fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceErro
         MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationRegistry,
     };
     use super::matrix::{
-        MatrixCoOccurKey, MatrixFieldCell, MatrixTemporalKey, MatrixTier,
-        MatrixValueCoord,
+        MatrixCoOccurKey, MatrixFieldCell, MatrixTemporalKey, MatrixTier, MatrixValueCoord,
     };
     use crate::audit::UnifiedAuditValue;
     use std::collections::HashMap;
@@ -370,11 +355,8 @@ fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceErro
         fn string(&mut self) -> Result<String, MatrixPersistenceError> {
             let len = self.u32()? as usize;
             let b = self.read_bytes(len)?;
-            String::from_utf8(b.to_vec()).map_err(|e| {
-                MatrixPersistenceError::SnapshotDecodeFailed(format!(
-                    "utf8: {e}"
-                ))
-            })
+            String::from_utf8(b.to_vec())
+                .map_err(|e| MatrixPersistenceError::SnapshotDecodeFailed(format!("utf8: {e}")))
         }
         fn value(&mut self) -> Result<UnifiedAuditValue, MatrixPersistenceError> {
             let tag = self.u8()?;
@@ -435,8 +417,7 @@ fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceErro
         // Direct insert: the encoder already wrote keys in canonical
         // ordering; preserve that ordering on decode by skipping
         // re-canonicalisation.
-        tier.co_occurrence
-            .insert(MatrixCoOccurKey { a, b }, v);
+        tier.co_occurrence.insert(MatrixCoOccurKey { a, b }, v);
     }
 
     let n_t = r.u32()? as usize;

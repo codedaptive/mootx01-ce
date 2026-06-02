@@ -16,8 +16,7 @@
 //   - The provisional default matches the decision record (500).
 
 use genius_locus_kit::audit::{
-    AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue,
-    UnifiedAuditVerb,
+    AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
 };
 use genius_locus_kit::matrix::{MatrixCalibrationRegistry, MatrixTier};
 // ─────────────────────────────────────────────────────────────────
@@ -33,10 +32,8 @@ use genius_locus_kit::matrix::{MatrixCalibrationRegistry, MatrixTier};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
+use genius_locus_kit::training::{EnrichmentPipeline, TrainingDaemon, TrainingThresholdGate};
 use substrate_types::hlc::HLC;
-use genius_locus_kit::training::{
-    EnrichmentPipeline, TrainingDaemon, TrainingThresholdGate,
-};
 
 fn hlc(p: i64) -> HLC {
     HLC::new(p, 0, 1)

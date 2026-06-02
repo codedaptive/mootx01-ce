@@ -9,12 +9,10 @@
 // 3. The default-set helper registers all six in the canonical order.
 
 use genius_locus_kit::{
-    ByReferenceValiditySignal, DecaySweepSignal, DreamingSignal, EndOfDayTournamentSignal,
-    MaintenanceSignal, VectorSimilaritySignal,
-    default_standing_signal_names, default_standing_signal_specs,
-    SchedulerNoopDispatcher, SerialLaneScheduler,
-    SchedulerSignalRouteOutcome as SignalRouteOutcome,
-    SchedulerSignalTrigger as SignalTrigger,
+    default_standing_signal_names, default_standing_signal_specs, ByReferenceValiditySignal,
+    DecaySweepSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
+    SchedulerNoopDispatcher, SchedulerSignalRouteOutcome as SignalRouteOutcome,
+    SchedulerSignalTrigger as SignalTrigger, SerialLaneScheduler, VectorSimilaritySignal,
 };
 
 const T0_NANOS: i64 = 1_700_000_000_000_000_000;
@@ -44,10 +42,16 @@ fn default_signal_names_and_cadences_match_swift_reference() {
     assert_eq!(DecaySweepSignal::SIGNAL_NAME, "decay-sweep");
     assert_eq!(DecaySweepSignal::DEFAULT_CADENCE_SECONDS, 86_400);
 
-    assert_eq!(ByReferenceValiditySignal::SIGNAL_NAME, "by-reference-validity");
+    assert_eq!(
+        ByReferenceValiditySignal::SIGNAL_NAME,
+        "by-reference-validity"
+    );
     assert_eq!(ByReferenceValiditySignal::DEFAULT_CADENCE_SECONDS, 604_800);
 
-    assert_eq!(EndOfDayTournamentSignal::SIGNAL_NAME, "end-of-day-tournament");
+    assert_eq!(
+        EndOfDayTournamentSignal::SIGNAL_NAME,
+        "end-of-day-tournament"
+    );
     assert_eq!(EndOfDayTournamentSignal::DEFAULT_CADENCE_SECONDS, 86_400);
 }
 
@@ -106,9 +110,8 @@ fn dreaming_signal_emits_propose_and_associate() {
         .recent_outcomes
         .iter()
         .filter_map(|o| match o {
-            SignalRouteOutcome::Routed { verb } | SignalRouteOutcome::RoutedButVerbStubbed { verb } => {
-                Some(verb.as_str())
-            }
+            SignalRouteOutcome::Routed { verb }
+            | SignalRouteOutcome::RoutedButVerbStubbed { verb } => Some(verb.as_str()),
             _ => None,
         })
         .collect();
@@ -135,7 +138,10 @@ fn maintenance_signal_emits_two_proposes_and_one_diagnostic() {
         .count();
     assert_eq!(propose_count, 2);
     assert_eq!(report.recent_diagnostics.len(), 1);
-    assert_eq!(report.recent_diagnostics[0].title, "maintenance.scan.summary");
+    assert_eq!(
+        report.recent_diagnostics[0].title,
+        "maintenance.scan.summary"
+    );
 }
 
 #[test]

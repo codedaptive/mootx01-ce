@@ -16,21 +16,21 @@
 // Substrate mathematics §8 names the same family and defines the
 // invariants the conformance harness asserts.
 
-pub mod matrix;
 pub mod calibration;
+#[allow(clippy::module_inception)]
+// matrix module inside matrix/ is intentional — the matrix.rs file defines MatrixTier, the module's primary type
+pub mod matrix;
 pub mod nmf;
 pub mod persistence;
 
-pub use matrix::{
-    MatrixCoOccurKey, MatrixFieldCell, MatrixTemporalKey, MatrixTier,
-    MatrixValueCoord,
-};
 pub use calibration::{
-    MatrixCalibrationBucket, MatrixCalibrationCurve,
-    MatrixCalibrationOutcome, MatrixCalibrationRegistry,
+    MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationOutcome,
+    MatrixCalibrationRegistry,
+};
+pub use matrix::{
+    MatrixCoOccurKey, MatrixFieldCell, MatrixTemporalKey, MatrixTier, MatrixValueCoord,
 };
 pub use nmf::{MatrixNMF, MatrixNMFFactorization};
 pub use persistence::{
-    MatrixPersistenceBackend, MatrixPersistenceError, MatrixPersistenceMode,
-    MatrixSnapshot,
+    MatrixPersistenceBackend, MatrixPersistenceError, MatrixPersistenceMode, MatrixSnapshot,
 };
