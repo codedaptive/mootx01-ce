@@ -1,6 +1,11 @@
 // DreamingDaemonTests.swift
 //
 // Conformance tests for the dreaming daemon (NEURONKIT_SPEC § 3.1).
+// Covers (peer-file mirror): Dreaming/DreamingDaemon.swift,
+// Dreaming/DreamingDecision.swift, Dreaming/DreamingPolicy.swift,
+// Dreaming/DreamingTriggerMode.swift, Dreaming/RewardSource.swift —
+// the decision core, policy, trigger mode, and reward seam are
+// exercised through the daemon over the shared seam fakes below.
 // Covers C-1 (tick cadence), C-2 (confidence gate), C-6 (one diary
 // entry per cycle), C-15 (reads RecallTraceItem.used as reward via the
 // RewardSource seam), B-4 (idempotency), and the never-create-Tunnels

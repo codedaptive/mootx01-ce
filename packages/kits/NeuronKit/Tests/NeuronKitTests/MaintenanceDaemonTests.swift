@@ -1,7 +1,12 @@
 // MaintenanceDaemonTests.swift
 //
 // Conformance tests for the maintenance daemon (NEURONKIT_SPEC § 3.2 /
-// § 3.5). Covers C-3 (all five scan categories detected and proposed),
+// § 3.5).
+// Covers (peer-file mirror): Maintenance/MaintenanceDaemon.swift,
+// Maintenance/MaintenanceDecision.swift,
+// Maintenance/MaintenancePolicy.swift, Maintenance/MaintenanceSeams.swift
+// — the decision core, policy, and seams are exercised through the
+// daemon over the shared seam fakes below. Covers C-3 (all five scan categories detected and proposed),
 // C-4 / C-12 (audit-chain break → integrity proposal; clean chain →
 // none), C-6 (exactly one diary entry per cycle), B-2 (every detected
 // issue is a proposal, never an action), B-4 (idempotency across

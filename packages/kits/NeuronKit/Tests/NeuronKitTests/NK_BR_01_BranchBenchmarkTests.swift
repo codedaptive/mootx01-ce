@@ -8,6 +8,10 @@ import GeniusLocusKit
 
 /// Branch ops + migration-benchmark tests — NK-BR-01.
 ///
+/// Covers (peer-file mirror): BranchOps.swift and
+/// BenchmarkAlgorithm.swift — both surfaces share the in-memory estate
+/// harness below.
+///
 /// Covers the four NeuronKit entry points (`deriveBranch`,
 /// `promoteBranch`, `mergeDrawers`, `benchmark`) plus the
 /// `ExternalCorpus` decode/`asRecallFrames()` surface and the C-13
