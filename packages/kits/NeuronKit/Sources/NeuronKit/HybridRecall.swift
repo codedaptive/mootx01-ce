@@ -313,3 +313,14 @@ internal enum HybridRecallEngine {
         return out
     }
 }
+
+extension NeuronKit {
+    /// Deterministic Jaccard similarity over 3-character lowercase
+    /// shingles — the engine's `shingleSimilarity`, surfaced publicly.
+    /// Pure text math; bit-identical across versions on shared vectors.
+    /// (The Rust version's `shingle_similarity` has always been `pub`;
+    /// the contradiction recipe is the named Swift consumer.)
+    public static func shingleSimilarity(_ a: String, _ b: String) -> Float {
+        HybridRecallEngine.shingleSimilarity(a, b)
+    }
+}

@@ -682,6 +682,11 @@ public func hybridRecall(_ frame: RecallFrame, handle: EstateHandle,
 // the per-row fingerprint derivation, keeping mmrRank free of estate context.
 public func mmrRank(candidates: [Drawer], query: Engram, lambda: Float, k: Int,
                     fingerprint: (Drawer) -> Engram) -> [Drawer]
+
+// Deterministic Jaccard similarity over 3-char lowercase shingles — the
+// engine's similarity, surfaced publicly (the Rust shingle_similarity
+// has always been pub). Bit-identical across versions on shared vectors.
+public static func shingleSimilarity(_ a: String, _ b: String) -> Float   // on NeuronKit
 ```
 
 **Rust:** (pure rerank + paging only — no estate, no `mmrRank`)
