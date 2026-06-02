@@ -482,28 +482,32 @@ public struct Substrate {
         auditEvents.append(event)
     }
 
-    /// Per § 9.5 / I-22 forbidden-combination check. Returns nil
-    /// on success or the relevant error on failure.
+    /// Forbidden-combination check (§ 9.5 / I-22). Returns nil on
+    /// success or the relevant error on failure.
+    ///
+    /// Delegates to `ForbiddenCombinations.check` — the single
+    /// SubstrateLib rule set (I-22 + S-1 + S-2 + S-4) — so the verb
+    /// oracle is faithful to the LocusKit mutation path, which
+    /// reaches the same check via `RowStateAutomaton.validate`.
+    /// `.check` reads only the adjective field; provenance is unused
+    /// here, so 0 is faithful.
     private func isLegalRowState(state: RowState,
                                   adjective: Int64,
                                   operational: Int64) -> SubstrateError? {
-        let sensitivity = Int((adjective >> 6) & 0x3F)
-        let exportability = Int((adjective >> 12) & 0x3F)
-        let trust = Int((adjective >> 18) & 0x3F)
-
-        // (1) tombstoned must have the expunge-completed bit set;
-        // we don't model that bit explicitly in the reference, so
-        // skip in this layer (production enforces).
-
-        // (2) secret cannot be public.
-        if sensitivity == 48 && exportability == 32 {
-            return .forbiddenStateCombination("secret cannot be public")
+        let fields = BitmapFields(
+            adjective: UInt64(bitPattern: adjective),
+            operational: UInt64(bitPattern: operational),
+            provenance: 0)
+        do {
+            try ForbiddenCombinations.check(state: state, fields: fields)
+            return nil
+        } catch RowStateError.violatesInvariant(let message) {
+            return .forbiddenStateCombination(message)
+        } catch {
+            // `.check` throws only `RowStateError.violatesInvariant`
+            // today; surface anything new rather than swallow it.
+            return .forbiddenStateCombination(String(describing: error))
         }
-        // (3) accepted cannot be verbatim.
-        if state == .accepted && trust == 0 {
-            return .forbiddenStateCombination("accepted cannot be verbatim")
-        }
-        return nil
     }
 
     private func rowHasBit(adj: Int64, op: Int64, prov: Int64,
