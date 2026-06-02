@@ -332,9 +332,32 @@ For each call to `step4`:
 
 ### §5.3. Score Representation
 
-`score` is a dictionary `FDCCode -> Int`. Ties are broken by lowest code
-value string-lexicographically (e.g., `"100"` beats `"200"`). The trail
-returned with the result is `score` sorted descending by weight.
+Ties are broken by lowest code value string-lexicographically (e.g., `"100"`
+beats `"200"`). The trail returned with the result is `score` sorted descending
+by weight.
+
+**Shipped scoring — IDF-weighted (Mission #4).** The raw-overlap sum above
+(`score[code] += bag[term]`) lets codes with large signatures win on breadth.
+The shipped runtime (`FDC`, via `FDCMatcher(scoreMode: .idf)`) weights each
+shared term by its inverse document frequency:
+
+```
+score[code] = Σ_{t ∈ bag ∩ sig(code)} bag[t] · idf(t)
+idf(t)      = ln(N / df(t))     # N = total code signatures, df(t) = # signatures containing t
+```
+
+so a concept term present in many signatures contributes little and a
+distinctive one dominates. `idf` is precomputed once from the pinned signatures
+at load (deterministic, no new artifact). It was the best of the measured
+variants (raw / idf / cosine / idf-cosine), lifting within-region selection on
+the v1.0 frame (exact 31→36%, wrong-branch 63→58%). `score` is therefore
+`FDCCode -> Double`, and the **same scheme is applied to the §6 descent
+ranking** (the §6.1 cutoff still gates on the raw integer overlap, so its
+meaning is mode-independent). The matcher *default* stays `.raw` (the literal
+sum above). **Determinism:** the IDF-weighted sums are accumulated in sorted
+term order (float addition is non-associative), keeping the result bit-identical
+across runs and across the Swift/Rust ports. The full scoring spec is in
+`FDC_ENCODER_CANONICAL_v1.0.md` §5.
 
 ---
 
