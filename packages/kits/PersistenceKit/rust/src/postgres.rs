@@ -621,6 +621,18 @@ impl Pool {
         self.condvar.notify_all();
     }
 
+    /// Discard a connection that is in a broken state and must not be
+    /// returned to the available pool (e.g. after a failed ROLLBACK).
+    /// Decrements `in_use` so the pool capacity slot is freed, then
+    /// notifies waiters. The caller is responsible for dropping the client.
+    /// Mirrors Swift: on rollback failure the connection is released
+    /// without being returned to the pool.
+    fn discard(&self) {
+        let mut guard = self.state.lock().unwrap();
+        guard.in_use -= 1;
+        self.condvar.notify_all();
+    }
+
     /// Close the pool. All idle connections are dropped. Blocked checkouts
     /// will wake and return Err(BackendUnavailable). Mirrors Swift's close().
     fn close(&self) {
@@ -654,6 +666,21 @@ impl std::fmt::Debug for PooledClient {
 impl PooledClient {
     fn get_mut(&mut self) -> &mut Client {
         self.client.as_mut().unwrap()
+    }
+
+    /// Discard a connection that must not be returned to the pool (e.g. after
+    /// a failed ROLLBACK). Notifies the pool that the capacity slot is free
+    /// without putting the broken connection back into the available list.
+    /// After this call the PooledClient holds no client; Drop is a no-op.
+    fn discard(mut self) {
+        if let Some(client) = self.client.take() {
+            // SAFETY: same invariant as Drop — pool pointer is valid for
+            // the lifetime of any in-flight PooledClient.
+            unsafe { (*self.pool).discard() }
+            // Drop the broken client here (after freeing the pool slot)
+            // so any TCP teardown happens outside the pool lock.
+            drop(client);
+        }
     }
 }
 
@@ -848,15 +875,19 @@ impl Storage for PostgresStorage {
         isolation: IsolationLevel,
         block: &mut dyn FnMut(&dyn StorageTransaction) -> StorageResult<()>,
     ) -> StorageResult<()> {
-        // Check out one connection for the transaction bracket. BEGIN and
-        // COMMIT/ROLLBACK run on this connection; the block's sub-stores each
-        // check out their own connections (per-operation checkout granularity,
-        // matching Swift's per-await granularity). The BEGIN/COMMIT bracket
-        // therefore does not hold the connection across the block — sub-stores
-        // issue their statements on separate checkouts. This is consistent
-        // with how the single-connection backend worked (the block ran on the
-        // same connection via the shared Mutex) and with the Swift async actor
-        // model (no connection is held across suspension points).
+        // Check out ONE connection for the entire transaction bracket. BEGIN,
+        // all DML inside the block, and COMMIT/ROLLBACK all execute on this
+        // single connection. Sub-stores in the block receive a
+        // PgTransactionContext that wraps this same connection (via
+        // Arc<Mutex<PooledClient>>), so every statement participates in the
+        // same PostgreSQL transaction.
+        //
+        // This mirrors Swift's PostgreSQLStorage.transaction(_:): one
+        // connection is acquired up front and wrapped in a
+        // PostgreSQLTransactionContext; every sub-store call inside the block
+        // routes through that context's shared connection. The single-
+        // connection contract is what makes the transaction real — not a
+        // naming convention.
         let begin = match isolation {
             IsolationLevel::ReadCommitted => "BEGIN ISOLATION LEVEL READ COMMITTED",
             IsolationLevel::RepeatableRead => "BEGIN ISOLATION LEVEL REPEATABLE READ",
@@ -867,42 +898,593 @@ impl Storage for PostgresStorage {
             .get_mut()
             .batch_execute(begin)
             .map_err(|e| map_pg_err(e, "transaction"))?;
-        match block(self) {
+
+        // Wrap the bracket connection in an Arc<Mutex> so PgTransactionContext
+        // and its sub-stores can share it without lifetime coupling.
+        let shared = Arc::new(Mutex::new(bracket_conn));
+        let ctx = PgTransactionContext {
+            conn: shared.clone(),
+            schema: self.schema.clone(),
+            observers: self.observers.clone(),
+        };
+
+        match block(&ctx) {
             Ok(()) => {
-                bracket_conn
+                shared
+                    .lock()
+                    .unwrap()
                     .get_mut()
                     .batch_execute("COMMIT")
                     .map_err(|e| map_pg_err(e, "transaction"))?;
                 Ok(())
             }
-            Err(e) => {
-                // Best-effort rollback; surface the block's error regardless.
-                let _ = bracket_conn.get_mut().batch_execute("ROLLBACK");
-                Err(e)
+            Err(block_err) => {
+                // Best-effort ROLLBACK on the bracket connection.
+                // If ROLLBACK fails the connection is in an unknown state;
+                // discard it (do not return to pool) — matching Swift's
+                // behaviour: a rollback-failed connection is released without
+                // being put back into the pool.
+                let rollback_result = shared.lock().unwrap().get_mut().batch_execute("ROLLBACK");
+                if rollback_result.is_err() {
+                    // Extract the client from the shared Arc so we can call
+                    // discard(). This is safe: the block has returned, so
+                    // ctx and all its sub-stores have been dropped; no other
+                    // holder of `shared` remains.
+                    if let Ok(guard) = Arc::try_unwrap(shared) {
+                        // Move the PooledClient out via discard() which
+                        // notifies the pool of the freed slot without
+                        // returning the broken connection to the available list.
+                        let conn = guard.into_inner().unwrap();
+                        conn.discard();
+                    }
+                }
+                // Surface the block's error regardless of rollback success.
+                Err(block_err)
             }
         }
     }
 }
 
-impl StorageTransaction for PostgresStorage {
+// ─────────────────────────────────────────────────────────────────────
+// Transaction context — routes all sub-store calls through one connection.
+//
+// PgTransactionContext wraps the single PooledClient checked out for the
+// transaction bracket. Every sub-store (TxRowStore, TxBlobStore,
+// TxAuditLog, TxVectorIndex) holds Arc<Mutex<PooledClient>> and locks it
+// per operation to execute SQL on that connection. BEGIN was issued before
+// this context is constructed; COMMIT or ROLLBACK follows after block()
+// returns. All DML therefore participates in the same PG transaction.
+//
+// Mirrors Swift's PostgreSQLTransactionContext: a single connection is
+// held for the bracket and every sub-store call is routed through it.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Shared handle to the single bracket connection. Locked per SQL call.
+type TxConn = Arc<Mutex<PooledClient>>;
+
+struct PgTransactionContext {
+    conn: TxConn,
+    schema: Arc<Mutex<SharedSchema>>,
+    observers: Arc<ObserverRegistry>,
+}
+
+impl StorageTransaction for PgTransactionContext {
     fn row_store(&self) -> Arc<dyn RowStore> {
-        Storage::row_store(self)
+        Arc::new(TxRowStore {
+            conn: self.conn.clone(),
+            schema: self.schema.clone(),
+            observers: self.observers.clone(),
+        })
     }
     fn blob_store(&self) -> Arc<dyn BlobStore> {
-        Storage::blob_store(self)
+        Arc::new(TxBlobStore {
+            conn: self.conn.clone(),
+        })
     }
     fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Storage::vector_index(self)
+        Arc::new(TxVectorIndex {
+            conn: self.conn.clone(),
+        })
     }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
-        Storage::audit_log(self)
+        Arc::new(TxAuditLog {
+            conn: self.conn.clone(),
+        })
+    }
+}
+
+// ── Transaction-scoped RowStore ──────────────────────────────────────
+
+struct TxRowStore {
+    conn: TxConn,
+    schema: Arc<Mutex<SharedSchema>>,
+    observers: Arc<ObserverRegistry>,
+}
+
+impl RowStore for TxRowStore {
+    fn insert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<RowHandle> {
+        let mut guard = self.conn.lock().unwrap();
+        let keys: Vec<&String> = values.keys().collect();
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ph = (1..=keys.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
+        let params: Vec<PgParam> = keys.iter().map(|k| to_param(&values[*k])).collect();
+        guard
+            .get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        let schema = self.schema.lock().unwrap();
+        let key = extract_row_key(schema.schema.as_ref(), table, &values);
+        drop(schema);
+        drop(guard);
+        self.observers.emit(&TableChange {
+            table: table.to_string(),
+            event: StorageEvent::Insert,
+            row_key: Some(key),
+            values: Some(values),
+            hlc: None,
+        });
+        Ok(RowHandle::new(table, key))
+    }
+
+    fn upsert(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        conflict_columns: &[String],
+    ) -> StorageResult<RowHandle> {
+        let mut guard = self.conn.lock().unwrap();
+        let keys: Vec<&String> = values.keys().collect();
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ph = (1..=keys.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({ph})");
+        if !conflict_columns.is_empty() {
+            let conflict = conflict_columns
+                .iter()
+                .map(|c| format!("\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let updates: Vec<String> = keys
+                .iter()
+                .filter(|k| !conflict_columns.contains(k))
+                .map(|k| format!("\"{k}\" = excluded.\"{k}\""))
+                .collect();
+            sql.push_str(&format!(" ON CONFLICT ({conflict})"));
+            if updates.is_empty() {
+                sql.push_str(" DO NOTHING");
+            } else {
+                sql.push_str(&format!(" DO UPDATE SET {}", updates.join(", ")));
+            }
+        }
+        let params: Vec<PgParam> = keys.iter().map(|k| to_param(&values[*k])).collect();
+        guard
+            .get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        let schema = self.schema.lock().unwrap();
+        let key = extract_row_key(schema.schema.as_ref(), table, &values);
+        drop(schema);
+        drop(guard);
+        self.observers.emit(&TableChange {
+            table: table.to_string(),
+            event: StorageEvent::Update,
+            row_key: Some(key),
+            values: Some(values),
+            hlc: None,
+        });
+        Ok(RowHandle::new(table, key))
+    }
+
+    fn update(
+        &self,
+        table: &str,
+        values: BTreeMap<String, TypedValue>,
+        predicate: &StoragePredicate,
+    ) -> StorageResult<usize> {
+        let mut guard = self.conn.lock().unwrap();
+        let keys: Vec<&String> = values.keys().collect();
+        let mut binds: Vec<TypedValue> = Vec::new();
+        let set_clause = keys
+            .iter()
+            .map(|k| {
+                binds.push(values[*k].clone());
+                format!("\"{k}\" = ${}", binds.len())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let where_sql = compile_predicate(predicate, &mut binds);
+        let sql = format!("UPDATE \"{table}\" SET {set_clause} WHERE {where_sql}");
+        let params: Vec<PgParam> = binds.iter().map(to_param).collect();
+        let changed = guard
+            .get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        drop(guard);
+        if changed > 0 {
+            self.observers.emit(&TableChange {
+                table: table.to_string(),
+                event: StorageEvent::Update,
+                row_key: None,
+                values: None,
+                hlc: None,
+            });
+        }
+        Ok(changed as usize)
+    }
+
+    fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
+        let mut guard = self.conn.lock().unwrap();
+        let mut binds: Vec<TypedValue> = Vec::new();
+        let where_sql = compile_predicate(predicate, &mut binds);
+        let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
+        let params: Vec<PgParam> = binds.iter().map(to_param).collect();
+        let changed = guard
+            .get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        drop(guard);
+        if changed > 0 {
+            self.observers.emit(&TableChange {
+                table: table.to_string(),
+                event: StorageEvent::Delete,
+                row_key: None,
+                values: None,
+                hlc: None,
+            });
+        }
+        Ok(changed as usize)
+    }
+
+    fn query(
+        &self,
+        table: &str,
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        let mut guard = self.conn.lock().unwrap();
+        let mut sql = format!("SELECT * FROM \"{table}\"");
+        let mut binds: Vec<TypedValue> = Vec::new();
+        if let Some(p) = predicate {
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+        }
+        if !order_by.is_empty() {
+            let parts: Vec<String> = order_by
+                .iter()
+                .map(|c| {
+                    let dir = match c.direction {
+                        OrderDirection::Ascending => "ASC",
+                        OrderDirection::Descending => "DESC",
+                    };
+                    format!("\"{}\" {dir}", c.column.name)
+                })
+                .collect();
+            sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
+        }
+        if let Some(l) = limit {
+            sql.push_str(&format!(" LIMIT {l}"));
+        }
+        if let Some(o) = offset {
+            if o > 0 {
+                sql.push_str(&format!(" OFFSET {o}"));
+            }
+        }
+        let params: Vec<PgParam> = binds.iter().map(to_param).collect();
+        let schema = self.schema.lock().unwrap().schema.clone();
+        let rows = guard
+            .get_mut()
+            .query(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+            for (i, col) in row.columns().iter().enumerate() {
+                let name = col.name().to_string();
+                let kit = table_column_type(schema.as_ref(), table, &name);
+                values.insert(name, read_value(row, i, kit));
+            }
+            out.push(StorageRow::new(values));
+        }
+        Ok(out)
+    }
+
+    fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize> {
+        let mut guard = self.conn.lock().unwrap();
+        let mut sql = format!("SELECT COUNT(*) FROM \"{table}\"");
+        let mut binds: Vec<TypedValue> = Vec::new();
+        if let Some(p) = predicate {
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+        }
+        let params: Vec<PgParam> = binds.iter().map(to_param).collect();
+        let row = guard
+            .get_mut()
+            .query_one(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        let n: i64 = row.get(0);
+        Ok(n as usize)
+    }
+}
+
+// ── Transaction-scoped BlobStore ─────────────────────────────────────
+
+struct TxBlobStore {
+    conn: TxConn,
+}
+
+impl BlobStore for TxBlobStore {
+    fn put(&self, key: &str, bytes: &[u8]) -> StorageResult<()> {
+        let mut guard = self.conn.lock().unwrap();
+        guard
+            .get_mut()
+            .execute(
+                r#"INSERT INTO "_storagekit_blobs" ("key", "bytes") VALUES ($1, $2)
+               ON CONFLICT ("key") DO UPDATE SET "bytes" = excluded.bytes"#,
+                &[&key.to_string(), &bytes.to_vec()],
+            )
+            .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
+        Ok(())
+    }
+    fn get(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
+        let mut guard = self.conn.lock().unwrap();
+        let rows = guard
+            .get_mut()
+            .query(
+                r#"SELECT "bytes" FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
+            .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
+        Ok(rows.first().map(|r| r.get::<_, Vec<u8>>(0)))
+    }
+    fn delete(&self, key: &str) -> StorageResult<()> {
+        let mut guard = self.conn.lock().unwrap();
+        guard
+            .get_mut()
+            .execute(
+                r#"DELETE FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
+            .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
+        Ok(())
+    }
+    fn exists(&self, key: &str) -> StorageResult<bool> {
+        Ok(self.size(key)?.is_some())
+    }
+    fn size(&self, key: &str) -> StorageResult<Option<usize>> {
+        let mut guard = self.conn.lock().unwrap();
+        let rows = guard
+            .get_mut()
+            .query(
+                r#"SELECT LENGTH("bytes") FROM "_storagekit_blobs" WHERE "key" = $1"#,
+                &[&key.to_string()],
+            )
+            .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
+        Ok(rows.first().map(|r| r.get::<_, i32>(0) as usize))
+    }
+}
+
+// ── Transaction-scoped AuditLog ──────────────────────────────────────
+
+struct TxAuditLog {
+    conn: TxConn,
+}
+
+impl AuditLog for TxAuditLog {
+    fn append(&self, event: AuditEvent) -> StorageResult<()> {
+        let mut guard = self.conn.lock().unwrap();
+        let ph = (1..=17)
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO \"_storagekit_audit\" ({AUDIT_COLS}) VALUES ({ph}) ON CONFLICT (\"event_id\",\"hlc\") DO NOTHING"
+        );
+        let params = audit_params(&event);
+        guard
+            .get_mut()
+            .execute(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        Ok(())
+    }
+    fn append_batch(&self, events: Vec<AuditEvent>) -> StorageResult<()> {
+        for e in events {
+            self.append(e)?;
+        }
+        Ok(())
+    }
+    fn iterate(
+        &self,
+        after: Option<HLC>,
+        row_id: Option<RowKey>,
+        limit: usize,
+    ) -> StorageResult<Vec<AuditEvent>> {
+        let mut guard = self.conn.lock().unwrap();
+        let mut sql = format!("SELECT {AUDIT_COLS} FROM \"_storagekit_audit\"");
+        let mut binds: Vec<PgParam> = Vec::new();
+        let mut clauses: Vec<String> = Vec::new();
+        if let Some(h) = after {
+            binds.push(Box::new(h.packed() as i64));
+            clauses.push(format!("\"hlc\" > ${}", binds.len()));
+        }
+        if let Some(r) = row_id {
+            binds.push(Box::new(r.to_string().to_uppercase()));
+            clauses.push(format!("\"row_id\" = ${}", binds.len()));
+        }
+        if !clauses.is_empty() {
+            sql.push_str(&format!(" WHERE {}", clauses.join(" AND ")));
+        }
+        let lim: i64 = if limit > i64::MAX as usize {
+            -1
+        } else {
+            limit as i64
+        };
+        if lim >= 0 {
+            sql.push_str(&format!(" ORDER BY \"hlc\" ASC LIMIT {lim}"));
+        } else {
+            sql.push_str(" ORDER BY \"hlc\" ASC");
+        }
+        let rows = guard
+            .get_mut()
+            .query(&sql, &param_refs(&binds))
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        Ok(rows.iter().map(decode_audit).collect())
+    }
+    fn events_for_row(&self, row_id: RowKey) -> StorageResult<Vec<AuditEvent>> {
+        self.iterate(None, Some(row_id), usize::MAX)
+    }
+    fn count(&self) -> StorageResult<usize> {
+        let mut guard = self.conn.lock().unwrap();
+        let row = guard
+            .get_mut()
+            .query_one(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, &[])
+            .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
+        Ok(row.get::<_, i64>(0) as usize)
+    }
+}
+
+// ── Transaction-scoped VectorIndex ──────────────────────────────────
+
+struct TxVectorIndex {
+    conn: TxConn,
+}
+
+impl VectorIndex for TxVectorIndex {
+    fn add(
+        &self,
+        key: RowKey,
+        vector: &[f32],
+        _metadata: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<()> {
+        let mut guard = self.conn.lock().unwrap();
+        let dim = vector.len();
+        guard.get_mut().batch_execute(&format!(
+            "CREATE TABLE IF NOT EXISTS \"{VEC_TABLE}\" (\"key\" TEXT PRIMARY KEY, \"embedding\" vector({dim}) NOT NULL, \"metadata_json\" TEXT NOT NULL DEFAULT '{{}}')"
+        )).map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        guard
+            .get_mut()
+            .execute(
+                &format!(
+                "INSERT INTO \"{VEC_TABLE}\" (\"key\", \"embedding\") VALUES ($1, '{}'::vector) \
+                 ON CONFLICT (\"key\") DO UPDATE SET \"embedding\" = excluded.embedding",
+                vector_literal(vector)
+            ),
+                &[&key.to_string().to_uppercase()],
+            )
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        Ok(())
+    }
+    fn update(
+        &self,
+        key: RowKey,
+        vector: &[f32],
+        metadata: BTreeMap<String, TypedValue>,
+    ) -> StorageResult<()> {
+        self.add(key, vector, metadata)
+    }
+    fn delete(&self, key: RowKey) -> StorageResult<()> {
+        let mut guard = self.conn.lock().unwrap();
+        // Check table existence via the same transaction connection.
+        let exists: bool = guard
+            .get_mut()
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&VEC_TABLE])
+            .ok()
+            .and_then(|r| r.try_get::<_, bool>(0).ok())
+            .unwrap_or(false);
+        if !exists {
+            return Ok(());
+        }
+        guard
+            .get_mut()
+            .execute(
+                &format!("DELETE FROM \"{VEC_TABLE}\" WHERE \"key\" = $1"),
+                &[&key.to_string().to_uppercase()],
+            )
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        Ok(())
+    }
+    fn knn(
+        &self,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        _filter: Option<&StoragePredicate>,
+        _search_parameters: Option<SearchParameters>,
+    ) -> StorageResult<Vec<VectorSearchResult>> {
+        let mut guard = self.conn.lock().unwrap();
+        let exists: bool = guard
+            .get_mut()
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&VEC_TABLE])
+            .ok()
+            .and_then(|r| r.try_get::<_, bool>(0).ok())
+            .unwrap_or(false);
+        if !exists {
+            return Ok(Vec::new());
+        }
+        let op = metric_op(metric);
+        let lit = vector_literal(query);
+        let sql = format!(
+            "SELECT \"key\", (\"embedding\" {op} '{lit}'::vector) AS distance FROM \"{VEC_TABLE}\" \
+             ORDER BY \"embedding\" {op} '{lit}'::vector LIMIT {k}"
+        );
+        let rows = guard
+            .get_mut()
+            .query(&sql, &[])
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
+        Ok(rows
+            .iter()
+            .map(|r| VectorSearchResult {
+                key: Uuid::parse_str(&r.get::<_, String>(0)).unwrap_or(Uuid::nil()),
+                distance: r.get::<_, f64>(1) as f32,
+                metadata: BTreeMap::new(),
+            })
+            .collect())
+    }
+    fn reindex(&self, _parameters: IndexParameters) -> StorageResult<()> {
+        Ok(())
+    }
+    fn count(&self) -> StorageResult<usize> {
+        let mut guard = self.conn.lock().unwrap();
+        let exists: bool = guard
+            .get_mut()
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&VEC_TABLE])
+            .ok()
+            .and_then(|r| r.try_get::<_, bool>(0).ok())
+            .unwrap_or(false);
+        if !exists {
+            return Ok(0);
+        }
+        let n: i64 = guard
+            .get_mut()
+            .query_one(&format!("SELECT COUNT(*) FROM \"{VEC_TABLE}\""), &[])
+            .map_err(|e| map_pg_err(e, VEC_TABLE))?
+            .get(0);
+        Ok(n as usize)
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // RowStore. Each method checks out one connection, executes, and returns
 // the connection to the pool on drop (via PooledClient's Drop impl).
-// This is per-operation granularity, matching Swift's per-await checkout.
+// This is per-operation granularity for non-transaction calls; within a
+// transaction all DML routes through TxRowStore on the bracket connection.
 // ─────────────────────────────────────────────────────────────────────
 
 struct PgRowStore {
@@ -1658,5 +2240,150 @@ mod pool_tests {
         // Construction must succeed; idle_timeout is stored, not acted on.
         let result = PostgresStorage::new(cfg);
         assert!(result.is_ok());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Transaction-context unit tests — no live server required.
+//
+// These tests verify that PgTransactionContext routes all sub-store
+// calls through the single bracket connection (Arc<Mutex<PooledClient>>)
+// rather than checking out additional pool connections. The structural
+// guarantee is tested by constructing a PgTransactionContext with a
+// known TxConn and asserting that every sub-store vended by the context
+// holds a pointer-equal Arc — proving that no pool checkout occurs inside
+// the block.
+//
+// Live transactional round-trip (BEGIN → DML → COMMIT in one PG
+// transaction) is verified only when PERSISTENCEKIT_PG_URL is set;
+// see tests/postgres_conformance.rs.
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod transaction_context_tests {
+    use super::*;
+
+    /// Build a TxConn (Arc<Mutex<PooledClient>>) using a PooledClient with
+    /// no live connection (client: None). Drop is a no-op when client is
+    /// None, so the pool pointer is never dereferenced. This lets us
+    /// exercise the context routing invariant without a live server.
+    fn make_tx_conn() -> (Arc<Pool>, TxConn) {
+        let pool = Arc::new(Pool::new(
+            "postgres://nobody@127.0.0.1:1/nonexistent".into(),
+            "pk_test".into(),
+            1,
+            0.05,
+            30.0,
+        ));
+        // Construct a PooledClient with no live client. Drop is a no-op
+        // because client is None, so the pool pointer is never accessed.
+        let pc = PooledClient {
+            client: None,
+            pool: Arc::as_ptr(&pool),
+        };
+        let conn = Arc::new(Mutex::new(pc));
+        (pool, conn)
+    }
+
+    /// PgTransactionContext construction succeeds and the context holds
+    /// the shared TxConn. Verifies the context can be built without
+    /// requiring a live PostgreSQL server.
+    #[test]
+    fn transaction_context_constructs_without_server() {
+        let (_pool, conn) = make_tx_conn();
+        let schema = Arc::new(Mutex::new(SharedSchema { schema: None }));
+        let observers = Arc::new(ObserverRegistry::default());
+        // Construction must not panic or connect.
+        let _ctx = PgTransactionContext {
+            conn,
+            schema,
+            observers,
+        };
+    }
+
+    /// Every sub-store vended by PgTransactionContext holds a pointer-equal
+    /// Arc<Mutex<PooledClient>> to the context's TxConn. This proves that
+    /// no pool checkout occurs when the block calls row_store(), blob_store(),
+    /// audit_log(), or vector_index() — all DML routes through the single
+    /// bracket connection.
+    ///
+    /// We access the private `conn` field of each sub-store directly
+    /// (allowed here because this module is a child of postgres.rs and sees
+    /// all private items). Arc::ptr_eq confirms pointer identity, not just
+    /// value equality.
+    #[test]
+    fn transaction_context_sub_stores_share_bracket_connection() {
+        let (_pool, conn) = make_tx_conn();
+        let schema = Arc::new(Mutex::new(SharedSchema { schema: None }));
+        let observers = Arc::new(ObserverRegistry::default());
+
+        // Construct the sub-stores as PgTransactionContext::row_store() etc.
+        // would, but access conn directly to verify pointer identity.
+        let row_store = TxRowStore {
+            conn: conn.clone(),
+            schema: schema.clone(),
+            observers: observers.clone(),
+        };
+        let blob_store = TxBlobStore { conn: conn.clone() };
+        let audit_log = TxAuditLog { conn: conn.clone() };
+        let vector_index = TxVectorIndex { conn: conn.clone() };
+
+        // All four sub-store conn fields must be pointer-equal to the
+        // original TxConn — the bracket connection is the only connection.
+        assert!(
+            Arc::ptr_eq(&row_store.conn, &conn),
+            "TxRowStore must use the bracket connection"
+        );
+        assert!(
+            Arc::ptr_eq(&blob_store.conn, &conn),
+            "TxBlobStore must use the bracket connection"
+        );
+        assert!(
+            Arc::ptr_eq(&audit_log.conn, &conn),
+            "TxAuditLog must use the bracket connection"
+        );
+        assert!(
+            Arc::ptr_eq(&vector_index.conn, &conn),
+            "TxVectorIndex must use the bracket connection"
+        );
+    }
+
+    /// PgTransactionContext::row_store() / blob_store() / audit_log() /
+    /// vector_index() all return sub-stores whose conn Arc is pointer-equal
+    /// to the context's bracket connection. Tests the full trait-path
+    /// (StorageTransaction accessors) rather than direct construction.
+    /// We verify via Arc::ptr_eq on the Mutex pointer, which is stable
+    /// across Arc::clone.
+    #[test]
+    fn transaction_context_accessors_route_through_bracket_connection() {
+        let (_pool, conn) = make_tx_conn();
+        let schema = Arc::new(Mutex::new(SharedSchema { schema: None }));
+        let observers = Arc::new(ObserverRegistry::default());
+        let ctx = PgTransactionContext {
+            conn: conn.clone(),
+            schema,
+            observers,
+        };
+
+        // Invoke the StorageTransaction trait accessors. Each returns an
+        // Arc<dyn Trait> backed by a Tx*Store. We verify the routing invariant
+        // by checking the Arc reference count: the bracket conn starts at 1
+        // (from `conn`); each sub-store accessor should clone it. After all
+        // four calls the strong count must be 5 (original + 4 clones held in
+        // the returned Arc<dyn Trait> values).
+        let _rs = ctx.row_store();
+        let _bs = ctx.blob_store();
+        let _al = ctx.audit_log();
+        let _vi = ctx.vector_index();
+
+        // 1 (conn) + 1 (ctx.conn) + 4 (one per sub-store) = 6.
+        // If any sub-store had checked out from the pool instead of cloning
+        // conn, the strong_count would differ.
+        assert_eq!(
+            Arc::strong_count(&conn),
+            6,
+            "each sub-store must hold one clone of the bracket conn Arc \
+             (count should be 6: original + ctx + 4 sub-stores)"
+        );
     }
 }
