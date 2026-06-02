@@ -1,7 +1,7 @@
 //! Standalone Maximal Marginal Relevance (MMR) diversity rerank — Rust
-//! port of the Swift `MMREngine` / `mmrRank` in
+//! version of the Swift `MMREngine` / `mmrRank` in
 //! `NeuronKit/Sources/NeuronKit/MMRRank.swift` (NEURONKIT_SPEC § 4.1
-//! step 4). Per CLAUDE.md neither port leads; both run identical math and
+//! step 4). Per CLAUDE.md neither version leads; both run identical math and
 //! are gated against the shared hand-computed fixtures.
 //!
 //! MMR re-orders a recall set to balance relevance against redundancy.
@@ -22,7 +22,7 @@
 //!
 //! PORT SHAPE: the Swift `mmrRank(candidates:query:lambda:k:fingerprint:)`
 //! wrapper threads `Drawer` rows + a caller-owned fingerprint closure. The
-//! Rust port has no `Drawer` (no LocusKit dependency), so it ports the
+//! Rust version has no `Drawer` (no LocusKit dependency), so it implements the
 //! PURE selection core — `mmr_select`, which operates directly on the
 //! engram fingerprints and returns selected indices. That is exactly the
 //! Swift `MMREngine.select` surface, and it is the conformance-gated unit
@@ -32,7 +32,7 @@
 //!
 //! Determinism: no clock, no randomness. Ties break on ascending input
 //! index (strict `>` over an ascending scan), reproduced bit-for-bit
-//! across ports.
+//! across versions.
 
 use engram_lib::{Engram, EngramLib};
 

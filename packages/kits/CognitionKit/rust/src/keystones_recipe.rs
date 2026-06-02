@@ -7,7 +7,7 @@
 //! first reasoning lens chased BEYOND the shipped recipe set, proving the
 //! through-line can grow new behaviour now that the foundation is real
 //! (real estate, real graph read, real gated centrality math). A Swift parity
-//! port follows the spec this establishes.
+//! version follows the spec this establishes.
 //!
 //! Layer discipline: the recipe only SEQUENCES — it reads the graph via GLK
 //! (`recall_tunnels`) and ranks via NeuronKit (`keystones`, which surfaces

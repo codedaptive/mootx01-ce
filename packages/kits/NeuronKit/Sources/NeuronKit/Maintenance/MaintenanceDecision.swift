@@ -5,7 +5,7 @@
 // `MaintenanceDaemon` so it is a pure function of pre-gathered, identity-
 // free inputs — no actor, no seam I/O, no clock, no substrate value type.
 // This is the Swift side of NeuronKit's Rust-parity Bucket A; the Rust
-// port at `NeuronKit/rust/src/maintenance_decision.rs` implements the same
+// version at `NeuronKit/rust/src/maintenance_decision.rs` implements the same
 // logic and both gate on shared fixtures.
 //
 // What stays in the actor: the async seam reads, the I-3 forbidden-combo
@@ -28,7 +28,7 @@
 import Foundation
 
 /// Pure maintenance-cycle decision logic shared by the Swift
-/// `MaintenanceDaemon` and the Rust port. No substrate types appear in the
+/// `MaintenanceDaemon` and the Rust version. No substrate types appear in the
 /// signatures; ids and scope keys are plain `String`.
 public enum MaintenanceDecision {
 
@@ -50,7 +50,7 @@ public enum MaintenanceDecision {
     /// turns each into a `ProposeFrame` with the category's kind and a
     /// justification built from `target` + `detailValue` (audit's
     /// entry-count comes from the actor's in-scope `auditReport`).
-    /// `detailValue` is a raw number, not formatted text, so the Rust port
+    /// `detailValue` is a raw number, not formatted text, so the Rust version
     /// carries the identical value through the portable contract.
     public struct Decision: Sendable, Equatable {
         public let key: String

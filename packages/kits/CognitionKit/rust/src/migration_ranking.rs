@@ -1,4 +1,4 @@
-//! The deterministic decision core of MigrationBenchmark — Rust port of
+//! The deterministic decision core of MigrationBenchmark — Rust version of
 //! the Swift `MigrationRanking` enum in
 //! `CognitionKit/Sources/CognitionKit/MigrationRanking.swift`.
 //!
@@ -6,7 +6,7 @@
 //! branch handles, no UUIDs, no clock). The Swift `MigrationBenchmark.run`
 //! does the estate I/O and delegates every decision — the duplicate-plan
 //! guard, the origin partition, the lost-concept union, the C-13 gate and
-//! the survivor ranking — to these functions. Both ports agree on the
+//! the survivor ranking — to these functions. Both versions agree on the
 //! fixtures in the `#[cfg(test)]` block below, which mirror the Swift
 //! `MigrationRankingTests`.
 //!
@@ -66,7 +66,7 @@ pub fn first_duplicate(names: &[String]) -> Option<String> {
 
 /// The lost-concept set for one plan: the union of `dropped` and
 /// `not_found`, de-duplicated and sorted for a deterministic,
-/// cross-port-identical result. Mirrors Swift `MigrationRanking.lostConcepts`.
+/// cross-version-identical result. Mirrors Swift `MigrationRanking.lostConcepts`.
 pub fn lost_concepts(dropped: &[String], not_found: &[String]) -> Vec<String> {
     let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for d in dropped {
@@ -101,7 +101,7 @@ pub fn partition_origin(entries: &[(String, String)]) -> (Vec<String>, Vec<Strin
 /// - a plan with a non-empty `lost` set is disqualified (not ranked);
 /// - a survivor's `combined_score` is `recall_overlap * mean_reciprocal_rank`;
 /// - survivors sort by `combined_score` descending, ties by `name`
-///   ascending, for a reproducible order across ports;
+///   ascending, for a reproducible order across versions;
 /// - the advisory `winner` is the top survivor's name, or `None`.
 pub fn rank(outcomes: &[PlanOutcome]) -> RankingResult {
     let mut rankings: Vec<RankedPlan> = Vec::new();

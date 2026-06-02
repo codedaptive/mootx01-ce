@@ -1,11 +1,11 @@
-//! ScenarioProfile Rust port. Persisted preference signal alongside a
+//! ScenarioProfile Rust version. Persisted preference signal alongside a
 //! tournament outcome per NEURONKIT_SPEC § 4.6, minus the
 //! `tournament_report` field per Mission Known Ambiguity 2 (the spec
 //! type `TournamentReport` references `BranchHandle`, which does not
-//! exist in either port today). The field returns in the tournament
+//! exist in either version today). The field returns in the tournament
 //! mission.
 //!
-//! Bit-identical to the Swift port over shared JSON conformance
+//! Bit-identical to the Swift version over shared JSON conformance
 //! vectors; field names map kebab-case to snake_case per Rust
 //! conventions.
 

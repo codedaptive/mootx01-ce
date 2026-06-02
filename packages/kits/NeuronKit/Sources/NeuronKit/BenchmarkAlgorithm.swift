@@ -120,7 +120,7 @@ public extension NeuronKit {
 
         // 3. Every metric is a pure function of (expectedIDs, foundPerQuery),
         //    delegated to the conformance-gated `BenchmarkScoring.score` —
-        //    the same core the Rust port implements. `branchID` and
+        //    the same core the Rust version implements. `branchID` and
         //    `evaluatedAt` are the only estate-/clock-supplied fields.
         let s = BenchmarkScoring.score(
             expectedIDs: expectedIDs, foundPerQuery: foundPerQuery)

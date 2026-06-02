@@ -11,7 +11,7 @@
 //!
 //! The SUCCESS signal is user-confirmation, now a LIVE event source: the
 //! `confirm` verb (`Estate.mutate(.confirm)`) transitions a row to
-//! UserConfirmed in both ports. Differentiation needs to see BOTH confirmed
+//! UserConfirmed in both versions. Differentiation needs to see BOTH confirmed
 //! and unconfirmed observations of the same action→outcome, but the recall
 //! confirmation axis is single-class (a frame returns either confirmed or
 //! unconfirmed rows, never both — absent a confirmation filter the evaluator

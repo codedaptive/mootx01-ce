@@ -7,7 +7,7 @@
 // MISSION_NK_1A_REASONING_SURFACE Known Ambiguity 2: the spec's
 // `tournamentReport: TournamentReport` field is intentionally absent
 // in this v0.1 shape. `TournamentReport` references `BranchHandle`,
-// which does not exist in either port today. The tournament mission
+// which does not exist in either version today. The tournament mission
 // adds the field once branching ships; no placeholder type is
 // invented here. ScenarioProfile is otherwise complete and round-trips
 // the rest of § 4.6 verbatim.

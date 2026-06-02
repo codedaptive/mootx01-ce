@@ -13,7 +13,7 @@
 //!
 //! There is no Rust dreaming actor: the seam I/O is estate-bound (Bucket
 //! B, waiting on the Rust LocusKit estate). The decision math is pure, so
-//! it ports now and is conformance-gated against the Swift port.
+//! it ships in Rust now and is conformance-gated against the Swift version.
 //!
 //! ```text
 //! contrastive(evidence, reward, baseline):

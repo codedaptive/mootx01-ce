@@ -1,6 +1,6 @@
 //! The output of the deterministic linguistic pipeline (per
 //! MISSION_AE_01_LINGUISTIC_PIPELINE.md). Pure data; identical
-//! shape to the Swift port's `LatticeAnchorInference` struct so
+//! shape to the Swift version's `LatticeAnchorInference` struct so
 //! callers can serialize and conformance-test cross-language.
 //!
 //! Consumed by GeniusLocusKit's capture verb path and by the
@@ -42,7 +42,7 @@ pub struct LatticeAnchorInference {
     pub enrichment_status_bits: u8,
 
     /// The pipeline mode that produced this inference. The Rust
-    /// port is always `DeterministicReference`; the Swift port
+    /// version is always `DeterministicReference`; the Swift version
     /// may also report `AppleNLAccel` per MISSION_AE_02.
     pub pipeline_mode: LinguisticPipelineMode,
 }
@@ -54,12 +54,12 @@ pub struct LatticeAnchorInference {
 #[serde(rename_all = "kebab-case")]
 pub enum LinguisticPipelineMode {
     /// Deterministic in-tree pipeline. Cross-language
-    /// conformance guaranteed against the Swift port.
+    /// conformance guaranteed against the Swift version.
     /// Federation-compatible.
     DeterministicReference,
 
     /// Apple NaturalLanguage acceleration path. Swift-only.
-    /// Federation-disabled. The Rust port never produces this
+    /// Federation-disabled. The Rust version never produces this
     /// mode; it appears only on anchors produced by an
     /// Apple-accelerated Swift build.
     AppleNlAccel,

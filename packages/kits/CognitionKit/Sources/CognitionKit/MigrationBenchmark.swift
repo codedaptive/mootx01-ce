@@ -296,7 +296,7 @@ public struct MigrationBenchmark: Recipe {
 
         // The C-13 gate, the combined-score, the survivor ranking, and the
         // tie-break all live in MigrationRanking.rank — the same function
-        // the Rust port implements and both test suites gate on shared
+        // the Rust version implements and both test suites gate on shared
         // fixtures.
         let ranked = MigrationRanking.rank(outcomes)
 

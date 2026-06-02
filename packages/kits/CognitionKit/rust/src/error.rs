@@ -1,10 +1,10 @@
-//! CognitionKit's single recipe error type — Rust port of the Swift
+//! CognitionKit's single recipe error type — Rust version of the Swift
 //! `RecipeError` enum in
 //! `CognitionKit/Sources/CognitionKit/RecipeError.swift`.
 //!
 //! The behavioural meaning of each case lives in COGNITIONKIT_SPEC § 5;
 //! this is the shipped shape. `Display` strings mirror the Swift
-//! `description` so a caller sees the same message across ports.
+//! `description` so a caller sees the same message across versions.
 
 use crate::capability::NeuronKitCapability;
 use std::fmt;

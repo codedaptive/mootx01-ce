@@ -2,8 +2,8 @@
 //
 // The DETERMINISTIC DECISION CORE of MigrationBenchmark, factored out of
 // the estate-driven recipe so it can be conformance-gated against the
-// Rust port (CognitionKit/rust/src/migration_ranking.rs). Per CLAUDE.md
-// neither port leads; both implement the same spec and agree on shared
+// Rust version (CognitionKit/rust/src/migration_ranking.rs). Per CLAUDE.md
+// neither version leads; both implement the same spec and agree on shared
 // fixtures.
 //
 // Everything here is a PURE function of its inputs — no estate, no
@@ -12,13 +12,13 @@
 // portable and gateable: `MigrationBenchmark.run` does the estate I/O
 // (Swift-only, needs the GLK handle) and delegates every *decision* —
 // the C-13 gate, the lost-concept union, the survivor ranking, the
-// duplicate-plan guard — to these functions. The Rust crate ports these
+// duplicate-plan guard — to these functions. The Rust crate implements these
 // same functions and its tests assert identical outputs on the same
 // fixtures the Swift `MigrationRankingTests` use.
 
 import Foundation
 
-/// Pure decision logic shared by the Swift recipe and the Rust port.
+/// Pure decision logic shared by the Swift recipe and the Rust version.
 public enum MigrationRanking {
 
     /// One plan's benchmark outcome, stripped of any estate identity
@@ -79,7 +79,7 @@ public enum MigrationRanking {
     /// The lost-concept set for one plan: the union of concepts never
     /// captured (`dropped`) and concepts captured but not recalled by the
     /// benchmark (`notFound`), de-duplicated and sorted for a
-    /// deterministic, cross-port-identical result.
+    /// deterministic, cross-version-identical result.
     public static func lostConcepts(
         dropped: [String], notFound: [String]
     ) -> [String] {
@@ -111,7 +111,7 @@ public enum MigrationRanking {
     ///   scored nor ranked).
     /// - A survivor's `combinedScore` is `recallOverlap × meanReciprocalRank`.
     /// - Survivors sort by `combinedScore` descending, ties broken by
-    ///   `name` ascending, so the order is reproducible across ports and
+    ///   `name` ascending, so the order is reproducible across versions and
     ///   across the recipe's concurrent execution.
     /// - The advisory `winner` is the top survivor's name, or nil.
     ///

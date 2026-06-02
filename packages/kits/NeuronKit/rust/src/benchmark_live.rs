@@ -6,12 +6,12 @@
 //! corpus. The ONLY substrate call it makes is `branch.recall_with(frame)`
 //! per query — read-only, the C-13 corollary; the branch is never
 //! perturbed. Every metric is delegated to the conformance-gated
-//! `benchmark_scoring::score` (already ported), so this module is a thin,
+//! `benchmark_scoring::score` (already in this crate), so this module is a thin,
 //! faithful orchestration over the branch surface and the scoring core.
 //!
 //! The Swift signature takes an `ExternalCorpus` and calls
 //! `origin.asRecallFrames()`; that convenience (build one frame per corpus
-//! entry) is the CALLER's to replicate — this port takes the expected ids
+//! entry) is the CALLER's to replicate — this version takes the expected ids
 //! and the query frames directly, which is exactly the data
 //! `benchmark_scoring::score` depends on. `branch_id` and `evaluated_at`
 //! are the only branch-/clock-supplied fields.

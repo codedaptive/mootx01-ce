@@ -2,7 +2,7 @@
 //
 // The output of the deterministic linguistic pipeline (per
 // MISSION_AE_01_LINGUISTIC_PIPELINE.md). Pure data; identical
-// shape to the Rust port's `LatticeAnchorInference` struct so
+// shape to the Rust version's `LatticeAnchorInference` struct so
 // callers can serialize and conformance-test cross-language.
 //
 // Intended for future use by GeniusLocusKit's capture verb path

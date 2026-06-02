@@ -61,7 +61,7 @@ public enum NeuronKitCapability: String, Sendable, Hashable, CaseIterable, Codab
 ///
 /// This is `NeuronKitCapability.allCases` today because every declared
 /// capability maps to a shipped NeuronKit surface. The seam exists so a
-/// future host running against a reduced NeuronKit (e.g. a port that has
+/// future host running against a reduced NeuronKit (e.g. a version that has
 /// not yet implemented branch ops) can pass a narrower set and have
 /// recipes that need the missing surface fail cleanly at the gate.
 public let shippedNeuronKitCapabilities: Set<NeuronKitCapability> =

@@ -1,14 +1,14 @@
 //! The deterministic scoring core of the migration recall-fidelity
-//! benchmark (NEURONKIT_SPEC § 4.7) — Rust port of the Swift
+//! benchmark (NEURONKIT_SPEC § 4.7) — Rust version of the Swift
 //! `BenchmarkScoring` in `NeuronKit/Sources/NeuronKit/BenchmarkScoring.swift`.
-//! Per CLAUDE.md neither port leads; both run identical math and are gated
+//! Per CLAUDE.md neither version leads; both run identical math and are gated
 //! against the shared BS-1..5 fixtures.
 //!
 //! Pure: a function of the expected concept ids and the per-query recalled
 //! id lists. No branch handle, no estate, no recall I/O, no clock. The
 //! Swift `benchmark(...)` performs the only substrate touch
 //! (`branch.recall`) to produce `found_per_query`, then delegates every
-//! metric here; the Rust port has no estate so it exposes only this core.
+//! metric here; the Rust version has no estate so it exposes only this core.
 //! The live recall path is Bucket B (estate-blocked), tracked separately.
 
 use std::collections::BTreeSet;

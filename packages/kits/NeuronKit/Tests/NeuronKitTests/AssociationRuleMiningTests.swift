@@ -6,10 +6,10 @@
 // the same update rule the substrate uses) so every metric is
 // hand-computable from the row counts.
 //
-// These tests are the Rust port's conformance contract too: the
+// These tests are the Rust version's conformance contract too: the
 // `association_rule_mining.rs` inline tests encode the IDENTICAL
 // input cases and expected outputs, and the packed-key emission
-// order documented here must reproduce exactly across ports.
+// order documented here must reproduce exactly across versions.
 //
 // Float tolerance: expected values are encoded as the same exact
 // fraction expressions the engine computes (IEEE-754 double division

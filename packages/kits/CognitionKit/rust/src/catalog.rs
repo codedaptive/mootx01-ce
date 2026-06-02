@@ -1,4 +1,4 @@
-//! The recipe catalog — Rust port of the Swift `RecipeCatalog` /
+//! The recipe catalog — Rust version of the Swift `RecipeCatalog` /
 //! `RecipeDescriptor` in
 //! `CognitionKit/Sources/CognitionKit/RecipeCatalog.swift`.
 //!
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// Type-erased metadata for a recipe. `serde` field names match the Swift
 /// `Codable` `RecipeDescriptor`, so a descriptor round-trips identically
-/// across the ports' wire shapes.
+/// across the versions' wire shapes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeDescriptor {
     pub name: String,

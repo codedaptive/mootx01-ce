@@ -1,13 +1,13 @@
-//! Hybrid-recall reranking engine, Rust port. Conformance-gated
+//! Hybrid-recall reranking engine, Rust version. Conformance-gated
 //! against the Swift `HybridRecallEngine` over shared deterministic
 //! test vectors per NeuronKit `MISSION_NK_1A_REASONING_SURFACE`.
 //!
-//! The Rust port intentionally does NOT host a `hybrid_recall(...)`
+//! The Rust version intentionally does NOT host a `hybrid_recall(...)`
 //! async entry point analogous to Swift's. The estate handle and the
 //! GeniusLocusKit verb surface are Swift-only today; the Rust side
 //! exposes the pure data-in / data-out reranking math
 //! (`HybridRecallEngine::rerank`) and the deterministic shingle
-//! similarity, both of which must match the Swift port bit-for-bit
+//! similarity, both of which must match the Swift version bit-for-bit
 //! against shared test vectors. The day the substrate gains a Rust
 //! verb surface, the public entry point lands here as a thin wrapper
 //! over the same engine.
@@ -15,9 +15,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Mirror of `LocusKit.Drawer` reduced to the fields the reranking
-/// engine consumes. The Rust port is conformance-gated against the
+/// engine consumes. The Rust version is conformance-gated against the
 /// Swift engine over shared vectors of this shape; full
-/// `LocusKit.Drawer` round-trip lives in the LocusKit Rust port.
+/// `LocusKit.Drawer` round-trip lives in the LocusKit Rust version.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct DrawerRow {
     pub id: String,
@@ -144,7 +144,7 @@ pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning) -> Vec<DrawerRo
         let mut best_idx: isize = -1;
         let mut best_score = f32::NEG_INFINITY;
         // Iterate in stable input order so ties break deterministically
-        // — bit-identical against the Swift port.
+        // — bit-identical against the Swift version.
         for (idx, alive) in remaining.iter().enumerate() {
             if !alive {
                 continue;

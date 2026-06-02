@@ -1,11 +1,11 @@
-//! Bradley-Terry batch maximum-likelihood ranker — Rust port.
+//! Bradley-Terry batch maximum-likelihood ranker — Rust version.
 //!
 //! Parallel implementation of the Swift `bradleyTerry(outcomes:)` in
 //! `NeuronKit/Sources/NeuronKit/Tournament/BradleyTerry.swift`. Neither
-//! port leads; both must agree (CLAUDE.md). Conformance is gated by the
+//! version leads; both must agree (CLAUDE.md). Conformance is gated by the
 //! tests in this module, which fit the same fixtures as the Swift
 //! `BradleyTerryTests` and assert the same rankings and strengths to a
-//! documented tolerance (1e-6 on the log-strength scale; the two ports
+//! documented tolerance (1e-6 on the log-strength scale; the two versions
 //! run the identical f64 MM iteration so they agree far more tightly in
 //! practice).
 //!
@@ -278,8 +278,8 @@ mod tests {
         ]
     }
 
-    /// Conformance anchor: values produced by the Swift port for the
-    /// dominance ladder. The Rust port must reproduce them to 1e-6.
+    /// Conformance anchor: values produced by the Swift version for the
+    /// dominance ladder. The Rust version must reproduce them to 1e-6.
     /// Swift: A strength=1.2240355728942105, lo=-0.9407234625180512,
     ///        hi=3.388794608306472; B strength≈0 (1.03e-9),
     ///        lo=-1.9095211749834127, hi=1.909521177047359;

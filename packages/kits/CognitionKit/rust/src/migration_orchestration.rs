@@ -1,4 +1,4 @@
-//! The portable orchestration of MigrationBenchmark — Rust port of the
+//! The portable orchestration of MigrationBenchmark — Rust version of the
 //! Swift `MigrationOrchestration` in
 //! `CognitionKit/Sources/CognitionKit/MigrationOrchestration.swift`.
 //!

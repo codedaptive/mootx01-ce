@@ -4,7 +4,7 @@
 // benchmark (NEURONKIT_SPEC § 4.7), factored out of `benchmark(...)` so
 // it is a pure function of its inputs — no branch handle, no estate, no
 // recall I/O, no clock. This is the Swift side of NeuronKit's Rust-parity
-// Bucket A: the Rust port at `NeuronKit/rust/src/benchmark_scoring.rs`
+// Bucket A: the Rust version at `NeuronKit/rust/src/benchmark_scoring.rs`
 // implements the same function and both gate on shared fixtures.
 //
 // What stays in `benchmark(...)`: the ONLY substrate touch — calling
@@ -18,7 +18,7 @@
 import Foundation
 
 /// Pure recall-fidelity scoring shared by the Swift `benchmark(...)` and
-/// the Rust port. Identity-free: a function of the expected concept ids
+/// the Rust version. Identity-free: a function of the expected concept ids
 /// and the per-query recalled id lists.
 public enum BenchmarkScoring {
 

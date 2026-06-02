@@ -16,7 +16,7 @@
 //! There is no Rust maintenance actor: the seam I/O and the bitmap /
 //! audit-verify reads are estate-bound (Bucket B, waiting on the Rust
 //! LocusKit estate + the GLK audit verifier's own Rust lane). The decision
-//! logic is pure, so it ports now and is conformance-gated.
+//! logic is pure, so it ships in Rust now and is conformance-gated.
 
 use std::collections::BTreeSet;
 

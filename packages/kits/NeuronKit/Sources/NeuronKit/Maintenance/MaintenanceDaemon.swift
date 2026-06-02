@@ -219,7 +219,7 @@ public actor MaintenanceDaemon {
         }
 
         // ── Delegate every DECISION to the pure core (steps 0–5) ───────
-        // Conformance-gated against the Rust port
+        // Conformance-gated against the Rust version
         // (NeuronKit/rust/src/maintenance_decision.rs). See MaintenanceDecision.swift.
         let outcome = MaintenanceDecision.decide(
             audit: auditVerdict,
@@ -349,7 +349,7 @@ public actor MaintenanceDaemon {
         }
     }
 
-    // MARK: - Pure helpers (deterministic; Rust port matches)
+    // MARK: - Pure helpers (deterministic; Rust version matches)
 
     /// The agent name the cycle diary entries are filed under.
     static let agentName = "maintenance-daemon"
