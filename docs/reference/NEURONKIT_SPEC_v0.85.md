@@ -441,6 +441,21 @@ by high similarity to the anchor over the match blocks AND high
 difference over the differ blocks. The caller excludes the anchor row
 if present. Result: ranked `(row, score)` matches.
 
+### § 7.7 — Federated lens (privacy-preserving overlap)
+
+**Mind overlap — DP summaries across estates.** Surfaces SubstrateML's
+DP-OR-reduce. Each estate reduces its fingerprint set to ONE
+differentially-private aggregate (deterministic for a fixed seed, so
+two estates seeded alike produce comparable noise); the two aggregates
+are compared as 1 − normalized Hamming over the
+structure/concept/channel blocks (192 bits; 1.0 = convergent minds,
+→ 0 as they diverge). Neither side's individual memories are ever
+touched by the comparison — only the DP summaries, which is exactly
+what would cross a federation boundary. Block 2 (lineage-temporal) is
+DELIBERATELY excluded: it encodes per-row identity, so it differs even
+between two estates holding the very same memory — comparing it across
+estates is both meaningless and nondeterministic.
+
 ## § 8 — The surface-then-sequence archetype
 
 Every lens in § 7 is built to one archetype, and the archetype is itself
