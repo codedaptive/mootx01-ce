@@ -1,8 +1,8 @@
-//! PostgreSQL backend — the Rust port of the Swift `PersistenceKitPostgreSQL`
+//! PostgreSQL backend — the Rust version of the Swift `PersistenceKitPostgreSQL`
 //! target, over the synchronous `postgres` crate (matching the sync Storage
 //! trait). One `Client` per estate behind a `Mutex` (a real shared DB
 //! handle). Schema DDL, predicate compilation, and the value codec match the
-//! Swift backend so both ports produce identical observable results.
+//! Swift backend so both versions produce identical observable results.
 //!
 //! NOTE: this backend is **unverified locally** — its conformance test only
 //! runs when `PERSISTENCEKIT_PG_URL` points at a live PostgreSQL server;

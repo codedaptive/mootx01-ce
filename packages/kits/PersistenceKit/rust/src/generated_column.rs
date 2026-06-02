@@ -7,9 +7,9 @@
 //! identical bit-operator DDL inside GENERATED ALWAYS AS (...)
 //! STORED; the InMemory backend evaluates it directly against the
 //! row at write time. One expression, three faithful realizations,
-//! no SQL-text escape hatch. (Only the InMemory backend exists in
-//! the Rust port today; render_sql is provided so the SQLite and
-//! PostgreSQL backends slot in additively in a follow-on R-mission.)
+//! no SQL-text escape hatch. All three backends ship in the Rust
+//! version: InMemory evaluates directly, and the SQLite and
+//! PostgreSQL backends render the expression via render_sql.
 
 use crate::types::{ColumnType, TypedValue};
 use std::collections::BTreeMap;
