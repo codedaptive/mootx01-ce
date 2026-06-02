@@ -119,6 +119,12 @@ encode(text) -> (code | UNRESOLVED, trail):
     lit   = ac_automaton.scan(bag.keys(), against=candidates)
     score = {}
     for code in lit:
+        # SHIPPED (Mission #4): IDF-weight the overlap so a term common across
+        # many signatures contributes little and a distinctive one dominates —
+        # score[code] = sum(bag[k]·idf(k) for k in bag if k in signatures[code]),
+        # idf(k) = ln(N / df(k)). This raw sum is the matcher's `.raw` default;
+        # the runtime ships `.idf`. df/idf are precomputed from the pinned
+        # signatures (deterministic, sorted-order float sums). See cookbook §5.3.
         score[code] = sum(bag[k] for k in bag if k in signatures[code])
 
     if score is empty:

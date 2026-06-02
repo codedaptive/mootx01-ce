@@ -56,7 +56,13 @@ public enum FDC {
               let sigs: SignaturesFile = load("FDCSignatures") else { return nil }
         var terms: [String: Set<String>] = [:]
         for e in sigs.codes { terms[e.code] = Set(e.terms) }
-        let m = FDCMatcher(lexicon: lexicon, frame: frame, signatures: terms, stopThreshold: stopThreshold)
+        // The runtime ships `.idf` scoring (Mission #4): IDF-weighting the
+        // overlap — penalizing concept terms common across many signatures,
+        // rewarding distinctive ones — improved within-region code selection
+        // over raw overlap (exact 31→36%, wrong-branch 63→58% on the v1.0
+        // frame). The matcher default stays `.raw`; the runtime opts in here.
+        let m = FDCMatcher(lexicon: lexicon, frame: frame, signatures: terms,
+                           stopThreshold: stopThreshold, scoreMode: .idf)
         return (m, sigs.version)
     }()
 
