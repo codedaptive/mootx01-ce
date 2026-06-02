@@ -12,9 +12,10 @@
 //!     captured heavily but never confirmed ranks high in representation yet
 //!     low here — "what you actually keep vs what merely accumulates."
 //!
-//! Rust-only today (Swift version contracted, SPEC C-7); the real Lens 4. Pure CognitionKit sequencing: three
-//! recalls via GLK (active + confirmed + withdrawn) + NeuronKit
-//! `representation_bias` and `learned_preference`. Read-only.
+//! Paired with the Swift version (`Sources/CognitionKit/Bias.swift`); the
+//! real Lens 4. Pure CognitionKit sequencing: three recalls via GLK
+//! (active + confirmed + withdrawn) + NeuronKit `representation_bias`
+//! and `learned_preference`. Read-only.
 //!
 //! All three signals are computable end-to-end today: withdrawal and the
 //! confirm verb are both live, so the learned-preference fit reads real
