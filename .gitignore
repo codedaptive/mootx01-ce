@@ -85,10 +85,7 @@ venv/
 coverage.out
 coverage.html
 
-# Internal work history — archived to the EE repository, never committed here
-docs/blast_radius/*
-!docs/blast_radius/.gitkeep
-docs/missions/*
-!docs/missions/inflight/
-docs/missions/inflight/*
-!docs/missions/inflight/.gitkeep
+# Internal work history: archived to the EE repository, never committed here
+docs/blast_radius/
+docs/missions/
+docs/analysis/
