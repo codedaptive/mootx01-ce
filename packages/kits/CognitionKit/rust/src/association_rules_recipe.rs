@@ -1,6 +1,7 @@
 //! AssociationRules — the conscious "what co-occurs with what" recipe
 //! (Analytics). Rust version of the Swift `AssociationRules` in
 //! `CognitionKit/Sources/CognitionKit/AssociationRules.swift`.
+//! Paired with the Swift version (`Sources/CognitionKit/AssociationRules.swift`).
 //!
 //! Recalls a set of drawers, projects each drawer's categorical facets
 //! (room, kind, channel, sensitivity) into a per-call label vocabulary,

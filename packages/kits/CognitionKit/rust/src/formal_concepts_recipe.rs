@@ -1,6 +1,7 @@
 //! FormalConcepts — the conscious "what clusters are hidden in my estate"
 //! recipe (Analytics). Rust version of the Swift `FormalConcepts` in
 //! `CognitionKit/Sources/CognitionKit/FormalConcepts.swift`.
+//! Paired with the Swift version (`Sources/CognitionKit/FormalConcepts.swift`).
 //!
 //! Recalls a set of drawers, builds a `FormalContext` where each drawer
 //! is one row and its categorical facets are its attributes, and surfaces
