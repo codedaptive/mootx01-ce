@@ -1283,3 +1283,307 @@ fn tools_list_new_tools_present_with_correct_schema_keys() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 15. v2b-p2 new tool groups — success + error path per group
+// ---------------------------------------------------------------------------
+
+// 15a. Tunnel lifecycle verbs.
+//
+// The coordinator routes these through the drawer estate path, which returns
+// DrawerNotFound for a non-drawer row ID → VerbError::UnderlyingEstateFailure
+// → error_result. This is the "success path" for the current stage (the tool
+// reaches the substrate and the substrate reports a typed error, not a
+// transport fault). The missing-required-arg path returns JSONRPCError.
+
+#[test]
+fn mutate_tunnel_missing_row_id_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    // Missing rowID — invalidParams transport fault.
+    let err = dispatch_tool("moot_mutate_tunnel", &args!["kind" => "confirm"], &registry)
+        .expect_err("missing rowID must be invalidParams");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+#[test]
+fn mutate_tunnel_unknown_row_id_returns_tool_error() {
+    // A non-existent tunnel rowID reaches the drawer path, gets DrawerNotFound,
+    // and surfaces as isError:true (not a transport fault).
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_mutate_tunnel",
+        &args!["rowID" => "no-such-tunnel", "kind" => "confirm"],
+        &registry,
+    )
+    .expect("dispatch must not throw transport fault for unknown tunnel row");
+    assert!(
+        is_tool_error(&result),
+        "unknown tunnel rowID must produce isError:true; got: {result}"
+    );
+}
+
+#[test]
+fn expunge_tunnel_without_confirmation_returns_tool_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_expunge_tunnel",
+        &args!["rowID" => "t1", "reason" => "cleanup"],
+        &registry,
+    )
+    .expect("expunge_tunnel without confirmation must not throw transport fault");
+    assert!(
+        is_tool_error(&result),
+        "expunge_tunnel without confirmation must produce isError:true; got: {result}"
+    );
+    assert!(
+        content_text(&result).contains("ExpungeNotConfirmed"),
+        "error text must mention ExpungeNotConfirmed; got: {}",
+        content_text(&result)
+    );
+}
+
+// 15b. kgFact lifecycle and recall.
+
+#[test]
+fn mutate_kg_fact_missing_kind_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let err = dispatch_tool("moot_mutate_kgFact", &args!["rowID" => "r1"], &registry)
+        .expect_err("missing kind must be invalidParams");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+#[test]
+fn expunge_kg_fact_without_confirmation_returns_tool_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_expunge_kgFact",
+        &args!["rowID" => "r1", "reason" => "cleanup"],
+        &registry,
+    )
+    .expect("expunge_kgFact must not throw transport fault");
+    assert!(is_tool_error(&result));
+}
+
+#[test]
+fn kg_fact_recall_returns_not_supported_error() {
+    // DrawerStore has no all_kg_facts() — surfaces NotSupportedByEstate.
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool("moot_kgFact_recall", &args![], &registry).expect("must not throw");
+    assert!(
+        is_tool_error(&result),
+        "kgFact_recall must return isError:true (not supported yet); got: {result}"
+    );
+}
+
+// 15c. diaryEntry recall.
+
+#[test]
+fn diary_entry_recall_returns_not_supported_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let result =
+        dispatch_tool("moot_diaryEntry_recall", &args![], &registry).expect("must not throw");
+    assert!(
+        is_tool_error(&result),
+        "diaryEntry_recall must return isError:true (not supported yet); got: {result}"
+    );
+}
+
+// 15d. Proposal lifecycle and recall.
+
+#[test]
+fn expunge_proposal_requires_confirmation() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_expunge_proposal",
+        &args!["rowID" => "p1", "reason" => "stale"],
+        &registry,
+    )
+    .expect("must not throw");
+    assert!(is_tool_error(&result));
+    assert!(content_text(&result).contains("ExpungeNotConfirmed"));
+}
+
+#[test]
+fn proposal_recall_returns_not_supported_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let result =
+        dispatch_tool("moot_proposal_recall", &args![], &registry).expect("must not throw");
+    assert!(is_tool_error(&result));
+}
+
+// 15e. Association lifecycle and recall.
+
+#[test]
+fn mutate_association_unknown_row_returns_tool_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_mutate_association",
+        &args!["rowID" => "no-such-assoc", "kind" => "confirm"],
+        &registry,
+    )
+    .expect("must not throw transport fault");
+    assert!(is_tool_error(&result));
+}
+
+#[test]
+fn association_recall_returns_not_supported_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let result =
+        dispatch_tool("moot_association_recall", &args![], &registry).expect("must not throw");
+    assert!(is_tool_error(&result));
+}
+
+// 15f. learnedReference — learn, lifecycle, recall.
+
+#[test]
+fn learn_learned_reference_returns_not_supported_error() {
+    // moot_learn_learnedReference dispatches to coordinator.learn which is a
+    // stub (Brain layer not yet present). Both sides return NotSupportedByEstate.
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_learn_learnedReference",
+        &args!["handle" => "some-catalog-ref"],
+        &registry,
+    )
+    .expect("must not throw transport fault");
+    assert!(
+        is_tool_error(&result),
+        "learn_learnedReference must return isError:true (stub); got: {result}"
+    );
+}
+
+#[test]
+fn learned_reference_recall_returns_not_supported_error() {
+    let registry = EstateRegistry::new_inmemory();
+    let result =
+        dispatch_tool("moot_learnedReference_recall", &args![], &registry).expect("must not throw");
+    assert!(is_tool_error(&result));
+}
+
+// 15g. Federation stub — moot_cross_estate_recall.
+
+#[test]
+fn cross_estate_recall_advertises_and_returns_not_implemented() {
+    // The Rust GLK fan_out has no grant model yet. The tool is advertised in
+    // tools/list (confirmed by the count test); every call returns error_result
+    // with the explicit "not yet implemented" message.
+    let registry = EstateRegistry::new_inmemory();
+    let result = dispatch_tool(
+        "moot_cross_estate_recall",
+        &args!["requesterEstateID" => "00000000-0000-0000-0000-000000000001"],
+        &registry,
+    )
+    .expect("must not throw transport fault");
+    assert!(
+        is_tool_error(&result),
+        "cross_estate_recall must return isError:true; got: {result}"
+    );
+    assert!(
+        content_text(&result).contains("not yet implemented"),
+        "error text must contain 'not yet implemented'; got: {}",
+        content_text(&result)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. tools/list name-set equality (v2b-p2 complete surface)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tools_list_name_set_matches_expected_49_names() {
+    // Gate: all 49 expected tool names are present, no more and no less.
+    // Derived from the Swift ToolProjection.tools() output (acceptance matrix
+    // × surfaced verbs) plus recipe, lens, and federation tools.
+    let expected_names: std::collections::HashSet<&str> = [
+        // recipe tools
+        "moot_list_recipes",
+        "moot_grounded_synthesis",
+        "moot_run_migration_benchmark",
+        "moot_confirm_migration_promotion",
+        // lens tools (14 reasoning + 2 analytics)
+        "moot_keystones",
+        "moot_constellation",
+        "moot_free_association",
+        "moot_theme_weather",
+        "moot_latent_themes",
+        "moot_bias",
+        "moot_drift",
+        "moot_contradiction",
+        "moot_trust_grounded_synthesis",
+        "moot_partial_cue_recall",
+        "moot_anticipate",
+        "moot_tunnel_successor",
+        "moot_mind_overlap",
+        "moot_estate_divergence",
+        "moot_association_rules",
+        "moot_formal_concepts",
+        // lexicon: drawer (6)
+        "moot_capture_drawer",
+        "moot_reanchor_drawer",
+        "moot_mutate_drawer",
+        "moot_withdraw_drawer",
+        "moot_expunge_drawer",
+        "moot_drawer_recall",
+        // lexicon: tunnel (5)
+        "moot_capture_tunnel",
+        "moot_mutate_tunnel",
+        "moot_withdraw_tunnel",
+        "moot_expunge_tunnel",
+        "moot_tunnel_recall",
+        // lexicon: kgFact (4)
+        "moot_mutate_kgFact",
+        "moot_withdraw_kgFact",
+        "moot_expunge_kgFact",
+        "moot_kgFact_recall",
+        // lexicon: diaryEntry (1)
+        "moot_diaryEntry_recall",
+        // lexicon: proposal (4)
+        "moot_mutate_proposal",
+        "moot_withdraw_proposal",
+        "moot_expunge_proposal",
+        "moot_proposal_recall",
+        // lexicon: association (3)
+        "moot_mutate_association",
+        "moot_expunge_association",
+        "moot_association_recall",
+        // lexicon: learnedReference (5)
+        "moot_learn_learnedReference",
+        "moot_mutate_learnedReference",
+        "moot_withdraw_learnedReference",
+        "moot_expunge_learnedReference",
+        "moot_learnedReference_recall",
+        // federation (1)
+        "moot_cross_estate_recall",
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    let tools = build_tool_list();
+    let arr = tools
+        .as_array()
+        .expect("build_tool_list must return an array");
+    let actual_names: std::collections::HashSet<&str> =
+        arr.iter().filter_map(|t| t["name"].as_str()).collect();
+
+    // Every expected name must appear.
+    for name in &expected_names {
+        assert!(
+            actual_names.contains(name),
+            "expected tool {name} missing from tools/list"
+        );
+    }
+    // No extra names beyond expected.
+    for name in &actual_names {
+        assert!(
+            expected_names.contains(name),
+            "unexpected tool {name} in tools/list"
+        );
+    }
+    assert_eq!(
+        actual_names.len(),
+        49,
+        "expected exactly 49 tools; got {}",
+        actual_names.len()
+    );
+}
