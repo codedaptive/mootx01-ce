@@ -16,31 +16,31 @@
 //!     a future backend (e.g. tokio-postgres) needs async, it
 //!     can wrap its own runtime.
 
-pub mod types;
-pub mod predicate;
-pub mod schema;
-pub mod generated_column;
-pub mod error;
-pub mod row_store;
-pub mod blob_store;
-pub mod vector_index;
 pub mod audit_log;
-pub mod observer;
-pub mod storage;
+pub mod blob_store;
+pub mod error;
+pub mod generated_column;
 pub mod inmemory;
-pub mod sqlite;
+pub mod observer;
 pub mod postgres;
+pub mod predicate;
+pub mod row_store;
+pub mod schema;
+pub mod sqlite;
+pub mod storage;
+pub mod types;
+pub mod vector_index;
 
-pub use types::*;
-pub use predicate::*;
-pub use schema::*;
-pub use generated_column::*;
-pub use error::*;
-pub use row_store::*;
-pub use blob_store::*;
-pub use vector_index::*;
 pub use audit_log::*;
+pub use blob_store::*;
+pub use error::*;
+pub use generated_column::*;
 pub use observer::*;
-pub use storage::*;
-pub use sqlite::SqliteStorage;
 pub use postgres::PostgresStorage;
+pub use predicate::*;
+pub use row_store::*;
+pub use schema::*;
+pub use sqlite::SqliteStorage;
+pub use storage::*;
+pub use types::*;
+pub use vector_index::*;

@@ -12,11 +12,11 @@
 use crate::audit_log::{AuditEvent, AuditLog};
 use crate::blob_store::BlobStore;
 use crate::error::{StorageError, StorageResult};
+use crate::generated_column::GeneratedColumn;
 use crate::observer::{ObserverHub, StorageEvent, StorageObserver, TableChange};
 use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use crate::row_store::RowStore;
 use crate::schema::{SchemaDeclaration, SchemaOperation, TableDeclaration};
-use crate::generated_column::GeneratedColumn;
 use crate::storage::{
     BackendConfiguration, EstateConfiguration, IsolationLevel, Storage, StorageTransaction,
 };
@@ -87,7 +87,10 @@ impl InMemoryStorage {
 
     /// Convenience constructor for tests.
     pub fn with_estate(estate_id: uuid::Uuid) -> Self {
-        Self::new(EstateConfiguration::new(estate_id, BackendConfiguration::InMemory))
+        Self::new(EstateConfiguration::new(
+            estate_id,
+            BackendConfiguration::InMemory,
+        ))
     }
 }
 
@@ -229,20 +232,22 @@ fn apply_operation(state: &mut State, op: SchemaOperation) -> StorageResult<()> 
             Ok(())
         }
         SchemaOperation::AddColumn { table, column } => {
-            let t = state.tables.get_mut(&table).ok_or_else(|| {
-                StorageError::InvalidQuery {
+            let t = state
+                .tables
+                .get_mut(&table)
+                .ok_or_else(|| StorageError::InvalidQuery {
                     detail: format!("addColumn: table {} not found", table),
-                }
-            })?;
+                })?;
             t.declaration.columns.push(column);
             Ok(())
         }
         SchemaOperation::DropColumn { table, column_name } => {
-            let t = state.tables.get_mut(&table).ok_or_else(|| {
-                StorageError::InvalidQuery {
+            let t = state
+                .tables
+                .get_mut(&table)
+                .ok_or_else(|| StorageError::InvalidQuery {
                     detail: format!("dropColumn: table {} not found", table),
-                }
-            })?;
+                })?;
             t.declaration.columns.retain(|c| c.name != column_name);
             for row in t.rows.values_mut() {
                 row.remove(&column_name);
@@ -283,11 +288,12 @@ impl RowStore for InMemoryRowStore {
     ) -> StorageResult<RowHandle> {
         let (key, stored) = {
             let mut state = self.state.lock().unwrap();
-            let t = state.tables.get_mut(table).ok_or_else(|| {
-                StorageError::InvalidQuery {
+            let t = state
+                .tables
+                .get_mut(table)
+                .ok_or_else(|| StorageError::InvalidQuery {
                     detail: format!("insert: table {} not found", table),
-                }
-            })?;
+                })?;
             let key = Self::resolve_key(t, &values);
             if t.rows.contains_key(&key) {
                 return Err(StorageError::DuplicateKey {
@@ -319,20 +325,23 @@ impl RowStore for InMemoryRowStore {
     ) -> StorageResult<RowHandle> {
         let (key, event, emitted_values) = {
             let mut state = self.state.lock().unwrap();
-            let t = state.tables.get_mut(table).ok_or_else(|| {
-                StorageError::InvalidQuery {
+            let t = state
+                .tables
+                .get_mut(table)
+                .ok_or_else(|| StorageError::InvalidQuery {
                     detail: format!("upsert: table {} not found", table),
-                }
-            })?;
+                })?;
             // Find existing row matching all conflict columns.
             let existing_key = t
                 .rows
                 .iter()
                 .find(|(_, row)| {
-                    conflict_columns.iter().all(|col| match (row.get(col), values.get(col)) {
-                        (Some(a), Some(b)) => a == b,
-                        _ => false,
-                    })
+                    conflict_columns
+                        .iter()
+                        .all(|col| match (row.get(col), values.get(col)) {
+                            (Some(a), Some(b)) => a == b,
+                            _ => false,
+                        })
                 })
                 .map(|(k, _)| *k);
             let generated = t.declaration.generated_columns.clone();
@@ -371,11 +380,12 @@ impl RowStore for InMemoryRowStore {
         let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
         let count = {
             let mut state = self.state.lock().unwrap();
-            let t = state.tables.get_mut(table).ok_or_else(|| {
-                StorageError::InvalidQuery {
+            let t = state
+                .tables
+                .get_mut(table)
+                .ok_or_else(|| StorageError::InvalidQuery {
                     detail: format!("update: table {} not found", table),
-                }
-            })?;
+                })?;
             if t.declaration.append_only {
                 return Err(StorageError::AppendOnlyViolation {
                     table: table.to_string(),
@@ -416,11 +426,12 @@ impl RowStore for InMemoryRowStore {
         let mut notifications: Vec<(RowKey, BTreeMap<String, TypedValue>)> = Vec::new();
         let count = {
             let mut state = self.state.lock().unwrap();
-            let t = state.tables.get_mut(table).ok_or_else(|| {
-                StorageError::InvalidQuery {
+            let t = state
+                .tables
+                .get_mut(table)
+                .ok_or_else(|| StorageError::InvalidQuery {
                     detail: format!("delete: table {} not found", table),
-                }
-            })?;
+                })?;
             if t.declaration.append_only {
                 return Err(StorageError::AppendOnlyViolation {
                     table: table.to_string(),
@@ -459,11 +470,12 @@ impl RowStore for InMemoryRowStore {
         offset: Option<usize>,
     ) -> StorageResult<Vec<StorageRow>> {
         let state = self.state.lock().unwrap();
-        let t = state.tables.get(table).ok_or_else(|| {
-            StorageError::InvalidQuery {
+        let t = state
+            .tables
+            .get(table)
+            .ok_or_else(|| StorageError::InvalidQuery {
                 detail: format!("query: table {} not found", table),
-            }
-        })?;
+            })?;
         let mut results: Vec<StorageRow> = t
             .rows
             .values()
@@ -476,8 +488,14 @@ impl RowStore for InMemoryRowStore {
         if !order_by.is_empty() {
             results.sort_by(|a, b| {
                 for clause in order_by {
-                    let lv = a.get(&clause.column.name).cloned().unwrap_or(TypedValue::Null);
-                    let rv = b.get(&clause.column.name).cloned().unwrap_or(TypedValue::Null);
+                    let lv = a
+                        .get(&clause.column.name)
+                        .cloned()
+                        .unwrap_or(TypedValue::Null);
+                    let rv = b
+                        .get(&clause.column.name)
+                        .cloned()
+                        .unwrap_or(TypedValue::Null);
                     let cmp = compare_typed_values(&lv, &rv);
                     if let Some(order) = cmp {
                         if order != std::cmp::Ordering::Equal {
@@ -500,19 +518,20 @@ impl RowStore for InMemoryRowStore {
         Ok(results)
     }
 
-    fn count(
-        &self,
-        table: &str,
-        predicate: Option<&StoragePredicate>,
-    ) -> StorageResult<usize> {
+    fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize> {
         let state = self.state.lock().unwrap();
-        let t = state.tables.get(table).ok_or_else(|| {
-            StorageError::InvalidQuery {
+        let t = state
+            .tables
+            .get(table)
+            .ok_or_else(|| StorageError::InvalidQuery {
                 detail: format!("count: table {} not found", table),
-            }
-        })?;
+            })?;
         Ok(match predicate {
-            Some(p) => t.rows.values().filter(|row| evaluate_predicate(p, row)).count(),
+            Some(p) => t
+                .rows
+                .values()
+                .filter(|row| evaluate_predicate(p, row))
+                .count(),
             None => t.rows.len(),
         })
     }
@@ -526,7 +545,11 @@ struct InMemoryBlobStore {
 
 impl BlobStore for InMemoryBlobStore {
     fn put(&self, key: &str, bytes: &[u8]) -> StorageResult<()> {
-        self.state.lock().unwrap().blobs.insert(key.to_string(), bytes.to_vec());
+        self.state
+            .lock()
+            .unwrap()
+            .blobs
+            .insert(key.to_string(), bytes.to_vec());
         Ok(())
     }
     fn get(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
@@ -635,7 +658,7 @@ fn compute_distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
             for i in 0..a.len().min(b.len()) {
                 sum += a[i] * b[i];
             }
-            -sum  // smaller = closer; negate so larger dot products win
+            -sum // smaller = closer; negate so larger dot products win
         }
         DistanceMetric::Cosine => {
             let mut dot = 0.0_f32;
@@ -664,7 +687,12 @@ struct InMemoryAuditLog {
 
 impl InMemoryAuditLog {
     fn idempotent_key(event: &AuditEvent) -> (RowKey, i64, i32, i32) {
-        (event.event_id, event.hlc.physical_time, event.hlc.logical_count, event.hlc.node_id)
+        (
+            event.event_id,
+            event.hlc.physical_time,
+            event.hlc.logical_count,
+            event.hlc.node_id,
+        )
     }
 }
 
@@ -760,10 +788,7 @@ impl StorageObserver for InMemoryObserver {
 /// variant. Mirrors what SQLite and PostgreSQL compute in their
 /// STORED generated columns, so a query against any backend returns
 /// the same materialized value.
-fn materialize_generated(
-    generated: &[GeneratedColumn],
-    row: &mut BTreeMap<String, TypedValue>,
-) {
+fn materialize_generated(generated: &[GeneratedColumn], row: &mut BTreeMap<String, TypedValue>) {
     for gen in generated {
         let raw = gen.expression.evaluate(row);
         let value = match gen.column_type {
@@ -777,10 +802,7 @@ fn materialize_generated(
 
 // ----- Predicate evaluation -----
 
-fn evaluate_predicate(
-    predicate: &StoragePredicate,
-    row: &BTreeMap<String, TypedValue>,
-) -> bool {
+fn evaluate_predicate(predicate: &StoragePredicate, row: &BTreeMap<String, TypedValue>) -> bool {
     match predicate {
         StoragePredicate::And(preds) => preds.iter().all(|p| evaluate_predicate(p, row)),
         StoragePredicate::Or(preds) => preds.iter().any(|p| evaluate_predicate(p, row)),
@@ -789,13 +811,23 @@ fn evaluate_predicate(
         StoragePredicate::IsFalse => false,
         StoragePredicate::Eq(col, value) => row.get(&col.name).map_or(false, |v| v == value),
         StoragePredicate::Neq(col, value) => row.get(&col.name).map_or(false, |v| v != value),
-        StoragePredicate::Lt(col, value) => compare(row.get(&col.name), value, std::cmp::Ordering::Less),
+        StoragePredicate::Lt(col, value) => {
+            compare(row.get(&col.name), value, std::cmp::Ordering::Less)
+        }
         StoragePredicate::Lte(col, value) => compare_le(row.get(&col.name), value),
-        StoragePredicate::Gt(col, value) => compare(row.get(&col.name), value, std::cmp::Ordering::Greater),
+        StoragePredicate::Gt(col, value) => {
+            compare(row.get(&col.name), value, std::cmp::Ordering::Greater)
+        }
         StoragePredicate::Gte(col, value) => compare_ge(row.get(&col.name), value),
-        StoragePredicate::IsNull(col) => row.get(&col.name).map_or(true, |v| matches!(v, TypedValue::Null)),
-        StoragePredicate::IsNotNull(col) => row.get(&col.name).map_or(false, |v| !matches!(v, TypedValue::Null)),
-        StoragePredicate::In(col, values) => row.get(&col.name).map_or(false, |v| values.iter().any(|x| x == v)),
+        StoragePredicate::IsNull(col) => row
+            .get(&col.name)
+            .map_or(true, |v| matches!(v, TypedValue::Null)),
+        StoragePredicate::IsNotNull(col) => row
+            .get(&col.name)
+            .map_or(false, |v| !matches!(v, TypedValue::Null)),
+        StoragePredicate::In(col, values) => row
+            .get(&col.name)
+            .map_or(false, |v| values.iter().any(|x| x == v)),
         StoragePredicate::Like(col, pattern) => match row.get(&col.name) {
             Some(TypedValue::Text(s)) => like_match(s, pattern),
             _ => false,
@@ -812,7 +844,11 @@ fn evaluate_predicate(
             Some(TypedValue::Bitmap(b)) | Some(TypedValue::Int(b)) => (b & mask) == 0,
             _ => false,
         },
-        StoragePredicate::BitwiseEq { column, expected, mask } => match row.get(&column.name) {
+        StoragePredicate::BitwiseEq {
+            column,
+            expected,
+            mask,
+        } => match row.get(&column.name) {
             Some(TypedValue::Bitmap(b)) | Some(TypedValue::Int(b)) => (b & mask) == *expected,
             _ => false,
         },

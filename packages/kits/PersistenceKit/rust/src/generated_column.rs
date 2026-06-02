@@ -127,10 +127,18 @@ impl GeneratedExpression {
                 ((expr.evaluate(row) as u64) << (*bits as u64)) as i64
             }
             GeneratedExpression::Equal(lhs, rhs) => {
-                if lhs.evaluate(row) == rhs.evaluate(row) { 1 } else { 0 }
+                if lhs.evaluate(row) == rhs.evaluate(row) {
+                    1
+                } else {
+                    0
+                }
             }
             GeneratedExpression::NotEqual(lhs, rhs) => {
-                if lhs.evaluate(row) != rhs.evaluate(row) { 1 } else { 0 }
+                if lhs.evaluate(row) != rhs.evaluate(row) {
+                    1
+                } else {
+                    0
+                }
             }
         }
     }
@@ -143,7 +151,13 @@ impl GeneratedExpression {
 pub fn integer_value(value: Option<&TypedValue>) -> i64 {
     match value {
         Some(TypedValue::Int(i)) | Some(TypedValue::Bitmap(i)) => *i,
-        Some(TypedValue::Bool(b)) => if *b { 1 } else { 0 },
+        Some(TypedValue::Bool(b)) => {
+            if *b {
+                1
+            } else {
+                0
+            }
+        }
         Some(TypedValue::Hlc(h)) => h.packed() as i64,
         _ => 0,
     }
