@@ -255,42 +255,38 @@ aggregation families listed below.
 
 ## Grounding Layer (Standalone, Parallel to Substrate)
 
-### LatticeKit (Zero Dependencies)
+### LatticeLib (Zero Dependencies)
 
-**Canonical Role:** Moot Decimal Classification Codes — notation spine, canon from Wikidata CC0, lookup surface.
+**Canonical Role:** Free Decimal Correspondence (FDC) engine — the encoder, the FDC frame (code tree), and the FDC signatures it scores against.
 
-**Spec:** TOPOLOGY.md § MDCC, the classification spine
+**Spec:** TOPOLOGY.md § FDC, the classification spine; FDC_ENCODER_CANONICAL_v1.0.md
 
 **Core Types:**
-- `LatticeCanon` — In-memory parsed canon
-- `LatticeSchemeManifest` — Scheme metadata
-- `LatticeCodeGrammar` — MDCC code validator
-- `ClassificationScheme` enum
+- `FDCFrame` / `FDCEntry` — The FDC code tree
+- `FDCMatcher` — Concept-bag → FDC code matcher
+- `Code` — FDC code grammar (`isWellFormed`)
 
 **Public Functions:**
-- `LatticeKit.bundledCanon() -> LatticeCanon?`
-- `LatticeKit.canonVersion: String`
-- `LatticeKit.classifyLatticeCode(_ code: String, knownCodes: Set<String>) -> LatticeCodeState`
-- `LatticeCodeGrammar.isWellFormed(_ code: String) -> Bool`
-
-**Code States:**
-- `LatticeCodeState` enum — .malformed, .known, .pending
+- `FDC.encode(_ text: String) -> String?`
+- `FDC.encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?)`
+- `FDC.isAvailable: Bool` / `FDC.dataVersion: String`
+- `Code.isWellFormed(_ code: String) -> Bool`
 
 **Dependencies:** None
 
-**Completion:** ✅ Mission MDCC-01 onward
+**Completion:** ✅ FDC engine shipped (MDCC→FDC migration, A2)
 
 ---
 
-### EideticLib (LatticeKit)
+### EideticLib (LatticeLib)
 
-**Canonical Role:** Deterministic text-to-anchor lookup. Tokenize → normalize → stem → gazetteer → classify → resolve.
+**Canonical Role:** Deterministic text-to-anchor lookup, FDC-backed. `lookup` delegates to LatticeLib's `FDC.encodeAnchor` (canonicalize term to a concept bag → match against pinned FDC signatures → FDC code + dominant Wikidata Q-ID).
 
-**Spec:** TOPOLOGY.md § Grounding, MOOTX01_AND_ARIA_CANON.md
+**Spec:** TOPOLOGY.md § Grounding, EIDETICLIB_SPEC_v0.8.md
 
 **Core Type:**
 - `Anchor` — Result of lookup
-  - `mdccCode: String`
+  - `code: String`
   - `wikidataQID: String?`
   - `confidence: UInt8`
   - `dataVersion: String`
@@ -298,23 +294,21 @@ aggregation families listed below.
 **Public Functions:**
 - `EideticLib.lookup(_ term: String) -> Anchor`
 - `EideticLib.classifyLatticeCode(_ code: String, knownCodes: Set<String>) -> LatticeCodeState`
-- `EideticLib.defaultSchemeManifest() -> LatticeSchemeManifest?`
-- `EideticLib.defaultScheme: ClassificationScheme`
+- `EideticLib.sentences(_:)` / `EideticLib.sentencesByDelimiter(_:)`
 
-**Foreign Scheme Support:**
-- `activationConsent: ActivationConsent` — Opt-in gate for foreign data
+**Code States:**
+- `LatticeCodeState` enum — .malformed, .known, .pending
+- `LatticeCodeGrammar` — dependency-free FDC code validator
 
 **Public Constants:**
 - `version: String`
 
 **Internals (cached, not exposed):**
-- Bundled MDCC canon (CC0)
-- Bundled Wikidata subset (CC0)
-- Tokenizer, Normalizer, Stemmer
+- FDC reference artifacts (owned by LatticeLib's FDC runtime)
 
-**Dependencies:** LatticeKit
+**Dependencies:** LatticeLib
 
-**Completion:** ✅ Mission MDCC-03 onward
+**Completion:** ✅ FDC-backed lookup shipped (Phase B)
 
 ---
 
@@ -672,7 +666,7 @@ aggregation families listed below.
 |------|------|
 | **Grammar** | AriaLexiconLib |
 | **Foundation** | SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit, EngramLib |
-| **Grounding** | LatticeKit, EideticLib |
+| **Grounding** | LatticeLib, EideticLib |
 | **Substrate** | LocusKit, VectorKit, CorpusKit |
 | **Composition** | GeniusLocusKit |
 | **Reasoning** | NeuronKit (in progress) |
@@ -690,8 +684,8 @@ SubstrateLib         (zero deps)
   ├── ConvergenceKit        (SubstrateLib, PersistenceKit)
   ├── QueueKit       (SubstrateLib)
   └── EngramLib      (SubstrateLib)
-LatticeKit              (zero deps)
-  └── EideticLib      (LatticeKit)
+LatticeLib              (zero deps)
+  └── EideticLib      (LatticeLib)
 LocusKit             (SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
 VectorKit            (SubstrateLib, EngramLib, PersistenceKit)
   └── CorpusKit         (VectorKit, PersistenceKit, ConvergenceKit, EngramLib)
@@ -750,15 +744,15 @@ When reviewing for placement and shape correctness:
 - [ ] All operations Hamming-distance-based
 - [ ] Session API for kernel reuse correct
 
-**LatticeKit:**
-- [ ] Only MDCC-specific concerns
-- [ ] No network, no foreign schemes in core
-- [ ] Canon version pinned and frozen
+**LatticeLib:**
+- [ ] Only FDC-encoder concerns
+- [ ] No network at runtime
+- [ ] FDC signatures version pinned and frozen
 
 **EideticLib:**
-- [ ] Stateless from caller view, caches internally
-- [ ] Pipeline correct (tokenize → normalize → stem → resolve)
-- [ ] Foreign scheme activation consent gate correct
+- [ ] Stateless from caller view; reference data cached by LatticeLib
+- [ ] lookup delegates to FDC.encodeAnchor
+- [ ] Empty anchor (no fallback code) on a miss
 
 **LocusKit:**
 - [ ] Nine verbs ARIA-compliant

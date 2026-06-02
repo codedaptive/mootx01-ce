@@ -78,7 +78,7 @@ This specification does NOT define:
 - Storage mechanics, the SQLite dialect, or the `Storage` protocol —
   see `PERSISTENCEKIT_SPEC_v0.8.md`.
 - Fingerprint / Hamming / SimHash math — see `SUBSTRATELIB_SPEC_v0.8.md`.
-- The MDCC/UDC lattice itself — see `LATTICEKIT_SPEC_v0.8.md`. LocusKit
+- The FDC classifier itself — see `FDC_ENCODER_CANONICAL_v1.0.md`. LocusKit
   stores a lattice anchor per drawer; it does not own the classification.
 - Multi-estate coordination, grants, federation, the Brain layer, or
   vector recall — see `GENIUSLOCUSKIT_SPEC_v0.8.md` and
@@ -300,7 +300,7 @@ conformance gate.
   `PERSISTENCEKIT_SPEC_v0.8.md`.
 - Fingerprint / Hamming / SimHash / count-fold math →
   `SUBSTRATELIB_SPEC_v0.8.md`.
-- The MDCC/UDC classification lattice → `LATTICEKIT_SPEC_v0.8.md`.
+- The FDC classification encoder → `FDC_ENCODER_CANONICAL_v1.0.md`.
 - Vector embeddings and ANN recall (`Filter.nearVector`,
   `Ordering.byRelevanceDesc`) → `VECTORKIT_SPEC_v0.8.md`. LocusKit declares
   the filter case and throws until VectorKit composes in.

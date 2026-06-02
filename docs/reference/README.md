@@ -52,17 +52,19 @@ standalone, AI-support-only deployment of the GeniusLocus memory
 engine. Drop-in MemPalace replacement; precedes the full Simple
 Machines integration ("Genius Mode") that will land later.
 
-## Encoder and lattice specs
+## Encoder spec
 
 **[`FDC_ENCODER_CANONICAL_v1.0.md`](FDC_ENCODER_CANONICAL_v1.0.md)** —
 the deterministic linguistic pipeline that maps text to a Free
-Decimal Correspondence code. No learned model, no network call at
-runtime. The filing backbone for federated data exchange.
+Decimal Correspondence (FDC) code. No learned model, no network call at
+runtime. The filing backbone for federated data exchange, and the
+classifier the substrate adopted as its v1.0 scheme.
 
-**[`MDCC_ANNEX_SPEC_v0.1.md`](MDCC_ANNEX_SPEC_v0.1.md)** — the MDCC
-annex system. How communities publish their own classification
-sets, federate them while provisional, and earn ratification into
-the main canon.
+The former MOOT Decimal Classification Codes (MDCC) taxonomy and its
+annex system were removed in the MDCC→FDC migration (A2). The
+superseded MDCC specs are kept in [`../archive/`](../archive/) for
+history only; a community-contribution/annex layer over FDC is a
+future redesign, not current.
 
 ## Conventions
 

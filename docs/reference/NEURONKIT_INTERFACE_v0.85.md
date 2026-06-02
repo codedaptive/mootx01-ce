@@ -143,7 +143,7 @@ pub enum LinguisticPipelineMode { DeterministicReference, AppleNlAccel }
 
 ### `LatticeAnchorInference`
 
-The output of lattice-anchor inference: the MDCC code, optional Wikidata
+The output of lattice-anchor inference: the FDC code, optional Wikidata
 Q-ID, packed confidence, and the provenance enrichment-status bit
 transition (cookbook § 2.5). Pure data; identical shape across ports.
 
@@ -151,12 +151,12 @@ transition (cookbook § 2.5). Pure data; identical shape across ports.
 
 ```swift
 public struct LatticeAnchorInference: Equatable, Sendable, Codable {
-    public let mdccCode: String                    // "" => no canon match
+    public let code: String                        // "" => the FDC encoder matched nothing
     public let wikidataQID: String?                // nil => qidPending
     public let confidence: UInt8                   // packed 6-bit field value
     public let enrichmentStatusBits: UInt8         // OR into provenance bits 36-41
     public let pipelineMode: LinguisticPipelineMode
-    public init(mdccCode: String, wikidataQID: String?, confidence: UInt8,
+    public init(code: String, wikidataQID: String?, confidence: UInt8,
                 enrichmentStatusBits: UInt8, pipelineMode: LinguisticPipelineMode)
 }
 
@@ -168,7 +168,7 @@ public enum EnrichmentStatus: UInt8 { case none = 0, qidPending = 1, qidComplete
 
 ```rust
 pub struct LatticeAnchorInference {
-    pub mdcc_code: String,
+    pub code: String,
     pub wikidata_qid: Option<String>,
     pub confidence: u8,
     pub enrichment_status_bits: u8,

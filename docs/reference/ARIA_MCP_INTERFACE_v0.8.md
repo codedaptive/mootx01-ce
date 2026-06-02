@@ -131,7 +131,7 @@ public enum ToolProjection {
 }
 ```
 
-### Dispatch — `ToolDispatcher` / `ClassificationScheme`
+### Dispatch — `ToolDispatcher`
 
 Routes a `tools/call` against one or more locally-open GeniusLocusKit
 estates (by optional `estateID`; absent ⇒ default).
@@ -149,9 +149,6 @@ public struct ToolDispatcher: Sendable {
     public static func textResult(_ text: String) -> JSONValue   // MCP success, isError:false
     public static func errorResult(_ text: String) -> JSONValue  // MCP result, isError:true
 }
-
-// Declared at the ARIA boundary (substrate LatticeAnchor carries no scheme tag yet).
-public enum ClassificationScheme: String, Sendable, CaseIterable { case udc, mdcc }
 ```
 
 ### Server — `ARIA_MCPDispatcher` / `StdioServer`

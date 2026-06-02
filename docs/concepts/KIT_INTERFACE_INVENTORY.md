@@ -166,38 +166,32 @@
 
 ## Grounding Layer
 
-### LatticeKit
-**Role:** Moot Decimal Classification Codes (Dewey-like spine, MDCC canon).  
-**Language:** Swift
+### LatticeLib
+**Role:** Free Decimal Correspondence (FDC) engine — encoder, frame, signatures (Dewey-like spine).  
+**Language:** Swift + Rust
 
 **Public Interface:**
-- `LatticeCanon` (loaded reference data)
-- `LatticeKit.bundledCanon() -> LatticeCanon?`
-- `LatticeSchemeManifest`
-- `LatticeCodeGrammar.isWellFormed(_ code: String) -> Bool`
-- `classifyLatticeCode(_ code: String, knownCodes: Set<String>) -> LatticeCodeState`
-- `LatticeKit.canonVersion: String`
+- `FDC.encode(_ text: String) -> String?` / `FDC.encodeAnchor(_ text: String) -> (code: String?, conceptQID: String?)`
+- `FDC.isAvailable: Bool` / `FDC.dataVersion: String`
+- `FDCMatcher`, `FDCFrame` / `FDCEntry` (the code tree)
+- `Code.isWellFormed(_ code: String) -> Bool`
 
 ---
 
 ### EideticLib
-**Role:** Deterministic text-to-anchor lookup (MDCC code + Wikidata Q-ID).  
+**Role:** Deterministic text-to-anchor lookup, FDC-backed (FDC code + Wikidata Q-ID).  
 **Language:** Swift + Rust
 
 **Public Type:**
-- `Anchor` (mdccCode, wikidataQID, confidence, dataVersion)
+- `Anchor` (code, wikidataQID, confidence, dataVersion)
 
 **Public Functions:**
-- `EideticLib.lookup(_ term: String) -> Anchor`
+- `EideticLib.lookup(_ term: String) -> Anchor`  (delegates to `FDC.encodeAnchor`)
 - `EideticLib.classifyLatticeCode(_ code: String, knownCodes: Set<String>) -> LatticeCodeState`
-- `EideticLib.defaultSchemeManifest() -> LatticeSchemeManifest?`
-
-**Scheme Registration:**
-- `activationConsent` (ActivationConsent type)
+- `EideticLib.sentences(_:)` / `EideticLib.sentencesByDelimiter(_:)`
 
 **Public Constants:**
 - `version: String`
-- `defaultScheme: ClassificationScheme`
 
 ---
 
@@ -455,7 +449,7 @@
 | Role | Kits |
 |------|------|
 | **Foundation** | AriaLexiconLib, SubstrateLib, PersistenceKit, QueueKit, ConvergenceKit, EngramLib |
-| **Grounding** | LatticeKit, EideticLib |
+| **Grounding** | LatticeLib, EideticLib |
 | **Substrate** | LocusKit, VectorKit, CorpusKit, GeniusLocusKit |
 | **Reasoning** | NeuronKit |
 | **Behaviour** | CognitionKit |
@@ -472,8 +466,8 @@ PersistenceKit            (SubstrateLib)
 ConvergenceKit               (SubstrateLib, PersistenceKit)
 QueueKit              (SubstrateLib)
 EngramLib             (SubstrateLib)
-LatticeKit               (zero deps)
-EideticLib             (LatticeKit)
+LatticeLib               (zero deps)
+EideticLib             (LatticeLib)
 LocusKit              (SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
 VectorKit             (SubstrateLib, EngramLib, PersistenceKit)
 CorpusKit                (VectorKit, PersistenceKit, ConvergenceKit, EngramLib)

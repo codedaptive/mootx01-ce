@@ -451,7 +451,7 @@ provenance_bitmap (Int64), low-to-high:
 
 Every drawer carries a lattice anchor:
 
-- `udc_code` — TEXT, required. The drawer's depth-coordinate classification code (see "Two schemes, two field names" below). Empty string is the no-anchor sentinel.
+- `udc_code` — TEXT, required. The drawer's depth-coordinate classification code (see "One scheme, two field names" below). Empty string is the no-anchor sentinel.
 - `udc_facets` — TEXT, optional. Comma-separated additional facet codes.
 - `wikidata_qid` — TEXT, optional but recommended. Wikidata Q-ID (e.g., `Q11165`).
 - `wikidata_qids_secondary` — TEXT, optional. Comma-separated additional Q-IDs.
@@ -460,36 +460,34 @@ When `wikidata_qid` is absent at capture, the enrichment daemon populates it. Wh
 
 The estate's lattice footprint is the OR-reduction of every row's anchor, computed on demand. Footprint is observed; no application or user pre-declares it.
 
-#### Two schemes, two field names
+#### One scheme, two field names
 
-The depth coordinate is currently carried under **two different field
-names in two different layers**, and they hold codes from **two
-different classification schemes**. A reader wiring the two layers
-together must not mistake one for the other — both are `String` (Swift)
-/ TEXT (SQLite), so the compiler will not catch a code from one scheme
-fed into the other layer's field.
+The depth coordinate is carried under **two different field names in two
+different layers**, both holding an **FDC code**. A reader wiring the two
+layers together must not mistake one field for the other — both are
+`String` (Swift) / TEXT (SQLite), so the compiler will not catch a code
+fed into the wrong layer's field.
 
-| Layer | Field name | Type | Scheme it carries |
+| Layer | Field name | Type | What it carries |
 |---|---|---|---|
-| Storage / wire (LocusKit `Drawer`, SQLite column) | `udc_code` (Swift `udcCode`) | `String` / TEXT | The persisted depth code. Named for UDC for historical reasons; it stores whatever depth code the capture path supplies, which in the shipped system is an MDCC code. |
-| Reasoning (EideticLib / NeuronKit `LatticeAnchorInference`) | `mdccCode` | `String` | The live MDCC code resolved by the deterministic linguistic pipeline. |
+| Storage / wire (LocusKit `Drawer`, SQLite column) | `udc_code` (Swift `udcCode`) | `String` / TEXT | The persisted depth code. Named for UDC for historical reasons; it stores whatever depth code the capture path supplies, which in the shipped system is an FDC code. |
+| Reasoning (EideticLib `Anchor` / NeuronKit `LatticeAnchorInference`) | `code` | `String` | The live FDC code produced by the FDC encoder (deterministic, offline). |
 
-**MDCC (MOOT Decimal Classification) is the shipped reference scheme.**
-UDC was the originally specified scheme and the source of the
-`udc_code` field name, but MDCC-03 retired the UDC schedule in the
-reasoning layer and named the resolver's output `mdccCode`. UDC is no
-longer populated; see `DECISION_LATTICE_CITATION_UDC_WIKIDATA_2026-05-07.md` for the
-original decision and `MDCC_ANNEX_SPEC_v0.1.md` for the MDCC scheme. MDCC is
-an original, openly licensed decimal scheme with the same depth-coordinate
-mental model, so the `udc_code` storage field keeps its shape while its
-contents are now MDCC codes.
+**FDC (Free Decimal Correspondence) is the shipped reference scheme.**
+UDC was the originally specified scheme and the source of the `udc_code`
+field name; an interim MOOT Decimal Classification Codes (MDCC) taxonomy
+followed, and was in turn removed in the MDCC→FDC migration (A2). The
+shipped classifier is now the public-domain FDC encoder (see
+`FDC_ENCODER_CANONICAL_v1.0.md`). FDC has the same depth-coordinate mental
+model, so the `udc_code` storage field keeps its shape while its contents
+are now FDC codes.
 
-The two field names coexist deliberately: MDCC-03 renamed the
-reasoning-layer field but left the storage/wire field as a separate
-symbol (`udc_code`) to avoid a schema migration. The storage field
-retains the `udc_code` name; `udc_code` (storage) and `mdccCode`
-(reasoning) are the **same depth coordinate under two names**, both
-`String`, neither compiler-policed against the other.
+The two field names coexist deliberately: the reasoning-layer field is
+named `code`, while the storage/wire field was left as a separate symbol
+(`udc_code`) to avoid a schema migration. The storage field retains the
+`udc_code` name; `udc_code` (storage) and `code` (reasoning) are the
+**same depth coordinate under two names**, both `String`, neither
+compiler-policed against the other.
 
 ### 5.9 Manifest schema
 
