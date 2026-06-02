@@ -1,44 +1,33 @@
 //! EideticLib, the deterministic text-to-anchor utility. Pass a
-//! term to `lookup`; get back an `Anchor` carrying an MDCC code,
-//! an optional Wikidata Q-ID, a confidence, and the data version
-//! that produced the answer.
+//! term to `lookup`; get back an `Anchor` carrying an FDC code, the
+//! dominant concept's Wikidata Q-ID, a confidence, and the FDC
+//! signatures version that produced the answer.
 //!
-//! The Rust runtime currently returns the `not_implemented`
-//! sentinel. The legacy UDC pipeline was retired alongside the
-//! Swift port (the UDC schedule is CC-BY-SA and cannot ship in the
-//! core). The deterministic FDC encoder steps that replace it land
-//! in the FDC runtime missions (see docs FDC_ENCODER_MISSION_PLAN_v1.0,
-//! GNO-FDC-06/07). Until then the tokenizer / normalizer / stemmer /
-//! wikidata / word_class modules below stand ready as the encoder's
-//! building blocks. Determinism is guaranteed against the pinned
-//! data version once the runtime lands.
+//! Swift LEADS this surface; the Rust port follows. The FDC encoder
+//! itself lives in the `lattice_lib` crate (frame / lexicon /
+//! signatures / concept-bag / stemmer / matcher). Swift's
+//! `EideticLib.lookup` delegates to `LatticeLib.FDC.encodeAnchor`;
+//! the Rust `lookup` here is a documented stub until it is wired to
+//! `lattice_lib`'s FDC runtime (`Fdc::encode_anchor`) — the remaining
+//! Rust-parity step. It returns the `not_implemented` sentinel so
+//! consumers can build against the API surface. (The retired MDCC /
+//! UDC pipeline and its Wikidata-subset resolver were removed.)
 
 pub mod anchor;
-pub mod normalizer;
-pub mod segmenter;
-pub mod stemmer;
-pub mod tokenizer;
-pub mod wikidata_resolver;
-pub mod wikidata_subset;
-pub mod word_class;
 
 pub use anchor::Anchor;
-pub use wikidata_resolver::ResolverDecision;
-pub use wikidata_subset::{WikidataEntry, WikidataSubset};
-pub use word_class::{WordClass, WordClassTable};
 
-/// The EideticLib crate version. Pinned with the Wikidata data
-/// version in the bundled JSON files.
+/// The EideticLib crate version.
 pub const VERSION: &str = "0.1.0";
 
 /// Looks up the lattice anchor for a term.
 ///
-/// The deterministic FDC encoder that produces real anchors lands
-/// in the FDC runtime missions (GNO-FDC-06/07); until then this
-/// returns the `not_implemented` sentinel so consumers can build
-/// against the API surface. The Swift port resolves real MDCC codes
-/// today — this Rust port is intentionally a stub pending the FDC
-/// runtime, not the retired UDC pipeline.
+/// Swift's `EideticLib.lookup` resolves real FDC codes by delegating
+/// to LatticeLib's FDC encoder. This Rust port returns the
+/// `not_implemented` sentinel until `lookup` is wired to the
+/// `lattice_lib` FDC runtime (`Fdc::encode_anchor`) — the remaining
+/// Rust-parity step. It is intentionally a stub, not the retired MDCC
+/// pipeline.
 pub fn lookup(_term: &str) -> Anchor {
     Anchor::not_implemented()
 }
@@ -54,8 +43,8 @@ mod tests {
 
     #[test]
     fn lookup_returns_not_implemented_stub() {
-        // Until the FDC runtime (GNO-FDC-06/07) lands, lookup is a
-        // stub: empty code, null confidence, stub data version.
+        // Rust lookup is a documented stub until it is wired to the
+        // lattice_lib FDC runtime (Swift leads; Rust-parity follow-up).
         let anchor = lookup("organic chemistry research");
         assert_eq!(anchor.code, "");
         assert_eq!(anchor.confidence, 0);

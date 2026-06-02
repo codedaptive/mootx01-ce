@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Anchor {
-    /// The MDCC code at the deepest depth supported by the
-    /// evidence. Empty string means classification failed.
+    /// The FDC code at the deepest depth supported by the
+    /// evidence. Empty string means UNRESOLVED (no signature overlap).
     pub code: String,
 
     /// The Wikidata Q-ID for the primary concept, or `None` if
