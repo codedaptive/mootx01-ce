@@ -6,9 +6,9 @@
 //!
 //! NOTE: this backend is **unverified locally** — its conformance test only
 //! runs when `PERSISTENCEKIT_PG_URL` points at a live PostgreSQL server;
-//! without one it is skipped. Phase 1 implements RowStore, BlobStore,
-//! AuditLog, StorageObserver + schema/generated-STORED-columns/append-only.
-//! VectorIndex is a placeholder pending the follow-on. A single connection
+//! without one it is skipped. Implements RowStore, BlobStore, AuditLog,
+//! StorageObserver + schema/generated-STORED-columns/append-only, and a
+//! pgvector-backed VectorIndex (see PgVectorIndex). A single connection
 //! is used; the configured `pool_size` is accepted but not yet pooled.
 
 use std::collections::{BTreeMap, BTreeSet};

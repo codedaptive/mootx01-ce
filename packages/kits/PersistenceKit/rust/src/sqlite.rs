@@ -4,9 +4,9 @@
 //! DDL, the closed predicate algebra, and the value codec match the
 //! Swift backend so both versions produce identical observable results.
 //!
-//! Phase 1 implements RowStore, BlobStore, AuditLog, and StorageObserver
-//! plus schema/migrations/generated-columns/append-only. VectorIndex is
-//! a placeholder pending the sqlite-vec follow-on.
+//! Implements RowStore, BlobStore, AuditLog, and StorageObserver plus
+//! schema/migrations/generated-columns/append-only, and a sqlite-vec
+//! backed VectorIndex (vec0 virtual table; see SqliteVectorIndex).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str;
