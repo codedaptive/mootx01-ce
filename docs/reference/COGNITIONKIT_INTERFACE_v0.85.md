@@ -290,6 +290,9 @@ pub fn run_theme_weather(
 
 ### Preference (category 4)
 
+Swift versions shipped: `Bias` (the dismissal pairs surface as a
+`DismissalRate` value type in Swift).
+
 ```rust
 pub struct BiasReport {
     pub biased_for: Vec<CategoryBias>,        // bias > 0, most-favored first
