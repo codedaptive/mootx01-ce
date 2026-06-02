@@ -3,13 +3,13 @@
 // predicates, ordering, pagination, blob round-trip, vector
 // kNN, audit log idempotence, observer notifications.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc::TryRecvError;
 use persistence_kit::{
     inmemory::InMemoryStorage, AuditEvent, Column, ColumnDeclaration, DistanceMetric,
     IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration, Storage, StorageEvent,
     StoragePredicate, TableDeclaration, TypedValue,
 };
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::mpsc::TryRecvError;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -31,18 +31,16 @@ fn make_storage() -> InMemoryStorage {
     let schema = SchemaDeclaration::new(
         "test-kit",
         1,
-        vec![
-            TableDeclaration::new(
-                "drawers",
-                vec![
-                    ColumnDeclaration::uuid("id"),
-                    ColumnDeclaration::text("content"),
-                    ColumnDeclaration::bitmap("flags"),
-                    ColumnDeclaration::int("priority"),
-                ],
-                vec!["id".to_string()],
-            ),
-        ],
+        vec![TableDeclaration::new(
+            "drawers",
+            vec![
+                ColumnDeclaration::uuid("id"),
+                ColumnDeclaration::text("content"),
+                ColumnDeclaration::bitmap("flags"),
+                ColumnDeclaration::int("priority"),
+            ],
+            vec!["id".to_string()],
+        )],
     )
     .with_indices(vec![IndexDeclaration::new(
         "idx_drawers_priority",
@@ -91,10 +89,7 @@ fn predicate_filters_rows() {
         )
         .unwrap();
     }
-    let predicate = StoragePredicate::Gt(
-        Column::new("drawers", "priority"),
-        TypedValue::Int(2),
-    );
+    let predicate = StoragePredicate::Gt(Column::new("drawers", "priority"), TypedValue::Int(2));
     let results = rows
         .query("drawers", Some(&predicate), &[], None, None)
         .unwrap();
@@ -190,10 +185,7 @@ fn update_predicate_modifies_matching() {
         )
         .unwrap();
     }
-    let predicate = StoragePredicate::Gte(
-        Column::new("drawers", "priority"),
-        TypedValue::Int(3),
-    );
+    let predicate = StoragePredicate::Gte(Column::new("drawers", "priority"), TypedValue::Int(3));
     let mut updates = BTreeMap::new();
     updates.insert("flags".to_string(), TypedValue::Bitmap(0xFF));
     let changed = rows.update("drawers", updates, &predicate).unwrap();
@@ -217,10 +209,7 @@ fn delete_removes_matching_rows() {
         )
         .unwrap();
     }
-    let predicate = StoragePredicate::Lt(
-        Column::new("drawers", "priority"),
-        TypedValue::Int(2),
-    );
+    let predicate = StoragePredicate::Lt(Column::new("drawers", "priority"), TypedValue::Int(2));
     let removed = rows.delete("drawers", &predicate).unwrap();
     assert_eq!(removed, 2);
     let remaining = rows.count("drawers", None).unwrap();
@@ -231,23 +220,33 @@ fn delete_removes_matching_rows() {
 fn bitmask_predicates() {
     let s = make_storage();
     let rows = s.row_store();
-    rows.insert("drawers", drawer_row(Uuid::new_v4(), "a", 0b0101, 1)).unwrap();
-    rows.insert("drawers", drawer_row(Uuid::new_v4(), "b", 0b1010, 2)).unwrap();
-    rows.insert("drawers", drawer_row(Uuid::new_v4(), "c", 0b1111, 3)).unwrap();
+    rows.insert("drawers", drawer_row(Uuid::new_v4(), "a", 0b0101, 1))
+        .unwrap();
+    rows.insert("drawers", drawer_row(Uuid::new_v4(), "b", 0b1010, 2))
+        .unwrap();
+    rows.insert("drawers", drawer_row(Uuid::new_v4(), "c", 0b1111, 3))
+        .unwrap();
 
     let p_all = StoragePredicate::BitmaskAll {
         column: Column::new("drawers", "flags"),
         mask: 0b0011,
     };
-    let res_all = rows.query("drawers", Some(&p_all), &[], None, None).unwrap();
+    let res_all = rows
+        .query("drawers", Some(&p_all), &[], None, None)
+        .unwrap();
     assert_eq!(res_all.len(), 1);
-    assert_eq!(res_all[0].get("content"), Some(&TypedValue::Text("c".into())));
+    assert_eq!(
+        res_all[0].get("content"),
+        Some(&TypedValue::Text("c".into()))
+    );
 
     let p_any = StoragePredicate::BitmaskAny {
         column: Column::new("drawers", "flags"),
         mask: 0b0001,
     };
-    let res_any = rows.query("drawers", Some(&p_any), &[], None, None).unwrap();
+    let res_any = rows
+        .query("drawers", Some(&p_any), &[], None, None)
+        .unwrap();
     assert_eq!(res_any.len(), 2);
 }
 
@@ -315,7 +314,7 @@ fn audit_log_idempotent_on_duplicate_event() {
         actor: "test".into(),
     };
     log.append(event.clone()).unwrap();
-    log.append(event.clone()).unwrap();  // duplicate, must be a no-op
+    log.append(event.clone()).unwrap(); // duplicate, must be a no-op
     log.append(event).unwrap();
     assert_eq!(log.count().unwrap(), 1);
 }
@@ -417,10 +416,8 @@ fn like_pattern_filters() {
     rows.insert("drawers", drawer_row(Uuid::new_v4(), "gamma-doc", 0, 3))
         .unwrap();
 
-    let predicate = StoragePredicate::Like(
-        Column::new("drawers", "content"),
-        "%alpha%".to_string(),
-    );
+    let predicate =
+        StoragePredicate::Like(Column::new("drawers", "content"), "%alpha%".to_string());
     let results = rows
         .query("drawers", Some(&predicate), &[], None, None)
         .unwrap();
@@ -437,16 +434,13 @@ fn predicate_all_short_circuits_trivial_cases() {
     let p = StoragePredicate::all(vec![]);
     assert!(matches!(p, StoragePredicate::IsTrue));
     // With IsFalse anywhere -> IsFalse.
-    let p2 = StoragePredicate::all(vec![
-        StoragePredicate::IsTrue,
-        StoragePredicate::IsFalse,
-    ]);
+    let p2 = StoragePredicate::all(vec![StoragePredicate::IsTrue, StoragePredicate::IsFalse]);
     assert!(matches!(p2, StoragePredicate::IsFalse));
 }
 
 // ----- Generated columns -----
 
-use persistence_kit::{GeneratedColumn, GeneratedExpression, ColumnType};
+use persistence_kit::{ColumnType, GeneratedColumn, GeneratedExpression};
 
 fn generated_storage() -> InMemoryStorage {
     let storage = InMemoryStorage::with_estate(Uuid::new_v4());
@@ -513,7 +507,10 @@ fn generated_columns_materialize_on_insert() {
     let rows = rs
         .query(
             "gen_items",
-            Some(&StoragePredicate::Eq(Column::new("gen_items", "id"), TypedValue::Uuid(id))),
+            Some(&StoragePredicate::Eq(
+                Column::new("gen_items", "id"),
+                TypedValue::Uuid(id),
+            )),
             &[],
             None,
             None,
@@ -541,7 +538,10 @@ fn generated_columns_recompute_on_update() {
     let rows = rs
         .query(
             "gen_items",
-            Some(&StoragePredicate::Eq(Column::new("gen_items", "id"), TypedValue::Uuid(id))),
+            Some(&StoragePredicate::Eq(
+                Column::new("gen_items", "id"),
+                TypedValue::Uuid(id),
+            )),
             &[],
             None,
             None,
@@ -562,7 +562,10 @@ fn generated_columns_recompute_on_update() {
     let rows2 = rs
         .query(
             "gen_items",
-            Some(&StoragePredicate::Eq(Column::new("gen_items", "id"), TypedValue::Uuid(id))),
+            Some(&StoragePredicate::Eq(
+                Column::new("gen_items", "id"),
+                TypedValue::Uuid(id),
+            )),
             &[],
             None,
             None,
@@ -587,7 +590,10 @@ fn generated_column_is_filterable() {
     let count = rs
         .count(
             "gen_items",
-            Some(&StoragePredicate::Eq(Column::new("gen_items", "low_nibble"), TypedValue::Int(0x5))),
+            Some(&StoragePredicate::Eq(
+                Column::new("gen_items", "low_nibble"),
+                TypedValue::Int(0x5),
+            )),
         )
         .unwrap();
     assert_eq!(count, 2);
@@ -669,7 +675,10 @@ fn append_only_allows_insert_rejects_update_and_delete() {
     let rows = rs
         .query(
             "ledger",
-            Some(&StoragePredicate::Eq(Column::new("ledger", "id"), TypedValue::Uuid(id1))),
+            Some(&StoragePredicate::Eq(
+                Column::new("ledger", "id"),
+                TypedValue::Uuid(id1),
+            )),
             &[],
             None,
             None,

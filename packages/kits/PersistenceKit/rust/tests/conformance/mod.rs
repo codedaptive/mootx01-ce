@@ -13,12 +13,12 @@
 
 #![allow(dead_code)] // each backend test binary uses a subset of helpers
 
-use std::collections::BTreeMap;
 use persistence_kit::{
     AuditEvent, Column, ColumnDeclaration, ColumnType, DistanceMetric, GeneratedColumn,
     GeneratedExpression, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection,
     SchemaDeclaration, Storage, StorageError, StoragePredicate, TableDeclaration, TypedValue,
 };
+use std::collections::BTreeMap;
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
@@ -166,9 +166,14 @@ fn transaction_fixtures(backend: &str, factory: &Factory) {
     let result = storage.transaction(IsolationLevel::Serializable, &mut |tx| {
         let rows = tx.row_store();
         rows.insert("items", make_row("rolled-back"))?;
-        Err(StorageError::BackendError { underlying: "intentional rollback".into() })
+        Err(StorageError::BackendError {
+            underlying: "intentional rollback".into(),
+        })
     });
-    assert!(result.is_err(), "{backend}: rollback propagates the block error");
+    assert!(
+        result.is_err(),
+        "{backend}: rollback propagates the block error"
+    );
     assert_eq!(
         storage.row_store().count("items", None).unwrap(),
         2,
@@ -197,7 +202,9 @@ pub fn vector_fixtures(backend: &str, factory: &Factory) {
 
     assert_eq!(idx.count().unwrap(), 4, "{backend}: vector count");
 
-    let top = idx.knn(&[1.0, 0.0, 0.0], 2, DistanceMetric::L2, None, None).unwrap();
+    let top = idx
+        .knn(&[1.0, 0.0, 0.0], 2, DistanceMetric::L2, None, None)
+        .unwrap();
     assert_eq!(top.len(), 2, "{backend}: kNN returns k results");
     assert_eq!(top[0].key, k1, "{backend}: exact match first");
     assert_eq!(top[1].key, k3, "{backend}: near match second");
@@ -236,12 +243,19 @@ fn row_fixtures(backend: &str, factory: &Factory) {
         rows.insert("items", row).unwrap();
     }
 
-    assert_eq!(rows.count("items", None).unwrap(), 10, "{backend}: count after 10 inserts");
+    assert_eq!(
+        rows.count("items", None).unwrap(),
+        10,
+        "{backend}: count after 10 inserts"
+    );
 
     let active = rows
         .count(
             "items",
-            Some(&StoragePredicate::Eq(Column::new("items", "active"), TypedValue::Bool(true))),
+            Some(&StoragePredicate::Eq(
+                Column::new("items", "active"),
+                TypedValue::Bool(true),
+            )),
         )
         .unwrap();
     assert_eq!(active, 5, "{backend}: active=true count");
@@ -250,14 +264,25 @@ fn row_fixtures(backend: &str, factory: &Factory) {
         .query(
             "items",
             None,
-            &[OrderClause::new(Column::new("items", "count"), OrderDirection::Ascending)],
+            &[OrderClause::new(
+                Column::new("items", "count"),
+                OrderDirection::Ascending,
+            )],
             Some(3),
             None,
         )
         .unwrap();
     assert_eq!(ordered.len(), 3, "{backend}: limit honored");
-    assert_eq!(ordered[0].get("count"), Some(&TypedValue::Int(0)), "{backend}: ascending order");
-    assert_eq!(ordered[2].get("count"), Some(&TypedValue::Int(20)), "{backend}: ascending tail");
+    assert_eq!(
+        ordered[0].get("count"),
+        Some(&TypedValue::Int(0)),
+        "{backend}: ascending order"
+    );
+    assert_eq!(
+        ordered[2].get("count"),
+        Some(&TypedValue::Int(20)),
+        "{backend}: ascending tail"
+    );
 
     storage.close().unwrap();
 }
@@ -281,16 +306,58 @@ fn predicate_fixtures(backend: &str, factory: &Factory) {
     let count_col = Column::new("items", "count");
     let c = |p: StoragePredicate| rows.count("items", Some(&p)).unwrap();
 
-    assert_eq!(c(StoragePredicate::BitmaskAll { column: col.clone(), mask: 0x01 }), 4, "{backend}: bitmaskAll 0x01");
-    assert_eq!(c(StoragePredicate::BitmaskAll { column: col.clone(), mask: 0x07 }), 2, "{backend}: bitmaskAll 0x07");
-    assert_eq!(c(StoragePredicate::BitmaskAny { column: col.clone(), mask: 0x90 }), 2, "{backend}: bitmaskAny 0x90");
-    assert_eq!(c(StoragePredicate::BitmaskNone { column: col.clone(), mask: 0xF0 }), 4, "{backend}: bitmaskNone 0xF0");
-    assert_eq!(c(StoragePredicate::BitwiseEq { column: col.clone(), expected: 0x03, mask: 0x0F }), 1, "{backend}: bitwiseEq 0x03");
+    assert_eq!(
+        c(StoragePredicate::BitmaskAll {
+            column: col.clone(),
+            mask: 0x01
+        }),
+        4,
+        "{backend}: bitmaskAll 0x01"
+    );
+    assert_eq!(
+        c(StoragePredicate::BitmaskAll {
+            column: col.clone(),
+            mask: 0x07
+        }),
+        2,
+        "{backend}: bitmaskAll 0x07"
+    );
+    assert_eq!(
+        c(StoragePredicate::BitmaskAny {
+            column: col.clone(),
+            mask: 0x90
+        }),
+        2,
+        "{backend}: bitmaskAny 0x90"
+    );
+    assert_eq!(
+        c(StoragePredicate::BitmaskNone {
+            column: col.clone(),
+            mask: 0xF0
+        }),
+        4,
+        "{backend}: bitmaskNone 0xF0"
+    );
+    assert_eq!(
+        c(StoragePredicate::BitwiseEq {
+            column: col.clone(),
+            expected: 0x03,
+            mask: 0x0F
+        }),
+        1,
+        "{backend}: bitwiseEq 0x03"
+    );
 
     assert_eq!(
         c(StoragePredicate::And(vec![
-            StoragePredicate::BitmaskAll { column: col.clone(), mask: 0x01 },
-            StoragePredicate::BitmaskNone { column: col.clone(), mask: 0xF0 },
+            StoragePredicate::BitmaskAll {
+                column: col.clone(),
+                mask: 0x01
+            },
+            StoragePredicate::BitmaskNone {
+                column: col.clone(),
+                mask: 0xF0
+            },
         ])),
         4,
         "{backend}: AND combination"
@@ -304,13 +371,25 @@ fn predicate_fixtures(backend: &str, factory: &Factory) {
         "{backend}: OR combination"
     );
     assert_eq!(
-        c(StoragePredicate::Not(Box::new(StoragePredicate::BitmaskAll { column: col.clone(), mask: 0x01 }))),
+        c(StoragePredicate::Not(Box::new(
+            StoragePredicate::BitmaskAll {
+                column: col.clone(),
+                mask: 0x01
+            }
+        ))),
         2,
         "{backend}: NOT combination"
     );
-    assert_eq!(c(StoragePredicate::Gt(count_col, TypedValue::Int(10))), 3, "{backend}: count > 10");
     assert_eq!(
-        c(StoragePredicate::In(col, vec![TypedValue::Bitmap(0x01), TypedValue::Bitmap(0x80)])),
+        c(StoragePredicate::Gt(count_col, TypedValue::Int(10))),
+        3,
+        "{backend}: count > 10"
+    );
+    assert_eq!(
+        c(StoragePredicate::In(
+            col,
+            vec![TypedValue::Bitmap(0x01), TypedValue::Bitmap(0x80)]
+        )),
         2,
         "{backend}: IN"
     );
@@ -325,12 +404,30 @@ fn blob_fixtures(backend: &str, factory: &Factory) {
 
     let payload: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
     blobs.put("test/binary", &payload).unwrap();
-    assert_eq!(blobs.get("test/binary").unwrap(), Some(payload), "{backend}: blob round-trip");
-    assert!(blobs.exists("test/binary").unwrap(), "{backend}: blob exists after put");
-    assert_eq!(blobs.size("test/binary").unwrap(), Some(8), "{backend}: blob size");
+    assert_eq!(
+        blobs.get("test/binary").unwrap(),
+        Some(payload),
+        "{backend}: blob round-trip"
+    );
+    assert!(
+        blobs.exists("test/binary").unwrap(),
+        "{backend}: blob exists after put"
+    );
+    assert_eq!(
+        blobs.size("test/binary").unwrap(),
+        Some(8),
+        "{backend}: blob size"
+    );
     blobs.delete("test/binary").unwrap();
-    assert!(!blobs.exists("test/binary").unwrap(), "{backend}: blob gone after delete");
-    assert_eq!(blobs.get("nonexistent").unwrap(), None, "{backend}: missing blob returns None");
+    assert!(
+        !blobs.exists("test/binary").unwrap(),
+        "{backend}: blob gone after delete"
+    );
+    assert_eq!(
+        blobs.get("nonexistent").unwrap(),
+        None,
+        "{backend}: missing blob returns None"
+    );
 
     storage.close().unwrap();
 }
@@ -351,7 +448,11 @@ fn audit_fixtures(backend: &str, factory: &Factory) {
             event_id: Uuid::new_v4(),
             estate_uuid: estate,
             row_id,
-            hlc: HLC { physical_time: 1_700_000_000 + i, logical_count: 0, node_id: 1 },
+            hlc: HLC {
+                physical_time: 1_700_000_000 + i,
+                logical_count: 0,
+                node_id: 1,
+            },
             verb: "capture".into(),
             before_adjective: None,
             before_operational: None,
@@ -366,21 +467,44 @@ fn audit_fixtures(backend: &str, factory: &Factory) {
     }
 
     log.append_batch(events.clone()).unwrap();
-    assert_eq!(log.count().unwrap(), 5, "{backend}: audit count after batch");
+    assert_eq!(
+        log.count().unwrap(),
+        5,
+        "{backend}: audit count after batch"
+    );
 
     // Idempotence on (event_id, hlc).
     log.append_batch(events).unwrap();
-    assert_eq!(log.count().unwrap(), 5, "{backend}: audit idempotent on (event_id, hlc)");
+    assert_eq!(
+        log.count().unwrap(),
+        5,
+        "{backend}: audit idempotent on (event_id, hlc)"
+    );
 
     let row_a_events = log.events_for_row(row_a).unwrap();
-    assert_eq!(row_a_events.len(), 3, "{backend}: rowA has 3 events (i=0,2,4)");
+    assert_eq!(
+        row_a_events.len(),
+        3,
+        "{backend}: rowA has 3 events (i=0,2,4)"
+    );
     for w in row_a_events.windows(2) {
-        assert!(w[0].hlc.physical_time < w[1].hlc.physical_time, "{backend}: events ordered by HLC");
+        assert!(
+            w[0].hlc.physical_time < w[1].hlc.physical_time,
+            "{backend}: events ordered by HLC"
+        );
     }
 
-    let mid = HLC { physical_time: 1_700_000_002, logical_count: 0, node_id: 1 };
+    let mid = HLC {
+        physical_time: 1_700_000_002,
+        logical_count: 0,
+        node_id: 1,
+    };
     let after = log.iterate(Some(mid), None, 100).unwrap();
-    assert_eq!(after.len(), 2, "{backend}: iterate after HLC=2 → events 3,4");
+    assert_eq!(
+        after.len(),
+        2,
+        "{backend}: iterate after HLC=2 → events 3,4"
+    );
 
     storage.close().unwrap();
 }
@@ -397,25 +521,56 @@ fn generated_column_fixtures(backend: &str, factory: &Factory) {
         m.insert("name".to_string(), TypedValue::Text(name.into()));
         m
     };
-    let by_id = |id: Uuid| StoragePredicate::Eq(Column::new("gen_items", "id"), TypedValue::Uuid(id));
+    let by_id =
+        |id: Uuid| StoragePredicate::Eq(Column::new("gen_items", "id"), TypedValue::Uuid(id));
 
     let id_a = Uuid::new_v4(); // 0xA5 = 1010_0101: low=0x5, high=0xA, bit7 set
     let id_b = Uuid::new_v4(); // 0x42 = 0100_0010: low=0x2, high=0x4, bit7 clear
     rows.insert("gen_items", gen_row(id_a, 0xA5, "a")).unwrap();
     rows.insert("gen_items", gen_row(id_b, 0x42, "b")).unwrap();
 
-    let rows_a = rows.query("gen_items", Some(&by_id(id_a)), &[], None, None).unwrap();
+    let rows_a = rows
+        .query("gen_items", Some(&by_id(id_a)), &[], None, None)
+        .unwrap();
     assert_eq!(rows_a.len(), 1, "{backend}: generated row A present");
-    assert_eq!(rows_a[0].get("low_nibble"), Some(&TypedValue::Int(0x5)), "{backend}: low_nibble of 0xA5");
-    assert_eq!(rows_a[0].get("high_nibble"), Some(&TypedValue::Int(0xA)), "{backend}: high_nibble of 0xA5");
-    assert_eq!(rows_a[0].get("has_bit7"), Some(&TypedValue::Bool(true)), "{backend}: has_bit7 of 0xA5");
+    assert_eq!(
+        rows_a[0].get("low_nibble"),
+        Some(&TypedValue::Int(0x5)),
+        "{backend}: low_nibble of 0xA5"
+    );
+    assert_eq!(
+        rows_a[0].get("high_nibble"),
+        Some(&TypedValue::Int(0xA)),
+        "{backend}: high_nibble of 0xA5"
+    );
+    assert_eq!(
+        rows_a[0].get("has_bit7"),
+        Some(&TypedValue::Bool(true)),
+        "{backend}: has_bit7 of 0xA5"
+    );
 
-    let rows_b = rows.query("gen_items", Some(&by_id(id_b)), &[], None, None).unwrap();
-    assert_eq!(rows_b[0].get("low_nibble"), Some(&TypedValue::Int(0x2)), "{backend}: low_nibble of 0x42");
-    assert_eq!(rows_b[0].get("has_bit7"), Some(&TypedValue::Bool(false)), "{backend}: has_bit7 of 0x42");
+    let rows_b = rows
+        .query("gen_items", Some(&by_id(id_b)), &[], None, None)
+        .unwrap();
+    assert_eq!(
+        rows_b[0].get("low_nibble"),
+        Some(&TypedValue::Int(0x2)),
+        "{backend}: low_nibble of 0x42"
+    );
+    assert_eq!(
+        rows_b[0].get("has_bit7"),
+        Some(&TypedValue::Bool(false)),
+        "{backend}: has_bit7 of 0x42"
+    );
 
     let low_is_five = rows
-        .count("gen_items", Some(&StoragePredicate::Eq(Column::new("gen_items", "low_nibble"), TypedValue::Int(0x5))))
+        .count(
+            "gen_items",
+            Some(&StoragePredicate::Eq(
+                Column::new("gen_items", "low_nibble"),
+                TypedValue::Int(0x5),
+            )),
+        )
         .unwrap();
     assert_eq!(low_is_five, 1, "{backend}: filter on generated column");
 
@@ -423,9 +578,19 @@ fn generated_column_fixtures(backend: &str, factory: &Factory) {
     let mut upd = BTreeMap::new();
     upd.insert("flags".to_string(), TypedValue::Bitmap(0x0F));
     rows.update("gen_items", upd, &by_id(id_b)).unwrap();
-    let rows_b2 = rows.query("gen_items", Some(&by_id(id_b)), &[], None, None).unwrap();
-    assert_eq!(rows_b2[0].get("low_nibble"), Some(&TypedValue::Int(0xF)), "{backend}: generated recomputed on update");
-    assert_eq!(rows_b2[0].get("has_bit7"), Some(&TypedValue::Bool(false)), "{backend}: bit7 clear after 0x0F");
+    let rows_b2 = rows
+        .query("gen_items", Some(&by_id(id_b)), &[], None, None)
+        .unwrap();
+    assert_eq!(
+        rows_b2[0].get("low_nibble"),
+        Some(&TypedValue::Int(0xF)),
+        "{backend}: generated recomputed on update"
+    );
+    assert_eq!(
+        rows_b2[0].get("has_bit7"),
+        Some(&TypedValue::Bool(false)),
+        "{backend}: bit7 clear after 0x0F"
+    );
 
     storage.close().unwrap();
 }
@@ -446,23 +611,41 @@ fn append_only_fixtures(backend: &str, factory: &Factory) {
 
     let id1 = Uuid::new_v4();
     let id2 = Uuid::new_v4();
-    rows.insert("ledger", ledger_row(id1, "first", 100)).unwrap();
-    rows.insert("ledger", ledger_row(id2, "second", 200)).unwrap();
+    rows.insert("ledger", ledger_row(id1, "first", 100))
+        .unwrap();
+    rows.insert("ledger", ledger_row(id2, "second", 200))
+        .unwrap();
 
     let mut upd = BTreeMap::new();
     upd.insert("amount".to_string(), TypedValue::Int(999));
     assert!(
-        matches!(rows.update("ledger", upd, &by_id(id1)), Err(StorageError::AppendOnlyViolation { .. })),
+        matches!(
+            rows.update("ledger", upd, &by_id(id1)),
+            Err(StorageError::AppendOnlyViolation { .. })
+        ),
         "{backend}: UPDATE rejected on append-only table"
     );
     assert!(
-        matches!(rows.delete("ledger", &by_id(id1)), Err(StorageError::AppendOnlyViolation { .. })),
+        matches!(
+            rows.delete("ledger", &by_id(id1)),
+            Err(StorageError::AppendOnlyViolation { .. })
+        ),
         "{backend}: DELETE rejected on append-only table"
     );
 
-    assert_eq!(rows.count("ledger", None).unwrap(), 2, "{backend}: append-only rows intact");
-    let first = rows.query("ledger", Some(&by_id(id1)), &[], None, None).unwrap();
-    assert_eq!(first[0].get("amount"), Some(&TypedValue::Int(100)), "{backend}: original value unchanged");
+    assert_eq!(
+        rows.count("ledger", None).unwrap(),
+        2,
+        "{backend}: append-only rows intact"
+    );
+    let first = rows
+        .query("ledger", Some(&by_id(id1)), &[], None, None)
+        .unwrap();
+    assert_eq!(
+        first[0].get("amount"),
+        Some(&TypedValue::Int(100)),
+        "{backend}: original value unchanged"
+    );
 
     storage.close().unwrap();
 }
