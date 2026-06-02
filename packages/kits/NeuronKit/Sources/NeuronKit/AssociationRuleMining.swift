@@ -164,6 +164,9 @@ internal enum AssociationRuleEngine {
         activeRowCount: Int64,
         thresholds: MiningThresholds
     ) -> [AssociationRule] {
+        // Two-pass over the same canonical scan, kept in one body so
+        // the conformance-critical control flow (guard order, gate
+        // order, emission order) reads top to bottom in both ports.
         // N <= 0: no population to measure support against.
         guard activeRowCount > 0 else { return [] }
         let n = Double(activeRowCount)
