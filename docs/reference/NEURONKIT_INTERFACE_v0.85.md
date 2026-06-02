@@ -69,6 +69,8 @@ purpose: |
   `ActionObservation`, `ActionPrediction`
 - `Sources/NeuronKit/Lenses/Drift.swift` — `drift`, `DriftScore`
 - `Sources/NeuronKit/Lenses/AnomalyScan.swift` — `anomalies`, `Anomaly`
+- `Sources/NeuronKit/Lenses/PartialRecall.swift` — `partialRecall`,
+  `FingerprintBlock`, `PartialMatch`
 - `Sources/NeuronKit/Dreaming/` — `DreamingDaemon`, `DreamingPolicy`
   (+ `DreamingPolicyStore`, `InMemoryDreamingPolicyStore`),
   `DreamingTriggerMode`, `RewardSource` (+ `RewardSourceKind`,
@@ -478,6 +480,16 @@ public struct Anomaly: Sendable, Equatable, Codable {
     public let zScore: Float                   // signed — negative = below the mean
     public init(index: Int, zScore: Float)
 }
+
+public enum FingerprintBlock: Int, Sendable, Equatable, Codable, CaseIterable {
+    case structure = 0, concept = 1, temporal = 2, channel = 3
+}
+
+public struct PartialMatch: Sendable, Equatable, Codable {
+    public let rowID: UUID
+    public let score: Double
+    public init(rowID: UUID, score: Double)
+}
 ```
 
 **Rust:**
@@ -508,6 +520,11 @@ pub struct ActionPrediction { pub action: u8, pub success_rate: f32, pub count: 
 // § 7.5 Surprise
 pub struct DriftScore { pub jensen_shannon: f32, pub kl_divergence: f32 }
 pub struct Anomaly { pub index: usize, pub z_score: f32 }
+
+// § 7.6 Associative — block indices as u8 consts (BLOCK_STRUCTURE 0,
+// BLOCK_CONCEPT 1, BLOCK_TEMPORAL 2, BLOCK_CHANNEL 3); matches as
+// (RowId, f64) pairs. The Swift version models the same surface as the
+// FingerprintBlock enum and PartialMatch value type.
 ```
 
 ### Dreaming daemon surface
@@ -841,6 +858,15 @@ extension NeuronKit {
     // § 7.5 Surprise.
     public static func drift(from p: [Float], to q: [Float]) -> DriftScore
     public static func anomalies(values: [Float], threshold: Float) -> [Anomaly]
+
+    // § 7.6 Associative.
+    public static func partialRecall(
+        anchor: Fingerprint256,
+        rows: [(rowID: UUID, fingerprint: Fingerprint256)],
+        matchBlocks: Set<FingerprintBlock>,
+        differBlocks: Set<FingerprintBlock>,
+        k: Int
+    ) -> [PartialMatch]
 }
 ```
 

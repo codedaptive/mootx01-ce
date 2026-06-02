@@ -427,6 +427,20 @@ series; a series with (near) zero spread has no outliers (guarded — no
 divide-by-zero z-score), and an empty series is total. Result:
 `[Anomaly { index, zScore }]`.
 
+### § 7.6 — Associative lens (partial-cue recall)
+
+**Partial-cue recall — per-block fingerprint matching.** Surfaces
+SubstrateML's `PartialStateRecall`. The 256-bit drawer fingerprint is
+four independent 64-bit similarity blocks — structure (0),
+concept/lattice (1), lineage-temporal (2), channel/source (3). Querying
+a block subset instead of the whole fingerprint gives "memories that
+FEEL structurally like this" vs "memories ABOUT this concept" vs
+"memories FROM this period" — different recalls from one cue. The
+match/differ split scores "similar in X, different in Y": top `k` rows
+by high similarity to the anchor over the match blocks AND high
+difference over the differ blocks. The caller excludes the anchor row
+if present. Result: ranked `(row, score)` matches.
+
 ## § 8 — The surface-then-sequence archetype
 
 Every lens in § 7 is built to one archetype, and the archetype is itself
