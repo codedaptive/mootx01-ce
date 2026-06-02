@@ -4,7 +4,7 @@
 //! ship at v1.0: NoSyncEngine (passthrough) and
 //! FederationSyncEngine (Ed25519-authenticated peer-to-peer).
 //!
-//! Like PersistenceKit's Rust port, the trait is synchronous; the
+//! Like PersistenceKit's Rust version, the trait is synchronous; the
 //! Swift side is async because Swift actors require it.
 //! Subscribe returns a std::sync::mpsc::Receiver<SyncEvent>;
 //! the Swift side returns AsyncStream<SyncEvent>.

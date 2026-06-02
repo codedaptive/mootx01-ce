@@ -1,4 +1,4 @@
-// Backend-agnostic conformance suite — the Rust port of Swift's
+// Backend-agnostic conformance suite — the Rust version of Swift's
 // Tests/PersistenceKitConformance/ConformanceRunner.swift. Every backend
 // produces identical observable results for the same fixture sequence.
 //

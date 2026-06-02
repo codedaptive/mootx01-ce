@@ -20,7 +20,7 @@
 // its own manifest with its own injected Storage, mirroring LocusKit's
 // dependency-injection convention.
 //
-// Platforms: macOS 15 / iOS 18 (Apple Silicon). The Rust port lives
+// Platforms: macOS 15 / iOS 18 (Apple Silicon). The Rust version lives
 // at `rust/` and is conformance-gated against shared test vectors
 // per the SubstrateLib pattern.
 //

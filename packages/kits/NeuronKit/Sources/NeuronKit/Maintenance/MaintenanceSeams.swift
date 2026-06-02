@@ -35,7 +35,7 @@ import LocusKit
 /// reference's source content that has changed; the daemon proposes a
 /// byReference-drift confirmation once it crosses the policy threshold.
 ///
-/// Net-new value type. Carries the reference drawer's RowID (the
+/// Value type. Carries the reference drawer's RowID (the
 /// proposal target) and the precomputed drift fraction; the daemon does
 /// not recompute drift, it only thresholds and proposes.
 public struct LearnedReferenceObservation: Sendable, Equatable {
@@ -62,7 +62,7 @@ public struct LearnedReferenceObservation: Sendable, Equatable {
 /// The adapter computes `driftFraction`; the daemon proposes a
 /// fingerprint-drift review once it crosses the policy threshold.
 ///
-/// Net-new value type. Carries the room/wing key (the basis for a
+/// Value type. Carries the room/wing key (the basis for a
 /// stable proposal target) and the precomputed drift fraction.
 public struct FingerprintDriftObservation: Sendable, Equatable {
 
@@ -85,7 +85,7 @@ public struct FingerprintDriftObservation: Sendable, Equatable {
 
 /// Read surface the maintenance daemon scans (NEURONKIT_SPEC § 3.2). All
 /// five reads are pure inputs — the daemon mutates nothing through this
-/// protocol. Net-new seam; the production adapter binds each method to
+/// protocol. Dependency seam; the production adapter binds each method to
 /// the corresponding estate read when the GLK surface exposes them.
 public protocol MaintenanceSubstrateReader: Sendable {
 

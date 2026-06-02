@@ -40,7 +40,7 @@ public enum RewardSourceKind: String, Sendable, Codable, CaseIterable, Equatable
 
 /// Derives a reward value in `[0, 1]` from a recall-trace row.
 ///
-/// Net-new seam. The daemon depends on this protocol, not on any concrete
+/// Dependency seam. The daemon depends on this protocol, not on any concrete
 /// substrate field, so the explicit `DiaryEntry.reward` source can be
 /// added later behind the same protocol without changing the daemon.
 public protocol RewardSource: Sendable {
