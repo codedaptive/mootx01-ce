@@ -16,7 +16,7 @@ GUARDIAN_001 is predominantly additive:
 1. **NEW**: `tools/guardian/` — SwiftPM executable package (new directory,
    no prior existence).
 2. **NEW**: `tools/guardian/Tests/GuardianTests/` — self-test suite.
-3. **NEW**: `tools/guardian/fixtures/` — deliberately-desynced fixture pair.
+3. **NEW**: `tools/guardian/Tests/GuardianTests/fixtures/` — deliberately-desynced fixture pair (a duplicate package-root copy was removed at Adams' post-flight note).
 4. **NEW**: `tools/guardian/README.md` — operator documentation.
 5. **COMMENT-ONLY edits** to seven existing watched source files: sentinel
    block (`@guardian-pair:` line + human explanation block). Zero behavior
