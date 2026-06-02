@@ -4,8 +4,8 @@
 //! `MatrixNMF`) into soft latent themes — the emergent topics in how the
 //! estate is filed, with mixed membership.
 //!
-//! Rust-only today (Swift version contracted, SPEC C-7; the second lens beyond the shipped recipe set, after
-//! Keystones). Layer discipline: the recipe SEQUENCES — recall via GLK, factor
+//! Paired with the Swift version (`Sources/CognitionKit/LatentThemes.swift`).
+//! Layer discipline: the recipe SEQUENCES — recall via GLK, factor
 //! via NeuronKit. Read-only; no capability gate (a structural read + a
 //! reasoning surface, not a declared NeuronKitCapability function).
 //!
@@ -19,7 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
+use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer::Drawer;
+use locus_kit::drawer_operational::{CaptureChannel, ContentKind};
 use locus_kit::filter::RecallFrame;
 use neuron_kit::{latent_themes, LatentThemes};
 
@@ -29,14 +31,53 @@ use crate::error::{RecipeRunError, SubstrateError};
 /// themes across runs (the reasoning is reproducible, per the determinism rule).
 const LATENT_THEMES_SEED: u64 = 0x_4C41_5445_4E54_3031; // "LATENT01"
 
+/// The canonical label token for a content kind — the Swift case-name
+/// spelling both versions emit (the Swift version is the design surface
+/// for the label vocabulary; Debug formatting would diverge on e.g.
+/// `structuredJSON`).
+fn kind_label(k: ContentKind) -> &'static str {
+    match k {
+        ContentKind::Prose => "prose",
+        ContentKind::Code => "code",
+        ContentKind::Transcript => "transcript",
+        ContentKind::List => "list",
+        ContentKind::StructuredJson => "structuredJSON",
+        ContentKind::ImageCaption => "imageCaption",
+        ContentKind::FingerprintOnly => "fingerprintOnly",
+    }
+}
+
+/// The canonical label token for a capture channel (Swift case names).
+fn channel_label(c: CaptureChannel) -> &'static str {
+    match c {
+        CaptureChannel::Typed => "typed",
+        CaptureChannel::Voiced => "voiced",
+        CaptureChannel::Ocr => "ocr",
+        CaptureChannel::ImportedFile => "importedFile",
+        CaptureChannel::Sensor => "sensor",
+        CaptureChannel::Actuator => "actuator",
+    }
+}
+
+/// The canonical label token for a sensitivity (Swift case names).
+fn sensitivity_label(s: AdjectiveSensitivity) -> &'static str {
+    match s {
+        AdjectiveSensitivity::Normal => "normal",
+        AdjectiveSensitivity::Elevated => "elevated",
+        AdjectiveSensitivity::Restricted => "restricted",
+        AdjectiveSensitivity::Secret => "secret",
+    }
+}
+
 /// The metadata field-value labels of a drawer — the tokens whose
-/// co-occurrence the lens factors.
+/// co-occurrence the lens factors. Spelled with the canonical (Swift
+/// case-name) vocabulary so both versions emit identical labels.
 fn field_value_labels(d: &Drawer) -> Vec<String> {
     let mut fv = vec![
         format!("room:{}", d.room),
-        format!("kind:{:?}", d.content_kind()),
-        format!("channel:{:?}", d.capture_channel()),
-        format!("sensitivity:{:?}", d.adjective_sensitivity()),
+        format!("kind:{}", kind_label(d.content_kind())),
+        format!("channel:{}", channel_label(d.capture_channel())),
+        format!("sensitivity:{}", sensitivity_label(d.adjective_sensitivity())),
     ];
     fv.sort();
     fv.dedup();
@@ -168,9 +209,9 @@ mod tests {
         assert_eq!(t.k, 2);
         // The study/prose field-values cluster together, distinct from work/code.
         let study = dominant(&t, "room:study");
-        assert_eq!(dominant(&t, "kind:Prose"), study, "study & prose share a theme");
+        assert_eq!(dominant(&t, "kind:prose"), study, "study & prose share a theme");
         let work = dominant(&t, "room:work");
-        assert_eq!(dominant(&t, "kind:Code"), work, "work & code share a theme");
+        assert_eq!(dominant(&t, "kind:code"), work, "work & code share a theme");
         assert_ne!(study, work, "the two filing regimes are different latent themes");
     }
 
