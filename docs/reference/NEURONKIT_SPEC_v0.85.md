@@ -418,6 +418,15 @@ D(p‖q) (asymmetric — how surprising the second window is under the
 first). "Your interests shifted in April." Result:
 `DriftScore { jensenShannon, klDivergence }`.
 
+**Anomaly scan — z-score outliers.** Surfaces SubstrateML's
+`AnomalyDetection`. Given a value series, flags every entry whose
+z-score magnitude meets the threshold; the sign carries direction
+(negative = below the mean — the "doesn't fit" signal the contradiction
+lens uses). Mean and standard deviation are computed over the whole
+series; a series with (near) zero spread has no outliers (guarded — no
+divide-by-zero z-score), and an empty series is total. Result:
+`[Anomaly { index, zScore }]`.
+
 ## § 8 — The surface-then-sequence archetype
 
 Every lens in § 7 is built to one archetype, and the archetype is itself

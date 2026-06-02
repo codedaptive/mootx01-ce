@@ -4,6 +4,7 @@
 //! the "Contradiction / odd-one-out" lens (a memory whose cohesion with its
 //! peers is anomalously low doesn't fit; the estate notices the tension).
 //!
+//! Paired with the Swift version (`Sources/NeuronKit/Lenses/AnomalyScan.swift`).
 //! Layer B-1: the z-score math lives in SubstrateML; this shapes a series into
 //! flagged outliers. CognitionKit sequences it (derive the series from the
 //! estate, then call this).
