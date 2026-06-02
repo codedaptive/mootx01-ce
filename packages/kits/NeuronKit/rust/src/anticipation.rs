@@ -89,7 +89,13 @@ mod tests {
     use super::*;
 
     fn obs(action: u8, outcome: u8, success: bool, n: usize) -> Vec<ActionObservation> {
-        (0..n).map(|_| ActionObservation { action, outcome, success }).collect()
+        (0..n)
+            .map(|_| ActionObservation {
+                action,
+                outcome,
+                success,
+            })
+            .collect()
     }
 
     #[test]
@@ -100,9 +106,15 @@ mod tests {
         events.extend(obs(1, target, false, 2)); // 18/20
         events.extend(obs(2, target, true, 2)); // 2/2, thin
         let preds = anticipate(&events, target, 10, 1);
-        assert_eq!(preds[0].action, 1, "well-evidenced action ranks first by Wilson LB");
+        assert_eq!(
+            preds[0].action, 1,
+            "well-evidenced action ranks first by Wilson LB"
+        );
         for pair in preds.windows(2) {
-            assert!(pair[0].success_rate >= pair[1].success_rate, "descending Wilson LB");
+            assert!(
+                pair[0].success_rate >= pair[1].success_rate,
+                "descending Wilson LB"
+            );
         }
     }
 
@@ -114,7 +126,10 @@ mod tests {
         events.extend(obs(2, target, true, 2));
         let preds = anticipate(&events, target, 10, 5);
         assert!(preds.iter().any(|p| p.action == 1));
-        assert!(!preds.iter().any(|p| p.action == 2), "below-threshold filtered");
+        assert!(
+            !preds.iter().any(|p| p.action == 2),
+            "below-threshold filtered"
+        );
     }
 
     #[test]
@@ -124,7 +139,10 @@ mod tests {
         events.extend(obs(2, 2, true, 10));
         let preds = anticipate(&events, 1, 10, 1);
         assert!(preds.iter().any(|p| p.action == 1));
-        assert!(!preds.iter().any(|p| p.action == 2), "other-outcome action not predicted");
+        assert!(
+            !preds.iter().any(|p| p.action == 2),
+            "other-outcome action not predicted"
+        );
     }
 
     #[test]
@@ -154,7 +172,10 @@ mod tests {
         events.extend(obs(1, target, true, 8));
         events.extend(obs(2, target, true, 5));
         events.extend(obs(1, target, false, 2));
-        assert_eq!(anticipate(&events, target, 10, 1), anticipate(&events, target, 10, 1));
+        assert_eq!(
+            anticipate(&events, target, 10, 1),
+            anticipate(&events, target, 10, 1)
+        );
     }
 
     #[test]

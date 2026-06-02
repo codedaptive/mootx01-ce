@@ -266,12 +266,18 @@ mod tests {
             0.6,
         );
         let second = c2.scores[&key];
-        let fresh_raw =
-            contrastive_confidence(&["r1".into(), "r2".into()], &rewards(&[("r1", 0.0), ("r2", 0.0)]), 0.6);
+        let fresh_raw = contrastive_confidence(
+            &["r1".into(), "r2".into()],
+            &rewards(&[("r1", 0.0), ("r2", 0.0)]),
+            0.6,
+        );
         assert!(fresh_raw < 0.1);
         assert!(second >= 0.7, "prior preserved by EWC++, got {second}");
         assert!(second > fresh_raw);
-        assert_eq!(c2.suppressed_duplicates, 1, "already-proposed key suppressed");
+        assert_eq!(
+            c2.suppressed_duplicates, 1,
+            "already-proposed key suppressed"
+        );
         assert_eq!(c2.emitted.len(), 0);
     }
 

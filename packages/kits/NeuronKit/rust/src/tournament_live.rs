@@ -63,10 +63,7 @@ pub struct TournamentReport {
 /// survivors by `recall_overlap * mean_reciprocal_rank`, and ranks
 /// descending with an ascending-branch-id tie-break for reproducibility.
 /// No substrate touch, no clock.
-pub fn rank_tournament(
-    scored: Vec<(String, BenchmarkReport)>,
-    now: i64,
-) -> TournamentReport {
+pub fn rank_tournament(scored: Vec<(String, BenchmarkReport)>, now: i64) -> TournamentReport {
     let mut ranking: Vec<BranchScore> = Vec::new();
     let mut disqualified: Vec<DisqualifiedBranch> = Vec::new();
 
@@ -84,7 +81,11 @@ pub fn rank_tournament(
             continue;
         }
         let combined = report.recall_overlap * report.mean_reciprocal_rank;
-        ranking.push(BranchScore { branch_id, report, combined_score: combined });
+        ranking.push(BranchScore {
+            branch_id,
+            report,
+            combined_score: combined,
+        });
     }
 
     // Descending by combined score; equal scores break by ascending branch
@@ -97,7 +98,12 @@ pub fn rank_tournament(
     });
 
     let winner = ranking.first().cloned();
-    TournamentReport { winner, ranking, disqualified, evaluated_at: now }
+    TournamentReport {
+        winner,
+        ranking,
+        disqualified,
+        evaluated_at: now,
+    }
 }
 
 /// Benchmark each branch against the corpus, then gate + rank (parity of the
@@ -159,9 +165,9 @@ mod tests {
     #[test]
     fn tr1_ranks_descending_by_combined_score() {
         let scored = vec![
-            ("low".to_string(), report("low", 0.5, 0.5, &[])),     // 0.25
-            ("high".to_string(), report("high", 1.0, 1.0, &[])),   // 1.00
-            ("mid".to_string(), report("mid", 0.8, 0.5, &[])),     // 0.40
+            ("low".to_string(), report("low", 0.5, 0.5, &[])), // 0.25
+            ("high".to_string(), report("high", 1.0, 1.0, &[])), // 1.00
+            ("mid".to_string(), report("mid", 0.8, 0.5, &[])), // 0.40
         ];
         let t = rank_tournament(scored, NOW);
         let order: Vec<&str> = t.ranking.iter().map(|b| b.branch_id.as_str()).collect();
@@ -177,7 +183,10 @@ mod tests {
     fn tr2_silent_loss_is_disqualified_before_ranking() {
         let scored = vec![
             ("clean".to_string(), report("clean", 1.0, 1.0, &[])),
-            ("lossy".to_string(), report("lossy", 0.9, 0.9, &["missing-concept"])),
+            (
+                "lossy".to_string(),
+                report("lossy", 0.9, 0.9, &["missing-concept"]),
+            ),
         ];
         let t = rank_tournament(scored, NOW);
         assert_eq!(t.ranking.len(), 1);
@@ -221,7 +230,9 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
         let store: Arc<dyn DrawerStore> =
             Arc::new(InMemoryDrawerStore::new(storage, NOW, None).unwrap());
-        let h = coord.open(store, OwnerCredentials::new("owner"), 0, 100).unwrap();
+        let h = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .unwrap();
         let bid = coord.glk_derive_branch("b", &h, NOW).unwrap();
 
         let mut ids = Vec::new();
@@ -234,7 +245,14 @@ mod tests {
                 "alice",
                 "test-v1",
             );
-            ids.push(coord.branch_handle_for(bid).unwrap().capture(frame, NOW).unwrap().id);
+            ids.push(
+                coord
+                    .branch_handle_for(bid)
+                    .unwrap()
+                    .capture(frame, NOW)
+                    .unwrap()
+                    .id,
+            );
         }
 
         let make_queries = || {
@@ -249,8 +267,14 @@ mod tests {
 
         let branch = coord.branch_handle_for(bid).unwrap();
         let t = run_tournament(std::slice::from_ref(branch), &ids, make_queries, NOW);
-        assert!(t.disqualified.is_empty(), "clean branch is not disqualified");
+        assert!(
+            t.disqualified.is_empty(),
+            "clean branch is not disqualified"
+        );
         assert_eq!(t.ranking.len(), 1);
-        assert!(t.winner.is_some(), "the clean branch is the advisory winner");
+        assert!(
+            t.winner.is_some(),
+            "the clean branch is the advisory winner"
+        );
     }
 }

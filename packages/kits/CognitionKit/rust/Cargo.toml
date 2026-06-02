@@ -36,3 +36,10 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 [dev-dependencies]
 # Test-only: building a parent estate to derive branches from.
 persistence-kit = { path = "../../PersistenceKit/rust" }
+
+# Shared-vector conformance integration test (BYCOPY_MIGRATION_001).
+# Reads Tests/CognitionKitTests/Fixtures/cognition_vectors.json and asserts
+# the Rust migration_ranking functions reproduce the Swift-recorded values.
+[[test]]
+name = "cognition_conformance"
+path = "tests/cognition_conformance.rs"

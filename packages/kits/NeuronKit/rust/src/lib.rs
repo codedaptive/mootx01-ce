@@ -22,92 +22,90 @@
 //! outside of the substrate's compliance boundary by the
 //! mere-aggregation doctrine.
 
-pub mod lattice_anchor;
-pub mod hybrid_recall;
-pub mod context_synthesizer;
-pub mod scenario_profile;
-pub mod tournament;
-pub mod mmr_rank;
-pub mod benchmark_scoring;
-pub mod benchmark_live;
-pub mod tournament_live;
-pub mod keystones;
-pub mod structure_graph;
-pub mod latent_themes;
-pub mod drift;
 pub mod anomaly_scan;
-pub mod constellation;
-pub mod spreading_activation;
-pub mod theme_weather;
-pub mod partial_recall;
 pub mod anticipation;
-pub mod mind_overlap;
-pub mod bias;
-pub mod dreaming_decision;
-pub mod dreaming_cycle;
-pub mod maintenance_decision;
-pub mod maintenance_cycle;
 pub mod association_rule_mining;
+pub mod benchmark_live;
+pub mod benchmark_scoring;
+pub mod bias;
+pub mod constellation;
+pub mod context_synthesizer;
+pub mod dreaming_cycle;
+pub mod dreaming_decision;
+pub mod drift;
 pub mod formal_concept_analysis;
+pub mod hybrid_recall;
+pub mod keystones;
+pub mod latent_themes;
+pub mod lattice_anchor;
+pub mod maintenance_cycle;
+pub mod maintenance_decision;
+pub mod mind_overlap;
+pub mod mmr_rank;
+pub mod partial_recall;
+pub mod scenario_profile;
+pub mod spreading_activation;
+pub mod structure_graph;
+pub mod theme_weather;
+pub mod tournament;
+pub mod tournament_live;
 
-pub use lattice_anchor::{
-    AnchorConfidence, EnrichmentStatus, LatticeAnchorInference,
-    LinguisticPipelineMode,
-};
-pub use hybrid_recall::{
-    page_recall, rerank, shingles, shingle_similarity,
-    DrawerRow, RecallFrameTuning, RecallPage,
-};
-pub use context_synthesizer::{synthesize, ContextDocument, DrawerRowMeta};
-pub use scenario_profile::ScenarioProfile;
-pub use tournament::{bradley_terry, BradleyTerryScore, PairwiseOutcome, TournamentError};
-pub use mmr_rank::{mmr_rank, mmr_select};
-pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
-pub use benchmark_live::{benchmark as benchmark_branch, BenchmarkReport};
-pub use tournament_live::{
-    rank_tournament, run_tournament, BranchScore, DisqualificationReason, DisqualifiedBranch,
-    TournamentReport,
-};
-pub use keystones::{keystones, Keystone};
-pub use latent_themes::{latent_themes, LatentThemes, ThemeLoading};
-pub use drift::{drift, DriftScore};
 pub use anomaly_scan::{anomalies, Anomaly};
-pub use constellation::{constellations, Constellation};
-pub use spreading_activation::{spreading_activation, Activation};
-pub use theme_weather::{recency_weight, theme_weather, CategoryMomentum};
-pub use partial_recall::{
-    partial_recall, BLOCK_CHANNEL, BLOCK_CONCEPT, BLOCK_STRUCTURE, BLOCK_TEMPORAL,
-};
 pub use anticipation::{anticipate, ActionObservation, ActionPrediction};
-pub use mind_overlap::{dp_summary, summary_overlap};
-pub use bias::{learned_preference, representation_bias, CategoryBias, PreferenceStrength};
 pub use association_rule_mining::{
     mine_association_rules, AssociationRule, Item, MiningThresholds,
 };
-pub use formal_concept_analysis::{
-    BoundedConceptMiner, FormalAttribute, FormalConcept, FormalContext,
-};
-/// Re-export the `formal_concept_analysis` module as `fca` so CognitionKit
-/// recipes can reference it via `neuron_kit::fca::...` if preferred.
-pub use formal_concept_analysis as fca;
-pub use dreaming_decision::{
-    candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
-    Observation, Outcome as DreamingOutcome,
-};
+pub use benchmark_live::{benchmark as benchmark_branch, BenchmarkReport};
+pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
+pub use bias::{learned_preference, representation_bias, CategoryBias, PreferenceStrength};
+pub use constellation::{constellations, Constellation};
+pub use context_synthesizer::{synthesize, ContextDocument, DrawerRowMeta};
 pub use dreaming_cycle::{
     tunnel_key, CoOccurrenceObservation, DreamingCycleReport, DreamingDaemon, DreamingPolicy,
     DreamingProposalSink, DreamingSubstrateReader, ProposeFrameOut, RecallTraceItem,
     RecallTraceRewardSource, RewardSource, TunnelLink,
+};
+pub use dreaming_decision::{
+    candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
+    Observation, Outcome as DreamingOutcome,
+};
+pub use drift::{drift, DriftScore};
+/// Re-export the `formal_concept_analysis` module as `fca` so CognitionKit
+/// recipes can reference it via `neuron_kit::fca::...` if preferred.
+pub use formal_concept_analysis as fca;
+pub use formal_concept_analysis::{
+    BoundedConceptMiner, FormalAttribute, FormalConcept, FormalContext,
+};
+pub use hybrid_recall::{
+    page_recall, rerank, shingle_similarity, shingles, DrawerRow, RecallFrameTuning, RecallPage,
+};
+pub use keystones::{keystones, Keystone};
+pub use latent_themes::{latent_themes, LatentThemes, ThemeLoading};
+pub use lattice_anchor::{
+    AnchorConfidence, EnrichmentStatus, LatticeAnchorInference, LinguisticPipelineMode,
+};
+pub use maintenance_cycle::{
+    MaintenanceCycleReport, MaintenanceDaemon, MaintenanceDiaryEntry, MaintenancePolicy,
+    MaintenanceProposalSink, MaintenanceScan, MaintenanceSubstrateReader,
+    ProposeFrameOut as MaintenanceProposeFrameOut,
 };
 pub use maintenance_decision::{
     broken_tag, decide as maintenance_decide, AgedRow, AuditVerdict,
     Category as MaintenanceCategory, Decision as MaintenanceDecision, DriftRow,
     Inputs as MaintenanceInputs, Outcome as MaintenanceOutcome,
 };
-pub use maintenance_cycle::{
-    MaintenanceCycleReport, MaintenanceDaemon, MaintenanceDiaryEntry, MaintenancePolicy,
-    MaintenanceProposalSink, MaintenanceScan, MaintenanceSubstrateReader,
-    ProposeFrameOut as MaintenanceProposeFrameOut,
+pub use mind_overlap::{dp_summary, summary_overlap};
+pub use mmr_rank::{mmr_rank, mmr_select};
+pub use partial_recall::{
+    partial_recall, BLOCK_CHANNEL, BLOCK_CONCEPT, BLOCK_STRUCTURE, BLOCK_TEMPORAL,
+};
+pub use scenario_profile::ScenarioProfile;
+pub use spreading_activation::{spreading_activation, Activation};
+pub use theme_weather::{recency_weight, theme_weather, CategoryMomentum};
+pub use tournament::{bradley_terry, BradleyTerryScore, PairwiseOutcome, TournamentError};
+pub use tournament_live::{
+    rank_tournament, run_tournament, BranchScore, DisqualificationReason, DisqualifiedBranch,
+    TournamentReport,
 };
 
 /// The NeuronKit crate version. Pinned with the substrate

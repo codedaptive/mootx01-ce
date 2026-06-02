@@ -142,7 +142,12 @@ pub fn decide(input: &Inputs) -> Outcome {
             *suppressed += 1;
         } else {
             proposed.insert(key.clone());
-            emitted.push(Decision { key, target, category, detail_value });
+            emitted.push(Decision {
+                key,
+                target,
+                category,
+                detail_value,
+            });
         }
     }
 
@@ -151,7 +156,9 @@ pub fn decide(input: &Inputs) -> Outcome {
         if !audit.valid {
             let tag = broken_tag(audit.first_broken_at_millis);
             consider(
-                &mut proposed, &mut emitted, &mut suppressed,
+                &mut proposed,
+                &mut emitted,
+                &mut suppressed,
                 format!("audit_integrity|{tag}"),
                 format!("audit-break-{tag}"),
                 Category::AuditIntegrity,
@@ -164,8 +171,13 @@ pub fn decide(input: &Inputs) -> Outcome {
     let forbidden_combinations = input.forbidden_drawer_ids.len();
     for id in input.forbidden_drawer_ids {
         consider(
-            &mut proposed, &mut emitted, &mut suppressed,
-            format!("discipline|{id}"), id.clone(), Category::DisciplineViolation, None,
+            &mut proposed,
+            &mut emitted,
+            &mut suppressed,
+            format!("discipline|{id}"),
+            id.clone(),
+            Category::DisciplineViolation,
+            None,
         );
     }
 
@@ -175,8 +187,13 @@ pub fn decide(input: &Inputs) -> Outcome {
         if row.age_seconds > input.decay_window_seconds {
             decay_candidates += 1;
             consider(
-                &mut proposed, &mut emitted, &mut suppressed,
-                format!("decay|{}", row.id), row.id.clone(), Category::Decay, None,
+                &mut proposed,
+                &mut emitted,
+                &mut suppressed,
+                format!("decay|{}", row.id),
+                row.id.clone(),
+                Category::Decay,
+                None,
             );
         }
     }
@@ -187,8 +204,13 @@ pub fn decide(input: &Inputs) -> Outcome {
         if row.age_seconds > input.tombstone_grace_seconds {
             tombstone_candidates += 1;
             consider(
-                &mut proposed, &mut emitted, &mut suppressed,
-                format!("tombstone|{}", row.id), row.id.clone(), Category::Tombstone, None,
+                &mut proposed,
+                &mut emitted,
+                &mut suppressed,
+                format!("tombstone|{}", row.id),
+                row.id.clone(),
+                Category::Tombstone,
+                None,
             );
         }
     }
@@ -199,7 +221,9 @@ pub fn decide(input: &Inputs) -> Outcome {
         if row.drift_fraction >= input.fingerprint_drift_threshold {
             fingerprint_drifts += 1;
             consider(
-                &mut proposed, &mut emitted, &mut suppressed,
+                &mut proposed,
+                &mut emitted,
+                &mut suppressed,
                 format!("fingerprint_drift|{}", row.key),
                 row.key.clone(),
                 Category::FingerprintDrift,
@@ -214,7 +238,9 @@ pub fn decide(input: &Inputs) -> Outcome {
         if row.drift_fraction >= input.by_reference_drift_threshold {
             by_reference_drifts += 1;
             consider(
-                &mut proposed, &mut emitted, &mut suppressed,
+                &mut proposed,
+                &mut emitted,
+                &mut suppressed,
                 format!("byref|{}", row.key),
                 row.key.clone(),
                 Category::ByReferenceDrift,
@@ -240,10 +266,16 @@ mod tests {
     use super::*;
 
     fn aged(id: &str, age: f64) -> AgedRow {
-        AgedRow { id: id.to_string(), age_seconds: age }
+        AgedRow {
+            id: id.to_string(),
+            age_seconds: age,
+        }
     }
     fn drift(key: &str, f: f32) -> DriftRow {
-        DriftRow { key: key.to_string(), drift_fraction: f }
+        DriftRow {
+            key: key.to_string(),
+            drift_fraction: f,
+        }
     }
 
     // A cycle with one crosser in every scan category. Mirrors the Swift
@@ -257,7 +289,10 @@ mod tests {
         seen: &'a BTreeSet<String>,
     ) -> Inputs<'a> {
         Inputs {
-            audit: Some(AuditVerdict { valid: true, first_broken_at_millis: None }),
+            audit: Some(AuditVerdict {
+                valid: true,
+                first_broken_at_millis: None,
+            }),
             forbidden_drawer_ids: forbidden,
             aged_active: active,
             decay_window_seconds: 2_592_000.0,
@@ -281,7 +316,14 @@ mod tests {
         let fp = vec![drift("wing_a/room_b", 0.5)];
         let refs = vec![drift("ref-1", 0.5)];
         let seen = BTreeSet::new();
-        let out = decide(&full_inputs(&forbidden, &active, &tombstoned, &fp, &refs, &seen));
+        let out = decide(&full_inputs(
+            &forbidden,
+            &active,
+            &tombstoned,
+            &fp,
+            &refs,
+            &seen,
+        ));
 
         assert_eq!(out.emitted.len(), 5, "one proposal per scan category");
         assert_eq!(out.forbidden_combinations, 1);
@@ -303,7 +345,11 @@ mod tests {
             ]
         );
         // Drift categories carry their fraction; the others carry none.
-        let fp_d = out.emitted.iter().find(|d| d.category == Category::FingerprintDrift).unwrap();
+        let fp_d = out
+            .emitted
+            .iter()
+            .find(|d| d.category == Category::FingerprintDrift)
+            .unwrap();
         assert_eq!(fp_d.detail_value, Some(0.5));
         assert_eq!(fp_d.key, "fingerprint_drift|wing_a/room_b");
     }
@@ -317,7 +363,10 @@ mod tests {
         let no_drift: Vec<DriftRow> = vec![];
         let seen = BTreeSet::new();
         let input = Inputs {
-            audit: Some(AuditVerdict { valid: false, first_broken_at_millis: Some(2000) }),
+            audit: Some(AuditVerdict {
+                valid: false,
+                first_broken_at_millis: Some(2000),
+            }),
             forbidden_drawer_ids: &empty,
             aged_active: &no_aged,
             decay_window_seconds: 2_592_000.0,
@@ -345,8 +394,14 @@ mod tests {
         let no_aged: Vec<AgedRow> = vec![];
         let no_drift: Vec<DriftRow> = vec![];
         let seen = BTreeSet::new();
-        let out = decide(&full_inputs(&empty, &no_aged, &no_aged, &no_drift, &no_drift, &seen));
-        assert_eq!(out.emitted.len(), 0, "clean chain, no crossers, proposes nothing");
+        let out = decide(&full_inputs(
+            &empty, &no_aged, &no_aged, &no_drift, &no_drift, &seen,
+        ));
+        assert_eq!(
+            out.emitted.len(),
+            0,
+            "clean chain, no crossers, proposes nothing"
+        );
     }
 
     // MD-4: a second cycle over unchanged state proposes nothing new — all
@@ -359,13 +414,29 @@ mod tests {
         let fp = vec![drift("wing_a/room_b", 0.5)];
         let refs = vec![drift("ref-1", 0.5)];
         let seen = BTreeSet::new();
-        let first = decide(&full_inputs(&forbidden, &active, &tombstoned, &fp, &refs, &seen));
+        let first = decide(&full_inputs(
+            &forbidden,
+            &active,
+            &tombstoned,
+            &fp,
+            &refs,
+            &seen,
+        ));
         assert_eq!(first.emitted.len(), 5);
 
         let second = decide(&full_inputs(
-            &forbidden, &active, &tombstoned, &fp, &refs, &first.updated_proposed_keys,
+            &forbidden,
+            &active,
+            &tombstoned,
+            &fp,
+            &refs,
+            &first.updated_proposed_keys,
         ));
-        assert_eq!(second.emitted.len(), 0, "already-proposed candidates suppressed");
+        assert_eq!(
+            second.emitted.len(),
+            0,
+            "already-proposed candidates suppressed"
+        );
         assert_eq!(second.suppressed_duplicates, 5);
         // Counts still report the crossers even when all were suppressed.
         assert_eq!(second.decay_candidates, 1);
@@ -384,10 +455,20 @@ mod tests {
         let no_drift: Vec<DriftRow> = vec![];
         let seen = BTreeSet::new();
 
-        let decay = decide(&full_inputs(&empty, &at_window, &no_aged, &no_drift, &no_drift, &seen));
-        assert_eq!(decay.decay_candidates, 0, "strict > excludes the exact window");
+        let decay = decide(&full_inputs(
+            &empty, &at_window, &no_aged, &no_drift, &no_drift, &seen,
+        ));
+        assert_eq!(
+            decay.decay_candidates, 0,
+            "strict > excludes the exact window"
+        );
 
-        let fp = decide(&full_inputs(&empty, &no_aged, &no_aged, &at_thresh, &no_drift, &seen));
-        assert_eq!(fp.fingerprint_drifts, 1, "inclusive >= includes the exact threshold");
+        let fp = decide(&full_inputs(
+            &empty, &no_aged, &no_aged, &at_thresh, &no_drift, &seen,
+        ));
+        assert_eq!(
+            fp.fingerprint_drifts, 1,
+            "inclusive >= includes the exact threshold"
+        );
     }
 }

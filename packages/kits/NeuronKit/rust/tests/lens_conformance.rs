@@ -17,12 +17,19 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use neuron_kit::{
-    anomalies, anticipate, constellations, dp_summary, drift, keystones, latent_themes,
-    learned_preference, partial_recall, representation_bias, shingle_similarity,
-    spreading_activation, summary_overlap, theme_weather, ActionObservation,
+    anomalies, anticipate, benchmark_score, bradley_terry, constellations, dp_summary, drift,
+    fca::{BoundedConceptMiner, FormalAttribute, FormalContext},
+    keystones, latent_themes, learned_preference, mine_association_rules, mmr_select, page_recall,
+    partial_recall, representation_bias, rerank, shingle_similarity, spreading_activation,
+    summary_overlap, synthesize, theme_weather, ActionObservation, DrawerRow, DrawerRowMeta,
+    MiningThresholds, RecallFrameTuning, RecallPage, ScenarioProfile,
 };
 use substrate_types::fingerprint256::Fingerprint256;
-use substrate_types::RowId;
+use substrate_types::{MatrixO, RowId};
+
+// Engram is a type alias for Fingerprint256 (engram_lib::Engram = Fingerprint256).
+// Use Fingerprint256 directly — same type, already imported.
+type Engram = Fingerprint256;
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -56,7 +63,12 @@ fn fp_of(blocks: &[String]) -> Fingerprint256 {
     }
 }
 fn blocks_of(fp: Fingerprint256) -> Vec<String> {
-    vec![hexu64(fp.block0), hexu64(fp.block1), hexu64(fp.block2), hexu64(fp.block3)]
+    vec![
+        hexu64(fp.block0),
+        hexu64(fp.block1),
+        hexu64(fp.block2),
+        hexu64(fp.block3),
+    ]
 }
 
 #[derive(Deserialize)]
@@ -75,6 +87,15 @@ struct LensVectors {
     partial_recall: Vec<PartialRecallCase>,
     mind_overlap: Vec<MindOverlapCase>,
     shingle_similarity: Vec<ShingleCase>,
+    // Families migrated by BYCOPY_MIGRATION_001:
+    benchmark_scoring: Vec<BenchmarkScoringCase>,
+    mmr_rank: Vec<MmrRankCase>,
+    formal_concept_analysis: Vec<FcaCase>,
+    hybrid_recall: HybridRecallSection,
+    association_rule_mining: Vec<AssocRuleCase>,
+    scenario_profile: Vec<ScenarioProfileCase>,
+    context_synthesizer: Vec<ContextSynthesizerCase>,
+    bradley_terry: Vec<BradleyTerryCase>,
 }
 
 #[derive(Deserialize)]
@@ -305,6 +326,202 @@ struct ShingleCase {
     similarity: String,
 }
 
+// ── BYCOPY_MIGRATION_001 structs ─────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchmarkScoringCase {
+    expected_i_ds: Vec<String>,
+    found_per_query: Vec<Vec<String>>,
+    query_count: usize,
+    recall_overlap: String,
+    recall_precision: String,
+    mean_reciprocal_rank: String,
+    not_found_in_branch: Vec<String>,
+    new_in_branch: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MmrRankCandidate {
+    // id is carried for Swift-leg ordering; Rust uses expected_indices by position.
+    #[allow(dead_code)]
+    id: String,
+    block_bits: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MmrRankCase {
+    candidates: Vec<MmrRankCandidate>,
+    lambda: f32,
+    k: i64,
+    // expected_i_ds carries Swift's string ordering; Rust verifies by index.
+    #[allow(dead_code)]
+    expected_i_ds: Vec<String>,
+    expected_indices: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FcaAttr {
+    namespace: String,
+    key: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FcaConcept {
+    extent: Vec<usize>,
+    intent: Vec<FcaAttr>,
+    support: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FcaCase {
+    rows: Vec<Vec<FcaAttr>>,
+    min_support: usize,
+    max_intent_size: usize,
+    max_concepts: usize,
+    concepts: Vec<FcaConcept>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HybridDrawer {
+    id: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RerankCase {
+    drawers: Vec<HybridDrawer>,
+    mmr_lambda: f32,
+    expected_order: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageEntry {
+    ids: Vec<String>,
+    is_last: bool,
+    page_index: i32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PagingCase {
+    rows: Vec<HybridDrawer>,
+    page_size: i32,
+    pages: Vec<PageEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HybridRecallSection {
+    rerank_cases: Vec<RerankCase>,
+    paging_cases: Vec<PagingCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssocItemPair {
+    field: u8,
+    value: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssocRule {
+    antecedent_field: u8,
+    antecedent_value: u8,
+    consequent_field: u8,
+    consequent_value: u8,
+    support: String,
+    confidence: String,
+    lift: String,
+    leverage: String,
+    conviction: String, // "inf" or f64 hex
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssocRuleCase {
+    rows: Vec<Vec<AssocItemPair>>,
+    active_row_count: i64,
+    min_support: f64,
+    min_confidence: f64,
+    rules: Vec<AssocRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScenarioProfileCase {
+    profile_i_d: String,
+    name: String,
+    framing_parameters: std::collections::BTreeMap<String, String>,
+    scoring_breakdown: std::collections::BTreeMap<String, f32>,
+    preference_weights: std::collections::BTreeMap<String, f32>,
+    created_at: String,
+    training_eligible: bool,
+    // Swift-produced canonical JSON for documentation. Not compared byte-for-byte in
+    // the Rust verifier because Swift and Rust use different field naming conventions
+    // (camelCase vs snake_case). The Rust leg does its own round-trip instead.
+    #[allow(dead_code)]
+    canonical_json: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextSynthRow {
+    content: String,
+    wing: String,
+    room: String,
+    // State in bits 0-5 of adjectiveBitmap (LocusKit State enum raws).
+    // Cluster A (currently believed) = (state_raw >> 4) & 0x3 == 0,
+    // i.e. states 0-15 (active=0, pending=1, contested=2, accepted=3).
+    adjective_bitmap: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContextSynthesizerCase {
+    rows: Vec<ContextSynthRow>,
+    summary: String,
+    patterns: Vec<String>,
+    key_insights: Vec<String>,
+    success_rate: String, // f32 hex
+    recommendations_count: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BtOutcome {
+    winner: String,
+    loser: String,
+    count: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BtScore {
+    competitor_i_d: String,
+    strength: String,
+    confidence_low: String,
+    confidence_high: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BradleyTerryCase {
+    outcomes: Vec<BtOutcome>,
+    tolerance: String,
+    scores: Vec<BtScore>,
+}
+
 #[test]
 fn lenses_reproduce_shared_vectors() {
     let data = std::fs::read_to_string(fixture_path()).expect("shared lens_vectors.json");
@@ -314,8 +531,16 @@ fn lenses_reproduce_shared_vectors() {
         let p: Vec<f32> = c.p.iter().map(|s| f32_of(s)).collect();
         let q: Vec<f32> = c.q.iter().map(|s| f32_of(s)).collect();
         let out = drift(&p, &q);
-        assert_eq!(hex32(out.jensen_shannon), c.jensen_shannon, "drift jensen_shannon");
-        assert_eq!(hex32(out.kl_divergence), c.kl_divergence, "drift kl_divergence");
+        assert_eq!(
+            hex32(out.jensen_shannon),
+            c.jensen_shannon,
+            "drift jensen_shannon"
+        );
+        assert_eq!(
+            hex32(out.kl_divergence),
+            c.kl_divergence,
+            "drift kl_divergence"
+        );
     }
 
     for c in &v.anomalies {
@@ -329,19 +554,29 @@ fn lenses_reproduce_shared_vectors() {
     }
 
     for c in &v.keystones {
-        let edges: Vec<(String, String)> =
-            c.edges.iter().map(|e| (e[0].clone(), e[1].clone())).collect();
+        let edges: Vec<(String, String)> = c
+            .edges
+            .iter()
+            .map(|e| (e[0].clone(), e[1].clone()))
+            .collect();
         let out = keystones(&c.node_ids, &edges, c.top_k);
         assert_eq!(out.len(), c.ranked.len(), "keystones count");
         for (got, want) in out.iter().zip(&c.ranked) {
             assert_eq!(got.id, want.id, "keystone id");
-            assert_eq!(hex64(got.centrality), want.centrality, "keystone centrality");
+            assert_eq!(
+                hex64(got.centrality),
+                want.centrality,
+                "keystone centrality"
+            );
         }
     }
 
     for c in &v.constellations {
-        let edges: Vec<(String, String)> =
-            c.edges.iter().map(|e| (e[0].clone(), e[1].clone())).collect();
+        let edges: Vec<(String, String)> = c
+            .edges
+            .iter()
+            .map(|e| (e[0].clone(), e[1].clone()))
+            .collect();
         let out = constellations(&c.node_ids, &edges, c.max_passes);
         assert_eq!(out.communities, c.communities, "constellation communities");
     }
@@ -353,7 +588,12 @@ fn lenses_reproduce_shared_vectors() {
             .map(|row| row.iter().map(|e| (e.node, f64_of(&e.weight))).collect())
             .collect();
         let out = spreading_activation(
-            &adjacency, c.seed, c.walk_length, f64_of(&c.restart_prob), c.rng_seed, c.k,
+            &adjacency,
+            c.seed,
+            c.walk_length,
+            f64_of(&c.restart_prob),
+            c.rng_seed,
+            c.k,
         );
         assert_eq!(out.len(), c.activations.len(), "activation count");
         for (got, want) in out.iter().zip(&c.activations) {
@@ -366,7 +606,13 @@ fn lenses_reproduce_shared_vectors() {
         let categories: Vec<(String, f64, f64)> = c
             .categories
             .iter()
-            .map(|m| (m.category.clone(), f64_of(&m.raw_count), f64_of(&m.weighted_mass)))
+            .map(|m| {
+                (
+                    m.category.clone(),
+                    f64_of(&m.raw_count),
+                    f64_of(&m.weighted_mass),
+                )
+            })
             .collect();
         let out = theme_weather(&categories);
         assert_eq!(out.len(), c.momenta.len(), "momentum count");
@@ -399,16 +645,26 @@ fn lenses_reproduce_shared_vectors() {
     }
 
     for c in &v.representation_bias {
-        let estate: Vec<(String, f64)> =
-            c.estate.iter().map(|m| (m.label.clone(), f64_of(&m.mass))).collect();
-        let reference: Vec<(String, f64)> =
-            c.reference.iter().map(|m| (m.label.clone(), f64_of(&m.mass))).collect();
+        let estate: Vec<(String, f64)> = c
+            .estate
+            .iter()
+            .map(|m| (m.label.clone(), f64_of(&m.mass)))
+            .collect();
+        let reference: Vec<(String, f64)> = c
+            .reference
+            .iter()
+            .map(|m| (m.label.clone(), f64_of(&m.mass)))
+            .collect();
         let out = representation_bias(&estate, &reference);
         assert_eq!(out.len(), c.biases.len(), "bias count");
         for (got, want) in out.iter().zip(&c.biases) {
             assert_eq!(got.label, want.label, "bias label");
             assert_eq!(hex64(got.estate_share), want.estate_share, "estate share");
-            assert_eq!(hex64(got.reference_share), want.reference_share, "reference share");
+            assert_eq!(
+                hex64(got.reference_share),
+                want.reference_share,
+                "reference share"
+            );
             assert_eq!(hex64(got.bias), want.bias, "bias");
         }
     }
@@ -424,8 +680,16 @@ fn lenses_reproduce_shared_vectors() {
         for (got, want) in out.iter().zip(&c.strengths) {
             assert_eq!(got.label, want.label, "strength label");
             assert_eq!(hex64(got.strength), want.strength, "strength");
-            assert_eq!(hex64(got.confidence_low), want.confidence_low, "confidence low");
-            assert_eq!(hex64(got.confidence_high), want.confidence_high, "confidence high");
+            assert_eq!(
+                hex64(got.confidence_low),
+                want.confidence_low,
+                "confidence low"
+            );
+            assert_eq!(
+                hex64(got.confidence_high),
+                want.confidence_high,
+                "confidence high"
+            );
             assert_eq!(got.endorsements, want.endorsements, "endorsements");
             assert_eq!(got.dismissals, want.dismissals, "dismissals");
         }
@@ -435,7 +699,11 @@ fn lenses_reproduce_shared_vectors() {
         let observations: Vec<ActionObservation> = c
             .observations
             .iter()
-            .map(|o| ActionObservation { action: o.action, outcome: o.outcome, success: o.success })
+            .map(|o| ActionObservation {
+                action: o.action,
+                outcome: o.outcome,
+                success: o.success,
+            })
             .collect();
         let out = anticipate(&observations, c.target_outcome, c.k, c.min_observations);
         assert_eq!(out.len(), c.predictions.len(), "prediction count");
@@ -468,16 +736,343 @@ fn lenses_reproduce_shared_vectors() {
     for c in &v.mind_overlap {
         let fps_a: Vec<Fingerprint256> = c.fingerprints_a.iter().map(|b| fp_of(b)).collect();
         let fps_b: Vec<Fingerprint256> = c.fingerprints_b.iter().map(|b| fp_of(b)).collect();
-        let summary_a =
-            dp_summary(&fps_a, f64_of(&c.epsilon), f64_of(&c.delta), c.k_anonymity, c.seed);
-        let summary_b =
-            dp_summary(&fps_b, f64_of(&c.epsilon), f64_of(&c.delta), c.k_anonymity, c.seed);
+        let summary_a = dp_summary(
+            &fps_a,
+            f64_of(&c.epsilon),
+            f64_of(&c.delta),
+            c.k_anonymity,
+            c.seed,
+        );
+        let summary_b = dp_summary(
+            &fps_b,
+            f64_of(&c.epsilon),
+            f64_of(&c.delta),
+            c.k_anonymity,
+            c.seed,
+        );
         assert_eq!(blocks_of(summary_a), c.summary_a, "summary A");
         assert_eq!(blocks_of(summary_b), c.summary_b, "summary B");
-        assert_eq!(hex64(summary_overlap(summary_a, summary_b)), c.overlap, "overlap");
+        assert_eq!(
+            hex64(summary_overlap(summary_a, summary_b)),
+            c.overlap,
+            "overlap"
+        );
     }
 
     for c in &v.shingle_similarity {
-        assert_eq!(hex32(shingle_similarity(&c.a, &c.b)), c.similarity, "shingle similarity");
+        assert_eq!(
+            hex32(shingle_similarity(&c.a, &c.b)),
+            c.similarity,
+            "shingle similarity"
+        );
+    }
+
+    // ── BYCOPY_MIGRATION_001 walkers ─────────────────────────────────────────
+
+    // benchmark_scoring: reproduce the exact same BenchmarkScore field values
+    // the Swift leg recorded. All four float metrics travel as f32 hex.
+    for c in &v.benchmark_scoring {
+        let out = benchmark_score(&c.expected_i_ds, &c.found_per_query);
+        assert_eq!(out.query_count, c.query_count, "bs query_count");
+        assert_eq!(
+            hex32(out.recall_overlap),
+            c.recall_overlap,
+            "bs recall_overlap"
+        );
+        assert_eq!(
+            hex32(out.recall_precision),
+            c.recall_precision,
+            "bs recall_precision"
+        );
+        assert_eq!(
+            hex32(out.mean_reciprocal_rank),
+            c.mean_reciprocal_rank,
+            "bs mean_reciprocal_rank"
+        );
+        assert_eq!(
+            out.not_found_in_branch, c.not_found_in_branch,
+            "bs not_found_in_branch"
+        );
+        assert_eq!(out.new_in_branch, c.new_in_branch, "bs new_in_branch");
+    }
+
+    // mmr_rank: reconstruct Engram (= Fingerprint256) from blockBits encoding.
+    // Each blockBits element is the count of low bits set in that 64-bit block.
+    // Query = all-zero engram. Verify the selection order matches expectedIndices.
+    for c in &v.mmr_rank {
+        fn low_bits(count: usize) -> u64 {
+            if count >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << count) - 1
+            }
+        }
+        let fingerprints: Vec<Engram> = c
+            .candidates
+            .iter()
+            .map(|cand| Engram {
+                block0: low_bits(cand.block_bits[0]),
+                block1: low_bits(cand.block_bits[1]),
+                block2: low_bits(cand.block_bits[2]),
+                block3: low_bits(cand.block_bits[3]),
+            })
+            .collect();
+        let query = Engram {
+            block0: 0,
+            block1: 0,
+            block2: 0,
+            block3: 0,
+        };
+        let order = mmr_select(&fingerprints, &query, c.lambda, c.k);
+        assert_eq!(order, c.expected_indices, "mmr_rank selection order");
+    }
+
+    // formal_concept_analysis: reconstruct FormalContext from rows of
+    // FormalAttribute triples; run BoundedConceptMiner with the artifact's
+    // params; verify the concepts match (extent, intent, support).
+    for c in &v.formal_concept_analysis {
+        let rows: Vec<Vec<FormalAttribute>> = c
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|a| FormalAttribute {
+                        namespace: a.namespace.clone(),
+                        key: a.key.clone(),
+                        value: a.value.clone(),
+                    })
+                    .collect()
+            })
+            .collect();
+        let ctx = FormalContext::new(&rows);
+        let miner = BoundedConceptMiner::new(c.min_support, c.max_intent_size, c.max_concepts);
+        let concepts = miner.mine(&ctx);
+        assert_eq!(concepts.len(), c.concepts.len(), "fca concept count");
+        for (got, want) in concepts.iter().zip(&c.concepts) {
+            // extent is Vec<u32> in Rust, Vec<Int> in artifact
+            let got_extent: Vec<usize> = got.extent.iter().map(|&r| r as usize).collect();
+            assert_eq!(got_extent, want.extent, "fca extent");
+            assert_eq!(got.support, want.support, "fca support");
+            assert_eq!(got.intent.len(), want.intent.len(), "fca intent len");
+            for (ga, wa) in got.intent.iter().zip(&want.intent) {
+                assert_eq!(ga.namespace, wa.namespace, "fca intent namespace");
+                assert_eq!(ga.key, wa.key, "fca intent key");
+                assert_eq!(ga.value, wa.value, "fca intent value");
+            }
+        }
+    }
+
+    // hybrid_recall rerank cases: build DrawerRow slice, rerank with tuning,
+    // verify expected id order.
+    for rc in &v.hybrid_recall.rerank_cases {
+        let drawers: Vec<DrawerRow> = rc
+            .drawers
+            .iter()
+            .map(|d| DrawerRow {
+                id: d.id.clone(),
+                content: d.content.clone(),
+            })
+            .collect();
+        let tuning = RecallFrameTuning {
+            mmr_lambda: rc.mmr_lambda,
+            ..RecallFrameTuning::default_tuning()
+        };
+        let out = rerank(&drawers, &tuning);
+        let ids: Vec<String> = out.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(ids, rc.expected_order, "hybrid_recall rerank order");
+    }
+
+    // hybrid_recall paging cases: rerank with default tuning, then page;
+    // verify page ids, isLast flags, and pageIndex values.
+    for pc in &v.hybrid_recall.paging_cases {
+        let drawers: Vec<DrawerRow> = pc
+            .rows
+            .iter()
+            .map(|d| DrawerRow {
+                id: d.id.clone(),
+                content: d.content.clone(),
+            })
+            .collect();
+        let reranked = rerank(&drawers, &RecallFrameTuning::default_tuning());
+        let pages = page_recall(&reranked, pc.page_size);
+        assert_eq!(pages.len(), pc.pages.len(), "hybrid_recall page count");
+        for (got, want) in pages.iter().zip(&pc.pages) {
+            let got_ids: Vec<String> = got.rows.iter().map(|d| d.id.clone()).collect();
+            assert_eq!(got_ids, want.ids, "hybrid_recall page ids");
+            assert_eq!(got.is_last, want.is_last, "hybrid_recall is_last");
+            assert_eq!(got.page_index, want.page_index, "hybrid_recall page_index");
+        }
+    }
+
+    // association_rule_mining: rebuild MatrixO via apply_row, mine rules,
+    // verify the expected rule metrics as f64 hex. Infinite conviction →
+    // sentinel string "inf" per both-legs convention.
+    for c in &v.association_rule_mining {
+        let mut matrix = MatrixO::default();
+        for row in &c.rows {
+            let field_values: Vec<(u8, u8)> = row.iter().map(|p| (p.field, p.value)).collect();
+            matrix.apply_row(1_i64, &field_values);
+        }
+        let thresholds = MiningThresholds {
+            min_support: c.min_support,
+            min_confidence: c.min_confidence,
+        };
+        let rules = mine_association_rules(&matrix, c.active_row_count, thresholds);
+        assert_eq!(rules.len(), c.rules.len(), "assoc rule count");
+        for (got, want) in rules.iter().zip(&c.rules) {
+            assert_eq!(
+                got.antecedent.field, want.antecedent_field,
+                "antecedent field"
+            );
+            assert_eq!(
+                got.antecedent.value, want.antecedent_value,
+                "antecedent value"
+            );
+            assert_eq!(
+                got.consequent.field, want.consequent_field,
+                "consequent field"
+            );
+            assert_eq!(
+                got.consequent.value, want.consequent_value,
+                "consequent value"
+            );
+            assert_eq!(hex64(got.support), want.support, "assoc support");
+            assert_eq!(hex64(got.confidence), want.confidence, "assoc confidence");
+            assert_eq!(hex64(got.lift), want.lift, "assoc lift");
+            assert_eq!(hex64(got.leverage), want.leverage, "assoc leverage");
+            if got.conviction.is_infinite() {
+                assert_eq!(want.conviction, "inf", "assoc conviction (inf)");
+            } else {
+                assert_eq!(hex64(got.conviction), want.conviction, "assoc conviction");
+            }
+        }
+    }
+
+    // scenario_profile: verify round-trip fidelity for each case.
+    // The Rust ScenarioProfile uses snake_case field names in JSON (different
+    // from Swift's camelCase), so canonical_json holds the Swift-produced JSON
+    // for documentation only — the Rust verifier does its own round-trip.
+    for c in &v.scenario_profile {
+        let profile = ScenarioProfile::new(
+            c.profile_i_d.clone(),
+            c.name.clone(),
+            c.framing_parameters.clone(),
+            c.scoring_breakdown.clone(),
+            c.preference_weights.clone(),
+            c.created_at.clone(),
+            c.training_eligible,
+        );
+        // Round-trip through Rust JSON and verify field values are preserved.
+        let json = serde_json::to_string(&profile).expect("scenario profile serialize");
+        let decoded: ScenarioProfile =
+            serde_json::from_str(&json).expect("scenario profile deserialize");
+        assert_eq!(decoded.profile_id, profile.profile_id, "sp profile_id");
+        assert_eq!(decoded.name, profile.name, "sp name");
+        assert_eq!(decoded.created_at, profile.created_at, "sp created_at");
+        assert_eq!(
+            decoded.training_eligible, profile.training_eligible,
+            "sp training_eligible"
+        );
+        // Verify no tournamentReport field leaks into JSON.
+        assert!(
+            !json.contains("tournament_report"),
+            "sp no tournament_report"
+        );
+        assert!(
+            !json.contains("tournamentReport"),
+            "sp no tournamentReport (camel)"
+        );
+    }
+
+    // context_synthesizer: build DrawerRow + DrawerRowMeta slices from the
+    // artifact's row inputs. The loader derives is_currently_believed from
+    // adjectiveBitmap via the State cluster formula documented on the meta
+    // construction below: (state_raw >> 4) & 0x3 == 0 (Cluster A — matches
+    // LocusKit's shipped Drawer.isCurrentlyBelieved). No source changes.
+    for c in &v.context_synthesizer {
+        let rows: Vec<DrawerRow> = c
+            .rows
+            .iter()
+            .map(|r| DrawerRow {
+                id: r.content.chars().take(8).collect(),
+                content: r.content.clone(),
+            })
+            .collect();
+        let meta: Vec<DrawerRowMeta> = c
+            .rows
+            .iter()
+            .map(|r| DrawerRowMeta {
+                wing: r.wing.clone(),
+                room: r.room.clone(),
+                // State occupies bits 0-5 of adjectiveBitmap (LocusKit State enum).
+                // Cluster A (currently believed) = (state_raw >> 4) & 0x3 == 0.
+                // This correctly identifies states 0-15 (active, pending, contested,
+                // accepted = raws 0,1,2,3) as currently believed, and 16+ as not.
+                // Cluster B (16-31: superseded, decayed, withdrawn, expired) and
+                // Cluster C (32+: rejected, tombstoned) are NOT currently believed.
+                is_currently_believed: {
+                    let state_raw = (r.adjective_bitmap & 0x3F) as u8;
+                    ((state_raw >> 4) & 0x3) == 0
+                },
+            })
+            .collect();
+        let page = RecallPage {
+            rows: rows.clone(),
+            page_index: 0,
+            is_last: true,
+        };
+        let doc = synthesize(&page, &meta);
+        assert_eq!(doc.summary, c.summary, "ctx summary");
+        assert_eq!(doc.patterns, c.patterns, "ctx patterns");
+        assert_eq!(doc.key_insights, c.key_insights, "ctx key_insights");
+        assert_eq!(hex32(doc.success_rate), c.success_rate, "ctx success_rate");
+        assert_eq!(
+            doc.recommendations.len(),
+            c.recommendations_count,
+            "ctx recommendations count"
+        );
+    }
+
+    // bradley_terry: tolerance-based (NOT bit-exact) per the documented
+    // C-6-adjacent contract. The tolerance string "1e-6" is carried in the
+    // artifact; both legs assert within the same bound.
+    for c in &v.bradley_terry {
+        let tol: f64 = c.tolerance.parse().unwrap_or(1e-6);
+        let outcomes: Vec<neuron_kit::PairwiseOutcome> = c
+            .outcomes
+            .iter()
+            .map(|o| neuron_kit::PairwiseOutcome::new(&o.winner, &o.loser, o.count))
+            .collect();
+        let fitted = bradley_terry(&outcomes).expect("bradley_terry fit");
+        assert_eq!(fitted.len(), c.scores.len(), "bt score count");
+        for (got, want) in fitted.iter().zip(&c.scores) {
+            assert_eq!(got.competitor_id, want.competitor_i_d, "bt competitor_id");
+            let got_str = f64::from_bits(u64::from_str_radix(&want.strength[2..], 16).unwrap());
+            let got_lo =
+                f64::from_bits(u64::from_str_radix(&want.confidence_low[2..], 16).unwrap());
+            let got_hi =
+                f64::from_bits(u64::from_str_radix(&want.confidence_high[2..], 16).unwrap());
+            assert!(
+                (got.strength - got_str).abs() < tol,
+                "bt strength: got {}, want {} (tol {})",
+                got.strength,
+                got_str,
+                tol
+            );
+            assert!(
+                (got.confidence_low - got_lo).abs() < tol,
+                "bt confidence_low: got {}, want {} (tol {})",
+                got.confidence_low,
+                got_lo,
+                tol
+            );
+            assert!(
+                (got.confidence_high - got_hi).abs() < tol,
+                "bt confidence_high: got {}, want {} (tol {})",
+                got.confidence_high,
+                got_hi,
+                tol
+            );
+        }
     }
 }

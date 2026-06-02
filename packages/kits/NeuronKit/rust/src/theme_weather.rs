@@ -35,7 +35,13 @@ pub fn theme_weather(categories: &[(String, f64, f64)]) -> Vec<CategoryMomentum>
     let total_weighted: f64 = categories.iter().map(|(_, _, w)| w).sum();
     // A side with no mass contributes a zero share (no division by zero).
     let raw_share = |x: f64| if total_raw > 0.0 { x / total_raw } else { 0.0 };
-    let weighted_share = |x: f64| if total_weighted > 0.0 { x / total_weighted } else { 0.0 };
+    let weighted_share = |x: f64| {
+        if total_weighted > 0.0 {
+            x / total_weighted
+        } else {
+            0.0
+        }
+    };
 
     let mut out: Vec<CategoryMomentum> = categories
         .iter()
@@ -87,7 +93,10 @@ mod tests {
         let fading = w.iter().find(|m| m.category == "fading").unwrap();
         assert!(rising.momentum > 0.0);
         assert!(fading.momentum < 0.0);
-        assert!((rising.momentum + fading.momentum).abs() < 1e-9, "shares zero-sum");
+        assert!(
+            (rising.momentum + fading.momentum).abs() < 1e-9,
+            "shares zero-sum"
+        );
     }
 
     #[test]

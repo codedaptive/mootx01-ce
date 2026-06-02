@@ -36,7 +36,10 @@ pub fn keystones(node_ids: &[String], edges: &[(String, String)], top_k: usize) 
     let mut ranked: Vec<Keystone> = node_ids
         .iter()
         .zip(scores.iter())
-        .map(|(id, &centrality)| Keystone { id: id.clone(), centrality })
+        .map(|(id, &centrality)| Keystone {
+            id: id.clone(),
+            centrality,
+        })
         .collect();
 
     ranked.sort_by(|a, b| {
@@ -60,7 +63,9 @@ mod tests {
         xs.iter().map(|s| s.to_string()).collect()
     }
     fn edges(xs: &[(&str, &str)]) -> Vec<(String, String)> {
-        xs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        xs.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     #[test]
