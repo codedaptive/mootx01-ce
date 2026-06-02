@@ -7,12 +7,15 @@
 // agent reads what recipes exist and triggers them, and the human-in-the-
 // loop confirms the migration promotion.
 //
-// Three tools ship here:
-//   - moot_grounded_synthesis        → GroundedSynthesis recipe (read)
-//   - moot_run_migration_benchmark   → MigrationBenchmark.run (read; no
-//                                       promotion — B-3)
+// Six tools ship here:
+//   - moot_list_recipes               → RecipeCatalog enumeration (read)
+//   - moot_grounded_synthesis         → GroundedSynthesis recipe (read)
+//   - moot_run_migration_benchmark    → MigrationBenchmark.run (read; no
+//                                        promotion — B-3)
 //   - moot_confirm_migration_promotion → MigrationBenchmark.confirmPromotion
-//                                       by branch id (the human-gated write)
+//                                        by branch id (the human-gated write)
+//   - moot_association_rules          → AssociationRules recipe (read)
+//   - moot_formal_concepts            → FormalConcepts recipe (read)
 //
 // Stateless-boundary discipline: MCP `tools/call` is stateless across
 // invocations, so the run tool cannot hand live `BranchHandle`s to a
@@ -22,6 +25,11 @@
 // the two-call run→confirm pattern the plan describes; webhook delivery
 // of async completion is an additive transport, not needed for the
 // synchronous behaviour.
+//
+// Note: the Rust MCP server's tools for moot_association_rules and
+// moot_formal_concepts are sequenced after ARIA_MCP_RUST_001 merges
+// (that mission is building the Rust server right now). The Rust tools
+// are a follow-up; this file is the Swift-side delivery only.
 
 import Foundation
 import GeniusLocusKit
@@ -38,6 +46,8 @@ enum RecipeTools {
     static let groundedSynthesisToolName = "moot_grounded_synthesis"
     static let runMigrationBenchmarkToolName = "moot_run_migration_benchmark"
     static let confirmMigrationPromotionToolName = "moot_confirm_migration_promotion"
+    static let associationRulesToolName = "moot_association_rules"
+    static let formalConceptsToolName = "moot_formal_concepts"
 
     /// True when `name` is one of the recipe tools dispatched by name.
     static func isRecipeTool(_ name: String) -> Bool {
@@ -45,11 +55,13 @@ enum RecipeTools {
             || name == groundedSynthesisToolName
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
+            || name == associationRulesToolName
+            || name == formalConceptsToolName
     }
 
     // MARK: - tools/list projection
 
-    /// The three recipe tool descriptors, advertised in `tools/list`
+    /// All recipe tool descriptors, advertised in `tools/list`
     /// after the lexicon projection and the federation tool.
     static func tools() -> [ProjectedTool] {
         [
@@ -57,6 +69,8 @@ enum RecipeTools {
             groundedSynthesisTool(),
             runMigrationBenchmarkTool(),
             confirmMigrationPromotionTool(),
+            associationRulesTool(),
+            formalConceptsTool(),
         ]
     }
 
@@ -177,6 +191,10 @@ enum RecipeTools {
             return try await runMigrationBenchmark(args, kit: kit, handle: handle)
         case confirmMigrationPromotionToolName:
             return try await runConfirmPromotion(args, kit: kit, handle: handle)
+        case associationRulesToolName:
+            return try await runAssociationRules(args, kit: kit, handle: handle)
+        case formalConceptsToolName:
+            return try await runFormalConcepts(args, kit: kit, handle: handle)
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.methodNotFound,
@@ -301,6 +319,116 @@ enum RecipeTools {
             "confirm_migration_promotion: promoted \(winner); discarded \(discard.count) branch(es).")
     }
 
+    // MARK: - association_rules
+
+    private static func associationRulesTool() -> ProjectedTool {
+        ProjectedTool(
+            name: associationRulesToolName,
+            description: "Behaviour recipe: recall a frame, project each drawer's categorical facets (room, kind, channel, sensitivity) into a co-occurrence matrix, and mine pairwise association rules with the five standard metrics (support, confidence, lift, conviction, leverage).",
+            inputSchema: objectSchema(
+                properties: [
+                    "filter": stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve."),
+                    "limit": integerSchema("Max drawers to recall."),
+                    "minSupport": .object(["type": .string("number"), "description": .string("Minimum rule support (0..1). Default 0.")]),
+                    "minConfidence": .object(["type": .string("number"), "description": .string("Minimum rule confidence (0..1). Default 0.")]),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
+                ],
+                required: []),
+            provenance: .recipe)
+    }
+
+    private static func runAssociationRules(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let filter = decodeFilter(args["filter"]?.stringValue)
+        let limit = args["limit"]?.integerValue.map(Int.init)
+        let minSupport = doubleArg(args["minSupport"]) ?? 0.0
+        let minConfidence = doubleArg(args["minConfidence"]) ?? 0.0
+        let frame = LocusKit.RecallFrame(
+            filterChain: [filter],
+            hydrationLevel: .structured,
+            limit: limit,
+            ordering: .byCaptureTimeDesc)
+
+        let out = try await AssociationRules().run(
+            input: .init(
+                frame: frame,
+                thresholds: MiningThresholds(minSupport: minSupport, minConfidence: minConfidence)),
+            estate: handle, kit: kit)
+
+        var lines = [
+            "association_rules: \(out.rules.count) rule(s) from \(out.drawerCount) drawer(s)",
+        ]
+        if out.labelOverflow {
+            lines.append("note: label vocabulary was capped at 64; some labels were dropped")
+        }
+        for rule in out.rules {
+            lines.append(
+                "  \(rule.antecedent) → \(rule.consequent): "
+                + "sup=\(String(format: "%.3f", rule.support)) "
+                + "conf=\(String(format: "%.3f", rule.confidence)) "
+                + "lift=\(String(format: "%.3f", rule.lift))")
+        }
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
+    // MARK: - formal_concepts
+
+    private static func formalConceptsTool() -> ProjectedTool {
+        ProjectedTool(
+            name: formalConceptsToolName,
+            description: "Behaviour recipe: recall a frame, build a formal context where each drawer is a row with its categorical facets (room, kind, channel, sensitivity) as attributes, and mine bounded formal concepts (maximal attribute closures).",
+            inputSchema: objectSchema(
+                properties: [
+                    "filter": stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve."),
+                    "limit": integerSchema("Max drawers to recall."),
+                    "minSupport": integerSchema("Minimum concept extent size. Default 1."),
+                    "maxIntentSize": integerSchema("Maximum concept intent size. Default 8."),
+                    "maxConcepts": integerSchema("Maximum concepts returned. Default 20."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
+                ],
+                required: []),
+            provenance: .recipe)
+    }
+
+    private static func runFormalConcepts(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let filter = decodeFilter(args["filter"]?.stringValue)
+        let limit = args["limit"]?.integerValue.map(Int.init)
+        let minSupport = args["minSupport"]?.integerValue.map(Int.init) ?? 1
+        let maxIntentSize = args["maxIntentSize"]?.integerValue.map(Int.init) ?? 8
+        let maxConcepts = args["maxConcepts"]?.integerValue.map(Int.init) ?? 20
+        let frame = LocusKit.RecallFrame(
+            filterChain: [filter],
+            hydrationLevel: .structured,
+            limit: limit,
+            ordering: .byCaptureTimeDesc)
+
+        let out = try await FormalConcepts().run(
+            input: .init(
+                frame: frame,
+                miner: BoundedConceptMiner(
+                    minSupport: minSupport,
+                    maxIntentSize: maxIntentSize,
+                    maxConcepts: maxConcepts)),
+            estate: handle, kit: kit)
+
+        var lines = [
+            "formal_concepts: \(out.concepts.count) concept(s) from \(out.drawerCount) drawer(s)",
+        ]
+        for (i, concept) in out.concepts.enumerated() {
+            lines.append("  concept \(i + 1): support=\(concept.support)")
+            lines.append("    intent: \(concept.intent.joined(separator: ", "))")
+            lines.append("    extent: \(concept.extentDrawerIDs.count) drawer(s)")
+        }
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
     // MARK: - Argument decoding
 
     private static func requireString(
@@ -406,6 +534,19 @@ enum RecipeTools {
         case "restricted": return .restricted
         case "secret": return .secret
         default: return .normal
+        }
+    }
+
+    // MARK: - Numeric argument decoding
+
+    /// Extract a `Double` from a `.double` or `.integer` JSON value.
+    /// Returns `nil` for absent or non-numeric values.
+    private static func doubleArg(_ value: JSONValue?) -> Double? {
+        guard let value else { return nil }
+        switch value {
+        case .double(let d): return d
+        case .integer(let i): return Double(i)
+        default: return nil
         }
     }
 
