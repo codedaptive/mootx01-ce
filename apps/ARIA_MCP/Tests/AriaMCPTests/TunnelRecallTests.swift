@@ -7,17 +7,16 @@ import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
 
-/// ARIA_MCP dispatch tests for moot_tunnel_recall (Swift parity with Rust v2b-p1).
+/// ARIA_MCP dispatch tests for moot_tunnel_recall and moot_capture_tunnel
+/// (Swift parity with Rust v2b-p1 and SWIFT_LEXICON_GAPS_001).
 ///
 /// These tests mirror the semantics of the Rust dispatch_tests.rs §13
 /// (`tunnel_recall_returns_outgoing_tunnels_for_wing`,
 /// `tunnel_recall_empty_wing_returns_zero_tunnels`,
 /// `tunnel_recall_missing_wing_returns_invalid_params`) and the §14
-/// schema-key assertion for `moot_tunnel_recall`. The Swift
-/// `moot_capture_tunnel` tool handler is not yet wired, so tunnel
-/// capture for test setup goes through GLK directly
-/// (`GeniusLocusKit.estate(for:)` → `Estate.capture(TunnelCaptureFrame)`),
-/// matching the pattern the GLK RecallTunnelsTests already use.
+/// schema-key assertion for `moot_tunnel_recall`. The `moot_capture_tunnel`
+/// handler is now wired (SWIFT_LEXICON_GAPS_001), so tunnel capture for test
+/// setup goes through the MCP dispatch surface rather than GLK directly.
 ///
 /// `.serialized`: each test opens a live in-memory estate; preserve
 /// one-at-a-time execution to prevent GeniusLocusKit actor contention.
@@ -41,43 +40,67 @@ struct TunnelRecallTests {
         return (dispatcher, kit, handle)
     }
 
-    /// Capture one outgoing tunnel into the estate via GLK (estate-direct,
-    /// not through the MCP surface — the Swift capture_tunnel handler is
-    /// not yet wired). Mirrors the setup pattern in GLK RecallTunnelsTests.
+    /// Capture one outgoing tunnel into the estate through the MCP dispatch surface
+    /// (moot_capture_tunnel). Now wired as of SWIFT_LEXICON_GAPS_001, so test setup
+    /// exercises the full round-trip rather than bypassing the server.
+    @discardableResult
     private func captureTunnel(
-        kit: GeniusLocusKit,
-        handle: EstateHandle,
+        dispatcher: ARIA_MCPDispatcher,
         sourceWing: String,
         targetWing: String,
         label: String = "relates"
-    ) async throws {
-        let estate = try await kit.estate(for: handle)
-        _ = try await estate.capture(
-            TunnelCaptureFrame(
-                sourceWing: sourceWing, sourceRoom: "room-src",
-                targetWing: targetWing, targetRoom: "room-dst",
-                label: label,
-                addedBy: "tunnel-recall-tests",
-                sourceDrawerId: nil,
-                targetDrawerId: nil,
-                kind: .references
-            )
+    ) async throws -> String {
+        let request = JSONRPCRequest(
+            id: .integer(0),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_capture_tunnel"),
+                "arguments": .object([
+                    "sourceWing": .string(sourceWing),
+                    "sourceRoom": .string("room-src"),
+                    "targetWing": .string(targetWing),
+                    "targetRoom": .string("room-dst"),
+                    "kind": .string(label),
+                    "addedBy": .string("tunnel-recall-tests"),
+                ]),
+            ])
         )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.internalError,
+                message: "moot_capture_tunnel returned JSON-RPC error in test setup: \(response.payload)"
+            )
+        }
+        let obj = try #require(result.objectValue)
+        let isError = obj["isError"]?.boolValue ?? true
+        if isError {
+            let msg = obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? "unknown"
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.internalError,
+                message: "moot_capture_tunnel returned isError=true in test setup: \(msg)"
+            )
+        }
+        return obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
     }
 
-    // MARK: - Happy path: capture then recall by wing
+    // MARK: - Happy path: full round-trip via moot_capture_tunnel + moot_tunnel_recall
 
-    /// A tunnel captured into the estate is returned by moot_tunnel_recall.
+    /// A tunnel captured through moot_capture_tunnel is returned by moot_tunnel_recall.
+    ///
+    /// This is the full round-trip test: capture via the MCP surface, then recall
+    /// via the MCP surface. Both handlers are now wired (SWIFT_LEXICON_GAPS_001).
     ///
     /// Mirrors Rust: `tunnel_recall_returns_outgoing_tunnels_for_wing` —
     /// result is a success (isError false), text starts with the count line.
-    @Test("moot_tunnel_recall returns tunnels for the source wing")
+    @Test("moot_tunnel_recall returns tunnels for the source wing (full round-trip through server)")
     func recallReturnsCapturedTunnel() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
+        let (dispatcher, _, _) = try await makeDispatcher()
 
-        // Capture a tunnel via GLK so the estate has outgoing edges for alpha-wing.
+        // Capture a tunnel through moot_capture_tunnel — full round-trip setup.
         try await captureTunnel(
-            kit: kit, handle: handle,
+            dispatcher: dispatcher,
             sourceWing: "alpha-wing", targetWing: "beta-wing"
         )
 

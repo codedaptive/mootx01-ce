@@ -161,10 +161,33 @@ public struct ToolDispatcher: Sendable {
             switch (verb, noun) {
             case (.capture, .drawer):
                 return try await runCaptureDrawer(args)
+            case (.capture, .tunnel):
+                return try await runCaptureTunnel(args)
             case (.recall, .drawer):
                 return try await runRecallDrawer(args)
             case (.recall, .tunnel):
                 return try await runRecallTunnel(args)
+            case (.recall, .kgFact):
+                // GLK has no estate-wide kgFact read accessor; the DrawerStore
+                // trait lacks all_kg_facts(). Surface an honest refusal matching
+                // the Rust leg's error_result — isError true, NOT a JSON-RPC
+                // transport fault, so the client retains the call ID. Kit accessor
+                // gap tracked separately; not shimmed here per blast-radius discipline.
+                return Self.errorResult("recall kgFact is not supported by this estate: no estate-wide kgFact read accessor exists in the substrate.")
+            case (.recall, .diaryEntry):
+                // Same discipline as kgFact_recall: DrawerStore trait has no
+                // unconstrained diary-entries accessor. Honest refusal matches Rust.
+                return Self.errorResult("recall diaryEntry is not supported by this estate: no estate-wide diaryEntry read accessor exists in the substrate.")
+            case (.recall, .proposal):
+                // Same discipline: no all_proposals() accessor in the substrate.
+                return Self.errorResult("recall proposal is not supported by this estate: no estate-wide proposal read accessor exists in the substrate.")
+            case (.recall, .association):
+                // Same discipline: no all_associations() accessor in the substrate.
+                return Self.errorResult("recall association is not supported by this estate: no estate-wide association read accessor exists in the substrate.")
+            case (.recall, .learnedReference):
+                // Same discipline: no all_learned_references() accessor in the
+                // substrate. Mirrors Rust leg's NotSupportedByEstate error_result.
+                return Self.errorResult("recall learnedReference is not supported by this estate: no estate-wide learnedReference read accessor exists in the substrate.")
             case (.mutate, _):
                 return try await runMutate(args, noun: noun)
             case (.withdraw, _):
@@ -177,9 +200,9 @@ public struct ToolDispatcher: Sendable {
                 return try await runLearn(args, noun: noun)
             default:
                 // All acceptance-matrix (verb, noun) pairs that surface as tools
-                // should have an explicit arm above. This arm fires only when a
-                // new (verb, noun) pair is accepted by the lexicon but has not
-                // yet been wired to a handler — a missing arm, not a caller error.
+                // have explicit arms above. This arm fires only when a new (verb,
+                // noun) pair is accepted by the lexicon but not yet wired — a
+                // missing arm, not a caller error.
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.methodNotFound,
                     message: "No handler bound for tool \(name)"
@@ -280,6 +303,52 @@ public struct ToolDispatcher: Sendable {
             "room: \(drawer.room)",
             "scheme: \(scheme.rawValue)",
         ].joined(separator: "\n"))
+    }
+
+    /// Handle moot_capture_tunnel: file a new directed graph edge (tunnel) into
+    /// the estate addressed by the optional `estateID` argument.
+    ///
+    /// Dispatches through `GeniusLocusKit.estate(for:)` → `LocusKit.Estate.capture(_:
+    /// TunnelCaptureFrame)` — the same path `TunnelRecallTests.captureTunnel` uses for
+    /// test setup, now exposed over the MCP surface. Required args are the six endpoint +
+    /// identity slots the TunnelCaptureFrame init mandates: `sourceWing`, `sourceRoom`,
+    /// `targetWing`, `targetRoom`, `kind` (used as the relation label), `addedBy`.
+    /// Optional `sourceDrawerID` and `targetDrawerID` pin the edge to specific drawer rows.
+    ///
+    /// The schema for this tool mirrors the Rust leg's `moot_capture_tunnel` descriptor
+    /// (rust/src/tool_list.rs lexicon_schema Verb::Capture Noun::Tunnel), so the two
+    /// servers advertise byte-identical required arrays and property keys on the wire.
+    private func runCaptureTunnel(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let sourceWing = try requireString(args, "sourceWing")
+        let sourceRoom = try requireString(args, "sourceRoom")
+        let targetWing = try requireString(args, "targetWing")
+        let targetRoom = try requireString(args, "targetRoom")
+        // `kind` is used as the tunnel's relation label (free-form string), matching
+        // the Rust leg's convention: TunnelCaptureFrame::new takes kind_str as the label.
+        let kind = try requireString(args, "kind")
+        let addedBy = try requireString(args, "addedBy")
+        let sourceDrawerID = args["sourceDrawerID"]?.stringValue
+        let targetDrawerID = args["targetDrawerID"]?.stringValue
+        let frame = TunnelCaptureFrame(
+            sourceWing: sourceWing,
+            sourceRoom: sourceRoom,
+            targetWing: targetWing,
+            targetRoom: targetRoom,
+            label: kind,
+            addedBy: addedBy,
+            sourceDrawerId: sourceDrawerID,
+            targetDrawerId: targetDrawerID
+        )
+        // Resolve the estate actor via await (estate(for:) is actor-isolated on
+        // GeniusLocusKit), then capture the tunnel via LocusKit.Estate.capture.
+        // No GLK kit-level captureTunnel verb exists — GLK exposes recallTunnels
+        // for the read but not a matching write wrapper. LocusKit.Estate.capture
+        // is the direct write path, the same one TunnelRecallTests.captureTunnel
+        // uses for test setup.
+        let estate = try await kit.estate(for: handle)
+        let tunnel = try await estate.capture(frame)
+        return Self.textResult("captured tunnel \(tunnel.id)")
     }
 
     private func runRecallDrawer(_ args: [String: JSONValue]) async throws -> JSONValue {
