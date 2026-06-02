@@ -272,7 +272,9 @@ pub fn run_free_association(
 
 ### Topics (category 2)
 
-Swift versions shipped: `ThemeWeather`.
+Swift versions shipped: `ThemeWeather`, `LatentThemesLens`. The
+field-value label vocabulary both versions emit spells the Swift case
+names (`kind:prose`, `channel:typed`, `sensitivity:normal`, …).
 
 ```rust
 pub fn run_latent_themes(
