@@ -87,14 +87,17 @@ Closure idempotence; both caps (`maxIntentSize`, `maxConcepts`) enforced; determ
 
 ## Test Verification Log
 
-### Baseline (mission start)
-- Pass count at mission start (NeuronKit `swift test` and `cargo test`): NNN (must exit 0; else STOP, write `.stuck`).
+### Baseline (mission start, branch @ `8cad620`)
+- NeuronKit `swift test`: exit 0 — **138 tests in 17 suites, all passed**.
+- NeuronKit `cargo test`: exit 0 — **143 passed; 0 failed**.
 
 ### Final
 - Commands: `cd packages/kits/NeuronKit && swift test 2>&1 | tail -20`; `cd packages/kits/NeuronKit/rust && cargo test`
-- Exit code: 0 (both)
-- Pass count: NNN (≥ baseline + new)
-- Tail output (verbatim): …
+- Exit code: 0 (both) — independently re-run and verified by Adams post-flight.
+- Pass count: Swift **152 tests in 18 suites** (baseline 138 + 14 new); Rust **157 passed; 0 failed** (baseline 143 + 14 new).
+- Swift tail (verbatim): `􁁛  Test run with 152 tests in 18 suites passed after 0.016 seconds.`
+- Rust result line (verbatim): `test result: ok. 157 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+- New-module filter run: `cargo test formal_concept_analysis` → `14 passed; 0 failed; ... 143 filtered out`, exit 0.
 
 ## Verification
 `swift build`/`swift test` green both ports; `cargo test` green; the two ports assert matching cases. Run self-review against the BRR's MUST_UPDATE list (created files plus the one `lib.rs` registration line). Spawn Adams for post-flight: net-new plus one registration line only; no full-lattice enumeration; stability omitted or explicitly sampled (no exponential path); no existing logic edited.
