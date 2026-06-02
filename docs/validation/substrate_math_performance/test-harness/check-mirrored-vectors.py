@@ -2,48 +2,44 @@
 """
 check-mirrored-vectors.py — kit mirrored-literal conformance drift detector.
 
-The kits' legacy Swift/Rust test pairs assert cross-version conformance
-through MIRRORED LITERALS: the same expected values typed into both
-legs' test sources by hand ("vectors shared by copy"). If one side's
-literals are edited alone, the legs silently stop proving the same
-contract — nothing catches it until someone diffs by hand. This script
-is that diff, automated, for the families where it CAN be automated —
-and an explicit inventory of the families where it cannot.
+BYCOPY_MIGRATION_001 (2026-06-02): ALL nine legacy by-copy conformance
+families have been migrated to the shared-artifact gate (NEURONKIT_SPEC § 9
+C-0). The FAMILIES dict is now empty. This script exits 0 in both lenient
+and --strict modes because there are no remaining unmigrated families.
 
-Anchor signal (comments stripped first): high-precision decimal
-literals (4+ fractional digits) in the Swift test file vs the Rust
-inline test region. Values that precise are recorded conformance
-numbers, never incidental counts. String/wire fixtures and structural
-tables are NOT mechanically comparable from source (Swift @Test display
-names and language syntax drown the signal) — families built on those
-report `not-comparable` with the prescribed fix.
+Migration complete:
+  NeuronKit families (8): benchmark_scoring, mmr_rank,
+    formal_concept_analysis, hybrid_recall, association_rule_mining,
+    scenario_profile, context_synthesizer, bradley_terry.
+    Artifact: packages/kits/NeuronKit/Tests/NeuronKitTests/Fixtures/
+              lens_vectors.json (extended with 8 new top-level sections)
+    Swift gate: LensVectorConformanceTests.swift
+    Rust gate:  NeuronKit/rust/tests/lens_conformance.rs
 
-Per-family modes:
+  CognitionKit families (1): migration_ranking.
+    Artifact: packages/kits/CognitionKit/Tests/CognitionKitTests/Fixtures/
+              cognition_vectors.json (new file)
+    Swift gate: CognitionVectorConformanceTests.swift
+    Rust gate:  CognitionKit/rust/tests/cognition_conformance.rs
+
+Historical note:
+  The original FAMILIES dict carried nine families. At the first audit
+  (2026-06-02) NONE carried machine-comparable two-sided literal anchors —
+  the "mirrors" were structural fixtures, worked-math comments, or one-sided
+  recordings. This script's job was to surface that gap; BYCOPY_MIGRATION_001
+  resolved it by moving all families to the artifact gate.
+
+Per-family modes (retained for reference; no families remain):
   exact             anchor value-sets must match, both directions
   tolerance:<eps>   anchors pair within <eps> after sorting — for
                     contracts documented as tolerance-based
-  one-sided         the anchors are recorded in ONE leg only (e.g. the
-                    Bradley-Terry ladder values: produced by a Swift
-                    run, asserted as literals in tournament.rs) — no
+  one-sided         the anchors are recorded in ONE leg only — no
                     two-sided table exists to diff
   not-comparable    the mirrored tables are structural/wire-string
                     fixtures this script cannot reliably extract
 
-`one-sided` and `not-comparable` families are reported every run as
-needing migration to the shared-artifact gate (NEURONKIT_SPEC § 9 C-0,
-the Tests/NeuronKitTests/Fixtures/lens_vectors.json pattern). When a
-family migrates, REMOVE it from this manifest — the artifact gate
-supersedes this heuristic.
-
-Run result on first audit (2026-06-02): NONE of the nine legacy
-families carry machine-comparable two-sided literal anchors in code —
-the "mirrors" are structural fixtures, worked-math comments, or
-one-sided recordings. Until migrated, their cross-version agreement is
-asserted by convention only and CANNOT be proven mechanically. That is
-the finding this script keeps visible on every run.
-
 Exit status:
-  0 — every comparable family's anchors agree
+  0 — every comparable family's anchors agree (trivially: none remain)
   1 — at least one comparable family has DIVERGED, or (with --strict)
       any family remains non-comparable / unmigrated
   2 — invocation / environment error
@@ -60,62 +56,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[4]
 KITS = REPO_ROOT / "packages" / "kits"
 
-# family name -> (swift test file, rust source file, mode)
-FAMILIES: dict[str, tuple[str, str, str]] = {
-    "mmr_rank": (
-        "NeuronKit/Tests/NeuronKitTests/MMRRankTests.swift",
-        "NeuronKit/rust/src/mmr_rank.rs",
-        "exact",
-    ),
-    "association_rule_mining": (
-        "NeuronKit/Tests/NeuronKitTests/AssociationRuleMiningTests.swift",
-        "NeuronKit/rust/src/association_rule_mining.rs",
-        "exact",
-    ),
-    "bradley_terry": (
-        "NeuronKit/Tests/NeuronKitTests/BradleyTerryTests.swift",
-        "NeuronKit/rust/src/tournament.rs",
-        # The dominance-ladder anchors were produced by a Swift run and
-        # are asserted (to 1e-6) as literals in the RUST tests only —
-        # the Swift suite asserts the MM stationary condition instead.
-        "one-sided",
-    ),
-    "benchmark_scoring": (
-        "NeuronKit/Tests/NeuronKitTests/BenchmarkScoringTests.swift",
-        "NeuronKit/rust/src/benchmark_scoring.rs",
-        # Expected values are simple fractions (0.5, 1.0) asserted
-        # against shared id-set fixtures — no high-precision anchors.
-        "not-comparable",
-    ),
-    "scenario_profile": (
-        "NeuronKit/Tests/NeuronKitTests/ScenarioProfileTests.swift",
-        "NeuronKit/rust/src/scenario_profile.rs",
-        # Wire-format JSON string fixtures.
-        "not-comparable",
-    ),
-    "context_synthesizer": (
-        "NeuronKit/Tests/NeuronKitTests/ContextSynthesizerTests.swift",
-        "NeuronKit/rust/src/context_synthesizer.rs",
-        # Structural document fixtures (summaries, patterns).
-        "not-comparable",
-    ),
-    "formal_concept_analysis": (
-        "NeuronKit/Tests/NeuronKitTests/FormalConceptAnalysisTests.swift",
-        "NeuronKit/rust/src/formal_concept_analysis.rs",
-        # Structural concept-lattice fixtures.
-        "not-comparable",
-    ),
-    "hybrid_recall": (
-        "NeuronKit/Tests/NeuronKitTests/HybridRecallTests.swift",
-        "NeuronKit/rust/src/hybrid_recall.rs",
-        "exact",
-    ),
-    "migration_ranking": (
-        "CognitionKit/Tests/CognitionKitTests/MigrationRankingTests.swift",
-        "CognitionKit/rust/src/migration_ranking.rs",
-        "exact",
-    ),
-}
+# All nine families have been migrated to the shared-artifact gate
+# (BYCOPY_MIGRATION_001). This dict is intentionally empty. The artifact
+# gates are in:
+#   - packages/kits/NeuronKit/Tests/NeuronKitTests/Fixtures/lens_vectors.json
+#   - packages/kits/CognitionKit/Tests/CognitionKitTests/Fixtures/cognition_vectors.json
+#
+# When a new by-copy family is added, add it here AND schedule a migration
+# mission. The by-copy pattern is the anti-pattern; the artifact is the goal.
+FAMILIES: dict[str, tuple[str, str, str]] = {}
 
 FLOAT_RE = re.compile(r"\b\d+\.\d{4,}\b")
 
