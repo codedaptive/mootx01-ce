@@ -53,10 +53,24 @@ struct RecipeToolsTests {
             .map(\.name)
             .sorted()
         #expect(recipeNames == [
+            "moot_anticipate",
+            "moot_bias",
             "moot_confirm_migration_promotion",
+            "moot_constellation",
+            "moot_contradiction",
+            "moot_drift",
+            "moot_estate_divergence",
+            "moot_free_association",
             "moot_grounded_synthesis",
+            "moot_keystones",
+            "moot_latent_themes",
             "moot_list_recipes",
+            "moot_mind_overlap",
+            "moot_partial_cue_recall",
             "moot_run_migration_benchmark",
+            "moot_theme_weather",
+            "moot_trust_grounded_synthesis",
+            "moot_tunnel_successor",
         ])
     }
 
