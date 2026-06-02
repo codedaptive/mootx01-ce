@@ -433,3 +433,102 @@ fn malformed_estate_id_returns_invalid_params() {
         err.code
     );
 }
+
+// ---------------------------------------------------------------------------
+// 7. moot_association_rules — analytics lens (AR_FCA_CAPABILITY_001)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn association_rules_over_captured_drawers_succeeds() {
+    // Capture drawers with the same categorical facets so the co-occurrence
+    // matrix has entries to mine. Association rules require repeated
+    // co-occurrence; three drawers in the same room/kind/channel/sensitivity
+    // bucket produce non-empty matrix cells.
+    let registry = EstateRegistry::new_inmemory();
+    for _ in 0..3 {
+        capture_one_drawer(&registry, "study content about knowledge", "study-room");
+    }
+
+    let a = args![];
+    let result = dispatch_tool("moot_association_rules", &a, &registry)
+        .expect("moot_association_rules must succeed");
+    assert!(
+        is_success(&result),
+        "association_rules should be a success result; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.starts_with("association_rules:"),
+        "result should start with 'association_rules:'; got: {text}"
+    );
+    assert!(
+        text.contains("drawer(s)"),
+        "result should mention drawer count; got: {text}"
+    );
+}
+
+#[test]
+fn association_rules_with_unknown_estate_returns_invalid_params() {
+    // Unknown estateID must produce a transport fault (INVALID_PARAMS),
+    // not a tool-level error result — the estate registry cannot resolve it.
+    let registry = EstateRegistry::new_inmemory();
+    let a = args!["estateID" => "00000000-0000-0000-0000-000000000000"];
+    let err = dispatch_tool("moot_association_rules", &a, &registry)
+        .expect_err("unknown estateID must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "unknown estateID must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8. moot_formal_concepts — analytics lens (AR_FCA_CAPABILITY_001)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn formal_concepts_over_captured_drawers_succeeds() {
+    // Two drawers in the same room share categorical facets; the formal context
+    // will have at least one concept.
+    let registry = EstateRegistry::new_inmemory();
+    capture_one_drawer(&registry, "concept content alpha", "concept-room");
+    capture_one_drawer(&registry, "concept content beta", "concept-room");
+
+    let a = args![
+        "minSupport" => 1,
+        "maxIntentSize" => 8,
+        "maxConcepts" => 20
+    ];
+    let result = dispatch_tool("moot_formal_concepts", &a, &registry)
+        .expect("moot_formal_concepts must succeed");
+    assert!(
+        is_success(&result),
+        "formal_concepts should be a success result; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.starts_with("formal_concepts:"),
+        "result should start with 'formal_concepts:'; got: {text}"
+    );
+    assert!(
+        text.contains("drawer(s)"),
+        "result should mention drawer count; got: {text}"
+    );
+}
+
+#[test]
+fn formal_concepts_with_unknown_estate_returns_invalid_params() {
+    // Mirror of the association_rules estateID test — same transport fault
+    // discipline for all lens tools.
+    let registry = EstateRegistry::new_inmemory();
+    let a = args!["estateID" => "00000000-0000-0000-0000-000000000000"];
+    let err = dispatch_tool("moot_formal_concepts", &a, &registry)
+        .expect_err("unknown estateID must produce transport fault");
+    assert_eq!(
+        err.code,
+        JSONRPCErrorCode::INVALID_PARAMS,
+        "unknown estateID must map to INVALID_PARAMS; got code {}",
+        err.code
+    );
+}

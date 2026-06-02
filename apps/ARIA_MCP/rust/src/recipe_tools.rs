@@ -80,14 +80,9 @@ fn run_list_recipes() -> serde_json::Value {
             .iter()
             .map(|c| {
                 // The capability rawValue — matches the Swift .rawValue string.
-                match c {
-                    cognition_kit::NeuronKitCapability::HybridRecall => "hybridRecall",
-                    cognition_kit::NeuronKitCapability::Synthesize => "synthesize",
-                    cognition_kit::NeuronKitCapability::DeriveBranch => "deriveBranch",
-                    cognition_kit::NeuronKitCapability::Benchmark => "benchmark",
-                    cognition_kit::NeuronKitCapability::PromoteBranch => "promoteBranch",
-                    cognition_kit::NeuronKitCapability::RunTournament => "runTournament",
-                }
+                // Delegates to the capability's own raw_value() to stay in sync
+                // with declaration order and avoid exhaustive match maintenance.
+                c.raw_value()
             })
             .collect();
         lines.push(format!("  - {} v{}", d.name, d.version));

@@ -13,8 +13,9 @@
 //!
 //! # Tool ordering
 //!
-//! moot_list_recipes, then the 14 lens tools (catalog order), then the
-//! 2 foundational recipe tools (grounded_synthesis, run_migration_benchmark,
+//! moot_list_recipes, then the 16 lens tools in catalog order (14 reasoning
+//! and 2 analytics), then the 2 foundational recipe tools
+//! (grounded_synthesis, run_migration_benchmark,
 //! confirm_migration_promotion), then the v1 lexicon minimum
 //! (moot_capture_drawer, moot_drawer_recall, moot_capture_tunnel).
 
@@ -28,7 +29,7 @@ pub fn build_tool_list() -> serde_json::Value {
     // 1. Recipe discovery.
     tools.push(list_recipes_tool());
 
-    // 2. The 14 reasoning-lens tools — descriptions from the catalog.
+    // 2. The 16 lens tools (14 reasoning + 2 analytics) — descriptions from the catalog.
     for desc in cognition_kit::recipe_catalog() {
         // The 2 foundational recipes appear in the catalog but get their own
         // dedicated tools below with richer descriptions. Skip them here.
@@ -208,6 +209,27 @@ fn lens_input_schema(tool_name: &str) -> serde_json::Value {
                 "filter": filter_schema
             }),
             json!(["estateIDB"]),
+        ),
+        "moot_association_rules" => object_schema(
+            json!({
+                "filter": filter_schema,
+                "limit": integer_schema("Max drawers to recall."),
+                "minSupport": number_schema("Minimum rule support (0..1). Default 0."),
+                "minConfidence": number_schema("Minimum rule confidence (0..1). Default 0."),
+                "estateID": estate_id
+            }),
+            json!([]),
+        ),
+        "moot_formal_concepts" => object_schema(
+            json!({
+                "filter": filter_schema,
+                "limit": integer_schema("Max drawers to recall."),
+                "minSupport": integer_schema("Minimum concept extent size. Default 1."),
+                "maxIntentSize": integer_schema("Maximum concept intent size. Default 8."),
+                "maxConcepts": integer_schema("Maximum concepts returned. Default 20."),
+                "estateID": estate_id
+            }),
+            json!([]),
         ),
         _ => object_schema(json!({}), json!([])),
     }

@@ -7,12 +7,18 @@
 // agent reads what recipes exist and triggers them, and the human-in-the-
 // loop confirms the migration promotion.
 //
-// Three tools ship here:
-//   - moot_grounded_synthesis        → GroundedSynthesis recipe (read)
-//   - moot_run_migration_benchmark   → MigrationBenchmark.run (read; no
-//                                       promotion — B-3)
+// Four foundational tools ship here:
+//   - moot_list_recipes               → RecipeCatalog enumeration (read)
+//   - moot_grounded_synthesis         → GroundedSynthesis recipe (read)
+//   - moot_run_migration_benchmark    → MigrationBenchmark.run (read; no
+//                                        promotion — B-3)
 //   - moot_confirm_migration_promotion → MigrationBenchmark.confirmPromotion
-//                                       by branch id (the human-gated write)
+//                                        by branch id (the human-gated write)
+//
+// The analytics recipes (moot_association_rules, moot_formal_concepts) and
+// all 14 reasoning-lens recipes ship through LensTools.swift — same
+// provenance (.recipe), dispatched through the lens surface per
+// LENS_DISCOVERABILITY_DECISION v2.0.
 //
 // Stateless-boundary discipline: MCP `tools/call` is stateless across
 // invocations, so the run tool cannot hand live `BranchHandle`s to a
@@ -39,7 +45,7 @@ enum RecipeTools {
     static let runMigrationBenchmarkToolName = "moot_run_migration_benchmark"
     static let confirmMigrationPromotionToolName = "moot_confirm_migration_promotion"
 
-    /// True when `name` is one of the recipe tools dispatched by name.
+    /// True when `name` is one of the foundational recipe tools dispatched by name.
     static func isRecipeTool(_ name: String) -> Bool {
         name == listRecipesToolName
             || name == groundedSynthesisToolName
@@ -49,8 +55,9 @@ enum RecipeTools {
 
     // MARK: - tools/list projection
 
-    /// The three recipe tool descriptors, advertised in `tools/list`
-    /// after the lexicon projection and the federation tool.
+    /// All foundational recipe tool descriptors, advertised in `tools/list`
+    /// after the lexicon projection and the federation tool. The analytics
+    /// and reasoning-lens tools are projected by LensTools.
     static func tools() -> [ProjectedTool] {
         [
             listRecipesTool(),
