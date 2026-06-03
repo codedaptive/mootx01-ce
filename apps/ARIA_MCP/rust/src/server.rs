@@ -16,9 +16,17 @@
 //! # ServerConfig
 //!
 //! Two constructors select the backend at startup:
-//! - `from_env()` — reads `ARIA_MCP_SQLITE_PATH` from the environment.
-//!   Present and non-empty → SQLite-backed default estate at that path.
-//!   Absent or empty → in-memory estate (identical to v1.0 behavior).
+//! - `from_env()` — reads `ARIA_MCP_POSTGRES_URL` and `ARIA_MCP_SQLITE_PATH`
+//!   from the environment and applies a four-state precedence ladder (no
+//!   trimming on either var — whitespace-only values are treated as non-empty):
+//!
+//!   | ARIA_MCP_POSTGRES_URL | ARIA_MCP_SQLITE_PATH | Backend           |
+//!   |-----------------------|----------------------|-------------------|
+//!   | Non-empty             | Non-empty            | Ambiguous → exit 1|
+//!   | Non-empty             | Absent or empty      | PostgreSQL estate |
+//!   | Absent or empty       | Non-empty            | SQLite at path    |
+//!   | Absent or empty       | Absent or empty      | In-memory (default)|
+//!
 //!   `from_env()` is the production entry point; `main.rs` calls it.
 //! - `default_inmemory()` — unconditionally in-memory; preserved for tests.
 //!
@@ -42,58 +50,90 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Construct a server config by reading `ARIA_MCP_SQLITE_PATH` from the
-    /// environment.
+    /// Construct a server config from environment variables.
     ///
-    /// Behavior table:
-    /// | Env var state       | Backend                          |
-    /// |---------------------|----------------------------------|
-    /// | Absent or empty     | In-memory (ephemeral, v1 default)|
-    /// | Present, non-empty  | SQLite at the specified path     |
-    /// | Present, unusable   | Exit 1 with clear stderr message |
+    /// Reads `ARIA_MCP_POSTGRES_URL` and `ARIA_MCP_SQLITE_PATH` and applies
+    /// a four-state precedence ladder. No trimming on either var — a
+    /// whitespace-only value is treated as non-empty (a config error that
+    /// fails fast, not a silent fallback). Matches the Swift server's
+    /// no-trimming semantics exactly.
     ///
-    /// Parent directories of the SQLite path are created if missing.
-    /// If directory creation fails, the server exits with a nonzero code
-    /// and a clear stderr message naming the path.
+    /// Precedence table:
+    /// | ARIA_MCP_POSTGRES_URL | ARIA_MCP_SQLITE_PATH | Backend                   |
+    /// |-----------------------|----------------------|---------------------------|
+    /// | Non-empty             | Non-empty            | Ambiguous → exit 1        |
+    /// | Non-empty             | Absent or empty      | PostgreSQL estate         |
+    /// | Absent or empty       | Non-empty            | SQLite at path            |
+    /// | Absent or empty       | Absent or empty      | In-memory (default)       |
     ///
-    /// Wire surface (tools, schemas, JSON-RPC) is unchanged for both backends.
+    /// Wire surface (tools, schemas, JSON-RPC) is unchanged for all backends.
     pub fn from_env() -> Self {
-        let sqlite_path = std::env::var("ARIA_MCP_SQLITE_PATH")
-            .ok()
-            .filter(|s| !s.is_empty());
+        // No .filter(|s| !s.is_empty()) — whitespace-only is non-empty here.
+        // None means the env var is absent; Some("") means it was set to empty.
+        // Both None and Some("") fall through to the absent/empty branch below.
+        let postgres_url = std::env::var("ARIA_MCP_POSTGRES_URL").unwrap_or_default();
+        let sqlite_path_raw = std::env::var("ARIA_MCP_SQLITE_PATH").unwrap_or_default();
 
-        let registry = match sqlite_path {
-            None => {
-                eprintln!("aria-mcp: ARIA_MCP_SQLITE_PATH not set — using in-memory estate");
-                EstateRegistry::new_inmemory()
-            }
-            Some(path) => {
-                // Create parent directories if they do not exist. Missing parents
-                // are a common operator error (the path is new or the mount is
-                // stale); failing fast here with a clear message is better than
-                // a cryptic SQLite "unable to open database" error.
-                if let Some(parent) = std::path::Path::new(&path).parent() {
-                    if !parent.as_os_str().is_empty() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
-                            eprintln!(
-                                "aria-mcp: cannot create parent directories for {path:?}: {e}"
-                            );
-                            std::process::exit(1);
-                        }
-                    }
+        let registry = if !postgres_url.is_empty() && !sqlite_path_raw.is_empty() {
+            // Ambiguous config: both vars set. Never pick silently — the
+            // operator must resolve the ambiguity by unsetting one of them.
+            // Mirrors Swift's AriaMCPMain ambiguous-config branch exactly.
+            eprintln!(
+                "aria-mcp: ambiguous config — both ARIA_MCP_POSTGRES_URL and \
+                 ARIA_MCP_SQLITE_PATH are set. Unset one to select the intended backend."
+            );
+            std::process::exit(1);
+        } else if !postgres_url.is_empty() {
+            // Only ARIA_MCP_POSTGRES_URL set → PostgreSQL-backed estate.
+            // PostgresDrawerStore::from_connection_string is lazy — the pool
+            // acquires connections on first use, not here. Construction
+            // succeeds even when the database is temporarily unreachable;
+            // the first tool call that touches the estate surfaces any
+            // connection error. Matches Swift's AriaMCPMain postgres branch.
+            eprintln!("aria-mcp: opening PostgreSQL estate at {postgres_url:?}");
+            match EstateRegistry::new_postgres(&postgres_url, "aria-mcp-default") {
+                Ok(reg) => {
+                    eprintln!("aria-mcp: PostgreSQL estate ready");
+                    reg
                 }
-                eprintln!("aria-mcp: opening SQLite estate at {path:?}");
-                match EstateRegistry::new_sqlite(&path, "aria-mcp-default") {
-                    Ok(reg) => {
-                        eprintln!("aria-mcp: SQLite estate ready at {path:?}");
-                        reg
-                    }
-                    Err(e) => {
-                        eprintln!("{e}");
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        } else if !sqlite_path_raw.is_empty() {
+            // Only ARIA_MCP_SQLITE_PATH set → SQLite-backed estate.
+            let path = sqlite_path_raw;
+            // Create parent directories if they do not exist. Missing parents
+            // are a common operator error (the path is new or the mount is
+            // stale); failing fast here with a clear message is better than
+            // a cryptic SQLite "unable to open database" error.
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        eprintln!("aria-mcp: cannot create parent directories for {path:?}: {e}");
                         std::process::exit(1);
                     }
                 }
             }
+            eprintln!("aria-mcp: opening SQLite estate at {path:?}");
+            match EstateRegistry::new_sqlite(&path, "aria-mcp-default") {
+                Ok(reg) => {
+                    eprintln!("aria-mcp: SQLite estate ready at {path:?}");
+                    reg
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            // Neither set → in-memory ephemeral estate (v1.0 default).
+            eprintln!(
+                "aria-mcp: neither ARIA_MCP_POSTGRES_URL nor ARIA_MCP_SQLITE_PATH \
+                       set — using in-memory estate"
+            );
+            EstateRegistry::new_inmemory()
         };
 
         ServerConfig {
