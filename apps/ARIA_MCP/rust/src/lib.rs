@@ -36,8 +36,10 @@
 //! See README.md for the full tool list (49 tools after v2b-p2) and what is
 //! out of scope (live federation fan-out, and live learn + non-drawer recall
 //! behavior — those tools are advertised and refuse honestly until their kit
-//! surfaces land). SQLite persistence is now supported via `ARIA_MCP_SQLITE_PATH`;
-//! CloudKit and federation remain future work.
+//! surfaces land). SQLite persistence is supported via `ARIA_MCP_SQLITE_PATH`;
+//! PostgreSQL persistence is supported via `ARIA_MCP_POSTGRES_URL` (pooled,
+//! lazy-connect, same pool defaults as the Swift leg). CloudKit and federation
+//! remain future work.
 
 pub mod dispatch;
 pub mod dispatcher;

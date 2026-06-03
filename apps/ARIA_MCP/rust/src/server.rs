@@ -23,7 +23,7 @@
 //!   | ARIA_MCP_POSTGRES_URL | ARIA_MCP_SQLITE_PATH | Backend           |
 //!   |-----------------------|----------------------|-------------------|
 //!   | Non-empty             | Non-empty            | Ambiguous → exit 1|
-//!   | Non-empty             | Absent or empty      | PostgreSQL (pending kit gap — exit 1 with message) |
+//!   | Non-empty             | Absent or empty      | PostgreSQL estate |
 //!   | Absent or empty       | Non-empty            | SQLite at path    |
 //!   | Absent or empty       | Absent or empty      | In-memory (default)|
 //!
@@ -32,16 +32,6 @@
 //!
 //! Wire surface (tools, schemas, JSON-RPC methods) is unchanged regardless
 //! of which backend is selected. Persistence is server-internal only.
-//!
-//! # PostgreSQL backend (pending)
-//!
-//! `ARIA_MCP_POSTGRES_URL` is read and the precedence logic is fully wired,
-//! but the estate cannot be opened yet. `locus_kit` lacks a
-//! `PostgresDrawerStore` wrapper (`DrawerStoreCore::new` is `pub(crate)` and
-//! `EstateCoordinator::open` requires `Arc<dyn DrawerStore>`). Until a
-//! `PostgresDrawerStore` is added to locus-kit, setting
-//! `ARIA_MCP_POSTGRES_URL` on the Rust server exits with a clear message
-//! and a nonzero code. The Swift server has full PostgreSQL support today.
 
 use std::io::{BufRead, BufReader, Read, Write};
 
@@ -72,7 +62,7 @@ impl ServerConfig {
     /// | ARIA_MCP_POSTGRES_URL | ARIA_MCP_SQLITE_PATH | Backend                   |
     /// |-----------------------|----------------------|---------------------------|
     /// | Non-empty             | Non-empty            | Ambiguous → exit 1        |
-    /// | Non-empty             | Absent or empty      | PostgreSQL (pending) → exit 1 |
+    /// | Non-empty             | Absent or empty      | PostgreSQL estate         |
     /// | Absent or empty       | Non-empty            | SQLite at path            |
     /// | Absent or empty       | Absent or empty      | In-memory (default)       |
     ///
@@ -94,21 +84,23 @@ impl ServerConfig {
             );
             std::process::exit(1);
         } else if !postgres_url.is_empty() {
-            // Only ARIA_MCP_POSTGRES_URL set → PostgreSQL backend intended.
-            // Not yet supported: locus-kit lacks PostgresDrawerStore.
-            // EstateCoordinator::open requires Arc<dyn DrawerStore> and
-            // DrawerStoreCore::new is pub(crate) within locus-kit. A
-            // PostgresDrawerStore newtype must be added before this branch
-            // can open an estate. Exit with a clear message rather than
-            // silently falling back to in-memory (which would violate the
-            // operator's intent).
-            eprintln!(
-                "aria-mcp: ARIA_MCP_POSTGRES_URL is set but PostgreSQL backend is not \
-                 yet supported in the Rust server. The Swift server (apps/ARIA_MCP) has \
-                 full PostgreSQL support. See ARIA_MCP_POSTGRES_001 rescope for the \
-                 locus-kit gap (PostgresDrawerStore missing)."
-            );
-            std::process::exit(1);
+            // Only ARIA_MCP_POSTGRES_URL set → PostgreSQL-backed estate.
+            // PostgresDrawerStore::from_connection_string is lazy — the pool
+            // acquires connections on first use, not here. Construction
+            // succeeds even when the database is temporarily unreachable;
+            // the first tool call that touches the estate surfaces any
+            // connection error. Matches Swift's AriaMCPMain postgres branch.
+            eprintln!("aria-mcp: opening PostgreSQL estate at {postgres_url:?}");
+            match EstateRegistry::new_postgres(&postgres_url, "aria-mcp-default") {
+                Ok(reg) => {
+                    eprintln!("aria-mcp: PostgreSQL estate ready");
+                    reg
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
         } else if !sqlite_path_raw.is_empty() {
             // Only ARIA_MCP_SQLITE_PATH set → SQLite-backed estate.
             let path = sqlite_path_raw;

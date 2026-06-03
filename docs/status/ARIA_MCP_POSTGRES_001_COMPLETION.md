@@ -1,6 +1,12 @@
 # Completion Report — ARIA_MCP_POSTGRES_001
 
-**Status:** PARTIAL (Swift leg COMPLETE; Rust leg RESCOPE_REQUIRED)
+**Status:** COMPLETE — both legs ship PostgreSQL backend parity.
+See § Follow-up Completion (ARIA_MCP_POSTGRES_001-COMPLETE) below for the Rust leg landing.
+
+---
+
+*Original partial status note (now superseded):*
+~~PARTIAL (Swift leg COMPLETE; Rust leg RESCOPE_REQUIRED)~~
 
 **Task:** ARIA_MCP_POSTGRES_001  
 **Stream:** worktree-agent-a7684bb9602da5cd8  
@@ -208,3 +214,69 @@ N/A — purely additive mission. No existing symbols changed; new env-var branch
 - Orphan code: none
 - Prohibited blast-radius patterns: none (no bridges, no shims, no deprecated annotations, no TODO on changed symbols)
 - Wire surface (tools/schemas/JSON-RPC): unchanged — verified by existing test suites passing
+
+---
+
+## Follow-up Completion — ARIA_MCP_POSTGRES_001-COMPLETE
+
+**Status:** COMPLETE  
+**Commits:** a6fd453 (LocusKit), + PIECE 2 commit (aria-mcp wiring)  
+**Date:** 2026-06-02
+
+### What landed
+
+**PIECE 1 — LocusKit `PostgresDrawerStore` (new file):**
+- `packages/kits/LocusKit/rust/src/drawer_store_postgres.rs` — thin newtype over `DrawerStoreCore` backed by `PostgresStorage`. Pool defaults (pool_size=10, connection_timeout_secs=5.0, idle_timeout_secs=300.0) match Swift leg exactly. Full `DrawerStore` delegation mirrors `SqliteDrawerStore` method-for-method (~270 LOC delegation).
+- `lib.rs` — module decl + doc update (two→three newtypes)
+- `drawer_store_inmemory.rs` — comment fidelity: "two newtypes" → "three newtypes", drop "(future)" language
+
+**PIECE 2 — aria-mcp Rust server wiring:**
+- `estate_registry.rs` — `new_postgres` + `register_postgres` constructors added (~90 LOC); module doc updated; stale kit-gap note removed
+- `server.rs` — postgres branch in `from_env()` replaced: exit-1 kit-gap message → real `EstateRegistry::new_postgres` open; module doc updated
+- `lib.rs` — surface boundary comment updated to reflect PostgreSQL support
+- `tests/persistence_tests.rs` — module doc updated; 2 new PG registry tests added (gated on `PERSISTENCEKIT_PG_URL`); pre-existing clippy lint on constant `is_empty()` suppressed with `#[allow(clippy::const_is_empty)]`
+- `README.md` (Rust) — "PostgreSQL pending" language replaced with actual support docs
+- `apps/ARIA_MCP/README.md` — "Rust pending kit gap" paragraph replaced with accurate both-legs parity statement
+
+### Precedence table as wired (Rust, final)
+
+| `ARIA_MCP_POSTGRES_URL` | `ARIA_MCP_SQLITE_PATH` | Backend | Exit |
+|---|---|---|---|
+| Non-empty | Non-empty | — | 1 — ambiguous config |
+| Non-empty | Absent or empty | PostgreSQL estate (pooled, lazy) | 0 |
+| Absent or empty | Non-empty | SQLite at path | 0 |
+| Absent or empty | Absent or empty | In-memory | 0 |
+
+### What is live-gated / untested here
+
+`DrawerStoreCore::new` initialises the estate manifest on first open, which requires a live database connection. All PostgreSQL path tests therefore require a live server and are gated on `PERSISTENCEKIT_PG_URL`. When that env var is absent, the tests emit a `SKIP` message and return. Live-gated (unskipped only with `PERSISTENCEKIT_PG_URL` set):
+
+- `new_postgres_opens_estate_with_live_server`
+- `register_postgres_estate_is_routable_by_estate_id`
+
+No live PG connection was available in CI for this run; these two tests were not exercised.
+
+### Test Verification Log (Rust, final)
+
+**LocusKit/rust:**
+- Baseline: 503 tests (442 + 11 + 27 + 4 + 6 + 13)
+- Final: 503 tests — unchanged (PostgresDrawerStore is additive, zero new unit tests in kit)
+- Exit: 0
+- Clippy: clean (`--all-targets -D warnings`)
+- fmt: clean (`--check`)
+
+**aria-mcp/rust:**
+- Baseline: 83 tests (3 + 53 + 8 + 12 + 7)
+- Final: 85 tests (3 + 53 + 8 + 14 + 7)
+- Delta: +2 PG registry tests (skip when PERSISTENCEKIT_PG_URL absent)
+- Exit: 0
+- Clippy: clean (`--all-targets -D warnings`)
+- fmt: clean
+
+### Self-review (follow-up)
+
+N/A blast radius — purely additive. No existing symbols renamed or removed.
+- Stale comments removed: "pending kit gap", "not yet supported", "(future)" references
+- Comment fidelity: module docs, struct docs, table rows all current
+- Wire surface: unchanged — no tool/schema/JSON-RPC edits
+- Prohibited patterns: none
