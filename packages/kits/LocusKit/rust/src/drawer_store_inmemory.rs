@@ -1,7 +1,7 @@
 //! Drawer-store implementations backed by persistence-kit `Storage`.
 //! Ports `DrawerStore.swift`.
 //!
-//! ## Architecture — core + two newtypes
+//! ## Architecture — core + three newtypes
 //!
 //! Backend identity is **structurally visible at every construction site**
 //! and **deliberately erased at the trait surface**.  The module exposes:
@@ -18,8 +18,11 @@
 //!   the `InMemoryStorage` internally so callers name their backend in
 //!   the type.
 //!
-//! - [`SqliteDrawerStore`] (future) — symmetric newtype over a
-//!   `SqliteStorage` backend; slots in without touching the core.
+//! - [`SqliteDrawerStore`] — symmetric newtype over a `SqliteStorage`
+//!   backend (WAL-mode, durable); see `drawer_store_sqlite.rs`.
+//!
+//! - [`PostgresDrawerStore`] — symmetric newtype over a `PostgresStorage`
+//!   backend (pooled, durable); see `drawer_store_postgres.rs`.
 //!
 //! The Swift parallel is the single storage-parameterised `actor
 //! DrawerStore` — no per-backend types exist on the Swift side, so only
@@ -1972,9 +1975,9 @@ impl DrawerStore for DrawerStoreCore {
 /// backend identity visible at the type level rather than buried in a
 /// runtime argument.
 ///
-/// Symmetric with the future `SqliteDrawerStore` newtype: each newtype
-/// names its backend, constructs it, and delegates every `DrawerStore`
-/// method to the shared `DrawerStoreCore`.
+/// Symmetric with the `SqliteDrawerStore` and `PostgresDrawerStore` newtypes:
+/// each newtype names its backend, constructs it, and delegates every
+/// `DrawerStore` method to the shared `DrawerStoreCore`.
 pub struct InMemoryDrawerStore {
     inner: DrawerStoreCore,
 }
