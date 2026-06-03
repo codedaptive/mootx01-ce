@@ -1,6 +1,6 @@
 //! corpus-kit -- the RAG layer of the GeniusLocus substrate.
 //!
-//! Rust port of the Swift `CorpusKit` Swift Package. Depends on
+//! Rust version of the Swift `CorpusKit` Swift Package. Depends on
 //! vectorkit (vector primitives), persistence-kit (content and bundle
 //! persistence), convergence-kit (replication), engram-lib (the Engram
 //! type), and substrate-lib (HLC, fingerprints).

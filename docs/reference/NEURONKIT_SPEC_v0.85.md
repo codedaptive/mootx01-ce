@@ -43,7 +43,7 @@ purpose: |
 > anticipation) as a port asymmetry to be reconciled away. It is not an
 > asymmetry — it is the design. The lenses are now specified as a
 > deliberate taxonomy with a shared construction archetype
-> (§ 8, "surface-then-sequence"), and both ports must realise the full
+> (§ 8, "surface-then-sequence"), and both legs must realise the full
 > lens surface (I-2 design law: every surface has both legs). The Swift
 > leg, currently narrower, is brought up to this spec Swift-first.
 
@@ -106,7 +106,7 @@ This specification defines:
   `Date()` or unseeded randomness in engines).
 - The conceptual error model.
 - Cross-port (Swift / Rust) conformance obligations, including the
-  obligation that **both ports realise the full lens surface**.
+  obligation that **both legs realise the full lens surface**.
 
 This specification does NOT define:
 
@@ -156,7 +156,7 @@ adjective-state accessors — the B-1 exception, I-2).
 external in-tree consumers** of NeuronKit; the recipe layer that would
 sequence the lenses has not shipped. The lenses are nonetheless
 first-class design: they exist to be sequenced, and the surface is
-contracted now so the Swift and Rust ports converge before the consumer
+contracted now so the Swift and Rust versions converge before the consumer
 arrives.
 
 ## § 4 — Invariants
@@ -253,7 +253,7 @@ and is a pure function of it — never a clock-derived seed. There is no
 unseeded randomness and no hash-order iteration that reaches the output:
 ties break on stable keys (input index, ascending ID string, ascending
 label, ascending node index, geometric-mean-normalised strength), so the
-Swift and Rust ports agree bit-for-bit on shared vectors.
+Swift and Rust versions agree bit-for-bit on shared vectors.
 
 **B-6 (hybrid recall is bounded by the verb surface):** the `recall`
 verb returns a single ordered `[Drawer]` (its internal RRF over the BM25
@@ -301,7 +301,7 @@ crate-local `TournamentError` enum (`SelfPairing`,
 `DisconnectedComparisonGraph`) rather than a shared `MOOTx01Error` name.
 The *cases* and their triggers match; the *type name* differs across
 ports (documented drift — see § 9 C-6 and INTERFACE § 4). This is the
-**only** sanctioned cross-port type-name divergence; everything else,
+**only** sanctioned cross-leg type-name divergence; everything else,
 including the entire lens surface, must agree in both name and value.
 
 ## § 7 — The reasoning-lens taxonomy
@@ -505,7 +505,7 @@ as the full interval elapses). The first `pump` always fires.
 two error cases are `MOOTx01Error.selfPairing` /
 `.disconnectedComparisonGraph` in Swift and `TournamentError::SelfPairing`
 / `::DisconnectedComparisonGraph` in Rust. Cases and triggers match; the
-type name differs. This is the only sanctioned cross-port name divergence
+type name differs. This is the only sanctioned cross-leg name divergence
 (§ 6).
 
 **C-8 (MMR on every page):** hybrid recall applies MMR reranking to the
@@ -543,7 +543,7 @@ no math (I-17). A lens whose result diverges from a direct call to the
 underlying SubstrateML / matrix-tier primitive on the same shaped input
 is non-conformant.
 
-**C-18 (full lens surface on both legs):** both the Swift and Rust ports
+**C-18 (full lens surface on both legs):** both the Swift and Rust versions
 realise the complete lens taxonomy (§ 7) — keystones, constellation,
 spreading activation, theme weather, latent themes, representation bias,
 learned preference, anticipation — with matching type and member names
@@ -552,8 +552,8 @@ bit-for-bit-equal numeric results on shared vectors. A surface present on
 one leg and absent on the other is non-conformant; this is the v0.85
 design law applied to NeuronKit (I-2 / "everything has both legs").
 
-**C-Det (cross-port determinism):** for every shared test vector, the
-Swift and Rust ports agree bit-for-bit on the reasoning engines AND the
+**C-Det (cross-leg determinism):** for every shared test vector, the
+Swift and Rust versions agree bit-for-bit on the reasoning engines AND the
 lenses they both implement — lattice-anchor inference, hybrid-recall
 rerank / shingle similarity / paging, context synthesis, the
 Bradley-Terry fit (strengths AND confidence-interval bounds), and every
@@ -562,7 +562,7 @@ frequencies, momentum, NMF loadings + reconstruction error, bias
 differences, preference strengths + intervals, Wilson-ranked
 predictions). Tie-breaks resolve on stable keys so the agreement is
 exact. Randomised primitives (spreading activation, latent themes) agree
-because both ports take the same explicit seed into the same gated
+because both legs take the same explicit seed into the same gated
 generator (SplitMix64).
 
 ---

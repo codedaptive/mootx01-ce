@@ -11,7 +11,7 @@ pub type RowID = String;
 
 /// String alias for opaque estate identifiers. The Rust mirror does
 /// not model the full `EstateHandle` value type because the Rust
-/// port of the GeniusLocusKit coordinator is out of scope for
+/// version of the GeniusLocusKit coordinator is out of scope for
 /// GLK-04; what the conformance gate verifies is the scheduler's
 /// surface vocabulary, not the per-handle dispatch infrastructure.
 pub type EstateHandleID = String;

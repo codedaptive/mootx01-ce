@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - CORPUSKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of CorpusKit in both ports: the Chunk content
+  Public API surface of CorpusKit in both legs: the Chunk content
   model and its content-addressed identity, the Chunker, the BM25Index
   actor, the BundleStore actor, HybridRecall, the Tokenizer protocol, the three CorpusKitProviders providers, the
   DeterministicTokenizer stand-in, and the CorpusKitSync manifest. The
@@ -423,7 +423,7 @@ impl Tokenizer for DeterministicTokenizer { /* FNV-1a fold, matches Swift */ }
 
 > **F11 consolidation (2026-05-27):** Swift AND Rust providers
 > conform to VectorKit's `EmbeddingProvider`. The previous parallel
-> `CorpusKit::TextEmbeddingProvider` (both ports) has been deleted.
+> `CorpusKit::TextEmbeddingProvider` (both legs) has been deleted.
 > Tokenizer stays in CorpusKit as a per-provider implementation
 > detail — not part of VectorKit's contract — preserving VectorKit's
 > pure-compute isolation for port maintenance.

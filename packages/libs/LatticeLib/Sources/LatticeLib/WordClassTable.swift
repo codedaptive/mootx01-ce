@@ -15,7 +15,7 @@ import Foundation
 
 /// The parsed word-class table with its pinned versioning metadata
 /// (cookbook §1.3 schema). Byte-identical shape to the Rust port's
-/// `WordClassTable` struct so both ports parse the same JSON.
+/// `WordClassTable` struct so both legs parse the same JSON.
 public struct WordClassTable: Sendable, Codable {
 
     /// The table version. Pinned; it gates pool submission — the

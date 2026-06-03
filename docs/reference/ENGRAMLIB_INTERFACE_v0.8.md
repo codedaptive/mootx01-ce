@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - ENGRAMLIB_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of EngramLib in both ports: the Engram type, the
+  Public API surface of EngramLib in both legs: the Engram type, the
   similarity / nearest-neighbour / threshold / union operations, the
   Match result type, and the Session reuse handle. The companion SPEC
   carries the behavioral contracts (invariants I-1…I-4, conformance

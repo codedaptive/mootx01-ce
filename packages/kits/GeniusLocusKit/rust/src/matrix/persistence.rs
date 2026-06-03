@@ -183,7 +183,7 @@ impl MatrixPersistenceBackend {
 
 // MARK: - Encoding
 //
-// Length-prefixed binary encoding. Not used for cross-port comparison
+// Length-prefixed binary encoding. Not used for cross-leg comparison
 // in this mission; the conformance harness compares in-memory tier
 // state, not on-disk bytes.
 

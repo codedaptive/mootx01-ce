@@ -8,7 +8,7 @@
 // stemmer crate. The reason: the conformance contract requires bit-identical stems
 // to the Swift engine, which is itself a hand-port. Any crate that diverges on even
 // one corpus vector would break the contract. The algorithm is hand-ported from the
-// same canonical Snowball source as the Swift version, so the two ports agree by
+// same canonical Snowball source as the Swift version, so the two legs agree by
 // construction. Verification is the SnowballEnglish.json reference corpus.
 //
 // ALGORITHM OVERVIEW (same as Swift)

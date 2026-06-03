@@ -38,7 +38,7 @@ pub const VERB_NAMES: [&str; 9] = [
 
 /// Errors raised by the GeniusLocusKit unified verb surface. Mirrors
 /// the Swift `VerbError` enum, case-for-case. Carries the same data
-/// the Swift side does so callers consuming both ports can branch on
+/// the Swift side does so callers consuming both legs can branch on
 /// matching shapes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerbError {

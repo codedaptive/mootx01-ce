@@ -288,7 +288,7 @@ func measureMomentSummary(_ rng: inout SplitMix64SW, _ wu: UInt64, _ me: UInt64)
     var out: [Measurement] = []
     for nRows in [100, 1_000, 10_000, 100_000] {
         // Build [RowLite] — same shape as Rust port for fair
-        // cross-port comparison. The full [Row] overload still
+        // cross-leg comparison. The full [Row] overload still
         // exists for production callsites; this bench measures
         // the lightweight path used by the dreaming daemon.
         var rows: [RowLite] = []

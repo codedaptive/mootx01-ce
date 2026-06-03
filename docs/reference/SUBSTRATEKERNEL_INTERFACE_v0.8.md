@@ -9,7 +9,7 @@ relates_to:
   - SUBSTRATEKERNEL_SPEC_v0.8.md  (the contract this interface implements)
   - SUBSTRATETYPES_INTERFACE_v0.8.md  (Layer 1 types this package consumes)
 purpose: |
-  Public API surface of SubstrateKernel in both ports. Eight Swift
+  Public API surface of SubstrateKernel in both legs. Eight Swift
   files publish the `SubstrateKernel` protocol, four concrete kernel
   backends, the `PortableKernel` dispatch namespace, and three
   primitives (`BitField`, `SHA256`, `HammingNN`). The Rust mirror

@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - NEURONKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of NeuronKit in both ports: the lattice-anchor
+  Public API surface of NeuronKit in both legs: the lattice-anchor
   inference path, the hybrid-recall + MMR reasoning surface, context
   synthesis, branch operations, the migration benchmark, tournament
   ranking, the Bradley-Terry batch MLE fitter, and the dreaming and

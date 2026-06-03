@@ -4,7 +4,7 @@
 //! synchronous paged cursor because the persistence-kit Rust trait is sync.
 //! The page-boundary contract (`page_index`, `is_last`, hydration
 //! semantics) is identical to the Swift contract so LP-0 vectors pass
-//! identically across both ports.
+//! identically across both legs.
 //!
 //! ## Hydration
 //!

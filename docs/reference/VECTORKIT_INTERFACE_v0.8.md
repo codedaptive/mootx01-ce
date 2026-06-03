@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - VECTORKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of VectorKit in both ports: the EmbeddingProvider
+  Public API surface of VectorKit in both legs: the EmbeddingProvider
   abstraction, the built-in FloatSimHashEmbeddingProvider, the
   StoredVector record, the VectorStore CRUD surface, the VectorMatch
   result type, and the VectorKitError enum. The companion SPEC carries

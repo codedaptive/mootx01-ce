@@ -141,7 +141,7 @@ impl ContentKind {
 ///
 /// Bit positions match `DrawerFeatureFlags` OptionSet members in
 /// `DrawerOperational.swift`. The Swift OptionSet's `rawValue` and
-/// these Rust constants are the same i64 wire value, so cross-port
+/// these Rust constants are the same i64 wire value, so cross-leg
 /// equality holds.
 pub struct DrawerFeatureFlags;
 

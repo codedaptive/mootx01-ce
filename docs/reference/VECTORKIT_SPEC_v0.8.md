@@ -157,13 +157,13 @@ provides storage and the application does not bring its own.
 its own. `findNearest` delegates the batch bitcount to EngramLib, which
 routes to the substrate kernel (BNNS / NEON accelerated where
 available). VectorKit therefore inherits EngramLib's and SubstrateLib's
-scalar-reference and cross-port parity guarantees.
+scalar-reference and cross-leg parity guarantees.
 
 ## § 5 — Behavioral contracts
 
 **B-1 (provider determinism):** for a fixed inference closure and
 projection seed, `embed(text)` is deterministic — the same text yields
-the same engram across calls and across the Swift and Rust ports
+the same engram across calls and across the Swift and Rust versions
 (FloatSimHash is bit-identical per the substrate conformance harness).
 
 **B-2 (provider error surface):** `embed` surfaces inference failure as
@@ -264,7 +264,7 @@ ascending then `drawerID` ascending, truncated to `limit`; `limit`/`k`
 of zero and the empty corpus both yield empty (B-6).
 
 **C-5 (empty-input zero engram):** `embed("")` returns the canonical
-zero engram in both ports without invoking the inference closure (I-5,
+zero engram in both legs without invoking the inference closure (I-5,
 B-1).
 
 **C-6 (provider determinism):** for a fixed seed and closure, `embed`
@@ -275,7 +275,7 @@ distinct engrams for the same float vector (I-2, B-1).
 substring-matching `drawerID`s up to `limit`, ordered ascending, and the
 empty set when nothing matches (B-7).
 
-**C-8 (cross-port):** the Swift and Rust ports agree on `embed` engrams
+**C-8 (cross-leg):** the Swift and Rust versions agree on `embed` engrams
 (for shared seeds and float vectors), on `findNearest` ordering, and on
 `findByKeyword` results for every shared test vector — inheriting
 SubstrateLib's bit-identical FloatSimHash and EngramLib's

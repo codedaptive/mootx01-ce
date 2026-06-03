@@ -109,7 +109,7 @@ package.
 
 **I-2 (determinism):** for a fixed bundled FDC signatures version and a
 fixed input term, `lookup` returns a byte-identical `Anchor` on every call
-and across both ports for artifact-resident inputs. No clock and no
+and across both legs for artifact-resident inputs. No clock and no
 randomness enters the lookup path.
 
 **I-3 (no fallback code):** when the FDC encoder matches nothing, `lookup`
@@ -120,9 +120,9 @@ sentinel, which is returned only when LatticeLib's FDC artifacts fail to
 load (a build/configuration error, carrying `dataVersion == "0.1.0-stub"`).
 
 **I-4 (Anchor shape parity):** `Anchor` is pure data with a byte-identical
-shape across the Swift and Rust ports — `code: String`,
+shape across the Swift and Rust versions — `code: String`,
 `wikidataQID: String?`, `confidence: UInt8`, `dataVersion: String`. Its
-JSON encoding is camelCase in both ports.
+JSON encoding is camelCase in both legs.
 
 **I-5 (confidence value set):** `Anchor.confidence` only ever holds a value
 from the substrate provenance confidence value set — `0` (null), `16`

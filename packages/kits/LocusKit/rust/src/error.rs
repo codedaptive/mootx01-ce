@@ -46,7 +46,7 @@ pub enum LocusKitError {
     /// Reserved for the migration workflow; no current mission throws
     /// this case, but it is part of the conformance surface.
     /// Swift declares these as `Int`, which is i64-width on Apple
-    /// Silicon, so the wire semantics match across the two ports.
+    /// Silicon, so the wire semantics match across the two legs.
     SchemaTooNew { found: i64, expected: i64 },
 
     /// Drawer, tunnel, or diary content failed validation. The

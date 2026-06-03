@@ -26,7 +26,7 @@
 //!   `materialize_room(wing, room, &store.drawers_in(wing, room)?, now)`.
 //! - Swift's default kernel `PortableKernel.kernelForCurrentPlatform()`
 //!   is replaced by `substrate_kernel::kernel::ScalarKernel` — the
-//!   scalar reference is the cross-port bit-identity baseline; SIMD
+//!   scalar reference is the cross-leg bit-identity baseline; SIMD
 //!   backends compose against the same `SubstrateKernel` trait so a
 //!   caller wanting acceleration substitutes a different kernel
 //!   value.

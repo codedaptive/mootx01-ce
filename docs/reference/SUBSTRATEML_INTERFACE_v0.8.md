@@ -10,7 +10,7 @@ relates_to:
   - SUBSTRATETYPES_INTERFACE_v0.8.md  (Layer 1 types consumed)
   - SUBSTRATEKERNEL_INTERFACE_v0.8.md  (Layer 2 primitives consumed)
 purpose: |
-  Public API surface of SubstrateML in both ports. Twenty-three Swift
+  Public API surface of SubstrateML in both legs. Twenty-three Swift
   files publish the cold-path algorithms over substrate types: the
   audit-log fold, matrix decay, Bradley-Terry estimation, NMF, FFT,
   eigenvalue centrality, lattice distance, anomaly / community
@@ -652,7 +652,7 @@ returns (empty, `nil`, default-valued).
   - `InformationTheoryTests.swift`
   - `TemporalCompressionTests.swift`
 - **Rust:** per-module `#[cfg(test)] mod tests` blocks, plus
-  `tests/` for cross-port conformance.
+  `tests/` for cross-leg conformance.
 
 ## § 6 — Examples
 

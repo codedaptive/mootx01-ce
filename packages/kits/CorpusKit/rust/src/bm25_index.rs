@@ -1,5 +1,5 @@
 //! BM25 inverted index. In-memory; rebuilt from the underlying
-//! bundle store as needed. The Rust port of the Swift BM25Index:
+//! bundle store as needed. The Rust version of the Swift BM25Index:
 //! the index owns its state directly and the mutating methods
 //! (`index_documents`, `remove`) take `&mut self`; scoring reads
 //! (`search`, `document_count`) take `&self`.

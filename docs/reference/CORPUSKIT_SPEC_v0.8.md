@@ -141,7 +141,7 @@ row; nothing else mediates the join.
 chunked — it does not normalize, lowercase, or trim. Normalization is a
 tokenizer concern applied at index/query time, not at storage time.
 
-**I-7 (cross-port parity):** the Swift and Rust ports produce
+**I-7 (cross-leg parity):** the Swift and Rust versions produce
 byte-identical chunk ids, identical chunk boundaries for identical
 configuration, identical BM25 rankings, and identical RRF fusion for
 every shared test vector. Neither port leads.
@@ -235,11 +235,11 @@ produces the same UUID in Swift and Rust for every shared
 (I-1, I-7).
 
 **C-2 (chunk boundaries):** `Chunker.chunk` produces identical chunk
-counts, offsets, lengths, and overlaps in both ports for identical text
+counts, offsets, lengths, and overlaps in both legs for identical text
 and `ChunkerConfiguration` on the delimiter-fallback path (B-1, I-7).
 
 **C-3 (BM25 ranking):** `BM25Index.search` returns the same ranked
-`(id, score)` order in both ports for every shared corpus + query, with
+`(id, score)` order in both legs for every shared corpus + query, with
 the documented IDF smoothing and tie-break (B-2).
 
 **C-4 (idempotent insert):** re-inserting a chunk with an existing id
@@ -248,7 +248,7 @@ is unchanged (I-3, B-5).
 
 **C-5 (hybrid fusion):** `HybridRecall.recall` produces the same fused
 ranking, the same `nil`-vs-present sub-score reporting, and the same
-`modelID`-filtered candidate set in both ports for every shared fixture
+`modelID`-filtered candidate set in both legs for every shared fixture
 (B-4, I-4, I-7).
 
 **C-6 (projection parity):** for a given pooled float vector and

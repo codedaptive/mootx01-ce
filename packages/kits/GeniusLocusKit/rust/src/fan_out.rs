@@ -2,7 +2,7 @@
 //
 // Mirrors `Sources/GeniusLocusKit/CrossEstateRead.swift`. The
 // overlap predicate is the conformance-gated unit: every shipping
-// implementation across both ports must agree on which open estates
+// implementation across both legs must agree on which open estates
 // a query region selects, given identical inputs. Parity tests live
 // in `tests/parity.rs`.
 
