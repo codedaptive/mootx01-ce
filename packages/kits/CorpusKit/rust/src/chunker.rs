@@ -83,7 +83,15 @@ pub fn chunk(
         if buf_len + seg_len <= config.target_chars || buffer.is_empty() {
             buffer.push_str(&segment);
         } else {
-            flush(&mut chunks, &mut buffer, &mut buffer_start, source_id, config, hlc_generator, now_millis);
+            flush(
+                &mut chunks,
+                &mut buffer,
+                &mut buffer_start,
+                source_id,
+                config,
+                hlc_generator,
+                now_millis,
+            );
             if buffer.is_empty() {
                 buffer_start = current_offset;
             }
@@ -91,7 +99,15 @@ pub fn chunk(
         }
         current_offset += seg_len;
         if buffer.chars().count() >= config.target_chars {
-            flush(&mut chunks, &mut buffer, &mut buffer_start, source_id, config, hlc_generator, now_millis);
+            flush(
+                &mut chunks,
+                &mut buffer,
+                &mut buffer_start,
+                source_id,
+                config,
+                hlc_generator,
+                now_millis,
+            );
         }
     }
 
@@ -143,7 +159,6 @@ fn flush(
     }
     *buffer_start = next_start;
 }
-
 
 /// Convenience wrapper around `chunk` for callers without their
 /// own HLC generator. Builds an in-place generator with `node_id`

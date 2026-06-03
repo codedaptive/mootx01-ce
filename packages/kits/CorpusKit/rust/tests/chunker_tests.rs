@@ -30,11 +30,16 @@ fn chunker_short_input_is_one_chunk() {
 #[test]
 fn chunker_splits_when_target_exceeded() {
     // Three sentences of ~40 chars each; target 60 forces splits.
-    let text = "Alpha sentence number one. Bravo sentence number two. Charlie sentence number three.";
+    let text =
+        "Alpha sentence number one. Bravo sentence number two. Charlie sentence number three.";
     let mut hlc = HLCGenerator::new(1);
     let config = ChunkerConfiguration::new(60, 10, true);
     let chunks = chunk(text, "src-2", config, &mut hlc, 1_000);
-    assert!(chunks.len() >= 2, "expected at least 2 chunks, got {}", chunks.len());
+    assert!(
+        chunks.len() >= 2,
+        "expected at least 2 chunks, got {}",
+        chunks.len()
+    );
     // Every chunk should be non-empty and carry the source id.
     for c in &chunks {
         assert!(!c.text.is_empty());
@@ -70,7 +75,12 @@ fn chunker_hlc_advances_per_chunk() {
         let cur = chunks[i].hlc;
         let prev_key = (prev.physical_time, prev.logical_count);
         let cur_key = (cur.physical_time, cur.logical_count);
-        assert!(cur_key >= prev_key, "HLCs must not regress: {:?} -> {:?}", prev_key, cur_key);
+        assert!(
+            cur_key >= prev_key,
+            "HLCs must not regress: {:?} -> {:?}",
+            prev_key,
+            cur_key
+        );
     }
 }
 

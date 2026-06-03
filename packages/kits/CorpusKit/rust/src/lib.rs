@@ -26,20 +26,20 @@
 //! - hybrid_recall: vector kNN + BM25 fused via RRF
 //! - sync_manifest: CorpusKitSync::manifest helper
 
-pub mod chunk;
-pub mod tokenizer;
-pub mod error;
-pub mod chunker;
 pub mod bm25_index;
 pub mod bundle_store;
+pub mod chunk;
+pub mod chunker;
+pub mod error;
 pub mod hybrid_recall;
 pub mod sync_manifest;
+pub mod tokenizer;
 
-pub use chunk::*;
-pub use tokenizer::*;
-pub use error::*;
-pub use chunker::*;
 pub use bm25_index::*;
 pub use bundle_store::*;
+pub use chunk::*;
+pub use chunker::*;
+pub use error::*;
 pub use hybrid_recall::*;
 pub use sync_manifest::*;
+pub use tokenizer::*;

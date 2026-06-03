@@ -108,8 +108,8 @@ impl Chunk {
     /// changing it re-keys every chunk fleet-wide and breaks the join
     /// to existing vectors. UUID d6f3a1b2-7c84-4e5f-9a0b-1c2d3e4f5061.
     const NAMESPACE: Uuid = Uuid::from_bytes([
-        0xd6, 0xf3, 0xa1, 0xb2, 0x7c, 0x84, 0x4e, 0x5f,
-        0x9a, 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61,
+        0xd6, 0xf3, 0xa1, 0xb2, 0x7c, 0x84, 0x4e, 0x5f, 0x9a, 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50,
+        0x61,
     ]);
 
     /// Derive the content-addressed v5 UUID for a chunk. The name is
@@ -150,11 +150,7 @@ impl ScoredChunk {
         }
     }
 
-    pub fn with_subscores(
-        mut self,
-        vector_score: Option<f32>,
-        keyword_score: Option<f32>,
-    ) -> Self {
+    pub fn with_subscores(mut self, vector_score: Option<f32>, keyword_score: Option<f32>) -> Self {
         self.vector_score = vector_score;
         self.keyword_score = keyword_score;
         self

@@ -1,9 +1,9 @@
 // Tests for BundleStore (persistence-kit-backed chunks table).
 
 use corpus_kit::{BundleStore, Chunk};
+use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use persistence_kit::{inmemory::InMemoryStorage, Storage};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -26,7 +26,11 @@ fn make_store() -> BundleStore {
 }
 
 fn sample_chunk(source: &str, offset: usize, text: &str, ts: i64) -> Chunk {
-    let hlc = HLC { physical_time: ts, logical_count: 0, node_id: 1 };
+    let hlc = HLC {
+        physical_time: ts,
+        logical_count: 0,
+        node_id: 1,
+    };
     let mut metadata = BTreeMap::new();
     metadata.insert("kind".into(), "test".into());
     Chunk::new(
@@ -109,10 +113,16 @@ fn insert_idempotent_on_duplicate_id() {
         0,
         12,
         "changed text",
-        HLC { physical_time: 200, logical_count: 0, node_id: 1 },
+        HLC {
+            physical_time: 200,
+            logical_count: 0,
+            node_id: 1,
+        },
         BTreeMap::new(),
     );
-    store.insert(&[dup]).expect("second insert is a no-op, not an error");
+    store
+        .insert(&[dup])
+        .expect("second insert is a no-op, not an error");
 
     assert_eq!(store.count().expect("count"), 1);
     let fetched = store.get(id).expect("get").expect("must exist");
@@ -122,7 +132,11 @@ fn insert_idempotent_on_duplicate_id() {
 #[test]
 fn metadata_roundtrips_through_json() {
     let store = make_store();
-    let hlc = HLC { physical_time: 1, logical_count: 0, node_id: 1 };
+    let hlc = HLC {
+        physical_time: 1,
+        logical_count: 0,
+        node_id: 1,
+    };
     let mut metadata = BTreeMap::new();
     metadata.insert("k1".into(), "v1".into());
     metadata.insert("k2".into(), "v2 with spaces".into());
