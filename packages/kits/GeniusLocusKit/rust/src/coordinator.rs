@@ -1,21 +1,20 @@
-// coordinator.rs — EstateCoordinator: the estate registry + unified verb
-// surface, the Rust parity of the Swift `GeniusLocusKit` actor
-// (Sources/GeniusLocusKit/GeniusLocusKit.swift + Verbs/VerbSurface.swift).
+// coordinator.rs — EstateCoordinator: the estate registry and the full
+// nine-verb dispatch surface, the Rust parity of the Swift `GeniusLocusKit`
+// actor (Sources/GeniusLocusKit/GeniusLocusKit.swift + Verbs/VerbSurface.swift).
 //
-// This is the downstream mission that wires the real Rust LocusKit estate:
-// the registry holds a live `locus_kit::Estate` per open handle, and the
-// six core verbs (capture/recall/mutate/withdraw/expunge/reanchor) delegate
-// to it exactly as the Swift `extension GeniusLocusKit` verbs delegate to
-// `estate(for: handle)`. The clone is behaviour-faithful so BOTH platforms
-// return identical datasets — the precondition for the conformance tents
-// pitched many levels up the tree.
+// The registry holds a live `locus_kit::Estate` per open handle; all nine
+// verbs delegate to it exactly as the Swift `extension GeniusLocusKit` verbs
+// delegate to `estate(for: handle)`. Six verbs (capture/recall/mutate/
+// withdraw/expunge/reanchor) reach a real Estate implementation; three
+// (learn/propose/associate) return `NotSupportedByEstate` until their
+// Brain-layer bodies ship — matching observable Swift behavior on both legs.
 //
-// The Brain-layer verbs (propose/associate/learn) are NOT here: they remain
-// `NotSupportedByEstate` on the `verbs::surface::Surface` lexicon surface in
-// both languages until the Brain layer ships. The AriaLexicon name-identity
-// + boundary-guard parity lives on `Surface`; the live dispatch lives here,
-// matching the Swift split between the verb-name vocabulary and the actor's
-// verb implementations.
+// The boundary guards (EmptyReanchor at reanchor, ExpungeNotConfirmed at
+// expunge) fire before any estate dispatch, parity of the Swift guards.
+//
+// The parity taxonomy (VerbError, VERB_NAMES, Verb, Noun, SurfaceTarget)
+// lives in `verbs::lexicon` and is imported by both this coordinator and
+// the parity tests.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,7 +29,7 @@ use locus_kit::frames::{CaptureFrame, MutationKind};
 use locus_kit::tunnel::Tunnel;
 
 use crate::handle::{EstateHandle, EstateUuid};
-use crate::verbs::surface::VerbError;
+use crate::verbs::lexicon::VerbError;
 
 /// Errors raised by the GeniusLocusKit composition surface on the Rust
 /// side. Mirrors the Swift `GeniusLocusKitError`; cases carry the same
@@ -355,6 +354,44 @@ impl EstateCoordinator {
         self.estate_for_verb(handle)?;
         Err(VerbError::NotSupportedByEstate {
             verb: "learn".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - propose
+
+    /// Brain-layer verb — substrate-driven proposal creation. Validates
+    /// the handle first so a stale handle raises `EstateNotOpen` uniformly
+    /// (parity of Swift `estate(for:)` propagating out of a verb). Returns
+    /// `NotSupportedByEstate` until the Brain layer ships, matching the
+    /// Swift GLK surface's `VerbError.notSupportedByEstate(verb: "propose")`.
+    pub fn propose(
+        &self,
+        handle: &EstateHandle,
+        _frame: crate::verbs::frames::ProposeFrame,
+    ) -> Result<(), VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "propose".to_string(),
+        }
+        .into())
+    }
+
+    // MARK: - associate
+
+    /// Brain-layer verb — substrate-driven association creation. Validates
+    /// the handle first so a stale handle raises `EstateNotOpen` uniformly
+    /// (parity of Swift `estate(for:)` propagating out of a verb). Returns
+    /// `NotSupportedByEstate` until the Brain layer ships, matching the
+    /// Swift GLK surface's `VerbError.notSupportedByEstate(verb: "associate")`.
+    pub fn associate(
+        &self,
+        handle: &EstateHandle,
+        _frame: crate::verbs::frames::AssociateFrame,
+    ) -> Result<(), VerbDispatchError> {
+        self.estate_for_verb(handle)?;
+        Err(VerbError::NotSupportedByEstate {
+            verb: "associate".to_string(),
         }
         .into())
     }
