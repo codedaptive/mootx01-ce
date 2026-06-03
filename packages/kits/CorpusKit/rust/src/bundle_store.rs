@@ -4,12 +4,12 @@
 
 use crate::chunk::Chunk;
 use crate::error::{CorpusKitError, CorpusKitResult};
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use persistence_kit::{
     Column, ColumnDeclaration, IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration,
     Storage, StorageError, StoragePredicate, StorageRow, TableDeclaration, TypedValue,
 };
+use std::collections::BTreeMap;
+use std::sync::Arc;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -93,8 +93,14 @@ impl BundleStore {
                 .map_err(|e| CorpusKitError::EncodingFailure(format!("metadata: {}", e)))?;
             let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
             values.insert("id".into(), TypedValue::Uuid(chunk.id));
-            values.insert("source_id".into(), TypedValue::Text(chunk.source_id.clone()));
-            values.insert("start_offset".into(), TypedValue::Int(chunk.start_offset as i64));
+            values.insert(
+                "source_id".into(),
+                TypedValue::Text(chunk.source_id.clone()),
+            );
+            values.insert(
+                "start_offset".into(),
+                TypedValue::Int(chunk.start_offset as i64),
+            );
             values.insert("length".into(), TypedValue::Int(chunk.length as i64));
             values.insert("text".into(), TypedValue::Text(chunk.text.clone()));
             values.insert("hlc".into(), TypedValue::Hlc(chunk.hlc));
@@ -112,10 +118,7 @@ impl BundleStore {
     }
 
     pub fn get(&self, id: Uuid) -> CorpusKitResult<Option<Chunk>> {
-        let predicate = StoragePredicate::Eq(
-            Column::new("chunks", "id"),
-            TypedValue::Uuid(id),
-        );
+        let predicate = StoragePredicate::Eq(Column::new("chunks", "id"), TypedValue::Uuid(id));
         let rows = self
             .storage
             .row_store()
@@ -207,9 +210,7 @@ fn decode_chunk(row: &StorageRow) -> Option<Chunk> {
         _ => return None,
     };
     let metadata: BTreeMap<String, String> = match row.get("metadata") {
-        Some(TypedValue::Json(bytes)) => {
-            serde_json::from_slice(bytes).unwrap_or_default()
-        }
+        Some(TypedValue::Json(bytes)) => serde_json::from_slice(bytes).unwrap_or_default(),
         _ => BTreeMap::new(),
     };
     Some(Chunk::new(

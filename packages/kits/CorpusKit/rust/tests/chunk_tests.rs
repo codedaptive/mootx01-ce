@@ -22,7 +22,11 @@ use uuid::Uuid;
 
 #[test]
 fn chunk_embeds_substrate_hlc_directly() {
-    let hlc = HLC { physical_time: 1234, logical_count: 5, node_id: 7 };
+    let hlc = HLC {
+        physical_time: 1234,
+        logical_count: 5,
+        node_id: 7,
+    };
     let mut metadata = BTreeMap::new();
     metadata.insert("source".into(), "test".into());
     let chunk = Chunk::new(
@@ -43,16 +47,12 @@ fn chunk_embeds_substrate_hlc_directly() {
 
 #[test]
 fn scored_chunk_with_subscores() {
-    let hlc = HLC { physical_time: 1, logical_count: 0, node_id: 1 };
-    let chunk = Chunk::new(
-        Uuid::new_v4(),
-        "src-1",
-        0,
-        4,
-        "test",
-        hlc,
-        BTreeMap::new(),
-    );
+    let hlc = HLC {
+        physical_time: 1,
+        logical_count: 0,
+        node_id: 1,
+    };
+    let chunk = Chunk::new(Uuid::new_v4(), "src-1", 0, 4, "test", hlc, BTreeMap::new());
     let scored = ScoredChunk::new(chunk.clone(), 0.5).with_subscores(Some(0.3), Some(0.2));
     assert_eq!(scored.score, 0.5);
     assert_eq!(scored.vector_score, Some(0.3));

@@ -129,15 +129,12 @@ impl BM25Index {
             }
             let n = posting.len() as f64;
             // IDF with the +1 smoothing for non-negative scores.
-            let idf = (1.0
-                + ((state.total_docs as f64) - n + 0.5) / (n + 0.5))
-                .ln();
+            let idf = (1.0 + ((state.total_docs as f64) - n + 0.5) / (n + 0.5)).ln();
             for (doc_id, tf) in posting {
                 let dl = *state.doc_lengths.get(doc_id).unwrap_or(&0) as f64;
                 let denom = (*tf as f64)
                     + self.parameters.k1
-                        * (1.0 - self.parameters.b
-                            + self.parameters.b * dl / avg_doc_len.max(1.0));
+                        * (1.0 - self.parameters.b + self.parameters.b * dl / avg_doc_len.max(1.0));
                 let contribution =
                     idf * ((*tf as f64) * (self.parameters.k1 + 1.0)) / denom.max(0.0001);
                 *scores.entry(*doc_id).or_insert(0.0) += contribution;

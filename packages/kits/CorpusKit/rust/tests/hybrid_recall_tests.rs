@@ -1,12 +1,11 @@
 // Tests for HybridRecall + CorpusKitSync manifest.
 
-use engram_lib::Engram;
-use corpus_kit::{recall, BM25Index, BundleStore, Chunk,
-              HybridRecallConfiguration, CorpusKitSync};
+use corpus_kit::{recall, BM25Index, BundleStore, Chunk, CorpusKitSync, HybridRecallConfiguration};
 use corpus_kit_providers::DeterministicTokenizer;
+use engram_lib::Engram;
+use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use persistence_kit::{inmemory::InMemoryStorage, Storage};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -20,8 +19,8 @@ use persistence_kit::{inmemory::InMemoryStorage, Storage};
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
-use substrate_types::hlc::HLC;
 use convergence_kit::{ConflictPolicy, SyncDirection};
+use substrate_types::hlc::HLC;
 use uuid::Uuid;
 use vectorkit::VectorStore;
 
@@ -44,18 +43,20 @@ fn hybrid_recall_merges_vector_and_keyword_hits() {
     // Two storages with shared chunk ids: one for vector store,
     // one for bundle store. The drawer_id in vectorstore is the
     // chunk's UUID string.
-    let vector_storage: Arc<dyn Storage> =
-        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    let vector_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let vector_store = VectorStore::open(vector_storage).expect("vector store");
-    let bundle_storage: Arc<dyn Storage> =
-        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    let bundle_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let bundle_store = BundleStore::open(bundle_storage).expect("bundle store");
 
     // Build a deterministic corpus of three chunks.
     let texts = ["alpha document", "beta document", "gamma document"];
     let mut chunks: Vec<Chunk> = Vec::new();
     for (i, text) in texts.iter().enumerate() {
-        let hlc = HLC { physical_time: i as i64, logical_count: 0, node_id: 1 };
+        let hlc = HLC {
+            physical_time: i as i64,
+            logical_count: 0,
+            node_id: 1,
+        };
         chunks.push(Chunk::new(
             Uuid::new_v4(),
             "src-1",
@@ -113,11 +114,9 @@ fn hybrid_recall_merges_vector_and_keyword_hits() {
 
 #[test]
 fn hybrid_recall_with_limit_zero_returns_empty() {
-    let vector_storage: Arc<dyn Storage> =
-        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    let vector_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let vector_store = VectorStore::open(vector_storage).expect("vector store");
-    let bundle_storage: Arc<dyn Storage> =
-        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    let bundle_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let bundle_store = BundleStore::open(bundle_storage).expect("bundle store");
     let bm25 = BM25Index::new(Arc::new(DeterministicTokenizer::new()));
     let probe = Engram::new(0, 0, 0, 0);
@@ -137,11 +136,9 @@ fn hybrid_recall_with_limit_zero_returns_empty() {
 
 #[test]
 fn hybrid_recall_empty_corpus_returns_empty() {
-    let vector_storage: Arc<dyn Storage> =
-        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    let vector_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let vector_store = VectorStore::open(vector_storage).expect("vector store");
-    let bundle_storage: Arc<dyn Storage> =
-        Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    let bundle_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let bundle_store = BundleStore::open(bundle_storage).expect("bundle store");
     let bm25 = BM25Index::new(Arc::new(DeterministicTokenizer::new()));
     let probe = Engram::new(0xFF, 0, 0, 0);
