@@ -66,6 +66,9 @@
 //! - `drawer_store_sqlite` — `SqliteDrawerStore` (public newtype over
 //!   `DrawerStoreCore` backed by persistence-kit `SqliteStorage`;
 //!   WAL-mode, durable across restarts)
+//! - `drawer_store_postgres` — `PostgresDrawerStore` (public newtype over
+//!   `DrawerStoreCore` backed by persistence-kit `PostgresStorage`;
+//!   pooled, durable across restarts, lazy connection)
 //! - `bitmap_ops` — § 7.7 bitmap operator primitives (and-mask,
 //!   threshold-compare, XOR, shift-extract, SIMD-ballot,
 //!   Hamming distance)
@@ -90,10 +93,11 @@
 //! The LP-0 vector runner (`tests/lp0_vectors.rs`) exercises the full
 //! port end-to-end against the canonical conformance vectors.
 //!
-//! Two concrete `DrawerStore` implementations ship: `InMemoryDrawerStore`
-//! (ephemeral/test fixture) and `SqliteDrawerStore` (WAL-mode SQLite,
-//! durable). Both are thin newtypes over `DrawerStoreCore` (the shared
-//! verb-logic core), each wrapping the appropriate persistence-kit backend.
+//! Three concrete `DrawerStore` implementations ship: `InMemoryDrawerStore`
+//! (ephemeral/test fixture), `SqliteDrawerStore` (WAL-mode SQLite, durable),
+//! and `PostgresDrawerStore` (pooled PostgreSQL, durable). All three are thin
+//! newtypes over `DrawerStoreCore` (the shared verb-logic core), each wrapping
+//! the appropriate persistence-kit backend.
 
 pub mod adjectives;
 pub mod association;
@@ -116,6 +120,7 @@ pub mod drawer_operational;
 pub mod drawer_state_validator;
 pub mod drawer_store;
 pub mod drawer_store_inmemory;
+pub mod drawer_store_postgres;
 pub mod drawer_store_sqlite;
 pub mod error;
 pub mod estate;
