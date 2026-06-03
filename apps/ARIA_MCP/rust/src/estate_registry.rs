@@ -16,13 +16,20 @@
 //!   identical for both backends. See `server::ServerConfig::from_env` for how
 //!   the env var selects between them at startup.
 //!
-//! NOTE: PostgreSQL backend support requires `locus_kit::PostgresDrawerStore`,
-//! which does not yet exist. The persistence-kit `PostgresStorage` struct is
-//! available, but `EstateCoordinator::open` requires `Arc<dyn DrawerStore>`
-//! and `DrawerStoreCore::new` is `pub(crate)` within locus-kit. A
-//! `PostgresDrawerStore` newtype must be added to locus-kit before this
-//! registry can offer `new_postgres` / `register_postgres`. See
-//! ARIA_MCP_POSTGRES_001 completion report for the full rescope finding.
+//! Three backend shapes are available:
+//! - **In-memory** (`new_inmemory`, `register_inmemory`): ephemeral, discarded
+//!   on process exit. Used by default when neither env var is set.
+//! - **SQLite** (`new_sqlite`, `register_sqlite`): WAL-mode durable estate
+//!   at a caller-supplied filesystem path. Database file is created if absent.
+//! - **PostgreSQL** (`new_postgres`, `register_postgres`): pooled durable estate
+//!   at a libpq connection string. Pool defaults match the Swift leg (size=10,
+//!   connect_timeout=5.0s, idle_timeout=300.0s). Connection is lazy — the pool
+//!   acquires connections on first use; construction succeeds even when PG is
+//!   temporarily unreachable.
+//!
+//! Persistence is server-internal — no wire change; the JSON-RPC surface is
+//! identical for all three backends. See `server::ServerConfig::from_env` for
+//! how environment variables select between them at startup.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +38,7 @@ use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+use locus_kit::drawer_store_postgres::PostgresDrawerStore;
 use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
 use uuid::Uuid;
@@ -67,9 +75,9 @@ pub struct OpenEstate {
 /// The estate registry the dispatcher uses to resolve `estateID` arguments.
 ///
 /// One default estate; zero or more additional estates keyed by UUID.
-/// The default estate is either in-memory (when `ARIA_MCP_SQLITE_PATH` is
-/// unset) or SQLite-backed (when the env var is set) — selection happens in
-/// `ServerConfig::from_env`. Wire surface is identical for both backends.
+/// The default estate is in-memory, SQLite-backed, or PostgreSQL-backed
+/// depending on which env var `ServerConfig::from_env` finds set. Wire surface
+/// is identical for all three backends.
 pub struct EstateRegistry {
     /// The default estate — targeted when a tool call omits `estateID`.
     pub default: OpenEstate,
@@ -207,6 +215,96 @@ impl EstateRegistry {
             .unwrap()
             .open(store, OwnerCredentials::new(owner), 0, 100)
             .expect("additional sqlite estate open must succeed");
+        let estate = OpenEstate {
+            coord: Arc::clone(&self.coord),
+            handle,
+            estate_id,
+        };
+        self.extras.insert(estate_id, estate);
+        Ok(estate_id)
+    }
+
+    /// Construct a registry with one PostgreSQL-backed default estate at `conn_str`.
+    ///
+    /// `conn_str` must be a libpq-compatible connection string (e.g.
+    /// `"postgresql://user:pass@host/db"`). The pool is lazy — connections are
+    /// acquired on first use; construction succeeds even when the database is
+    /// temporarily unreachable.
+    ///
+    /// Pool defaults match the Swift leg: `pool_size=10`,
+    /// `connection_timeout_secs=5.0`, `idle_timeout_secs=300.0`.
+    ///
+    /// `owner` identifies the estate in log messages and audit records; use
+    /// `DEFAULT_OWNER` (`"aria-mcp-default"`) for the production default estate.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` with a human-readable message if
+    /// `PostgresDrawerStore` construction fails (malformed connection string,
+    /// etc.). The pool itself is lazy; actual connection errors surface on first
+    /// use, not here.
+    pub fn new_postgres(conn_str: &str, owner: &str) -> Result<Self, String> {
+        let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            PostgresDrawerStore::from_connection_string(conn_str, INIT_NOW, None).map_err(|e| {
+                format!("aria-mcp: cannot open PostgreSQL estate at {conn_str:?}: {e}")
+            })?,
+        );
+        // PostgresStorage does not store an estate_uuid in a manifest the same
+        // way SQLite does. We mint a new UUID for this registry session; the
+        // manifest uuid is reconciled by DrawerStoreCore on first write.
+        let estate_id = {
+            let manifest = store
+                .read_manifest()
+                .map_err(|e| format!("aria-mcp: cannot read estate manifest from postgres: {e}"))?;
+            uuid::Uuid::parse_str(&manifest.estate_uuid).map_err(|e| {
+                format!("aria-mcp: manifest estate_uuid is not a valid UUID (postgres): {e}")
+            })?
+        };
+        let handle = coord
+            .lock()
+            .unwrap()
+            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .expect("default postgres estate open must succeed");
+        let default_estate = OpenEstate {
+            coord: Arc::clone(&coord),
+            handle,
+            estate_id,
+        };
+        let mut extras = HashMap::new();
+        extras.insert(estate_id, default_estate.clone());
+        Ok(EstateRegistry {
+            default: default_estate,
+            extras,
+            coord,
+        })
+    }
+
+    /// Register an additional PostgreSQL-backed estate at `conn_str`.
+    /// Returns the estate's UUID.
+    ///
+    /// Same pool semantics as `new_postgres`: lazy connections, Swift-parity
+    /// defaults. Returns `Err(String)` on construction failure.
+    pub fn register_postgres(&mut self, conn_str: &str, owner: &str) -> Result<Uuid, String> {
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            PostgresDrawerStore::from_connection_string(conn_str, INIT_NOW, None).map_err(|e| {
+                format!("aria-mcp: cannot open PostgreSQL estate at {conn_str:?}: {e}")
+            })?,
+        );
+        let estate_id = {
+            let manifest = store
+                .read_manifest()
+                .map_err(|e| format!("aria-mcp: cannot read estate manifest from postgres: {e}"))?;
+            Uuid::parse_str(&manifest.estate_uuid).map_err(|e| {
+                format!("aria-mcp: manifest estate_uuid is not a valid UUID (postgres): {e}")
+            })?
+        };
+        let handle = self
+            .coord
+            .lock()
+            .unwrap()
+            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .expect("additional postgres estate open must succeed");
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
             handle,

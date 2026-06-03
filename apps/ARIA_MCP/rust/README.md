@@ -124,21 +124,17 @@ fails fast, not a silent fallback.
 | `ARIA_MCP_POSTGRES_URL` | `ARIA_MCP_SQLITE_PATH` | Backend | Notes |
 |---|---|---|---|
 | Non-empty | Non-empty | — | Ambiguous config: exit 1, stderr names both vars |
-| Non-empty | Absent or empty | PostgreSQL (pending) | Kit gap: see note below |
+| Non-empty | Absent or empty | PostgreSQL estate | Pooled, lazy-connect, Swift-parity defaults |
 | Absent or empty | Non-empty | SQLite at that path | WAL-mode, durable across restarts |
 | Absent or empty | Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
 
-**PostgreSQL support pending:** the Rust server recognises
-`ARIA_MCP_POSTGRES_URL` in the precedence table above but cannot yet open a
-PostgreSQL estate. The persistence-kit `PostgresStorage` is available, but
-`locus-kit` lacks a `PostgresDrawerStore` wrapper (the
-`DrawerStoreCore::new` constructor is `pub(crate)`; `EstateCoordinator::open`
-requires `Arc<dyn DrawerStore>`). Adding `PostgresDrawerStore` to locus-kit
-is queued as a follow-up mission (ARIA_MCP_POSTGRES_001 rescope). Until that
-lands, setting `ARIA_MCP_POSTGRES_URL` on the Rust server exits with a
-"not yet supported" message and a nonzero code.
-
-The Swift server has full PostgreSQL support today.
+**PostgreSQL:** the Rust server opens a pooled PostgreSQL estate via
+`locus_kit::PostgresDrawerStore` backed by persistence-kit's `PostgresStorage`.
+Pool defaults match the Swift leg exactly: `pool_size=10`,
+`connection_timeout_secs=5.0`, `idle_timeout_secs=300.0`. The pool acquires
+connections on first use (lazy), so construction succeeds even when the
+database is temporarily unreachable; the first tool call that touches the
+estate surfaces any connection error.
 
 **SQLite:** parent directories of the SQLite path are created automatically if
 missing.

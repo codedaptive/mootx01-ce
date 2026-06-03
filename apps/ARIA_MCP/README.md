@@ -75,10 +75,9 @@ know or care which backend is active.
 
 CloudKit and live federation fan-out remain future work.
 
-**Rust parity note:** the Rust server's env handling for `ARIA_MCP_POSTGRES_URL` is
-pending a locus-kit `PostgresDrawerStore` addition (see ARIA_MCP_POSTGRES_001
-completion report). The Swift server has full PostgreSQL support. The Rust server
-supports in-memory and SQLite only until that kit gap is resolved.
+Both the Swift and Rust servers support all three backends (in-memory, SQLite,
+PostgreSQL) with identical wire behavior. The Rust server opens PostgreSQL estates
+via `locus_kit::PostgresDrawerStore` (ARIA_MCP_POSTGRES_001-COMPLETE).
 
 ### Example
 
