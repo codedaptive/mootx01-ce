@@ -59,6 +59,9 @@ Icon
 # Rust build artifacts — global, any depth (every crate's target/ dir)
 **/target/
 
+# Cargo lockfiles are not tracked, any depth
+**/Cargo.lock
+
 # Security-audit Finder-flag manifest (local triage sidecar)
 packages/.audit-flagged
 
