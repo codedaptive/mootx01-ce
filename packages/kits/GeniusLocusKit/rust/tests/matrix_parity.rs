@@ -1,7 +1,7 @@
 // matrix_parity.rs — Rust-side conformance tests for the matrix tier.
 //
 // Mission GLK-06. The same canonical vectors that the Swift
-// `MatrixTierTests` exercise are used here so the two ports stay
+// `MatrixTierTests` exercise are used here so the two legs stay
 // numerically aligned. Substrate-mathematics §8 and cookbook §6 fix
 // the semantics; these tests fix the byte-for-byte expectations.
 

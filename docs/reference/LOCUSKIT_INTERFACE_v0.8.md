@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - LOCUSKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of LocusKit in both ports, in two tiers within
+  Public API surface of LocusKit in both legs, in two tiers within
   § 2. Tier 1 is the CONSUMED CONTRACT — the types GeniusLocusKit,
   NeuronKit, and ARIA_MCP actually import (the Estate actor, the four
   nouns, the verb frames, the recall stream, the filter algebra, the

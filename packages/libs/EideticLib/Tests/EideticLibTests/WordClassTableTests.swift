@@ -49,7 +49,7 @@ struct WordClassTableTests {
 
     @Test("wire schema uses pinned snake_case keys")
     func wireSchemaUsesPinnedSnakeCaseKeys() throws {
-        // The §1.3 schema is the cross-port contract: both legs parse
+        // The §1.3 schema is the cross-leg contract: both legs parse
         // the same JSON, so the CodingKeys must emit snake_case.
         let table = WordClassTable(
             tableVersion: "1.0.0",

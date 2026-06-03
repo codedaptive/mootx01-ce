@@ -68,7 +68,7 @@ use substrate_types::simhash;
 ///
 /// Density defaults to `1.0` (the Swift default for
 /// `blockFamilies(baseSeed:density:)`). The Rust signature has no
-/// default; the constructor passes `1.0` explicitly so cross-port
+/// default; the constructor passes `1.0` explicitly so cross-leg
 /// fingerprints match.
 pub struct EstateFingerprintFamilies {
     pub families: [HyperplaneFamily; 4],
@@ -81,7 +81,7 @@ impl EstateFingerprintFamilies {
         let estate_uuid: String = estate_uuid.into();
         let base = Self::base_seed(&estate_uuid);
         // Density 1.0 matches the Swift default. Diverging here would
-        // silently produce incompatible fingerprints across the two ports.
+        // silently produce incompatible fingerprints across the two legs.
         let families = HyperplaneFamily::block_families(&base, 1.0);
         EstateFingerprintFamilies {
             families,

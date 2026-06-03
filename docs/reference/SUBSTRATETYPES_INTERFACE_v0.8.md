@@ -11,7 +11,7 @@ relates_to:
   - SUBSTRATEML_INTERFACE_v0.8.md      (sibling: cold-path algorithms)
   - SUBSTRATELIB_INTERFACE_v0.8.md     (umbrella: orchestration)
 purpose: |
-  Public API surface of SubstrateTypes in both ports. Twenty-four
+  Public API surface of SubstrateTypes in both legs. Twenty-four
   Swift files publish forty-two top-level types and eight algebra-
   primitive namespaces; the Rust mirror exposes the same shapes with
   Rust-idiomatic names. The companion SPEC carries the behavioral

@@ -314,7 +314,7 @@ algorithms. Higher-level than bitops but still bandwidth-bounded.
   "everything observed in a time window" primitive.
   *Note:* Swift takes the full production `Row` type; Rust takes
   a minimal `RowLite { fingerprint, capture_hlc }` stub. The
-  harness bridges this asymmetry — both ports produce identical
+  harness bridges this asymmetry — both legs produce identical
   output. New code that calls `summarize` should pass whichever
   type its language exposes; results are equivalent.
 
@@ -440,7 +440,7 @@ the following:
 
 4. **Order-determinism.** Where floating-point summation order
    matters (e.g. `eigenvalue_centrality`'s inner product),
-   both ports iterate inputs in identical order. Don't reorder.
+   both legs iterate inputs in identical order. Don't reorder.
 
 5. **No private state.** Harness primitives test pure functions
    or stateless update operations. Anywhere the substrate

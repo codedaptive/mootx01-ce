@@ -1,7 +1,7 @@
 // lib.rs, the ARIA grammar reified.
 //
 // One noun, nine verbs, four adjectives, and the verb-noun acceptance
-// matrix, as data. No behavior. This is the Rust port of the
+// matrix, as data. No behavior. This is the Rust version of the
 // vocabulary every MOOTx01 kit and ARIA surface conforms to; it is
 // conformance-gated against the Swift port (AriaLexicon) so both speak
 // the same words. The canonical statement is ARIA_LEXICON.md.

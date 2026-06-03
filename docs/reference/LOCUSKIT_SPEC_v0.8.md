@@ -171,7 +171,7 @@ never a file path. The kit depends only on the PersistenceKit protocol and
 never constructs a concrete backend; the caller owns the connection's
 lifecycle.
 
-**I-11 (cross-port parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and XOR-fold reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
+**I-11 (cross-leg parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and XOR-fold reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
 
 ## § 5 — Behavioral contracts
 
@@ -289,7 +289,7 @@ before touching storage (I-9, error model).
 same injected `now` produces identical stored rows and audit deltas; no
 engine reads the system clock internally (I-6).
 
-**C-7 (cross-port, I-11):** the Swift and Rust version produce identical
+**C-7 (cross-leg, I-11):** the Swift and Rust version produce identical
 value-level results for C-1…C-4 and C-6 against shared behaviour, allowing
 for the documented surface gap (§ 8). A value-level divergence fails the
 conformance gate.
@@ -332,7 +332,7 @@ required to agree.
 
 The nine verbs are not uniformly legal on every noun. Legality is defined by
 the acceptance matrix (`AriaLexiconLib.Acceptance`, architecture spec § 7.2),
-which is data so a conformance harness checks both ports agree:
+which is data so a conformance harness checks both legs agree:
 
 | Noun | Accepts |
 |---|---|

@@ -160,11 +160,11 @@ stored column.
 instance for one estate. A PostgreSQL pool is per-estate, fixed-size,
 with an explicit maximum and no auto-resize (Q6).
 
-**I-10 (cross-port parity):** the Rust version (`persistence-kit`) mirrors
+**I-10 (cross-leg parity):** the Rust version (`persistence-kit`) mirrors
 the value model, predicate algebra, schema declaration, and the five
-trait contracts case-for-case. All three backends ship in both ports —
+trait contracts case-for-case. All three backends ship in both legs —
 InMemory, SQLite (rusqlite "bundled" + sqlite-vec), and PostgreSQL (sync
-`postgres` crate + pgvector) — and both ports implement the transaction
+`postgres` crate + pgvector) — and both legs implement the transaction
 surface. The one port adaptation: Swift's `transaction<T>` returns a
 generic value, while Rust's must stay object-safe (`dyn Storage`), so the
 Rust block returns `StorageResult<()>` (Ok commits, Err rolls back) and
@@ -306,7 +306,7 @@ INSERT succeeds (B-8).
 **C-7 (date storage):** a round-tripped `TypedValue.timestamp` is stored
 as ISO-8601 text and reads back equal (I-3).
 
-**C-8 (cross-port parity):** every backend — InMemory, SQLite, and
+**C-8 (cross-leg parity):** every backend — InMemory, SQLite, and
 PostgreSQL — produces identical observable results in the Swift and Rust
 ports for the same fixture sequence: value round-trip, predicate
 evaluation, schema declaration, blob I/O, audit ordering, generated

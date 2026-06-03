@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - PERSISTENCEKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of PersistenceKit in both ports, in two tiers
+  Public API surface of PersistenceKit in both legs, in two tiers
   within § 2. Tier 1 is the CONSUMED CONTRACT — the 18 types other
   packages actually import (the Storage protocol, its five sub-store
   protocols, the value model, schema declaration, predicate algebra,
@@ -52,7 +52,7 @@ targets:
   `sqlite.rs`, `postgres.rs`.
 - Traits are synchronous (`Result<T, StorageError>`); the Swift side is
   `async` because Swift actors require it, while the in-process Rust
-  backends do no real async I/O. All three backends ship in both ports:
+  backends do no real async I/O. All three backends ship in both legs:
   InMemory, SQLite (rusqlite "bundled" + sqlite-vec vectors), and
   PostgreSQL (sync `postgres` crate + pgvector). The Rust transaction
   surface (`Storage::transaction` + `StorageTransaction`) is implemented

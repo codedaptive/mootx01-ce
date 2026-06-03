@@ -3,7 +3,7 @@
 // Per-type coverage for the WordClass enum
 // (Sources/EideticLib/WordClass.swift): the String-backed FDC encoder
 // Step 1 label. The stable lowercase JSON form ("noun"/"verb"/"other")
-// is the cross-port contract the shared conformance vectors and the
+// is the cross-leg contract the shared conformance vectors and the
 // Rust port read; mirrors the Rust word_class.rs serialization test.
 
 import Testing

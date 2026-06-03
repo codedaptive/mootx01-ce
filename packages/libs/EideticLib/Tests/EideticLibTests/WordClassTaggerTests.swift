@@ -60,7 +60,7 @@ struct WordClassSharedVectorTests {
     }
 
     /// Every shared vector resolves to its expected WordClass. This is
-    /// the Swift half of the cross-port conformance gate; the Rust
+    /// the Swift half of the cross-leg conformance gate; the Rust
     /// port asserts the same file.
     @Test("all shared vectors match")
     func allSharedVectorsMatch() throws {

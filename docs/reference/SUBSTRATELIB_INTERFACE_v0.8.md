@@ -11,7 +11,7 @@ relates_to:
   - SUBSTRATEKERNEL_INTERFACE_v0.8.md  (Layer 2 primitives consumed)
   - SUBSTRATEML_INTERFACE_v0.8.md     (Layer 3 algorithms consumed)
 purpose: |
-  Public API surface of SubstrateLib in both ports. Three Swift files
+  Public API surface of SubstrateLib in both legs. Three Swift files
   publish the nine substrate verbs (`Verbs.Substrate`), the row-state
   automaton (`RowStateAutomaton`), and the AuditGate write-gate
   (`AuditGate.admit`). The Rust mirror exposes the same shapes with

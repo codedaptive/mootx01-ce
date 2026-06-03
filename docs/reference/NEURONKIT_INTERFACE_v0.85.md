@@ -9,7 +9,7 @@ languages: [swift, rust]
 relates_to:
   - NEURONKIT_SPEC_v0.85.md  (the contract this interface implements)
 purpose: |
-  Public API surface of NeuronKit in both ports: the lattice-anchor
+  Public API surface of NeuronKit in both legs: the lattice-anchor
   inference path, the hybrid-recall + MMR reasoning surface, context
   synthesis, branch operations, the migration benchmark, tournament
   ranking, the Bradley-Terry batch MLE fitter, the dreaming and
@@ -389,7 +389,7 @@ public struct TournamentReport: Sendable, Equatable {
 ### Reasoning-lens result types (SPEC § 7)
 
 Pure data carried out of the lenses; identical shape across ports (member
-names match; the only sanctioned cross-port divergence anywhere in
+names match; the only sanctioned cross-leg divergence anywhere in
 NeuronKit is the fitter error name in § 4, SPEC C-6). All Swift result
 types are `Sendable, Equatable, Codable`; all Rust result types derive
 `Debug, Clone, PartialEq` and serde where serialised.
@@ -959,7 +959,7 @@ cargo test -p neuron-kit
 
 (Exercises the pure reasoning engines shared with Swift — lattice anchor,
 hybrid-recall rerank / shingle / paging, context synthesis, Bradley-Terry
-— and every § 7 lens, against the shared cross-port vectors of C-Det.)
+— and every § 7 lens, against the shared cross-leg vectors of C-Det.)
 
 ## § 6 — Examples
 

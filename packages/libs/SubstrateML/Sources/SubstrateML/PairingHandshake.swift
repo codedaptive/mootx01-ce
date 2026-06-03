@@ -50,7 +50,7 @@ public struct PairingNonce: Sendable, Equatable {
         // ASCII lexicographic compare, "0F..." sorts AFTER "10..."
         // (because 'F' = 0x46 > '1' = 0x31), but raw byte compare
         // ranks 0x0F before 0x10. The Rust mirror compares raw
-        // bytes; Swift must agree byte-for-byte or the two ports
+        // bytes; Swift must agree byte-for-byte or the two legs
         // would derive different seeds and incompatible shared
         // hyperplane families. Cross-language conformance gate
         // catches this divergence.

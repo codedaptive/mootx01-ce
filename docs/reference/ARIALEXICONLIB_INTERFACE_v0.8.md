@@ -10,7 +10,7 @@ relates_to:
 purpose: |
   Public API surface of AriaLexiconLib: the noun, verb, adjective, and
   flow enumerations, the verb-noun acceptance matrix, and the grammar
-  constant — in both the Swift and Rust ports. The companion SPEC
+  constant — in both the Swift and Rust versions. The companion SPEC
   document carries the behavioral contracts (invariants I-1…I-5,
   conformance C-1…C-5) these signatures satisfy.
 ---

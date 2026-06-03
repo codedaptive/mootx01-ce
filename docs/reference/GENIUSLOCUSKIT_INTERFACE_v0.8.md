@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - GENIUSLOCUSKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of GeniusLocusKit in both ports, in two tiers within
+  Public API surface of GeniusLocusKit in both legs, in two tiers within
   § 2. Tier 1 is the CONSUMED CONTRACT — the types NeuronKit and ARIA_MCP
   actually import (the GeniusLocusKit actor, the unified verb surface and
   its frames, the recall results, the fan-out and grant-gated federated

@@ -9,12 +9,12 @@
 //   declaration-order key emission — observed output puts the
 //   keys in what looks like hash-bucket order, which varies by
 //   struct. Rust serde_json preserves declaration order. So
-//   byte-identical JSON across the two ports would require
+//   byte-identical JSON across the two legs would require
 //   custom CodingKeys + custom encode(to:) on the Swift side
 //   (to control order) OR alphabetic-key normalization on both.
 //
 //   Neither is wrong; both are bigger swaps. F16.A pins the gate
-//   at the level that actually matters for cross-port consumers:
+//   at the level that actually matters for cross-leg consumers:
 //   the JSON KEY NAMES match Swift↔Rust, and the value-encoding
 //   conventions match (integer raws for RowState, camelCase
 //   string raws for RowVerb / AuditVerb, etc.).

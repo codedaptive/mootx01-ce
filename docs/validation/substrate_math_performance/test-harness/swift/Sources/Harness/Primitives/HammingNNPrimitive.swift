@@ -7,7 +7,7 @@
 // substrate_reference/GeniusLocusReference/glref-swift-HammingNN.swift
 // via the GeniusLocusReference Swift package.
 //
-// Tie-breaking note: both ports use a max-heap of size K and
+// Tie-breaking note: both legs use a max-heap of size K and
 // extract via sort-by-distance. Equal distances may surface in
 // different orders between languages. The harness applies a
 // deterministic secondary sort by row-ID bytes (lexicographic)
@@ -55,7 +55,7 @@ public enum HammingNNPrimitive {
             let cohortSize = 16
             // Use k == cohort_size so the top-K returns the entire
             // cohort. This sidesteps the tie-breaking ambiguity in
-            // both ports' K-bounded heaps: when distances tie at
+            // both legs' K-bounded heaps: when distances tie at
             // the eviction boundary, Swift and Rust may evict
             // different items. Returning the full cohort and
             // applying the canonical (distance, id-bytes) sort

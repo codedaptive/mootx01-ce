@@ -329,7 +329,7 @@ mod tests {
     }
 
     /// The expected bitmap layout version is the value the spec fixes;
-    /// changing it is a coordinated cross-port event.
+    /// changing it is a coordinated cross-leg event.
     #[test]
     fn expected_bitmap_layout_version_matches_spec() {
         assert_eq!(EXPECTED_BITMAP_LAYOUT_VERSION, "v1.0");

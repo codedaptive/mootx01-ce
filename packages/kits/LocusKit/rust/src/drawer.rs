@@ -29,7 +29,7 @@
 //!   the Rust port stores timestamps as i64 epoch seconds and the
 //!   persistence-kit `TypedValue::Timestamp(i64)` carries them on the wire.
 //!   The Swift port uses `Date` because the storage layer there hands
-//!   back `Date`; both ports agree on the canonical wire shape (ISO8601
+//!   back `Date`; both legs agree on the canonical wire shape (ISO8601
 //!   in SQLite).
 //! - `UUID lineageID` → `uuid::Uuid lineage_id`. Same value semantics.
 

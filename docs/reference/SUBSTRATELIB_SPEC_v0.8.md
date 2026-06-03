@@ -236,11 +236,11 @@ The package raises:
 
 ## § 7 — Conformance requirements
 
-Per I-7 (cross-port bit-identity) and ML-5 (federation determinism),
+Per I-7 (cross-leg bit-identity) and ML-5 (federation determinism),
 this package ships conformance vectors:
 
 - **AuditGate vectors:** identical events emitted for identical
-  inputs across Swift and Rust ports. Includes content-ID hash
+  inputs across Swift and Rust versions. Includes content-ID hash
   identity.
 - **RowStateAutomaton vectors:** every (state, verb) pair returns
   the same next state (or the same error) across ports.

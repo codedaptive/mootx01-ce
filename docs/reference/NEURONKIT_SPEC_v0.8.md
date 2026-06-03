@@ -187,7 +187,7 @@ deterministic function of its inputs. No engine reads the wall clock —
 methods, the benchmark, the tournament, the dreaming/maintenance cycles).
 There is no unseeded randomness and no hash-order iteration that reaches
 the output: ties break on stable keys (input index, ascending ID
-string, geometric-mean-normalised strength), so the Swift and Rust ports
+string, geometric-mean-normalised strength), so the Swift and Rust versions
 agree bit-for-bit on shared vectors.
 
 **B-6 (hybrid recall is bounded by the verb surface):** the `recall`
@@ -259,8 +259,8 @@ two-source taxonomy (implicit recall-trace + explicit `DiaryEntry.reward`)
 is preserved at the type level; the explicit source is a documented seam
 the substrate does not yet populate.
 
-**C-Det (cross-port determinism):** for every shared test vector, the
-Swift and Rust ports agree bit-for-bit on the reasoning engines they
+**C-Det (cross-leg determinism):** for every shared test vector, the
+Swift and Rust versions agree bit-for-bit on the reasoning engines they
 both implement — lattice-anchor inference, hybrid-recall rerank /
 shingle similarity / paging, context synthesis, and the Bradley-Terry
 fit (strengths AND confidence-interval bounds). Tie-breaks resolve on
