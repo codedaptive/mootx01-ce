@@ -71,7 +71,7 @@ already exists noun-free (`threshold_compare` over `ADJ_SENS_MASK`,
 `bitmap_evaluator.rs:439`). Extract it as `pub(crate) fn
 sensitivity_clamp(adjective_bitmap: i64, ceiling: AdjectiveSensitivity)
 -> bool` in `adjectives.rs` (where the nibble layout already lives), so
-any egress path — federation, vector, corpus (Perkins' audit) — adopts
+any egress path — federation, vector, corpus (the clearance-pattern propagation TODO) — adopts
 the same function, not a re-derivation. **Note (comment-fidelity, not
 load-bearing):** `bitmap_evaluator.rs:433` comments "adjective bits 4-7"
 while the constants and `adjectives.rs:16` say bits 6-11. The constants
@@ -231,7 +231,7 @@ acceptance gate, not a nice-to-have.
   boundary." Reason: per-noun filter-threading re-introduces the
   copy-paste that caused the original bug; a single generic clamp is
   unbypassable by construction and adoptable by the federation/vector/
-  corpus paths Perkins is auditing.
+  corpus paths the propagation TODO tracks.
 - The layering invariant (§4) is the durable artifact. If a future
   PersistenceKit RAM cache is built, it slots below the gate and evicts on
   the existing StorageObserver. Never cache post-clamp results. This was
