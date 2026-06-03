@@ -64,8 +64,11 @@ public extension EideticLib {
     /// splits on `.`, `!`, `?`, and newline while preserving
     /// the terminator at the end of each segment. This is
     /// the canonical reference path, identical across
-    /// platforms and ports (the Rust port's chunker fallback
-    /// implements the same algorithm).
+    /// platforms. The Rust cross-leg counterpart is
+    /// `eidetic_lib::segmenter::sentences`, which implements
+    /// the same algorithm (Apple NLTokenizer acceleration is
+    /// deliberately Apple-only and excluded from cross-leg
+    /// parity).
     ///
     /// Always callable directly when strict cross-platform
     /// identity is required.
