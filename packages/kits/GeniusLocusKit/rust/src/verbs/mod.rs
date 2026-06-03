@@ -1,5 +1,5 @@
-// verbs/mod.rs — Rust mirror of the GeniusLocusKit unified verb
-// surface and AriaLexicon conformance.
+// verbs/mod.rs — Rust vocabulary and frame types for the GeniusLocusKit
+// verb surface.
 //
 // Parity gate: the (Verb, Noun) acceptance enumeration and the
 // nine-verb method-name set are conformance-tested against the Swift
@@ -8,19 +8,20 @@
 // Whenever the Swift surface changes a verb name, a frame slot set,
 // or an acceptance row, the Rust mirror must follow.
 //
-// What this scaffold does NOT do: dispatch verbs against a live
-// locus_kit::Estate. LocusKit Rust is fully shipped (503 tests);
-// the `Surface` type here is a no-op placeholder that the parity
-// test inspects by name rather than by behavior. Downstream missions
-// wire the verb dispatch through to a live Estate.
+// The live verb dispatch surface is `EstateCoordinator` in
+// `coordinator.rs`, the faithful Rust analog of the Swift
+// `extension GeniusLocusKit` blocks in `Verbs/VerbSurface.swift`.
+// The parity taxonomy (VerbError, VERB_NAMES, Verb, Noun, SurfaceTarget)
+// lives here in `lexicon.rs` and is imported by both the coordinator
+// and the parity tests.
 
 pub mod frames;
 pub mod lexicon;
-pub mod surface;
 
 pub use frames::{
     AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame, MutateFrame,
     MutationKind, ProposeFrame, ReanchorFrame, RecallFrame, WithdrawFrame,
 };
-pub use lexicon::{Acceptance, Adjective, Noun, NounRole, SurfaceTarget, Verb, VerbFlow};
-pub use surface::{Surface, VerbError, VERB_NAMES};
+pub use lexicon::{
+    Acceptance, Adjective, Noun, NounRole, SurfaceTarget, Verb, VerbError, VerbFlow, VERB_NAMES,
+};
