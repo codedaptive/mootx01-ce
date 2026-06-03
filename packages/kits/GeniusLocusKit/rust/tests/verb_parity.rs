@@ -3,17 +3,35 @@
 // Shared vectors below mirror the Swift `VerbSurfaceTests.swift`
 // AriaLexicon assertions. The unit of conformance is the (verb, noun)
 // acceptance matrix and the nine-verb method-name set, not the
-// per-drawer dispatch payload. Per-drawer parity is out of scope
-// here because the GLK verb bodies have not yet been wired to
-// dispatch through a live locus_kit::Estate (LocusKit Rust is fully
-// shipped; the verb-wiring layer is the remaining gap). When the
-// Swift surface changes a verb name, an acceptance row, or the
-// surface target list, this file must change in lock-step.
+// per-drawer dispatch payload. When the Swift surface changes a verb
+// name, an acceptance row, or the surface target list, this file must
+// change in lock-step.
+//
+// The live dispatch surface is `EstateCoordinator`; tests that exercise
+// boundary guards or per-verb behavior call it directly.
+
+use std::sync::Arc;
 
 use genius_locus_kit::{
-    Acceptance, AssociateFrame, ExpungeFrame, Noun, ProposeFrame, ReanchorFrame,
-    SchedulerProposalKind as ProposalKind, Surface, SurfaceTarget, Verb, VerbError, VERB_NAMES,
+    Acceptance, AssociateFrame, EstateCoordinator, EstateHandle, Noun, ProposeFrame,
+    SchedulerProposalKind as ProposalKind, SurfaceTarget, Verb, VerbDispatchError, VerbError,
+    VERB_NAMES,
 };
+use locus_kit::{
+    drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,
+    estate_types::OwnerCredentials,
+};
+
+const NOW: i64 = 1_700_000_000;
+
+fn open_one() -> (EstateCoordinator, EstateHandle) {
+    let mut coord = EstateCoordinator::new();
+    let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+    let handle = coord
+        .open(store, OwnerCredentials::new("owner"), 0, 100)
+        .expect("open");
+    (coord, handle)
+}
 
 /// `Verb` enumerates exactly the nine cases the Swift mirror does, in
 /// the same order. Swift declares the cases in `Verb.swift`; the Rust
@@ -120,73 +138,90 @@ fn surface_targets_are_all_accepted() {
     assert_eq!(SurfaceTarget::ALL.len(), 7);
 }
 
-/// The boundary-side `EmptyReanchor` guard fires before any dispatch
-/// when neither `to_room` nor `to_lattice` is supplied. Matches
-/// `VerbSurfaceTests.testReanchorEmptyRaisesGuard`.
-#[test]
-fn reanchor_empty_raises_guard() {
-    let s = Surface::new();
-    let frame = ReanchorFrame {
-        row_id: "row-1".into(),
-        to_room: None,
-        to_lattice: None,
-    };
-    let err = s.reanchor(frame).unwrap_err();
-    match err {
-        VerbError::EmptyReanchor { row_id } => assert_eq!(row_id, "row-1"),
-        other => panic!("expected EmptyReanchor, got {:?}", other),
-    }
-}
+// The boundary-guard tests (`reanchor_empty_raises_guard` and
+// `expunge_without_confirmation_raises_guard`) are covered by coordinator
+// CO-4 and CO-3 respectively in `coordinator.rs`'s inline `#[cfg(test)]`
+// block. Those tests carry the Swift parity-name comments and run
+// on the live EstateCoordinator, which is the authoritative dispatch
+// surface. Duplicating them here against a removed Surface stub would
+// test dead code. See `co4_empty_reanchor_is_refused` and
+// `co3_expunge_requires_confirmation` in coordinator.rs for the
+// retained parity assertions.
 
-/// The boundary-side `ExpungeNotConfirmed` guard fires when
-/// `confirmation = false`. Matches
-/// `VerbSurfaceTests.testExpungeWithoutConfirmationRaisesGuard`.
-#[test]
-fn expunge_without_confirmation_raises_guard() {
-    let s = Surface::new();
-    let frame = ExpungeFrame {
-        row_id: "row-1".into(),
-        reason: "test".into(),
-        confirmation: false,
-    };
-    let err = s.expunge(frame).unwrap_err();
-    match err {
-        VerbError::ExpungeNotConfirmed { row_id } => assert_eq!(row_id, "row-1"),
-        other => panic!("expected ExpungeNotConfirmed, got {:?}", other),
-    }
-}
-
-/// `propose` raises `NotSupportedByEstate("propose")` on this
-/// scaffold. Matches `VerbSurfaceTests.testProposeRaisesNotSupported`.
+/// `propose` raises `NotSupportedByEstate("propose")` — Brain layer has
+/// not shipped; mirrors `VerbSurfaceTests.testProposeRaisesNotSupported`.
 #[test]
 fn propose_raises_not_supported() {
-    let s = Surface::new();
+    let (coord, h) = open_one();
     let frame = ProposeFrame {
         target: "row-1".into(),
         kind: ProposalKind::Amend,
         justification: None,
     };
-    match s.propose(frame).unwrap_err() {
-        VerbError::NotSupportedByEstate { verb } => assert_eq!(verb, "propose"),
+    match coord.propose(&h, frame).unwrap_err() {
+        VerbDispatchError::Verb(VerbError::NotSupportedByEstate { verb }) => {
+            assert_eq!(verb, "propose")
+        }
         other => panic!("expected NotSupportedByEstate('propose'), got {:?}", other),
     }
 }
 
-/// `associate` raises `NotSupportedByEstate("associate")` on this
-/// scaffold. Matches `VerbSurfaceTests.testAssociateRaisesNotSupported`.
+/// `associate` raises `NotSupportedByEstate("associate")` — Brain layer
+/// has not shipped; mirrors `VerbSurfaceTests.testAssociateRaisesNotSupported`.
 #[test]
 fn associate_raises_not_supported() {
-    let s = Surface::new();
+    let (coord, h) = open_one();
     let frame = AssociateFrame {
         a: "row-a".into(),
         b: "row-b".into(),
         weight: 0.5,
     };
-    match s.associate(frame).unwrap_err() {
-        VerbError::NotSupportedByEstate { verb } => assert_eq!(verb, "associate"),
+    match coord.associate(&h, frame).unwrap_err() {
+        VerbDispatchError::Verb(VerbError::NotSupportedByEstate { verb }) => {
+            assert_eq!(verb, "associate")
+        }
         other => panic!(
             "expected NotSupportedByEstate('associate'), got {:?}",
             other
         ),
     }
+}
+
+/// A stale handle raises `EstateNotOpen` for `propose` — handle validation
+/// runs before the NotSupportedByEstate short-circuit. Mirrors the Swift
+/// `estate(for:)` propagation pattern on the other stub verbs.
+#[test]
+fn propose_on_closed_handle_raises_estate_not_open() {
+    let (mut coord, h) = open_one();
+    coord.close(&h).expect("close");
+    let frame = ProposeFrame {
+        target: "row-1".into(),
+        kind: ProposalKind::Amend,
+        justification: None,
+    };
+    assert_eq!(
+        coord.propose(&h, frame).unwrap_err(),
+        VerbDispatchError::EstateNotOpen {
+            estate_uuid: h.estate_uuid
+        }
+    );
+}
+
+/// A stale handle raises `EstateNotOpen` for `associate` — handle
+/// validation runs before the NotSupportedByEstate short-circuit.
+#[test]
+fn associate_on_closed_handle_raises_estate_not_open() {
+    let (mut coord, h) = open_one();
+    coord.close(&h).expect("close");
+    let frame = AssociateFrame {
+        a: "row-a".into(),
+        b: "row-b".into(),
+        weight: 0.5,
+    };
+    assert_eq!(
+        coord.associate(&h, frame).unwrap_err(),
+        VerbDispatchError::EstateNotOpen {
+            estate_uuid: h.estate_uuid
+        }
+    );
 }
