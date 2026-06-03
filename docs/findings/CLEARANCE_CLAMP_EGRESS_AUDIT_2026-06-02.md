@@ -1,4 +1,17 @@
 # CLEARANCE_CLAMP_001 — Egress-Completeness Security Audit
+
+> **Pre-product calibration (Bob, 2026-06-02).** MOOTx01 is not a shipping
+> product — there are no live estates, federation peers, or real classified
+> data. The severities below model the *eventual* shipping threat surface, not
+> live exposure. Read this as a **design-propagation checklist**: the egress
+> surfaces that must adopt the clearance pattern AS EACH IS BUILT. Nothing here
+> is an active leak or a merge blocker. The one item that is load-bearing now,
+> independent of product stage, is the elevated-sensitivity conformance vectors
+> in CLEARANCE_CLAMP_001 Mission A — that is a correctness test of the clamp
+> primitive, not a shipping gate. G2 (federation push) is an ungated API on an
+> unbuilt/unwired feature: gate it when federation is built, or bake a cheap
+> reject-Private default now as a placeholder — not a blocker either way.
+
 **Date:** 2026-06-02  
 **Author:** Perkins  
 **Commit audited:** main HEAD da4b1ce  
