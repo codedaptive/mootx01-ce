@@ -38,6 +38,12 @@ impl Default for HybridRecallConfiguration {
 /// pre-indexed `BM25Index`. Both candidate sets are fused via
 /// RRF; the resulting top-`limit` ids are hydrated through the
 /// `bundle_store`.
+// Eight parameters: probe/query/model_id/limit/config plus the three
+// substrate handles (vector_store, bm25, bundle_store) are each a
+// distinct input recall needs; bundling them into a struct would
+// obscure the call site and diverge the signature from the Swift
+// CorpusKit `recall`. Parity over the lint.
+#[allow(clippy::too_many_arguments)]
 pub fn recall(
     probe: &Engram,
     query: &str,

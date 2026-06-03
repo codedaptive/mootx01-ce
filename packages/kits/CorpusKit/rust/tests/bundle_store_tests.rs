@@ -49,7 +49,7 @@ fn insert_and_get_roundtrip() {
     let store = make_store();
     let c = sample_chunk("src-A", 0, "hello world", 100);
     let target_id = c.id;
-    store.insert(&[c.clone()]).expect("insert");
+    store.insert(std::slice::from_ref(&c)).expect("insert");
     let fetched = store.get(target_id).expect("get").expect("must exist");
     assert_eq!(fetched.id, target_id);
     assert_eq!(fetched.source_id, "src-A");
