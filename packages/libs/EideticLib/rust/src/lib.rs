@@ -14,6 +14,7 @@
 //! UDC pipeline and its Wikidata-subset resolver were removed.)
 
 pub mod anchor;
+pub mod segmenter;
 
 pub use anchor::Anchor;
 
