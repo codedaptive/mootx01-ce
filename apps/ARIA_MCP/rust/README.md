@@ -115,19 +115,37 @@ methodNotFound on the Swift side. The Rust server is ahead here: the coordinator
 
 ## Persistence
 
-The server selects its storage backend from the environment at startup:
+The server selects its storage backend from environment variables at startup.
+Both vars are read without trimming — a whitespace-only value is non-empty and
+fails fast, not a silent fallback.
 
-| `ARIA_MCP_SQLITE_PATH` state | Backend | Notes |
-|---|---|---|
-| Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
-| Present, non-empty | SQLite at that path | WAL-mode, durable across restarts |
-| Present, path unusable | — | Exit 1 with clear stderr message |
+### Backend precedence table
 
-Parent directories of the SQLite path are created automatically if missing.
+| `ARIA_MCP_POSTGRES_URL` | `ARIA_MCP_SQLITE_PATH` | Backend | Notes |
+|---|---|---|---|
+| Non-empty | Non-empty | — | Ambiguous config: exit 1, stderr names both vars |
+| Non-empty | Absent or empty | PostgreSQL (pending) | Kit gap: see note below |
+| Absent or empty | Non-empty | SQLite at that path | WAL-mode, durable across restarts |
+| Absent or empty | Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
+
+**PostgreSQL support pending:** the Rust server recognises
+`ARIA_MCP_POSTGRES_URL` in the precedence table above but cannot yet open a
+PostgreSQL estate. The persistence-kit `PostgresStorage` is available, but
+`locus-kit` lacks a `PostgresDrawerStore` wrapper (the
+`DrawerStoreCore::new` constructor is `pub(crate)`; `EstateCoordinator::open`
+requires `Arc<dyn DrawerStore>`). Adding `PostgresDrawerStore` to locus-kit
+is queued as a follow-up mission (ARIA_MCP_POSTGRES_001 rescope). Until that
+lands, setting `ARIA_MCP_POSTGRES_URL` on the Rust server exits with a
+"not yet supported" message and a nonzero code.
+
+The Swift server has full PostgreSQL support today.
+
+**SQLite:** parent directories of the SQLite path are created automatically if
+missing.
 
 Persistence is **server-internal only** — the JSON-RPC wire surface (tools,
-schemas, methods) is completely unchanged for both backends. Clients do not
-need to know or care which backend is in use.
+schemas, methods) is completely unchanged for all backends. Clients do not need
+to know or care which backend is in use.
 
 CloudKit and live federation fan-out remain future work.
 

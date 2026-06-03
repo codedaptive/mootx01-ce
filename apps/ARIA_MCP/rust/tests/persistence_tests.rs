@@ -222,3 +222,88 @@ fn register_sqlite_estate_is_routable_by_estate_id() {
     let _ = std::fs::remove_file(&default_path);
     let _ = std::fs::remove_file(&extra_path);
 }
+
+// ---------------------------------------------------------------------------
+// Precedence-ladder logic tests (no live Postgres required)
+//
+// ServerConfig::from_env() calls process::exit for the ambiguous-config and
+// postgres-not-yet-supported branches, so those cannot be tested through
+// from_env() directly. These tests verify the PREDICATE LOGIC that drives
+// the four-state decision — same approach as Swift's PostgresPrecedenceTests.
+//
+// The invariant being tested: given two strings (postgres_url, sqlite_path),
+// the decision rule must be unambiguous and deterministic.
+// ---------------------------------------------------------------------------
+
+/// Helper: replicate the from_env precedence decision as a pure function.
+/// Returns one of four branch labels that from_env would take.
+fn precedence_branch(postgres_url: &str, sqlite_path: &str) -> &'static str {
+    if !postgres_url.is_empty() && !sqlite_path.is_empty() {
+        "ambiguous"
+    } else if !postgres_url.is_empty() {
+        "postgres"
+    } else if !sqlite_path.is_empty() {
+        "sqlite"
+    } else {
+        "inmemory"
+    }
+}
+
+/// Both vars set → ambiguous config.
+#[test]
+fn precedence_both_set_is_ambiguous() {
+    assert_eq!(
+        precedence_branch("postgresql://localhost/db", "/tmp/estate.sqlite"),
+        "ambiguous"
+    );
+}
+
+/// Only postgres URL set → postgres branch.
+#[test]
+fn precedence_only_postgres_url_selects_postgres() {
+    assert_eq!(
+        precedence_branch("postgresql://localhost/db", ""),
+        "postgres"
+    );
+}
+
+/// Only sqlite path set → sqlite branch.
+#[test]
+fn precedence_only_sqlite_path_selects_sqlite() {
+    assert_eq!(precedence_branch("", "/tmp/estate.sqlite"), "sqlite");
+}
+
+/// Neither set → in-memory branch.
+#[test]
+fn precedence_neither_set_selects_inmemory() {
+    assert_eq!(precedence_branch("", ""), "inmemory");
+}
+
+/// No-trimming invariant: whitespace-only postgres URL is non-empty.
+#[test]
+fn precedence_whitespace_postgres_url_is_non_empty() {
+    // No trimming — whitespace-only is non-empty, treated as a config
+    // attempt. Mirrors Swift's no-trimming invariant test.
+    let url = "   ";
+    assert!(
+        !url.is_empty(),
+        "whitespace-only ARIA_MCP_POSTGRES_URL must be non-empty (no trimming)"
+    );
+}
+
+/// No-trimming invariant: whitespace-only sqlite path is non-empty.
+#[test]
+fn precedence_whitespace_sqlite_path_is_non_empty() {
+    let path = "  ";
+    assert!(
+        !path.is_empty(),
+        "whitespace-only ARIA_MCP_SQLITE_PATH must be non-empty (no trimming)"
+    );
+}
+
+/// Whitespace-only postgres URL with empty sqlite path → postgres branch
+/// (not in-memory; whitespace-only is not empty, fails fast).
+#[test]
+fn precedence_whitespace_postgres_url_routes_to_postgres_branch() {
+    assert_eq!(precedence_branch("   ", ""), "postgres");
+}

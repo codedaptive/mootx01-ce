@@ -15,6 +15,14 @@
 //!   Persistence is server-internal — no wire change; the JSON-RPC surface is
 //!   identical for both backends. See `server::ServerConfig::from_env` for how
 //!   the env var selects between them at startup.
+//!
+//! NOTE: PostgreSQL backend support requires `locus_kit::PostgresDrawerStore`,
+//! which does not yet exist. The persistence-kit `PostgresStorage` struct is
+//! available, but `EstateCoordinator::open` requires `Arc<dyn DrawerStore>`
+//! and `DrawerStoreCore::new` is `pub(crate)` within locus-kit. A
+//! `PostgresDrawerStore` newtype must be added to locus-kit before this
+//! registry can offer `new_postgres` / `register_postgres`. See
+//! ARIA_MCP_POSTGRES_001 completion report for the full rescope finding.
 
 use std::collections::HashMap;
 use std::sync::Arc;

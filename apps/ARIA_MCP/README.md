@@ -43,24 +43,42 @@ ARIA_MCP is a boundary, not a processing layer. It does not implement algorithms
 
 ## Persistence
 
-The server selects its storage backend from the environment at startup:
+The server selects its storage backend from two environment variables at startup.
+Both are read without trimming — a whitespace-only value is treated as non-empty
+and fails fast as a config error, not a silent fallback.
 
-| `ARIA_MCP_SQLITE_PATH` state | Backend | Notes |
-|---|---|---|
-| Absent or empty (`""`) | In-memory (default) | Ephemeral; discarded on exit |
-| Present, non-empty | SQLite at that path | WAL-mode, durable across restarts |
-| Present, path unusable | — | Exit 1 with clear stderr message |
+### Backend precedence table
 
-The value is read exactly as set — no trimming. A whitespace-only value is
-treated as a path attempt and fails fast, not a silent in-memory fallback
-(byte-for-byte parity with the Rust server's env handling). Parent
-directories of the SQLite path are created automatically if missing; a bare
-filename (no directory component) skips creation and resolves against the
-working directory.
+| `ARIA_MCP_POSTGRES_URL` | `ARIA_MCP_SQLITE_PATH` | Backend | Notes |
+|---|---|---|---|
+| Non-empty | Non-empty | — | Ambiguous config: exit 1, stderr names both vars |
+| Non-empty | Absent or empty | PostgreSQL at the URL | Pooled, lazy; defaults poolSize=10, connectionTimeout=5s, idleTimeout=300s |
+| Absent or empty | Non-empty | SQLite at that path | WAL-mode, durable across restarts |
+| Absent or empty | Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
 
-Persistence is **server-internal only** — the JSON-RPC wire surface (tools, schemas, methods) is completely unchanged for both backends. Clients do not need to know or care which backend is active.
+**Unusable config** (path unwritable, malformed connection string, or unreachable
+server at startup): exit 1 with a clear stderr message. No half-open state.
+
+**Lazy-vs-probe (PostgreSQL):** `PostgreSQLStorage` uses a lazy connection pool —
+no TCP connection is opened at construction time. The first real connection attempt
+happens at `Estate.create`, which runs at startup before any tool call. An
+unreachable server therefore surfaces as a startup failure (exit 1), not a runtime
+error during a tool call. No explicit probe is needed.
+
+**SQLite:** parent directories of the SQLite path are created automatically if
+missing. A bare filename (no directory component) skips creation and resolves
+against the working directory.
+
+Persistence is **server-internal only** — the JSON-RPC wire surface (tools,
+schemas, methods) is completely unchanged for all backends. Clients do not need to
+know or care which backend is active.
 
 CloudKit and live federation fan-out remain future work.
+
+**Rust parity note:** the Rust server's env handling for `ARIA_MCP_POSTGRES_URL` is
+pending a locus-kit `PostgresDrawerStore` addition (see ARIA_MCP_POSTGRES_001
+completion report). The Swift server has full PostgreSQL support. The Rust server
+supports in-memory and SQLite only until that kit gap is resolved.
 
 ### Example
 
@@ -70,9 +88,10 @@ aria-mcp
 
 # Durable SQLite at a specific path
 ARIA_MCP_SQLITE_PATH=/var/lib/aria-mcp/estate.sqlite aria-mcp
-```
 
-The Swift and Rust servers read the same `ARIA_MCP_SQLITE_PATH` variable and implement the same three-state behavior table above. Convergence is by output comparison only; there are no cross-language calls.
+# PostgreSQL-backed (requires a running PostgreSQL server)
+ARIA_MCP_POSTGRES_URL=postgresql://user:pass@localhost:5432/aria_mcp aria-mcp
+```
 
 ## Build order
 

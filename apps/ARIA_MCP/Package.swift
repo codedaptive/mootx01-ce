@@ -68,6 +68,10 @@ let package = Package(
                 // SQLite backend: selected at runtime via ARIA_MCP_SQLITE_PATH.
                 // Present and non-empty → SQLiteStorage; absent/empty → InMemoryStorage.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                // PostgreSQL backend: selected at runtime via ARIA_MCP_POSTGRES_URL.
+                // Both ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH set → exit 1.
+                // Only ARIA_MCP_POSTGRES_URL set → PostgreSQLStorage (lazy pool).
+                .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
             ],
             path: "Sources/aria-mcp"
         ),
@@ -84,6 +88,8 @@ let package = Package(
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 // SQLite backend: needed for the persistence round-trip tests.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                // PostgreSQL backend: needed for the precedence-ladder config tests.
+                .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
             ],
             path: "Tests/AriaMCPTests"
         ),

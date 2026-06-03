@@ -1,9 +1,9 @@
 //! `aria-mcp` binary entry point.
 //!
-//! Reads `ARIA_MCP_SQLITE_PATH` from the environment to select the storage
-//! backend, then runs the newline-delimited JSON stdio loop until stdin
-//! closes. All logging goes to stderr; stdout is reserved for JSON-RPC
-//! frames.
+//! Reads `ARIA_MCP_POSTGRES_URL` and `ARIA_MCP_SQLITE_PATH` from the
+//! environment to select the storage backend, then runs the newline-delimited
+//! JSON stdio loop until stdin closes. All logging goes to stderr; stdout is
+//! reserved for JSON-RPC frames.
 //!
 //! # Running
 //!
@@ -19,10 +19,12 @@
 //!
 //! # Persistence
 //!
-//! Set `ARIA_MCP_SQLITE_PATH` to a writable filesystem path to enable
-//! durable storage. Absent or empty → in-memory estate (ephemeral, default
-//! behavior). See `server::ServerConfig::from_env` for the full behavior
-//! table.
+//! Two env vars drive backend selection; see `server::ServerConfig::from_env`
+//! for the full four-state precedence table. Short form:
+//!   Both set → exit 1 (ambiguous).
+//!   ARIA_MCP_POSTGRES_URL only → PostgreSQL (pending locus-kit kit gap).
+//!   ARIA_MCP_SQLITE_PATH only → SQLite at that path (durable, WAL-mode).
+//!   Neither set → in-memory estate (ephemeral, default behavior).
 
 use aria_mcp::server::{run_stdio_loop, ServerConfig};
 
@@ -31,9 +33,10 @@ fn main() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
-    // from_env reads ARIA_MCP_SQLITE_PATH: present+non-empty → SQLite-backed
-    // estate, absent/empty → in-memory. Exits with nonzero code if the path
-    // is set but cannot be opened.
+    // from_env reads ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH and applies
+    // the four-state precedence ladder. Exits with a nonzero code on ambiguous
+    // config, unusable path/URL, or (currently) when ARIA_MCP_POSTGRES_URL is
+    // set (PostgreSQL pending locus-kit PostgresDrawerStore).
     let config = ServerConfig::from_env();
     run_stdio_loop(stdin.lock(), &mut stdout, config);
     eprintln!("aria-mcp: stdin closed, exiting");
