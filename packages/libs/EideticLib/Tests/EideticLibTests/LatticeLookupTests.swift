@@ -5,22 +5,25 @@
 // the dominant concept's Wikidata Q-ID, and never guesses (UNRESOLVED
 // terms return an empty code). No UDC schedule is bundled or consulted.
 
-import XCTest
+import Testing
+import Foundation
 @testable import EideticLib
 import LatticeLib
 
-final class FDCLookupTests: XCTestCase {
+@Suite("FDC lookup contract")
+struct FDCLookupTests {
 
     // 1. A topical term grounds to a well-formed FDC code, never a
     //    guess. (Which specific code — exact-match accuracy — is
     //    governed by STOP_THRESHOLD tuning, not this contract test.)
-    func testLookupResolvesToWellFormedCode() throws {
+    @Test("lookup resolves to a well-formed code")
+    func lookupResolvesToWellFormedCode() throws {
         let anchor = EideticLib.lookup("philosophy")
-        XCTAssertFalse(
-            anchor.code.isEmpty,
+        #expect(
+            !anchor.code.isEmpty,
             "philosophy must resolve to an FDC code"
         )
-        XCTAssertTrue(
+        #expect(
             Code.isWellFormed(anchor.code),
             "resolved code \(anchor.code) must be a well-formed FDC code"
         )
@@ -28,48 +31,52 @@ final class FDCLookupTests: XCTestCase {
 
     // 2. The lookup carries the dominant concept's Wikidata Q-ID
     //    (the highest-weighted Q-ID in the term's concept bag).
-    func testLookupCarriesDominantConceptQID() throws {
+    @Test("lookup carries dominant concept QID")
+    func lookupCarriesDominantConceptQID() throws {
         let anchor = EideticLib.lookup("philosophy")
-        let qid = try XCTUnwrap(
+        let qid = try #require(
             anchor.wikidataQID,
             "a topical term must carry a dominant concept Q-ID"
         )
-        XCTAssertTrue(qid.hasPrefix("Q"), "the concept identity is a Wikidata Q-ID")
+        #expect(qid.hasPrefix("Q"), "the concept identity is a Wikidata Q-ID")
     }
 
     // 3. A well-formed code absent from the canon is pending — the
     //    valid-but-unknown contract — and round-trips intact.
-    func testWellFormedCodeAbsentFromCanonIsPendingAndRoundTrips() throws {
+    @Test("well-formed code absent from canon is pending and round-trips")
+    func wellFormedCodeAbsentFromCanonIsPendingAndRoundTrips() throws {
         // "999.99" is well-formed grammar but not in the v1 canon.
         let knownCodes: Set<String> = ["100"]
         let state = EideticLib.classifyLatticeCode("999.99", knownCodes: knownCodes)
-        XCTAssertEqual(state, .pending("999.99"))
-        XCTAssertTrue(state.isWellFormed)
+        #expect(state == .pending("999.99"))
+        #expect(state.isWellFormed)
 
         let data = try JSONEncoder().encode(state)
         let decoded = try JSONDecoder().decode(LatticeCodeState.self, from: data)
-        XCTAssertEqual(decoded, state, "pending code must round-trip intact")
-        XCTAssertEqual(decoded.rawCode, "999.99")
+        #expect(decoded == state, "pending code must round-trip intact")
+        #expect(decoded.rawCode == "999.99")
     }
 
     // 4. An UNRESOLVED term (no signature overlap) returns an empty
     //    code, nil Q-ID, zero confidence — never a guess.
-    func testUnresolvedTermReturnsEmptyAnchor() {
+    @Test("unresolved term returns empty anchor")
+    func unresolvedTermReturnsEmptyAnchor() {
         let anchor = EideticLib.lookup("zxcvqwertyasdfgh")
-        XCTAssertEqual(
-            anchor.code, "",
+        #expect(
+            anchor.code == "",
             "an unresolved term must yield an empty code, not a fallback"
         )
-        XCTAssertNil(anchor.wikidataQID)
-        XCTAssertEqual(anchor.confidence, 0)
+        #expect(anchor.wikidataQID == nil)
+        #expect(anchor.confidence == 0)
     }
 
     // 5. Anchor shape: exposes code and no udcCode.
-    func testAnchorExposesLatticeCodeAndNoUDCCode() {
+    @Test("anchor exposes lattice code and no UDC code")
+    func anchorExposesLatticeCodeAndNoUDCCode() {
         let anchor = EideticLib.lookup("chemistry")
         let mirror = Mirror(reflecting: anchor)
         let labels = mirror.children.compactMap { $0.label }
-        XCTAssertTrue(labels.contains("code"), "Anchor must expose code")
-        XCTAssertFalse(labels.contains("udcCode"), "Anchor must not expose udcCode")
+        #expect(labels.contains("code"), "Anchor must expose code")
+        #expect(!labels.contains("udcCode"), "Anchor must not expose udcCode")
     }
 }
