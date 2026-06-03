@@ -76,11 +76,7 @@ impl BM25Index {
                 *tf.entry(t).or_insert(0) += 1;
             }
             for (term, freq) in tf {
-                state
-                    .postings
-                    .entry(term)
-                    .or_insert_with(HashMap::new)
-                    .insert(id, freq);
+                state.postings.entry(term).or_default().insert(id, freq);
             }
         }
     }
