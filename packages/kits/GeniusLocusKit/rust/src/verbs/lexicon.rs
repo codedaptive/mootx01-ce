@@ -1,5 +1,5 @@
-// lexicon.rs — Rust mirror of the AriaLexicon vocabulary, scoped to
-// the constructs the GLK verb surface needs.
+// lexicon.rs — Rust mirror of the AriaLexicon vocabulary and the GLK
+// verb error taxonomy.
 //
 // Source of truth for the vocabulary is the AriaLexicon Swift module
 // at `AriaLexicon/Sources/AriaLexicon/`. The Rust port duplicates the
@@ -7,17 +7,62 @@
 // `tests/verb_parity.rs` can assert agreement across ports. AriaLexicon
 // has its own Rust port in a later mission; until then this minimal
 // mirror keeps the GLK conformance gate honored.
+//
+// `VerbError` and `VERB_NAMES` live here rather than in a separate
+// module: both are pure vocabulary — error-case taxonomy and the
+// nine-verb name array — and belong alongside the rest of the lexicon
+// primitives (`Verb`, `Noun`, `SurfaceTarget`). The live dispatch lives
+// in `coordinator.rs` (`EstateCoordinator`), which imports `VerbError`
+// from here.
 
-use crate::verbs::frames; // for re-exporting types if needed downstream
+use crate::verbs::frames::RowId;
 
-// Suppress the unused-import lint without removing the import: it
-// keeps the module-level dependency record honest and signals to
-// downstream missions that the lexicon module is meant to share
-// frame-adjacent types as the Rust port grows.
-#[allow(dead_code)]
-const _FRAMES_LINK: fn() = || {
-    let _ = std::mem::size_of::<frames::CaptureFrame>();
-};
+/// The nine verb method names the GLK surface publishes. Order
+/// matters: the parity test compares this list against the Swift
+/// `glkMethodNames` array, which is the authoritative method-name
+/// enumeration on the Swift side.
+pub const VERB_NAMES: [&str; 9] = [
+    "capture",
+    "recall",
+    "mutate",
+    "withdraw",
+    "expunge",
+    "reanchor",
+    "learn",
+    "propose",
+    "associate",
+];
+
+/// Errors raised by the GeniusLocusKit unified verb surface. Mirrors
+/// the Swift `VerbError` enum, case-for-case. Carries the same data
+/// the Swift side does so callers consuming both legs can branch on
+/// matching shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerbError {
+    /// The verb dispatched, reached the estate, and the underlying
+    /// call failed. The associated value is the textual description
+    /// of the underlying error so concrete error taxonomies do not
+    /// leak across the GLK boundary.
+    UnderlyingEstateFailure { verb: String, reason: String },
+
+    /// The verb is part of the nine-verb vocabulary but the
+    /// underlying estate does not yet support it. Today this is the
+    /// case for the same verbs as on the Swift side: mutate,
+    /// expunge, reanchor, learn, propose, associate (when their
+    /// Brain-layer bodies have not yet shipped).
+    NotSupportedByEstate { verb: String },
+
+    /// The combination of verb and noun is rejected by the §7.2
+    /// acceptance matrix. Reserved for future per-verb runtime
+    /// checks; today only the matrix data lookup raises this.
+    RejectedByLexicon { verb: String, noun: String },
+
+    /// A reanchor frame supplied neither `to_room` nor `to_lattice`.
+    EmptyReanchor { row_id: RowId },
+
+    /// An expunge frame had `confirmation = false`.
+    ExpungeNotConfirmed { row_id: RowId },
+}
 
 /// The nine verbs of the ARIA grammar. Names and order mirror
 /// `AriaLexicon.Verb` in Swift (`Verb.swift`).

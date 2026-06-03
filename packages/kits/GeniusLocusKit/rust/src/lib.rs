@@ -88,6 +88,6 @@ pub use training::{
 };
 pub use verbs::{
     Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame,
-    MutateFrame, MutationKind, Noun, NounRole, ProposeFrame, ReanchorFrame, RecallFrame, Surface,
+    MutateFrame, MutationKind, Noun, NounRole, ProposeFrame, ReanchorFrame, RecallFrame,
     SurfaceTarget, Verb, VerbError, VerbFlow, WithdrawFrame, VERB_NAMES,
 };
