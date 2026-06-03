@@ -22,7 +22,7 @@
 //! Two env vars drive backend selection; see `server::ServerConfig::from_env`
 //! for the full four-state precedence table. Short form:
 //!   Both set → exit 1 (ambiguous).
-//!   ARIA_MCP_POSTGRES_URL only → PostgreSQL (pending locus-kit kit gap).
+//!   ARIA_MCP_POSTGRES_URL only → PostgreSQL (pooled durable estate, libpq URL).
 //!   ARIA_MCP_SQLITE_PATH only → SQLite at that path (durable, WAL-mode).
 //!   Neither set → in-memory estate (ephemeral, default behavior).
 
@@ -35,8 +35,7 @@ fn main() {
     let mut stdout = stdout.lock();
     // from_env reads ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH and applies
     // the four-state precedence ladder. Exits with a nonzero code on ambiguous
-    // config, unusable path/URL, or (currently) when ARIA_MCP_POSTGRES_URL is
-    // set (PostgreSQL pending locus-kit PostgresDrawerStore).
+    // config or an unusable path/URL (unreachable PostgreSQL fails fast here).
     let config = ServerConfig::from_env();
     run_stdio_loop(stdin.lock(), &mut stdout, config);
     eprintln!("aria-mcp: stdin closed, exiting");

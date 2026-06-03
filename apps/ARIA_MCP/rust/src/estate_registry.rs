@@ -7,15 +7,6 @@
 //!
 //! # Backend constructors
 //!
-//! Two backend shapes are available:
-//! - **In-memory** (`new_inmemory`, `register_inmemory`): ephemeral, discarded
-//!   on process exit. Used by default when `ARIA_MCP_SQLITE_PATH` is unset.
-//! - **SQLite** (`new_sqlite`, `register_sqlite`): WAL-mode durable estate
-//!   at a caller-supplied filesystem path. Database file is created if absent.
-//!   Persistence is server-internal — no wire change; the JSON-RPC surface is
-//!   identical for both backends. See `server::ServerConfig::from_env` for how
-//!   the env var selects between them at startup.
-//!
 //! Three backend shapes are available:
 //! - **In-memory** (`new_inmemory`, `register_inmemory`): ephemeral, discarded
 //!   on process exit. Used by default when neither env var is set.
@@ -23,9 +14,14 @@
 //!   at a caller-supplied filesystem path. Database file is created if absent.
 //! - **PostgreSQL** (`new_postgres`, `register_postgres`): pooled durable estate
 //!   at a libpq connection string. Pool defaults match the Swift leg (size=10,
-//!   connect_timeout=5.0s, idle_timeout=300.0s). Connection is lazy — the pool
-//!   acquires connections on first use; construction succeeds even when PG is
-//!   temporarily unreachable.
+//!   connect_timeout=5.0s, idle_timeout=300.0s). The pool acquires connections
+//!   on first use, but `new_postgres` reads the estate manifest at open, so an
+//!   unreachable server fails fast at construction — the same startup-time
+//!   failure point as the Swift leg's `DrawerStore(storage:)`.
+//!
+//! Persistence is server-internal — no wire change; the JSON-RPC surface is
+//! identical across all three backends. See `server::ServerConfig::from_env`
+//! for how the env vars select between them at startup.
 //!
 //! Persistence is server-internal — no wire change; the JSON-RPC surface is
 //! identical for all three backends. See `server::ServerConfig::from_env` for
