@@ -81,7 +81,7 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
     }
 
     public var identity: LocalIdentity {
-        get async { await stateActor.localIdentity }
+        get async { stateActor.localIdentity }
     }
 }
 
@@ -202,7 +202,7 @@ actor FederationStateActor {
     }
 
     func pair(with peerActor: FederationStateActor, via relay: any Relay, family: HyperplaneFamilySpec) async throws {
-        let peerPubKey = await peerActor.localIdentity.publicKey
+        let peerPubKey = peerActor.localIdentity.publicKey
         peers.append(PairedPeer(publicKey: peerPubKey, actor: peerActor, relay: relay, family: family))
         // Symmetric: register ourselves on the peer too.
         await peerActor.acceptPeering(publicKey: localIdentity.publicKey, relay: relay, family: family)
@@ -341,34 +341,63 @@ actor FederationStateActor {
         return receipt
     }
 
+    /// Apply one inbound SyncRecord to local storage.
+    ///
+    /// The body is two nested switches: event kind (insert/update/delete)
+    /// × conflict policy (four cases each). Each arm is a short operation —
+    /// upsert, insert-if-absent, delete, or early-return. The length comes
+    /// from the cross-product of cases, not from complex logic.
     private func applyInbound(
         _ record: SyncRecord,
         syncedTable: SyncedTable,
         storage: any Storage
     ) async throws {
-        let values = record.values?.asTypedValues ?? [:]
-        switch syncedTable.conflictPolicy {
-        case .appendOnly:
-            _ = try await storage.rowStore.upsert(
-                table: record.table,
-                values: values,
-                conflictColumns: [syncedTable.primaryKeyColumn]
-            )
+        switch record.event {
+        case .insert, .update:
+            let values = record.values?.asTypedValues ?? [:]
+            switch syncedTable.conflictPolicy {
+            case .appendOnly:
+                _ = try await storage.rowStore.upsert(
+                    table: record.table,
+                    values: values,
+                    conflictColumns: [syncedTable.primaryKeyColumn]
+                )
 
-        case .lastWriterWinsByHLC, .remoteWins:
-            _ = try await storage.rowStore.upsert(
-                table: record.table,
-                values: values,
-                conflictColumns: [syncedTable.primaryKeyColumn]
-            )
+            case .lastWriterWinsByHLC, .remoteWins:
+                _ = try await storage.rowStore.upsert(
+                    table: record.table,
+                    values: values,
+                    conflictColumns: [syncedTable.primaryKeyColumn]
+                )
 
-        case .localWins:
-            let existing = try? await storage.rowStore.count(
-                table: record.table,
-                where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
+            case .localWins:
+                let existing = try? await storage.rowStore.count(
+                    table: record.table,
+                    where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
+                )
+                if (existing ?? 0) == 0 {
+                    _ = try await storage.rowStore.insert(table: record.table, values: values)
+                }
+            }
+
+        case .delete:
+            let predicate: StoragePredicate = .eq(
+                Column(table: record.table, name: syncedTable.primaryKeyColumn),
+                .uuid(record.rowKey)
             )
-            if (existing ?? 0) == 0 {
-                _ = try await storage.rowStore.insert(table: record.table, values: values)
+            switch syncedTable.conflictPolicy {
+            case .appendOnly:
+                // Append-only tables are write-once; silently reject remote deletes.
+                return
+
+            case .lastWriterWinsByHLC, .remoteWins:
+                // Remote delete wins; hard-delete the row by primary key.
+                _ = try await storage.rowStore.delete(table: record.table, where: predicate)
+
+            case .localWins:
+                // Local state is authoritative; silently reject remote deletes
+                // regardless of whether the row exists locally.
+                return
             }
         }
     }

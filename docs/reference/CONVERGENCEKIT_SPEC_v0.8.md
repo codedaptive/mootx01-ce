@@ -207,8 +207,7 @@ fingerprints are directly comparable. Pairing is symmetric — each side
 registers the other. Pairing rides a `Relay` transport abstraction
 (INTERFACE § 4): the in-process `FederationRelay` is the local-and-test
 implementation, and a hosted HTTPS/gRPC SyncServer relay is a drop-in
-`Relay` conformer requiring no change to the engine. Cross-machine wire
-transport rollout is tracked in § 9.
+`Relay` conformer requiring no change to the engine.
 
 ## § 6 — Error model (conceptual)
 
@@ -261,46 +260,9 @@ does not mutate storage (I-4, B-2).
 is rejected at pull and its records do not apply (I-7).
 
 **C-8 (wire round-trip):** every `TypedValue` case round-trips through
-`SyncValueMap` / `SyncValueBox` and the Rust port agrees with the Swift
-port on the discriminated encoding (B-5). The CloudKit HLC pack/unpack
+`SyncValueMap` / `SyncValueBox` and the Rust version agrees with the Swift version on the discriminated encoding (B-5). The CloudKit HLC pack/unpack
 is lossless within the 48/12/4-bit layout (B-6).
 
 The conformance fixtures run with InMemory PersistenceKit underneath.
 None and Federation run them unconditionally; CloudKit is gated on a
 configured test container.
-
-## § 8 — Out of scope
-
-- Storage, row stores, audit log, `TypedValue`, `TableChange`,
-  `StorageObserver` → `PERSISTENCEKIT_SPEC_v0.8.md`.
-- HLC and `Fingerprint256` math → `SUBSTRATELIB_SPEC_v0.8.md`.
-- CRDT mathematics (G-Set audit union) and its enforcement →
-  SubstrateLib (`GSetAuditLog`) + GeniusLocusKit; ConvergenceKit ships
-  the rows, the storage layer guarantees idempotence.
-- Cross-estate access policy, grants, multi-estate query routing →
-  ARIA_MCP (access surface, invariant I-13).
-- Encryption at rest → backend-specific (CloudKit's private database;
-  Federation persists keys in PersistenceKit's blob store).
-
-## § 9 — Open questions
-
-- **Federation wire transport.** At v0.8 Federation pairing and exchange
-  run in-process via `FederationRelay`; HTTPS-relay / peer-to-peer / IPFS
-  transport is a v1.x decision (the protocol is specified; the wire is
-  not).
-- **Rust conflict-policy enforcement.** The Rust Federation backend
-  verifies signatures and gates kit/schema at pull, but defers per-table
-  `ConflictPolicy` enforcement and the observer-driven outbox (callers
-  `enqueue` explicitly); the Swift backend enforces both today.
-- **CloudKit deletion routing.** Deletions arrive without a record type,
-  so the CloudKit backend attempts the delete across every synced table
-  by primary key; a typed-deletion convention is a v1.x refinement.
-- **Large blobs over sync, retry/backoff, battery budgeting** — carried
-  forward from the design decision as v1.x items.
-- **Array `TypedValue` over CloudKit.** Array values are not yet mapped
-  into `CKRecord` (they raise `encodingFailure`); they round-trip fine
-  over Federation's JSON wire.
-
----
-
-*End of ConvergenceKit Specification v0.8.*
