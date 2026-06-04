@@ -336,7 +336,9 @@ actor CloudKitStateActor {
         return receipt
     }
 
-    private func applyInbound(
+    // Internal (not private) so the LWW tests can call it directly
+    // via @testable import without going through the CloudKit stack.
+    func applyInbound(
         _ decoded: DecodedRecord,
         syncedTable: SyncedTable,
         storage: any Storage
@@ -361,9 +363,16 @@ actor CloudKitStateActor {
                     return
                 }
             }
+            // Merge sync meta into the persisted row so the next inbound
+            // write can read _syncHLC back and compare. decoded.values is
+            // clean (no _sync* keys); the engine owns the _sync* lifecycle.
+            var rowValues = decoded.values
+            rowValues["_syncHLC"] = .hlc(decoded.syncMeta.hlc)
+            rowValues["_syncSchemaVersion"] = .int(Int64(decoded.syncMeta.schemaVersion))
+            rowValues["_syncKitID"] = .text(decoded.syncMeta.kitID)
             _ = try await storage.rowStore.upsert(
                 table: decoded.table,
-                values: decoded.values,
+                values: rowValues,
                 conflictColumns: [syncedTable.primaryKeyColumn]
             )
 
