@@ -4,61 +4,93 @@
 // filesystem touching; the tests inject environment and home so
 // they run identically under any user.
 
-import Foundation
-import Testing
+import XCTest
 @testable import MootInstallerCore
 
-@Suite("MootPaths path math")
-struct PathsTests {
+final class PathsTests: XCTestCase {
 
-    @Test("resolveDataDirectory defaults to Application Support")
-    func resolveDataDirectoryDefaultsToApplicationSupport() {
+    func testResolveDataDirectoryDefaultsToApplicationSupport() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         let resolved = MootPaths.resolveDataDirectory(
             environment: [:],
             homeDirectory: home
         )
-        #expect(
-            resolved.path == "/Users/test/Library/Application Support/MOOTx01"
+        XCTAssertEqual(
+            resolved.path,
+            "/Users/test/Library/Application Support/MOOTx01"
         )
     }
 
-    @Test("resolveDataDirectory honors the environment override")
-    func resolveDataDirectoryHonorsEnvironmentOverride() {
+    func testResolveDataDirectoryHonorsEnvironmentOverride() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         let resolved = MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": "/tmp/sandbox-moot"],
             homeDirectory: home
         )
-        #expect(resolved.path == "/tmp/sandbox-moot")
+        XCTAssertEqual(resolved.path, "/tmp/sandbox-moot")
     }
 
-    @Test("resolveDataDirectory ignores an empty override")
-    func resolveDataDirectoryIgnoresEmptyOverride() {
+    func testResolveDataDirectoryIgnoresEmptyOverride() {
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         let resolved = MootPaths.resolveDataDirectory(
             environment: ["MOOTX01_DATA_DIR": ""],
             homeDirectory: home
         )
-        #expect(
-            resolved.path == "/Users/test/Library/Application Support/MOOTx01"
+        XCTAssertEqual(
+            resolved.path,
+            "/Users/test/Library/Application Support/MOOTx01"
         )
     }
 
-    @Test("estateURL appends the fixed filename")
-    func estateURLAppendsFixedFilename() {
+    func testEstateURLAppendsFixedFilename() {
         let dir = URL(fileURLWithPath: "/Users/test/Library/Application Support/MOOTx01", isDirectory: true)
         let estate = MootPaths.estateURL(in: dir)
-        #expect(
-            estate.path == "/Users/test/Library/Application Support/MOOTx01/estate.sqlite"
+        XCTAssertEqual(
+            estate.path,
+            "/Users/test/Library/Application Support/MOOTx01/estate.sqlite"
         )
     }
 
-    @Test("default owner identifier is non-empty")
-    func defaultOwnerIdentifierIsNonEmpty() {
+    func testDefaultOwnerIdentifierIsNonEmpty() {
         // LocusKit.Estate.create rejects an empty owner identifier
         // up front; the default the installer stamps must satisfy
         // that precondition.
-        #expect(!MootPaths.defaultOwnerIdentifier.isEmpty)
+        XCTAssertFalse(MootPaths.defaultOwnerIdentifier.isEmpty)
+    }
+
+    func testLocalMCPConfigURLAppendsFixedFilename() {
+        // localMCPConfigURL must return workingDirectory/.mcp.json —
+        // the file Claude Code reads for project-scoped MCP servers.
+        let workdir = URL(fileURLWithPath: "/Users/test/myproject", isDirectory: true)
+        let configURL = MootPaths.localMCPConfigURL(workingDirectory: workdir)
+        XCTAssertEqual(configURL.path, "/Users/test/myproject/.mcp.json")
+    }
+
+    func testGlobalClaudeSettingsURLIsUnderDotClaude() {
+        // globalClaudeSettingsURL must return homeDirectory/.claude/settings.json —
+        // the file Claude Code uses for global permissions.allow entries.
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let settingsURL = MootPaths.globalClaudeSettingsURL(homeDirectory: home)
+        XCTAssertEqual(settingsURL.path, "/Users/test/.claude/settings.json")
+    }
+
+    func testLocalClaudeSettingsURLIsUnderDotClaude() {
+        // localClaudeSettingsURL must return workingDirectory/.claude/settings.json —
+        // the per-project settings file that receives ARIA tool approvals when
+        // --local is used.
+        let workdir = URL(fileURLWithPath: "/Users/test/myproject", isDirectory: true)
+        let settingsURL = MootPaths.localClaudeSettingsURL(workingDirectory: workdir)
+        XCTAssertEqual(settingsURL.path, "/Users/test/myproject/.claude/settings.json")
+    }
+
+    func testGlobalAndLocalClaudeSettingsURLShareFilename() {
+        // Both helpers must agree on the filename component so that code
+        // choosing between global and local settings targets is consistent.
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        let workdir = URL(fileURLWithPath: "/Users/test/myproject", isDirectory: true)
+        XCTAssertEqual(
+            MootPaths.globalClaudeSettingsURL(homeDirectory: home).lastPathComponent,
+            MootPaths.localClaudeSettingsURL(workingDirectory: workdir).lastPathComponent
+        )
     }
 }

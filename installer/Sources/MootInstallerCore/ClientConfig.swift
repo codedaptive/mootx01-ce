@@ -9,11 +9,15 @@
 //
 // LAUNCH_PLAN.md §"The Monday cut": the installer wires the MCP
 // into Claude and "other clients." Monday's tracked clients are
-// the four widely-used MCP hosts: Claude Desktop, Claude Code,
+// five widely-used MCP hosts: Claude Desktop, Claude Code,
 // Cursor, Cline, and Continue. Each entry uses the stdio transport;
 // the command is the absolute path the installer writes the
 // binary to. Args are empty — mootx01-mcp reads MOOTX01_DATA_DIR
 // from the environment if the user wants a non-default location.
+//
+// Each client carries a `detectPath` that the installer probes before
+// touching any config. Clients not found on the machine are skipped,
+// preventing orphaned config entries for software the user hasn't installed.
 
 import Foundation
 
@@ -21,6 +25,14 @@ import Foundation
 /// macOS-relative path the installer merges the entry into;
 /// `serverName` is the key used inside the JSON config's
 /// `mcpServers` object.
+///
+/// `detectPath` is the probe path used by `isPresent` to decide
+/// whether the client is installed. `nil` means always-wire.
+///
+/// `localConfigPath` is the relative filename used when the installer
+/// is run with `--local`. Only Claude Code has a non-nil value
+/// (`.mcp.json`) because it is the only supported client that accepts
+/// a project-scoped config. All other clients remain global-only.
 public struct MCPClient: Sendable, Equatable {
     public let id: String
     public let displayName: String
@@ -31,12 +43,62 @@ public struct MCPClient: Sendable, Equatable {
     /// clients use the same name so a user with multiple clients
     /// sees the same MOOT in each.
     public let serverName: String
+    /// Detection probe path used by `isPresent`.
+    /// Absolute paths (starting with "/") are checked directly.
+    /// Relative paths are resolved against the user's home directory.
+    /// `nil` means always-wire (skip detection).
+    public let detectPath: String?
+    /// Relative filename for project-local wiring via `--local`.
+    /// Non-nil only for Claude Code (`.mcp.json`). All other clients
+    /// are global-only and have `nil` here; the installer skips the
+    /// local-mode substitution for them.
+    public let localConfigPath: String?
 
-    public init(id: String, displayName: String, configPath: String, serverName: String) {
+    public init(
+        id: String,
+        displayName: String,
+        configPath: String,
+        serverName: String,
+        detectPath: String? = nil,
+        localConfigPath: String? = nil
+    ) {
         self.id = id
         self.displayName = displayName
         self.configPath = configPath
         self.serverName = serverName
+        self.detectPath = detectPath
+        self.localConfigPath = localConfigPath
+    }
+
+    /// Returns `true` if this client appears to be installed on the machine.
+    ///
+    /// - For clients with a `nil` detectPath, always returns `true` (always-wire semantics).
+    /// - For absolute detectPaths (e.g. `/Applications/Claude.app`), checks the path directly.
+    /// - For relative detectPaths, resolves against `homeDirectory`.
+    /// - Cline is a VS Code extension: its detectPath is the extensions directory,
+    ///   and presence is confirmed by finding any entry with the `saoudrizwan.claude-dev-` prefix.
+    public func isPresent(homeDirectory: URL) -> Bool {
+        guard let detectPath else { return true }
+
+        let resolved: URL
+        if detectPath.hasPrefix("/") {
+            resolved = URL(fileURLWithPath: detectPath)
+        } else {
+            resolved = homeDirectory.appendingPathComponent(detectPath)
+        }
+
+        if id == "cline" {
+            // Cline is a VS Code extension installed under ~/.vscode/extensions/.
+            // There is no single stable path — the directory name includes the
+            // version number (e.g. saoudrizwan.claude-dev-4.1.0), so we enumerate
+            // the extensions directory and look for any entry with that prefix.
+            guard let contents = try? FileManager.default.contentsOfDirectory(atPath: resolved.path) else {
+                return false
+            }
+            return contents.contains { $0.hasPrefix("saoudrizwan.claude-dev-") }
+        }
+
+        return FileManager.default.fileExists(atPath: resolved.path)
     }
 }
 
@@ -50,36 +112,57 @@ public enum MCPClients {
 
     /// Clients the installer wires up on macOS. Order matches the
     /// install.sh merge sequence so the progress output is stable.
+    ///
+    /// Detection probes (AIRA-INSTALL-P1):
+    ///   Claude Desktop  → /Applications/Claude.app (macOS app bundle)
+    ///   Claude Code     → .claude.json (config file written on first login;
+    ///                     bash also tries `command -v claude` as primary check)
+    ///   Cursor          → /Applications/Cursor.app (macOS app bundle)
+    ///   Cline           → .vscode/extensions (VS Code extensions dir; isPresent
+    ///                     scans for saoudrizwan.claude-dev-* prefix)
+    ///   Continue        → .continue (config directory written on first launch)
     public static let supported: [MCPClient] = [
         MCPClient(
             id: "claude-desktop",
             displayName: "Claude Desktop",
             configPath: "Library/Application Support/Claude/claude_desktop_config.json",
-            serverName: serverName
+            serverName: serverName,
+            detectPath: "/Applications/Claude.app"
         ),
         MCPClient(
             id: "claude-code",
             displayName: "Claude Code",
             configPath: ".claude.json",
-            serverName: serverName
+            serverName: serverName,
+            // bash uses `command -v claude` as the primary CLI probe;
+            // Swift isPresent uses this config file as the file-based fallback.
+            detectPath: ".claude.json",
+            // Claude Code supports project-local MCP config via .mcp.json in
+            // the project root. Other clients are global-only (nil).
+            localConfigPath: ".mcp.json"
         ),
         MCPClient(
             id: "cursor",
             displayName: "Cursor",
             configPath: ".cursor/mcp.json",
-            serverName: serverName
+            serverName: serverName,
+            detectPath: "/Applications/Cursor.app"
         ),
         MCPClient(
             id: "cline",
             displayName: "Cline",
             configPath: "Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json",
-            serverName: serverName
+            serverName: serverName,
+            // detectPath is the parent directory; isPresent enumerates it
+            // for a saoudrizwan.claude-dev-* prefix (see isPresent implementation).
+            detectPath: ".vscode/extensions"
         ),
         MCPClient(
             id: "continue",
             displayName: "Continue",
             configPath: ".continue/mcpServers/mootx01.yaml",
-            serverName: serverName
+            serverName: serverName,
+            detectPath: ".continue"
         ),
     ]
 }

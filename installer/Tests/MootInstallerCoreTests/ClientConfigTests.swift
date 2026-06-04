@@ -1,53 +1,73 @@
 // ClientConfigTests.swift
 //
 // Verifies the shape of the MCP server entry the bash installer
-// merges into client config files. The Python merge in install.sh
-// reads the JSON this code emits; if the shape drifts, the merge
-// breaks silently.
+// merges into client config files, and the localConfigPath values
+// that drive --local mode. The Python merge in install.sh reads the
+// JSON this code emits; if the shape drifts, the merge breaks silently.
 
-import Testing
+import XCTest
 @testable import MootInstallerCore
 
-@Suite("MCP client config shape")
-struct ClientConfigTests {
+final class ClientConfigTests: XCTestCase {
 
-    @Test("supported clients cover the launch-plan clients")
-    func supportedClientsCoverLaunchPlanClients() {
+    func testSupportedClientsCoverLaunchPlanClients() {
         let ids = MCPClients.supported.map { $0.id }
-        #expect(ids.contains("claude-desktop"))
-        #expect(ids.contains("claude-code"))
-        #expect(ids.contains("cursor"))
-        #expect(ids.contains("cline"))
-        #expect(ids.contains("continue"))
+        XCTAssertTrue(ids.contains("claude-desktop"))
+        XCTAssertTrue(ids.contains("claude-code"))
+        XCTAssertTrue(ids.contains("cursor"))
+        XCTAssertTrue(ids.contains("cline"))
+        XCTAssertTrue(ids.contains("continue"))
     }
 
-    @Test("all clients share the same server name")
-    func allClientsShareTheSameServerName() {
+    func testAllClientsShareTheSameServerName() {
         for client in MCPClients.supported {
-            #expect(client.serverName == MCPClients.serverName)
+            XCTAssertEqual(client.serverName, MCPClients.serverName)
         }
     }
 
-    @Test("entry uses the absolute binary path")
-    func entryUsesAbsoluteBinaryPath() {
+    func testEntryUsesAbsoluteBinaryPath() {
         let entry = MCPServerEntryBuilder.entry(
             binaryPath: "/Users/test/.local/share/MOOTx01/bin/mootx01-mcp"
         )
-        #expect(entry.command == "/Users/test/.local/share/MOOTx01/bin/mootx01-mcp")
-        #expect(entry.args.isEmpty)
-        #expect(entry.env.isEmpty)
+        XCTAssertEqual(entry.command, "/Users/test/.local/share/MOOTx01/bin/mootx01-mcp")
+        XCTAssertTrue(entry.args.isEmpty)
+        XCTAssertTrue(entry.env.isEmpty)
     }
 
-    @Test("entry JSON is stable with sorted keys")
-    func entryJSONIsStableSortedKeys() throws {
+    func testEntryJSONIsStableSortedKeys() throws {
         let json = try MCPServerEntryBuilder.entryJSON(
             binaryPath: "/abs/path/mootx01-mcp"
         )
         // Sorted-keys formatting is what makes the Python merge in
         // install.sh produce stable diffs across runs. If JSONEncoder
         // ever loses the option the diff churn returns; lock it in.
-        #expect(
-            json == "{\"args\":[],\"command\":\"/abs/path/mootx01-mcp\",\"env\":{}}"
+        XCTAssertEqual(
+            json,
+            "{\"args\":[],\"command\":\"/abs/path/mootx01-mcp\",\"env\":{}}"
         )
+    }
+
+    // MARK: - localConfigPath (--local mode)
+
+    func testOnlyClaudeCodeHasNonNilLocalConfigPath() {
+        // Only Claude Code supports project-local scoping (.mcp.json).
+        // All other clients are global-only; their localConfigPath must
+        // be nil so install.sh --local leaves them on their global paths.
+        for client in MCPClients.supported where client.id != "claude-code" {
+            XCTAssertNil(
+                client.localConfigPath,
+                "\(client.displayName) (\(client.id)) should have nil localConfigPath — only Claude Code supports project-local scoping"
+            )
+        }
+    }
+
+    func testClaudeCodeLocalConfigPathIsDotMCPJson() {
+        guard let client = MCPClients.supported.first(where: { $0.id == "claude-code" }) else {
+            XCTFail("claude-code not found in MCPClients.supported")
+            return
+        }
+        // Claude Code reads .mcp.json from the project root for project-local
+        // servers. The installer writes this file when --local is passed.
+        XCTAssertEqual(client.localConfigPath, ".mcp.json")
     }
 }
