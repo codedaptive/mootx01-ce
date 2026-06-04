@@ -9,16 +9,15 @@
 //!
 //! ── Why seam traits, not a live estate binding ───────────────────────
 //! The READ seam (recall traces, co-occurrence, tunnels) is backable by
-//! the Rust `Estate` today. The WRITE seam's `propose` is the Brain-layer
-//! verb, which raises `NotSupportedByEstate` in BOTH the Rust and Swift GLK
-//! surfaces until the Brain layer ships — so a live proposal adapter waits
-//! on the same architectural boundary in both languages, not on this version.
-//! The orchestration itself is pure of that boundary: it talks to the
+//! the Rust `Estate` today. The WRITE seam's `propose` goes through
+//! `EstateDreamingSink` (the production adapter, shipped in both Swift and
+//! Rust). The Rust adapter calls `store.add_proposal` directly rather than
+//! routing through the GLK coordinator (B-1-compliant; no circular crate
+//! dependency). The orchestration is pure: it talks to the
 //! `DreamingSubstrateReader` / `DreamingProposalSink` / `RewardSource`
 //! traits, exactly as the Swift actor talks to its protocols, and is gated
 //! with deterministic fakes (the same shape as the Swift DreamingDaemonTests
-//! fakes). The production adapter binding these traits to the estate is the
-//! future bridge, identical to Swift's deferred adapter.
+//! fakes).
 //!
 //! Determinism: no clock, no RNG. The daemon carries `cycle_count` and the
 //! caller supplies any time-derived inputs through the seam.

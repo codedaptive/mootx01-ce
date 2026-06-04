@@ -8,15 +8,13 @@ languages: [swift, rust]
 relates_to:
   - NEURONKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of NeuronKit in both legs: the lattice-anchor
+  Public API surface of NeuronKit in both ports: the lattice-anchor
   inference path, the hybrid-recall + MMR reasoning surface, context
   synthesis, branch operations, the migration benchmark, tournament
   ranking, the Bradley-Terry batch MLE fitter, and the dreaming and
   maintenance autonomic daemons with their seam protocols. The
   companion SPEC carries the behavioral contracts (invariants I-1…I-16,
-  behaviors B-1…B-7, conformance C-1…C-PortGap). The Rust port
-  implements the pure reasoning engines only; the Swift-only surfaces
-  are flagged inline and in SPEC § 7 C-PortGap.
+  behaviors B-1…B-7, conformance C-1…C-15).
 ---
 
 # NeuronKit Interface
@@ -59,11 +57,10 @@ purpose: |
 - `src/lattice_anchor.rs`, `src/hybrid_recall.rs`,
   `src/context_synthesizer.rs`, `src/scenario_profile.rs`,
   `src/tournament.rs`
-- depends on `eidetic-lib`, `serde`, `serde_json`. The Rust port has
+- depends on `eidetic-lib`, `serde`, `serde_json`. The Rust version has
   **no** LocusKit / GeniusLocusKit / EngramLib dependency, so the
   daemons, branch ops, benchmark, tournament orchestration, and the
-  standalone Engram-distance `mmrRank` are **not ported** (SPEC § 7
-  C-PortGap).
+  standalone Engram-distance `mmrRank`.
 
 ## § 2 — Public types
 
@@ -100,7 +97,7 @@ The compile-time pipeline mode recorded in the estate manifest.
 ```swift
 public enum LinguisticPipelineMode: String, Sendable, Codable {
     case deterministicReference = "deterministic-reference"
-    case appleNLAccel           = "apple-nl-accel"   // Swift-only, federation-disabled
+    case appleNLAccel           = "apple-nl-accel"   // Apple NL acceleration; federation-disabled
 }
 ```
 
@@ -180,11 +177,6 @@ impl RecallFrameTuning { pub const fn default_tuning() -> Self; }   // also impl
 ```
 
 ### `Drawer` / `RecallStream` (Swift) — `DrawerRow` / `RecallPage` (Rust)
-
-The recall row type and the paged async sequence. **Port shapes differ**
-(SPEC § 7 C-PortGap): Swift re-exports the substrate `LocusKit.Drawer`
-and pages into an `AsyncSequence`; Rust, having no LocusKit dependency,
-carries a minimal `DrawerRow` and pages eagerly into `Vec<RecallPage>`.
 
 **Swift:**
 
@@ -314,9 +306,8 @@ pub struct BradleyTerryScore {
 }
 ```
 
-### Branch / benchmark / tournament types — **Swift-only** (SPEC § 7 C-PortGap)
+### Branch / benchmark / tournament types
 
-No Rust counterpart at v0.8.
 
 ```swift
 public struct BenchmarkReport: Sendable, Equatable {
@@ -357,7 +348,7 @@ public struct TournamentReport: Sendable, Equatable {
 }
 ```
 
-### Dreaming daemon surface — **Swift-only** (SPEC § 7 C-PortGap)
+### Dreaming daemon surface
 
 ```swift
 public actor DreamingDaemon { /* see § 3 for methods */ }
@@ -419,7 +410,7 @@ public struct DreamingCycleReport: Sendable, Equatable {
 }
 ```
 
-### Maintenance daemon surface — **Swift-only** (SPEC § 7 C-PortGap)
+### Maintenance daemon surface
 
 ```swift
 public actor MaintenanceDaemon { /* see § 3 for methods */ }
@@ -539,7 +530,7 @@ pub fn synthesize(page: &RecallPage, meta: &[DrawerRowMeta]) -> ContextDocument;
 // empty meta => every row treated as DrawerRowMeta::default()
 ```
 
-### Branch operations — **Swift-only** (SPEC § 4.3, I-15)
+### Branch operations (SPEC § 4.3, I-15)
 
 Thin forwards over the GeniusLocusKit COW branch verbs; NeuronKit stores
 no branch state.
@@ -558,7 +549,7 @@ extension NeuronKit {
 }
 ```
 
-### Migration benchmark + tournament — **Swift-only** (SPEC § 4.4, § 4.7, C-13, I-16)
+### Migration benchmark + tournament (SPEC § 4.4, § 4.7, C-13, I-16)
 
 **Swift:**
 
@@ -592,7 +583,7 @@ pub fn bradley_terry(outcomes: &[PairwiseOutcome]) -> Result<Vec<BradleyTerrySco
 // Err(TournamentError::SelfPairing(id)) / Err(DisconnectedComparisonGraph). Empty -> Ok(vec![]).
 ```
 
-### Dreaming daemon (SPEC § 3.1) — **Swift-only**
+### Dreaming daemon (SPEC § 3.1)
 
 **Swift:**
 
@@ -621,7 +612,7 @@ public actor DreamingDaemon {
 }
 ```
 
-### Maintenance daemon (SPEC § 3.2, § 3.5) — **Swift-only**
+### Maintenance daemon (SPEC § 3.2, § 3.5)
 
 **Swift:**
 
@@ -660,8 +651,7 @@ public enum MOOTx01Error: Error, Sendable, Equatable {
 ```
 
 **Rust:** (crate-local name; cases mirror the Swift enum — documented
-drift, SPEC § 6 / § 7 C-PortGap)
-
+drift, SPEC § 6)
 ```rust
 pub enum TournamentError {
     SelfPairing(String),

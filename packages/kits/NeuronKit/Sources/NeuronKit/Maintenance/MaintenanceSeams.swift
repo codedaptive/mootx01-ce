@@ -7,22 +7,19 @@
 // ── Why the daemon talks to seams, not to GLK verbs ──────────────────
 // MOOTx01 invariant B-1: NeuronKit never executes SQL and never calls
 // LocusKit / VectorKit / CorpusKit directly; the estate handle is the only
-// write surface. But the current GLK verb surface cannot satisfy this
-// daemon's substrate needs: the `propose` verb raises
-// `VerbError.notSupportedByEstate` (Brain layer absent), and there is
-// no estate verb that reads `Drawer` rows, reads a `UnifiedAuditLog`,
-// or writes a `DiaryEntry`. So the maintenance daemon depends on
-// NeuronKit-owned seam protocols — exactly as the dreaming daemon
-// depends on `DreamingSubstrateReader` / `DreamingProposalSink` /
-// `DreamingPolicyStore`. The production adapter that binds these seams
-// to real estate verbs lands when the GLK Brain layer ships. The daemon
-// references substrate VALUE types (`Drawer`, `UnifiedAuditLog`,
+// write surface. The seam protocols decouple the daemon from the GLK surface
+// so the daemon can be constructed, tested, and reasoned about without a live
+// estate. The production adapters (`EstateMaintenanceSink`,
+// `EstateMaintenanceReader`) delegate through GLK's public verb surface (B-1):
+// `propose` via `GeniusLocusKit.propose(_:_:)`, diary writes via
+// `GeniusLocusKit.addDiaryEntry(in:_:)`, and drawer reads via
+// `GeniusLocusKit.allDrawers(in:)` and `GeniusLocusKit.currentAuditLog(in:)`.
+// The daemon references substrate VALUE types (`Drawer`, `UnifiedAuditLog`,
 // `DiaryEntry`, `ProposeFrame`, `ProposalKind`) but calls no substrate
-// method, so B-1 holds.
+// method directly, so B-1 holds.
 
 import Foundation
 import GeniusLocusKit
-import LocusKit
 
 // MARK: - Scan-input observation value types
 
@@ -121,9 +118,10 @@ public protocol MaintenanceSubstrateReader: Sendable {
 /// can reach does. It can only propose, exactly as the dreaming sink can
 /// only propose and never creates a Tunnel.
 ///
-/// The production adapter implements `propose(_:)` by forwarding to the
-/// estate handle's `propose` verb (the legal B-1 write path) once the
-/// GLK Brain layer makes that verb live.
+/// `EstateMaintenanceSink` is the production adapter; it implements
+/// `propose(_:)` by forwarding to the estate handle's `propose` verb
+/// (the legal B-1 write path) and `recordCycleDiary(_:)` by forwarding
+/// to `addDiaryEntry`.
 public protocol MaintenanceProposalSink: Sendable {
 
     /// Emit a remediation proposal. Maps to the estate `propose` verb in

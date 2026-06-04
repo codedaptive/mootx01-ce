@@ -32,6 +32,10 @@ pub mod constellation;
 pub mod context_synthesizer;
 pub mod dreaming_cycle;
 pub mod dreaming_decision;
+pub mod estate_dreaming_reader;
+pub mod estate_dreaming_sink;
+pub mod estate_maintenance_reader;
+pub mod estate_maintenance_sink;
 pub mod drift;
 pub mod formal_concept_analysis;
 pub mod hybrid_recall;
@@ -69,6 +73,18 @@ pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,
 };
+/// Production adapter that binds `DreamingSubstrateReader` to a live
+/// `DrawerStore`. Mirrors `EstateDreamingReader.swift`.
+pub use estate_dreaming_reader::EstateDreamingReader;
+/// Production adapter that binds `DreamingProposalSink` to a live
+/// `DrawerStore`. Mirrors `EstateDreamingSink.swift`. Closes BRAIN-PROPOSE.
+pub use estate_dreaming_sink::EstateDreamingSink;
+/// Production adapter that binds `MaintenanceSubstrateReader` to a live
+/// `DrawerStore`. Mirrors `EstateMaintenanceReader.swift`.
+pub use estate_maintenance_reader::EstateMaintenanceReader;
+/// Production adapter that binds `MaintenanceProposalSink` to a live
+/// `DrawerStore`. Mirrors `EstateMaintenanceSink.swift`.
+pub use estate_maintenance_sink::EstateMaintenanceSink;
 pub use drift::{drift, DriftScore};
 /// Re-export the `formal_concept_analysis` module as `fca` so CognitionKit
 /// recipes can reference it via `neuron_kit::fca::...` if preferred.

@@ -11,21 +11,17 @@
 // ── Why this daemon talks to seams, not to GLK verbs ──────────────────
 // MOOTx01 invariant B-1: NeuronKit never executes SQL and never calls
 // LocusKit / VectorKit / CorpusKit directly; the estate handle is the only
-// write surface. But the current GLK verb surface cannot satisfy this
-// daemon's substrate needs: `propose` throws
-// `VerbError.notSupportedByEstate` (Brain layer not present,
-// VerbSurface.swift:198), and there is no estate verb that reads
-// RecallTraceItem rows, reads existing Tunnels, or writes a DiaryEntry.
-// So the daemon depends on NeuronKit-owned seam protocols
-// (`DreamingSubstrateReader` for reads, `DreamingProposalSink` for the
-// two write kinds, `DreamingPolicyStore` for the manifest-resident
-// policy, `RewardSource` for the reward signal). The production adapter
-// that binds these seams to real estate verbs lands when the GLK Brain
-// layer ships — exactly the staged posture of the GLK `DreamingSignal`
-// scaffold, which today emits canned shapes for the same reason. The
-// daemon references the substrate VALUE types (RecallTraceItem,
-// DiaryEntry, Tunnel, ProposeFrame) but calls no substrate method, so
-// B-1 holds.
+// write surface. Even with `propose` now live (Brain layer landed in
+// GLK-02), no estate verb reads RecallTraceItem rows, reads existing
+// Tunnels, or writes a DiaryEntry. So the daemon depends on
+// NeuronKit-owned seam protocols (`DreamingSubstrateReader` for reads,
+// `DreamingProposalSink` for the two write kinds, `DreamingPolicyStore`
+// for the manifest-resident policy, `RewardSource` for the reward
+// signal). The production adapters (`EstateDreamingReader`,
+// `EstateDreamingSink`) bind these seams to real estate calls through
+// the GLK surface. The daemon references the substrate VALUE types
+// (RecallTraceItem, DiaryEntry, Tunnel, ProposeFrame) but calls no
+// substrate method, so B-1 holds.
 //
 // ── Determinism ───────────────────────────────────────────────────────
 // Per CLAUDE.md every computation is deterministic: the daemon never
@@ -35,12 +31,12 @@
 
 import Foundation
 import GeniusLocusKit
-import LocusKit
 
 /// Read surface the dreaming daemon mines (NEURONKIT_SPEC § 3.1 tick
-/// steps 1–2 and 5). Dependency seam; the production adapter binds it to
-/// estate reads when the GLK surface exposes them. All three reads are
-/// pure inputs — the daemon mutates nothing through this protocol.
+/// steps 1–2 and 5). Dependency seam; `EstateDreamingReader` is the
+/// production adapter that binds each method to the corresponding GLK
+/// estate read. All three reads are pure inputs — the daemon mutates
+/// nothing through this protocol.
 public protocol DreamingSubstrateReader: Sendable {
 
     /// Recall-trace rows in the recent reward window. The daemon derives
@@ -67,9 +63,10 @@ public protocol DreamingSubstrateReader: Sendable {
 /// the never-create-Tunnels invariant is enforced structurally: the
 /// daemon cannot create a Tunnel because nothing it can reach does.
 ///
-/// The production adapter implements `propose(_:)` by forwarding to the
-/// estate handle's `propose` verb (the legal B-1 write path) once the GLK
-/// Brain layer makes that verb live.
+/// `EstateDreamingSink` is the production adapter; it implements
+/// `propose(_:)` by forwarding to the estate handle's `propose` verb
+/// (the legal B-1 write path) and `recordCycleDiary(_:)` by forwarding
+/// to `addDiaryEntry`.
 public protocol DreamingProposalSink: Sendable {
 
     /// Emit a proposal for a novel candidate alignment (step 6). Maps to

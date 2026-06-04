@@ -79,11 +79,10 @@ public extension NeuronKit {
     /// The daemon talks to the substrate only through these seams (B-1):
     /// `reader` for the reads it mines, `sink` for its two writes
     /// (proposal + cycle diary), `policyStore` for the manifest-resident
-    /// policy, and `rewardSource` for the reward signal. The production
-    /// adapter that binds the seams to live estate verbs lands with the
-    /// GLK Brain layer; until then the GLK `propose` verb throws and no
-    /// estate verb exposes the reads, so the seams cannot be wired to GLK
-    /// here.
+    /// policy, and `rewardSource` for the reward signal. Production
+    /// adapters that bind the seams to live estate verbs are implemented
+    /// by `EstateDreamingReader` (read seam) and `EstateDreamingSink`
+    /// (write seam) in NeuronKit/Dreaming/.
     ///
     /// - Parameters:
     ///   - reader: substrate read seam.
