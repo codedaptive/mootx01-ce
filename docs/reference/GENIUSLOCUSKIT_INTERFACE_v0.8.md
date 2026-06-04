@@ -123,6 +123,17 @@ public actor GeniusLocusKit {
     public func glkMergeDrawers(_ drawerIDs: [RowID], from branch: any BranchHandle, into handle: EstateHandle) async throws -> MergeReport
     public func branchHandle(for branchID: BranchID) -> (any BranchHandle)?    // read accessor: resolve a tracked branch by id (stateless ARIA_MCP recipe callers)
 
+    // Recall substrate registration (GeniusLocusKit.swift) — SPEC B-recall:
+    // Wire the BM25/vector/matrix substrate lanes for a given estate. Call after
+    // open(_:owner:) and before the first recall(_:GLKRecallRequest) that uses
+    // corpusOnly, hybrid, or unionBest mode. Re-registering replaces the existing
+    // entry for the handle. These methods are actor-isolated (called with `await`).
+    public func registerCorpus(_ corpus: Corpus, for handle: EstateHandle)
+    public func registerVectorStore(_ store: VectorStore, for handle: EstateHandle)
+    public func registerMatrixTier(_ tier: MatrixTier, for handle: EstateHandle)
+    public func registerGraphCache(_ cache: some GraphCache, for handle: EstateHandle)   // RECALL-GRAPH-001
+    public func registerPreferenceStore(_ store: some PreferenceStore, for handle: EstateHandle) // RECALL-GRAPH-001
+
     // Standing-signals API (SignalAPI.swift / DefaultStandingSignals.swift) — SPEC B-5/B-6:
     public func registerStandingSignal(_ spec: SignalSpec, in handle: EstateHandle, now: Date) async throws -> SignalID
     @discardableResult
@@ -516,6 +527,11 @@ role, source file. Full signatures live in the cited file.
   production factory (GLK_RAG_WIRING_001); captures `VectorStore`, scans
   row embeddings via `findNearest` on each 5-minute pass, emits
   `AssociateFrames` for pairs within Hamming threshold (default 64).
+- **Recall cold-path signals (RECALL-GRAPH-001):** `GraphCache`,
+  `PreferenceStore` — public protocols defined in `GeniusLocusKit.swift`.
+  Registered via `registerGraphCache(_:for:)` and `registerPreferenceStore(_:for:)`.
+  Populate the `graph` and `preference` buffer columns in `RecallDirector`
+  step 5.7 via candidate-frontier lookups (no synchronous estate-wide analytics).
 - **Matrix tier (architecture § 12, GLK-06):** `MatrixTier`,
   `MatrixFieldCell`, `MatrixValueCoord`, `MatrixCoOccurKey`,
   `MatrixTemporalKey` (the F/C/O/T coordinate model), `MatrixCalibrationCurve`/

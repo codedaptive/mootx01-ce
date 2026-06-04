@@ -118,6 +118,19 @@ public extension GeniusLocusKit {
         // Apply the hard limit after draining.
         let limited = Array(rows.prefix(request.limit))
 
+        // Scoring semantics for the locusOnly lane:
+        //   - .raw  — hits returned in RecallFrame.ordering order; this IS raw
+        //             behaviour because no multi-lane combiner is active.
+        //   - .rrf  — single-lane RRF degrades to .raw ordering; nothing to
+        //             fuse. A future mission may weight intra-lane ranks with
+        //             explicit RRF math if more than one locus cursor runs in
+        //             parallel.
+        //   - .matrixAware — not yet active for locusOnly; falls back to raw
+        //             ordering. A future mission will add the matrix scoring
+        //             pass here once the per-lane matrix signal is defined.
+        // No scoring branch is needed now: all three cases produce the same
+        // ordering-based output for a single lane.
+
         // Wrap each drawer as a RecallHit. The locusOnly lane:
         //   - sources: [.locusBitmap] — the bitmap evaluator produced this hit
         //   - score: .locus(1.0) — full locus-lane confidence; multi-lane
@@ -208,15 +221,53 @@ public extension GeniusLocusKit {
             vectorList = []
         }
 
-        // RRF fusion of BM25 and vector lists.
-        let fused = rrfFuse(bm25List, vectorList, k: 60, limit: request.limit)
+        // Build the candidate list according to the requested scoring strategy.
+        //
+        // .rrf  — RRF-fuse BM25 and vector lists; this is the default behaviour
+        //         and the most accurate multi-lane combiner for two-lane inputs.
+        // .raw  — skip RRF; merge the two lists in score-descending order and
+        //         deduplicate by ID. BM25 scores take precedence because keyword
+        //         matching is the primary signal when RRF is not requested;
+        //         vector-only results are appended for IDs not in the BM25 list.
+        //         This honours the caller's request to skip inter-lane rank math.
+        // .matrixAware — not yet active for the corpusOnly lane; the matrix
+        //         scoring pass (fieldFit, coOccurrence, temporal) is defined for
+        //         the unionBest lane only. Falls back to .rrf behaviour here.
+        //         A future mission will add the matrix pass to the corpusOnly lane.
+        let fused: [(id: String, score: Float)]
+        switch request.scoring {
+        case .raw:
+            // .raw skips RRF; hits returned in BM25 score order
+            // (or vector score order if BM25 empty).
+            var seen: Set<String> = []
+            var merged: [(id: String, score: Float)] = []
+            for item in bm25List.sorted(by: { $0.score > $1.score }) {
+                if seen.insert(item.id).inserted {
+                    merged.append(item)
+                }
+            }
+            for item in vectorList.sorted(by: { $0.score > $1.score }) {
+                if seen.insert(item.id).inserted {
+                    merged.append(item)
+                }
+            }
+            fused = Array(merged.prefix(request.limit))
+        case .rrf, .matrixAware:
+            // .rrf — existing RRF fusion; two-lane reciprocal rank combination.
+            // .matrixAware scoring is not yet active for the corpusOnly lane;
+            // falls back to .rrf behaviour. A future mission will add the matrix
+            // pass here.
+            fused = rrfFuse(bm25List, vectorList, k: 60, limit: request.limit)
+        }
 
-        // Hydrate fused hits from the estate.
+        // Hydrate fused hits from the estate, excluding tombstoned drawers and
+        // applying the requested hydration level to the loaded drawers.
         let hits = await hydrateHits(
             fused,
             estate: estate,
             bm25IDs: Set(bm25List.map(\.id)),
-            vectorIDs: Set(vectorList.map(\.id))
+            vectorIDs: Set(vectorList.map(\.id)),
+            level: request.frame.hydrationLevel
         )
 
         Self.recallLog.debug(
@@ -275,26 +326,64 @@ public extension GeniusLocusKit {
             }
         }
 
-        // RRF fusion of all three lists.
-        let fused = rrfFuseThree(locusList, bm25List, vectorList, k: 60, limit: request.limit)
+        // Build the candidate list according to the requested scoring strategy.
+        //
+        // .rrf  — three-way RRF fusion of locus, BM25, and vector; default
+        //         and most accurate combiner for the hybrid lane.
+        // .raw  — skip rrfFuseThree; merge all three lists in order
+        //         (locus → BM25 → vector), dedup by ID, apply limit.
+        //         No rank math; the ordering reflects lane priority, not
+        //         inter-lane rank fusion.
+        // .matrixAware — not yet active for the hybrid lane; falls back to
+        //         .rrf behaviour. A future mission will add the matrix pass.
+        let fused: [(id: String, score: Float)]
+        switch request.scoring {
+        case .raw:
+            // .raw skips rrfFuseThree; merge locus → BM25 → vector in order.
+            var seen: Set<String> = []
+            var merged: [(id: String, score: Float)] = []
+            for item in locusList {
+                if seen.insert(item.id).inserted { merged.append(item) }
+            }
+            for item in bm25List.sorted(by: { $0.score > $1.score }) {
+                if seen.insert(item.id).inserted { merged.append(item) }
+            }
+            for item in vectorList.sorted(by: { $0.score > $1.score }) {
+                if seen.insert(item.id).inserted { merged.append(item) }
+            }
+            fused = Array(merged.prefix(request.limit))
+        case .rrf, .matrixAware:
+            // .rrf — existing three-way RRF fusion.
+            // .matrixAware not yet active for the hybrid lane; falls back to
+            // .rrf behaviour. A future mission will add the matrix pass here.
+            fused = rrfFuseThree(locusList, bm25List, vectorList, k: 60, limit: request.limit)
+        }
 
         // Hydrate fused hits from the estate. Locus rows are already in memory;
-        // supplement with allDrawers() for any IDs that came only from BM25/vector.
+        // supplement with a live-drawers fetch for any IDs that came only from
+        // BM25 or vector. Tombstoned rows are excluded from the extra index so
+        // that expunged content cannot surface via the BM25 or vector lanes.
         let locusIndex = Dictionary(uniqueKeysWithValues: locusRows.map { ($0.id, $0) })
         let bm25IDs = Set(bm25List.map(\.id))
         let vectorIDs = Set(vectorList.map(\.id))
-        // Load all drawers only if there are non-locus hits to hydrate.
+        // Load non-tombstoned drawers only if there are non-locus hits to hydrate.
+        // The .state != .tombstoned guard uses the adjectiveBitmap state field
+        // (bits 0-5), which is reliable across both InMemory and SQLite backends.
         let extraIDs = (bm25IDs.union(vectorIDs)).subtracting(Set(locusIndex.keys))
         let extraIndex: [String: LocusKit.Drawer]
         if !extraIDs.isEmpty {
-            let allDrawers = (try? await estate.allDrawers()) ?? []
-            extraIndex = Dictionary(uniqueKeysWithValues: allDrawers.map { ($0.id, $0) })
+            let liveDrawers = (try? await estate.allDrawers())?.filter { $0.state != .tombstoned } ?? []
+            extraIndex = Dictionary(uniqueKeysWithValues: liveDrawers.map { ($0.id, $0) })
         } else {
             extraIndex = [:]
         }
         var hits: [RecallHit] = []
         for (drawerID, rrfScore) in fused {
-            let drawer: LocusKit.Drawer? = locusIndex[drawerID] ?? extraIndex[drawerID]
+            let rawDrawer: LocusKit.Drawer? = locusIndex[drawerID] ?? extraIndex[drawerID]
+            // Apply the caller-requested hydration level so BM25/vector-path drawers
+            // honour the same bitmapOnly stripping that RecallStream applies on the
+            // locus page-emission path.
+            let drawer = rawDrawer.map { applyHydration($0, level: request.frame.hydrationLevel) }
             var sources: Set<RecallEvidencePath> = []
             if locusIndex[drawerID] != nil { sources.insert(.locusBitmap) }
             if bm25IDs.contains(drawerID) { sources.insert(.corpusBM25) }
@@ -424,21 +513,22 @@ public extension GeniusLocusKit {
     /// 3. Run the BM25 lane → frontierK hits (if corpus registered).
     /// 4. Run the vector lane → frontierK hits (if vectorStore and engram available).
     /// 5. Merge all hits into a `RecallCandidateBuffer` (capacity = frontierK * 3 + 10).
+    /// 5.5. Bulk-load non-tombstoned drawers from the estate into a `drawerIndex`.
+    /// 5.6. Matrix scoring (fieldFit, coOccurrence, temporal columns).
+    /// 5.7. Graph and preference scoring from pre-built cold-path caches.
     /// 6. Normalise score columns to [0, 1].
     /// 7. Compute a `RecallUnionProfile`.
     /// 8. Compute adaptive weights from sketch + profile.
     /// 9. Score each candidate: weighted sum of normalised columns
     ///    + signal-agreement bonus (0.05 × popcount(sourceMask) / 3).
-    /// 10. Greedy MMR (λ=0.7): iteratively pick the candidate that maximises
-    ///    λ·relevance − (1−λ)·maxSimilarityToSelected, where similarity
-    ///    is sourceMask Jaccard (cheap, pre-hydration proxy).
-    /// 11. Hydrate selected IDs from the estate (single `allDrawers()` call).
+    /// 10. Greedy MMR (λ adaptive from `weights.diversity`, range 0.5–0.9): iteratively
+    ///    pick the candidate that maximises λ·relevance − (1−λ)·maxSimilarityToSelected,
+    ///    where similarity uses post-hydration content shingle overlap (3-gram Jaccard)
+    ///    when drawer content is non-empty, and sourceMask bit-overlap Jaccard when
+    ///    content is stripped (bitmapOnly hydration) or absent.
+    /// 11. Build `RecallHit` array from `drawerIndex` in MMR-selected order,
+    ///    applying `hydrationLevel` stripping via `applyHydration(_:level:)`.
     /// 12. Return `GLKRecallResult` with `unionProfile` populated.
-    ///
-    /// MMR similarity before hydration uses sourceMask bit-overlap (Jaccard).
-    /// This is the correct pre-hydration proxy: candidates sourced from the same
-    /// lanes carry similar signal, so penalising them raises diversity. Post-
-    /// hydration shingle similarity can replace this in a future mission.
     private func recallUnionBest(
         estate: LocusKit.Estate,
         request: GLKRecallRequest,
@@ -534,24 +624,24 @@ public extension GeniusLocusKit {
             buffer.merge(hit: hit, sourceBit: RecallCandidateBuffer.bitVectorHamming)
         }
 
-        // Step 5.5 — bulk-load all drawers early so matrix scoring and final
-        // hydration share one estate round-trip. Moving allDrawers() before
-        // normalize (step 6) lets the matrix scorer derive per-candidate
+        // Step 5.5 — bulk-load all live (non-tombstoned) drawers early so matrix
+        // scoring and final hydration share one estate round-trip. Moving this
+        // before normalize (step 6) lets the matrix scorer derive per-candidate
         // field coordinates from Drawer objects rather than a second fetch.
-        let allDrawers = (try? await estate.allDrawers()) ?? []
-        let drawerIndex = Dictionary(uniqueKeysWithValues: allDrawers.map { ($0.id, $0) })
+        // Tombstoned rows are excluded via the adjectiveBitmap state field (bits
+        // 0-5); this is reliable across both InMemory and SQLite backends and
+        // prevents expunged drawers from surfacing via the BM25 or vector lanes.
+        let liveDrawers = (try? await estate.allDrawers())?.filter { $0.state != .tombstoned } ?? []
+        let drawerIndex = Dictionary(uniqueKeysWithValues: liveDrawers.map { ($0.id, $0) })
 
         // Step 5.6 — matrix scoring (before normalize).
-        // Populate fieldFit, coOccurrence, and temporal buffer columns when a
-        // MatrixTier is registered for this estate. queryCoords are derived from
-        // the top locus candidate — the highest-ranked bitmap hit sets the
-        // reference field-value signature that all other candidates are scored
-        // against. Graph and preference columns remain 0.0: no cached graph
-        // projections (RandomWalks, EigenvalueCentrality) or preference data
-        // (Bradley-Terry from RecallTrace) are integrated per-estate yet; a
-        // future mission will wire these when the graph cache and the preference
-        // store are promoted into the GeniusLocusKit actor's registry.
-        if let matrix = matrixTiers[handle] {
+        // Runs only when scoring is .matrixAware (the full pipeline) and a
+        // MatrixTier is registered. Skipped for .raw and .rrf — see step 9.
+        // Populates fieldFit, coOccurrence, and temporal buffer columns.
+        // queryCoords are derived from the top locus candidate — the
+        // highest-ranked bitmap hit sets the reference field-value signature
+        // that all other candidates are scored against.
+        if request.scoring == .matrixAware, let matrix = matrixTiers[handle] {
             let scorer = RecallMatrixScorer()
             let queryCoords: [MatrixValueCoord] = locusSlice.first.map {
                 matrixCoordsFor(drawer: $0)
@@ -576,6 +666,23 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Step 5.7 — graph and preference scoring.
+        // Candidate-frontier lookups only: per-drawer scores are read from
+        // pre-built caches registered by the dreaming/training cycle. No
+        // synchronous estate-wide analytics are performed here (spec §15).
+        // Columns remain 0.0 when no cache is registered for the estate —
+        // correct for a fresh estate with no graph or preference priors.
+        if let graphCache = graphCaches[handle] {
+            for i in 0..<buffer.count {
+                buffer.graph[i] = graphCache.graphScore(for: buffer.ids[i])
+            }
+        }
+        if let prefStore = preferenceStores[handle] {
+            for i in 0..<buffer.count {
+                buffer.preference[i] = prefStore.preferenceScore(for: buffer.ids[i])
+            }
+        }
+
         // Step 6 — normalise score columns to [0, 1].
         buffer.normalizeFinals()
 
@@ -584,35 +691,69 @@ public extension GeniusLocusKit {
             from: buffer, primarySourceCount: primarySourceCount)
 
         // Step 8 — compute adaptive weights from query + profile.
+        // Used only for .matrixAware (the full weighted pipeline). For .raw
+        // and .rrf the weights are unused; scores are read directly from the
+        // normalised buffer.final column (the lane-normalised rank score from
+        // step 6, which already encodes relative relevance without matrix
+        // signal contributions).
         let weights = RecallWeights.adaptive(for: sketch, profile: profile)
 
-        // Step 9 — compute weighted final score per candidate.
-        // Active weights: locus, bm25, vector, fieldFit, graph, matrix (coOccurrence
-        // + temporal combined under the matrix weight budget).
-        // agreementBonus = 0.05 × popcount(sourceMask) / 3.
-        // Divides by 3 because the maximum popcount across the three primary
-        // source bits is 3; this normalises the bonus to a maximum of 0.05.
+        // Step 9 — compute final score per candidate.
+        //
+        // .matrixAware — the full existing weighted pipeline IS the matrixAware
+        //   path. Active weights: locus, bm25, vector, fieldFit, graph, preference,
+        //   matrix (coOccurrence + temporal combined). agreementBonus = 0.05 ×
+        //   popcount(sourceMask) / 3 (normalised to max 0.05 over 3 source bits).
+        //   RecallWeights has no dedicated preference field; preference is scored
+        //   at equal weight to graph (weights.graph) so both cold-path signals
+        //   share the same budget slice.
+        //
+        // .raw — skip the weighted scoring pass; use the raw .final score from
+        //   the buffer (the lane-normalised rank score set in step 6) for MMR.
+        //   No matrix signals, no adaptive weights, no agreement bonus.
+        //
+        // .rrf — .rrf in unionBest uses equal-weight lane scoring without matrix
+        //   signals. A future mission will add explicit equal-weight RRF fusion
+        //   across lane scores here; for now this falls back to the .raw path
+        //   (buffer.final scores) to avoid silent matrix-signal bleed.
         let agreementBonus: Float = 0.05
         var scores = [Float](repeating: 0, count: buffer.count)
-        for i in 0..<buffer.count {
-            // Matrix lane: coOccurrence and temporal combined at equal weight
-            // under the matrix weight budget, so the two matrix signals share
-            // the same budget slice without over-weighting matrix overall.
-            let matrixSignal = (buffer.coOccurrence[i] + buffer.temporal[i]) * 0.5
-            scores[i] =
-                weights.locus    * buffer.locus[i] +
-                weights.bm25     * buffer.bm25[i] +
-                weights.vector   * buffer.vector[i] +
-                weights.fieldFit * buffer.fieldFit[i] +
-                weights.matrix   * matrixSignal +
-                weights.graph    * buffer.graph[i] +
-                agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 3.0
+        switch request.scoring {
+        case .matrixAware:
+            for i in 0..<buffer.count {
+                // Matrix lane: coOccurrence and temporal combined at equal weight
+                // under the matrix weight budget, so the two matrix signals share
+                // the same budget slice without over-weighting matrix overall.
+                let matrixSignal = (buffer.coOccurrence[i] + buffer.temporal[i]) * 0.5
+                scores[i] =
+                    weights.locus    * buffer.locus[i] +
+                    weights.bm25     * buffer.bm25[i] +
+                    weights.vector   * buffer.vector[i] +
+                    weights.fieldFit * buffer.fieldFit[i] +
+                    weights.matrix   * matrixSignal +
+                    weights.graph    * buffer.graph[i] +
+                    weights.graph    * buffer.preference[i] +
+                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 3.0
+            }
+        case .raw, .rrf:
+            // .raw: use the normalised lane-rank score directly — no matrix signals,
+            // no adaptive weights, no agreement bonus.
+            // .rrf: falls back to .raw (buffer.final) until a future mission adds
+            // explicit equal-weight RRF fusion across lane scores in unionBest.
+            for i in 0..<buffer.count {
+                scores[i] = buffer.final[i]
+            }
         }
 
-        // Step 10 — greedy MMR (λ = 0.7).
-        // maxSim[i] tracks the highest similarity between candidate i and any
-        // already-selected candidate. Updated incrementally after each selection
-        // to avoid O(n²·k) full recomputation.
+        // Step 10 — greedy MMR with adaptive λ.
+        // λ is derived from weights.diversity: higher diversity weight (triggered
+        // by high-redundancy corpus) reduces λ, pushing MMR toward diversity.
+        // Formula: λ = clamp(0.7 − (diversity − 0.1) × 0.5, 0.5, 0.9).
+        // At diversity=0.1 (base): λ=0.7. At diversity=0.25 (high redundancy):
+        // λ=0.625. maxSim[i] tracks the highest similarity between candidate i
+        // and any already-selected candidate. Updated incrementally after each
+        // selection to avoid O(n²·k) full recomputation.
+        let lambda: Float = min(0.9, max(0.5, 0.7 - (weights.diversity - 0.1) * 0.5))
         var maxSim = [Float](repeating: 0, count: buffer.count)
         var selected: [Int] = []
         var unselected = Set(0..<buffer.count)
@@ -623,7 +764,7 @@ public extension GeniusLocusKit {
             var bestIdx = unselected.first!
             var bestMMR = Float.leastNormalMagnitude
             for i in unselected {
-                let mmrScore = 0.7 * scores[i] - 0.3 * maxSim[i]
+                let mmrScore = lambda * scores[i] - (1 - lambda) * maxSim[i]
                 if mmrScore > bestMMR {
                     bestMMR = mmrScore
                     bestIdx = i
@@ -632,12 +773,20 @@ public extension GeniusLocusKit {
             selected.append(bestIdx)
             unselected.remove(bestIdx)
 
-            // Update maxSim for remaining candidates using sourceMask Jaccard.
-            // Pre-hydration similarity proxy: candidates that share source lanes
-            // carry correlated signal and should be penalised.
+            // Update maxSim for remaining candidates using post-hydration
+            // shingle similarity when drawer content is available. Falls
+            // back to sourceMask Jaccard for bitmapOnly hydration (content
+            // stripped to "") or candidates absent from drawerIndex.
+            let contentBest = drawerIndex[buffer.ids[bestIdx]]?.content ?? ""
             for i in unselected {
-                let sim = glkSourceMaskJaccard(
-                    buffer.sourceMask[bestIdx], buffer.sourceMask[i])
+                let sim: Float
+                let contentI = drawerIndex[buffer.ids[i]]?.content ?? ""
+                if !contentBest.isEmpty, !contentI.isEmpty {
+                    sim = glkShingleSimilarity(contentBest, contentI)
+                } else {
+                    sim = glkSourceMaskJaccard(
+                        buffer.sourceMask[bestIdx], buffer.sourceMask[i])
+                }
                 if sim > maxSim[i] { maxSim[i] = sim }
             }
         }
@@ -650,7 +799,13 @@ public extension GeniusLocusKit {
         hits.reserveCapacity(selected.count)
         for idx in selected {
             let id = buffer.ids[idx]
-            let drawer = drawerIndex[id]
+            // Apply the caller-requested hydration level to the drawer from
+            // drawerIndex (which holds unstripped drawers loaded from the estate).
+            // This mirrors the stripping RecallStream applies on the locus
+            // page-emission path so the director path is consistent.
+            let drawer = drawerIndex[id].map {
+                applyHydration($0, level: request.frame.hydrationLevel)
+            }
             var sources: Set<RecallEvidencePath> = []
             let mask = buffer.sourceMask[idx]
             if mask & RecallCandidateBuffer.bitLocusBitmap  != 0 { sources.insert(.locusBitmap) }
@@ -720,10 +875,10 @@ public extension GeniusLocusKit {
 
     /// Jaccard similarity between two source-lane bitsets.
     ///
-    /// Pre-hydration MMR similarity proxy: candidates sourced from the same
-    /// lanes carry correlated signal. Penalising them in the MMR pass raises
-    /// topical diversity. Post-hydration, shingle similarity over drawer content
-    /// can replace this in a future mission.
+    /// MMR similarity proxy for bitmapOnly hydration or drawers without
+    /// content: candidates sourced from the same lanes carry correlated
+    /// signal. Penalising them in the MMR pass raises topical diversity.
+    /// When content is available, `glkShingleSimilarity` is preferred.
     ///
     /// Returns 0 when both masks are zero (no shared lane evidence — treat
     /// as fully dissimilar).
@@ -734,28 +889,67 @@ public extension GeniusLocusKit {
         return Float(andBits.nonzeroBitCount) / Float(orBits.nonzeroBitCount)
     }
 
+    /// Shingle-overlap (Jaccard) similarity between two content strings.
+    ///
+    /// Builds 3-character lowercase shingle sets from each string and
+    /// returns |A ∩ B| / |A ∪ B|. Returns 0.0 when either set is empty
+    /// (no shingle overlap — treat as fully dissimilar). The 3-gram window
+    /// matches NeuronKit.HybridRecallEngine.shingleSimilarity exactly;
+    /// GeniusLocusKit reimplements locally because it does not depend on
+    /// NeuronKit (layering constraint).
+    private func glkShingleSimilarity(_ a: String, _ b: String) -> Float {
+        let sa = glkShingles(a)
+        let sb = glkShingles(b)
+        guard !sa.isEmpty, !sb.isEmpty else { return 0 }
+        let intersection = sa.intersection(sb).count
+        let union = sa.union(sb).count
+        guard union > 0 else { return 0 }
+        return Float(intersection) / Float(union)
+    }
+
+    /// 3-character lowercase shingle set for shingle similarity computation.
+    ///
+    /// Folds the string to lowercase UTF-8 scalars and windows over
+    /// every consecutive triple. Short strings (fewer than 3 scalars)
+    /// produce an empty set, causing `glkShingleSimilarity` to return 0.
+    private func glkShingles(_ s: String) -> Set<String> {
+        let chars = Array(s.lowercased())
+        guard chars.count >= 3 else { return [] }
+        var result = Set<String>(minimumCapacity: chars.count - 2)
+        for i in 0...(chars.count - 3) {
+            result.insert(String(chars[i..<i+3]))
+        }
+        return result
+    }
+
     // MARK: - Hydration helper (corpusOnly lane)
 
     /// Hydrate fused hits for the `corpusOnly` lane.
     ///
-    /// Loads all current drawers from the estate once, then joins by row ID.
-    /// Using `estate.allDrawers()` is the available public estate API for bulk
-    /// drawer retrieval; single-drawer-by-ID lookup is not yet on the public
-    /// surface (tracked for a future LocusKit verb). For small estates
-    /// (test and early-production scale) this is efficient enough.
+    /// Loads all live (non-tombstoned) drawers from the estate once, then joins
+    /// by row ID. Tombstoned rows are excluded via the adjectiveBitmap state
+    /// field so that expunged content cannot surface in BM25 or vector results.
+    /// The `level` parameter applies the same hydration stripping that RecallStream
+    /// enforces on the locus page-emission path. For small estates
+    /// (test and early-production scale) a full scan is efficient enough.
     private func hydrateHits(
         _ fused: [(id: String, score: Float)],
         estate: LocusKit.Estate,
         bm25IDs: Set<String>,
-        vectorIDs: Set<String>
+        vectorIDs: Set<String>,
+        level: LocusKit.HydrationLevel
     ) async -> [RecallHit] {
-        // Bulk-load all drawers once; build an ID index for O(1) joins.
-        let allDrawers = (try? await estate.allDrawers()) ?? []
-        let drawerIndex = Dictionary(uniqueKeysWithValues: allDrawers.map { ($0.id, $0) })
+        // Bulk-load non-tombstoned drawers once; build an ID index for O(1) joins.
+        // The .state != .tombstoned guard uses adjectiveBitmap bits 0-5, which is
+        // reliable across both InMemory and SQLite backends.
+        let liveDrawers = (try? await estate.allDrawers())?.filter { $0.state != .tombstoned } ?? []
+        let drawerIndex = Dictionary(uniqueKeysWithValues: liveDrawers.map { ($0.id, $0) })
 
         var hits: [RecallHit] = []
         for (drawerID, rrfScore) in fused {
-            let drawer: LocusKit.Drawer? = drawerIndex[drawerID]
+            // Apply hydration stripping so the BM25/vector path honours the same
+            // bitmapOnly contract that RecallStream enforces on the locus path.
+            let drawer = drawerIndex[drawerID].map { applyHydration($0, level: level) }
             var sources: Set<RecallEvidencePath> = []
             if bm25IDs.contains(drawerID) { sources.insert(.corpusBM25) }
             if vectorIDs.contains(drawerID) { sources.insert(.vectorHamming) }
@@ -772,5 +966,50 @@ public extension GeniusLocusKit {
                                   score: scoreVec, explanation: sources.map(\.rawValue).sorted()))
         }
         return hits
+    }
+
+    // MARK: - Hydration helper
+
+    /// Apply `hydrationLevel` stripping to a drawer, mirroring the behaviour
+    /// `RecallStream` enforces on the locus page-emission path (see
+    /// `RecallStream.AsyncIterator.hydrate`).
+    ///
+    /// `.bitmapOnly` rebuilds the `Drawer` with `content = ""` while preserving
+    /// every other field (notably the bitmap columns — adjective, operational,
+    /// provenance — which are the entire point of this tier).
+    /// `.structured` and `.full` return the drawer unchanged.
+    private func applyHydration(
+        _ d: LocusKit.Drawer,
+        level: LocusKit.HydrationLevel
+    ) -> LocusKit.Drawer {
+        switch level {
+        case .bitmapOnly:
+            return LocusKit.Drawer(
+                id: d.id,
+                content: "",
+                wing: d.wing,
+                room: d.room,
+                sourceFile: d.sourceFile,
+                chunkIndex: d.chunkIndex,
+                addedBy: d.addedBy,
+                filedAt: d.filedAt,
+                // Preserve eventTime (ING-01): bitmapOnly hydration
+                // must not collapse the event clock onto filedAt.
+                eventTime: d.eventTime,
+                embeddingModelID: d.embeddingModelID,
+                tombstonedAt: d.tombstonedAt,
+                removedByBatch: d.removedByBatch,
+                provenance: d.provenance,
+                adjectiveBitmap: d.adjectiveBitmap,
+                operationalBitmap: d.operationalBitmap,
+                lineageID: d.lineageID,
+                udcCode: d.udcCode,
+                udcFacets: d.udcFacets,
+                wikidataQID: d.wikidataQID,
+                wikidataQidsSecondary: d.wikidataQidsSecondary
+            )
+        case .structured, .full:
+            return d
+        }
     }
 }
