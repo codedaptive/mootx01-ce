@@ -1,8 +1,11 @@
 //! Adjective bitmap axis enums. Ports the four axis enums from `Adjectives.swift`.
 //!
-//! The `Drawer` extension accessors from `Adjectives.swift` are deferred to LP-1B
-//! (they belong to the Drawer type). Only the four backing axis enums are
-//! ported here — they are genuine leaves.
+//! Only the four backing axis enums are ported here — they are genuine
+//! leaves. The `Drawer` accessors that decode them belong to the Drawer
+//! type and live in `drawer_operational.rs` alongside the operational
+//! accessors: `adjective_sensitivity()` (bits 6–11) and `trust()` (bits
+//! 18–23) are implemented; the remaining Drawer adjective accessors
+//! (state, exportability, and the cluster predicates) are pending.
 //!
 //! ## Adjective bitmap layout (per cookbook §2.3 / §2.8)
 //!

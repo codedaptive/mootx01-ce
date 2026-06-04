@@ -33,12 +33,6 @@ pub type LineageID = Uuid;
 /// Wikidata Q-ID string (e.g. `"Q11165"`).
 pub type WikidataQID = String;
 
-/// Floating-point vector. Placeholder until VectorKit ships — the
-/// evaluator's `Filter::NearVector` case carries this type; the
-/// underlying ANN index is decoupled by the alias so VectorKit can
-/// later replace `Vec<f32>` without churning filter call sites.
-pub type Vector = Vec<f32>;
-
 // MARK: - StateCluster --------------------------------------------------------
 
 /// State-cluster membership filter. Coarser than `State`; used when the
@@ -183,9 +177,6 @@ pub enum Filter {
     // ---------- Content queries ----------
     /// Rows whose verbatim content contains this string.
     ContentMatches(String),
-    /// Rows near this vector — approximate nearest neighbour. Requires
-    /// the vector tier; the evaluator throws until VectorKit ships.
-    NearVector { vector: Vector, count: usize },
 
     // ---------- Composition ----------
     /// All child filters must match (AND).

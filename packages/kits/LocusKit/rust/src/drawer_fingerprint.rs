@@ -124,7 +124,10 @@ impl EstateFingerprintFamilies {
 
         let lineage_temporal_input = simhash::lineage_temporal_input(
             substrate_types::fnv::hash16(&drawer.lineage_id.to_string()),
-            capture_week_bucket(drawer.filed_at),
+            // Fingerprint keys off event_time (ING-01): bulk historical ingest
+            // must bucket to the original authorship week, not the ingest instant.
+            // Fall back to filed_at for rows pre-dating the column.
+            capture_week_bucket(drawer.event_time.unwrap_or(drawer.filed_at)),
             // Drawers carry no defer pattern; null per I-17.
             0,
             // Drawers carry no completion gradient; null per I-17.
@@ -166,14 +169,16 @@ impl EstateFingerprintFamilies {
 const CAPTURE_WEEK_EPOCH_SECONDS: i64 = 1_577_836_800;
 
 /// The capture-week bucket: whole weeks from the 2020 epoch to the
-/// filing time, modulo 256. Times before the epoch bucket at zero.
+/// event time, modulo 256. Times before the epoch bucket at zero.
 ///
-/// `filed_at` is epoch seconds (the Rust port's timestamp shape). The
+/// `event_time` is epoch seconds (the Rust port's timestamp shape). The
 /// Swift port passes a `Date` whose `timeIntervalSince1970` is a
 /// `Double` of seconds — wire-identical for any time the substrate
-/// stores.
-pub fn capture_week_bucket(filed_at: i64) -> u8 {
-    let seconds = filed_at - CAPTURE_WEEK_EPOCH_SECONDS;
+/// stores. Receives `drawer.event_time` (ING-01 two-clock ingest) so
+/// bulk historical content buckets to the authorship week, not the
+/// ingest instant.
+pub fn capture_week_bucket(event_time: i64) -> u8 {
+    let seconds = event_time - CAPTURE_WEEK_EPOCH_SECONDS;
     if seconds <= 0 {
         return 0;
     }

@@ -25,8 +25,7 @@
 //!    `LineageID`, `CreatedAfter`, `CreatedBefore`, `LatticeAnchor`,
 //!    `LatticeUnder`, `WikidataConcept`.
 //! 4. **Content tier** (§ 7.9.4 step 4) — `ContentMatches` via a
-//!    case-insensitive substring fold; `NearVector` surfaces a typed
-//!    error until VectorKit ships.
+//!    case-insensitive substring fold.
 //!
 //! Container pruning (§ 7.9.4 step 1) is exposed via
 //! [`BitmapEvaluator::container_survives`]. It tests the chain's
@@ -152,9 +151,7 @@ impl BitmapEvaluator {
     /// reference is borrowed because the evaluator never retains
     /// state across calls.
     ///
-    /// Returns `LocusKitError::InvalidContent` when the chain contains
-    /// `NearVector` (vector tier requires VectorKit). Propagates
-    /// substrate errors from `DrawerStore::audit_events_for_row`
+    /// Propagates substrate errors from `DrawerStore::audit_events_for_row`
     /// during historical reconstruction.
     pub fn evaluate(
         frame: &RecallFrame,
@@ -206,8 +203,7 @@ impl BitmapEvaluator {
         // 2. Structured-tier filters (room / wing / time / lattice).
         candidates.retain(|d| Self::evaluate_structured_tier(&chain, d));
 
-        // 3. Content-tier filters (substring; NearVector surfaces a
-        //    typed error rather than silently returning zero rows).
+        // 3. Content-tier filters (substring match).
         let mut result = Vec::with_capacity(candidates.len());
         for d in candidates {
             if Self::evaluate_content_tier(&chain, &d)? {
@@ -380,7 +376,7 @@ impl BitmapEvaluator {
     }
 
     /// Compile a single Filter case to a bitmap-tier predicate. Cases
-    /// outside the bitmap tier (structured / content / NearVector)
+    /// outside the bitmap tier (structured / content)
     /// pass at this stage; they are evaluated in their respective
     /// tiers.
     fn evaluate_one(filter: &Filter, adj: i64, op: i64, prov: i64) -> bool {
@@ -513,7 +509,7 @@ impl BitmapEvaluator {
 
             // Non-bitmap cases — pass at this tier, evaluated in their
             // own tier below. Includes structured (room / wing / time
-            // / lattice) and content (ContentMatches / NearVector).
+            // / lattice) and content (ContentMatches).
             _ => true,
         }
     }
@@ -627,7 +623,7 @@ impl BitmapEvaluator {
     /// to `false` here.
     fn is_content_filter(f: &Filter) -> bool {
         match f {
-            Filter::ContentMatches(_) | Filter::NearVector { .. } => true,
+            Filter::ContentMatches(_) => true,
             Filter::All(fs) | Filter::Any(fs) => fs.iter().any(Self::is_content_filter),
             Filter::Not(inner) => Self::is_content_filter(inner),
             _ => false,
@@ -647,15 +643,6 @@ impl BitmapEvaluator {
                 let haystack = drawer.content.to_lowercase();
                 let needle = s.to_lowercase();
                 Ok(haystack.contains(&needle))
-            }
-            Filter::NearVector { .. } => {
-                // The vector index ships with VectorKit. Throwing here
-                // surfaces a typed error to the caller rather than
-                // silently returning zero rows, so a chain that
-                // requires `NearVector` fails loud.
-                Err(LocusKitError::InvalidContent(
-                    "nearVector requires VectorKit — not yet implemented".to_string(),
-                ))
             }
             Filter::All(fs) => {
                 for f in fs.iter().filter(|f| Self::is_content_filter(f)) {
@@ -1099,21 +1086,6 @@ mod tests {
         let frame = make_frame(vec![Filter::ContentMatches("WORLD".to_string())]);
         let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
         assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn near_vector_surfaces_invalid_content_error() {
-        let store = make_store();
-        let d = base_drawer("d");
-        let frame = make_frame(vec![Filter::NearVector {
-            vector: vec![0.0, 1.0],
-            count: 5,
-        }]);
-        let err = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap_err();
-        match err {
-            LocusKitError::InvalidContent(msg) => assert!(msg.contains("VectorKit")),
-            other => panic!("expected InvalidContent, got {:?}", other),
-        }
     }
 
     // -----------------------------------------------------------------

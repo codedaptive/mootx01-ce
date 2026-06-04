@@ -34,13 +34,14 @@
 //!   which is sound (correct, just slower for large corpora at which point
 //!   the SQLite backend and fingerprint pruning land together).
 
-use crate::adjectives::State;
+use crate::adjectives::{State, Trust};
 use crate::bitmap_evaluator::BitmapEvaluator;
 use crate::drawer::Drawer;
+use crate::drawer_operational::DrawerFeatureFlags;
 use crate::error::LocusKitError;
 use crate::estate::Estate;
 use crate::frames::TunnelCaptureFrame;
-use crate::frames::{CaptureFrame, LearnFrame, MutationKind};
+use crate::frames::{AssociateFrame, CaptureFrame, LearnFrame, MutationKind, ProposeFrame};
 use crate::provenance::Confirmation;
 use crate::recall_stream::RecallStream;
 use crate::tunnel::Tunnel;
@@ -85,14 +86,15 @@ impl Estate {
     ///
     /// # Bitmap assembly
     ///
-    /// Operational bitmap:
-    ///   - bits 0–3: `capture_channel` (contiguous raw 0..4)
-    ///   - bits 4–7: `content_kind`    (contiguous raw 0..5)
+    /// Operational bitmap (cookbook §2.4 v0.6 layout):
+    ///   - bits 0–5:   `capture_channel` (contiguous raw 0..5)
+    ///   - bits 6–11:  `content_kind`    (contiguous raw 0..6)
+    ///   - bits 12–23: `feature_flags`   (DrawerFeatureFlags bitset, pre-shifted)
     ///
     /// Adjective bitmap:
-    ///   - bits 0–3: state — default 0 (`Active`)
-    ///   - bits 4–7: adjective_sensitivity (scale-gapped raw 0/4/8/12,
-    ///     shifted left 4 to land in bits 4–7)
+    ///   - bits 0–5:  state — default 0 (`Active`)
+    ///   - bits 6–11: adjective_sensitivity (scale-gapped raw 0/16/32/48,
+    ///     packed via `bit_field::write_field` into bits 6–11)
     ///
     /// Per `DrawerOperational.swift` / spec § 5.6 and § 5.5.
     ///
@@ -130,25 +132,29 @@ impl Estate {
             ));
         }
 
-        // Operational bitmap assembly:
-        //   bits 0–3  capture_channel (contiguous raw 0..4)
-        //   bits 4–7  content_kind    (contiguous raw 0..5)
+        // Operational bitmap assembly (cookbook §2.4 v0.6 layout):
+        //   bits 0–5   capture_channel (contiguous raw 0..5)
+        //   bits 6–11  content_kind    (contiguous raw 0..6)
+        //   bits 12–23 feature_flags   (DrawerFeatureFlags bitset)
         // Per DrawerOperational.swift / spec § 5.6.
+        //
+        // DrawerFeatureFlags constants are pre-shifted (e.g. HAS_LINKS = 1<<15),
+        // so the merge is a direct OR masked to FIELD_MASK (0xFFF000) — the
+        // inverse of the `feature_flags()` accessor's `& FIELD_MASK` decoder.
         let op_bitmap = bit_field::write_field(
             frame.kind.raw_value(),
             bit_field::write_field(frame.channel.raw_value(), 0, 0, 6),
             6,
             6,
-        );
+        ) | (frame.feature_flags & DrawerFeatureFlags::FIELD_MASK);
 
-        // Adjective bitmap assembly:
-        //   bits 0–3  state             (default 0 = Active)
-        //   bits 4–7  adjective_sensitivity (scale-gapped raw 0/4/8/12)
+        // Adjective bitmap assembly (cookbook §2.3 v0.6 layout):
+        //   bits 0–5  state                 (default 0 = Active)
+        //   bits 6–11 adjective_sensitivity (scale-gapped raw 0/16/32/48)
         //
-        // The sensitivity raw values are scale-gapped (0/16/32/48), so shifting
-        // left 4 lands them exactly in bits 4–7.
+        // The sensitivity raw values are scale-gapped and packed via
+        // write_field into the 6-bit window at bits 6–11.
         // Per Adjectives.swift / spec § 5.5.
-        // F18: cookbook §2.3 sensitivity at bits 6-11.
         let adj_bitmap = bit_field::write_field(frame.sensitivity.raw_value(), 0, 6, 6);
 
         // Provenance bitmap assembly (cookbook §2.5 layout):
@@ -206,6 +212,9 @@ impl Estate {
         drawer.udc_facets = frame.lattice_anchor.udc_facets;
         drawer.wikidata_qid = frame.lattice_anchor.wikidata_qid;
         drawer.wikidata_qids_secondary = frame.lattice_anchor.wikidata_qids_secondary;
+        // Two-clock ingest (ING-01): caller-supplied event time for bulk
+        // historical ingestion; streaming capture defaults to now.
+        drawer.event_time = Some(frame.event_time.unwrap_or(now));
 
         self.store.add_drawer(&drawer, now)?;
         Ok(drawer)
@@ -278,8 +287,13 @@ impl Estate {
             ));
         }
 
-        // Bitmaps left at `Tunnel::new`'s all-zero defaults, byte-identical
-        // to the cascade's `Tunnel::new(...)` construction.
+        // Encode origin_class into bits 6–8 of the tunnel operational bitmap.
+        // The decoder (`Tunnel::origin_class()` in `tunnel_operational.rs`) uses
+        // `bit_field::extract_field(operational_bitmap, 6, 3)`, so this write
+        // is the exact inverse. Default `UserExplicit` (raw 0) produces 0,
+        // preserving byte-identical all-zero defaults for existing callers
+        // (spec § 5.6 / cookbook §2.4).
+        let op_bitmap = bit_field::write_field(frame.origin_class.raw_value(), 0, 6, 3);
         let mut tunnel = Tunnel::new(
             Uuid::new_v4().to_string(),
             frame.source_wing,
@@ -293,6 +307,7 @@ impl Estate {
         tunnel.kind = frame.kind;
         tunnel.source_drawer_id = frame.source_drawer_id;
         tunnel.target_drawer_id = frame.target_drawer_id;
+        tunnel.operational_bitmap = op_bitmap;
         self.store.add_tunnel(&tunnel)?;
         Ok(tunnel)
     }
@@ -379,6 +394,44 @@ impl Estate {
     /// graph the keystone lens consumes is built from these.
     pub fn add_tunnel(&self, tunnel: &Tunnel) -> Result<(), LocusKitError> {
         self.store.add_tunnel(tunnel)
+    }
+
+    // -----------------------------------------------------------------------
+    // Unfiltered full-corpus reads (recall surface)
+    // -----------------------------------------------------------------------
+
+    /// All non-tombstoned proposals in the estate, ordered by `filed_at`
+    /// ascending. Estate-level pass-through over `DrawerStore::all_proposals`.
+    pub fn all_proposals(&self) -> Result<Vec<crate::proposal::Proposal>, LocusKitError> {
+        self.store.all_proposals()
+    }
+
+    /// All non-tombstoned associations in the estate, ordered by `filed_at`
+    /// ascending. Estate-level pass-through over `DrawerStore::all_associations`.
+    pub fn all_associations(&self) -> Result<Vec<crate::association::Association>, LocusKitError> {
+        self.store.all_associations()
+    }
+
+    /// All non-tombstoned learned references in the estate, ordered by
+    /// `filed_at` ascending. Estate-level pass-through over
+    /// `DrawerStore::all_learned_references`.
+    pub fn all_learned_references(
+        &self,
+    ) -> Result<Vec<crate::learned_reference::LearnedReference>, LocusKitError> {
+        self.store.all_learned_references()
+    }
+
+    /// All kg-facts in the estate where state cluster < 7, ordered by
+    /// `filed_at` ascending. Estate-level pass-through over
+    /// `DrawerStore::all_kg_facts`.
+    pub fn all_kg_facts(&self) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
+        self.store.all_kg_facts()
+    }
+
+    /// All non-tombstoned diary entries in the estate, ordered by `filed_at`
+    /// ascending. Estate-level pass-through over `DrawerStore::all_diary_entries`.
+    pub fn all_diary_entries(&self) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
+        self.store.all_diary_entries()
     }
 
     // -----------------------------------------------------------------------
@@ -509,31 +562,53 @@ impl Estate {
     }
 
     // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    /// Resolve the owner identifier from the manifest, falling back to
+    /// "estate" when empty. Mirrors the `let changedBy = ...` pattern
+    /// repeated across every Swift verb that calls a store mutator.
+    fn changed_by_or_estate(&self) -> String {
+        let id = self
+            .store
+            .read_manifest()
+            .map(|m| m.owner_identifier)
+            .unwrap_or_default();
+        if id.is_empty() {
+            "estate".to_string()
+        } else {
+            id
+        }
+    }
+
+    /// Current time as epoch milliseconds. Used anywhere a store method takes
+    /// `now: i64`. The HLC generator (`hlc.rs`) expects milliseconds; using
+    /// seconds produces physical_time ~1000× too small (timestamps in 1970).
+    /// Mirrors the pre-existing `expunge` and `reanchor` arms, which both
+    /// compute `as_millis()`.
+    fn now_millis() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    // -----------------------------------------------------------------------
     // mutate
     // -----------------------------------------------------------------------
 
-    /// Mutate a row along one of its mutation axes.
+    /// Mutate a row along one of its mutation axes per cookbook §7.8.3.
     ///
     /// `MutationKind::Confirm` moves the confirmation axis (provenance bits
-    /// 18–23, cookbook §2.5) to `UserConfirmed`: read the drawer, recompose
-    /// the provenance bitmap with the confirmation field set via
-    /// `bit_field::write_field` (every other provenance axis — source_type,
-    /// channel, capture_channel, confidence, sensitivity-at-capture,
-    /// enrichment_status — is preserved untouched), and persist through
-    /// `DrawerStore::mutate_provenance`, which routes the gated column write
-    /// and appends one sealed `AuditEvent` atomically. Mirror of Swift
-    /// `Estate.mutate` for `.confirm`.
-    ///
-    /// The state-axis kinds (Reject / Contest / Resolve / Supersede /
-    /// Revive) move the row's *state*, not its confirmation, so they belong
-    /// on the `mutate_state` automaton path; that path is not yet wired
-    /// here, so they return `InvalidContent`, which GLK's `remap` turns into
-    /// `NotSupportedByEstate`.
-    ///
-    /// `now` is taken from the wall clock here — the mirror of Swift
-    /// `Estate.mutate`, which defaults its store call's `now` to `Date()`.
-    /// The confirmation transition itself is deterministic (a pure function
-    /// of the prior bitmap); only the audit row's timestamp is clock-derived.
+    /// 18–23, cookbook §2.5) to `UserConfirmed` via
+    /// `DrawerStore::mutate_provenance`. All state-axis kinds (Reject, Contest,
+    /// Resolve, Accept, Supersede, Revive) route through
+    /// `DrawerStore::mutate_state`, which validates against the canonical
+    /// automaton (cookbook §9.2). Adjective-axis kinds (CorrectSensitivity,
+    /// CorrectTrust) recompose `adjective_bitmap` and persist via
+    /// `DrawerStore::mutate_adjective`. Guard conditions: Resolve requires
+    /// current state == Contested; Accept requires trust >= Canonical (S-1);
+    /// Revive requires current state in Cluster B. Mirror of Swift `Estate.mutate`.
     pub fn mutate(
         &self,
         row_id: &str,
@@ -558,22 +633,9 @@ impl Estate {
                     6,
                 );
 
-                let changed_by = self
-                    .store
-                    .read_manifest()
-                    .map(|m| m.owner_identifier)
-                    .unwrap_or_default();
-                let changed_by = if changed_by.is_empty() {
-                    "estate".to_string()
-                } else {
-                    changed_by
-                };
-
-                // Store `now` is epoch-seconds (Swift `Date` → i64 seconds).
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
+                let changed_by = self.changed_by_or_estate();
+                // Store `now` is epoch-milliseconds (HLC physical_time).
+                let now = Self::now_millis();
 
                 self.store.mutate_provenance(
                     row_id,
@@ -583,12 +645,197 @@ impl Estate {
                     now,
                 )
             }
-            // State-axis mutations are not yet wired; the "not yet
-            // implemented" marker is the sentinel GLK's `remap` keys on to
-            // produce NotSupportedByEstate (rather than UnderlyingEstateFailure).
-            _ => Err(LocusKitError::InvalidContent(
-                "mutate: state-axis kinds not yet implemented (only Confirm)".to_string(),
-            )),
+            MutationKind::Reject => {
+                self.store.get_drawer(row_id)?.ok_or_else(|| LocusKitError::DrawerNotFound {
+                    id: row_id.to_string(),
+                })?;
+                // pending → reject → rejected per automaton §9.2.
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_state(
+                    row_id,
+                    State::Rejected,
+                    RowVerb::Reject,
+                    &changed_by,
+                    Some(_payload.unwrap_or("rejected via Estate.mutate")),
+                    now,
+                )
+            }
+
+            MutationKind::Contest => {
+                self.store.get_drawer(row_id)?.ok_or_else(|| LocusKitError::DrawerNotFound {
+                    id: row_id.to_string(),
+                })?;
+                // active/pending → contest → contested per automaton §9.2.
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_state(
+                    row_id,
+                    State::Contested,
+                    RowVerb::Contest,
+                    &changed_by,
+                    Some(_payload.unwrap_or("contested via Estate.mutate")),
+                    now,
+                )
+            }
+
+            MutationKind::Resolve => {
+                let drawer = self.store.get_drawer(row_id)?.ok_or_else(|| {
+                    LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    }
+                })?;
+                // Guard: resolve is only legal from Contested per automaton
+                // (contested → resolveContest → active). Any other prior state
+                // throws before touching the store.
+                let state = State::from_raw(bit_field::extract_field(drawer.adjective_bitmap, 0, 6));
+                if state != State::Contested {
+                    return Err(LocusKitError::InvalidContent(format!(
+                        "resolve: only valid from Contested (current: {state:?})"
+                    )));
+                }
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_state(
+                    row_id,
+                    State::Active,
+                    RowVerb::ResolveContest,
+                    &changed_by,
+                    Some(_payload.unwrap_or("resolved via Estate.mutate")),
+                    now,
+                )
+            }
+
+            MutationKind::Accept => {
+                let drawer = self.store.get_drawer(row_id)?.ok_or_else(|| {
+                    LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    }
+                })?;
+                // S-1 pre-check (cookbook §9.5.1): accepted rows require trust ≥
+                // Canonical. Raising this guard before the store call produces a
+                // clearer diagnostic than the raw invariant message the gate emits.
+                let trust = Trust::from_raw(bit_field::extract_field(drawer.adjective_bitmap, 18, 6));
+                if trust < Trust::Canonical {
+                    return Err(LocusKitError::InvalidContent(format!(
+                        "accept: S-1 requires trust >= Canonical (current: {trust:?})"
+                    )));
+                }
+                // active → promote → accepted per automaton §9.2.
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_state(
+                    row_id,
+                    State::Accepted,
+                    RowVerb::Promote,
+                    &changed_by,
+                    Some(_payload.unwrap_or("accepted via Estate.mutate")),
+                    now,
+                )
+            }
+
+            MutationKind::Supersede => {
+                self.store.get_drawer(row_id)?.ok_or_else(|| LocusKitError::DrawerNotFound {
+                    id: row_id.to_string(),
+                })?;
+                // active/accepted → supersede → superseded per automaton §9.2.
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_state(
+                    row_id,
+                    State::Superseded,
+                    RowVerb::Supersede,
+                    &changed_by,
+                    Some(_payload.unwrap_or("superseded via Estate.mutate")),
+                    now,
+                )
+            }
+
+            MutationKind::Revive => {
+                let drawer = self.store.get_drawer(row_id)?.ok_or_else(|| {
+                    LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    }
+                })?;
+                // Guard: revive is only valid from Cluster B (historical) states
+                // per ARCH SPEC §6.2. Cluster A and Cluster C are not eligible.
+                let state = State::from_raw(bit_field::extract_field(drawer.adjective_bitmap, 0, 6));
+                let is_knew_past = matches!(
+                    state,
+                    State::Superseded | State::Decayed | State::Withdrawn | State::Expired
+                );
+                if !is_knew_past {
+                    return Err(LocusKitError::InvalidContent(format!(
+                        "revive: only valid from Cluster B states (Decayed, Withdrawn, Expired, Superseded); current: {state:?}"
+                    )));
+                }
+                // The canonical automaton (cookbook §9.2) supports only
+                // Decayed → Observe → Active. Withdrawn, Expired, and Superseded
+                // → Active are not in the automaton table; those attempts surface
+                // as a gate discipline violation. See LOCUSKIT_SPEC_v0.8.md §revive;
+                // a follow-up mission must extend the automaton to support
+                // withdrawn/expired/superseded → active.
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_state(
+                    row_id,
+                    State::Active,
+                    RowVerb::Observe,
+                    &changed_by,
+                    Some(_payload.unwrap_or("revived via Estate.mutate")),
+                    now,
+                )
+            }
+
+            MutationKind::CorrectSensitivity(sensitivity) => {
+                let drawer = self.store.get_drawer(row_id)?.ok_or_else(|| {
+                    LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    }
+                })?;
+                // Sensitivity lives in adjective_bitmap bits 6–11 (cookbook §2.3,
+                // 6-bit scale-gapped field; raws 0/16/32/48 for the four tiers).
+                let new_adjective = bit_field::write_field(
+                    sensitivity.raw_value(),
+                    drawer.adjective_bitmap,
+                    6,
+                    6,
+                );
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_adjective(
+                    row_id,
+                    new_adjective,
+                    &changed_by,
+                    Some(_payload.unwrap_or("sensitivity corrected via Estate.mutate")),
+                    now,
+                )
+            }
+
+            MutationKind::CorrectTrust(trust) => {
+                let drawer = self.store.get_drawer(row_id)?.ok_or_else(|| {
+                    LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    }
+                })?;
+                // Trust lives in adjective_bitmap bits 18–23 (cookbook §2.3,
+                // 6-bit gradient field; raws 0–6 for Verbatim through Ambient).
+                let new_adjective = bit_field::write_field(
+                    trust.raw_value(),
+                    drawer.adjective_bitmap,
+                    18,
+                    6,
+                );
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_adjective(
+                    row_id,
+                    new_adjective,
+                    &changed_by,
+                    Some(_payload.unwrap_or("trust corrected via Estate.mutate")),
+                    now,
+                )
+            }
         }
     }
 
@@ -643,12 +890,208 @@ impl Estate {
         )
     }
 
-    /// Register a learned reference. Body pending — implementation lands
-    /// in the standing-signals mission.
-    pub fn learn(&self, _frame: LearnFrame) -> Result<(), LocusKitError> {
-        Err(LocusKitError::InvalidContent(
-            "learn not yet implemented".to_string(),
-        ))
+    // MARK: - propose
+
+    /// Create a proposal targeting a row in the estate. Mirrors `Estate.propose` in Swift.
+    ///
+    /// Validates that the target drawer exists, assembles `operational_bitmap`
+    /// from the `ProposeFrame.kind` (bits 0–5) and `ProposalTargetObjectType::Drawer`
+    /// (bits 6–11, raw 0), sets `adjective_bitmap` state to `State::Pending` (raw 1)
+    /// at bits 0–5, derives `candidate_state` and `lattice_anchor` from the target
+    /// drawer, then calls `DrawerStore::add_proposal`. Per cookbook §10.7.
+    ///
+    /// - `frame.target` must be non-empty and identify an existing drawer;
+    ///   returns `LocusKitError::DrawerNotFound` otherwise.
+    /// - `now` is epoch seconds (TEXT ISO8601 stored in the proposals table).
+    pub fn propose(
+        &self,
+        frame: ProposeFrame,
+        now: i64,
+    ) -> Result<crate::proposal::Proposal, LocusKitError> {
+        if frame.target.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "propose target must not be empty".to_string(),
+            ));
+        }
+        let target_drawer = self
+            .store
+            .get_drawer(&frame.target)?
+            .ok_or_else(|| LocusKitError::DrawerNotFound { id: frame.target.clone() })?;
+
+        // Operational bitmap: ProposalKind at bits 0–5, ProposalTargetObjectType
+        // (.drawer = 0) at bits 6–11. Remaining axes default to 0 (confirmation
+        // .human, generated-by .dreamingDaemon, confidence .null).
+        // bit_field::write_field(value, into_bitmap, shift, width).
+        let kind_in_op = bit_field::write_field(frame.kind as i64, 0i64, 0, 6);
+        let op_bitmap = bit_field::write_field(
+            0i64, // ProposalTargetObjectType::Drawer raw value = 0
+            kind_in_op,
+            6,
+            6,
+        );
+
+        // Adjective bitmap: state .pending at bits 0–5, raw value 1.
+        // bit_field::write_field(value, into_bitmap, shift, width).
+        let adj_bitmap = bit_field::write_field(
+            crate::adjectives::State::Pending as i64,
+            0i64,
+            0,
+            6,
+        );
+
+        // Candidate state derives from the target drawer's current adjective_bitmap —
+        // the accept path applies this to the target if confirmed.
+        let candidate_state = target_drawer.adjective_bitmap;
+
+        // Lattice anchor derives from the target drawer's four anchor fields.
+        let lattice_anchor = crate::estate_types::LatticeAnchor {
+            udc_code: target_drawer.udc_code.clone(),
+            udc_facets: target_drawer.udc_facets.clone(),
+            wikidata_qid: target_drawer.wikidata_qid.clone(),
+            wikidata_qids_secondary: target_drawer.wikidata_qids_secondary.clone(),
+        };
+
+        let proposal = crate::proposal::Proposal {
+            id: Uuid::new_v4().to_string(),
+            target_row_id: frame.target,
+            justification: frame.justification,
+            candidate_state,
+            lattice_anchor,
+            adjective_bitmap: adj_bitmap,
+            operational_bitmap: op_bitmap,
+            provenance_bitmap: 0,
+            filed_at: now,
+        };
+        self.store.add_proposal(&proposal)?;
+        Ok(proposal)
+    }
+
+    // MARK: - associate
+
+    /// Create an association between two rows in the estate. Mirrors `Estate.associate` in Swift.
+    ///
+    /// Validates both endpoints, looks up both drawers, derives `lattice_anchor`
+    /// from endpoint A (the source), sets state to `.active` (associations are born
+    /// active, adjectiveBitmap = 0), and calls `DrawerStore::add_association`.
+    /// Per cookbook §10.8.
+    ///
+    /// - `frame.a` and `frame.b` must be non-empty and identify existing drawers;
+    ///   returns `LocusKitError::DrawerNotFound` on any missing endpoint.
+    /// - `now` is epoch seconds.
+    pub fn associate(
+        &self,
+        frame: AssociateFrame,
+        now: i64,
+    ) -> Result<crate::association::Association, LocusKitError> {
+        if frame.a.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "associate endpoint a must not be empty".to_string(),
+            ));
+        }
+        if frame.b.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "associate endpoint b must not be empty".to_string(),
+            ));
+        }
+        let drawer_a = self
+            .store
+            .get_drawer(&frame.a)?
+            .ok_or_else(|| LocusKitError::DrawerNotFound { id: frame.a.clone() })?;
+        let drawer_b = self
+            .store
+            .get_drawer(&frame.b)?
+            .ok_or_else(|| LocusKitError::DrawerNotFound { id: frame.b.clone() })?;
+
+        // Association label derives from endpoint A's room and endpoint B's room.
+        let label = format!("{}→{}", drawer_a.room, drawer_b.room);
+
+        // Adjective bitmap: state .active is the zero baseline (raw 0),
+        // so adjective_bitmap = 0. Associations are born active, not pending.
+
+        // Lattice anchor derives from endpoint A (the source drawer).
+        let lattice_anchor = crate::estate_types::LatticeAnchor {
+            udc_code: drawer_a.udc_code.clone(),
+            udc_facets: drawer_a.udc_facets.clone(),
+            wikidata_qid: drawer_a.wikidata_qid.clone(),
+            wikidata_qids_secondary: drawer_a.wikidata_qids_secondary.clone(),
+        };
+
+        let association = crate::association::Association {
+            id: Uuid::new_v4().to_string(),
+            source_wing: drawer_a.wing.clone(),
+            source_room: drawer_a.room.clone(),
+            source_drawer_id: Some(drawer_a.id.clone()),
+            target_wing: drawer_b.wing.clone(),
+            target_room: drawer_b.room.clone(),
+            target_drawer_id: Some(drawer_b.id.clone()),
+            label,
+            lattice_anchor,
+            adjective_bitmap: 0, // .active is raw 0
+            operational_bitmap: 0,
+            provenance_bitmap: 0,
+            added_by: "associate".to_string(),
+            filed_at: now,
+            tombstoned_at: None,
+            removed_by_batch: None,
+        };
+        self.store.add_association(&association)?;
+        Ok(association)
+    }
+
+    // MARK: - learn
+
+    /// Bring an external reference into the estate by handle. Mirrors `Estate.learn` in Swift.
+    ///
+    /// Constructs a `LearnedReference` with `source_catalog_id` set to the frame's
+    /// handle (v1 placeholder — `SourceCatalogEntry` is spec-only, not yet implemented),
+    /// sentinel `lattice_anchor` ("0" UDC code per Known Ambiguity), and
+    /// `added_by = "learn"`. Per cookbook §10.9 / spec § 7.8.2.
+    ///
+    /// - `frame.handle` must be non-empty; returns `LocusKitError::InvalidContent` if empty.
+    /// - `now` is epoch seconds.
+    pub fn learn(
+        &self,
+        frame: LearnFrame,
+        now: i64,
+    ) -> Result<crate::learned_reference::LearnedReference, LocusKitError> {
+        if frame.handle.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "learn handle must not be empty".to_string(),
+            ));
+        }
+
+        // Trust::Canonical encodes as raw value 3 (adjectives.rs Trust::Canonical = 3).
+        // Cookbook §2.3: trust axis at bits 18–23 of adjective_bitmap.
+        // bit_field::write_field(value, into_bitmap, shift, width).
+        let adj_bitmap = bit_field::write_field(
+            crate::adjectives::Trust::Canonical as i64,
+            0i64,
+            18,
+            6,
+        );
+
+        // Sentinel lattice anchor ("0" UDC code) — SourceCatalogEntry is spec-only;
+        // the enrichment daemon will resolve the real anchor when it runs.
+        let ref_row = crate::learned_reference::LearnedReference {
+            id: Uuid::new_v4().to_string(),
+            source_catalog_id: frame.handle.clone(), // v1 placeholder — no SourceCatalogEntry yet
+            handle: frame.handle,
+            lattice_anchor: crate::estate_types::LatticeAnchor {
+                udc_code: "0".to_string(),
+                udc_facets: None,
+                wikidata_qid: None,
+                wikidata_qids_secondary: None,
+            },
+            adjective_bitmap: adj_bitmap,
+            operational_bitmap: 0,
+            provenance_bitmap: 0,
+            added_by: "learn".to_string(),
+            filed_at: now,
+            tombstoned_at: None,
+            removed_by_batch: None,
+        };
+        self.store.add_learned_reference(&ref_row)?;
+        Ok(ref_row)
     }
 }
 
@@ -909,15 +1352,234 @@ mod tests {
     }
 
     #[test]
-    fn mutate_state_axis_kind_is_not_yet_implemented() {
-        // Reject is a state-axis transition; that path is not wired here, so
-        // it returns InvalidContent (GLK remaps to NotSupportedByEstate).
+    fn mutate_reject_from_active_throws_gate_violation() {
+        // Reject is implemented but automaton only permits it from Pending.
+        // Active → reject is an illegal transition; the gate throws InvalidContent.
         let estate = make_estate();
         let drawer = basic_capture(&estate, "x", "r");
         let err = estate
             .mutate(&drawer.id, MutationKind::Reject, None)
             .unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    }
+
+    // --- MutationKind round-trip tests (parity with Swift MutateMutationKindTests) ---
+
+    #[test]
+    fn mutate_contest_from_active_becomes_contested() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "contest target", "study");
+        assert_eq!(State::from_raw(drawer.adjective_bitmap & 0x3F), State::Active);
+
+        estate
+            .mutate(&drawer.id, MutationKind::Contest, None)
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(
+            State::from_raw(after.adjective_bitmap & 0x3F),
+            State::Contested,
+            "state should be Contested after Contest"
+        );
+    }
+
+    #[test]
+    fn mutate_resolve_from_contested_becomes_active() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "resolve target", "study");
+        // Contest first so resolve has a valid source state.
+        estate
+            .mutate(&drawer.id, MutationKind::Contest, None)
+            .unwrap();
+
+        estate
+            .mutate(&drawer.id, MutationKind::Resolve, None)
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(
+            State::from_raw(after.adjective_bitmap & 0x3F),
+            State::Active,
+            "resolve should return a contested row to Active"
+        );
+    }
+
+    #[test]
+    fn mutate_resolve_from_active_throws_guard() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "non-contested", "r");
+        let err = estate
+            .mutate(&drawer.id, MutationKind::Resolve, None)
+            .unwrap_err();
+        if let LocusKitError::InvalidContent(msg) = &err {
+            assert!(
+                msg.contains("resolve") || msg.contains("Contested"),
+                "error should mention resolve guard: {msg}"
+            );
+        } else {
+            panic!("expected InvalidContent, got {err:?}");
+        }
+    }
+
+    #[test]
+    fn mutate_supersede_from_active_becomes_superseded() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "supersede target", "study");
+
+        estate
+            .mutate(&drawer.id, MutationKind::Supersede, None)
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(
+            State::from_raw(after.adjective_bitmap & 0x3F),
+            State::Superseded,
+            "state should be Superseded after Supersede"
+        );
+    }
+
+    #[test]
+    fn mutate_accept_with_canonical_trust_becomes_accepted() {
+        use substrate_kernel::bit_field;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "accept target", "study");
+
+        // Lift trust to Canonical (raw 3) so the S-1 guard and gate both pass.
+        estate
+            .mutate(&drawer.id, MutationKind::CorrectTrust(Trust::Canonical), None)
+            .unwrap();
+        let with_trust = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        let trust = Trust::from_raw(bit_field::extract_field(with_trust.adjective_bitmap, 18, 6));
+        assert_eq!(trust, Trust::Canonical);
+
+        estate
+            .mutate(&drawer.id, MutationKind::Accept, None)
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(
+            State::from_raw(after.adjective_bitmap & 0x3F),
+            State::Accepted,
+            "state should be Accepted after Accept with canonical trust"
+        );
+    }
+
+    #[test]
+    fn mutate_accept_with_low_trust_throws_s1_guard() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "low-trust target", "r");
+        // Trust defaults to Verbatim (raw 0) — below Canonical (raw 3).
+        let err = estate
+            .mutate(&drawer.id, MutationKind::Accept, None)
+            .unwrap_err();
+        if let LocusKitError::InvalidContent(msg) = &err {
+            assert!(
+                msg.contains("S-1") || msg.contains("canonical") || msg.contains("Canonical"),
+                "error should mention S-1 or Canonical trust: {msg}"
+            );
+        } else {
+            panic!("expected InvalidContent, got {err:?}");
+        }
+    }
+
+    #[test]
+    fn mutate_revive_from_active_throws_cluster_b_guard() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "cluster-a target", "r");
+        let err = estate
+            .mutate(&drawer.id, MutationKind::Revive, None)
+            .unwrap_err();
+        if let LocusKitError::InvalidContent(msg) = &err {
+            assert!(
+                msg.contains("revive") || msg.contains("Cluster B") || msg.contains("cluster"),
+                "error should identify the revive Cluster B guard: {msg}"
+            );
+        } else {
+            panic!("expected InvalidContent, got {err:?}");
+        }
+    }
+
+    #[test]
+    fn mutate_correct_sensitivity_updates_bits_6_to_11() {
+        use substrate_kernel::bit_field;
+        use crate::adjectives::AdjectiveSensitivity;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "sensitivity target", "study");
+        // Default sensitivity: Normal (raw 0).
+        let initial_sens = AdjectiveSensitivity::from_raw(
+            bit_field::extract_field(drawer.adjective_bitmap, 6, 6)
+        );
+        assert_eq!(initial_sens, AdjectiveSensitivity::Normal);
+
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectSensitivity(AdjectiveSensitivity::Elevated),
+                None,
+            )
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        let sens = AdjectiveSensitivity::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 6, 6)
+        );
+        assert_eq!(sens, AdjectiveSensitivity::Elevated, "sensitivity should be Elevated");
+        // State must be unchanged.
+        assert_eq!(State::from_raw(after.adjective_bitmap & 0x3F), State::Active);
+    }
+
+    #[test]
+    fn mutate_correct_trust_updates_bits_18_to_23() {
+        use substrate_kernel::bit_field;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "trust target", "study");
+        // Default trust: Verbatim (raw 0).
+        let initial_trust = Trust::from_raw(
+            bit_field::extract_field(drawer.adjective_bitmap, 18, 6)
+        );
+        assert_eq!(initial_trust, Trust::Verbatim);
+
+        estate
+            .mutate(&drawer.id, MutationKind::CorrectTrust(Trust::Derived), None)
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        let trust = Trust::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 18, 6)
+        );
+        assert_eq!(trust, Trust::Derived, "trust should be Derived");
+        // State must be unchanged.
+        assert_eq!(State::from_raw(after.adjective_bitmap & 0x3F), State::Active);
+    }
+
+    #[test]
+    fn mutate_correct_sensitivity_and_trust_are_independent() {
+        use substrate_kernel::bit_field;
+        use crate::adjectives::AdjectiveSensitivity;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "independence target", "r");
+
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted),
+                None,
+            )
+            .unwrap();
+        estate
+            .mutate(&drawer.id, MutationKind::CorrectTrust(Trust::Imported), None)
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        let sens = AdjectiveSensitivity::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 6, 6)
+        );
+        let trust = Trust::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 18, 6)
+        );
+        assert_eq!(sens, AdjectiveSensitivity::Restricted, "sensitivity must be Restricted");
+        assert_eq!(trust, Trust::Imported, "trust must be Imported");
+        assert_eq!(State::from_raw(after.adjective_bitmap & 0x3F), State::Active);
     }
 
     #[test]
@@ -970,10 +1632,87 @@ mod tests {
     }
 
     #[test]
-    fn learn_stub_returns_invalid_content() {
+    fn learn_with_empty_handle_returns_invalid_content() {
         let estate = make_estate();
-        let err = estate.learn(LearnFrame::new("source-x")).unwrap_err();
+        // learn is now live; an empty handle is invalid.
+        let err = estate
+            .learn(LearnFrame::new(""), 1_700_000_000)
+            .unwrap_err();
         assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    }
+
+    #[test]
+    fn learn_with_valid_handle_returns_learned_reference() {
+        let estate = make_estate();
+        let result = estate.learn(LearnFrame::new("test-handle"), 1_700_000_000);
+        let ref_row = result.expect("learn should succeed with a valid handle");
+        assert_eq!(ref_row.handle, "test-handle");
+        assert_eq!(ref_row.source_catalog_id, "test-handle");
+        assert_eq!(ref_row.lattice_anchor.udc_code, "0"); // sentinel anchor
+        assert_eq!(ref_row.added_by, "learn");
+        // Trust::Canonical (raw 3) at bits 18–23 of adjective_bitmap.
+        assert_ne!(ref_row.adjective_bitmap, 0);
+    }
+
+    #[test]
+    fn propose_with_nonexistent_target_returns_drawer_not_found() {
+        let estate = make_estate();
+        let err = estate
+            .propose(
+                crate::frames::ProposeFrame::new(
+                    "nonexistent-row",
+                    crate::proposal_operational::ProposalKind::NewTunnel,
+                ),
+                1_700_000_000,
+            )
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
+    }
+
+    #[test]
+    fn propose_with_existing_target_returns_proposal() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "content", "room-a");
+        let proposal = estate
+            .propose(
+                crate::frames::ProposeFrame::new(
+                    &drawer.id,
+                    crate::proposal_operational::ProposalKind::MutateDrawer,
+                ),
+                1_700_000_000,
+            )
+            .expect("propose should succeed with an existing target");
+        assert_eq!(proposal.target_row_id, drawer.id);
+        // Adjective bitmap: state .pending (raw 1) at bits 0–5.
+        assert_ne!(proposal.adjective_bitmap, 0);
+    }
+
+    #[test]
+    fn associate_with_missing_endpoint_returns_drawer_not_found() {
+        let estate = make_estate();
+        let err = estate
+            .associate(
+                crate::frames::AssociateFrame::new("missing-a", "missing-b", 0.5),
+                1_700_000_000,
+            )
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::DrawerNotFound { .. }));
+    }
+
+    #[test]
+    fn associate_with_existing_endpoints_returns_association() {
+        let estate = make_estate();
+        let drawer_a = basic_capture(&estate, "endpoint-a", "room-a");
+        let drawer_b = basic_capture(&estate, "endpoint-b", "room-b");
+        let assoc = estate
+            .associate(
+                crate::frames::AssociateFrame::new(&drawer_a.id, &drawer_b.id, 0.7),
+                1_700_000_000,
+            )
+            .expect("associate should succeed with existing endpoints");
+        assert_eq!(assoc.source_drawer_id, Some(drawer_a.id.clone()));
+        assert_eq!(assoc.target_drawer_id, Some(drawer_b.id.clone()));
+        assert_eq!(assoc.added_by, "associate");
     }
 
     // -----------------------------------------------------------------

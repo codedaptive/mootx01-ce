@@ -39,8 +39,7 @@ import SubstrateTypes
 ///    `.lineageID`, `.createdAfter`, `.createdBefore`,
 ///    `.latticeAnchor`, `.latticeUnder`, `.wikidataConcept`.
 /// 4. Content tier (§ 7.9.4 step 4) — `.contentMatches` via
-///    `localizedCaseInsensitiveContains`. `.nearVector` throws —
-///    the vector index ships with VectorKit.
+///    `localizedCaseInsensitiveContains`.
 ///
 /// Fingerprint pruning (§ 7.9.4 step 1) runs ahead of these tiers in
 /// the recall path. `containerSurvives` tests the chain's set-bit
@@ -141,10 +140,8 @@ struct BitmapEvaluator {
     ///     `AuditLogFold.projectStateAt`. Ignored when `frame.asOf` is nil.
     /// - Returns: the ordered, filtered slice of drawers ready for
     ///   `RecallStream` to page out.
-    /// - Throws: `LocusKitError.invalidContent` when the chain contains
-    ///   `.nearVector` (vector tier requires VectorKit). Propagates
-    ///   substrate errors from `DrawerStore.auditEventsForRow` during
-    ///   historical reconstruction.
+    /// - Throws: Propagates substrate errors from `DrawerStore.auditEventsForRow`
+    ///   during historical reconstruction.
     static func evaluate(
         frame: RecallFrame,
         drawers: [Drawer],
@@ -192,7 +189,7 @@ struct BitmapEvaluator {
             evaluateStructuredTier(chain: chain, drawer: $0)
         }
 
-        // 3. Content-tier filters (substring; nearVector throws).
+        // 3. Content-tier filters (substring match).
         candidates = try candidates.filter {
             try evaluateContentTier(chain: chain, drawer: $0)
         }
@@ -362,7 +359,7 @@ struct BitmapEvaluator {
     }
 
     /// Compile a single Filter case to a bitmap-tier predicate. Cases
-    /// outside the bitmap tier (structured / content / nearVector)
+    /// outside the bitmap tier (structured / content)
     /// pass at this stage; they are evaluated in their respective tiers.
     private static func evaluateOne(
         _ filter: Filter, adj: Int64, op: Int64, prov: Int64
@@ -467,7 +464,7 @@ struct BitmapEvaluator {
 
         // Non-bitmap cases — pass at this tier, evaluated in their own
         // tier below. Includes structured (room/wing/time/lattice) and
-        // content (.contentMatches / .nearVector).
+        // content (.contentMatches).
         default:
             return true
         }
@@ -561,7 +558,7 @@ struct BitmapEvaluator {
     /// `false` here.
     private static func isContentFilter(_ f: Filter) -> Bool {
         switch f {
-        case .contentMatches, .nearVector:
+        case .contentMatches:
             return true
         case .all(let fs), .any(let fs):
             return fs.contains(where: isContentFilter)
@@ -578,14 +575,6 @@ struct BitmapEvaluator {
         switch filter {
         case .contentMatches(let s):
             return drawer.content.localizedCaseInsensitiveContains(s)
-        case .nearVector:
-            // The vector index ships with VectorKit (LOCI_V035_17+).
-            // Throwing here surfaces a typed error to the caller rather
-            // than silently returning zero rows, so a chain that
-            // requires nearVector fails loud.
-            throw LocusKitError.invalidContent(
-                "nearVector requires VectorKit — not yet implemented"
-            )
         // Composition cases evaluate ONLY content-tier children — see
         // the structured tier's matching classifier for the rationale.
         case .all(let fs):
@@ -637,9 +626,9 @@ struct BitmapEvaluator {
         case .byRoomAsc:
             return drawers.sorted { $0.room < $1.room }
         case .byRelevanceDesc:
-            // Relevance scoring requires the vector index from VectorKit.
-            // Returning the input order is the documented stub behaviour
-            // until that index ships.
+            // Relevance scoring requires the vector index from VectorKit
+            // (ships with VectorKit). Returning the input order is the
+            // documented stub behaviour until that index composes in.
             return drawers
         }
     }

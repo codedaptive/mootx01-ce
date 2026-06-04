@@ -71,6 +71,16 @@ public struct CaptureFrame: Sendable {
     /// streaming-capture semantic where event time and ingest time
     /// coincide. Bulk importers supply the original authorship date.
     public var eventTime: Date?
+    /// Feature flags to set on the resulting drawer at capture time.
+    /// Encodes directly into bits 12–23 of the drawer's
+    /// `operationalBitmap` (cookbook §2.4 feature_flags field). Because
+    /// `DrawerFeatureFlags` rawValues are pre-shifted (e.g. `hasLinks`
+    /// is `1 << 15`), the merge is a direct bitwise OR masked to the
+    /// 12-bit feature region — the inverse of the
+    /// `DrawerFeatureFlags(rawValue: extractField(op,12,12) << 12)` decoder
+    /// in `DrawerOperational.swift`. Defaults to `[]` (no flags set) so
+    /// all existing callers continue to produce zero feature-flag bits.
+    public var featureFlags: DrawerFeatureFlags
 
     public init(
         content: String,
@@ -85,7 +95,8 @@ public struct CaptureFrame: Sendable {
         sourceType: SourceType = .user,
         provenanceSensitivity: Sensitivity = .normal,
         lineageID: LineageID? = nil,
-        eventTime: Date? = nil
+        eventTime: Date? = nil,
+        featureFlags: DrawerFeatureFlags = []
     ) {
         self.content = content
         self.channel = channel
@@ -100,6 +111,7 @@ public struct CaptureFrame: Sendable {
         self.provenanceSensitivity = provenanceSensitivity
         self.lineageID = lineageID
         self.eventTime = eventTime
+        self.featureFlags = featureFlags
     }
 }
 
@@ -145,6 +157,14 @@ public struct TunnelCaptureFrame: Sendable {
     public var kind: TunnelKind
     /// Actor identifier written into the tunnel's `addedBy` field.
     public var addedBy: String
+    /// How this tunnel entered the substrate — user assertion, agent
+    /// derivation, import path, sync replication, or schema migration.
+    /// Encodes into bits 6–8 of the tunnel's `operationalBitmap` at
+    /// capture (via `BitField.writeField`; decoder is `TunnelOriginClass`
+    /// in `TunnelOperational.swift`). Defaults to `.userExplicit` (raw 0)
+    /// so all existing callers continue to produce a zero operational
+    /// bitmap byte-identically.
+    public var originClass: TunnelOriginClass
 
     public init(
         sourceWing: String,
@@ -155,7 +175,8 @@ public struct TunnelCaptureFrame: Sendable {
         addedBy: String,
         sourceDrawerId: String? = nil,
         targetDrawerId: String? = nil,
-        kind: TunnelKind = .references
+        kind: TunnelKind = .references,
+        originClass: TunnelOriginClass = .userExplicit
     ) {
         self.sourceWing = sourceWing
         self.sourceRoom = sourceRoom
@@ -166,6 +187,7 @@ public struct TunnelCaptureFrame: Sendable {
         self.label = label
         self.kind = kind
         self.addedBy = addedBy
+        self.originClass = originClass
     }
 }
 
@@ -248,6 +270,52 @@ public struct LearnFrame: Sendable {
 
     public init(handle: String) {
         self.handle = handle
+    }
+}
+
+// MARK: - ProposeFrame
+
+/// Slots for the `propose` verb at the LocusKit substrate. Per spec § 7.8.3.
+///
+/// Distinct from `GeniusLocusKit.ProposeFrame`, which carries a Brain-layer
+/// `ProposalKind` (String-based routing labels). This LocusKit type carries
+/// a substrate-axis `ProposalKind` (Int-based, cookbook §2.4 bits 0–5).
+/// The GLK boundary maps Brain-kind to substrate-kind at the
+/// `mapBrainKindToSubstrate` translation point.
+public struct ProposeFrame: Sendable {
+    /// The row this proposal is about. Must be non-empty; Estate.propose
+    /// throws LocusKitError.drawerNotFound if no drawer with this id exists.
+    public var target: RowID
+    /// Substrate-axis proposal kind (cookbook §2.4 bits 0–5).
+    public var kind: ProposalKind
+    /// Optional free-text justification.
+    public var justification: String?
+
+    public init(target: RowID, kind: ProposalKind, justification: String? = nil) {
+        self.target = target
+        self.kind = kind
+        self.justification = justification
+    }
+}
+
+// MARK: - AssociateFrame
+
+/// Slots for the `associate` verb at the LocusKit substrate.
+///
+/// Creates or strengthens an Association row between two rows (cookbook §10.8).
+public struct AssociateFrame: Sendable {
+    /// One endpoint of the association.
+    public var a: RowID
+    /// The other endpoint.
+    public var b: RowID
+    /// Coarse weight in [0, 1]. The Brain layer interprets this; the substrate
+    /// stores it opaquely.
+    public var weight: Double
+
+    public init(a: RowID, b: RowID, weight: Double) {
+        self.a = a
+        self.b = b
+        self.weight = weight
     }
 }
 

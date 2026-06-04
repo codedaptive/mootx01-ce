@@ -98,6 +98,16 @@ pub struct Drawer {
     /// SQLite column stores ISO8601 TEXT per the fleet rule.
     pub filed_at: i64,
 
+    /// When the content happened or was authored in the world. For
+    /// streaming capture this equals `filed_at`. For bulk historical
+    /// ingestion callers supply the original authorship date. The
+    /// fingerprint's capture-week bucket keys off this field, not
+    /// `filed_at` (ING-01, two-clock ingest). Epoch seconds; None when
+    /// the stored row pre-dates the column (backfilled to `filed_at` on
+    /// read). Stored as TEXT ISO8601 at the SQLite boundary per the fleet
+    /// date-storage rule.
+    pub event_time: Option<i64>,
+
     /// Identifier of the embedding model that produced (or will
     /// produce) the vector for this drawer.
     pub embedding_model_id: String,
@@ -174,6 +184,7 @@ impl Drawer {
             chunk_index: None,
             added_by: added_by.into(),
             filed_at,
+            event_time: None,
             embedding_model_id: embedding_model_id.into(),
             tombstoned_at: None,
             removed_by_batch: None,

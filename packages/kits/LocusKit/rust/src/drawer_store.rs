@@ -298,6 +298,15 @@ pub trait DrawerStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// All non-tombstoned tunnels across all wings, ordered by `filed_at`
+    /// ascending. The dreaming daemon reads this to build the tunnel-key
+    /// set for duplicate suppression — candidates whose drawer pair already
+    /// has a Tunnel are dropped before scoring. Mirrors Swift
+    /// `DrawerStore.allTunnels()`.
+    fn all_tunnels(&self) -> Result<Vec<Tunnel>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
     // -----------------------------------------------------------------
     // KGFact CRUD
     // -----------------------------------------------------------------
@@ -472,6 +481,20 @@ pub trait DrawerStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Trace rows whose `recalled_at` falls in `[since, now]` (both
+    /// bounds inclusive), ordered ascending. Both parameters are ISO8601
+    /// strings. The dreaming daemon calls this in step 1 to build the
+    /// reward map for one tick: rows outside `now` are excluded so future
+    /// rows are never pulled into a past cycle. Mirrors Swift
+    /// `DrawerStore.recentRecallTraces(since:now:)`.
+    fn recent_recall_traces(
+        &self,
+        _since: &str,
+        _now: &str,
+    ) -> Result<Vec<RecallTraceItem>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
     /// Mark a trace row's `used` flag (bit 0 of `operational_bitmap`).
     /// Idempotent on already-marked rows. Returns
     /// `LocusKitError::RecallTraceItemNotFound` when `id` is absent.
@@ -516,5 +539,45 @@ pub trait DrawerStore: Send + Sync {
     /// counts. Today it returns the same value as `list_wings`.
     fn taxonomy(&self) -> Result<Vec<WingSummary>, LocusKitError> {
         self.list_wings()
+    }
+
+    // -----------------------------------------------------------------
+    // Unfiltered full-corpus reads (recall surface)
+    // -----------------------------------------------------------------
+
+    /// All non-tombstoned proposals estate-wide, ordered by `filed_at`
+    /// ascending. The MCP recall surface calls this to list every pending
+    /// or resolved proposal without a target-row filter.
+    fn all_proposals(&self) -> Result<Vec<Proposal>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
+    /// All non-tombstoned associations estate-wide, ordered by `filed_at`
+    /// ascending. The MCP recall surface calls this when no source
+    /// wing/room filter is needed.
+    fn all_associations(&self) -> Result<Vec<Association>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
+    /// All non-tombstoned learned references estate-wide, ordered by
+    /// `filed_at` ascending. The MCP recall surface calls this when no
+    /// source catalog filter is needed.
+    fn all_learned_references(&self) -> Result<Vec<LearnedReference>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
+    /// All kg-facts estate-wide where the state cluster is below 7
+    /// (excludes rejected/accepted/tombstoned post-resolution states),
+    /// ordered by `filed_at` ascending. Mirrors `kg_facts_for_drawer`
+    /// but without the source-drawer predicate.
+    fn all_kg_facts(&self) -> Result<Vec<KGFact>, LocusKitError> {
+        Ok(Vec::new())
+    }
+
+    /// All non-tombstoned diary entries estate-wide, ordered by `filed_at`
+    /// ascending. The MCP recall surface calls this when no agent-name
+    /// filter is needed.
+    fn all_diary_entries(&self) -> Result<Vec<DiaryEntry>, LocusKitError> {
+        Ok(Vec::new())
     }
 }

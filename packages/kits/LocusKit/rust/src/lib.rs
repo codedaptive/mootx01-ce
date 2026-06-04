@@ -106,6 +106,8 @@ pub mod association_operational;
 mod association_tests;
 #[cfg(test)]
 mod capture_tunnel_tests;
+#[cfg(test)]
+mod two_clock_ingest_tests;
 
 pub mod audit_types;
 pub mod bitmap_evaluator;

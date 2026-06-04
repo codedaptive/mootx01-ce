@@ -1008,6 +1008,24 @@ public actor DrawerStore {
         return try rows.map(Self.tunnelFromRow)
     }
 
+    /// All non-tombstoned tunnels across all wings, ordered by filedAt.
+    /// Used by the dreaming daemon to suppress duplicate proposals: a
+    /// candidate endpoint pair that already has a Tunnel is dropped.
+    /// Unlike `tunnelsFrom(wing:)` this is estate-wide — the daemon
+    /// considers the full association graph, not a single wing.
+    public func allTunnels() async throws -> [Tunnel] {
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
+    }
+
     // MARK: - KGFact CRUD
 
     /// Insert a KGFact. Conflicting ids surface as duplicateKey.
@@ -1240,6 +1258,83 @@ public actor DrawerStore {
         return try rows.map(Self.diaryFromRow)
     }
 
+    // MARK: - Unfiltered full-corpus reads (recall surface)
+
+    /// All proposals estate-wide, ordered by `filedAt` ascending.
+    ///
+    /// The MCP recall surface calls this to list every proposal without
+    /// a target-row filter. Peer of the Rust `DrawerStore::all_proposals`.
+    public func allProposals() async throws -> [Proposal] {
+        let rows = try await storage.rowStore.query(
+            table: "proposals",
+            where: nil,
+            orderBy: [OrderClause(column: Column(table: "proposals", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.proposalFromRow)
+    }
+
+    /// All non-tombstoned associations estate-wide, ordered by `filedAt`
+    /// ascending.
+    ///
+    /// The MCP recall surface calls this when no source wing/room filter is
+    /// needed. Peer of the Rust `DrawerStore::all_associations`.
+    public func allAssociations() async throws -> [Association] {
+        let rows = try await storage.rowStore.query(
+            table: "associations",
+            where: .isNull(Column(table: "associations", name: "tombstonedAt")),
+            orderBy: [OrderClause(column: Column(table: "associations", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.associationFromRow)
+    }
+
+    /// All non-tombstoned learned references estate-wide, ordered by `filedAt`
+    /// ascending.
+    ///
+    /// The MCP recall surface calls this when no source catalog filter is
+    /// needed. Peer of the Rust `DrawerStore::all_learned_references`.
+    public func allLearnedReferences() async throws -> [LearnedReference] {
+        let rows = try await storage.rowStore.query(
+            table: "learned_references",
+            where: .isNull(Column(table: "learned_references", name: "tombstonedAt")),
+            orderBy: [OrderClause(column: Column(table: "learned_references", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.learnedReferenceFromRow)
+    }
+
+    /// All kg-facts estate-wide where the state cluster is below 7
+    /// (excludes rejected/accepted/tombstoned post-resolution states),
+    /// ordered by `filedAt` ascending.
+    ///
+    /// Mirrors `kgFacts(forDrawerID:)` but without the source-drawer
+    /// predicate. Peer of the Rust `DrawerStore::all_kg_facts`.
+    public func allKGFacts() async throws -> [KGFact] {
+        let rows = try await storage.rowStore.query(
+            table: "kg_facts",
+            where: .lt(Column(table: "kg_facts", name: "g_state_cluster"), .int(7)),
+            orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.kgFactFromRow)
+    }
+
+    /// All non-tombstoned diary entries estate-wide, ordered by `filedAt`
+    /// ascending.
+    ///
+    /// The MCP recall surface calls this when no agent-name filter is needed.
+    /// Peer of the Rust `DrawerStore::all_diary_entries`.
+    public func allDiaryEntries() async throws -> [DiaryEntry] {
+        let rows = try await storage.rowStore.query(
+            table: "diary",
+            where: .isNull(Column(table: "diary", name: "tombstonedAt")),
+            orderBy: [OrderClause(column: Column(table: "diary", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        return try rows.map(Self.diaryFromRow)
+    }
+
     // MARK: - RecallTrace CRUD
 
     /// Insert a recall trace row. The row records one drawer returned by
@@ -1270,6 +1365,33 @@ public actor DrawerStore {
                 Column(table: "recall_trace", name: "recalledAt"),
                 .timestamp(since)
             ),
+            orderBy: [OrderClause(
+                column: Column(table: "recall_trace", name: "recalledAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.recallTraceFromRow)
+    }
+
+    /// Trace rows whose `recalledAt` falls in `[since, now]` (inclusive),
+    /// ordered ascending (oldest first). This is the two-sided reward window
+    /// the dreaming daemon uses: `since` is `now - tickInterval`; `now` is the
+    /// deterministic clock the caller supplies. Rows outside the upper bound
+    /// are excluded so future rows are never pulled into a past cycle.
+    public func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem] {
+        let rows = try await storage.rowStore.query(
+            table: "recall_trace",
+            where: .and([
+                .gte(
+                    Column(table: "recall_trace", name: "recalledAt"),
+                    .timestamp(since)
+                ),
+                .lte(
+                    Column(table: "recall_trace", name: "recalledAt"),
+                    .timestamp(now)
+                ),
+            ]),
             orderBy: [OrderClause(
                 column: Column(table: "recall_trace", name: "recalledAt"),
                 direction: .ascending)],
