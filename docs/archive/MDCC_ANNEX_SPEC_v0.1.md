@@ -81,8 +81,3 @@ The reserved ranges this system promotes into are in MDCC v1 and cannot be retro
 - The federation boundary check: same scheme direct, foreign scheme through conversion.
 - The cold and hot transform tools, and EideticLib custom-scheme import.
 - A naming pass on LatticeKit so ReservedRange.Kind.annex reads as the in-spine provisional range, to match this spec. This is the only change to shipped code, and it is cosmetic.
-
-## Open questions carried forward
-
-- Self-allocation mechanism: reverse-domain or key-fingerprint namespacing is the proposal above. Confirm before the v1.2 mission.
-- Promotion alias: a permanent read-only alias is the proposal above. Confirm before the v1.2 mission.

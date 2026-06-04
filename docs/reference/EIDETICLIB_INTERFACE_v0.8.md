@@ -9,7 +9,7 @@ relates_to:
   - EIDETICLIB_SPEC_v0.8.md  (the contract this interface implements)
   - FDC_ENCODER_CANONICAL_v1.0.md  (the FDC encoder EideticLib.lookup grounds against)
 purpose: |
-  Public API surface of EideticLib in both legs. Documents the term→Anchor
+  Public API surface of EideticLib in both ports. Documents the term→Anchor
   lookup path that other packages consume (the EideticLib namespace and the
   Anchor result), the FDC code-state classifier (classifyLatticeCode /
   LatticeCodeState), and the sentence segmenter consumed by
@@ -215,7 +215,7 @@ pub fn classify_lattice_code(code: &str, known_codes: &HashSet<String>) -> Latti
 ### `sentences` / `sentencesByDelimiter`
 
 Sentence segmentation for the deterministic linguistic pipeline.
-Behavioral contracts: SPEC § 5 (B-10); cross-leg parity: SPEC § 7
+Behavioral contracts: SPEC § 5 (B-10); cross-port parity: SPEC § 7
 (C-11). Full signatures live in § 2 under `EideticLib.Segmenter`.
 
 ## § 4 — Errors

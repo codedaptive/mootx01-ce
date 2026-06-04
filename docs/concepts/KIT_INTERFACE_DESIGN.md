@@ -624,7 +624,7 @@ aggregation families listed below.
 
 ---
 
-### ARIA_Rust (GeniusLocusKit Rust port)
+### ARIA_Rust (GeniusLocusKit Rust version)
 
 **Canonical Role:** Rust demonstration app. **Required** for conformance parity between Swift and Rust ports.
 
@@ -695,7 +695,7 @@ CognitionKit         (NeuronKit, GeniusLocusKit)
 ARIA_MCP             (GeniusLocusKit, NeuronKit)
 ARIA_MacOS           (GeniusLocusKit)
 ARIA_iOS             (GeniusLocusKit)
-ARIA_Rust            (GeniusLocusKit Rust port)
+ARIA_Rust            (GeniusLocusKit Rust version)
 ```
 
 ---
