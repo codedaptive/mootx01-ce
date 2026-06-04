@@ -149,7 +149,10 @@ event identities (those are GeniusLocusKit's, per Q7).
 one transaction per migration, fail-fast. A failure mid-run leaves the
 schema at the last successfully committed version; there is no automatic
 rollback across committed migrations. Callers inspect
-`currentSchemaVersion()` after a failed `migrate`.
+`currentSchemaVersion()` after a failed `migrate`. In multi-kit
+deployments (multiple kits sharing one `Storage` instance), use
+`currentSchemaVersion(for: kitID)` to query per-kit version; the
+no-arg method returns the global maximum across all kits.
 
 **I-8 (no Bool stored property on entities):** PersistenceKit stores
 boolean *columns* (`ColumnType.bool`, `TypedValue.bool`) for backends,
@@ -307,7 +310,7 @@ Errors are surfaced as `StorageError` (Swift) / `StorageError` (Rust).
 |---|---|---|
 | `backendUnavailable` | backend cannot be opened/reached | abort; fix configuration |
 | `schemaMismatch` | on-disk schema version ≠ expected | migrate, or surface to operator |
-| `migrationFailed` | a migration step threw | inspect `currentSchemaVersion()`, fix migration, retry forward |
+| `migrationFailed` | a migration step threw | inspect `currentSchemaVersion(for:)` (or no-arg for global), fix migration, retry forward |
 | `constraintViolation` | unique/PK/check constraint hit | surface to caller; caller adjusts data |
 | `poolExhausted` | no connection within `connectionTimeout` | retry per caller policy (Q6) |
 | `transactionConflict` | serialization/lock conflict | retry the transaction |

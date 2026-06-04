@@ -174,7 +174,7 @@ public static let declaration = SchemaDeclaration(
 )
 ```
 
-A failed migration leaves the schema at the last successfully-applied version. Operators check `currentSchemaVersion()` after failure.
+A failed migration leaves the schema at the last successfully-applied version. Operators check `currentSchemaVersion()` (global max) or `currentSchemaVersion(for: kitID)` (per-kit) after failure. In multi-kit deployments, use the kitID-scoped variant to avoid misdiagnosing failure in one kit as failure in another.
 
 ## 10. Bitmap predicate semantics
 

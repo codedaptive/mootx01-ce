@@ -102,6 +102,7 @@ public protocol Storage: Sendable {
         _ block: @Sendable (any StorageTransaction) async throws -> T
     ) async throws -> T
     func currentSchemaVersion() async throws -> Int
+    func currentSchemaVersion(for kitID: String) async throws -> Int
     func migrate(to schema: SchemaDeclaration) async throws
 }
 
