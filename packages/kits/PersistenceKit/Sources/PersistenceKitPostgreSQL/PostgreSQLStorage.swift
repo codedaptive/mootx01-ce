@@ -58,7 +58,13 @@ public final class PostgreSQLStorage: Storage, Sendable {
         self.pool = pool
         let backend = PostgreSQLBackend(pool: pool)
         self.backend = backend
-        self.rowStore = PostgreSQLRowStore(backend: backend)
+        let baseRowStore = PostgreSQLRowStore(backend: backend)
+        // Wrap in the LRU hot-tier decorator when caching is enabled. The
+        // disabled path (the default) is byte-identical to pre-wiring behavior —
+        // callers receive an `any RowStore` either way so no call sites change.
+        self.rowStore = configuration.cacheConfig.enabled
+            ? CachingRowStore(backing: baseRowStore, config: configuration.cacheConfig)
+            : baseRowStore
         self.blobStore = PostgreSQLBlobStore(backend: backend)
         self.vectorIndex = PostgreSQLVectorIndex(backend: backend)
         self.auditLog = PostgreSQLAuditLog(backend: backend)
@@ -74,6 +80,10 @@ public final class PostgreSQLStorage: Storage, Sendable {
 
     public func currentSchemaVersion() async throws -> Int {
         try await backend.currentSchemaVersion()
+    }
+
+    public func currentSchemaVersion(for kitID: String) async throws -> Int {
+        try await backend.currentSchemaVersion(for: kitID)
     }
 
     public func migrate(to schema: SchemaDeclaration) async throws {
@@ -127,8 +137,12 @@ actor PostgreSQLBackend {
             try await conn.executeSimple(PostgreSQLSchemaEmitter.createIndexSQL(idx), logger: logger)
         }
 
-        // Apply pending migrations.
-        let current = try await readSchemaVersion(connection: conn)
+        // Apply pending migrations scoped to this kit's version.
+        // Both the per-kit key ("schema_version:<kitID>") and the global key
+        // ("schema_version") are kept current so the no-arg currentSchemaVersion()
+        // returns a meaningful value. The global key holds the maximum version
+        // written by any kit that has opened on this storage instance.
+        let current = try await readSchemaVersion(kitID: schema.kitID, connection: conn)
         let pending = schema.migrations
             .filter { $0.fromVersion >= current && $0.toVersion <= schema.version }
             .sorted(by: { $0.fromVersion < $1.fromVersion })
@@ -138,7 +152,12 @@ actor PostgreSQLBackend {
                 for op in m.operations {
                     try await applyOperation(op, connection: conn)
                 }
-                try await writeSchemaVersion(m.toVersion, connection: conn)
+                try await writeSchemaVersion(m.toVersion, kitID: schema.kitID, connection: conn)
+                // Update global key to the running maximum across all kits.
+                let globalCurrent = try await readSchemaVersion(connection: conn)
+                if m.toVersion > globalCurrent {
+                    try await writeSchemaVersion(m.toVersion, key: "schema_version", connection: conn)
+                }
                 try await conn.executeSimple("COMMIT", logger: logger)
             } catch {
                 try? await conn.executeSimple("ROLLBACK", logger: logger)
@@ -146,7 +165,11 @@ actor PostgreSQLBackend {
             }
         }
         if pending.isEmpty && current < schema.version {
-            try await writeSchemaVersion(schema.version, connection: conn)
+            try await writeSchemaVersion(schema.version, kitID: schema.kitID, connection: conn)
+            let globalCurrent = try await readSchemaVersion(connection: conn)
+            if schema.version > globalCurrent {
+                try await writeSchemaVersion(schema.version, key: "schema_version", connection: conn)
+            }
         }
     }
 
@@ -156,14 +179,38 @@ actor PostgreSQLBackend {
         return try await readSchemaVersion(connection: conn)
     }
 
+    /// Per-kit schema version. Postgres stores per-kit versions as rows in
+    /// `_storagekit_meta` using the composite key `"schema_version:<kitID>"`.
+    /// The global `"schema_version"` key is preserved for the no-arg overload.
+    /// This mirrors the SQLite backend which uses a `_storagekit_migrations`
+    /// table with a `kit_id` column; Postgres uses the existing meta table to
+    /// avoid a new table and a schema change.
+    func currentSchemaVersion(for kitID: String) async throws -> Int {
+        let conn = try await pool.acquire()
+        defer { Task { await pool.release(conn) } }
+        return try await readSchemaVersion(kitID: kitID, connection: conn)
+    }
+
     func applyMigrations(_ schema: SchemaDeclaration) async throws {
         try await open(schema: schema)
     }
 
+    /// Read the global (no-arg) schema version from the `schema_version` meta key.
     private func readSchemaVersion(connection: PostgresConnection) async throws -> Int {
+        try await readSchemaVersion(key: "schema_version", connection: connection)
+    }
+
+    /// Read the per-kit schema version. The key is `schema_version:<kitID>` — a
+    /// composite form that avoids a new table while keeping per-kit isolation in
+    /// the existing `_storagekit_meta` key-value table.
+    private func readSchemaVersion(kitID: String, connection: PostgresConnection) async throws -> Int {
+        try await readSchemaVersion(key: "schema_version:\(kitID)", connection: connection)
+    }
+
+    private func readSchemaVersion(key: String, connection: PostgresConnection) async throws -> Int {
         let rows = try await connection.executeParameterized(
             "SELECT \"value\" FROM \"_storagekit_meta\" WHERE \"key\" = $1",
-            bindings: [.text("schema_version")],
+            bindings: [.text(key)],
             logger: logger
         )
         for try await row in rows {
@@ -177,11 +224,16 @@ actor PostgreSQLBackend {
         return 0
     }
 
-    private func writeSchemaVersion(_ v: Int, connection: PostgresConnection) async throws {
+    /// Write the per-kit schema version under key `schema_version:<kitID>`.
+    private func writeSchemaVersion(_ v: Int, kitID: String, connection: PostgresConnection) async throws {
+        try await writeSchemaVersion(v, key: "schema_version:\(kitID)", connection: connection)
+    }
+
+    private func writeSchemaVersion(_ v: Int, key: String, connection: PostgresConnection) async throws {
         _ = try await connection.executeParameterized("""
             INSERT INTO "_storagekit_meta" ("key", "value") VALUES ($1, $2)
             ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value"
-            """, bindings: [.text("schema_version"), .text(String(v))], logger: logger)
+            """, bindings: [.text(key), .text(String(v))], logger: logger)
     }
 
     private func applyOperation(_ op: SchemaOperation, connection: PostgresConnection) async throws {

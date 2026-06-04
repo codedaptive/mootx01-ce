@@ -28,6 +28,28 @@ struct InMemoryObserverTests {
         ))
     }
 
+    /// Await the first change on `stream`, returning nil if none arrives
+    /// within `duration`. The timeout converts a dropped change into a test
+    /// failure rather than letting the suite hang on a never-delivered stream.
+    private func firstChange(
+        from stream: AsyncStream<TableChange>,
+        within duration: Duration
+    ) async -> TableChange? {
+        await withTaskGroup(of: TableChange?.self) { group in
+            group.addTask {
+                for await change in stream { return change }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: duration)
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+    }
+
     @Test func insertNotification() async throws {
         let storage = makeStorage()
         try await storage.open(schema: SchemaDeclaration(
@@ -137,5 +159,41 @@ struct InMemoryObserverTests {
 
         let count = await collected.value
         #expect(count == 1, "only insert observed; delete filtered out")
+    }
+
+    /// Ordering guarantee: a change from an insert issued immediately after
+    /// `observe()` — with no settling sleep — is delivered, because
+    /// `observe()` records the subscription synchronously before it returns,
+    /// so the subscription is live before the insert can fire. This case
+    /// deliberately omits the settling delay the other cases use, so it
+    /// regresses if registration ever becomes asynchronous again.
+    @Test func observeThenImmediateInsertDelivers() async throws {
+        let storage = makeStorage()
+        try await storage.open(schema: SchemaDeclaration(
+            kitID: "ObserverTest",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "items",
+                    columns: [.uuid("id"), .text("name")],
+                    primaryKey: ["id"]
+                )
+            ]
+        ))
+
+        // No `Task.sleep` here — the absence of a settling delay is the
+        // point of this test.
+        let stream = storage.observer.observe(table: "items", events: [.insert])
+
+        let id = UUID()
+        _ = try await storage.rowStore.insert(
+            table: "items",
+            values: ["id": .uuid(id), "name": .text("first")]
+        )
+
+        let received = await firstChange(from: stream, within: .seconds(2))
+        #expect(received != nil, "change from an insert immediately after observe() must be delivered")
+        #expect(received?.event == .insert)
+        #expect(received?.rowKey == id)
     }
 }

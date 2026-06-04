@@ -3,9 +3,9 @@
 //! Storage abstraction layer mirroring the Swift PersistenceKit
 //! package. Closed-enum predicate algebra, typed values, schema
 //! declaration, Storage + RowStore + BlobStore + VectorIndex +
-//! AuditLog + StorageObserver traits. InMemory backend ships at
-//! v1.0; SQLite backend lands as a follow-on (see TODO at the
-//! bottom of this file).
+//! AuditLog + StorageObserver traits. InMemory, SQLite, and
+//! PostgreSQL backends all ship at v1.0. PostgreSQL conformance
+//! requires `PERSISTENCEKIT_PG_URL` to point at a live server.
 //!
 //! Swift parity:
 //!   - TypedValue mirrors Swift's enum case-for-case
@@ -18,6 +18,9 @@
 
 pub mod audit_log;
 pub mod blob_store;
+pub mod cache_config;
+pub mod cache_invalidator;
+pub mod caching_row_store;
 pub mod error;
 pub mod generated_column;
 pub mod inmemory;
@@ -33,6 +36,9 @@ pub mod vector_index;
 
 pub use audit_log::*;
 pub use blob_store::*;
+pub use cache_config::*;
+pub use cache_invalidator::CacheInvalidator;
+pub use caching_row_store::CachingRowStore;
 pub use error::*;
 pub use generated_column::*;
 pub use observer::*;
@@ -44,3 +50,10 @@ pub use sqlite::SqliteStorage;
 pub use storage::*;
 pub use types::*;
 pub use vector_index::*;
+
+#[cfg(test)]
+mod cache_config_tests;
+#[cfg(test)]
+mod cache_wiring_tests;
+#[cfg(test)]
+mod caching_row_store_tests;

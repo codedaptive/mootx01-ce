@@ -23,11 +23,12 @@ use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
 use crate::{
-    AuditEvent, AuditLog, BackendConfiguration, BlobStore, ColumnType, DistanceMetric,
-    EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel, OrderClause,
-    OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters, Storage,
-    StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult, StorageRow,
-    StorageTransaction, TableChange, TableDeclaration, TypedValue, VectorIndex, VectorSearchResult,
+    AuditEvent, AuditLog, BackendConfiguration, BlobStore, CachingRowStore, ColumnType,
+    DistanceMetric, EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel,
+    OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters,
+    Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
+    StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue, VectorIndex,
+    VectorSearchResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -813,11 +814,21 @@ impl Storage for PostgresStorage {
         &self.config
     }
     fn row_store(&self) -> Arc<dyn RowStore> {
-        Arc::new(PgRowStore {
+        let backing: Arc<dyn RowStore> = Arc::new(PgRowStore {
             pool: self.pool.clone(),
             schema: self.schema.clone(),
             observers: self.observers.clone(),
-        })
+        });
+        // When cache is enabled, wrap with an LRU hot tier. Disabled (the
+        // default) is a zero-change passthrough — identical to pre-mission
+        // behavior. PgTransactionContext::row_store() is intentionally NOT
+        // wrapped here; it lives on a separate struct and operates inside a
+        // transaction boundary where caching uncommitted reads would be wrong.
+        if self.config.cache_config.enabled {
+            Arc::new(CachingRowStore::new(backing, self.config.cache_config.clone()))
+        } else {
+            backing
+        }
     }
     fn blob_store(&self) -> Arc<dyn BlobStore> {
         Arc::new(PgBlobStore {

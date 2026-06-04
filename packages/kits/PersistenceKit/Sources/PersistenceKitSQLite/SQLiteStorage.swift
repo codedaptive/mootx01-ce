@@ -46,7 +46,13 @@ public final class SQLiteStorage: Storage, Sendable {
             encryptionConfig: configuration.encryptionConfig
         )
         self.backend = backend
-        self.rowStore = SQLiteRowStore(backend: backend)
+        let baseRowStore = SQLiteRowStore(backend: backend)
+        // Wrap in the LRU hot-tier decorator when caching is enabled. The
+        // disabled path (the default) is byte-identical to pre-wiring behavior —
+        // callers receive an `any RowStore` either way so no call sites change.
+        self.rowStore = configuration.cacheConfig.enabled
+            ? CachingRowStore(backing: baseRowStore, config: configuration.cacheConfig)
+            : baseRowStore
         self.blobStore = SQLiteBlobStore(backend: backend)
         self.vectorIndex = SQLiteVectorIndex(backend: backend)
         self.auditLog = SQLiteAuditLog(backend: backend)
@@ -63,6 +69,10 @@ public final class SQLiteStorage: Storage, Sendable {
 
     public func currentSchemaVersion() async throws -> Int {
         try await backend.currentSchemaVersion(kitID: nil)
+    }
+
+    public func currentSchemaVersion(for kitID: String) async throws -> Int {
+        try await backend.currentSchemaVersion(kitID: kitID)
     }
 
     public func migrate(to schema: SchemaDeclaration) async throws {
@@ -331,6 +341,11 @@ actor SQLiteBackend {
         // write paths. All current callers update only bitmap/timestamp
         // columns, so this is a no-op for them.
         try assertContentKeyIDInvariant(values, table: table)
+        // Pre-query row keys before mutating. The `values` dict carries only
+        // the SET columns (not the primary key), so keys must be resolved via
+        // a SELECT. The SQLiteBackend actor serializes all operations, so no
+        // interleaving is possible between this SELECT and the UPDATE.
+        let matchedKeys = try fetchMatchingRowKeys(table: table, predicate: predicate)
         let sortedKeys = values.keys.sorted()
         let setClause = sortedKeys.map { "\"\($0)\" = ?" }.joined(separator: ", ")
         let compiled = SQLitePredicateCompiler.compile(predicate)
@@ -346,13 +361,17 @@ actor SQLiteBackend {
         }
         _ = try stmt.step()
         let changes = Int(sqlite3_changes(connection.handle))
-        if changes > 0 {
-            notifyObservers(TableChange(table: table, event: .update, rowKey: nil, values: nil))
+        for key in matchedKeys {
+            notifyObservers(TableChange(table: table, event: .update, rowKey: key, values: nil))
         }
         return changes
     }
 
     func deleteRows(table: String, where predicate: StoragePredicate) throws -> Int {
+        // Pre-query row keys before deletion so notifications carry them.
+        // The SQLiteBackend actor serializes all operations, so no interleaving
+        // is possible between this SELECT and the DELETE.
+        let matchedKeys = try fetchMatchingRowKeys(table: table, predicate: predicate)
         let compiled = SQLitePredicateCompiler.compile(predicate)
         let sql = "DELETE FROM \"\(table)\" WHERE \(compiled.sql)"
         let stmt = try connection.prepare(sql)
@@ -362,8 +381,8 @@ actor SQLiteBackend {
         }
         _ = try stmt.step()
         let changes = Int(sqlite3_changes(connection.handle))
-        if changes > 0 {
-            notifyObservers(TableChange(table: table, event: .delete, rowKey: nil, values: nil))
+        for key in matchedKeys {
+            notifyObservers(TableChange(table: table, event: .delete, rowKey: key, values: nil))
         }
         return changes
     }
@@ -518,6 +537,35 @@ actor SQLiteBackend {
             if case .text(let s) = v, let u = UUID(uuidString: s) { return u }
         }
         return UUID()
+    }
+
+    /// Collect the row keys for rows currently matching `predicate`.
+    /// Called before a mutating operation (update or delete) so that
+    /// observer notifications can carry the actual key for each affected
+    /// row. The `values` dict passed to updateRows contains only the SET
+    /// columns, not the primary key, making this pre-query necessary.
+    /// The primary-key column name is read from the retained schema; "row_id"
+    /// is the fallback for tables whose schema has no single-UUID PK.
+    private func fetchMatchingRowKeys(table: String, predicate: StoragePredicate) throws -> [RowKey] {
+        let pkCol = schemaDeclaration?
+            .tables.first(where: { $0.name == table })?
+            .primaryKey.first ?? "row_id"
+        let compiled = SQLitePredicateCompiler.compile(predicate)
+        let sql = "SELECT \"\(pkCol)\" FROM \"\(table)\" WHERE \(compiled.sql)"
+        let stmt = try connection.prepare(sql)
+        defer { stmt.finalize() }
+        for (i, v) in compiled.bindings.enumerated() {
+            try stmt.bind(v, at: Int32(i + 1))
+        }
+        var keys: [RowKey] = []
+        while try stmt.step() {
+            // UUIDs are stored as uppercase TEXT (the value codec invariant).
+            let s = stmt.columnText(0) ?? ""
+            if let uuid = UUID(uuidString: s) {
+                keys.append(uuid)
+            }
+        }
+        return keys
     }
 
     private func readColumn(

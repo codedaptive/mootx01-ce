@@ -45,7 +45,13 @@ public final class InMemoryStorage: Storage, Sendable {
         self.observerRegistry = registry
         let actor = InMemoryStateActor(observerRegistry: registry)
         self.stateActor = actor
-        self.rowStore = InMemoryRowStore(stateActor: actor)
+        let baseRowStore = InMemoryRowStore(stateActor: actor)
+        // Wrap in the LRU hot-tier decorator when caching is enabled. The
+        // disabled path (the default) is byte-identical to pre-wiring behavior —
+        // callers receive an `any RowStore` either way so no call sites change.
+        self.rowStore = configuration.cacheConfig.enabled
+            ? CachingRowStore(backing: baseRowStore, config: configuration.cacheConfig)
+            : baseRowStore
         self.blobStore = InMemoryBlobStore(stateActor: actor)
         self.vectorIndex = InMemoryVectorIndex(stateActor: actor)
         self.auditLog = InMemoryAuditLog(stateActor: actor)
@@ -62,6 +68,10 @@ public final class InMemoryStorage: Storage, Sendable {
 
     public func currentSchemaVersion() async throws -> Int {
         await stateActor.schemaVersion()
+    }
+
+    public func currentSchemaVersion(for kitID: String) async throws -> Int {
+        await stateActor.schemaVersion(for: kitID)
     }
 
     public func migrate(to schema: SchemaDeclaration) async throws {
@@ -115,8 +125,18 @@ actor InMemoryStateActor {
     func replace(with newState: InMemoryState) { state = newState }
     func schemaVersion() -> Int { state.schemaVersion }
 
+    /// Per-kit schema version, keyed by kitID. Returns 0 if no migrations
+    /// have been applied for this kit yet.
+    func schemaVersion(for kitID: String) -> Int {
+        state.kitSchemaVersions[kitID] ?? 0
+    }
+
     func openSchema(_ schema: SchemaDeclaration) throws {
-        if state.schemaVersion < schema.version {
+        // Gate on the per-kit version so a second kit opening on this storage
+        // does not skip migration because another kit's migration advanced the
+        // global schemaVersion counter above this kit's target version.
+        let kitCurrent = state.kitSchemaVersions[schema.kitID] ?? 0
+        if kitCurrent < schema.version {
             try applyMigrationsInner(schema)
         }
         state.schemaDeclaration = schema
@@ -132,17 +152,24 @@ actor InMemoryStateActor {
                 state.tables[table.name] = InMemoryTable(declaration: table)
             }
         }
+        // Per-kit version is the source of truth for the migration gate.
+        // The global `schemaVersion` is updated in parallel so the no-arg
+        // `currentSchemaVersion()` still returns a sensible value (the max
+        // across all kits that have opened on this storage instance).
+        let kitCurrent = state.kitSchemaVersions[schema.kitID] ?? 0
         let pending = schema.migrations
-            .filter { $0.fromVersion >= state.schemaVersion && $0.toVersion <= schema.version }
+            .filter { $0.fromVersion >= kitCurrent && $0.toVersion <= schema.version }
             .sorted(by: { $0.fromVersion < $1.fromVersion })
         for migration in pending {
             for op in migration.operations {
                 try applyOperation(op)
             }
-            state.schemaVersion = migration.toVersion
+            state.kitSchemaVersions[schema.kitID] = migration.toVersion
+            state.schemaVersion = max(state.schemaVersion, migration.toVersion)
         }
-        if state.schemaVersion < schema.version {
-            state.schemaVersion = schema.version
+        if (state.kitSchemaVersions[schema.kitID] ?? 0) < schema.version {
+            state.kitSchemaVersions[schema.kitID] = schema.version
+            state.schemaVersion = max(state.schemaVersion, schema.version)
         }
     }
 
@@ -408,7 +435,10 @@ actor InMemoryStateActor {
 // MARK: - In-memory state value types
 
 struct InMemoryState: Sendable {
+    /// Global maximum schema version across all kits (for no-arg `currentSchemaVersion()`).
     var schemaVersion: Int = 0
+    /// Per-kit schema versions (for `currentSchemaVersion(for:)`).
+    var kitSchemaVersions: [String: Int] = [:]
     var schemaDeclaration: SchemaDeclaration? = nil
     var tables: [String: InMemoryTable] = [:]
     var blobs: [BlobKey: Data] = [:]
