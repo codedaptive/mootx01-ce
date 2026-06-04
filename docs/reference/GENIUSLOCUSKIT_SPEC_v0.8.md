@@ -156,11 +156,13 @@ shadowing the live entry.
 
 **I-3 (substrate access flows through the verb surface — B-1 of the
 architecture):** the composed kits (LocusKit, VectorKit, CorpusKit) are
-reached only through GLK's estate verb surface. NeuronKit and
-CognitionKit never import LocusKit, VectorKit, or CorpusKit directly; all
-substrate access is a verb applied to an `EstateHandle`. This is the
-structural form of the architecture's layering rule and is the reason
-the verb surface, not the composed kits, is GLK's consumed contract.
+reached only through GLK's estate verb surface. NeuronKit and CognitionKit
+MAY import LocusKit to name read-only value types (e.g. `Drawer`,
+`ContentKind`) in their inputs and outputs, but never call a LocusKit,
+VectorKit, or CorpusKit estate/verb/storage surface directly; all substrate
+access is a verb applied to an `EstateHandle`. This is the structural form
+of the architecture's layering rule and is the reason the verb surface, not
+the composed kits, is GLK's consumed contract.
 
 **I-4 (queue authority):** GLK holds exactly one QueueKit instance per
 estate, inside that estate's `StandingSignalScheduler`, mounted on a
@@ -464,5 +466,40 @@ C-6 (matrix), C-7 (training), and the grant, federation, branch, and
 migration surfaces — against the shared `glref` vectors.
 
 
+
+---
+
+## § 8 — DreamingSubstrateReader adapter (EstateDreamingReader)
+
+`EstateDreamingReader` is the production adapter that binds
+NeuronKit's `DreamingSubstrateReader` protocol seam to the live
+GeniusLocusKit estate surface. It is declared in NeuronKit
+(`NeuronKit/Sources/NeuronKit/Dreaming/EstateDreamingReader.swift`)
+because that is the only package that can import both the protocol
+(NeuronKit) and the estate surface (GeniusLocusKit) without creating
+a circular package dependency.
+
+GeniusLocusKit supports the adapter through three new public
+extension methods (`DreamingReads.swift`) that follow the same
+handle-resolution pattern as `recallTunnels`:
+
+```swift
+func recentRecallTraces(in handle: EstateHandle, since: Date, now: Date)
+    async throws -> [RecallTraceItem]
+func allTunnels(in handle: EstateHandle) async throws -> [Tunnel]
+func allDrawers(in handle: EstateHandle) async throws -> [Drawer]
+```
+
+The adapter holds an `EstateHandle` and a `GeniusLocusKit` reference
+and delegates the three `DreamingSubstrateReader` requirements:
+
+1. `recentRecallTraces(since:now:)` → `GeniusLocusKit.recentRecallTraces(in:since:now:)` → `Estate.recentRecallTraces` → `DrawerStore.recentRecallTraces` — windowed reward-window query.
+2. `coOccurrenceObservations()` → `GeniusLocusKit.allDrawers(in:)` → v1 room-grouping algorithm: drawers sharing a room are emitted as co-occurrence pairs.
+3. `existingTunnels()` → `GeniusLocusKit.allTunnels(in:)` → `Estate.allTunnels` → `DrawerStore.allTunnels` — estate-wide tunnel set for duplicate suppression.
+
+The Rust port (`NeuronKit/rust/src/estate_dreaming_reader.rs`)
+implements the same adapter over a synchronous `DrawerStore` trait
+reference; reads are snapshotted at construction time to match the
+Rust `DreamingSubstrateReader` trait's sync method signatures.
 
 *End of GeniusLocusKit Specification v0.8.*

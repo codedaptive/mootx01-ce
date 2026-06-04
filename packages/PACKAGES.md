@@ -286,8 +286,11 @@ The structured storage tier of the substrate.
 - `DiaryEntry` — temporal event log entry
 - `Tunnel` — typed cross-reference between drawers
 - `Estate` (actor) — the estate orchestrator
-- Nine verbs on Estate: capture, reanchor, mutate, withdraw, expunge,
-  recall, propose, associate, learn
+- Nine verbs on Estate (readiness mirrors the GeniusLocusKit surface above):
+  `capture`, `recall`, `withdraw`, `expunge`, `reanchor`, and `mutate`'s
+  `.confirm` kind dispatch live; `learn` and `mutate`'s state-axis kinds are
+  stubs; `propose` and `associate` are substrate-driven Brain-layer verbs with
+  no Estate method yet
 - `RecallFrame` — spatial query with bitmap filters
 - `RecallStream` — paginated result iterator
 - `Manifest`, `LocusKitSchema` — self-describing estate metadata
@@ -368,8 +371,16 @@ the Brain layer — the autonomous intelligence beneath the reasoning layers.
 - `open(storage:owner:)` → `EstateHandle`
 - `close(_:)`, `estate(for:)`, `openEstateCount`
 
-*Nine verbs (unified surface):*
-  capture, reanchor, mutate, withdraw, expunge, recall, propose, associate, learn
+*Nine verbs (unified surface)* — every verb is a legal lexicon target, but
+readiness reflects the live dispatch behavior asserted by
+`GeniusLocusKitTests/VerbSurfaceTests.swift`, not the grammar surface:
+- Live round-trip: `capture`, `recall`, `withdraw`, `expunge`, `reanchor`
+- `mutate`: the `.confirm` kind is live; the state-axis kinds (`.reject`,
+  `.contest`, `.resolve`, `.supersede`, `.revive`) surface
+  `VerbError.notSupportedByEstate` until they are wired
+- `learn`: surfaces `notSupportedByEstate` (reaches LocusKit's `learn` stub)
+- `propose`, `associate`: surface `notSupportedByEstate` — substrate-driven
+  verbs owned by the Brain layer, which is not present in this build
 
 *Brain layer (the autonomous system):*
 - `StandingSignalScheduler` — serial-dispatch scheduler per estate via QueueKit
@@ -393,9 +404,17 @@ the Brain layer — the autonomous intelligence beneath the reasoning layers.
 
 **Critical invariants:**
 
-**B-1:** NeuronKit and CognitionKit NEVER import LocusKit, VectorKit, or
-CorpusKit directly. All substrate access flows through GeniusLocusKit's
-estate verb surface.
+**B-1:** NeuronKit and CognitionKit reach the substrate (LocusKit,
+VectorKit, CorpusKit) only through GeniusLocusKit's estate verb surface —
+no estate/IO call, no SQL. The one exception is **read-only value types**:
+they MAY import LocusKit to name value types (e.g. `Drawer`, `ContentKind`,
+`RecallFrame`, `Filter`) in their inputs and outputs. They MUST NOT call any
+LocusKit (or VectorKit / CorpusKit) estate, verb, or storage surface. Both
+ports take this posture today — `NeuronKit/HybridRecall.swift` re-exports
+`LocusKit.Drawer`; the CognitionKit recipes (`Drift`, `AssociationRules`,
+`FormalConcepts`, …) import LocusKit for their frame value types only.
+(Boundary-owned DTOs that would drop even the value-type import are a
+separate architecture decision — deferred, not adopted here.)
 
 **Queue authority:** GLK holds one QueueKit instance per estate in
 StandingSignalScheduler. NeuronKit and CognitionKit never import QueueKit
@@ -438,19 +457,35 @@ daemons only. CognitionKit composes these into recipes.
 ### CognitionKit
 
 **Role:** The conscious mind. Named, composable behaviour recipes.
+A recipe is a sequence of NeuronKit reasoning calls and GeniusLocusKit
+estate verbs — it implements no algorithm and holds no substrate state.
 
-**Status:** Planned — Mission 10. Not yet built.
+**Provides:**
+- `Recipe` protocol — typed `Input`/`Output` behaviour definition
+- `RecipeCatalog` — the discovery registry (type-erased `RecipeDescriptor`
+  metadata: name, version, description, required capabilities)
+- `NeuronKitCapability` — the capability set a recipe declares it sequences
+- Shipped recipes (`RecipeCatalog.all`, 18 total):
+  - *Foundational:* `grounded_synthesis`, `migration_benchmark`
+  - *Structure lenses:* `keystones`, `constellation`, `free_association`
+  - *Topic lenses:* `theme_weather`, `latent_themes`
+  - *Preference lens:* `bias`
+  - *Surprise lenses:* `drift`, `contradiction`
+  - *Grounding/trust lens:* `trust_grounded_synthesis`
+  - *Associative lens:* `partial_cue_recall`
+  - *Prediction lenses:* `anticipate`, `tunnel_successor`
+  - *Federated lenses:* `mind_overlap`, `estate_divergence`
+  - *Analytics lenses:* `association_rules`, `formal_concepts`
 
-**Will provide:**
-- `Workflow` protocol — composable named workflow definition
-- `WorkflowStep` — atomic step in a workflow
-- `FulcrumDailyFraming` — the canonical daily review recipe
-- `ScenarioSkill` — scenario-driven workflow composition
-- `WorkflowScheduler` — recipe execution scheduling
+**Does NOT:** No algorithms of its own (those are NeuronKit), no direct
+substrate calls. Every read and write descends through NeuronKit or the
+passed GeniusLocusKit estate handle.
 
-**Dependencies (planned):** NeuronKit, GeniusLocusKit  
-**Languages:** Swift  
-**Spec:** `docs/specs/COGNITIONKIT_SPEC_v0.1.md`
+**Dependencies:** GeniusLocusKit, NeuronKit, LocusKit (read-only value
+types), SubstrateTypes  
+**Languages:** Swift + Rust (conformance-gated; `rust/src/catalog.rs` is the
+recipe-descriptor conformance anchor)  
+**Spec:** `docs/reference/COGNITIONKIT_SPEC_v0.85.md`
 
 ---
 
@@ -473,7 +508,7 @@ VectorKit       ← EngramLib, SubstrateTypes, SubstrateML, PersistenceKit
 CorpusKit       ← VectorKit, PersistenceKit, ConvergenceKit, EngramLib, SubstrateTypes, SubstrateML
 GeniusLocusKit  ← AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit, SubstrateTypes, SubstrateKernel
 NeuronKit       ← EideticLib, EngramLib, GeniusLocusKit, LocusKit, SubstrateTypes
-CognitionKit    ← NeuronKit, GeniusLocusKit (planned)
+CognitionKit    ← GeniusLocusKit, NeuronKit, LocusKit, SubstrateTypes
 ```
 
 Only LocusKit keeps a direct `SubstrateLib` dependency — it drives the
@@ -502,11 +537,13 @@ the precise sub-package(s) it uses.
 | CorpusKit | ✅ | ✅ | Built |
 | GeniusLocusKit | ✅ | — | Rust port pending |
 | NeuronKit | ✅ | — | Rust port pending |
-| CognitionKit | 🔲 | — | Mission 10 |
+| CognitionKit | ✅ | ✅ | Built (18 recipes; descriptor conformance-gated) |
 
 No package has cleared the security/quality/slop review gate yet.
 Build status reflects functional tests only.
 
 ---
 
-*Last updated: 2026-05-29 (four-package substrate split complete).*
+*Last updated: 2026-06-03 (reconciled verb readiness, CognitionKit built
+status + recipe set, and the B-1 read-only value-type exception to shipped
+code; four-package substrate split recorded 2026-05-29).*

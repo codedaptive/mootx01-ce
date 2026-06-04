@@ -171,7 +171,7 @@ never a file path. The kit depends only on the PersistenceKit protocol and
 never constructs a concrete backend; the caller owns the connection's
 lifecycle.
 
-**I-11 (cross-leg parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and XOR-fold reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
+**I-11 (cross-port parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and XOR-fold reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
 
 ## § 5 — Behavioral contracts
 
@@ -190,11 +190,10 @@ bitmap-audit row is written, and a `supersedes` tunnel is created. When
 (architecture spec § 5.10).
 
 **B-3 (recall is non-throwing; the stream is the failure boundary):**
-`recall` returns a `RecallStream`. Substrate faults and unsupported filters
-(`.nearVector` before VectorKit) collapse to an empty result set rather than
-an error: an empty single-page sequence with `isLast == true` is the uniform
-signal that no rows matched. Callers needing to distinguish empty-corpus from
-fault go through the store directly.
+`recall` returns a `RecallStream`. Substrate faults collapse to an empty result
+set rather than an error: an empty single-page sequence with `isLast == true`
+is the uniform signal that no rows matched. Callers needing to distinguish
+empty-corpus from fault go through the store directly.
 
 **B-4 (filter chain is conjunction):** a `RecallFrame.filterChain` is `[Filter]`
 interpreted as implicit AND (equivalent to `Filter.all(chain)`). When the
@@ -289,7 +288,7 @@ before touching storage (I-9, error model).
 same injected `now` produces identical stored rows and audit deltas; no
 engine reads the system clock internally (I-6).
 
-**C-7 (cross-leg, I-11):** the Swift and Rust version produce identical
+**C-7 (cross-port, I-11):** the Swift and Rust version produce identical
 value-level results for C-1…C-4 and C-6 against shared behaviour, allowing
 for the documented surface gap (§ 8). A value-level divergence fails the
 conformance gate.
@@ -301,9 +300,9 @@ conformance gate.
 - Fingerprint / Hamming / SimHash / count-fold math →
   `SUBSTRATELIB_SPEC_v0.8.md`.
 - The FDC classification encoder → `FDC_ENCODER_CANONICAL_v1.0.md`.
-- Vector embeddings and ANN recall (`Filter.nearVector`,
-  `Ordering.byRelevanceDesc`) → `VECTORKIT_SPEC_v0.8.md`. LocusKit declares
-  the filter case and throws until VectorKit composes in.
+- Vector embeddings and ANN recall (`Ordering.byRelevanceDesc`) →
+  `VECTORKIT_SPEC_v0.8.md`. Vector-tier filtering and relevance ordering
+  are provided when VectorKit composes in.
 - N-estate coordination, grants, cross-estate recall, branches, the Brain
   layer → `GENIUSLOCUSKIT_SPEC_v0.8.md`.
 - Hybrid recall, dreaming, maintenance, reward sweeps → NeuronKit.
@@ -332,7 +331,7 @@ required to agree.
 
 The nine verbs are not uniformly legal on every noun. Legality is defined by
 the acceptance matrix (`AriaLexiconLib.Acceptance`, architecture spec § 7.2),
-which is data so a conformance harness checks both legs agree:
+which is data so a conformance harness checks both ports agree:
 
 | Noun | Accepts |
 |---|---|
@@ -345,10 +344,20 @@ which is data so a conformance harness checks both legs agree:
 | `LearnedReference` | learn, mutate, withdraw, expunge, recall |
 | `Vector` | (none — substrate-managed, not verb-addressable) |
 
-- `mutate` carries the `MutationKind` axis (`confirm`, `reject`, `contest`,
-  `resolve`, `supersede`, `revive`, `accept`, `correctSensitivity`,
-  `correctTrust`); each rewrites a bounded bitmap field and writes its audit
-  row atomically, leaving the other axes intact.
+- `mutate` carries the `MutationKind` axis with nine implemented cases:
+  - **Confirmation axis** — `confirm`: writes `userConfirmed` to provenance
+    bits 18–23.
+  - **State axis** — `reject` (→ rejected), `contest` (→ contested),
+    `resolve` (contested → active; guard: only from contested), `accept`
+    (→ accepted; guard: trust ≥ canonical per S-1 cookbook §9.5.1),
+    `supersede` (→ superseded), `revive` (Cluster B → active; guard: only
+    from Cluster B; automaton supports decayed → observe → active per §9.2;
+    withdrawn/expired require a follow-up automaton extension).
+  - **Adjective axis** — `correctSensitivity(AdjectiveSensitivity)`: rewrites
+    bits 6–11; `correctTrust(Trust)`: rewrites bits 18–23.
+  - All cases route through `DrawerStore.mutateState` or
+    `DrawerStore.mutateAdjective`, which validate via `AuditGate.admit` and
+    append one sealed `AuditEvent` atomically.
 - `learn` is legal only on `LearnedReference`: it records a learned reference
   drawer through the LRF noun substrate.
 - `propose` / `associate` are realised through the `Proposal` and
