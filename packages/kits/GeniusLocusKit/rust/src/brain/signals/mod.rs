@@ -9,9 +9,10 @@
 // What the Rust port does NOT do: open a real QueueKit substrate or
 // LocusKit recall surface. The Rust mirror's signal bodies emit the
 // same demonstrative proposals/associations/diagnostics the Swift port
-// emits, so the conformance gate checks the surface vocabulary and
-// drain ordering — not the substrate-level work the bodies will do
-// when the Brain layer's verb bodies land.
+// emits, so the conformance gate checks the surface vocabulary and drain
+// ordering. The `dreaming` signal is wired with a real daemon_cycle
+// closure; other signals still emit demonstrative shapes for the
+// conformance gate.
 
 pub mod by_reference_validity;
 pub mod decay_sweep;

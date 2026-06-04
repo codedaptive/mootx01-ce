@@ -148,48 +148,49 @@ fn surface_targets_are_all_accepted() {
 // `co3_expunge_requires_confirmation` in coordinator.rs for the
 // retained parity assertions.
 
-/// `propose` raises `NotSupportedByEstate("propose")` — Brain layer has
-/// not shipped; mirrors `VerbSurfaceTests.testProposeRaisesNotSupported`.
+/// `propose` is now live — a missing target row produces
+/// `UnderlyingEstateFailure("propose", ...)`.
+/// Mirrors `VerbSurfaceTests.proposeWithMissingTargetThrows`.
 #[test]
-fn propose_raises_not_supported() {
+fn propose_with_missing_target_produces_underlying_failure() {
     let (coord, h) = open_one();
     let frame = ProposeFrame {
-        target: "row-1".into(),
+        target: "nonexistent-row".into(),
         kind: ProposalKind::Amend,
         justification: None,
     };
-    match coord.propose(&h, frame).unwrap_err() {
-        VerbDispatchError::Verb(VerbError::NotSupportedByEstate { verb }) => {
+    match coord.propose(&h, frame, 1_700_000_000).unwrap_err() {
+        VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure { verb, .. }) => {
             assert_eq!(verb, "propose")
         }
-        other => panic!("expected NotSupportedByEstate('propose'), got {:?}", other),
+        other => panic!("expected UnderlyingEstateFailure('propose'), got {:?}", other),
     }
 }
 
-/// `associate` raises `NotSupportedByEstate("associate")` — Brain layer
-/// has not shipped; mirrors `VerbSurfaceTests.testAssociateRaisesNotSupported`.
+/// `associate` is now live — missing endpoint rows produce
+/// `UnderlyingEstateFailure("associate", ...)`.
+/// Mirrors `VerbSurfaceTests.associateWithMissingEndpointsThrows`.
 #[test]
-fn associate_raises_not_supported() {
+fn associate_with_missing_endpoints_produces_underlying_failure() {
     let (coord, h) = open_one();
     let frame = AssociateFrame {
-        a: "row-a".into(),
-        b: "row-b".into(),
+        a: "missing-a".into(),
+        b: "missing-b".into(),
         weight: 0.5,
     };
-    match coord.associate(&h, frame).unwrap_err() {
-        VerbDispatchError::Verb(VerbError::NotSupportedByEstate { verb }) => {
+    match coord.associate(&h, frame, 1_700_000_000).unwrap_err() {
+        VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure { verb, .. }) => {
             assert_eq!(verb, "associate")
         }
         other => panic!(
-            "expected NotSupportedByEstate('associate'), got {:?}",
+            "expected UnderlyingEstateFailure('associate'), got {:?}",
             other
         ),
     }
 }
 
 /// A stale handle raises `EstateNotOpen` for `propose` — handle validation
-/// runs before the NotSupportedByEstate short-circuit. Mirrors the Swift
-/// `estate(for:)` propagation pattern on the other stub verbs.
+/// runs before any verb dispatch. Mirrors the Swift `estate(for:)` pattern.
 #[test]
 fn propose_on_closed_handle_raises_estate_not_open() {
     let (mut coord, h) = open_one();
@@ -200,15 +201,15 @@ fn propose_on_closed_handle_raises_estate_not_open() {
         justification: None,
     };
     assert_eq!(
-        coord.propose(&h, frame).unwrap_err(),
+        coord.propose(&h, frame, 1_700_000_000).unwrap_err(),
         VerbDispatchError::EstateNotOpen {
             estate_uuid: h.estate_uuid
         }
     );
 }
 
-/// A stale handle raises `EstateNotOpen` for `associate` — handle
-/// validation runs before the NotSupportedByEstate short-circuit.
+/// A stale handle raises `EstateNotOpen` for `associate` — handle validation
+/// runs before any verb dispatch.
 #[test]
 fn associate_on_closed_handle_raises_estate_not_open() {
     let (mut coord, h) = open_one();
@@ -219,7 +220,7 @@ fn associate_on_closed_handle_raises_estate_not_open() {
         weight: 0.5,
     };
     assert_eq!(
-        coord.associate(&h, frame).unwrap_err(),
+        coord.associate(&h, frame, 1_700_000_000).unwrap_err(),
         VerbDispatchError::EstateNotOpen {
             estate_uuid: h.estate_uuid
         }

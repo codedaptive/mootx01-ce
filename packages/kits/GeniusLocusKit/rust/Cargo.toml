@@ -28,4 +28,10 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # depend on GLK). persistence-kit supplies the in-memory `Storage` backend.
 locus-kit = { path = "../../LocusKit/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
+# GLK_RAG_WIRING_001: VectorKit and CorpusKit are the RAG and vector
+# seam dependencies. VectorSimilaritySignal queries VectorStore.find_nearest
+# for row-pair proximity; ExternalCorpus.hybrid_recall routes through
+# Corpus.recall for hybrid BM25+vector retrieval.
+vectorkit = { path = "../../VectorKit/rust" }
+corpus-kit = { path = "../../CorpusKit/rust" }
 uuid = { version = "1", features = ["v4"] }

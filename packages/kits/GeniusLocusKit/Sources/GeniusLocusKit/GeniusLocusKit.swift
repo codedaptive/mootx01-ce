@@ -1,37 +1,35 @@
+import CorpusKit
 import Foundation
 import OSLog
 import LocusKit
 import PersistenceKit
+import VectorKit
 
 /// The composition layer for the GeniusLocus substrate.
 ///
 /// `GeniusLocusKit` is the public actor that coordinates N estates on
-/// one device. Each estate is its own composed substrate (LocusKit
-/// today; VectorKit and CorpusKit when later sub-missions wire them in)
-/// with its own manifest and its own injected storage. Estates are
-/// isolated from one another: a handle reaches exactly one estate's
-/// data.
+/// one device. Each estate is its own composed substrate (LocusKit with
+/// VectorKit and CorpusKit wired in) with its own manifest and its own
+/// injected storage. Estates are isolated from one another: a handle
+/// reaches exactly one estate's data.
 ///
-/// This scaffold mission delivers:
+/// Public surface:
 ///
 /// - Lifecycle: `open(storage:owner:)` to admit a new estate into the
 ///   registry; `close(_:)` to remove it; `handles` to list what is
 ///   currently open.
-/// - Per-handle access: `estate(for:)` returns the live `LocusKit.Estate`
-///   actor associated with a handle, so callers can issue verbs through
-///   the existing LocusKit surface while later sub-missions build the
-///   unified verb surface (GLK-02) on top.
+/// - Nine-verb surface (GLK-02): `capture`, `recall`, `mutate`,
+///   `withdraw`, `expunge`, `reanchor`, `propose`, `associate`,
+///   `learn` — all implemented and dispatching to the underlying estate.
 /// - Lattice-scoped read fan-out: `fanOutRecall(_:region:)` routes a
 ///   `RecallFrame` to every open estate whose zoom window overlaps the
-///   query region, then aggregates results. This is the "query N
-///   estates" capability at the coordination level, ahead of the
-///   unified verb surface.
+///   query region, then aggregates results.
 ///
-/// The per-estate unified audit log is wired here (GLK-03): each open
+/// The per-estate unified audit log is wired (GLK-03): each open
 /// estate carries a `UnifiedAuditLog` in `auditLogs`, fed from the
 /// LocusKit tier through `feedAuditLog(for:)` and verified through the
-/// `verifyAuditChain` verb. The Brain layer beyond the standing-signal
-/// scheduler and the matrix tier remain later sub-missions (GLK-04+).
+/// `verifyAuditChain` verb. The Brain layer (standing-signal scheduler,
+/// matrix tier, dreaming/maintenance daemons) is live.
 ///
 /// Per the standing-signal serial-dispatch decision recorded for
 /// GLK-04, the public type is an actor so the registry is serialized
@@ -89,6 +87,20 @@ public actor GeniusLocusKit {
     /// grants in the same backend as the estate they belong to.
     internal var storages: [EstateHandle: any Storage] = [:]
 
+    /// Per-estate `Corpus` instances for BM25 and embedding recall lanes.
+    ///
+    /// Populated via `registerCorpus(_:for:)` after an estate is opened.
+    /// The RecallDirector reads this registry to drive `corpusOnly` and
+    /// `hybrid` BM25/vector lanes. Dropped when the estate is closed.
+    internal var corpusKits: [EstateHandle: Corpus] = [:]
+
+    /// Per-estate `VectorStore` instances for Hamming nearest-neighbour recall.
+    ///
+    /// Populated via `registerVectorStore(_:for:)`. Expected to be keyed by
+    /// drawer IDs (not chunk IDs) so RecallDirector hits join directly to
+    /// LocusKit `Drawer` rows. Dropped when the estate is closed.
+    internal var vectorStores: [EstateHandle: VectorStore] = [:]
+
     /// Per-estate grant persistence (GRT-01). Built lazily on the first
     /// grant verb against a handle via `ensureGrantSurface(for:)`; the
     /// `grants` table lives in the estate's storage. Dropped in `close`.
@@ -98,6 +110,23 @@ public actor GeniusLocusKit {
     /// `GrantStore`. Mode-1 scope keys live here in memory only; the
     /// vault is dropped in `close`, which discharges all held keys.
     internal var scopeVaults: [EstateHandle: ScopeKeyVault] = [:]
+
+    /// Per-estate diary `DrawerStore` facade (dreaming sink). Built lazily
+    /// by `ensureDiaryStore(for:)` on the first `addDiaryEntry(in:_:)` call
+    /// against a handle; the store is backed by the same `Storage` as the
+    /// estate's LocusKit tier. Dropped in `close` via `EstateCoordinator`.
+    internal var diaryStores: [EstateHandle: DrawerStore] = [:]
+
+    /// Per-estate matrix tier snapshots for recall scoring.
+    ///
+    /// Populated via `registerMatrixTier(_:for:)` after an estate is opened
+    /// and the caller has built or loaded a `MatrixTier` from the estate's
+    /// unified audit log. The RecallDirector reads this registry to populate
+    /// the `fieldFit`, `coOccurrence`, and `temporal` score columns during
+    /// the `unionBest` lane's scoring pass. When absent, all three columns
+    /// remain 0.0 (no matrix priors — correct behaviour for a fresh estate).
+    /// Dropped when the estate is closed.
+    internal var matrixTiers: [EstateHandle: MatrixTier] = [:]
 
     /// Construct an empty kit. The estate registry starts empty;
     /// callers admit estates via `open(storage:owner:)`.
@@ -116,6 +145,66 @@ public actor GeniusLocusKit {
     /// reads should sort the result themselves.
     public var handles: [EstateHandle] {
         Array(registry.keys)
+    }
+}
+
+// MARK: - CorpusKit / VectorStore registration (RECALL-DIRECTOR-002)
+
+public extension GeniusLocusKit {
+
+    /// Register a `Corpus` instance for the given estate handle.
+    ///
+    /// The RecallDirector reads this registry to drive the BM25 and embedding
+    /// lanes in `corpusOnly` and `hybrid` recall. The corpus should already be
+    /// populated via `Corpus.ingest` before recall is invoked; the director
+    /// does not ingest on behalf of the caller.
+    ///
+    /// Re-registering with a different corpus for the same handle replaces the
+    /// existing entry. Call with `close(_:)` semantics to drop the reference.
+    ///
+    /// - Parameters:
+    ///   - corpus: The `Corpus` actor for BM25 and embedding recall.
+    ///   - handle: The estate this corpus is associated with. Must be open.
+    func registerCorpus(_ corpus: Corpus, for handle: EstateHandle) {
+        corpusKits[handle] = corpus
+    }
+
+    /// Register a `VectorStore` for the given estate handle.
+    ///
+    /// The RecallDirector uses this store for Hamming top-K nearest-neighbour
+    /// recall in `corpusOnly` and `hybrid` modes. The store should be keyed by
+    /// drawer IDs (matching `Drawer.id`) so hits join back to LocusKit rows
+    /// without an intermediate mapping step.
+    ///
+    /// Re-registering replaces the existing entry.
+    ///
+    /// - Parameters:
+    ///   - store: The `VectorStore` for Hamming nearest-neighbour recall.
+    ///   - handle: The estate this store is associated with. Must be open.
+    func registerVectorStore(_ store: VectorStore, for handle: EstateHandle) {
+        vectorStores[handle] = store
+    }
+
+    /// Register a `MatrixTier` snapshot for the given estate handle.
+    ///
+    /// The RecallDirector reads this registry to compute `fieldFit`,
+    /// `coOccurrence`, and `temporal` score columns during the `unionBest`
+    /// scoring pass. Build the tier via `MatrixTier.rebuild(from:)` or
+    /// `MatrixPersistenceBackend.rebuild(from:)` after feeding the estate's
+    /// unified audit log. Re-registering with a fresh snapshot replaces the
+    /// existing entry; call with a fresh tier after each dreaming cycle to keep
+    /// recall scoring current.
+    ///
+    /// When no tier is registered for an estate, all matrix score columns
+    /// remain 0.0 — correct behaviour for a fresh estate with no captured
+    /// content, and safe for estates where matrix scoring has not been
+    /// configured.
+    ///
+    /// - Parameters:
+    ///   - tier:   The in-memory `MatrixTier` snapshot to use for recall scoring.
+    ///   - handle: The estate this tier is associated with. Must be open.
+    func registerMatrixTier(_ tier: MatrixTier, for handle: EstateHandle) {
+        matrixTiers[handle] = tier
     }
 }
 

@@ -13,12 +13,17 @@ import LocusKit
 /// attribution of which content was disclosed under which grant is the
 /// load-bearing fact the answer-assembly layer needs.
 ///
-/// Scope-level row filtering (returning only rows inside the granted
-/// wing/room/subtree) is **not** applied here. This layer enforces the
-/// binary "may the requester read the source at all" gate and treats
-/// `grant.scope` as advisory metadata the caller may act on. Per-scope
-/// row filtering is an ARIA-surface answer-assembly concern (§10), left
-/// to `MCP-MULTI-01`.
+/// Content-level sensitivity filtering **is** applied by the caller
+/// (`CrossEstateFederation.federatedRecall`): drawers whose
+/// `adjectiveSensitivity` exceeds `grant.contentLevel` are excluded
+/// before this result is constructed, making GLK the primary enforcer.
+///
+/// Scope-subtree filtering **is** applied by the caller
+/// (`CrossEstateFederation.federatedRecall`): drawers outside the
+/// granted wing/room/lattice subtree/single row are excluded before
+/// this result is constructed, making GLK the primary enforcer.
+/// ARIA's scope narrowing in `ToolDispatch` remains as defense-in-depth
+/// secondary.
 public struct FederatedRecallResult: Sendable {
 
     /// The drawers recalled from the **source** estate. Hydration

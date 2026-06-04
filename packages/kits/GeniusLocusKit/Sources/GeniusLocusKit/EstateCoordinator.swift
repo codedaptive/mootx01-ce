@@ -131,11 +131,15 @@ public extension GeniusLocusKit {
             // resolve to a live log (GLK-03).
             registry[handle] = nil
             auditLogs[handle] = nil
+            diaryStores[handle] = nil
+            matrixTiers[handle] = nil
             dropGrantSurface(for: handle)
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")
         }
         registry[handle] = nil
         auditLogs[handle] = nil
+        diaryStores[handle] = nil
+        matrixTiers[handle] = nil
         dropGrantSurface(for: handle)
         Self.log.info("closed estate \(handle.estateUUID, privacy: .public)")
     }

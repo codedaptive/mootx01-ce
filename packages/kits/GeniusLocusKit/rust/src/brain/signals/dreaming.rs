@@ -1,8 +1,14 @@
 // brain/signals/dreaming.rs — Rust mirror of `DreamingSignal.swift`.
 //
 // Architecture spec §11.2 row 1 / cookbook §15 — the dreaming daemon.
-// Emits a mining-pattern proposal plus a representative association
-// on each fire; cadence weekly per cookbook §15.2.
+// Emits mining-pattern proposals on each fire via an injected daemon cycle
+// closure. Cadence: weekly per cookbook §15.2.
+//
+// The `spec` factory accepts a closure that returns proposals from the
+// dreaming daemon. The caller constructs a `DreamingDaemon` (neuron_kit)
+// with production seam implementations and captures it in the closure.
+// genius_locus_kit cannot depend on neuron_kit (circular crate dependency);
+// the closure is the architectural bridge between the two crates.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +25,20 @@ impl DreamingSignal {
     /// Stable name surfaced in `SignalReport.name`.
     pub const SIGNAL_NAME: &'static str = "dreaming-daemon";
 
-    pub fn default_spec() -> SignalSpec {
+    /// Build a signal spec that invokes the dreaming daemon on each fire.
+    ///
+    /// `daemon_cycle` is called on each emit and returns the proposals the
+    /// daemon emitted. An empty `Vec` is correct when the estate has no
+    /// co-occurrence candidates. The Rust emit closure is synchronous;
+    /// the daemon_cycle closure should already have its seam inputs bound.
+    ///
+    /// Usage: construct a `DreamingDaemon` (neuron_kit), wrap its
+    /// `run_cycle` result's `proposals_emitted` in an `Arc<dyn Fn>`, and
+    /// pass it here.
+    pub fn spec<F>(daemon_cycle: Arc<F>) -> SignalSpec
+    where
+        F: Fn() -> Vec<ProposalFrame> + Send + Sync + 'static,
+    {
         SignalSpec {
             name: Self::SIGNAL_NAME.to_string(),
             trigger: SignalTrigger::Interval {
@@ -28,24 +47,13 @@ impl DreamingSignal {
             resource_cost: ResourceCostEstimate::ZERO,
             freshness_target: Duration::from_secs(Self::DEFAULT_CADENCE_SECONDS * 2),
             concurrency_policy: ConcurrencyPolicy::Single,
-            emit: Arc::new(|context: &SignalContext| {
-                let mining = ProposalFrame {
-                    target: "dreaming/mining-candidate".into(),
-                    kind: ProposalKind::MiningPattern,
-                    justification: Some(format!(
-                        "weekly NMF candidate (cookbook §15.1 rule 8); signal={}",
-                        context.signal_id.0
-                    )),
-                };
-                let association = AssociationFrame {
-                    a: "dreaming/source".into(),
-                    b: "dreaming/target".into(),
-                    weight: 1.0,
-                };
-                vec![
-                    SignalEmission::Propose(mining),
-                    SignalEmission::Associate(association),
-                ]
+            // Map each ProposalFrame from the daemon cycle to a
+            // SignalEmission::Propose. An empty cycle returns vec![].
+            emit: Arc::new(move |_context: &SignalContext| {
+                daemon_cycle()
+                    .into_iter()
+                    .map(SignalEmission::Propose)
+                    .collect()
             }),
         }
     }

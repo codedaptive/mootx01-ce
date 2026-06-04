@@ -9,17 +9,15 @@ import PersistenceKitInMemory
 /// One round-trip per verb against a composed estate, plus the
 /// AriaLexicon §7.2 acceptance-matrix conformance.
 ///
-/// `capture`, `recall`, `withdraw`, and `expunge` round-trip through
-/// LocusKit's live verb surface. `mutate`, `reanchor`, and `learn`
-/// reach LocusKit's stubs and the GLK boundary re-raises the
-/// "not yet implemented" failure as
-/// `VerbError.notSupportedByEstate(verb:)` so callers see a single
-/// case across all stubbed-verb dispatches. `propose` and `associate`
-/// are substrate-driven (Brain layer) and have no LocusKit Estate
-/// method — the GLK surface raises `notSupportedByEstate` directly.
+/// `capture`, `recall`, `withdraw`, `expunge`, `learn`, `propose`, and
+/// `associate` round-trip through LocusKit's live verb surface.
+/// `mutate` is fully implemented for all MutationKind cases; this suite
+/// covers the `.confirm` confirmation round-trip and the state-axis
+/// round-trips (`.contest`, `.resolve`). `reanchor` routes to a LocusKit
+/// stub. `propose` and `associate` delegate to LocusKit; a missing
+/// target/endpoint produces `VerbError.underlyingEstateFailure(verb:)`.
 /// In every case the verb call reaches the GLK boundary, resolves the
-/// handle through `estate(for:)`, and dispatches; the assertion is on
-/// the observed outcome.
+/// handle through `estate(for:)`, and dispatches.
 @Suite("Verb surface round-trips")
 struct VerbSurfaceTests {
 
@@ -109,22 +107,42 @@ struct VerbSurfaceTests {
         #expect(row.confirmation == .userConfirmed)
     }
 
-    /// A state-axis mutation kind (`.reject`) is not yet wired, so the GLK
-    /// boundary re-raises LocusKit's "not yet implemented" marker as
-    /// `VerbError.notSupportedByEstate(verb: "mutate")`. Confirms the
-    /// dispatch chain's error remap is intact for unimplemented kinds.
+    /// `.reject` on an active row: the verb is now implemented and dispatches
+    /// to LocusKit. The automaton gate rejects active→rejected (only pending
+    /// may reject per cookbook §9.2), so the GLK surface re-raises as
+    /// `VerbError.underlyingEstateFailure`. This confirms the dispatch chain
+    /// routes through the live LocusKit path, not a "not supported" stub.
     @Test
-    func mutateStateAxisKindSurfacesNotSupported() async throws {
+    func mutateRejectFromActive_raisesUnderlyingEstateFailure() async throws {
         let (kit, handle) = try await openOneEstate()
         let stored = try await kit.capture(handle, captureFrame(content: "reject target"))
         let thrown = await #expect(throws: VerbError.self) {
             try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .reject))
         }
-        if case .notSupportedByEstate(let verb)? = thrown {
+        // The gate throws LocusKitError.invalidContent (not the "not yet
+        // implemented" sentinel), so GLK maps it to underlyingEstateFailure.
+        if case .underlyingEstateFailure(let verb, _)? = thrown {
             #expect(verb == "mutate")
         } else {
-            Issue.record("expected .notSupportedByEstate, got \(String(describing: thrown))")
+            Issue.record("expected .underlyingEstateFailure(verb: \"mutate\", ...), got \(String(describing: thrown))")
         }
+    }
+
+    /// `.contest` on an active row succeeds: the row transitions to `.contested`
+    /// and a subsequent `.resolve` returns it to `.active`. Verifies the
+    /// state-axis round-trip through the GLK boundary.
+    @Test
+    func mutateContestThenResolve_roundTrip() async throws {
+        let (kit, handle) = try await openOneEstate()
+        let stored = try await kit.capture(handle, captureFrame(content: "contest-resolve target"))
+
+        // contest: active → contested
+        try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .contest))
+
+        // resolve: contested → active
+        try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .resolve))
+        // No throw == round-trip success; the test is structural (the GLK
+        // boundary dispatched and LocusKit's automaton accepted both transitions).
     }
 
     // MARK: - withdraw round-trip
@@ -214,36 +232,28 @@ struct VerbSurfaceTests {
 
     // MARK: - learn round-trip
 
-    /// `learn` reaches LocusKit's learn stub and is remapped.
+    /// `learn` is now live — delegates to LocusKit and returns a `LearnedReference`.
     @Test
-    func learnRoundTripSurfacesNotSupported() async throws {
+    func learnRoundTripSucceeds() async throws {
         let (kit, handle) = try await openOneEstate()
-        let thrown = await #expect(throws: VerbError.self) {
-            try await kit.learn(handle, LearnFrame(handle: "test-source"))
-        }
-        if case .notSupportedByEstate(let verb)? = thrown {
-            #expect(verb == "learn")
-        } else {
-            Issue.record("expected .notSupportedByEstate, got \(String(describing: thrown))")
-        }
+        let ref = try await kit.learn(handle, LearnFrame(handle: "test-source"))
+        #expect(ref.handle == "test-source")
     }
 
     // MARK: - propose round-trip
 
-    /// `propose` is substrate-driven (Brain layer) and has no
-    /// LocusKit Estate method. The GLK surface validates the handle
-    /// (so a stale handle still raises `estateNotOpen`), then raises
-    /// `VerbError.notSupportedByEstate` directly.
+    /// `propose` is now live — delegates to LocusKit. A missing target row
+    /// produces `VerbError.underlyingEstateFailure(verb: "propose", ...)`.
     @Test
-    func proposeRaisesNotSupported() async throws {
+    func proposeWithMissingTargetThrows() async throws {
         let (kit, handle) = try await openOneEstate()
         let thrown = await #expect(throws: VerbError.self) {
-            try await kit.propose(handle, ProposeFrame(target: "row-1", kind: .amend))
+            try await kit.propose(handle, ProposeFrame(target: "nonexistent-row", kind: .amend))
         }
-        if case .notSupportedByEstate(let verb)? = thrown {
+        if case .underlyingEstateFailure(let verb, _)? = thrown {
             #expect(verb == "propose")
         } else {
-            Issue.record("expected .notSupportedByEstate, got \(String(describing: thrown))")
+            Issue.record("expected .underlyingEstateFailure, got \(String(describing: thrown))")
         }
     }
 
@@ -265,18 +275,18 @@ struct VerbSurfaceTests {
 
     // MARK: - associate round-trip
 
-    /// `associate` is substrate-driven (dreaming daemon) and raises
-    /// `notSupportedByEstate`.
+    /// `associate` is now live — delegates to LocusKit. Missing endpoint rows
+    /// produce `VerbError.underlyingEstateFailure(verb: "associate", ...)`.
     @Test
-    func associateRaisesNotSupported() async throws {
+    func associateWithMissingEndpointsThrows() async throws {
         let (kit, handle) = try await openOneEstate()
         let thrown = await #expect(throws: VerbError.self) {
-            try await kit.associate(handle, AssociateFrame(a: "row-a", b: "row-b", weight: 0.5))
+            try await kit.associate(handle, AssociateFrame(a: "missing-a", b: "missing-b", weight: 0.5))
         }
-        if case .notSupportedByEstate(let verb)? = thrown {
+        if case .underlyingEstateFailure(let verb, _)? = thrown {
             #expect(verb == "associate")
         } else {
-            Issue.record("expected .notSupportedByEstate, got \(String(describing: thrown))")
+            Issue.record("expected .underlyingEstateFailure, got \(String(describing: thrown))")
         }
     }
 

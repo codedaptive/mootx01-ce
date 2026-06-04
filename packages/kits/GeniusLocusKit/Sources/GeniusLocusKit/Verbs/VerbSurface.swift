@@ -31,23 +31,18 @@ import SubstrateTypes
 /// isolation serializes verb dispatch per kit instance; each LocusKit
 /// `Estate` is itself an actor and serializes its own writes.
 ///
-/// Per the mission's "no later sub-mission scope" rule, this surface
-/// does not build the unified audit log (GLK-03), the standing-signals
-/// scheduler (GLK-04), the Brain layer, or the matrix tier. Audit
-/// emission happens through LocusKit's existing per-kit audit path;
-/// the unified single-log-per-estate is GLK-03.
+/// Audit emission happens through LocusKit's existing per-kit audit
+/// path; the unified single-log-per-estate is wired via GLK-03 and the
+/// standing-signals scheduler via GLK-04.
 ///
-/// Error mapping: LocusKit's verb stubs throw
-/// `LocusKitError.invalidContent("…not yet implemented")` for
-/// `reanchor` and `learn` today, and for `mutate`'s state-axis kinds
-/// (`mutate`'s `.confirm` kind is implemented and dispatches straight
-/// through; `expunge` is implemented too). The GLK boundary recognises
-/// this pattern and re-raises it as
+/// Error mapping: all nine verbs dispatch to live LocusKit estate
+/// methods except `mutate`'s non-confirm state-axis kinds (`.reject`,
+/// `.contest`, `.resolve`, `.supersede`, `.revive`), which throw
+/// `LocusKitError.invalidContent("…not yet implemented")`. The GLK
+/// boundary recognises this pattern and re-raises it as
 /// `VerbError.notSupportedByEstate(verb:)` so callers see a single
-/// case across all stubbed-verb dispatches. Other LocusKit failures
-/// flow through as `VerbError.underlyingEstateFailure(verb:reason:)`.
-/// `propose` and `associate` have no LocusKit Estate method to call;
-/// the GLK surface raises `notSupportedByEstate` directly.
+/// case. Other LocusKit failures flow through as
+/// `VerbError.underlyingEstateFailure(verb:reason:)`.
 public extension GeniusLocusKit {
 
     /// Logger reused across verb dispatch. The static logger on the
@@ -79,24 +74,26 @@ public extension GeniusLocusKit {
 
     /// Recall rows from the estate addressed by `handle`.
     ///
-    /// The GLK boundary drains LocusKit's `RecallStream` fully and
-    /// returns a single materialized array; callers that need page-at-a-time
-    /// access reach the underlying estate via `estate(for:)`. This
-    /// matches the shape used by the GLK-01 lattice-scoped fan-out
-    /// (`fanOutRecall`) so the two recall surfaces compose
-    /// predictably.
+    /// This is the legacy shim preserved for callers that do not need
+    /// explicit mode/scoring control. It routes through the Recall Director
+    /// with `mode: .locusOnly, scoring: .raw` and returns the hydrated drawers
+    /// from the result, matching the prior flat-array contract.
+    ///
+    /// Callers that need multi-lane or scored recall use
+    /// `recall(_ handle:, _ request: GLKRecallRequest)` directly.
     ///
     /// - Returns: drawers matching the frame's filter chain, in the
     ///   ordering the frame requested.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     func recall(_ handle: EstateHandle, _ frame: RecallFrame) async throws -> [Drawer] {
-        let estate = try estate(for: handle)
-        let stream = await estate.recall(frame)
-        var rows: [Drawer] = []
-        for await page in stream {
-            rows.append(contentsOf: page.rows)
-        }
-        return rows
+        let result = try await recall(handle, GLKRecallRequest(
+            frame: frame,
+            mode: .locusOnly,
+            scoring: .raw,
+            limit: frame.limit ?? 50,
+            fallback: .failClosed
+        ))
+        return result.drawers
     }
 
     // MARK: - recallTunnels
@@ -115,6 +112,76 @@ public extension GeniusLocusKit {
     func recallTunnels(_ handle: EstateHandle, wing: String) async throws -> [Tunnel] {
         let estate = try estate(for: handle)
         return try await estate.tunnelsFromWing(wing)
+    }
+
+    // MARK: - recallKGFacts
+
+    /// Recall all active kg-fact rows from the estate addressed by `handle`.
+    ///
+    /// Returns kg-facts where state cluster < 7 (active, pre-resolution
+    /// states), ordered by `filedAt` ascending. Delegates to
+    /// `Estate.allKGFacts`. Peer of the Rust `EstateCoordinator::recall_kg_facts`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func recallKGFacts(_ handle: EstateHandle) async throws -> [KGFact] {
+        let estate = try estate(for: handle)
+        return try await estate.allKGFacts()
+    }
+
+    // MARK: - recallDiaryEntries
+
+    /// Recall all non-tombstoned diary entries from the estate addressed by
+    /// `handle`, ordered by `filedAt` ascending.
+    ///
+    /// Delegates to `Estate.allDiaryEntries`. Peer of the Rust
+    /// `EstateCoordinator::recall_diary_entries`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func recallDiaryEntries(_ handle: EstateHandle) async throws -> [DiaryEntry] {
+        let estate = try estate(for: handle)
+        return try await estate.allDiaryEntries()
+    }
+
+    // MARK: - recallProposals
+
+    /// Recall all proposals from the estate addressed by `handle`, ordered
+    /// by `filedAt` ascending.
+    ///
+    /// Delegates to `Estate.allProposals`. Peer of the Rust
+    /// `EstateCoordinator::recall_proposals`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func recallProposals(_ handle: EstateHandle) async throws -> [Proposal] {
+        let estate = try estate(for: handle)
+        return try await estate.allProposals()
+    }
+
+    // MARK: - recallAssociations
+
+    /// Recall all non-tombstoned associations from the estate addressed by
+    /// `handle`, ordered by `filedAt` ascending.
+    ///
+    /// Delegates to `Estate.allAssociations`. Peer of the Rust
+    /// `EstateCoordinator::recall_associations`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func recallAssociations(_ handle: EstateHandle) async throws -> [Association] {
+        let estate = try estate(for: handle)
+        return try await estate.allAssociations()
+    }
+
+    // MARK: - recallLearnedReferences
+
+    /// Recall all non-tombstoned learned references from the estate addressed
+    /// by `handle`, ordered by `filedAt` ascending.
+    ///
+    /// Delegates to `Estate.allLearnedReferences`. Peer of the Rust
+    /// `EstateCoordinator::recall_learned_references`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func recallLearnedReferences(_ handle: EstateHandle) async throws -> [LearnedReference] {
+        let estate = try estate(for: handle)
+        return try await estate.allLearnedReferences()
     }
 
     // MARK: - mutate
@@ -205,13 +272,18 @@ public extension GeniusLocusKit {
     /// Ingest a learned reference into the estate addressed by `handle`.
     ///
     /// `learn` is grounding-driven per AriaLexicon's flow taxonomy: it
-    /// pulls authoritative external reference content into the
-    /// substrate. Today LocusKit's `learn` stub throws and the GLK
-    /// surface re-raises as `VerbError.notSupportedByEstate`.
-    func learn(_ handle: EstateHandle, _ frame: LearnFrame) async throws {
+    /// pulls authoritative external reference content into the substrate.
+    /// Delegates to `Estate.learn` and returns the stored `LearnedReference`.
+    /// Per cookbook §10.9 / spec § 7.8.2.
+    ///
+    /// - Returns: the stored `LearnedReference`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale;
+    ///   `VerbError.underlyingEstateFailure` on any LocusKit failure.
+    @discardableResult
+    func learn(_ handle: EstateHandle, _ frame: LearnFrame) async throws -> LocusKit.LearnedReference {
         let estate = try estate(for: handle)
         do {
-            try await estate.learn(frame)
+            return try await estate.learn(frame, now: Date())
         } catch {
             throw remap(verb: "learn", error: error)
         }
@@ -219,44 +291,81 @@ public extension GeniusLocusKit {
 
     // MARK: - propose
 
-    /// Create a proposal targeting a row in the estate addressed by
-    /// `handle`.
+    /// Create a proposal targeting a row in the estate addressed by `handle`.
     ///
-    /// `propose` is substrate-driven per AriaLexicon's flow taxonomy —
-    /// emitted by the Brain layer's standing signals, not invoked
-    /// synchronously by application callers in production. LocusKit's
-    /// public Estate surface does not expose a `propose` method
-    /// because the Proposal noun is owned by the Brain layer (cookbook
-    /// §10.7), which ships in a later sub-mission. The GLK surface
-    /// declares the verb to keep the nine-verb shape complete and
-    /// raises `VerbError.notSupportedByEstate` until the Brain layer
-    /// arrives.
-    func propose(_ handle: EstateHandle, _ frame: ProposeFrame) async throws {
-        // Verify the handle is valid so the surface uniformly raises
-        // estateNotOpen for stale handles regardless of substrate
-        // implementation state. Without this check a propose call on a
-        // closed handle would silently report notSupportedByEstate and
-        // hide the real fault.
-        _ = try estate(for: handle)
-        Self.verbLog.debug("propose dispatched on row \(frame.target, privacy: .public) — Brain layer not yet present")
-        throw VerbError.notSupportedByEstate(verb: "propose")
+    /// Maps the Brain layer's `GeniusLocusKit.ProposalKind` routing label to
+    /// the substrate's `LocusKit.ProposalKind` bitmap axis via
+    /// `mapBrainKindToSubstrate`, constructs a `LocusKit.ProposeFrame`, and
+    /// delegates to `Estate.propose`. Any LocusKit failure is remapped to
+    /// `VerbError.underlyingEstateFailure` via `remap`. Per cookbook §10.7.
+    @discardableResult
+    func propose(_ handle: EstateHandle, _ frame: ProposeFrame) async throws -> LocusKit.Proposal {
+        let estate = try estate(for: handle)
+        let locusKind = Self.mapBrainKindToSubstrate(frame.kind)
+        let locusFrame = LocusKit.ProposeFrame(
+            target: frame.target,
+            kind: locusKind,
+            justification: frame.justification
+        )
+        do {
+            return try await estate.propose(locusFrame, now: Date())
+        } catch {
+            throw remap(verb: "propose", error: error)
+        }
     }
 
     // MARK: - associate
 
-    /// Create or strengthen an association between two rows in the
-    /// estate addressed by `handle`.
+    /// Create an association between two rows in the estate addressed by `handle`.
     ///
-    /// `associate` is substrate-driven (dreaming daemon territory,
-    /// cookbook §10.8). LocusKit's public Estate surface does not
-    /// expose an `associate` method; the Association noun is owned by
-    /// the Brain layer. As with `propose`, the GLK surface declares
-    /// the verb and raises `VerbError.notSupportedByEstate` until the
-    /// Brain layer ships.
-    func associate(_ handle: EstateHandle, _ frame: AssociateFrame) async throws {
-        _ = try estate(for: handle)
-        Self.verbLog.debug("associate dispatched on rows \(frame.a, privacy: .public)/\(frame.b, privacy: .public) — Brain layer not yet present")
-        throw VerbError.notSupportedByEstate(verb: "associate")
+    /// Constructs a `LocusKit.AssociateFrame` from the GLK-level frame and
+    /// delegates to `Estate.associate`. Any LocusKit failure is remapped to
+    /// `VerbError.underlyingEstateFailure` via `remap`. Per cookbook §10.8.
+    @discardableResult
+    func associate(_ handle: EstateHandle, _ frame: AssociateFrame) async throws -> LocusKit.Association {
+        let estate = try estate(for: handle)
+        let locusFrame = LocusKit.AssociateFrame(
+            a: frame.a,
+            b: frame.b,
+            weight: frame.weight
+        )
+        do {
+            return try await estate.associate(locusFrame, now: Date())
+        } catch {
+            throw remap(verb: "associate", error: error)
+        }
+    }
+
+    // MARK: - Kind mapping
+
+    /// Maps the Brain layer's `GeniusLocusKit.ProposalKind` (routing-queue
+    /// labels used by standing signals and NeuronKit) to the substrate's
+    /// `LocusKit.ProposalKind` (cookbook §2.4 bitmap axis). The two
+    /// vocabularies operate at different altitudes; this function is the
+    /// single translation point per the mission's two-vocabulary architecture.
+    ///
+    /// Mapping rules (Brain label → substrate axis):
+    ///   - byReferenceDrift     → .newTunnel (closest structural analogue)
+    ///   - tournamentUpdate     → .mutateDrawer
+    ///   - miningPattern        → .miningPatternAdjustment
+    ///   - disciplineViolation  → .recordObservation
+    ///   - mutateCandidate      → .mutateDrawer
+    ///   - amend                → .mutateDrawer
+    ///   - testPropose          → .newTunnel (test scaffold)
+    ///   - other                → .newTunnel (safe fallback)
+    private static func mapBrainKindToSubstrate(
+        _ brainKind: ProposalKind
+    ) -> LocusKit.ProposalKind {
+        switch brainKind {
+        case .byReferenceDrift:    return .newTunnel
+        case .tournamentUpdate:    return .mutateDrawer
+        case .miningPattern:       return .miningPatternAdjustment
+        case .disciplineViolation: return .recordObservation
+        case .mutateCandidate:     return .mutateDrawer
+        case .amend:               return .mutateDrawer
+        case .testPropose:         return .newTunnel
+        case .other:               return .newTunnel
+        }
     }
 
     // MARK: - verifyAuditChain
@@ -566,7 +675,7 @@ public extension GeniusLocusKit {
     /// `GeniusLocusKitError` cases (notably `.estateNotOpen` raised by
     /// `estate(for:)`) are passed through unchanged so callers can
     /// distinguish a stale handle from a verb-level fault.
-    private func remap(verb: String, error: Error) -> Error {
+    func remap(verb: String, error: Error) -> Error {
         if let glkError = error as? GeniusLocusKitError {
             return glkError
         }

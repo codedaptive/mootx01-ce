@@ -278,15 +278,14 @@ public enum SignalState: Sendable, Equatable, Codable {
 /// `SignalReport.recentOutcomes` so the application can audit what
 /// the scheduler did with each unit of work.
 public enum SignalRouteOutcome: Sendable, Equatable, Codable {
-    /// Routed through the named verb successfully. Today GLK-02's
-    /// `propose` and `associate` stubs raise
-    /// `notSupportedByEstate`; the scheduler records that as
-    /// `routedButVerbStubbed` rather than `routed` so the difference
-    /// is visible until the Brain layer's verb bodies land.
+    /// Routed through the named verb successfully — the verb is fully
+    /// live in the estate and returned without error.
     case routed(verb: String)
-    /// Verb call returned `notSupportedByEstate`, which is the
-    /// expected outcome until the Brain layer ships. The route was
-    /// attempted at the GLK boundary; the substrate then declined.
+    /// Verb call returned `notSupportedByEstate`. The route was
+    /// attempted at the GLK boundary; the estate declined. The
+    /// `propose`, `associate`, and `learn` verbs are fully live;
+    /// this case arises for verbs that remain partially stubbed
+    /// (e.g., `mutate` state-axis kinds not yet wired in LocusKit).
     case routedButVerbStubbed(verb: String)
     /// Diagnostic emission; surfaced through `signalStatus` instead
     /// of a verb call.
