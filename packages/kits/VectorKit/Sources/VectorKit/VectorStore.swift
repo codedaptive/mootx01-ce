@@ -169,18 +169,23 @@ public actor VectorStore {
     }
 
     /// k-nearest-neighbours by Hamming distance over the engram bit
-    /// representation. Returns up to `limit` matches sorted by
-    /// distance ascending.
+    /// representation. Returns up to `limit` matches sorted by distance
+    /// ascending, with ties broken by drawerID ascending for
+    /// deterministic output.
     ///
-    /// Currently scans every row (linear). The migration to
-    /// PersistenceKit's VectorIndex protocol with sqlite-vec / pgvector
-    /// is a follow-on; this implementation preserves the existing
-    /// VectorKit semantics while consuming PersistenceKit's RowStore.
+    /// Delegates top-K selection to `EngramLib.findNearest`, which
+    /// calls `hammingTopK` (O(N log k)). The O(N) row fetch from the
+    /// RowStore remains at this layer pending a VectorIndex migration
+    /// (sqlite-vec or pgvector) that would push the limit into the
+    /// storage backend.
     public func findNearest(
         probe: Engram,
         modelID: String,
         limit: Int
     ) async throws -> [VectorMatch] {
+        // O(N) row fetch: no vector index at this layer. A future mission wires
+        // sqlite-vec (SQLite) or pgvector (PostgreSQL) to push the limit into
+        // the storage layer and reduce this to O(k).
         let rows = try await storage.rowStore.query(
             table: "vectors",
             where: .eq(Column(table: "vectors", name: "model_id"), .text(modelID)),
@@ -189,30 +194,23 @@ public actor VectorStore {
             offset: nil
         )
         let stored = rows.compactMap { Self.storedVector(from: $0) }
-        // Delegate the bitcount to EngramLib, which routes to the
-        // substrate kernel (BNNS-accelerated where available). The
-        // batch call is faster than a per-row scalar loop and keeps
-        // the Hamming primitive owned by the layer that owns it. The
-        // Rust VectorStore does the same via EngramLib::find_nearest.
-        let distances = EngramLib.distances(
+        let matches = EngramLib.findNearest(
             probe: probe,
-            candidates: stored.map(\.engram)
+            in: stored.map(\.engram),
+            k: limit
         )
-        var scored: [VectorMatch] = []
-        scored.reserveCapacity(stored.count)
-        for (i, sv) in stored.enumerated() {
-            scored.append(VectorMatch(
-                drawerID: sv.drawerID,
-                distance: distances[i],
-                modelID: sv.modelID
-            ))
-        }
-        scored.sort {
-            if $0.distance != $1.distance { return $0.distance < $1.distance }
-            return $0.drawerID < $1.drawerID
-        }
-        if scored.count > limit { scored.removeLast(scored.count - limit) }
-        return scored
+        // Map Match.index back to stored[index] for drawerID and modelID.
+        // Apply drawerID tie-break for determinism parity with the prior implementation.
+        return matches
+            .map { m in
+                VectorMatch(drawerID: stored[m.index].drawerID,
+                            distance: m.distance,
+                            modelID: stored[m.index].modelID)
+            }
+            .sorted {
+                if $0.distance != $1.distance { return $0.distance < $1.distance }
+                return $0.drawerID < $1.drawerID
+            }
     }
 
     /// Keyword pre-filter: returns drawer IDs whose drawer_id
