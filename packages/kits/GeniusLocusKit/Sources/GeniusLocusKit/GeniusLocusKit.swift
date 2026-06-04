@@ -128,6 +128,26 @@ public actor GeniusLocusKit {
     /// Dropped when the estate is closed.
     internal var matrixTiers: [EstateHandle: MatrixTier] = [:]
 
+    /// Per-estate graph cache snapshots for recall scoring.
+    ///
+    /// Populated via `registerGraphCache(_:for:)` after an estate is opened
+    /// and the dreaming cycle has produced a graph projection. The
+    /// RecallDirector reads this registry to populate the `graph` score
+    /// column during the `unionBest` scoring pass. When absent, the column
+    /// remains 0.0 — correct behaviour for a fresh estate with no graph
+    /// data. Dropped when the estate is closed.
+    internal var graphCaches: [EstateHandle: any GraphCache] = [:]
+
+    /// Per-estate preference store snapshots for recall scoring.
+    ///
+    /// Populated via `registerPreferenceStore(_:for:)` after an estate is
+    /// opened and the training daemon has produced preference weights.
+    /// The RecallDirector reads this registry to populate the `preference`
+    /// score column during the `unionBest` scoring pass. When absent, the
+    /// column remains 0.0 — correct behaviour for a fresh estate. Dropped
+    /// when the estate is closed.
+    internal var preferenceStores: [EstateHandle: any PreferenceStore] = [:]
+
     /// Construct an empty kit. The estate registry starts empty;
     /// callers admit estates via `open(storage:owner:)`.
     public init() {
@@ -165,7 +185,7 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - corpus: The `Corpus` actor for BM25 and embedding recall.
     ///   - handle: The estate this corpus is associated with. Must be open.
-    func registerCorpus(_ corpus: Corpus, for handle: EstateHandle) {
+    public func registerCorpus(_ corpus: Corpus, for handle: EstateHandle) {
         corpusKits[handle] = corpus
     }
 
@@ -181,7 +201,7 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - store: The `VectorStore` for Hamming nearest-neighbour recall.
     ///   - handle: The estate this store is associated with. Must be open.
-    func registerVectorStore(_ store: VectorStore, for handle: EstateHandle) {
+    public func registerVectorStore(_ store: VectorStore, for handle: EstateHandle) {
         vectorStores[handle] = store
     }
 
@@ -203,8 +223,87 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - tier:   The in-memory `MatrixTier` snapshot to use for recall scoring.
     ///   - handle: The estate this tier is associated with. Must be open.
-    func registerMatrixTier(_ tier: MatrixTier, for handle: EstateHandle) {
+    public func registerMatrixTier(_ tier: MatrixTier, for handle: EstateHandle) {
         matrixTiers[handle] = tier
+    }
+}
+
+// MARK: - Graph cache + preference store protocols (RECALL-GRAPH-001)
+
+/// Cache of pre-built graph projections for one estate.
+///
+/// Implementations hold pre-computed per-drawer graph centrality scores
+/// (e.g. random-walk stationary distributions, eigenvalue centrality)
+/// built during the dreaming cycle. The director queries this cache for
+/// candidate-frontier lookups only — no synchronous estate-wide analytics
+/// are performed at recall time (spec §15).
+///
+/// When no implementation is registered for an estate the graph column
+/// remains 0.0, which is correct and not an error.
+public protocol GraphCache: Sendable {
+    /// Return the graph centrality score for the given drawer ID.
+    ///
+    /// Returns 0.0 when the drawer is not in the cache. Must not perform
+    /// any synchronous estate-wide graph traversal.
+    func graphScore(for drawerID: String) -> Float
+}
+
+/// Store of learned per-drawer preference scores for one estate.
+///
+/// Implementations hold pre-trained Bradley-Terry or RecallTrace
+/// preference weights built by the training daemon. The director queries
+/// this store for candidate-frontier lookups only — no synchronous
+/// model retraining occurs at recall time (spec §15).
+///
+/// When no implementation is registered for an estate the preference
+/// column remains 0.0, which is correct and not an error.
+public protocol PreferenceStore: Sendable {
+    /// Return the preference score for the given drawer ID.
+    ///
+    /// Returns 0.0 when the drawer is not in the store. Must not trigger
+    /// any synchronous preference model update.
+    func preferenceScore(for drawerID: String) -> Float
+}
+
+// MARK: - Graph cache + preference store registration (RECALL-GRAPH-001)
+
+public extension GeniusLocusKit {
+
+    /// Register a `GraphCache` for the given estate handle.
+    ///
+    /// The RecallDirector reads this cache to populate the `graph` score
+    /// column during the `unionBest` scoring pass. The cache must hold
+    /// pre-built per-drawer graph centrality scores from the dreaming
+    /// cycle; the director performs candidate-frontier lookups only and
+    /// never triggers synchronous estate-wide graph traversal (spec §15).
+    ///
+    /// Re-registering replaces the existing entry. The graph column
+    /// remains 0.0 when no cache is registered for an estate — this is
+    /// correct, not an error.
+    ///
+    /// - Parameters:
+    ///   - cache:  The pre-built graph centrality cache.
+    ///   - handle: The estate this cache is associated with.
+    func registerGraphCache(_ cache: some GraphCache, for handle: EstateHandle) {
+        graphCaches[handle] = cache
+    }
+
+    /// Register a `PreferenceStore` for the given estate handle.
+    ///
+    /// The RecallDirector reads this store to populate the `preference`
+    /// score column during the `unionBest` scoring pass. The store must
+    /// hold pre-trained per-drawer preference weights from the training
+    /// daemon; the director performs candidate-frontier lookups only and
+    /// never triggers synchronous preference model updates (spec §15).
+    ///
+    /// Re-registering replaces the existing entry. The preference column
+    /// remains 0.0 when no store is registered — correct for a fresh estate.
+    ///
+    /// - Parameters:
+    ///   - store:  The pre-trained preference weight store.
+    ///   - handle: The estate this store is associated with.
+    func registerPreferenceStore(_ store: some PreferenceStore, for handle: EstateHandle) {
+        preferenceStores[handle] = store
     }
 }
 

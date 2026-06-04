@@ -634,4 +634,70 @@ proximity_threshold)` mirrors the Swift factory. `default_standing_signal_specs`
 now accepts an `Arc<VectorStore>` and forwards it to the signal.
 `ExternalCorpus::hybrid_recall` routes through `corpus_kit::Corpus::recall`.
 
+## § RECALL-GRAPH-001 — Graph cache + preference store cold-path signals
+
+*Status: landed. Graph and preference columns wired in RecallDirector.*
+
+### Overview
+
+Two new registration protocols extend the recall substrate's cold-path
+signal set. Both follow the pre-built-cache pattern established by
+`MatrixTier`: caches are built offline by the dreaming/training cycle and
+registered before recall; the director performs candidate-frontier lookups
+only, never synchronous estate-wide analytics (spec §15).
+
+### GraphCache protocol
+
+`public protocol GraphCache: Sendable` — exposes one method:
+
+```swift
+func graphScore(for drawerID: String) -> Float
+```
+
+Returns a pre-computed graph centrality score for the drawer (e.g. from
+random-walk stationary distributions or eigenvalue centrality built by the
+dreaming cycle). Returns 0.0 when the drawer is not in the cache. The
+caller must not perform any synchronous estate-wide graph traversal.
+
+Registered via `registerGraphCache(_:for:)`. The `graph` buffer column in
+`RecallCandidateBuffer` is populated in step 5.7 of `recallUnionBest`.
+Column remains 0.0 when no cache is registered — correct, not an error.
+
+### PreferenceStore protocol
+
+`public protocol PreferenceStore: Sendable` — exposes one method:
+
+```swift
+func preferenceScore(for drawerID: String) -> Float
+```
+
+Returns a pre-trained preference weight for the drawer (e.g. from
+Bradley-Terry or RecallTrace models built by the training daemon). Returns
+0.0 when the drawer is not in the store. Must not trigger any synchronous
+preference model update.
+
+Registered via `registerPreferenceStore(_:for:)`. The `preference` buffer
+column is populated in step 5.7. Column remains 0.0 when absent.
+
+### Scoring
+
+Both signals are scored under `RecallWeights.graph` weight (the
+RecallWeights struct has no dedicated preference field; sharing the graph
+budget gives each cold-path signal equal weight within that slice). The
+scoring formula in `.matrixAware` mode is:
+
+```
+scores[i] += weights.graph * buffer.graph[i]
+           + weights.graph * buffer.preference[i]
+```
+
+### Post-hydration shingle MMR
+
+The MMR similarity proxy in step 10 is upgraded to post-hydration shingle
+overlap. When `drawerIndex[id]?.content` is non-empty, `glkShingleSimilarity`
+(3-gram Jaccard) replaces the pre-hydration `glkSourceMaskJaccard` fallback.
+For bitmapOnly hydration or drawers without content, sourceMask Jaccard is
+retained. GeniusLocusKit reimplements shingle similarity locally (`glkShingleSimilarity`
+/ `glkShingles`) because it cannot import NeuronKit (circular package dependency).
+
 *End of GeniusLocusKit Specification v0.8.*

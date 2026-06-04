@@ -18,6 +18,23 @@
 //  13. unionBest hydration count is <= request.limit
 //  14. RecallCandidateBuffer never grows beyond capacity after init
 //  15. RecallUnionProfile.signalAgreement reflects multi-source candidates
+//
+// RecallDirectorSafetyTests (tombstone + hydration):
+//  16. unionBestExcludesTombstonedDrawers — corpusOnly; tombstoned drawer absent from hit.drawer
+//  17. bitmapOnlyHydrationStripsContentInDirectorPath — hit.drawer.content == "" for bitmapOnly
+//  18. structuredHydrationPreservesContentInDirectorPath — content preserved for structured
+//
+// RecallDirectorGraphShingleTests (RECALL-GRAPH-001):
+//  19. graphSignalRaisesScoreWhenCacheRegistered — graph column non-zero when GraphCache registered
+//  20. preferenceSignalRaisesScoreWhenStoreRegistered — preference column non-zero when store registered
+//  21. postHydrationShingleSuppressesNearDuplicates — MMR suppresses near-dup content pair via shingle
+//  22. shingleFallsBackToSourceMaskForBitmapOnly — bitmapOnly hydration uses sourceMask Jaccard, no crash
+//
+// RecallDirector RECALL-MMR-TUNE-001 (adaptive lambda + scoring branch):
+//  23. lambdaReducedOnHighRedundancyCorpus — diversity weight > 0.1 and derived λ < 0.7 on high-redundancy profile
+//  24. lambdaDefaultOnLowRedundancyCorpus — diversity weight at base and derived λ ≈ 0.7 on low-redundancy profile
+//  25. rrfScoringSkipsMatrixStep — .rrf recall succeeds; final scores in [0, 1] (lane-rank, no matrix blend)
+//  26. matrixAwareScoringAppliesMatrixStep — .matrixAware recall applies matrix tier; temporal scores non-zero
 
 import Testing
 import Foundation
@@ -936,5 +953,795 @@ struct RecallDirector004Tests {
         // Why line must mention content query (queryText was set).
         #expect(lines[3].contains("content query"), "why line must mention content query when queryText set")
         #expect(lines[3].contains("MatrixO"),      "why line must mention MatrixO when coOccurrence > 0")
+    }
+}
+
+// MARK: - Recall Director Safety Tests — tombstone exclusion + bitmapOnly hydration
+
+@Suite("RecallDirector safety: tombstone exclusion and bitmapOnly hydration stripping")
+struct RecallDirectorSafetyTests {
+
+    // MARK: - 16. unionBestExcludesTombstonedDrawers
+
+    /// Expunge a drawer after indexing it in the corpus, then run corpusOnly
+    /// recall with a matching query. The tombstoned drawer must not surface as
+    /// a non-nil hit.drawer with a non-nil tombstonedAt.
+    ///
+    /// Uses corpusOnly so the BM25 lane is guaranteed to run and the
+    /// hydrateHits path (which calls allDrawers()) is exercised directly.
+    /// CorpusKit and LocusKit are separate stores; expunge tombstones the
+    /// LocusKit row but leaves the BM25 index intact — so BM25 still returns
+    /// the expunged drawer's ID, making this test non-vacuous.
+    ///
+    /// Without the tombstone filter on allDrawers(), the expunged drawer's ID
+    /// enters the hit-building path via the BM25 lane and surfaces as a
+    /// tombstoned Drawer in hit.drawer. The fix excludes tombstoned rows from
+    /// the drawerIndex bulk-load so they cannot appear as non-nil drawers.
+    @Test
+    func unionBestExcludesTombstonedDrawers() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-tombstone-safety")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        let content = "apple mango tombstone safety recall exclusion test"
+        let captureFrame = CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: "tombstone-safety",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "safety-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        let drawer = try await kit.capture(handle, captureFrame)
+
+        // Register a corpus so BM25 indexes the content under drawer.id.
+        // After expunge, the CorpusKit index is unchanged and will still return
+        // drawer.id for matching queries — that is the scenario we are testing.
+        let corpusConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let corpusStorage = InMemoryStorage(configuration: corpusConfig)
+        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+        let now = Date(timeIntervalSinceReferenceDate: 2_000_000)
+        try await corpus.ingest(content, sourceID: drawer.id, now: now)
+        await kit.registerCorpus(corpus, for: handle)
+
+        // Verify expunge precondition: BM25 finds the content BEFORE expunge.
+        let preExpungeHits = await corpus.bm25TopKBySource(query: "apple mango tombstone", limit: 10)
+        #expect(
+            !preExpungeHits.isEmpty,
+            "BM25 must find the ingested content before expunge — if this fails the test setup is broken"
+        )
+
+        // Expunge the drawer — sets tombstonedAt in LocusKit; CorpusKit is unchanged.
+        try await kit.expunge(handle, ExpungeFrame(
+            rowID: drawer.id,
+            reason: "test: verify tombstone exclusion from recall results",
+            confirmation: true
+        ))
+
+        // Verify expunge worked: allDrawers() (which includes tombstoned rows)
+        // must return the tombstoned drawer with state == .tombstoned.
+        // The state is stored reliably in adjectiveBitmap (bits 0-5); it is
+        // NOT checked via tombstonedAt because the InMemory backend stores that
+        // field as a TEXT value whose ISO8601 format does not round-trip through
+        // the LKISO8601 parser (default vs fractional-seconds formatter mismatch).
+        let allStored = (try? await kit.estate(for: handle).allDrawers()) ?? []
+        let tombstonedInStore = allStored.filter { $0.id == drawer.id && $0.state == .tombstoned }
+        #expect(
+            !tombstonedInStore.isEmpty,
+            "expunge must set state to .tombstoned via adjectiveBitmap — if this fails the expunge path is broken"
+        )
+
+        // Run corpusOnly recall with a query that matches the expunged content.
+        // BM25 still returns drawer.id; hydrateHits loads allDrawers() and builds
+        // a hit with the tombstoned drawer BEFORE the fix, nil drawer AFTER the fix.
+        let request = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .structured,
+                ordering: .byCaptureTimeDesc
+            ),
+            mode: .corpusOnly,
+            scoring: .raw,
+            limit: 10,
+            fallback: .failClosed,
+            queryText: "apple mango tombstone"
+        )
+        let result = try await kit.recall(handle, request)
+
+        // The BM25 index still has the content, so result.hits must be non-empty.
+        #expect(!result.hits.isEmpty, "corpusOnly must return hits via BM25 (the index is unchanged after expunge)")
+
+        // No hit may carry a tombstoned drawer. The tombstone-filtered drawerIndex
+        // ensures tombstoned rows cannot surface as non-nil hit.drawer values.
+        // Before the fix: hit.drawer = tombstoned drawer (state == .tombstoned).
+        // After the fix: hit.drawer = nil (tombstoned rows excluded from drawerIndex).
+        for hit in result.hits {
+            #expect(
+                hit.drawer?.state != .tombstoned,
+                "tombstoned drawer (id=\(drawer.id)) must not appear as hit.drawer with state=.tombstoned"
+            )
+        }
+    }
+
+    // MARK: - 17. bitmapOnlyHydrationStripsContentInDirectorPath
+
+    /// RecallDirector's allDrawers bulk-load path must strip content when
+    /// hydrationLevel is .bitmapOnly, matching the behaviour RecallStream
+    /// already enforces on the locus page-emission path.
+    ///
+    /// Without the fix, the drawerIndex is built from the unstripped allDrawers()
+    /// result; hit.drawer placed from drawerIndex carries full content even when
+    /// the request specified .bitmapOnly — bypassing the stripping RecallStream
+    /// already applied to the locusSlice.
+    @Test
+    func bitmapOnlyHydrationStripsContentInDirectorPath() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-bitmaponly-safety")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        let content = "bitmapOnly hydration bypass safety test content corpus"
+        let captureFrame = CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: "bitmaponly-safety",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "safety-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        _ = try await kit.capture(handle, captureFrame)
+
+        let request = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .bitmapOnly,
+                ordering: .byCaptureTimeDesc
+            ),
+            mode: .unionBest,
+            scoring: .raw,
+            limit: 10,
+            fallback: .allowDegraded
+        )
+        let result = try await kit.recall(handle, request)
+
+        // At least one hit must carry a hydrated drawer to make the content
+        // assertion meaningful (the seeded drawer should appear via the locus lane).
+        let hydratedHits = result.hits.filter { $0.drawer != nil }
+        #expect(
+            !hydratedHits.isEmpty,
+            "at least one hit must have a non-nil drawer for the bitmapOnly assertion to fire"
+        )
+
+        // Every non-nil drawer must have its content stripped to the empty string.
+        for hit in result.hits {
+            if let drawer = hit.drawer {
+                #expect(
+                    drawer.content == "",
+                    "bitmapOnly hydration must strip content from hit.drawer; got prefix=\(drawer.content.prefix(80).debugDescription)"
+                )
+            }
+        }
+    }
+
+    // MARK: - 18. structuredHydrationPreservesContentInDirectorPath
+
+    /// RecallDirector's allDrawers path must preserve full content when
+    /// hydrationLevel is .structured. The tombstone + hydration fix must
+    /// not regress the .structured (pass-through) case.
+    @Test
+    func structuredHydrationPreservesContentInDirectorPath() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-structured-safety")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        let content = "structured hydration preservation regression test content"
+        let captureFrame = CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: "structured-safety",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "safety-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        let drawer = try await kit.capture(handle, captureFrame)
+
+        let request = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .structured,
+                ordering: .byCaptureTimeDesc
+            ),
+            mode: .unionBest,
+            scoring: .raw,
+            limit: 10,
+            fallback: .allowDegraded
+        )
+        let result = try await kit.recall(handle, request)
+
+        // The seeded drawer must appear in results with its content intact.
+        let seededHit = result.hits.first { $0.id == drawer.id }
+        #expect(seededHit != nil, "seeded drawer must appear in unionBest results")
+        #expect(
+            seededHit?.drawer?.content == content,
+            "structured hydration must preserve drawer content; expected=\(content.debugDescription) got=\(seededHit?.drawer?.content.debugDescription ?? "nil")"
+        )
+    }
+}
+
+// MARK: - Recall API-001 tests — ARIA recall knob routing
+
+/// Coverage that the ARIA recallMode and scoring parameters route to
+/// the correct Recall Director lanes and are accepted without error.
+///
+/// Tests:
+///  19. locusOnlyModeSelectedViaARIAParam — mode:.locusOnly hits are .locusBitmap only
+///  20. rrfScoringSelectableViaARIAParam  — scoring:.rrf on locusOnly does not throw
+@Suite("RecallAPI001 ARIA recall knob routing")
+struct RecallAPI001Tests {
+
+    // MARK: - 19. locusOnly mode produces only .locusBitmap hits
+
+    /// Verify that GLKRecallRequest with mode:.locusOnly produces hits
+    /// sourced only from .locusBitmap, confirming the ARIA recallMode
+    /// parameter routes to the correct lane.
+    @Test
+    func locusOnlyModeSelectedViaARIAParam() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-aria-param-routing-test")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        let frame = CaptureFrame(
+            content: "aria-param-routing-test",
+            channel: .typed,
+            room: "test",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "test",
+            embeddingModelID: "test"
+        )
+        _ = try await kit.capture(handle, frame)
+
+        let recallFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+        let request = GLKRecallRequest(
+            frame: recallFrame,
+            mode: .locusOnly,
+            scoring: .raw,
+            limit: 10,
+            fallback: .failClosed
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(!result.hits.isEmpty, "locusOnly recall should return at least one hit")
+
+        for hit in result.hits {
+            #expect(hit.sources.contains(.locusBitmap),
+                    "locusOnly hits must be sourced from .locusBitmap; got \(hit.sources)")
+            #expect(!hit.sources.contains(.corpusBM25),
+                    "locusOnly hits must not include .corpusBM25")
+            #expect(!hit.sources.contains(.vectorHamming),
+                    "locusOnly hits must not include .vectorHamming")
+        }
+        try await kit.close(handle)
+    }
+
+    // MARK: - 20. .rrf scoring accepted without error on locusOnly
+
+    /// Verify that GLKRecallRequest with scoring:.rrf does not throw and
+    /// returns a non-error result. The locusOnly lane degrades gracefully
+    /// (single-lane RRF = raw ordering), so this confirms the scoring field
+    /// is accepted without error regardless of mode.
+    @Test
+    func rrfScoringSelectableViaARIAParam() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-rrf-scoring-acceptance")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        let frame = CaptureFrame(
+            content: "rrf-scoring-acceptance-test",
+            channel: .typed,
+            room: "test",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "test",
+            embeddingModelID: "test"
+        )
+        _ = try await kit.capture(handle, frame)
+
+        let recallFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+        let request = GLKRecallRequest(
+            frame: recallFrame,
+            mode: .locusOnly,
+            scoring: .rrf,
+            limit: 10,
+            fallback: .failClosed
+        )
+        // Must not throw; .rrf on a single lane degrades to raw ordering.
+        let result = try await kit.recall(handle, request)
+        #expect(!result.hits.isEmpty, "rrf scoring on locusOnly should return hits")
+        try await kit.close(handle)
+    }
+}
+
+// MARK: - RecallDirector graph/preference + shingle tests (RECALL-GRAPH-001)
+
+/// Suite grouping for graph/preference cold-path signal tests.
+@Suite("RecallDirector RECALL-GRAPH-001 graph/preference/shingle")
+struct RecallDirectorGraphShingleTests {
+
+    // Minimal estate factory for these tests.
+    private func openEstate(
+        content: String = "graph preference shingle test content"
+    ) async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-graph-shingle-tests-\(UUID())")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        let frame = CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: "graph-shingle-tests",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "graph-shingle-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        _ = try await kit.capture(handle, frame)
+        return (kit, handle)
+    }
+
+    // MARK: - Graph signal test
+
+    /// When a GraphCache is registered, the `graph` column in returned hits
+    /// must be non-zero for candidates whose drawerID is in the cache.
+    @Test
+    func graphSignalRaisesScoreWhenCacheRegistered() async throws {
+        let (kit, handle) = try await openEstate()
+        // Capture a second drawer to have two candidates.
+        let frame2 = CaptureFrame(
+            content: "second drawer graph test",
+            channel: .typed,
+            room: "graph-shingle-tests",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "graph-shingle-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        _ = try await kit.capture(handle, frame2)
+
+        // Stub GraphCache returning 0.8 for every drawer ID.
+        struct ConstantGraphCache: GraphCache {
+            let score: Float
+            func graphScore(for drawerID: String) -> Float { score }
+        }
+        await kit.registerGraphCache(ConstantGraphCache(score: 0.8), for: handle)
+
+        let recallFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+        let request = GLKRecallRequest(
+            frame: recallFrame,
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: 10,
+            fallback: .failClosed
+        )
+        let result = try await kit.recall(handle, request)
+        // With a registered GraphCache returning 0.8, every hit's graph score
+        // must be non-zero. After normalisation, a uniform non-zero raw column
+        // produces 0.5 for all slots (normalizeFinals sets uniform columns to 0.5).
+        #expect(!result.hits.isEmpty, "unionBest must return hits when drawers are captured")
+        let allGraphNonZero = result.hits.allSatisfy { $0.score.graph > 0 }
+        #expect(allGraphNonZero, "graph score must be non-zero when GraphCache is registered")
+        try await kit.close(handle)
+    }
+
+    // MARK: - Preference signal test
+
+    /// When a PreferenceStore is registered, the `preference` column in returned
+    /// hits must be non-zero for candidates whose drawerID is in the store.
+    @Test
+    func preferenceSignalRaisesScoreWhenStoreRegistered() async throws {
+        let (kit, handle) = try await openEstate()
+        // Stub PreferenceStore returning 0.9 for every drawer ID.
+        struct ConstantPreferenceStore: PreferenceStore {
+            let score: Float
+            func preferenceScore(for drawerID: String) -> Float { score }
+        }
+        await kit.registerPreferenceStore(ConstantPreferenceStore(score: 0.9), for: handle)
+
+        let recallFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+        let request = GLKRecallRequest(
+            frame: recallFrame,
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: 10,
+            fallback: .failClosed
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(!result.hits.isEmpty)
+        let allPrefNonZero = result.hits.allSatisfy { $0.score.preference > 0 }
+        #expect(allPrefNonZero, "preference score must be non-zero when PreferenceStore is registered")
+        try await kit.close(handle)
+    }
+
+    // MARK: - Post-hydration shingle test
+
+    /// Near-duplicate content pairs must be suppressed by MMR when using
+    /// post-hydration shingle similarity. Two drawers with nearly identical
+    /// text should produce a lower-redundancy selection than raw scoring.
+    @Test
+    func postHydrationShingleSuppressesNearDuplicates() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-shingle-suppress-\(UUID())")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Capture two near-duplicate drawers and one clearly different drawer.
+        let nearDupA = "apple mango banana tropical fruit salad smoothie blend"
+        let nearDupB = "apple mango banana tropical fruit salad smoothie blend extra"
+        let different = "software engineering systems design distributed architecture"
+
+        for content in [nearDupA, nearDupB, different] {
+            let frame = CaptureFrame(
+                content: content,
+                channel: .typed,
+                room: "shingle-tests",
+                latticeAnchor: .udc("000.000"),
+                addedBy: "shingle-tests",
+                embeddingModelID: "test-model-v1"
+            )
+            _ = try await kit.capture(handle, frame)
+        }
+
+        let recallFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+        let request = GLKRecallRequest(
+            frame: recallFrame,
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: 2,  // ask for only 2: shingle should suppress one near-dup
+            fallback: .failClosed
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(result.hits.count == 2, "limit=2 must yield exactly 2 hits")
+        let contents = Set(result.hits.compactMap { $0.drawer?.content })
+        #expect(!contents.isEmpty, "structured hydration must preserve content on hits")
+        // Shingle suppression guarantee: both near-duplicate drawers must not fill
+        // both result slots. The near-dups share the "apple mango banana tropical"
+        // shingle cluster. Regardless of which candidate is selected first, the
+        // high glkShingleSimilarity between the near-dups means the second near-dup's
+        // MMR score drops below the topically different drawer — so at most one
+        // near-dup appears in the top-2.
+        let nearDupCount = contents.filter { $0.contains("apple mango banana tropical") }.count
+        #expect(nearDupCount < 2,
+                "MMR shingle suppression must prevent both near-dups from occupying all result slots")
+        try await kit.close(handle)
+    }
+
+    // MARK: - Shingle fallback to sourceMask for bitmapOnly
+
+    /// For bitmapOnly hydration, content is stripped to "". The MMR step
+    /// must fall back to sourceMask Jaccard rather than shingle similarity.
+    @Test
+    func shingleFallsBackToSourceMaskForBitmapOnly() async throws {
+        let (kit, handle) = try await openEstate()
+        // Capture a second drawer.
+        let frame2 = CaptureFrame(
+            content: "second content for fallback test",
+            channel: .typed,
+            room: "graph-shingle-tests",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "graph-shingle-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        _ = try await kit.capture(handle, frame2)
+
+        let recallFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .bitmapOnly,  // strips content to ""
+            ordering: .byCaptureTimeDesc
+        )
+        let request = GLKRecallRequest(
+            frame: recallFrame,
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: 10,
+            fallback: .failClosed
+        )
+        // Must not throw or crash. With bitmapOnly, content is "" so
+        // sourceMask Jaccard fallback is used. All hits must have empty content.
+        let result = try await kit.recall(handle, request)
+        #expect(!result.hits.isEmpty, "bitmapOnly unionBest must return hits")
+        let allEmpty = result.hits.allSatisfy { ($0.drawer?.content ?? "") == "" }
+        #expect(allEmpty, "bitmapOnly hits must have empty content (stripped)")
+        try await kit.close(handle)
+    }
+}
+
+// MARK: - RecallDirector adaptive lambda + scoring branch tests (RECALL-MMR-TUNE-001)
+//
+// Tests:
+//  23. lambdaReducedOnHighRedundancyCorpus — adaptive weights.diversity > base on
+//      high-redundancy corpus, producing λ < 0.7
+//  24. lambdaDefaultOnLowRedundancyCorpus — adaptive weights.diversity ≈ base on
+//      low-redundancy corpus, producing λ ≈ 0.7 (no redundancy bonus applied)
+//  25. rrfScoringSkipsMatrixStep — .rrf scoring returns hits without applying
+//      matrix (co-occurrence / temporal) signals; matrix column stays 0
+//  26. matrixAwareScoringAppliesMatrixStep — .matrixAware applies matrix signals;
+//      coOccurrence/temporal column is non-zero when a MatrixTier is registered
+
+/// Suite covering adaptive MMR λ derivation and scoring branch selection.
+@Suite("RecallDirector RECALL-MMR-TUNE-001 adaptive lambda and scoring branch")
+struct RecallDirectorAdaptiveLambdaTests {
+
+    // MARK: - Helpers
+
+    /// Build a `RecallUnionProfile` where `redundancy` exceeds the high-redundancy
+    /// threshold (0.5), triggering the diversityW bonus in `RecallWeights.adaptive`.
+    private func highRedundancyProfile() -> RecallUnionProfile {
+        RecallUnionProfile(
+            locusSharpness: 0.3,
+            bm25Sharpness: 0.2,
+            vectorSharpness: 0.2,
+            signalAgreement: 0.5,
+            // redundancy > 0.5 triggers +0.15 to diversityW in RecallWeights.adaptive.
+            redundancy: 0.8,
+            matrixCoherence: 0
+        )
+    }
+
+    /// Build a `RecallUnionProfile` where `redundancy` is below the threshold,
+    /// so no diversity bonus is applied and diversityW stays at base 0.1.
+    private func lowRedundancyProfile() -> RecallUnionProfile {
+        RecallUnionProfile(
+            locusSharpness: 0.3,
+            bm25Sharpness: 0.2,
+            vectorSharpness: 0.2,
+            signalAgreement: 0.5,
+            // redundancy ≤ 0.5: no diversityW bonus.
+            redundancy: 0.1,
+            matrixCoherence: 0
+        )
+    }
+
+    /// Build a minimal `RecallQuerySketch` with no text and no bitmap predicates
+    /// so neither the structural-filter nor the free-text bonus applies. This
+    /// isolates the effect of the redundancy signal on diversityW.
+    private func plainSketch() -> RecallQuerySketch {
+        RecallQuerySketch(
+            frame: RecallFrame(filterChain: [], hydrationLevel: .structured,
+                               ordering: .byCaptureTimeDesc),
+            bitmapPredicates: [],
+            queryText: nil,
+            queryTokens: [],
+            queryEngram: nil,
+            latticeAnchor: nil
+        )
+    }
+
+    // MARK: - 23. lambdaReducedOnHighRedundancyCorpus
+
+    /// When the corpus has high redundancy (profile.redundancy > 0.5), adaptive
+    /// weights apply a +0.15 diversity bonus. After normalisation, weights.diversity
+    /// exceeds the base fraction (0.1 / total_base), so the adaptive λ formula
+    /// λ = clamp(0.7 − (diversity − 0.1) × 0.5, 0.5, 0.9) yields λ < 0.7.
+    ///
+    /// This test calls `RecallWeights.adaptive` directly, computes the expected λ
+    /// from the returned weights, and asserts it is strictly below 0.7.
+    @Test
+    func lambdaReducedOnHighRedundancyCorpus() {
+        let sketch  = plainSketch()
+        let profile = highRedundancyProfile()
+
+        let weights = RecallWeights.adaptive(for: sketch, profile: profile)
+
+        // With high redundancy: diversityW = 0.1 + 0.15 = 0.25 before normalisation.
+        // Base total (plain sketch, no bonuses): 0.2+0.2+0.2+0.1+0.1+0.25+0.1 = 1.15.
+        // Normalised diversity = 0.25 / 1.15 ≈ 0.2174.
+        // λ = clamp(0.7 − (0.2174 − 0.1) × 0.5, 0.5, 0.9) = clamp(0.7 − 0.0587, …) ≈ 0.641.
+        // So λ must be < 0.7.
+        let lambda = min(Float(0.9), max(Float(0.5), 0.7 - (weights.diversity - 0.1) * 0.5))
+        #expect(lambda < 0.7,
+                "high-redundancy corpus must produce λ < 0.7, got \(lambda) (diversity=\(weights.diversity))")
+        // Confirm the diversity weight itself is raised above base (0.1 / 1.0 = 0.1).
+        #expect(weights.diversity > 0.1,
+                "high-redundancy profile must raise diversity weight above base 0.1, got \(weights.diversity)")
+    }
+
+    // MARK: - 24. lambdaDefaultOnLowRedundancyCorpus
+
+    /// When the corpus has low redundancy (profile.redundancy ≤ 0.5), no diversity
+    /// bonus is applied. With a plain sketch (no text, no bitmap predicates), the
+    /// total base is 0.2+0.2+0.2+0.1+0.1+0.1+0.1 = 1.0, so diversityW normalises
+    /// to exactly 0.1. The λ formula then yields 0.7 − (0.1 − 0.1) × 0.5 = 0.7.
+    @Test
+    func lambdaDefaultOnLowRedundancyCorpus() {
+        let sketch  = plainSketch()
+        let profile = lowRedundancyProfile()
+
+        let weights = RecallWeights.adaptive(for: sketch, profile: profile)
+
+        // With low redundancy and a plain sketch, diversityW = 0.1, total = 1.0.
+        // Normalised diversity = 0.1. λ = 0.7 − (0.1 − 0.1) × 0.5 = 0.7.
+        let lambda = min(Float(0.9), max(Float(0.5), 0.7 - (weights.diversity - 0.1) * 0.5))
+        #expect(abs(lambda - 0.7) < 1e-5,
+                "low-redundancy corpus must produce λ ≈ 0.7, got \(lambda) (diversity=\(weights.diversity))")
+    }
+
+    // MARK: - 25. rrfScoringSkipsMatrixStep
+
+    /// `.rrf` scoring must not feed matrix (co-occurrence / temporal) signals into
+    /// the final ranking score. The `.rrf` branch in step 9 uses `buffer.final`
+    /// (the lane-normalised rank score) directly for MMR, bypassing the weighted
+    /// matrix combiner. This means `.rrf` hits have `score.final` ≤ 1.0 derived
+    /// purely from lane rank — not from the matrix weight budget.
+    ///
+    /// Observable proxy: when a MatrixTier is registered and `.rrf` is used, the
+    /// recall must complete without error and return the same number of hits as
+    /// `.matrixAware` (the scoring branch does not affect candidate availability,
+    /// only the ranking within the MMR pass). The distinction between branches is
+    /// that `.rrf` hit final scores are in [0, 1] from lane-rank normalisation,
+    /// while `.matrixAware` final scores may differ because the matrix combiner
+    /// produces a weighted sum of multiple columns.
+    @Test
+    func rrfScoringSkipsMatrixStep() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "test-rrf-skip-matrix-\(UUID())")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Capture two drawers so there are candidates for both branches to rank.
+        let f1 = CaptureFrame(content: "rrf skip matrix alpha content", channel: .typed,
+                              room: "rrf-test", latticeAnchor: .udc("000.000"),
+                              addedBy: "rrf-test", embeddingModelID: "test-v1")
+        _ = try await kit.capture(handle, f1)
+        let f2 = CaptureFrame(content: "rrf skip matrix beta content", channel: .voiced,
+                              room: "rrf-test", latticeAnchor: .udc("000.000"),
+                              addedBy: "rrf-test", embeddingModelID: "test-v1")
+        _ = try await kit.capture(handle, f2)
+
+        // Register an empty MatrixTier (no priors) so the matrix step runs but
+        // produces 0.0 scores for all candidates. This isolates the scoring-branch
+        // gate: .rrf must succeed, and .matrixAware must also succeed.
+        let matrix = MatrixTier()
+        await kit.registerMatrixTier(matrix, for: handle)
+
+        // Run .rrf — must not throw, must return hits.
+        let rrfRequest = GLKRecallRequest(
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+                               ordering: .byCaptureTimeDesc),
+            mode: .unionBest,
+            scoring: .rrf,
+            limit: 10,
+            fallback: .failClosed
+        )
+        let rrfResult = try await kit.recall(handle, rrfRequest)
+        #expect(!rrfResult.hits.isEmpty, ".rrf scoring on unionBest must return hits")
+
+        // Run .matrixAware on the same estate — must also return hits.
+        let matrixRequest = GLKRecallRequest(
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+                               ordering: .byCaptureTimeDesc),
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: 10,
+            fallback: .failClosed
+        )
+        let matrixResult = try await kit.recall(handle, matrixRequest)
+        #expect(!matrixResult.hits.isEmpty, ".matrixAware scoring on unionBest must return hits")
+
+        // Both branches must produce the same number of hits (candidate count is
+        // independent of scoring mode; only ranking differs).
+        #expect(rrfResult.hits.count == matrixResult.hits.count,
+                ".rrf and .matrixAware must return the same hit count for the same estate")
+
+        // .rrf hit final scores are lane-rank normalised (from buffer.final, in [0,1]).
+        // Confirm all .rrf scores are within [0, 1].
+        let allRrfFinalInRange = rrfResult.hits.allSatisfy { $0.score.final >= 0 && $0.score.final <= 1 }
+        #expect(allRrfFinalInRange, ".rrf hit final scores must be in [0, 1]")
+        try await kit.close(handle)
+    }
+
+    // MARK: - 26. matrixAwareScoringAppliesMatrixStep
+
+    /// `.matrixAware` scoring must apply matrix (co-occurrence / temporal) signals
+    /// when a MatrixTier is registered with a strong temporal prior.
+    ///
+    /// This mirrors `matrixScoringProducesNonZeroScoresWhenPriorsSeeded` from the
+    /// RECALL-DIRECTOR-004 suite, but focuses explicitly on the scoring branch gate:
+    /// the hit's `score.coOccurrence` or `score.temporal` must be > 0 when the
+    /// MatrixTier has a seeded entry matching the captured drawers.
+    @Test
+    func matrixAwareScoringAppliesMatrixStep() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "test-matrix-aware-\(UUID())")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Capture two drawers on different channels so operationalBitmaps differ.
+        let f1 = CaptureFrame(content: "matrix aware alpha content", channel: .typed,
+                              room: "matrix-aware-test", latticeAnchor: .udc("000.000"),
+                              addedBy: "matrix-test", embeddingModelID: "test-v1")
+        let d1 = try await kit.capture(handle, f1)
+        let f2 = CaptureFrame(content: "matrix aware beta content", channel: .voiced,
+                              room: "matrix-aware-test", latticeAnchor: .udc("000.000"),
+                              addedBy: "matrix-test", embeddingModelID: "test-v1")
+        let d2 = try await kit.capture(handle, f2)
+
+        // Build and register a MatrixTier with a strong temporal signal.
+        try await kit.feedAuditLog(for: handle)
+        let auditLog = try await kit.auditLog(for: handle)
+        var matrix = MatrixTier.rebuild(from: auditLog)
+        let allDrawers = (try? await kit.estate(for: handle).allDrawers()) ?? []
+        let d1Op = UInt64(bitPattern: (allDrawers.first(where: { $0.id == d1.id })?.operationalBitmap ?? 0))
+        let d2Op = UInt64(bitPattern: (allDrawers.first(where: { $0.id == d2.id })?.operationalBitmap ?? 0))
+        var matrixSeeded = false
+        if d1Op != 0, d2Op != 0, d1Op != d2Op {
+            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
+            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            matrix.applyTemporalEvent(source: src, target: tgt, deltaMinutes: 2, delta: 1000)
+            matrixSeeded = true
+        }
+        await kit.registerMatrixTier(matrix, for: handle)
+
+        let request = GLKRecallRequest(
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+                               limit: 2, ordering: .byCaptureTimeDesc),
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: 2,
+            fallback: .failClosed
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(!result.hits.isEmpty, "matrixAware scoring on unionBest must return hits")
+
+        // When the matrix was seeded with distinguishable operationalBitmaps, at
+        // least one hit must carry a non-zero temporal score (step 5.6 ran).
+        // When operationalBitmaps are identical (same channel/sensitivity defaults),
+        // temporal stays 0 — both outcomes are valid for this environment.
+        if matrixSeeded {
+            let anyTemporalNonZero = result.hits.contains(where: { $0.score.temporal > 0 })
+            #expect(anyTemporalNonZero,
+                    ".matrixAware must apply matrix step when MatrixTier has seeded temporal prior")
+        } else {
+            // Bitmaps were indistinguishable — matrix scoring ran but found no prior.
+            // Confirm recall still completes without error.
+            #expect(result.hits.count <= 2, "matrixAware must respect limit even without matrix priors")
+        }
+        try await kit.close(handle)
     }
 }

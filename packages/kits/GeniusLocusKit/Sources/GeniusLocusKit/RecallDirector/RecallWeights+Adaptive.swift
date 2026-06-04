@@ -24,8 +24,8 @@ extension RecallWeights {
     ///   - profile: The union profile computed over the merged candidate buffer.
     static func adaptive(for sketch: RecallQuerySketch, profile: RecallUnionProfile) -> RecallWeights {
         // Base weights. The active scoring combiner applies: locus, bm25, vector,
-        // fieldFit, and graph. `diversity` is computed here and reserved for the
-        // MMR λ-tuning pass in a future mission; it does not yet enter the combiner.
+        // fieldFit, and graph. `diversity` drives the adaptive MMR λ in step 10:
+        // higher diversity weight reduces λ toward 0.5, favouring diverse results.
         // `matrix` is 0.1 base weight, reserved for a future signal lane.
         var locusW:     Float = 0.2
         var bm25W:      Float = 0.2
