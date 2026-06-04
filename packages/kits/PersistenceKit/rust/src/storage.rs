@@ -2,6 +2,7 @@
 
 use crate::audit_log::AuditLog;
 use crate::blob_store::BlobStore;
+use crate::cache_config::EstateCacheConfig;
 use crate::error::StorageResult;
 use crate::observer::StorageObserver;
 use crate::row_store::RowStore;
@@ -13,11 +14,22 @@ use std::sync::Arc;
 pub struct EstateConfiguration {
     pub estate_id: uuid::Uuid,
     pub backend: BackendConfiguration,
+    /// Cache configuration for this estate (Mission PK-CACHE-A). Defaults
+    /// to `EstateCacheConfig::disabled()` so existing call sites are unchanged:
+    /// a disabled-cache estate behaves exactly as before.
+    pub cache_config: EstateCacheConfig,
 }
 
 impl EstateConfiguration {
+    /// Construct an estate configuration. `cache_config` defaults to disabled
+    /// so existing `EstateConfiguration::new(id, backend)` call sites compile
+    /// and behave identically.
     pub fn new(estate_id: uuid::Uuid, backend: BackendConfiguration) -> Self {
-        EstateConfiguration { estate_id, backend }
+        EstateConfiguration {
+            estate_id,
+            backend,
+            cache_config: EstateCacheConfig::disabled(),
+        }
     }
 }
 

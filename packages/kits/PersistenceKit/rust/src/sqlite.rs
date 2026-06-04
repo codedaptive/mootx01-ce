@@ -20,11 +20,12 @@ use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
 use crate::{
-    AuditEvent, AuditLog, BackendConfiguration, BlobStore, ColumnType, DistanceMetric,
-    EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel, OrderClause,
-    OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters, Storage,
-    StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult, StorageRow,
-    StorageTransaction, TableChange, TableDeclaration, TypedValue, VectorIndex, VectorSearchResult,
+    AuditEvent, AuditLog, BackendConfiguration, BlobStore, CachingRowStore, ColumnType,
+    DistanceMetric, EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel,
+    OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters,
+    Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
+    StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue, VectorIndex,
+    VectorSearchResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -484,10 +485,18 @@ impl Storage for SqliteStorage {
         &self.config
     }
     fn row_store(&self) -> Arc<dyn RowStore> {
-        Arc::new(SqliteRowStore {
+        let backing: Arc<dyn RowStore> = Arc::new(SqliteRowStore {
             inner: self.inner.clone(),
             observers: self.observers.clone(),
-        })
+        });
+        // When cache is enabled, wrap with an LRU hot tier. Disabled (the
+        // default) is a zero-change passthrough — identical to pre-mission
+        // behavior.
+        if self.config.cache_config.enabled {
+            Arc::new(CachingRowStore::new(backing, self.config.cache_config.clone()))
+        } else {
+            backing
+        }
     }
     fn blob_store(&self) -> Arc<dyn BlobStore> {
         Arc::new(SqliteBlobStore {
@@ -591,6 +600,41 @@ impl StorageTransaction for SqliteStorage {
 struct SqliteRowStore {
     inner: Arc<Mutex<Inner>>,
     observers: Arc<ObserverRegistry>,
+}
+
+/// Collect the row keys for rows currently matching `predicate`.
+/// Called before a mutating operation (update or delete) so observer
+/// notifications can carry the actual key for each affected row.
+/// The `values` map passed to `update` contains only the SET columns,
+/// not the primary key, making this pre-query necessary.
+/// The primary-key column is read from the retained schema; "row_id"
+/// is the fallback. Mirrors Swift's `fetchMatchingRowKeys`.
+fn fetch_matching_keys(
+    conn: &Connection,
+    schema: Option<&SchemaDeclaration>,
+    table: &str,
+    predicate: &StoragePredicate,
+) -> Vec<RowKey> {
+    let pk_col = schema
+        .and_then(|s| s.tables.iter().find(|t| t.name == table))
+        .and_then(|t| t.primary_key.first().cloned())
+        .unwrap_or_else(|| "row_id".to_string());
+    let mut binds: Vec<SqlValue> = Vec::new();
+    let where_sql = compile_predicate(predicate, &mut binds);
+    let sql = format!("SELECT \"{pk_col}\" FROM \"{table}\" WHERE {where_sql}");
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map(params_from_iter(binds), |row| {
+        let s: String = row.get(0)?;
+        Ok(s)
+    })
+    .map(|rows| {
+        rows.filter_map(|r| r.ok().and_then(|s| Uuid::parse_str(&s).ok()))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Resolve the row's primary key: a single-column UUID primary key reads
@@ -715,6 +759,11 @@ impl RowStore for SqliteRowStore {
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
         let guard = self.inner.lock().unwrap();
+        // Pre-query row keys before mutating. The `values` map carries only
+        // the SET columns (not the primary key). The Mutex serializes all
+        // operations so no interleaving is possible between this SELECT and
+        // the UPDATE.
+        let matched_keys = fetch_matching_keys(&guard.conn, guard.schema.as_ref(), table, predicate);
         let keys: Vec<&String> = values.keys().collect();
         let set_clause = keys
             .iter()
@@ -728,11 +777,11 @@ impl RowStore for SqliteRowStore {
             .conn
             .execute(&sql, params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
-        if changed > 0 {
+        for key in matched_keys {
             self.observers.emit(&TableChange {
                 table: table.to_string(),
                 event: StorageEvent::Update,
-                row_key: None,
+                row_key: Some(key),
                 values: None,
                 hlc: None,
             });
@@ -742,6 +791,10 @@ impl RowStore for SqliteRowStore {
 
     fn delete(&self, table: &str, predicate: &StoragePredicate) -> StorageResult<usize> {
         let guard = self.inner.lock().unwrap();
+        // Pre-query row keys before deletion so notifications carry them.
+        // The Mutex serializes all operations — no interleaving is possible
+        // between this SELECT and the DELETE.
+        let matched_keys = fetch_matching_keys(&guard.conn, guard.schema.as_ref(), table, predicate);
         let mut binds: Vec<SqlValue> = Vec::new();
         let where_sql = compile_predicate(predicate, &mut binds);
         let sql = format!("DELETE FROM \"{table}\" WHERE {where_sql}");
@@ -749,11 +802,11 @@ impl RowStore for SqliteRowStore {
             .conn
             .execute(&sql, params_from_iter(binds))
             .map_err(|e| map_sql_err(e, table))?;
-        if changed > 0 {
+        for key in matched_keys {
             self.observers.emit(&TableChange {
                 table: table.to_string(),
                 event: StorageEvent::Delete,
-                row_key: None,
+                row_key: Some(key),
                 values: None,
                 hlc: None,
             });

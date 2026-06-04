@@ -15,6 +15,7 @@ use crate::error::{StorageError, StorageResult};
 use crate::generated_column::GeneratedColumn;
 use crate::observer::{ObserverHub, StorageEvent, StorageObserver, TableChange};
 use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
+use crate::caching_row_store::CachingRowStore;
 use crate::row_store::RowStore;
 use crate::schema::{SchemaDeclaration, SchemaOperation, TableDeclaration};
 use crate::storage::{
@@ -100,10 +101,21 @@ impl Storage for InMemoryStorage {
     }
 
     fn row_store(&self) -> Arc<dyn RowStore> {
-        Arc::new(InMemoryRowStore {
+        let backing: Arc<dyn RowStore> = Arc::new(InMemoryRowStore {
             state: self.state.clone(),
             hub: self.hub.clone(),
-        })
+        });
+        // When cache is enabled, wrap with an LRU hot tier. Disabled (the
+        // default) is a zero-change passthrough — identical to pre-mission
+        // behavior.
+        if self.configuration.cache_config.enabled {
+            Arc::new(CachingRowStore::new(
+                backing,
+                self.configuration.cache_config.clone(),
+            ))
+        } else {
+            backing
+        }
     }
 
     fn blob_store(&self) -> Arc<dyn BlobStore> {

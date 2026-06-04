@@ -12,15 +12,21 @@ public struct EstateConfiguration: Sendable {
     /// to `.plaintext` so existing call sites are unchanged: a plaintext
     /// estate behaves exactly as before, with no crypto on any path.
     public let encryptionConfig: EstateEncryptionConfig
+    /// Cache configuration for this estate (Mission PK-CACHE-A). Defaults
+    /// to `.disabled` so existing call sites are unchanged: a disabled-cache
+    /// estate behaves exactly as before, with no cache on any path.
+    public let cacheConfig: EstateCacheConfig
 
     public init(
         estateID: UUID,
         backend: BackendConfiguration,
-        encryptionConfig: EstateEncryptionConfig = .plaintext
+        encryptionConfig: EstateEncryptionConfig = .plaintext,
+        cacheConfig: EstateCacheConfig = .disabled
     ) {
         self.estateID = estateID
         self.backend = backend
         self.encryptionConfig = encryptionConfig
+        self.cacheConfig = cacheConfig
     }
 }
 

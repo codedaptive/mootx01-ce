@@ -118,6 +118,7 @@ public struct ConformanceRunner {
 
     public func runAll() async throws {
         try await schemaFixtures()
+        try await multiKitSchemaFixtures()
         try await rowFixtures()
         try await predicateFixtures()
         try await blobFixtures()
@@ -135,6 +136,75 @@ public struct ConformanceRunner {
         try await storage.open(schema: Self.testSchema)
         let version = try await storage.currentSchemaVersion()
         #expect(version == 1, "\(backendName): schema version after open")
+        await storage.close()
+    }
+
+    // MARK: - Multi-kit schema fixtures
+
+    /// Verifies that two kits sharing one storage instance track their schema
+    /// versions independently. Kit A migrates to version 2; Kit B stays at
+    /// version 1. `currentSchemaVersion(for:)` must return the correct version
+    /// for each kit, and the values must differ.
+    func multiKitSchemaFixtures() async throws {
+        let storage = try await factory()
+
+        // Kit A starts at version 1, migrates to version 2.
+        let schemaA_v1 = SchemaDeclaration(
+            kitID: "ConformanceKitA",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "kit_a_items",
+                    columns: [.uuid("id"), .text("name")],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+        let schemaA_v2 = SchemaDeclaration(
+            kitID: "ConformanceKitA",
+            version: 2,
+            tables: [
+                TableDeclaration(
+                    name: "kit_a_items",
+                    columns: [.uuid("id"), .text("name"), .text("note", nullable: true)],
+                    primaryKey: ["id"]
+                )
+            ],
+            migrations: [
+                Migration(fromVersion: 1, toVersion: 2, operations: [
+                    .addColumn(table: "kit_a_items", column: .text("note", nullable: true))
+                ])
+            ]
+        )
+
+        // Kit B stays at version 1.
+        let schemaB_v1 = SchemaDeclaration(
+            kitID: "ConformanceKitB",
+            version: 1,
+            tables: [
+                TableDeclaration(
+                    name: "kit_b_items",
+                    columns: [.uuid("id"), .int("count")],
+                    primaryKey: ["id"]
+                )
+            ]
+        )
+
+        try await storage.open(schema: schemaA_v1)
+        try await storage.migrate(to: schemaA_v2)
+        try await storage.open(schema: schemaB_v1)
+
+        let vA = try await storage.currentSchemaVersion(for: "ConformanceKitA")
+        let vB = try await storage.currentSchemaVersion(for: "ConformanceKitB")
+
+        #expect(vA == 2, "\(backendName): Kit A migrated to version 2")
+        #expect(vB == 1, "\(backendName): Kit B stays at version 1")
+        #expect(vA != vB, "\(backendName): per-kit versions are independent")
+
+        // No-arg method still returns a value ≥ either kit's version.
+        let global = try await storage.currentSchemaVersion()
+        #expect(global >= vA, "\(backendName): global version ≥ Kit A version")
+
         await storage.close()
     }
 

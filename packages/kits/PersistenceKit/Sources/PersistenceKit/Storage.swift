@@ -31,7 +31,16 @@ public protocol Storage: Sendable {
     ) async throws -> T
 
     /// Current schema version applied to the backend.
+    /// Returns the global maximum version across all kits when multiple
+    /// kits share one storage. Use `currentSchemaVersion(for:)` for
+    /// per-kit precision in multi-kit deployments.
     func currentSchemaVersion() async throws -> Int
+
+    /// Current schema version for a specific kit on this backend.
+    /// Each kit migrates independently when multiple kits share one storage;
+    /// this method returns the version recorded for `kitID` alone, not the
+    /// global maximum across all kits.
+    func currentSchemaVersion(for kitID: String) async throws -> Int
 
     /// Apply migrations forward to the schema's declared version.
     /// Forward-only, fail-fast per Q4.
