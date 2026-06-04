@@ -1,9 +1,6 @@
 # FDC Encoder — Canonical Specification
 
-**Version 1.1 · 2026-06-02** (revised to shipped reality; v1.1 folds in
-the two-tier gap fill, the membership-only runtime artifact, the
-shipped label-hygiene behavior, and version language — each claim
-re-verified against the code and build artifacts on this date)
+**Version 1.0 · 2026-06-01** (revised to shipped reality)
 
 ---
 
@@ -66,14 +63,9 @@ Nothing in this list includes a learned model, a proprietary dataset, or a runti
 
 The encoder runs the same five-step pipeline in two contexts:
 
-**Build time:** steps 1–3 are run over each FDC code's reference text drawn from three sources: its FDC label, its subject-heading title, and its Wikipedia article. The three sources vary enormously in size. To prevent the article from drowning the label, LexRank is applied to the article first, reducing it to its most central terms before it enters the pipeline. The three resulting bags are then merged with source-type weights applied: label terms carry the highest weight, title terms medium, article terms lowest. The weights shape the build-time intermediate only: the SHIPPED runtime artifact is compacted to term MEMBERSHIP (each code -> its sorted term-key list) and the matcher never reads a source weight — the weights ride in the artifact header as build provenance. A code inherits its ancestors' merged signature terms down the decimal tree, so a child code carries the union of its own terms and every ancestor's terms. (Artifact contract pinned by `FDCSignaturesArtifactTests` and `rust/tests/fdc_artifact_test.rs`: 1071 codes, sorted, non-empty, membership-only.)
+**Build time:** steps 1–3 are run over each FDC code's reference text drawn from three sources: its FDC label, its subject-heading title, and its Wikipedia article. The three sources vary enormously in size. To prevent the article from drowning the label, LexRank is applied to the article first, reducing it to its most central terms before it enters the pipeline. The three resulting bags are then merged with source-type weights applied: label terms carry the highest weight, title terms medium, article terms lowest. These weights are part of the pinned contract. A code inherits its ancestors' merged signature terms down the decimal tree, so a child code carries the union of its own terms and every ancestor's terms.
 
-All 1071 signature-bearing codes of the v1.0 frame carry Wikipedia-sourced article signatures (up from 793). Codes whose heading did not auto-resolve to a Wikipedia title were filled by a **two-tier LLM gap fill**, of which only the first tier ever fired:
-
-- **Tier 1 — resolver (shipped, fired).** An LLM proposed the single best real Wikipedia article title per gap code, frozen in a committed, auditable input (`_gap_titles.tsv`, code -> title) and validated by actually fetching the article. The model only *chose which article to pull*. One proposal missed (012 -> "Biobibliography", no such article) and was re-resolved to a real article ("Bibliography") rather than falling through.
-- **Tier 2 — generated description (designed, NOT implemented, never fired).** The design reserved a fallback where a title with no fetchable article would receive a model-written description as its article text. The shipped signature builder contains no such code path, and the build artifacts show zero codes took it. It is named here so the guarantee below is checkable, not rhetorical.
-
-The guarantee is therefore structural: every signature term in the shipped artifact is sourced from the FDC label, the Wikipedia title, or the Wikipedia article body — **no model-generated text enters a signature**, and the builder has no path by which it could. This build-time tooling ships in the maintainer Seed Generator (see cookbook §7.1.1).
+All 1071 signature-bearing codes of the v1.0 frame now carry Wikipedia-sourced article signatures (up from 793). Codes whose heading did not auto-resolve to a Wikipedia title were filled **resolve-first**: an LLM proposed the single best real Wikipedia article title, the title was frozen in a committed, auditable input, and it was validated by actually fetching the article. The model only *chose which article to pull*; every signature term is sourced from the FDC label, the Wikipedia title, or the Wikipedia article body — no model-generated text enters a signature. This build-time tooling ships in the maintainer Seed Generator (see cookbook §7.1.1).
 
 **Runtime:** steps 1–5 are run over the inbound text block to produce a code.
 
@@ -90,7 +82,7 @@ Because both sides use identical steps on comparable inputs, the runtime bag is 
     score[code] = Σ_{t ∈ bag ∩ sig(code)}  bag[t] · idf(t)
     idf(t)      = ln( N / df(t) )    # N = total code signatures, df(t) = # signatures containing t
 
-A term that appears in many signatures contributes little; a distinctive term dominates. This is the scoring the runtime ships. The plain raw-overlap sum (`Σ bag[t]`, no IDF) lets codes with large, broad signatures win on breadth alone, which is why IDF — rewarding distinctive terms — was chosen over it; cosine and IDF-cosine variants were measured and rejected (cosine worse, IDF-cosine behind IDF). `idf(t)` is precomputed once from the pinned signatures at load (no additional shipped artifact). **Determinism:** the IDF-weighted sums are floating-point and float addition is non-associative, so every per-code sum is accumulated in sorted term order, making the result bit-identical across runs and across the Swift and Rust versions. If no candidate shares a term, return UNRESOLVED. The encoder never guesses. (The raw-overlap sum is the matcher's `.raw` mode and is what the direct unit tests use; the runtime is constructed in `.idf` mode.)
+A term that appears in many signatures contributes little; a distinctive term dominates. This is the scoring the runtime ships. The plain raw-overlap sum (`Σ bag[t]`, no IDF) lets codes with large, broad signatures win on breadth alone, which is why IDF — rewarding distinctive terms — was chosen over it; cosine and IDF-cosine variants were measured and rejected (cosine worse, IDF-cosine behind IDF). `idf(t)` is precomputed once from the pinned signatures at load (no additional shipped artifact). **Determinism:** the IDF-weighted sums are floating-point and float addition is non-associative, so every per-code sum is accumulated in sorted term order, making the result bit-identical across runs and across the Swift and Rust ports. If no candidate shares a term, return UNRESOLVED. The encoder never guesses. (The raw-overlap sum is the matcher's `.raw` mode and is what the direct unit tests use; the runtime is constructed in `.idf` mode.)
 
 **Step 5 — Descend the frame to the deepest passing code.** Take the highest-scoring top-level region under the same IDF scoring (tie-break: lowest code value). Check its children: a child is a descent candidate only if its **raw integer overlap** (`Σ bag[t]`, mode-independent) clears `STOP_THRESHOLD`; among the candidates that clear it, the highest IDF score wins (tie-break: lowest code value). Move to that child and repeat. Stop when no child clears the threshold. The descent cutoff gates on the raw overlap so its meaning is independent of the scoring mode; the IDF score only ranks the candidates that pass the gate. Coarse agreement is guaranteed; fine depth is best-effort and depends on whether the text is specific enough to light up a child signature.
 
@@ -193,13 +185,13 @@ build_signature(fdc_code) -> {conceptID: weight}:
 
 ## 5. STOP_THRESHOLD — Resolved
 
-`STOP_THRESHOLD` (Step 5) is **pinned at 1** and is **empirically inert** on the v1.0 frame. A sweep over 1…200 against the shipped signatures produced identical results: the v1.0 frame is shallow — most codes are integer-head and the average encoded depth is about 1.3 — so the Step-5 descent rarely fires, and where it does, the cutoff value does not change the outcome. Classification accuracy is therefore governed by the within-region IDF scoring of §4, not by this cutoff. The constant ships at 1 (any raw overlap continues descent) in both the Swift and Rust versions. This closes the open item carried in the v1.0 draft and recorded in `DECISION_FDC_ENCODER_KIT_PROVENANCE_2026-05-25.md` §8.
+`STOP_THRESHOLD` (Step 5) is **pinned at 1** and is **empirically inert** on the v1.0 frame. A sweep over 1…200 against the shipped signatures produced identical results: the v1.0 frame is shallow — most codes are integer-head and the average encoded depth is about 1.3 — so the Step-5 descent rarely fires, and where it does, the cutoff value does not change the outcome. Classification accuracy is therefore governed by the within-region IDF scoring of §4, not by this cutoff. The constant ships at 1 (any raw overlap continues descent) in both the Swift and Rust ports. This closes the open item carried in the v1.0 draft and recorded in `DECISION_FDC_ENCODER_KIT_PROVENANCE_2026-05-25.md` §8.
 
 ---
 
 ## 6. Cross-Platform Conformance
 
-The encoder ships as two co-authored versions — Swift (`LatticeLib`) and Rust (`LatticeLib/rust`). The shipped agreement property is **Swift-scalar == Rust-scalar**: both versions produce identical `encode` / `encodeAnchor` output for identical input and identical pinned artifacts, proven against the committed conformance fixture (`rust/tests/fixtures/fdc_conformance.json`, 52/52 passing) and the artifact-contract tests both versions run over the SAME bundled `FDCSignatures.json`. This is a pure string/concept-ID algorithm: there is no Metal or BLAS dimension and no SIMD kernel to conform — the only cross-version determinism concern is float summation order in the IDF scoring (§4), which both versions pin by summing in sorted term order.
+The encoder is implemented in Swift (`LatticeLib`) and ported to Rust (`LatticeLib/rust`). The shipped agreement property is **Swift-scalar == Rust-scalar**: both ports produce identical `encode` / `encodeAnchor` output for identical input and identical pinned artifacts, proven against a committed conformance fixture (52/52 passing). This is a pure string/concept-ID algorithm: there is no Metal or BLAS dimension and no SIMD kernel to conform — the only cross-port determinism concern is float summation order in the IDF scoring (§4), which both ports pin by summing in sorted term order.
 
 The cross-platform-*guaranteed* surface is the static word-class table plus the pinned lexicon and signatures: any token resolved through them is bit-identical on every platform. Novel-token tagging is platform-divergent **by design** — Apple uses `NLTagger`, non-Apple uses the (currently stubbed) Penn-Treebank HMM/Viterbi tagger — and is deliberately kept off the agreement-bearing path. The Step-1 Q-ID relaxation (§3) further moves named entities onto the deterministic lexicon path and off the divergent tagger path.
 
@@ -212,15 +204,7 @@ These are designed-but-unshipped surfaces. They are named here so a reader does 
 - **SimHash long-input pre-filter** (§2, cookbook §5.1) — no fingerprints produced, no pre-filter applied at runtime.
 - **LexRank and the weighted CodeSignature** — build-time only (Seed Generator); never invoked at runtime.
 - **Multilingual lexicons** — only the English lexicon ships; additional languages follow the same format (CONTRIBUTING).
-- **FDCFrame label normalization pass** — frame labels are stored verbatim
-  (including LCSH quotation and `+` / `|` subject markers); no dedicated
-  normalization pass ships. The hygiene that DOES ship is narrower and
-  lives elsewhere: at build, the signature builder extracts the quoted
-  LCSH headings from a label and strips ` -- ` subdivisions and trailing
-  parentheticals when resolving a heading to its Wikipedia title; at both
-  build and runtime, the tokenizer drops the markers naturally when a
-  label is bagged. A future verbatim-label consumer should not mistake
-  the raw label for clean text.
+- **FDCFrame label hygiene** — labels are stored verbatim (including LCSH quotation and subject markers); no normalization pass ships.
 - **A labeled-path export helper** (an `FDC.classify`-style human-readable directory export) — not shipped.
 - **HMM/Viterbi non-Apple tagger** — a deterministic `.other` stub ships; the real compiled artifact is pending.
 - **Novel-token pool reducer / submit endpoint** — the cache accumulates against a no-op submitter; the pool reducer is not yet built.
