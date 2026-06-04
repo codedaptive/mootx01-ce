@@ -8,11 +8,11 @@
 //! Per `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` §§ 7.1 / 7.8.3.
 
 use crate::adjectives::{AdjectiveSensitivity, Trust};
-use crate::drawer_operational::{CaptureChannel, ContentKind};
+use crate::drawer_operational::{CaptureChannel, ContentKind, DrawerFeatureFlags};
 use crate::estate_types::LatticeAnchor;
 use crate::filter::LineageID;
 use crate::provenance::{Channel, Sensitivity, SourceType};
-use crate::tunnel_operational::TunnelKind;
+use crate::tunnel_operational::{TunnelKind, TunnelOriginClass};
 
 // MARK: - CaptureFrame
 
@@ -78,12 +78,29 @@ pub struct CaptureFrame {
     /// Required even before vectors are generated so a future model bump
     /// cannot accidentally compare across versions.
     pub embedding_model_id: String,
+
+    /// Feature flags to set on the resulting drawer at capture time.
+    /// Encodes directly into bits 12–23 of the drawer's `operational_bitmap`
+    /// (cookbook §2.4 feature_flags field). The `DrawerFeatureFlags` constants
+    /// are pre-shifted (e.g. `HAS_LINKS` is `1 << 15`), so the merge is a
+    /// direct bitwise OR masked to `FIELD_MASK (0xFFF000)` — the inverse of
+    /// the `feature_flags()` accessor's `& FIELD_MASK` decoder. Defaults to
+    /// `0` (no flags set) so all existing callers continue to produce zero
+    /// feature-flag bits. Mirrors Swift `CaptureFrame.featureFlags`.
+    pub feature_flags: i64,
+
+    /// When the content happened or was authored in the world. For
+    /// streaming capture leave as `None` — the substrate stamps it from
+    /// `now`. For bulk historical ingestion supply the original
+    /// authorship date as epoch seconds. Mirrors Swift
+    /// `CaptureFrame.eventTime: Date?`. (ING-01)
+    pub event_time: Option<i64>,
 }
 
 impl CaptureFrame {
     /// Construct a `CaptureFrame` with the spec defaults: `Typed` channel,
-    /// `Normal` sensitivity, `Prose` kind, no lineage id. Mirrors the
-    /// Swift `CaptureFrame.init(content:channel:room:latticeAnchor:addedBy:embeddingModelID:)`.
+    /// `Normal` sensitivity, `Prose` kind, no lineage id, no feature flags.
+    /// Mirrors `CaptureFrame.init(content:channel:room:latticeAnchor:addedBy:embeddingModelID:)`.
     pub fn new(
         content: impl Into<String>,
         channel: CaptureChannel,
@@ -105,6 +122,8 @@ impl CaptureFrame {
             lattice_anchor,
             added_by: added_by.into(),
             embedding_model_id: embedding_model_id.into(),
+            feature_flags: 0,
+            event_time: None,
         }
     }
 }
@@ -145,12 +164,21 @@ pub struct TunnelCaptureFrame {
     pub kind: TunnelKind,
     /// Actor identifier written into the tunnel's `added_by` field.
     pub added_by: String,
+    /// How this tunnel entered the substrate — user assertion, agent
+    /// derivation, import path, sync replication, or schema migration.
+    /// Encodes into bits 6–8 of the tunnel's `operational_bitmap` at
+    /// capture (via `bit_field::write_field`; decoder is `TunnelOriginClass`
+    /// in `tunnel_operational.rs`). Defaults to `UserExplicit` (raw 0)
+    /// so all existing callers continue to produce a zero operational
+    /// bitmap byte-identically. Mirrors Swift `TunnelCaptureFrame.originClass`.
+    pub origin_class: TunnelOriginClass,
 }
 
 impl TunnelCaptureFrame {
     /// Construct a `TunnelCaptureFrame` with `kind` defaulting to
-    /// `TunnelKind::References` and both drawer ids `None` (a room-level
-    /// edge). Mirrors the Swift initializer's defaults.
+    /// `TunnelKind::References`, `origin_class` defaulting to
+    /// `TunnelOriginClass::UserExplicit`, and both drawer ids `None`
+    /// (a room-level edge). Mirrors the Swift initializer's defaults.
     pub fn new(
         source_wing: impl Into<String>,
         source_room: impl Into<String>,
@@ -169,6 +197,7 @@ impl TunnelCaptureFrame {
             label: label.into(),
             kind: TunnelKind::References,
             added_by: added_by.into(),
+            origin_class: TunnelOriginClass::UserExplicit,
         }
     }
 }
@@ -222,6 +251,59 @@ impl LearnFrame {
     pub fn new(handle: impl Into<String>) -> Self {
         Self {
             handle: handle.into(),
+        }
+    }
+}
+
+// MARK: - ProposeFrame
+
+/// Slots for the `propose` verb. Mirrors `LocusKit.ProposeFrame` in Swift.
+///
+/// `kind` uses `LocusKit.ProposalKind` (Int-based substrate axis) — distinct
+/// from the GLK `ProposalKind` (String-based Brain routing labels).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposeFrame {
+    /// The row this proposal is about. Must be non-empty.
+    pub target: String,
+    /// Substrate-axis proposal kind (cookbook §2.4 bits 0–5).
+    /// Uses the `ProposalKind` Int enum from `proposal_operational.rs`.
+    pub kind: crate::proposal_operational::ProposalKind,
+    /// Optional free-text justification.
+    pub justification: Option<String>,
+}
+
+impl ProposeFrame {
+    /// Create a `ProposeFrame` with a target and kind; justification defaults to None.
+    pub fn new(target: impl Into<String>, kind: crate::proposal_operational::ProposalKind) -> Self {
+        Self {
+            target: target.into(),
+            kind,
+            justification: None,
+        }
+    }
+}
+
+// MARK: - AssociateFrame
+
+/// Slots for the `associate` verb. Mirrors `LocusKit.AssociateFrame` in Swift.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssociateFrame {
+    /// One endpoint.
+    pub a: String,
+    /// The other endpoint.
+    pub b: String,
+    /// Coarse weight in [0, 1]. The Brain layer interprets this; the substrate
+    /// stores it opaquely.
+    pub weight: f64,
+}
+
+impl AssociateFrame {
+    /// Create an `AssociateFrame` with two endpoints and a weight.
+    pub fn new(a: impl Into<String>, b: impl Into<String>, weight: f64) -> Self {
+        Self {
+            a: a.into(),
+            b: b.into(),
+            weight,
         }
     }
 }

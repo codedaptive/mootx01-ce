@@ -441,4 +441,26 @@ impl DrawerStore for PostgresDrawerStore {
     fn taxonomy(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
         self.0.taxonomy()
     }
+
+    fn all_proposals(&self) -> Result<Vec<crate::proposal::Proposal>, LocusKitError> {
+        self.0.all_proposals()
+    }
+
+    fn all_associations(&self) -> Result<Vec<crate::association::Association>, LocusKitError> {
+        self.0.all_associations()
+    }
+
+    fn all_learned_references(
+        &self,
+    ) -> Result<Vec<crate::learned_reference::LearnedReference>, LocusKitError> {
+        self.0.all_learned_references()
+    }
+
+    fn all_kg_facts(&self) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
+        self.0.all_kg_facts()
+    }
+
+    fn all_diary_entries(&self) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
+        self.0.all_diary_entries()
+    }
 }

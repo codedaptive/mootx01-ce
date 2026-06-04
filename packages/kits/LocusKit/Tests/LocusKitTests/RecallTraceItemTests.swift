@@ -277,4 +277,82 @@ struct RecallTraceItemTests {
         let results = try await store.recallTraceSince(t(9_999_999_999))
         #expect(results.isEmpty)
     }
+
+    // MARK: - § 6  recentRecallTraces(since:now:)
+
+    @Test("recentRecallTraces returns rows within the [since, now] window")
+    func recentRecallTracesWindowFilter() async throws {
+        let (store, url) = try await TestStorage.makeStore()
+        defer { TestStorage.cleanup(url) }
+
+        // Four rows: before window, at lower bound, inside, at upper bound.
+        let before = t(500)
+        let since  = t(1_000)
+        let inside = t(2_000)
+        let now    = t(3_000)
+        let after  = t(4_000)   // not inserted, just to confirm no phantom rows
+
+        for (id, ts) in [("r-before", before), ("r-since", since), ("r-inside", inside), ("r-now", now)] {
+            try await store.insertRecallTrace(RecallTraceItem(id: id, target: "d-\(id)", recalledAt: ts))
+        }
+        _ = after  // silence unused warning
+
+        let results = try await store.recentRecallTraces(since: since, now: now)
+        let ids = Set(results.map(\.id))
+
+        // Lower and upper bounds are inclusive.
+        #expect(ids.contains("r-since"))
+        #expect(ids.contains("r-inside"))
+        #expect(ids.contains("r-now"))
+        // Row before the window must be excluded.
+        #expect(!ids.contains("r-before"))
+    }
+
+    @Test("recentRecallTraces excludes rows strictly after now")
+    func recentRecallTracesExcludesFutureRows() async throws {
+        let (store, url) = try await TestStorage.makeStore()
+        defer { TestStorage.cleanup(url) }
+
+        let now   = t(2_000)
+        let future = t(3_000)
+
+        try await store.insertRecallTrace(RecallTraceItem(id: "r-now",    target: "d1", recalledAt: now))
+        try await store.insertRecallTrace(RecallTraceItem(id: "r-future", target: "d2", recalledAt: future))
+
+        let results = try await store.recentRecallTraces(since: t(0), now: now)
+        let ids = Set(results.map(\.id))
+        #expect(ids.contains("r-now"))
+        #expect(!ids.contains("r-future"))
+    }
+
+    @Test("recentRecallTraces returns rows in ascending recalledAt order")
+    func recentRecallTracesAscendingOrder() async throws {
+        let (store, url) = try await TestStorage.makeStore()
+        defer { TestStorage.cleanup(url) }
+
+        // Insert in reverse timestamp order.
+        for epoch in [3_000.0, 1_000.0, 2_000.0] {
+            try await store.insertRecallTrace(
+                RecallTraceItem(id: "r-\(Int(epoch))", target: "d", recalledAt: t(epoch)))
+        }
+
+        let results = try await store.recentRecallTraces(since: t(0), now: t(9_999))
+        #expect(results.count == 3)
+        for i in 0..<(results.count - 1) {
+            #expect(results[i].recalledAt <= results[i + 1].recalledAt)
+        }
+    }
+
+    @Test("recentRecallTraces returns empty array when window contains no rows")
+    func recentRecallTracesEmptyWindow() async throws {
+        let (store, url) = try await TestStorage.makeStore()
+        defer { TestStorage.cleanup(url) }
+
+        // Only row is outside the window.
+        try await store.insertRecallTrace(
+            RecallTraceItem(id: "r-old", target: "d1", recalledAt: t(100)))
+
+        let results = try await store.recentRecallTraces(since: t(1_000), now: t(2_000))
+        #expect(results.isEmpty)
+    }
 }

@@ -64,4 +64,42 @@ struct EstateTunnelReadTests {
         #expect(fromStudy.count == 1)
         #expect(fromStudy.first?.sourceWing == "study")
     }
+
+    // MARK: - Estate.allTunnels
+
+    // allTunnels returns all non-tombstoned tunnels across every wing.
+    // The dreaming daemon calls this to suppress duplicate proposals.
+    @Test("allTunnels returns all tunnels across all wings")
+    func allTunnelsReturnsAll() async throws {
+        let estate = try await makeEstate()
+        _ = try await estate.capture(frame(source: "study",  target: "kitchen", label: "a"))
+        _ = try await estate.capture(frame(source: "garden", target: "kitchen", label: "b"))
+        _ = try await estate.capture(frame(source: "attic",  target: "study",   label: "c"))
+
+        let all = try await estate.allTunnels()
+        #expect(all.count == 3)
+        let labels = Set(all.map(\.label))
+        #expect(labels == ["a", "b", "c"])
+    }
+
+    @Test("allTunnels returns empty array when estate has no tunnels")
+    func allTunnelsEmptyEstate() async throws {
+        let estate = try await makeEstate()
+        let all = try await estate.allTunnels()
+        #expect(all.isEmpty)
+    }
+
+    @Test("allTunnels cross-wing: includes tunnels that tunnelsFromWing misses")
+    func allTunnelsCrossWing() async throws {
+        let estate = try await makeEstate()
+        _ = try await estate.capture(frame(source: "alpha", target: "beta",  label: "x"))
+        _ = try await estate.capture(frame(source: "gamma", target: "delta", label: "y"))
+
+        // allTunnels must find both; tunnelsFromWing("alpha") would miss "y".
+        let all = try await estate.allTunnels()
+        #expect(all.count == 2)
+
+        let fromAlpha = try await estate.tunnelsFromWing("alpha")
+        #expect(fromAlpha.count == 1, "sanity: tunnelsFromWing only sees its wing")
+    }
 }

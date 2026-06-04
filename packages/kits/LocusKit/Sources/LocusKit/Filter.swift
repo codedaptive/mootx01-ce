@@ -39,12 +39,6 @@ public typealias FeatureFlag = DrawerFeatureFlags
 // the adjective-axis filter cases below and rely on the type system
 // to make the choice unambiguous at call sites.
 
-/// Floating-point vector. Placeholder until VectorKit ships — the
-/// evaluator's `.nearVector` case accepts this type; the underlying
-/// storage and ANN index are decoupled by the alias so VectorKit can
-/// later replace `[Float]` without churning filter call sites.
-public typealias Vector = [Float]
-
 // MARK: - StateCluster
 
 /// State-cluster membership filter. Coarser than `State`; used when the
@@ -163,9 +157,6 @@ public indirect enum Filter: Sendable {
 
     /// Rows whose verbatim content contains this string.
     case contentMatches(String)
-    /// Rows near this vector — approximate nearest neighbour.
-    /// Requires the vector tier; the evaluator throws until VectorKit ships.
-    case nearVector(Vector, count: Int)
 
     // MARK: Composition
 

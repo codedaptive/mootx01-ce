@@ -3,14 +3,14 @@
 
 #![cfg(test)]
 
-use crate::drawer_operational::CaptureChannel;
+use crate::drawer_operational::{CaptureChannel, DrawerFeatureFlags};
 use crate::drawer_store::DrawerStore;
 use crate::drawer_store_inmemory::InMemoryDrawerStore;
 use crate::error::LocusKitError;
 use crate::estate::Estate;
 use crate::estate_types::{LatticeAnchor, OwnerCredentials};
 use crate::frames::{CaptureFrame, TunnelCaptureFrame};
-use crate::tunnel_operational::TunnelKind;
+use crate::tunnel_operational::{TunnelKind, TunnelOriginClass};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -209,4 +209,164 @@ fn rejects_empty_added_by() {
     let mut f = sample_frame();
     f.added_by = String::new();
     assert_invalid(f);
+}
+
+// --------------------------------------------------------------------------
+// origin_class round-trip tests (TCO-001)
+// --------------------------------------------------------------------------
+
+/// Default `origin_class` is `UserExplicit` and the captured tunnel's
+/// `operational_bitmap` is zero.
+#[test]
+fn origin_class_default_is_user_explicit_and_zero_bitmap() {
+    let (estate, store) = make_estate_with_store();
+    let frame = sample_frame(); // origin_class defaults to UserExplicit
+    let captured = estate.capture_tunnel(frame, NOW).unwrap();
+    assert_eq!(captured.origin_class(), TunnelOriginClass::UserExplicit);
+    assert_eq!(captured.operational_bitmap, 0);
+    let loaded = store.get_tunnel(&captured.id).unwrap().unwrap();
+    assert_eq!(loaded.origin_class(), TunnelOriginClass::UserExplicit);
+    assert_eq!(loaded.operational_bitmap, 0);
+}
+
+/// Round-trip all five `TunnelOriginClass` variants through capture and
+/// verify both the decoded enum and the raw bit pattern.
+#[test]
+fn origin_class_round_trips_all_five_raws() {
+    let (estate, store) = make_estate_with_store();
+    // (origin_class, expected bits 6–8 in operational_bitmap)
+    let cases: &[(TunnelOriginClass, i64)] = &[
+        (TunnelOriginClass::UserExplicit, 0 << 6),  // raw 0
+        (TunnelOriginClass::Derived, 1 << 6),       // raw 1
+        (TunnelOriginClass::Imported, 2 << 6),      // raw 2
+        (TunnelOriginClass::FederatedSync, 3 << 6), // raw 3
+        (TunnelOriginClass::Migration, 4 << 6),     // raw 4
+    ];
+    for &(origin_class, expected_bits) in cases {
+        let mut frame = sample_frame();
+        frame.origin_class = origin_class;
+        let captured = estate.capture_tunnel(frame, NOW).unwrap();
+        let loaded = store.get_tunnel(&captured.id).unwrap().unwrap();
+        assert_eq!(loaded.origin_class(), origin_class);
+        assert_eq!(loaded.operational_bitmap, expected_bits);
+    }
+}
+
+/// `.Imported` (raw 2) encodes to `2 << 6 = 0x80 = 128`.
+/// This is the canonical VaultKit use case that motivated the mission.
+/// Mirrors the Swift `importedOriginClassBitPattern` test.
+#[test]
+fn imported_origin_class_encodes_to_0x80() {
+    let (estate, store) = make_estate_with_store();
+    let mut frame = sample_frame();
+    frame.origin_class = TunnelOriginClass::Imported;
+    let captured = estate.capture_tunnel(frame, NOW).unwrap();
+    let loaded = store.get_tunnel(&captured.id).unwrap().unwrap();
+    // imported (raw 2) at shift 6, width 3 → 2 << 6 = 0x80.
+    assert_eq!(loaded.operational_bitmap, 0x80);
+    assert_eq!(loaded.origin_class().raw_value(), 2);
+    assert_eq!(loaded.origin_class(), TunnelOriginClass::Imported);
+}
+
+/// Swift/Rust parity: `.Imported` → `operational_bitmap == 0x80`.
+/// Asserts the same value the Swift `importedOriginClassSwiftRustParity` test asserts.
+#[test]
+fn imported_origin_class_swift_rust_parity() {
+    let (estate, _store) = make_estate_with_store();
+    let mut frame = sample_frame();
+    frame.origin_class = TunnelOriginClass::Imported;
+    let captured = estate.capture_tunnel(frame, NOW).unwrap();
+    assert_eq!(captured.operational_bitmap, 0x80);
+}
+
+// --------------------------------------------------------------------------
+// DrawerFeatureFlags round-trip tests (TCO-001)
+// --------------------------------------------------------------------------
+
+fn drawer_frame_with_flags(content: &str, feature_flags: i64) -> CaptureFrame {
+    let mut f = CaptureFrame::new(
+        content,
+        CaptureChannel::Typed,
+        "test-room",
+        LatticeAnchor::udc("004"),
+        "test-agent",
+        "minilm-v6",
+    );
+    f.feature_flags = feature_flags;
+    f
+}
+
+/// Default frame produces no feature flags; bits 12–23 of the operational
+/// bitmap are all zero.
+#[test]
+fn feature_flags_default_produces_zero_feature_bits() {
+    let (estate, store) = make_estate_with_store();
+    let frame = drawer_frame_with_flags("plain drawer", 0);
+    let drawer = estate.capture(frame, NOW).unwrap();
+    let loaded = store.get_drawer(&drawer.id).unwrap().unwrap();
+    assert_eq!(
+        loaded.operational_bitmap & DrawerFeatureFlags::FIELD_MASK,
+        0
+    );
+    assert_eq!(loaded.feature_flags(), 0);
+}
+
+/// `HAS_LINKS | HAS_ATTACHMENTS` round-trips and sets the exact bits 12–23;
+/// the encoded value is `0x9000`. Mirrors the Swift parity assertion.
+#[test]
+fn has_links_has_attachments_encodes_to_0x9000() {
+    let (estate, store) = make_estate_with_store();
+    let flags = DrawerFeatureFlags::HAS_LINKS | DrawerFeatureFlags::HAS_ATTACHMENTS;
+    let frame = drawer_frame_with_flags("linked drawer", flags);
+    let drawer = estate.capture(frame, NOW).unwrap();
+    let loaded = store.get_drawer(&drawer.id).unwrap().unwrap();
+    // hasLinks = 1<<15 = 0x8000, hasAttachments = 1<<12 = 0x1000 → 0x9000
+    assert_eq!(
+        loaded.operational_bitmap & DrawerFeatureFlags::FIELD_MASK,
+        0x9000
+    );
+    assert!(loaded.has_feature_flag(DrawerFeatureFlags::HAS_LINKS));
+    assert!(loaded.has_feature_flag(DrawerFeatureFlags::HAS_ATTACHMENTS));
+    // No other feature flags set.
+    assert!(!loaded.has_feature_flag(DrawerFeatureFlags::HAS_VOICE));
+    assert!(!loaded.has_feature_flag(DrawerFeatureFlags::HAS_IMAGE));
+    assert!(!loaded.has_feature_flag(DrawerFeatureFlags::IS_PINNED));
+}
+
+/// The channel/kind bits (0–11) are not disturbed by feature flags.
+#[test]
+fn feature_flags_do_not_disturb_channel_or_kind_bits() {
+    let (estate, store) = make_estate_with_store();
+    let mut frame = CaptureFrame::new(
+        "test",
+        CaptureChannel::Ocr, // raw 2 → bits 0–5
+        "test-room",
+        LatticeAnchor::udc("4"),
+        "test-agent",
+        "minilm-v6",
+    );
+    frame.kind = crate::drawer_operational::ContentKind::Code; // raw 1 → bits 6–11
+    frame.feature_flags = DrawerFeatureFlags::HAS_LINKS;
+    let drawer = estate.capture(frame, NOW).unwrap();
+    let loaded = store.get_drawer(&drawer.id).unwrap().unwrap();
+    assert_eq!(loaded.capture_channel(), CaptureChannel::Ocr);
+    assert_eq!(
+        loaded.content_kind(),
+        crate::drawer_operational::ContentKind::Code
+    );
+    assert!(loaded.has_feature_flag(DrawerFeatureFlags::HAS_LINKS));
+}
+
+/// Swift/Rust parity: `HAS_LINKS | HAS_ATTACHMENTS` → feature-flag bits == `0x9000`.
+#[test]
+fn feature_flags_swift_rust_parity() {
+    let (estate, _store) = make_estate_with_store();
+    let flags = DrawerFeatureFlags::HAS_LINKS | DrawerFeatureFlags::HAS_ATTACHMENTS;
+    let drawer = estate
+        .capture(drawer_frame_with_flags("parity", flags), NOW)
+        .unwrap();
+    assert_eq!(
+        drawer.operational_bitmap & DrawerFeatureFlags::FIELD_MASK,
+        0x9000
+    );
 }

@@ -1426,6 +1426,24 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.iter().map(tunnel_from_row).collect())
     }
 
+    fn all_tunnels(&self) -> Result<Vec<Tunnel>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_TUNNELS,
+                Some(&StoragePredicate::IsNull(Column::new(T_TUNNELS, "tombstonedAt"))),
+                &[OrderClause::new(
+                    Column::new(T_TUNNELS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(tunnel_from_row).collect())
+    }
+
     // -----------------------------------------------------------------
     // KGFact CRUD
     // -----------------------------------------------------------------
@@ -1851,6 +1869,40 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.iter().map(recall_trace_from_row).collect())
     }
 
+    fn recent_recall_traces(
+        &self,
+        since: &str,
+        now: &str,
+    ) -> Result<Vec<RecallTraceItem>, LocusKitError> {
+        // The in-memory store uses TEXT ISO8601 timestamps for `recalledAt`.
+        // Lexicographic comparison is correct for canonical ISO8601 strings
+        // (same guarantee as Swift's `recallTraceSince`).
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_RECALL_TRACE,
+                Some(&StoragePredicate::all(vec![
+                    StoragePredicate::Gte(
+                        Column::new(T_RECALL_TRACE, "recalledAt"),
+                        TypedValue::Text(since.to_string()),
+                    ),
+                    StoragePredicate::Lte(
+                        Column::new(T_RECALL_TRACE, "recalledAt"),
+                        TypedValue::Text(now.to_string()),
+                    ),
+                ])),
+                &[OrderClause::new(
+                    Column::new(T_RECALL_TRACE, "recalledAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(recall_trace_from_row).collect())
+    }
+
     fn mark_recall_trace_used(&self, id: &str, _now: i64) -> Result<(), LocusKitError> {
         let item = self
             .get_recall_trace(id)?
@@ -1960,6 +2012,123 @@ impl DrawerStore for DrawerStoreCore {
                 drawer_count: c,
             })
             .collect())
+    }
+
+    // -----------------------------------------------------------------
+    // Unfiltered full-corpus reads (recall surface)
+    // -----------------------------------------------------------------
+
+    fn all_proposals(&self) -> Result<Vec<Proposal>, LocusKitError> {
+        // All rows — no predicate filters out any state. Order by filedAt
+        // ascending so results are stable and repeatable.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_PROPOSALS,
+                None,
+                &[OrderClause::new(
+                    Column::new(T_PROPOSALS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(proposal_from_row).collect())
+    }
+
+    fn all_associations(&self) -> Result<Vec<Association>, LocusKitError> {
+        // Non-tombstoned associations, filedAt ascending. Mirrors the
+        // tombstone guard in associations_from/associations_to.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_ASSOCIATIONS,
+                Some(&StoragePredicate::IsNull(Column::new(
+                    T_ASSOCIATIONS,
+                    "tombstonedAt",
+                ))),
+                &[OrderClause::new(
+                    Column::new(T_ASSOCIATIONS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(association_from_row).collect())
+    }
+
+    fn all_learned_references(&self) -> Result<Vec<LearnedReference>, LocusKitError> {
+        // Non-tombstoned learned references, filedAt ascending. Mirrors
+        // the tombstone guard in learned_references_from_source.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_LEARNED_REFERENCES,
+                Some(&StoragePredicate::IsNull(Column::new(
+                    T_LEARNED_REFERENCES,
+                    "tombstonedAt",
+                ))),
+                &[OrderClause::new(
+                    Column::new(T_LEARNED_REFERENCES, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(learned_reference_from_row).collect())
+    }
+
+    fn all_kg_facts(&self) -> Result<Vec<KGFact>, LocusKitError> {
+        // KG-facts where state cluster < 7 (excludes rejected/accepted/
+        // tombstoned post-resolution states). Mirrors kg_facts_for_drawer
+        // but without the source-drawer predicate.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_KG_FACTS,
+                Some(&StoragePredicate::Lt(
+                    Column::new(T_KG_FACTS, "g_state_cluster"),
+                    TypedValue::Int(7),
+                )),
+                &[OrderClause::new(
+                    Column::new(T_KG_FACTS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(kg_fact_from_row).collect())
+    }
+
+    fn all_diary_entries(&self) -> Result<Vec<DiaryEntry>, LocusKitError> {
+        // Non-tombstoned diary entries, filedAt ascending. Mirrors the
+        // tombstone guard used in read_diary / read_diary_in_wing.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_DIARY,
+                Some(&StoragePredicate::IsNull(Column::new(
+                    T_DIARY,
+                    "tombstonedAt",
+                ))),
+                &[OrderClause::new(
+                    Column::new(T_DIARY, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.iter().map(diary_from_row).collect())
     }
 }
 
@@ -2147,6 +2316,9 @@ impl DrawerStore for InMemoryDrawerStore {
     fn tunnels_to_wing(&self, wing: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.inner.tunnels_to_wing(wing)
     }
+    fn all_tunnels(&self) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        self.inner.all_tunnels()
+    }
     fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
         self.inner.add_kg_fact(fact)
     }
@@ -2257,6 +2429,13 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<Vec<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
         self.inner.recall_trace_since(since)
     }
+    fn recent_recall_traces(
+        &self,
+        since: &str,
+        now: &str,
+    ) -> Result<Vec<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
+        self.inner.recent_recall_traces(since, now)
+    }
     fn mark_recall_trace_used(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
         self.inner.mark_recall_trace_used(id, now)
     }
@@ -2277,6 +2456,23 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn taxonomy(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
         self.inner.taxonomy()
+    }
+    fn all_proposals(&self) -> Result<Vec<crate::proposal::Proposal>, LocusKitError> {
+        self.inner.all_proposals()
+    }
+    fn all_associations(&self) -> Result<Vec<crate::association::Association>, LocusKitError> {
+        self.inner.all_associations()
+    }
+    fn all_learned_references(
+        &self,
+    ) -> Result<Vec<crate::learned_reference::LearnedReference>, LocusKitError> {
+        self.inner.all_learned_references()
+    }
+    fn all_kg_facts(&self) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
+        self.inner.all_kg_facts()
+    }
+    fn all_diary_entries(&self) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
+        self.inner.all_diary_entries()
     }
 }
 
@@ -2305,6 +2501,12 @@ fn drawer_values(d: &Drawer) -> BTreeMap<String, TypedValue> {
     );
     m.insert("addedBy".to_string(), TypedValue::Text(d.added_by.clone()));
     m.insert("filedAt".to_string(), TypedValue::Timestamp(d.filed_at));
+    m.insert(
+        "eventTime".to_string(),
+        d.event_time
+            .map(TypedValue::Timestamp)
+            .unwrap_or(TypedValue::Null),
+    );
     m.insert(
         "embeddingModelID".to_string(),
         TypedValue::Text(d.embedding_model_id.clone()),
@@ -2687,6 +2889,13 @@ fn drawer_from_row(row: &StorageRow) -> Drawer {
         chunk_index: opt_int_value_of(row.get("chunkIndex")),
         added_by: string_value_of(row.get("addedBy")),
         filed_at: i64_value_of(row.get("filedAt")),
+        // Two-clock ingest (ING-01): backfill a NULL/absent eventTime to
+        // this row's filed_at. Rows written before the column existed read
+        // NULL here; the fallback gives them event_time == filed_at (the
+        // streaming-capture identity), realizing the backfill in the read
+        // path rather than via ALTER+UPDATE.
+        event_time: opt_int_value_of(row.get("eventTime"))
+            .or_else(|| Some(i64_value_of(row.get("filedAt")))),
         embedding_model_id: string_value_of(row.get("embeddingModelID")),
         tombstoned_at: opt_int_value_of(row.get("tombstonedAt")),
         removed_by_batch: opt_string_value_of(row.get("removedByBatch")),
@@ -3852,6 +4061,76 @@ mod tests {
             .unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["mid", "late"]);
+    }
+
+    #[test]
+    fn recent_recall_traces_windowed_filter() {
+        let store = open_store();
+        let before = RecallTraceItem::new("before", "d-a", "2024-01-01T00:00:00.000Z", None, 0);
+        let at_since = RecallTraceItem::new("at-since", "d-b", "2024-06-01T00:00:00.000Z", None, 0);
+        let inside = RecallTraceItem::new("inside", "d-c", "2024-09-01T00:00:00.000Z", None, 0);
+        let at_now = RecallTraceItem::new("at-now", "d-d", "2024-12-01T00:00:00.000Z", None, 0);
+        let after = RecallTraceItem::new("after", "d-e", "2025-01-01T00:00:00.000Z", None, 0);
+        for item in &[&before, &at_since, &inside, &at_now, &after] {
+            store.insert_recall_trace(item).unwrap();
+        }
+        let rows = store
+            .recent_recall_traces("2024-06-01T00:00:00.000Z", "2024-12-01T00:00:00.000Z")
+            .unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        // Lower and upper bounds inclusive; "before" and "after" excluded.
+        assert!(ids.contains(&"at-since"));
+        assert!(ids.contains(&"inside"));
+        assert!(ids.contains(&"at-now"));
+        assert!(!ids.contains(&"before"));
+        assert!(!ids.contains(&"after"));
+    }
+
+    #[test]
+    fn recent_recall_traces_empty_when_window_has_no_rows() {
+        let store = open_store();
+        store
+            .insert_recall_trace(&RecallTraceItem::new(
+                "old",
+                "d-x",
+                "2023-01-01T00:00:00.000Z",
+                None,
+                0,
+            ))
+            .unwrap();
+        let rows = store
+            .recent_recall_traces("2024-01-01T00:00:00.000Z", "2024-12-31T00:00:00.000Z")
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn all_tunnels_returns_all_non_tombstoned() {
+        let store = open_store();
+        let t1 = Tunnel::new(
+            "t1".to_string(), "wA".to_string(), "r1".to_string(),
+            "wB".to_string(), "r2".to_string(), "link-a".to_string(),
+            "test".to_string(), NOW,
+        );
+        let t2 = Tunnel::new(
+            "t2".to_string(), "wC".to_string(), "r3".to_string(),
+            "wD".to_string(), "r4".to_string(), "link-b".to_string(),
+            "test".to_string(), NOW,
+        );
+        store.add_tunnel(&t1).unwrap();
+        store.add_tunnel(&t2).unwrap();
+        let all = store.all_tunnels().unwrap();
+        assert_eq!(all.len(), 2);
+        let ids: Vec<&str> = all.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&"t1"));
+        assert!(ids.contains(&"t2"));
+    }
+
+    #[test]
+    fn all_tunnels_returns_empty_for_fresh_store() {
+        let store = open_store();
+        let all = store.all_tunnels().unwrap();
+        assert!(all.is_empty());
     }
 
     // -----------------------------------------------------------------

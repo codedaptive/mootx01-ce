@@ -148,8 +148,8 @@ struct EstateVerbTests {
         }
     }
 
-    @Test("mutate state-axis kind is not yet implemented (throws invalidContent)")
-    func mutate_stateAxisKind_throwsInvalidContent() async throws {
+    @Test(".reject on an active drawer throws — automaton enforces pending-only source state")
+    func mutate_reject_fromActive_throwsGateViolation() async throws {
         let (estate, _) = try await makeEstate()
         let frame = CaptureFrame(
             content: "x",
@@ -160,6 +160,8 @@ struct EstateVerbTests {
             embeddingModelID: "minilm-v6"
         )
         let drawer = try await estate.capture(frame)
+        // reject is implemented but the automaton only permits it from .pending.
+        // Active rows raise a gate discipline violation.
         await #expect(throws: LocusKitError.self) {
             try await estate.mutate(rowID: drawer.id, kind: .reject, payload: String?.none)
         }

@@ -219,4 +219,157 @@ struct CaptureTunnelTests {
         var frame = sampleFrame(); frame.addedBy = ""
         await #expect(throws: LocusKitError.self) { _ = try await estate.capture(frame) }
     }
+
+    // MARK: - originClass round-trip tests (TCO-001)
+
+    /// Verify the default `originClass` is `.userExplicit` and that the
+    /// captured tunnel's `operationalBitmap` is zero (raw 0 at bits 6–8).
+    @Test("default originClass is .userExplicit and produces zero operationalBitmap")
+    func originClassDefault() async throws {
+        let estate = try await makeEstate()
+        let frame = sampleFrame() // originClass defaults to .userExplicit
+        let captured = try await estate.capture(frame)
+        #expect(captured.originClass == .userExplicit)
+        #expect(captured.operationalBitmap == 0)
+        let loaded = try #require(try await estate._peekTunnel(id: captured.id))
+        #expect(loaded.originClass == .userExplicit)
+        #expect(loaded.operationalBitmap == 0)
+    }
+
+    /// Round-trip all five `TunnelOriginClass` raw values through capture
+    /// and verify both the decoded enum and the raw bit pattern persist correctly.
+    @Test("originClass round-trips all five raw values")
+    func originClassRoundTripsAllFiveRaws() async throws {
+        let estate = try await makeEstate()
+        let cases: [(TunnelOriginClass, Int64)] = [
+            (.userExplicit, 0 << 6),   // raw 0 → bits 6–8 = 0
+            (.derived,      1 << 6),   // raw 1 → bits 6–8 = 1
+            (.imported,     2 << 6),   // raw 2 → bits 6–8 = 2
+            (.federatedSync, 3 << 6),  // raw 3 → bits 6–8 = 3
+            (.migration,    4 << 6),   // raw 4 → bits 6–8 = 4
+        ]
+        for (originClass, expectedBits) in cases {
+            var frame = sampleFrame(label: "test-\(originClass.rawValue)")
+            frame.originClass = originClass
+            let captured = try await estate.capture(frame)
+            let loaded = try #require(try await estate._peekTunnel(id: captured.id))
+            #expect(loaded.originClass == originClass)
+            #expect(loaded.operationalBitmap == expectedBits)
+        }
+    }
+
+    /// Verify `.imported` (raw 2) encodes to the exact bit pattern `2 << 6 = 128 = 0x80`.
+    /// This is the canonical VaultKit use case that motivated the mission.
+    @Test("imported originClass encodes to operationalBitmap == 0x80 and rawValue == 2")
+    func importedOriginClassBitPattern() async throws {
+        let estate = try await makeEstate()
+        var frame = sampleFrame(label: "imported-link")
+        frame.originClass = .imported
+        let captured = try await estate.capture(frame)
+        let loaded = try #require(try await estate._peekTunnel(id: captured.id))
+        #expect(loaded.operationalBitmap == (2 << 6))
+        #expect(loaded.originClass.rawValue == 2)
+        #expect(loaded.originClass == .imported)
+    }
+
+    // MARK: - DrawerFeatureFlags round-trip tests (TCO-001)
+
+    /// Build a drawer capture frame with the specified feature flags.
+    private func drawerFrameWithFlags(
+        content: String,
+        flags: DrawerFeatureFlags
+    ) -> CaptureFrame {
+        CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: "test-room",
+            latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "test-agent",
+            embeddingModelID: "minilm-v6",
+            featureFlags: flags
+        )
+    }
+
+    /// Default frame produces no feature flags; bits 12–23 of the
+    /// operational bitmap are all zero.
+    @Test("default featureFlags produces zero feature bits in operationalBitmap")
+    func featureFlagsDefault() async throws {
+        let estate = try await makeEstate()
+        let drawer = try await estate.capture(drawerFrameWithFlags(
+            content: "plain drawer", flags: []))
+        let loaded = try #require(try await estate._peekDrawer(id: drawer.id))
+        // Bits 12–23 must all be zero.
+        #expect(loaded.operationalBitmap & 0xFFF000 == 0)
+        #expect(loaded.featureFlags == [])
+    }
+
+    /// `[.hasLinks, .hasAttachments]` round-trips through capture and the
+    /// persisted drawer has both flags set; the bits 12–23 contain exactly
+    /// `(1 << 15) | (1 << 12)` and no other feature flags.
+    @Test("hasLinks+hasAttachments round-trips and sets correct bits 12–23")
+    func featureFlagsHasLinksHasAttachments() async throws {
+        let estate = try await makeEstate()
+        let flags: DrawerFeatureFlags = [.hasLinks, .hasAttachments]
+        let drawer = try await estate.capture(drawerFrameWithFlags(
+            content: "linked drawer", flags: flags))
+        let loaded = try #require(try await estate._peekDrawer(id: drawer.id))
+        // hasLinks = 1<<15 = 0x8000, hasAttachments = 1<<12 = 0x1000
+        let expectedBits: Int64 = (1 << 15) | (1 << 12)
+        #expect(loaded.operationalBitmap & 0xFFF000 == expectedBits)
+        #expect(loaded.hasFeatureFlag(.hasLinks))
+        #expect(loaded.hasFeatureFlag(.hasAttachments))
+        // No other feature flags must be set.
+        #expect(!loaded.hasFeatureFlag(.hasVoice))
+        #expect(!loaded.hasFeatureFlag(.hasImage))
+        #expect(!loaded.hasFeatureFlag(.isPinned))
+    }
+
+    /// The channel/kind bits (0–11) are not disturbed by feature flags.
+    @Test("featureFlags do not disturb channel or kind bits")
+    func featureFlagsDoNotDisturbChannelKindBits() async throws {
+        let estate = try await makeEstate()
+        let frame = CaptureFrame(
+            content: "test",
+            channel: .ocr,      // raw 2 → bits 0–5
+            room: "r",
+            latticeAnchor: LatticeAnchor(udcCode: "4"),
+            addedBy: "a",
+            embeddingModelID: "m",
+            kind: .code,        // raw 1 → bits 6–11
+            featureFlags: [.hasLinks]
+        )
+        let loaded = try #require(try await estate._peekDrawer(
+            id: (try await estate.capture(frame)).id))
+        // channel bits 0–5 = 2 (ocr), kind bits 6–11 = 1 (code)
+        #expect(loaded.captureChannel == .ocr)
+        #expect(loaded.contentKind == .code)
+        #expect(loaded.hasFeatureFlag(.hasLinks))
+    }
+
+    // MARK: - Swift/Rust bitmap parity assertions
+
+    /// Verify that `.imported` produces `0x80` encoded in Swift, matching
+    /// the Rust canonical value asserted in capture_tunnel_tests.rs.
+    @Test("imported originClass encoded value is 0x80 (matches Rust conformance)")
+    func importedOriginClassSwiftRustParity() async throws {
+        let estate = try await makeEstate()
+        var frame = sampleFrame(label: "parity")
+        frame.originClass = .imported
+        let captured = try await estate.capture(frame)
+        // imported (raw 2) at shift 6 → 2 << 6 = 0x80 = 128.
+        #expect(captured.operationalBitmap == 0x80)
+    }
+
+    /// Verify that `[.hasLinks, .hasAttachments]` produces `0x9000` in
+    /// the feature-flags region, matching the Rust conformance assertion.
+    @Test("hasLinks+hasAttachments encoded value is 0x9000 (matches Rust conformance)")
+    func featureFlagsSwiftRustParity() async throws {
+        let estate = try await makeEstate()
+        let drawer = try await estate.capture(drawerFrameWithFlags(
+            content: "parity",
+            flags: [.hasLinks, .hasAttachments]
+        ))
+        // hasLinks = 1<<15 = 0x8000, hasAttachments = 1<<12 = 0x1000 → 0x9000
+        #expect(drawer.operationalBitmap & 0xFFF000 == 0x9000)
+    }
 }

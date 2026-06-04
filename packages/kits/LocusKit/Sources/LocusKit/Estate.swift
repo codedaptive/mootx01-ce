@@ -258,6 +258,61 @@ public actor Estate {
         try await store.tunnelsFrom(wing: wing)
     }
 
+    // MARK: - Dreaming substrate reads
+
+    /// Recall-trace rows whose `recalledAt` falls in `[since, now]`. The
+    /// two-sided window the dreaming daemon uses when it mines the reward
+    /// signal for a cycle. Delegates to `DrawerStore.recentRecallTraces`.
+    public func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem] {
+        try await store.recentRecallTraces(since: since, now: now)
+    }
+
+    /// All non-tombstoned tunnels across all wings, in filed-at order.
+    /// Used by the dreaming daemon to suppress candidate proposals that
+    /// already have a Tunnel. Delegates to `DrawerStore.allTunnels`.
+    public func allTunnels() async throws -> [Tunnel] {
+        try await store.allTunnels()
+    }
+
+    // MARK: - Unfiltered full-corpus reads (recall surface)
+
+    /// All proposals estate-wide, ordered by `filedAt` ascending.
+    /// Estate-level pass-through over `DrawerStore.allProposals`.
+    /// Peer of the Rust `Estate::all_proposals`.
+    public func allProposals() async throws -> [Proposal] {
+        try await store.allProposals()
+    }
+
+    /// All non-tombstoned associations estate-wide, ordered by `filedAt`
+    /// ascending. Estate-level pass-through over `DrawerStore.allAssociations`.
+    /// Peer of the Rust `Estate::all_associations`.
+    public func allAssociations() async throws -> [Association] {
+        try await store.allAssociations()
+    }
+
+    /// All non-tombstoned learned references estate-wide, ordered by
+    /// `filedAt` ascending. Estate-level pass-through over
+    /// `DrawerStore.allLearnedReferences`.
+    /// Peer of the Rust `Estate::all_learned_references`.
+    public func allLearnedReferences() async throws -> [LearnedReference] {
+        try await store.allLearnedReferences()
+    }
+
+    /// All kg-facts estate-wide where state cluster < 7, ordered by
+    /// `filedAt` ascending. Estate-level pass-through over
+    /// `DrawerStore.allKGFacts`.
+    /// Peer of the Rust `Estate::all_kg_facts`.
+    public func allKGFacts() async throws -> [KGFact] {
+        try await store.allKGFacts()
+    }
+
+    /// All non-tombstoned diary entries estate-wide, ordered by `filedAt`
+    /// ascending. Estate-level pass-through over `DrawerStore.allDiaryEntries`.
+    /// Peer of the Rust `Estate::all_diary_entries`.
+    public func allDiaryEntries() async throws -> [DiaryEntry] {
+        try await store.allDiaryEntries()
+    }
+
     // MARK: - Manifest and identity
 
     /// Typed snapshot of the estate manifest.

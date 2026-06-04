@@ -208,6 +208,17 @@ impl Drawer {
         ))
     }
 
+    /// Decode bits 18–23 of `adjective_bitmap` as a `Trust`. Returns
+    /// `Verbatim` for unrecognised raw values; verbatim is the neutral
+    /// baseline (unqualified content as filed). Cookbook §2.3 6-bit field.
+    /// The parity of the Swift `Drawer.trust` computed property in
+    /// `Adjectives.swift`; lives here alongside `adjective_sensitivity()`,
+    /// the other adjective-bitmap accessor.
+    pub fn trust(&self) -> crate::adjectives::Trust {
+        // Cookbook §2.3: trust at bits 18-23 of adjective_bitmap.
+        crate::adjectives::Trust::from_raw(bit_field::extract_field(self.adjective_bitmap, 18, 6))
+    }
+
     /// The feature-flag region of `operational_bitmap` masked to bits
     /// 12–23. Bit positions inside the masked value match the
     /// `DrawerFeatureFlags` constants exactly. Cookbook §2.4.
@@ -389,5 +400,22 @@ mod tests {
         // Other bits don't trigger.
         d.operational_bitmap = 1 << 24;
         assert!(!d.lineage_clustering_active());
+    }
+
+    #[test]
+    fn trust_accessor_reads_bits_18_23() {
+        use crate::adjectives::Trust;
+        let mut d = sample();
+        // Default is the neutral baseline.
+        assert_eq!(d.trust(), Trust::Verbatim);
+        // Canonical (raw 3) at bits 18-23.
+        d.adjective_bitmap = Trust::Canonical.raw_value() << 18;
+        assert_eq!(d.trust(), Trust::Canonical);
+        // Lower-field bits (sensitivity at 6-11) don't leak into trust.
+        d.adjective_bitmap |= crate::adjectives::AdjectiveSensitivity::Secret.raw_value() << 6;
+        assert_eq!(d.trust(), Trust::Canonical);
+        // Ambient (raw 6) — the highest used case.
+        d.adjective_bitmap = Trust::Ambient.raw_value() << 18;
+        assert_eq!(d.trust(), Trust::Ambient);
     }
 }
