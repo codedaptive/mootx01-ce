@@ -304,6 +304,10 @@ public enum ToolProjection {
                     "limit": integerSchema("Max rows to return."),
                     "ordering": stringSchema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc."),
                     "hydrationLevel": stringSchema("Hydration: structured (default), full, bitmapOnly."),
+                    "explain": booleanSchema("Return per-hit explanation blocks. Activates the Recall Director path."),
+                    "queryText": stringSchema("Free-text query for BM25 and vector recall lanes."),
+                    "recallMode": stringSchema("Recall mode: locusOnly | corpusOnly | hybrid | unionBest. Default: unionBest when explain is true."),
+                    "scoring": stringSchema("Scoring strategy: raw | rrf | matrixAware. Default: matrixAware."),
                 ],
                 required: []
             )

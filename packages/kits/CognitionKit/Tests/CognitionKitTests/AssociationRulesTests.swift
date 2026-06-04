@@ -184,7 +184,7 @@ extension AssociationRulesTests {
         }
 
         let input = AssociationRules.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed], limit: 100),
             thresholds: .init(minSupport: 0.0, minConfidence: 0.0))
         let out = try await AssociationRules().run(
             input: input, estate: handle, kit: kit)

@@ -358,8 +358,8 @@ public struct ToolDispatcher: Sendable {
 
         // explain: true — route through the Recall Director (GLKRecallRequest /
         // GLKRecallResult) and append explanation blocks per selected hit.
-        // Opt-in only: callers that omit "explain" or pass false get the
-        // unchanged legacy path below; no existing behavior is affected.
+        // Opt-in only: callers that omit "explain" or pass false take the
+        // fast locus-only path below (see comment at that branch).
         if args["explain"]?.boolValue == true {
             let queryText = args["queryText"]?.stringValue
             let effectiveLimit = rawLimit ?? 12
@@ -369,10 +369,16 @@ public struct ToolDispatcher: Sendable {
                 limit: effectiveLimit,
                 ordering: ordering
             )
+            // Decode recall mode and scoring from the caller's args; fall back to
+            // the current defaults (unionBest, matrixAware) when omitted so that
+            // existing callers that set explain:true but omit these fields retain
+            // their current behaviour unchanged.
+            let recallMode = GLKRecallMode(rawValue: args["recallMode"]?.stringValue ?? "") ?? .unionBest
+            let scoringStrategy = GLKRecallScoring(rawValue: args["scoring"]?.stringValue ?? "") ?? .matrixAware
             let request = GLKRecallRequest(
                 frame: frame,
-                mode: .unionBest,
-                scoring: .matrixAware,
+                mode: recallMode,
+                scoring: scoringStrategy,
                 limit: effectiveLimit,
                 fallback: .allowDegraded,
                 queryText: queryText
@@ -392,7 +398,10 @@ public struct ToolDispatcher: Sendable {
             return Self.textResult(lines.joined(separator: "\n"))
         }
 
-        // Legacy path — unchanged behavior for callers that omit explain.
+        // Fast locus-only path: callers that omit `explain` receive structured recall
+        // via RecallStream without BM25 or vector lane composition. This is intentional
+        // for low-latency use cases. To activate corpus/vector lanes, pass explain: true
+        // or supply recallMode in the tool params (see RECALL-API-001).
         let frame = RecallFrame(
             filterChain: [filter],
             hydrationLevel: hydration,

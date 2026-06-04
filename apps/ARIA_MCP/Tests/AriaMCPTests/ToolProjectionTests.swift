@@ -99,6 +99,27 @@ struct ToolProjectionTests {
         #expect(schema?["properties"]?.objectValue?["estateID"] == nil)
     }
 
+    /// The four recall-director knobs (explain, queryText, recallMode, scoring) must
+    /// be advertised as optional properties on the `moot_drawer_recall` schema.
+    /// Any drift here means a caller cannot wire the Recall Director through ARIA.
+    @Test func testDrawerRecallSchemaAdvertisesRecallKnobs() {
+        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_drawer_recall" }) else {
+            Issue.record("moot_drawer_recall tool not found")
+            return
+        }
+        let properties = tool.inputSchema.objectValue?["properties"]?.objectValue
+        #expect(properties?["explain"] != nil, "explain must be present")
+        #expect(properties?["queryText"] != nil, "queryText must be present")
+        #expect(properties?["recallMode"] != nil, "recallMode must be present")
+        #expect(properties?["scoring"] != nil, "scoring must be present")
+        // All four are optional — confirm none are in required.
+        let required = tool.inputSchema.objectValue?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        #expect(!required.contains("explain"))
+        #expect(!required.contains("queryText"))
+        #expect(!required.contains("recallMode"))
+        #expect(!required.contains("scoring"))
+    }
+
     /// `estateID` is an optional addressing field on every per-estate
     /// (lexicon) tool: present in `properties`, never in `required`.
     @Test func testEstateIDIsOptionalOnPerEstateTools() {

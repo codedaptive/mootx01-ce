@@ -323,4 +323,72 @@ struct VectorStoreTests {
         #expect(nearest.contains { $0.drawerID == "alpha-doc" })
         #expect(keyword.contains("alpha-doc"))
     }
+
+    /// `findNearest` returns exactly `limit` results when the corpus is
+    /// larger than `limit`. Inserts 100 vectors and requests 5 — the
+    /// result count must be exactly 5.
+    @Test func findNearestReturnsBoundedCountEqualToLimit() async throws {
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        for i in 1...100 {
+            try await store.addVector(
+                drawerID: "drawer-\(String(format: "%03d", i))",
+                engram: Engram(blocks: UInt64(i), 0, 0, 0),
+                modelID: "minilm",
+                modelVersion: "1.0.0",
+                filedAt: now
+            )
+        }
+        let probe = Engram(blocks: 0, 0, 0, 0)
+        let result = try await store.findNearest(probe: probe,
+                                                 modelID: "minilm",
+                                                 limit: 5)
+        #expect(result.count == 5)
+    }
+
+    /// `findNearest` results are sorted by Hamming distance ascending.
+    /// Uses the seeded corpus (alpha=1, bravo=2, charlie=3, delta=4)
+    /// and a zero probe — verifies non-decreasing distance order over
+    /// all 4 results.
+    @Test func findNearestResultsAreSortedByDistanceAscending() async throws {
+        let store = try await makeStore()
+        try await seedCorpus(store)
+        let probe = Engram(blocks: 0, 0, 0, 0)
+        let matches = try await store.findNearest(probe: probe,
+                                                  modelID: "minilm",
+                                                  limit: 4)
+        for i in 1..<matches.count {
+            #expect(matches[i - 1].distance <= matches[i].distance)
+        }
+    }
+
+    /// When two candidates have identical Hamming distance from the
+    /// probe, `findNearest` breaks the tie by `drawerID` ascending.
+    ///
+    /// Engram(blocks: 1, 0, 0, 0) (popcount=1) and
+    /// Engram(blocks: 2, 0, 0, 0) (popcount=1) are both distance 1
+    /// from the zero probe. The drawer with the lexicographically
+    /// smaller ID ("aaa-drawer") must appear first.
+    @Test func findNearestTieBreakByDrawerIDIsStable() async throws {
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        // Both engrams have popcount 1 — identical distance from zero probe.
+        try await store.addVector(drawerID: "zzz-drawer",
+                                  engram: Engram(blocks: 1, 0, 0, 0),
+                                  modelID: "minilm",
+                                  modelVersion: "1.0.0",
+                                  filedAt: now)
+        try await store.addVector(drawerID: "aaa-drawer",
+                                  engram: Engram(blocks: 2, 0, 0, 0),
+                                  modelID: "minilm",
+                                  modelVersion: "1.0.0",
+                                  filedAt: now)
+        let probe = Engram(blocks: 0, 0, 0, 0)
+        let matches = try await store.findNearest(probe: probe,
+                                                  modelID: "minilm",
+                                                  limit: 2)
+        #expect(matches.count == 2)
+        #expect(matches[0].drawerID == "aaa-drawer")
+        #expect(matches[1].drawerID == "zzz-drawer")
+    }
 }

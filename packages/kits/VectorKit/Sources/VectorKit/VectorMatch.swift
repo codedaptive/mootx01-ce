@@ -10,10 +10,9 @@ import Foundation
 /// ascending — smaller distance is "closer," so a sorted array of
 /// matches reads near → far from front to back. Ties on distance
 /// have no defined tiebreak at this layer; `VectorStore.findNearest`
-/// gets its ordering from `EngramLib.findNearest` which tiebreaks
-/// on candidate index ascending. The ordering is stable across
-/// equivalent corpora but is intentionally not part of the
-/// `VectorMatch` contract.
+/// applies a secondary sort by `drawerID` ascending for deterministic
+/// output. The ordering is stable across equivalent corpora but is
+/// intentionally not part of the `VectorMatch` contract.
 ///
 /// `Sendable` — `VectorMatch` is a value type composed of value
 /// fields and can be returned across actors / from background
