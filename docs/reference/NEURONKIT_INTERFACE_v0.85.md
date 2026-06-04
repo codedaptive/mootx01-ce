@@ -9,7 +9,7 @@ languages: [swift, rust]
 relates_to:
   - NEURONKIT_SPEC_v0.85.md  (the contract this interface implements)
 purpose: |
-  Public API surface of NeuronKit in both legs: the lattice-anchor
+  Public API surface of NeuronKit in both ports: the lattice-anchor
   inference path, the hybrid-recall + MMR reasoning surface, context
   synthesis, branch operations, the migration benchmark, tournament
   ranking, the Bradley-Terry batch MLE fitter, the dreaming and
@@ -67,12 +67,6 @@ purpose: |
   `learnedPreference`, `CategoryBias`, `PreferenceStrength`
 - `Sources/NeuronKit/Lenses/Anticipation.swift` — `anticipate`,
   `ActionObservation`, `ActionPrediction`
-- `Sources/NeuronKit/Lenses/Drift.swift` — `drift`, `DriftScore`
-- `Sources/NeuronKit/Lenses/AnomalyScan.swift` — `anomalies`, `Anomaly`
-- `Sources/NeuronKit/Lenses/PartialRecall.swift` — `partialRecall`,
-  `FingerprintBlock`, `PartialMatch`
-- `Sources/NeuronKit/Lenses/MindOverlap.swift` — `dpSummary`,
-  `summaryOverlap`
 - `Sources/NeuronKit/Dreaming/` — `DreamingDaemon`, `DreamingPolicy`
   (+ `DreamingPolicyStore`, `InMemoryDreamingPolicyStore`),
   `DreamingTriggerMode`, `RewardSource` (+ `RewardSourceKind`,
@@ -285,12 +279,12 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
     public let profileID: UUID
     public let name: String
     public let framingParameters: [String: String]   // [String: Any] narrowed for Codable
-    public let scoringBreakdown: [String: Double]
-    public let preferenceWeights: [String: Double]
+    public let scoringBreakdown: [String: Float]
+    public let preferenceWeights: [String: Float]
     public let createdAt: Date                        // caller-supplied; stored ISO8601 TEXT
     public let trainingEligible: Bool                 // value-type Bool; not a SQLite entity (B-1)
     public init(profileID: UUID = UUID(), name: String, framingParameters: [String: String],
-                scoringBreakdown: [String: Double], preferenceWeights: [String: Double],
+                scoringBreakdown: [String: Float], preferenceWeights: [String: Float],
                 createdAt: Date, trainingEligible: Bool = false)
 }
 ```
@@ -301,8 +295,8 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
 pub struct ScenarioProfile {
     pub profile_id: String, pub name: String,
     pub framing_parameters: BTreeMap<String, String>,
-    pub scoring_breakdown: BTreeMap<String, f64>,
-    pub preference_weights: BTreeMap<String, f64>,
+    pub scoring_breakdown: BTreeMap<String, f32>,
+    pub preference_weights: BTreeMap<String, f32>,
     pub created_at: String,            // ISO8601
     pub training_eligible: bool,
 }   // ScenarioProfile::new(...)
@@ -389,7 +383,7 @@ public struct TournamentReport: Sendable, Equatable {
 ### Reasoning-lens result types (SPEC § 7)
 
 Pure data carried out of the lenses; identical shape across ports (member
-names match; the only sanctioned cross-leg divergence anywhere in
+names match; the only sanctioned cross-port divergence anywhere in
 NeuronKit is the fitter error name in § 4, SPEC C-6). All Swift result
 types are `Sendable, Equatable, Codable`; all Rust result types derive
 `Debug, Clone, PartialEq` and serde where serialised.
@@ -470,28 +464,6 @@ public struct ActionPrediction: Sendable, Equatable, Codable {
     public let count: UInt32                   // observations supporting this action
     public init(action: UInt8, successRate: Float, count: UInt32)
 }
-
-public struct DriftScore: Sendable, Equatable, Codable {
-    public let jensenShannon: Float            // symmetric, bounded — primary signal
-    public let klDivergence: Float             // D(p‖q), asymmetric
-    public init(jensenShannon: Float, klDivergence: Float)
-}
-
-public struct Anomaly: Sendable, Equatable, Codable {
-    public let index: Int                      // position in the input series
-    public let zScore: Float                   // signed — negative = below the mean
-    public init(index: Int, zScore: Float)
-}
-
-public enum FingerprintBlock: Int, Sendable, Equatable, Codable, CaseIterable {
-    case structure = 0, concept = 1, temporal = 2, channel = 3
-}
-
-public struct PartialMatch: Sendable, Equatable, Codable {
-    public let rowID: UUID
-    public let score: Double
-    public init(rowID: UUID, score: Double)
-}
 ```
 
 **Rust:**
@@ -518,15 +490,6 @@ pub struct PreferenceStrength {
 // § 7.4 Prediction
 pub struct ActionObservation { pub action: u8, pub outcome: u8, pub success: bool }
 pub struct ActionPrediction { pub action: u8, pub success_rate: f32, pub count: u32 }
-
-// § 7.5 Surprise
-pub struct DriftScore { pub jensen_shannon: f32, pub kl_divergence: f32 }
-pub struct Anomaly { pub index: usize, pub z_score: f32 }
-
-// § 7.6 Associative — block indices as u8 consts (BLOCK_STRUCTURE 0,
-// BLOCK_CONCEPT 1, BLOCK_TEMPORAL 2, BLOCK_CHANNEL 3); matches as
-// (RowId, f64) pairs. The Swift version models the same surface as the
-// FingerprintBlock enum and PartialMatch value type.
 ```
 
 ### Dreaming daemon surface
@@ -682,11 +645,6 @@ public func hybridRecall(_ frame: RecallFrame, handle: EstateHandle,
 // the per-row fingerprint derivation, keeping mmrRank free of estate context.
 public func mmrRank(candidates: [Drawer], query: Engram, lambda: Float, k: Int,
                     fingerprint: (Drawer) -> Engram) -> [Drawer]
-
-// Deterministic Jaccard similarity over 3-char lowercase shingles — the
-// engine's similarity, surfaced publicly (the Rust shingle_similarity
-// has always been pub). Bit-identical across versions on shared vectors.
-public static func shingleSimilarity(_ a: String, _ b: String) -> Float   // on NeuronKit
 ```
 
 **Rust:** (pure rerank + paging only — no estate, no `mmrRank`)
@@ -861,24 +819,6 @@ extension NeuronKit {
     // § 7.4 Prediction.
     public static func anticipate(observations: [ActionObservation], targetOutcome: UInt8,
                                   k: Int, minObservations: UInt32) -> [ActionPrediction]
-
-    // § 7.5 Surprise.
-    public static func drift(from p: [Float], to q: [Float]) -> DriftScore
-    public static func anomalies(values: [Float], threshold: Float) -> [Anomaly]
-
-    // § 7.6 Associative.
-    public static func partialRecall(
-        anchor: Fingerprint256,
-        rows: [(rowID: UUID, fingerprint: Fingerprint256)],
-        matchBlocks: Set<FingerprintBlock>,
-        differBlocks: Set<FingerprintBlock>,
-        k: Int
-    ) -> [PartialMatch]
-
-    // § 7.7 Federated.
-    public static func dpSummary(fingerprints: [Fingerprint256], epsilon: Double,
-                                 delta: Double, kAnonymity: Int, seed: UInt64) -> Fingerprint256
-    public static func summaryOverlap(_ a: Fingerprint256, _ b: Fingerprint256) -> Double
 }
 ```
 
@@ -959,7 +899,7 @@ cargo test -p neuron-kit
 
 (Exercises the pure reasoning engines shared with Swift — lattice anchor,
 hybrid-recall rerank / shingle / paging, context synthesis, Bradley-Terry
-— and every § 7 lens, against the shared cross-leg vectors of C-Det.)
+— and every § 7 lens, against the shared cross-port vectors of C-Det.)
 
 ## § 6 — Examples
 

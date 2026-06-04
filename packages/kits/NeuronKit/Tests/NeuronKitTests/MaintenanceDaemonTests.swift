@@ -25,7 +25,6 @@ import Testing
 import Foundation
 import SubstrateTypes
 import GeniusLocusKit
-import LocusKit
 @testable import NeuronKit
 
 // MARK: - In-memory seam fakes

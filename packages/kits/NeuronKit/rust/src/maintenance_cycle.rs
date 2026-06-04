@@ -13,11 +13,12 @@
 //! public bitmap, the drift observations) and the GLK-owned
 //! `AuditChainVerifier.verify` are the ADAPTER's job; the reader seam
 //! yields their identity-free results (the `maintenance_decision` input
-//! shapes + an `AuditVerdict`). The write seam's `propose` is the
-//! Brain-layer verb, `NotSupportedByEstate` in both languages until the
-//! Brain layer ships — so a live proposal adapter waits on the same
-//! architectural boundary in both, not on this version. The orchestration is
-//! gated with deterministic fakes mirroring the Swift MaintenanceDaemonTests.
+//! shapes + an `AuditVerdict`). The write seam's `propose` goes through
+//! `EstateMaintenanceSink` (the production adapter, shipped in both Swift
+//! and Rust). The Rust adapter calls `store.add_proposal` directly
+//! (B-1-compliant; no GLK coordinator needed in the sync Rust port).
+//! The orchestration is gated with deterministic fakes mirroring the
+//! Swift MaintenanceDaemonTests.
 //!
 //! Determinism: no clock, no RNG. The daemon carries `cycle_count`; all
 //! time-derived inputs (ages, the audit verdict) arrive through the seam.

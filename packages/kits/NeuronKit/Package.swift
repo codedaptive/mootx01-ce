@@ -72,6 +72,11 @@ let package = Package(
         // and own no math (SPEC I-17); this is a typed-math dependency only,
         // consistent with B-1.
         .package(path: "../../libs/SubstrateML"),
+        // PersistenceKit is a test-only dependency: EstateDreamingReaderTests
+        // constructs an in-memory estate to integration-test the
+        // EstateDreamingReader adapter. No NeuronKit production source
+        // touches PersistenceKit; the B-1 invariant is preserved.
+        .package(path: "../PersistenceKit"),
     ],
     targets: [
         .target(
@@ -89,7 +94,15 @@ let package = Package(
         ),
         .testTarget(
             name: "NeuronKitTests",
-            dependencies: ["NeuronKit", .product(name: "SubstrateTypes", package: "SubstrateTypes")],
+            dependencies: [
+                "NeuronKit",
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                // EstateDreamingReaderTests constructs a live GeniusLocusKit
+                // estate with an in-memory backend to verify the production
+                // adapter delegates all three reads correctly.
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+            ],
             // Shared conformance vectors — one artifact read by this
             // suite AND rust/tests/lens_conformance.rs (QueueKit's
             // Fixtures pattern).

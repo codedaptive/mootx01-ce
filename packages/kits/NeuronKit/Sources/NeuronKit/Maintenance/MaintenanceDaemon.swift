@@ -22,11 +22,10 @@
 //
 // ── Why this daemon talks to seams, not to GLK verbs ─────────────────
 // B-1: NeuronKit never executes SQL and never calls LocusKit / VectorKit
-// / CorpusKit directly. The GLK verb surface cannot satisfy a daemon's
-// substrate needs today (the `propose` verb raises
-// `VerbError.notSupportedByEstate`, and no verb reads drawers, reads a
-// `UnifiedAuditLog`, or writes a `DiaryEntry`). So the daemon depends on
-// the NeuronKit-owned seams in `MaintenanceSeams.swift`. It references
+// / CorpusKit directly. Even with `propose` now live (Brain layer landed
+// in GLK-02), no estate verb reads drawers, reads a `UnifiedAuditLog`,
+// or writes a `DiaryEntry`. So the daemon depends on the NeuronKit-owned
+// seams in `MaintenanceSeams.swift`. It references
 // substrate VALUE types and calls the pure `AuditChainVerifier.verify`,
 // but calls no substrate method, so B-1 holds structurally. NeuronKit
 // owns the scheduling and the proposal; GeniusLocusKit owns the chain
@@ -40,7 +39,6 @@
 
 import Foundation
 import GeniusLocusKit
-import LocusKit
 
 /// The maintenance daemon — a background actor so it never blocks the
 /// caller (§ 3 autonomic contract). Idempotent across cycles (B-4):
