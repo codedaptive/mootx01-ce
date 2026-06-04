@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - CORPUSKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of CorpusKit in both legs: the Chunk content
+  Public API surface of CorpusKit in both ports: the Chunk content
   model and its content-addressed identity, the Chunker, the BM25Index
   actor, the BundleStore actor, HybridRecall, the Tokenizer protocol, the three CorpusKitProviders providers, the
   DeterministicTokenizer stand-in, and the CorpusKitSync manifest. The
@@ -423,7 +423,7 @@ impl Tokenizer for DeterministicTokenizer { /* FNV-1a fold, matches Swift */ }
 
 > **F11 consolidation (2026-05-27):** Swift AND Rust providers
 > conform to VectorKit's `EmbeddingProvider`. The previous parallel
-> `CorpusKit::TextEmbeddingProvider` (both legs) has been deleted.
+> `CorpusKit::TextEmbeddingProvider` (both ports) has been deleted.
 > Tokenizer stays in CorpusKit as a per-provider implementation
 > detail — not part of VectorKit's contract — preserving VectorKit's
 > pure-compute isolation for port maintenance.
@@ -581,7 +581,88 @@ cargo test -p corpus-kit-providers
 (The `corpus-kit` integration tests pull `corpus-kit-providers` as a
 dev-dependency for the `DeterministicTokenizer` fixture.)
 
-## § 6 — Examples
+## § 6 — Corpus actor (public entry point)
+
+### `EmbeddingModel` (Swift) / `EmbeddingModelConfig` (Rust)
+
+A CorpusKit-owned type for selecting the embedding model. No VectorKit
+type is required at the call site. The default is `.deterministic`
+(no CoreML required).
+
+**Swift:**
+
+```swift
+public enum EmbeddingModel: Sendable {
+    case deterministic
+    case miniLM(inference: @Sendable ([Int32]) async throws -> [Float])
+    case mpNet(inference: @Sendable ([Int32]) async throws -> [Float])
+    case embeddingGemma(inference: @Sendable ([Int32]) async throws -> [Float])
+    public static let `default`: EmbeddingModel = .deterministic
+}
+```
+
+**Rust:**
+
+```rust
+/// Platform note: named model cases (miniLM/mpNet/embeddingGemma) are
+/// Apple-only (CoreML). The Rust port ships Deterministic only.
+#[derive(Default)]
+pub enum EmbeddingModelConfig {
+    #[default]
+    Deterministic,
+}
+```
+
+### `Corpus`
+
+The public RAG entry point. No VectorKit type appears in any public
+signature (SPEC § 8, B-8).
+
+**Swift:**
+
+```swift
+public actor Corpus {
+    /// Construct a Corpus. Opens BundleStore + VectorStore schemas on
+    /// the supplied storage via migrate(to:). The caller owns the
+    /// Storage lifecycle.
+    public init(storage: any Storage, model: EmbeddingModel = .default) async throws
+
+    /// Chunk, store, index, embed, and vector-store a document.
+    /// Idempotent on content-addressed chunk ids (SPEC B-9, I-3).
+    public func ingest(_ text: String, sourceID: String, now: Date) async throws
+
+    /// Embed the query and return fused kNN + BM25 results (SPEC B-10).
+    public func recall(_ query: String, limit: Int = 10, now: Date) async throws -> [ScoredChunk]
+
+    /// Remove a source from BM25 + VectorStore. BundleStore is
+    /// append-only; count() does not decrease (SPEC B-11).
+    public func remove(sourceID: String) async throws
+
+    /// Total chunks in BundleStore (does not decrease after remove).
+    public func count() async throws -> Int
+}
+```
+
+**Rust:**
+
+```rust
+pub struct Corpus { /* bundle_store, bm25: Mutex<BM25Index>, vector_store, provider */ }
+impl Corpus {
+    /// Construct via migrate() to apply both schemas (BundleStore + VectorStore)
+    /// regardless of version gating.
+    pub fn open(storage: Arc<dyn Storage>, model: EmbeddingModelConfig) -> CorpusKitResult<Self>;
+
+    /// now_millis: Unix epoch in milliseconds (caller-supplied for determinism).
+    pub fn ingest(&self, text: &str, source_id: &str, now_millis: i64) -> CorpusKitResult<()>;
+    pub fn recall(&self, query: &str, limit: usize, now_millis: i64) -> CorpusKitResult<Vec<ScoredChunk>>;
+    pub fn remove(&self, source_id: &str) -> CorpusKitResult<()>;
+    pub fn count(&self) -> CorpusKitResult<usize>;
+}
+```
+
+---
+
+## § 7 — Examples
 
 ```swift
 import CorpusKit

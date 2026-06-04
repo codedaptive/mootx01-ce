@@ -141,7 +141,7 @@ row; nothing else mediates the join.
 chunked — it does not normalize, lowercase, or trim. Normalization is a
 tokenizer concern applied at index/query time, not at storage time.
 
-**I-7 (cross-leg parity):** the Swift and Rust versions produce
+**I-7 (cross-port parity):** the Swift and Rust ports produce
 byte-identical chunk ids, identical chunk boundaries for identical
 configuration, identical BM25 rankings, and identical RRF fusion for
 every shared test vector. Neither port leads.
@@ -235,11 +235,11 @@ produces the same UUID in Swift and Rust for every shared
 (I-1, I-7).
 
 **C-2 (chunk boundaries):** `Chunker.chunk` produces identical chunk
-counts, offsets, lengths, and overlaps in both legs for identical text
+counts, offsets, lengths, and overlaps in both ports for identical text
 and `ChunkerConfiguration` on the delimiter-fallback path (B-1, I-7).
 
 **C-3 (BM25 ranking):** `BM25Index.search` returns the same ranked
-`(id, score)` order in both legs for every shared corpus + query, with
+`(id, score)` order in both ports for every shared corpus + query, with
 the documented IDF smoothing and tie-break (B-2).
 
 **C-4 (idempotent insert):** re-inserting a chunk with an existing id
@@ -248,7 +248,7 @@ is unchanged (I-3, B-5).
 
 **C-5 (hybrid fusion):** `HybridRecall.recall` produces the same fused
 ranking, the same `nil`-vs-present sub-score reporting, and the same
-`modelID`-filtered candidate set in both legs for every shared fixture
+`modelID`-filtered candidate set in both ports for every shared fixture
 (B-4, I-4, I-7).
 
 **C-6 (projection parity):** for a given pooled float vector and
@@ -259,3 +259,72 @@ across ports (B-6, inherits SubstrateLib FloatSimHash parity).
 `BundleStore.schemaDeclaration` is `appendOnly`, and the sync manifest
 declares the same table with the `.appendOnly` conflict policy
 (I-2, § 5 B-5).
+
+## § 8 — Corpus actor (public entry point)
+
+### 8.1 Purpose
+
+`Corpus` is the public entry point that seals the composition of
+BundleStore, BM25Index, VectorStore, and an EmbeddingProvider behind
+a four-verb SDK surface. A consumer calls `ingest`, `recall`, `remove`,
+and `count` — no vector type, no Engram, no chunk id, no model id ever
+crosses the public API boundary. This is the sealed-vector principle
+applied at the kit level: the caller knows documents and queries, not
+the internals of how retrieval works.
+
+### 8.2 EmbeddingModel enum
+
+`EmbeddingModel` is a CorpusKit-owned enum. It lets the host select
+an embedding model without importing VectorKit or naming an
+EmbeddingProvider. Cases:
+
+- `.deterministic` — FNV-1a hash through FloatSimHash; no CoreML required.
+  The default. Suitable for tests and offline contexts; not for semantic
+  retrieval.
+- `.miniLM(inference:)` — MiniLM v6 (384-dim). Caller supplies the
+  CoreML inference closure; CorpusKit handles FNV-1a tokenization
+  (vocab 30522, max 128 tokens) and FloatSimHash projection.
+- `.mpNet(inference:)` — MPNet base v2 (768-dim).
+- `.embeddingGemma(inference:)` — Embedding-Gemma 300M (768-dim,
+  vocab 256000, max 2048 tokens).
+
+The Rust port ships `EmbeddingModelConfig::Deterministic` only; named
+model cases land in a follow-on mission once ONNX/Candle providers are
+wired in.
+
+### 8.3 Behavioral contracts
+
+**B-8 (sealed-vector principle):** No VectorKit type appears in any
+public signature of `Corpus` or `EmbeddingModel`. VectorStore, Engram,
+EmbeddingProvider, StoredVector, VectorMatch, drawerID, and modelID are
+internal implementation details; the caller never names them.
+
+**B-9 (ingest fan-out):** `Corpus.ingest` executes the full RAG fan-out
+in one call: chunk via Chunker, insert into BundleStore (idempotent on
+content-addressed ids), index into BM25, embed via the selected provider,
+and store vectors in VectorStore with `drawerID = chunk.id.uuidString`.
+The chunk.id == vector.drawerID join (I-5) is maintained internally.
+
+**B-10 (recall delegation):** `Corpus.recall` embeds the query and
+delegates to `HybridRecall.recall`, passing the internal VectorStore,
+BM25Index, and BundleStore. The caller receives `[ScoredChunk]`.
+
+**B-11 (remove contract):** `Corpus.remove(sourceID:)` removes the
+source's chunks from BM25 and deletes their vectors from VectorStore.
+BundleStore is append-only (I-2); chunk rows are not deleted. `count()`
+therefore does not decrease after `remove`; only recall results change.
+
+**B-12 (dual-schema init):** `Corpus.init` applies both the
+BundleStore schema and the VectorStore schema to the supplied Storage
+via `migrate(to:)`, which bypasses the version gate that would otherwise
+skip the second schema application when both kits share version 1. The
+caller does not need to pre-open schemas.
+
+### 8.4 Conformance
+
+**C-8 (Corpus parity):** Swift and Rust `Corpus` / `EmbeddingModelConfig`
+produce identical chunk ids, identical BM25 results, and identical fused
+rankings for shared test vectors (inherits C-1…C-7). The deterministic
+embedding (`.deterministic` / `Deterministic`) uses the same FNV-1a
+64-bit hash, LCG constants, and FloatSimHash seed (`0xC05BD15CA15D1B00`)
+in both ports.

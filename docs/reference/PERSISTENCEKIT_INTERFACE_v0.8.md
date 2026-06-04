@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - PERSISTENCEKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of PersistenceKit in both legs, in two tiers
+  Public API surface of PersistenceKit in both ports, in two tiers
   within § 2. Tier 1 is the CONSUMED CONTRACT — the 18 types other
   packages actually import (the Storage protocol, its five sub-store
   protocols, the value model, schema declaration, predicate algebra,
@@ -32,7 +32,9 @@ targets:
   `VectorIndex.swift`, `AuditLog.swift`, `StorageObserver.swift`,
   `Transaction.swift`, `TypedValue.swift`, `Column.swift`,
   `Predicate.swift`, `Schema.swift`, `GeneratedColumn.swift`,
-  `EstateConfiguration.swift`, `EncryptionMode.swift`,
+  `EstateConfiguration.swift`, `EstateCacheConfig.swift`,
+  `CachingRowStore.swift`, `CacheInvalidator.swift`,
+  `EncryptionMode.swift`,
   `StorageError.swift`, `NoOpObserver.swift`.
 - `Sources/PersistenceKitInMemory/` — `InMemoryStorage` (test +
   conformance reference).
@@ -48,11 +50,12 @@ targets:
 
 - `src/storage.rs`, `row_store.rs`, `blob_store.rs`, `vector_index.rs`,
   `audit_log.rs`, `observer.rs`, `types.rs`, `predicate.rs`,
-  `schema.rs`, `generated_column.rs`, `error.rs`, `inmemory.rs`,
+  `schema.rs`, `generated_column.rs`, `error.rs`, `cache_config.rs`,
+  `caching_row_store.rs`, `cache_invalidator.rs`, `inmemory.rs`,
   `sqlite.rs`, `postgres.rs`.
 - Traits are synchronous (`Result<T, StorageError>`); the Swift side is
   `async` because Swift actors require it, while the in-process Rust
-  backends do no real async I/O. All three backends ship in both legs:
+  backends do no real async I/O. All three backends ship in both ports:
   InMemory, SQLite (rusqlite "bundled" + sqlite-vec vectors), and
   PostgreSQL (sync `postgres` crate + pgvector). The Rust transaction
   surface (`Storage::transaction` + `StorageTransaction`) is implemented
@@ -63,9 +66,9 @@ Naming differs by port convention (Swift `insert(table:values:)` /
 `StoragePredicate::BitmaskAll`); the *observable results* match
 (SPEC § 7, C-8).
 
-> **Two-tier surface.** PersistenceKit declares 39 public types across
-> its targets, of which 18 are consumed by other packages today (measured
-> against all package Sources, 2026-05-27). § 2 Tier 1 documents those 18
+> **Two-tier surface.** PersistenceKit declares 42 public types across
+> its targets, of which 21 are consumed by other packages today (measured
+> against all package Sources, 2026-06-03). § 2 Tier 1 documents those 21
 > in full — the contract the system depends on, including the structural
 > sub-store protocols reached through `Storage`. The Tier 2 subsection at
 > the end of § 2 is a table of contents for the rest: present in the
@@ -458,8 +461,10 @@ public struct EstateConfiguration: Sendable {
     public let estateID: UUID
     public let backend: BackendConfiguration
     public let encryptionConfig: EstateEncryptionConfig   // defaults .plaintext (SPEC B-12)
+    public let cacheConfig: EstateCacheConfig             // defaults .disabled (SPEC I-11)
     public init(estateID: UUID, backend: BackendConfiguration,
-                encryptionConfig: EstateEncryptionConfig = .plaintext)
+                encryptionConfig: EstateEncryptionConfig = .plaintext,
+                cacheConfig: EstateCacheConfig = .disabled)
 }
 public enum BackendConfiguration: Sendable {
     case sqlite(url: URL, busyTimeout: TimeInterval = 5.0)
@@ -468,8 +473,8 @@ public enum BackendConfiguration: Sendable {
     case inMemory
 }
 ```
-**Rust:** `pub struct EstateConfiguration { estate_id, backend }` (the
-Rust version carries no encryption config at v0.8),
+**Rust:** `pub struct EstateConfiguration { estate_id, backend, cache_config }` (the
+Rust version carries encryption config and cache config at v0.8),
 `pub enum BackendConfiguration { Sqlite{…}, Postgresql{…}, InMemory }`.
 
 #### Backend entry points: `InMemoryStorage`, `SQLiteStorage`, `PostgreSQLStorage`
@@ -515,6 +520,16 @@ cited file. Promote a type into Tier 1 when a consumer adopts it.
   AES-GCM-256 key; `.plaintext` default) — `EncryptionMode.swift`.
   Consumers select a mode through `EstateConfiguration.encryptionConfig`
   rather than naming these types.
+- **Cache layer:** `EstateCacheConfig` (enabled flag, byte ceiling,
+  sensitivity threshold clamped to ≤2; `.disabled` default),
+  `CachingRowStore` (decorating `RowStore` with InMemory hot tier, LRU
+  eviction, and sensitivity gate per SPEC I-11/I-12), `CacheInvalidator`
+  (subscribes to `StorageObserver` and invalidates cache entries on
+  `TableChange` per SPEC B-14) — `EstateCacheConfig.swift`,
+  `CachingRowStore.swift`, `CacheInvalidator.swift`. Consumers do not
+  name these types; enabling caching is done through
+  `EstateConfiguration.cacheConfig`. The decorator is wired inside each
+  backend when enabled (SPEC I-13).
 
 > Beyond these, the backend targets (`PersistenceKitSQLite`,
 > `PersistenceKitPostgreSQL`, `PersistenceKitInMemory`) expose only their

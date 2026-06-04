@@ -67,6 +67,9 @@ This specification defines:
 - Append-only audit persistence and HLC-ordered iteration.
 - Change-notification (observer) delivery semantics.
 - At-rest encryption modes (1–3) as an estate-configuration concern.
+- The automated read-through cache layer: per-backend row caching with
+  a tunable sensitivity gate, LRU eviction under a RAM byte ceiling,
+  and StorageObserver-driven invalidation.
 - The cross-backend conformance obligation (all three backends, one
   fixture suite, identical observable results).
 
@@ -160,11 +163,36 @@ stored column.
 instance for one estate. A PostgreSQL pool is per-estate, fixed-size,
 with an explicit maximum and no auto-resize (Q6).
 
-**I-10 (cross-leg parity):** the Rust version (`persistence-kit`) mirrors
+**I-11 (cache transparency):** when `EstateConfiguration.cacheConfig` is
+enabled, each backend's `rowStore` accessor returns a `CachingRowStore`
+decorator wrapping the backing `RowStore`. The decorator is fully
+transparent: consumers call the same `RowStore` protocol, receive
+identical results, and need not know the cache exists. When
+`cacheConfig` is disabled (the default, `.disabled`), no decorator is
+created, no observer is subscribed, no memory is allocated — behavior
+is identical to pre-cache PersistenceKit.
+
+**I-12 (sensitivity gate, fail-closed):** the cache reads the
+`provenance` column from each `StorageRow` and decodes sensitivity as
+`(provenance >> 4) & 0x7`. Rows at or above the configured
+`sensitivityThreshold` are not cached. Rows at Secret level (raw 3)
+are never cached regardless of threshold — `EstateCacheConfig` clamps
+the threshold to ≤2 at construction. If the `provenance` column is
+absent (table does not carry it), the row caches normally. If the
+column is present but unparseable, the row does not cache (fail
+closed), mirroring the `adjectives.rs` `from_raw` precedent.
+
+**I-13 (cache is PersistenceKit-internal):** the cache lives entirely
+inside PersistenceKit. No consumer kit constructs, configures, or
+references caching types directly. Consumers receive `any Storage` via
+dependency injection (I-1) and get caching automatically if the
+underlying backend's `EstateConfiguration` has it enabled.
+
+**I-14 (cross-port parity):** the Rust version (`persistence-kit`) mirrors
 the value model, predicate algebra, schema declaration, and the five
-trait contracts case-for-case. All three backends ship in both legs —
+trait contracts case-for-case. All three backends ship in both ports —
 InMemory, SQLite (rusqlite "bundled" + sqlite-vec), and PostgreSQL (sync
-`postgres` crate + pgvector) — and both legs implement the transaction
+`postgres` crate + pgvector) — and both ports implement the transaction
 surface. The one port adaptation: Swift's `transaction<T>` returns a
 generic value, while Rust's must stay object-safe (`dyn Storage`), so the
 Rust block returns `StorageResult<()>` (Ok commits, Err rolls back) and
@@ -243,6 +271,26 @@ on subscribers; a slow subscriber gets backpressure and may drop oldest
 under load. `NoOpObserver` returns an immediately-finished stream for
 backends or paths that do not observe.
 
+**B-13 (cache read-through):** on a keyed row lookup, `CachingRowStore`
+serves from its InMemory hot tier when the row is warm and admissible.
+On a miss, it falls through to the backing `RowStore`, populates the
+cache (subject to the sensitivity gate), and returns the result. Query
+by predicate passes through to the backing store (no query-result
+caching). `insert`, `upsert`, `update`, and `delete` pass through to
+the backing store and synchronously invalidate the affected cache
+entry.
+
+**B-14 (cache invalidation):** `CacheInvalidator` subscribes to
+`StorageObserver` for insert/update/delete events on all tables. On a
+`TableChange`, it invalidates the affected `RowHandle` in the
+`CachingRowStore`. This provides belt-and-suspenders invalidation
+alongside the synchronous write-path invalidation in B-13.
+
+**B-15 (LRU eviction):** the cache maintains an estimated byte size
+for its entries and evicts least-recently-used entries when the total
+exceeds `EstateCacheConfig.ceilingBytes`. Evicted rows remain
+readable via the backing store on the next read.
+
 **B-12 (encryption is transparent to consumers):** an estate's
 `EstateEncryptionConfig` selects mode 1 (plaintext), 2 (per-row content
 ciphertext), or 3 (full-database under a per-install key). Default is
@@ -306,7 +354,18 @@ INSERT succeeds (B-8).
 **C-7 (date storage):** a round-tripped `TypedValue.timestamp` is stored
 as ISO-8601 text and reads back equal (I-3).
 
-**C-8 (cross-leg parity):** every backend — InMemory, SQLite, and
+**C-9 (cache transparency):** a backend with caching enabled produces
+identical observable results to the same backend with caching disabled
+for the same operation sequence. The cache is a performance
+optimization only; it must never change semantics.
+
+**C-10 (cache sensitivity gate):** rows with `(provenance >> 4) & 0x7`
+at or above the configured threshold are verified absent from the
+cache after admission attempts. Secret-level rows (raw 3) are never
+present in the cache regardless of threshold setting. Rows without a
+`provenance` column are verified present in the cache after admission.
+
+**C-8 (cross-port parity):** every backend — InMemory, SQLite, and
 PostgreSQL — produces identical observable results in the Swift and Rust
 ports for the same fixture sequence: value round-trip, predicate
 evaluation, schema declaration, blob I/O, audit ordering, generated

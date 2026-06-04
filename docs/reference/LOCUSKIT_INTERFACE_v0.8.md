@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - LOCUSKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of LocusKit in both legs, in two tiers within
+  Public API surface of LocusKit in both ports, in two tiers within
   § 2. Tier 1 is the CONSUMED CONTRACT — the types GeniusLocusKit,
   NeuronKit, and ARIA_MCP actually import (the Estate actor, the four
   nouns, the verb frames, the recall stream, the filter algebra, the
@@ -37,9 +37,7 @@ purpose: |
 
 - `src/` — one module per Swift file (`drawer.rs`, `estate.rs`,
   `estate_verbs.rs`, `filter.rs`, …) plus `drawer_store_inmemory.rs`
-  (crate `locus-kit`). `drawer_store_inmemory.rs` contains `DrawerStoreCore`
-  (storage-agnostic verb-logic core, `pub(crate)` constructor) and the
-  public `InMemoryDrawerStore` newtype that wraps it.
+  (crate `locus-kit`).
 
 Naming differs by port convention (Swift `addDrawer` / `bitmapAuditTrail`;
 Rust `add_drawer` / `bitmap_audit_trail`). The two ports also differ in
@@ -95,6 +93,10 @@ public actor Estate {
 
     // Association graph (extension Estate, Estate.swift):
     public func tunnelsFromWing(_ wing: String) async throws -> [Tunnel]
+
+    // Dreaming substrate reads (extension Estate, Estate.swift):
+    public func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem]
+    public func allTunnels() async throws -> [Tunnel]
 }
 ```
 **Rust:** `pub struct Estate` with `open`, `create`, `close`, `manifest`,
@@ -291,8 +293,20 @@ public struct RecallFrame: Sendable {
 }
 public struct LearnFrame: Sendable { public var handle: String; public init(handle: String) }
 public enum MutationKind: Sendable {
-    case confirm, reject, contest, resolve, supersede, revive, accept
-    case correctSensitivity(AdjectiveSensitivity), correctTrust(Trust)
+    // Confirmation axis (provenance bits 18–23):
+    case confirm                                   // → userConfirmed
+    // State axis (adjectiveBitmap bits 0–5 via DrawerStore.mutateState):
+    case reject                                    // → rejected (automaton: from pending only)
+    case contest                                   // → contested (from active, pending)
+    case resolve                                   // contested → active (guard: must be contested)
+    case supersede                                 // → superseded (from active, accepted)
+    case revive                                    // Cluster B → active (guard: isKnewPast;
+                                                   //   automaton supports decayed only — follow-up
+                                                   //   mission extends for withdrawn/expired)
+    case accept                                    // → accepted (guard: trust ≥ canonical, S-1)
+    // Adjective axis (adjectiveBitmap via DrawerStore.mutateAdjective):
+    case correctSensitivity(AdjectiveSensitivity)  // bits 6–11
+    case correctTrust(Trust)                       // bits 18–23
 }
 ```
 **Rust:** `pub struct CaptureFrame`, `RecallFrame`, `LearnFrame`,
@@ -316,7 +330,7 @@ public indirect enum Filter: Sendable {
     // structural:  inRoom(RoomID), inWing(WingID), lineageID(LineageID), createdAfter(Date),
     //              createdBefore(Date), latticeAnchor(LatticeAnchor), latticeUnder(udcPrefix: String),
     //              wikidataConcept(WikidataQID)
-    // content:     contentMatches(String), nearVector(Vector, count: Int)   // .nearVector throws until VectorKit
+    // content:     contentMatches(String)
     // composition: all([Filter]), any([Filter]), not(Filter)
 }
 public enum StateCluster: Sendable { case knowNow, knewPast, terminal }
@@ -470,7 +484,11 @@ public actor DrawerStore {
     public func addKGFact(_ f: KGFact) async throws; public func kgFacts(forDrawerID: String) async throws -> [KGFact]
     public func addDiaryEntry(_ e: DiaryEntry) async throws; public func readDiary(agentName: String, lastN: Int = 10) async throws -> [DiaryEntry]
     public func insertRecallTrace(_ item: RecallTraceItem) async throws
+    public func getRecallTrace(id: String) async throws -> RecallTraceItem?
+    public func recallTraceSince(_ since: Date) async throws -> [RecallTraceItem]
+    public func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem]
     public func markRecallTraceUsed(id: String, now: Date) async throws
+    public func allTunnels() async throws -> [Tunnel]
     public func listWings() async throws -> [WingSummary]; public func listRooms(in wing: String?) async throws -> [RoomSummary]
     public func readManifest() async throws -> ManifestValues; public func setMeta(key: String, value: String) async throws
     public func bitmapAuditTrail(rowID: String) async throws -> [AuditRow]
@@ -478,16 +496,8 @@ public actor DrawerStore {
     // … full CRUD + audit surface, see DrawerStore.swift
 }
 ```
-**Rust:** `pub trait DrawerStore: Send + Sync` implemented by three types:
-`DrawerStoreCore` (storage-agnostic verb-logic core — `pub(crate)` constructor,
-kit-internal only), `InMemoryDrawerStore` (public newtype for the in-memory
-backend, wraps `DrawerStoreCore` over `InMemoryStorage`; a `with_storage`
-variant serves shared-storage scenarios such as GLK parity tests and the
-reopen-idempotency test), and `SqliteDrawerStore` (public newtype for the
-durable backend, wraps `DrawerStoreCore` over `SqliteStorage`). Backend
-identity is structurally visible at every construction site and deliberately
-erased at the trait surface.
-Methods are synchronous and take `now: i64`. The Swift `DrawerStore` is a
+**Rust:** `pub trait DrawerStore: Send + Sync` with `InMemoryDrawerStore`;
+methods are synchronous and take `now: i64`. The Swift `DrawerStore` is a
 concrete actor over any injected `Storage` (SQLite in production); the Rust
 version realises the same store contract through the trait (SPEC § 8).
 
@@ -534,10 +544,8 @@ cited file.
 - **Taxonomy summaries:** `WingSummary`, `RoomSummary` (computed
   `GROUP BY` projections; no wings/rooms table) — `Summaries.swift`.
 - **Rust-only helper shapes:** `BitmapAuditPair`, `RoomBundle`,
-  `RoomLevelEntry`, `InMemoryDrawerStore` (public newtype for the in-memory
-  backend), `DrawerStoreCore` (kit-internal storage-agnostic core,
-  `pub(crate)`) — present in the Rust version where the Swift version keeps
-  the equivalent internal (SPEC § 8).
+  `RoomLevelEntry`, `InMemoryDrawerStore` — present in the Rust version where
+  the Swift version keeps the equivalent internal (SPEC § 8).
 
 ## § 3 — Public functions
 

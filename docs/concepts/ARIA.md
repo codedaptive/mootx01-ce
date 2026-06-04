@@ -71,9 +71,9 @@ ARIA does not define:
 
 ## Where the formal specification lives
 
-The full ARIA specification is in `docs/reference/`. The architecture spec (`GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`) is the authoritative source for the substrate's behavior, and ARIA is the surface of that substrate.
+The full ARIA specification is in `docs/reference/`. The architecture spec (`GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8*.md`) is the authoritative source for the substrate's behavior, and ARIA is the surface of that substrate.
 
-The engineering cookbook (`docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36_2026-05-16.md`) is the reference for how the algorithms behind ARIA actually work.
+The engineering cookbook (`docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`) is the reference for how the algorithms behind ARIA actually work.
 
 The conformance test vectors are in `docs/validation/substrate_math_performance/test-harness/`.
 
