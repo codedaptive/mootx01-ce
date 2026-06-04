@@ -61,9 +61,9 @@ struct AriaLexiconLibTests {
         #expect(Acceptance.verbs(for: .vector).isEmpty)
         #expect(Acceptance.verbs(for: .diaryEntry) == [.recall])
         #expect(Acceptance.verbs(for: .proposal)
-                == [.mutate, .withdraw, .expunge, .recall])
+                == [.propose, .mutate, .withdraw, .expunge, .recall])
         #expect(Acceptance.verbs(for: .association)
-                == [.mutate, .expunge, .recall])
+                == [.associate, .mutate, .expunge, .recall])
         #expect(Acceptance.verbs(for: .learnedReference)
                 == [.learn, .mutate, .withdraw, .expunge, .recall])
     }

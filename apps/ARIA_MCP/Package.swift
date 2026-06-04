@@ -42,6 +42,11 @@ let package = Package(
         .package(name: "CognitionKit", path: "../../packages/kits/CognitionKit"),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
+        // VaultKit: the moot_vault_* tool family consumes VaultBridge.
+        // In-repo dependency, permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28
+        // and recorded in ADR-VAULTKIT-002. Layering is downstream→upstream
+        // (ARIA_MCP app → VaultKit kit); no inversion.
+        .package(name: "VaultKit", path: "../../packages/kits/VaultKit"),
     ],
     targets: [
         .target(
@@ -54,6 +59,7 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "VaultKit", package: "VaultKit"),
             ],
             path: "Sources/AriaMCP"
         ),
@@ -90,6 +96,7 @@ let package = Package(
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 // PostgreSQL backend: needed for the precedence-ladder config tests.
                 .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
+                .product(name: "VaultKit", package: "VaultKit"),
             ],
             path: "Tests/AriaMCPTests"
         ),

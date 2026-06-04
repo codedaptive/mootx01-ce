@@ -27,16 +27,14 @@
 //! in both (content, room, udcCode, addedBy, embeddingModelID, classificationScheme,
 //! filter, limit, ordering, hydrationLevel, rowID, kind, reason, confirmation).
 //!
-//! # Swift-side reconciliation items
+//! # Remaining stubs
 //!
-//! The Swift server has no live handlers for the following tools; they fall
-//! through to methodNotFound. The Rust server surfaces error_result instead
-//! (better client experience). Each item below is flagged for Swift parity once
-//! the Swift handlers land:
-//!   - All recall tools for non-drawer nouns (kgFact, diaryEntry, proposal,
-//!     association, learnedReference): Rust returns NotSupportedByEstate because
-//!     the DrawerStore trait lacks all-rows accessors for these types.
-//!   - moot_learn_learnedReference: both sides return NotSupportedByEstate.
+//! All recall tools for non-drawer nouns (kgFact, diaryEntry, proposal,
+//! association, learnedReference) and moot_learn_learnedReference are now live
+//! on both Rust and Swift sides. DrawerStore exposes all-rows accessors for all
+//! five noun types; the coordinator and GLK verb surface wire them end-to-end.
+//!
+//! One stub remains:
 //!   - moot_cross_estate_recall: the Rust GLK fan_out has no grant model;
 //!     advertised but returns "not yet implemented: federation requires the grant
 //!     model". The Swift side DOES have a live handler (but no test estate grants).
@@ -716,18 +714,17 @@ fn run_noun_expunge(
 }
 
 // ---------------------------------------------------------------------------
-// v2b-p2 recall stubs — non-drawer nouns
+// v2b-p2 recall reads — non-drawer nouns
 // ---------------------------------------------------------------------------
 //
-// The DrawerStore trait has no all-rows accessors for kg_facts, diary_entries,
-// proposals, associations, or learned_references (only by-source filtered
-// queries exist). Until the trait gains unconstrained accessors, each recall
-// surfaces error_result with NotSupportedByEstate. Advertised honestly so
-// clients can see the tool exists; the MCP error surface (isError: true with
-// the reason) is better than the Swift server's methodNotFound for these tools.
+// The DrawerStore trait gained all-rows accessors for kg_facts, diary_entries,
+// proposals, associations, and learned_references in this stream. Each recall
+// function below delegates to the coordinator, which delegates to the estate's
+// DrawerStore. An empty estate returns Ok(empty vec); the result text is
+// "recalled N X(s)" matching the drawer recall format.
 
-/// Recall kg-fact rows. Stub: returns NotSupportedByEstate because the
-/// DrawerStore trait has no all_kg_facts() accessor.
+/// Recall kg-fact rows. Delegates to `coordinator.recall_kg_facts`,
+/// which reads all active kg-facts via `DrawerStore::all_kg_facts`.
 fn run_kg_fact_recall(
     coord: &EstateCoordinator,
     estate: &crate::estate_registry::OpenEstate,
@@ -741,8 +738,8 @@ fn run_kg_fact_recall(
     }
 }
 
-/// Recall diary-entry rows. Stub: returns NotSupportedByEstate because the
-/// DrawerStore trait has no unconstrained diary-entries accessor.
+/// Recall diary-entry rows. Delegates to `coordinator.recall_diary_entries`,
+/// which reads all non-tombstoned diary entries via `DrawerStore::all_diary_entries`.
 fn run_diary_entry_recall(
     coord: &EstateCoordinator,
     estate: &crate::estate_registry::OpenEstate,
@@ -756,8 +753,8 @@ fn run_diary_entry_recall(
     }
 }
 
-/// Recall proposal rows. Stub: returns NotSupportedByEstate because the
-/// DrawerStore trait has no all_proposals() accessor.
+/// Recall proposal rows. Delegates to `coordinator.recall_proposals`,
+/// which reads all proposals via `DrawerStore::all_proposals`.
 fn run_proposal_recall(
     coord: &EstateCoordinator,
     estate: &crate::estate_registry::OpenEstate,
@@ -771,8 +768,8 @@ fn run_proposal_recall(
     }
 }
 
-/// Recall association rows. Stub: returns NotSupportedByEstate because the
-/// DrawerStore trait has no all_associations() accessor.
+/// Recall association rows. Delegates to `coordinator.recall_associations`,
+/// which reads all non-tombstoned associations via `DrawerStore::all_associations`.
 fn run_association_recall(
     coord: &EstateCoordinator,
     estate: &crate::estate_registry::OpenEstate,
@@ -786,8 +783,9 @@ fn run_association_recall(
     }
 }
 
-/// Recall learned-reference rows. Stub: returns NotSupportedByEstate because
-/// the DrawerStore trait has no all_learned_references() accessor.
+/// Recall learned-reference rows. Delegates to `coordinator.recall_learned_references`,
+/// which reads all non-tombstoned learned references via
+/// `DrawerStore::all_learned_references`.
 fn run_learned_reference_recall(
     coord: &EstateCoordinator,
     estate: &crate::estate_registry::OpenEstate,
@@ -805,20 +803,25 @@ fn run_learned_reference_recall(
 // v2b-p2 learn_learnedReference
 // ---------------------------------------------------------------------------
 
-/// Ingest a learned reference. Dispatches to the coordinator's learn stub,
-/// which raises NotSupportedByEstate (Brain layer not yet present). Mirrors
+/// Ingest a learned reference. Dispatches to the coordinator's learn verb,
+/// which writes a LearnedReference row to the estate's DrawerStore. Mirrors
 /// the Swift ToolDispatcher.runLearn behavior: the tool is callable, reaches
-/// the substrate boundary, and the substrate reports not-supported.
+/// the substrate, and returns the learned reference id on success.
 fn run_learn_learned_reference(
     args: &BTreeMap<String, JsonValue>,
     coord: &EstateCoordinator,
     estate: &crate::estate_registry::OpenEstate,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let source_handle = require_string(args, "handle")?;
+    // Wall-clock seconds at dispatch time — matches the pattern at
+    // run_capture_drawer (line 271) and every other write path that
+    // passes now: i64 to the coordinator.
+    let now = crate::dispatch::wall_now();
 
-    match coord.learn(&estate.handle, source_handle) {
-        Ok(()) => Ok(text_result(&format!(
-            "learned learnedReference {source_handle}"
+    match coord.learn(&estate.handle, source_handle, now) {
+        Ok(lr) => Ok(text_result(&format!(
+            "learned learnedReference {}",
+            lr.handle
         ))),
         Err(e) => Ok(error_result(&format!("{e:?}"))),
     }

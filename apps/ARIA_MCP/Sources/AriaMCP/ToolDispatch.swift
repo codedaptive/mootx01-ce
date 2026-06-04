@@ -146,6 +146,15 @@ public struct ToolDispatcher: Sendable {
                     name: name, args: args, kit: kit, defaultHandle: handle,
                     resolveHandle: resolveHandle)
             }
+            // VaultKit control-surface tools (`moot_vault_*`) sit above the
+            // lexicon projection (provenance `.vault`): no (verb, noun)
+            // pair, so they are matched by name before parseToolName would
+            // reject them. VaultTools owns their decode + run.
+            if VaultTools.isVaultTool(name) {
+                return try await VaultTools.dispatch(
+                    name: name, args: args, kit: kit, defaultHandle: handle,
+                    resolveHandle: resolveHandle)
+            }
             guard let (verb, noun) = parseToolName(name) else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.methodNotFound,
@@ -168,26 +177,15 @@ public struct ToolDispatcher: Sendable {
             case (.recall, .tunnel):
                 return try await runRecallTunnel(args)
             case (.recall, .kgFact):
-                // GLK has no estate-wide kgFact read accessor; the DrawerStore
-                // trait lacks all_kg_facts(). Surface an honest refusal matching
-                // the Rust leg's error_result — isError true, NOT a JSON-RPC
-                // transport fault, so the client retains the call ID. Kit accessor
-                // gap tracked separately; not shimmed here per blast-radius discipline.
-                return Self.errorResult("recall kgFact is not supported by this estate: no estate-wide kgFact read accessor exists in the substrate.")
+                return try await runRecallKGFacts(args)
             case (.recall, .diaryEntry):
-                // Same discipline as kgFact_recall: DrawerStore trait has no
-                // unconstrained diary-entries accessor. Honest refusal matches Rust.
-                return Self.errorResult("recall diaryEntry is not supported by this estate: no estate-wide diaryEntry read accessor exists in the substrate.")
+                return try await runRecallDiaryEntries(args)
             case (.recall, .proposal):
-                // Same discipline: no all_proposals() accessor in the substrate.
-                return Self.errorResult("recall proposal is not supported by this estate: no estate-wide proposal read accessor exists in the substrate.")
+                return try await runRecallProposals(args)
             case (.recall, .association):
-                // Same discipline: no all_associations() accessor in the substrate.
-                return Self.errorResult("recall association is not supported by this estate: no estate-wide association read accessor exists in the substrate.")
+                return try await runRecallAssociations(args)
             case (.recall, .learnedReference):
-                // Same discipline: no all_learned_references() accessor in the
-                // substrate. Mirrors Rust leg's NotSupportedByEstate error_result.
-                return Self.errorResult("recall learnedReference is not supported by this estate: no estate-wide learnedReference read accessor exists in the substrate.")
+                return try await runRecallLearnedReferences(args)
             case (.mutate, _):
                 return try await runMutate(args, noun: noun)
             case (.withdraw, _):
@@ -356,11 +354,49 @@ public struct ToolDispatcher: Sendable {
         let filter = try decodeFilter(args["filter"])
         let hydration = try decodeHydration(args["hydrationLevel"])
         let ordering = try decodeOrdering(args["ordering"])
-        let limit = args["limit"]?.integerValue.map(Int.init)
+        let rawLimit = args["limit"]?.integerValue.map(Int.init)
+
+        // explain: true — route through the Recall Director (GLKRecallRequest /
+        // GLKRecallResult) and append explanation blocks per selected hit.
+        // Opt-in only: callers that omit "explain" or pass false get the
+        // unchanged legacy path below; no existing behavior is affected.
+        if args["explain"]?.boolValue == true {
+            let queryText = args["queryText"]?.stringValue
+            let effectiveLimit = rawLimit ?? 12
+            let frame = RecallFrame(
+                filterChain: [filter],
+                hydrationLevel: hydration,
+                limit: effectiveLimit,
+                ordering: ordering
+            )
+            let request = GLKRecallRequest(
+                frame: frame,
+                mode: .unionBest,
+                scoring: .matrixAware,
+                limit: effectiveLimit,
+                fallback: .allowDegraded,
+                queryText: queryText
+            )
+            let result = try await kit.recall(handle, request)
+            // Build response: header + one row per hit, each followed by
+            // its explanation as an indented note block.
+            var lines: [String] = ["recalled \(result.hits.count) drawer(s) with explanations"]
+            for hit in result.hits.prefix(50) {
+                let contentPreview = hit.drawer?.content.prefix(80) ?? "(not hydrated)"
+                let room = hit.drawer?.room ?? "?"
+                lines.append("\(hit.id)  [\(room)]  \(contentPreview)")
+                for expLine in hit.explanation {
+                    lines.append("  \(expLine)")
+                }
+            }
+            return Self.textResult(lines.joined(separator: "\n"))
+        }
+
+        // Legacy path — unchanged behavior for callers that omit explain.
         let frame = RecallFrame(
             filterChain: [filter],
             hydrationLevel: hydration,
-            limit: limit,
+            limit: rawLimit,
             ordering: ordering
         )
         let rows = try await kit.recall(handle, frame)
@@ -395,6 +431,72 @@ public struct ToolDispatcher: Sendable {
             "\(tunnel.id)  [\(tunnel.sourceWing)/\(tunnel.sourceRoom)]→[\(tunnel.targetWing)/\(tunnel.targetRoom)]  \(tunnel.label)"
         }
         let header = "recalled \(tunnels.count) tunnel(s) from wing \(wing)"
+        let body = ([header] + lines).joined(separator: "\n")
+        return Self.textResult(body)
+    }
+
+    /// Handle moot_kgFact_recall: read all active kg-facts (state cluster < 7)
+    /// from the estate. Delegates to `GeniusLocusKit.recallKGFacts`.
+    private func runRecallKGFacts(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let facts = try await kit.recallKGFacts(handle)
+        let lines = facts.prefix(50).map { f -> String in
+            "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]"
+        }
+        let header = "recalled \(facts.count) kgFact(s)"
+        let body = ([header] + lines).joined(separator: "\n")
+        return Self.textResult(body)
+    }
+
+    /// Handle moot_diaryEntry_recall: read all non-tombstoned diary entries
+    /// from the estate. Delegates to `GeniusLocusKit.recallDiaryEntries`.
+    private func runRecallDiaryEntries(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let entries = try await kit.recallDiaryEntries(handle)
+        let lines = entries.prefix(50).map { e -> String in
+            "\(e.id)  [\(e.wing)/\(e.room)]  \(e.entry.prefix(80))"
+        }
+        let header = "recalled \(entries.count) diaryEntry(s)"
+        let body = ([header] + lines).joined(separator: "\n")
+        return Self.textResult(body)
+    }
+
+    /// Handle moot_proposal_recall: read all proposals from the estate.
+    /// Delegates to `GeniusLocusKit.recallProposals`.
+    private func runRecallProposals(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let proposals = try await kit.recallProposals(handle)
+        let lines = proposals.prefix(50).map { p -> String in
+            "\(p.id)  target:\(p.targetRowID)"
+        }
+        let header = "recalled \(proposals.count) proposal(s)"
+        let body = ([header] + lines).joined(separator: "\n")
+        return Self.textResult(body)
+    }
+
+    /// Handle moot_association_recall: read all non-tombstoned associations
+    /// from the estate. Delegates to `GeniusLocusKit.recallAssociations`.
+    private func runRecallAssociations(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let associations = try await kit.recallAssociations(handle)
+        let lines = associations.prefix(50).map { a -> String in
+            "\(a.id)  [\(a.sourceWing)/\(a.sourceRoom)]→[\(a.targetWing)/\(a.targetRoom)]  \(a.label)"
+        }
+        let header = "recalled \(associations.count) association(s)"
+        let body = ([header] + lines).joined(separator: "\n")
+        return Self.textResult(body)
+    }
+
+    /// Handle moot_learnedReference_recall: read all non-tombstoned learned
+    /// references from the estate. Delegates to
+    /// `GeniusLocusKit.recallLearnedReferences`.
+    private func runRecallLearnedReferences(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let refs = try await kit.recallLearnedReferences(handle)
+        let lines = refs.prefix(50).map { r -> String in
+            "\(r.id)  handle:\(r.handle)"
+        }
+        let header = "recalled \(refs.count) learnedReference(s)"
         let body = ([header] + lines).joined(separator: "\n")
         return Self.textResult(body)
     }
@@ -475,14 +577,15 @@ public struct ToolDispatcher: Sendable {
     /// reached the substrate-mediated surface and was refused, so the
     /// client sees why without losing the call ID.
     ///
-    /// Answer-assembly scope narrowing (DECISION §10) is applied HERE,
-    /// not in GLK. `federatedRecall`'s grant gate is binary and returns
-    /// the whole source estate; this runner narrows each contribution to
-    /// the rows inside its authorizing grant's scope (a `.room`/`.wing`/
-    /// `.latticeSubtree`/`.singleRow` grant must not over-disclose). GLK
-    /// hands this obligation up by name: `FederatedRecallResult` carries
-    /// `grant.scope` as advisory metadata and does not narrow rows at the
-    /// substrate layer. The companion §10 obligation — excluding
+    /// GLK is the primary grant enforcer. `federatedRecall` applies both
+    /// the binary "may the requester read the source" gate and the
+    /// content-level sensitivity filter (`grant.contentLevel` vs
+    /// `adjectiveSensitivity`). This runner applies answer-assembly
+    /// scope narrowing (DECISION §10) as defense-in-depth secondary:
+    /// it narrows each contribution to the rows inside its authorizing
+    /// grant's scope (a `.room`/`.wing`/`.latticeSubtree`/`.singleRow`
+    /// grant must not over-disclose). `FederatedRecallResult` carries
+    /// `grant.scope` as advisory metadata so this layer can act on it. The companion §10 obligation — excluding
     /// foreign-provenance rows — is a no-op in this scaffold: each source
     /// estate's `federatedRecall` reads only that estate's own isolated
     /// storage, so no foreign-origin rows are present to exclude. It
@@ -562,10 +665,16 @@ public struct ToolDispatcher: Sendable {
     }
 
     /// Narrow a source estate's recalled drawers to the rows inside the
-    /// authorizing grant's scope (DECISION §10 answer assembly). GLK's
-    /// `federatedRecall` gate is binary and returns the whole source
-    /// estate, so a sub-estate grant is honored here. `.wholeEstate`
-    /// applies no narrowing.
+    /// authorizing grant's scope (DECISION §10 answer assembly).
+    ///
+    /// PRIMARY enforcement is in GLK: `CrossEstateFederation.federatedRecall`
+    /// already filtered drawers by `grant.contentLevel` (sensitivity gate)
+    /// before this function is called. This narrowing — scope-subtree
+    /// filtering by wing/room/lattice/singleRow — is **defense-in-depth
+    /// secondary** at the ARIA surface, not the sole enforcer.
+    ///
+    /// `.wholeEstate` applies no scope narrowing (all sensitivity-gated rows
+    /// pass through); sub-estate scopes honor the grant's spatial boundary.
     private static func narrow(_ drawers: [Drawer], to scope: GrantScope) -> [Drawer] {
         switch scope {
         case .wholeEstate:

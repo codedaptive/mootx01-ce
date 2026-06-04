@@ -85,9 +85,13 @@ struct AriaMCPMain {
             // BackendConfiguration.postgresql defaults:
             //   poolSize: 10, connectionTimeout: 5.0s, idleTimeout: 300.0s
             // A connectivity failure surfaces at Estate.create/kit.open below.
-            Logging.stderr.log(
-                "ARIA_MCP starting (stdio, PostgreSQL backend: \(rawPostgresURL))"
-            )
+            // Redact userinfo before logging — rawPostgresURL may contain
+            // user:password@host which would leak credentials to stderr/log aggregators.
+            // URL(string:) parses standard postgres:// format; keyword-value strings
+            // (e.g. "host=... user=... password=...") are not URL-parseable and fall
+            // back to "configured" so no connection details appear in logs.
+            let redactedHost = URL(string: rawPostgresURL)?.host ?? "configured"
+            Logging.stderr.log("ARIA_MCP starting (stdio, PostgreSQL backend: \(redactedHost))")
             let configuration = EstateConfiguration(
                 estateID: UUID(),
                 backend: .postgresql(connectionString: rawPostgresURL)
@@ -161,7 +165,15 @@ struct AriaMCPMain {
             _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
             handle = try await kit.open(storage: storage, owner: owner)
         } catch {
-            Logging.stderr.log("ARIA_MCP fatal: failed to open estate: \(error)")
+            // Redact the raw PostgreSQL connection string from error descriptions —
+            // storage errors may propagate the full connection string (which can contain
+            // user:password) when the URL fails to parse or the connection is refused.
+            // Replace any verbatim occurrence of rawPostgresURL with "[REDACTED]"
+            // before logging so credentials never appear in stderr.
+            let safeDescription = rawPostgresURL.isEmpty
+                ? String(describing: error)
+                : String(describing: error).replacingOccurrences(of: rawPostgresURL, with: "[REDACTED]")
+            Logging.stderr.log("ARIA_MCP fatal: failed to open estate: \(safeDescription)")
             exit(1)
         }
 

@@ -31,22 +31,32 @@ struct FormalConceptsTests {
         return (kit, handle)
     }
 
+    /// Capture a drawer with the supplied filing facets and discovery-spine
+    /// inputs; returns the minted drawer id. `udc == ""` / `qid == nil` model
+    /// an unanchored drawer (the no-anchor sentinels). Trust is set
+    /// separately via `setTrust` because it lands through the `mutate` verb,
+    /// not capture.
+    @discardableResult
     private func capture(
         _ kit: GeniusLocusKit,
         _ handle: EstateHandle,
         room: String,
         kind: ContentKind = .prose,
-        channel: CaptureChannel = .typed
-    ) async throws {
+        channel: CaptureChannel = .typed,
+        sensitivity: AdjectiveSensitivity = .normal,
+        udc: String = "000",
+        qid: String? = nil
+    ) async throws -> String {
         let frame = CaptureFrame(
             content: "test content",
             channel: channel,
             room: room,
-            latticeAnchor: .udc("000"),
+            latticeAnchor: LatticeAnchor(udcCode: udc, wikidataQID: qid),
             addedBy: "fa-test",
             embeddingModelID: "test-v1",
+            sensitivity: sensitivity,
             kind: kind)
-        _ = try await kit.capture(handle, frame)
+        return try await kit.capture(handle, frame).id
     }
 
     // MARK: - Tests
@@ -66,17 +76,13 @@ struct FormalConceptsTests {
 
     // CK-FA-2: two disjoint cohorts produce two concepts.
     //
-    // 3 drawers: room "study", kind prose, channel typed →
-    //   attributes include ("locus","room","study"), ("locus","kind","prose"),
-    //   ("locus","channel","typed"), ("locus","sensitivity","normal")
-    // 2 drawers: room "work", kind code, channel voiced →
-    //   attributes include ("locus","room","work"), ("locus","kind","code"),
-    //   ("locus","channel","voiced"), ("locus","sensitivity","normal")
-    //
-    // The two cohorts share only sensitivity:normal. Each sub-cohort's
-    // room+kind+channel labels close together → two distinct concepts
-    // (plus potentially a shared concept for sensitivity:normal alone).
-    // We assert at least 2 concepts and that their extents are non-trivial.
+    // 3 drawers: room "study", kind prose, channel typed.
+    // 2 drawers: room "work", kind code, channel voiced.
+    // Both cohorts share the default spine (trust:verbatim, sensitivity:normal,
+    // udc:000) and differ on room+kind+channel. Each sub-cohort's distinct
+    // facets close together → two cohort-specific concepts, plus a shared
+    // concept over the common spine. We assert at least 2 concepts and that
+    // their extents are non-trivial.
     @Test("two disjoint cohorts yield at least two concepts")
     func twoCohorts() async throws {
         let (kit, handle) = try await openEstate()
@@ -162,5 +168,124 @@ struct FormalConceptsTests {
             #expect(a.intent == b.intent)
             #expect(a.support == b.support)
         }
+    }
+
+    // CK-FA-6 — DISCOVERY: cross-room grouping by trust + lattice.
+    //
+    // Two drawers filed DIFFERENTLY (different room, kind, channel) but
+    // sharing the discovery spine — same trust, same UDC, same Wikidata QID
+    // — fuse into one concept. This proves concepts emerge from about-ness
+    // (lattice) and provenance (trust), not from where the drawers were
+    // filed. (Trust is the capture-time default `verbatim`; the full trust
+    // vocabulary, including non-default values, is asserted directly in
+    // CK-FA-7 — the in-memory estate does not yet wire the `correctTrust`
+    // mutation.)
+    @Test("two differently-filed drawers sharing trust + lattice land in one concept")
+    func discoveryGroupsByTrustAndLattice() async throws {
+        let (kit, handle) = try await openEstate()
+        let id1 = try await capture(
+            kit, handle, room: "study", kind: .prose, channel: .typed,
+            udc: "530", qid: "Q11397")
+        let id2 = try await capture(
+            kit, handle, room: "work", kind: .code, channel: .voiced,
+            udc: "530", qid: "Q11397")
+
+        let input = FormalConcepts.Input(
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            miner: .init(minSupport: 2, maxIntentSize: 8, maxConcepts: 16))
+        let out = try await FormalConcepts().run(input: input, estate: handle, kit: kit)
+
+        // The concept spanning both drawers carries the shared spine.
+        let spine = out.concepts.first { Set($0.extentDrawerIDs) == Set([id1, id2]) }
+        let concept = try #require(spine, "a concept spanning both drawers must exist")
+        #expect(concept.support == 2)
+        #expect(concept.intent.contains("locus.trust=verbatim"))
+        #expect(concept.intent.contains("locus.udc=530"))
+        #expect(concept.intent.contains("locus.qid=Q11397"))
+        // Grouping is by the spine, not filing: facets the two drawers
+        // disagree on cannot appear in the shared intent.
+        #expect(!concept.intent.contains("locus.room=study"))
+        #expect(!concept.intent.contains("locus.room=work"))
+        #expect(!concept.intent.contains("locus.kind=prose"))
+        #expect(!concept.intent.contains("locus.kind=code"))
+    }
+
+    // CK-FA-7 — ANCHOR OMISSION + trust vocabulary (direct builder unit
+    // test). The estate forbids an empty `udcCode` at capture (spec I-5), so
+    // the unanchored-udc case is exercised by building the FormalContext row
+    // directly. An absent anchor is OMITTED, never emitted as an empty
+    // attribute; a present anchor and a non-default trust map to their
+    // canonical §4.2 values.
+    @Test("absent anchors omit udc/qid; present anchors and trust map canonically")
+    func anchorOmissionAndTrustVocabulary() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // Unanchored: empty udc, nil qid, default (verbatim) trust.
+        let unanchored = Drawer(
+            content: "x", wing: "w", room: "void", addedBy: "t", filedAt: now,
+            embeddingModelID: "v1", udcCode: "", wikidataQID: nil)
+        let bare = formalAttributesForDrawer(unanchored)
+        #expect(!bare.contains { $0.key == "udc" }, "empty udcCode emits no udc attribute")
+        #expect(!bare.contains { $0.key == "qid" }, "nil wikidataQID emits no qid attribute")
+        #expect(bare.contains { $0.key == "trust" && $0.value == "verbatim" })
+
+        // Anchored + non-default trust (canonical = raw 3 at adjective bits 18–23).
+        let anchored = Drawer(
+            content: "y", wing: "w", room: "lab", addedBy: "t", filedAt: now,
+            embeddingModelID: "v1",
+            adjectiveBitmap: Int64(Trust.canonical.rawValue) << 18,
+            udcCode: "530", wikidataQID: "Q11397")
+        let full = formalAttributesForDrawer(anchored)
+        #expect(full.contains { $0.key == "udc" && $0.value == "530" })
+        #expect(full.contains { $0.key == "qid" && $0.value == "Q11397" })
+        #expect(full.contains { $0.key == "trust" && $0.value == "canonical" })
+    }
+
+    // CK-FA-8 — CLEARANCE: recall is the clearance gate. Two recalls at
+    // different sensitivity ceilings yield different concept sets — a
+    // secret-only concept is unreachable for the lower-clearance caller.
+    @Test("different sensitivity ceilings produce different concept sets")
+    func clearanceScopesConcepts() async throws {
+        let (kit, handle) = try await openEstate()
+        try await capture(kit, handle, room: "open", sensitivity: .normal)
+        try await capture(kit, handle, room: "open", sensitivity: .normal)
+        try await capture(kit, handle, room: "vault", sensitivity: .secret)
+        try await capture(kit, handle, room: "vault", sensitivity: .secret)
+
+        func run(_ ceiling: AdjectiveSensitivity) async throws -> FormalConcepts.Output {
+            try await FormalConcepts().run(
+                input: .init(
+                    frame: LocusKit.RecallFrame(
+                        filterChain: [.unconfirmed, .sensitivityAtMost(ceiling)]),
+                    miner: .init(minSupport: 1, maxIntentSize: 8, maxConcepts: 16)),
+                estate: handle, kit: kit)
+        }
+        let low = try await run(.normal)
+        let high = try await run(.secret)
+
+        func hasSecret(_ o: FormalConcepts.Output) -> Bool {
+            o.concepts.contains { $0.intent.contains("locus.sensitivity=secret") }
+        }
+        #expect(!hasSecret(low))
+        #expect(hasSecret(high))
+        #expect(low.drawerCount < high.drawerCount)
+    }
+
+    // CK-FA-9 — REGRESSION: the filing facets are retained as attributes
+    // (now tiebreakers, but still present).
+    @Test("filing facets (kind/channel/room) still appear as attributes")
+    func filingFacetsRetained() async throws {
+        let (kit, handle) = try await openEstate()
+        try await capture(kit, handle, room: "study", kind: .code, channel: .voiced, udc: "600")
+
+        let input = FormalConcepts.Input(
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            miner: .init(minSupport: 1, maxIntentSize: 8, maxConcepts: 16))
+        let out = try await FormalConcepts().run(input: input, estate: handle, kit: kit)
+
+        let allAttrs = Set(out.concepts.flatMap { $0.intent })
+        #expect(allAttrs.contains("locus.kind=code"))
+        #expect(allAttrs.contains("locus.channel=voiced"))
+        #expect(allAttrs.contains("locus.room=study"))
     }
 }

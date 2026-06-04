@@ -188,7 +188,7 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
             name: "formal_concepts".into(),
             version: "1.0.0".into(),
             description:
-                "Recall a frame, build a formal context where each drawer is a row with its categorical facets as attributes, and mine bounded formal concepts."
+                "Recall a frame, build a formal context whose attributes are each drawer's trust, lattice anchors, sensitivity, and filing facets, and mine bounded formal concepts — emergent provenance and about-ness clusters, not the authored taxonomy."
                     .into(),
             required_capabilities: vec![NeuronKitCapability::FormalConceptAnalysis],
         },
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(d.version, "1.0.0");
         assert_eq!(
             d.description,
-            "Recall a frame, build a formal context where each drawer is a row with its categorical facets as attributes, and mine bounded formal concepts."
+            "Recall a frame, build a formal context whose attributes are each drawer's trust, lattice anchors, sensitivity, and filing facets, and mine bounded formal concepts — emergent provenance and about-ness clusters, not the authored taxonomy."
         );
         assert_eq!(
             d.required_capabilities,

@@ -7,24 +7,41 @@
 //
 // Layer discipline (SPEC § 5, B-1/B-2, I-1/I-2): the recipe only SEQUENCES.
 //   - Estate read: one `GLK.recall` call.
-//   - Context build: one row per recalled drawer; the drawer's four
-//     categorical facets (kind, channel, sensitivity, room) become
-//     `FormalAttribute` triples with namespace "locus", key = axis name,
-//     value = the canonical lowercase Swift case name (§ 4.2 vocabulary).
+//   - Context build: one row per recalled drawer; the drawer's discovery
+//     spine + filing tiebreakers become `FormalAttribute` triples with
+//     namespace "locus", key = axis name, value = the canonical lowercase
+//     Swift case name (§ 4.2 vocabulary).
 //   - Concept mining: one `BoundedConceptMiner.mine` call — the engine owns
 //     all closure/dedup/ordering logic.
 // Capability gate: `.formalConceptAnalysis` is verified before any estate
 // touch (spec B-5, I-3).
 //
+// Discovery spine (FORMAL_CONCEPTS_DISCOVERY_SPINE_001): the context is
+// built so concepts emerge from about-ness and provenance, not from the
+// authored taxonomy. The spine attributes are trust (provenance), the
+// lattice anchors udc/qid (about-ness — where in knowledge space), and
+// sensitivity (access posture). The filing facets (kind/channel/room) are
+// retained as secondary tiebreakers that can refine a concept but no longer
+// define it.
+//
 // Drawer → FormalContext mapping:
 //   Each drawer is one row of the FormalContext. Row ordering matches the
 //   recall ordering. The drawer's attributes are:
+//     FormalAttribute(namespace:"locus", key:"trust",       value:{caseName})
+//     FormalAttribute(namespace:"locus", key:"sensitivity", value:{caseName})
 //     FormalAttribute(namespace:"locus", key:"kind",        value:{caseName})
 //     FormalAttribute(namespace:"locus", key:"channel",     value:{caseName})
-//     FormalAttribute(namespace:"locus", key:"sensitivity", value:{caseName})
 //     FormalAttribute(namespace:"locus", key:"room",        value:{roomString})
+//     FormalAttribute(namespace:"locus", key:"udc",         value:{udcCode})   // only when non-empty
+//     FormalAttribute(namespace:"locus", key:"qid",         value:{wikidataQID}) // only when non-nil/non-empty
 //   The `caseName` is the lowercase camelCase Swift case name (canonical
 //   substrate vocabulary, § 4.2), identical across both versions.
+//
+// Anchor-omission (load-bearing): an absent anchor is OMITTED, never emitted
+// as an empty attribute. A drawer with `udcCode == ""` contributes no `udc`;
+// a drawer with `wikidataQID == nil` contributes no `qid`. Emitting `udc=` /
+// `qid=` for unanchored drawers would fuse every unanchored drawer into one
+// spurious shared concept — the opposite of discovery.
 //
 // Output relabeling: FormalConcept.extent is a [FormalContext.RowID] —
 // 0-based row indices. The output converts these to the original drawer
@@ -95,7 +112,7 @@ public struct FormalConcepts: Recipe {
     public let name = "formal_concepts"
     public let version = "1.0.0"
     public let description =
-        "Recall a frame, build a formal context where each drawer is a row with its categorical facets as attributes, and mine bounded formal concepts."
+        "Recall a frame, build a formal context whose attributes are each drawer's trust, lattice anchors, sensitivity, and filing facets, and mine bounded formal concepts — emergent provenance and about-ness clusters, not the authored taxonomy."
 
     /// Requires the `formalConceptAnalysis` NeuronKit surface (spec I-3).
     public let requiredCapabilities: [NeuronKitCapability] = [.formalConceptAnalysis]
@@ -149,22 +166,61 @@ public struct FormalConcepts: Recipe {
 
 // MARK: - Attribute helpers
 
-/// Build the `FormalAttribute` set for a single recalled drawer.
+/// Build the `FormalAttribute` set for a single recalled drawer — the
+/// discovery spine (trust + lattice + sensitivity) plus the filing facets
+/// as tiebreakers.
 ///
 /// Namespace "locus" is the substrate vocabulary namespace. Key is the
-/// categorical axis name. Value is the canonical lowercase camelCase
-/// Swift case name — identical across both versions (§ 4.2).
-private func formalAttributesForDrawer(_ drawer: Drawer) -> [FormalAttribute] {
-    [
+/// axis name. Value is the canonical lowercase camelCase Swift case name —
+/// identical across both versions (§ 4.2). The lattice anchors (udc/qid)
+/// are omitted when absent (see the file header's anchor-omission note).
+///
+/// Internal (not private) so the anchor-omission and trust-vocabulary
+/// behaviour can be unit-tested directly, independent of the estate's
+/// capture-time I-5 constraint that forbids an empty `udcCode`.
+func formalAttributesForDrawer(_ drawer: Drawer) -> [FormalAttribute] {
+    var attributes: [FormalAttribute] = [
+        // Spine — provenance: how the substrate qualifies the row's reliability.
+        FormalAttribute(namespace: "locus", key: "trust",
+                        value: trustValue(drawer.trust)),
+        // Spine — access posture.
+        FormalAttribute(namespace: "locus", key: "sensitivity",
+                        value: sensitivityValue(drawer.adjectiveSensitivity)),
+        // Tiebreakers — filing facets (retained, no longer the spine).
         FormalAttribute(namespace: "locus", key: "kind",
                         value: contentKindValue(drawer.contentKind)),
         FormalAttribute(namespace: "locus", key: "channel",
                         value: captureChannelValue(drawer.captureChannel)),
-        FormalAttribute(namespace: "locus", key: "sensitivity",
-                        value: sensitivityValue(drawer.adjectiveSensitivity)),
         FormalAttribute(namespace: "locus", key: "room",
                         value: drawer.room),
     ]
+    // Spine — about-ness: the lattice anchors locating the drawer in
+    // knowledge space. Omit-on-absent is load-bearing: an unanchored drawer
+    // contributes NO udc/qid attribute, so unanchored drawers are never
+    // fused by a spurious shared empty anchor. The empty string ("") is the
+    // no-anchor sentinel for `udcCode`; `nil` is the no-anchor sentinel for
+    // `wikidataQID` (an empty qid string is treated as absent too).
+    if !drawer.udcCode.isEmpty {
+        attributes.append(
+            FormalAttribute(namespace: "locus", key: "udc", value: drawer.udcCode))
+    }
+    if let qid = drawer.wikidataQID, !qid.isEmpty {
+        attributes.append(
+            FormalAttribute(namespace: "locus", key: "qid", value: qid))
+    }
+    return attributes
+}
+
+private func trustValue(_ trust: Trust) -> String {
+    switch trust {
+    case .verbatim:  return "verbatim"
+    case .observed:  return "observed"
+    case .imported:  return "imported"
+    case .canonical: return "canonical"
+    case .derived:   return "derived"
+    case .proposed:  return "proposed"
+    case .ambient:   return "ambient"
+    }
 }
 
 private func contentKindValue(_ kind: ContentKind) -> String {
