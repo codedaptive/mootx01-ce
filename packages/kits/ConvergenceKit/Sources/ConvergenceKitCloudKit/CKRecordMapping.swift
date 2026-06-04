@@ -89,9 +89,7 @@ public enum CKRecordMapping {
             table: tableName,
             rowKey: rowKey,
             values: values,
-            hlc: hlc,
-            schemaVersion: schemaVersion,
-            kitID: kitID
+            syncMeta: SyncMeta(hlc: hlc, schemaVersion: schemaVersion, kitID: kitID)
         )
     }
 
@@ -179,11 +177,28 @@ public enum CKRecordMapping {
     }
 }
 
-public struct DecodedRecord: Sendable {
-    public let table: String
-    public let rowKey: UUID
-    public let values: [String: TypedValue]
+/// Sync metadata extracted from the `_sync*` fields of a CKRecord.
+/// Carried separately from `values` so `values` remains clean
+/// (no `_sync*` keys) while the engine retains the metadata needed
+/// for conflict resolution and durable HLC persistence.
+public struct SyncMeta: Sendable {
     public let hlc: HLC
     public let schemaVersion: Int
     public let kitID: String
+}
+
+public struct DecodedRecord: Sendable {
+    public let table: String
+    public let rowKey: UUID
+    /// App-data values. Contains no `_sync*` keys.
+    public let values: [String: TypedValue]
+    /// Sync metadata extracted during decode.
+    public let syncMeta: SyncMeta
+
+    /// HLC of the record — convenience accessor backed by `syncMeta`.
+    public var hlc: HLC { syncMeta.hlc }
+    /// Schema version — convenience accessor backed by `syncMeta`.
+    public var schemaVersion: Int { syncMeta.schemaVersion }
+    /// Kit identifier — convenience accessor backed by `syncMeta`.
+    public var kitID: String { syncMeta.kitID }
 }

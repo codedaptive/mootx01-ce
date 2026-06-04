@@ -61,6 +61,8 @@ public actor BM25Index {
     }
 
     /// Top-k BM25 scoring over the given query string.
+    @available(*, deprecated, renamed: "topK(_:for:)",
+        message: "search(_:limit:) performs an unbounded sort. Use topK(_:for:) for bounded O(M log k) recall.")
     public func search(_ query: String, limit: Int) -> [(UUID, Double)] {
         guard totalDocs > 0, limit > 0 else { return [] }
         let queryTokens = tokenizer.keywordTokens(query)
