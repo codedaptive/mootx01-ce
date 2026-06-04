@@ -15,6 +15,9 @@ INSTALL_PREFIX="${MOOTX01_INSTALL_PREFIX:-$HOME/.local/share/MOOTx01}"
 BINARY_PATH="$INSTALL_PREFIX/bin/mootx01-mcp"
 SERVER_NAME="mootx01"
 PURGE_DATA=0
+# When 1 (set via --local), Claude Code entry is removed from ./.mcp.json
+# instead of ~/.claude.json. Symmetric with install.sh --local.
+LOCAL_SCOPE=0
 
 DATA_DIR="$HOME/Library/Application Support/MOOTx01"
 
@@ -33,13 +36,15 @@ log() { printf '%s\n' "$*" >&2; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --purge) PURGE_DATA=1; shift ;;
+        --local) LOCAL_SCOPE=1; shift ;;
         *) log "uninstall.sh: unknown argument: $1"; exit 1 ;;
     esac
 done
 
 log "MOOTx01 uninstaller"
-log "  prefix:  $INSTALL_PREFIX"
-log "  purge:   $PURGE_DATA"
+log "  prefix:      $INSTALL_PREFIX"
+log "  purge:       $PURGE_DATA"
+log "  local-scope: $LOCAL_SCOPE"
 
 # Remove the binary.
 if [[ -f "$BINARY_PATH" ]]; then
@@ -48,7 +53,13 @@ if [[ -f "$BINARY_PATH" ]]; then
 fi
 
 # Remove the server entry from every JSON client config that still has one.
-for config_path in "${CLIENT_CONFIGS[@]}"; do
+# When --local is set, Claude Code (index 1) targets ./.mcp.json instead of
+# ~/.claude.json — symmetric with install.sh --local.
+for i in "${!CLIENT_CONFIGS[@]}"; do
+    config_path="${CLIENT_CONFIGS[$i]}"
+    if [[ "$LOCAL_SCOPE" == "1" && "$i" == "1" ]]; then
+        config_path="$PWD/.mcp.json"
+    fi
     [[ -f "$config_path" ]] || continue
     SERVER_NAME="$SERVER_NAME" CONFIG_PATH="$config_path" python3 - <<'PY'
 import json, os, sys

@@ -68,4 +68,57 @@ public enum MootPaths {
     public static func estateURL(in dataDirectory: URL) -> URL {
         dataDirectory.appendingPathComponent(estateFileName, isDirectory: false)
     }
+
+    /// URL of the Claude Code project-local MCP config file.
+    ///
+    /// Claude Code reads `.mcp.json` from the project root when a
+    /// server is wired with `claude mcp add --local`. The installer
+    /// writes to this path when `--local` is passed, scoping the MOOT
+    /// server entry to the current project rather than the global
+    /// `~/.claude.json`.
+    ///
+    /// - Parameter workingDirectory: the directory in which install.sh
+    ///   was invoked (i.e. `$PWD` at install time). Inject in tests;
+    ///   pass `URL(fileURLWithPath: FileManager.default.currentDirectoryPath)`
+    ///   in the executable.
+    /// - Returns: `workingDirectory/.mcp.json`. Does not touch the filesystem.
+    public static func localMCPConfigURL(workingDirectory: URL) -> URL {
+        workingDirectory.appendingPathComponent(".mcp.json", isDirectory: false)
+    }
+
+    /// URL of the global Claude Code settings file.
+    ///
+    /// Claude Code persists per-tool approval state in
+    /// `~/.claude/settings.json` under the `permissions.allow` key.
+    /// The installer merges ARIA tool names into this file so users
+    /// do not see per-tool approval prompts after a fresh install.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`
+    ///   in the executable.
+    /// - Returns: `homeDirectory/.claude/settings.json`. Does not touch
+    ///   the filesystem.
+    public static func globalClaudeSettingsURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent("settings.json", isDirectory: false)
+    }
+
+    /// URL of the project-local Claude Code settings file.
+    ///
+    /// When `--local` is used during install, Claude Code is wired to
+    /// `.mcp.json` in the project root. The corresponding per-project
+    /// settings file that receives ARIA tool approvals lives at
+    /// `.claude/settings.json` in the same working directory.
+    ///
+    /// - Parameter workingDirectory: the directory in which install.sh
+    ///   was invoked (i.e. `$PWD` at install time). Inject in tests;
+    ///   pass `URL(fileURLWithPath: FileManager.default.currentDirectoryPath)`.
+    /// - Returns: `workingDirectory/.claude/settings.json`. Does not
+    ///   touch the filesystem.
+    public static func localClaudeSettingsURL(workingDirectory: URL) -> URL {
+        workingDirectory
+            .appendingPathComponent(".claude", isDirectory: true)
+            .appendingPathComponent("settings.json", isDirectory: false)
+    }
 }
