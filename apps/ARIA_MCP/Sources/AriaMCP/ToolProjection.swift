@@ -50,6 +50,12 @@ public enum ToolProvenance: Sendable, Equatable {
     /// the conscious-mind recipes an agent triggers (and, for the
     /// migration flow, the human-confirmed promotion step).
     case recipe
+    /// A VaultKit control-surface tool (`moot_vault_*`). Like `.federation`
+    /// and `.recipe` it has no `(verb, noun)` pair and is dispatched by
+    /// name. It bridges a MOOT estate and a Markdown vault (export /
+    /// import / status / reconcile); Swift-only by design per
+    /// ADR-VAULTKIT-002 (the shipped MCP binary is the Swift port).
+    case vault
 }
 
 /// A single tool advertised in `tools/list`. The structure mirrors the
@@ -127,6 +133,11 @@ public enum ToolProjection {
         // lens recipe (LENS_DISCOVERABILITY_DECISION v2.0: listing and
         // invokability ship together).
         out.append(contentsOf: LensTools.tools())
+        // The VaultKit control-surface tools — the `moot_vault_*` family
+        // (export / import / status / reconcile). Dispatched by name like
+        // the recipe and lens tools; appended after them so the lexicon
+        // projection's byte-for-byte conformance is untouched.
+        out.append(contentsOf: VaultTools.tools())
         return out
     }
 

@@ -12,9 +12,9 @@ import PersistenceKitInMemory
 ///
 ///   - moot_capture_tunnel: live handler, happy path, arg-validation failure
 ///   - moot_kgFact_recall, moot_diaryEntry_recall, moot_proposal_recall,
-///     moot_association_recall, moot_learnedReference_recall: honest-refusal
-///     stubs (isError true, NOT JSON-RPC transport fault), matching the Rust
-///     leg's error_result discipline for the same tools.
+///     moot_association_recall, moot_learnedReference_recall: live read handlers
+///     (isError false, returning "recalled 0 X(s)" on a fresh estate), matching
+///     the Rust leg's text_result output for the same tools.
 ///   - Schema assertions for all 6 tools: required arrays + property keys,
 ///     byte-parity with the Rust leg's lexicon_schema output.
 ///
@@ -119,76 +119,76 @@ struct LexiconGapsTests {
         )
     }
 
-    // MARK: - Recall stubs: honest-refusal tests
+    // MARK: - Recall live-read tests
 
-    /// moot_kgFact_recall returns an honest tool-level error result (isError true,
-    /// NOT a JSON-RPC transport fault) because the substrate has no estate-wide
-    /// kgFact read accessor. This matches the Rust leg's error_result for the same
-    /// tool and removes the prior methodNotFound divergence.
-    @Test("moot_kgFact_recall returns honest refusal (isError true, not JSON-RPC error)")
-    func kgFactRecallReturnsHonestRefusal() async throws {
+    /// moot_kgFact_recall returns a live success result (isError false) because
+    /// the substrate now has `DrawerStore.allKGFacts()` — an estate-wide kg-fact
+    /// read accessor. Matches the Rust leg's Ok(empty vec) on a fresh estate.
+    @Test("moot_kgFact_recall returns live recall result (isError false)")
+    func kgFactRecallReturnsLiveResult() async throws {
         let dispatcher = try await makeDispatcher()
-        try await assertHonestRefusal(
+        try await assertLiveRecall(
             dispatcher: dispatcher,
             toolName: "moot_kgFact_recall",
             id: 10
         )
     }
 
-    /// moot_diaryEntry_recall returns an honest tool-level error result.
-    /// Substrate has no unconstrained diary-entries accessor.
-    @Test("moot_diaryEntry_recall returns honest refusal (isError true, not JSON-RPC error)")
-    func diaryEntryRecallReturnsHonestRefusal() async throws {
+    /// moot_diaryEntry_recall returns a live success result. Substrate now has
+    /// `DrawerStore.allDiaryEntries()` — an estate-wide diary-entry accessor.
+    @Test("moot_diaryEntry_recall returns live recall result (isError false)")
+    func diaryEntryRecallReturnsLiveResult() async throws {
         let dispatcher = try await makeDispatcher()
-        try await assertHonestRefusal(
+        try await assertLiveRecall(
             dispatcher: dispatcher,
             toolName: "moot_diaryEntry_recall",
             id: 11
         )
     }
 
-    /// moot_proposal_recall returns an honest tool-level error result.
-    /// Substrate has no all_proposals() accessor.
-    @Test("moot_proposal_recall returns honest refusal (isError true, not JSON-RPC error)")
-    func proposalRecallReturnsHonestRefusal() async throws {
+    /// moot_proposal_recall returns a live success result. Substrate now has
+    /// `DrawerStore.allProposals()` — an estate-wide proposals accessor.
+    @Test("moot_proposal_recall returns live recall result (isError false)")
+    func proposalRecallReturnsLiveResult() async throws {
         let dispatcher = try await makeDispatcher()
-        try await assertHonestRefusal(
+        try await assertLiveRecall(
             dispatcher: dispatcher,
             toolName: "moot_proposal_recall",
             id: 12
         )
     }
 
-    /// moot_association_recall returns an honest tool-level error result.
-    /// Substrate has no all_associations() accessor.
-    @Test("moot_association_recall returns honest refusal (isError true, not JSON-RPC error)")
-    func associationRecallReturnsHonestRefusal() async throws {
+    /// moot_association_recall returns a live success result. Substrate now has
+    /// `DrawerStore.allAssociations()` — an estate-wide associations accessor.
+    @Test("moot_association_recall returns live recall result (isError false)")
+    func associationRecallReturnsLiveResult() async throws {
         let dispatcher = try await makeDispatcher()
-        try await assertHonestRefusal(
+        try await assertLiveRecall(
             dispatcher: dispatcher,
             toolName: "moot_association_recall",
             id: 13
         )
     }
 
-    /// moot_learnedReference_recall returns an honest tool-level error result.
-    /// Substrate has no all_learned_references() accessor.
-    @Test("moot_learnedReference_recall returns honest refusal (isError true, not JSON-RPC error)")
-    func learnedReferenceRecallReturnsHonestRefusal() async throws {
+    /// moot_learnedReference_recall returns a live success result. Substrate now
+    /// has `DrawerStore.allLearnedReferences()` — an estate-wide learned
+    /// references accessor.
+    @Test("moot_learnedReference_recall returns live recall result (isError false)")
+    func learnedReferenceRecallReturnsLiveResult() async throws {
         let dispatcher = try await makeDispatcher()
-        try await assertHonestRefusal(
+        try await assertLiveRecall(
             dispatcher: dispatcher,
             toolName: "moot_learnedReference_recall",
             id: 14
         )
     }
 
-    /// Shared assertion: the named tool must return a tool-level error result
-    /// (isError true, content present) NOT a JSON-RPC transport fault when
-    /// called with empty arguments. This is the honest-refusal discipline:
-    /// the call reached the dispatch surface, the surface said no, the client
-    /// retains the call ID. Matches the Rust leg's error_result output.
-    private func assertHonestRefusal(
+    /// Shared assertion: the named tool must return a tool-level success result
+    /// (isError false, content present with "recalled" text) NOT a JSON-RPC
+    /// transport fault when called with empty arguments. The call reached the
+    /// dispatch surface, the substrate returned Ok, the client retains the call
+    /// ID. Matches the Rust leg's text_result output on a fresh estate.
+    private func assertLiveRecall(
         dispatcher: ARIA_MCPDispatcher,
         toolName: String,
         id: Int64
@@ -209,13 +209,17 @@ struct LexiconGapsTests {
         }
         let obj = try #require(result.objectValue)
         #expect(
-            obj["isError"] == JSONValue.bool(true),
-            "\(toolName) must return isError=true (honest refusal)"
+            obj["isError"] == JSONValue.bool(false),
+            "\(toolName) must return isError=false (live recall)"
         )
         let text = obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
         #expect(
             text != nil && !(text?.isEmpty ?? true),
-            "\(toolName) honest refusal must include non-empty text content"
+            "\(toolName) live recall must include non-empty text content"
+        )
+        #expect(
+            text?.contains("recalled") == true,
+            "\(toolName) live recall text must contain 'recalled'; got: \(text ?? "nil")"
         )
     }
 

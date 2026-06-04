@@ -1,5 +1,5 @@
 {
-  "originHash" : "0593046f3dbdd2066fba0e9cc032cc7a8e5d9ef64388eef3a8a824c0930ef7aa",
+  "originHash" : "cbbd0c9a2a0da426cf952fbd60e97d290e9dea350444c996ddef5406e09cf0c0",
   "pins" : [
     {
       "identity" : "postgres-nio",
@@ -51,8 +51,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-crypto.git",
       "state" : {
-        "revision" : "95ba0316a9b733e92bb6b071255ff46263bbe7dc",
-        "version" : "3.15.1"
+        "revision" : "1b6b2e274e85105bfa155183145a1dcfd63331f1",
+        "version" : "4.5.0"
       }
     },
     {

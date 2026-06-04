@@ -24,9 +24,9 @@ public enum Acceptance {
         case .diaryEntry:
             return [.recall]
         case .proposal:
-            return [.mutate, .withdraw, .expunge, .recall]
+            return [.propose, .mutate, .withdraw, .expunge, .recall]
         case .association:
-            return [.mutate, .expunge, .recall]
+            return [.associate, .mutate, .expunge, .recall]
         case .learnedReference:
             return [.learn, .mutate, .withdraw, .expunge, .recall]
         }

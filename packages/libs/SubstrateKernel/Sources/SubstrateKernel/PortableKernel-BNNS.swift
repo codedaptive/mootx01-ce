@@ -49,6 +49,42 @@ import SubstrateTypes
 
 #if canImport(Accelerate)
 
+// BNNS single-shot matmul wrapper.
+//
+// `BNNS.applyMatrixMultiplication` is deprecated as of macOS 15 / iOS 18
+// in favor of the BNNSGraph API. Migrating this kernel to BNNSGraph is a
+// graph-construct-and-compile rewrite that changes the compute path; this
+// kernel is conformance-gated (byte-identical to the scalar reference,
+// CI-checked four ways), so swapping the engine requires Newton four-way
+// re-validation and is out of scope for a no-behavior-change hygiene
+// mission. A dedicated BNNSGraph migration is tracked separately.
+//
+// The single deprecated reference is isolated to this one wrapper so the
+// kernel carries exactly one documented deprecation warning instead of two
+// scattered through the hot batch methods. Swift has no per-call
+// deprecation suppression; an `@available(deprecated:)` on this wrapper
+// would be inert at the current macOS 14 / iOS 17 floor (the floor is
+// below the deprecation version, so it neither silences the inner call nor
+// warns the callers) and would actively cascade to the protocol-witness
+// call sites if the floor were ever raised to macOS 15 — so the wrapper is
+// deliberately left un-annotated. This containment stands until the
+// BNNSGraph migration clears the call for good.
+//
+// The shape (inputB transposed, alpha 1.0, no workspace) is identical for
+// both callers; each guards correctness with its own scalar fallback.
+private func bnnsApplyMatMul(
+    a: BNNSNDArrayDescriptor,
+    b: BNNSNDArrayDescriptor,
+    out: BNNSNDArrayDescriptor
+) throws {
+    try BNNS.applyMatrixMultiplication(
+        inputA: a, transposed: false,
+        inputB: b, transposed: true,
+        output: out,
+        alpha: 1.0,
+        workspace: nil)
+}
+
 /// Pre-encoded ±1/0 Float32 matrix derived from one
 /// HyperplaneFamily. Layout is row-major [64, inputBits]:
 /// row k is the k-th hyperplane, column i is bit i of the
@@ -297,12 +333,7 @@ public struct BnnsKernel: SubstrateKernel {
                 data: outRaw, scalarType: Float.self,
                 shape: .matrixRowMajor(n, 1)) else { return false }
             do {
-                try BNNS.applyMatrixMultiplication(
-                    inputA: aDesc, transposed: false,
-                    inputB: bDesc, transposed: true,
-                    output: outDesc,
-                    alpha: 1.0,
-                    workspace: nil)
+                try bnnsApplyMatMul(a: aDesc, b: bDesc, out: outDesc)
                 return true
             } catch {
                 return false
@@ -440,12 +471,7 @@ public struct BnnsKernel: SubstrateKernel {
                 data: outRaw, scalarType: Float.self,
                 shape: .matrixRowMajor(64, n)) else { return false }
             do {
-                try BNNS.applyMatrixMultiplication(
-                    inputA: aDesc, transposed: false,
-                    inputB: bDesc, transposed: true,
-                    output: outDesc,
-                    alpha: 1.0,
-                    workspace: nil)
+                try bnnsApplyMatMul(a: aDesc, b: bDesc, out: outDesc)
                 return true
             } catch {
                 return false

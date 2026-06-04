@@ -73,8 +73,6 @@ public enum NeuronKitCapability: String, Sendable, Hashable, CaseIterable, Codab
     case promoteBranch
     case benchmark
     case runTournament
-    case associationRuleMining   // mineAssociationRules
-    case formalConceptAnalysis   // BoundedConceptMiner.mine
 }
 
 public let shippedNeuronKitCapabilities: Set<NeuronKitCapability>
@@ -90,7 +88,6 @@ public func verifyCapabilities(
 ```rust
 pub enum NeuronKitCapability {
     HybridRecall, Synthesize, DeriveBranch, PromoteBranch, Benchmark, RunTournament,
-    AssociationRuleMining, FormalConceptAnalysis,
 }
 impl NeuronKitCapability { pub fn raw_value(&self) -> &'static str; }
 
@@ -239,13 +236,11 @@ binding; the catalog descriptor matches the Swift values (§ 7).
 
 ## § 6 — Reasoning-lens recipes (SPEC § 4.2)
 
-The fourteen reasoning-lens recipes plus two analytics recipes. **Both versions
-are shipped**: Rust in `packages/kits/CognitionKit/rust/src/*_recipe.rs`, Swift
-in `Sources/CognitionKit/` (SPEC C-7 satisfied) — each category below names its
-Swift entry points. Per `LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02`, a recipe
-graduates into the catalog only when both versions ship in the same change, with
-the MCP tool landing in the same commit. The analytics recipes (association_rules,
-formal_concepts) ship both legs as of AR_FCA_CAPABILITY_001.
+The fourteen lens recipes. **Rust signatures are shipped** in
+`packages/kits/CognitionKit/rust/src/*_recipe.rs`. The **Swift versions are
+the contracted target (SPEC C-7) and are not yet authored** — each must be
+written before its lens can graduate into the catalog (SPEC § 8). They are
+listed here as the surface both versions must converge on.
 
 Every lens `run_*` takes the estate coordinator and handle, a recall frame
 or wing/anchor, lens-specific parameters, and (where it recalls) a `now`;
@@ -253,8 +248,6 @@ each returns its reasoning result or a `RecipeRunError` (read-only;
 SPEC § 5, I-6).
 
 ### Structure (category 1)
-
-Swift versions shipped: `Keystones`, `Constellation`, `FreeAssociation`.
 
 ```rust
 pub fn run_keystones(
@@ -275,10 +268,6 @@ pub fn run_free_association(
 
 ### Topics (category 2)
 
-Swift versions shipped: `ThemeWeather`, `LatentThemesLens`. The
-field-value label vocabulary both versions emit spells the Swift case
-names (`kind:prose`, `channel:typed`, `sensitivity:normal`, …).
-
 ```rust
 pub fn run_latent_themes(
     coord: &EstateCoordinator, handle: &EstateHandle,
@@ -292,9 +281,6 @@ pub fn run_theme_weather(
 ```
 
 ### Preference (category 4)
-
-Swift versions shipped: `Bias` (the dismissal pairs surface as a
-`DismissalRate` value type in Swift).
 
 ```rust
 pub struct BiasReport {
@@ -310,9 +296,6 @@ pub fn run_bias(
 ```
 
 ### Surprise (category 5)
-
-Swift versions shipped: `Drift` (`splitAt`/window math over `Date`,
-matching the Swift capture surface), `Contradiction`.
 
 ```rust
 pub struct DriftOutput { pub drift: DriftScore, pub before_count: usize, pub after_count: usize }
@@ -330,8 +313,6 @@ pub fn run_contradiction(
 
 ### Grounding / trust (category 6)
 
-Swift versions shipped: `TrustLens`.
-
 ```rust
 pub struct TrustGroundedOutput {
     pub context: ContextDocument,
@@ -346,10 +327,6 @@ pub fn run_trust_grounded_synthesis(
 
 ### Associative (category 7)
 
-Swift versions shipped: `PartialCueRecall` (an unknown anchor throws
-the typed `AnchorNotInRecalledSetError` — the Swift face of the fault
-the Rust version reports through its `Substrate` arm, § 4).
-
 ```rust
 pub enum CueMode { FeelsLike, AboutThis, FromThen }
 pub struct CueMatch { pub id: String, pub score: f64 }
@@ -360,8 +337,6 @@ pub fn run_partial_cue_recall(
 ```
 
 ### Prediction (category 8)
-
-Swift versions shipped: `TunnelSuccessor`, `Anticipate`.
 
 ```rust
 pub fn run_anticipate(
@@ -378,10 +353,6 @@ pub fn run_tunnel_successor(
 
 ### Federated (category 9)
 
-Swift versions shipped: `EstateDivergenceLens`, `MindOverlapLens`
-(each takes one `RecallFrame` value for both recalls; the Rust
-`make_frame` closures exist for ownership reasons, not contract).
-
 ```rust
 pub struct MindOverlap { pub overlap: f64, pub a_count: usize, pub b_count: usize }
 pub fn run_mind_overlap<F: Fn() -> RecallFrame>(
@@ -395,108 +366,6 @@ pub fn run_estate_divergence<F: Fn() -> RecallFrame>(
     make_frame: F, now: i64,
 ) -> Result<EstateDivergence, RecipeRunError>;
 ```
-
-### Analytics (category 10) — both versions shipped (AR_FCA_CAPABILITY_001)
-
-**Swift**
-
-```swift
-public struct AssociationRuleResult: Sendable, Equatable {
-    public let antecedent: String     // label string, e.g. "room:study"
-    public let consequent: String     // label string, e.g. "kind:prose"
-    public let support: Double
-    public let confidence: Double
-    public let lift: Double
-    public let conviction: Double     // +infinity when confidence == 1
-    public let leverage: Double
-}
-
-// N-semantics (MATRIX_ACCESSOR_DECISION v1.0): the recipe folds its
-// co-occurrence from the RECALLED drawers — N = recalled drawer count, a
-// snapshot over the recalled frame, NOT estate-lifetime decayed history.
-// The recall filter chain is therefore the sensitivity/clearance gate for
-// the mined matrix. A live-tier variant, if ever wanted, is a NEW-named
-// recipe behind a clearance-partitioned tier — never a source switch here.
-public struct AssociationRules: Recipe {
-    public struct Input: Sendable {
-        public let frame: RecallFrame
-        public let thresholds: MiningThresholds
-        public init(frame: RecallFrame, thresholds: MiningThresholds)
-    }
-    public struct Output: Sendable {
-        public let rules: [AssociationRuleResult]  // ascending packed label-index order
-        public let drawerCount: Int
-        public let labelOverflow: Bool             // true if >64 unique labels were capped
-    }
-    public let name = "association_rules"
-    public let version = "1.0.0"
-    public let requiredCapabilities = [.associationRuleMining]
-    public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
-}
-
-public struct FormalConceptResult: Sendable, Equatable {
-    public let intent: [String]               // "{ns}.{key}={value}" strings, sorted
-    public let extentDrawerIDs: [String]      // drawer IDs, row-index ascending
-    public let support: Int
-}
-
-public struct FormalConcepts: Recipe {
-    public struct Input: Sendable {
-        public let frame: RecallFrame
-        public let miner: BoundedConceptMiner
-        public init(frame: RecallFrame, miner: BoundedConceptMiner)
-    }
-    public struct Output: Sendable {
-        public let concepts: [FormalConceptResult]   // support desc, intent size asc, lexicographic
-        public let drawerCount: Int
-    }
-    public let name = "formal_concepts"
-    public let version = "1.0.0"
-    public let requiredCapabilities = [.formalConceptAnalysis]
-    public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
-}
-```
-
-**Rust**
-
-```rust
-pub struct AssociationRuleResult {
-    pub antecedent: String, pub consequent: String,
-    pub support: f64, pub confidence: f64,
-    pub lift: f64, pub conviction: f64, pub leverage: f64,
-}
-pub struct AssociationRulesOutput {
-    pub rules: Vec<AssociationRuleResult>,
-    pub drawer_count: usize,
-    pub label_overflow: bool,
-}
-pub fn run_association_rules(
-    coord: &EstateCoordinator, handle: &EstateHandle,
-    frame: RecallFrame, thresholds: MiningThresholds, now: i64,
-) -> Result<AssociationRulesOutput, RecipeRunError>;
-
-pub struct FormalConceptResult {
-    pub intent: Vec<String>,              // "{ns}.{key}={value}", sorted
-    pub extent_drawer_ids: Vec<String>,
-    pub support: usize,
-}
-pub struct FormalConceptsOutput {
-    pub concepts: Vec<FormalConceptResult>,
-    pub drawer_count: usize,
-}
-pub fn run_formal_concepts(
-    coord: &EstateCoordinator, handle: &EstateHandle,
-    frame: RecallFrame, miner: BoundedConceptMiner, now: i64,
-) -> Result<FormalConceptsOutput, RecipeRunError>;
-```
-
-The label vocabulary contract (canonical in both versions): each drawer
-contributes four categorical labels using **lowercase camelCase Swift case
-names** as the canonical substrate vocabulary (§ 4.2 of the SPEC). Format:
-`"kind:{caseName}"`, `"channel:{caseName}"`, `"sensitivity:{caseName}"`,
-`"room:{roomString}"`. Labels are sorted alphabetically; up to 64 distinct
-labels are indexed (MatrixO 6-bit field constraint). The Rust version uses
-the same lowercase strings — NOT the Rust PascalCase Debug names.
 
 ## § 7 — The catalog (SPEC § 8)
 
@@ -534,9 +403,8 @@ pub fn recipe_names() -> Vec<String>;
 
 The descriptor strings and field shape match across versions byte-for-byte
 (SPEC § 8, C-8). The catalog lists exactly the recipes present in both
-versions — the 2 foundational recipes plus all 14 reasoning lenses plus the
-2 analytics lenses (LENS_DISCOVERABILITY_DECISION v2.0); a recipe enters when
-both versions land together, with its MCP tool in the same change (SPEC § 8).
+versions — today **grounded_synthesis** and **migration_benchmark**; a lens
+recipe enters only when both versions land together (SPEC § 8).
 
 ---
 

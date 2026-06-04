@@ -11,7 +11,7 @@ relates_to:
   - NEURONKIT_SPEC_v0.85.md  (the reasoning surface every recipe sequences — daemons, reasoning functions, the lens taxonomy)
   - GENIUSLOCUSKIT_SPEC_v0.8.md  (the estate verb surface and branch COW verbs recipes dispatch through)
   - GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md  (the substrate contract; the active/subconscious control path)
-  - LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md  (the catalog-graduation criteria for a lens recipe; supersedes v1.0)
+  - LENS_DISCOVERABILITY_DECISION_v1.0.md  (the catalog-graduation criteria for a lens recipe)
 purpose: |
   CognitionKit is the conscious mind of the MOOTx01 substrate: the
   behaviour-recipe layer that sequences NeuronKit reasoning and
@@ -234,52 +234,6 @@ answer; the category numbers match the NeuronKit lens headers
 obeys I-1 (no algorithm), I-2 (no direct substrate), I-6 (read-only,
 deterministic), and the read-sequence-shape archetype (§ 5).
 
-#### The categorical projection of a drawer
-
-The topic, preference, and prediction lenses do not reason over a
-drawer's prose. They reason over the drawer's **categorical facets** —
-the same facets the substrate already records as bitmap fields and as the
-structural fingerprint. A lens recipe derives one of two projections from
-a recalled drawer set, and which one is fixed by the shape the lens's math
-requires, not by the recipe's discretion:
-
-- **The partition projection** — for a lens whose math takes one value per
-  axis (theme weather's per-category mass, bias's category share,
-  anticipate's category-keyed events). Each categorical axis of a drawer
-  (a state, a content kind, a capture channel, a source type, a trust
-  level, a sensitivity, and the other bitmap fields) holds exactly one
-  value, so the drawer contributes exactly one category token per axis.
-  A category token is the pairing of an axis identifier with that axis's
-  value identifier; both identifiers are the axis's and value's own
-  canonical names as fixed by the substrate vocabulary, language-neutral
-  and identical across versions. The token is a stable identity, never a
-  rendered or debug-formatted string. A lens counts, masses, or shares
-  these per-axis tokens; because each axis is single-valued, the tokens
-  of one axis form a true partition of the drawer set.
-
-- **The co-occurrence projection** — for a lens whose math takes a sparse
-  symmetric co-occurrence over a shared label vocabulary (latent themes'
-  NMF). A drawer projects to the **set bits of its structural
-  fingerprint**: the fingerprint is a fixed-width bit vector each drawer
-  carries, and a set bit is a categorical feature the drawer exhibits and
-  may share with other drawers. A label is a fingerprint bit position — an
-  integer index into the fixed bit space, language-neutral by
-  construction. The co-occurrence weight of a label pair is the count of
-  recalled drawers whose fingerprint has both bits set. This projection is
-  what makes the factorisation meaningful: bits that co-vary across the
-  recalled set are the latent themes the NMF recovers. The single-valued
-  partition tokens are deliberately NOT used here — independent axes do not
-  co-occur in any way the factorisation can read.
-
-Both projections are derived from substrate quantities that are already
-byte-identical across versions (the bitmap fields and the conformance-
-gated fingerprint), so a lens that shapes its input from them inherits
-cross-version determinism for free (C-Det). A lens recipe that invents a
-label or category string of its own — a rendered field value, a
-language-specific formatting of an enum — has left the substrate
-vocabulary and is non-conformant: the projection must be the substrate's
-own identities, not a restatement of them.
-
 ### Structure (category 1) — over the drawer/tunnel graph
 
 - **Keystones** — read a wing's drawer-to-drawer tunnel graph and rank the
@@ -296,23 +250,19 @@ own identities, not a restatement of them.
 
 ### Topics (category 2) — over categories / co-occurrence
 
-- **Latent themes** — recall a frame, derive the **co-occurrence
-  projection** over the recalled drawers (fingerprint-bit labels, weighted
-  by how many drawers share each bit pair), and surface NeuronKit's
-  latent-themes factorisation into soft topic loadings. "The themes
-  underlying the co-occurrence."
+- **Latent themes** — recall a frame, derive a label co-occurrence, and
+  surface NeuronKit's latent-themes factorisation into soft topic loadings.
+  "The themes underlying the co-occurrence."
 
-- **Theme weather** — recall a frame, derive the **partition projection**
-  over one categorical axis (per-category counts, plus recency-weighted
-  masses over the same tokens), and surface NeuronKit's theme-weather
-  momentum. "Which themes are rising vs fading."
+- **Theme weather** — recall a frame, derive per-category recency-weighted
+  and raw masses, and surface NeuronKit's theme-weather momentum. "Which
+  themes are rising vs fading."
 
 ### Preference (category 4) — what the estate leans toward / away from
 
-- **Bias** — derive the **partition projection** of the estate's category
-  shares, compare against a passed-in reference share, and surface
-  NeuronKit's representation bias and learned preference. "What I lean
-  toward, away from, and actually keep."
+- **Bias** — recall the estate's category distribution against a passed-in
+  reference and surface NeuronKit's representation bias and learned
+  preference. "What I lean toward, away from, and actually keep."
 
 ### Surprise (category 5) — distributional movement and outliers
 
@@ -357,25 +307,6 @@ own identities, not a restatement of them.
   surface NeuronKit's drift between their distributions. "How two estates'
   distributions differ."
 
-### Analytics (category 10) — over the recalled set's co-occurrence structure
-
-- **Association rules** — recall a frame, project each drawer's categorical
-  facets (kind, channel, sensitivity, room) into the co-occurrence matrix O
-  using a per-call label vocabulary (canonical lowercase camelCase Swift
-  case names, ≤64 labels), and surface NeuronKit's `mineAssociationRules`
-  pairwise rule mining with the five standard metrics (support, confidence,
-  lift, conviction, leverage). "What co-occurs with what across the
-  recalled drawers." The label vocabulary is per-call and deterministic;
-  rules are relabeled to string antecedents and consequents before return.
-
-- **Formal concepts** — recall a frame, build a `FormalContext` where each
-  drawer is one row and its categorical facets (kind, channel, sensitivity,
-  room) are its `FormalAttribute` triples (namespace "locus", key = axis
-  name, value = canonical lowercase camelCase Swift case name), and surface
-  NeuronKit's `BoundedConceptMiner`. "What maximal attribute closures — the
-  hidden cohorts — emerge from the recalled drawer set." Concept extents are
-  relabeled to drawer IDs before return.
-
 ## § 5 — The read-sequence-shape archetype
 
 Every lens recipe in § 4.2 is built to one archetype, and the archetype is
@@ -388,15 +319,9 @@ itself a design contract:
    state beyond what the read returns (I-2, I-6).
 
 2. **Shape the read into the reasoning surface's input.** The recipe turns
-   the substrate's natural form into the NeuronKit surface's input: a
-   drawer-id edge list for the graph lenses, the **co-occurrence
-   projection** (fingerprint-bit labels) for latent themes, the
-   **partition projection** (single-valued categorical-axis tokens) for
-   theme weather, bias, and anticipate, a set of action-outcome events, or
-   two estate distributions. Both categorical projections (§ 4.2) are read
-   off substrate quantities — the bitmap fields and the structural
-   fingerprint — so the recipe restates the substrate's own identities and
-   invents no label of its own. The recipe adds no math (I-1).
+   the substrate's natural form (a drawer-id edge list, a sparse
+   co-occurrence, per-category masses, a set of action-outcome events) into
+   the NeuronKit surface's input. The recipe adds no math (I-1).
 
 3. **Surface the gated reasoning.** The recipe calls the one NeuronKit
    reasoning surface for its lens and returns that surface's reasoning
@@ -480,18 +405,12 @@ match across the Swift and Rust versions byte-for-byte, so a descriptor
 round-trips identically across the versions' wire shapes. The catalog
 therefore lists exactly the recipes that exist in both versions.
 
-A recipe **registers** in the catalog when both its versions ship, per
-`LENS_DISCOVERABILITY_DECISION_v2.0`: the catalog lists every recipe
-that exists in both versions — the normal registry posture — and a
-registered recipe ships its dedicated MCP tool in the same change, so
-the listing never advertises a behaviour an agent cannot reach. Caveats
-are retired rather than relabeled (a recipe registers under its honest
-name for what it actually computes). A recipe registered in the catalog
-is registered in both versions or in neither — the anchor never sees a
-recipe present in one version and absent from the other. The catalog
-currently lists **18 recipes**: the 2 foundational recipes (grounded_synthesis,
-migration_benchmark), the 14 reasoning lenses, and the 2 analytics lenses
-(association_rules, formal_concepts).
+A lens recipe **graduates** into the catalog only when, per
+`LENS_DISCOVERABILITY_DECISION_v1.0`: it has a named consumer; its caveats
+are retired rather than relabeled; it fits the descriptor model; and both
+versions of the recipe land together, so the anchor never sees a recipe
+present in one version and absent from the other. A recipe registered in
+the catalog is registered in both versions or in neither.
 
 ## § 9 — Invariants
 

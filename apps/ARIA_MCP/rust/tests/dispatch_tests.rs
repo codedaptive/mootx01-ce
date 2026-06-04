@@ -1373,26 +1373,34 @@ fn expunge_kg_fact_without_confirmation_returns_tool_error() {
 }
 
 #[test]
-fn kg_fact_recall_returns_not_supported_error() {
-    // DrawerStore has no all_kg_facts() — surfaces NotSupportedByEstate.
+fn kg_fact_recall_returns_live_result() {
+    // DrawerStore now has all_kg_facts() — surfaces Ok(empty vec) on a fresh estate.
     let registry = EstateRegistry::new_inmemory();
     let result = dispatch_tool("moot_kgFact_recall", &args![], &registry).expect("must not throw");
     assert!(
-        is_tool_error(&result),
-        "kgFact_recall must return isError:true (not supported yet); got: {result}"
+        !is_tool_error(&result),
+        "kgFact_recall must return isError:false (live read); got: {result}"
+    );
+    assert!(
+        content_text(&result).contains("recalled"),
+        "kgFact_recall result text must contain 'recalled'; got: {result}"
     );
 }
 
 // 15c. diaryEntry recall.
 
 #[test]
-fn diary_entry_recall_returns_not_supported_error() {
+fn diary_entry_recall_returns_live_result() {
     let registry = EstateRegistry::new_inmemory();
     let result =
         dispatch_tool("moot_diaryEntry_recall", &args![], &registry).expect("must not throw");
     assert!(
-        is_tool_error(&result),
-        "diaryEntry_recall must return isError:true (not supported yet); got: {result}"
+        !is_tool_error(&result),
+        "diaryEntry_recall must return isError:false (live read); got: {result}"
+    );
+    assert!(
+        content_text(&result).contains("recalled"),
+        "diaryEntry_recall result text must contain 'recalled'; got: {result}"
     );
 }
 
@@ -1412,11 +1420,19 @@ fn expunge_proposal_requires_confirmation() {
 }
 
 #[test]
-fn proposal_recall_returns_not_supported_error() {
+fn proposal_recall_returns_live_result() {
+    // DrawerStore now has all_proposals() — live read on fresh estate returns empty vec.
     let registry = EstateRegistry::new_inmemory();
     let result =
         dispatch_tool("moot_proposal_recall", &args![], &registry).expect("must not throw");
-    assert!(is_tool_error(&result));
+    assert!(
+        !is_tool_error(&result),
+        "proposal_recall must return isError:false (live read); got: {result}"
+    );
+    assert!(
+        content_text(&result).contains("recalled"),
+        "proposal_recall result text must contain 'recalled'; got: {result}"
+    );
 }
 
 // 15e. Association lifecycle and recall.
@@ -1434,19 +1450,27 @@ fn mutate_association_unknown_row_returns_tool_error() {
 }
 
 #[test]
-fn association_recall_returns_not_supported_error() {
+fn association_recall_returns_live_result() {
+    // DrawerStore now has all_associations() — live read on fresh estate returns empty vec.
     let registry = EstateRegistry::new_inmemory();
     let result =
         dispatch_tool("moot_association_recall", &args![], &registry).expect("must not throw");
-    assert!(is_tool_error(&result));
+    assert!(
+        !is_tool_error(&result),
+        "association_recall must return isError:false (live read); got: {result}"
+    );
+    assert!(
+        content_text(&result).contains("recalled"),
+        "association_recall result text must contain 'recalled'; got: {result}"
+    );
 }
 
 // 15f. learnedReference — learn, lifecycle, recall.
 
 #[test]
-fn learn_learned_reference_returns_not_supported_error() {
-    // moot_learn_learnedReference dispatches to coordinator.learn which is a
-    // stub (Brain layer not yet present). Both sides return NotSupportedByEstate.
+fn learn_learned_reference_returns_live_result() {
+    // moot_learn_learnedReference now dispatches to the live coordinator.learn,
+    // which writes a LearnedReference row to the estate's DrawerStore.
     let registry = EstateRegistry::new_inmemory();
     let result = dispatch_tool(
         "moot_learn_learnedReference",
@@ -1455,17 +1479,30 @@ fn learn_learned_reference_returns_not_supported_error() {
     )
     .expect("must not throw transport fault");
     assert!(
-        is_tool_error(&result),
-        "learn_learnedReference must return isError:true (stub); got: {result}"
+        !is_tool_error(&result),
+        "learn_learnedReference must return isError:false (live); got: {result}"
+    );
+    assert!(
+        content_text(&result).contains("learned learnedReference"),
+        "learn_learnedReference result text must contain 'learned learnedReference'; got: {result}"
     );
 }
 
 #[test]
-fn learned_reference_recall_returns_not_supported_error() {
+fn learned_reference_recall_returns_live_result() {
+    // DrawerStore now has all_learned_references() — live read on fresh estate
+    // returns empty vec.
     let registry = EstateRegistry::new_inmemory();
     let result =
         dispatch_tool("moot_learnedReference_recall", &args![], &registry).expect("must not throw");
-    assert!(is_tool_error(&result));
+    assert!(
+        !is_tool_error(&result),
+        "learnedReference_recall must return isError:false (live read); got: {result}"
+    );
+    assert!(
+        content_text(&result).contains("recalled"),
+        "learnedReference_recall result text must contain 'recalled'; got: {result}"
+    );
 }
 
 // 15g. Federation stub — moot_cross_estate_recall.
