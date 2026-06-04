@@ -1,0 +1,5 @@
+# build artifacts
+rust/target/
+swift-app/.build/
+*.swiftpm
+swift-app/source-crc.txt
