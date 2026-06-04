@@ -26,7 +26,21 @@ use convergence_kit::{
 use uuid::Uuid;
 
 fn make_storage() -> Arc<dyn Storage> {
-    Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()))
+    use persistence_kit::{ColumnDeclaration, ColumnType, SchemaDeclaration, TableDeclaration};
+    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+    // Open a minimal schema so apply_record can upsert into "drawers".
+    // InMemory requires tables to be declared before row operations.
+    let schema = SchemaDeclaration::new(
+        "test-kit",
+        1,
+        vec![TableDeclaration::new(
+            "drawers",
+            vec![ColumnDeclaration::new("id", ColumnType::Uuid)],
+            vec!["id".to_string()],
+        )],
+    );
+    storage.open(&schema).expect("open drawers schema");
+    storage
 }
 
 fn sample_manifest() -> SyncManifest {

@@ -174,7 +174,10 @@ actor CloudKitStateActor {
     // MARK: - Push
 
     func push() async throws -> SyncReceipt {
-        guard isEnabled, let manifest, let storage else { throw SyncError.notEnabled }
+        // storage must be configured to push, but push() drives the CloudKit
+        // operations directly off `manifest`/`pendingOutbound` and does not
+        // read it here — so assert configuration without binding the value.
+        guard isEnabled, let manifest, storage != nil else { throw SyncError.notEnabled }
         emit(.pushCompleted(receipt: SyncReceipt.empty))  // start signal; reset after work
 
         let zoneID = CKRecordZone.ID(zoneName: manifest.zoneIdentifier, ownerName: CKCurrentUserDefaultName)

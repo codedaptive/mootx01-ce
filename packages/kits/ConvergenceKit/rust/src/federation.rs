@@ -12,16 +12,17 @@
 //! follows the per-table ConflictPolicy on the local manifest.
 
 use crate::engine::SyncEngine;
-use crate::record::SyncRecord;
-use crate::types::{SyncError, SyncEvent, SyncManifest, SyncReceipt, SyncResult, SyncState};
+use crate::record::{SyncEventKind, SyncRecord};
+use crate::types::{ConflictPolicy, SyncDirection, SyncedTable, SyncError, SyncEvent, SyncManifest, SyncReceipt, SyncResult, SyncState};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH,
     SIGNATURE_LENGTH,
 };
 use rand_core::OsRng;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use persistence_kit::Storage;
+use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 
 // ----- identity -----
 
@@ -280,6 +281,7 @@ impl SyncEngine for FederationSyncEngine {
             return Err(SyncError::NotEnabled);
         }
         let manifest = self.state.manifest.clone().ok_or(SyncError::NotEnabled)?;
+        let storage = self.state.storage.clone().ok_or(SyncError::NotEnabled)?;
 
         // Drain the inbox into an owned buffer.
         let envelopes: Vec<SignedRecord> = {
@@ -309,11 +311,23 @@ impl SyncEngine for FederationSyncEngine {
                 conflicts += 1;
                 continue;
             }
-            // For v1.0 we accept the record into the local
-            // persistence-kit; conflict-policy enforcement lives in
-            // the receive boundary, deferred to a follow-on.
-            // Counting accepted records for the receipt.
-            pulled += 1;
+            // Look up the synced table; reject records for unknown tables.
+            let synced_table = match manifest.table_named(&envelope.record.table) {
+                Some(t) => t,
+                None => {
+                    conflicts += 1;
+                    continue;
+                }
+            };
+            // Skip push-only tables on the pull boundary.
+            if synced_table.direction == SyncDirection::PushOnly {
+                continue;
+            }
+            // Apply the record per event kind and conflict policy.
+            match apply_record(&envelope.record, synced_table, &storage) {
+                Ok(()) => { pulled += 1; }
+                Err(_) => { conflicts += 1; }
+            }
         }
         let receipt = SyncReceipt::now(0, pulled, conflicts);
         self.state.last_pull_secs = Some(receipt.timestamp_secs);
@@ -339,4 +353,73 @@ impl SyncEngine for FederationSyncEngine {
         }
         SyncState::Disabled
     }
+}
+
+/// Apply one inbound SyncRecord to local storage per event kind and conflict policy.
+///
+/// The body is two nested matches: event kind (Insert/Update/Delete) × conflict
+/// policy (four arms each). Each arm is a short operation — upsert, conditional
+/// insert, hard-delete, or a silent return. Length comes from the cross-product
+/// of cases, not from complex logic.
+fn apply_record(
+    record: &SyncRecord,
+    synced_table: &SyncedTable,
+    storage: &Arc<dyn Storage>,
+) -> SyncResult<()> {
+    let row_store = storage.row_store();
+    let predicate = StoragePredicate::Eq(
+        Column::new(record.table.clone(), synced_table.primary_key_column.clone()),
+        TypedValue::Uuid(record.row_key),
+    );
+
+    match record.event {
+        SyncEventKind::Insert | SyncEventKind::Update => {
+            let mut values: BTreeMap<String, TypedValue> = record
+                .values
+                .as_ref()
+                .map(|v| v.clone().into_typed())
+                .unwrap_or_default();
+            // Guarantee the primary key column is present so the storage
+            // backend can resolve the row key even when `values` is sparse.
+            values
+                .entry(synced_table.primary_key_column.clone())
+                .or_insert_with(|| TypedValue::Uuid(record.row_key));
+            match synced_table.conflict_policy {
+                ConflictPolicy::AppendOnly
+                | ConflictPolicy::LastWriterWinsByHLC
+                | ConflictPolicy::RemoteWins => {
+                    row_store
+                        .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                }
+                ConflictPolicy::LocalWins => {
+                    let count = row_store
+                        .count(&record.table, Some(&predicate))
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                    if count == 0 {
+                        row_store
+                            .insert(&record.table, values)
+                            .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                    }
+                }
+            }
+        }
+        SyncEventKind::Delete => {
+            match synced_table.conflict_policy {
+                ConflictPolicy::AppendOnly => {
+                    // Append-only tables are write-once; silently reject remote deletes.
+                }
+                ConflictPolicy::LastWriterWinsByHLC | ConflictPolicy::RemoteWins => {
+                    // Remote delete wins; hard-delete the row by primary key.
+                    row_store
+                        .delete(&record.table, &predicate)
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                }
+                ConflictPolicy::LocalWins => {
+                    // Local state is authoritative; silently reject remote deletes.
+                }
+            }
+        }
+    }
+    Ok(())
 }

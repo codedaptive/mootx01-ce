@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - CONVERGENCEKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of ConvergenceKit in both legs: the SyncEngine
+  Public API surface of ConvergenceKit in both ports: the SyncEngine
   protocol, the SyncManifest declaration model, the SyncRecord wire
   format and TypedValue boxing, the SyncReceipt / SyncEvent / SyncState
   value types, the SyncError enum, and the three backends (None,
@@ -545,7 +545,7 @@ pub type SyncResult<T> = Result<T, SyncError>;
 
 ConvergenceKit names its error enum `SyncError` (not `ConvergenceKitError`):
 the type predates the `<Package>Error` naming convention and is the
-stable wire-and-API name across both legs.
+stable wire-and-API name across both ports.
 
 ## § 5 — Conformance test entry points
 

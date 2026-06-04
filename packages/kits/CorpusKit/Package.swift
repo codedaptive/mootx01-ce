@@ -33,7 +33,7 @@ let package = Package(
         .package(path: "../PersistenceKit"),
         .package(path: "../ConvergenceKit"),
         .package(path: "../VectorKit"),
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
     ],
     targets: [
         .target(
