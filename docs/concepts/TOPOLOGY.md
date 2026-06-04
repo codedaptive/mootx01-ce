@@ -91,6 +91,8 @@ The BrainKits sit on top. NeuronKit is the algorithm BrainKit: reasoning functio
 
 A single MOOTx01 instance runs in GLK mode. The write surface is always GLK; every write goes through it, and GLK keeps the underlying databases in sync via QueueKit over PersistenceKit. Reads may be taken in narrower lenses on the same instance — a CorpusKit-only query, a LocusKit-only query — but those are read projections of the union, not separate writable stores. Narrowing applies to reads; writing is uniformly GLK.
 
+This applies to estate mode. When consuming kits independently via the SDK (LocusKit, CorpusKit, VectorKit standalone), GLK is not required and writes go directly to the kit. See `packages/SDK.md` for the independently-consumable kit model.
+
 At the API layer an operator may configure many separate instances of different kinds (for example three CorpusKit, two LocusKit, three GeniusLocus) and route each call to the database it belongs to. That route-to-the-right-database behaviour is an API-layer concern, not something inside a single instance.
 
 ## FDC, the classification spine

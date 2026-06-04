@@ -318,10 +318,10 @@ The vector storage tier of the substrate.
 - `EmbeddingProvider` protocol — pluggable embedding model interface
 - `EmbeddingModel`, `EmbeddingResult`
 - `StoredVector` — model-tagged vector (embedding + model identity)
-- `VectorStore` — queryable ANN store (HNSW via sqlite-vec)
+- `VectorStore` — queryable vector store (linear scan; ANN/HNSW migration pending)
 - `VectorMatch` — result with similarity score
 - `VectorKit.embed(_:using:)` — text → embedding
-- `VectorKit.findNearest(query:in:k:)` — ANN search
+- `VectorKit.findNearest(query:in:k:)` — nearest-neighbour search (linear scan)
 - `FloatSimHashEmbeddingProvider` — built-in deterministic provider
 
 **Does NOT:** No content storage, no RAG bundles, no chunking. Stores and
