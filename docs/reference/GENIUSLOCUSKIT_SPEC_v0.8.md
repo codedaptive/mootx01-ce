@@ -301,16 +301,30 @@ verb surface, `mutateCandidate` is rewritten to a `propose` of kind
 without a verb call. A routed emission records `routed` in
 `signalStatus` once its verb dispatch returns.
 
-**B-7 (federated read is fail-closed, grantee-scoped):** `federatedRecall`
-resolves both handles (stale either side → `estateNotOpen`), consults the
-**source** estate's grant store, keeps active grants naming the requester
-as grantee (none → `crossEstateReadRefused(.noActiveGrant)`), requires at
-least one unexpired at `now` (all expired → `.grantExpired`), and only
-then reads the source estate and returns its drawers plus the authorizing
-grant. A revoked grant is already dropped from `active()`, so a read after
-revocation lands on `.noActiveGrant`. Scope-level row narrowing is not
-applied here — `grant.scope` rides back as advisory metadata (the access
-surface narrows).
+**B-7 (federated read is fail-closed, grantee-scoped, content-level-gated):**
+`federatedRecall` resolves both handles (stale either side →
+`estateNotOpen`), consults the **source** estate's grant store, keeps
+active grants naming the requester as grantee (none →
+`crossEstateReadRefused(.noActiveGrant)`), requires at least one
+unexpired at `now` (all expired → `.grantExpired`), and only then reads
+the source estate. Before returning, drawers whose `adjectiveSensitivity`
+(bits 6–11 of `adjectiveBitmap`, scale-gapped raw values 0/16/32/48 for
+normal/elevated/restricted/secret) exceeds `grant.contentLevel` are
+excluded — this is the GLK-layer primary content-level enforcement. A
+default grant (`contentLevel: 0`) exposes only normal-sensitivity rows.
+A revoked grant is already dropped from `active()`, so a read after
+revocation lands on `.noActiveGrant`.
+
+GLK is the primary enforcer of the content-level gate regardless of
+which caller invokes `federatedRecall` — callers that bypass the ARIA
+access surface still receive sensitivity-narrowed results. Scope-subtree
+narrowing (wing/room/lattice/singleRow) is NOT applied here; `grant.scope`
+rides back as advisory metadata for the ARIA surface to apply as
+defense-in-depth secondary per DECISION §10.
+
+`custodyMode` recall-path enforcement and `inferenceRemainingBudget`
+debit are DEFERRED (no recall-path semantics defined in spec §4.1 or §6
+at v0.8; see `CrossEstateFederation.swift` DEFERRED comments).
 
 **B-8 (grant issue/revoke is signed, persisted, audited, custody-gated):**
 `issueGrant` gates the custody mode first (modes 3/4 require confirmed IP
@@ -501,5 +515,123 @@ The Rust port (`NeuronKit/rust/src/estate_dreaming_reader.rs`)
 implements the same adapter over a synchronous `DrawerStore` trait
 reference; reads are snapshotted at construction time to match the
 Rust `DreamingSubstrateReader` trait's sync method signatures.
+
+
+
+---
+
+## § 9 — DreamingProposalSink adapter (EstateDreamingSink) — BRAIN-PROPOSE closed
+
+`EstateDreamingSink` is the production adapter that binds NeuronKit's
+`DreamingProposalSink` protocol seam to the live GeniusLocusKit estate
+write surface. It is declared in NeuronKit
+(`NeuronKit/Sources/NeuronKit/Dreaming/EstateDreamingSink.swift`)
+for the same circular-dependency reason as `EstateDreamingReader`: a
+conforming type must import NeuronKit, and GLK cannot import NeuronKit
+without inverting the layering.
+
+GeniusLocusKit supports the adapter through two new public extension
+methods in `Brain/DreamingWrites.swift`:
+
+```swift
+func addDiaryEntry(in handle: EstateHandle, _ entry: DiaryEntry) async throws
+func readDiaryEntries(in handle: EstateHandle, agentName: String, lastN: Int = 10) async throws -> [DiaryEntry]
+```
+
+The `addDiaryEntry` method builds a `DrawerStore` lazily from the estate's
+retained `Storage` and caches it per handle, following the GrantStore pattern
+(GRT-01). It substitutes `"no-embedding"` for an empty `embeddingModelID`
+so autonomous daemon diary entries (which carry no vector) satisfy the
+storage layer's non-empty invariant without modifying the daemon.
+
+The `GeniusLocusKit` actor gains one internal property:
+`diaryStores: [EstateHandle: DrawerStore]`, dropped in `close`.
+
+The adapter delegates both `DreamingProposalSink` requirements:
+
+1. `propose(_:)` → `GeniusLocusKit.propose(_:_:)` → `Estate.propose` → `DrawerStore.addProposal` — creates a real `Proposal` row.
+2. `recordCycleDiary(_:)` → `GeniusLocusKit.addDiaryEntry(in:_:)` → `DrawerStore.addDiaryEntry` — creates a real `DiaryEntry` row.
+
+**BRAIN-PROPOSE is now closed.** The dreaming daemon can emit real proposals
+and diary entries through `EstateDreamingSink` over a live GLK estate.
+
+**DreamingSignal cold-path is now wired (DREAMING_COLDPATH_001).** The
+sentinel scaffold (`defaultSpec()` emitting canned strings) has been replaced
+by `DreamingSignal.spec(daemonCycle:)`, which accepts a
+`@Sendable (Date) async throws -> [ProposeFrame]` closure. The caller
+constructs a `DreamingDaemon` (NeuronKit) with production adapters
+(`EstateDreamingReader` + `EstateDreamingSink`) and passes
+`daemon.triggerDreamingCycle(now:).proposalsEmitted` as the closure.
+GeniusLocusKit cannot import NeuronKit (circular package dependency), so the
+closure is the architectural bridge between the two packages. An empty result
+(zero proposals) is correct for an estate with no co-occurrence candidates;
+a daemon cycle error surfaces as a `.diagnostic` emission on the signal's
+record rather than silencing the signal. `registerDefaultStandingSignals`
+exposes a `dreamingCycle:` parameter (defaulted to `{ _ in [] }`) so
+registration without a live daemon remains possible for test scaffolds.
+
+The Rust port (`NeuronKit/rust/src/estate_dreaming_sink.rs`) implements the
+same adapter over a `DrawerStore` trait reference. Propose calls
+`store.add_proposal` with a `LatticeAnchor::udc("dreaming")` placeholder;
+record-cycle-diary calls `store.add_diary_entry`. Row IDs are deterministic:
+`dreaming-<now>-<counter>` per the fleet determinism rule (no RNG in engines).
+
+## § RAG_WIRING — RAG and vector seams wired (GLK_RAG_WIRING_001)
+
+*Status: landed. Both seams are now wired in Swift and Rust.*
+
+### ExternalCorpus hybrid recall
+
+`ExternalCorpus.hybridRecall(via:limit:now:)` routes recall through
+CorpusKit's `Corpus` actor. Each corpus entry's content is used as
+the query to `Corpus.recall(query:limit:now:)`, which fuses vector
+kNN and BM25 keyword scores via Reciprocal Rank Fusion. The result
+per entry is a `[ScoredChunk]` list with both `vectorScore` and
+`keywordScore` sub-scores.
+
+The existing `asRecallFrames()` method is preserved for the
+LocusKit-only content-match path used by `verifyMigration` (estate
+existence checking, not hybrid retrieval).
+
+**Corpus construction:** the caller constructs the `Corpus` actor
+from the same `Storage` backing the estate so chunk embeddings index
+the estate's content. The default embedding model is `.deterministic`
+(no CoreML required).
+
+**Import domain:** `ExternalCorpus.swift` imports `CorpusKit`. RAG
+retrieval always routes through CorpusKit per the kit-roles doctrine.
+
+### VectorSimilaritySignal real VectorKit queries
+
+`VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:)`
+produces the production signal spec. The emit closure captures the
+`VectorStore` and on each five-minute fire:
+
+1. Calls `VectorStore.findByKeyword("", limit: 50)` to sample up to
+   50 candidate drawer IDs.
+2. For each candidate, retrieves its engram via
+   `VectorStore.getVector(drawerID:modelID:)`.
+3. Calls `VectorStore.findNearest(probe:modelID:limit:5)` to find
+   nearby rows.
+4. Deduplicates pairs and emits one `AssociateFrame` per pair whose
+   Hamming distance ≤ `proximityThreshold` (default 64 = 25% of 256
+   bits). Weight = 1 − distance / 256.
+5. Always emits a scan-summary `DiagnosticReport` with the candidate
+   pair count.
+
+The sentinel-only `defaultSpec()` factory is removed. The production
+factory requires an injected `VectorStore` and `modelID`.
+
+`DefaultStandingSignals.registerDefaultStandingSignals(in:vectorStore:
+modelID:now:)` forwards the VectorStore to `VectorSimilaritySignal.spec`.
+
+**Import domain:** `VectorSimilaritySignal.swift` imports `VectorKit`.
+GLK may orchestrate VectorKit directly for non-RAG vector work per the
+kit-roles doctrine; row-similarity is Brain math, not RAG.
+
+**Rust parity:** `VectorSimilaritySignal::spec(vector_store, model_id,
+proximity_threshold)` mirrors the Swift factory. `default_standing_signal_specs`
+now accepts an `Arc<VectorStore>` and forwards it to the signal.
+`ExternalCorpus::hybrid_recall` routes through `corpus_kit::Corpus::recall`.
 
 *End of GeniusLocusKit Specification v0.8.*

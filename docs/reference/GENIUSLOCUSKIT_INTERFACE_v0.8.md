@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - GENIUSLOCUSKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of GeniusLocusKit in both legs, in two tiers within
+  Public API surface of GeniusLocusKit in both ports, in two tiers within
   § 2. Tier 1 is the CONSUMED CONTRACT — the types NeuronKit and ARIA_MCP
   actually import (the GeniusLocusKit actor, the unified verb surface and
   its frames, the recall results, the fan-out and grant-gated federated
@@ -126,7 +126,7 @@ public actor GeniusLocusKit {
     // Standing-signals API (SignalAPI.swift / DefaultStandingSignals.swift) — SPEC B-5/B-6:
     public func registerStandingSignal(_ spec: SignalSpec, in handle: EstateHandle, now: Date) async throws -> SignalID
     @discardableResult
-    public func registerDefaultStandingSignals(in handle: EstateHandle, now: Date) async throws -> [String: SignalID]
+    public func registerDefaultStandingSignals(in handle: EstateHandle, vectorStore: VectorStore, modelID: String = "minilm-v6", now: Date) async throws -> [String: SignalID]
     public func signalStatus(in handle: EstateHandle) async throws -> [SignalReport]
     public func signalTick(in handle: EstateHandle, now: Date) async throws
     public func signalRequestFire(_ signalID: SignalID, in handle: EstateHandle, now: Date) async throws
@@ -142,48 +142,12 @@ public actor GeniusLocusKit {
     public func verifyMigration(estate: EstateHandle, against corpus: ExternalCorpus, now: Date) async throws -> MigrationVerification
 }
 ```
-**Rust:** the Swift actor splits across synchronous types. The estate registry plus live verb dispatch is `EstateCoordinator` (`coordinator.rs`); `now: i64` and the zoom window are explicit per the Rust substrate's determinism convention.
-
-```rust
-pub struct EstateCoordinator { /* estate registry + COW-branch registry */ }
-
-impl EstateCoordinator {
-    pub fn new() -> Self;
-    pub fn open_estate_count(&self) -> usize;
-    pub fn handles(&self) -> Vec<EstateHandle>;
-
-    // Lifecycle:
-    pub fn open(&mut self, store: Arc<dyn DrawerStore>, owner: OwnerCredentials,
-                zoom_window_low: i64, zoom_window_high: i64)
-        -> Result<EstateHandle, GeniusLocusKitError>;
-    pub fn close(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError>;
-    pub fn estate_for(&self, handle: &EstateHandle) -> Result<&Estate, GeniusLocusKitError>;
-
-    // Six live verbs — delegate to the Rust LocusKit estate, returning
-    // VerbDispatchError = EstateNotOpen | Verb(VerbError):
-    pub fn capture(&self, handle: &EstateHandle, frame: CaptureFrame, now: i64) -> Result<Drawer, VerbDispatchError>;
-    pub fn recall(&self, handle: &EstateHandle, frame: RecallFrame, now: i64) -> Result<Vec<Drawer>, VerbDispatchError>;
-    pub fn recall_tunnels(&self, handle: &EstateHandle, wing: &str) -> Result<Vec<Tunnel>, VerbDispatchError>;
-    pub fn mutate(&self, handle: &EstateHandle, row_id: &str, kind: MutationKind, payload: Option<&str>) -> Result<(), VerbDispatchError>;
-    pub fn withdraw(&self, handle: &EstateHandle, row_id: &str, reason: Option<&str>, now: i64) -> Result<(), VerbDispatchError>;
-    pub fn expunge(&self, handle: &EstateHandle, row_id: &str, reason: &str, confirmation: bool) -> Result<(), VerbDispatchError>;
-    pub fn reanchor(&self, handle: &EstateHandle, row_id: &str, to_room: Option<&str>, to_lattice: Option<LatticeAnchor>) -> Result<(), VerbDispatchError>;
-
-    // COW branch verbs (branches.rs):
-    pub fn glk_derive_branch(&mut self, name: &str, from: &EstateHandle, now: i64) -> Result<BranchId, BranchError>;
-    pub fn glk_derive_branch_from_branch(&mut self, name: &str, parent: BranchId, now: i64) -> Result<BranchId, BranchError>;
-    pub fn glk_promote_branch(&mut self, branch_id: BranchId, replacing: &EstateHandle, now: i64) -> Result<(), BranchError>;
-    pub fn glk_merge_drawers(&mut self, drawer_ids: &[String], from: BranchId, into: &EstateHandle, now: i64) -> Result<MergeReport, BranchError>;
-    pub fn glk_discard_branch(&mut self, branch_id: BranchId) -> Result<(), BranchError>;
-    pub fn branch_handle_for(&self, branch_id: BranchId) -> Option<&EstateBranch>;
-}
-```
-
-Divergences from the Swift surface, stated honestly:
-
-- **`learn` / `propose` / `associate` are not dispatched in Rust.** They raise `VerbError::NotSupportedByEstate` on the stateless lexicon `Surface` (`verbs/surface.rs`), which carries the nine-verb name-identity (`VERB_NAMES`) and the boundary guards (empty-reanchor, unconfirmed-expunge). The Brain layer wires live dispatch later. `recall_tunnels` (Rust `EstateCoordinator`) and `recallTunnels` (Swift) are matching association-graph read accessors on both legs — a dedicated tunnel read, distinct from `recall`.
-- **Standing-signals API lives on `SerialLaneScheduler`** (`brain/scheduler/serial_lane.rs`): `register` / `tick` / `request_fire` / `subscribe` / `unsubscribe` — not on the coordinator. Default-set registration is `default_standing_signal_specs()` (`brain/signals`).
-- **Rust parity pending** for the grant surface (`issueGrant` / `revokeGrant`), the grant-gated `federatedRecall`, the migration API, and the coordinator-level audit accessors (`auditLog(for:)` / `feedAuditLog` / `verifyAuditChain`). The Swift contract above is authoritative; the Rust port conforms to it as each surface lands. Read fan-out (`estatesOverlapping` / `fanOutRecall`) is already present (`fan_out.rs`), and the standalone audit verifier is `AuditRecovery::verify`.
+**Rust:** the surface is split across synchronous types — `EstateCoordinator`
+(`open` / `close` / `handles` / `open_estate_count` / `state_for`, plus the
+association-graph read `recall_tunnels(handle, wing) -> Result<Vec<Tunnel>, VerbDispatchError>`),
+the stateless verb `Surface` (the nine verbs returning `Result<…, VerbError>`),
+`LatticeRegion` + `EstateRecallContribution` fan-out, `SerialLaneScheduler`,
+and the grant, federation, branch, and migration surfaces (SPEC § 8).
 
 #### `EstateHandle`
 
@@ -199,25 +163,8 @@ public struct EstateHandle: Sendable, Hashable {
     // internal init(manifest:) — only the coordinator issues handles
 }
 ```
-**Rust:** (`handle.rs`)
-
-```rust
-pub type EstateUuid = [u8; 16];
-
-pub struct EstateHandle {
-    pub estate_uuid: EstateUuid,
-    pub zoom_window_low: i64,
-    pub zoom_window_high: i64,
-}
-
-impl EstateHandle {
-    // Returns Err(InvalidManifest) when low > high.
-    pub fn new(estate_uuid: EstateUuid, zoom_window_low: i64, zoom_window_high: i64)
-        -> Result<Self, GeniusLocusKitError>;
-}
-```
-
-The Rust handle carries no `estate_name` (the Swift handle's `estateName` has no Rust counterpart at v0.8); `estate_uuid` is a raw 16-byte array rather than a `UUID` type.
+**Rust:** `pub struct EstateHandle { estate_uuid, zoom_window_low,
+zoom_window_high, estate_name }` with `pub fn new(...)`.
 
 #### Verb frames: `CaptureFrame`, `RecallFrame`, `LearnFrame`, `MutationKind`, `WithdrawFrame`, `MutateFrame`, `ExpungeFrame`, `ReanchorFrame`, `ProposeFrame`, `AssociateFrame`
 
@@ -262,47 +209,10 @@ public struct AssociateFrame: Sendable, Equatable {
     public init(a: RowID, b: RowID, weight: Double)
 }
 ```
-**Rust:** the `verbs` module (`verbs/frames.rs`) publishes the frame mirrors. Ids and content stay string-typed, and axis values are raw `i64` codes, until the LocusKit Rust port publishes the nominal types.
-
-```rust
-pub type RowId = String;
-pub type RoomId = String;
-
-pub struct LatticeAnchor {
-    pub udc_code: String, pub udc_facets: Option<String>,
-    pub wikidata_qid: Option<String>, pub wikidata_qids_secondary: Option<String>,
-}
-impl LatticeAnchor { pub fn udc(code: impl Into<String>) -> Self; }
-
-pub enum MutationKind {
-    Confirm, Reject, Contest, Resolve, Supersede, Revive, Accept,
-    CorrectSensitivity(i64),   // Swift carries a Sensitivity enum; Rust a raw 0/4/8/12 value
-    CorrectTrust(i64),         // Swift carries a Trust enum; Rust a raw 0..=5 value
-}
-
-pub struct CaptureFrame {
-    pub content: String, pub channel: i64, pub kind: i64, pub sensitivity: i64,
-    pub lineage_id: Option<String>, pub room: RoomId, pub lattice_anchor: LatticeAnchor,
-    pub added_by: String, pub embedding_model_id: String,
-}
-pub struct RecallFrame {
-    pub filter_chain: Vec<String>,   // opaque string tokens at this tier (see note)
-    pub hydration_level: HydrationLevel, pub limit: Option<i64>,
-    pub ordering: Ordering, pub as_of: Option<String>,   // ISO-8601 string until an HLC type lands
-}
-pub enum HydrationLevel { Structured, Full, BitmapOnly }
-pub enum Ordering { ByCaptureTimeDesc, ByCaptureTimeAsc, ByRelevanceDesc, ByRoomAsc }
-
-pub struct LearnFrame    { pub handle: String }   // full slot set lands with the Rust learn port
-pub struct WithdrawFrame { pub row_id: RowId, pub reason: Option<String> }
-pub struct MutateFrame   { pub row_id: RowId, pub kind: MutationKind, pub payload: Option<String> }
-pub struct ExpungeFrame  { pub row_id: RowId, pub reason: String, pub confirmation: bool }
-pub struct ReanchorFrame { pub row_id: RowId, pub to_room: Option<RoomId>, pub to_lattice: Option<LatticeAnchor> }
-pub struct ProposeFrame  { pub target: RowId, pub kind: SchedulerProposalKind, pub justification: Option<String> }
-pub struct AssociateFrame { pub a: RowId, pub b: RowId, pub weight: f64 }
-```
-
-Two divergences to note: (1) the `verbs`-module `RecallFrame.filter_chain` is an opaque `Vec<String>` at the scaffold tier, whereas the *live* `EstateCoordinator` verbs consume LocusKit's own frames — `locus_kit::filter::RecallFrame` with the typed `Vec<Filter>` (Swift's `[Filter]`); the two converge when the unified Rust port lands. (2) `LearnFrame` carries only `handle` in Rust so far.
+**Rust:** `pub struct CaptureFrame`, `RecallFrame`, `LearnFrame`,
+`WithdrawFrame`, `MutateFrame`, `ExpungeFrame`, `ReanchorFrame`,
+`ProposeFrame`, `AssociateFrame`, `pub enum MutationKind`, `LatticeAnchor`
+mirror these in the `verbs` module.
 
 #### `ProposalKind`
 
@@ -319,18 +229,8 @@ public enum ProposalKind: Sendable, Hashable, Codable {
     public init(rawValue: String)
 }
 ```
-**Rust:** `brain::scheduler::api::ProposalKind`, re-exported as `SchedulerProposalKind` (`lib.rs`), with the same raw wire strings.
-
-```rust
-pub enum ProposalKind {   // re-exported as SchedulerProposalKind
-    ByReferenceDrift, TournamentUpdate, MiningPattern, DisciplineViolation,
-    MutateCandidate, Amend, TestPropose, Other(String),
-}
-impl ProposalKind {
-    pub fn raw_value(&self) -> &str;       // e.g. ByReferenceDrift => "by_reference_drift"
-    pub fn from_raw(s: &str) -> Self;      // unknown strings => Other(s); total, like Swift's init(rawValue:)
-}
-```
+**Rust:** `pub enum SchedulerProposalKind` (re-exported under the scheduler
+prefix) with the same raw strings.
 
 #### `VerbError`
 
@@ -346,19 +246,7 @@ public enum VerbError: Error, Sendable, CustomStringConvertible {
     case expungeNotConfirmed(rowID: RowID)
 }
 ```
-**Rust:** (`verbs/surface.rs`) — case-for-case parity (the parity test asserts the case-name set).
-
-```rust
-pub enum VerbError {
-    UnderlyingEstateFailure { verb: String, reason: String },
-    NotSupportedByEstate { verb: String },
-    RejectedByLexicon { verb: String, noun: String },
-    EmptyReanchor { row_id: RowId },
-    ExpungeNotConfirmed { row_id: RowId },
-}
-```
-
-The live coordinator wraps this as `VerbDispatchError` (`coordinator.rs`): `EstateNotOpen { estate_uuid }` | `Verb(VerbError)` — encoding the Swift split between `estate(for:)` throwing `estateNotOpen` and the verb body throwing `VerbError`.
+**Rust:** `pub enum VerbError` mirrors these cases (`verbs/surface.rs`).
 
 #### `LatticeRegion` / `EstateRecallContribution`
 
@@ -373,19 +261,7 @@ public struct EstateRecallContribution: Sendable {
     public let handle: EstateHandle; public let drawers: [Drawer]
 }
 ```
-**Rust:** (`fan_out.rs`)
-
-```rust
-pub struct LatticeRegion { pub low: i64, pub high: i64 }   // closed interval [low, high]
-impl LatticeRegion { pub fn new(low: i64, high: i64) -> Self; }
-
-pub struct EstateRecallContribution { pub handle: EstateHandle, pub drawers: Vec<Drawer> }
-
-impl EstateCoordinator {
-    pub fn estates_overlapping(&self, region: LatticeRegion) -> Result<Vec<EstateHandle>, GeniusLocusKitError>;
-    pub fn fan_out_recall(&self, region: LatticeRegion) -> Result<Vec<EstateRecallContribution>, GeniusLocusKitError>;
-}
-```
+**Rust:** `pub struct LatticeRegion`, `EstateRecallContribution` (`fan_out.rs`).
 
 #### `FederatedRecallResult` / `FederatedReadRefusalReason` / `IssueGrantResult`
 
@@ -405,7 +281,9 @@ public struct IssueGrantResult: Sendable {
     public let grant: Grant; public let scopeKey: Data?   // non-nil only for handed-over / decay-derived custody
 }
 ```
-**Rust:** parity pending — the port mirrors this Swift contract (`FederatedRecallResult`, `FederatedReadRefusalReason`, `IssueGrantResult`) when the grant-gated read surface lands. Unscoped read fan-out (`estatesOverlapping` / `fanOutRecall`) is already present (`fan_out.rs`, above).
+**Rust:** `pub struct FederatedRecallResult`, `pub enum
+FederatedReadRefusalReason`, `pub struct IssueGrantResult` mirror these in
+the `federation` module.
 
 #### Grant model: `Grant`, `GrantOptions`, `GrantScope`, `GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`, `GrantError`
 
@@ -449,7 +327,9 @@ public enum GrantError: Error, Sendable, Equatable {
     case hardwareNotSupported, grantNotFound(id: UUID), scopeKeyUnavailable(id: UUID), keyDecayed
 }
 ```
-**Rust:** parity pending — the port mirrors this Swift contract (`Grant`, `GrantOptions`, `GrantScope`, `GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`, `GrantError`, including the mode-3/4 decay-key machinery) when the sharing/custody surface lands.
+**Rust:** `pub struct Grant`, `GrantOptions`, `pub enum GrantScope`,
+`GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`,
+`GrantError` mirror these in the `grants` module.
 
 #### COW branching: `BranchHandle`, `BranchID`, `DrawerID`, `BranchStatus`, `MergeReport`, `BranchScore`, `DifferentialReport`
 
@@ -475,21 +355,9 @@ public struct DifferentialReport: Sendable {
     public let period: DateInterval; public init(...)
 }
 ```
-**Rust:** the `branches` module (`branches.rs`). Rust has **no `BranchHandle` trait** — a branch is the concrete `EstateBranch` struct, minted and retained by the coordinator's branch verbs (shown in the `EstateCoordinator` block above); there is no `BranchID`/`DrawerID` alias pair beyond `BranchId = Uuid`.
-
-```rust
-pub type BranchId = Uuid;
-pub enum BranchStatus { Active, Won, Merged, Discarded }
-pub struct BranchScore { pub quality: f64, pub new_drawer_count: usize }
-pub struct DifferentialReport {
-    pub new_in_branch: Vec<String>, pub modified_in_branch: Vec<String>,   // modified_* always empty until content-hash compare ships
-    pub withdrawn_in_branch: Vec<String>,
-}
-pub struct MergeReport { pub merged: Vec<String>, pub conflicts: Vec<String>, pub skipped: Vec<String> }  // conflicts reserved (empty)
-pub enum BranchError { Estate(EstateError), Locus(LocusKitError), EstateNotOpen,
-    NotTracked { branch_id: BranchId }, PromotionTargetMismatch { branch_id: BranchId } }
-pub struct EstateBranch { pub branch_id: BranchId, pub name: String, pub lineage_depth: usize, /* + private estates, snapshot, status */ }
-```
+**Rust:** `pub trait BranchHandle`, `pub enum BranchStatus`, `pub struct
+MergeReport`, `BranchScore`, `DifferentialReport` mirror these in the
+`branch` module.
 
 The coordinator also exposes a read accessor resolving a tracked branch by
 id (branches are retained through every lifecycle state until the kit is
@@ -504,13 +372,8 @@ discard remain the write surface. Supports stateless callers (notably the
 ARIA_MCP recipe surface, where a recipe's `run` and its human-confirmed
 promotion arrive as two separate `tools/call` invocations against one
 long-lived kit).
-**Rust:** (`branches.rs`)
-
-```rust
-impl EstateCoordinator {
-    pub fn branch_handle_for(&self, branch_id: BranchId) -> Option<&EstateBranch>;  // None if not derived by this coordinator
-}
-```
+**Rust:** `EstateCoordinator::branch_handle_for(branch_id: BranchId) ->
+Option<&EstateBranch>` (`branches.rs`).
 
 #### Unified audit log: `UnifiedAuditLog`, `UnifiedAuditEntry`, `UnifiedHLC`, `UnifiedAuditValue`, `UnifiedAuditVerb`, `AuditTier`, `AuditChainReport`, `AuditChainVerifier`
 
@@ -558,26 +421,13 @@ public struct AuditChainReport: Sendable, Equatable {
 }
 public enum AuditChainVerifier { public static func verify(_ log: UnifiedAuditLog) -> AuditChainReport }
 ```
-**Rust:** the `audit` module (`audit/log.rs`, `audit/recovery.rs`, `audit/projection.rs`), re-exported from `lib.rs`. Full definitions live in those files.
-
-```rust
-// audit/log.rs — the G-Set CRDT and its entries:
-pub struct UnifiedAuditLog;     // add / merge / ordered_entries / entries(tier|row|since|as_of)
-pub struct UnifiedAuditEntry;   // 32-byte content-hash id (EntryUUID), tier, verb, row, field, before/after, origin
-pub enum   UnifiedAuditValue;   // Null | Bitmap | Integer | String | Bytes
-pub enum   UnifiedAuditVerb;    // the verb taxonomy written to the log
-pub enum   AuditTier;           // Locus | Rag
-// audit/projection.rs + audit/recovery.rs:
-pub struct AuditProjectionFold; pub struct UnifiedProjection; pub struct UnifiedProjectionKey;
-pub struct UnifiedRowProjection; pub struct AuditRecovery; pub struct AuditRecoveryResult;
-pub struct AuditRecoveryDivergence; pub struct RowMismatch;
-```
-
-The chain verifier is `AuditRecovery::verify` (`audit/recovery.rs`). Two notes: Rust exposes **no `UnifiedHLC` type** (the Swift HLC has no re-exported Rust counterpart at v0.8), and there are **no coordinator-level audit accessors** (`auditLog(for:)` / `feedAuditLog` / `verifyAuditChain` are Swift-only) — Rust callers use `AuditRecovery::verify` directly.
+**Rust:** `pub struct UnifiedAuditLog`, `UnifiedAuditEntry`, `UnifiedHLC`,
+`pub enum UnifiedAuditValue`, `UnifiedAuditVerb`, `AuditTier` mirror these in
+the `audit` module; the chain verifier is the audit module's `verify`.
 
 #### Migration: `ExternalCorpus`, `ExternalEntry`, `MigrationReport`, `MigrationVerification`, `MigrationDivergence`, `MigrationError`, `UnmappedConcept`, `MigrationWarning`, `ParallelCaptureMode`, `ParallelRunHandle`
 
-The external-corpus migration API DTOs and the parallel-run handle (SPEC § 2,
+The MemPalace migration API DTOs and the parallel-run handle (SPEC § 2,
 B-14). `ParallelRunHandle` is an actor.
 
 ```swift
@@ -585,7 +435,8 @@ public struct ExternalEntry: Sendable, Codable, Equatable { public let id, conte
 public struct ExternalCorpus: Sendable, Codable, Equatable {
     public let name: String; public let entries: [ExternalEntry]; public init(...)
     public static func load(from url: URL) throws -> ExternalCorpus
-    public func asRecallFrames() -> [LocusKit.RecallFrame]
+    public func asRecallFrames() -> [LocusKit.RecallFrame]   // LocusKit content-match path; used by verifyMigration
+    public func hybridRecall(via corpus: CorpusKit.Corpus, limit: Int = 10, now: Date) async throws -> [[CorpusKit.ScoredChunk]]  // hybrid BM25+vector via CorpusKit
 }
 public struct MigrationReport: Sendable, Codable {
     public let rowsByNoun: [String: Int]; public let unmappedConcepts: [UnmappedConcept]; public let warnings: [MigrationWarning]
@@ -605,7 +456,9 @@ public enum MigrationError: Error, Sendable, Equatable, CustomStringConvertible 
     case corpusUnreadable(reason: String), parallelRunStopped, targetEstateNotOpen
 }
 ```
-**Rust:** parity pending — the port mirrors this Swift contract (`ExternalCorpus`, `ExternalEntry`, `MigrationReport`, `MigrationVerification`, `MigrationDivergence`, `MigrationError`, `UnmappedConcept`, `MigrationWarning`, `ParallelCaptureMode`, `ParallelRunHandle`) when the external-corpus migration surface lands.
+**Rust:** `pub struct ExternalCorpus` (+ `hybrid_recall`), `ExternalEntry`,
+`MigrationReport`, `pub enum MigrationVerification`, `MigrationError`,
+`pub struct ParallelRunHandle` mirror these in the `migration` module.
 
 #### `GeniusLocusKitError`
 
@@ -626,19 +479,9 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     case crossEstateReadRefused(source: UUID, requester: UUID, reason: FederatedReadRefusalReason)
 }
 ```
-**Rust:** (`coordinator.rs`) — the Rust enum covers the **lifecycle + fan-out** subset only; it does **not** mirror the full Swift case set. The scheduler, grant, branch, and federation error cases live on their own Rust error types (or are unported), not folded into `GeniusLocusKitError`.
-
-```rust
-pub enum GeniusLocusKitError {
-    InvalidManifest { key: String, detail: String },
-    EstateNotOpen { estate_uuid: EstateUuid },
-    DuplicateEstate { estate_uuid: EstateUuid },
-    InvalidLatticeRegion { low: i64, high: i64 },
-    EstateOpenFailed { detail: String },
-}
-```
-
-Swift's `schedulerSignalNotRegistered` / `schedulerNotStarted` map to Rust `SchedulerError`; `branchNotTracked` / `invalidPromotionTarget` map to `BranchError::{NotTracked, PromotionTargetMismatch}`; `crossEstateReadRefused` has no Rust case (federation is unported). Meaning: SPEC § 6.
+**Rust:** `pub enum GeniusLocusKitError` (`coordinator.rs`) mirrors the full
+case set across the lifecycle, fan-out, scheduler, grant, branch, and
+federation surfaces. Meaning: SPEC § 6.
 
 ### Tier 2 — broader surface (table of contents)
 
@@ -669,6 +512,10 @@ role, source file. Full signatures live in the cited file.
   `registerDefaultStandingSignals` (Tier 1). Names: `dreaming-daemon`,
   `maintenance-daemon`, `vector-similarity`, `decay-sweep`,
   `by-reference-validity`, `end-of-day-tournament`.
+  `VectorSimilaritySignal.spec(vectorStore:modelID:proximityThreshold:)` —
+  production factory (GLK_RAG_WIRING_001); captures `VectorStore`, scans
+  row embeddings via `findNearest` on each 5-minute pass, emits
+  `AssociateFrames` for pairs within Hamming threshold (default 64).
 - **Matrix tier (architecture § 12, GLK-06):** `MatrixTier`,
   `MatrixFieldCell`, `MatrixValueCoord`, `MatrixCoOccurKey`,
   `MatrixTemporalKey` (the F/C/O/T coordinate model), `MatrixCalibrationCurve`/
@@ -725,16 +572,9 @@ public enum GrantError: Error, Sendable, Equatable { /* § 2 */ }
 public enum MigrationError: Error, Sendable, Equatable, CustomStringConvertible { /* § 2 */ }
 public enum MatrixPersistenceError: Error, Equatable, Sendable    // snapshot load/save (Tier 2)
 ```
-**Rust:** the ported error types are `GeniusLocusKitError` and `VerbError` (+ the dispatch-union `VerbDispatchError`), `BranchError`, `SchedulerError`, and `MatrixPersistenceError`. There is **no `GrantError` or `MigrationError`** — those subsystems are Swift-only at v0.8 (above). So the Rust error surface is *not* a case-for-case mirror of the five Swift error types. Meaning: SPEC § 6.
-
-```rust
-pub enum GeniusLocusKitError { /* lifecycle + fan-out, § 2 */ }
-pub enum VerbError { /* verb surface, § 2 */ }
-pub enum VerbDispatchError { EstateNotOpen { estate_uuid: EstateUuid }, Verb(VerbError) }
-pub enum BranchError { /* § 2 COW branching */ }
-pub enum SchedulerError { /* standing-signal scheduler */ }
-pub enum MatrixPersistenceError { /* snapshot load/save (Tier 2) */ }
-```
+**Rust:** `pub enum GeniusLocusKitError`, `VerbError`, `GrantError`,
+`MigrationError`, `MatrixPersistenceError`, and `SchedulerError` mirror the
+full error surface. Meaning: SPEC § 6.
 
 ## § 5 — Conformance test entry points
 
@@ -777,8 +617,9 @@ let drawer = try await kit.capture(handle, CaptureFrame(
 let rows = try await kit.recall(handle, RecallFrame(filterChain: [.inRoom("chemistry")]))
 
 // Brain layer: register the six v1 signals and advance the serial lane (SPEC B-5).
+// VectorSimilaritySignal requires an injected VectorStore (GLK_RAG_WIRING_001).
 let now = Date()
-_ = try await kit.registerDefaultStandingSignals(in: handle, now: now)
+_ = try await kit.registerDefaultStandingSignals(in: handle, vectorStore: vectorStore, now: now)
 try await kit.signalTick(in: handle, now: now)          // deterministic, FIFO, single lane (I-5)
 
 // Verify the unified audit chain (SPEC B-10).
