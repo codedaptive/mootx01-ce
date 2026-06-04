@@ -46,6 +46,7 @@ pub mod coordinator;
 pub mod fan_out;
 pub mod handle;
 pub mod matrix;
+pub mod migration;
 pub mod training;
 pub mod verbs;
 
@@ -73,6 +74,7 @@ pub use brain::signals::{
     DecaySweepSignal, DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
     VectorSimilaritySignal,
 };
+pub use migration::{ExternalCorpus, ExternalEntry};
 pub use coordinator::{EstateCoordinator, GeniusLocusKitError, VerbDispatchError};
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;

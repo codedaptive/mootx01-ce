@@ -1,12 +1,24 @@
 import Foundation
 
+/// Identifies a recall lane that is not yet available in this version.
+///
+/// Carried by `GeniusLocusKitError.recallLaneUnavailable` so callers can
+/// branch on the specific missing lane without string matching.
+public enum RecallLane: String, Sendable, Equatable {
+    /// The CorpusKit BM25 + vector lane.
+    case corpus
+    /// The standalone vector similarity lane.
+    case vector
+    /// The matrix co-occurrence / temporal signal lane. Reserved for a future mission.
+    case matrix
+}
+
 /// Errors raised by the GeniusLocusKit composition surface.
 ///
 /// Per CLAUDE.md, every kit owns an enum-typed error and never falls
-/// back to optionals-plus-logging. The cases here cover the scaffold's
-/// public surface: lifecycle, manifest validation, and the read fan-out.
-/// Later sub-missions (GLK-02 verb surface, GLK-03 audit log) add their
-/// own cases through extending this enum.
+/// back to optionals-plus-logging. Cases span lifecycle, manifest
+/// validation, read fan-out, signal scheduling, branch management,
+/// and cross-estate federation.
 public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvertible {
 
     /// Caller passed a manifest that violates the kit's preconditions.
@@ -78,6 +90,13 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     /// to A. `reason` distinguishes no-grant from expired/revoked.
     case crossEstateReadRefused(source: UUID, requester: UUID, reason: FederatedReadRefusalReason)
 
+    /// The caller requested a recall lane that is not available in this version.
+    ///
+    /// Raised when a lane is requested before its required kit is registered
+    /// (e.g. `corpusOnly` with no corpus registered and `failClosed`). The
+    /// `matrix` lane is reserved for a future mission.
+    case recallLaneUnavailable(RecallLane)
+
     public var description: String {
         switch self {
         case let .invalidManifest(key, detail):
@@ -100,6 +119,8 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
             return "branch \(id) cannot be promoted into estate \(actual): its parent estate is \(expected)"
         case let .crossEstateReadRefused(source, requester, reason):
             return "cross-estate read of \(source) by \(requester) refused: \(reason)"
+        case let .recallLaneUnavailable(lane):
+            return "recall lane '\(lane.rawValue)' is not available in this version"
         }
     }
 }

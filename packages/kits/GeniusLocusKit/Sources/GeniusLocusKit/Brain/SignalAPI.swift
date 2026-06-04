@@ -162,12 +162,12 @@ public extension GeniusLocusKit {
 /// scheduler holds a typed reference so the dispatch is a single
 /// call-site whose contract is checked at compile time.
 ///
-/// Today the GLK-02 surface raises `VerbError.notSupportedByEstate`
-/// for both verbs because LocusKit's Brain-layer verb bodies have
-/// not yet shipped. The scheduler recognises that error and records
-/// the outcome as `routedButVerbStubbed`. When the Brain layer's
-/// verb bodies land in a later sub-mission this dispatcher's
-/// behaviour does not need to change.
+/// The `propose` and `associate` verb bodies are fully live in
+/// GLK-02. The scheduler (`StandingSignalScheduler`) still recognises
+/// `VerbError.notSupportedByEstate` and records it as
+/// `routedButVerbStubbed` for verbs that remain partially stubbed
+/// (e.g., `mutate` state-axis kinds). This dispatcher requires no
+/// changes as further verb bodies are completed.
 internal struct SchedulerDispatcher: SignalDispatcher {
     /// Captured weakly through an unowned reference to avoid a
     /// retain cycle with the scheduler. The GLK actor outlives its

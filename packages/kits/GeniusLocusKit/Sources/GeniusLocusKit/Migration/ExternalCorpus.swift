@@ -20,6 +20,7 @@
 
 import Foundation
 import LocusKit
+import CorpusKit
 
 /// A single entry in an external reference corpus used for migration
 /// benchmarking. `id` is the stable identifier from the source system
@@ -95,11 +96,11 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     ///   the benchmark measures whether the migrated branch can *recall*
     ///   the concept from its text, which is what a real consumer query
     ///   does. An ID lookup would test storage round-trip, not recall
-    ///   fidelity. It is also the only content-tier filter that resolves
-    ///   without the vector tier (`.nearVector` throws until VectorKit
-    ///   ships), so it is the portable BM25/substring path that fires on
-    ///   every backend today. When the vector tier lands, this is the
-    ///   seam where a hybrid semantic+BM25 frame would be constructed.
+    ///   fidelity. This is the LocusKit content-match path used for
+    ///   estate-level existence checking in `verifyMigration`. For
+    ///   hybrid BM25+vector recall through the CorpusKit tier (with
+    ///   both `vectorScore` and `keywordScore` on each result), call
+    ///   `hybridRecall(via:limit:now:)` instead.
     /// - `.unconfirmed` is required, not incidental. The recall evaluator
     ///   inserts four implicit filters for any axis the chain leaves
     ///   unconstrained (spec § 7.9.5), and one of them is `.userConfirmed`.
@@ -123,5 +124,46 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
                 ordering: .byCaptureTimeDesc
             )
         }
+    }
+
+    /// Execute hybrid BM25+vector recall for each corpus entry via the
+    /// supplied `Corpus` actor. Returns one `[ScoredChunk]` list per
+    /// entry, in entry order. Entries with empty content return an empty
+    /// list without querying the store.
+    ///
+    /// This is the production recall path (CORPUSKIT_INTERFACE_v0.8 § 6).
+    /// Recall fuses vector kNN and BM25 keyword scores via Reciprocal Rank
+    /// Fusion, surfacing both `vectorScore` and `keywordScore` on each
+    /// result. For the LocusKit-only content-match path used in
+    /// `verifyMigration`, use `asRecallFrames()`.
+    ///
+    /// - Parameters:
+    ///   - corpus: The estate's `Corpus` actor. Caller constructs it from
+    ///     the same `Storage` backing the estate so chunk embeddings index
+    ///     the estate's content.
+    ///   - limit: Maximum scored chunks per entry. Default 10.
+    ///   - now: Deterministic clock — forwarded to `Corpus.recall` per the
+    ///     fleet determinism rule (CLAUDE.md).
+    ///
+    /// - Returns: One `[ScoredChunk]` list per entry, index-aligned with
+    ///   `entries`. Entries with empty content produce an empty list.
+    ///
+    /// - Throws: `CorpusKitError` if any recall call fails.
+    public func hybridRecall(
+        via corpus: CorpusKit.Corpus,
+        limit: Int = 10,
+        now: Date
+    ) async throws -> [[CorpusKit.ScoredChunk]] {
+        var results: [[CorpusKit.ScoredChunk]] = []
+        results.reserveCapacity(entries.count)
+        for entry in entries {
+            guard !entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                results.append([])
+                continue
+            }
+            let hits = try await corpus.recall(entry.content, limit: limit, now: now)
+            results.append(hits)
+        }
+        return results
     }
 }

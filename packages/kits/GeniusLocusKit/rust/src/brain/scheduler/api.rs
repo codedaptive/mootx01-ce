@@ -4,7 +4,16 @@
 // gate's primary target.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+// Global monotonic counter mixed into SignalID entropy so that
+// rapid-succession generate() calls (within the same nanosecond)
+// always produce distinct identifiers. The counter is combined with
+// the nanosecond timestamp via wrapping addition before the SplitMix64
+// diffusion, which keeps the 32-hex output format identical while
+// guaranteeing per-process uniqueness regardless of clock resolution.
+static SIGNAL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// String alias for row identifiers. Matches Swift's `RowID = String`.
 pub type RowID = String;
@@ -25,15 +34,19 @@ pub struct SignalID(pub String);
 impl SignalID {
     /// Generate a fresh identifier. The Rust mirror uses the same
     /// 32-lowercase-hex format Swift's `SignalID.generate` emits so
-    /// joined diagnostics across ports compare cleanly. The randomness
-    /// source is `std::time::SystemTime` mixed into a SplitMix64
-    /// stream because the conformance gate does not depend on the
-    /// quality of the entropy — only on the surface shape.
+    /// joined diagnostics across ports compare cleanly. The entropy
+    /// mixes a monotonic atomic counter with `SystemTime` nanoseconds
+    /// before SplitMix64 diffusion, guaranteeing uniqueness even when
+    /// called multiple times within the same nanosecond.
     pub fn generate() -> Self {
-        let seed = std::time::SystemTime::now()
+        let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(1);
+        // Combine the counter with the timestamp so rapid-succession calls
+        // never collide even when the clock has not advanced.
+        let counter = SIGNAL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let seed = nanos.wrapping_add(counter.wrapping_mul(0x6C62272E07BB0142));
         let mut s = seed.wrapping_mul(0x9E3779B97F4A7C15);
         let mut buf = String::with_capacity(32);
         for _ in 0..4 {

@@ -5,22 +5,23 @@ import LocusKit
 /// (the dreaming-daemon update rules).
 ///
 /// What it does: reads the substrate's blob/JSON tier and association
-/// graph and emits two emission classes:
+/// graph and emits:
 ///
 /// - `propose` for mining-pattern matches and novel structural
 ///   alignments uncovered by cold-path rules 6–13 (weekly NMF, weekly
 ///   T-matrix increment, daily eigenvalue centrality, daily community
 ///   detection).
-/// - `associate` for Hebbian weight reinforcement on the association
-///   graph (cookbook §15.1 rule 9 — "Weekly T-matrix incremental
-///   update from co-active rows").
+/// - `diagnostic` on daemon cycle error (surfaced in the signal's
+///   `recentDiagnostics` without silencing the signal).
 ///
 /// What it does NOT do: write to bitmap state directly. Every emission
-/// goes through the GLK-02 propose/associate verb boundary. The actual
-/// substrate-level NMF and matrix work belongs to the dreaming
-/// implementation that lands when the Brain layer's verb bodies ship;
-/// this signal supplies the cadence and the emission shape on the
-/// GLK-04 scheduler.
+/// goes through the GLK-02 propose/associate verb boundary. The daemon
+/// cycle is supplied by the caller through `spec(daemonCycle:)` — the
+/// caller constructs a `DreamingDaemon` (NeuronKit) with production
+/// adapters (`EstateDreamingReader` + `EstateDreamingSink`) and wraps
+/// `daemon.triggerDreamingCycle(now:).proposalsEmitted` in the closure.
+/// GeniusLocusKit cannot import NeuronKit (circular package dependency),
+/// so the closure is the architectural bridge between the two packages.
 ///
 /// Cadence: weekly. Cookbook §15.2 schedules the cold-path NMF and
 /// T-matrix work at a weekly cadence; that is the slowest of the
@@ -34,40 +35,60 @@ public enum DreamingSignal {
     /// Stable name surfaced in `SignalReport.name`.
     public static let signalName = "dreaming-daemon"
 
-    /// Build the default signal spec. The emit closure produces a
-    /// mining-pattern proposal plus a representative association on
-    /// every firing. Production tuning (candidate row selection,
-    /// proposal density, NMF residuals) is later sub-mission territory.
-    public static func defaultSpec() -> SignalSpec {
+    /// Build a signal spec that invokes the dreaming daemon on each fire.
+    ///
+    /// The `daemonCycle` closure is called with the scheduler's `now` and
+    /// returns the proposals the daemon emitted. An empty array is correct
+    /// when the estate has no co-occurrence candidates to mine. On error, the
+    /// closure's throw is caught and surfaced as a `.diagnostic` emission so
+    /// the scheduler's signal log records the failure without silencing the
+    /// signal.
+    ///
+    /// **Usage:** construct a `DreamingDaemon` (NeuronKit) once with production
+    /// adapters and capture it in the closure:
+    ///
+    ///     let reader = EstateDreamingReader(handle: handle, kit: kit)
+    ///     let sink   = EstateDreamingSink(handle: handle, kit: kit)
+    ///     let store  = InMemoryDreamingPolicyStore()
+    ///     let daemon = NeuronKit.dreamingDaemon(reader: reader, sink: sink, policyStore: store)
+    ///     let spec   = DreamingSignal.spec { now in
+    ///         try await daemon.triggerDreamingCycle(now: now).proposalsEmitted
+    ///     }
+    ///     let id = try await kit.registerStandingSignal(spec, in: handle, now: now)
+    ///
+    /// The daemon is an actor; re-entry is prevented by actor isolation and the
+    /// scheduler's `.single` concurrency policy, which together guarantee at most
+    /// one cycle runs at a time per estate.
+    public static func spec(
+        daemonCycle: @escaping @Sendable (Date) async throws -> [ProposeFrame]
+    ) -> SignalSpec {
         SignalSpec(
             name: signalName,
             trigger: .interval(seconds: defaultCadenceSeconds),
             freshnessTarget: defaultCadenceSeconds * 2,
             concurrencyPolicy: .single,
             emit: { context in
-                // Mining-pattern candidate: a proposal targeting the
-                // substrate's dreaming queue. The actual NMF residual
-                // and the row identity are computed by the cold-path
-                // implementation that ships when the Brain layer's
-                // verb bodies land. Until then the emission shape is
-                // what the scheduler dispatches.
-                let mining = ProposalFrame(
-                    target: "dreaming/mining-candidate",
-                    kind: .miningPattern,
-                    justification:
-                        "weekly NMF candidate (cookbook §15.1 rule 8); signal=\(context.signalID.rawValue)")
-                // Hebbian association proposal: a co-active row pair
-                // the dreaming daemon would have folded into the
-                // T-matrix's incremental update (cookbook §15.1
-                // rule 9 / §6.4).
-                let association = AssociationFrame(
-                    a: "dreaming/source",
-                    b: "dreaming/target",
-                    weight: 1.0)
-                return [
-                    .propose(mining),
-                    .associate(association),
-                ]
+                do {
+                    let proposals = try await daemonCycle(context.now)
+                    // Map each ProposeFrame (substrate verb frame) to the Brain
+                    // layer's ProposalFrame (SignalEmission.propose). Both types
+                    // are in GeniusLocusKit; the scheduler converts ProposalFrame
+                    // back to ProposeFrame before dispatching to the verb surface.
+                    return proposals.map { frame in
+                        SignalEmission.propose(ProposalFrame(
+                            target: frame.target,
+                            kind: frame.kind,
+                            justification: frame.justification))
+                    }
+                } catch {
+                    // Surface daemon errors as a diagnostic rather than crashing
+                    // the scheduler's drain loop. The error appears in the signal's
+                    // recentDiagnostics so the application can observe cycle failures.
+                    return [.diagnostic(DiagnosticReport(
+                        title: "dreaming-daemon.cycle.error",
+                        detail: "\(error)",
+                        observedAt: context.now))]
+                }
             })
     }
 }

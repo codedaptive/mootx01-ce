@@ -76,7 +76,10 @@ let package = Package(
             dependencies: [
                 "GeniusLocusKit",
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "CorpusKit", package: "CorpusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),

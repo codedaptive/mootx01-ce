@@ -146,6 +146,47 @@ public struct ReanchorFrame: Sendable, Equatable {
     }
 }
 
+/// Learned reference re-export so the public `learn` return type is nameable
+/// through the GLK module alone.
+public typealias LearnedReference = LocusKit.LearnedReference
+
+// MARK: - Substrate noun re-exports for seam consumers
+//
+// NeuronKit's dreaming and maintenance daemons use these value types in
+// their seam protocols. Re-exporting them through GeniusLocusKit lets those
+// files import ONLY GeniusLocusKit, eliminating the ProposeFrame ambiguity
+// that arises when both GeniusLocusKit and LocusKit are imported directly
+// (both modules define `ProposeFrame` with different `ProposalKind` types).
+
+/// Recall-trace row re-export. The dreaming daemon reads these through
+/// `DreamingSubstrateReader.recentRecallTraces`.
+public typealias RecallTraceItem = LocusKit.RecallTraceItem
+
+/// Tunnel (association edge) re-export. The dreaming daemon reads these
+/// through `DreamingSubstrateReader.existingTunnels`.
+public typealias Tunnel = LocusKit.Tunnel
+
+/// Diary entry re-export. The dreaming and maintenance daemons write one
+/// cycle summary per run through `DreamingProposalSink.recordCycleDiary` /
+/// `MaintenanceProposalSink.recordCycleDiary`.
+public typealias DiaryEntry = LocusKit.DiaryEntry
+
+/// Sensitivity adjective re-export. Used in NeuronKit test helpers that
+/// construct drawers, and in the maintenance daemon's forbidden-combination scan.
+public typealias AdjectiveSensitivity = LocusKit.AdjectiveSensitivity
+
+/// Exportability adjective re-export. Paired with `AdjectiveSensitivity` for
+/// the I-3 forbidden-combination check (secret AND public).
+public typealias AdjectiveExportability = LocusKit.AdjectiveExportability
+
+/// Proposal re-export so the public `propose` return type is nameable
+/// through the GLK module alone.
+public typealias Proposal = LocusKit.Proposal
+
+/// Association re-export so the public `associate` return type is nameable
+/// through the GLK module alone.
+public typealias Association = LocusKit.Association
+
 /// Slots for the `propose` verb.
 ///
 /// `propose` creates a Proposal row with `state = pending` (cookbook
@@ -153,9 +194,7 @@ public struct ReanchorFrame: Sendable, Equatable {
 /// substrate-driven — emitted by the Brain layer's standing signals,
 /// not invoked synchronously by application callers. The GLK verb
 /// surface defines the frame so the nine-verb shape is consistent;
-/// the substrate implementation arrives with the Brain layer in a
-/// later sub-mission, and today's GLK surface raises
-/// `VerbError.notSupportedByEstate` when invoked.
+/// `propose` is fully live in the GLK-02 verb surface.
 public struct ProposeFrame: Sendable, Equatable {
     /// The row this proposal is about (the target). Carried as a
     /// `RowID` because the substrate's RowReference resolves through
@@ -182,8 +221,7 @@ public struct ProposeFrame: Sendable, Equatable {
 /// `associate` creates or strengthens an Association row between two
 /// rows (cookbook §10.8). Substrate-driven (Brain layer / dreaming
 /// daemon). The GLK surface declares the frame so the nine-verb shape
-/// is consistent; today's surface raises
-/// `VerbError.notSupportedByEstate` when invoked.
+/// is consistent; `associate` is fully live in the GLK-02 verb surface.
 public struct AssociateFrame: Sendable, Equatable {
     /// One endpoint of the association.
     public let a: RowID
