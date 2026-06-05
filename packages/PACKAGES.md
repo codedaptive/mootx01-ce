@@ -23,7 +23,7 @@ Packages compose bottom-up. Each layer depends only on layers below it.
 REASONING   CognitionKit        NeuronKit
 ORCHESTRAT  GeniusLocusKit
 STANDALONE  LocusKit            VectorKit           CorpusKit
-GROUNDING   LatticeKit          EideticLib
+GROUNDING   LatticeLib          EideticLib
 FOUNDATION  EngramLib           AriaLexiconLib
 STORAGE     PersistenceKit      ConvergenceKit      QueueKit
 SUBSTRATE   SubstrateLib  (orchestration: verbs + row-state automaton + AuditGate)
@@ -129,6 +129,37 @@ As of 2026-05-29 it no longer re-exports them (the transitional shim was removed
 
 ---
 
+### LatticeLib
+
+**Role:** Frame Decimal Classification (FDC). Maintains the Eidetic
+Label Lattice — the universal coordinate spine of the substrate.
+
+**Provides:**
+- `LatticeCanon` — the loaded in-memory classification canon
+- `LatticeLib.bundledCanon()` — loads the bundled canon
+- `LatticeCodeGrammar.isWellFormed(_:)` — code syntax validation
+- `classifyLatticeCode(_:knownCodes:)` → `LatticeCodeState`
+- `LatticeSchemeManifest` — scheme metadata
+- `StableKeyRegistry` — stable code assignments across canon builds
+- `Assembler` — builds the canon from Wikidata CC0 source data
+- `mdcc-build` executable — CLI tool for editorial canon management
+- Editorial pin files — human-authored classification decisions
+
+**Does NOT:** No text processing, no live lookup, no search. Defines and
+maintains the label space. EideticLib performs the actual lookups.
+
+**Why Lib:** Editorial tooling (`Assembler`, `mdcc-build`) and `StableKeyRegistry`
+operate at build time, not runtime. The deployed library loads a bundled, static
+canon — no actors, no lifecycle, no ongoing state mutations during estate
+operation. Directory placement in `libs/` reflects this: LatticeLib produces
+and validates the FDC label space; it does not manage that space at runtime.
+
+**Dependencies:** None  
+**Languages:** Swift only (Rust port pending)  
+**Spec:** `docs/specs/MDCC_ANNEX_SPEC_v0.1.md`, `docs/specs/LATTICE_CITATION_UDC_WIKIDATA.md`
+
+---
+
 ### EideticLib
 
 **Role:** Deterministic text-to-anchor lookup. Produces Eidetics.
@@ -146,7 +177,7 @@ the Eidetic Label Lattice.
 **Does NOT:** No storage, no managed state. Stateless lookup against a
 bundled gazetteer. Give it a term, get an Anchor back.
 
-**Dependencies:** LatticeKit (for canon + code grammar)  
+**Dependencies:** LatticeLib (for canon + code grammar)  
 **Languages:** Swift + Rust (conformance-gated)  
 **Spec:** `docs/specs/FDC_ENCODER_CANONICAL_v1.0.md`
 
@@ -243,35 +274,6 @@ One estate. One queue. One authority over serial dispatch.
 **Dependencies:** SubstrateLib, PersistenceKit  
 **Languages:** Swift + Rust + Python (three-way conformance parity)  
 **Spec:** `docs/specs/QUEUEKIT_SPEC.md`, `docs/specs/QUEUE_PROTOCOL_SPEC.md`
-
----
-
-### LatticeKit
-
-**Role:** Moot Decimal Classification Codes (MDCC). Maintains the Eidetic
-Label Lattice — the universal coordinate spine of the substrate.
-
-**Provides:**
-- `LatticeCanon` — the loaded in-memory classification canon
-- `LatticeKit.bundledCanon()` — loads the bundled canon
-- `LatticeCodeGrammar.isWellFormed(_:)` — code syntax validation
-- `classifyLatticeCode(_:knownCodes:)` → `LatticeCodeState`
-- `LatticeSchemeManifest` — scheme metadata
-- `StableKeyRegistry` — stable code assignments across canon builds
-- `Assembler` — builds the canon from Wikidata CC0 source data
-- `mdcc-build` executable — CLI tool for editorial canon management
-- Editorial pin files — human-authored classification decisions
-
-**Does NOT:** No text processing, no live lookup, no search. Defines and
-maintains the label space. EideticLib performs the actual lookups.
-
-**Why Kit not Lib:** Actively managed — StableKeyRegistry persists state
-across builds, Assembler runs editorial tooling, human editors author pin
-files. There is a management interface and maintained mutable state.
-
-**Dependencies:** None  
-**Languages:** Swift only (Rust port pending)  
-**Spec:** `docs/specs/MDCC_ANNEX_SPEC_v0.1.md`, `docs/specs/LATTICE_CITATION_UDC_WIKIDATA.md`
 
 ---
 
@@ -410,11 +412,18 @@ no estate/IO call, no SQL. The one exception is **read-only value types**:
 they MAY import LocusKit to name value types (e.g. `Drawer`, `ContentKind`,
 `RecallFrame`, `Filter`) in their inputs and outputs. They MUST NOT call any
 LocusKit (or VectorKit / CorpusKit) estate, verb, or storage surface. Both
-ports take this posture today — `NeuronKit/HybridRecall.swift` re-exports
-`LocusKit.Drawer`; the CognitionKit recipes (`Drift`, `AssociationRules`,
-`FormalConcepts`, …) import LocusKit for their frame value types only.
+ports hold this posture — Swift held it from the start; the Rust BrainKit
+reader layer was brought into compliance by TASK-MXE-2026-0070 (stream
+`rb-rust-brainkit-substrate-boundary`). The Swift port re-exports
+`LocusKit.Drawer` via `NeuronKit/HybridRecall.swift`; the Rust port
+re-exports `locus_kit::Drawer` and allied value types via `genius_locus_kit`
+so NeuronKit readers carry zero direct `locus_kit::` storage imports. The
+CognitionKit recipes (`Drift`, `AssociationRules`, `FormalConcepts`, …)
+import LocusKit for frame value types only.
 (Boundary-owned DTOs that would drop even the value-type import are a
 separate architecture decision — deferred, not adopted here.)
+A B-1 conformance test in `packages/kits/NeuronKit/rust/tests/brain_kit_boundary_test.rs`
+enforces the reader boundary mechanically for both reader adapters.
 
 **Queue authority:** GLK holds one QueueKit instance per estate in
 StandingSignalScheduler. NeuronKit and CognitionKit never import QueueKit
@@ -497,9 +506,9 @@ SubstrateTypes  ← (none)
 SubstrateKernel ← SubstrateTypes
 SubstrateML     ← SubstrateTypes, SubstrateKernel
 SubstrateLib    ← SubstrateTypes, SubstrateKernel, SubstrateML
-LatticeKit      ← (none)
+LatticeLib      ← (none)
 EngramLib       ← SubstrateTypes, SubstrateKernel
-EideticLib      ← LatticeKit
+EideticLib      ← LatticeLib
 PersistenceKit  ← SubstrateTypes
 ConvergenceKit  ← SubstrateTypes, PersistenceKit
 QueueKit        ← SubstrateTypes, PersistenceKit
@@ -530,7 +539,7 @@ the precise sub-package(s) it uses.
 | QueueKit | ✅ | ✅ | Built + Python parity |
 | EngramLib | ✅ | ✅ | Built |
 | AriaLexiconLib | ✅ | ✅ | Built |
-| LatticeKit | ✅ | — | Rust port pending |
+| LatticeLib | ✅ | — | Rust port pending |
 | EideticLib | ✅ | ✅ | Built |
 | LocusKit | ✅ | — | Rust port pending |
 | VectorKit | ✅ | ✅ | Built |
@@ -544,6 +553,5 @@ Build status reflects functional tests only.
 
 ---
 
-*Last updated: 2026-06-03 (reconciled verb readiness, CognitionKit built
-status + recipe set, and the B-1 read-only value-type exception to shipped
-code; four-package substrate split recorded 2026-05-29).*
+*Last updated: 2026-06-05 (relocated LatticeLib from kits/ to libs/ section;
+reconciled "Why Kit not Lib" note with libs/ placement).*

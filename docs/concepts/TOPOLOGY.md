@@ -64,8 +64,8 @@ Foundation
                        Over SubstrateTypes + SubstrateKernel.
     SubstrateLib       Orchestration: AuditGate (write gate), GSetAuditLog,
                        AuditLogFold, RowStateAutomaton, MatrixDecay, BitField,
-                       SHA256, HammingNN. Umbrella that @_exported-imports
-                       the three substrate packages above.
+                       SHA256, HammingNN. Depends on SubstrateTypes, SubstrateKernel,
+                       and SubstrateML directly (no umbrella re-export).
     PersistenceKit         Storage backends: SQLite, PostgreSQL, InMemory.
                        Over SubstrateLib + SubstrateTypes.
     ConvergenceKit            Sync backends: CloudKit, Federation, None.
@@ -77,7 +77,7 @@ Foundation
 
 ### How the layers compose
 
-Foundation has eight kits: the four-package substrate (SubstrateTypes → SubstrateKernel → SubstrateML → SubstrateLib, the latter an umbrella that re-exports the first three), PersistenceKit, QueueKit and ConvergenceKit (peers that share SubstrateLib and chain QueueKit and ConvergenceKit on top of PersistenceKit), and the zero-dependency AriaLexiconLib. The pre-Phase-6 description ("five peer kits with no inter-dependencies") no longer holds: PersistenceKit takes SubstrateLib and SubstrateTypes; ConvergenceKit and QueueKit take SubstrateLib and PersistenceKit; the substrate split itself defines an internal ordering. The Foundation still bottoms out at SubstrateTypes and AriaLexiconLib, neither of which has any dependency. EngramLib lifts SubstrateLib's bytes into a typed 256-bit Engram. EideticLib sits beside the substrate as a standalone grounding utility: it produces anchors (FDC code + Wikidata Q-ID + confidence) via LatticeLib's FDC encoder and is consumed by the layers above without being part of them — it imports no substrate kit and is licensed independently.
+Foundation has eight kits: the four-package substrate (SubstrateTypes → SubstrateKernel → SubstrateML → SubstrateLib; the transitional umbrella re-export shim was removed 2026-05-29, so each consumer depends on the precise sub-package it uses), PersistenceKit, QueueKit and ConvergenceKit (peers that share SubstrateLib and chain QueueKit and ConvergenceKit on top of PersistenceKit), and the zero-dependency AriaLexiconLib. The pre-Phase-6 description ("five peer kits with no inter-dependencies") no longer holds: PersistenceKit takes SubstrateLib and SubstrateTypes; ConvergenceKit and QueueKit take SubstrateLib and PersistenceKit; the substrate split itself defines an internal ordering. The Foundation still bottoms out at SubstrateTypes and AriaLexiconLib, neither of which has any dependency. EngramLib lifts SubstrateLib's bytes into a typed 256-bit Engram. EideticLib sits beside the substrate as a standalone grounding utility: it produces anchors (FDC code + Wikidata Q-ID + confidence) via LatticeLib's FDC encoder and is consumed by the layers above without being part of them — it imports no substrate kit and is licensed independently.
 
 Standalone substrate is three usable estates in their own right: LocusKit for spatial memory and the knowledge graph, VectorKit for on-device semantic search, CorpusKit for content-plus-vector bundles. Each is shippable on its own.
 
