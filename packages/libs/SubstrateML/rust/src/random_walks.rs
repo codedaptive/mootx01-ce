@@ -1,7 +1,12 @@
 // random_walks.rs
 //
 // Random walks with restart on the estate graph, per cookbook
-// § 7.4. Mirror of glref-swift-RandomWalks.swift.
+// § 7.4. Mirror of RandomWalks.swift.
+//
+// Markov kernel preconditions (enforced at entry of walk(); violations panic):
+//   - Every neighbor index must be in [0, N) where N = adjacency.len().
+//   - Every edge weight must be finite and >= 0.
+//   - sample_weighted() panics on an empty neighbor list.
 
 pub struct RandomWalks;
 
@@ -21,6 +26,30 @@ impl RandomWalks {
             restart_prob >= 0.0 && restart_prob < 1.0,
             "restart_prob must be in [0, 1)"
         );
+
+        // Validate the Markov kernel: neighbor indices in [0, N) and
+        // all edge weights finite and >= 0.
+        let n = adjacency.len();
+        for (row, neighbors) in adjacency.iter().enumerate() {
+            for (edge_idx, &(neighbor, weight)) in neighbors.iter().enumerate() {
+                assert!(
+                    neighbor < n,
+                    "adjacency[{}][{}].neighbor {} is out of range [0, {})",
+                    row, edge_idx, neighbor, n
+                );
+                assert!(
+                    weight.is_finite(),
+                    "adjacency[{}][{}].weight is not finite ({})",
+                    row, edge_idx, weight
+                );
+                assert!(
+                    weight >= 0.0,
+                    "adjacency[{}][{}].weight is negative ({})",
+                    row, edge_idx, weight
+                );
+            }
+        }
+
         let mut rng = SplitMix64::new(seed);
         let mut visited = Vec::with_capacity(length);
         let mut current = start;
@@ -42,6 +71,7 @@ impl RandomWalks {
     }
 
     pub fn sample_weighted(neighbors: &[(usize, f64)], rng: &mut SplitMix64) -> usize {
+        assert!(!neighbors.is_empty(), "sample_weighted requires a non-empty neighbor list");
         let total: f64 = neighbors.iter().map(|&(_, w)| if w > 0.0 { w } else { 0.0 }).sum();
         if total <= 0.0 {
             let idx = (rng.next() % neighbors.len() as u64) as usize;

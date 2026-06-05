@@ -2,6 +2,26 @@
 //
 // Eigenvalue centrality on the estate graph, per cookbook § 7.2.
 // Mirror of glref-swift-EigenvalueCentrality.swift.
+//
+// Directed-graph convention (design council decision, 2026-06-04):
+//
+//   Computes AUTHORITY CENTRALITY via A^T @ x:
+//
+//       x_{k+1} = A^T @ x_k / ||A^T @ x_k||_2
+//
+//   where adjacency[i] lists edges OUT OF node i. The inner loop
+//   `x_next[j] += w * x[i]` for edge i→j accumulates at j the
+//   weighted influence of all nodes pointing TO j — the authority
+//   interpretation. A node scores highly when many high-scoring
+//   nodes point to it.
+//
+//   This is the correct semantic for cognitive-recall keystones:
+//   a row is central when many other rows reference it, not when it
+//   references many others. The design council locked this convention
+//   on 2026-06-04; the directed conformance vector pins it.
+//
+//   For undirected graphs (A = A^T), hub and authority are identical;
+//   symmetrize before calling if undirected centrality is needed.
 
 pub struct EigenvalueCentrality;
 

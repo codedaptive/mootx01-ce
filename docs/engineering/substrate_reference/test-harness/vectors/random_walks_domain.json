@@ -1,0 +1,116 @@
+{
+  "description": "Domain enforcement conformance vectors for RandomWalks. Tests that the Markov kernel is valid at entry: neighbor indices in [0,N), weights finite and >= 0, and sampleWeighted requires non-empty input.",
+  "version": "1.0",
+  "engine": "RandomWalks",
+  "preconditions": [
+    {
+      "id": "rw-domain-001",
+      "name": "invalid_neighbor_index_rejected",
+      "description": "Neighbor index >= N triggers precondition in walk()",
+      "input": {
+        "adjacency": [[[99, 1.0]]],
+        "start": 0,
+        "length": 5,
+        "restart_prob": 0.15,
+        "seed": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "out of range"
+    },
+    {
+      "id": "rw-domain-002",
+      "name": "negative_weight_rejected",
+      "description": "Negative edge weight triggers precondition in walk()",
+      "input": {
+        "adjacency": [[[0, -1.0]]],
+        "start": 0,
+        "length": 5,
+        "restart_prob": 0.15,
+        "seed": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "negative"
+    },
+    {
+      "id": "rw-domain-003",
+      "name": "nan_weight_rejected",
+      "description": "NaN edge weight triggers precondition in walk()",
+      "input": {
+        "adjacency": [[[0, "NaN"]]],
+        "start": 0,
+        "length": 5,
+        "restart_prob": 0.15,
+        "seed": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "not finite"
+    },
+    {
+      "id": "rw-domain-004",
+      "name": "inf_weight_rejected",
+      "description": "Infinite edge weight triggers precondition in walk()",
+      "input": {
+        "adjacency": [[[0, "Inf"]]],
+        "start": 0,
+        "length": 5,
+        "restart_prob": 0.15,
+        "seed": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "not finite"
+    },
+    {
+      "id": "rw-domain-005",
+      "name": "empty_neighbor_list_to_sample_weighted_rejected",
+      "description": "Empty neighbor list passed directly to sampleWeighted triggers precondition",
+      "input": {
+        "neighbors": [],
+        "rng_seed": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "non-empty neighbor list"
+    }
+  ],
+  "valid_inputs": [
+    {
+      "id": "rw-domain-006",
+      "name": "valid_symmetric_chain_walk",
+      "description": "4-node chain with positive weights produces a walk of the correct length",
+      "input": {
+        "adjacency": [
+          [[1, 1.0]],
+          [[0, 1.0], [2, 1.0]],
+          [[1, 1.0], [3, 1.0]],
+          [[2, 1.0]]
+        ],
+        "start": 0,
+        "length": 10,
+        "restart_prob": 0.15,
+        "seed": 305441741
+      },
+      "expected_outcome": "success",
+      "invariants": [
+        "walk.count == 10",
+        "walk[0] == 0",
+        "all walk elements in [0, 4)"
+      ]
+    },
+    {
+      "id": "rw-domain-007",
+      "name": "all_zero_weights_uniform_fallback",
+      "description": "Zero-weight edges trigger uniform sampling fallback; no crash",
+      "input": {
+        "adjacency": [
+          [[1, 0.0]],
+          [[0, 0.0]]
+        ],
+        "start": 0,
+        "length": 6,
+        "restart_prob": 0.0,
+        "seed": 7
+      },
+      "expected_outcome": "success",
+      "invariants": ["all walk elements in {0, 1}"]
+    }
+  ]
+}

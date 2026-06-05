@@ -1,0 +1,52 @@
+{
+  "description": "Lambda domain enforcement conformance vectors for mmrRank / mmr_select. The MMR score is a convex blend only when lambda in [0, 1]; out-of-range lambda triggers a precondition (Swift) / panic (Rust). Fixtures mirror the canonical A/B/C engram set (query = all-zero engram, distance = popcount).",
+  "version": "1.0",
+  "engine": "MMRRank",
+  "notes": "A: low 40 bits set (dist 40). B: low 44 bits set (dist 44). C: 80 bits in blocks 1..2 (dist 80).",
+  "preconditions": [
+    {
+      "id": "mmr-lambda-001",
+      "name": "lambda_below_zero_rejected",
+      "description": "lambda < 0 triggers precondition",
+      "input": { "lambda": -0.1, "k": 3 },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "lambda must be in [0, 1]"
+    },
+    {
+      "id": "mmr-lambda-002",
+      "name": "lambda_above_one_rejected",
+      "description": "lambda > 1 triggers precondition",
+      "input": { "lambda": 1.5, "k": 3 },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "lambda must be in [0, 1]"
+    }
+  ],
+  "valid_inputs": [
+    {
+      "id": "mmr-lambda-003",
+      "name": "lambda_zero_pure_diversity_accepted",
+      "description": "lambda = 0.0 (lower boundary) is accepted",
+      "input": { "lambda": 0.0, "k": 3 },
+      "expected_outcome": "success",
+      "invariants": ["returns 3 indices"]
+    },
+    {
+      "id": "mmr-lambda-004",
+      "name": "lambda_one_pure_relevance_accepted",
+      "description": "lambda = 1.0 (upper boundary) is accepted; pure relevance order",
+      "input": { "lambda": 1.0, "k": 3 },
+      "expected_outcome": "success",
+      "expected_order": [0, 1, 2],
+      "invariants": ["ascending distance-to-query: A(40), B(44), C(80)"]
+    },
+    {
+      "id": "mmr-lambda-005",
+      "name": "lambda_interior_accepted",
+      "description": "lambda = 0.7 (interior) is accepted; diversity reorders to [A, C, B]",
+      "input": { "lambda": 0.7, "k": 3 },
+      "expected_outcome": "success",
+      "expected_order": [0, 2, 1],
+      "invariants": ["diversity pulls disjoint C ahead of near-duplicate B"]
+    }
+  ]
+}

@@ -1,0 +1,237 @@
+{
+  "algorithm": "TemporalCausalityFold",
+  "version": "1.0",
+  "seed": "0xCAFEBABEDEADBEEF",
+  "date": "2026-06-04",
+  "notes": [
+    "Conformance vectors for TemporalCausalityFold (SubstrateML §5.22 / cookbook §6.4).",
+    "Both Swift and Rust ports must produce identical deltas and watermarks for each case.",
+    "All HLC values use physicalTime in milliseconds since Unix epoch.",
+    "windowMinutes=256 (defaultWindowMinutes) unless overridden per-case.",
+    "startWatermark=zero unless noted.",
+    "fieldCoords encoding: 'bitmap:{uint64}', 'string:{s}', 'integer:{int64}', 'bytes:{count}', 'null'."
+  ],
+  "vectors": [
+    {
+      "id": "tcf-001",
+      "description": "Empty entry list: no deltas, watermark unchanged at zero",
+      "input": {
+        "entries": [],
+        "windowMinutes": 256,
+        "startWatermark": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 }
+      },
+      "expected": {
+        "deltas": [],
+        "newWatermark": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 }
+      }
+    },
+    {
+      "id": "tcf-002",
+      "description": "Single entry: no pairs (nothing to pair against), watermark advances",
+      "input": {
+        "entries": [
+          {
+            "hlc": { "physicalTime": 60000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "f", "valueRepr": "bitmap:1" }]
+          }
+        ],
+        "windowMinutes": 256,
+        "startWatermark": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 }
+      },
+      "expected": {
+        "deltas": [],
+        "newWatermark": { "physicalTime": 60000, "logicalCount": 0, "nodeID": 0 }
+      }
+    },
+    {
+      "id": "tcf-003",
+      "description": "Two entries 1 minute apart: one pair in bucket 1",
+      "input": {
+        "entries": [
+          {
+            "hlc": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "field-a", "valueRepr": "bitmap:10" }]
+          },
+          {
+            "hlc": { "physicalTime": 60000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "field-b", "valueRepr": "bitmap:20" }]
+          }
+        ],
+        "windowMinutes": 256,
+        "startWatermark": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 }
+      },
+      "expected": {
+        "deltas": [
+          {
+            "key": {
+              "source": { "fieldPath": "field-a", "valueRepr": "bitmap:10" },
+              "target": { "fieldPath": "field-b", "valueRepr": "bitmap:20" },
+              "lagBucket": 1
+            },
+            "count": 1
+          }
+        ],
+        "newWatermark": { "physicalTime": 60000, "logicalCount": 0, "nodeID": 0 }
+      }
+    },
+    {
+      "id": "tcf-004",
+      "description": "Two entries 257 minutes apart (> windowMinutes=256): no deltas",
+      "notes": "Buffer eviction removes the earlier entry before the later new entry pairs with it.",
+      "input": {
+        "entries": [
+          {
+            "hlc": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "f", "valueRepr": "bitmap:1" }]
+          },
+          {
+            "hlc": { "physicalTime": 15420000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "g", "valueRepr": "bitmap:2" }]
+          }
+        ],
+        "windowMinutes": 256,
+        "startWatermark": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 }
+      },
+      "expected": {
+        "deltas": [],
+        "newWatermark": { "physicalTime": 15420000, "logicalCount": 0, "nodeID": 0 }
+      }
+    },
+    {
+      "id": "tcf-005",
+      "description": "Entries at exactly 128 minutes apart: bucket = 128",
+      "input": {
+        "entries": [
+          {
+            "hlc": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "src", "valueRepr": "bitmap:1" }]
+          },
+          {
+            "hlc": { "physicalTime": 7680000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "tgt", "valueRepr": "bitmap:2" }]
+          }
+        ],
+        "windowMinutes": 256,
+        "startWatermark": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 }
+      },
+      "expected": {
+        "deltas": [
+          {
+            "key": {
+              "source": { "fieldPath": "src", "valueRepr": "bitmap:1" },
+              "target": { "fieldPath": "tgt", "valueRepr": "bitmap:2" },
+              "lagBucket": 128
+            },
+            "count": 1
+          }
+        ],
+        "newWatermark": { "physicalTime": 7680000, "logicalCount": 0, "nodeID": 0 }
+      }
+    },
+    {
+      "id": "tcf-006",
+      "description": "Watermark boundary: entry at or before watermark serves as source only",
+      "notes": "Entry at t=0 is <= watermark(t=30000); entry at t=60000 is > watermark → new. One pair.",
+      "input": {
+        "entries": [
+          {
+            "hlc": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "src", "valueRepr": "bitmap:1" }]
+          },
+          {
+            "hlc": { "physicalTime": 60000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "tgt", "valueRepr": "bitmap:2" }]
+          }
+        ],
+        "windowMinutes": 256,
+        "startWatermark": { "physicalTime": 30000, "logicalCount": 0, "nodeID": 0 }
+      },
+      "expected": {
+        "deltas": [
+          {
+            "key": {
+              "source": { "fieldPath": "src", "valueRepr": "bitmap:1" },
+              "target": { "fieldPath": "tgt", "valueRepr": "bitmap:2" },
+              "lagBucket": 1
+            },
+            "count": 1
+          }
+        ],
+        "newWatermark": { "physicalTime": 60000, "logicalCount": 0, "nodeID": 0 }
+      }
+    },
+    {
+      "id": "tcf-007",
+      "description": "All 8 lag bucket boundaries verified in sequence",
+      "notes": "Eight entries at t=0,1,2,4,8,16,32,64,128 minutes. First entry is source; each subsequent new entry produces one pair with that source and a bucket matching its distance.",
+      "input": {
+        "entries": [
+          {
+            "hlc": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "base", "valueRepr": "bitmap:1" }]
+          },
+          {
+            "hlc": { "physicalTime": 60000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "at1min", "valueRepr": "bitmap:2" }]
+          },
+          {
+            "hlc": { "physicalTime": 120000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "at2min", "valueRepr": "bitmap:3" }]
+          },
+          {
+            "hlc": { "physicalTime": 240000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "at4min", "valueRepr": "bitmap:4" }]
+          },
+          {
+            "hlc": { "physicalTime": 480000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "at8min", "valueRepr": "bitmap:5" }]
+          },
+          {
+            "hlc": { "physicalTime": 960000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "at16min", "valueRepr": "bitmap:6" }]
+          },
+          {
+            "hlc": { "physicalTime": 1920000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "at32min", "valueRepr": "bitmap:7" }]
+          },
+          {
+            "hlc": { "physicalTime": 3840000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "at64min", "valueRepr": "bitmap:8" }]
+          },
+          {
+            "hlc": { "physicalTime": 7680000, "logicalCount": 0, "nodeID": 0 },
+            "fieldCoords": [{ "fieldPath": "at128min", "valueRepr": "bitmap:9" }]
+          }
+        ],
+        "windowMinutes": 256,
+        "startWatermark": { "physicalTime": 0, "logicalCount": 0, "nodeID": 0 }
+      },
+      "expected": {
+        "notes": "Each new entry pairs with 'base' (still in window) at its respective bucket. Later entries also pair with earlier new entries within window.",
+        "newWatermark": { "physicalTime": 7680000, "logicalCount": 0, "nodeID": 0 },
+        "bucketsFromBase": [1, 2, 4, 8, 16, 32, 64, 128]
+      }
+    }
+  ],
+  "lagBucketVectors": {
+    "description": "Canonical lagBucket(forMinutes:) function output. Both Swift and Rust must agree.",
+    "cases": [
+      { "input": 1, "expected": 1 },
+      { "input": 2, "expected": 2 },
+      { "input": 3, "expected": 4 },
+      { "input": 4, "expected": 4 },
+      { "input": 5, "expected": 8 },
+      { "input": 8, "expected": 8 },
+      { "input": 9, "expected": 16 },
+      { "input": 16, "expected": 16 },
+      { "input": 17, "expected": 32 },
+      { "input": 32, "expected": 32 },
+      { "input": 33, "expected": 64 },
+      { "input": 64, "expected": 64 },
+      { "input": 65, "expected": 128 },
+      { "input": 128, "expected": 128 },
+      { "input": 200, "expected": 128 },
+      { "input": 256, "expected": 128 }
+    ]
+  }
+}

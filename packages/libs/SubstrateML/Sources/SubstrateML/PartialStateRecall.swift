@@ -33,6 +33,19 @@
 // scores all rows under the predicate-based candidate filter and
 // returns the top-K by descending score.
 //
+// Input validation convention (MX-Tidy, 2026-06-05):
+//
+//   Block IDs must be in the domain {0, 1, 2, 3}. An out-of-domain
+//   block ID is a programmer error: `hammingBlocks` ignores the
+//   unknown block but the denominator still counts it, producing
+//   silently wrong scores. Both `score` and `topK` assert via
+//   `precondition` — consistent with `HammingNN.topK`'s k > 0
+//   precondition and BradleyTerry's parameter assertions.
+//
+//   `k` in `topK` must be non-negative. `prefix(-n)` in Swift
+//   crashes; the explicit precondition makes the contract visible
+//   and matches HammingNN.topK's style.
+//
 // Cookbook references:
 //   § 8.8   Partial-state recall definition
 //   § 8.2   Hamming distance with block subset
@@ -55,12 +68,20 @@ public enum PartialStateRecall {
     ///
     /// Returns 0.0 if either block subset is empty (degenerate
     /// case: no "match" or no "differ" constraint imposed).
+    ///
+    /// Precondition: all block IDs must be in {0, 1, 2, 3}. An
+    /// out-of-domain ID corrupts the denominator while not
+    /// contributing to the Hamming distance, yielding a wrong score.
     public static func score(
         rowFingerprint: Fingerprint256,
         anchor: Fingerprint256,
         matchBlocks: Set<Int>,
         differBlocks: Set<Int>
     ) -> Double {
+        precondition(matchBlocks.allSatisfy { (0...3).contains($0) },
+                     "matchBlocks IDs must be in domain {0, 1, 2, 3}")
+        precondition(differBlocks.allSatisfy { (0...3).contains($0) },
+                     "differBlocks IDs must be in domain {0, 1, 2, 3}")
         if matchBlocks.isEmpty || differBlocks.isEmpty { return 0.0 }
         let matchTotalBits  = 64 * matchBlocks.count
         let differTotalBits = 64 * differBlocks.count
@@ -76,6 +97,10 @@ public enum PartialStateRecall {
     /// Production code consults the bit-slice tensor and computes
     /// partial scores in batched SIMD; this reference is a
     /// straightforward scan over `rows`.
+    ///
+    /// Precondition: `k >= 0`. Negative k is a programmer error;
+    /// `prefix` would crash — the precondition makes the contract
+    /// explicit, matching `HammingNN.topK`'s `k > 0` style.
     public static func topK(
         anchor: Fingerprint256,
         rows: [(rowId: UUID, fingerprint: Fingerprint256)],
@@ -83,6 +108,7 @@ public enum PartialStateRecall {
         differBlocks: Set<Int>,
         k: Int
     ) -> [(rowId: UUID, score: Double)] {
+        precondition(k >= 0, "k must be non-negative")
         var scored: [(UUID, Double)] = []
         scored.reserveCapacity(rows.count)
         for row in rows {

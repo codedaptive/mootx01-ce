@@ -1,0 +1,212 @@
+{
+  "case_count": 8,
+  "cases": [
+    {
+      "description": "empty context → no concepts",
+      "expected_output": {
+        "concepts": []
+      },
+      "id": "case_000",
+      "inputs": {
+        "max_concepts": 8,
+        "max_intent_size": 8,
+        "min_support": 1,
+        "rows": []
+      }
+    },
+    {
+      "description": "non-positive max_concepts cap → no concepts",
+      "expected_output": {
+        "concepts": []
+      },
+      "id": "case_001",
+      "inputs": {
+        "max_concepts": 0,
+        "max_intent_size": 8,
+        "min_support": 2,
+        "rows": [
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}]
+        ]
+      }
+    },
+    {
+      "description": "single-attribute seed produces correct closure; intent-dedup collapses A+B seeds",
+      "expected_output": {
+        "concepts": [
+          {
+            "extent": [0, 1, 2],
+            "intent": [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+            "support": 3
+          },
+          {
+            "extent": [3, 4],
+            "intent": [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+            "support": 2
+          }
+        ]
+      },
+      "id": "case_002",
+      "inputs": {
+        "max_concepts": 8,
+        "max_intent_size": 8,
+        "min_support": 2,
+        "rows": [
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+          [{"key": "shape", "namespace": "adj", "value": "round"}]
+        ]
+      }
+    },
+    {
+      "description": "minSupport gates: min_support=3 keeps only the support-3 cohort",
+      "expected_output": {
+        "concepts": [
+          {
+            "extent": [0, 1, 2],
+            "intent": [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+            "support": 3
+          }
+        ]
+      },
+      "id": "case_003",
+      "inputs": {
+        "max_concepts": 8,
+        "max_intent_size": 8,
+        "min_support": 3,
+        "rows": [
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+          [{"key": "shape", "namespace": "adj", "value": "round"}]
+        ]
+      }
+    },
+    {
+      "description": "maxIntentSize cap: cap=1 keeps only the size-1 closure [A], excludes size-2 closure [A,B]",
+      "expected_output": {
+        "concepts": [
+          {
+            "extent": [0, 1, 2, 3, 4],
+            "intent": [{"key": "color", "namespace": "adj", "value": "red"}],
+            "support": 5
+          }
+        ]
+      },
+      "id": "case_004",
+      "inputs": {
+        "max_concepts": 8,
+        "max_intent_size": 1,
+        "min_support": 2,
+        "rows": [
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}]
+        ]
+      }
+    },
+    {
+      "description": "maxConcepts truncation: cap=1 keeps only the support-3 concept (head of sorted order)",
+      "expected_output": {
+        "concepts": [
+          {
+            "extent": [0, 1, 2],
+            "intent": [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+            "support": 3
+          }
+        ]
+      },
+      "id": "case_005",
+      "inputs": {
+        "max_concepts": 1,
+        "max_intent_size": 8,
+        "min_support": 2,
+        "rows": [
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}]
+        ]
+      }
+    },
+    {
+      "description": "deterministic sort: equal support tie-breaks on intent size asc then lex — intent size 1 before size 2",
+      "expected_output": {
+        "concepts": [
+          {
+            "extent": [0, 1],
+            "intent": [{"key": "color", "namespace": "adj", "value": "red"}],
+            "support": 2
+          },
+          {
+            "extent": [2, 3],
+            "intent": [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+            "support": 2
+          }
+        ]
+      },
+      "id": "case_006",
+      "inputs": {
+        "max_concepts": 8,
+        "max_intent_size": 8,
+        "min_support": 2,
+        "rows": [
+          [{"key": "color", "namespace": "adj", "value": "red"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}]
+        ]
+      }
+    },
+    {
+      "description": "deterministic sort: equal support and equal intent size, lex intent order — [C,D] before [A,B]",
+      "expected_output": {
+        "concepts": [
+          {
+            "extent": [2, 3],
+            "intent": [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+            "support": 2
+          },
+          {
+            "extent": [0, 1],
+            "intent": [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+            "support": 2
+          }
+        ]
+      },
+      "id": "case_007",
+      "inputs": {
+        "max_concepts": 8,
+        "max_intent_size": 8,
+        "min_support": 2,
+        "rows": [
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "red"}, {"key": "size", "namespace": "adj", "value": "large"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}],
+          [{"key": "color", "namespace": "adj", "value": "blue"}, {"key": "size", "namespace": "adj", "value": "small"}]
+        ]
+      }
+    }
+  ],
+  "cookbook_section": "§8 (pure engine)",
+  "format_version": "1",
+  "generated_at": "2026-06-04",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "Rust",
+    "reference_file": "SubstrateML/Sources/SubstrateML/FormalConceptAnalysis.swift"
+  },
+  "output_crc32": "0xfeb1a9e9",
+  "primitive": "formal_concept_analysis",
+  "seed": "0x0000000000000000"
+}

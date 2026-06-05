@@ -1,0 +1,31 @@
+{
+  "description": "normalizedMutualInformation guard cases. Empty and ragged inputs that previously caused index-out-of-bounds crashes now return 0 (matching mutualInformation's sentinel). Pins the MX-Tidy fix (2026-06-05).",
+  "cases": [
+    {
+      "name": "empty_joint",
+      "joint": [],
+      "expected": 0.0,
+      "note": "Empty slice: joint[0] access removed by guard."
+    },
+    {
+      "name": "ragged_joint",
+      "joint": [[0.5, 0.5], [0.3]],
+      "expected": 0.0,
+      "note": "Ragged rows (lengths 2 and 1) return sentinel; marginals would be wrong."
+    },
+    {
+      "name": "perfectly_correlated_2x2",
+      "joint": [[0.5, 0.0], [0.0, 0.5]],
+      "expected": 1.0,
+      "tolerance": 1e-5,
+      "note": "Valid input: NMI = 1 under perfect correlation. Existing behavior unchanged."
+    },
+    {
+      "name": "independent_2x2",
+      "joint": [[0.25, 0.25], [0.25, 0.25]],
+      "expected": 0.0,
+      "tolerance": 1e-5,
+      "note": "Valid input: NMI = 0 under independence. Existing behavior unchanged."
+    }
+  ]
+}

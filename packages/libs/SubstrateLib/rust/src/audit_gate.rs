@@ -19,6 +19,30 @@ use crate::row_state::{self, BitmapFields, RowState, RowVerb};
 use crate::verbs::{AuditEvent, LatticeAnchor, NounType, RowId};
 use substrate_types::hlc::HLC;
 
+// MARK: - SubstrateLib adjective vocabulary constants
+//
+// Rust-side counterparts of the Swift AuditState / AuditSensitivity /
+// AuditExportability / AuditTrust enums. Rust has no CaseIterable, so
+// typed const slices serve the same role: the basis() function below
+// references these slices instead of inline integer literals, so adding
+// a new adjective value means updating the constant in one place.
+//
+// Raw values must match LocusKit's types (State, AdjectiveSensitivity,
+// AdjectiveExportability, Trust). Parity is verified by
+// GuardianPairParityTests in LocusKit.
+
+// @guardian-pair: state-basis AUDIT_STATE_VALUES <-> State.allCases (raw set equality)
+const AUDIT_STATE_VALUES: &[i64] = &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33];
+
+// @guardian-pair: sensitivity-basis AUDIT_SENSITIVITY_VALUES <-> AdjectiveSensitivity.allCases (raw set equality)
+const AUDIT_SENSITIVITY_VALUES: &[i64] = &[0, 16, 32, 48];
+
+// @guardian-pair: exportability-basis AUDIT_EXPORTABILITY_VALUES <-> AdjectiveExportability.allCases (raw set equality)
+const AUDIT_EXPORTABILITY_VALUES: &[i64] = &[0, 32];
+
+// @guardian-pair: trust-basis AUDIT_TRUST_VALUES <-> Trust.allCases (raw set equality)
+const AUDIT_TRUST_VALUES: &[i64] = &[0, 1, 2, 3, 4, 5, 6];
+
 // MARK: - Field slots
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -66,11 +90,13 @@ impl FieldSlot {
 /// (the federation minimum). Adjective layout per cookbook §2.3 (F11).
 pub fn basis() -> Vec<FieldSlot> {
     vec![
-        // Enumerated value sets per cookbook §2.3 (mirrors Swift basis).
-        FieldSlot::with_values(Column::Adjective, 0,  6, "state", &[0,1,2,3,16,17,18,19,32,33]),
-        FieldSlot::with_values(Column::Adjective, 6,  6, "sensitivity", &[0,16,32,48]),
-        FieldSlot::with_values(Column::Adjective, 12, 6, "exportability", &[0,32]),
-        FieldSlot::with_values(Column::Adjective, 18, 6, "trust", &[0,1,2,3,4,5,6]),
+        // Enumerated value sets per cookbook §2.3. Derived from the typed
+        // constants above rather than inline integer literals, mirroring
+        // the Swift CaseIterable derivation in Vocabulary.basis.
+        FieldSlot::with_values(Column::Adjective, 0,  6, "state",         AUDIT_STATE_VALUES),
+        FieldSlot::with_values(Column::Adjective, 6,  6, "sensitivity",   AUDIT_SENSITIVITY_VALUES),
+        FieldSlot::with_values(Column::Adjective, 12, 6, "exportability", AUDIT_EXPORTABILITY_VALUES),
+        FieldSlot::with_values(Column::Adjective, 18, 6, "trust",         AUDIT_TRUST_VALUES),
         // flags: a 3-bit bitset spanning adjective bits 24-26, any
         // value fits the width.
         //   bit 24 = state_extension     (cookbook §2.3)
@@ -382,6 +408,21 @@ mod tests {
         let r = admit(1, RowId(2), NounType::Drawer, RowVerb::Mutate, None, None,
             &[FieldWrite { slot: ch(), value: 1 }], anchor(), &voc(vec![ch()]), hlc(1), "t");
         assert!(matches!(r, Err(GateViolation::StateInconsistentWithVerb(_))));
+    }
+
+    // Basis legalValues are derived from the typed AUDIT_*_VALUES constants,
+    // not inline literals. Verify each slot's value set equals the constant.
+    #[test]
+    fn basis_legal_values_derived_from_typed_constants() {
+        let b = basis();
+        let state = b.iter().find(|s| s.label == "state").unwrap();
+        let sens  = b.iter().find(|s| s.label == "sensitivity").unwrap();
+        let exp   = b.iter().find(|s| s.label == "exportability").unwrap();
+        let trust = b.iter().find(|s| s.label == "trust").unwrap();
+        assert_eq!(state.legal_values, AUDIT_STATE_VALUES.iter().copied().collect::<HashSet<_>>());
+        assert_eq!(sens.legal_values,  AUDIT_SENSITIVITY_VALUES.iter().copied().collect::<HashSet<_>>());
+        assert_eq!(exp.legal_values,   AUDIT_EXPORTABILITY_VALUES.iter().copied().collect::<HashSet<_>>());
+        assert_eq!(trust.legal_values, AUDIT_TRUST_VALUES.iter().copied().collect::<HashSet<_>>());
     }
 
     // Shared cross-leg content-ID vector. The hex is asserted identically

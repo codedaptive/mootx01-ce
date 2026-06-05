@@ -25,6 +25,13 @@
 // below tolerance, or maxIterations reached. The error is RMS:
 //   err = sqrt(Σ (V - WH)^2 / (m·n))
 //
+// Input preconditions (enforced at entry; violations trigger precondition):
+//   - V is rectangular: every row has the same column count.
+//   - All entries of V are finite (no NaN, no Inf).
+//   - All entries of V are ≥ 0 (the Lee-Seung theorem requires V ≥ 0;
+//     negative input violates the non-negativity theorem and produces
+//     undefined output).
+//
 // Used by:
 //   § 6.9    NMF definition (this file)
 //   § 8.9    NMF over F matrix (latent themes)
@@ -68,6 +75,19 @@ public enum NMFAlternatingLeastSquares {
         precondition(n > 0, "V must have at least one column")
         precondition(rank > 0 && rank <= min(m, n),
                      "rank must be positive and at most min(m, n)")
+
+        // Domain preconditions: rectangular, finite, non-negative.
+        // Negative or non-finite input violates the Lee-Seung theorem;
+        // ragged rows corrupt the flat-storage index arithmetic below.
+        for i in 0..<m {
+            precondition(V[i].count == n,
+                         "V is not rectangular: row 0 has \(n) columns but row \(i) has \(V[i].count)")
+            for j in 0..<n {
+                let v = V[i][j]
+                precondition(v.isFinite, "V[\(i)][\(j)] is not finite (\(v))")
+                precondition(v >= 0, "V[\(i)][\(j)] is negative (\(v)): NMF requires V ≥ 0")
+            }
+        }
 
         // Convert nested-array input V to flat [Float32] for the
         // hot loops. The matMul helpers below all operate on flat

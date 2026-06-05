@@ -1,0 +1,71 @@
+{
+  "description": "Deterministic tie-break conformance vectors for AprioriMining. When rules share identical lift, confidence, and evidenceCount, the four-key total order resolves ties lexicographically by (antecedent packed keys ASC, consequent packed key ASC). Swift and Rust must produce bit-identical output.",
+  "version": "1.0",
+  "engine": "AprioriMining",
+  "notes": "Item.packed = (field << 8) | value. For field=0: A=(0,1) packed=1, B=(0,2) packed=2, C=(0,3) packed=3.",
+  "cases": [
+    {
+      "id": "apriori-tiebreak-001",
+      "name": "all_equal_metrics_resolve_lexicographically",
+      "description": "Three co-occurring items (A,B,C always together), maxK=2. All six pairwise rules have lift=1.0, confidence=1.0, evidenceCount=3. Tie-break must order by (antecedent.packed, consequent.packed) ascending.",
+      "input": {
+        "rows": [
+          [[0, 1], [0, 2], [0, 3]],
+          [[0, 1], [0, 2], [0, 3]],
+          [[0, 1], [0, 2], [0, 3]]
+        ],
+        "thresholds": {
+          "min_support": 0.5,
+          "min_confidence": 0.5,
+          "min_lift": 1.0,
+          "max_k": 2
+        }
+      },
+      "expected_rule_count": 6,
+      "expected_order": [
+        { "antecedent": [[0, 1]], "consequent": [0, 2] },
+        { "antecedent": [[0, 1]], "consequent": [0, 3] },
+        { "antecedent": [[0, 2]], "consequent": [0, 1] },
+        { "antecedent": [[0, 2]], "consequent": [0, 3] },
+        { "antecedent": [[0, 3]], "consequent": [0, 1] },
+        { "antecedent": [[0, 3]], "consequent": [0, 2] }
+      ],
+      "invariants": [
+        "all rules have lift == 1.0",
+        "all rules have confidence == 1.0",
+        "all rules have evidence_count == 3",
+        "output identical across repeated runs",
+        "output identical between Swift and Rust"
+      ]
+    },
+    {
+      "id": "apriori-tiebreak-002",
+      "name": "distinct_metrics_unaffected_by_tiebreak",
+      "description": "am-002 fixture. The two rules differ in confidence (1.0 vs 0.75), so the third sort key (evidenceCount) and fourth (lexicographic) never fire. Output unchanged by the tie-break addition — regression guard.",
+      "input": {
+        "rows": [
+          [[0, 1], [0, 2]],
+          [[0, 1], [0, 2]],
+          [[0, 1], [0, 2]],
+          [[0, 1], [0, 3]],
+          [[0, 3]]
+        ],
+        "thresholds": {
+          "min_support": 0.5,
+          "min_confidence": 0.5,
+          "min_lift": 1.0,
+          "max_k": 2
+        }
+      },
+      "expected_rule_count": 2,
+      "expected_order": [
+        { "antecedent": [[0, 2]], "consequent": [0, 1], "confidence": 1.0, "lift": 1.25 },
+        { "antecedent": [[0, 1]], "consequent": [0, 2], "confidence": 0.75, "lift": 1.25 }
+      ],
+      "invariants": [
+        "B->A precedes A->B (confidence 1.0 > 0.75)",
+        "metrics unchanged from pre-tie-break am-002 output"
+      ]
+    }
+  ]
+}

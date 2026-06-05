@@ -75,10 +75,20 @@ impl InformationTheory {
     }
 
     /// Normalized mutual information NMI in [0, 1].
+    ///
+    /// Returns 0 (matching `mutual_information`'s sentinel) when `joint`
+    /// is empty or ragged. A ragged matrix corrupts the marginals; guard
+    /// matches the Swift port's totality contract.
     pub fn normalized_mutual_information(joint: &[Vec<f32>]) -> f32 {
+        if joint.is_empty() {
+            return 0.0;
+        }
+        let n = joint[0].len();
+        if joint.iter().any(|row| row.len() != n) {
+            return 0.0;
+        }
         let mi = Self::mutual_information(joint);
         let m = joint.len();
-        let n = joint[0].len();
         let mut px = vec![0.0_f32; m];
         let mut py = vec![0.0_f32; n];
         for i in 0..m {

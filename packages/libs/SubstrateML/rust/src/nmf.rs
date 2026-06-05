@@ -2,10 +2,15 @@
 //
 // Non-negative matrix factorization via alternating least squares
 // per cookbook § 6.9 / § 8.9. Mirror of
-// glref-swift-NMFAlternatingLeastSquares.swift.
+// NMFAlternatingLeastSquares.swift.
 //
 // V ≈ W × H, all three non-negative. Lee-Seung multiplicative
 // update rules preserve non-negativity without explicit projection.
+//
+// Input preconditions (enforced at entry; violations panic):
+//   - V is rectangular: every row has the same column count.
+//   - All entries of V are finite (no NaN, no Inf).
+//   - All entries of V are >= 0 (Lee-Seung theorem requires V >= 0).
 
 use crate::random_walks::SplitMix64;
 
@@ -31,6 +36,19 @@ impl NMFAlternatingLeastSquares {
         let n = v[0].len();
         assert!(n > 0, "V must have at least one column");
         assert!(rank > 0 && rank <= m.min(n), "rank out of range");
+
+        // Domain preconditions: rectangular, finite, non-negative.
+        for (i, row) in v.iter().enumerate() {
+            assert!(row.len() == n,
+                "V is not rectangular: row 0 has {} columns but row {} has {}",
+                n, i, row.len());
+            for (j, &val) in row.iter().enumerate() {
+                assert!(val.is_finite(),
+                    "V[{}][{}] is not finite ({})", i, j, val);
+                assert!(val >= 0.0,
+                    "V[{}][{}] is negative ({}): NMF requires V >= 0", i, j, val);
+            }
+        }
 
         let mut rng = SplitMix64::new(seed);
         let mut w: Vec<Vec<f32>> = (0..m).map(|_|

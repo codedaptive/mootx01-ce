@@ -15,6 +15,18 @@
 // the same `(adjacency, start, length, restartProb, seed)` produce
 // the same walk in both reference language ports.
 //
+// Markov kernel preconditions (enforced at entry of walk(); violations
+// trigger precondition):
+//   - Every neighbor index must be in [0, N) where N = adjacency.count.
+//     An out-of-range index would crash on the next adjacency[current]
+//     access.
+//   - Every edge weight must be finite (no NaN, no Inf) and >= 0.
+//     Non-finite or negative weights violate the stochastic kernel
+//     definition (weights are relative probabilities).
+//   - sampleWeighted() rejects an empty neighbor list — the caller
+//     (walk()) guards this, but sampleWeighted is public and must be
+//     safe to call independently.
+//
 // Cookbook references:
 //   § 7.4   Random walks (the spec)
 //   § 8.5   OR-reduction (downstream consumer for walk-aggregate
@@ -45,6 +57,21 @@ public enum RandomWalks {
         precondition(length >= 1, "length must be at least 1")
         precondition(restartProb >= 0.0 && restartProb < 1.0,
                      "restartProb must be in [0, 1)")
+
+        // Validate the Markov kernel: neighbor indices in [0, N) and
+        // all edge weights finite and >= 0.
+        let n = adjacency.count
+        for (row, neighbors) in adjacency.enumerated() {
+            for (edgeIdx, (neighbor, weight)) in neighbors.enumerated() {
+                precondition(neighbor >= 0 && neighbor < n,
+                             "adjacency[\(row)][\(edgeIdx)].neighbor \(neighbor) is out of range [0, \(n))")
+                precondition(weight.isFinite,
+                             "adjacency[\(row)][\(edgeIdx)].weight is not finite (\(weight))")
+                precondition(weight >= 0.0,
+                             "adjacency[\(row)][\(edgeIdx)].weight is negative (\(weight))")
+            }
+        }
+
         var rng = SplitMix64(seed: seed)
         var visited = [Int]()
         visited.reserveCapacity(length)
@@ -67,14 +94,19 @@ public enum RandomWalks {
         return visited
     }
 
-    /// Sample a neighbor proportional to edge weight. Negative
-    /// weights are treated as zero (the substrate does not use
-    /// negative weights, but the reference is defensive).
+    /// Sample a neighbor proportional to edge weight.
+    ///
+    /// Precondition: `neighbors` must be non-empty. An empty list has no
+    /// valid selection and indicates a logic error at the call site.
+    /// Non-negative weight invariant is enforced by `walk()`'s Markov
+    /// kernel validation; callers that bypass `walk()` must guarantee it.
     @inlinable
     public static func sampleWeighted(
         _ neighbors: [(neighbor: Int, weight: Double)],
         rng: inout SplitMix64
     ) -> Int {
+        precondition(!neighbors.isEmpty,
+                     "sampleWeighted requires a non-empty neighbor list")
         var total = 0.0
         for (_, w) in neighbors { if w > 0 { total += w } }
         if total <= 0.0 {

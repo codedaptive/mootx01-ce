@@ -2,6 +2,14 @@
 //
 // Partial-state recall per cookbook § 8.8. Mirror of
 // glref-swift-PartialStateRecall.swift.
+//
+// Input validation convention (MX-Tidy, 2026-06-05):
+// Block IDs must be in the domain {0, 1, 2, 3}. An out-of-domain
+// block ID corrupts the denominator (counted) without contributing
+// to the Hamming distance (ignored by hamming_blocks), producing
+// silently wrong scores. `assert!` is used consistently with the
+// Rust port's hamming_nn.rs (`assert!(k > 0)`).
+// `k` in `top_k` is `usize`, so negative k cannot occur in Rust.
 
 use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::RowId;
@@ -12,12 +20,22 @@ pub struct PartialStateRecall;
 impl PartialStateRecall {
     /// Score a single row against an anchor under the match-and-
     /// differ block constraints.
+    ///
+    /// Panics (debug) if any block ID is outside {0, 1, 2, 3}.
     pub fn score(
         row_fingerprint: Fingerprint256,
         anchor: Fingerprint256,
         match_blocks: &HashSet<u8>,
         differ_blocks: &HashSet<u8>,
     ) -> f64 {
+        assert!(
+            match_blocks.iter().all(|&b| b <= 3),
+            "match_blocks IDs must be in domain {{0, 1, 2, 3}}"
+        );
+        assert!(
+            differ_blocks.iter().all(|&b| b <= 3),
+            "differ_blocks IDs must be in domain {{0, 1, 2, 3}}"
+        );
         if match_blocks.is_empty() || differ_blocks.is_empty() {
             return 0.0;
         }

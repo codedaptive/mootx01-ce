@@ -1,0 +1,44 @@
+{
+  "description": "EigenvalueCentrality directed-graph conformance vector. Pins the authority-centrality convention (A^T @ x) locked by design council 2026-06-04. Both Swift and Rust ports must agree on the ordering for this fixture to within 1e-6.",
+  "convention": "authority_centrality",
+  "formula": "x_{k+1} = A^T @ x_k / ||A^T @ x_k||_2",
+  "fixture": {
+    "name": "asymmetric_hub_vs_authority_4node",
+    "description": "4-node directed graph where hub node (high out-degree) and authority node (high in-degree) are distinct. Node 0 is the hub (3 out-edges, 0 in-edges). Node 2 is the authority (3 in-edges, 0 out-edges).",
+    "n": 4,
+    "edges": [
+      { "from": 0, "to": 1, "weight": 1.0 },
+      { "from": 0, "to": 2, "weight": 1.0 },
+      { "from": 0, "to": 3, "weight": 1.0 },
+      { "from": 1, "to": 2, "weight": 1.0 },
+      { "from": 3, "to": 2, "weight": 1.0 }
+    ],
+    "max_iterations": 300,
+    "tolerance": 1e-9
+  },
+  "expected_ordering": {
+    "description": "Both ports must satisfy all of these strict inequalities.",
+    "constraints": [
+      { "lhs_node": 2, "rhs_node": 0, "relation": "greater_than", "note": "authority node beats hub node" },
+      { "lhs_node": 2, "rhs_node": 1, "relation": "greater_than", "note": "authority node beats mid-chain node" },
+      { "lhs_node": 2, "rhs_node": 3, "relation": "greater_than", "note": "authority node beats other in-edge source" }
+    ]
+  },
+  "directed_chain_fixture": {
+    "name": "directed_chain_4node",
+    "description": "Chain 0 -> 1 -> 2 -> 3. Under authority semantics, score increases along the chain: scores[3] > scores[2] > scores[1] > scores[0].",
+    "n": 4,
+    "edges": [
+      { "from": 0, "to": 1, "weight": 1.0 },
+      { "from": 1, "to": 2, "weight": 1.0 },
+      { "from": 2, "to": 3, "weight": 1.0 }
+    ],
+    "expected_ordering": {
+      "constraints": [
+        { "lhs_node": 3, "rhs_node": 2, "relation": "greater_than", "note": "tail has highest authority" },
+        { "lhs_node": 2, "rhs_node": 1, "relation": "greater_than" },
+        { "lhs_node": 1, "rhs_node": 0, "relation": "greater_than", "note": "head has lowest authority (zero in-edges)" }
+      ]
+    }
+  }
+}

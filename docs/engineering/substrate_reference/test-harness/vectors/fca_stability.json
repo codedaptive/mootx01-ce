@@ -1,0 +1,98 @@
+{
+  "description": "Conformance vectors for sampled Kuznetsov stability estimation (MX-3B). Shared test vectors for the Swift and Rust implementations. All vectors use canonical seed 0xCAFEBABEDEADBEEF. Per-concept seed is derived by XOR-ing the canonical seed with FNV-1a-64 of the canonical key string 'extentRow0,extentRow1,...|ns:key:val|ns:key:val|...'.",
+  "schema_version": "1",
+  "canonical_seed_hex": "0xCAFEBABEDEADBEEF",
+  "vectors": [
+    {
+      "id": "fcs-001",
+      "description": "Dense 3-row context: every row carries both attributes. All Bernoulli subsets of extent (including the empty subset, whose intent equals the full attribute universe) produce intent equal to concept.intent. Stability is exactly 1.0 regardless of budget or seed.",
+      "input": {
+        "context_rows": [
+          [
+            {"namespace": "cv", "key": "k1", "value": "v1"},
+            {"namespace": "cv", "key": "k2", "value": "v2"}
+          ],
+          [
+            {"namespace": "cv", "key": "k1", "value": "v1"},
+            {"namespace": "cv", "key": "k2", "value": "v2"}
+          ],
+          [
+            {"namespace": "cv", "key": "k1", "value": "v1"},
+            {"namespace": "cv", "key": "k2", "value": "v2"}
+          ]
+        ],
+        "concept": {
+          "extent": [0, 1, 2],
+          "intent": [
+            {"namespace": "cv", "key": "k1", "value": "v1"},
+            {"namespace": "cv", "key": "k2", "value": "v2"}
+          ],
+          "support": 3
+        },
+        "budget": 100,
+        "seed_hex": "0xCAFEBABEDEADBEEF"
+      },
+      "expected": {
+        "stability": 1.0
+      },
+      "notes": "Exact result — no sampling variance. Empty subset intent = all attributes = concept.intent. Non-empty subset intent always equals concept.intent. Canonical key: '0,1,2|cv:k1:v1|cv:k2:v2'."
+    },
+    {
+      "id": "fcs-002-nested",
+      "description": "Nested 2-row context. Row 0 carries {k1,k2}; row 1 carries {k1} only. Concept extent=[0,1], intent=[k1]. Bernoulli draws: {} miss, {0} miss, {1} hit, {0,1} hit — theoretical stability 0.5. Deterministic value at budget=1000 with canonical seed is 0.519.",
+      "input": {
+        "context_rows": [
+          [
+            {"namespace": "cv", "key": "k1", "value": "v1"},
+            {"namespace": "cv", "key": "k2", "value": "v2"}
+          ],
+          [
+            {"namespace": "cv", "key": "k1", "value": "v1"}
+          ]
+        ],
+        "concept": {
+          "extent": [0, 1],
+          "intent": [
+            {"namespace": "cv", "key": "k1", "value": "v1"}
+          ],
+          "support": 2
+        },
+        "budget": 1000,
+        "seed_hex": "0xCAFEBABEDEADBEEF"
+      },
+      "expected": {
+        "stability": 0.519
+      },
+      "notes": "Sampled estimate — deterministic but not mathematically exact. Expected value converges to 0.5 as budget → ∞; at budget=1000 with canonical seed the count is 519/1000. Canonical key: '0,1|cv:k1:v1'. Per-concept seed = 0xCAFEBABEDEADBEEF XOR fnv64('0,1|cv:k1:v1')."
+    },
+    {
+      "id": "fcs-002-singleton",
+      "description": "Same nested 2-row context, singleton concept extent=[0], intent=[k1,k2]. Both Bernoulli subsets ({} and {0}) have intent equal to the full attribute universe {k1,k2} = concept.intent. Stability is exactly 1.0.",
+      "input": {
+        "context_rows": [
+          [
+            {"namespace": "cv", "key": "k1", "value": "v1"},
+            {"namespace": "cv", "key": "k2", "value": "v2"}
+          ],
+          [
+            {"namespace": "cv", "key": "k1", "value": "v1"}
+          ]
+        ],
+        "concept": {
+          "extent": [0],
+          "intent": [
+            {"namespace": "cv", "key": "k1", "value": "v1"},
+            {"namespace": "cv", "key": "k2", "value": "v2"}
+          ],
+          "support": 1
+        },
+        "budget": 100,
+        "seed_hex": "0xCAFEBABEDEADBEEF"
+      },
+      "expected": {
+        "stability": 1.0
+      },
+      "notes": "Exact result. Extent has one row. Empty subset intent = all attributes = {k1,k2} = concept.intent. Singleton subset {0} intent = {k1,k2} = concept.intent. Every draw hits. Canonical key: '0|cv:k1:v1|cv:k2:v2'."
+    }
+  ]
+}

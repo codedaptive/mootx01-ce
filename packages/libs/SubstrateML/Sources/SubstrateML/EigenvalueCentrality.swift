@@ -8,14 +8,28 @@
 // supplies a sparse adjacency list `(row_index, neighbors, weights)`
 // over a fixed row enumeration.
 //
-// The centrality vector is the dominant eigenvector of the sparse
-// adjacency matrix A, computed by power iteration:
+// Directed-graph convention (design council decision, 2026-06-04):
 //
-//     x_{k+1} = A @ x_k / ||A @ x_k||_2
+//   The implementation computes AUTHORITY CENTRALITY via A^T @ x:
 //
-// converging to the principal eigenvector. The substrate uses the
-// L2-normalized result so the scores are dimensionless and
-// comparable across estate snapshots.
+//       x_{k+1} = A^T @ x_k / ||A^T @ x_k||_2
+//
+//   where adjacency[i] lists edges OUT OF node i.  Expanding the
+//   inner loop: `x_next[j] += w * x[i]` for edge i→j accumulates
+//   at j the weighted influence of all nodes that POINT TO j.  A
+//   node scores highly when it is pointed to by many high-scoring
+//   nodes — the authority interpretation.
+//
+//   This is the correct semantic for cognitive-recall keystones:
+//   a row is "central" when many other rows reference it (e.g.
+//   via association edges), not when it references many others.
+//   The design council confirmed this on 2026-06-04 and locked the
+//   directed-graph conformance vector in MX-Tidy to prevent future
+//   drift back to hub semantics.
+//
+//   For undirected graphs, A = A^T so the distinction is immaterial;
+//   symmetrize the adjacency before calling if undirected centrality
+//   is needed (see the star-graph test in EigenvalueCentralityTests).
 //
 // Convergence: typical sparse graphs converge in 20-50 iterations
 // to a relative error of 1e-6. The reference uses 100 iterations
@@ -72,7 +86,7 @@ public enum EigenvalueCentrality {
         var xNext = [Double](repeating: 0.0, count: n)
 
         for _ in 0..<maxIterations {
-            // x_next = A @ x
+            // x_next = A^T @ x  (xNext[j] += w * x[i] for edge i→j — authority, not hub)
             for i in 0..<n {
                 xNext[i] = 0.0
             }

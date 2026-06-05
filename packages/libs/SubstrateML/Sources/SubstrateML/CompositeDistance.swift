@@ -40,6 +40,13 @@ public enum CompositeDistance {
     public static let fingerprintTotalBits: Int = 256
 
     /// Composite distance between two rows.
+    ///
+    /// Both component distances must be in [0, 1]; callers that pass
+    /// out-of-range values will trap. `latticeDistance` must satisfy
+    /// 0 ≤ d ≤ 1 (guaranteed by `UDCTreeDistance` and `WikidataGraphDistance`
+    /// after the LatticeDistance normalization fix). `fingerprintHammingDistance`
+    /// must not exceed `fingerprintTotalBits` (256); callers that derive it
+    /// from `SimHash.hammingDistance` satisfy this by construction.
     public static func distance(
         latticeDistance: Double,
         fingerprintHammingDistance: Int,
@@ -47,6 +54,14 @@ public enum CompositeDistance {
         alphaFingerprint: Double = defaultAlphaFingerprint,
         compatibleSeedScope: Bool = true
     ) -> Double {
+        precondition(
+            latticeDistance >= 0 && latticeDistance <= 1.0,
+            "latticeDistance must be in [0, 1]; got \(latticeDistance)"
+        )
+        precondition(
+            fingerprintHammingDistance <= fingerprintTotalBits,
+            "fingerprintHammingDistance \(fingerprintHammingDistance) exceeds total bits \(fingerprintTotalBits)"
+        )
         let latPart = alphaLattice * latticeDistance
         guard compatibleSeedScope else { return latPart }
         let fpNormalized = Double(fingerprintHammingDistance)
