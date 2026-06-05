@@ -1,0 +1,214 @@
+{
+  "description": "Conformance vectors for FCA extensions — RowAttributeView factory, multi-seed exploration, and cover deltas (structural lens over the concept order). Shared test vectors for the Swift and Rust implementations.",
+  "schema_version": "1",
+  "vectors": [
+    {
+      "id": "rav_factory_two_cohorts",
+      "description": "FormalContext.from(rowAttributeViews:) — two clean cohorts, four rows",
+      "input": {
+        "row_attribute_views": [
+          [{"field": 0, "value": 1}, {"field": 1, "value": 2}],
+          [{"field": 0, "value": 1}, {"field": 1, "value": 2}],
+          [{"field": 0, "value": 3}, {"field": 1, "value": 4}],
+          [{"field": 0, "value": 3}, {"field": 1, "value": 4}]
+        ]
+      },
+      "expected": {
+        "row_count": 4,
+        "attribute_count": 4,
+        "attribute_universe": [
+          {"namespace": "row", "key": "0", "value": "1"},
+          {"namespace": "row", "key": "0", "value": "3"},
+          {"namespace": "row", "key": "1", "value": "2"},
+          {"namespace": "row", "key": "1", "value": "4"}
+        ]
+      }
+    },
+    {
+      "id": "rav_factory_mining_cohorts",
+      "description": "BoundedConceptMiner over RowAttributeView-derived context — two clean cohorts produce exactly two concepts",
+      "input": {
+        "row_attribute_views": [
+          [{"field": 0, "value": 1}, {"field": 1, "value": 2}],
+          [{"field": 0, "value": 1}, {"field": 1, "value": 2}],
+          [{"field": 0, "value": 3}, {"field": 1, "value": 4}],
+          [{"field": 0, "value": 3}, {"field": 1, "value": 4}]
+        ],
+        "miner": {"min_support": 2, "max_intent_size": 8, "max_concepts": 8}
+      },
+      "expected": {
+        "concept_count": 2,
+        "concepts": [
+          {
+            "extent": [0, 1],
+            "intent": [
+              {"namespace": "row", "key": "0", "value": "1"},
+              {"namespace": "row", "key": "1", "value": "2"}
+            ],
+            "support": 2
+          },
+          {
+            "extent": [2, 3],
+            "intent": [
+              {"namespace": "row", "key": "0", "value": "3"},
+              {"namespace": "row", "key": "1", "value": "4"}
+            ],
+            "support": 2
+          }
+        ]
+      },
+      "notes": "Intents are unordered sets; order shown here is sorted by FormalAttribute natural order (namespace, key, value). The two concepts have equal support so tie-break is by lexicographic intent."
+    },
+    {
+      "id": "multi_seed_bridge_single_mode",
+      "description": "BoundedConceptMiner single-seed on bridge context finds 3 concepts",
+      "input": {
+        "context_rows": [
+          [{"namespace": "t", "key": "k", "value": "a"}, {"namespace": "t", "key": "k", "value": "b"}],
+          [{"namespace": "t", "key": "k", "value": "a"}, {"namespace": "t", "key": "k", "value": "b"}],
+          [{"namespace": "t", "key": "k", "value": "a"}, {"namespace": "t", "key": "k", "value": "c"}],
+          [{"namespace": "t", "key": "k", "value": "b"}, {"namespace": "t", "key": "k", "value": "c"}]
+        ],
+        "miner": {"min_support": 2, "max_intent_size": 8, "max_concepts": 8, "seed_mode": "single"}
+      },
+      "expected": {
+        "concept_count": 3,
+        "concepts": [
+          {"intent": [{"namespace": "t", "key": "k", "value": "a"}], "support": 3},
+          {"intent": [{"namespace": "t", "key": "k", "value": "b"}], "support": 3},
+          {"intent": [{"namespace": "t", "key": "k", "value": "c"}], "support": 2}
+        ]
+      },
+      "notes": "Bridge context: rows {A,B},{A,B},{A,C},{B,C}. A and B each appear in 3 rows; C in 2. Single-seed closures are all singletons."
+    },
+    {
+      "id": "multi_seed_bridge_multi_mode",
+      "description": "BoundedConceptMiner multi-seed on bridge context discovers extra {A,B} concept",
+      "input": {
+        "context_rows": [
+          [{"namespace": "t", "key": "k", "value": "a"}, {"namespace": "t", "key": "k", "value": "b"}],
+          [{"namespace": "t", "key": "k", "value": "a"}, {"namespace": "t", "key": "k", "value": "b"}],
+          [{"namespace": "t", "key": "k", "value": "a"}, {"namespace": "t", "key": "k", "value": "c"}],
+          [{"namespace": "t", "key": "k", "value": "b"}, {"namespace": "t", "key": "k", "value": "c"}]
+        ],
+        "miner": {"min_support": 2, "max_intent_size": 8, "max_concepts": 8, "seed_mode": "multi"}
+      },
+      "expected": {
+        "concept_count": 4,
+        "contains_concept": {
+          "intent": [
+            {"namespace": "t", "key": "k", "value": "a"},
+            {"namespace": "t", "key": "k", "value": "b"}
+          ],
+          "support": 2,
+          "extent": [0, 1]
+        }
+      },
+      "notes": "Pair seed {A,B}: extent = rows 0 and 1 (both carry A and B); closure({A,B}) = {A,B} support 2. This concept is NOT found by single-seed because closure([A]) = [A] and closure([B]) = [B] independently."
+    },
+    {
+      "id": "concept_cover_deltas_chain",
+      "description": "ConceptCoverDeltas.covering over a chain of 3 concepts yields 2 cover deltas",
+      "input": {
+        "concepts": [
+          {
+            "extent": [0, 1, 2, 3, 4],
+            "intent": [{"namespace": "t", "key": "k", "value": "a"}],
+            "support": 5
+          },
+          {
+            "extent": [0, 1, 2],
+            "intent": [
+              {"namespace": "t", "key": "k", "value": "a"},
+              {"namespace": "t", "key": "k", "value": "b"}
+            ],
+            "support": 3
+          },
+          {
+            "extent": [0, 1],
+            "intent": [
+              {"namespace": "t", "key": "k", "value": "a"},
+              {"namespace": "t", "key": "k", "value": "b"},
+              {"namespace": "t", "key": "k", "value": "c"}
+            ],
+            "support": 2
+          }
+        ]
+      },
+      "expected": {
+        "cover_delta_count": 2,
+        "cover_deltas": [
+          {
+            "lower_intent": [{"namespace": "t", "key": "k", "value": "a"}],
+            "added_attributes": [{"namespace": "t", "key": "k", "value": "b"}]
+          },
+          {
+            "lower_intent": [
+              {"namespace": "t", "key": "k", "value": "a"},
+              {"namespace": "t", "key": "k", "value": "b"}
+            ],
+            "added_attributes": [{"namespace": "t", "key": "k", "value": "c"}]
+          }
+        ]
+      },
+      "notes": "Chain {a} ⊂ {a,b} ⊂ {a,b,c}: covers are {a}→{a,b} and {a,b}→{a,b,c}. The transitive pair {a}→{a,b,c} is NOT a cover because {a,b} is intermediate. Cover deltas: lowerIntent is the more-general concept's intent; addedAttributes = moreSpecific.intent − lowerIntent."
+    },
+    {
+      "id": "concept_cover_deltas_direct_cover",
+      "description": "ConceptCoverDeltas.covering over two concepts with no intermediate yields 1 cover delta",
+      "input": {
+        "concepts": [
+          {
+            "extent": [0, 1, 2],
+            "intent": [{"namespace": "t", "key": "k", "value": "a"}],
+            "support": 3
+          },
+          {
+            "extent": [0, 1],
+            "intent": [
+              {"namespace": "t", "key": "k", "value": "a"},
+              {"namespace": "t", "key": "k", "value": "b"},
+              {"namespace": "t", "key": "k", "value": "c"}
+            ],
+            "support": 2
+          }
+        ]
+      },
+      "expected": {
+        "cover_delta_count": 1,
+        "cover_deltas": [
+          {
+            "lower_intent": [{"namespace": "t", "key": "k", "value": "a"}],
+            "added_attributes": [
+              {"namespace": "t", "key": "k", "value": "b"},
+              {"namespace": "t", "key": "k", "value": "c"}
+            ]
+          }
+        ]
+      },
+      "notes": "Direct cover: {a} ⊂ {a,b,c} with no intermediate concept. addedAttributes = {b,c} (the full delta)."
+    },
+    {
+      "id": "concept_cover_deltas_disjoint",
+      "description": "ConceptCoverDeltas.covering over two disjoint concepts yields empty cover deltas",
+      "input": {
+        "concepts": [
+          {
+            "extent": [0, 1],
+            "intent": [{"namespace": "t", "key": "k", "value": "a"}],
+            "support": 2
+          },
+          {
+            "extent": [2, 3],
+            "intent": [{"namespace": "t", "key": "k", "value": "b"}],
+            "support": 2
+          }
+        ]
+      },
+      "expected": {
+        "cover_delta_count": 0
+      },
+      "notes": "Disjoint intents: neither is a subset of the other. No cover relations exist."
+    }
+  ]
+}

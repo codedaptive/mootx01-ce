@@ -1,0 +1,20 @@
+{
+  "name": "lattice_distance",
+  "description": "UDC tree distance, Wikidata graph distance, and combined lattice distance. All UDC outputs bounded to [0, 1].",
+  "version": "2",
+  "udc_tree_distance": [
+    {"a": "004.42", "b": "004.42", "expected": 0.0},
+    {"a": "004.42", "b": "004.5",  "expected": 0.2727272727272727},
+    {"a": "004",    "b": "37",     "expected": 1.0},
+    {"a": "",       "b": "",       "expected": 0.0},
+    {"a": "",       "b": "004",    "expected": 1.0},
+    {"a": "1",      "b": "99",     "expected": 1.0}
+  ],
+  "wikidata_graph_distance": [
+    {"from": 11111, "to": 11111, "max_depth": 4, "expected": 0.0},
+    {"from": 0,     "to": 11111, "max_depth": 4, "expected": 1.0},
+    {"from": 11111, "to": 0,     "max_depth": 4, "expected": 1.0},
+    {"from": 11111, "to": 22222, "edges": [[11111, 22222]], "max_depth": 4, "expected": 0.2834686841995958},
+    {"from": 1, "to": 4, "edges": [[1,2],[2,3],[3,4]], "max_depth": 4, "expected": 0.6321205588285578}
+  ]
+}

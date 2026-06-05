@@ -1,0 +1,81 @@
+{
+  "algorithm": "AprioriMining",
+  "version": "1.0",
+  "seed": "0xA00000000000001",
+  "date": "2026-06-04",
+  "notes": [
+    "Conformance vectors for AprioriMining (SubstrateML).  Both Swift and Rust",
+    "ports must produce identical rules for each case.",
+    "Item encoding: {\"field\": <u8>, \"value\": <u8>}.  All items sorted ascending",
+    "by packed key (field<<8 | value) in antecedents and attribute lists.",
+    "conviction is encoded as the string \"+Inf\" when confidence == 1.0.",
+    "Floating-point values are exact IEEE-754 double results of small-integer",
+    "divisions; assert with tolerance 1e-12 to guard against platform drift.",
+    "am-002 dataset (N=5):",
+    "  Row 0-2: {A=(f0v1), B=(f0v2)};  Row 3: {A=(f0v1), C=(f0v3)};  Row 4: {C=(f0v3)}",
+    "  minSupport=0.5 (minCount=3); {C} not frequent (2 rows); {A}: 4, {B}: 3, {A,B}: 3",
+    "  B->A: conf=1.0, lift=1.25, conv=+Inf;  A->B: conf=0.75, lift=1.25, conv=1.6",
+    "  Sort order: both lift=1.25, evidenceCount=3 -> conf desc: B->A first."
+  ],
+  "vectors": [
+    {
+      "id": "am-001",
+      "description": "Empty rows returns empty rules",
+      "input": {
+        "rows": [],
+        "thresholds": {
+          "minSupport": 0.5,
+          "minConfidence": 0.5,
+          "minLift": 1.0,
+          "maxK": 2
+        }
+      },
+      "expected": {
+        "rules": []
+      }
+    },
+    {
+      "id": "am-002",
+      "description": "Five-row, two-item dataset: A=(f0v1), B=(f0v2) co-occur in rows 0-2; C not frequent",
+      "input": {
+        "rows": [
+          { "attributes": [{"field": 0, "value": 1}, {"field": 0, "value": 2}] },
+          { "attributes": [{"field": 0, "value": 1}, {"field": 0, "value": 2}] },
+          { "attributes": [{"field": 0, "value": 1}, {"field": 0, "value": 2}] },
+          { "attributes": [{"field": 0, "value": 1}, {"field": 0, "value": 3}] },
+          { "attributes": [{"field": 0, "value": 3}] }
+        ],
+        "thresholds": {
+          "minSupport": 0.5,
+          "minConfidence": 0.5,
+          "minLift": 1.0,
+          "maxK": 2
+        }
+      },
+      "expected": {
+        "rules": [
+          {
+            "antecedent": [{"field": 0, "value": 2}],
+            "consequent": {"field": 0, "value": 1},
+            "support": 0.6,
+            "confidence": 1.0,
+            "lift": 1.25,
+            "conviction": "+Inf",
+            "leverage": 0.12,
+            "evidenceCount": 3
+          },
+          {
+            "antecedent": [{"field": 0, "value": 1}],
+            "consequent": {"field": 0, "value": 2},
+            "support": 0.6,
+            "confidence": 0.75,
+            "lift": 1.25,
+            "conviction": 1.6,
+            "leverage": 0.12,
+            "evidenceCount": 3
+          }
+        ]
+      }
+    }
+  ]
+}

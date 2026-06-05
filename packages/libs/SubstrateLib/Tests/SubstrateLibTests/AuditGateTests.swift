@@ -182,6 +182,24 @@ struct AuditGateTests {
             Issue.record("expected stateInconsistentWithVerb for non-capture verb on fresh row"); return
         }
     }
+    // Basis legalValues are derived from the SubstrateLib-local adjective
+    // enums, not from hardcoded integer arrays. Verify each slot's set
+    // equals the corresponding enum's allCases raw values.
+    @Test func testBasisLegalValuesDerivedFromAuditEnums() {
+        let state = Vocabulary.basis.first(where: { $0.label == "state" })
+        let sens  = Vocabulary.basis.first(where: { $0.label == "sensitivity" })
+        let exp   = Vocabulary.basis.first(where: { $0.label == "exportability" })
+        let trust = Vocabulary.basis.first(where: { $0.label == "trust" })
+        #expect(state?.legalValues == Set(AuditState.allCases.map { Int64($0.rawValue) }),
+            "state slot legalValues must equal AuditState.allCases raws")
+        #expect(sens?.legalValues == Set(AuditSensitivity.allCases.map { Int64($0.rawValue) }),
+            "sensitivity slot legalValues must equal AuditSensitivity.allCases raws")
+        #expect(exp?.legalValues == Set(AuditExportability.allCases.map { Int64($0.rawValue) }),
+            "exportability slot legalValues must equal AuditExportability.allCases raws")
+        #expect(trust?.legalValues == Set(AuditTrust.allCases.map { Int64($0.rawValue) }),
+            "trust slot legalValues must equal AuditTrust.allCases raws")
+    }
+
     // I-22: a secret row cannot be exportable — now enforced in the
     // substrate basis check (centralized from LocusKit), so the gate
     // refuses it on any write.

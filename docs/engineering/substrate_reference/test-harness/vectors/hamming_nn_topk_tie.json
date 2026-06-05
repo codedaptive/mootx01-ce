@@ -1,0 +1,24 @@
+{
+  "description": "HammingNN.topK tie-break by row_id ascending. Equal-distance candidates must appear in ascending row_id order in the output. Pins the MX-Tidy fix (2026-06-05).",
+  "anchor": {
+    "block0": 0,
+    "block1": 0,
+    "block2": 0,
+    "block3": 0
+  },
+  "candidates": [
+    { "row_id": 5, "block0": 16, "block1": 0, "block2": 0, "block3": 0, "distance": 1 },
+    { "row_id": 3, "block0":  8, "block1": 0, "block2": 0, "block3": 0, "distance": 1 },
+    { "row_id": 1, "block0":  1, "block1": 0, "block2": 0, "block3": 0, "distance": 1 },
+    { "row_id": 4, "block0":  4, "block1": 0, "block2": 0, "block3": 0, "distance": 1 },
+    { "row_id": 2, "block0":  2, "block1": 0, "block2": 0, "block3": 0, "distance": 1 }
+  ],
+  "k": 3,
+  "blocks": "all",
+  "expected": [
+    { "row_id": 1, "distance": 1 },
+    { "row_id": 2, "distance": 1 },
+    { "row_id": 3, "distance": 1 }
+  ],
+  "note": "row_id values 1..5 map to Swift UUIDs with last byte = n (00000000-0000-0000-0000-0000000000NN). String-ascending order matches numeric order for these IDs."
+}

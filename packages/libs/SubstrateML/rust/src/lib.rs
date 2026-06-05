@@ -10,6 +10,10 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod anomaly;
+pub mod apriori_mining;
+pub mod association_rule_mining;
+pub mod formal_concept_analysis;
+pub mod concept_implications;
 pub mod bradley_terry;
 pub mod calibration;
 pub mod community_detection;
@@ -35,5 +39,6 @@ pub mod pairing;
 pub mod partial_state_recall;
 pub mod tier_contribution;
 pub mod tier_query;
+pub mod temporal_causality_fold;
 
 pub const VERSION: &str = "1.0.0-skeleton";

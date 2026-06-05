@@ -1,0 +1,479 @@
+{
+  "case_count": 8,
+  "cases": [
+    {
+      "description": "empty matrix → no rules",
+      "expected_output": {
+        "rules": []
+      },
+      "id": "case_000",
+      "inputs": {
+        "active_row_count": "0x0a00000000000000",
+        "entries": [],
+        "min_confidence": "0x0000000000000000",
+        "min_support": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "diagonal-only (one item, no co-occurrence) → no rules",
+      "expected_output": {
+        "rules": []
+      },
+      "id": "case_001",
+      "inputs": {
+        "active_row_count": "0x0100000000000000",
+        "entries": [
+          {
+            "count": "0x0100000000000000",
+            "field_i": "0x00",
+            "field_j": "0x00",
+            "value_i": "0x01",
+            "value_j": "0x01"
+          }
+        ],
+        "min_confidence": "0x0000000000000000",
+        "min_support": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "active_row_count=0 → no rules regardless of matrix content",
+      "expected_output": {
+        "rules": []
+      },
+      "id": "case_002",
+      "inputs": {
+        "active_row_count": "0x0000000000000000",
+        "entries": [
+          {
+            "count": "0x0700000000000000",
+            "field_i": "0x00",
+            "field_j": "0x00",
+            "value_i": "0x01",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0400000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x04"
+          },
+          {
+            "count": "0x0400000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x03",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0600000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x03",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x04",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x04",
+            "value_j": "0x04"
+          }
+        ],
+        "min_confidence": "0x0000000000000000",
+        "min_support": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "single co-occurring pair N=4 (2×{A,B}, 1×{A}, 1×{B}) → 2 rules A↔B",
+      "expected_output": {
+        "rules": [
+          {
+            "antecedent_field": "0x00",
+            "antecedent_value": "0x01",
+            "confidence": "0x555555555555e53f",
+            "consequent_field": "0x05",
+            "consequent_value": "0x03",
+            "conviction": "0xffffffffffffe73f",
+            "leverage": "0x000000000000b0bf",
+            "lift": "0x1cc7711cc771ec3f",
+            "support": "0x000000000000e03f"
+          },
+          {
+            "antecedent_field": "0x05",
+            "antecedent_value": "0x03",
+            "confidence": "0x555555555555e53f",
+            "consequent_field": "0x00",
+            "consequent_value": "0x01",
+            "conviction": "0xffffffffffffe73f",
+            "leverage": "0x000000000000b0bf",
+            "lift": "0x1cc7711cc771ec3f",
+            "support": "0x000000000000e03f"
+          }
+        ]
+      },
+      "id": "case_003",
+      "inputs": {
+        "active_row_count": "0x0400000000000000",
+        "entries": [
+          {
+            "count": "0x0300000000000000",
+            "field_i": "0x00",
+            "field_j": "0x00",
+            "value_i": "0x01",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x03",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0300000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x03",
+            "value_j": "0x03"
+          }
+        ],
+        "min_confidence": "0x0000000000000000",
+        "min_support": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "main fixture N=10 zero thresholds → 4 rules [A→B, A→C, B→A, C→A]; C→A conviction=+inf",
+      "expected_output": {
+        "rules": [
+          {
+            "antecedent_field": "0x00",
+            "antecedent_value": "0x01",
+            "confidence": "0x922449922449e23f",
+            "consequent_field": "0x05",
+            "consequent_value": "0x03",
+            "conviction": "0xdedddddddddded3f",
+            "leverage": "0x7014ae47e17a94bf",
+            "lift": "0x9ee7799ee779ee3f",
+            "support": "0x9a9999999999d93f"
+          },
+          {
+            "antecedent_field": "0x00",
+            "antecedent_value": "0x01",
+            "confidence": "0x922449922449d23f",
+            "consequent_field": "0x05",
+            "consequent_value": "0x04",
+            "conviction": "0xec51b81e85ebf13f",
+            "leverage": "0xbc1e85eb51b8ae3f",
+            "lift": "0xb76ddbb66ddbf63f",
+            "support": "0x9a9999999999c93f"
+          },
+          {
+            "antecedent_field": "0x05",
+            "antecedent_value": "0x03",
+            "confidence": "0x555555555555e53f",
+            "consequent_field": "0x00",
+            "consequent_value": "0x01",
+            "conviction": "0xcdccccccccccec3f",
+            "leverage": "0x7014ae47e17a94bf",
+            "lift": "0x9ee7799ee779ee3f",
+            "support": "0x9a9999999999d93f"
+          },
+          {
+            "antecedent_field": "0x05",
+            "antecedent_value": "0x04",
+            "confidence": "0x000000000000f03f",
+            "consequent_field": "0x00",
+            "consequent_value": "0x01",
+            "conviction": "0x000000000000f07f",
+            "leverage": "0xbc1e85eb51b8ae3f",
+            "lift": "0xb76ddbb66ddbf63f",
+            "support": "0x9a9999999999c93f"
+          }
+        ]
+      },
+      "id": "case_004",
+      "inputs": {
+        "active_row_count": "0x0a00000000000000",
+        "entries": [
+          {
+            "count": "0x0700000000000000",
+            "field_i": "0x00",
+            "field_j": "0x00",
+            "value_i": "0x01",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0400000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x04"
+          },
+          {
+            "count": "0x0400000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x03",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0600000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x03",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x04",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x04",
+            "value_j": "0x04"
+          }
+        ],
+        "min_confidence": "0x0000000000000000",
+        "min_support": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "main fixture N=10 minSupport=0.3 → 2 rules [A→B, B→A]; A↔C pair dropped (support 0.2 < 0.3)",
+      "expected_output": {
+        "rules": [
+          {
+            "antecedent_field": "0x00",
+            "antecedent_value": "0x01",
+            "confidence": "0x922449922449e23f",
+            "consequent_field": "0x05",
+            "consequent_value": "0x03",
+            "conviction": "0xdedddddddddded3f",
+            "leverage": "0x7014ae47e17a94bf",
+            "lift": "0x9ee7799ee779ee3f",
+            "support": "0x9a9999999999d93f"
+          },
+          {
+            "antecedent_field": "0x05",
+            "antecedent_value": "0x03",
+            "confidence": "0x555555555555e53f",
+            "consequent_field": "0x00",
+            "consequent_value": "0x01",
+            "conviction": "0xcdccccccccccec3f",
+            "leverage": "0x7014ae47e17a94bf",
+            "lift": "0x9ee7799ee779ee3f",
+            "support": "0x9a9999999999d93f"
+          }
+        ]
+      },
+      "id": "case_005",
+      "inputs": {
+        "active_row_count": "0x0a00000000000000",
+        "entries": [
+          {
+            "count": "0x0700000000000000",
+            "field_i": "0x00",
+            "field_j": "0x00",
+            "value_i": "0x01",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0400000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x04"
+          },
+          {
+            "count": "0x0400000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x03",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0600000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x03",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x04",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x04",
+            "value_j": "0x04"
+          }
+        ],
+        "min_confidence": "0x0000000000000000",
+        "min_support": "0x333333333333d33f"
+      }
+    },
+    {
+      "description": "main fixture N=10 minConfidence=0.6 → 2 rules [B→A, C→A]; A→B (4/7≈.571) and A→C dropped",
+      "expected_output": {
+        "rules": [
+          {
+            "antecedent_field": "0x05",
+            "antecedent_value": "0x03",
+            "confidence": "0x555555555555e53f",
+            "consequent_field": "0x00",
+            "consequent_value": "0x01",
+            "conviction": "0xcdccccccccccec3f",
+            "leverage": "0x7014ae47e17a94bf",
+            "lift": "0x9ee7799ee779ee3f",
+            "support": "0x9a9999999999d93f"
+          },
+          {
+            "antecedent_field": "0x05",
+            "antecedent_value": "0x04",
+            "confidence": "0x000000000000f03f",
+            "consequent_field": "0x00",
+            "consequent_value": "0x01",
+            "conviction": "0x000000000000f07f",
+            "leverage": "0xbc1e85eb51b8ae3f",
+            "lift": "0xb76ddbb66ddbf63f",
+            "support": "0x9a9999999999c93f"
+          }
+        ]
+      },
+      "id": "case_006",
+      "inputs": {
+        "active_row_count": "0x0a00000000000000",
+        "entries": [
+          {
+            "count": "0x0700000000000000",
+            "field_i": "0x00",
+            "field_j": "0x00",
+            "value_i": "0x01",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0400000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x04"
+          },
+          {
+            "count": "0x0400000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x03",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0600000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x03",
+            "value_j": "0x03"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x00",
+            "value_i": "0x04",
+            "value_j": "0x01"
+          },
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x05",
+            "field_j": "0x05",
+            "value_i": "0x04",
+            "value_j": "0x04"
+          }
+        ],
+        "min_confidence": "0x333333333333e33f",
+        "min_support": "0x0000000000000000"
+      }
+    },
+    {
+      "description": "off-diagonal cell without diagonal support → no rules (missing antecedent support guard)",
+      "expected_output": {
+        "rules": []
+      },
+      "id": "case_007",
+      "inputs": {
+        "active_row_count": "0x0a00000000000000",
+        "entries": [
+          {
+            "count": "0x0200000000000000",
+            "field_i": "0x00",
+            "field_j": "0x05",
+            "value_i": "0x01",
+            "value_j": "0x03"
+          }
+        ],
+        "min_confidence": "0x0000000000000000",
+        "min_support": "0x0000000000000000"
+      }
+    }
+  ],
+  "cookbook_section": "§6.3",
+  "format_version": "1",
+  "generated_at": "2026-06-04",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "Rust",
+    "reference_file": "SubstrateML/Sources/SubstrateML/AssociationRuleMining.swift"
+  },
+  "output_crc32": "0xdd61f0d0",
+  "primitive": "association_rule_mining",
+  "seed": "0x0000000000000000"
+}

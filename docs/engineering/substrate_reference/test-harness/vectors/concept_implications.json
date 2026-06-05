@@ -1,0 +1,120 @@
+{
+  "description": "ConceptImplications Duquenne-Guigues canonical basis conformance vectors. Both Swift and Rust implementations must produce bit-identical output for each case.",
+  "algorithm": "ConceptImplications",
+  "version": "1.0",
+  "seed": "0xCAFEBABEDEADBEEF",
+  "date": "2026-06-05",
+  "notes": [
+    "Attribute encoding: FormalAttribute(namespace, key, value) serialised as {ns, key, value}.",
+    "Implications are sorted: premise size ascending, then lex premise, then lex conclusion.",
+    "isTruncated is true when the maxImplications cap terminated enumeration early.",
+    "The D-G canonical basis is minimal: every emitted implication is a genuine pseudo-intent",
+    "and no implication is derivable from the others by Armstrong's rules.",
+    "ci-001 (empty): empty context yields empty basis.",
+    "ci-002 (two-row): Row0:{a}, Row1:{b,c}. D-G basis: {b}->>{c} and {c}->>{b}.",
+    "  closure({b}) = {b,c} != {b} and no smaller pseudo-intent Q subset {b}.",
+    "  closure({c}) = {b,c} != {c} and no smaller pseudo-intent Q subset {c}.",
+    "ci-003 (cap-truncation): three singletons, maxImplications=2. D-G basis has 3 size-2 implications;",
+    "  first 2 are emitted (in combination/lex order), isTruncated=true.",
+    "  Full basis: {a,b}->{c}, {a,c}->{b}, {b,c}->{a}. Emitted: first 2.",
+    "ci-004 (global-attribute): Row0:{a,b}, Row1:{b,c}. b is global (closure({})={b}).",
+    "  D-G basis: {{}->>{b}}. The implications {a}->{b} and {c}->{b} are derivable",
+    "  from {}->>{b} and are NOT in the D-G canonical basis."
+  ],
+  "vectors": [
+    {
+      "id": "ci-001",
+      "description": "Empty context yields empty basis, not truncated",
+      "context": {
+        "attributes": [],
+        "rows": []
+      },
+      "params": {
+        "maxImplications": 100,
+        "maxPremiseSize": 100
+      },
+      "expected": {
+        "implications": [],
+        "isTruncated": false
+      }
+    },
+    {
+      "id": "ci-002",
+      "description": "Two-row context: Row0:{a}, Row1:{b,c}. D-G basis has two implications.",
+      "context": {
+        "rows": [
+          [{"ns": "t", "key": "k", "value": "a"}],
+          [{"ns": "t", "key": "k", "value": "b"}, {"ns": "t", "key": "k", "value": "c"}]
+        ]
+      },
+      "params": {
+        "maxImplications": 100,
+        "maxPremiseSize": 100
+      },
+      "expected": {
+        "implications": [
+          {
+            "premise": [{"ns": "t", "key": "k", "value": "b"}],
+            "conclusion": [{"ns": "t", "key": "k", "value": "c"}]
+          },
+          {
+            "premise": [{"ns": "t", "key": "k", "value": "c"}],
+            "conclusion": [{"ns": "t", "key": "k", "value": "b"}]
+          }
+        ],
+        "isTruncated": false
+      }
+    },
+    {
+      "id": "ci-003",
+      "description": "Three singleton rows: maxImplications=2 truncates a 3-element basis",
+      "context": {
+        "rows": [
+          [{"ns": "t", "key": "k", "value": "a"}],
+          [{"ns": "t", "key": "k", "value": "b"}],
+          [{"ns": "t", "key": "k", "value": "c"}]
+        ]
+      },
+      "params": {
+        "maxImplications": 2,
+        "maxPremiseSize": 100
+      },
+      "expected": {
+        "implications": [
+          {
+            "premise": [{"ns": "t", "key": "k", "value": "a"}, {"ns": "t", "key": "k", "value": "b"}],
+            "conclusion": [{"ns": "t", "key": "k", "value": "c"}]
+          },
+          {
+            "premise": [{"ns": "t", "key": "k", "value": "a"}, {"ns": "t", "key": "k", "value": "c"}],
+            "conclusion": [{"ns": "t", "key": "k", "value": "b"}]
+          }
+        ],
+        "isTruncated": true
+      }
+    },
+    {
+      "id": "ci-004",
+      "description": "Global attribute context: Row0:{a,b}, Row1:{b,c}. Only {}->>{b} in D-G basis.",
+      "context": {
+        "rows": [
+          [{"ns": "t", "key": "k", "value": "a"}, {"ns": "t", "key": "k", "value": "b"}],
+          [{"ns": "t", "key": "k", "value": "b"}, {"ns": "t", "key": "k", "value": "c"}]
+        ]
+      },
+      "params": {
+        "maxImplications": 100,
+        "maxPremiseSize": 100
+      },
+      "expected": {
+        "implications": [
+          {
+            "premise": [],
+            "conclusion": [{"ns": "t", "key": "k", "value": "b"}]
+          }
+        ],
+        "isTruncated": false
+      }
+    }
+  ]
+}

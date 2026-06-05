@@ -1,0 +1,42 @@
+{
+  "description": "PartialStateRecall input validation. Block IDs must be in {0,1,2,3}; out-of-domain IDs corrupt the denominator. k must be non-negative. Pins the MX-Tidy fix (2026-06-05).",
+  "validation_convention": "precondition (programmer error, matches HammingNN.topK style). Not directly testable; documented for conformance vector reference.",
+  "valid_cases": [
+    {
+      "name": "ideal_partial_match_blocks_0_1_vs_2_3",
+      "anchor": { "block0": 255, "block1": 170, "block2": 0, "block3": 0 },
+      "row":    { "block0": 255, "block1": 170, "block2": 18446744073709551615, "block3": 18446744073709551615 },
+      "match_blocks": [0, 1],
+      "differ_blocks": [2, 3],
+      "expected_score": 1.0,
+      "tolerance": 1e-12,
+      "note": "match_d=0, differ_d=128 -> score=1.0"
+    },
+    {
+      "name": "single_block_each",
+      "anchor": { "block0": 0, "block1": 0, "block2": 0, "block3": 0 },
+      "row":    { "block0": 0, "block1": 18446744073709551615, "block2": 0, "block3": 0 },
+      "match_blocks": [0],
+      "differ_blocks": [1],
+      "expected_score": 1.0,
+      "tolerance": 1e-12,
+      "note": "match_total=64, differ_total=64, match_d=0, differ_d=64 -> 1*1=1"
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "block_id_5_in_match_blocks",
+      "match_blocks": [0, 5],
+      "differ_blocks": [2, 3],
+      "expected": "precondition_failure",
+      "note": "Block 5 is out-of-domain. denominator would be 64*2=128 but Hamming only computes 64 bits."
+    },
+    {
+      "name": "block_id_255_in_differ_blocks",
+      "match_blocks": [0],
+      "differ_blocks": [255],
+      "expected": "precondition_failure",
+      "note": "Block 255 is out-of-domain."
+    }
+  ]
+}

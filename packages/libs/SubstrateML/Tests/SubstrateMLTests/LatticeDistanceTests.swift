@@ -2,7 +2,7 @@
 //
 // Lattice distance per cookbook § 8.3. swift-testing peer suite for
 // Sources/SubstrateML/LatticeDistance.swift, mirroring
-// rust/src/lattice_distance.rs (11 #[test]) case-for-case, including
+// rust/src/lattice_distance.rs (12 #[test]) case-for-case, including
 // the synthetic MockGraph adjacency provider and the Rust 1e-9
 // tolerance.
 
@@ -39,19 +39,37 @@ struct LatticeDistanceTests {
         #expect(UDCTreeDistance.distance("004.42", "004.42") == 0.0)
     }
 
-    @Test("shared-prefix UDC codes: 004.42 vs 004.5 = 0.5")
+    @Test("shared-prefix UDC codes: 004.42 vs 004.5 = 3/11")
     func udcSharedPrefix() {
         // lcp = "004.", len 4. len(a)=6, len(b)=5.
-        // raw = (6-4)+(5-4) = 3. max_len = 6. d = 3/6 = 0.5.
+        // raw = (6-4)+(5-4) = 3. divisor = 6+5 = 11. d = 3/11.
         let d = UDCTreeDistance.distance("004.42", "004.5")
-        #expect(abs(d - 0.5) < tol)
+        #expect(abs(d - 3.0 / 11.0) < tol)
     }
 
-    @Test("no common prefix: 004 vs 37 = 5/3 (>1 permitted)")
+    @Test("no common prefix: 004 vs 37 = 1.0")
     func udcNoCommonPrefix() {
-        // lcp = "", raw = 3 + 2 = 5, max_len = 3, d = 5/3.
+        // lcp = "", raw = 3 + 2 = 5, divisor = 3+2 = 5, d = 1.0.
+        // Maximum distance: no shared prefix between two fully-disjoint codes.
         let d = UDCTreeDistance.distance("004", "37")
-        #expect(abs(d - 5.0 / 3.0) < tol)
+        #expect(abs(d - 1.0) < tol)
+    }
+
+    @Test("UDC distance is bounded to [0, 1] for all fixture inputs")
+    func udcBoundedUnit() {
+        let pairs: [(String, String)] = [
+            ("004.42", "004.5"),
+            ("004", "37"),
+            ("", "004"),
+            ("004.42", ""),
+            ("004", "004.42"),
+            ("1", "99999.99999"),
+            ("004.42", "004.42"),
+        ]
+        for (a, b) in pairs {
+            let d = UDCTreeDistance.distance(a, b)
+            #expect(d >= 0.0 && d <= 1.0, "d=\(d) for (\(a), \(b)) is out of [0,1]")
+        }
     }
 
     @Test("two empty UDC strings have zero distance")

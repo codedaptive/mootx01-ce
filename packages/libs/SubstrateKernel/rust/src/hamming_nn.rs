@@ -15,7 +15,15 @@
 //   2. For each candidate, compute Hamming distance via the
 //      kernel layer (here scalar; production routes to SIMD).
 //   3. Maintain a fixed-size max-heap of the K smallest distances.
-//   4. Return them sorted ascending.
+//   4. Return them sorted ascending by (distance, row_id).
+//
+// Tie-break convention: equal-distance hits are ordered by row_id
+// ascending. This gives deterministic, reproducible results across
+// runs — a substrate-wide conformance requirement. The Ord impl on
+// HammingNNHit encodes this tie-break so both the heap eviction and
+// the final sort respect it automatically. Mirrors the Swift port's
+// uuidString-ascending convention (u128 and UUID string order agree
+// on the conformance vector IDs used in testing).
 
 use std::collections::BinaryHeap;
 // (Removed unused `use std::cmp::Reverse;` — the heap implements
@@ -74,18 +82,23 @@ where
 
     for (row_id, fingerprint) in candidates {
         let d = hamming::distance(anchor, &fingerprint, blocks);
+        let new_hit = HammingNNHit { row_id, distance: d };
         if heap.len() < k {
-            heap.push(HammingNNHit { row_id, distance: d });
-        } else if let Some(worst) = heap.peek() {
-            if d < worst.distance {
+            heap.push(new_hit);
+        } else if let Some(&worst) = heap.peek() {
+            // Evict the worst retained hit when the new one is strictly
+            // better by the same (distance, row_id) ordering used for
+            // the final sort. `new_hit < worst` via Ord means lower
+            // distance, or same distance with lower row_id.
+            if new_hit < worst {
                 heap.pop();
-                heap.push(HammingNNHit { row_id, distance: d });
+                heap.push(new_hit);
             }
         }
     }
 
     let mut result: Vec<HammingNNHit> = heap.into_sorted_vec();
-    // into_sorted_vec returns ascending by Ord (distance ascending)
+    // into_sorted_vec returns ascending by Ord: (distance ASC, row_id ASC).
     result.truncate(k);
     result
 }

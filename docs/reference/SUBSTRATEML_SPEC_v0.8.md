@@ -112,6 +112,41 @@ This specification defines:
   mutual-information primitives.
 - **Temporal compression** (`TemporalCompression`, `TemporalWindow`,
   `WindowLevel`) — multi-level temporal-window roll-up, cookbook §15.2.
+- **Association-rule mining** (`mineAssociationRules`, `AssociationRule`,
+  `Item`, `MiningThresholds`) — pairwise co-occurrence rules over `MatrixO`,
+  cookbook §6.3. Pure engine: `MatrixO` + active row count + threshold scalars
+  in, ranked `[AssociationRule]` out. No estate, no clocks, no I/O.
+- **Bounded formal concept analysis** (`FormalContext`, `FormalAttribute`,
+  `FormalConcept`, `BoundedConceptMiner`, `StabilityEstimator`) — finds
+  exact attribute closures (emergent provenance and about-ness clusters)
+  over a materialized row × attribute context, with optional sampled
+  Kuznetsov stability estimation. Pure engine: fully-materialized
+  `FormalContext` in, ranked `[FormalConcept]` out. Randomness only when
+  `stabilityBudget > 0` (deterministic via explicit seed).
+  Bounding contract: seeds are by default frequent single attributes
+  (`.single` mode); `.multi` mode additionally seeds from frequent
+  2-attribute pairs; one closure per seed; deduplicated by intent; no
+  full lattice enumeration. Stability is sampled-only, never exact.
+  The audit-log-backed context builder lives in `GeniusLocusKit`
+  (`EstateFormalConcepts`). The recipe wrapper lives in `CognitionKit`
+  (`FormalConcepts`).
+- **Bounded Duquenne–Guigues canonical basis** (`Implication`,
+  `ConceptImplications`) — computes sound logical implications over a
+  `FormalContext` via bounded D-G pseudo-intent enumeration (Ganter &
+  Wille §7). Every emitted implication holds universally: any row
+  carrying all attributes in `premise` also carries all attributes in
+  `conclusion`. Enumeration visits subsets of the attribute universe in
+  non-decreasing size order (lexicographic within each size); each
+  candidate is tested against the two D-G pseudo-intent conditions
+  ((1) not closed, (2) all smaller pseudo-intent conclusions fit inside
+  the candidate). Output is sorted for determinism (premise size asc,
+  lex premise, lex conclusion). Two bounding caps: `maxImplications`
+  (hard cap; `isTruncated == true` when triggered) and `maxPremiseSize`
+  (size filter; never sets `isTruncated`). Both Swift and Rust
+  implementations pass the four-way conformance gate on canonical vectors
+  `concept_implications.json`. The estate-backed entry point lives in
+  `GeniusLocusKit` (`EstateFormalConcepts.conceptImplications`). The
+  recipe surface lives in `CognitionKit` (`FormalConcepts.Output.implications`).
 
 This specification does NOT define:
 
@@ -123,6 +158,14 @@ This specification does NOT define:
 - Verb mechanics that use these algorithms — those live in
   `SUBSTRATELIB_SPEC_v0.8.md`.
 - The dreaming daemon orchestration — lives in `NEURONKIT_SPEC_v0.8.md`.
+- The estate-backed `MatrixO` wiring that feeds `mineAssociationRules` —
+  that belongs in `GeniusLocusKit`. SubstrateML owns the pure algorithm;
+  GeniusLocusKit owns the estate-tier orchestration that supplies inputs.
+- The estate-backed context builder that maps audit-log entries to
+  `FormalAttribute` triples — that belongs in `GeniusLocusKit`
+  (`EstateFormalConcepts`). SubstrateML owns the pure FCA engine;
+  GeniusLocusKit owns the estate-tier orchestration that materializes
+  the `FormalContext`.
 
 ## § 3 — Position in the kit family
 
@@ -205,11 +248,18 @@ estimate. The estimator is monotone per ML-4.
 
 ### § 5.4 NMFAlternatingLeastSquares
 
-Non-negative matrix factorization. `factor(_ matrix:rank:iterations:)`
-returns an `NMFFactorization` of the input matrix into two
-non-negative factors `W` and `H` such that `W * H ≈ matrix`. The
-algorithm uses alternating least squares with non-negativity
-projection.
+Non-negative matrix factorization.
+`factorize(V:rank:maxIterations:tolerance:seed:)` returns an
+`NMFFactorization` of the input matrix `V` into two non-negative
+factors `W` and `H` such that `W × H ≈ V`. The algorithm uses
+Lee-Seung multiplicative updates, which preserve non-negativity
+without explicit projection.
+
+**Domain preconditions** (enforced at entry; §6): `V` must be
+rectangular (every row the same column count), all entries finite,
+and all entries `≥ 0`. Negative input violates the Lee-Seung theorem
+and produces undefined output; the engine rejects it rather than
+trapping incidentally or returning garbage.
 
 ### § 5.5 FFT
 
@@ -224,21 +274,35 @@ centrality scores. Power-iteration based.
 
 ### § 5.7 LatticeDistance / UDCTreeDistance
 
-`UDCTreeDistance.distance(_ a: LatticeAnchorStr, _ b: LatticeAnchorStr)`
-returns the tree distance between two UDC codes (cookbook §8.11).
+`UDCTreeDistance.distance(_ a: String, _ b: String)` returns the
+UDC tree distance normalized to [0, 1] (cookbook §8.3).
+
+**Normalization choice:** the divisor is `lenA + lenB`, NOT
+`max(lenA, lenB)`. Proof of bound: when `lcp = 0`,
+`raw = lenA + lenB = divisor`, so the output is 1.0 at worst.
+Using `max(lenA, lenB)` would allow outputs greater than 1 (for
+example "004" vs "37": raw=5, max=3, d=5/3 ≈ 1.667).
+
 `WikidataAdjacencyProvider` is the protocol consumers implement to
 supply Wikidata-adjacency information; this package does not embed
 a Wikidata snapshot.
 
-`LatticeDistance.combined(_:_:wikidataAdjacency:)` combines the UDC
-tree distance with optional Wikidata adjacency into a single
-distance score.
+`LatticeDistance.distance(_:_:provider:alphaUDC:alphaQID:)` combines
+the UDC tree distance with Wikidata graph distance into a single
+distance score in [0, 1] when `alphaUDC + alphaQID = 1`.
 
 ### § 5.8 CompositeDistance
 
-`CompositeDistance.score(semantic:temporal:lattice:weights:)`
-combines the three component distances into a single recall score.
-The weights are caller-supplied per cookbook §8.5.
+`CompositeDistance.distance(latticeDistance:fingerprintHammingDistance:alphaLattice:alphaFingerprint:compatibleSeedScope:)`
+combines lattice and fingerprint distances into a single recall score.
+
+**Precondition:** both component distances must be in [0, 1]. The
+Swift implementation traps via `precondition()` on out-of-range
+inputs; the Rust implementation uses `debug_assert!`. Callers that
+derive `latticeDistance` from `LatticeDistance.distance` and
+`fingerprintHammingDistance` from `SimHash.hammingDistance` satisfy
+the precondition by construction. The weights are caller-supplied
+per cookbook §8.5.
 
 ### § 5.9 FeatureExtractors
 
@@ -323,11 +387,280 @@ single window's `(level, range)` pair. `TemporalCompression.compress
 (events:to:)` compresses an event stream into a coarser window
 level.
 
+### § 5.20 AssociationRuleMining
+
+Pairwise co-occurrence rule mining over `MatrixO` (cookbook §6.3).
+
+`mineAssociationRules(matrix:activeRowCount:thresholds:)` mines all
+single-antecedent → single-consequent rules with support and
+confidence at or above `MiningThresholds` thresholds. The five
+metrics per rule — `support`, `confidence`, `lift`, `leverage`,
+`conviction` — are derived from the co-occurrence counts and
+`activeRowCount` (injected by the caller; the engine never derives
+it from the matrix). When `confidence == 1.0`, `conviction` is
+`+infinity`.
+
+Rules are emitted in ascending packed `(antecedent, consequent)`
+key order — total, deterministic, and identical across the Swift and
+Rust ports. The diagonal (`O[A,A]`) provides single-item support
+but is never emitted as a rule (an `A → A` self-rule has
+`confidence ≡ 1` and carries no information). Off-diagonal cells
+`O[A,B]` without a corresponding diagonal entry on either side
+are silently skipped (engine guard; reachable only via
+decay/expunge imbalance).
+
+`activeRowCount <= 0` returns an empty rule list immediately.
+
+### § 5.20a RowAttributeView
+
+Row-replay shape extractor for audit-log–based mining. Converts a
+`[RowAuditEntry]` (SubstrateML-native, see §5.20b) into a
+`[RowAttributeView]` — one view per (tier, rowID) pair — each holding
+a sorted `[(field: UInt8, value: UInt8)]` attribute list.
+
+**Input type `RowAuditEntry`** (`tier`, `rowID`, `fieldPath`, `hlc`,
+`value: RowAuditValue`) carries one audit event. `RowAuditValue` is the
+SubstrateML-native counterpart to `UnifiedAuditValue`; GeniusLocusKit
+converts at the kit boundary to preserve layer separation.
+
+**Extraction algorithm** (pure, deterministic):
+1. Build a vocabulary: sorted unique fieldPaths across all entries,
+   capped at 64. Field index = vocabulary position.
+2. Group entries by `(tier, rowID)`.
+3. For each group, for each fieldPath in vocabulary order, take the
+   entry with the latest HLC (latest-write-wins deduplication).
+4. Extract attributes:
+   - `.bitmap(v)`: each set bit → `(field: vocabIdx, value: bitPosition)`.
+     Zero bitmaps are dropped. Up to 64 items per field.
+   - `.integer(n)`: low byte `UInt8(n & 0xFF)` → `(field: vocabIdx, value: lowByte)`.
+   - `.null`: dropped (no categorical content).
+5. Output: `RowAttributeView` values sorted by `(tier, rowID.uuidString)`
+   for deterministic downstream mining.
+
+**Use by Apriori**: `RowAttributeView.from(auditEntries:)` is the
+entry point. Each resulting `RowAttributeView.attributes` array becomes
+one `[Item]` row for `AprioriMining.mine`.
+
+**Conformance**: deterministic for identical inputs on any platform.
+No Rust port (pure Swift, only used via GeniusLocusKit's Apriori path).
+
+### § 5.20b AprioriMining
+
+Multi-antecedent association-rule mining over row-replay data (Agrawal
+& Srikant 1994 Apriori algorithm). Complements `AssociationRuleMining`
+(§5.20) with k-item antecedents.
+
+**Input**: `[RowAttributeView]` (from §5.20a) and `AprioriThresholds`
+(`minSupport`, `minConfidence`, `minLift`, `maxK`). `maxK` is the
+maximum total itemset size (antecedent count + 1); minimum effective
+value is 2 (promoted from lower values).
+
+**Output type `AprioriRule`**: `antecedent: [Item]`, `consequent: Item`,
+plus `support`, `confidence`, `lift`, `conviction`, `leverage`,
+`evidenceCount: Int`. `conviction` is `+infinity` when `confidence ==
+1.0`. Antecedent items are sorted ascending on packed key.
+
+**At `maxK = 2`** (one antecedent item) the output is equivalent to
+`mineAssociationRules` on the same row data.
+
+**Algorithm outline**:
+1. Convert each row to a `Set<Item>` for O(1) subset testing.
+2. Level 1: count frequent 1-itemsets (support ≥ minSupport).
+3. Join: generate size-k candidates from frequent (k-1)-itemsets that
+   share a lexicographic prefix of length k-2 (Apriori join step).
+4. Count candidate support via subset tests.
+5. Prune below minSupport. Repeat 3-5 until k > maxK or no candidates.
+6. Extract rules from all frequent itemsets of size ≥ 2 (iterated in
+   canonical sorted order, not dictionary hash order): each item can
+   be the consequent.
+7. Filter by minSupport, minConfidence, minLift.
+8. Sort: lift DESC, confidence DESC, evidenceCount DESC, then
+   lexicographic (antecedent packed keys ASC, consequent packed key
+   ASC).
+
+**Total-order determinism**: the four-key sort plus canonical-order
+itemset iteration make the output a total order. Equal-metric ties
+resolve lexicographically rather than by dictionary hash order, so
+Swift and Rust produce bit-identical output regardless of their
+differing dictionary implementations.
+
+**Free function**: `mineAprioriRules(rows:thresholds:)` is a thin
+wrapper around `AprioriMining.mine(rows:thresholds:)` for call-site
+convenience.
+
+**Conformance vectors**: `docs/engineering/substrate_reference/
+test-harness/vectors/apriori_mining.json`. Both Swift and Rust ports
+must produce identical rules for each case.
+
+**Rust port**: `substrate-ml/src/apriori_mining.rs` re-uses
+`crate::association_rule_mining::Item`.
+
+### § 5.21 FormalConceptAnalysis
+
+Bounded formal concept analysis over a materialized `FormalContext`
+(this is a pure engine — it reads no estate, no `MatrixO`, no clocks,
+no randomness).
+
+**Bounding contract** (the reason this is "bounded" FCA):
+- Seeds are frequent single attributes only (support ≥ `minSupport`)
+  in `.single` mode (the default, v1 behaviour).
+- Optional multi-seed pass (`seedMode: .multi`): additionally seeds
+  from frequent 2-attribute pairs, each pair tried up to `maxSeeds`
+  times. Discovers concepts whose minimal generator is a pair rather
+  than a singleton. Still bounded: O(|frequent|²) additional closures,
+  capped by `maxSeeds`.
+- ONE closure per seed (not full lattice enumeration, in either mode).
+- Deduplicated by intent (two seeds whose closure is the same set of
+  attributes produce one concept, not two).
+- Truncated to `maxConcepts` after sorting.
+- `FormalConcept.stability` is `nil` by default (when
+  `stabilityBudget == 0`). Set `stabilityBudget > 0` on the miner to
+  populate it via `StabilityEstimator`. The exact Kuznetsov stability
+  is exponential and is never computed — only the sampled estimate is
+  available.
+
+**Sampled Kuznetsov stability** (`StabilityEstimator`, MX-3B):
+
+`StabilityEstimator.estimate(concept:context:budget:seed:)` approximates
+Kuznetsov stability by Bernoulli(p=0.5) sampling over the concept's
+extent. For each of `budget` independent draws, a random subset of the
+extent rows is selected (each row independently included with probability
+0.5), the FCA `intent` operator is applied to the subset, and a "hit"
+is counted when the resulting intent equals the concept's full intent.
+The stability estimate is `hits / budget`.
+
+**Empty-subset semantics**: the empty subset's intent is the full
+attribute universe (standard FCA convention). For a concept whose
+intent equals the full universe, all draws — including the empty subset
+draw — count as hits.
+
+**Per-concept RNG isolation**: the per-concept seed is
+`globalSeed XOR fnv64(canonicalKey(concept))`. The canonical key is
+`"rowID0,rowID1,...|ns:key:val|ns:key:val|..."` (extent indices
+comma-joined; intent attributes, already sorted ascending, pipe-joined
+as `namespace:key:value`). This gives each concept an independent PRNG
+stream regardless of miner call order.
+
+**Canonical conformance seed**: `0xCAFEBABEDEADBEEF`. Conformance
+vectors are at
+`docs/engineering/substrate_reference/test-harness/vectors/fca_stability.json`.
+Both Swift and Rust ports must produce bit-identical output on these
+vectors. The Swift implementation uses `SplitMix64` (from `RandomWalks`)
+and `FNV.hash64` (from `SubstrateTypes`); the Rust implementation uses
+`crate::random_walks::SplitMix64` and `substrate_types::fnv::hash64`.
+
+`FormalContext(rows:)` materializes a context from per-row attribute
+sets. Row `i` of `rows` becomes `RowID(i)`. The attribute universe is
+the sorted union across all rows; duplicate attributes within a row are
+collapsed. `extent(of:)` and `intent(of:)` are the standard FCA
+derivation operators; `closure(of:)` is idempotent.
+
+`FormalContext.from(rowAttributeViews:)` builds a context from
+`[RowAttributeView]` — the canonical row-replay input shape shared
+with `AprioriMining`. Each `(field, value)` pair becomes
+`FormalAttribute(namespace:"row", key:String(field), value:String(value))`.
+
+`BoundedConceptMiner.mine(context:)` returns concepts sorted by support
+descending, then intent size ascending, then lexicographic intent (the
+stable key), truncated to `maxConcepts`. Cost is O(|attributes| ×
+closure) — polynomial, no exponential path.
+
+Output is deterministic and identical across the Swift and Rust ports.
+
+**Cover deltas (structural lens, MX-Soundness-1A):**
+
+`ConceptCoverDeltas.covering(concepts:)` derives the cover-delta set
+over the emitted concept set — a structural lens over the concept order.
+For each pair of concepts `(A, B)` where `A.intent ⊂ B.intent` and no
+intermediate concept `C` in the input has `A.intent ⊂ C.intent ⊂
+B.intent`, the function emits a `CoverDelta`:
+
+    lowerIntent = A.intent
+    addedAttributes = B.intent − A.intent
+
+**This is NOT the Duquenne–Guigues canonical basis.** It is the
+cover-relation structural lens over the emitted concept set:
+
+- **Structural** — every delta holds within the emitted concept set
+  (`lowerIntent` and `lowerIntent ∪ addedAttributes` both correspond
+  to emitted concepts).
+- **Not universally sound** — a cover delta does NOT assert that every
+  row carrying `lowerIntent` also carries `addedAttributes`. Rows not
+  in the more-specific concept's extent may carry `lowerIntent` without
+  `addedAttributes`.
+- **Incomplete** — some implications in the full D-G canonical basis
+  may be omitted (those not captured by a direct cover relation in the
+  emitted set).
+
+Callers treat cover deltas as structural lattice summaries, not
+universally valid rules. For sound logical implications (the full
+Duquenne–Guigues canonical basis), see `ConceptImplications`.
+
+The cover-delta set is sorted: `lowerIntent` size ascending, then
+lexicographic on `lowerIntent`, then lexicographic on `addedAttributes`.
+Output is deterministic and identical across Swift and Rust.
+
+### § 5.22 TemporalCausalityFold
+
+Pure fold engine for the T (temporal causality) matrix population pass
+(cookbook §6.4). Invoked by `MatrixTier.rebuildTemporal(from:)` in
+GeniusLocusKit on each hourly TemporalCausalitySignal fire per
+DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+
+**Input types** (local to SubstrateML — GeniusLocusKit maps at the kit
+boundary to avoid a circular import):
+- `TemporalAuditEntry`: `hlc: HLC`, `fieldCoords: [TemporalFieldCoord]`
+- `TemporalFieldCoord`: `fieldPath: String`, `valueRepr: String`
+- Entries must be pre-sorted ascending by HLC (caller responsibility).
+
+**Output**: `(deltas: [(TemporalCausalityKey, Int64)], newWatermark: HLC)`
+- `TemporalCausalityKey`: `(source: TemporalFieldCoord, target: TemporalFieldCoord, lagBucket: Int)`
+- Deltas in stable insertion order (source HLC ascending).
+
+**Algorithm** (cookbook §6.4 update rule):
+```
+for each new entry E (HLC > startWatermark):
+    evict from buffer entries where minuteDiff(E, older) > windowMinutes
+    for each older entry O in buffer:
+        deltaMinutes = max(1, (E.hlc.physicalTime - O.hlc.physicalTime) / 60_000)
+        bucket = lagBucket(deltaMinutes)
+        for each srcCoord in O.fieldCoords:
+            for each tgtCoord in E.fieldCoords:
+                emit delta[(srcCoord, tgtCoord, bucket)] += 1
+    add E to buffer
+    advance newWatermark to E.hlc
+```
+
+**Lag bucket function** (canonical): smallest boundary ≥ deltaMinutes from
+{1, 2, 4, 8, 16, 32, 64, 128}; clamped to 128 above. This is the canonical
+implementation; GeniusLocusKit's `MatrixTier.lagBucket(forMinutes:)` delegates
+to it.
+
+**Window cap**: 256 minutes (defaultWindowMinutes). Entries farther apart
+than windowMinutes are excluded by buffer eviction before pairing.
+
+**Determinism**: same sorted input, same startWatermark, same windowMinutes →
+identical deltas in identical order. No clocks or randomness.
+
+**Conformance vectors**: `docs/engineering/substrate_reference/
+test-harness/vectors/temporal_causality_fold.json`. Swift and Rust ports must
+produce identical deltas on canonical test cases.
+
 ## § 6 — Error model (conceptual)
 
-ML algorithms here raise errors only on contract violations:
+ML algorithms here reject out-of-domain input at the public entry
+point via precondition (process-terminating, the substrate
+convention for programmer-error contract violations):
 
-- `NMFAlternatingLeastSquares` raises on negative-cell inputs.
+- `NMFAlternatingLeastSquares.factorize` requires `V` rectangular
+  (every row the same length), all entries finite (no NaN, no Inf),
+  and all entries `≥ 0` (the Lee-Seung multiplicative-update theorem
+  requires `V ≥ 0`).
+- `RandomWalks.walk` requires a valid Markov kernel: every neighbor
+  index in `[0, N)`, every edge weight finite and `≥ 0`.
+  `RandomWalks.sampleWeighted` requires a non-empty neighbor list.
+- `AprioriMining.mine` accepts any row set; out-of-domain enforcement
+  is not applicable, but its output is a total order (see §5.20b).
 - `FFT` raises on non-power-of-two signal lengths.
 - `BradleyTerryEstimator` raises on observation weights ≤ 0.
 - `PairingHandshake.validate` raises on signature mismatch.
@@ -355,3 +688,13 @@ Other algorithms (Bradley-Terry, NMF, FFT, eigenvalue centrality,
 random walks) are conformance-tested but not federation-critical;
 small floating-point drift between ports is tolerated within an
 ε-bound per algorithm.
+
+**Association-rule mining** is deterministic on IEEE-754 integer
+arithmetic (counts and multiplications of exact integers over N).
+It is bit-for-bit conformance-gated:
+
+- **AssociationRuleMining vectors:** 8 hand-computed cases from
+  `docs/validation/substrate_math_performance/test-harness/vectors/association_rule_mining.json`.
+  Both ports (Swift SubstrateML and Rust `substrate_ml`) must
+  reproduce all metrics bit-for-bit. `conviction == +infinity`
+  is encoded as IEEE-754 `+Inf` (`0x000000000000f07f` LE).

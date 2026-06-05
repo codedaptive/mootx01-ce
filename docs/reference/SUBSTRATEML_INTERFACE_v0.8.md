@@ -10,7 +10,7 @@ relates_to:
   - SUBSTRATETYPES_INTERFACE_v0.8.md  (Layer 1 types consumed)
   - SUBSTRATEKERNEL_INTERFACE_v0.8.md  (Layer 2 primitives consumed)
 purpose: |
-  Public API surface of SubstrateML in both ports. Twenty-three Swift
+  Public API surface of SubstrateML in both ports. Twenty-five Swift
   files publish the cold-path algorithms over substrate types: the
   audit-log fold, matrix decay, Bradley-Terry estimation, NMF, FFT,
   eigenvalue centrality, lattice distance, anomaly / community
@@ -18,7 +18,8 @@ purpose: |
   partial-state recall, pairing handshake, tier-contribution
   fingerprint, tier-ascending query, action-outcome matrix, DP-OR
   reduction, LLM calibration curve, information theory, temporal
-  compression. The Rust mirror exposes the same shapes.
+  compression, pairwise association-rule mining, and bounded formal
+  concept analysis. The Rust mirror exposes the same shapes.
 ---
 
 # SubstrateML Interface
@@ -27,7 +28,7 @@ purpose: |
 
 **Swift:** `packages/libs/SubstrateML/`
 
-- `Sources/SubstrateML/` — 23 files, one per algorithm or family.
+- `Sources/SubstrateML/` — 25 files, one per algorithm or family.
 - `Tests/SubstrateMLTests/` — unit + conformance.
 - `Package.swift` — depends on `SubstrateTypes`, `SubstrateKernel`.
 
@@ -140,17 +141,29 @@ SPEC § 5.4.
 
 ```swift
 public struct NMFFactorization: Sendable {
-    public let W: MatrixF
-    public let H: MatrixF
+    public let W: [[Float32]]   // m × k
+    public let H: [[Float32]]   // k × n
+    public let rank: Int
+    public let iterations: Int
+    public let finalError: Float32
 }
 public enum NMFAlternatingLeastSquares {
-    public static func factor(_ matrix: MatrixF, rank: Int, iterations: Int) throws -> NMFFactorization
+    // Precondition: V rectangular, all entries finite, all entries ≥ 0
+    // (Lee-Seung theorem requires V ≥ 0). Violations trigger precondition.
+    public static func factorize(V: [[Float32]],
+                                 rank: Int,
+                                 maxIterations: Int = 100,
+                                 tolerance: Float32 = 1e-4,
+                                 seed: UInt64 = 0xDEADBEEFCAFEBABE) -> NMFFactorization
 }
 ```
 
 ```rust
-pub struct NMFFactorization { pub w: MatrixF, pub h: MatrixF }
-pub fn nmf_als_factor(matrix: &MatrixF, rank: usize, iterations: usize) -> Result<NMFFactorization, &'static str>;
+pub struct NMFFactorization { pub w: Vec<Vec<f32>>, pub h: Vec<Vec<f32>>,
+                              pub rank: usize, pub iterations: usize, pub final_error: f32 }
+// Same preconditions as Swift; violations panic.
+pub fn factorize(v: &[Vec<f32>], rank: usize, max_iterations: usize,
+                 tolerance: f32, seed: u64) -> NMFFactorization;
 ```
 
 ### `Complex`, `FFT`, `RhythmResult`
@@ -208,14 +221,23 @@ public struct SplitMix64 {
     public mutating func next() -> UInt64
 }
 public enum RandomWalks {
-    public static func walk(graph: MatrixF, start: Int, steps: Int, prng: inout SplitMix64) -> [Int]
+    public typealias Adjacency = [[(neighbor: Int, weight: Double)]]
+    // Precondition: every neighbor index in [0, N); every weight finite and ≥ 0.
+    public static func walk(adjacency: Adjacency, start: Int, length: Int,
+                            restartProb: Double = defaultRestartProb, seed: UInt64) -> [Int]
+    // Precondition: neighbors must be non-empty.
+    public static func sampleWeighted(_ neighbors: [(neighbor: Int, weight: Double)],
+                                      rng: inout SplitMix64) -> Int
 }
 ```
 
 ```rust
-pub struct SplitMix64 { /* internal */ }
+pub struct SplitMix64 { pub state: u64 }
 impl SplitMix64 { pub fn new(seed: u64) -> Self; pub fn next(&mut self) -> u64; }
-pub fn random_walk(graph: &MatrixF, start: usize, steps: usize, prng: &mut SplitMix64) -> Vec<usize>;
+// Same preconditions as Swift; violations panic.
+pub fn walk(adjacency: &[Vec<(usize, f64)>], start: usize, length: usize,
+            restart_prob: f64, seed: u64) -> Vec<usize>;
+pub fn sample_weighted(neighbors: &[(usize, f64)], rng: &mut SplitMix64) -> usize;
 ```
 
 ### `LatticeAnchorStr`, `UDCTreeDistance`, `LatticeDistance`, `WikidataAdjacencyProvider`
@@ -612,16 +634,388 @@ pub mod community_detection { /* … */ }
 pub mod calibration { /* … */ }
 ```
 
+### `Item`, `AssociationRule`, `MiningThresholds`, `mineAssociationRules`
+
+SPEC § 5.20.
+
+```swift
+public struct Item: Hashable, Comparable, Sendable, Codable {
+    public let field: UInt8
+    public let value: UInt8
+    public init(field: UInt8, value: UInt8)
+    public var packed: UInt16      // (field << 8) | value; ordering basis
+    public static func < (a: Item, b: Item) -> Bool
+}
+
+public struct AssociationRule: Equatable, Sendable, Codable {
+    public let antecedent: Item
+    public let consequent: Item
+    public let support: Double
+    public let confidence: Double
+    public let lift: Double
+    public let conviction: Double    // +infinity when confidence == 1.0
+    public let leverage: Double
+    public init(antecedent:consequent:support:confidence:lift:conviction:leverage:)
+}
+
+public struct MiningThresholds: Equatable, Sendable, Codable {
+    public let minSupport: Double
+    public let minConfidence: Double
+    public init(minSupport: Double, minConfidence: Double)
+}
+
+/// Mines pairwise rules. Free function (no namespace wrapper).
+public func mineAssociationRules(
+    matrix: MatrixO,
+    activeRowCount: Int64,
+    thresholds: MiningThresholds
+) -> [AssociationRule]
+```
+
+```rust
+// In substrate_ml::association_rule_mining
+pub struct Item { pub field: u8, pub value: u8 }
+impl Item { pub fn new(field: u8, value: u8) -> Self; pub fn packed(&self) -> u16; }
+
+pub struct AssociationRule {
+    pub antecedent: Item, pub consequent: Item,
+    pub support: f64, pub confidence: f64, pub lift: f64,
+    pub conviction: f64, pub leverage: f64,
+}
+
+pub struct MiningThresholds { pub min_support: f64, pub min_confidence: f64 }
+impl MiningThresholds { pub fn new(min_support: f64, min_confidence: f64) -> Self; }
+
+pub fn mine_association_rules(
+    matrix: &MatrixO,
+    active_row_count: i64,
+    thresholds: MiningThresholds,
+) -> Vec<AssociationRule>
+```
+
+### `RowAuditValue`, `RowAuditEntry`, `RowAttributeView`
+
+SPEC § 5.20a.
+
+```swift
+public enum RowAuditValue: Sendable, Equatable {
+    case bitmap(UInt64)
+    case integer(Int64)
+    case null
+}
+
+/// One audit event, SubstrateML-native. GeniusLocusKit converts
+/// `UnifiedAuditEntry` to this at the kit boundary.
+public struct RowAuditEntry: Sendable, Equatable {
+    public let rowID: UUID
+    public let tier: String
+    public let fieldPath: String
+    public let hlc: HLC
+    public let value: RowAuditValue
+    public init(rowID: UUID, tier: String, fieldPath: String, hlc: HLC, value: RowAuditValue)
+}
+
+/// Row-replay shape: one (tier, rowID) pair, categorical attributes extracted.
+public struct RowAttributeView: Sendable, Equatable, Hashable {
+    public let rowID: UUID
+    public let tier: String
+    /// Sorted [(field: UInt8, value: UInt8)] attribute list. Bitmap fields
+    /// expand to one item per set bit (value = bit position). Integer fields
+    /// use low byte as value.
+    public let attributes: [(field: UInt8, value: UInt8)]
+    public init(rowID: UUID, tier: String, attributes: [(field: UInt8, value: UInt8)])
+
+    /// Factory: convert audit entries to row-replay shapes.
+    /// Builds a vocabulary (sorted fieldPaths, capped at 64), groups by
+    /// (tier, rowID), deduplicates by latest HLC, extracts attributes.
+    /// Output sorted by (tier, rowID.uuidString).
+    public static func from(auditEntries: [RowAuditEntry]) -> [RowAttributeView]
+}
+```
+
+### `AprioriThresholds`, `AprioriRule`, `AprioriMining`, `mineAprioriRules`
+
+SPEC § 5.20b.
+
+```swift
+public struct AprioriThresholds: Equatable, Sendable, Codable {
+    public let minSupport: Double
+    public let minConfidence: Double
+    public let minLift: Double
+    public let maxK: Int              // minimum effective value: 2
+    public init(minSupport: Double, minConfidence: Double,
+                minLift: Double = 1.0, maxK: Int = 3)
+}
+
+public struct AprioriRule: Equatable, Sendable, Codable {
+    public let antecedent: [Item]     // sorted ascending on packed key
+    public let consequent: Item
+    public let support: Double
+    public let confidence: Double
+    public let lift: Double
+    public let conviction: Double     // +infinity when confidence == 1.0
+    public let leverage: Double
+    public let evidenceCount: Int     // raw row count: rows containing antecedent ∪ consequent
+}
+
+public enum AprioriMining {
+    /// Pure engine. Rows come from RowAttributeView.attributes.
+    /// Output is a total order: sorted by lift ↓, confidence ↓,
+    /// evidenceCount ↓, then lexicographic (antecedent packed keys ↑,
+    /// consequent packed key ↑). Equal-metric ties resolve
+    /// deterministically rather than by dictionary hash order, so
+    /// Swift and Rust produce bit-identical output.
+    public static func mine(
+        rows: [RowAttributeView],
+        thresholds: AprioriThresholds
+    ) -> [AprioriRule]
+}
+
+/// Free function: thin wrapper around `AprioriMining.mine`.
+public func mineAprioriRules(
+    rows: [RowAttributeView],
+    thresholds: AprioriThresholds
+) -> [AprioriRule]
+```
+
+```rust
+// In substrate_ml::apriori_mining  (re-uses association_rule_mining::Item)
+pub struct AprioriThresholds { pub min_support: f64, pub min_confidence: f64,
+                               pub min_lift: f64, pub max_k: usize }
+impl AprioriThresholds { pub fn new(min_support, min_confidence, min_lift, max_k) -> Self; }
+
+pub struct AprioriRule { pub antecedent: Vec<Item>, pub consequent: Item,
+    pub support: f64, pub confidence: f64, pub lift: f64,
+    pub conviction: f64, pub leverage: f64, pub evidence_count: usize }
+
+pub fn mine_apriori_rules(rows: &[Vec<Item>], thresholds: &AprioriThresholds) -> Vec<AprioriRule>
+```
+
+### `FormalAttribute`, `FormalConcept`, `FormalContext`, `BoundedConceptMiner`, `StabilityEstimator`, `SeedMode`, `CoverDelta`, `ConceptCoverDeltas`
+
+SPEC § 5.21.
+
+```swift
+public struct FormalAttribute: Hashable, Codable, Sendable, Comparable {
+    public let namespace: String
+    public let key: String
+    public let value: String
+    public init(namespace: String, key: String, value: String)
+    public static func < (lhs: FormalAttribute, rhs: FormalAttribute) -> Bool
+}
+
+public struct FormalConcept: Hashable, Codable, Sendable {
+    public let extent: [FormalContext.RowID]   // sorted ascending
+    public let intent: [FormalAttribute]        // sorted ascending
+    public let support: Int
+    public let stability: Double?              // nil when stabilityBudget == 0 (default)
+    public init(extent:intent:support:stability:)
+}
+
+public enum SeedMode: Hashable, Codable, Sendable {
+    case single  // v1 default — frequent single attributes only
+    case multi   // additionally seeds from frequent 2-attribute pairs
+}
+
+public struct CoverDelta: Hashable, Codable, Sendable {
+    public let lowerIntent: Set<FormalAttribute>
+    public let addedAttributes: Set<FormalAttribute>
+    public init(lowerIntent: Set<FormalAttribute>, addedAttributes: Set<FormalAttribute>)
+}
+
+public struct ConceptCoverDeltas: Sendable {
+    public let coverDeltas: [CoverDelta]
+    public init(coverDeltas: [CoverDelta])
+    /// Cover-delta set over an emitted concept set — structural lens over
+    /// the concept order. Not universally sound. See SPEC § 5.21.
+    public static func covering(concepts: [FormalConcept]) -> ConceptCoverDeltas
+}
+
+public struct FormalContext: Sendable {
+    public typealias RowID = UInt32
+    public let attributes: [FormalAttribute]
+    public let rowCount: Int
+    public init(rows: [[FormalAttribute]])
+    /// Build a context from RowAttributeView row data. Each (field, value)
+    /// pair maps to FormalAttribute(namespace:"row", key:String(field),
+    /// value:String(value)).
+    public static func from(rowAttributeViews: [RowAttributeView]) -> FormalContext
+    public func extent(of intent: [FormalAttribute]) -> [RowID]
+    public func intent(of extent: [RowID]) -> [FormalAttribute]
+    public func closure(of intent: [FormalAttribute]) -> [FormalAttribute]
+}
+
+public struct BoundedConceptMiner: Sendable {
+    public let minSupport: Int
+    public let maxIntentSize: Int
+    public let maxConcepts: Int
+    public let seedMode: SeedMode         // default .single
+    public let maxSeeds: Int              // default Int.max; caps pair-seed pass
+    public let stabilityBudget: Int       // default 0 — no stability estimation
+    public let stabilitySeed: UInt64      // default 0xCAFEBABEDEADBEEF
+    public init(minSupport: Int, maxIntentSize: Int, maxConcepts: Int,
+                seedMode: SeedMode = .single, maxSeeds: Int = Int.max,
+                stabilityBudget: Int = 0,
+                stabilitySeed: UInt64 = 0xCAFEBABEDEADBEEF)
+    public func mine(context: FormalContext) -> [FormalConcept]
+}
+
+/// Sampled Kuznetsov stability estimator. Bernoulli(p=0.5) sampling
+/// over a concept's extent; hit when intent(subset) == concept.intent.
+/// Per-concept seed: globalSeed XOR fnv64(canonicalKey(concept)).
+/// Returns 0.0 when budget == 0 or extent is empty. See SPEC § 5.21.
+public enum StabilityEstimator {
+    public static func estimate(
+        concept: FormalConcept, context: FormalContext,
+        budget: Int, seed: UInt64
+    ) -> Double
+}
+
+/// One sound logical implication from the D-G canonical basis.
+/// `conclusion = closure_context(premise) \ premise`.
+/// `premise` and `conclusion` are disjoint. See SPEC § 5.21 (FormalConceptAnalysis).
+public struct Implication: Hashable, Codable, Sendable {
+    public let premise: Set<FormalAttribute>
+    public let conclusion: Set<FormalAttribute>
+    public init(premise: Set<FormalAttribute>, conclusion: Set<FormalAttribute>)
+}
+
+/// Bounded Duquenne–Guigues canonical basis over a `FormalContext`.
+/// Every emitted implication is sound. `isTruncated` is true when
+/// `maxImplications` terminated enumeration early. See SPEC § 5.21 (FormalConceptAnalysis).
+public struct ConceptImplications: Sendable {
+    public let implications: [Implication]  // sorted: premise-size asc, lex premise, lex conclusion
+    public let isTruncated: Bool
+    public init(implications: [Implication], isTruncated: Bool)
+    /// Compute the bounded D-G canonical basis for `context`.
+    /// `over:` accepts the pre-mined concepts (may be empty).
+    /// `maxImplications`: hard cap; set to `Int.max` for uncapped.
+    /// `maxPremiseSize`: size filter; does not set `isTruncated`.
+    public static func conceptImplications(
+        over concepts: [FormalConcept],
+        context: FormalContext,
+        maxImplications: Int,
+        maxPremiseSize: Int
+    ) -> ConceptImplications
+}
+```
+
+```rust
+// In substrate_ml::formal_concept_analysis
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FormalAttribute { pub namespace: String, pub key: String, pub value: String }
+impl FormalAttribute { pub fn new(namespace: &str, key: &str, value: &str) -> Self; }
+
+pub type RowId = u32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedMode { Single, Multi }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverDelta {
+    pub lower_intent: Vec<FormalAttribute>,     // sorted
+    pub added_attributes: Vec<FormalAttribute>, // sorted, non-empty
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConceptCoverDeltas {
+    pub cover_deltas: Vec<CoverDelta>,
+}
+impl ConceptCoverDeltas {
+    pub fn covering(concepts: &[FormalConcept]) -> ConceptCoverDeltas;
+}
+
+// In substrate_ml::concept_implications
+/// One sound logical implication from the D-G canonical basis.
+/// `conclusion = closure_context(premise) \ premise`. See SPEC § 5.21 (FormalConceptAnalysis).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Implication {
+    pub premise: Vec<FormalAttribute>,    // sorted ascending
+    pub conclusion: Vec<FormalAttribute>, // sorted ascending
+}
+
+/// Bounded Duquenne–Guigues canonical basis over a `FormalContext`.
+/// Every emitted implication is sound. `is_truncated` is true when
+/// `max_implications` terminated enumeration early. See SPEC § 5.21 (FormalConceptAnalysis).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConceptImplications {
+    pub implications: Vec<Implication>, // sorted: premise-size asc, lex premise, lex conclusion
+    pub is_truncated: bool,
+}
+impl ConceptImplications {
+    /// Compute the bounded D-G canonical basis for `context`.
+    /// `max_implications`: hard cap; set to `usize::MAX` for uncapped.
+    /// `max_premise_size`: size filter; does not set `is_truncated`.
+    pub fn compute(
+        context: &FormalContext,
+        max_implications: usize,
+        max_premise_size: usize,
+    ) -> ConceptImplications;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormalConcept {
+    pub extent: Vec<RowId>,
+    pub intent: Vec<FormalAttribute>,
+    pub support: usize,
+    pub stability: Option<f64>,   // None when stability_budget == 0 (default)
+}
+
+pub struct FormalContext { /* internal */ }
+impl FormalContext {
+    pub fn new(rows: &[Vec<FormalAttribute>]) -> Self;
+    /// Build from (field, value) pair rows — mirrors Swift from(rowAttributeViews:).
+    pub fn from_row_attribute_views(views: &[Vec<(u8, u8)>]) -> Self;
+    pub fn attributes(&self) -> &[FormalAttribute];
+    pub fn row_count(&self) -> usize;
+    pub fn extent(&self, intent: &[FormalAttribute]) -> Vec<RowId>;
+    pub fn intent(&self, extent: &[RowId]) -> Vec<FormalAttribute>;
+    pub fn closure(&self, intent: &[FormalAttribute]) -> Vec<FormalAttribute>;
+}
+
+pub struct BoundedConceptMiner {
+    pub min_support: usize,
+    pub max_intent_size: usize,
+    pub max_concepts: usize,
+    pub seed_mode: SeedMode,        // default Single
+    pub max_seeds: usize,           // default usize::MAX
+    pub stability_budget: usize,    // default 0 — no stability estimation
+    pub stability_seed: u64,        // default 0xCAFE_BABE_DEAD_BEEF
+}
+impl BoundedConceptMiner {
+    pub fn new(min_support: usize, max_intent_size: usize, max_concepts: usize) -> Self;
+    pub fn new_with_seed_mode(min_support: usize, max_intent_size: usize,
+        max_concepts: usize, seed_mode: SeedMode, max_seeds: usize) -> Self;
+    pub fn mine(&self, context: &FormalContext) -> Vec<FormalConcept>;
+}
+
+/// Sampled Kuznetsov stability estimator. Mirrors Swift StabilityEstimator.
+/// Per-concept seed: seed XOR fnv::hash64(canonical_key(concept)).
+pub struct StabilityEstimator;
+impl StabilityEstimator {
+    pub fn estimate(
+        concept: &FormalConcept, context: &FormalContext,
+        budget: usize, seed: u64
+    ) -> f64;
+}
+```
+
 ## § 3 — Public functions
 
-All public function signatures appear under their owning type in § 2.
-No free top-level functions outside those namespaces.
+`mineAssociationRules` / `mine_association_rules` is a free function in
+this package (SPEC § 5.20). All other public function signatures appear
+under their owning type in § 2.
 
 ## § 4 — Errors
 
+Domain-enforcement preconditions terminate the process on programmer
+error (the substrate convention); the table notes both forms.
+
 | Error site | Trigger |
 |---|---|
-| `NMFAlternatingLeastSquares.factor` throws | negative cell in input matrix |
+| `NMFAlternatingLeastSquares.factorize` precondition | non-rectangular, non-finite, or negative cell in `V` |
+| `RandomWalks.walk` precondition | neighbor index outside `[0, N)`, or non-finite/negative weight |
+| `RandomWalks.sampleWeighted` precondition | empty neighbor list |
 | `FFT.forward` / `.inverse` throws | non-power-of-two signal length |
 | `BradleyTerryEstimator.update` throws | `weight ≤ 0` |
 | `PairingHandshake.validate` returns `false` | signature mismatch |
@@ -651,6 +1045,7 @@ returns (empty, `nil`, default-valued).
   - `LLMCalibrationCurveTests.swift`
   - `InformationTheoryTests.swift`
   - `TemporalCompressionTests.swift`
+  - `ConceptImplicationsTests.swift`
 - **Rust:** per-module `#[cfg(test)] mod tests` blocks, plus
   `tests/` for cross-port conformance.
 

@@ -105,10 +105,18 @@ public enum InformationTheory {
 
     /// Normalized mutual information NMI = 2·I(X;Y) / (H(X) + H(Y))
     /// in [0, 1]. Useful for ranking field-field dependence in O.
+    ///
+    /// Returns 0 (the same sentinel `mutualInformation` returns) when
+    /// `joint` is empty or ragged (rows of unequal length). This matches
+    /// the totality contract of `mutualInformation`.
     public static func normalizedMutualInformation(joint: [[Float32]]) -> Float32 {
+        guard !joint.isEmpty else { return 0 }
+        let n = joint[0].count
+        // Ragged matrix: unequal row lengths corrupt the pY accumulation,
+        // producing wrong marginals and wrong NMI. Return the sentinel.
+        guard joint.allSatisfy({ $0.count == n }) else { return 0 }
         let mi = mutualInformation(joint: joint)
         let m = joint.count
-        let n = joint[0].count
         var pX = [Float32](repeating: 0, count: m)
         var pY = [Float32](repeating: 0, count: n)
         for i in 0..<m {

@@ -42,19 +42,25 @@ impl UDCTreeDistance {
     }
 
     /// UDC tree distance normalized to [0, 1].
+    ///
+    /// Formula: raw = (len_a - lcp) + (len_b - lcp), divisor = len_a + len_b.
+    /// Proof of [0,1] bound: raw_max = len_a + len_b when lcp = 0, so
+    /// raw / divisor ≤ 1.0 always. Both-empty is handled by equality
+    /// check above; non-empty vs empty yields len_a + len_b > 0.
     pub fn distance(a: &str, b: &str) -> f64 {
         if a == b {
             return 0.0;
         }
         let len_a = a.chars().count();
         let len_b = b.chars().count();
-        let max_len = len_a.max(len_b);
-        if max_len == 0 {
+        // Guard: both-empty are equal (caught above); at least one non-empty
+        // means len_a + len_b > 0.
+        if len_a + len_b == 0 {
             return 0.0;
         }
         let lcp = Self::longest_common_prefix_length(a, b);
         let raw = ((len_a - lcp) + (len_b - lcp)) as f64;
-        raw / max_len as f64
+        raw / (len_a + len_b) as f64
     }
 }
 
@@ -191,18 +197,39 @@ mod tests {
     #[test]
     fn udc_shared_prefix() {
         // "004.42" vs "004.5": lcp = "004.", len 4. len(a)=6, len(b)=5.
-        // raw = (6-4) + (5-4) = 3. max_len = 6. d = 3/6 = 0.5.
+        // raw = (6-4) + (5-4) = 3. divisor = 6+5 = 11. d = 3/11.
         let d = UDCTreeDistance::distance("004.42", "004.5");
-        assert!((d - 0.5).abs() < 1e-9);
+        assert!((d - 3.0 / 11.0).abs() < 1e-9);
     }
 
     #[test]
     fn udc_no_common_prefix() {
-        // "004" vs "37": lcp = "", raw = 3 + 2 = 5, max_len = 3, d = 5/3.
-        // d > 1 is permitted by the formula; cookbook normalization
-        // is by max(len) not by max(len + len).
+        // "004" vs "37": lcp = "", raw = 3 + 2 = 5, divisor = 3+2 = 5.
+        // d = 5/5 = 1.0 (maximum distance, no shared prefix).
         let d = UDCTreeDistance::distance("004", "37");
-        assert!((d - 5.0 / 3.0).abs() < 1e-9);
+        assert!((d - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn udc_bounded_unit() {
+        // Every fixture output must be in [0.0, 1.0].
+        let pairs: &[(&str, &str)] = &[
+            ("004.42", "004.5"),
+            ("004", "37"),
+            ("", "004"),
+            ("004.42", ""),
+            ("004", "004.42"),
+            ("1", "99999.99999"),
+            ("004.42", "004.42"),
+        ];
+        for &(a, b) in pairs {
+            let d = UDCTreeDistance::distance(a, b);
+            assert!(
+                d >= 0.0 && d <= 1.0,
+                "d={} for ({}, {}) is out of [0,1]",
+                d, a, b
+            );
+        }
     }
 
     #[test]

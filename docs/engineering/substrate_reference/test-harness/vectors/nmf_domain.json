@@ -1,0 +1,77 @@
+{
+  "description": "Domain enforcement conformance vectors for NMFAlternatingLeastSquares. Tests that V >= 0 and V rectangular and V finite are preconditions at the public entry point. Valid inputs produce non-negative factors.",
+  "version": "1.0",
+  "engine": "NMFAlternatingLeastSquares",
+  "preconditions": [
+    {
+      "id": "nmf-domain-001",
+      "name": "ragged_rows_rejected",
+      "description": "V with rows of different lengths triggers precondition",
+      "input": {
+        "V": [[1.0, 2.0], [3.0]],
+        "rank": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "V is not rectangular"
+    },
+    {
+      "id": "nmf-domain-002",
+      "name": "nan_entry_rejected",
+      "description": "V with a NaN entry triggers precondition",
+      "input": {
+        "V": [["NaN", 1.0], [2.0, 3.0]],
+        "rank": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "not finite"
+    },
+    {
+      "id": "nmf-domain-003",
+      "name": "inf_entry_rejected",
+      "description": "V with an infinite entry triggers precondition",
+      "input": {
+        "V": [["Inf", 1.0], [2.0, 3.0]],
+        "rank": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "not finite"
+    },
+    {
+      "id": "nmf-domain-004",
+      "name": "negative_entry_rejected",
+      "description": "V with a negative entry triggers precondition (Lee-Seung requires V >= 0)",
+      "input": {
+        "V": [[-1.0, 2.0], [3.0, 4.0]],
+        "rank": 1
+      },
+      "expected_outcome": "precondition_failure",
+      "expected_message_fragment": "negative"
+    }
+  ],
+  "valid_inputs": [
+    {
+      "id": "nmf-domain-005",
+      "name": "all_zero_matrix_accepted",
+      "description": "All-zero V is valid (V >= 0); factors are non-negative",
+      "input": {
+        "V": [[0.0, 0.0], [0.0, 0.0]],
+        "rank": 1,
+        "seed": 1234
+      },
+      "expected_outcome": "success",
+      "invariants": ["all W entries >= 0", "all H entries >= 0"]
+    },
+    {
+      "id": "nmf-domain-006",
+      "name": "positive_rectangular_matrix_accepted",
+      "description": "Standard positive rectangular V accepted; factors non-negative",
+      "input": {
+        "V": [[4.0, 1.0], [1.0, 5.0]],
+        "rank": 1,
+        "seed": 4321
+      },
+      "expected_outcome": "success",
+      "invariants": ["all W entries >= 0", "all H entries >= 0"]
+    }
+  ]
+}

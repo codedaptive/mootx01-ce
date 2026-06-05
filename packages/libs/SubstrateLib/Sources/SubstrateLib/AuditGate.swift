@@ -33,7 +33,7 @@
 // validator perform no storage access; SubstrateLib stays zero-dep,
 // pure, stateless.
 //
-// Mirror: rust/glref-rust-audit_gate.rs — OWED (M8, I-7/I-11), shape
+// Mirror: rust/src/audit_gate.rs — (M8, I-7/I-11), shape
 // settled on the Swift leg first, then mirrored with shared vectors.
 
 import Foundation
@@ -88,6 +88,43 @@ public struct FieldSlot: Hashable, Sendable {
     }
 }
 
+// MARK: - SubstrateLib adjective vocabulary enums
+//
+// SubstrateLib-local enum types for the four adjective-axis fields.
+// AuditGate.basis derives its legalValues from these enums at compile
+// time, so adding a case automatically extends the gate vocabulary
+// without a manual integer-array update.
+//
+// Raw values are identical to the LocusKit counterparts in
+// LocusKit/Adjectives.swift (State, AdjectiveSensitivity,
+// AdjectiveExportability, Trust). The layer below LocusKit cannot
+// import those types (dependency graph points the other way), so
+// SubstrateLib maintains its own copies. GuardianPairParityTests
+// (LocusKit/Tests) enforces cross-layer parity at CI time.
+
+// @guardian-pair: state-basis AuditState.allCases <-> State.allCases (raw set equality)
+enum AuditState: Int, CaseIterable {
+    case active = 0, pending = 1, contested = 2, accepted = 3
+    case superseded = 16, decayed = 17, withdrawn = 18, expired = 19
+    case rejected = 32, tombstoned = 33
+}
+
+// @guardian-pair: sensitivity-basis AuditSensitivity.allCases <-> AdjectiveSensitivity.allCases (raw set equality)
+enum AuditSensitivity: Int, CaseIterable {
+    case normal = 0, elevated = 16, restricted = 32, secret = 48
+}
+
+// @guardian-pair: exportability-basis AuditExportability.allCases <-> AdjectiveExportability.allCases (raw set equality)
+enum AuditExportability: Int, CaseIterable {
+    case private_ = 0, public_ = 32
+}
+
+// @guardian-pair: trust-basis AuditTrust.allCases <-> Trust.allCases (raw set equality)
+enum AuditTrust: Int, CaseIterable {
+    case verbatim = 0, observed = 1, imported = 2, canonical = 3
+    case derived = 4, proposed = 5, ambient = 6
+}
+
 // MARK: - Vocabulary
 
 /// The admitted vocabulary for an instance: the substrate basis plus
@@ -110,28 +147,20 @@ public struct Vocabulary: Sendable {
         // sensitivity/trust the way it refuses an undeclared field. State
         // additionally gets the verb-consistency check in `admit`.
         //
-        // ──────────────────────────────────────────────────────────────
-        // Quis custodiet ipsos custodes? Who watches the watchmen's
-        // bitmaps? The SwiftSyntax Guardian does — tools/guardian.
-        //
-        // The four legalValues sets below duplicate facts owned in
-        // LocusKit (cannot import: this tier sits below LocusKit).
-        // Touch one side and the Guardian warns at your desk, before
-        // it ships. Test backstop: GuardianPairParityTests.
-        // ──────────────────────────────────────────────────────────────
-        //
-        // @guardian-pair: state-basis AuditGate.basis[state].legalValues <-> State.allCases (raw set equality)
+        // legalValues are derived from the SubstrateLib-local adjective
+        // enums (AuditState, AuditSensitivity, AuditExportability,
+        // AuditTrust). Adding a case to one of those enums automatically
+        // extends the gate vocabulary without a manual integer update.
+        // Cross-layer parity vs LocusKit's types is enforced by
+        // GuardianPairParityTests in LocusKitTests.
         FieldSlot(column: .adjective, shift: 0,  width: 6, label: "state",
-                  legalValues: [0,1,2,3,16,17,18,19,32,33]),
-        // @guardian-pair: sensitivity-basis AuditGate.basis[sensitivity].legalValues <-> AdjectiveSensitivity.allCases (raw set equality)
+                  legalValues: Set(AuditState.allCases.map { Int64($0.rawValue) })),
         FieldSlot(column: .adjective, shift: 6,  width: 6, label: "sensitivity",
-                  legalValues: [0,16,32,48]),
-        // @guardian-pair: exportability-basis AuditGate.basis[exportability].legalValues <-> AdjectiveExportability.allCases (raw set equality)
+                  legalValues: Set(AuditSensitivity.allCases.map { Int64($0.rawValue) })),
         FieldSlot(column: .adjective, shift: 12, width: 6, label: "exportability",
-                  legalValues: [0,32]),
-        // @guardian-pair: trust-basis AuditGate.basis[trust].legalValues <-> Trust.allCases (raw set equality)
+                  legalValues: Set(AuditExportability.allCases.map { Int64($0.rawValue) })),
         FieldSlot(column: .adjective, shift: 18, width: 6, label: "trust",
-                  legalValues: [0,1,2,3,4,5,6]),
+                  legalValues: Set(AuditTrust.allCases.map { Int64($0.rawValue) })),
         // flags: a 3-bit bitset spanning adjective bits 24-26, any
         // value fits the width.
         //   bit 24 = state_extension     (cookbook §2.3; hint that the

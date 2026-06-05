@@ -11,6 +11,12 @@ impl CompositeDistance {
     pub const FINGERPRINT_TOTAL_BITS: usize = 256;
 
     /// Composite distance between two rows.
+    ///
+    /// Both component distances must be in [0, 1]; callers that pass
+    /// out-of-range values will trip the debug assertions below.
+    /// `lattice_distance` is guaranteed in-range by `UDCTreeDistance` and
+    /// `WikidataGraphDistance` after the normalization fix.
+    /// `fingerprint_hamming_distance` must not exceed `FINGERPRINT_TOTAL_BITS` (256).
     pub fn distance(
         lattice_distance: f64,
         fingerprint_hamming_distance: usize,
@@ -18,6 +24,17 @@ impl CompositeDistance {
         alpha_fingerprint: f64,
         compatible_seed_scope: bool,
     ) -> f64 {
+        debug_assert!(
+            lattice_distance >= 0.0 && lattice_distance <= 1.0,
+            "lattice_distance must be in [0, 1]; got {}",
+            lattice_distance
+        );
+        debug_assert!(
+            fingerprint_hamming_distance <= Self::FINGERPRINT_TOTAL_BITS,
+            "fingerprint_hamming_distance {} exceeds total bits {}",
+            fingerprint_hamming_distance,
+            Self::FINGERPRINT_TOTAL_BITS
+        );
         let lat_part = alpha_lattice * lattice_distance;
         if !compatible_seed_scope {
             return lat_part;

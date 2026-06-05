@@ -1,0 +1,112 @@
+{
+  "name": "glk_rust_write_path",
+  "description": "EstateCoordinator write-path conformance vectors: add_kg_fact, withdraw_kg_fact, add_diary_entry, diary_entries. Parity surface: VerbSurface.swift (captureKGFact, retireKGFact) and DreamingWrites.swift (addDiaryEntry, readDiaryEntries).",
+  "version": "1",
+  "cases": [
+    {
+      "id": "add_kg_fact_basic",
+      "description": "add_kg_fact stores the fact with adjective_bitmap = 0 (State::Active). The row appears in recall_kg_facts (g_state_cluster 0 < 7).",
+      "operation": "add_kg_fact",
+      "input": {
+        "subject": "Alice",
+        "predicate": "knows",
+        "object": "Bob",
+        "source_drawer_id": "src-1",
+        "now": 1700000000
+      },
+      "expected": {
+        "adjective_bitmap": 0,
+        "subject": "Alice",
+        "predicate": "knows",
+        "object": "Bob",
+        "source_drawer_id": "src-1",
+        "filed_at": 1700000000,
+        "appears_in_recall": true
+      }
+    },
+    {
+      "id": "withdraw_kg_fact_state_transition",
+      "description": "withdraw_kg_fact sets adjective_bitmap bits 0-5 to State::Withdrawn (raw 18). g_state_cluster becomes 18 >= 7, so the fact is excluded from recall_kg_facts active filter.",
+      "operation": "withdraw_kg_fact",
+      "precondition": "fact with adjective_bitmap = 0 exists",
+      "expected": {
+        "adjective_bitmap_bits_0_5": 18,
+        "appears_in_recall": false,
+        "upper_bits_preserved": true
+      }
+    },
+    {
+      "id": "withdraw_kg_fact_upper_bits_preserved",
+      "description": "withdraw_kg_fact masks only bits 0-5. Upper bits (sensitivity, exportability, trust, flags) are preserved unchanged. Formula: new_bitmap = (old_bitmap & !0x3F) | 18.",
+      "operation": "withdraw_kg_fact",
+      "precondition": "fact with adjective_bitmap = 0x0000000000000040 (sensitivity bit set)",
+      "expected": {
+        "adjective_bitmap": "0x0000000000000052",
+        "note": "0x40 (bit 6) preserved; bits 0-5 set to 18 (0x12)"
+      }
+    },
+    {
+      "id": "add_diary_entry_wing_convention",
+      "description": "add_diary_entry sets wing = 'wing_<agent_name>' and room = 'diary'. Mirrors the Swift DreamingWrites / DrawerStore wing-per-agent convention.",
+      "operation": "add_diary_entry",
+      "input": {
+        "agent_name": "skippy",
+        "entry": "session note",
+        "topic": "session-2026-06-05",
+        "embedding_model_id": "text-embedding-3-small",
+        "now": 1700000000
+      },
+      "expected": {
+        "agent_name": "skippy",
+        "wing": "wing_skippy",
+        "room": "diary",
+        "entry": "session note",
+        "topic": "session-2026-06-05",
+        "embedding_model_id": "text-embedding-3-small",
+        "filed_at": 1700000000
+      }
+    },
+    {
+      "id": "add_diary_entry_empty_model_id",
+      "description": "When embedding_model_id is empty, add_diary_entry substitutes 'no-embedding'. Mirrors Swift DreamingWrites.addDiaryEntry guard: autonomous diary writes carry no embedding.",
+      "operation": "add_diary_entry",
+      "input": {
+        "agent_name": "bilby",
+        "entry": "work log",
+        "topic": "mission-abc",
+        "embedding_model_id": "",
+        "now": 1700000000
+      },
+      "expected": {
+        "embedding_model_id": "no-embedding"
+      }
+    },
+    {
+      "id": "diary_entries_last_n",
+      "description": "diary_entries returns at most last_n entries, newest first. Multiple entries for the same agent are capped by last_n.",
+      "operation": "diary_entries",
+      "precondition": "5 entries added for agent 'skippy' at filed_at 1700000000..1700000004",
+      "input": {
+        "agent_name": "skippy",
+        "last_n": 3
+      },
+      "expected": {
+        "count": 3
+      }
+    },
+    {
+      "id": "diary_entries_agent_isolation",
+      "description": "diary_entries filters by agent_name. Entries from other agents do not appear in the result.",
+      "operation": "diary_entries",
+      "precondition": "1 entry for 'skippy', 1 entry for 'bilby'",
+      "input": {
+        "agent_name": "skippy",
+        "last_n": 10
+      },
+      "expected": {
+        "count": 1,
+        "all_agent_names": ["skippy"]
+      }
+    }
+  ]
+}

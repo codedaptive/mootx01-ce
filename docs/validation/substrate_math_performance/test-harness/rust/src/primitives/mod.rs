@@ -1,6 +1,8 @@
 // src/primitives/mod.rs
 
 pub mod anomaly;
+pub mod association_rule_mining;
+pub mod formal_concept_analysis;
 pub mod audit_log_fold;
 pub mod bit_field_masked_equals;
 pub mod bitwise;

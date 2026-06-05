@@ -5,6 +5,8 @@
 
 use crate::harness::vector_file::VectorFile;
 use crate::primitives::anomaly::AnomalyPrimitive;
+use crate::primitives::association_rule_mining::AssociationRuleMiningPrimitive;
+use crate::primitives::formal_concept_analysis::FormalConceptAnalysisPrimitive;
 use crate::primitives::audit_log_fold::AuditLogFoldPrimitive;
 use crate::primitives::bit_field_masked_equals::BitFieldMaskedEqualsPrimitive;
 use crate::primitives::bitwise::BitwisePrimitive;
@@ -54,6 +56,8 @@ pub fn all_primitives() -> Vec<PrimitiveDescriptor> {
     vec![
         SimHashPrimitive::descriptor(),
         AnomalyPrimitive::descriptor(),
+        AssociationRuleMiningPrimitive::descriptor(),
+        FormalConceptAnalysisPrimitive::descriptor(),
         HammingPrimitive::descriptor(),
         ORReducePrimitive::descriptor(),
         BitwisePrimitive::descriptor(),

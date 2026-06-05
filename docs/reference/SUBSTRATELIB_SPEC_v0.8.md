@@ -133,6 +133,14 @@ Orchestration-specific:
   outside the declared range is rejected; a write that mutates a
   bit outside the declared field width is rejected. Corruption
   is unrepresentable through the gate.
+- **O-5.** AuditGate's basis vocabulary is derived from typed
+  enums, not hardcoded integer arrays. The four SubstrateLib-local
+  CaseIterable enums (`AuditState`, `AuditSensitivity`,
+  `AuditExportability`, `AuditTrust`) are the single source of truth
+  for the legal values of each adjective-axis basis slot. Adding a
+  new enum case automatically extends the gate vocabulary. Cross-layer
+  parity vs LocusKit's adjective types is enforced by
+  `GuardianPairParityTests` at CI time.
 
 ## § 5 — Behavioral contracts
 
@@ -201,7 +209,12 @@ The "corruption is unrepresentable" guarantee:
 
 - Vocabulary validation: every FieldWrite's slot must be declared
   in the vocabulary; the value must fit the slot's width; the
-  value must be in the slot's legal range.
+  value must be in the slot's legal range. The basis FieldSlots'
+  legal-value sets are derived from SubstrateLib-local CaseIterable
+  enums (`AuditState`, `AuditSensitivity`, `AuditExportability`,
+  `AuditTrust`) — no hardcoded integer arrays. Cross-layer parity
+  vs LocusKit's adjective types is enforced by
+  `GuardianPairParityTests`.
 - Basis validation: after merging the writes into the prior, the
   resulting state must satisfy the row-state automaton
   (`RowStateAutomaton.validate`).
@@ -236,11 +249,11 @@ The package raises:
 
 ## § 7 — Conformance requirements
 
-Per I-7 (cross-leg bit-identity) and ML-5 (federation determinism),
+Per I-7 (cross-port bit-identity) and ML-5 (federation determinism),
 this package ships conformance vectors:
 
 - **AuditGate vectors:** identical events emitted for identical
-  inputs across Swift and Rust versions. Includes content-ID hash
+  inputs across Swift and Rust ports. Includes content-ID hash
   identity.
 - **RowStateAutomaton vectors:** every (state, verb) pair returns
   the same next state (or the same error) across ports.
