@@ -1,37 +1,33 @@
 import Testing
 import Foundation
-import AriaLexiconLib
 import GeniusLocusKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
 
-/// ARIA_MCP dispatch tests closing the 6 projected-but-dead lexicon tools
-/// (SWIFT_LEXICON_GAPS_001). Covers:
+/// Dispatch tests for Tier 3 (Knowledge Graph) and Tier 4 (Journal) tools.
 ///
-///   - moot_capture_tunnel: live handler, happy path, arg-validation failure
-///   - moot_kgFact_recall, moot_diaryEntry_recall, moot_proposal_recall,
-///     moot_association_recall, moot_learnedReference_recall: live read handlers
-///     (isError false, returning "recalled 0 X(s)" on a fresh estate), matching
-///     the Rust leg's text_result output for the same tools.
-///   - Schema assertions for all 6 tools: required arrays + property keys,
-///     byte-parity with the Rust leg's lexicon_schema output.
+/// These tests replace the SWIFT_LEXICON_GAPS_001 lexicon-based tests
+/// (MCP-INT-01 surface replacement). The old lexicon surface tools this
+/// file covered — `moot_capture_tunnel`, `moot_kgFact_recall`,
+/// `moot_diaryEntry_recall`, `moot_proposal_recall`, `moot_association_recall`,
+/// `moot_learnedReference_recall` — no longer exist on the AI-client surface.
 ///
-/// Wire identity: tool names, schema property keys, and required arrays must
-/// match the Rust server (rust/src/tool_list.rs lexicon_schema) byte for byte.
+/// Tier 3 KG tools: `moot_file_fact`, `moot_fact_search`, `moot_retire_fact`,
+/// `moot_fact_timeline`.
+/// Tier 4 Journal tools: `moot_write_journal`, `moot_read_journal`.
 ///
 /// `.serialized`: each live-estate test opens an in-memory estate; preserve
 /// one-at-a-time execution to prevent GeniusLocusKit actor contention.
-@Suite("Lexicon gaps (SWIFT_LEXICON_GAPS_001)", .serialized)
+@Suite("KG and Journal dispatch", .serialized)
 struct LexiconGapsTests {
 
     // MARK: - Harness
 
-    /// Build a fresh dispatcher wired to a clean in-memory estate.
     private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
         let kit = GeniusLocusKit()
-        let owner = OwnerCredentials(ownerIdentifier: "lexicon-gaps-tests")
+        let owner = OwnerCredentials(ownerIdentifier: "kg-journal-tests")
         let storage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
@@ -42,267 +38,287 @@ struct LexiconGapsTests {
         return ARIA_MCPDispatcher(info: info, tooling: tooling)
     }
 
-    // MARK: - moot_capture_tunnel: happy path
+    // MARK: - Tier 3: moot_file_fact
 
-    /// Capturing a tunnel through the MCP surface returns a success result
-    /// whose text starts with "captured tunnel". Exercises the live
-    /// (.capture, .tunnel) dispatch arm added in SWIFT_LEXICON_GAPS_001.
-    @Test("moot_capture_tunnel happy path returns captured tunnel id")
-    func captureTunnelHappyPath() async throws {
+    @Test("moot_file_fact happy path returns success result with fact id")
+    func fileFactHappyPath() async throws {
         let dispatcher = try await makeDispatcher()
-
         let request = JSONRPCRequest(
             id: .integer(1),
             method: "tools/call",
             params: .object([
-                "name": .string("moot_capture_tunnel"),
+                "name": .string("moot_file_fact"),
                 "arguments": .object([
-                    "sourceWing": .string("wing-a"),
-                    "sourceRoom": .string("room-src"),
-                    "targetWing": .string("wing-b"),
-                    "targetRoom": .string("room-dst"),
-                    "kind": .string("supports"),
-                    "addedBy": .string("lexicon-gaps-tests"),
+                    "subject": .string("carbon"),
+                    "predicate": .string("is_a"),
+                    "object": .string("element"),
                 ]),
             ])
         )
         let rawResponse = await dispatcher.handle(request)
         let response = try #require(rawResponse)
         guard case .result(let result) = response.payload else {
-            Issue.record("moot_capture_tunnel returned JSON-RPC error: \(response.payload)")
+            Issue.record("moot_file_fact returned JSON-RPC error: \(response.payload)")
             return
         }
         let obj = try #require(result.objectValue)
-        #expect(obj["isError"] == .bool(false), "capture_tunnel must be a success result")
+        #expect(obj["isError"] == .bool(false), "file_fact must return isError=false")
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue,
             "content[0].text must be present"
         )
-        #expect(
-            text.hasPrefix("captured tunnel"),
-            "result text must start with 'captured tunnel'; got: \(text)"
-        )
+        #expect(text.hasPrefix("filed fact "), "result must start with 'filed fact'; got: \(text)")
     }
 
-    // MARK: - moot_capture_tunnel: arg-validation failure
-
-    /// Omitting a required argument (`sourceWing`) is an out-of-band
-    /// invalidParams transport fault, not a tool-level error result.
-    @Test("moot_capture_tunnel without sourceWing returns invalidParams")
-    func captureTunnelMissingArgReturnsInvalidParams() async throws {
+    @Test("moot_file_fact without required subject returns invalidParams")
+    func fileFactMissingSubjectReturnsInvalidParams() async throws {
         let dispatcher = try await makeDispatcher()
-
         let request = JSONRPCRequest(
             id: .integer(2),
             method: "tools/call",
             params: .object([
-                "name": .string("moot_capture_tunnel"),
+                "name": .string("moot_file_fact"),
                 "arguments": .object([
-                    // sourceWing omitted intentionally
-                    "sourceRoom": .string("room-src"),
-                    "targetWing": .string("wing-b"),
-                    "targetRoom": .string("room-dst"),
-                    "kind": .string("supports"),
-                    "addedBy": .string("lexicon-gaps-tests"),
+                    // subject intentionally omitted
+                    "predicate": .string("is_a"),
+                    "object": .string("element"),
                 ]),
             ])
         )
         let rawResponse = await dispatcher.handle(request)
         let response = try #require(rawResponse)
         guard case .error(let error) = response.payload else {
-            Issue.record("missing sourceWing must produce JSON-RPC error, got: \(response.payload)")
+            Issue.record("missing subject must produce JSON-RPC error, got: \(response.payload)")
             return
         }
-        #expect(
-            error.code == JSONRPCErrorCode.invalidParams,
-            "missing sourceWing must map to invalidParams; got code \(error.code)"
-        )
+        #expect(error.code == JSONRPCErrorCode.invalidParams)
     }
 
-    // MARK: - Recall live-read tests
+    // MARK: - Tier 3: moot_fact_search
 
-    /// moot_kgFact_recall returns a live success result (isError false) because
-    /// the substrate now has `DrawerStore.allKGFacts()` — an estate-wide kg-fact
-    /// read accessor. Matches the Rust leg's Ok(empty vec) on a fresh estate.
-    @Test("moot_kgFact_recall returns live recall result (isError false)")
-    func kgFactRecallReturnsLiveResult() async throws {
+    @Test("moot_fact_search on empty estate returns success with zero facts")
+    func factSearchEmptyEstateReturnsZero() async throws {
         let dispatcher = try await makeDispatcher()
-        try await assertLiveRecall(
-            dispatcher: dispatcher,
-            toolName: "moot_kgFact_recall",
-            id: 10
-        )
-    }
-
-    /// moot_diaryEntry_recall returns a live success result. Substrate now has
-    /// `DrawerStore.allDiaryEntries()` — an estate-wide diary-entry accessor.
-    @Test("moot_diaryEntry_recall returns live recall result (isError false)")
-    func diaryEntryRecallReturnsLiveResult() async throws {
-        let dispatcher = try await makeDispatcher()
-        try await assertLiveRecall(
-            dispatcher: dispatcher,
-            toolName: "moot_diaryEntry_recall",
-            id: 11
-        )
-    }
-
-    /// moot_proposal_recall returns a live success result. Substrate now has
-    /// `DrawerStore.allProposals()` — an estate-wide proposals accessor.
-    @Test("moot_proposal_recall returns live recall result (isError false)")
-    func proposalRecallReturnsLiveResult() async throws {
-        let dispatcher = try await makeDispatcher()
-        try await assertLiveRecall(
-            dispatcher: dispatcher,
-            toolName: "moot_proposal_recall",
-            id: 12
-        )
-    }
-
-    /// moot_association_recall returns a live success result. Substrate now has
-    /// `DrawerStore.allAssociations()` — an estate-wide associations accessor.
-    @Test("moot_association_recall returns live recall result (isError false)")
-    func associationRecallReturnsLiveResult() async throws {
-        let dispatcher = try await makeDispatcher()
-        try await assertLiveRecall(
-            dispatcher: dispatcher,
-            toolName: "moot_association_recall",
-            id: 13
-        )
-    }
-
-    /// moot_learnedReference_recall returns a live success result. Substrate now
-    /// has `DrawerStore.allLearnedReferences()` — an estate-wide learned
-    /// references accessor.
-    @Test("moot_learnedReference_recall returns live recall result (isError false)")
-    func learnedReferenceRecallReturnsLiveResult() async throws {
-        let dispatcher = try await makeDispatcher()
-        try await assertLiveRecall(
-            dispatcher: dispatcher,
-            toolName: "moot_learnedReference_recall",
-            id: 14
-        )
-    }
-
-    /// Shared assertion: the named tool must return a tool-level success result
-    /// (isError false, content present with "recalled" text) NOT a JSON-RPC
-    /// transport fault when called with empty arguments. The call reached the
-    /// dispatch surface, the substrate returned Ok, the client retains the call
-    /// ID. Matches the Rust leg's text_result output on a fresh estate.
-    private func assertLiveRecall(
-        dispatcher: ARIA_MCPDispatcher,
-        toolName: String,
-        id: Int64
-    ) async throws {
         let request = JSONRPCRequest(
-            id: .integer(id),
+            id: .integer(3),
             method: "tools/call",
             params: .object([
-                "name": .string(toolName),
+                "name": .string("moot_fact_search"),
                 "arguments": .object([:]),
             ])
         )
         let rawResponse = await dispatcher.handle(request)
         let response = try #require(rawResponse)
         guard case .result(let result) = response.payload else {
-            Issue.record("\(toolName) must return a tool-level result (not JSON-RPC error)")
+            Issue.record("moot_fact_search returned JSON-RPC error: \(response.payload)")
             return
         }
         let obj = try #require(result.objectValue)
-        #expect(
-            obj["isError"] == JSONValue.bool(false),
-            "\(toolName) must return isError=false (live recall)"
+        #expect(obj["isError"] == .bool(false), "fact_search must return isError=false on empty estate")
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
         )
-        let text = obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
-        #expect(
-            text != nil && !(text?.isEmpty ?? true),
-            "\(toolName) live recall must include non-empty text content"
-        )
-        #expect(
-            text?.contains("recalled") == true,
-            "\(toolName) live recall text must contain 'recalled'; got: \(text ?? "nil")"
-        )
+        #expect(text.contains("0"), "empty estate must report zero facts; got: \(text)")
     }
 
-    // MARK: - Schema assertions: all 6 tools
+    @Test("moot_fact_search returns filed facts")
+    func factSearchReturnsFacts() async throws {
+        let dispatcher = try await makeDispatcher()
 
-    /// moot_capture_tunnel schema has the 6 required args from the Rust leg's
-    /// lexicon_schema(Verb::Capture, Noun::Tunnel) and carries optional estateID.
-    ///
-    /// Required (Rust-grounded): sourceWing, sourceRoom, targetWing, targetRoom,
-    /// kind, addedBy. Optional: sourceDrawerID, targetDrawerID, estateID.
-    @Test("moot_capture_tunnel schema matches Rust required array and property keys")
-    func captureTunnelSchemaMatchesRust() throws {
-        let tool = try #require(
-            ToolProjection.tools().first(where: { $0.name == "moot_capture_tunnel" }),
-            "moot_capture_tunnel must appear in the projected tool list"
+        // File a fact first.
+        _ = await dispatcher.handle(JSONRPCRequest(
+            id: .integer(0),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_file_fact"),
+                "arguments": .object([
+                    "subject": .string("iron"),
+                    "predicate": .string("has_property"),
+                    "object": .string("magnetic"),
+                ]),
+            ])
+        ))
+
+        let request = JSONRPCRequest(
+            id: .integer(4),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_fact_search"),
+                "arguments": .object([:]),
+            ])
         )
-        guard case .lexicon(let verb, let noun) = tool.provenance else {
-            Issue.record("moot_capture_tunnel must have lexicon provenance")
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("moot_fact_search returned JSON-RPC error: \(response.payload)")
             return
         }
-        #expect(verb == .capture)
-        #expect(noun == .tunnel)
-
-        let schema = try #require(tool.inputSchema.objectValue, "inputSchema must be an object")
-        let properties = try #require(schema["properties"]?.objectValue, "properties must be present")
-        let required = schema["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
-
-        // Required args — wire-identical to Rust (tool_list.rs lexicon_schema Capture Tunnel).
-        let expectedRequired = ["sourceWing", "sourceRoom", "targetWing", "targetRoom", "kind", "addedBy"]
-        for key in expectedRequired {
-            #expect(required.contains(key), "\(key) must be in required; got: \(required)")
-            #expect(properties[key] != nil, "\(key) must be in properties")
-        }
-        // Optional args in the schema.
-        #expect(properties["sourceDrawerID"] != nil, "sourceDrawerID must be in properties")
-        #expect(properties["targetDrawerID"] != nil, "targetDrawerID must be in properties")
-        // estateID injected by withEstateID wrapper — optional, never required.
-        #expect(properties["estateID"] != nil, "estateID must be an optional property")
-        #expect(!required.contains("estateID"), "estateID must not be required")
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"] == .bool(false))
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
+        )
+        #expect(text.contains("iron"), "fact_search must return filed facts; got: \(text)")
     }
 
-    /// Schema assertions for the 5 recall-stub tools. Each must appear in
-    /// tools/list with the standard recall frame schema (filter, limit, ordering,
-    /// hydrationLevel, all optional) — wire-identical to the Rust leg's generic
-    /// Verb::Recall arm in lexicon_schema. No required fields. estateID optional.
-    @Test("recall stub schemas carry standard recall frame fields and optional estateID")
-    func recallStubSchemasMatchRust() throws {
-        let recallTools = [
-            ("moot_kgFact_recall",            Noun.kgFact),
-            ("moot_diaryEntry_recall",        Noun.diaryEntry),
-            ("moot_proposal_recall",          Noun.proposal),
-            ("moot_association_recall",       Noun.association),
-            ("moot_learnedReference_recall",  Noun.learnedReference),
-        ]
-        let allTools = ToolProjection.tools()
-        for (toolName, expectedNoun) in recallTools {
-            guard let tool = allTools.first(where: { $0.name == toolName }) else {
-                Issue.record("\(toolName) must appear in the projected tool list")
-                continue
-            }
-            guard case .lexicon(let verb, let noun) = tool.provenance else {
-                Issue.record("\(toolName) must have lexicon provenance")
-                continue
-            }
-            #expect(verb == .recall, "\(toolName) must project from .recall verb")
-            #expect(noun == expectedNoun, "\(toolName) must project from .\(expectedNoun) noun")
+    // MARK: - Tier 3: moot_retire_fact
 
-            let schema = tool.inputSchema.objectValue
-            let properties = schema?["properties"]?.objectValue
-            let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
-
-            // Standard recall frame fields — all optional, matching Rust generic Recall arm.
-            for key in ["filter", "limit", "ordering", "hydrationLevel"] {
-                #expect(
-                    properties?[key] != nil,
-                    "\(toolName) must have '\(key)' in properties"
-                )
-            }
-            // No required fields in the standard recall frame (empty required array).
-            #expect(required.isEmpty, "\(toolName) must have empty required array; got: \(required)")
-            // estateID injected by withEstateID — optional, never required.
-            #expect(properties?["estateID"] != nil, "\(toolName) must have optional estateID property")
-            #expect(!required.contains("estateID"), "\(toolName) estateID must not be required")
+    @Test("moot_retire_fact for nonexistent id returns isError result")
+    func retireFactNonexistentIDReturnsError() async throws {
+        let dispatcher = try await makeDispatcher()
+        let request = JSONRPCRequest(
+            id: .integer(5),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_retire_fact"),
+                "arguments": .object(["id": .string("nonexistent-fact-id")]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("moot_retire_fact returned JSON-RPC error: \(response.payload)")
+            return
         }
+        let obj = try #require(result.objectValue)
+        // Not found = substrate refusal → isError=true tool result, not JSON-RPC error.
+        #expect(obj["isError"] == .bool(true), "retiring nonexistent fact must return isError=true")
+    }
+
+    // MARK: - Tier 3: moot_fact_timeline
+
+    @Test("moot_fact_timeline on empty estate returns success result")
+    func factTimelineEmptyEstateReturnsSuccess() async throws {
+        let dispatcher = try await makeDispatcher()
+        let request = JSONRPCRequest(
+            id: .integer(6),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_fact_timeline"),
+                "arguments": .object([:]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("moot_fact_timeline returned JSON-RPC error: \(response.payload)")
+            return
+        }
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"] == .bool(false), "fact_timeline must return isError=false")
+    }
+
+    // MARK: - Tier 4: moot_write_journal
+
+    @Test("moot_write_journal happy path returns success result")
+    func writeJournalHappyPath() async throws {
+        let dispatcher = try await makeDispatcher()
+        let request = JSONRPCRequest(
+            id: .integer(7),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_write_journal"),
+                "arguments": .object([
+                    "entry": .string("decided to approach the problem using BFS over DFS"),
+                    "agent": .string("test-agent"),
+                ]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("moot_write_journal returned JSON-RPC error: \(response.payload)")
+            return
+        }
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"] == .bool(false), "write_journal must return isError=false")
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
+        )
+        #expect(text.contains("test-agent"), "result must mention the agent name; got: \(text)")
+    }
+
+    @Test("moot_write_journal without content returns invalidParams")
+    func writeJournalMissingContentReturnsInvalidParams() async throws {
+        let dispatcher = try await makeDispatcher()
+        let request = JSONRPCRequest(
+            id: .integer(8),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_write_journal"),
+                "arguments": .object([:]),  // content intentionally omitted
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .error(let error) = response.payload else {
+            Issue.record("missing content must produce JSON-RPC error, got: \(response.payload)")
+            return
+        }
+        #expect(error.code == JSONRPCErrorCode.invalidParams)
+    }
+
+    // MARK: - Tier 4: moot_read_journal
+
+    @Test("moot_read_journal on empty estate returns success result")
+    func readJournalEmptyEstateReturnsSuccess() async throws {
+        let dispatcher = try await makeDispatcher()
+        let request = JSONRPCRequest(
+            id: .integer(9),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_read_journal"),
+                "arguments": .object(["agent": .string("nobody")]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("moot_read_journal returned JSON-RPC error: \(response.payload)")
+            return
+        }
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"] == .bool(false), "read_journal must return isError=false")
+    }
+
+    @Test("moot_write_journal then moot_read_journal round-trips the entry")
+    func writeJournalThenReadReturnsEntry() async throws {
+        let dispatcher = try await makeDispatcher()
+
+        // Write an entry.
+        _ = await dispatcher.handle(JSONRPCRequest(
+            id: .integer(0),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_write_journal"),
+                "arguments": .object([
+                    "entry": .string("journal round-trip test entry"),
+                    "agent": .string("rt-agent"),
+                ]),
+            ])
+        ))
+
+        // Read it back.
+        let request = JSONRPCRequest(
+            id: .integer(10),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_read_journal"),
+                "arguments": .object(["agent": .string("rt-agent"), "last_n": .integer(5)]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        let response = try #require(rawResponse)
+        guard case .result(let result) = response.payload else {
+            Issue.record("moot_read_journal returned JSON-RPC error: \(response.payload)")
+            return
+        }
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"] == .bool(false))
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
+        )
+        #expect(text.contains("journal round-trip test entry"),
+            "read_journal must return the entry written; got: \(text)")
     }
 }

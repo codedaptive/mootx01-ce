@@ -8,12 +8,13 @@
 // loop confirms the migration promotion.
 //
 // Four foundational tools ship here:
-//   - moot_list_recipes               → RecipeCatalog enumeration (read)
-//   - moot_grounded_synthesis         → GroundedSynthesis recipe (read)
-//   - moot_run_migration_benchmark    → MigrationBenchmark.run (read; no
-//                                        promotion — B-3)
-//   - moot_confirm_migration_promotion → MigrationBenchmark.confirmPromotion
-//                                        by branch id (the human-gated write)
+//   - moot_list_lenses           → ProjectedTool descriptor enumeration
+//                                   (LensTools + RecipeTools, Tier 6 only — read)
+//   - moot_synthesize            → GroundedSynthesis recipe (read)
+//   - moot_run_migration         → MigrationBenchmark.run (read; no
+//                                   promotion — B-3)
+//   - moot_confirm_migration     → MigrationBenchmark.confirmPromotion
+//                                   by branch id (the human-gated write)
 //
 // The analytics recipes (moot_association_rules, moot_formal_concepts) and
 // all 14 reasoning-lens recipes ship through LensTools.swift — same
@@ -40,10 +41,10 @@ enum RecipeTools {
 
     // MARK: - Tool names
 
-    static let listRecipesToolName = "moot_list_recipes"
-    static let groundedSynthesisToolName = "moot_grounded_synthesis"
-    static let runMigrationBenchmarkToolName = "moot_run_migration_benchmark"
-    static let confirmMigrationPromotionToolName = "moot_confirm_migration_promotion"
+    static let listRecipesToolName = "moot_list_lenses"
+    static let groundedSynthesisToolName = "moot_synthesize"
+    static let runMigrationBenchmarkToolName = "moot_run_migration"
+    static let confirmMigrationPromotionToolName = "moot_confirm_migration"
 
     /// True when `name` is one of the foundational recipe tools dispatched by name.
     static func isRecipeTool(_ name: String) -> Bool {
@@ -67,14 +68,14 @@ enum RecipeTools {
         ]
     }
 
-    /// The recipe-discovery tool. Reads `RecipeCatalog` so the surfaced
-    /// list stays in lockstep with the shipped recipes — a new recipe
-    /// registered in the catalog appears here automatically. Takes no
-    /// arguments; it is the conscious mind enumerating its own behaviours.
+    /// The cognition-discovery tool. At runtime (`runListRecipes`), returns
+    /// one block per Tier 6 tool drawn from `LensTools.tools()` and the two
+    /// non-migration entries in `RecipeTools.tools()` — not `RecipeCatalog`.
+    /// Takes no arguments; it is the conscious mind enumerating its surface.
     private static func listRecipesTool() -> ProjectedTool {
         ProjectedTool(
             name: listRecipesToolName,
-            description: "List the available CognitionKit behaviour recipes — each with its version, description, and the NeuronKit capabilities it requires.",
+            description: "List the available reasoning lenses and CognitionKit behaviour recipes — each with its version, description, and the NeuronKit capabilities it requires.",
             inputSchema: objectSchema(properties: [:], required: []),
             provenance: .recipe)
     }
@@ -82,7 +83,7 @@ enum RecipeTools {
     private static func groundedSynthesisTool() -> ProjectedTool {
         ProjectedTool(
             name: groundedSynthesisToolName,
-            description: "Behaviour recipe: hybrid-recall a query and synthesize the recalled drawers into a single grounded context document (summary, patterns, success rate, recommendations, key insights).",
+            description: "Synthesize memories into a grounded context document: hybrid-recall and summarise into patterns, success rate, recommendations, and key insights.",
             inputSchema: objectSchema(
                 properties: [
                     "filter": stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve."),
@@ -96,7 +97,7 @@ enum RecipeTools {
     private static func runMigrationBenchmarkTool() -> ProjectedTool {
         ProjectedTool(
             name: runMigrationBenchmarkToolName,
-            description: "Behaviour recipe: derive one COW branch per migration plan, populate each from the origin corpus, benchmark recall fidelity with the zero-silent-loss gate, and rank survivors. Never promotes — returns branch ids for a separate confirm step.",
+            description: "Run a migration benchmark: derive COW branches, populate from origin corpus, benchmark recall fidelity, and rank survivors. Returns branch ids for a separate confirm step. Never promotes automatically.",
             inputSchema: objectSchema(
                 properties: [
                     "corpusName": stringSchema("Human-readable name for the origin corpus."),
@@ -136,7 +137,7 @@ enum RecipeTools {
     private static func confirmMigrationPromotionTool() -> ProjectedTool {
         ProjectedTool(
             name: confirmMigrationPromotionToolName,
-            description: "Behaviour recipe (human-confirmed write): promote a migration-benchmark winner branch into the estate and discard the losers, by branch id. Refuses to promote a branch the run report disqualified.",
+            description: "Confirm a migration: promote the winning branch into the estate and discard the losers, by branch id. Refuses to promote any branch the run report disqualified.",
             inputSchema: objectSchema(
                 properties: [
                     "winnerBranchID": stringSchema("UUID of the winning branch to promote (from the run report)."),
@@ -172,7 +173,7 @@ enum RecipeTools {
         resolveHandle: ([String: JSONValue]) throws -> EstateHandle
     ) async throws -> JSONValue {
         // Recipe discovery needs no estate; answer it before resolving a
-        // handle so `moot_list_recipes` works even with no estate targeted.
+        // handle so `moot_list_lenses` works even with no estate targeted.
         if name == listRecipesToolName {
             return runListRecipes()
         }
@@ -191,20 +192,39 @@ enum RecipeTools {
         }
     }
 
-    // MARK: - list_recipes
+    // MARK: - list_lenses (cognition menu)
 
-    /// Render the recipe catalog as a text listing. Pure read over
-    /// `RecipeCatalog` — no estate, no substrate touch.
+    /// Return a one-block-per-tool cognition menu drawn from the shipped
+    /// `ProjectedTool` descriptors. Shows name, description, and required
+    /// args for each Tier 6 cognition tool — the 16 lens tools plus
+    /// `moot_synthesize` and `moot_list_lenses` itself.
+    /// Migration tools (Tier 7) are intentionally excluded here; they have
+    /// their own teachme guides and a separate caller workflow.
     private static func runListRecipes() -> JSONValue {
-        var lines: [String] = ["recipes: \(RecipeCatalog.all.count)"]
-        for descriptor in RecipeCatalog.all {
-            let caps = descriptor.requiredCapabilities
-                .map(\.rawValue).joined(separator: ", ")
-            lines.append("  - \(descriptor.name) v\(descriptor.version)")
-            lines.append("      \(descriptor.description)")
-            lines.append("      capabilities: \(caps)")
+        // Tier 6 recipe tools: list-lenses + synthesize only (not migration).
+        let tier6RecipeNames: Set<String> = [listRecipesToolName, groundedSynthesisToolName]
+        let recipeTools = tools().filter { tier6RecipeNames.contains($0.name) }
+        // All 16 lens tools from LensTools.
+        let lensTools = LensTools.tools()
+        let cognitionTools = recipeTools + lensTools
+
+        var lines: [String] = ["\(listRecipesToolName): \(cognitionTools.count) cognition tools"]
+        for tool in cognitionTools {
+            let required = requiredArgNames(from: tool.inputSchema)
+            let requiredText = required.isEmpty ? "none" : required.joined(separator: ", ")
+            lines.append("")
+            lines.append(tool.name)
+            lines.append("  \(tool.description)")
+            lines.append("  Required: \(requiredText).")
         }
+        lines.append("")
+        lines.append("Call any tool with teachme:true for a full usage guide.")
         return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// Extract required argument names from a JSON Schema `required` array.
+    private static func requiredArgNames(from schema: JSONValue) -> [String] {
+        schema.objectValue?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
     }
 
     // MARK: - grounded_synthesis

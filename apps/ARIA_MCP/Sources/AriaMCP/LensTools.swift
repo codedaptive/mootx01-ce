@@ -2,15 +2,15 @@
 //
 // The CognitionKit reasoning-lens surface on ARIA_MCP — one hard-bound
 // tool per cataloged lens recipe (LENS_DISCOVERABILITY_DECISION v2.0:
-// listing and invokability ship together; `moot_list_recipes` never
+// listing and invokability ship together; `moot_list_lenses` never
 // advertises a behaviour an agent cannot reach). Same dispatch shape as
 // RecipeTools: provenance `.recipe`, matched by name above the lexicon
 // projection, no generic run-by-name dispatcher.
 //
-// Tool stem = catalog name: moot_keystones … moot_formal_concepts.
+// Tool stem = moot_lens_ + catalog name: moot_lens_keystones … moot_lens_concepts.
 // The 14 reasoning lenses span structure, topic, preference, surprise,
 // grounding/trust, associative, prediction, and federated categories.
-// The 2 analytics lenses (moot_association_rules, moot_formal_concepts)
+// The 2 analytics lenses (moot_lens_associations, moot_lens_concepts)
 // follow in catalog order.
 // The two federated lenses take a second estate via `estateIDB`,
 // resolved through the dispatcher's own estate registry exactly like
@@ -21,19 +21,20 @@ import GeniusLocusKit
 import NeuronKit
 import LocusKit
 import CognitionKit
+import SubstrateML
 
 /// Namespace for the reasoning-lens tool surface. No instances.
 enum LensTools {
 
-    // MARK: - Tool names (catalog name with the moot_ stem)
+    // MARK: - Tool names (catalog name with the moot_lens_ stem)
 
     static let lensToolNames: Set<String> = [
-        "moot_keystones", "moot_constellation", "moot_free_association",
-        "moot_theme_weather", "moot_latent_themes", "moot_bias",
-        "moot_drift", "moot_contradiction", "moot_trust_grounded_synthesis",
-        "moot_partial_cue_recall", "moot_anticipate", "moot_tunnel_successor",
-        "moot_mind_overlap", "moot_estate_divergence",
-        "moot_association_rules", "moot_formal_concepts",
+        "moot_lens_keystones", "moot_lens_constellation", "moot_lens_free_association",
+        "moot_lens_theme_weather", "moot_lens_latent_themes", "moot_lens_bias",
+        "moot_lens_drift", "moot_lens_contradiction", "moot_lens_trust_synthesis",
+        "moot_lens_partial_cue", "moot_lens_anticipate", "moot_lens_successors",
+        "moot_lens_overlap", "moot_lens_divergence",
+        "moot_lens_associations", "moot_lens_concepts",
     ]
 
     /// True when `name` is one of the lens tools dispatched by name.
@@ -46,7 +47,7 @@ enum LensTools {
     static func tools() -> [ProjectedTool] {
         [
             ProjectedTool(
-                name: "moot_keystones",
+                name: "moot_lens_keystones",
                 description: "Reasoning lens: rank a wing's load-bearing memories by centrality over its drawer-to-drawer tunnel graph.",
                 inputSchema: objectSchema(
                     properties: [
@@ -57,7 +58,7 @@ enum LensTools {
                     required: ["wing"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_constellation",
+                name: "moot_lens_constellation",
                 description: "Reasoning lens: recover the emergent communities of a wing's drawer-to-drawer tunnel graph.",
                 inputSchema: objectSchema(
                     properties: [
@@ -67,7 +68,7 @@ enum LensTools {
                     required: ["wing"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_free_association",
+                name: "moot_lens_free_association",
                 description: "Reasoning lens: from a seed memory, walk the wing's tunnel graph with restart and rank the memories the walk keeps landing on.",
                 inputSchema: objectSchema(
                     properties: [
@@ -80,7 +81,7 @@ enum LensTools {
                     required: ["wing", "seedDrawerID"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_theme_weather",
+                name: "moot_lens_theme_weather",
                 description: "Reasoning lens: per-room momentum — recent attention share vs historical share; what's rising and what's fading.",
                 inputSchema: objectSchema(
                     properties: [
@@ -91,7 +92,7 @@ enum LensTools {
                     required: []),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_latent_themes",
+                name: "moot_lens_latent_themes",
                 description: "Reasoning lens: factor the recalled set's metadata co-occurrence into soft latent themes — the emergent topics in how the estate is filed.",
                 inputSchema: objectSchema(
                     properties: [
@@ -102,7 +103,7 @@ enum LensTools {
                     required: []),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_bias",
+                name: "moot_lens_bias",
                 description: "Reasoning lens: representation bias vs a reference, per-room dismissal rates, and learned preference from real curation choices.",
                 inputSchema: objectSchema(
                     properties: [
@@ -121,7 +122,7 @@ enum LensTools {
                     required: []),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_drift",
+                name: "moot_lens_drift",
                 description: "Reasoning lens: how far the room distribution after a split instant has drifted from the distribution before it.",
                 inputSchema: objectSchema(
                     properties: [
@@ -132,7 +133,7 @@ enum LensTools {
                     required: ["splitAt"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_contradiction",
+                name: "moot_lens_contradiction",
                 description: "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the odd-ones-out.",
                 inputSchema: objectSchema(
                     properties: [
@@ -143,7 +144,7 @@ enum LensTools {
                     required: []),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_trust_grounded_synthesis",
+                name: "moot_lens_trust_synthesis",
                 description: "Reasoning lens: recall, rank by provenance trust (canonical and user above derived), and synthesize the trust-ordered set.",
                 inputSchema: objectSchema(
                     properties: [
@@ -153,7 +154,7 @@ enum LensTools {
                     required: []),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_partial_cue_recall",
+                name: "moot_lens_partial_cue",
                 description: "Reasoning lens: one anchor memory, three recalls — feels-like, about-this, from-then — by per-block fingerprint matching.",
                 inputSchema: objectSchema(
                     properties: [
@@ -166,7 +167,7 @@ enum LensTools {
                     required: ["anchorID"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_anticipate",
+                name: "moot_lens_anticipate",
                 description: "Reasoning lens: learn which capture actions tend to reach a target outcome, ranked by conservative success rate.",
                 inputSchema: objectSchema(
                     properties: [
@@ -179,7 +180,7 @@ enum LensTools {
                     required: ["targetKind"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_tunnel_successor",
+                name: "moot_lens_successors",
                 description: "Reasoning lens: the memories an anchor points onward to by explicit tunnels, ranked by frequency.",
                 inputSchema: objectSchema(
                     properties: [
@@ -191,7 +192,7 @@ enum LensTools {
                     required: ["wing", "anchorID"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_mind_overlap",
+                name: "moot_lens_overlap",
                 description: "Reasoning lens (federated): privacy-preserving overlap of two estates via differentially-private fingerprint summaries.",
                 inputSchema: objectSchema(
                     properties: [
@@ -202,7 +203,7 @@ enum LensTools {
                     required: ["estateIDB"]),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_estate_divergence",
+                name: "moot_lens_divergence",
                 description: "Reasoning lens (federated): how two estates' room distributions diverge, by Jensen-Shannon divergence.",
                 inputSchema: objectSchema(
                     properties: [
@@ -214,7 +215,7 @@ enum LensTools {
                 provenance: .recipe),
             // Analytics lenses.
             ProjectedTool(
-                name: "moot_association_rules",
+                name: "moot_lens_associations",
                 description: "Recall a frame, project each drawer's categorical facets into a co-occurrence matrix, and mine pairwise association rules.",
                 inputSchema: objectSchema(
                     properties: [
@@ -227,7 +228,7 @@ enum LensTools {
                     required: []),
                 provenance: .recipe),
             ProjectedTool(
-                name: "moot_formal_concepts",
+                name: "moot_lens_concepts",
                 description: "Recall a frame, build a formal context where each drawer is a row with its categorical facets as attributes, and mine bounded formal concepts.",
                 inputSchema: objectSchema(
                     properties: [
@@ -257,19 +258,19 @@ enum LensTools {
     ) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         switch name {
-        case "moot_keystones":
+        case "moot_lens_keystones":
             let ranked = try await Keystones.run(
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
                 topK: integer(args, "topK", default: 5))
             return list("keystones", ranked.map { "\($0.id) centrality=\($0.centrality)" })
 
-        case "moot_constellation":
+        case "moot_lens_constellation":
             let out = try await ConstellationLens.run(
                 kit: kit, handle: handle, wing: try requireString(args, "wing"))
             return list("constellation", out.communities.map { $0.joined(separator: ", ") })
 
-        case "moot_free_association":
+        case "moot_lens_free_association":
             let out = try await FreeAssociationLens.run(
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
@@ -278,14 +279,14 @@ enum LensTools {
                 k: integer(args, "k", default: 10))
             return list("free_association", out.map { "\($0.drawerID) activation=\($0.activation)" })
 
-        case "moot_theme_weather":
+        case "moot_lens_theme_weather":
             let weather = try await ThemeWeather.run(
                 kit: kit, handle: handle, frame: frame(args),
                 halfLifeSeconds: number(args, "halfLifeSeconds", default: 604_800),
                 now: Date())
             return list("theme_weather", weather.map { "\($0.category) momentum=\($0.momentum)" })
 
-        case "moot_latent_themes":
+        case "moot_lens_latent_themes":
             let themes = try await LatentThemesLens.run(
                 kit: kit, handle: handle, frame: frame(args),
                 k: integer(args, "k", default: 3))
@@ -293,7 +294,7 @@ enum LensTools {
                 "latent_themes (k=\(themes.k))",
                 themes.loadings.map { "\($0.label) → theme \($0.dominantTheme)" })
 
-        case "moot_bias":
+        case "moot_lens_bias":
             let report = try await Bias.run(
                 kit: kit, handle: handle, reference: try decodeReference(args["reference"]))
             var lines = ["bias"]
@@ -309,7 +310,7 @@ enum LensTools {
             }
             return ToolDispatcher.textResult(lines.joined(separator: "\n"))
 
-        case "moot_drift":
+        case "moot_lens_drift":
             let out = try await Drift.run(
                 kit: kit, handle: handle, frame: frame(args),
                 splitAt: try requireDate(args, "splitAt"))
@@ -319,7 +320,7 @@ enum LensTools {
             klDivergence: \(out.drift.klDivergence)
             """)
 
-        case "moot_contradiction":
+        case "moot_lens_contradiction":
             let out = try await Contradiction.run(
                 kit: kit, handle: handle, frame: frame(args),
                 threshold: Float(number(args, "threshold", default: 1.5)))
@@ -327,7 +328,7 @@ enum LensTools {
                 "contradiction (considered \(out.considered))",
                 out.outliers)
 
-        case "moot_trust_grounded_synthesis":
+        case "moot_lens_trust_synthesis":
             let out = try await TrustLens.run(
                 kit: kit, handle: handle, frame: frame(args))
             return ToolDispatcher.textResult("""
@@ -336,7 +337,7 @@ enum LensTools {
             summary: \(out.context.summary)
             """)
 
-        case "moot_partial_cue_recall":
+        case "moot_lens_partial_cue":
             do {
                 let out = try await PartialCueRecall.run(
                     kit: kit, handle: handle, frame: frame(args),
@@ -351,7 +352,7 @@ enum LensTools {
                     "anchor '\(error.anchorID)' is not in the recalled set")
             }
 
-        case "moot_anticipate":
+        case "moot_lens_anticipate":
             guard let kind = decodeContentKind(try requireString(args, "targetKind")) else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,
@@ -366,7 +367,7 @@ enum LensTools {
                 "action=\(channelName($0.action)) successRate=\($0.successRate) n=\($0.count)"
             })
 
-        case "moot_tunnel_successor":
+        case "moot_lens_successors":
             let out = try await TunnelSuccessor.run(
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
@@ -374,7 +375,7 @@ enum LensTools {
                 k: integer(args, "k", default: 5))
             return list("tunnel_successor", out.map { "\($0.id) weight=\($0.weight)" })
 
-        case "moot_mind_overlap":
+        case "moot_lens_overlap":
             let out = try await MindOverlapLens.run(
                 kit: kit, handleA: handle,
                 handleB: try resolveHandle(secondEstateArgs(args)),
@@ -382,7 +383,7 @@ enum LensTools {
             return ToolDispatcher.textResult(
                 "mind_overlap: \(out.overlap) (a=\(out.aCount), b=\(out.bCount) drawer(s))")
 
-        case "moot_estate_divergence":
+        case "moot_lens_divergence":
             let out = try await EstateDivergenceLens.run(
                 kit: kit, handleA: handle,
                 handleB: try resolveHandle(secondEstateArgs(args)),
@@ -392,7 +393,7 @@ enum LensTools {
             a=\(out.aCount) drawer(s), b=\(out.bCount) drawer(s)
             """)
 
-        case "moot_association_rules":
+        case "moot_lens_associations":
             let filter = decodeFilter(args["filter"]?.stringValue)
             let limit = args["limit"]?.integerValue.map(Int.init)
             let minSupport = doubleArg(args["minSupport"]) ?? 0.0
@@ -422,7 +423,7 @@ enum LensTools {
             }
             return ToolDispatcher.textResult(arLines.joined(separator: "\n"))
 
-        case "moot_formal_concepts":
+        case "moot_lens_concepts":
             let fcFilter = decodeFilter(args["filter"]?.stringValue)
             let fcLimit = args["limit"]?.integerValue.map(Int.init)
             let minSupport = args["minSupport"]?.integerValue.map(Int.init) ?? 1

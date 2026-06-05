@@ -26,6 +26,7 @@ cognition-kit    = { path = "../../../packages/kits/CognitionKit/rust" }
 genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 locus-kit        = { path = "../../../packages/kits/LocusKit/rust" }
 neuron-kit       = { path = "../../../packages/kits/NeuronKit/rust" }
+substrate-ml     = { path = "../../../packages/libs/SubstrateML/rust" }
 # The estate registry opens in-memory estates using InMemoryStorage and
 # InMemoryDrawerStore — both production-path for v1. persistence-kit is
 # a regular dep, not dev-only, because it is used in the lib (estate_registry).

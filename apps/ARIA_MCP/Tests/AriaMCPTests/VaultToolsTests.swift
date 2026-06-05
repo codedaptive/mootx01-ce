@@ -79,9 +79,6 @@ struct VaultToolsTests {
         #expect(vaultTools.count == 4)
         for tool in vaultTools {
             #expect(tool.provenance == .vault)
-            // A vault tool is not a lexicon tool — no (verb, noun) pair.
-            #expect(tool.verb == nil)
-            #expect(tool.noun == nil)
         }
     }
 

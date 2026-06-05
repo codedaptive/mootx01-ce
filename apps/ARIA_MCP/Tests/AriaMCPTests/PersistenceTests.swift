@@ -19,8 +19,8 @@ import PersistenceKitSQLite
 ///   5. Verify the drawer is still present via recall.
 ///
 /// This mirrors the Rust v2a-server's persistence_tests pattern:
-/// `moot_capture_drawer` → teardown → fresh server same path →
-/// `moot_drawer_recall` finds the drawer.
+/// `moot_file_memory` → teardown → fresh server same path →
+/// estate recall finds the drawer.
 ///
 /// Seam note: the ToolDispatcher / ARIA_MCPDispatcher construction seam
 /// prevents a full dispatcher-layer round-trip without refactoring beyond

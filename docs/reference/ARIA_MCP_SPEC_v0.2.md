@@ -117,3 +117,239 @@ The placement of resources, prompts, completions, sampling, elicitation, and tas
 This supersedes the v0.1 conformance rule that required all three call modes. Conformance is now defined per release in § 9. ARIA addresses the substrate through a backend-adapter seam: in GLK mode it calls the GeniusLocusKit verb surface, and the adapter is where the v1.1 narrow-instance modes and the API-mode fleet routing attach without reworking the projection. The transactional scaffold becomes the v1.0 build once the BrainKits land, refined to: tools generated from the lexicon and the acceptance matrix; the local-stdio clients as the named compatibility set with a smoke test against Claude and one other; local-owner trust with the credential seam; writes always GLK with recall lensing; resources and prompts advertised while only tools are implemented.
 
 The lexicon-to-MCP projection in § 2 and § 4, and the instance-versus-API model in § 3, are the durable contribution of v0.2. Everything else is sequencing around them.
+
+## § 11. MCP-INT-01: AI-client-oriented surface (supersedes §2 for external tools)
+
+> **Note (2026-06-05 — MCP-INT-01):** The lexicon-to-MCP projection principle in §2 and the
+> tool naming discipline ("verb-then-noun") apply to the substrate's internal ARIA grammar
+> contract. The *external* MCP tool surface exposed to AI clients was replaced by MCP-INT-01
+> with an AI-client-oriented five-tier interface. The §2 projection principle is preserved as
+> the architectural rationale; it no longer describes the external tool names or schemas.
+
+The external MCP tool surface as shipped (MCP-INT-01) is an AI-client-oriented interface
+organized in five tiers. This design decision was made to expose familiar, task-oriented verbs
+to AI clients rather than the substrate's internal grammar vocabulary.
+
+### Five-tier external tool surface (19 interface tools)
+
+| Tier | Tools | Substrate operation |
+|------|-------|---------------------|
+| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` | GLK capture/recall/mutate/withdraw/expunge/reanchor on drawers |
+| 2 — Connections | `moot_link_memories`, `moot_connection_search`, `moot_connection_map` | GLK tunnel capture/recall |
+| 3 — Knowledge Graph | `moot_file_fact`, `moot_fact_search`, `moot_retire_fact`, `moot_fact_timeline` | GLK captureKGFact/recallKGFacts/retireKGFact |
+| 4 — Journal | `moot_write_journal`, `moot_read_journal` | GLK addDiaryEntry/readDiaryEntries |
+| 5 — Estate | `moot_estate_status`, `moot_estate_map`, `moot_estate_ping` | Kit estate introspection |
+
+One federation tool (`moot_federated_search`) sits above the interface tier. It replaces
+the v0.2 `cross_estate_recall` concept with a grant-authorized federated read across all
+locally-open estates the requester is authorized for.
+
+### Infrastructure field ownership
+
+The server owns all infrastructure fields: `latticeAnchor`, `embeddingModelID`, `addedBy`,
+and capture `channel`. AI clients supply only subject-matter fields (`content`, `location`,
+`query`, etc.). This isolates AI clients from substrate plumbing and allows server-side
+evolution of infrastructure configuration without client changes.
+
+### KGFact model
+
+The `KGFact` substrate type (`LocusKit.KGFact`) stores a subject–predicate–object triple
+with the following fields: `id` (server-assigned UUID), `subject`, `predicate`, `object`,
+`sourceDrawerID`, three adjective/operational/provenance bitmaps, and `filedAt`.
+
+`filedAt` is immutable and server-assigned at capture time — the same pattern as
+`captureTime` on drawers. It records when the fact was filed, not when the underlying
+fact became true in the world. Callers cannot supply it.
+
+There are no temporal validity windows (`valid_from`/`valid_to`) in the current KGFact
+model. Facts are active from the moment they are filed until explicitly retired via
+`moot_retire_fact`. Retirement transitions the adjective bitmap state axis to `withdrawn`
+(the same state machine as drawers), which excludes the fact from active recall.
+
+`source_id` is the optional `sourceDrawerID` field — the drawer this fact was extracted
+from. Omit for agent-asserted freestanding triples (the server supplies `""` as the
+unanchored sentinel). Supply when the fact was derived from a specific memory to preserve
+provenance.
+
+### Recipe, lens, and vault tools (above the interface tier)
+
+CognitionKit recipe tools (`moot_list_lenses`, `moot_synthesize`, `moot_run_migration`,
+`moot_confirm_migration`), sixteen reasoning-lens tools (`moot_lens_*`), and four vault
+control tools (`moot_vault_*`) sit above the interface tier with `.recipe` and `.vault`
+provenance respectively. Total: 44 tools (19 interface + 1 federation + 20 recipe/lens + 4 vault).
+
+### Conformance contract
+
+The acceptance matrix (§2) remains the internal substrate contract; it is not surfaced as
+the external API shape. External conformance is defined by the tool list in INTERFACE v0.8
+§2 and the test suite at `apps/ARIA_MCP/Tests/AriaMCPTests/`. The SPEC §9 release plan is
+not affected — MCP-INT-01 is a surface refinement within v1.0, not a release boundary change.
+
+## § 13. MCP-INT-03: Session orientation protocol
+
+Two additions to the session entry-point (`moot_estate_status`) and the
+cognition-discovery tool (`moot_list_lenses`) — MCP-INT-03.
+
+### Protocol block in `moot_estate_status`
+
+Every `moot_estate_status` response now appends a static `protocol:` section
+unconditionally, after the estate stats block. The block teaches a cold AI
+client the full ARIA surface in a single call, without prior knowledge:
+
+```
+estate: <name> [<uuid>]
+memories: N active (M total)
+wings: <list>
+kg facts: N active
+status: connected
+
+protocol:
+  — Call moot_estate_status with teachme:true for a full orientation guide.
+  — Call moot_list_lenses to see available cognition tools.
+  — Add teachme:true to any tool to learn it before using it.
+  — Watch for hint: lines in responses — they contain coaching for better results.
+  — File memories: moot_file_memory (content + location required).
+  — Search memories: moot_memory_search (query required).
+  — Write journal entries: moot_write_journal after meaningful sessions.
+  — Store structured facts: moot_file_fact (subject + predicate + object).
+```
+
+Invariants:
+- The block is **static** — identical across every call, every estate, every
+  estate state. Content is a constant defined in `SessionProtocol.swift`.
+- The block is **unconditional** — appears even on zero-memory estates.
+- No estate is touched to produce the block; it requires no async work.
+
+### Nine-tier `moot_estate_status teachme:true` guide
+
+The `TeachmeGuides` entry for `moot_estate_status` is replaced with a
+nine-tier surface summary covering all 44 tools across Tier 1 (Core Memory)
+through Tier 9 (Federation), plus the teachme and coaching mechanisms.
+The guide states "44 tools" and names the cold-start sequence explicitly.
+
+### `moot_list_lenses` cognition menu
+
+`RecipeTools.runListRecipes()` now returns a one-block-per-tool cognition menu
+assembled from `LensTools.tools()` and `RecipeTools.tools()`, listing only the
+18 Tier 6 cognition tools (16 lens + `moot_synthesize` + `moot_list_lenses`).
+Migration tools (Tier 7) are intentionally excluded — they have their own tier
+and teachme guides.
+
+Response shape:
+```
+moot_list_lenses: 18 cognition tools
+
+moot_list_lenses
+  List the available reasoning lenses and CognitionKit behaviour recipes...
+  Required: none.
+
+moot_synthesize
+  Synthesize memories into a grounded context document...
+  Required: none.
+
+moot_lens_keystones
+  Reasoning lens: rank a wing's load-bearing memories by centrality...
+  Required: wing.
+
+... (one block per tool)
+
+Call any tool with teachme:true for a full usage guide.
+```
+
+Required args are extracted from each tool's JSON Schema `required` array.
+
+## § 12. MCP-INT-02: teachme protocol and coaching hints
+
+Two companion mechanisms wired into the dispatch layer (MCP-INT-02).
+
+### teachme
+
+Every tool accepts an optional `teachme: boolean` argument. When `true`, the
+dispatch layer intercepts the call before any runner fires, looks up the static
+per-tool guide in `TeachmeGuides`, and returns it as a successful text result.
+No estate is touched. The guide contains: what the tool does, when to use it vs
+siblings, an annotated example call, response shape, and common mistakes.
+
+Dispatch contract:
+- Intercept happens at the top of `ToolDispatcher.dispatch`, before all routing
+  (federation, recipe, lens, vault, interface checks).
+- Result: `textResult(TeachmeGuides.guide(for: name))` with `isError: false`.
+- Unknown tool names receive a fallback guide directing callers to
+  `moot_estate_status` with `teachme: true` for orientation.
+- Generic guides apply to lens tools, migration tools (`moot_run_migration`,
+  `moot_confirm_migration`), other recipe tools, and vault tools.
+
+### Coaching hints
+
+Runners return a plain text result; after the runner returns, the dispatch layer
+calls `CoachingEngine.hint(name:args:resultText:)` and, if a hint is returned,
+appends `\nhint: <message>` to the result text before wrapping it.
+
+Invariants:
+- Hints are **never** appended to error results (`isError: true`).
+- Hint injection does not change the tool's semantic result — it only appends
+  advisory text. The `isError` flag is unaffected.
+
+Coaching triggers:
+
+| Tool | Condition | Hint summary |
+|------|-----------|-------------|
+| `moot_memory_search` | No `query` arg | Use `query` for semantic retrieval; browse with `moot_estate_map` |
+| `moot_memory_search` | `query` length > 200 chars | Short queries recall more precisely |
+| `moot_memory_search` | Result contains "0 memory" | Try broader terms or verify location with `moot_estate_map` |
+| `moot_file_memory` | `content` length > 4000 chars | Split into smaller memories |
+| `moot_file_memory` | Result contains "already exists" | Use `moot_update_memory` instead |
+| `moot_erase_memory` | `confirmed` absent or false | Erase is irreversible; use `moot_withdraw_memory` for recoverable removal |
+| `moot_confirm_migration` | Result contains "disqualified" | Promote only branches from the rankings list |
+| `moot_link_memories` | Result contains "isError" | One or both IDs not found; search first |
+| Any lens tool | Result contains "0 result" | Try `scope: active` for a fuller picture |
+
+Multiple triggers per tool are evaluated in the order listed; the first matching
+trigger wins and subsequent checks are skipped.
+
+## § 14. Design note: moot_estate_ping replaces moot_estate_reconnect
+
+ARIA_MCP is a long-running stdio process. It opens one estate at startup and
+holds the handle for the lifetime of the process. There is no transient
+disconnection state in this design: a `GeniusLocusKit` estate handle is either
+registered in the actor's registry (open) or absent (`.estateNotOpen`). There
+is no network layer between the MCP server and the estate — the storage is
+direct (SQLite via `PersistenceKit`). Accordingly, there is nothing to
+reconnect.
+
+The tool was renamed from `moot_estate_reconnect` to `moot_estate_ping` (issue-3
+review, 2026-06-05) and its implementation reduced to a handle-resolution check
+only. The previous implementation performed a full `allDrawers()` table scan,
+which is O(N) on estate size, as a "health check" — an expensive proxy for
+a question that resolveHandle already answers in O(1).
+
+`moot_estate_ping` resolves the handle and returns `pong: estate <name> is live`.
+If the estate is not open, `resolveHandle` throws `.estateNotOpen` and dispatch
+surfaces it as `isError: true` before the runner is called. If that occurs, the
+correct remediation is restarting the server process — no MCP tool can reopen
+an estate that the process did not open at startup.
+
+## § 15. Design note: moot_write_journal field name is `entry`, not `content`
+
+`moot_write_journal` requires the field `entry`, not `content`. This mirrors
+the `DiaryEntry.entry` substrate field in `LocusKit`. The distinction is
+intentional: `moot_file_memory` files a memory into the estate’s drawer store
+and uses `content`; `moot_write_journal` files a diary entry into the agent
+journal and uses `entry`. The two tools write to different substrate stores
+and the field name reflects that boundary. Using `content` with
+`moot_write_journal` returns a missing-required-argument error.
+
+## § 16. Design note: moot_fact_search accepts an optional query filter
+
+`moot_fact_search` accepts an optional `query` string that performs a
+case-insensitive substring match across all three KGFact fields: `subject`,
+`predicate`, and `object`. Omitting `query` returns all active facts
+(the unfiltered case).
+
+This design was chosen over per-field filters (`subject`, `predicate`,
+`object` as separate arguments) because LLM callers naturally produce a
+single search term — an entity name, a relationship keyword, a concept —
+rather than decomposing a query into a triple structure before calling.
+A single `query` field matches how LLMs are trained to express retrieval
+intent. Per-field decomposition would be appropriate for a developer-facing
+SPARQL-style interface; it is not appropriate for the AI-client surface.

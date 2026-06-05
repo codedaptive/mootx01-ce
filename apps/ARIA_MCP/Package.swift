@@ -39,6 +39,10 @@ let package = Package(
         .package(name: "AriaLexiconLib", path: "../../packages/libs/AriaLexiconLib"),
         .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
         .package(name: "NeuronKit", path: "../../packages/kits/NeuronKit"),
+        // SubstrateML provides ARM (MiningThresholds) and FCA (BoundedConceptMiner,
+        // FormalAttribute, FormalContext) types consumed by LensTools.swift.
+        // These engines were relocated from NeuronKit in MX-0a (ARM) and MX-0B (FCA).
+        .package(name: "SubstrateML", path: "../../packages/libs/SubstrateML"),
         .package(name: "CognitionKit", path: "../../packages/kits/CognitionKit"),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
@@ -59,6 +63,7 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "SubstrateML", package: "SubstrateML"),
                 .product(name: "VaultKit", package: "VaultKit"),
             ],
             path: "Sources/AriaMCP"

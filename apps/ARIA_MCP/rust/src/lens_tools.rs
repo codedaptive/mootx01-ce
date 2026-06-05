@@ -2,11 +2,11 @@
 //!
 //! Mirrors Swift `LensTools.swift`. One arm per cataloged lens recipe;
 //! each arm calls its `run_*` function directly (no generic run-by-name
-//! dispatcher). Tool names are `moot_<catalog_name>`.
+//! dispatcher). Tool names use the `moot_lens_` prefix (e.g. `moot_lens_keystones`).
 //!
 //! Includes the 14 reasoning lenses (structure, topic, preference, surprise,
 //! grounding/trust, associative, prediction, federated) and the 2 analytics
-//! lenses (moot_association_rules, moot_formal_concepts) that are cataloged
+//! lenses (moot_lens_associations, moot_lens_concepts) that are cataloged
 //! by AR_FCA_CAPABILITY_001.
 //!
 //! Arg surfaces mirror the Swift LensTools schemas. The `now: i64` that
@@ -28,7 +28,8 @@ use cognition_kit::{
     run_trust_grounded_synthesis, run_tunnel_successor, CueMode,
 };
 use locus_kit::drawer_operational::ContentKind;
-use neuron_kit::{BoundedConceptMiner, MiningThresholds};
+use substrate_ml::association_rule_mining::MiningThresholds;
+use substrate_ml::formal_concept_analysis::BoundedConceptMiner;
 
 use crate::dispatch::{
     error_result, opt_float, opt_integer, recall_frame, require_string, text_result, wall_now,
@@ -37,24 +38,25 @@ use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
 /// The 16 lens tool names — 14 reasoning lenses plus 2 analytics lenses.
-const LENS_TOOLS: &[&str] = &[
-    "moot_keystones",
-    "moot_constellation",
-    "moot_free_association",
-    "moot_theme_weather",
-    "moot_latent_themes",
-    "moot_bias",
-    "moot_drift",
-    "moot_contradiction",
-    "moot_trust_grounded_synthesis",
-    "moot_partial_cue_recall",
-    "moot_anticipate",
-    "moot_tunnel_successor",
-    "moot_mind_overlap",
-    "moot_estate_divergence",
+/// All names use the `moot_lens_` prefix to match Swift `LensTools.swift`.
+pub const LENS_TOOLS: &[&str] = &[
+    "moot_lens_keystones",
+    "moot_lens_constellation",
+    "moot_lens_free_association",
+    "moot_lens_theme_weather",
+    "moot_lens_latent_themes",
+    "moot_lens_bias",
+    "moot_lens_drift",
+    "moot_lens_contradiction",
+    "moot_lens_trust_synthesis",
+    "moot_lens_partial_cue",
+    "moot_lens_anticipate",
+    "moot_lens_successors",
+    "moot_lens_overlap",
+    "moot_lens_divergence",
     // Analytics lenses (AR_FCA_CAPABILITY_001).
-    "moot_association_rules",
-    "moot_formal_concepts",
+    "moot_lens_associations",
+    "moot_lens_concepts",
 ];
 
 /// True when `name` is one of the lens tools.
@@ -73,7 +75,7 @@ pub fn dispatch(
     let coord = estate.coord.lock().unwrap();
 
     match name {
-        "moot_keystones" => {
+        "moot_lens_keystones" => {
             let wing = require_string(args, "wing")?;
             let top_k = opt_integer(args, "topK", 5) as usize;
             let ranked = run_keystones(&coord, &estate.handle, wing, top_k).map_err(lens_error)?;
@@ -86,7 +88,7 @@ pub fn dispatch(
             ))
         }
 
-        "moot_constellation" => {
+        "moot_lens_constellation" => {
             let wing = require_string(args, "wing")?;
             let out = run_constellation(&coord, &estate.handle, wing).map_err(lens_error)?;
             Ok(list(
@@ -95,7 +97,7 @@ pub fn dispatch(
             ))
         }
 
-        "moot_free_association" => {
+        "moot_lens_free_association" => {
             let wing = require_string(args, "wing")?;
             let seed = require_string(args, "seedDrawerID")?;
             let walk_length = opt_integer(args, "walkLength", 10_000) as usize;
@@ -110,7 +112,7 @@ pub fn dispatch(
             ))
         }
 
-        "moot_theme_weather" => {
+        "moot_lens_theme_weather" => {
             let frame = recall_frame(args);
             let half_life = opt_float(args, "halfLifeSeconds", 604_800.0);
             let weather = run_theme_weather(&coord, &estate.handle, frame, half_life, now)
@@ -124,7 +126,7 @@ pub fn dispatch(
             ))
         }
 
-        "moot_latent_themes" => {
+        "moot_lens_latent_themes" => {
             let frame = recall_frame(args);
             let k = opt_integer(args, "k", 3) as usize;
             let themes =
@@ -139,7 +141,7 @@ pub fn dispatch(
             ))
         }
 
-        "moot_bias" => {
+        "moot_lens_bias" => {
             let reference = decode_reference(args)?;
             let report = run_bias(&coord, &estate.handle, &reference, now).map_err(lens_error)?;
             let mut lines = vec!["bias".to_owned()];
@@ -174,7 +176,7 @@ pub fn dispatch(
             Ok(text_result(&lines.join("\n")))
         }
 
-        "moot_drift" => {
+        "moot_lens_drift" => {
             let frame = recall_frame(args);
             let split_at = require_iso8601(args, "splitAt")?;
             let out =
@@ -188,7 +190,7 @@ pub fn dispatch(
             )))
         }
 
-        "moot_contradiction" => {
+        "moot_lens_contradiction" => {
             let frame = recall_frame(args);
             let threshold = opt_float(args, "threshold", 1.5) as f32;
             let out = run_contradiction(&coord, &estate.handle, frame, threshold, now)
@@ -199,7 +201,7 @@ pub fn dispatch(
             ))
         }
 
-        "moot_trust_grounded_synthesis" => {
+        "moot_lens_trust_synthesis" => {
             let frame = recall_frame(args);
             let out = run_trust_grounded_synthesis(&coord, &estate.handle, frame, now)
                 .map_err(lens_error)?;
@@ -212,7 +214,7 @@ pub fn dispatch(
             )))
         }
 
-        "moot_partial_cue_recall" => {
+        "moot_lens_partial_cue" => {
             let anchor_id = require_string(args, "anchorID")?;
             let mode = decode_cue_mode(args.get("mode").and_then(|v| v.as_str()));
             let k = opt_integer(args, "k", 5) as usize;
@@ -237,7 +239,7 @@ pub fn dispatch(
             }
         }
 
-        "moot_anticipate" => {
+        "moot_lens_anticipate" => {
             let target_kind_str = require_string(args, "targetKind")?;
             let target_kind = decode_content_kind(target_kind_str).ok_or_else(|| {
                 JSONRPCError::new(
@@ -273,7 +275,7 @@ pub fn dispatch(
             ))
         }
 
-        "moot_tunnel_successor" => {
+        "moot_lens_successors" => {
             let wing = require_string(args, "wing")?;
             let anchor_id = require_string(args, "anchorID")?;
             let k = opt_integer(args, "k", 5) as usize;
@@ -287,7 +289,7 @@ pub fn dispatch(
             ))
         }
 
-        "moot_mind_overlap" => {
+        "moot_lens_overlap" => {
             // estateIDB is presented as estateID to the resolver for estate B.
             // Both estates share the same coordinator Arc (single coordinator per
             // server); we call through coord already locked above with both handles.
@@ -301,7 +303,7 @@ pub fn dispatch(
             )))
         }
 
-        "moot_estate_divergence" => {
+        "moot_lens_divergence" => {
             // Both estates share the same coordinator — coord (already locked
             // above) covers both handles. No need to re-lock.
             let estate_b = registry.resolve(args, "estateIDB")?;
@@ -316,7 +318,7 @@ pub fn dispatch(
             )))
         }
 
-        "moot_association_rules" => {
+        "moot_lens_associations" => {
             // Analytics lens: recall drawers, project categorical facets into
             // a co-occurrence matrix, mine pairwise association rules. Mirrors
             // Swift `LensTools.dispatch` case "moot_association_rules".
@@ -348,7 +350,7 @@ pub fn dispatch(
             Ok(text_result(&lines.join("\n")))
         }
 
-        "moot_formal_concepts" => {
+        "moot_lens_concepts" => {
             // Analytics lens: recall drawers, build a formal context, mine
             // bounded formal concepts. Mirrors Swift `LensTools.dispatch`
             // case "moot_formal_concepts".
@@ -356,11 +358,7 @@ pub fn dispatch(
             let min_support = opt_integer(args, "minSupport", 1) as usize;
             let max_intent_size = opt_integer(args, "maxIntentSize", 8) as usize;
             let max_concepts = opt_integer(args, "maxConcepts", 20) as usize;
-            let miner = BoundedConceptMiner {
-                min_support,
-                max_intent_size,
-                max_concepts,
-            };
+            let miner = BoundedConceptMiner::new(min_support, max_intent_size, max_concepts);
             let out = run_formal_concepts(&coord, &estate.handle, frame, miner, now)
                 .map_err(lens_error)?;
             let mut lines = vec![format!(

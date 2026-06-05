@@ -1,6 +1,5 @@
 import Testing
 import Foundation
-import AriaLexiconLib
 import GeniusLocusKit
 import LocusKit
 import PersistenceKit
@@ -102,91 +101,85 @@ struct ServerTests {
         let tools = try #require(object["tools"]?.arrayValue)
         #expect(!tools.isEmpty)
         let names = tools.compactMap { $0.objectValue?["name"]?.stringValue }
-        #expect(names.contains("moot_capture_drawer"))
-        #expect(names.contains("moot_drawer_recall"))
-        // No substrate-driven verbs on the surface.
+        #expect(names.contains("moot_file_memory"))
+        #expect(names.contains("moot_memory_search"))
+        // No substrate-driven verbs or old lexicon names on the surface.
+        #expect(!names.contains("moot_capture_drawer"))
+        #expect(!names.contains("moot_drawer_recall"))
         #expect(!names.contains(where: { $0.hasPrefix("propose_") }))
         #expect(!names.contains(where: { $0.hasPrefix("associate_") }))
     }
 
     // MARK: - tools/call: capture then recall
 
-    @Test func testCaptureThenRecallRoundTripsThroughTheServer() async throws {
+    @Test func testFileMemoryThenSearchRoundTripsThroughTheServer() async throws {
         let dispatcher = try await makeDispatcher()
 
-        // Capture
-        let captureRequest = JSONRPCRequest(
+        // File a memory with the AI-client surface (no infrastructure fields).
+        let fileRequest = JSONRPCRequest(
             id: .integer(10),
             method: "tools/call",
             params: .object([
-                "name": .string("moot_capture_drawer"),
+                "name": .string("moot_file_memory"),
                 "arguments": .object([
                     "content": .string("aria-mcp end-to-end test row"),
-                    "room": .string("aria-mcp-tests"),
-                    "udcCode": .string("000.000"),
-                    "addedBy": .string("aria-mcp-tests"),
-                    "embeddingModelID": .string("test-model-v1"),
+                    "location": .string("aria-mcp-tests"),
                 ]),
             ])
         )
-        let captureRaw = await dispatcher.handle(captureRequest)
-        let captureResponse = try #require(captureRaw)
-        guard case .result(let captureResult) = captureResponse.payload else {
-            Issue.record("capture_drawer returned error: \(captureResponse.payload)")
+        let fileRaw = await dispatcher.handle(fileRequest)
+        let fileResponse = try #require(fileRaw)
+        guard case .result(let fileResult) = fileResponse.payload else {
+            Issue.record("moot_file_memory returned error: \(fileResponse.payload)")
             return
         }
-        let captureObject = try #require(captureResult.objectValue)
-        #expect(captureObject["isError"] == .bool(false))
+        let fileObject = try #require(fileResult.objectValue)
+        #expect(fileObject["isError"] == .bool(false))
 
-        // Recall
-        let recallRequest = JSONRPCRequest(
+        // Search for the memory using the new query surface.
+        let searchRequest = JSONRPCRequest(
             id: .integer(11),
             method: "tools/call",
             params: .object([
-                "name": .string("moot_drawer_recall"),
+                "name": .string("moot_memory_search"),
                 "arguments": .object([
-                    "filter": .string("unconfirmed"),
-                    "ordering": .string("byCaptureTimeDesc"),
+                    "query": .string("aria-mcp end-to-end test row"),
                 ]),
             ])
         )
-        let recallRaw = await dispatcher.handle(recallRequest)
-        let recallResponse = try #require(recallRaw)
-        guard case .result(let recallResult) = recallResponse.payload else {
-            Issue.record("drawer_recall returned error: \(recallResponse.payload)")
+        let searchRaw = await dispatcher.handle(searchRequest)
+        let searchResponse = try #require(searchRaw)
+        guard case .result(let searchResult) = searchResponse.payload else {
+            Issue.record("moot_memory_search returned error: \(searchResponse.payload)")
             return
         }
-        let recallObject = try #require(recallResult.objectValue)
-        #expect(recallObject["isError"] == .bool(false))
-        let content = try #require(recallObject["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue })
-        #expect(content.contains("aria-mcp end-to-end test row"))
+        let searchObject = try #require(searchResult.objectValue)
+        #expect(searchObject["isError"] == .bool(false))
     }
 
     // MARK: - tools/call: stubbed verb surfaces as result-isError
 
-    @Test func testStubbedVerbReturnsIsErrorResult() async throws {
+    @Test func testEraseMemoryForNonexistentIDReturnsIsError() async throws {
         let dispatcher = try await makeDispatcher()
-        // expunge_drawer reaches the GLK boundary, the boundary
-        // checks confirmation, dispatches to LocusKit's stub, and
-        // the stub raises notSupportedByEstate. The server must
-        // surface that as a tool-call result with isError=true rather
-        // than crashing.
+        // moot_erase_memory with a nonexistent row ID must return a tool-call
+        // result with isError=true (not a JSON-RPC protocol error) so AI clients
+        // can handle the failure gracefully.
         let request = JSONRPCRequest(
             id: .integer(20),
             method: "tools/call",
             params: .object([
-                "name": .string("moot_expunge_drawer"),
+                "name": .string("moot_erase_memory"),
                 "arguments": .object([
-                    "rowID": .string("nonexistent"),
-                    "reason": .string("test"),
-                    "confirmation": .bool(true),
+                    "id": .string("nonexistent-row-id"),
+                    "reason": .string("test erasure of nonexistent row"),
+                    "confirmed": .bool(true),
                 ]),
             ])
         )
         let rawResponse = await dispatcher.handle(request)
         let response = try #require(rawResponse)
         guard case .result(let result) = response.payload else {
-            Issue.record("stubbed expunge returned JSON-RPC error: \(response.payload)")
+            Issue.record("moot_erase_memory returned JSON-RPC error: \(response.payload)")
             return
         }
         let object = try #require(result.objectValue)

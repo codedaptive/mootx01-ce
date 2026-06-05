@@ -1,36 +1,30 @@
 import Testing
 import Foundation
-import AriaLexiconLib
 import GeniusLocusKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import AriaMCP
 
-/// Coverage for the `capture_drawer` `classificationScheme` discriminator
-/// (FUP-F / AUDIT-01 Zone C-1). A caller may declare whether a
-/// lattice-anchor code is UDC or MDCC; the boundary validates and
-/// accepts the declared scheme, echoing it in the capture confirmation.
-/// Omitting the arg preserves the prior default (UDC) behavior so no
-/// existing caller breaks.
+/// Input-validation coverage for `moot_file_memory` at the ARIA_MCP
+/// boundary (MCP-INT-01 replacement for the old scheme-discriminator tests).
 ///
-/// The substrate's `LatticeAnchor` stores a bare classification code
-/// with no scheme tag (tagging the storage column is a separate
-/// migration, out of scope here), so both schemes construct the same
-/// anchor; the discriminator's present job is declaration + validation
-/// at the ARIA boundary, expressing the dual-scheme model in spec §5.8.
+/// The old classification-scheme discriminator (`classificationScheme`
+/// on `moot_capture_drawer`) is no longer surfaced — the server owns
+/// infrastructure fields. This suite covers the equivalent boundary:
+/// optional parameters that the AI client MAY supply (sensitivity, kind)
+/// must be accepted when valid and must fail out-of-band when the
+/// required fields are missing.
 ///
-/// `.serialized`: each case opens a live in-memory estate and runs a
-/// capture/recall sequence; preserve the one-at-a-time execution the
-/// suite ran under XCTest.
-@Suite("Scheme discriminator", .serialized)
+/// `.serialized`: each case opens a live in-memory estate; preserve
+/// one-at-a-time execution to prevent GeniusLocusKit actor contention.
+@Suite("File memory input validation", .serialized)
 struct SchemeDiscriminatorTests {
 
-    /// Build a dispatcher wired to a fresh in-memory estate. Mirrors the
-    /// harness in `ServerTests` so each case gets isolated state.
+    /// Build a dispatcher wired to a fresh in-memory estate.
     private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
         let kit = GeniusLocusKit()
-        let owner = OwnerCredentials(ownerIdentifier: "scheme-discriminator-tests")
+        let owner = OwnerCredentials(ownerIdentifier: "file-memory-validation-tests")
         let storage = InMemoryStorage(
             configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
         )
@@ -41,8 +35,8 @@ struct SchemeDiscriminatorTests {
         return ARIA_MCPDispatcher(info: info, tooling: tooling)
     }
 
-    /// Issue a `capture_drawer` tools/call with the given argument object.
-    private func capture(
+    /// Issue a `moot_file_memory` tools/call with the given argument object.
+    private func fileMemory(
         _ dispatcher: ARIA_MCPDispatcher,
         arguments: [String: JSONValue],
         id: Int64
@@ -51,7 +45,7 @@ struct SchemeDiscriminatorTests {
             id: .integer(id),
             method: "tools/call",
             params: .object([
-                "name": .string("moot_capture_drawer"),
+                "name": .string("moot_file_memory"),
                 "arguments": .object(arguments),
             ])
         )
@@ -59,123 +53,97 @@ struct SchemeDiscriminatorTests {
         return try #require(raw)
     }
 
-    // MARK: - mdcc scheme routes correctly
+    // MARK: - Sensitivity parameter is accepted
 
-    @Test func testCaptureWithMdccSchemeIsAcceptedAndEchoed() async throws {
+    @Test func testElevatedSensitivityIsAccepted() async throws {
         let dispatcher = try await makeDispatcher()
-        let response = try await capture(dispatcher, arguments: [
-            "content": .string("mdcc-tagged anchor row"),
-            "room": .string("scheme-tests"),
-            "udcCode": .string("500.000"),
-            "addedBy": .string("scheme-tests"),
-            "embeddingModelID": .string("test-model-v1"),
-            "classificationScheme": .string("mdcc"),
+        let response = try await fileMemory(dispatcher, arguments: [
+            "content": .string("sensitive content row"),
+            "location": .string("validation-tests"),
+            "sensitivity": .string("elevated"),
         ], id: 100)
 
         guard case .result(let result) = response.payload else {
-            Issue.record("mdcc capture returned error: \(response.payload)")
+            Issue.record("elevated sensitivity returned error: \(response.payload)")
             return
         }
         let object = try #require(result.objectValue)
-        #expect(object["isError"] == .bool(false))
-        let text = try #require(
-            object["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue }
-        )
-        // The validated scheme is echoed so the caller can confirm how
-        // its code was interpreted.
-        #expect(text.contains("scheme: mdcc"), "expected mdcc scheme echoed, got: \(text)")
+        #expect(object["isError"] == .bool(false),
+            "elevated sensitivity must be accepted by the server")
     }
 
-    // MARK: - omitting the arg preserves the default (udc) behavior
+    // MARK: - kind parameter is accepted
 
-    @Test func testOmittedSchemeDefaultsToUdcAndRoundTrips() async throws {
+    @Test func testCodeKindIsAccepted() async throws {
         let dispatcher = try await makeDispatcher()
-
-        // Capture without the scheme arg — must behave as today.
-        let captureResponse = try await capture(dispatcher, arguments: [
-            "content": .string("default-scheme anchor row"),
-            "room": .string("scheme-tests"),
-            "udcCode": .string("000.000"),
-            "addedBy": .string("scheme-tests"),
-            "embeddingModelID": .string("test-model-v1"),
+        let response = try await fileMemory(dispatcher, arguments: [
+            "content": .string("func main() { }"),
+            "location": .string("validation-tests"),
+            "kind": .string("code"),
         ], id: 101)
-        guard case .result(let captureResult) = captureResponse.payload else {
-            Issue.record("default capture returned error: \(captureResponse.payload)")
-            return
-        }
-        let captureObject = try #require(captureResult.objectValue)
-        #expect(captureObject["isError"] == .bool(false))
-        let captureText = try #require(
-            captureObject["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue }
-        )
-        // Default path resolves to udc.
-        #expect(captureText.contains("scheme: udc"), "expected udc default echoed, got: \(captureText)")
 
-        // Recall still returns the row — substrate behavior unchanged.
-        let recallRequest = JSONRPCRequest(
-            id: .integer(102),
-            method: "tools/call",
-            params: .object([
-                "name": .string("moot_drawer_recall"),
-                "arguments": .object([
-                    "filter": .string("unconfirmed"),
-                    "ordering": .string("byCaptureTimeDesc"),
-                ]),
-            ])
-        )
-        let recallRaw = await dispatcher.handle(recallRequest)
-        let recallResponse = try #require(recallRaw)
-        guard case .result(let recallResult) = recallResponse.payload else {
-            Issue.record("recall returned error: \(recallResponse.payload)")
+        guard case .result(let result) = response.payload else {
+            Issue.record("code kind returned error: \(response.payload)")
             return
         }
-        let recallObject = try #require(recallResult.objectValue)
-        let content = try #require(
-            recallObject["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue }
-        )
-        #expect(content.contains("default-scheme anchor row"))
+        let object = try #require(result.objectValue)
+        #expect(object["isError"] == .bool(false),
+            "kind=code must be accepted by the server")
     }
 
-    // MARK: - explicit "udc" is accepted
+    // MARK: - Base case: minimal required args succeed
 
-    @Test func testExplicitUdcSchemeIsAccepted() async throws {
+    @Test func testMinimalArgsSucceed() async throws {
         let dispatcher = try await makeDispatcher()
-        let response = try await capture(dispatcher, arguments: [
-            "content": .string("explicit-udc anchor row"),
-            "room": .string("scheme-tests"),
-            "udcCode": .string("547"),
-            "addedBy": .string("scheme-tests"),
-            "embeddingModelID": .string("test-model-v1"),
-            "classificationScheme": .string("udc"),
-        ], id: 103)
+        let response = try await fileMemory(dispatcher, arguments: [
+            "content": .string("minimal required args row"),
+            "location": .string("validation-tests"),
+        ], id: 102)
+
         guard case .result(let result) = response.payload else {
-            Issue.record("explicit udc capture returned error: \(response.payload)")
+            Issue.record("minimal capture returned error: \(response.payload)")
             return
         }
         let object = try #require(result.objectValue)
         #expect(object["isError"] == .bool(false))
         let text = try #require(
-            object["content"]?.arrayValue.flatMap { $0.first?.objectValue?["text"]?.stringValue }
+            object["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue
         )
-        #expect(text.contains("scheme: udc"), "expected udc scheme echoed, got: \(text)")
+        // Response must begin with the "filed memory <id>" confirmation.
+        #expect(text.hasPrefix("filed memory "), "expected filed memory confirmation, got: \(text)")
     }
 
-    // MARK: - unknown scheme is rejected
+    // MARK: - Missing required `content` is invalidParams
 
-    @Test func testUnknownSchemeReturnsInvalidParams() async throws {
+    @Test func testMissingContentReturnsInvalidParams() async throws {
         let dispatcher = try await makeDispatcher()
-        let response = try await capture(dispatcher, arguments: [
-            "content": .string("bad-scheme anchor row"),
-            "room": .string("scheme-tests"),
-            "udcCode": .string("000.000"),
-            "addedBy": .string("scheme-tests"),
-            "embeddingModelID": .string("test-model-v1"),
-            "classificationScheme": .string("dewey"),
-        ], id: 104)
+        let response = try await fileMemory(dispatcher, arguments: [
+            "location": .string("validation-tests"),
+            // content intentionally omitted
+        ], id: 103)
+
         guard case .error(let error) = response.payload else {
-            Issue.record("unknown scheme did not produce a JSON-RPC error: \(response.payload)")
+            Issue.record("missing content did not produce JSON-RPC error: \(response.payload)")
             return
         }
-        #expect(error.code == JSONRPCErrorCode.invalidParams)
+        #expect(error.code == JSONRPCErrorCode.invalidParams,
+            "missing content must map to invalidParams; got code \(error.code)")
+    }
+
+    // MARK: - Missing required `location` is invalidParams
+
+    @Test func testMissingLocationReturnsInvalidParams() async throws {
+        let dispatcher = try await makeDispatcher()
+        let response = try await fileMemory(dispatcher, arguments: [
+            "content": .string("some content without location"),
+            // location intentionally omitted
+        ], id: 104)
+
+        guard case .error(let error) = response.payload else {
+            Issue.record("missing location did not produce JSON-RPC error: \(response.payload)")
+            return
+        }
+        #expect(error.code == JSONRPCErrorCode.invalidParams,
+            "missing location must map to invalidParams; got code \(error.code)")
     }
 }

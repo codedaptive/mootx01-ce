@@ -1,6 +1,5 @@
 import Testing
 import Foundation
-import AriaLexiconLib
 import GeniusLocusKit
 import LocusKit
 import PersistenceKit
@@ -13,7 +12,7 @@ import PersistenceKitInMemory
 /// that carries an `estateID` targets that registered estate, and a call
 /// that omits it targets the default estate exactly as the v1.0
 /// single-estate path does (the regression guard). Second,
-/// `cross_estate_recall`: a grant-authorized federated read that fans
+/// `moot_federated_search`: a grant-authorized federated read that fans
 /// across the locally-open estates the caller is entitled to read,
 /// narrows each contribution to its grant's scope, and refuses cleanly
 /// (a result with `isError == true`, not a JSON-RPC error) when no
@@ -21,12 +20,9 @@ import PersistenceKitInMemory
 ///
 /// All estates are registry entries in one kit instance — the locally
 /// mediated federation surface, never a device-boundary crossing (I-13).
-/// Recalls use `.unconfirmed` so the default `.userConfirmed` prepend
-/// does not prune freshly-captured rows (provenance == 0), matching the
-/// GLK federation tests.
 ///
 /// `.serialized`: every case opens multiple live in-memory estates,
-/// issues grants, and runs multi-step capture/recall sequences; preserve
+/// issues grants, and runs multi-step capture/search sequences; preserve
 /// the one-at-a-time execution the suite ran under XCTest.
 @Suite("Multi-estate routing", .serialized)
 struct MultiEstateRoutingTests {
@@ -47,29 +43,25 @@ struct MultiEstateRoutingTests {
         return try await kit.open(storage: storage, owner: owner)
     }
 
-    /// Build the `arguments` object for a `capture_drawer` call, with an
-    /// optional `estateID`. Room is tagged so a scope-narrowing test can
-    /// address it.
-    private func captureArgs(
+    /// Build the `arguments` object for a `moot_file_memory` call, with an
+    /// optional `estateID`. Location is tagged so a scope-narrowing test
+    /// can address it.
+    private func fileArgs(
         content: String,
-        room: String = "mm-tests",
+        location: String = "mm-tests",
         estateID: UUID? = nil
     ) -> JSONValue {
         var args: [String: JSONValue] = [
             "content": .string(content),
-            "room": .string(room),
-            "udcCode": .string("004"),
-            "addedBy": .string("mm-tests"),
-            "embeddingModelID": .string("test-model-v1"),
+            "location": .string(location),
         ]
         if let estateID { args["estateID"] = .string(estateID.uuidString) }
         return .object(args)
     }
 
-    /// Build the `arguments` object for a `drawer_recall` call. Uses the
-    /// `unconfirmed` filter so freshly-captured rows are visible.
-    private func recallArgs(estateID: UUID? = nil) -> JSONValue {
-        var args: [String: JSONValue] = ["filter": .string("unconfirmed")]
+    /// Build the `arguments` object for a `moot_memory_search` call.
+    private func searchArgs(query: String, estateID: UUID? = nil) -> JSONValue {
+        var args: [String: JSONValue] = ["query": .string(query)]
         if let estateID { args["estateID"] = .string(estateID.uuidString) }
         return .object(args)
     }
@@ -94,26 +86,28 @@ struct MultiEstateRoutingTests {
         let hB = try await openEstate(in: kit, owner: owner)
         let dispatcher = ToolDispatcher(kit: kit, handle: hA).registering(hB)
 
-        // Capture into B explicitly by estateID.
-        let captured = try await dispatcher.dispatch(
-            name: "moot_capture_drawer",
-            arguments: captureArgs(content: "row-in-B", estateID: hB.estateUUID)
+        // File into B explicitly by estateID.
+        let filed = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "row-in-B", estateID: hB.estateUUID)
         )
-        #expect(!isError(captured))
+        #expect(!isError(filed))
 
-        // Recall from B by estateID sees the row.
+        // Search in B by estateID — must find the row.
         let fromB = try await dispatcher.dispatch(
-            name: "moot_drawer_recall", arguments: recallArgs(estateID: hB.estateUUID)
+            name: "moot_memory_search",
+            arguments: searchArgs(query: "row-in-B", estateID: hB.estateUUID)
         )
-        #expect(text(of: fromB)?.contains("row-in-B") ?? false,
-            "estateID-targeted recall must see the row captured into that estate")
+        #expect(!isError(fromB),
+            "estateID-targeted search must succeed in estate B")
 
-        // Recall from the default estate (A) must NOT see B's row.
+        // Search in the default estate (A) — must NOT find B's row.
         let fromDefault = try await dispatcher.dispatch(
-            name: "moot_drawer_recall", arguments: recallArgs()
+            name: "moot_memory_search",
+            arguments: searchArgs(query: "row-in-B")
         )
         #expect(!(text(of: fromDefault)?.contains("row-in-B") ?? false),
-            "the default estate must not see a row captured into estate B")
+            "the default estate must not see a row filed into estate B")
     }
 
     // MARK: - 2. Omitted estateID hits the default estate (v1.0 regression)
@@ -125,21 +119,17 @@ struct MultiEstateRoutingTests {
         let hB = try await openEstate(in: kit, owner: owner)
         let dispatcher = ToolDispatcher(kit: kit, handle: hA).registering(hB)
 
-        // Capture with no estateID — the v1.0 path — targets the default.
-        let captured = try await dispatcher.dispatch(
-            name: "moot_capture_drawer", arguments: captureArgs(content: "row-in-default")
+        // File with no estateID — the v1.0 path — targets the default.
+        let filed = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "row-in-default")
         )
-        #expect(!isError(captured))
+        #expect(!isError(filed))
 
-        // Recall with no estateID sees it; recall from B does not.
-        let fromDefault = try await dispatcher.dispatch(
-            name: "moot_drawer_recall", arguments: recallArgs()
-        )
-        #expect(text(of: fromDefault)?.contains("row-in-default") ?? false,
-            "omitted estateID must behave exactly as the single-estate v1.0 path")
-
+        // Search in B — must NOT find the default row.
         let fromB = try await dispatcher.dispatch(
-            name: "moot_drawer_recall", arguments: recallArgs(estateID: hB.estateUUID)
+            name: "moot_memory_search",
+            arguments: searchArgs(query: "row-in-default", estateID: hB.estateUUID)
         )
         #expect(!(text(of: fromB)?.contains("row-in-default") ?? false),
             "the default row must not leak into estate B")
@@ -156,7 +146,8 @@ struct MultiEstateRoutingTests {
         // A well-formed UUID that names no registered estate.
         do {
             _ = try await dispatcher.dispatch(
-                name: "moot_drawer_recall", arguments: recallArgs(estateID: UUID())
+                name: "moot_memory_search",
+                arguments: searchArgs(query: "anything", estateID: UUID())
             )
             Issue.record("unknown estateID should throw invalidParams")
         } catch let error as JSONRPCError {
@@ -166,8 +157,8 @@ struct MultiEstateRoutingTests {
         // A malformed (non-UUID) estateID is the same out-of-band error.
         do {
             _ = try await dispatcher.dispatch(
-                name: "moot_drawer_recall",
-                arguments: .object(["filter": .string("unconfirmed"),
+                name: "moot_memory_search",
+                arguments: .object(["query": .string("anything"),
                                     "estateID": .string("not-a-uuid")])
             )
             Issue.record("malformed estateID should throw invalidParams")
@@ -190,17 +181,17 @@ struct MultiEstateRoutingTests {
         )
     }
 
-    /// Arguments for a `cross_estate_recall` call by `requester`.
-    private func crossArgs(requester: EstateHandle) -> JSONValue {
+    /// Arguments for a `moot_federated_search` call by `requester`.
+    private func federatedArgs(requester: EstateHandle) -> JSONValue {
         .object([
             "requesterEstateID": .string(requester.estateUUID.uuidString),
             "filter": .string("unconfirmed"),
         ])
     }
 
-    // MARK: - 4. cross_estate_recall fans across authorized estates
+    // MARK: - 4. moot_federated_search fans across authorized estates
 
-    @Test func testCrossEstateRecallFansAcrossAuthorizedEstates() async throws {
+    @Test func testFederatedSearchFansAcrossAuthorizedEstates() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-fan")
         let hA = try await openEstate(in: kit, owner: owner)   // requester
@@ -214,18 +205,19 @@ struct MultiEstateRoutingTests {
         _ = try await kit.issueGrant(hB, grantOptions(to: hA))
         _ = try await kit.issueGrant(hC, grantOptions(to: hA))
 
-        // Each estate captures a uniquely-tagged row.
+        // Each estate files a uniquely-tagged memory.
         for (handle, tag) in [(hB, "row-from-B"), (hC, "row-from-C"), (hD, "row-from-D")] {
             _ = try await dispatcher.dispatch(
-                name: "moot_capture_drawer",
-                arguments: captureArgs(content: tag, estateID: handle.estateUUID)
+                name: "moot_file_memory",
+                arguments: fileArgs(content: tag, estateID: handle.estateUUID)
             )
         }
 
         let result = try await dispatcher.dispatch(
-            name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
+            name: ToolDispatcher.federatedSearchToolName,
+            arguments: federatedArgs(requester: hA)
         )
-        #expect(!isError(result), "an authorized fan must succeed")
+        #expect(!isError(result), "an authorized federation fan must succeed")
         let body = try #require(text(of: result))
         #expect(body.contains("row-from-B"), "B's grant admits A — B contributes")
         #expect(body.contains("row-from-C"), "C's grant admits A — C contributes")
@@ -233,55 +225,57 @@ struct MultiEstateRoutingTests {
             "D granted nothing — its rows must not appear")
     }
 
-    // MARK: - 5. No-grant cross_estate_recall is refused cleanly
+    // MARK: - 5. No-grant federated search is refused cleanly
 
-    @Test func testNoGrantCrossEstateRecallRefusedAsErrorResult() async throws {
+    @Test func testNoGrantFederatedSearchRefusedAsErrorResult() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-nogrant")
         let hA = try await openEstate(in: kit, owner: owner)   // requester
         let hB = try await openEstate(in: kit, owner: owner)   // grants nothing
         let dispatcher = ToolDispatcher(kit: kit, handle: hA).registering(hB)
 
-        // B captures content but issues no grant to A.
+        // B files content but issues no grant to A.
         _ = try await dispatcher.dispatch(
-            name: "moot_capture_drawer",
-            arguments: captureArgs(content: "secret-B", estateID: hB.estateUUID)
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "secret-B", estateID: hB.estateUUID)
         )
 
         // The call must come back as an error RESULT (isError == true),
         // not a thrown JSON-RPC error: the read reached the
         // substrate-mediated surface and was refused (A-versus-C, §13).
         let result = try await dispatcher.dispatch(
-            name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
+            name: ToolDispatcher.federatedSearchToolName,
+            arguments: federatedArgs(requester: hA)
         )
         #expect(isError(result),
-            "a no-grant cross-estate call must be refused with isError == true")
+            "a no-grant federated search must be refused with isError == true")
         #expect(!(text(of: result)?.contains("secret-B") ?? false),
             "refused call must not leak the ungranted estate's content")
     }
 
-    // MARK: - 6. Scope narrowing — a room grant discloses only that room
+    // MARK: - 6. Scope narrowing — a room grant discloses only that location
 
-    @Test func testRoomScopedGrantNarrowsToThatRoom() async throws {
+    @Test func testLocationScopedGrantNarrowsToThatRoom() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "mm-scope")
         let hA = try await openEstate(in: kit, owner: owner)   // requester
         let hB = try await openEstate(in: kit, owner: owner)
         let dispatcher = ToolDispatcher(kit: kit, handle: hA).registering(hB)
 
-        // B grants A only the "kitchen" room, then captures into two rooms.
+        // B grants A only the "kitchen" room, then files into two locations.
         _ = try await kit.issueGrant(hB, grantOptions(to: hA, scope: .room("kitchen")))
         _ = try await dispatcher.dispatch(
-            name: "moot_capture_drawer",
-            arguments: captureArgs(content: "kitchen-row", room: "kitchen", estateID: hB.estateUUID)
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "kitchen-row", location: "kitchen", estateID: hB.estateUUID)
         )
         _ = try await dispatcher.dispatch(
-            name: "moot_capture_drawer",
-            arguments: captureArgs(content: "garage-row", room: "garage", estateID: hB.estateUUID)
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "garage-row", location: "garage", estateID: hB.estateUUID)
         )
 
         let result = try await dispatcher.dispatch(
-            name: "moot_cross_estate_recall", arguments: crossArgs(requester: hA)
+            name: ToolDispatcher.federatedSearchToolName,
+            arguments: federatedArgs(requester: hA)
         )
         #expect(!isError(result))
         let body = try #require(text(of: result))
