@@ -1,40 +1,41 @@
 // swift-tools-version:6.0
 //
-// Installer — the LAUNCH-05 installer and first-run binary.
+// Installer — the mootx01 unified CLI binary.
 //
-// Ships the `mootx01-mcp` stdio MCP server that the installer wires
-// into Claude Desktop, Claude Code, and other MCP clients. The binary
-// wraps the public AriaMCP library (ARIA_MCP/Sources/AriaMCP) on top
-// of a persistent SQLite-backed GeniusLocusKit estate stored under
-// the user's data directory. First-run is a code path inside the
-// same binary: when the estate file is absent it calls
-// LocusKit.Estate.create on the MDCC default before serving.
+// Ships a single `mootx01` binary that serves, installs, uninstalls,
+// manages named estate databases, and issues queries. The binary
+// replaces the prior two-binary arrangement (mootx01-mcp stdio server +
+// bash install scripts) per MOOTX01-CLI-001.
 //
-// The bare `aria-mcp` executable in ARIA_MCP/ is the in-memory
-// LAUNCH-04 transactional spike and is left untouched. mootx01-mcp
-// is the user-installed binary; it consumes only published AriaMCP,
-// GeniusLocusKit, LocusKit, and PersistenceKitSQLite API.
+// The serve subcommand wraps AriaMCP + GeniusLocusKit on macOS only
+// (Apple Silicon, macOS 15+). All other subcommands — install, uninstall,
+// db, status, query — are cross-platform and compile on Linux.
 //
-// MootInstallerCore holds the path-and-config helpers used by both
-// the executable and the installer's test target so platform-path
-// logic can be exercised without spawning a process.
+// MootInstallerCore holds path/config helpers and the installer state
+// machine. The test target exercises those helpers without spawning a
+// process or touching real user data.
 //
-// Platforms: macOS 15 (Apple Silicon). Monday targets macOS only
-// per docs/canon/LAUNCH_PLAN.md §"The Monday cut"; install.sh exits
-// gracefully on other platforms.
+// Binary name: mootx01 (replaces mootx01-mcp; all client configs use
+// the new name after running `mootx01 install`).
 
 import PackageDescription
 
 let package = Package(
     name: "Installer",
+    // macOS(.v15) is the minimum for the serve subcommand and its deps
+    // (AriaMCP, GeniusLocusKit, LocusKit, PersistenceKitSQLite).
+    // Linux builds succeed because ServeCommand.swift is guarded with
+    // #if os(macOS) — SPM compiles only the cross-platform subcommands
+    // (install, uninstall, db, status, query) on Linux.
     platforms: [
         .macOS(.v15),
     ],
     products: [
         .library(name: "MootInstallerCore", targets: ["MootInstallerCore"]),
-        .executable(name: "mootx01-mcp", targets: ["mootx01-mcp"]),
+        .executable(name: "mootx01", targets: ["mootx01"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(name: "AriaLexiconLib", path: "../packages/libs/AriaLexiconLib"),
         .package(name: "GeniusLocusKit", path: "../packages/kits/GeniusLocusKit"),
         .package(name: "LocusKit", path: "../packages/kits/LocusKit"),
@@ -48,9 +49,13 @@ let package = Package(
             path: "Sources/MootInstallerCore"
         ),
         .executableTarget(
-            name: "mootx01-mcp",
+            name: "mootx01",
             dependencies: [
                 "MootInstallerCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                // macOS-only: serve subcommand depends on the MCP stack + GLK.
+                // On Linux these products are unavailable; ServeCommand.swift uses
+                // #if os(macOS) guards so the Linux build omits the serve subcommand.
                 .product(name: "AriaMCP", package: "ARIA_MCP"),
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
@@ -58,7 +63,7 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
             ],
-            path: "Sources/mootx01-mcp"
+            path: "Sources/mootx01"
         ),
         .testTarget(
             name: "MootInstallerCoreTests",
