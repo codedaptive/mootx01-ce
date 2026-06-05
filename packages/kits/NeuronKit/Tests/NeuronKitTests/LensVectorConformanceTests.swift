@@ -13,9 +13,9 @@
 //     spreadingActivation, themeWeather, latentThemes,
 //     representationBias, learnedPreference, anticipate,
 //     partialRecall, mindOverlap, shingleSimilarity,
-//     benchmarkScoring, mmrRank, formalConceptAnalysis,
-//     hybridRecall, associationRuleMining, scenarioProfile,
+//     benchmarkScoring, mmrRank, hybridRecall, scenarioProfile,
 //     contextSynthesizer, bradleyTerry
+//   SubstrateML: formalConceptAnalysis, associationRuleMining
 //
 // Regenerate (after a DELIBERATE behavioral change only):
 //   RECORD_LENS_VECTORS=1 swift test --filter LensVectorConformance
@@ -25,6 +25,7 @@
 
 import Testing
 import Foundation
+import SubstrateML
 import SubstrateTypes
 import EngramLib
 @testable import NeuronKit

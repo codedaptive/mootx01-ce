@@ -2,11 +2,11 @@ import Foundation
 import LocusKit
 import VectorKit
 
-/// Registration helper for the six v1 standing signals — architecture
+/// Registration helper for the seven v1 standing signals — architecture
 /// spec §11.2.
 ///
 /// Calling `registerDefaultStandingSignals(in:now:)` registers all
-/// six default signal specs against the addressed estate's scheduler
+/// seven default signal specs against the addressed estate's scheduler
 /// at their architecture-spec cadences. The returned dictionary maps
 /// each signal's stable name to its freshly-minted `SignalID` so the
 /// application can subscribe, inspect, or unregister selectively.
@@ -15,9 +15,15 @@ import VectorKit
 /// are the signal-name constants from each signal file. The scheduler
 /// itself orders dispatch by `SignalID.rawValue`, so registration
 /// order is a property of this helper rather than of the scheduler.
+///
+/// Signal 7 (TemporalCausalitySignal) was added 2026-06-04 per
+/// DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md, superseding the
+/// weekly cadence in cookbook §6.4. It is registered using
+/// `defaultSpec()` (diagnostic no-op); production callers wire a live
+/// fold closure via `TemporalCausalitySignal.spec(foldCycle:)`.
 public extension GeniusLocusKit {
 
-    /// Names of the six v1 standing signals, in the order they are
+    /// Names of the seven v1 standing signals, in the order they are
     /// registered by `registerDefaultStandingSignals`. Exposed as a
     /// stable array so tests and diagnostics can assert against the
     /// vocabulary without hard-coding string literals.
@@ -29,6 +35,7 @@ public extension GeniusLocusKit {
             DecaySweepSignal.signalName,
             ByReferenceValiditySignal.signalName,
             EndOfDayTournamentSignal.signalName,
+            TemporalCausalitySignal.signalName,
         ]
     }
 
@@ -70,6 +77,14 @@ public extension GeniusLocusKit {
             DecaySweepSignal.defaultSpec(),
             ByReferenceValiditySignal.defaultSpec(),
             EndOfDayTournamentSignal.defaultSpec(),
+            // TemporalCausalitySignal registered with its diagnostic no-op
+            // spec. Production callers replace this with
+            // TemporalCausalitySignal.spec(foldCycle:) to wire a live fold
+            // closure. The default is appropriate here because
+            // registerDefaultStandingSignals cannot supply estate-specific
+            // context (audit log, mutable MatrixTier) without breaking the
+            // method's generic signature.
+            TemporalCausalitySignal.defaultSpec(),
         ]
         var registered: [String: SignalID] = [:]
         for spec in specs {

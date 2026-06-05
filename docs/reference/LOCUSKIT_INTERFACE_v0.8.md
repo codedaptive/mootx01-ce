@@ -482,6 +482,7 @@ public actor DrawerStore {
     public func mutateProvenance(...) async throws; public func mutateState(...) async throws
     public func addTunnel(_ t: Tunnel) async throws; public func getTunnel(id: String) async throws -> Tunnel?
     public func addKGFact(_ f: KGFact) async throws; public func kgFacts(forDrawerID: String) async throws -> [KGFact]
+    public func withdrawKGFact(id: String) async throws  // GLK-VERB-EXT-01: transitions adjectiveBitmap to State.withdrawn (exits g_state_cluster < 7 filter)
     public func addDiaryEntry(_ e: DiaryEntry) async throws; public func readDiary(agentName: String, lastN: Int = 10) async throws -> [DiaryEntry]
     public func insertRecallTrace(_ item: RecallTraceItem) async throws
     public func getRecallTrace(id: String) async throws -> RecallTraceItem?
@@ -496,10 +497,15 @@ public actor DrawerStore {
     // … full CRUD + audit surface, see DrawerStore.swift
 }
 ```
-**Rust:** `pub trait DrawerStore: Send + Sync` with `InMemoryDrawerStore`;
+**Rust:** `pub trait DrawerStore: Send + Sync` with `InMemoryDrawerStore`
+(plus `SqliteDrawerStore` and `PostgresDrawerStore` delegation wrappers);
 methods are synchronous and take `now: i64`. The Swift `DrawerStore` is a
 concrete actor over any injected `Storage` (SQLite in production); the Rust
 version realises the same store contract through the trait (SPEC § 8).
+GLK-RUST-WRITE-PATH-01 added `withdraw_kg_fact(id: &str, now: i64)` to the
+trait with a `DatabaseUnavailable` default; `DrawerStoreCore` carries the
+live implementation (sets bits 0–5 of `adjective_bitmap` to `State::Withdrawn`
+raw 18, preserving upper bits — mirrors `withdrawKGFact` in the Swift actor).
 
 ### Tier 2 — broader surface (table of contents)
 

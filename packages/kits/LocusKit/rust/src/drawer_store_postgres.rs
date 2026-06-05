@@ -290,6 +290,10 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.add_kg_fact(fact)
     }
 
+    fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
+        self.0.withdraw_kg_fact(id, now)
+    }
+
     fn get_kg_fact(&self, id: &str) -> Result<Option<crate::kg_fact::KGFact>, LocusKitError> {
         self.0.get_kg_fact(id)
     }

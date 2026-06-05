@@ -3,7 +3,7 @@
 // AssociationRules — the conscious "what co-occurs with what" recipe (Analytics).
 // Recalls a set of drawers, projects each drawer's categorical facets (room,
 // kind, channel, sensitivity) into a per-call label vocabulary, builds the
-// co-occurrence matrix O from the recalled set, and surfaces NeuronKit's
+// co-occurrence matrix O from the recalled set, and surfaces SubstrateML's
 // pairwise association-rule mining.
 //
 // Layer discipline (SPEC § 5, B-1/B-2, I-1/I-2): the recipe only SEQUENCES.
@@ -11,8 +11,8 @@
 //     through the passed handle and kit).
 //   - Label projection: derive the substrate's categorical facets as
 //     lowercase canonical strings (Swift case-name vocabulary, per § 4.2).
-//   - MatrixO build: accumulate the co-occurrence using the NeuronKit
-//     engine's own `MatrixO.applyRow`; no arithmetic in this file.
+//   - MatrixO build: accumulate the co-occurrence using
+//     `MatrixO.applyRow` (SubstrateTypes); no arithmetic in this file.
 //   - Rule mining: one `mineAssociationRules` call — the engine owns all
 //     metric computation; the recipe shapes inputs and relabels outputs.
 // Capability gate: `.associationRuleMining` is verified before any estate
@@ -58,6 +58,7 @@ import Foundation
 import GeniusLocusKit
 import LocusKit
 import NeuronKit
+import SubstrateML
 import SubstrateTypes
 
 // MARK: - Result type
@@ -133,7 +134,8 @@ public struct AssociationRules: Recipe {
     public let description =
         "Recall a frame, project each drawer's categorical facets into a co-occurrence matrix, and mine pairwise association rules."
 
-    /// Requires the `associationRuleMining` NeuronKit surface (spec I-3).
+    /// Requires the `associationRuleMining` capability gate (spec I-3).
+    /// The engine itself (`mineAssociationRules`) lives in SubstrateML.
     public let requiredCapabilities: [NeuronKitCapability] = [.associationRuleMining]
 
     public func run(
@@ -187,6 +189,62 @@ public struct AssociationRules: Recipe {
         }
 
         return Output(rules: results, drawerCount: drawerCount, labelOverflow: labelOverflow)
+    }
+}
+
+// MARK: - Apriori recipe
+
+/// Multi-antecedent association-rule mining over the estate's audit log.
+///
+/// Delegates entirely to `GeniusLocusKit.mineAprioriRules(estate:thresholds:)`.
+/// No label projection is needed: the engine works on raw `(field, value)` items
+/// derived from the `RowAttributeView` of the audit log.
+///
+/// The recipe's output preserves the engine's `AprioriRule` values verbatim so
+/// callers can inspect all five metrics and the full multi-item antecedent list.
+public struct AprioriRules: Recipe {
+
+    public struct Input: Sendable {
+        /// Apriori threshold gates: minSupport, minConfidence, minLift, maxK.
+        public let thresholds: AprioriThresholds
+
+        public init(thresholds: AprioriThresholds) {
+            self.thresholds = thresholds
+        }
+    }
+
+    public struct Output: Sendable {
+        /// Mined rules sorted by lift DESC, confidence DESC, evidenceCount DESC.
+        public let rules: [AprioriRule]
+
+        public init(rules: [AprioriRule]) {
+            self.rules = rules
+        }
+    }
+
+    public init() {}
+
+    public let name = "apriori_rules"
+    public let version = "1.0.0"
+    public let description =
+        "Read the estate's audit log and mine multi-antecedent association rules via the Apriori algorithm."
+
+    /// Requires the `associationRuleMining` capability gate (spec I-3).
+    public let requiredCapabilities: [NeuronKitCapability] = [.associationRuleMining]
+
+    public func run(
+        input: Input,
+        estate: EstateHandle,
+        kit: GeniusLocusKit
+    ) async throws -> Output {
+        // B-5: verify capabilities before any substrate touch.
+        try verifyCapabilities(required: requiredCapabilities)
+
+        // Delegate to GeniusLocusKit: refresh audit log, build RowAttributeView
+        // rows, run AprioriMining. No math duplicated here.
+        let rules = try await kit.mineAprioriRules(estate: estate,
+                                                   thresholds: input.thresholds)
+        return Output(rules: rules)
     }
 }
 

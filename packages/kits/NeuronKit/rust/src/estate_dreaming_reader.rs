@@ -2,21 +2,23 @@
 // `NeuronKit/Sources/NeuronKit/Dreaming/EstateDreamingReader.swift`.
 //
 // Production adapter that implements `DreamingSubstrateReader` over a
-// synchronous `DrawerStore` reference. Unlike the Swift actor that
-// calls async GLK surface methods, the Rust version snapshots the three
-// reads at construction time — the trait's methods are sync (no time args)
-// and the store is sync, so pre-fetching is the natural fit.
+// GeniusLocusKit estate handle. Unlike the Swift actor that calls async
+// GLK surface methods, the Rust version snapshots the three reads at
+// construction time — the trait's methods are sync (no time args)
+// and the estate reads are sync, so pre-fetching is the natural fit.
 //
 // Architecture note: same layering rationale as Swift. `EstateDreamingReader`
 // lives in NeuronKit because it needs to implement `DreamingSubstrateReader`
-// (declared in `dreaming_cycle.rs`) AND call locus-kit DrawerStore methods.
-// NeuronKit already depends on both; locus-kit does not depend on
-// neuron-kit, so there is no circular dependency.
+// (declared in `dreaming_cycle.rs`) AND call genius_locus_kit coordinator
+// methods. NeuronKit already depends on both; genius_locus_kit does not
+// depend on neuron_kit, so there is no circular dependency.
+//
+// B-1 compliance: all estate reads route through genius_locus_kit's
+// EstateCoordinator surface — no direct locus_kit storage calls.
 
 use std::collections::BTreeMap;
 
-use locus_kit::drawer_store::DrawerStore;
-use locus_kit::error::LocusKitError;
+use genius_locus_kit::{Drawer, EstateCoordinator, EstateHandle, VerbDispatchError};
 
 use crate::dreaming_cycle::{
     CoOccurrenceObservation, DreamingSubstrateReader, RecallTraceItem as CycleRecallTraceItem,
@@ -25,9 +27,9 @@ use crate::dreaming_cycle::{
 
 /// Snapshot-based production adapter for `DreamingSubstrateReader`.
 ///
-/// Reads are snapshotted from the store at construction via
+/// Reads are snapshotted from the estate at construction via
 /// `EstateDreamingReader::new`. The three trait methods return
-/// references into those snapshots so no store call is needed after
+/// references into those snapshots so no coordinator call is needed after
 /// construction. This matches the Rust `DreamingSubstrateReader` trait
 /// contract (sync, no time parameters).
 pub struct EstateDreamingReader {
@@ -37,17 +39,22 @@ pub struct EstateDreamingReader {
 }
 
 impl EstateDreamingReader {
-    /// Construct the adapter by snapshotting all three reads from `store`.
+    /// Construct the adapter by snapshotting all three reads from the
+    /// addressed estate through the GeniusLocusKit coordinator surface.
     ///
     /// `since` and `now` are ISO8601 strings bounding the recall-trace
     /// reward window (both inclusive). The co-occurrence observations are
     /// derived from the drawer snapshot using the v1 room-grouping algorithm.
-    pub fn new<S: DrawerStore>(
-        store: &S,
+    ///
+    /// All reads go through `coordinator.all_drawers`, `coordinator.all_tunnels`,
+    /// and `coordinator.recent_recall_traces` — B-1 compliant.
+    pub fn new(
+        coordinator: &EstateCoordinator,
+        handle: &EstateHandle,
         since: &str,
         now: &str,
-    ) -> Result<Self, LocusKitError> {
-        let raw_traces = store.recent_recall_traces(since, now)?;
+    ) -> Result<Self, VerbDispatchError> {
+        let raw_traces = coordinator.recent_recall_traces(handle, since, now)?;
         let traces = raw_traces
             .into_iter()
             .map(|t| CycleRecallTraceItem {
@@ -56,10 +63,10 @@ impl EstateDreamingReader {
             })
             .collect();
 
-        let drawers = store.all_drawers()?;
+        let drawers = coordinator.all_drawers(handle)?;
         let observations = build_co_occurrence_observations(&drawers);
 
-        let raw_tunnels = store.all_tunnels()?;
+        let raw_tunnels = coordinator.all_tunnels(handle)?;
         let tunnels = raw_tunnels
             .into_iter()
             .map(|t| TunnelLink {
@@ -97,13 +104,11 @@ impl DreamingSubstrateReader for EstateDreamingReader {
 // CoOccurrenceObservation per pair of drawers that share a room.
 // `attempts` = total drawers in that room (proxy for evidence density).
 
-fn build_co_occurrence_observations(
-    drawers: &[locus_kit::drawer::Drawer],
-) -> Vec<CoOccurrenceObservation> {
+fn build_co_occurrence_observations(drawers: &[Drawer]) -> Vec<CoOccurrenceObservation> {
     let mut by_room: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
 
     for drawer in drawers {
-        // Rust `tombstoned_at` is `Option<i64>` (epoch seconds); None means live.
+        // `tombstoned_at` is `Option<i64>` (epoch seconds); None means live.
         if drawer.tombstoned_at.is_some() {
             continue;
         }
@@ -205,8 +210,8 @@ mod tests {
         }
     }
 
-    fn make_drawer(id: &str, wing: &str, room: &str) -> locus_kit::drawer::Drawer {
-        locus_kit::drawer::Drawer::new(
+    fn make_drawer(id: &str, wing: &str, room: &str) -> Drawer {
+        Drawer::new(
             id,
             format!("content-{id}"),
             wing,

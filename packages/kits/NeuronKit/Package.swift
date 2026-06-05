@@ -97,6 +97,9 @@ let package = Package(
             dependencies: [
                 "NeuronKit",
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                // SubstrateML provides ARM types (mineAssociationRules,
+                // MiningThresholds) used by LensVectorConformanceTests.
+                .product(name: "SubstrateML", package: "SubstrateML"),
                 // EstateDreamingReaderTests constructs a live GeniusLocusKit
                 // estate with an in-memory backend to verify the production
                 // adapter delegates all three reads correctly.

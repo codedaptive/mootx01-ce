@@ -42,6 +42,12 @@ import Foundation
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 import SubstrateTypes
+// SubstrateML is imported here to access TemporalCausalityFold,
+// the canonical T-matrix engine (cookbook §6.4). GeniusLocusKit
+// is the composition layer; importing SubstrateML (algorithms)
+// does not invert the kit layering graph. Added 2026-06-04 per
+// DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+import SubstrateML
 
 // MARK: - Coordinate types
 
@@ -165,7 +171,24 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     /// Last HLC seen by the tier. Used by the snapshot watermark.
     public private(set) var lastHLC: HLC
 
+    /// HLC of the last audit entry processed by `rebuildTemporal`.
+    ///
+    /// The hourly TemporalCausalitySignal uses this watermark to
+    /// process only entries that arrived since the last T-population
+    /// pass, avoiding redundant reprocessing of the full log.
+    /// Initialized to `.zero` (no pass has run yet) and advanced by
+    /// every `rebuildTemporal(from:)` call.
+    ///
+    /// Old snapshots that predate this field decode cleanly because
+    /// the custom `init(from:)` below uses `decodeIfPresent` with
+    /// a `.zero` fallback.
+    public private(set) var temporalWatermarkHLC: HLC
+
     /// Log-spaced lag bucket boundaries in minutes (cookbook §6.4).
+    /// The canonical implementation lives in
+    /// `TemporalCausalityFold.lagBuckets`; this constant mirrors it
+    /// so callers that already reference `MatrixTier.lagBuckets` work
+    /// unchanged.
     public static let lagBuckets: [Int] = [1, 2, 4, 8, 16, 32, 64, 128]
 
     /// Window cap for T — pairs whose capture-time delta exceeds the
@@ -178,6 +201,46 @@ public struct MatrixTier: Sendable, Equatable, Codable {
         self.temporalCausality = [:]
         self.liveRowCount = 0
         self.lastHLC = .zero
+        self.temporalWatermarkHLC = .zero
+    }
+
+    // MARK: - Codable (backward-compatible)
+    //
+    // MatrixTier gained `temporalWatermarkHLC` on 2026-06-04. Old
+    // snapshots (MatrixSnapshot.tier) lack this key; synthesized
+    // Codable would throw `keyNotFound`. A custom `init(from:)` with
+    // `decodeIfPresent` restores `.zero` for old snapshots so all
+    // decode paths remain forward-compatible.
+
+    public enum CodingKeys: String, CodingKey {
+        case fieldPresence
+        case coOccurrence
+        case temporalCausality
+        case liveRowCount
+        case lastHLC
+        case temporalWatermarkHLC
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        fieldPresence        = try c.decode([MatrixFieldCell: Int64].self, forKey: .fieldPresence)
+        coOccurrence         = try c.decode([MatrixCoOccurKey: Int64].self, forKey: .coOccurrence)
+        temporalCausality    = try c.decode([MatrixTemporalKey: Int64].self, forKey: .temporalCausality)
+        liveRowCount         = try c.decode(Int64.self, forKey: .liveRowCount)
+        lastHLC              = try c.decode(HLC.self, forKey: .lastHLC)
+        // Decode with fallback to .zero so snapshots produced before
+        // this field was added still decode without throwing keyNotFound.
+        temporalWatermarkHLC = try c.decodeIfPresent(HLC.self, forKey: .temporalWatermarkHLC) ?? .zero
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(fieldPresence,         forKey: .fieldPresence)
+        try c.encode(coOccurrence,          forKey: .coOccurrence)
+        try c.encode(temporalCausality,     forKey: .temporalCausality)
+        try c.encode(liveRowCount,          forKey: .liveRowCount)
+        try c.encode(lastHLC,               forKey: .lastHLC)
+        try c.encode(temporalWatermarkHLC,  forKey: .temporalWatermarkHLC)
     }
 
     // MARK: Derived correlation
@@ -270,12 +333,12 @@ public struct MatrixTier: Sendable, Equatable, Codable {
     /// Log-spaced bucket index: 1, 2, 4, 8, ..., 128 minutes.
     /// Out-of-window inputs are caller-side rejected by
     /// `applyTemporalEvent`.
+    ///
+    /// Delegates to `TemporalCausalityFold.lagBucket(forMinutes:)` so
+    /// the canonical implementation lives in SubstrateML (single source
+    /// of truth for conformance vectors). The result is identical.
     public static func lagBucket(forMinutes minutes: Int) -> Int {
-        // Find the smallest bucket whose boundary >= minutes.
-        for b in lagBuckets {
-            if minutes <= b { return b }
-        }
-        return lagBuckets.last ?? 128
+        return TemporalCausalityFold.lagBucket(forMinutes: minutes)
     }
 
     // MARK: Decay
@@ -414,6 +477,140 @@ public struct MatrixTier: Sendable, Equatable, Codable {
             }
         }
         return tier
+    }
+
+    // MARK: - rebuildTemporal
+
+    /// Rebuild the T (temporal causality) matrix from the unified audit log.
+    ///
+    /// This is SEPARATE from `rebuild(from:)`, which populates F, C, and O.
+    /// Calling `rebuild(from:)` alone does NOT populate T — temporal causality
+    /// crosses *pairs* of rows captured at different times, whereas F/O derive
+    /// from individual rows. Callers that want a full rebuild call both:
+    ///
+    ///     var tier = MatrixTier.rebuild(from: log)
+    ///     tier = MatrixTier.rebuildTemporal(from: log, into: tier)
+    ///
+    /// Or equivalently, merge two passes:
+    ///
+    ///     var tier = MatrixTier.rebuild(from: log)
+    ///     let tTier = MatrixTier.rebuildTemporal(from: log)
+    ///     tier.temporalCausality = tTier.temporalCausality
+    ///     tier.temporalWatermarkHLC = tTier.temporalWatermarkHLC
+    ///
+    /// Implementation:
+    ///   1. Converts UnifiedAuditEntry → TemporalAuditEntry at this kit
+    ///      boundary (SubstrateML cannot import GeniusLocusKit).
+    ///   2. Calls `TemporalCausalityFold.fold` with `.zero` watermark
+    ///      (full rebuild always replays the full log).
+    ///   3. Applies each delta via `applyTemporalEvent`.
+    ///   4. Sets `temporalWatermarkHLC` to the fold's returned watermark.
+    ///
+    /// The rebuild is idempotent on the same log: replaying the same log
+    /// twice from a fresh MatrixTier produces a cell-equal result because
+    /// T counts pairs and the fold is deterministic.
+    public static func rebuildTemporal(from log: UnifiedAuditLog) -> MatrixTier {
+        var tier = MatrixTier()
+
+        // Convert UnifiedAuditEntry to TemporalAuditEntry at the GeniusLocusKit
+        // boundary. Only capture and expunge verbs contribute to T (same filter
+        // as applyCapture on the hot path). Entries are taken in HLC order —
+        // orderedEntries is already HLC-ascending, meeting TemporalCausalityFold's
+        // precondition.
+        let temporalEntries: [TemporalAuditEntry] = log.orderedEntries
+            .filter { $0.verb == .capture || $0.verb == .expunge }
+            .map { entry in
+                let coords: [TemporalFieldCoord]
+                switch entry.afterValue {
+                case .bitmap(let v):
+                    // Bitmap value: one coord carrying the full bitmap.
+                    coords = [TemporalFieldCoord(
+                        fieldPath: entry.fieldPath,
+                        valueRepr: "bitmap:\(v)")]
+                case .string(let s):
+                    coords = [TemporalFieldCoord(
+                        fieldPath: entry.fieldPath,
+                        valueRepr: "string:\(s)")]
+                case .integer(let v):
+                    coords = [TemporalFieldCoord(
+                        fieldPath: entry.fieldPath,
+                        valueRepr: "integer:\(v)")]
+                case .bytes(let b):
+                    coords = [TemporalFieldCoord(
+                        fieldPath: entry.fieldPath,
+                        valueRepr: "bytes:\(b.count)")]
+                case .null:
+                    // Null after-value contributes no coordinate; the entry
+                    // advances the watermark but generates no T pairs.
+                    coords = []
+                }
+                return TemporalAuditEntry(hlc: entry.hlc, fieldCoords: coords)
+            }
+
+        // Full rebuild: start watermark at .zero so the fold processes
+        // every entry as "new".
+        let (deltas, newWatermark) = TemporalCausalityFold.fold(
+            entries: temporalEntries,
+            windowMinutes: Self.temporalWindowMinutes,
+            startWatermark: .zero)
+
+        for (foldKey, delta) in deltas {
+            // Map TemporalCausalityKey → (source, target, deltaMinutes) for
+            // applyTemporalEvent. applyTemporalEvent internally calls
+            // Self.lagBucket again, so we pass the bucket value directly as
+            // the deltaMinutes argument — it maps back to the same bucket.
+            let src = MatrixValueCoord(
+                fieldPath: foldKey.source.fieldPath,
+                value: decodeValueRepr(foldKey.source.valueRepr))
+            let tgt = MatrixValueCoord(
+                fieldPath: foldKey.target.fieldPath,
+                value: decodeValueRepr(foldKey.target.valueRepr))
+            // Pass lagBucket value as deltaMinutes; applyTemporalEvent maps
+            // it back to the same bucket because lagBucket(x) == x for each
+            // boundary value in {1,2,4,8,16,32,64,128}.
+            tier.applyTemporalEvent(
+                source: src,
+                target: tgt,
+                deltaMinutes: foldKey.lagBucket,
+                delta: delta)
+        }
+
+        tier.temporalWatermarkHLC = newWatermark
+        return tier
+    }
+
+    /// Decode a `TemporalFieldCoord.valueRepr` string back to a
+    /// `UnifiedAuditValue`. Used at the GeniusLocusKit boundary when
+    /// converting fold output to MatrixValueCoord.
+    ///
+    /// This is the inverse of the encoding applied in `rebuildTemporal`:
+    ///   "bitmap:\(v)"    → .bitmap(v)
+    ///   "string:\(s)"    → .string(s)
+    ///   "integer:\(v)"   → .integer(v)
+    ///   "bytes:\(count)" → .bytes([]) (count used for matching; content
+    ///                       is not round-tripped — T is keyed by repr only)
+    ///   "null"           → .null
+    ///   anything else    → .string(repr) (safe fallback)
+    private static func decodeValueRepr(_ repr: String) -> UnifiedAuditValue {
+        if repr == "null" { return .null }
+        if repr.hasPrefix("bitmap:"),
+           let v = UInt64(repr.dropFirst("bitmap:".count)) {
+            return .bitmap(v)
+        }
+        if repr.hasPrefix("integer:"),
+           let v = Int64(repr.dropFirst("integer:".count)) {
+            return .integer(v)
+        }
+        if repr.hasPrefix("bytes:") {
+            // Bytes content is not round-tripped; only the field identity
+            // matters for T-matrix keying.
+            return .bytes([])
+        }
+        if repr.hasPrefix("string:") {
+            return .string(String(repr.dropFirst("string:".count)))
+        }
+        // Safe fallback: treat unknown reprs as string values.
+        return .string(repr)
     }
 
     // MARK: - Private update helpers

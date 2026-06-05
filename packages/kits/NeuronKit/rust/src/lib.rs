@@ -4,8 +4,8 @@
 //! maintenance, standing-signals scheduler, SolverBandit,
 //! audit-chain monitor) and reasoning functions (hybrid recall,
 //! MMR diversification, ContextSynthesizer, branch derivation,
-//! tournament scoring, association-rule mining,
-//! bounded formal concept analysis) per NEURONKIT_SPEC_v0.85.md.
+//! tournament scoring)
+//! per NEURONKIT_SPEC_v0.85.md.
 //!
 //! First reasoning surface: the lattice-anchor inference path.
 //! NeuronKit composes EideticLib's deterministic `lookup` and
@@ -16,6 +16,11 @@
 //! resolve) lives in EideticLib and is the same code path on both
 //! sides of the substrate boundary.
 //!
+//! Association-rule mining and bounded formal concept analysis live
+//! in SubstrateML, not this crate. Use
+//! `substrate_ml::association_rule_mining` and
+//! `substrate_ml::formal_concept_analysis` for those types.
+//!
 //! Per DESIGN_CONSTRAINTS.md C-1, this crate takes NO external
 //! ML runtime dependencies. Pure Rust source plus the eidetic-lib
 //! dependency, whose CC-BY-SA reference data stays on the
@@ -24,7 +29,6 @@
 
 pub mod anomaly_scan;
 pub mod anticipation;
-pub mod association_rule_mining;
 pub mod benchmark_live;
 pub mod benchmark_scoring;
 pub mod bias;
@@ -37,7 +41,6 @@ pub mod estate_dreaming_sink;
 pub mod estate_maintenance_reader;
 pub mod estate_maintenance_sink;
 pub mod drift;
-pub mod formal_concept_analysis;
 pub mod hybrid_recall;
 pub mod keystones;
 pub mod latent_themes;
@@ -56,9 +59,6 @@ pub mod tournament_live;
 
 pub use anomaly_scan::{anomalies, Anomaly};
 pub use anticipation::{anticipate, ActionObservation, ActionPrediction};
-pub use association_rule_mining::{
-    mine_association_rules, AssociationRule, Item, MiningThresholds,
-};
 pub use benchmark_live::{benchmark as benchmark_branch, BenchmarkReport};
 pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
 pub use bias::{learned_preference, representation_bias, CategoryBias, PreferenceStrength};
@@ -74,24 +74,18 @@ pub use dreaming_decision::{
     Observation, Outcome as DreamingOutcome,
 };
 /// Production adapter that binds `DreamingSubstrateReader` to a live
-/// `DrawerStore`. Mirrors `EstateDreamingReader.swift`.
+/// `EstateCoordinator`. Mirrors `EstateDreamingReader.swift`.
 pub use estate_dreaming_reader::EstateDreamingReader;
 /// Production adapter that binds `DreamingProposalSink` to a live
 /// `DrawerStore`. Mirrors `EstateDreamingSink.swift`. Closes BRAIN-PROPOSE.
 pub use estate_dreaming_sink::EstateDreamingSink;
 /// Production adapter that binds `MaintenanceSubstrateReader` to a live
-/// `DrawerStore`. Mirrors `EstateMaintenanceReader.swift`.
+/// `EstateCoordinator`. Mirrors `EstateMaintenanceReader.swift`.
 pub use estate_maintenance_reader::EstateMaintenanceReader;
 /// Production adapter that binds `MaintenanceProposalSink` to a live
 /// `DrawerStore`. Mirrors `EstateMaintenanceSink.swift`.
 pub use estate_maintenance_sink::EstateMaintenanceSink;
 pub use drift::{drift, DriftScore};
-/// Re-export the `formal_concept_analysis` module as `fca` so CognitionKit
-/// recipes can reference it via `neuron_kit::fca::...` if preferred.
-pub use formal_concept_analysis as fca;
-pub use formal_concept_analysis::{
-    BoundedConceptMiner, FormalAttribute, FormalConcept, FormalContext,
-};
 pub use hybrid_recall::{
     page_recall, rerank, shingle_similarity, shingles, DrawerRow, RecallFrameTuning, RecallPage,
 };

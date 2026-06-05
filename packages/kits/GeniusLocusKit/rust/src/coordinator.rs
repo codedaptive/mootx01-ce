@@ -19,9 +19,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
+use uuid::Uuid;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::error::LocusKitError;
+use locus_kit::recall_trace_item::RecallTraceItem;
 use locus_kit::estate::Estate;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::filter::RecallFrame;
@@ -471,6 +474,116 @@ impl EstateCoordinator {
         estate.all_diary_entries().map_err(|e| remap("recall_diary_entries", e).into())
     }
 
+    // MARK: - add_kg_fact
+
+    /// Capture a new KGFact in the estate addressed by `handle`.
+    ///
+    /// Allocates a UUID v4 id, constructs a `KGFact` with all-zero bitmaps,
+    /// and delegates to `Estate::add_kg_fact`. Returns the stored fact so
+    /// callers can retain the generated id. Mirrors the Swift
+    /// `GeniusLocusKit.captureKGFact(_:subject:predicate:object:sourceDrawerID:now:)`.
+    ///
+    /// `now` is epoch-seconds. Always pass the current time from the caller;
+    /// never call time inside this method — keeps the coordinator deterministic.
+    pub fn add_kg_fact(
+        &self,
+        handle: &EstateHandle,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        source_drawer_id: &str,
+        now: i64,
+    ) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        let fact = locus_kit::kg_fact::KGFact::new(
+            Uuid::new_v4().to_string(),
+            subject.to_string(),
+            predicate.to_string(),
+            object.to_string(),
+            source_drawer_id.to_string(),
+            now,
+        );
+        estate.add_kg_fact(&fact).map_err(|e| VerbDispatchError::from(remap("add_kg_fact", e)))?;
+        Ok(fact)
+    }
+
+    // MARK: - withdraw_kg_fact
+
+    /// Retire a KGFact by transitioning its state to `Withdrawn`.
+    ///
+    /// The row is preserved for audit purposes; `g_state_cluster` rises to 18
+    /// which excludes the fact from the active-recall filter. Delegates to
+    /// `Estate::withdraw_kg_fact`. Mirrors the Swift
+    /// `GeniusLocusKit.retireKGFact(_:rowID:)`.
+    pub fn withdraw_kg_fact(
+        &self,
+        handle: &EstateHandle,
+        id: &str,
+        now: i64,
+    ) -> Result<(), VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate.withdraw_kg_fact(id, now).map_err(|e| VerbDispatchError::from(remap("withdraw_kg_fact", e)))
+    }
+
+    // MARK: - add_diary_entry
+
+    /// Write a diary entry for `agent_name` into the estate addressed by `handle`.
+    ///
+    /// Allocates a UUID v4 id and constructs a `DiaryEntry`. If
+    /// `embedding_model_id` is empty the caller's intent is "no embedding";
+    /// substitute `"no-embedding"` so the non-empty model-id contract is
+    /// satisfied. Mirrors the Swift `GeniusLocusKit.addDiaryEntry(in:_:)`.
+    ///
+    /// `now` is epoch-seconds. `topic` and `embedding_model_id` are caller-
+    /// supplied; callers that have no topic may pass `""`.
+    pub fn add_diary_entry(
+        &self,
+        handle: &EstateHandle,
+        agent_name: &str,
+        entry_text: &str,
+        topic: &str,
+        embedding_model_id: &str,
+        now: i64,
+    ) -> Result<DiaryEntry, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        // Substitute "no-embedding" when the caller left the field empty,
+        // matching the Swift DreamingWrites.addDiaryEntry guard.
+        let model_id = if embedding_model_id.is_empty() {
+            "no-embedding"
+        } else {
+            embedding_model_id
+        };
+        let entry = DiaryEntry::new(
+            Uuid::new_v4().to_string(),
+            agent_name.to_string(),
+            entry_text.to_string(),
+            topic.to_string(),
+            format!("wing_{agent_name}"),
+            "diary".to_string(),
+            now,
+            model_id.to_string(),
+        );
+        estate.add_diary_entry(&entry).map_err(|e| VerbDispatchError::from(remap("add_diary_entry", e)))?;
+        Ok(entry)
+    }
+
+    // MARK: - diary_entries
+
+    /// Read the most-recent `last_n` diary entries for `agent_name` from the
+    /// estate addressed by `handle`, newest first.
+    ///
+    /// Delegates to `Estate::read_diary`. Mirrors the Swift
+    /// `GeniusLocusKit.readDiaryEntries(in:agentName:lastN:)`.
+    pub fn diary_entries(
+        &self,
+        handle: &EstateHandle,
+        agent_name: &str,
+        last_n: usize,
+    ) -> Result<Vec<DiaryEntry>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate.read_diary(agent_name, last_n).map_err(|e| VerbDispatchError::from(remap("diary_entries", e)))
+    }
+
     // MARK: - recall_proposals
 
     /// Recall proposal rows for the estate addressed by `handle`.
@@ -514,6 +627,56 @@ impl EstateCoordinator {
     ) -> Result<Vec<locus_kit::learned_reference::LearnedReference>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         estate.all_learned_references().map_err(|e| remap("recall_learned_references", e).into())
+    }
+
+    // MARK: - all_drawers
+
+    /// All drawers in the estate (including tombstoned rows).
+    ///
+    /// Full-corpus snapshot. Used by the dreaming and maintenance readers to
+    /// obtain raw drawer data through the GLK surface (B-1 compliance). Mirrors
+    /// the Swift `GeniusLocusKit.allDrawers(in:)`. Delegates to
+    /// `Estate::all_drawers`.
+    pub fn all_drawers(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<Drawer>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate.all_drawers().map_err(|e| remap("all_drawers", e).into())
+    }
+
+    // MARK: - all_tunnels
+
+    /// All tunnels in the estate across all wings.
+    ///
+    /// Full association-graph snapshot. Used by the dreaming reader to check
+    /// for existing tunnels during co-occurrence consolidation (B-1 compliance).
+    /// Mirrors the Swift `GeniusLocusKit.allTunnels(in:)`. Delegates to
+    /// `Estate::all_tunnels`.
+    pub fn all_tunnels(
+        &self,
+        handle: &EstateHandle,
+    ) -> Result<Vec<locus_kit::tunnel::Tunnel>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate.all_tunnels().map_err(|e| remap("all_tunnels", e).into())
+    }
+
+    // MARK: - recent_recall_traces
+
+    /// Recall-trace rows whose `recalled_at` falls in `[since, now]`.
+    ///
+    /// Both bounds are inclusive ISO8601 strings. Used by the dreaming reader
+    /// to build the reward map for one cycle tick (B-1 compliance). Mirrors
+    /// the Swift `GeniusLocusKit.recentRecallTraces(in:since:now:)`. Delegates
+    /// to `Estate::recent_recall_traces`.
+    pub fn recent_recall_traces(
+        &self,
+        handle: &EstateHandle,
+        since: &str,
+        now: &str,
+    ) -> Result<Vec<RecallTraceItem>, VerbDispatchError> {
+        let estate = self.estate_for_verb(handle)?;
+        estate.recent_recall_traces(since, now).map_err(|e| remap("recent_recall_traces", e).into())
     }
 }
 

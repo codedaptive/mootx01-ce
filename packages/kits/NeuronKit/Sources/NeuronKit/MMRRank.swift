@@ -45,7 +45,10 @@ import EngramLib
 ///   - query: the engram the relevance term is measured against.
 ///   - lambda: the MMR trade-off in [0, 1]. `1.0` is pure relevance
 ///     (closest-to-query first); `0.0` is pure diversity (each pick
-///     maximises distance from what is already selected).
+///     maximises distance from what is already selected). Values
+///     outside [0, 1] are a precondition violation — an out-of-range
+///     lambda produces out-of-spec scores (the formula is only a
+///     convex blend when lambda ∈ [0, 1]).
 ///   - k: the maximum number of rows to return. `k <= 0` returns
 ///     empty; `k >= candidates.count` returns all candidates reranked.
 ///   - fingerprint: per-candidate engram derivation owned by the caller.
@@ -59,6 +62,9 @@ public func mmrRank(
     k: Int,
     fingerprint: (Drawer) -> Engram
 ) -> [Drawer] {
+    precondition(lambda >= 0 && lambda <= 1,
+                 "lambda must be in [0, 1] (got \(lambda)): the MMR score is a "
+                 + "convex blend only when lambda ∈ [0, 1]")
     guard k > 0, !candidates.isEmpty else { return [] }
 
     // Project candidates to engrams once, preserving index alignment,
@@ -116,6 +122,10 @@ internal enum MMREngine {
         lambda: Float,
         k: Int
     ) -> [Int] {
+        // Lambda domain check at the conformance-gated core, so the
+        // Swift and Rust ports reject out-of-range lambda identically.
+        precondition(lambda >= 0 && lambda <= 1,
+                     "lambda must be in [0, 1] (got \(lambda))")
         guard k > 0, !fingerprints.isEmpty else { return [] }
 
         let n = fingerprints.count

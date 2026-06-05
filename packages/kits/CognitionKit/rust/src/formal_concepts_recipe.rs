@@ -5,7 +5,7 @@
 //!
 //! Recalls a set of drawers, builds a `FormalContext` where each drawer
 //! is one row and its categorical facets are its attributes, and surfaces
-//! NeuronKit's `BoundedConceptMiner`.
+//! SubstrateML's `BoundedConceptMiner`.
 //!
 //! Layer discipline (SPEC § 5, B-1/B-2, I-1/I-2): the recipe only SEQUENCES.
 //!   - Estate read: one `coord.recall` call.
@@ -53,7 +53,7 @@ use locus_kit::adjectives::{AdjectiveSensitivity, Trust};
 use locus_kit::drawer::Drawer;
 use locus_kit::drawer_operational::{CaptureChannel, ContentKind};
 use locus_kit::filter::RecallFrame;
-use neuron_kit::{BoundedConceptMiner, FormalAttribute, FormalContext};
+use substrate_ml::formal_concept_analysis::{BoundedConceptMiner, FormalAttribute, FormalContext};
 
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
 use crate::error::{RecipeRunError, SubstrateError};

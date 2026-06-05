@@ -6,7 +6,7 @@
 //! Recalls a set of drawers, projects each drawer's categorical facets
 //! (room, kind, channel, sensitivity) into a per-call label vocabulary,
 //! builds the co-occurrence matrix O from the recalled set, and surfaces
-//! NeuronKit's pairwise association-rule mining.
+//! SubstrateML's pairwise association-rule mining.
 //!
 //! Layer discipline (SPEC § 5, B-1/B-2, I-1/I-2): the recipe only SEQUENCES.
 //!   - Estate read: one `coord.recall` call.
@@ -44,7 +44,8 @@ use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer::Drawer;
 use locus_kit::drawer_operational::{CaptureChannel, ContentKind};
 use locus_kit::filter::RecallFrame;
-use neuron_kit::{mine_association_rules, MiningThresholds};
+// ARM engine lives in SubstrateML; neuron_kit no longer re-exports these.
+use substrate_ml::association_rule_mining::{mine_association_rules, MiningThresholds};
 use substrate_types::MatrixO;
 
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};

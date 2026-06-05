@@ -2,7 +2,7 @@
 // `NeuronKit/Sources/NeuronKit/Maintenance/EstateMaintenanceReader.swift`.
 //
 // Production adapter that implements `MaintenanceSubstrateReader` over a
-// synchronous `DrawerStore` reference. Unlike the Swift struct that performs
+// GeniusLocusKit estate handle. Unlike the Swift struct that performs
 // five async reads on demand, the Rust version pre-fetches all drawers at
 // construction time and builds the `MaintenanceScan` from the snapshot.
 //
@@ -24,29 +24,32 @@
 // The Rust `Drawer` type's `state()` and `exportability()` accessors are
 // pending in `drawer_operational.rs` (adjectives.rs module note). This
 // adapter decodes the bits directly from `adjective_bitmap` using the
-// `State::from_raw` and `AdjectiveExportability::from_raw` functions,
+// `DrawerState::from_raw` and `AdjectiveExportability::from_raw` functions,
 // which are implemented and correct. This is the established pattern for
 // callers that need these axes before the accessor lands.
 //
 // ── Architecture note ────────────────────────────────────────────────
 // Lives in NeuronKit because it implements `MaintenanceSubstrateReader`
-// (declared in `maintenance_cycle.rs`) AND calls locus-kit DrawerStore
-// methods. NeuronKit already depends on both; locus-kit does not depend
-// on neuron-kit, so there is no circular dependency.
+// (declared in `maintenance_cycle.rs`) AND calls genius_locus_kit coordinator
+// methods. NeuronKit already depends on both; genius_locus_kit does not
+// depend on neuron_kit, so there is no circular dependency.
+//
+// B-1 compliance: all estate reads route through genius_locus_kit's
+// EstateCoordinator surface — no direct locus_kit storage calls.
 
-use locus_kit::adjectives::{AdjectiveExportability, AdjectiveSensitivity, State};
-use locus_kit::drawer::Drawer;
-use locus_kit::drawer_store::DrawerStore;
-use locus_kit::error::LocusKitError;
+use genius_locus_kit::{
+    AdjectiveExportability, AdjectiveSensitivity, Drawer, DrawerState, EstateCoordinator,
+    EstateHandle, VerbDispatchError,
+};
 
 use crate::maintenance_cycle::{MaintenanceScan, MaintenanceSubstrateReader};
 use crate::maintenance_decision::AgedRow;
 
 /// Snapshot-based production adapter for `MaintenanceSubstrateReader`.
 ///
-/// Reads are snapshotted from the store at construction via
+/// Reads are snapshotted from the estate at construction via
 /// `EstateMaintenanceReader::new`. The `scan()` method returns the
-/// pre-computed scan from those snapshots, so no store call is needed
+/// pre-computed scan from those snapshots, so no coordinator call is needed
 /// after construction. This matches the Rust `MaintenanceSubstrateReader`
 /// trait contract (sync, single `scan()` call).
 ///
@@ -58,12 +61,19 @@ pub struct EstateMaintenanceReader {
 }
 
 impl EstateMaintenanceReader {
-    /// Construct the adapter by snapshotting the drawer corpus from `store`.
+    /// Construct the adapter by snapshotting the drawer corpus from the
+    /// addressed estate through the GeniusLocusKit coordinator surface.
     ///
     /// `now` is the deterministic epoch-seconds timestamp for age computations.
     /// Passed at construction; not derived from the system clock.
-    pub fn new<S: DrawerStore>(store: &S, now: i64) -> Result<Self, LocusKitError> {
-        let drawers = store.all_drawers()?;
+    ///
+    /// All reads go through `coordinator.all_drawers` — B-1 compliant.
+    pub fn new(
+        coordinator: &EstateCoordinator,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<Self, VerbDispatchError> {
+        let drawers = coordinator.all_drawers(handle)?;
         let scan = build_scan(&drawers, now);
         Ok(EstateMaintenanceReader { scan })
     }
@@ -99,7 +109,7 @@ fn build_scan(drawers: &[Drawer], now: i64) -> MaintenanceScan {
         } else {
             // Live: check Cluster A membership.
             // Decode state from bits 0-5 of adjective_bitmap.
-            let state = State::from_raw(drawer.adjective_bitmap & 0x3F);
+            let state = DrawerState::from_raw(drawer.adjective_bitmap & 0x3F);
             if !state.is_cluster_a() {
                 // Non-Cluster-A live rows (Superseded, Decayed, etc.) are not
                 // part of the active-drawer health scan.
@@ -145,102 +155,100 @@ fn build_scan(drawers: &[Drawer], now: i64) -> MaintenanceScan {
 mod tests {
     use super::*;
 
-    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    // Tests mirror the dreaming reader's pattern: test the `build_scan`
+    // helper directly with hand-crafted Drawer objects. This avoids
+    // needing a full coordinator + estate for unit-level assertions; the
+    // coordinator path is exercised by the GLK integration tests and by
+    // the empty-estate smoke test below.
 
-    fn make_store() -> InMemoryDrawerStore {
-        InMemoryDrawerStore::new(0, None).expect("store")
-    }
-
-    // Use UUID-formatted IDs — InMemoryDrawerStore rejects non-UUID ids.
-    const ID_A: &str = "00000000-0000-0000-0000-000000000001";
-    const ID_B: &str = "00000000-0000-0000-0000-000000000002";
-    const ID_C: &str = "00000000-0000-0000-0000-000000000003";
-    const ID_D: &str = "00000000-0000-0000-0000-000000000004";
+    const FILED_AT: i64 = 1_000_000;
+    const NOW: i64 = 1_100_000;
 
     fn make_drawer(id: &str, filed_at: i64) -> Drawer {
         Drawer::new(id, format!("content-{id}"), "wing1", "room1", "agent", filed_at, "model-v1")
     }
 
-    fn make_tombstoned_drawer(id: &str, filed_at: i64, tombstoned_at: i64) -> Drawer {
+    fn make_tombstoned(id: &str, filed_at: i64, tombstoned_at: i64) -> Drawer {
         let mut d = make_drawer(id, filed_at);
         d.tombstoned_at = Some(tombstoned_at);
         d
     }
 
+    // ── build_scan unit tests ─────────────────────────────────────────
+
     #[test]
-    fn active_drawers_appear_in_aged_active() {
-        let store = make_store();
-        let drawer = make_drawer(ID_A, 1_000_000);
-        store.add_drawer(&drawer, drawer.filed_at).expect("add");
-
-        let reader = EstateMaintenanceReader::new(&store, 1_100_000).expect("reader");
-        let scan = reader.scan();
-
-        assert_eq!(scan.aged_active.len(), 1, "expected one active drawer");
-        assert_eq!(scan.aged_active[0].id, ID_A);
-        // Age = 1_100_000 - 1_000_000 = 100_000 seconds.
-        assert_eq!(scan.aged_active[0].age_seconds, 100_000.0);
+    fn active_drawer_in_aged_active() {
+        let drawers = vec![make_drawer("a", FILED_AT)];
+        let scan = build_scan(&drawers, NOW);
+        assert_eq!(scan.aged_active.len(), 1);
+        assert_eq!(scan.aged_active[0].id, "a");
+        assert_eq!(scan.aged_active[0].age_seconds, (NOW - FILED_AT) as f64);
     }
 
     #[test]
-    fn tombstoned_drawers_appear_in_aged_tombstoned() {
-        let store = make_store();
-        // filed at 1_000_000, tombstoned at 1_050_000
-        let drawer = make_tombstoned_drawer(ID_B, 1_000_000, 1_050_000);
-        store.add_drawer(&drawer, drawer.filed_at).expect("add");
-
-        let reader = EstateMaintenanceReader::new(&store, 1_100_000).expect("reader");
-        let scan = reader.scan();
-
-        assert!(scan.aged_active.is_empty(), "tombstoned drawer must not be in aged_active");
+    fn tombstoned_drawer_in_aged_tombstoned_not_active() {
+        // tombstoned_at = FILED_AT + 500, so age from tombstone = 100_000 - 500 seconds
+        let drawers = vec![make_tombstoned("b", FILED_AT, FILED_AT + 500)];
+        let scan = build_scan(&drawers, NOW);
+        assert!(scan.aged_active.is_empty(), "tombstoned row must not appear in aged_active");
         assert_eq!(scan.aged_tombstoned.len(), 1);
-        assert_eq!(scan.aged_tombstoned[0].id, ID_B);
-        // Age measured from tombstoned_at: 1_100_000 - 1_050_000 = 50_000 seconds.
-        assert_eq!(scan.aged_tombstoned[0].age_seconds, 50_000.0);
+        assert_eq!(scan.aged_tombstoned[0].id, "b");
+        assert_eq!(scan.aged_tombstoned[0].age_seconds, (NOW - FILED_AT - 500) as f64);
     }
 
     #[test]
     fn forbidden_combination_detected() {
-        // InMemoryDrawerStore rejects the secret+public combination at write time
-        // (invariant I-22 gate). Test `build_scan` directly with a manually crafted
-        // Drawer so we can exercise the detection logic for rows that may exist
-        // in older databases or arrive via migration.
-        let mut drawer = make_drawer(ID_C, 1_000_000);
-        // Set sensitivity = Secret (bits 6-11, raw 48 = 0b110000 << 6 = 3072)
-        // Set exportability = Public (bits 12-17, raw 32 = 0b100000 << 12 = 131072)
-        // adjective_bitmap = 3072 | 131072 = 134144
+        // InMemoryDrawerStore rejects secret+public at write time (I-22 gate).
+        // Test build_scan directly to exercise the detection path for rows that
+        // may arrive via migration or exist in older databases.
+        //
+        // sensitivity = Secret: bits 6–11, raw value 48 (0b110000) → bitmap |= (48 << 6)
+        // exportability = Public: bits 12–17, raw value 32 (0b100000) → bitmap |= (32 << 12)
+        let mut drawer = make_drawer("c", FILED_AT);
         drawer.adjective_bitmap = (48_i64 << 6) | (32_i64 << 12);
-
-        let scan = super::build_scan(&[drawer], 1_100_000);
-
-        assert!(
-            scan.forbidden_drawer_ids.contains(&ID_C.to_string()),
-            "expected {ID_C} in forbidden_drawer_ids"
-        );
+        let scan = build_scan(&[drawer], NOW);
+        assert!(scan.forbidden_drawer_ids.contains(&"c".to_string()));
     }
 
     #[test]
     fn normal_drawer_not_in_forbidden() {
-        let store = make_store();
-        let drawer = make_drawer(ID_D, 1_000_000);
-        store.add_drawer(&drawer, drawer.filed_at).expect("add");
-
-        let reader = EstateMaintenanceReader::new(&store, 1_100_000).expect("reader");
-        let scan = reader.scan();
-
-        assert!(
-            !scan.forbidden_drawer_ids.contains(&ID_D.to_string()),
-            "normal drawer must not be in forbidden_drawer_ids"
-        );
+        let scan = build_scan(&[make_drawer("d", FILED_AT)], NOW);
+        assert!(!scan.forbidden_drawer_ids.contains(&"d".to_string()));
     }
 
     #[test]
     fn v1_stubs_are_empty() {
-        let store = make_store();
-        let reader = EstateMaintenanceReader::new(&store, 0).expect("reader");
-        let scan = reader.scan();
+        let scan = build_scan(&[], 0);
         assert!(scan.fingerprint_drift.is_empty(), "v1: no fingerprint drift");
         assert!(scan.reference_drift.is_empty(), "v1: no reference drift");
         assert!(scan.audit.is_none(), "v1: no audit verdict");
+    }
+
+    // ── EstateMaintenanceReader::new smoke test ───────────────────────
+
+    #[test]
+    fn new_over_empty_estate_succeeds() {
+        use std::sync::Arc;
+        use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
+        use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+        use locus_kit::estate_types::OwnerCredentials;
+
+        let store: Arc<dyn LocusDrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(0, None).expect("store"));
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+
+        let reader = EstateMaintenanceReader::new(&coord, &handle, 0).expect("reader");
+        let scan = reader.scan();
+
+        // Empty estate: all scan fields should be their zero/empty defaults.
+        assert!(scan.aged_active.is_empty());
+        assert!(scan.aged_tombstoned.is_empty());
+        assert!(scan.forbidden_drawer_ids.is_empty());
+        assert!(scan.fingerprint_drift.is_empty());
+        assert!(scan.reference_drift.is_empty());
+        assert!(scan.audit.is_none());
     }
 }

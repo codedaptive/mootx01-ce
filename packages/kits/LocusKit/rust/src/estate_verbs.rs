@@ -428,10 +428,71 @@ impl Estate {
         self.store.all_kg_facts()
     }
 
+    /// Insert a kg-fact into the estate. Estate-level pass-through over
+    /// `DrawerStore::add_kg_fact`. Required by GLK since `estate.store`
+    /// is `pub(crate)` and inaccessible from `GeniusLocusKit` (B-1 compliance).
+    pub fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
+        self.store.add_kg_fact(fact)
+    }
+
+    /// Retire a kg-fact by transitioning its state to `Withdrawn`. Estate-level
+    /// pass-through over `DrawerStore::withdraw_kg_fact`. Required by GLK for
+    /// the same B-1 compliance reason as `add_kg_fact`.
+    pub fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
+        self.store.withdraw_kg_fact(id, now)
+    }
+
     /// All non-tombstoned diary entries in the estate, ordered by `filed_at`
     /// ascending. Estate-level pass-through over `DrawerStore::all_diary_entries`.
     pub fn all_diary_entries(&self) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
         self.store.all_diary_entries()
+    }
+
+    /// Insert a diary entry into the estate. Estate-level pass-through over
+    /// `DrawerStore::add_diary_entry`. Required by GLK for B-1 compliance.
+    pub fn add_diary_entry(
+        &self,
+        entry: &crate::diary_entry::DiaryEntry,
+    ) -> Result<(), LocusKitError> {
+        self.store.add_diary_entry(entry)
+    }
+
+    /// Most-recent `last_n` non-tombstoned diary entries for `agent_name`,
+    /// newest first. Estate-level pass-through over `DrawerStore::read_diary`.
+    /// Required by GLK for B-1 compliance.
+    pub fn read_diary(
+        &self,
+        agent_name: &str,
+        last_n: usize,
+    ) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
+        self.store.read_diary(agent_name, last_n)
+    }
+
+    /// All drawers in the estate, including tombstoned rows. Estate-level
+    /// pass-through over `DrawerStore::all_drawers`. Used by GLK to expose
+    /// the full-corpus snapshot the dreaming and maintenance readers need
+    /// without NeuronKit calling the store directly (B-1 compliance).
+    pub fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.all_drawers()
+    }
+
+    /// All tunnels in the estate across all wings. Estate-level pass-through
+    /// over `DrawerStore::all_tunnels`. Used by GLK to expose the full
+    /// association graph the dreaming reader needs (B-1 compliance).
+    pub fn all_tunnels(&self) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        self.store.all_tunnels()
+    }
+
+    /// Recall-trace rows whose `recalled_at` falls in `[since, now]` (both
+    /// bounds inclusive). Both parameters are ISO8601 strings. Estate-level
+    /// pass-through over `DrawerStore::recent_recall_traces`. Used by GLK
+    /// to surface the dreaming daemon's reward window (B-1 compliance).
+    pub fn recent_recall_traces(
+        &self,
+        since: &str,
+        now: &str,
+    ) -> Result<Vec<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
+        self.store.recent_recall_traces(since, now)
     }
 
     // -----------------------------------------------------------------------
