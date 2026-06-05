@@ -28,8 +28,8 @@ Standalone substrate:
     CorpusKit         Content-plus-vector RAG bundles
 
 Grounding:
-    EideticLib      Deterministic text-to-anchor (MDCC code + Wikidata Q-ID)
-    LatticeKit        Moot Decimal Classification Codes: assembler, canon, lookup
+    EideticLib      Deterministic text-to-anchor (FDC code + Wikidata Q-ID)
+    LatticeLib      Frame Decimal Classification: assembler, canon, lookup
 
 Typed math:
     EngramLib      Typed 256-bit Engram API
@@ -70,11 +70,11 @@ Two status dimensions are tracked. **Build** is whether the kit is functional wi
 | **CognitionKit** | Behaviour recipes: FulcrumDailyFraming, ScenarioSkill, composable workflows | 🔲 Planned | ⏳ Pending |
 | **ConvergenceKit** | Sync abstraction: CloudKit, Federation, None behind one protocol | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **CorpusKit** | A private RAG database: content-plus-vector bundles, hybrid retrieval, no cloud dependency | ✅ Built (Swift + Rust) | ⏳ Pending |
-| **EideticLib** | Deterministic text-to-anchor: term in, MDCC code plus Wikidata Q-ID out; ships with a frozen reference snapshot | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **EideticLib** | Deterministic text-to-anchor: term in, FDC code plus Wikidata Q-ID out; ships with a frozen reference snapshot | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **EngramLib** | Typed 256-bit Engram API on SubstrateLib | ✅ Built (Swift + Rust) | ⏳ Pending |
-| **GeniusLocusKit** | Spatial memory + RAG + knowledge graph: nine verbs, Brain layer, N estates | ✅ Built (Swift) | ⏳ Pending |
-| **LatticeKit** | Moot Decimal Classification Codes: original Dewey-like spine, clean-room from Wikidata CC0, assembler + canon + lookup | ✅ Built (Swift) | ⏳ Pending |
-| **LocusKit** | A spatial memory system: wings, rooms, drawers, typed tunnels, KG facts, bitmap-indexed content, full audit trail | ✅ Built (Swift) | ⏳ Pending |
+| **GeniusLocusKit** | Spatial memory + RAG + knowledge graph: nine verbs, Brain layer, N estates | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **LatticeLib** | Frame Decimal Classification: original Dewey-like spine, clean-room from Wikidata CC0, assembler + canon + lookup | ✅ Built (Swift) | ⏳ Pending |
+| **LocusKit** | A spatial memory system: wings, rooms, drawers, typed tunnels, KG facts, bitmap-indexed content, full audit trail | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **NeuronKit** | AI algorithms: hybrid recall, dreaming daemon, Bradley-Terry, SolverBandit | 🔧 In progress | ⏳ Pending |
 | **PersistenceKit** | Storage abstraction: SQLite, PostgreSQL, InMemory backends behind one protocol | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **QueueKit** | A fill-and-drain job queue: RAM and database backends, serial dispatch, audit-ordered claims | ✅ Built (Swift + Rust) | ⏳ Pending |
@@ -101,7 +101,7 @@ Most MOOTx01 kits ship in two equal-status implementations, conformance-gated ag
 - **Swift** for Apple Silicon, macOS 15+, iOS 18+
 - **Rust** for PC/Linux x86_64 and Linux aarch64
 
-LocusKit, GeniusLocusKit, and LatticeKit are currently Swift-only; their Rust ports are pending. The remaining built kits ship both ports.
+LatticeLib is currently Swift-only; its Rust port is pending. The remaining built kits ship both Swift and Rust ports.
 
 Three further implementations are on the major-release line:
 
@@ -121,8 +121,8 @@ The near-term path to a usable release, in order:
 2. **Ship the ARIA MCP reference server.** A reference implementation of the MCP server that exposes a MOOTx01 estate over the ARIA grammar, so anyone can compile it and use their MOOT from an agentic chat or coding harness — Claude, Claude Code, or any MCP-capable client.
 3. **Full security sweep.** A complete security, quality-control, and hardening pass across the substrate and the MCP server. No kit has cleared this gate yet; this is where that happens, before the server is put in front of people who did not build it themselves.
 4. **Binary package for non-compiler users.** A precompiled, installable binary of the MCP reference server, so people who do not want to build from source can install a hardened binary and run it. The binary follows the security sweep deliberately: the first artifact aimed at non-developers is also the first one that has been hardened.
-5. **Multiple sidecars and small experimental apps.** A reference set of applications to increase awareness of the sidecar and embedding possibilities in the system.
-6. And a rather large number of ideas, roadblocked by several days of getting the house in order for you all.
+5. **Multilple Side Car and Small Expriement apps with embedded** A reference set of application to increase awareness of the sidecar and embedding possibilities in the system
+6. And a rather large number of idea roadblock by several days getting the house in order for you'all to be able to navigate all this
 
 This roadmap describes intended sequence, not committed dates.
 
@@ -142,6 +142,7 @@ mootx01/
 │   │   ├── SubstrateLib/      Orchestration: verbs + row-state automaton
 │   │   ├── EngramLib/         Typed Engram API
 │   │   ├── AriaLexiconLib/    Reified ARIA grammar
+│   │   ├── LatticeLib/        Frame Decimal Classification (Swift only — no Rust port)
 │   │   └── EideticLib/        Text-to-anchor utility
 │   ├── kits/
 │   │   ├── LocusKit/          Spatial memory + KG
@@ -149,7 +150,6 @@ mootx01/
 │   │   ├── PersistenceKit/    Storage backends
 │   │   ├── ConvergenceKit/    Sync implementations
 │   │   ├── QueueKit/          Fill-and-drain job queue
-│   │   ├── LatticeKit/        Moot Decimal Classification Codes (Swift only — no Rust port)
 │   │   ├── CorpusKit/         RAG bundles
 │   │   ├── GeniusLocusKit/    Composition + Brain layer
 │   │   ├── NeuronKit/         AI algorithms
