@@ -128,6 +128,64 @@ public extension GeniusLocusKit {
         return try await estate.allKGFacts()
     }
 
+    // MARK: - captureKGFact
+
+    /// File a KGFact triple into the estate addressed by `handle`.
+    ///
+    /// `sourceDrawerID` is the drawer this fact was extracted from; pass `""`
+    /// for freestanding facts not anchored to a specific drawer (the MCP
+    /// interface convention for agent-asserted triples). `DrawerStore.addKGFact`
+    /// accepts `""` as an unanchored sentinel per the GLK-VERB-EXT-01 relaxation.
+    ///
+    /// `now` is the capture instant. Always pass `Date()` at non-test call sites;
+    /// the parameter exists to keep the method deterministic under test, matching
+    /// the fleet "pass now as a parameter" discipline.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func captureKGFact(
+        _ handle: EstateHandle,
+        subject: String,
+        predicate: String,
+        object: String,
+        sourceDrawerID: String = "",
+        now: Date
+    ) async throws -> KGFact {
+        let store = try await ensureKGStore(for: handle)
+        let fact = KGFact(
+            subject: subject,
+            predicate: predicate,
+            object: object,
+            sourceDrawerID: sourceDrawerID,
+            filedAt: now
+        )
+        try await store.addKGFact(fact)
+        return fact
+    }
+
+    // MARK: - retireKGFact
+
+    /// Retire a KGFact by transitioning its state to withdrawn.
+    ///
+    /// Retirement is a state transition (not a delete): the row remains in the
+    /// estate for audit purposes. `State.withdrawn` (rawValue 18) sets
+    /// `g_state_cluster` >= 7, which exits the active-recall filter in
+    /// `allKGFacts`. Routes through `DrawerStore.withdrawKGFact` directly —
+    /// `Estate.withdraw` is Drawer-specific and does not handle KGFact rowIDs.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen`, or
+    ///   `VerbError.underlyingEstateFailure` if the row is not found.
+    func retireKGFact(
+        _ handle: EstateHandle,
+        rowID: String
+    ) async throws {
+        let store = try await ensureKGStore(for: handle)
+        do {
+            try await store.withdrawKGFact(id: rowID)
+        } catch {
+            throw remap(verb: "retireKGFact", error: error)
+        }
+    }
+
     // MARK: - recallDiaryEntries
 
     /// Recall all non-tombstoned diary entries from the estate addressed by
@@ -625,6 +683,23 @@ public extension GeniusLocusKit {
     }
 
     // MARK: - Internal helpers
+
+    /// Return the cached `DrawerStore` for KGFact writes against `handle`,
+    /// building one from the retained `Storage` on first use. Mirrors
+    /// `ensureDiaryStore(for:)` in `DreamingWrites.swift` and
+    /// `ensureGrantSurface(for:)` here: the storage is retained in
+    /// `storages[handle]` since `open`; the store is built lazily and cached
+    /// in `kgStores[handle]`. Caching is required — `DrawerStore.init` applies
+    /// schema migrations and reads the manifest on every instantiation.
+    private func ensureKGStore(for handle: EstateHandle) async throws -> DrawerStore {
+        if let store = kgStores[handle] { return store }
+        guard let storage = storages[handle] else {
+            throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
+        }
+        let store = try await DrawerStore(storage: storage)
+        kgStores[handle] = store
+        return store
+    }
 
     /// Drain all unconfirmed rows from a LocusKit estate into an array.
     /// Used by `glkDeriveBranch` to snapshot the parent or parent-branch

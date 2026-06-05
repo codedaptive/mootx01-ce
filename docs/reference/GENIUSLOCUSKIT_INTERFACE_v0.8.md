@@ -98,6 +98,14 @@ public actor GeniusLocusKit {
     // reasoning-lens recipes read; parallels `recall`, read-only:
     public func recallTunnels(_ handle: EstateHandle, wing: String) async throws -> [Tunnel]
 
+    // KGFact verb surface (VerbSurface.swift) — GLK-VERB-EXT-01:
+    // captureKGFact files a triple into the estate; sourceDrawerID = "" is the
+    // unanchored-fact sentinel for agent-asserted triples. retireKGFact
+    // transitions the row to State.withdrawn so it exits the active-recall filter.
+    func captureKGFact(_ handle: EstateHandle, subject: String, predicate: String,
+                       object: String, sourceDrawerID: String, now: Date) async throws -> KGFact
+    func retireKGFact(_ handle: EstateHandle, rowID: String) async throws
+
     // Read fan-out (CrossEstateRead.swift) — SPEC B-4:
     public func estatesOverlapping(_ region: LatticeRegion) throws -> [EstateHandle]
     public func fanOutRecall(_ frame: RecallFrame, region: LatticeRegion) async throws -> [EstateRecallContribution]
@@ -151,14 +159,53 @@ public actor GeniusLocusKit {
                                     owner: OwnerCredentials, now: Date) async throws -> (EstateHandle, MigrationReport)
     public func runParallel(source: EstateHandle, target: EstateHandle, mode: ParallelCaptureMode) async throws -> ParallelRunHandle
     public func verifyMigration(estate: EstateHandle, against corpus: ExternalCorpus, now: Date) async throws -> MigrationVerification
+
+    // FCA and implication engine (EstateFormalConcepts.swift) — SPEC § MX-3a:
+    // Pure adapters; capability gating lives in CognitionKit recipes.
+    public func mineFormalConcepts(estate: EstateHandle, miner: BoundedConceptMiner) async throws -> [FormalConcept]
+    public func formalConceptCoverDeltas(estate: EstateHandle, miner: BoundedConceptMiner) async throws -> ConceptCoverDeltas
+    public func conceptImplications(estate: EstateHandle, miner: BoundedConceptMiner,
+                                    maxImplications: Int, maxPremiseSize: Int) async throws -> ConceptImplications
 }
 ```
 **Rust:** the surface is split across synchronous types — `EstateCoordinator`
 (`open` / `close` / `handles` / `open_estate_count` / `state_for`, plus the
-association-graph read `recall_tunnels(handle, wing) -> Result<Vec<Tunnel>, VerbDispatchError>`),
-the stateless verb `Surface` (the nine verbs returning `Result<…, VerbError>`),
-`LatticeRegion` + `EstateRecallContribution` fan-out, `SerialLaneScheduler`,
-and the grant, federation, branch, and migration surfaces (SPEC § 8).
+association-graph read `recall_tunnels(handle, wing) -> Result<Vec<Tunnel>, VerbDispatchError>`,
+and the write-path methods added by GLK-RUST-WRITE-PATH-01):
+
+```rust
+// EstateCoordinator — write-path surface (GLK-RUST-WRITE-PATH-01)
+pub fn add_kg_fact(
+    &self, handle: &EstateHandle,
+    subject: &str, predicate: &str, object: &str,
+    source_drawer_id: &str, now: i64,
+) -> Result<locus_kit::kg_fact::KGFact, VerbDispatchError>
+
+pub fn withdraw_kg_fact(
+    &self, handle: &EstateHandle, id: &str, now: i64,
+) -> Result<(), VerbDispatchError>
+
+pub fn add_diary_entry(
+    &self, handle: &EstateHandle,
+    agent_name: &str, entry_text: &str, topic: &str,
+    embedding_model_id: &str, now: i64,
+) -> Result<locus_kit::diary_entry::DiaryEntry, VerbDispatchError>
+
+pub fn diary_entries(
+    &self, handle: &EstateHandle, agent_name: &str, last_n: usize,
+) -> Result<Vec<locus_kit::diary_entry::DiaryEntry>, VerbDispatchError>
+```
+
+`add_kg_fact` allocates a UUID v4 id and returns the stored fact.
+`add_diary_entry` sets `wing = "wing_<agent_name>"` and `room = "diary"`;
+an empty `embedding_model_id` is substituted with `"no-embedding"`.
+`withdraw_kg_fact` transitions the fact's `adjective_bitmap` bits 0–5 to
+`State::Withdrawn` (raw 18); upper bits are preserved. The parity surfaces
+are `VerbSurface.captureKGFact` / `.retireKGFact` and `DreamingWrites.addDiaryEntry`
+/ `.readDiaryEntries` in Swift. The stateless verb `Surface` (the nine verbs
+returning `Result<…, VerbError>`), `LatticeRegion` + `EstateRecallContribution`
+fan-out, `SerialLaneScheduler`, and the grant, federation, branch, and
+migration surfaces are documented in SPEC § 8.
 
 #### `EstateHandle`
 

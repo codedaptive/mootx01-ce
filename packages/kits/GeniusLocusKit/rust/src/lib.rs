@@ -78,6 +78,12 @@ pub use migration::{ExternalCorpus, ExternalEntry};
 pub use coordinator::{EstateCoordinator, GeniusLocusKitError, VerbDispatchError};
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;
+// Re-exports for B-1-compliant reader types: NeuronKit readers import these
+// from genius_locus_kit so they carry no direct locus_kit:: imports.
+pub use locus_kit::adjectives::{AdjectiveExportability, AdjectiveSensitivity, State as DrawerState};
+pub use locus_kit::drawer::Drawer;
+pub use locus_kit::recall_trace_item::RecallTraceItem;
+pub use locus_kit::tunnel::Tunnel;
 pub use matrix::{
     MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationOutcome,
     MatrixCalibrationRegistry, MatrixCoOccurKey, MatrixFieldCell, MatrixNMF,

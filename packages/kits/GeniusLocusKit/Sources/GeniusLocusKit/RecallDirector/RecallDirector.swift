@@ -670,8 +670,11 @@ public extension GeniusLocusKit {
         // Candidate-frontier lookups only: per-drawer scores are read from
         // pre-built caches registered by the dreaming/training cycle. No
         // synchronous estate-wide analytics are performed here (spec §15).
-        // Columns remain 0.0 when no cache is registered for the estate —
-        // correct for a fresh estate with no graph or preference priors.
+        // Columns remain 0.0 when no cache is registered for the estate.
+        // normalizeFinals preserves all-zero columns as 0.0 (absent signal),
+        // distinguishing them from non-zero uniform columns (measured-uniform,
+        // normalized to 0.5). Absent columns therefore contribute nothing to
+        // scoring on a fresh estate — the correct behaviour for no priors.
         if let graphCache = graphCaches[handle] {
             for i in 0..<buffer.count {
                 buffer.graph[i] = graphCache.graphScore(for: buffer.ids[i])

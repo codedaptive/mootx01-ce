@@ -18,12 +18,14 @@ use serde::Deserialize;
 
 use neuron_kit::{
     anomalies, anticipate, benchmark_score, bradley_terry, constellations, dp_summary, drift,
-    fca::{BoundedConceptMiner, FormalAttribute, FormalContext},
-    keystones, latent_themes, learned_preference, mine_association_rules, mmr_select, page_recall,
+    keystones, latent_themes, learned_preference, mmr_select, page_recall,
     partial_recall, representation_bias, rerank, shingle_similarity, spreading_activation,
     summary_overlap, synthesize, theme_weather, ActionObservation, DrawerRow, DrawerRowMeta,
-    MiningThresholds, RecallFrameTuning, RecallPage, ScenarioProfile,
+    RecallFrameTuning, RecallPage, ScenarioProfile,
 };
+// FCA and ARM engines live in SubstrateML, not this crate.
+use substrate_ml::association_rule_mining::{mine_association_rules, MiningThresholds};
+use substrate_ml::formal_concept_analysis::{BoundedConceptMiner, FormalAttribute, FormalContext};
 use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::{MatrixO, RowId};
 

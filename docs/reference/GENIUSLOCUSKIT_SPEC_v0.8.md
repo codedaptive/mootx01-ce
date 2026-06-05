@@ -390,6 +390,34 @@ entry is recallable, else `.diverged` with the missing entries.
 `runParallel` returns a `ParallelRunHandle` that routes captures per
 `ParallelCaptureMode` until `stop()`.
 
+**B-15 (Rust write-path surface — GLK-RUST-WRITE-PATH-01):** the Rust
+`EstateCoordinator` exposes four write methods that mirror the Swift
+`VerbSurface.captureKGFact` / `retireKGFact` and `DreamingWrites.addDiaryEntry`
+/ `readDiaryEntries` surfaces. These methods are required because
+`locus_kit::Estate::store` is `pub(crate)`, so GeniusLocusKit must reach the
+store through `estate_verbs` pass-throughs (B-1/I-3). Contracts:
+
+- `add_kg_fact` allocates a UUID v4 `id`, writes the fact with
+  `adjective_bitmap = 0` (State::Active), and returns the stored struct. The
+  returned fact appears in `recall_kg_facts` (`g_state_cluster 0 < 7`).
+- `withdraw_kg_fact` sets bits 0–5 of the fact's `adjective_bitmap` to
+  `State::Withdrawn` (raw 18), preserving bits 6+ (sensitivity, exportability,
+  trust, flags). After withdrawal `g_state_cluster = 18 ≥ 7`, so the fact is
+  excluded from the `recall_kg_facts` active filter. The row is never deleted.
+- `add_diary_entry` sets `wing = "wing_<agent_name>"` and `room = "diary"`;
+  an empty `embedding_model_id` is substituted with `"no-embedding"` (mirrors
+  the Swift `DreamingWrites.addDiaryEntry` guard for autonomous diary writes
+  that carry no embedding). A UUID v4 `id` is allocated and the stored entry
+  is returned.
+- `diary_entries` delegates to `DrawerStore.read_diary`; results are ordered
+  and capped by `last_n`.
+
+All four methods return `VerbDispatchError::EstateNotOpen` on an unregistered
+handle, `VerbDispatchError::Verb(...)` wrapping an underlying `VerbError` on
+store failures. Every write allocates a fresh UUID so no two calls in the same
+coordinator share an id (deterministic with respect to inputs; UUID v4 entropy
+is acceptable here as the id is opaque to callers).
+
 ## § 6 — Error model (conceptual)
 
 | Category | Trigger | Recovery posture |
@@ -576,6 +604,58 @@ same adapter over a `DrawerStore` trait reference. Propose calls
 record-cycle-diary calls `store.add_diary_entry`. Row IDs are deterministic:
 `dreaming-<now>-<counter>` per the fleet determinism rule (no RNG in engines).
 
+## § MATRIXT_HOURLY — T-matrix population signal (MX-1, 2026-06-04)
+
+*Status: landed. TemporalCausalitySignal wired as signal 7 in the default
+standing-signal set. Design-council decision 2026-06-04.*
+
+### Standing-signal inventory update (§11.2)
+
+The six v1 standing signals documented in §11.2 of the architecture spec have
+been extended to seven with the addition of `TemporalCausalitySignal`:
+
+| # | Signal name | Cadence | Purpose |
+|---|------------|---------|---------|
+| 1 | dreaming-daemon | 604 800 s (weekly) | NMF, eigenvalue, T-matrix cold-path |
+| 2 | maintenance | 3 600 s (hourly) | Tombstone cleanup, orphan detection |
+| 3 | vector-similarity | 300 s (5 min) | HNSW proximity clustering |
+| 4 | decay-sweep | 86 400 s (daily) | O/T matrix multiplicative decay |
+| 5 | byReference-validity | 604 800 s (weekly) | Broken reference detection |
+| 6 | end-of-day-tournament | 86 400 s (daily) | Bradley-Terry reward signal |
+| **7** | **temporal-causality-fold** | **3 600 s (hourly)** | **T-matrix population pass** |
+
+Signal 7 is registered via `TemporalCausalitySignal.defaultSpec()` in
+`registerDefaultStandingSignals`. Production callers replace it with
+`TemporalCausalitySignal.spec(foldCycle:)` to wire a live fold closure.
+
+### Cadence decision
+
+Cookbook §6.4 specified a weekly T-matrix update on the dreaming daemon pass.
+Design Council 2026-06-04 superseded this with hourly cadence.
+See `docs/decisions/DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md`.
+
+### MatrixTier additions
+
+`MatrixTier` (Matrix/MatrixTier.swift) gained:
+- `temporalWatermarkHLC: HLC` — HLC of the last audit entry processed by
+  `rebuildTemporal`. Old snapshots decode with a `.zero` fallback (custom
+  `CodingKeys` + `init(from:)` with `decodeIfPresent`).
+- `rebuildTemporal(from: UnifiedAuditLog) -> MatrixTier` — static method that
+  calls `TemporalCausalityFold.fold` (SubstrateML) at the GeniusLocusKit
+  boundary and applies deltas via `applyTemporalEvent`. Separate from
+  `rebuild(from:)` because T crosses pairs of rows, not individual rows.
+
+`lagBucket(forMinutes:)` on MatrixTier now delegates to
+`TemporalCausalityFold.lagBucket(forMinutes:)` so the canonical bucket
+function lives in SubstrateML (single source of truth for conformance vectors).
+
+### Package dependency
+
+GeniusLocusKit/Package.swift gained a dependency on SubstrateML to access
+`TemporalCausalityFold`. Layering is correct: GeniusLocusKit (composition) →
+SubstrateML (algorithms). Justified by
+DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+
 ## § RAG_WIRING — RAG and vector seams wired (GLK_RAG_WIRING_001)
 
 *Status: landed. Both seams are now wired in Swift and Rust.*
@@ -699,5 +779,142 @@ overlap. When `drawerIndex[id]?.content` is non-empty, `glkShingleSimilarity`
 For bitmapOnly hydration or drawers without content, sourceMask Jaccard is
 retained. GeniusLocusKit reimplements shingle similarity locally (`glkShingleSimilarity`
 / `glkShingles`) because it cannot import NeuronKit (circular package dependency).
+
+## § MX-2 — EstateAssociationRuleMining (Apriori + pairwise ARM, 2026-06-04)
+
+Adds two mining entry points to the public `GeniusLocusKit` surface via
+a `public extension GeniusLocusKit` (same pattern as `MaintenanceReads`,
+`RecallDirector`, etc.; gives access to `internal var matrixTiers` and
+`internal var auditLogs`).
+
+### Pairwise ARM entry point
+
+```swift
+func mineAssociationRules(
+    estate: EstateHandle,
+    thresholds: MiningThresholds
+) -> [AssociationRule]
+```
+
+Reads the registered `MatrixTier` for the estate and delegates to
+`SubstrateML.mineAssociationRules(matrix:activeRowCount:thresholds:)`.
+Returns an empty array (no error) when no `MatrixTier` has been registered.
+
+**MatrixTier → MatrixO adaptation** (private helper `adaptToMatrixO`):
+1. Build vocabulary: sorted unique fieldPaths from `coOccurrence` keys,
+   capped at 64.
+2. Project each `MatrixValueCoord` to `(field: UInt8, value: UInt8)`:
+   - `.integer(n)` → value = `UInt8(n & 0x3F)` (low 6 bits; safe for the
+     `CooccurrenceKey` 6-bit value constraint).
+   - `.bitmap(v)` where `v.nonzeroBitCount == 1` → value = bit position.
+   - Multi-bit `.bitmap`, `.string`, `.bytes`, `.null` → skipped (no lossless
+     6-bit encoding; documented INTENTIONALLY_LEFT in the MX-2 Blast Radius
+     Report).
+3. Emit both directed cells `(a,b)` and `(b,a)` from each upper-triangle entry.
+4. Add diagonal `O[A,A] = liveRowCount` for each observed item (conservative
+   upper-bound approximation for single-item support; full correctness requires
+   a future mission that stores diagonal counts in `MatrixTier`).
+
+### Apriori entry point
+
+```swift
+func mineAprioriRules(
+    estate: EstateHandle,
+    thresholds: AprioriThresholds
+) async throws -> [AprioriRule]
+```
+
+Calls `currentAuditLog(in:)` to refresh the audit log, maps each
+`UnifiedAuditEntry.afterValue` to a `RowAuditEntry` (SubstrateML-native),
+calls `RowAttributeView.from(auditEntries:)`, and delegates to
+`AprioriMining.mine(rows:thresholds:)`. Throws `estateNotOpen` when the
+estate is unregistered; surfaces any error from `currentAuditLog`.
+
+**Value mapping** (private helper `toRowAuditEntry`):
+- `.bitmap(v)` → `.bitmap(v)` (pass-through; `RowAttributeView` expands bits).
+- `.integer(n)` → `.integer(n)` (pass-through; `RowAttributeView` uses low byte).
+- `.string`, `.bytes`, `.null` → `.null` (no categorical Item encoding).
+
+### CognitionKit recipe wiring
+
+`CognitionKit/AssociationRules.swift` gains a new `AprioriRules` recipe
+struct alongside the existing `AssociationRules` recipe. `AprioriRules.run`
+delegates to `kit.mineAprioriRules(estate:thresholds:)` with no math
+duplication. Both recipes gate on the `associationRuleMining` capability.
+
+---
+
+## § MX-3a — EstateFormalConcepts (Bounded FCA + Implication Basis, 2026-06-04)
+
+Thin wrapper in `GeniusLocusKit/EstateFormalConcepts.swift` that wires
+bounded Formal Concept Analysis, cover-delta computation, and the D-G
+canonical basis to live estates. All three entry points read the estate's
+audit log via `currentAuditLog(in:)`, convert entries to `RowAuditEntry`,
+build `RowAttributeView` rows (the shared row-replay shape), materialise a
+`FormalContext`, and delegate to the provided `BoundedConceptMiner`.
+
+```swift
+// public extension GeniusLocusKit
+
+/// Mine bounded formal concepts from the estate's audit log.
+/// Returns [] for a fresh estate (silent, not an error).
+func mineFormalConcepts(
+    estate: EstateHandle,
+    miner: BoundedConceptMiner
+) async throws -> [FormalConcept]
+
+/// Derive cover deltas (structural lens over the concept order) over the
+/// mined concept set. Same pipeline as mineFormalConcepts; additionally
+/// calls ConceptCoverDeltas.covering(concepts:). Returns empty cover
+/// deltas for a fresh estate.
+func formalConceptCoverDeltas(
+    estate: EstateHandle,
+    miner: BoundedConceptMiner
+) async throws -> ConceptCoverDeltas
+
+/// Derive the bounded Duquenne–Guigues canonical basis from the estate's
+/// audit log. Every emitted implication is universally sound: every row
+/// carrying all attributes in `premise` also carries all in `conclusion`.
+/// Returns an empty basis for a fresh estate. `isTruncated` is true when
+/// `maxImplications` terminated enumeration early.
+func conceptImplications(
+    estate: EstateHandle,
+    miner: BoundedConceptMiner,
+    maxImplications: Int,
+    maxPremiseSize: Int
+) async throws -> ConceptImplications
+```
+
+**Cover-delta contract**: the set returned is structural (cover-relation
+lens, not Duquenne–Guigues canonical). It holds within the emitted
+concept set but is not universally sound across all context rows — a
+cover delta does NOT assert that every row carrying `lowerIntent` also
+carries `addedAttributes`. See SUBSTRATEML_SPEC_v0.8 § 5.21 for the
+full contract.
+
+**Implication contract**: `conceptImplications` returns the bounded
+Duquenne–Guigues canonical basis (SUBSTRATEML_SPEC_v0.8 § 5.21,
+FormalConceptAnalysis). Every
+emitted implication is sound and minimal. The basis may be incomplete when
+`maxImplications` or `maxPremiseSize` bind.
+
+**Multi-seed access**: pass a `BoundedConceptMiner` constructed with
+`seedMode: .multi` to activate the 2-attribute-pair seed pass. The
+wrapper does not gate or modify the miner — it delegates unchanged.
+
+**Capability gating** belongs at the CognitionKit recipe layer
+(`FormalConcepts.swift`), not here. This wrapper is a pure adapter.
+
+### CognitionKit recipe wiring
+
+`CognitionKit/FormalConcepts.swift`'s `FormalConcepts` recipe includes
+`coverDeltas: ConceptCoverDeltas` and `implications: ConceptImplications`
+in its `Output` type. Cover deltas are computed via
+`ConceptCoverDeltas.covering(concepts:)` over the mined concept set.
+Implications are computed via `ConceptImplications.conceptImplications`
+with the bounding parameters from `Input.maxImplications` (default 200)
+and `Input.maxPremiseSize` (default 4). Multi-seed is accessible by
+constructing the `Input.miner` with `seedMode: .multi`. The recipe gates
+on `.formalConceptAnalysis` (unchanged).
 
 *End of GeniusLocusKit Specification v0.8.*

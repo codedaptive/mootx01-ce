@@ -1029,13 +1029,40 @@ public actor DrawerStore {
     // MARK: - KGFact CRUD
 
     /// Insert a KGFact. Conflicting ids surface as duplicateKey.
+    ///
+    /// `sourceDrawerID` may be `""` as an "unanchored fact" sentinel — used by
+    /// the MCP surface when the caller asserts a freestanding triple not
+    /// extracted from a specific drawer. Non-empty values are validated as usual.
     public func addKGFact(_ f: KGFact) async throws {
         try Self.validateNonEmpty(f.subject, label: "subject")
         try Self.validateNonEmpty(f.predicate, label: "predicate")
         try Self.validateNonEmpty(f.object, label: "object")
-        try Self.validateNonEmpty(f.sourceDrawerID, label: "sourceDrawerID")
+        // sourceDrawerID = "" is the "not anchored to a specific drawer" sentinel;
+        // non-empty values are admitted as-is (same leniency as the other fields'
+        // validateNonEmpty checks, which accept non-empty strings without
+        // additional whitespace trimming).
         _ = try await storage.rowStore.insert(
             table: "kg_facts", values: Self.kgFactValues(f))
+    }
+
+    /// Transition a KGFact's state to withdrawn.
+    ///
+    /// Sets bits 0–5 of `adjectiveBitmap` to `State.withdrawn.rawValue` (18).
+    /// Facts with `g_state_cluster` >= 7 are excluded from `allKGFacts` active
+    /// recall. The row is not deleted — retirement is a state transition that
+    /// preserves the audit trail.
+    ///
+    /// - Throws: `LocusKitError.invalidContent` if no fact with `id` exists.
+    public func withdrawKGFact(id: String) async throws {
+        guard let fact = try await getKGFact(id: id) else {
+            throw LocusKitError.invalidContent("kgFact not found: \(id)")
+        }
+        // Preserve all bits above the 6-bit state field (g_state_cluster mask = 0x3F).
+        let newBitmap = (fact.adjectiveBitmap & ~Int64(0x3F)) | Int64(State.withdrawn.rawValue)
+        _ = try await storage.rowStore.update(
+            table: "kg_facts",
+            values: ["adjectiveBitmap": .bitmap(newBitmap)],
+            where: .eq(Column(table: "kg_facts", name: "id"), .text(id)))
     }
 
     public func getKGFact(id: String) async throws -> KGFact? {

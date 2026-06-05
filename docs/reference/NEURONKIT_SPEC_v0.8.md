@@ -187,7 +187,7 @@ deterministic function of its inputs. No engine reads the wall clock —
 methods, the benchmark, the tournament, the dreaming/maintenance cycles).
 There is no unseeded randomness and no hash-order iteration that reaches
 the output: ties break on stable keys (input index, ascending ID
-string, geometric-mean-normalised strength), so the Swift and Rust versions
+string, geometric-mean-normalised strength), so the Swift and Rust ports
 agree bit-for-bit on shared vectors.
 
 **B-6 (hybrid recall is bounded by the verb surface):** the `recall`
@@ -216,13 +216,21 @@ fleet convention (one typed error enum per owning module, never optionals
 plus logging). Daemon and branch operations surface upstream
 GeniusLocusKit verb errors unchanged.
 
+Standalone MMR (`mmrRank`, § 4.1 step 4) enforces one domain
+precondition: `lambda` must be in `[0, 1]`. The MMR score
+`λ·relevance − (1−λ)·maxSim` is a convex blend only on that interval;
+an out-of-range λ produces out-of-spec scores. The check is a
+process-terminating precondition (programmer error, the substrate
+convention), enforced identically in the Swift and Rust ports.
+
 | Category | Trigger | Recovery posture |
 |---|---|---|
 | Self-pairing (`selfPairing`) | A `PairwiseOutcome` has `winner == loser` — a malformed tally, not a quantity-zero record. | Abort the fit; surface so the caller corrects tally construction. Never silently dropped. |
 | Disconnected comparison graph (`disconnectedComparisonGraph`) | The directed win graph is not strongly connected, so the BT MLE is not finite (a competitor never wins, or never loses, or a group is uncompared). | Abort the fit; finite confidence intervals cannot be represented for a non-finite estimate. |
+| MMR lambda out of range (precondition) | `mmrRank` / `MMREngine.select` called with `lambda < 0` or `lambda > 1`. | Process-terminating precondition; the caller must pass `lambda ∈ [0, 1]`. |
 | Verb error (forwarded) | A branch op, benchmark, or daemon proposal hits a stale handle or a not-yet-live verb (`estateNotOpen`, `notSupportedByEstate`). | Forwarded unchanged from GeniusLocusKit; the caller retries or aborts per the verb's contract. |
 
-Rust-port note: the Rust port models the two fitter errors as a
+Rust version note: the Rust version models the two fitter errors as a
 crate-local `TournamentError` enum (`SelfPairing`,
 `DisconnectedComparisonGraph`) rather than a shared `MOOTx01Error` name.
 The *cases* and their triggers match; the *type name* differs across
@@ -259,66 +267,10 @@ two-source taxonomy (implicit recall-trace + explicit `DiaryEntry.reward`)
 is preserved at the type level; the explicit source is a documented seam
 the substrate does not yet populate.
 
-**C-Det (cross-leg determinism):** for every shared test vector, the
-Swift and Rust versions agree bit-for-bit on the reasoning engines they
+**C-Det (cross-port determinism):** for every shared test vector, the
+Swift and Rust ports agree bit-for-bit on the reasoning engines they
 both implement — lattice-anchor inference, hybrid-recall rerank /
 shingle similarity / paging, context synthesis, and the Bradley-Terry
 fit (strengths AND confidence-interval bounds). Tie-breaks resolve on
 stable keys so the agreement is exact.
 
-**C-PortGap (documented Rust-narrower surface):** the Rust port
-implements the pure reasoning engines only. The following Swift surfaces
-have **no Rust counterpart** at v0.8, and conformance does not require
-one: the dreaming daemon and its seams, the maintenance daemon and its
-seams, branch operations, the migration benchmark, tournament
-orchestration (`runTournament` / `TournamentReport` / `BranchScore` /
-`DisqualifiedBranch`), and standalone Engram-distance `mmrRank`. The
-Rust hybrid-recall surface also differs in shape (free `page_recall`,
-`DrawerRow` / `DrawerRowMeta` value types in place of the substrate
-`Drawer`) because Rust has no LocusKit dependency. These gaps are
-intentional and tracked here, not silenced.
-
-## § 8 — Out of scope
-
-- The estate verb surface, branch COW mechanics, `ExternalCorpus`,
-  `AuditChainVerifier`, and the Brain-layer daemon adapter →
-  `GENIUSLOCUSKIT_SPEC_v0.8.md`.
-- The linguistic pipeline that produces a raw anchor →
-  `EIDETICLIB_SPEC_v0.8.md`.
-- The Hamming-distance primitive MMR ranks with →
-  `ENGRAMLIB_SPEC_v0.8.md`.
-- `Drawer` storage, schema, bitmap encoding, and SQL →
-  `LOCUSKIT_SPEC_v0.8.md`.
-- Named, user-facing behaviour recipes that compose these algorithms →
-  `COGNITIONKIT_SPEC_v0.1.md` (not yet built).
-- The SolverBandit trigger-mode learner — the `DreamingTriggerMode` enum
-  is the fixed seam it will attach to; the learner itself is a future
-  mission and is not in NeuronKit at v0.8.
-
-## § 9 — Open questions
-
-- **SolverBandit (trigger-mode learning).** `DreamingTriggerMode` ships
-  `.timer` / `.event` / `.hybrid`, but only `.timer` is live; `.event`
-  and `.hybrid` behave as `.timer` until a future bandit mission wires
-  an event source. The seam is in place so the attachment is additive.
-- **Explicit reward source.** `RewardSourceKind.explicitDiaryReward`
-  awaits a `DiaryEntry.reward` substrate field that does not exist yet;
-  v1 is single-source (`recallTrace`).
-- **`ScenarioProfile.tournamentReport`.** The architecture-level § 4.6
-  shape carries a `tournamentReport` field referencing `BranchHandle`;
-  it is deferred until branching stabilises, and no placeholder type is
-  invented. `ScenarioProfile` round-trips the rest of § 4.6 verbatim.
-- **Reconciling the two MMR paths.** The standalone Engram-distance
-  `mmrRank` (§ 4.1 step 4, the canonical spec form) and the vector-free
-  shingle-Jaccard MMR inside the hybrid-recall wrapper coexist; the
-  wrapper proxy is bounded by B-1 (no Engram access behind the verb).
-  Unifying them is a future mission.
-- **Tournament scoring model.** Tournament ranking uses the
-  benchmark-derived product `recallOverlap × meanReciprocalRank` rather
-  than the older substrate-signal `ScoringConfig` sketch; the
-  benchmark-derived model is authoritative because `BenchmarkReport`
-  is the type that actually exists.
-
----
-
-*End of NeuronKit Specification v0.8.*

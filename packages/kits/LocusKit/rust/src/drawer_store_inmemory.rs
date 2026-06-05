@@ -1460,6 +1460,33 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
+    fn withdraw_kg_fact(&self, id: &str, _now: i64) -> Result<(), LocusKitError> {
+        validate_non_empty(id, "id")?;
+        let fact = self
+            .get_kg_fact(id)?
+            .ok_or_else(|| LocusKitError::InvalidContent(format!("kgFact not found: {id}")))?;
+        // Preserve adjective bits above the State field (bits 6+) and set
+        // bits 0-5 to Withdrawn (raw 18). Mirrors Swift DrawerStore.withdrawKGFact.
+        let new_bitmap = (fact.adjective_bitmap & !0x3Fi64) | State::Withdrawn.raw_value();
+        let mut update_vals = BTreeMap::new();
+        update_vals.insert(
+            "adjectiveBitmap".to_string(),
+            TypedValue::Bitmap(new_bitmap),
+        );
+        self.storage
+            .row_store()
+            .update(
+                T_KG_FACTS,
+                update_vals,
+                &StoragePredicate::Eq(
+                    Column::new(T_KG_FACTS, "id"),
+                    TypedValue::Text(id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
     fn get_kg_fact(&self, id: &str) -> Result<Option<KGFact>, LocusKitError> {
         let rows = self
             .storage
@@ -2321,6 +2348,9 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
         self.inner.add_kg_fact(fact)
+    }
+    fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
+        self.inner.withdraw_kg_fact(id, now)
     }
     fn get_kg_fact(&self, id: &str) -> Result<Option<crate::kg_fact::KGFact>, LocusKitError> {
         self.inner.get_kg_fact(id)

@@ -53,6 +53,8 @@ fn closeness(a: &Engram, b: &Engram) -> f32 {
 /// Greedy MMR selection. Returns selected indices into `fingerprints`, in
 /// MMR order, truncated to `k`. Mirrors the Swift `MMREngine.select`:
 ///
+/// - Precondition: `lambda` must be in [0, 1] (the MMR score is a convex
+///   blend only on that interval); out-of-range lambda panics.
 /// - `k <= 0` or empty input → empty.
 /// - Complexity O(k · n): each round scans the remaining candidates and
 ///   folds only the just-picked row into a running max-similarity vector
@@ -60,6 +62,14 @@ fn closeness(a: &Engram, b: &Engram) -> f32 {
 /// - Tie-break: ascending input-index scan with strict `>` keeps the
 ///   earliest candidate when scores are equal.
 pub fn mmr_select(fingerprints: &[Engram], query: &Engram, lambda: f32, k: i64) -> Vec<usize> {
+    // Lambda domain check: the MMR score is a convex blend only when
+    // lambda in [0, 1]. Out-of-range lambda produces out-of-spec scores.
+    // Mirrors the Swift MMREngine.select precondition.
+    assert!(
+        (0.0..=1.0).contains(&lambda),
+        "lambda must be in [0, 1] (got {})",
+        lambda
+    );
     if k <= 0 || fingerprints.is_empty() {
         return Vec::new();
     }

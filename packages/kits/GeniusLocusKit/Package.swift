@@ -54,6 +54,13 @@ let package = Package(
         // standing signals: scheduler enqueues jobs through QueueKit; a
         // single drainer applies them through the propose verb.
         .package(name: "QueueKit", path: "../QueueKit"),
+        // SubstrateML (Layer 3 algorithms) is required by GeniusLocusKit so
+        // MatrixTier.rebuildTemporal can call TemporalCausalityFold — the
+        // canonical T-matrix population engine (cookbook §6.4).
+        // Dependency added 2026-06-04 per DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md.
+        // Layering: GeniusLocusKit (composition) → SubstrateML (algorithms) does
+        // NOT invert — SubstrateML is below GeniusLocusKit in the kit graph.
+        .package(path: "../../libs/SubstrateML"),
     ],
     targets: [
         .target(
@@ -68,6 +75,7 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
+                .product(name: "SubstrateML", package: "SubstrateML"),
             ],
             path: "Sources/GeniusLocusKit"
         ),
@@ -83,6 +91,7 @@ let package = Package(
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
+                .product(name: "SubstrateML", package: "SubstrateML"),
             ],
             path: "Tests/GeniusLocusKitTests"
         ),

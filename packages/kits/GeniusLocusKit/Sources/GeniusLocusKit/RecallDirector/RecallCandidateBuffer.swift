@@ -124,9 +124,13 @@ struct RecallCandidateBuffer {
     /// Min-max normalise every score column to [0, 1] across the `count` populated slots.
     ///
     /// For each column, finds the minimum and maximum across slots 0..<count, then
-    /// scales each slot value to (value - min) / (max - min). When min == max (all
-    /// values are identical, including the single-slot case), the column is set to
-    /// 0.5 — conveying "no relative ordering information" rather than 0 or 1.
+    /// scales each slot value to (value - min) / (max - min).
+    ///
+    /// When all values are identical (range == 0), the treatment depends on the value:
+    ///   - All-zero column (lo == 0): no cache was registered; no measurement was taken.
+    ///     Slots remain 0.0 — absent evidence contributes nothing to scoring.
+    ///   - Non-zero uniform column (lo > 0): real measurements exist but produce no
+    ///     relative ordering. Slots are set to 0.5 — "measured but informationally flat."
     ///
     /// NaN values are treated as 0 before normalisation so a pathological embed
     /// failure does not poison the MMR pass.
@@ -149,7 +153,11 @@ struct RecallCandidateBuffer {
     /// Return a min-max scaled copy of `col` over the first `count` elements.
     ///
     /// - Replaces NaN with 0 before computing min/max.
-    /// - Sets all elements to 0.5 when min == max (uniform column).
+    /// - All-zero column (absent signal): slots remain 0.0. No cache was registered;
+    ///   contributing 0.0 is the correct neutral value for scoring.
+    /// - Non-zero uniform column (measured-uniform signal): slots are set to 0.5,
+    ///   conveying "measured but no relative ordering information."
+    /// - Varying column: standard min-max scale to [0, 1].
     /// - Elements beyond `count` are copied unchanged (they are unpopulated slots).
     private func normalizedCopy(of col: [Float]) -> [Float] {
         // Replace NaN, then scan populated slots for min/max.
@@ -165,8 +173,14 @@ struct RecallCandidateBuffer {
         }
         let range = hi - lo
         if range == 0 {
-            // Uniform column — no relative information; use neutral 0.5.
-            for i in 0..<count { copy[i] = 0.5 }
+            if lo == 0 {
+                // All-zero column: no cache was registered; no measurement was taken.
+                // Leave at 0.0 — absent evidence contributes nothing to scoring.
+            } else {
+                // Measured-uniform column: real measurements, no relative ordering.
+                // Use 0.5 to convey "measured but informationally flat."
+                for i in 0..<count { copy[i] = 0.5 }
+            }
         } else {
             for i in 0..<count {
                 copy[i] = (copy[i] - lo) / range

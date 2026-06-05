@@ -10,6 +10,7 @@ import Foundation
 import GeniusLocusKit
 import LocusKit
 import NeuronKit
+import SubstrateML
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import CognitionKit
@@ -193,5 +194,66 @@ extension AssociationRulesTests {
         #expect(out.drawerCount == 70)
         #expect(!out.rules.isEmpty,
                 "rules still mine over the kept (sorted-first-64) labels")
+    }
+}
+
+// MARK: - AprioriRules recipe tests
+
+extension AssociationRulesTests {
+
+    // CK-AP-1: empty estate produces no Apriori rules — verifies recipe
+    // wiring (capability check, currentAuditLog call, empty-return path).
+    @Test("AprioriRules recipe returns empty on fresh estate")
+    func aprioriRulesEmptyEstate() async throws {
+        let (kit, handle) = try await openEstate()
+        let input = AprioriRules.Input(
+            thresholds: AprioriThresholds(
+                minSupport: 0.5,
+                minConfidence: 0.5,
+                minLift: 1.0,
+                maxK: 2
+            )
+        )
+        let out = try await AprioriRules().run(input: input, estate: handle, kit: kit)
+        #expect(out.rules.isEmpty,
+                "fresh estate has no audit entries and no Apriori rules")
+    }
+
+    // CK-AP-2: recipe has the expected capability gate.
+    @Test("AprioriRules capability declaration is associationRuleMining")
+    func aprioriCapabilityDeclaration() {
+        let recipe = AprioriRules()
+        #expect(recipe.requiredCapabilities == [.associationRuleMining])
+        #expect(throws: RecipeError.missingCapability(.associationRuleMining)) {
+            try verifyCapabilities(
+                required: recipe.requiredCapabilities,
+                available: [.hybridRecall])
+        }
+    }
+
+    // CK-AP-3: recipe returns a non-throwing result with captures in the estate.
+    // The audit log after capture may or may not yield frequent patterns; what
+    // we verify is that the recipe runs to completion without error.
+    @Test("AprioriRules recipe runs without error after captures")
+    func aprioriRulesRunsAfterCaptures() async throws {
+        let (kit, handle) = try await openEstate()
+        for _ in 0..<4 {
+            try await capture(kit, handle, room: "study", kind: .prose, channel: .typed)
+        }
+        let input = AprioriRules.Input(
+            thresholds: AprioriThresholds(
+                minSupport: 0.1,
+                minConfidence: 0.1,
+                minLift: 0.5,
+                maxK: 2
+            )
+        )
+        // Should not throw; result may be empty or non-empty depending on
+        // the audit entries the LocusKit trail produces for these drawers.
+        let out = try await AprioriRules().run(input: input, estate: handle, kit: kit)
+        // Every returned rule must have a non-empty antecedent.
+        for rule in out.rules {
+            #expect(!rule.antecedent.isEmpty)
+        }
     }
 }

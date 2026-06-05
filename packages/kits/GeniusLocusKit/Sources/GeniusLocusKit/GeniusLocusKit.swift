@@ -117,6 +117,12 @@ public actor GeniusLocusKit {
     /// estate's LocusKit tier. Dropped in `close` via `EstateCoordinator`.
     internal var diaryStores: [EstateHandle: DrawerStore] = [:]
 
+    /// Per-estate KGFact `DrawerStore` facade (verb surface). Built lazily
+    /// by `ensureKGStore(for:)` on the first `captureKGFact` or `retireKGFact`
+    /// call against a handle. Mirrors `diaryStores` — same backing `Storage`,
+    /// separate facade to avoid cross-concern entanglement. Dropped in `close`.
+    internal var kgStores: [EstateHandle: DrawerStore] = [:]
+
     /// Per-estate matrix tier snapshots for recall scoring.
     ///
     /// Populated via `registerMatrixTier(_:for:)` after an estate is opened

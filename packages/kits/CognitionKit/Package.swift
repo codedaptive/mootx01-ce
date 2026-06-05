@@ -45,6 +45,9 @@ let package = Package(
         .package(path: "../NeuronKit"),
         .package(path: "../LocusKit"),
         .package(path: "../../libs/SubstrateTypes"),
+        // SubstrateML provides the ARM engine (mineAssociationRules,
+        // MiningThresholds, AssociationRule, Item) consumed by AssociationRules.swift.
+        .package(path: "../../libs/SubstrateML"),
         // PersistenceKit's in-memory backend is a test-only dependency:
         // the recipe tests open a real GeniusLocusKit estate over
         // InMemoryStorage, exercising the full substrate boundary rather
@@ -60,6 +63,7 @@ let package = Package(
                 .product(name: "NeuronKit", package: "NeuronKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                .product(name: "SubstrateML", package: "SubstrateML"),
             ],
             path: "Sources/CognitionKit"
         ),
@@ -71,6 +75,9 @@ let package = Package(
                 .product(name: "NeuronKit", package: "NeuronKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                // SubstrateML provides ARM types (MiningThresholds) used
+                // in AssociationRulesTests.
+                .product(name: "SubstrateML", package: "SubstrateML"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],

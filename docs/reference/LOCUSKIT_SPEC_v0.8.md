@@ -323,6 +323,10 @@ the same contract with different host shapes:
   through a `DrawerStore` trait. Both legs are conformance-gated to identical
   value-level results. The Rust version also surfaces helper shapes the Swift
   version keeps internal (`BitmapAuditPair`, `RoomBundle`, `RoomLevelEntry`).
+  GLK-RUST-WRITE-PATH-01 extended the Rust trait with `withdraw_kg_fact`
+  (mirroring the Swift `withdrawKGFact` already present on the actor); the
+  trait default returns `DatabaseUnavailable` so existing implementations are
+  not broken — only `DrawerStoreCore` carries the live bitmap update logic.
 
 These are *shape* differences; the value-level results that C-7 gates are
 required to agree.

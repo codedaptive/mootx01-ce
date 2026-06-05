@@ -3,7 +3,7 @@
 // FormalConcepts — the conscious "what clusters are hidden in my estate"
 // recipe (Analytics). Recalls a set of drawers, builds a FormalContext
 // where each drawer is one row and its categorical facets are its
-// attributes, and surfaces NeuronKit's BoundedConceptMiner.
+// attributes, and surfaces SubstrateML's BoundedConceptMiner.
 //
 // Layer discipline (SPEC § 5, B-1/B-2, I-1/I-2): the recipe only SEQUENCES.
 //   - Estate read: one `GLK.recall` call.
@@ -53,6 +53,7 @@ import Foundation
 import GeniusLocusKit
 import LocusKit
 import NeuronKit
+import SubstrateML
 
 // MARK: - Result types
 
@@ -68,11 +69,16 @@ public struct FormalConceptResult: Sendable, Equatable {
     public let extentDrawerIDs: [String]
     /// Number of drawers in the extent — the FCA support measure.
     public let support: Int
+    /// Sampled Kuznetsov stability estimate, or `nil` when the miner
+    /// ran with `stabilityBudget == 0` (the default). Populated when
+    /// the caller passes a miner with `stabilityBudget > 0`.
+    public let stability: Double?
 
-    public init(intent: [String], extentDrawerIDs: [String], support: Int) {
+    public init(intent: [String], extentDrawerIDs: [String], support: Int, stability: Double? = nil) {
         self.intent = intent
         self.extentDrawerIDs = extentDrawerIDs
         self.support = support
+        self.stability = stability
     }
 }
 
@@ -86,10 +92,25 @@ public struct FormalConcepts: Recipe {
         public let frame: RecallFrame
         /// Bounding parameters for the miner.
         public let miner: BoundedConceptMiner
+        /// Hard cap on the number of D-G implications to emit. Set to
+        /// `Int.max` for uncapped enumeration. When the cap triggers,
+        /// `output.implications.isTruncated == true`.
+        public let maxImplications: Int
+        /// Maximum premise size for D-G implications. Pseudo-intents with
+        /// `|premise| > maxPremiseSize` are silently skipped (not truncated).
+        /// Set to `Int.max` to place no size limit.
+        public let maxPremiseSize: Int
 
-        public init(frame: RecallFrame, miner: BoundedConceptMiner) {
+        public init(
+            frame: RecallFrame,
+            miner: BoundedConceptMiner,
+            maxImplications: Int = 200,
+            maxPremiseSize: Int = 4
+        ) {
             self.frame = frame
             self.miner = miner
+            self.maxImplications = maxImplications
+            self.maxPremiseSize = maxPremiseSize
         }
     }
 
@@ -100,10 +121,30 @@ public struct FormalConcepts: Recipe {
         public let concepts: [FormalConceptResult]
         /// Number of drawers the context was built from.
         public let drawerCount: Int
+        /// Cover deltas over the mined concept set — a structural lens showing
+        /// how concepts relate in the emitted set. Not a sound implication basis:
+        /// a cover delta does not assert that every row carrying `lowerIntent`
+        /// also carries `addedAttributes` (see SUBSTRATEML_SPEC_v0.8). Empty
+        /// when fewer than two concepts are found or when the mined concepts have
+        /// no cover relations.
+        public let coverDeltas: ConceptCoverDeltas
+        /// Bounded D-G canonical basis — sound logical implications over the
+        /// recalled drawer context. Every implication holds: any drawer carrying
+        /// all attributes in `premise` also carries all attributes in `conclusion`.
+        /// `isTruncated` is true when `maxImplications` terminated enumeration
+        /// early.
+        public let implications: ConceptImplications
 
-        public init(concepts: [FormalConceptResult], drawerCount: Int) {
+        public init(
+            concepts: [FormalConceptResult],
+            drawerCount: Int,
+            coverDeltas: ConceptCoverDeltas = ConceptCoverDeltas(coverDeltas: []),
+            implications: ConceptImplications = ConceptImplications(implications: [], isTruncated: false)
+        ) {
             self.concepts = concepts
             self.drawerCount = drawerCount
+            self.coverDeltas = coverDeltas
+            self.implications = implications
         }
     }
 
@@ -112,7 +153,7 @@ public struct FormalConcepts: Recipe {
     public let name = "formal_concepts"
     public let version = "1.0.0"
     public let description =
-        "Recall a frame, build a formal context whose attributes are each drawer's trust, lattice anchors, sensitivity, and filing facets, and mine bounded formal concepts — emergent provenance and about-ness clusters, not the authored taxonomy."
+        "Recall a frame, build a formal context whose attributes are each drawer's trust, lattice anchors, sensitivity, and filing facets, mine bounded formal concepts — emergent provenance and about-ness clusters — derive cover deltas (structural lens over the concept order) over the mined concept set, and compute the bounded Duquenne–Guigues canonical basis of sound logical implications."
 
     /// Requires the `formalConceptAnalysis` NeuronKit surface (spec I-3).
     public let requiredCapabilities: [NeuronKitCapability] = [.formalConceptAnalysis]
@@ -142,10 +183,14 @@ public struct FormalConcepts: Recipe {
         let context = FormalContext(rows: rows)
 
         // 3. Mine bounded concepts (engine owns all closure/dedup/ordering).
+        //    The miner's seedMode determines whether single-attribute seeds
+        //    only (v1 default) or frequent 2-attribute pairs are also used.
         let rawConcepts = input.miner.mine(context: context)
 
         // 4. Relabel: convert FormalContext.RowID (0-based index) back to
         //    drawer IDs; project FormalAttribute triples to "ns.key=value" strings.
+        //    Pass stability through from the raw concept (nil when the miner
+        //    ran with stabilityBudget == 0).
         let results: [FormalConceptResult] = rawConcepts.map { concept in
             let intentStrings = concept.intent.map { attr in
                 "\(attr.namespace).\(attr.key)=\(attr.value)"
@@ -157,10 +202,32 @@ public struct FormalConcepts: Recipe {
             return FormalConceptResult(
                 intent: intentStrings,
                 extentDrawerIDs: extentIDs,
-                support: concept.support)
+                support: concept.support,
+                stability: concept.stability)
         }
 
-        return Output(concepts: results, drawerCount: drawerCount)
+        // 5. Derive cover deltas over the mined concept set (structural lens
+        //    over the concept order — not a sound implication basis). Empty
+        //    when fewer than two concepts exist.
+        let coverDeltas = ConceptCoverDeltas.covering(concepts: rawConcepts)
+
+        // 6. Compute the bounded D-G canonical basis — sound logical implications
+        //    over the drawer context. `over:` receives the mined concepts so the
+        //    engine can reuse already-computed closures; `context:` provides the
+        //    full closure operator for pseudo-intent enumeration.
+        let implications = ConceptImplications.conceptImplications(
+            over: rawConcepts,
+            context: context,
+            maxImplications: input.maxImplications,
+            maxPremiseSize: input.maxPremiseSize
+        )
+
+        return Output(
+            concepts: results,
+            drawerCount: drawerCount,
+            coverDeltas: coverDeltas,
+            implications: implications
+        )
     }
 }
 

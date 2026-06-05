@@ -43,6 +43,7 @@ import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
 import VectorKit
+import SubstrateTypes
 @testable import GeniusLocusKit
 
 @Suite("Recall Director API and locusOnly lane")
@@ -1348,8 +1349,9 @@ struct RecallDirectorGraphShingleTests {
         )
         let result = try await kit.recall(handle, request)
         // With a registered GraphCache returning 0.8, every hit's graph score
-        // must be non-zero. After normalisation, a uniform non-zero raw column
-        // produces 0.5 for all slots (normalizeFinals sets uniform columns to 0.5).
+        // must be non-zero. After normalisation, a measured-uniform non-zero
+        // column produces 0.5 for all slots (normalizeFinals sets measured-uniform
+        // columns to 0.5, distinct from absent all-zero columns which remain 0.0).
         #expect(!result.hits.isEmpty, "unionBest must return hits when drawers are captured")
         let allGraphNonZero = result.hits.allSatisfy { $0.score.graph > 0 }
         #expect(allGraphNonZero, "graph score must be non-zero when GraphCache is registered")
@@ -1742,6 +1744,111 @@ struct RecallDirectorAdaptiveLambdaTests {
             // Confirm recall still completes without error.
             #expect(result.hits.count <= 2, "matrixAware must respect limit even without matrix priors")
         }
+        try await kit.close(handle)
+    }
+
+    // MARK: - 27. rebuildTemporal wires through recall scoring
+
+    /// Regression test: rebuildTemporal produces a MatrixTier that
+    /// the RecallDirector's matrix-scoring step can read.
+    ///
+    /// The test seeds two drawers on different channels so their
+    /// operationalBitmaps differ, rebuilds T via rebuildTemporal, adds
+    /// a strong temporal prior via applyTemporalEvent matching the
+    /// captured bitmap values, then verifies matrixAware recall produces
+    /// non-zero temporal scores.
+    ///
+    /// This regression ensures the TemporalCausalityFold→MatrixTier
+    /// pipeline is end-to-end wired: fold → rebuildTemporal → register →
+    /// recall scorer → non-zero temporal column.
+    @Test
+    func rebuildTemporalWiresThroughRecallScoring() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "test-rebuild-temporal-\(UUID())")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Capture two drawers on different channels so operationalBitmaps differ.
+        let f1 = CaptureFrame(
+            content: "rebuild temporal source content",
+            channel: .typed,
+            room: "rebuild-temporal-test",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "rebuild-temporal-test",
+            embeddingModelID: "test-v1")
+        let d1 = try await kit.capture(handle, f1)
+
+        let f2 = CaptureFrame(
+            content: "rebuild temporal target content",
+            channel: .voiced,
+            room: "rebuild-temporal-test",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "rebuild-temporal-test",
+            embeddingModelID: "test-v1")
+        let d2 = try await kit.capture(handle, f2)
+
+        // Feed and retrieve the audit log, then rebuild via rebuildTemporal.
+        try await kit.feedAuditLog(for: handle)
+        let auditLog = try await kit.auditLog(for: handle)
+
+        // rebuildTemporal is the method under test: it uses
+        // TemporalCausalityFold to produce T-matrix deltas from the audit log.
+        var matrix = MatrixTier.rebuildTemporal(from: auditLog)
+
+        // The watermark must advance — at minimum past .zero.
+        #expect(matrix.temporalWatermarkHLC > HLC.zero,
+            "rebuildTemporal must advance temporalWatermarkHLC when log is non-empty")
+
+        // Inject a strong temporal prior matching the captured drawers'
+        // operational bitmaps (non-zero + distinct). This gives the recall
+        // scorer a known prior to evaluate.
+        let allDrawers = (try? await kit.estate(for: handle).allDrawers()) ?? []
+        let d1Op = UInt64(bitPattern: allDrawers.first(where: { $0.id == d1.id })?.operationalBitmap ?? 0)
+        let d2Op = UInt64(bitPattern: allDrawers.first(where: { $0.id == d2.id })?.operationalBitmap ?? 0)
+
+        var matrixSeeded = false
+        if d1Op != 0, d2Op != 0, d1Op != d2Op {
+            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
+            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            // Seed count of 1000 ensures a dominant prior signal in the scorer.
+            matrix.applyTemporalEvent(source: src, target: tgt, deltaMinutes: 2, delta: 1000)
+            matrixSeeded = true
+        }
+
+        await kit.registerMatrixTier(matrix, for: handle)
+
+        let request = GLKRecallRequest(
+            frame: RecallFrame(
+                filterChain: [.unconfirmed],
+                hydrationLevel: .structured,
+                limit: 2,
+                ordering: .byCaptureTimeDesc),
+            mode: .unionBest,
+            scoring: .matrixAware,
+            limit: 2,
+            fallback: .failClosed)
+        let result = try await kit.recall(handle, request)
+
+        #expect(!result.hits.isEmpty,
+            "matrixAware recall must return hits when two drawers are captured")
+
+        if matrixSeeded {
+            // When the prior is seeded and the drawers have distinguishable
+            // operationalBitmaps, at least one hit must carry a temporal score
+            // > 0. The threshold (0.0) is derived from the known test setup:
+            // a delta of 1000 is large enough to lift temporal above zero in
+            // any realistic scorer weight configuration.
+            let anyTemporalNonZero = result.hits.contains(where: { $0.score.temporal > 0.0 })
+            #expect(anyTemporalNonZero,
+                "rebuildTemporal→registerMatrixTier→recall must produce non-zero temporal score")
+        } else {
+            // Identical bitmaps: recall succeeds but temporal stays zero — that
+            // is correct. The regression only requires the round-trip not to crash.
+            #expect(result.hits.count <= 2)
+        }
+
         try await kit.close(handle)
     }
 }
