@@ -1,21 +1,24 @@
 ---
 status: draft
 authors: Bob Pankratz (via/ claude)
-date: 2026-05-27
+date: 2026-06-05
 version: v0.8
 package: ARIA_MCP
 languages: [swift]   # access surface, implemented in Swift
 relates_to:
-  - ARIA_MCP_SPEC_v0.8.md  (the contract this interface implements)
-  - ARIALEXICONLIB_SPEC_v0.8.md  (the grammar this surface projects)
+  - ARIA_MCP_SPEC_v0.2.md  (the behavioral contract; MCP-INT-01 adds §11 AI-client surface)
   - GENIUSLOCUSKIT_SPEC_v0.8.md  (the estate verb surface tools dispatch to)
 purpose: |
-  Public API surface of ARIA_MCP — the stdio MCP server that projects
-  the ARIA grammar onto Model Context Protocol tools and dispatches them
-  against GeniusLocusKit estates. Documents the JSON-RPC transport, the
-  JSONValue wire type, the lexicon→tool projection, the multi-estate
-  tool dispatcher, and the server loop. The access surface is implemented in Swift. The
-  companion SPEC carries the behavioral contracts.
+  Public API surface of ARIA_MCP — the stdio MCP server that exposes
+  GeniusLocusKit estates over Model Context Protocol. Documents the JSON-RPC
+  transport, the JSONValue wire type, the five-tier AI-client tool surface, the
+  multi-estate tool dispatcher, the teachme guide engine, the coaching hint
+  engine, and the server loop. Updated by MCP-INT-01 to replace the
+  lexicon-projected surface with an AI-client-oriented interface; updated by
+  MCP-INT-02 to add per-tool usage guides and coaching hints; updated by
+  MCP-INT-03 to add the static protocol block to estate_status and the full
+  cognition menu to moot_list_lenses.
+  The companion SPEC carries the behavioral contracts.
 ---
 
 # ARIA_MCP Interface
@@ -27,13 +30,17 @@ purpose: |
 - `Sources/AriaMCP/` — the `AriaMCP` library: JSON-RPC envelope + error
   codes (`JSONRPC.swift`), the `JSONValue` wire type (`JSONValue.swift`),
   OSLog/stderr logging (`Logging.swift`), the server dispatcher + stdio
-  loop (`Server.swift`), the lexicon→tool projection (`ToolProjection.swift`),
-  the estate dispatcher (`ToolDispatch.swift`).
+  loop (`Server.swift`), the five-tier tool projection (`ToolProjection.swift`),
+  the estate dispatcher + interface runners (`ToolDispatch.swift`),
+  per-tool usage guide strings (`TeachmeGuides.swift`),
+  coaching-hint trigger logic (`CoachingEngine.swift`),
+  CognitionKit recipe tools (`RecipeTools.swift`), reasoning-lens tools
+  (`LensTools.swift`), vault control tools (`VaultTools.swift`).
 - `Sources/aria-mcp/` — the `aria-mcp` executable (`AriaMCPMain.swift`):
   opens an estate and runs the stdio loop.
 - `Tests/AriaMCPTests/`
-- `Package.swift` — depends on AriaLexiconLib, GeniusLocusKit, LocusKit,
-  PersistenceKit (path deps under `../../packages/`).
+- `Package.swift` — depends on GeniusLocusKit, LocusKit, PersistenceKit,
+  NeuronKit, CognitionKit (path deps under `../../packages/`).
 
 **Rust:** none. ARIA_MCP is the external access surface above the substrate and is implemented in Swift.
 
@@ -104,37 +111,141 @@ public enum JSONValueError: Error, Equatable { /* unsupported value, etc. */ }
 
 ### Tool projection — `ToolProjection` / `ProjectedTool` / `ToolProvenance`
 
-Generates the MCP tool list from the AriaLexicon acceptance matrix
-(`verb_noun` actions, `noun_verb` for recall); `propose`/`associate` are
-excluded as substrate-driven (SPEC). `cross_estate_recall` is the one
-federation tool appended above the projection.
+MCP-INT-01 replaced the lexicon-projected surface with a five-tier
+AI-client-oriented interface. `ToolProjection.tools()` assembles all
+44 tools across four provenance tiers.
 
 ```swift
 public enum ToolProvenance: Sendable, Equatable {
-    case lexicon(verb: Verb, noun: Noun)   // Verb/Noun from AriaLexiconLib
-    case federation
+    case interface     // 19 five-tier AI-client tools
+    case federation    // 1 federated-search tool (moot_federated_search)
+    case recipe        // 4 recipe + 16 lens tools via CognitionKit/LensTools
+    case vault         // 4 vault control tools
 }
 public struct ProjectedTool: Sendable, Equatable {
     public let name: String
     public let description: String
     public let inputSchema: JSONValue
     public let provenance: ToolProvenance
-    public var verb: Verb? { get }
-    public var noun: Noun? { get }
 }
 public enum ToolProjection {
-    public static func surfaces(_ verb: Verb) -> Bool                 // false for substrate-driven
-    public static func tools() -> [ProjectedTool]                     // full projected list + federation tool
-    public static func make(verb: Verb, noun: Noun) -> ProjectedTool
+    public static func tools() -> [ProjectedTool]   // all 44 tools (interface+federation+recipe+vault)
     public static func federationTool() -> ProjectedTool
-    public static func toolName(verb: Verb, noun: Noun) -> String
 }
 ```
+
+#### Five-tier AI-client interface (`.interface` provenance, 19 tools)
+
+| Tier | Tools |
+|------|-------|
+| 1 — Core Memory | `moot_file_memory`, `moot_memory_search`, `moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory` |
+| 2 — Connections | `moot_link_memories`, `moot_connection_search`, `moot_connection_map` |
+| 3 — Knowledge Graph | `moot_file_fact`, `moot_fact_search`, `moot_retire_fact`, `moot_fact_timeline` |
+| 4 — Journal | `moot_write_journal`, `moot_read_journal` |
+| 5 — Estate | `moot_estate_status`, `moot_estate_map`, `moot_estate_ping` |
+
+All interface tools accept an optional `estateID` (UUID string) to address a
+registered non-default estate and an optional `teachme` (boolean) to request a
+usage guide instead of executing. Infrastructure fields (`latticeAnchor`,
+`embeddingModelID`, `addedBy`, `channel`) are server-owned and never exposed
+to AI clients. Required caller fields: `content` + `location` for
+`moot_file_memory`; `query` for `moot_memory_search`; `subject`, `predicate`,
+`object` for `moot_file_fact`; `entry` for `moot_write_journal` (note: `entry`,
+not `content` — mirrors the `DiaryEntry.entry` substrate field); optional `query`
+for `moot_fact_search` (substring match across subject, predicate, and object;
+omit to return all active facts).
+
+`moot_file_fact` also accepts optional `source_id` — the row identifier of the
+drawer this fact was extracted from; omit for agent-asserted freestanding triples.
+`filedAt` is server-assigned and immutable; callers cannot supply it. There are no
+temporal validity window fields (`valid_from`/`valid_to`) — facts are active until
+retired via `moot_retire_fact`, which transitions the adjective state bitmap to
+`withdrawn` and removes the fact from active recall.
+
+#### Federation tool (`.federation` provenance, 1 tool)
+
+```swift
+ToolDispatcher.federatedSearchToolName   // "moot_federated_search"
+```
+
+Fans across locally-open estates the requester is authorized to read.
+Required caller field: `requesterEstateID` (UUID string of the requesting estate).
+
+#### Recipe and lens tools (`.recipe` provenance, 20 tools)
+
+- `moot_list_lenses`, `moot_synthesize`, `moot_run_migration`, `moot_confirm_migration`
+  (CognitionKit recipe tools)
+- 16 `moot_lens_*` tools: `moot_lens_keystones`, `moot_lens_constellation`,
+  `moot_lens_free_association`, `moot_lens_theme_weather`, `moot_lens_latent_themes`,
+  `moot_lens_bias`, `moot_lens_drift`, `moot_lens_contradiction`,
+  `moot_lens_trust_synthesis`, `moot_lens_partial_cue`, `moot_lens_anticipate`,
+  `moot_lens_successors`, `moot_lens_overlap`, `moot_lens_divergence`,
+  `moot_lens_associations`, `moot_lens_concepts`
+
+#### Vault tools (`.vault` provenance, 4 tools)
+
+`moot_vault_export`, `moot_vault_import`, `moot_vault_status`, `moot_vault_reconcile`
+
+### Session protocol block — `ToolDispatcher.ARIASessionProtocol`
+
+Static string constant appended unconditionally to every
+`moot_estate_status` response. Defined in `SessionProtocol.swift` as an
+extension on `ToolDispatcher`. Identical across every call and estate state.
+
+```swift
+extension ToolDispatcher {
+    static let ARIASessionProtocol: String
+    // Appended after the stats block in runEstateStatus.
+    // Contains the protocol: section with the eight surface-entry hints.
+}
+```
+
+### Teachme guides — `TeachmeGuides`
+
+Static per-tool usage guides. Called by `ToolDispatcher.dispatch` when
+`teachme: true` is present. No instances; no estate access.
+
+```swift
+enum TeachmeGuides {
+    static func guide(for toolName: String) -> String
+    // Per-tool guide for all 19 Tier 1–5 tools and moot_federated_search.
+    // moot_estate_status returns the nine-tier orientation guide (MCP-INT-03).
+    // Generic guide for lens, recipe, migration, and vault tools.
+    // Fallback for unknown names: "Unknown tool '…'. Call moot_estate_status…"
+}
+```
+
+### Coaching engine — `CoachingEngine`
+
+Inspects completed tool calls and returns a hint string when a suboptimal
+call pattern is detected. Called by `ToolDispatcher.dispatch` after the
+runner returns, before the result is sent. Nil means no hint warranted.
+Hints are never appended to error results (`isError: true`).
+
+```swift
+enum CoachingEngine {
+    static func hint(
+        name: String,
+        args: [String: JSONValue],
+        resultText: String
+    ) -> String?
+}
+```
+
+Coaching triggers (see SPEC §12 for the full table):
+`moot_memory_search` — long query, no query, zero results;
+`moot_file_memory` — content over 4000 chars, duplicate content;
+`moot_erase_memory` — confirmed absent or false;
+`moot_confirm_migration` — disqualified branch;
+`moot_link_memories` — IDs not found;
+any lens tool — zero results.
 
 ### Dispatch — `ToolDispatcher`
 
 Routes a `tools/call` against one or more locally-open GeniusLocusKit
-estates (by optional `estateID`; absent ⇒ default).
+estates (by optional `estateID`; absent ⇒ default). Dispatch order:
+teachme pre-check → federation → recipe → lens → vault → interface →
+methodNotFound → hint injection.
 
 ```swift
 public struct ToolDispatcher: Sendable {
@@ -143,9 +254,7 @@ public struct ToolDispatcher: Sendable {
     public init(kit: GeniusLocusKit, handle: EstateHandle)
     public func registering(_ additional: EstateHandle) -> ToolDispatcher   // value-semantic add
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue
-    public static func parseToolName(_ name: String) -> (Verb, Noun)?
-    public func parseToolName(_ name: String) -> (Verb, Noun)?
-    public static let crossEstateRecallToolName: String   // "cross_estate_recall"
+    public static let federatedSearchToolName: String   // "moot_federated_search"
     public static func textResult(_ text: String) -> JSONValue   // MCP success, isError:false
     public static func errorResult(_ text: String) -> JSONValue  // MCP result, isError:true
 }
@@ -214,8 +323,11 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   swift test --package-path apps/ARIA_MCP
 ```
 
-(Targets: `AriaMCPTests` — JSON-RPC, stdio framing, server, tool
-projection, multi-estate routing, scheme discriminator.) No Rust version.
+(Targets: `AriaMCPTests` — JSON-RPC, stdio framing, server, five-tier
+tool projection, connection dispatch, file-memory validation, KG and
+journal dispatch, multi-estate routing, recipe/lens tools, vault tools,
+teachme guides and coaching hints.)
+No Rust version.
 
 ## § 6 — Examples
 
@@ -232,4 +344,4 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 
 ---
 
-*End of ARIA_MCP Interface v0.8.*
+*End of ARIA_MCP Interface v0.8. Updated 2026-06-05 by MCP-INT-01 to document the five-tier AI-client surface; updated 2026-06-05 by MCP-INT-02 to add TeachmeGuides, CoachingEngine, and the teachme/hint dispatch protocol; updated 2026-06-05 by MCP-INT-03 to add ARIASessionProtocol, the static protocol block on estate_status, and the full cognition menu on moot_list_lenses.*

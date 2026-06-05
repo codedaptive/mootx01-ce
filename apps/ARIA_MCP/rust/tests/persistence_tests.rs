@@ -21,10 +21,10 @@
 //!
 //! # Round-trip shape
 //!
-//! The critical persistence invariant: a drawer captured through the dispatch
+//! The critical persistence invariant: a memory filed through the dispatch
 //! layer survives a registry drop and is recoverable by a second registry
 //! opened at the same path. This exercises the full WAL flush path
-//! (capture_drawer → SQLite write → process-level drop → reopen → drawer_recall).
+//! (moot_file_memory → SQLite write → process-level drop → reopen → moot_memory_search).
 
 use std::collections::BTreeMap;
 
@@ -131,9 +131,9 @@ fn new_sqlite_on_nonexistent_parent_returns_err() {
 // Persistence round-trip — dispatch layer
 // ---------------------------------------------------------------------------
 
-/// Full persistence round-trip: capture a drawer via dispatch, drop the
-/// registry (flushes WAL to main file), open a new registry at the same
-/// path, and verify the drawer is recoverable via moot_drawer_recall.
+/// Full persistence round-trip: file a memory via dispatch, drop the registry
+/// (flushes WAL to main file), open a new registry at the same path, and
+/// verify the memory is recoverable via moot_memory_search.
 ///
 /// This is the canonical SQLite persistence invariant for the server: data
 /// filed during one server process survives restart and is visible to the
@@ -142,58 +142,55 @@ fn new_sqlite_on_nonexistent_parent_returns_err() {
 fn persistence_round_trip_capture_then_reopen_then_recall() {
     let path = temp_sqlite_path("roundtrip");
 
-    // --- Pass 1: capture a drawer. ---
-    let captured_id = {
+    // --- Pass 1: file a memory. ---
+    let filed_id = {
         let registry =
             EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-1 open must succeed");
 
         let a = args![
             "content" => "persistent content for round-trip test",
-            "room" => "persistence-room",
-            "udcCode" => "000.001",
-            "addedBy" => "test-agent",
-            "embeddingModelID" => "test-model"
+            "location" => "persistence-room"
         ];
         let result =
-            dispatch_tool("moot_capture_drawer", &a, &registry).expect("capture must succeed");
+            dispatch_tool("moot_file_memory", &a, &registry).expect("capture must succeed");
         let text = content_text(&result);
         assert!(
-            text.starts_with("captured drawer "),
-            "capture result must start with drawer id prefix; got: {text}"
+            text.starts_with("filed memory "),
+            "file_memory result must start with id prefix; got: {text}"
         );
 
-        // Parse the drawer id from "captured drawer <id>\nroom: ...\nscheme: ..."
+        // Parse the drawer id from "filed memory <id>\nroom: ...\nlineage: ..."
         let id_line = text.lines().next().unwrap_or("");
         let id = id_line
-            .strip_prefix("captured drawer ")
+            .strip_prefix("filed memory ")
             .unwrap_or("")
             .to_owned();
-        assert!(!id.is_empty(), "captured drawer id must be non-empty");
+        assert!(!id.is_empty(), "filed memory id must be non-empty");
         id
         // registry drops here — SQLite WAL should flush to main file.
     };
 
-    // --- Pass 2: open a new registry at the same path and recall. ---
+    // --- Pass 2: open a new registry at the same path and search. ---
     {
         let registry2 =
             EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-2 reopen must succeed");
 
-        let recall_a = args!["limit" => 10];
-        let recall_result = dispatch_tool("moot_drawer_recall", &recall_a, &registry2)
-            .expect("recall must succeed");
-        let recall_text = content_text(&recall_result);
+        let search_a = args!["query" => "persistent content"];
+        let search_result = dispatch_tool("moot_memory_search", &search_a, &registry2)
+            .expect("search must succeed");
+        let search_text = content_text(&search_result);
 
         assert!(
-            recall_text.starts_with("recalled 1 drawer(s)"),
-            "reopen must find exactly one persisted drawer; got: {recall_text}"
+            search_text.contains("found 1 memory(s)"),
+            "reopen must find exactly one persisted memory; got: {search_text}"
         );
         assert!(
-            recall_text.contains(&captured_id),
-            "recalled result must include the captured drawer id {captured_id}; got: {recall_text}"
+            search_text.contains(&filed_id),
+            "search result must include the filed memory id {filed_id}; got: {search_text}"
         );
         assert!(
-            recall_text.contains("persistent content"),
-            "recalled result must include drawer content; got: {recall_text}"
+            search_text.contains("persistent content"),
+            "search result must include memory content; got: {search_text}"
         );
     }
 

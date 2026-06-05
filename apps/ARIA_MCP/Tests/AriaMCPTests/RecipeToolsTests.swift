@@ -8,7 +8,6 @@
 
 import Testing
 import Foundation
-import AriaLexiconLib
 import GeniusLocusKit
 import LocusKit
 import NeuronKit
@@ -34,13 +33,10 @@ struct RecipeToolsTests {
         return try await kit.open(storage: storage, owner: owner)
     }
 
-    private func captureArgs(content: String) -> JSONValue {
+    private func fileArgs(content: String) -> JSONValue {
         .object([
             "content": .string(content),
-            "room": .string("recipe-tests"),
-            "udcCode": .string("004"),
-            "addedBy": .string("recipe-tests"),
-            "embeddingModelID": .string("test-model-v1"),
+            "location": .string("recipe-tests"),
         ])
     }
 
@@ -52,55 +48,65 @@ struct RecipeToolsTests {
             .filter { if case .recipe = $0.provenance { return true } else { return false } }
             .map(\.name)
             .sorted()
+        // Full sorted list: alphabetically moot_confirm_* < moot_lens_* < moot_list_* <
+        // moot_run_* < moot_synthesize. RecipeTool names interleave with LensTool names.
         #expect(recipeNames == [
-            "moot_anticipate",
-            "moot_association_rules",
-            "moot_bias",
-            "moot_confirm_migration_promotion",
-            "moot_constellation",
-            "moot_contradiction",
-            "moot_drift",
-            "moot_estate_divergence",
-            "moot_formal_concepts",
-            "moot_free_association",
-            "moot_grounded_synthesis",
-            "moot_keystones",
-            "moot_latent_themes",
-            "moot_list_recipes",
-            "moot_mind_overlap",
-            "moot_partial_cue_recall",
-            "moot_run_migration_benchmark",
-            "moot_theme_weather",
-            "moot_trust_grounded_synthesis",
-            "moot_tunnel_successor",
+            "moot_confirm_migration",
+            "moot_lens_anticipate",
+            "moot_lens_associations",
+            "moot_lens_bias",
+            "moot_lens_concepts",
+            "moot_lens_constellation",
+            "moot_lens_contradiction",
+            "moot_lens_divergence",
+            "moot_lens_drift",
+            "moot_lens_free_association",
+            "moot_lens_keystones",
+            "moot_lens_latent_themes",
+            "moot_lens_overlap",
+            "moot_lens_partial_cue",
+            "moot_lens_successors",
+            "moot_lens_theme_weather",
+            "moot_lens_trust_synthesis",
+            "moot_list_lenses",
+            "moot_run_migration",
+            "moot_synthesize",
         ])
     }
 
-    @Test func testListRecipesDispatchEnumeratesCatalog() async throws {
+    @Test func testListRecipesDispatchEnumeratesCognitionTools() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "lr"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         let result = try await dispatcher.dispatch(
-            name: "moot_list_recipes", arguments: .object([:]))
+            name: "moot_list_lenses", arguments: .object([:]))
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        // The listing reflects the shipped catalog.
-        #expect(text.contains("grounded_synthesis"))
-        #expect(text.contains("migration_benchmark"))
-        #expect(text.contains("capabilities:"))
+        // Listing uses ProjectedTool names and descriptions (not catalog names).
+        #expect(text.contains("moot_synthesize"))
+        #expect(text.contains("moot_list_lenses"))
+        // Migration tools are Tier 7 and intentionally absent from the cognition menu.
+        #expect(!text.contains("moot_run_migration"))
+        #expect(!text.contains("moot_confirm_migration"))
+        #expect(text.contains("18 cognition tools"))
     }
 
-    @Test func testRecipeToolsDoNotCollideWithLexiconNames() {
-        // Recipe tools sit above the lexicon projection — no recipe name
-        // parses back to a (verb, noun) lexicon pair.
+    @Test func testRecipeToolNamesDoNotCollideWithInterfaceToolNames() {
+        // Recipe and lens tools sit above the interface tier — no recipe/lens name
+        // must match any of the 19 AI-client interface tool names.
+        let interfaceNames = Set(
+            ToolProjection.tools()
+                .filter { if case .interface = $0.provenance { return true } else { return false } }
+                .map(\.name)
+        )
         for tool in ToolProjection.tools() {
             guard case .recipe = tool.provenance else { continue }
-            #expect(ToolDispatcher.parseToolName(tool.name) == nil,
-                    "recipe tool \(tool.name) must not parse as a lexicon pair")
+            #expect(!interfaceNames.contains(tool.name),
+                    "recipe tool \(tool.name) must not collide with an interface tool name")
         }
     }
 
@@ -112,18 +118,18 @@ struct RecipeToolsTests {
             in: kit, owner: OwnerCredentials(ownerIdentifier: "gs"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Capture three drawers through the real capture tool.
+        // File three memories through the AI-client surface.
         for text in [
             "carbon chemistry of organic compounds",
             "carbon based biochemistry of life",
             "quantum mechanics fundamentals",
         ] {
             _ = try await dispatcher.dispatch(
-                name: "moot_capture_drawer", arguments: captureArgs(content: text))
+                name: "moot_file_memory", arguments: fileArgs(content: text))
         }
 
         let result = try await dispatcher.dispatch(
-            name: "moot_grounded_synthesis",
+            name: "moot_synthesize",
             arguments: .object(["filter": .string("unconfirmed")]))
 
         let obj = try #require(result.objectValue)
@@ -174,7 +180,7 @@ struct RecipeToolsTests {
         ])
 
         let runResult = try await dispatcher.dispatch(
-            name: "moot_run_migration_benchmark", arguments: runArgs)
+            name: "moot_run_migration", arguments: runArgs)
         let runObj = try #require(runResult.objectValue)
         #expect(runObj["isError"]?.boolValue == false)
         let runText = try #require(
@@ -201,7 +207,7 @@ struct RecipeToolsTests {
             "discardBranchIDs": .array(losers.map { .string($0.uuidString) }),
         ])
         let confirmResult = try await dispatcher.dispatch(
-            name: "moot_confirm_migration_promotion", arguments: confirmArgs)
+            name: "moot_confirm_migration", arguments: confirmArgs)
         let confirmObj = try #require(confirmResult.objectValue)
         #expect(confirmObj["isError"]?.boolValue == false)
 
@@ -226,7 +232,7 @@ struct RecipeToolsTests {
             "disqualifiedBranchIDs": .array([.string(branch.branchID.uuidString)]),
         ])
         let result = try await dispatcher.dispatch(
-            name: "moot_confirm_migration_promotion", arguments: confirmArgs)
+            name: "moot_confirm_migration", arguments: confirmArgs)
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == true)
         let text = try #require(
@@ -244,21 +250,18 @@ struct RecipeToolsTests {
             in: kit, owner: OwnerCredentials(ownerIdentifier: "ar-dispatch"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
-        // Capture some drawers so there's co-occurrence to mine.
+        // File some memories so there's co-occurrence to mine.
         for _ in 0..<3 {
             _ = try await dispatcher.dispatch(
-                name: "moot_capture_drawer",
+                name: "moot_file_memory",
                 arguments: .object([
                     "content": .string("study content"),
-                    "room": .string("study"),
-                    "udcCode": .string("000"),
-                    "addedBy": .string("test"),
-                    "embeddingModelID": .string("test-v1"),
+                    "location": .string("study"),
                 ]))
         }
 
         let result = try await dispatcher.dispatch(
-            name: "moot_association_rules",
+            name: "moot_lens_associations",
             arguments: .object(["filter": .string("unconfirmed")]))
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
@@ -268,20 +271,21 @@ struct RecipeToolsTests {
         #expect(text.contains("drawer(s)"))
     }
 
-    @Test func testAssociationRulesAppearsInListRecipes() async throws {
+    @Test func testAnalyticsLensToolsAppearInListLenses() async throws {
         let kit = GeniusLocusKit()
         let handle = try await openEstate(
             in: kit, owner: OwnerCredentials(ownerIdentifier: "ar-list"))
         let dispatcher = ToolDispatcher(kit: kit, handle: handle)
 
         let result = try await dispatcher.dispatch(
-            name: "moot_list_recipes", arguments: .object([:]))
+            name: "moot_list_lenses", arguments: .object([:]))
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
-        #expect(text.contains("association_rules"))
-        #expect(text.contains("formal_concepts"))
+        // Analytics lens tools are listed by ProjectedTool name.
+        #expect(text.contains("moot_lens_associations"))
+        #expect(text.contains("moot_lens_concepts"))
     }
 
     // MARK: - formal_concepts dispatch
@@ -294,18 +298,15 @@ struct RecipeToolsTests {
 
         for _ in 0..<2 {
             _ = try await dispatcher.dispatch(
-                name: "moot_capture_drawer",
+                name: "moot_file_memory",
                 arguments: .object([
                     "content": .string("study content"),
-                    "room": .string("study"),
-                    "udcCode": .string("000"),
-                    "addedBy": .string("test"),
-                    "embeddingModelID": .string("test-v1"),
+                    "location": .string("study"),
                 ]))
         }
 
         let result = try await dispatcher.dispatch(
-            name: "moot_formal_concepts",
+            name: "moot_lens_concepts",
             arguments: .object([
                 "filter": .string("unconfirmed"),
                 "minSupport": .integer(1),

@@ -1,97 +1,91 @@
 import Testing
-import AriaLexiconLib
 @testable import AriaMCP
 
-/// Coverage that the lexicon-to-MCP projection holds the contract
-/// described in ARIA_MCP_SPEC_v0.2 § 2 and § 4.
+/// Coverage that the AI-client-oriented tool surface holds the contract
+/// described in ARIA_MCP_SPEC (MCP-INT-01 surface replacement).
 ///
-/// `cross_estate_recall` is the one tool that sits ABOVE the lexicon
-/// projection (provenance `.federation`, no `(verb, noun)` pair). The
-/// lexicon-conformance tests below iterate only the `.lexicon` tools —
-/// the federation tool is the single deliberate exception and has its
-/// own dedicated test (MCP-MULTI-01, Kong review).
+/// The five-tier interface tools carry `.interface` provenance; the
+/// federation tool carries `.federation`. Recipe and lens tools carry
+/// `.recipe`; vault tools carry `.vault`. There are no `.lexicon` tools.
 @Suite("Tool projection")
 struct ToolProjectionTests {
 
-    /// Every lexicon-projected tool must correspond to a (verb, noun)
-    /// pair the lexicon's acceptance matrix accepts. A drift here is a
-    /// wire surface that promises something the substrate refuses.
-    @Test func testEveryProjectedToolIsAcceptedByLexicon() {
+    /// Every interface tool must carry `.interface` provenance. No
+    /// `.lexicon` provenance should appear anywhere in the list.
+    @Test func testNoLexiconProvenance() {
         for tool in ToolProjection.tools() {
-            guard case .lexicon(let verb, let noun) = tool.provenance else { continue }
+            if case .interface = tool.provenance { continue }
+            if case .federation = tool.provenance { continue }
+            if case .recipe = tool.provenance { continue }
+            if case .vault = tool.provenance { continue }
+            Issue.record("Unexpected provenance on tool \(tool.name)")
+        }
+    }
+
+    /// Hard contract gate: the total tool count must be exactly 44.
+    /// 19 interface + 1 federation + 4 recipe + 16 lens + 4 vault.
+    /// Any accidental addition or removal fails here before it ships.
+    @Test func testTotalToolCount() {
+        #expect(ToolProjection.tools().count == 44,
+                "tools() must return exactly 44 tools; got \(ToolProjection.tools().count)")
+    }
+
+    /// All 19 interface tools must be present.
+    @Test func testInterfaceToolsArePresent() {
+        let names = Set(ToolProjection.tools().map(\.name))
+        let expected: [String] = [
+            // Tier 1
+            "moot_file_memory", "moot_memory_search", "moot_update_memory",
+            "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
+            "moot_move_memory",
+            // Tier 2
+            "moot_link_memories", "moot_connection_search", "moot_connection_map",
+            // Tier 3
+            "moot_file_fact", "moot_fact_search", "moot_retire_fact",
+            "moot_fact_timeline",
+            // Tier 4
+            "moot_write_journal", "moot_read_journal",
+            // Tier 5
+            "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+        ]
+        for name in expected {
+            #expect(names.contains(name), "\(name) missing from tools()")
+        }
+    }
+
+    /// Old lexicon tool names must not be present in the new surface.
+    @Test func testOldToolNamesAreGone() {
+        let names = Set(ToolProjection.tools().map(\.name))
+        let removed: [String] = [
+            "moot_capture_drawer", "moot_drawer_recall", "moot_mutate_drawer",
+            "moot_withdraw_drawer", "moot_expunge_drawer", "moot_reanchor_drawer",
+            "moot_capture_tunnel", "moot_tunnel_recall",
+            "moot_cross_estate_recall",
+        ]
+        for name in removed {
+            #expect(!names.contains(name), "\(name) should no longer be on the surface")
+        }
+    }
+
+    /// Every tool name must start with the product namespace prefix.
+    @Test func testAllToolNamesHaveProductPrefix() {
+        for tool in ToolProjection.tools() {
             #expect(
-                Acceptance.accepts(noun, verb),
-                "tool \(tool.name) projects (verb: \(verb), noun: \(noun)) but the matrix rejects that pair"
+                tool.name.hasPrefix(ToolProjection.toolNamePrefix),
+                "\(tool.name) is missing the moot_ prefix"
             )
         }
     }
 
-    /// propose and associate are substrate-driven; they must never
-    /// appear on the tool surface.
-    @Test func testSubstrateDrivenVerbsAreNotTools() {
-        for tool in ToolProjection.tools() {
-            guard case .lexicon(let verb, _) = tool.provenance else { continue }
-            #expect(verb != .propose, "propose surfaced as tool \(tool.name)")
-            #expect(verb != .associate, "associate surfaced as tool \(tool.name)")
-        }
-    }
-
-    /// Action tools take the verb_noun form; the one query verb takes
-    /// noun_verb. Spec § 2 fixes this naming discipline.
-    @Test func testNamingDiscipline() {
-        for tool in ToolProjection.tools() {
-            guard case .lexicon(let verb, let noun) = tool.provenance else { continue }
-            // Shipped names carry the product namespace prefix (moot_)
-            // ahead of the ARIA grammar body (commit e6dd7ba).
-            let prefix = ToolProjection.toolNamePrefix
-            if verb == .recall {
-                #expect(tool.name == "\(prefix)\(noun.rawValue)_recall")
-            } else {
-                #expect(tool.name == "\(prefix)\(verb.rawValue)_\(noun.rawValue)")
-            }
-        }
-    }
-
-    /// Round-trip: each lexicon tool name parses back to its verb / noun
-    /// pair. Confirms `ToolDispatcher.parseToolName` is the strict
-    /// inverse of `ToolProjection.toolName`.
-    @Test func testParseRoundTrip() {
-        for tool in ToolProjection.tools() {
-            guard case .lexicon(let verb, let noun) = tool.provenance else { continue }
-            guard let parsed = ToolDispatcher.parseToolName(tool.name) else {
-                Issue.record("parse failed for tool \(tool.name)")
-                continue
-            }
-            #expect(parsed.0 == verb)
-            #expect(parsed.1 == noun)
-        }
-    }
-
-    /// The capture_drawer and drawer_recall tools must be present —
-    /// they are the live verbs in the GLK substrate today and the
-    /// smoke test for the wire works through them.
-    @Test func testCoreToolsArePresent() {
-        let names = Set(ToolProjection.tools().map(\.name))
-        #expect(names.contains("moot_capture_drawer"))
-        #expect(names.contains("moot_drawer_recall"))
-        #expect(names.contains("moot_withdraw_drawer"))
-    }
-
-    /// `cross_estate_recall` is the one federation tool above the lexicon
-    /// projection: present in `tools()`, provenance `.federation`, no
-    /// `(verb, noun)` pair, and NOT parseable as a lexicon tool name.
+    /// The federation tool must be present, carry `.federation` provenance,
+    /// and use the renamed `federatedSearchToolName` constant.
     @Test func testFederationToolIsPresentAboveTheProjection() throws {
         let federation = ToolProjection.tools().filter { $0.provenance == .federation }
         #expect(federation.count == 1, "exactly one federation tool is expected")
         let tool = try #require(federation.first)
-        #expect(tool.name == ToolDispatcher.crossEstateRecallToolName)
-        #expect(tool.verb == nil)
-        #expect(tool.noun == nil)
-        #expect(
-            ToolDispatcher.parseToolName(tool.name) == nil,
-            "the federation tool name must not parse as a lexicon (verb, noun) pair"
-        )
-        // Its schema requires the caller identity and carries no estateID
+        #expect(tool.name == ToolDispatcher.federatedSearchToolName)
+        #expect(tool.name == "moot_federated_search")
+        // Federation tool requires the requester identity and carries no estateID
         // (it fans across estates rather than targeting one).
         let schema = tool.inputSchema.objectValue
         let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
@@ -99,32 +93,53 @@ struct ToolProjectionTests {
         #expect(schema?["properties"]?.objectValue?["estateID"] == nil)
     }
 
-    /// The four recall-director knobs (explain, queryText, recallMode, scoring) must
-    /// be advertised as optional properties on the `moot_drawer_recall` schema.
-    /// Any drift here means a caller cannot wire the Recall Director through ARIA.
-    @Test func testDrawerRecallSchemaAdvertisesRecallKnobs() {
-        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_drawer_recall" }) else {
-            Issue.record("moot_drawer_recall tool not found")
+    /// `moot_file_memory` must require `content` and `location`, and must
+    /// NOT expose internal infrastructure fields (udcCode, embeddingModelID,
+    /// latticeAnchor, addedBy).
+    @Test func testFileMemoryRequiredFieldsAndNoInternals() {
+        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_file_memory" }) else {
+            Issue.record("moot_file_memory not found")
             return
         }
-        let properties = tool.inputSchema.objectValue?["properties"]?.objectValue
-        #expect(properties?["explain"] != nil, "explain must be present")
-        #expect(properties?["queryText"] != nil, "queryText must be present")
-        #expect(properties?["recallMode"] != nil, "recallMode must be present")
-        #expect(properties?["scoring"] != nil, "scoring must be present")
-        // All four are optional — confirm none are in required.
-        let required = tool.inputSchema.objectValue?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
-        #expect(!required.contains("explain"))
-        #expect(!required.contains("queryText"))
-        #expect(!required.contains("recallMode"))
-        #expect(!required.contains("scoring"))
+        let schema = tool.inputSchema.objectValue
+        let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        #expect(required.contains("content"), "content must be required")
+        #expect(required.contains("location"), "location must be required")
+        let properties = schema?["properties"]?.objectValue ?? [:]
+        // Internal fields must not be surfaced.
+        #expect(properties["udcCode"] == nil, "udcCode must not appear on AI-client surface")
+        #expect(properties["embeddingModelID"] == nil, "embeddingModelID must not appear")
+        #expect(properties["addedBy"] == nil, "addedBy must not appear")
+        #expect(properties["latticeAnchor"] == nil, "latticeAnchor must not appear")
     }
 
-    /// `estateID` is an optional addressing field on every per-estate
-    /// (lexicon) tool: present in `properties`, never in `required`.
-    @Test func testEstateIDIsOptionalOnPerEstateTools() {
+    /// `moot_erase_memory` must require `confirmed` (safety gate).
+    @Test func testEraseMemoryRequiresConfirmed() {
+        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_erase_memory" }) else {
+            Issue.record("moot_erase_memory not found")
+            return
+        }
+        let required = tool.inputSchema.objectValue?["required"]?
+            .arrayValue?.compactMap { $0.stringValue } ?? []
+        #expect(required.contains("confirmed"), "moot_erase_memory must require confirmed=true")
+    }
+
+    /// `moot_memory_search` must require `query`.
+    @Test func testMemorySearchRequiresQuery() {
+        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_memory_search" }) else {
+            Issue.record("moot_memory_search not found")
+            return
+        }
+        let required = tool.inputSchema.objectValue?["required"]?
+            .arrayValue?.compactMap { $0.stringValue } ?? []
+        #expect(required.contains("query"), "moot_memory_search must require query")
+    }
+
+    /// `estateID` must be optional (in properties, not in required) on every
+    /// interface tool.
+    @Test func testEstateIDIsOptionalOnInterfaceTools() {
         for tool in ToolProjection.tools() {
-            guard case .lexicon = tool.provenance else { continue }
+            guard case .interface = tool.provenance else { continue }
             let schema = tool.inputSchema.objectValue
             #expect(
                 schema?["properties"]?.objectValue?["estateID"] != nil,

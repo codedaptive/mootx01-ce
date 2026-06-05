@@ -1,18 +1,18 @@
-//! CognitionKit recipe tool surface — moot_list_recipes, moot_grounded_synthesis,
-//! moot_run_migration_benchmark, moot_confirm_migration_promotion.
+//! CognitionKit recipe tool surface — moot_list_lenses, moot_synthesize,
+//! moot_run_migration, moot_confirm_migration.
 //!
 //! Mirrors Swift `RecipeTools.swift`. Same dispatch contract: out-of-band faults
 //! throw `JSONRPCError`; recipe-level refusals come back as `error_result` (isError
 //! true) so the client keeps the call id.
 //!
-//! # moot_run_migration_benchmark
+//! # moot_run_migration
 //!
 //! Derives one COW branch per candidate plan, populates each from the origin corpus,
 //! benchmarks recall fidelity with the zero-silent-loss gate, and returns a ranked
 //! list of survivors. Never promotes. Returns branch ids in the result text so a
 //! caller can pass them to the confirm tool.
 //!
-//! # moot_confirm_migration_promotion
+//! # moot_confirm_migration
 //!
 //! Dispatches `confirm_migration_promotion_by_id` — the id-addressed form of the
 //! human-gated promotion step. The server is stateless across tool calls; the
@@ -39,16 +39,16 @@ use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
 /// Recipe tool names — mirrors Swift `RecipeTools` static constants.
-const LIST_RECIPES: &str = "moot_list_recipes";
-const GROUNDED_SYNTHESIS: &str = "moot_grounded_synthesis";
-const RUN_MIGRATION_BENCHMARK: &str = "moot_run_migration_benchmark";
-const CONFIRM_MIGRATION_PROMOTION: &str = "moot_confirm_migration_promotion";
+const LIST_LENSES: &str = "moot_list_lenses";
+const SYNTHESIZE: &str = "moot_synthesize";
+const RUN_MIGRATION: &str = "moot_run_migration";
+const CONFIRM_MIGRATION: &str = "moot_confirm_migration";
 
 /// True when `name` is one of the recipe tools.
 pub fn is_recipe_tool(name: &str) -> bool {
     matches!(
         name,
-        LIST_RECIPES | GROUNDED_SYNTHESIS | RUN_MIGRATION_BENCHMARK | CONFIRM_MIGRATION_PROMOTION
+        LIST_LENSES | SYNTHESIZE | RUN_MIGRATION | CONFIRM_MIGRATION
     )
 }
 
@@ -59,10 +59,10 @@ pub fn dispatch(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     match name {
-        LIST_RECIPES => Ok(run_list_recipes()),
-        GROUNDED_SYNTHESIS => run_grounded_synthesis_tool(args, registry),
-        RUN_MIGRATION_BENCHMARK => run_migration_benchmark_tool(args, registry),
-        CONFIRM_MIGRATION_PROMOTION => run_confirm_promotion_tool(args, registry),
+        LIST_LENSES => Ok(run_list_recipes()),
+        SYNTHESIZE => run_grounded_synthesis_tool(args, registry),
+        RUN_MIGRATION => run_migration_benchmark_tool(args, registry),
+        CONFIRM_MIGRATION => run_confirm_promotion_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
             format!("Unknown recipe tool: {name}"),
@@ -71,7 +71,7 @@ pub fn dispatch(
 }
 
 // ---------------------------------------------------------------------------
-// moot_list_recipes
+// moot_list_lenses
 // ---------------------------------------------------------------------------
 
 fn run_list_recipes() -> serde_json::Value {
@@ -217,7 +217,7 @@ fn run_migration_benchmark_tool(
     lines.push(String::new());
     lines.push(format!(
         "To promote, call {} with winnerBranchID, discardBranchIDs (the other ranking ids), and disqualifiedBranchIDs from above.",
-        "moot_confirm_migration_promotion"
+        "moot_confirm_migration"
     ));
     Ok(text_result(&lines.join("\n")))
 }
@@ -266,7 +266,7 @@ fn run_confirm_promotion_tool(
         Ok(()) => {
             // Mirror the Swift server's success text shape.
             let body = format!(
-                "confirm_migration_promotion: promoted {}; discarded {} branch(es).",
+                "confirm_migration: promoted {}; discarded {} branch(es).",
                 winner_str,
                 discard_bids
                     .iter()

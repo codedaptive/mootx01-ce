@@ -72,13 +72,18 @@ struct LensToolsTests {
     // MARK: - Projection
 
     @Test func everyCatalogedLensHasATool() {
-        // The catalog and the tool surface stay in lockstep: every lens
-        // recipe's catalog name has a moot_ tool, and no lens tool
-        // exists without a catalog entry.
-        let lensNames = Set(RecipeCatalog.names)
-            .subtracting(["grounded_synthesis", "migration_benchmark"])
-        let toolStems = Set(LensTools.lensToolNames.map { String($0.dropFirst("moot_".count)) })
-        #expect(toolStems == lensNames)
+        // The lens tool count matches the catalog size minus the two RecipeTool
+        // entries (grounded_synthesis → moot_synthesize; migration_benchmark →
+        // moot_run_migration). All lens tools carry the moot_lens_ prefix.
+        let lensToolCount = RecipeCatalog.names
+            .filter { $0 != "grounded_synthesis" && $0 != "migration_benchmark" }
+            .count
+        #expect(LensTools.lensToolNames.count == lensToolCount,
+            "lens tool count must match catalog count minus the two RecipeTool entries")
+        for name in LensTools.lensToolNames {
+            #expect(name.hasPrefix("moot_lens_"),
+                "\(name) must carry the moot_lens_ prefix")
+        }
     }
 
     // MARK: - Graph lenses
@@ -93,7 +98,7 @@ struct LensToolsTests {
         }
 
         let result = try await dispatcher.dispatch(
-            name: "moot_keystones",
+            name: "moot_lens_keystones",
             arguments: .object(["wing": .string("study")]))
 
         let body = try text(result)
@@ -112,7 +117,7 @@ struct LensToolsTests {
         try await addTunnel(kit, handle, wing: "study", src: "anchor", tgt: "Y")
 
         let result = try await dispatcher.dispatch(
-            name: "moot_tunnel_successor",
+            name: "moot_lens_successors",
             arguments: .object([
                 "wing": .string("study"), "anchorID": .string("anchor"),
             ]))
@@ -133,7 +138,7 @@ struct LensToolsTests {
         _ = try await capture(kit, handle, content: "second memory", room: "study")
 
         let result = try await dispatcher.dispatch(
-            name: "moot_trust_grounded_synthesis",
+            name: "moot_lens_trust_synthesis",
             arguments: .object(["filter": .string("unconfirmed")]))
 
         let body = try text(result)
@@ -151,7 +156,7 @@ struct LensToolsTests {
         _ = try await capture(kit, handle, content: "only memory", room: "study")
 
         let result = try await dispatcher.dispatch(
-            name: "moot_partial_cue_recall",
+            name: "moot_lens_partial_cue",
             arguments: .object(["anchorID": .string("no-such-id")]))
 
         // A lens-level refusal: isError true, call id preserved.
@@ -173,7 +178,7 @@ struct LensToolsTests {
         _ = try await capture(kit, handleB, content: "beta", room: "cooking")
 
         let result = try await dispatcher.dispatch(
-            name: "moot_estate_divergence",
+            name: "moot_lens_divergence",
             arguments: .object([
                 "estateIDB": .string(handleB.estateUUID.uuidString),
             ]))

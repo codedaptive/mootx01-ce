@@ -2,7 +2,7 @@
 //!
 //! This crate is the Rust vertical's counterpart to the Swift `ARIA_MCP`
 //! binary (apps/ARIA_MCP). It links the Rust kits (cognition-kit,
-//! neuron-kit, genius-locus-kit, locus-kit) and hosts them behind a
+//! genius-locus-kit, locus-kit) and hosts them behind a
 //! JSON-RPC 2.0 / newline-delimited-JSON stdio transport, matching the
 //! Swift server's wire contract exactly.
 //!
@@ -13,14 +13,13 @@
 //!   └─► framing::read_frames
 //!         └─► jsonrpc::JSONRPCRequest::decode
 //!               └─► dispatcher::Dispatcher::handle
-//!                     ├─► tool_list (catalog + lexicon)
+//!                     ├─► tool_list (5-tier AI-client interface surface, 44 tools)
 //!                     └─► tool_call  ──► dispatch::dispatch_tool
-//!                                         ├─► recipe_tools
-//!                                         ├─► lens_tools
-//!                                         └─► lexicon_tools
-//!                                               ├─► capture_drawer / drawer_recall / capture_tunnel
-//!                                               └─► mutate_drawer / withdraw_drawer / expunge_drawer
-//!                                                   / reanchor_drawer / tunnel_recall
+//!                                         ├─► teachme pre-check (intercepts before any runner)
+//!                                         ├─► interface_tools (Tier 1–5, 19 tools)
+//!                                         ├─► recipe_tools (moot_list_lenses, moot_synthesize, …)
+//!                                         ├─► lens_tools (moot_lens_keystones … moot_lens_concepts)
+//!                                         └─► hint injection (CoachingEngine, non-error results only)
 //! stdout (newline-delimited JSON responses)
 //! ```
 //!
@@ -33,20 +32,19 @@
 //!
 //! # Surface boundary
 //!
-//! See README.md for the full tool list (49 tools after v2b-p2) and what is
-//! out of scope (live federation fan-out, and live learn + non-drawer recall
-//! behavior — those tools are advertised and refuse honestly until their kit
-//! surfaces land). SQLite persistence is supported via `ARIA_MCP_SQLITE_PATH`;
-//! PostgreSQL persistence is supported via `ARIA_MCP_POSTGRES_URL` (pooled,
-//! lazy-connect, same pool defaults as the Swift leg). CloudKit and federation
-//! remain future work.
+//! 44 tools: 19 interface (Tier 1–5), 1 federation, 4 recipe, 16 lens, 4 vault.
+//! Vault tools are advertised and return methodNotFound until VaultKit-Rust ships.
+//! SQLite persistence: `ARIA_MCP_SQLITE_PATH`. PostgreSQL: `ARIA_MCP_POSTGRES_URL`.
 
+pub mod coaching_engine;
 pub mod dispatch;
 pub mod dispatcher;
 pub mod estate_registry;
+pub mod interface_tools;
 pub mod jsonrpc;
 pub mod lens_tools;
-pub mod lexicon_tools;
 pub mod recipe_tools;
 pub mod server;
+pub mod session_protocol;
+pub mod teachme_guides;
 pub mod tool_list;

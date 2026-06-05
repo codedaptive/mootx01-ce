@@ -1,5 +1,4 @@
 import Foundation
-import AriaLexiconLib
 import GeniusLocusKit
 import LocusKit
 
@@ -8,14 +7,12 @@ import LocusKit
 ///
 /// The dispatcher carries one `GeniusLocusKit` reference and a map of
 /// the estates it can address, keyed by `estateUUID`. One of those is
-/// the default estate. Each tool name decodes back to a `(Verb, Noun)`
-/// pair, the arguments object decodes into the matching GLK frame, the
-/// call's target estate is resolved from the optional `estateID`
-/// argument (absent ⇒ default estate), and the verb method on
-/// `GeniusLocusKit` runs against that estate. Outcomes — success
-/// payloads or substrate refusals — map to MCP `tools/call` result
-/// shapes; out-of-band failures (unknown tool, malformed arguments,
-/// unknown `estateID`) surface as JSON-RPC error responses instead.
+/// the default estate. Each tool call is routed by name through the
+/// five-tier AI-client interface, the federation tool, recipe tools,
+/// lens tools, and vault tools. Outcomes — success payloads or substrate
+/// refusals — map to MCP `tools/call` result shapes; out-of-band failures
+/// (unknown tool, malformed arguments, unknown `estateID`) surface as
+/// JSON-RPC error responses instead.
 ///
 /// ## Multi-estate addressing and the I-13 boundary
 ///
@@ -87,8 +84,7 @@ public struct ToolDispatcher: Sendable {
     /// to today. A present `estateID` must be a UUID string naming a
     /// registered estate; a malformed or unregistered value is an
     /// out-of-band client error (`invalidParams`), consistent with the
-    /// other enum decoders in this file (it is the caller addressing a
-    /// thing that is not there, not the substrate refusing a request).
+    /// other enum decoders in this file.
     private func resolveHandle(_ args: [String: JSONValue]) throws -> EstateHandle {
         guard let raw = args["estateID"]?.stringValue else {
             return handle
@@ -117,111 +113,60 @@ public struct ToolDispatcher: Sendable {
     /// come back as a result with `isError == true` rather than as a
     /// JSON-RPC error: the call did reach the substrate, the substrate
     /// said no, the client should see why.
+    ///
+    /// Dispatch order: teachme pre-check → federation → recipe → lens → vault → interface → methodNotFound → hint injection.
     public func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
         let args = arguments.objectValue ?? [:]
         do {
-            // Federation tools sit ABOVE the lexicon projection: they
-            // have no (verb, noun) pair, so they are matched by name
-            // before parseToolName — which would otherwise reject a
-            // non-lexicon name as methodNotFound. cross_estate_recall is
-            // the one such tool today (see ToolProjection for the
-            // matching descriptor it advertises in tools/list).
-            if name == Self.crossEstateRecallToolName {
-                return try await runCrossEstateRecall(args)
+            // teachme: true — return the usage guide without touching the estate.
+            // Intercepted before any runner fires so no side effects occur.
+            if args["teachme"]?.boolValue == true {
+                return Self.textResult(TeachmeGuides.guide(for: name))
             }
-            // CognitionKit behaviour-recipe tools sit above the lexicon
-            // projection (provenance `.recipe`), so they are matched by
-            // name before parseToolName — which would reject a non-lexicon
-            // name as methodNotFound. RecipeTools owns their decode + run.
-            if RecipeTools.isRecipeTool(name) {
-                return try await RecipeTools.dispatch(
+            // Route to the appropriate runner and capture the result so
+            // the coaching engine can inspect it before it is returned.
+            let runnerResult: JSONValue
+            if name == Self.federatedSearchToolName {
+                // Federation tool above the interface tier — matched by name.
+                runnerResult = try await runFederatedSearch(args)
+            } else if RecipeTools.isRecipeTool(name) {
+                // CognitionKit behaviour-recipe tools dispatched by name.
+                runnerResult = try await RecipeTools.dispatch(
                     name: name, args: args, kit: kit, defaultHandle: handle,
                     resolveHandle: resolveHandle)
-            }
-            // Reasoning-lens tools: one hard-bound tool per cataloged
-            // lens recipe, matched by name above the lexicon projection
-            // like the recipe tools (LENS_DISCOVERABILITY_DECISION v2.0).
-            if LensTools.isLensTool(name) {
-                return try await LensTools.dispatch(
+            } else if LensTools.isLensTool(name) {
+                // Reasoning-lens tools dispatched by name.
+                runnerResult = try await LensTools.dispatch(
                     name: name, args: args, kit: kit, defaultHandle: handle,
                     resolveHandle: resolveHandle)
-            }
-            // VaultKit control-surface tools (`moot_vault_*`) sit above the
-            // lexicon projection (provenance `.vault`): no (verb, noun)
-            // pair, so they are matched by name before parseToolName would
-            // reject them. VaultTools owns their decode + run.
-            if VaultTools.isVaultTool(name) {
-                return try await VaultTools.dispatch(
+            } else if VaultTools.isVaultTool(name) {
+                // VaultKit control-surface tools dispatched by name.
+                runnerResult = try await VaultTools.dispatch(
                     name: name, args: args, kit: kit, defaultHandle: handle,
                     resolveHandle: resolveHandle)
-            }
-            guard let (verb, noun) = parseToolName(name) else {
+            } else if InterfaceTools.isInterfaceTool(name) {
+                // Five-tier AI-client interface tools dispatched by name.
+                runnerResult = try await InterfaceTools.dispatch(
+                    name: name, args: args, dispatcher: self)
+            } else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.methodNotFound,
                     message: "Unknown tool: \(name)"
                 )
             }
-            guard Acceptance.accepts(noun, verb), ToolProjection.surfaces(verb) else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.methodNotFound,
-                    message: "Tool \(name) is not on the projected surface"
-                )
-            }
-            switch (verb, noun) {
-            case (.capture, .drawer):
-                return try await runCaptureDrawer(args)
-            case (.capture, .tunnel):
-                return try await runCaptureTunnel(args)
-            case (.recall, .drawer):
-                return try await runRecallDrawer(args)
-            case (.recall, .tunnel):
-                return try await runRecallTunnel(args)
-            case (.recall, .kgFact):
-                return try await runRecallKGFacts(args)
-            case (.recall, .diaryEntry):
-                return try await runRecallDiaryEntries(args)
-            case (.recall, .proposal):
-                return try await runRecallProposals(args)
-            case (.recall, .association):
-                return try await runRecallAssociations(args)
-            case (.recall, .learnedReference):
-                return try await runRecallLearnedReferences(args)
-            case (.mutate, _):
-                return try await runMutate(args, noun: noun)
-            case (.withdraw, _):
-                return try await runWithdraw(args, noun: noun)
-            case (.expunge, _):
-                return try await runExpunge(args, noun: noun)
-            case (.reanchor, _):
-                return try await runReanchor(args, noun: noun)
-            case (.learn, _):
-                return try await runLearn(args, noun: noun)
-            default:
-                // All acceptance-matrix (verb, noun) pairs that surface as tools
-                // have explicit arms above. This arm fires only when a new (verb,
-                // noun) pair is accepted by the lexicon but not yet wired — a
-                // missing arm, not a caller error.
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.methodNotFound,
-                    message: "No handler bound for tool \(name)"
-                )
-            }
+            // Append a coaching hint to non-error results when a trigger fires.
+            return applyHint(name: name, args: args, to: runnerResult)
         } catch let error as JSONRPCError {
             throw error
         } catch let error as VerbError {
-            // VerbError covers the substrate's own refusals
-            // (notSupportedByEstate when the verb's LocusKit
-            // implementation is still stubbed; expungeNotConfirmed,
-            // emptyReanchor; underlyingEstateFailure). These reach
-            // the substrate and bounce back; emit them as tool-call
-            // results with isError set so the client can act on them
-            // without losing the call ID.
+            // VerbError covers the substrate's own refusals. Emit as a
+            // tool-call result with isError set so the client can act on
+            // them without losing the call ID.
             return Self.errorResult(describe(error))
         } catch let error as GeniusLocusKitError {
             return Self.errorResult(describe(error))
         } catch {
-            // Anything else is genuinely out of band — bubble it up as
-            // a JSON-RPC error.
+            // Anything else is genuinely out of band.
             throw JSONRPCError(
                 code: JSONRPCErrorCode.toolDispatchFailure,
                 message: "\(error)"
@@ -229,344 +174,31 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    // MARK: - Tool name parsing
+    // MARK: - Hint injection
 
-    /// Reverse the projection: `verb_noun` (or `noun_verb` for recall)
-    /// back to `(Verb, Noun)`. Returns `nil` for any name outside the
-    /// projected set, including names whose verb is `propose` or
-    /// `associate` (those are not callable tools per § 4).
-    public static func parseToolName(_ name: String) -> (Verb, Noun)? {
-        // Strip the product namespace prefix (`moot_`) before parsing the
-        // ARIA grammar body. Names without it are not projected tools.
-        guard name.hasPrefix(ToolProjection.toolNamePrefix) else { return nil }
-        let body = String(name.dropFirst(ToolProjection.toolNamePrefix.count))
-        let parts = body.split(separator: "_", maxSplits: 1).map(String.init)
-        guard parts.count == 2 else { return nil }
-        // Try verb_noun first (the action form): parts[0] is the verb.
-        if let verb = Verb(rawValue: parts[0]),
-           let noun = Noun(rawValue: parts[1]),
-           verb != .recall {
-            return (verb, noun)
+    /// Append a coaching hint to a successful tool result when `CoachingEngine`
+    /// detects a suboptimal call pattern. Returns the result unchanged when
+    /// `isError == true` or when no trigger fires.
+    private func applyHint(name: String, args: [String: JSONValue], to result: JSONValue) -> JSONValue {
+        guard let obj = result.objectValue,
+              obj["isError"]?.boolValue == false,
+              let text = obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue else {
+            return result
         }
-        // Otherwise the query form: parts[0] is the noun, parts[1] is recall.
-        if let noun = Noun(rawValue: parts[0]),
-           let verb = Verb(rawValue: parts[1]),
-           verb == .recall {
-            return (verb, noun)
+        guard let hint = CoachingEngine.hint(name: name, args: args, resultText: text) else {
+            return result
         }
-        return nil
+        return Self.textResult(text + "\nhint: " + hint)
     }
 
-    /// Instance forwarder so call sites do not need to qualify the
-    /// static. Behaviour identical to `ToolDispatcher.parseToolName(_:)`.
-    public func parseToolName(_ name: String) -> (Verb, Noun)? {
-        Self.parseToolName(name)
-    }
+    // MARK: - Federation tool
 
-    // MARK: - Per-verb runners
+    /// Tool name for the grant-authorized cross-estate federated search.
+    /// Renamed from `crossEstateRecallToolName` (MCP-INT-01) to use the
+    /// AI-client-oriented vocabulary.
+    public static let federatedSearchToolName = "moot_federated_search"
 
-    private func runCaptureDrawer(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let content = try requireString(args, "content")
-        let room = try requireString(args, "room")
-        let code = try requireString(args, "udcCode")
-        let addedBy = try requireString(args, "addedBy")
-        let modelID = try requireString(args, "embeddingModelID")
-        let channel = try decodeChannel(args["channel"])
-        let sensitivity = try decodeSensitivity(args["sensitivity"])
-        let kind = try decodeContentKind(args["kind"])
-        // Validate the declared classification scheme at the ARIA
-        // boundary. The substrate's LatticeAnchor stores a bare code
-        // with no scheme tag yet (tagging the storage column is a
-        // separate migration, §5.8 dual-scheme model), so both schemes
-        // construct the same anchor today; the discriminator's present
-        // job is to let a caller DECLARE the scheme and have it
-        // validated here. The validated scheme is echoed back so the
-        // caller can confirm how its code was interpreted.
-        let scheme = try decodeClassificationScheme(args["classificationScheme"])
-        let frame = CaptureFrame(
-            content: content,
-            channel: channel,
-            room: room,
-            latticeAnchor: .udc(code),
-            addedBy: addedBy,
-            embeddingModelID: modelID,
-            sensitivity: sensitivity,
-            kind: kind
-        )
-        let drawer = try await kit.capture(handle, frame)
-        return Self.textResult([
-            "captured drawer \(drawer.id)",
-            "lineage: \(drawer.lineageID.uuidString)",
-            "room: \(drawer.room)",
-            "scheme: \(scheme.rawValue)",
-        ].joined(separator: "\n"))
-    }
-
-    /// Handle moot_capture_tunnel: file a new directed graph edge (tunnel) into
-    /// the estate addressed by the optional `estateID` argument.
-    ///
-    /// Dispatches through `GeniusLocusKit.estate(for:)` → `LocusKit.Estate.capture(_:
-    /// TunnelCaptureFrame)` — the same path `TunnelRecallTests.captureTunnel` uses for
-    /// test setup, now exposed over the MCP surface. Required args are the six endpoint +
-    /// identity slots the TunnelCaptureFrame init mandates: `sourceWing`, `sourceRoom`,
-    /// `targetWing`, `targetRoom`, `kind` (used as the relation label), `addedBy`.
-    /// Optional `sourceDrawerID` and `targetDrawerID` pin the edge to specific drawer rows.
-    ///
-    /// The schema for this tool mirrors the Rust leg's `moot_capture_tunnel` descriptor
-    /// (rust/src/tool_list.rs lexicon_schema Verb::Capture Noun::Tunnel), so the two
-    /// servers advertise byte-identical required arrays and property keys on the wire.
-    private func runCaptureTunnel(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let sourceWing = try requireString(args, "sourceWing")
-        let sourceRoom = try requireString(args, "sourceRoom")
-        let targetWing = try requireString(args, "targetWing")
-        let targetRoom = try requireString(args, "targetRoom")
-        // `kind` is used as the tunnel's relation label (free-form string), matching
-        // the Rust leg's convention: TunnelCaptureFrame::new takes kind_str as the label.
-        let kind = try requireString(args, "kind")
-        let addedBy = try requireString(args, "addedBy")
-        let sourceDrawerID = args["sourceDrawerID"]?.stringValue
-        let targetDrawerID = args["targetDrawerID"]?.stringValue
-        let frame = TunnelCaptureFrame(
-            sourceWing: sourceWing,
-            sourceRoom: sourceRoom,
-            targetWing: targetWing,
-            targetRoom: targetRoom,
-            label: kind,
-            addedBy: addedBy,
-            sourceDrawerId: sourceDrawerID,
-            targetDrawerId: targetDrawerID
-        )
-        // Resolve the estate actor via await (estate(for:) is actor-isolated on
-        // GeniusLocusKit), then capture the tunnel via LocusKit.Estate.capture.
-        // No GLK kit-level captureTunnel verb exists — GLK exposes recallTunnels
-        // for the read but not a matching write wrapper. LocusKit.Estate.capture
-        // is the direct write path, the same one TunnelRecallTests.captureTunnel
-        // uses for test setup.
-        let estate = try await kit.estate(for: handle)
-        let tunnel = try await estate.capture(frame)
-        return Self.textResult("captured tunnel \(tunnel.id)")
-    }
-
-    private func runRecallDrawer(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let filter = try decodeFilter(args["filter"])
-        let hydration = try decodeHydration(args["hydrationLevel"])
-        let ordering = try decodeOrdering(args["ordering"])
-        let rawLimit = args["limit"]?.integerValue.map(Int.init)
-
-        // explain: true — route through the Recall Director (GLKRecallRequest /
-        // GLKRecallResult) and append explanation blocks per selected hit.
-        // Opt-in only: callers that omit "explain" or pass false take the
-        // fast locus-only path below (see comment at that branch).
-        if args["explain"]?.boolValue == true {
-            let queryText = args["queryText"]?.stringValue
-            let effectiveLimit = rawLimit ?? 12
-            let frame = RecallFrame(
-                filterChain: [filter],
-                hydrationLevel: hydration,
-                limit: effectiveLimit,
-                ordering: ordering
-            )
-            // Decode recall mode and scoring from the caller's args; fall back to
-            // the current defaults (unionBest, matrixAware) when omitted so that
-            // existing callers that set explain:true but omit these fields retain
-            // their current behaviour unchanged.
-            let recallMode = GLKRecallMode(rawValue: args["recallMode"]?.stringValue ?? "") ?? .unionBest
-            let scoringStrategy = GLKRecallScoring(rawValue: args["scoring"]?.stringValue ?? "") ?? .matrixAware
-            let request = GLKRecallRequest(
-                frame: frame,
-                mode: recallMode,
-                scoring: scoringStrategy,
-                limit: effectiveLimit,
-                fallback: .allowDegraded,
-                queryText: queryText
-            )
-            let result = try await kit.recall(handle, request)
-            // Build response: header + one row per hit, each followed by
-            // its explanation as an indented note block.
-            var lines: [String] = ["recalled \(result.hits.count) drawer(s) with explanations"]
-            for hit in result.hits.prefix(50) {
-                let contentPreview = hit.drawer?.content.prefix(80) ?? "(not hydrated)"
-                let room = hit.drawer?.room ?? "?"
-                lines.append("\(hit.id)  [\(room)]  \(contentPreview)")
-                for expLine in hit.explanation {
-                    lines.append("  \(expLine)")
-                }
-            }
-            return Self.textResult(lines.joined(separator: "\n"))
-        }
-
-        // Fast locus-only path: callers that omit `explain` receive structured recall
-        // via RecallStream without BM25 or vector lane composition. This is intentional
-        // for low-latency use cases. To activate corpus/vector lanes, pass explain: true
-        // or supply recallMode in the tool params (see RECALL-API-001).
-        let frame = RecallFrame(
-            filterChain: [filter],
-            hydrationLevel: hydration,
-            limit: rawLimit,
-            ordering: ordering
-        )
-        let rows = try await kit.recall(handle, frame)
-        // Cap the body so a wide recall does not push the response
-        // past JSON-RPC sanity. Clients re-call with `limit` if they
-        // want more; this matches MCP's discouraged-large-payload
-        // guidance without imposing a hard schema cap.
-        let lines = rows.prefix(50).map { drawer -> String in
-            "\(drawer.id)  [\(drawer.room)]  \(drawer.content.prefix(80))"
-        }
-        let header = "recalled \(rows.count) drawer(s)"
-        let body = ([header] + lines).joined(separator: "\n")
-        return Self.textResult(body)
-    }
-
-    /// Handle moot_tunnel_recall: read the outgoing tunnel edges whose source
-    /// wing matches the required `wing` argument.
-    ///
-    /// Dispatches to `GeniusLocusKit.recallTunnels(_:wing:)` — the graph-read
-    /// method verified in GeniusLocusKit/Verbs/VerbSurface.swift:115 that
-    /// returns all non-tombstoned tunnels originating from `wing` in stable
-    /// filed-at order. A wing with no tunnels returns an empty list, not an
-    /// error. `wing` is required; its absence is an out-of-band `invalidParams`
-    /// consistent with the other required-arg decoders.
-    private func runRecallTunnel(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let wing = try requireString(args, "wing")
-        let tunnels = try await kit.recallTunnels(handle, wing: wing)
-        // Cap the body at 50 rows, matching the drawer recall cap discipline
-        // so wide tunnel reads do not push the response past JSON-RPC sanity.
-        let lines = tunnels.prefix(50).map { tunnel -> String in
-            "\(tunnel.id)  [\(tunnel.sourceWing)/\(tunnel.sourceRoom)]→[\(tunnel.targetWing)/\(tunnel.targetRoom)]  \(tunnel.label)"
-        }
-        let header = "recalled \(tunnels.count) tunnel(s) from wing \(wing)"
-        let body = ([header] + lines).joined(separator: "\n")
-        return Self.textResult(body)
-    }
-
-    /// Handle moot_kgFact_recall: read all active kg-facts (state cluster < 7)
-    /// from the estate. Delegates to `GeniusLocusKit.recallKGFacts`.
-    private func runRecallKGFacts(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let facts = try await kit.recallKGFacts(handle)
-        let lines = facts.prefix(50).map { f -> String in
-            "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]"
-        }
-        let header = "recalled \(facts.count) kgFact(s)"
-        let body = ([header] + lines).joined(separator: "\n")
-        return Self.textResult(body)
-    }
-
-    /// Handle moot_diaryEntry_recall: read all non-tombstoned diary entries
-    /// from the estate. Delegates to `GeniusLocusKit.recallDiaryEntries`.
-    private func runRecallDiaryEntries(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let entries = try await kit.recallDiaryEntries(handle)
-        let lines = entries.prefix(50).map { e -> String in
-            "\(e.id)  [\(e.wing)/\(e.room)]  \(e.entry.prefix(80))"
-        }
-        let header = "recalled \(entries.count) diaryEntry(s)"
-        let body = ([header] + lines).joined(separator: "\n")
-        return Self.textResult(body)
-    }
-
-    /// Handle moot_proposal_recall: read all proposals from the estate.
-    /// Delegates to `GeniusLocusKit.recallProposals`.
-    private func runRecallProposals(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let proposals = try await kit.recallProposals(handle)
-        let lines = proposals.prefix(50).map { p -> String in
-            "\(p.id)  target:\(p.targetRowID)"
-        }
-        let header = "recalled \(proposals.count) proposal(s)"
-        let body = ([header] + lines).joined(separator: "\n")
-        return Self.textResult(body)
-    }
-
-    /// Handle moot_association_recall: read all non-tombstoned associations
-    /// from the estate. Delegates to `GeniusLocusKit.recallAssociations`.
-    private func runRecallAssociations(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let associations = try await kit.recallAssociations(handle)
-        let lines = associations.prefix(50).map { a -> String in
-            "\(a.id)  [\(a.sourceWing)/\(a.sourceRoom)]→[\(a.targetWing)/\(a.targetRoom)]  \(a.label)"
-        }
-        let header = "recalled \(associations.count) association(s)"
-        let body = ([header] + lines).joined(separator: "\n")
-        return Self.textResult(body)
-    }
-
-    /// Handle moot_learnedReference_recall: read all non-tombstoned learned
-    /// references from the estate. Delegates to
-    /// `GeniusLocusKit.recallLearnedReferences`.
-    private func runRecallLearnedReferences(_ args: [String: JSONValue]) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let refs = try await kit.recallLearnedReferences(handle)
-        let lines = refs.prefix(50).map { r -> String in
-            "\(r.id)  handle:\(r.handle)"
-        }
-        let header = "recalled \(refs.count) learnedReference(s)"
-        let body = ([header] + lines).joined(separator: "\n")
-        return Self.textResult(body)
-    }
-
-    private func runMutate(_ args: [String: JSONValue], noun: Noun) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let rowID = try requireString(args, "rowID")
-        let kindName = try requireString(args, "kind")
-        let kind = try decodeMutationKind(kindName)
-        let payload = args["payload"]?.stringValue
-        let frame = MutateFrame(rowID: rowID, kind: kind, payload: payload)
-        try await kit.mutate(handle, frame)
-        return Self.textResult("mutated \(noun.rawValue) \(rowID) (\(kindName))")
-    }
-
-    private func runWithdraw(_ args: [String: JSONValue], noun: Noun) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let rowID = try requireString(args, "rowID")
-        let reason = args["reason"]?.stringValue
-        try await kit.withdraw(handle, WithdrawFrame(rowID: rowID, reason: reason))
-        return Self.textResult("withdrew \(noun.rawValue) \(rowID)")
-    }
-
-    private func runExpunge(_ args: [String: JSONValue], noun: Noun) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let rowID = try requireString(args, "rowID")
-        let reason = try requireString(args, "reason")
-        let confirmation = args["confirmation"]?.boolValue ?? false
-        try await kit.expunge(handle, ExpungeFrame(rowID: rowID, reason: reason, confirmation: confirmation))
-        return Self.textResult("expunged \(noun.rawValue) \(rowID)")
-    }
-
-    private func runReanchor(_ args: [String: JSONValue], noun: Noun) async throws -> JSONValue {
-        let handle = try resolveHandle(args)
-        let rowID = try requireString(args, "rowID")
-        let toRoom = args["toRoom"]?.stringValue
-        let toLatticeRaw = args["toUDC"]?.stringValue
-        let toLattice = toLatticeRaw.map { LatticeAnchor.udc($0) }
-        try await kit.reanchor(handle, ReanchorFrame(rowID: rowID, toRoom: toRoom, toLattice: toLattice))
-        return Self.textResult("reanchored \(noun.rawValue) \(rowID)")
-    }
-
-    private func runLearn(_ args: [String: JSONValue], noun: Noun) async throws -> JSONValue {
-        // `estateID` resolves the target estate; `handle` is the
-        // LearnFrame's source-reference string (a different argument) —
-        // the two never collide.
-        let estate = try resolveHandle(args)
-        let handleArg = try requireString(args, "handle")
-        try await kit.learn(estate, LearnFrame(handle: handleArg))
-        return Self.textResult("learned \(noun.rawValue) \(handleArg)")
-    }
-
-    // MARK: - Federation tool (above the lexicon projection)
-
-    /// The one federation tool dispatched by name, above the lexicon
-    /// projection. It has no AriaLexicon (verb, noun) pair, so `dispatch`
-    /// matches it before `parseToolName` and `ToolProjection` advertises
-    /// it as an explicit non-projected entry in `tools/list`.
-    public static let crossEstateRecallToolName = "moot_cross_estate_recall"
-
-    /// Run `cross_estate_recall`: a grant-authorized federated read that
+    /// Run `moot_federated_search`: a grant-authorized federated read that
     /// fans across the locally-open estates the caller is entitled to
     /// read, narrows each contribution to its grant's scope, and returns
     /// the per-estate contributions.
@@ -574,36 +206,11 @@ public struct ToolDispatcher: Sendable {
     /// Authorization is NOT performed here. The per-estate grant gate
     /// lives entirely in GLK's `federatedRecall` — this is the I-13
     /// boundary in practice: ARIA mediates *which* locally-open estates
-    /// to attempt; GLK enforces *whether* each read is granted. This
-    /// runner iterates the registered estates other than the requester,
-    /// calls `federatedRecall` per candidate source, and keeps only the
-    /// contributions GLK authorizes. A per-estate `.crossEstateReadRefused`
-    /// is the expected "not granted" signal for that estate and is
-    /// skipped, not surfaced. If no estate authorizes the caller, the
-    /// call is refused cleanly with an `errorResult` (`isError == true`),
-    /// matching the A-versus-C refusal discipline
-    /// (DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §13): the read
-    /// reached the substrate-mediated surface and was refused, so the
-    /// client sees why without losing the call ID.
-    ///
-    /// GLK is the primary grant enforcer. `federatedRecall` applies both
-    /// the binary "may the requester read the source" gate and the
-    /// content-level sensitivity filter (`grant.contentLevel` vs
-    /// `adjectiveSensitivity`). This runner applies answer-assembly
-    /// scope narrowing (DECISION §10) as defense-in-depth secondary:
-    /// it narrows each contribution to the rows inside its authorizing
-    /// grant's scope (a `.room`/`.wing`/`.latticeSubtree`/`.singleRow`
-    /// grant must not over-disclose). `FederatedRecallResult` carries
-    /// `grant.scope` as advisory metadata so this layer can act on it. The companion §10 obligation — excluding
-    /// foreign-provenance rows — is a no-op in this scaffold: each source
-    /// estate's `federatedRecall` reads only that estate's own isolated
-    /// storage, so no foreign-origin rows are present to exclude. It
-    /// becomes live when a cross-estate import path lands (a later
-    /// mission); the §10 inference-budget ledger is likewise out of scope
-    /// for this scaffold.
-    private func runCrossEstateRecall(_ args: [String: JSONValue]) async throws -> JSONValue {
-        // The caller identity GLK's grant gate is evaluated against: the
-        // requester must be a registered, locally-open estate.
+    /// to attempt; GLK enforces *whether* each read is granted.
+    /// A per-estate `.crossEstateReadRefused` is the expected "not granted"
+    /// signal and is skipped. If no estate authorizes the caller, the
+    /// call is refused cleanly with an `errorResult`.
+    private func runFederatedSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let requester = try resolveRequester(args)
         let filter = try decodeFilter(args["filter"])
         let hydration = try decodeHydration(args["hydrationLevel"])
@@ -615,23 +222,17 @@ public struct ToolDispatcher: Sendable {
             limit: limit,
             ordering: ordering
         )
-
         // Visit candidate sources sorted by UUID so the assembled text is
         // deterministic across runs, independent of map iteration order.
         let candidates = estates.values
             .filter { $0.estateUUID != requester.estateUUID }
             .sorted { $0.estateUUID.uuidString < $1.estateUUID.uuidString }
-
         var sections: [String] = []
         for source in candidates {
             let result: FederatedRecallResult
             do {
                 result = try await kit.federatedRecall(frame, from: source, requestedBy: requester)
             } catch let error as GeniusLocusKitError {
-                // A refusal means the caller holds no active grant from
-                // this source; that estate is simply omitted from the
-                // federated answer. Any other GLK error is genuine and
-                // propagates to the dispatch error mapper.
                 if case .crossEstateReadRefused = error { continue }
                 throw error
             }
@@ -640,22 +241,18 @@ public struct ToolDispatcher: Sendable {
                 source: source, grant: result.grant, drawers: scoped
             ))
         }
-
         guard !sections.isEmpty else {
-            // A-versus-C refusal: the caller is entitled to read nothing.
             return Self.errorResult(
-                "cross_estate_recall refused: no open estate holds an active grant naming the requester."
+                "federated_search refused: no open estate holds an active grant naming the requester."
             )
         }
         return Self.textResult(sections.joined(separator: "\n\n"))
     }
 
-    /// Resolve the requester estate for a federation call from the
-    /// required `requesterEstateID` argument. It must name a registered,
-    /// locally-open estate; absent/malformed/unknown is an out-of-band
-    /// `invalidParams`, consistent with `resolveHandle` and the other
-    /// decoders (the caller naming a thing that is not there, not the
-    /// substrate refusing a granted request).
+    // MARK: - Federation helpers
+
+    /// Resolve the requester estate from the required `requesterEstateID`
+    /// argument. Must name a registered, locally-open estate.
     private func resolveRequester(_ args: [String: JSONValue]) throws -> EstateHandle {
         let raw = try requireString(args, "requesterEstateID")
         guard let uuid = UUID(uuidString: raw) else {
@@ -677,13 +274,8 @@ public struct ToolDispatcher: Sendable {
     /// authorizing grant's scope (DECISION §10 answer assembly).
     ///
     /// PRIMARY enforcement is in GLK: `CrossEstateFederation.federatedRecall`
-    /// already filtered drawers by `grant.contentLevel` (sensitivity gate)
-    /// before this function is called. This narrowing — scope-subtree
-    /// filtering by wing/room/lattice/singleRow — is **defense-in-depth
-    /// secondary** at the ARIA surface, not the sole enforcer.
-    ///
-    /// `.wholeEstate` applies no scope narrowing (all sensitivity-gated rows
-    /// pass through); sub-estate scopes honor the grant's spatial boundary.
+    /// already filtered drawers by `grant.contentLevel` before this is called.
+    /// This narrowing is defense-in-depth secondary at the ARIA surface.
     private static func narrow(_ drawers: [Drawer], to scope: GrantScope) -> [Drawer] {
         switch scope {
         case .wholeEstate:
@@ -693,22 +285,16 @@ public struct ToolDispatcher: Sendable {
         case .room(let name):
             return drawers.filter { $0.room == name }
         case .latticeSubtree(let code):
-            // A drawer is inside the subtree rooted at `code` when its UDC
-            // code equals `code` or descends from it on a dot boundary
-            // (UDC is dot-decimal: "004" roots "004.42"). The "+ ." guard
-            // prevents a bare-prefix false match (e.g. "00" vs "001").
+            // A drawer is inside the subtree when its UDC code equals `code`
+            // or descends from it on a dot boundary. The `+ "."` guard prevents
+            // a bare-prefix false match (e.g. "00" vs "001").
             return drawers.filter { $0.udcCode == code || $0.udcCode.hasPrefix(code + ".") }
         case .singleRow(let id):
-            // Grant rows are addressed by UUID; `Drawer.id` is the string
-            // form of that identifier.
             return drawers.filter { $0.id == id.uuidString }
         }
     }
 
-    /// Format one estate's authorized contribution: a header naming the
-    /// source estate and its authorizing grant, then up to 50 row lines —
-    /// the same cap discipline `runRecallDrawer` uses to keep a wide
-    /// response within JSON-RPC sanity.
+    /// Format one estate's authorized contribution for the federated response.
     private static func renderContribution(
         source: EstateHandle, grant: Grant, drawers: [Drawer]
     ) -> String {
@@ -721,7 +307,7 @@ public struct ToolDispatcher: Sendable {
 
     // MARK: - Argument decoders
 
-    private func requireString(_ args: [String: JSONValue], _ key: String) throws -> String {
+    func requireString(_ args: [String: JSONValue], _ key: String) throws -> String {
         guard let value = args[key]?.stringValue else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
@@ -731,8 +317,8 @@ public struct ToolDispatcher: Sendable {
         return value
     }
 
-    private func decodeChannel(_ value: JSONValue?) throws -> CaptureChannel {
-        guard let name = value?.stringValue else { return .typed }
+    func decodeChannel(_ value: JSONValue?) throws -> CaptureChannel {
+        guard let name = value?.stringValue else { return .importedFile }
         switch name {
         case "typed": return .typed
         case "voiced": return .voiced
@@ -747,7 +333,7 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    private func decodeSensitivity(_ value: JSONValue?) throws -> AdjectiveSensitivity {
+    func decodeSensitivity(_ value: JSONValue?) throws -> AdjectiveSensitivity {
         guard let name = value?.stringValue else { return .normal }
         switch name {
         case "normal": return .normal
@@ -763,11 +349,8 @@ public struct ToolDispatcher: Sendable {
     }
 
     /// Decode the optional `classificationScheme` arg for a capture.
-    /// Absent defaults to `.udc`, preserving the prior bare-UDC behavior
-    /// so no existing caller breaks. An unrecognized scheme is an
-    /// out-of-band client error (`invalidParams`), consistent with the
-    /// other enum decoders in this file.
-    private func decodeClassificationScheme(_ value: JSONValue?) throws -> ClassificationScheme {
+    /// Absent defaults to `.udc`, preserving the prior bare-UDC behavior.
+    func decodeClassificationScheme(_ value: JSONValue?) throws -> ClassificationScheme {
         guard let name = value?.stringValue else { return .udc }
         guard let scheme = ClassificationScheme(rawValue: name) else {
             throw JSONRPCError(
@@ -778,7 +361,7 @@ public struct ToolDispatcher: Sendable {
         return scheme
     }
 
-    private func decodeContentKind(_ value: JSONValue?) throws -> ContentKind {
+    func decodeContentKind(_ value: JSONValue?) throws -> ContentKind {
         guard let name = value?.stringValue else { return .prose }
         switch name {
         case "prose": return .prose
@@ -795,7 +378,7 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    private func decodeFilter(_ value: JSONValue?) throws -> Filter {
+    func decodeFilter(_ value: JSONValue?) throws -> Filter {
         guard let name = value?.stringValue else { return .unconfirmed }
         switch name {
         case "unconfirmed": return .unconfirmed
@@ -810,7 +393,7 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    private func decodeHydration(_ value: JSONValue?) throws -> HydrationLevel {
+    func decodeHydration(_ value: JSONValue?) throws -> HydrationLevel {
         guard let name = value?.stringValue else { return .structured }
         switch name {
         case "structured": return .structured
@@ -824,7 +407,7 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    private func decodeOrdering(_ value: JSONValue?) throws -> Ordering {
+    func decodeOrdering(_ value: JSONValue?) throws -> Ordering {
         guard let name = value?.stringValue else { return .byCaptureTimeDesc }
         switch name {
         case "byCaptureTimeDesc": return .byCaptureTimeDesc
@@ -839,7 +422,7 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    private func decodeMutationKind(_ name: String) throws -> MutationKind {
+    func decodeMutationKind(_ name: String) throws -> MutationKind {
         switch name {
         case "confirm": return .confirm
         case "reject": return .reject
@@ -849,9 +432,6 @@ public struct ToolDispatcher: Sendable {
         case "revive": return .revive
         case "accept": return .accept
         default:
-            // correctSensitivity and correctTrust take associated
-            // values; the MCP tool surface does not yet expose them.
-            // A future schema extension can add tagged variants here.
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
                 message: "Unsupported mutation kind: \(name)"
@@ -890,10 +470,6 @@ public struct ToolDispatcher: Sendable {
     }
 
     private func describe(_ error: VerbError) -> String {
-        // The exhaustive switch surfaces every VerbError case as a
-        // single sentence the client can render in a tool-output
-        // panel. Adding a new case to VerbError will require an arm
-        // here; the compiler enforces that without a default branch.
         switch error {
         case .notSupportedByEstate(let verb):
             return "Verb \(verb) is declared on the GLK surface but not yet implemented by the substrate."
@@ -913,15 +489,560 @@ public struct ToolDispatcher: Sendable {
     }
 }
 
+// MARK: - Server-owned defaults
+
+extension ToolDispatcher {
+    /// Default lattice anchor applied by the server when the caller supplies
+    /// a `location` string instead of explicit UDC coordinates. The UDC
+    /// "000.000" root is the general-knowledge default per the substrate spec.
+    static let defaultLatticeAnchor = LatticeAnchor.udc("000.000")
+
+    /// Embedding model ID placeholder. GeniusLocusKit has no
+    /// `defaultEmbeddingModelID` property; "default" signals to the substrate
+    /// that a concrete model will be bound when the embedding pipeline runs.
+    static let defaultEmbeddingModelID = "default"
+}
+
+// MARK: - InterfaceTools
+
+/// Static dispatch table for the five-tier AI-client interface tools.
+///
+/// Each of the 19 interface tools has a named `run*` function on
+/// `ToolDispatcher`; this type routes from name to function, isolating
+/// the dispatch logic from the tool-name string constants.
+enum InterfaceTools {
+
+    private static let names: Set<String> = [
+        // Tier 1 — Core Memory
+        "moot_file_memory", "moot_memory_search", "moot_update_memory",
+        "moot_withdraw_memory", "moot_erase_memory", "moot_confirm_memory",
+        "moot_move_memory",
+        // Tier 2 — Connections
+        "moot_link_memories", "moot_connection_search", "moot_connection_map",
+        // Tier 3 — Knowledge Graph
+        "moot_file_fact", "moot_fact_search", "moot_retire_fact",
+        "moot_fact_timeline",
+        // Tier 4 — Journal
+        "moot_write_journal", "moot_read_journal",
+        // Tier 5 — Estate
+        "moot_estate_status", "moot_estate_map", "moot_estate_ping",
+    ]
+
+    static func isInterfaceTool(_ name: String) -> Bool {
+        names.contains(name)
+    }
+
+    static func dispatch(
+        name: String,
+        args: [String: JSONValue],
+        dispatcher: ToolDispatcher
+    ) async throws -> JSONValue {
+        switch name {
+        // Tier 1
+        case "moot_file_memory":       return try await dispatcher.runFileMemory(args)
+        case "moot_memory_search":     return try await dispatcher.runMemorySearch(args)
+        case "moot_update_memory":     return try await dispatcher.runUpdateMemory(args)
+        case "moot_withdraw_memory":   return try await dispatcher.runWithdrawMemory(args)
+        case "moot_erase_memory":      return try await dispatcher.runEraseMemory(args)
+        case "moot_confirm_memory":    return try await dispatcher.runConfirmMemory(args)
+        case "moot_move_memory":       return try await dispatcher.runMoveMemory(args)
+        // Tier 2
+        case "moot_link_memories":     return try await dispatcher.runLinkMemories(args)
+        case "moot_connection_search": return try await dispatcher.runConnectionSearch(args)
+        case "moot_connection_map":    return try await dispatcher.runConnectionMap(args)
+        // Tier 3
+        case "moot_file_fact":         return try await dispatcher.runFileFact(args, now: Date())
+        case "moot_fact_search":       return try await dispatcher.runFactSearch(args)
+        case "moot_retire_fact":       return try await dispatcher.runRetireFact(args)
+        case "moot_fact_timeline":     return try await dispatcher.runFactTimeline(args)
+        // Tier 4
+        case "moot_write_journal":     return try await dispatcher.runWriteJournal(args, now: Date())
+        case "moot_read_journal":      return try await dispatcher.runReadJournal(args)
+        // Tier 5
+        case "moot_estate_status":     return try await dispatcher.runEstateStatus(args)
+        case "moot_estate_map":        return try await dispatcher.runEstateMap(args)
+        case "moot_estate_ping":        return try await dispatcher.runEstatePing(args)
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.methodNotFound,
+                message: "No handler bound for interface tool \(name)"
+            )
+        }
+    }
+}
+
+// MARK: - Tier 1: Core Memory runners
+
+extension ToolDispatcher {
+
+    /// `moot_file_memory` — file a new memory drawer into the estate.
+    ///
+    /// The server owns infrastructure fields: lattice anchor (UDC "000.000"),
+    /// embedding model ("default"), capture channel (.importedFile), source
+    /// type (.agent), and addedBy (derived from the session handle). The caller
+    /// supplies only the content and a free-form location hint.
+    func runFileMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let content = try requireString(args, "content")
+        let location = try requireString(args, "location")
+        let sensitivity = try decodeSensitivity(args["sensitivity"])
+        let kind = try decodeContentKind(args["kind"])
+        let eventTime: Date? = args["event_time"]?.stringValue.flatMap {
+            ISO8601DateFormatter().date(from: $0)
+        }
+        // location is a caller-facing subject-matter hint; map it to the
+        // room field (structural coordinate). Wing defaults to "memories";
+        // future routing logic can refine this per estate topology.
+        let room = location
+        let frame = CaptureFrame(
+            content: content,
+            channel: Self.defaultChannel,
+            room: room,
+            latticeAnchor: Self.defaultLatticeAnchor,
+            addedBy: Self.serverAddedBy,
+            embeddingModelID: Self.defaultEmbeddingModelID,
+            sensitivity: sensitivity,
+            kind: kind,
+            provenanceChannel: .mcpAgent,
+            sourceType: .imported,
+            eventTime: eventTime
+        )
+        let drawer = try await kit.capture(handle, frame)
+        return Self.textResult([
+            "filed memory \(drawer.id)",
+            "room: \(drawer.room)",
+            "lineage: \(drawer.lineageID.uuidString)",
+        ].joined(separator: "\n"))
+    }
+
+    /// `moot_memory_search` — hybrid BM25+vector recall over the estate.
+    ///
+    /// Routes through the Recall Director (GLKRecallRequest) using the
+    /// `unionBest` mode and `matrixAware` scoring by default, giving the
+    /// AI client the best available ranked results without exposing the
+    /// multi-lane machinery.
+    func runMemorySearch(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let query = try requireString(args, "query")
+        let rawLimit = args["limit"]?.integerValue.map(Int.init) ?? 20
+        let filter = try decodeFilter(args["filter"])
+        let explain = args["explain"]?.boolValue ?? false
+        let scoringStr = args["scoring"]?.stringValue ?? "matrixAware"
+        let scoring = GLKRecallScoring(rawValue: scoringStr) ?? .matrixAware
+        let frame = RecallFrame(
+            filterChain: [filter],
+            hydrationLevel: .structured,
+            limit: rawLimit,
+            ordering: .byRelevanceDesc
+        )
+        let request = GLKRecallRequest(
+            frame: frame,
+            mode: .unionBest,
+            scoring: scoring,
+            limit: rawLimit,
+            fallback: .allowDegraded,
+            queryText: query
+        )
+        let result = try await kit.recall(handle, request)
+        var lines: [String] = ["found \(result.hits.count) memory(s)"]
+        for hit in result.hits.prefix(50) {
+            let preview = hit.drawer?.content.prefix(120) ?? "(not hydrated)"
+            let room = hit.drawer?.room ?? "?"
+            lines.append("\(hit.id)  [\(room)]  \(preview)")
+            if explain {
+                for line in hit.explanation { lines.append("  \(line)") }
+            }
+        }
+        return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// `moot_update_memory` — apply a named mutation to a memory.
+    func runUpdateMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let rowID = try requireString(args, "id")
+        let mutationName = try requireString(args, "mutation")
+        let kind = try decodeMutationKind(mutationName)
+        let payload = args["note"]?.stringValue
+        let frame = MutateFrame(rowID: rowID, kind: kind, payload: payload)
+        try await kit.mutate(handle, frame)
+        return Self.textResult("updated memory \(rowID) (\(mutationName))")
+    }
+
+    /// `moot_withdraw_memory` — soft-remove a memory from active circulation.
+    func runWithdrawMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let rowID = try requireString(args, "id")
+        let reason = args["reason"]?.stringValue
+        try await kit.withdraw(handle, WithdrawFrame(rowID: rowID, reason: reason))
+        return Self.textResult("withdrew memory \(rowID)")
+    }
+
+    /// `moot_erase_memory` — hard-erase a memory. Requires `confirmed: true`.
+    func runEraseMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let rowID = try requireString(args, "id")
+        let reason = try requireString(args, "reason")
+        // Surface the caller-facing field name "confirmed" but map it to
+        // the substrate's ExpungeFrame "confirmation" field.
+        let confirmed = args["confirmed"]?.boolValue ?? false
+        try await kit.expunge(handle, ExpungeFrame(rowID: rowID, reason: reason, confirmation: confirmed))
+        return Self.textResult("erased memory \(rowID)")
+    }
+
+    /// `moot_confirm_memory` — shortcut for moot_update_memory with mutation=confirm.
+    func runConfirmMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let rowID = try requireString(args, "id")
+        let payload = args["note"]?.stringValue
+        let frame = MutateFrame(rowID: rowID, kind: .confirm, payload: payload)
+        try await kit.mutate(handle, frame)
+        return Self.textResult("confirmed memory \(rowID)")
+    }
+
+    /// `moot_move_memory` — reanchor a memory to a new location.
+    ///
+    /// The caller provides a free-form `location` hint; the server maps it
+    /// to the substrate's `toRoom` field (same convention as `moot_file_memory`).
+    func runMoveMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let rowID = try requireString(args, "id")
+        let location = try requireString(args, "location")
+        // location maps to room; no UDC change at this surface layer.
+        try await kit.reanchor(handle, ReanchorFrame(rowID: rowID, toRoom: location, toLattice: nil))
+        return Self.textResult("moved memory \(rowID) to \(location)")
+    }
+}
+
+// MARK: - Tier 2: Connections runners
+
+extension ToolDispatcher {
+
+    /// Map caller-facing kind strings to the substrate's `TunnelKind` enum.
+    ///
+    /// The caller vocabulary ("relates", "precedes", etc.) is more natural for
+    /// AI clients than the substrate names. Pass-through of substrate names is
+    /// also accepted so advanced callers can target specific kinds directly.
+    private static func tunnelKind(for kindString: String) -> TunnelKind {
+        switch kindString {
+        // Caller-friendly vocabulary
+        case "relates":     return .references
+        case "precedes":    return .blocks
+        case "contradicts": return .contradicts
+        case "supports":    return .validates
+        case "refines":     return .elaborates
+        case "exemplifies": return .covers
+        case "extends":     return .derivesFrom
+        // Pass-through substrate names (for advanced callers)
+        case "supersedes":  return .supersedes
+        case "references":  return .references
+        case "blocks":      return .blocks
+        case "validates":   return .validates
+        case "derivesFrom": return .derivesFrom
+        case "covers":      return .covers
+        case "elaborates":  return .elaborates
+        case "respondsTo":  return .respondsTo
+        default:            return .references
+        }
+    }
+
+    /// `moot_link_memories` — create a directed connection between two memories.
+    ///
+    /// Resolves source and target drawer coordinates (wing/room) by looking up
+    /// both drawers by ID via `estate.allDrawers()`, then delegates to
+    /// `Estate.capture(TunnelCaptureFrame)` — the same path the existing
+    /// tunnel tests use. No GLK kit-level captureTunnel verb exists; the
+    /// estate actor is the direct write path.
+    func runLinkMemories(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let fromID = try requireString(args, "from_id")
+        let toID = try requireString(args, "to_id")
+        let kindString = try requireString(args, "kind")
+        let label = args["label"]?.stringValue ?? kindString
+        let kind = Self.tunnelKind(for: kindString)
+        // Resolve wing/room by looking up both drawers. `estate.allDrawers()`
+        // is public on LocusKit.Estate; GLK has no direct getDrawer(id:) call.
+        let estate = try await kit.estate(for: handle)
+        let allDrawers = try await estate.allDrawers()
+        guard let source = allDrawers.first(where: { $0.id == fromID }) else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Memory not found: \(fromID)"
+            )
+        }
+        guard let target = allDrawers.first(where: { $0.id == toID }) else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Memory not found: \(toID)"
+            )
+        }
+        let frame = TunnelCaptureFrame(
+            sourceWing: source.wing,
+            sourceRoom: source.room,
+            targetWing: target.wing,
+            targetRoom: target.room,
+            label: label,
+            addedBy: Self.serverAddedBy,
+            sourceDrawerId: fromID,
+            targetDrawerId: toID,
+            kind: kind,
+            originClass: .derived
+        )
+        let tunnel = try await estate.capture(frame)
+        return Self.textResult("linked \(fromID) → \(toID) via \(label) (\(tunnel.id))")
+    }
+
+    /// `moot_connection_search` — find connections going out from a memory.
+    ///
+    /// Reads all tunnels from the estate and filters by `sourceDrawerId`.
+    func runConnectionSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let fromID = try requireString(args, "from_id")
+        let estate = try await kit.estate(for: handle)
+        let allTunnels = try await estate.allTunnels()
+        // Keep only non-tombstoned tunnels originating from this drawer.
+        let outgoing = allTunnels.filter {
+            $0.sourceDrawerId == fromID && $0.tombstonedAt == nil
+        }
+        let lines = outgoing.prefix(50).map { t -> String in
+            "\(t.id)  → \(t.targetDrawerId ?? "\(t.targetWing)/\(t.targetRoom)")  [\(t.label)]"
+        }
+        let header = "connections from \(fromID): \(outgoing.count)"
+        return Self.textResult(([header] + lines).joined(separator: "\n"))
+    }
+
+    /// `moot_connection_map` — find connections pointing to a memory.
+    ///
+    /// Reads all tunnels from the estate and filters by `targetDrawerId`.
+    func runConnectionMap(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let toID = try requireString(args, "to_id")
+        let estate = try await kit.estate(for: handle)
+        let allTunnels = try await estate.allTunnels()
+        // Keep only non-tombstoned tunnels pointing to this drawer.
+        let incoming = allTunnels.filter {
+            $0.targetDrawerId == toID && $0.tombstonedAt == nil
+        }
+        let lines = incoming.prefix(50).map { t -> String in
+            "\(t.id)  \(t.sourceDrawerId ?? "\(t.sourceWing)/\(t.sourceRoom)") →  [\(t.label)]"
+        }
+        let header = "connections to \(toID): \(incoming.count)"
+        return Self.textResult(([header] + lines).joined(separator: "\n"))
+    }
+}
+
+// MARK: - Tier 3: Knowledge Graph runners
+
+extension ToolDispatcher {
+
+    /// `moot_file_fact` — assert a subject–predicate–object triple.
+    ///
+    /// `now` is sampled at the `InterfaceTools.dispatch` boundary so this
+    /// runner is deterministic — it never calls `Date()` itself.
+    func runFileFact(_ args: [String: JSONValue], now: Date) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let subject = try requireString(args, "subject")
+        let predicate = try requireString(args, "predicate")
+        let object = try requireString(args, "object")
+        let sourceDrawerID = args["source_id"]?.stringValue ?? ""
+        let fact = try await kit.captureKGFact(
+            handle,
+            subject: subject,
+            predicate: predicate,
+            object: object,
+            sourceDrawerID: sourceDrawerID,
+            now: now
+        )
+        return Self.textResult("filed fact \(fact.id): [\(subject)] \(predicate) [\(object)]")
+    }
+
+    /// `moot_fact_search` — retrieve all currently-active KG facts.
+    func runFactSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let allFacts = try await kit.recallKGFacts(handle)
+        // Optional query: substring match across subject, predicate, and object.
+        // Omitting query returns all active facts (the unfiltered case).
+        let query = args["query"]?.stringValue?.lowercased()
+        let facts = query.map { q in
+            allFacts.filter {
+                $0.subject.lowercased().contains(q) ||
+                $0.predicate.lowercased().contains(q) ||
+                $0.object.lowercased().contains(q)
+            }
+        } ?? allFacts
+        let lines = facts.prefix(100).map { f -> String in
+            "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]"
+        }
+        let header = query != nil
+            ? "facts matching \"\(args["query"]?.stringValue ?? "")\": \(facts.count)"
+            : "facts: \(facts.count)"
+        return Self.textResult(([header] + lines).joined(separator: "\n"))
+    }
+
+    /// `moot_retire_fact` — invalidate a KG fact by row ID.
+    func runRetireFact(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let rowID = try requireString(args, "id")
+        try await kit.retireKGFact(handle, rowID: rowID)
+        return Self.textResult("retired fact \(rowID)")
+    }
+
+    /// `moot_fact_timeline` — read all KG facts including retired ones.
+    ///
+    /// Uses `recallKGFacts` which returns active facts. The timeline
+    /// view is a superset that may include retired facts; for now it
+    /// returns the same active set as `moot_fact_search` and notes the
+    /// timeline semantics for future expansion.
+    func runFactTimeline(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let facts = try await kit.recallKGFacts(handle)
+        let lines = facts.prefix(200).map { f -> String in
+            let filed = ISO8601DateFormatter().string(from: f.filedAt)
+            return "\(filed)  \(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]"
+        }
+        let header = "fact timeline: \(facts.count) active"
+        return Self.textResult(([header] + lines).joined(separator: "\n"))
+    }
+}
+
+// MARK: - Tier 4: Journal runners
+
+extension ToolDispatcher {
+
+    /// Server identity written into journal entries filed through the MCP surface.
+    private static let mcpAgentName = "mcp-agent"
+
+    /// `moot_write_journal` — write a diary entry for session continuity.
+    ///
+    /// Encodes `DiaryActorClass.mcpAgent` (raw=2) at bits 7–9 of the
+    /// operational bitmap, per DiaryOperational.swift §5.6 layout.
+    /// `now` is sampled at the `InterfaceTools.dispatch` boundary so this
+    /// runner is deterministic — it never calls `Date()` itself.
+    func runWriteJournal(_ args: [String: JSONValue], now: Date) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let entry = try requireString(args, "entry")
+        let agentName = args["agent"]?.stringValue ?? Self.mcpAgentName
+        // Encode DiaryActorClass.mcpAgent (raw 2) at bits 7–9 (3-bit field).
+        let actorBits = Int64(DiaryActorClass.mcpAgent.rawValue) << 7
+        let diaryEntry = DiaryEntry(
+            agentName: agentName,
+            entry: entry,
+            topic: "mcp-session",
+            wing: "agents",
+            room: "diary",
+            filedAt: now,
+            embeddingModelID: Self.defaultEmbeddingModelID,
+            operationalBitmap: actorBits
+        )
+        try await kit.addDiaryEntry(in: handle, diaryEntry)
+        return Self.textResult("wrote journal entry for \(agentName)")
+    }
+
+    /// `moot_read_journal` — read recent journal entries for an agent.
+    func runReadJournal(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let agentName = args["agent"]?.stringValue ?? Self.mcpAgentName
+        let lastN = args["last_n"]?.integerValue.map(Int.init) ?? 10
+        let entries = try await kit.readDiaryEntries(in: handle, agentName: agentName, lastN: lastN)
+        let lines = entries.map { e -> String in
+            let filed = ISO8601DateFormatter().string(from: e.filedAt)
+            return "[\(filed)]  \(e.entry.prefix(200))"
+        }
+        let header = "journal for \(agentName): \(entries.count) entry(s)"
+        return Self.textResult(([header] + lines).joined(separator: "\n"))
+    }
+}
+
+// MARK: - Tier 5: Estate runners
+
+extension ToolDispatcher {
+
+    /// `moot_estate_status` — return a summary of the estate.
+    ///
+    /// Appends the static `ARIASessionProtocol` block unconditionally
+    /// so every cold-start call receives enough context to navigate the
+    /// full surface without prior knowledge of ARIA.
+    func runEstateStatus(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let estate = try await kit.estate(for: handle)
+        let drawers = try await estate.allDrawers()
+        let active = drawers.filter { $0.tombstonedAt == nil }
+        let wings = Set(active.map { $0.wing }).sorted()
+        let facts = try await kit.recallKGFacts(handle)
+        let stats = [
+            "estate: \(handle.estateName) [\(handle.estateUUID)]",
+            "memories: \(active.count) active (\(drawers.count) total)",
+            "wings: \(wings.joined(separator: ", "))",
+            "kg facts: \(facts.count) active",
+            "status: connected",
+        ].joined(separator: "\n")
+        return Self.textResult(stats + Self.ARIASessionProtocol)
+    }
+
+    /// `moot_estate_map` — return the estate's structural map with memory counts.
+    func runEstateMap(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        let estate = try await kit.estate(for: handle)
+        let drawers = try await estate.allDrawers()
+        let active = drawers.filter { $0.tombstonedAt == nil }
+        // Group by wing then room, counting drawers per location.
+        var map: [String: [String: Int]] = [:]
+        for d in active {
+            map[d.wing, default: [:]][d.room, default: 0] += 1
+        }
+        var lines: [String] = ["estate map: \(handle.estateName)"]
+        for wing in map.keys.sorted() {
+            lines.append("  \(wing)/")
+            for room in (map[wing] ?? [:]).keys.sorted() {
+                let count = map[wing]?[room] ?? 0
+                lines.append("    \(room): \(count)")
+            }
+        }
+        return Self.textResult(lines.joined(separator: "\n"))
+    }
+
+    /// `moot_estate_ping` — confirm the estate handle is live and the server
+    /// process is reachable.
+    ///
+    /// ARIA_MCP is a long-running stdio process that opens one estate on
+    /// startup and holds it for the session. There is no transient
+    /// disconnection state: the handle is either registered (open) or not.
+    /// This tool resolves the handle — if it succeeds, the estate is live;
+    /// if it throws `estateNotOpen`, the server needs restarting. No drawer
+    /// scan is performed; this is a true lightweight ping.
+    func runEstatePing(_ args: [String: JSONValue]) async throws -> JSONValue {
+        let handle = try resolveHandle(args)
+        // Resolving the handle is the entire check. If the estate were not
+        // open, resolveHandle would throw estateNotOpen and dispatch would
+        // surface it as isError:true before this line runs.
+        return Self.textResult(
+            "pong: estate \(handle.estateName) [\(handle.estateUUID)] is live"
+        )
+    }
+}
+
+// MARK: - Server defaults (private)
+
+private extension ToolDispatcher {
+    /// Default capture channel for server-filed memories: `importedFile` signals
+    /// that content was imported through an automated interface (the MCP surface),
+    /// not typed directly by a user.
+    static let defaultChannel: CaptureChannel = .importedFile
+
+    /// Actor identifier the server writes into rows it files. Uses a stable
+    /// constant so the source is identifiable in the audit trail.
+    static let serverAddedBy = "aria-mcp-server"
+}
+
+// MARK: - ClassificationScheme
+
 /// The classification scheme a lattice-anchor code belongs to.
 ///
 /// Per spec §5.8 (dual-scheme model), an anchor code may be a UDC code
-/// or an MDCC code. `capture_drawer` lets a caller declare which scheme
-/// its `udcCode` argument uses; `udc` is the default so omitting the
-/// discriminator preserves the original UDC-only behavior. The scheme
-/// is validated and echoed at the ARIA boundary — the substrate's
-/// `LatticeAnchor` does not yet carry a scheme tag (that is a separate
-/// storage migration), so this type lives in ARIA_MCP, not LocusKit.
+/// or an MDCC code. `moot_file_memory` (and other capture paths) accept
+/// a `classificationScheme` discriminator so the scheme can be validated
+/// and echoed at the ARIA boundary. The substrate's `LatticeAnchor` does
+/// not yet carry a scheme tag (that is a separate storage migration),
+/// so this type lives in ARIA_MCP, not LocusKit.
 public enum ClassificationScheme: String, Sendable, CaseIterable {
     case udc
     case mdcc
