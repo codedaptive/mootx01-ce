@@ -27,6 +27,112 @@ import Foundation
 /// Writes and removes MCP server config entries for each supported client.
 public enum Installer {
 
+    // MARK: - Binary placement
+
+    /// Copy the running `mootx01` binary into the standard install
+    /// directory and symlink it onto PATH. Mirrors codegraph's
+    /// install.sh: a self-contained executable lands at
+    /// `<home>/.mootx01/bin/mootx01`, and `<home>/.local/bin/mootx01`
+    /// symlinks to it so the command resolves from any shell.
+    ///
+    /// This is the fix for the core installer bug: previously the
+    /// installer wrote `command: <wherever the binary was run from>`
+    /// into every client config, so the entry pointed at a CWD or
+    /// dev-tree path. By copying to a stable location first and writing
+    /// THAT absolute path into the configs, the wiring survives moving
+    /// or deleting the source binary.
+    ///
+    /// Re-install is overwrite-safe: an existing placed binary is
+    /// replaced and an existing symlink is repointed.
+    ///
+    /// - Parameters:
+    ///   - sourcePath: absolute path of the binary to copy (the running
+    ///     executable, i.e. `Bundle.main.executablePath`).
+    ///   - homeDirectory: user's home directory. Inject in tests.
+    /// - Returns: the absolute path of the placed binary
+    ///   (`installedBinaryURL`) — feed this into `install(...)` as the
+    ///   client config `command`.
+    /// - Throws: filesystem errors (copy, chmod, or symlink failure).
+    @discardableResult
+    public static func placeBinary(
+        sourcePath: String,
+        homeDirectory: URL
+    ) throws -> String {
+        let fm = FileManager.default
+        let destURL = MootPaths.installedBinaryURL(homeDirectory: homeDirectory)
+        let binDir = MootPaths.installedBinaryDirURL(homeDirectory: homeDirectory)
+        let symlinkURL = MootPaths.binarySymlinkURL(homeDirectory: homeDirectory)
+        let localBinDir = MootPaths.localBinDirURL(homeDirectory: homeDirectory)
+
+        // 1. Resolve the source to its REAL path first. When `mootx01 install`
+        //    is run from the already-installed binary, it was launched via the
+        //    ~/.local/bin/mootx01 symlink, and `copyItem` on a symlink copies
+        //    the LINK (not its target) — which, after removing the real dest,
+        //    lands a self-referential symlink at dest (ELOOP) that breaks every
+        //    subsequent install. Resolving guarantees we copy a regular file.
+        let realSource = URL(fileURLWithPath: sourcePath).resolvingSymlinksInPath()
+        try fm.createDirectory(at: binDir, withIntermediateDirectories: true)
+
+        // If the source already IS the installed binary (re-install run from the
+        // placed copy), there is nothing to copy — removing dest would delete
+        // the source itself. Skip straight to (re)perms + symlink below.
+        if realSource.standardizedFileURL.path != destURL.standardizedFileURL.path {
+            // Remove any prior placed binary OR stale/looped symlink at dest so
+            // the fresh copy lands cleanly (removeItem on a symlink unlinks it,
+            // even a self-referential one).
+            if fm.fileExists(atPath: destURL.path)
+                || (try? fm.destinationOfSymbolicLink(atPath: destURL.path)) != nil {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.copyItem(at: realSource, to: destURL)
+        }
+
+        // 2. Mark the placed binary executable (0755). copyItem preserves
+        //    the source mode, but a build product copied from a sandbox or
+        //    archive may lose the bit — set it explicitly to be safe.
+        try fm.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: destURL.path
+        )
+
+        // 3. Repoint the PATH symlink. Remove any existing entry first
+        //    (file OR dangling symlink) so ln -sf semantics hold.
+        try fm.createDirectory(at: localBinDir, withIntermediateDirectories: true)
+        // symlinkExists must use lstat semantics: a dangling symlink would
+        // report false from fileExists but still block createSymbolicLink.
+        if (try? fm.destinationOfSymbolicLink(atPath: symlinkURL.path)) != nil
+            || fm.fileExists(atPath: symlinkURL.path) {
+            try fm.removeItem(at: symlinkURL)
+        }
+        try fm.createSymbolicLink(at: symlinkURL, withDestinationURL: destURL)
+
+        return destURL.path
+    }
+
+    /// Remove the placed binary and its PATH symlink. Inverse of
+    /// `placeBinary`. Safe to call when nothing was installed.
+    ///
+    /// Removes `<home>/.local/bin/mootx01` (the symlink) and the whole
+    /// `<home>/.mootx01` directory (matching codegraph's
+    /// `rm -rf "$INSTALL_DIR"`). Leaves `~/.local/bin` itself intact —
+    /// other tools may live there.
+    ///
+    /// - Parameter homeDirectory: user's home directory. Inject in tests.
+    /// - Throws: filesystem errors other than "not found".
+    public static func removePlacedBinary(homeDirectory: URL) throws {
+        let fm = FileManager.default
+        let symlinkURL = MootPaths.binarySymlinkURL(homeDirectory: homeDirectory)
+        let installRoot = homeDirectory.appendingPathComponent(".mootx01", isDirectory: true)
+
+        if (try? fm.destinationOfSymbolicLink(atPath: symlinkURL.path)) != nil
+            || fm.fileExists(atPath: symlinkURL.path) {
+            try fm.removeItem(at: symlinkURL)
+        }
+        if fm.fileExists(atPath: installRoot.path) {
+            try fm.removeItem(at: installRoot)
+        }
+    }
+
     // MARK: - Install
 
     /// Wire the mootx01 MCP server into a client's config file.

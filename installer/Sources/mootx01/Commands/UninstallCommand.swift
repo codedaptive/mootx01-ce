@@ -69,6 +69,17 @@ struct UninstallCommand: AsyncParsableCommand {
             print("  ✗ Could not remove permissions: \(error)")
         }
 
+        // Remove the placed binary (~/.mootx01) and the PATH symlink
+        // (~/.local/bin/mootx01). Inverse of install's placeBinary; mirrors
+        // codegraph's `--uninstall` which removes both the install dir and
+        // the launcher symlink.
+        do {
+            try Installer.removePlacedBinary(homeDirectory: home)
+            print("  ✓ Removed placed binary and PATH symlink.")
+        } catch {
+            print("  ✗ Could not remove placed binary: \(error)")
+        }
+
         // Purge estate databases if requested.
         if purge {
             let environment = ProcessInfo.processInfo.environment

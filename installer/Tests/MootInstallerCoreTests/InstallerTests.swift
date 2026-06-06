@@ -124,6 +124,153 @@ struct InstallerTests {
         )
     }
 
+    // MARK: - Binary placement
+
+    @Test("placeBinary copies the binary to ~/.mootx01/bin/mootx01 and makes it executable")
+    func placeBinaryCopiesAndChmods() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let source = try makeFakeBinary()
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
+
+        let expected = home.appendingPathComponent(".mootx01/bin/mootx01")
+        #expect(placed == expected.path, "placeBinary must return the installed absolute path")
+        #expect(FileManager.default.fileExists(atPath: expected.path))
+
+        // Executable bit (0755) must be set.
+        let attrs = try FileManager.default.attributesOfItem(atPath: expected.path)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        #expect(perms & 0o111 != 0, "placed binary must be executable")
+    }
+
+    @Test("placeBinary creates a PATH symlink that resolves to the placed binary")
+    func placeBinaryCreatesResolvingSymlink() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let source = try makeFakeBinary()
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
+
+        let symlink = home.appendingPathComponent(".local/bin/mootx01")
+        let dest = try FileManager.default.destinationOfSymbolicLink(atPath: symlink.path)
+        #expect(dest == placed, "symlink must resolve to the placed binary")
+    }
+
+    @Test("placeBinary overwrites an existing install (re-install is safe)")
+    func placeBinaryReinstallOverwrites() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let first = try makeFakeBinary(contents: "v1")
+        defer { try? FileManager.default.removeItem(at: first) }
+        _ = try Installer.placeBinary(sourcePath: first.path, homeDirectory: home)
+
+        let second = try makeFakeBinary(contents: "v2")
+        defer { try? FileManager.default.removeItem(at: second) }
+        let placed = try Installer.placeBinary(sourcePath: second.path, homeDirectory: home)
+
+        let content = try String(contentsOfFile: placed, encoding: .utf8)
+        #expect(content == "v2", "re-install must overwrite the prior binary")
+    }
+
+    @Test("placeBinary re-run from the installed binary does not create a self-symlink loop")
+    func placeBinaryReinstallFromPlacedBinaryDoesNotLoop() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let source = try makeFakeBinary(contents: "real")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
+
+        let fm = FileManager.default
+        let symlink = home.appendingPathComponent(".local/bin/mootx01").path
+
+        // Regression: `mootx01 install` run from the installed binary arrives
+        // here with sourcePath = the ~/.local/bin/mootx01 symlink (or the
+        // resolved installed path). Previously copyItem copied the LINK and,
+        // after removing dest, produced a self-referential symlink (ELOOP)
+        // that broke every subsequent install.
+        _ = try Installer.placeBinary(sourcePath: symlink, homeDirectory: home)
+        _ = try Installer.placeBinary(sourcePath: placed, homeDirectory: home)
+
+        // Dest must stay a REGULAR FILE — never a symlink, let alone a loop.
+        #expect((try? fm.destinationOfSymbolicLink(atPath: placed)) == nil,
+                "placed binary must remain a regular file, not a symlink")
+        #expect(fm.fileExists(atPath: placed), "placed binary must still exist")
+        #expect(try String(contentsOfFile: placed, encoding: .utf8) == "real",
+                "the real binary content must survive re-install from itself")
+        #expect(try fm.destinationOfSymbolicLink(atPath: symlink) == placed,
+                "PATH symlink still resolves to the real placed binary")
+    }
+
+    @Test("config command is the ABSOLUTE placed path, not the source path")
+    func configCommandUsesPlacedPath() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        // Simulate the InstallCommand flow: place, then write configs with
+        // the placed path. The source lives somewhere unrelated (a CWD/dev
+        // dir stand-in); the config must NOT reference it.
+        let source = try makeFakeBinary()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
+
+        let client = MCPClients.supported.first { $0.id == "claude-code" }!
+        try Installer.install(
+            client: client, binaryPath: placed,
+            homeDirectory: home, workingDirectory: URL(fileURLWithPath: "/tmp"), local: false
+        )
+
+        let configURL = home.appendingPathComponent(client.configPath)
+        let data = try Data(contentsOf: configURL)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let servers = obj?["mcpServers"] as? [String: Any]
+        let entry = servers?[client.serverName] as? [String: Any]
+        let command = entry?["command"] as? String
+
+        #expect(command == home.appendingPathComponent(".mootx01/bin/mootx01").path,
+                "config command must be the absolute placed path")
+        #expect(command?.hasPrefix("/") == true, "config command must be absolute")
+        #expect(command != source.path, "config command must not be the source/CWD path")
+        #expect(command?.hasPrefix("./") == false, "config command must not be relative")
+        let args = entry?["args"] as? [String]
+        #expect(args?.isEmpty == true, "args must stay empty")
+    }
+
+    @Test("removePlacedBinary removes the binary and the PATH symlink")
+    func removePlacedBinaryCleansUp() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let source = try makeFakeBinary()
+        defer { try? FileManager.default.removeItem(at: source) }
+        _ = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
+
+        try Installer.removePlacedBinary(homeDirectory: home)
+
+        let placed = home.appendingPathComponent(".mootx01/bin/mootx01")
+        let symlink = home.appendingPathComponent(".local/bin/mootx01")
+        let installRoot = home.appendingPathComponent(".mootx01")
+        #expect(!FileManager.default.fileExists(atPath: placed.path))
+        #expect(!FileManager.default.fileExists(atPath: installRoot.path), "install root removed")
+        // lstat-aware check: the symlink (dangling or not) must be gone.
+        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: symlink.path)) == nil)
+        #expect(!FileManager.default.fileExists(atPath: symlink.path))
+    }
+
+    @Test("removePlacedBinary is a no-op when nothing was installed")
+    func removePlacedBinaryNoOp() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+        // Must not throw on a clean home.
+        try Installer.removePlacedBinary(homeDirectory: home)
+    }
+
     // MARK: - Continue YAML
 
     @Test("install writes a valid YAML file for Continue")
@@ -210,5 +357,16 @@ struct InstallerTests {
 
     private func cleanupSandbox(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Create a throwaway file that stands in for the `mootx01` binary
+    /// in placement tests. Written to a temp dir distinct from any
+    /// sandbox home so tests can assert the config path is NOT the
+    /// source path.
+    private func makeFakeBinary(contents: String = "#!/bin/sh\nexit 0\n") throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fake-mootx01-\(UUID().uuidString)")
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        return url
     }
 }
