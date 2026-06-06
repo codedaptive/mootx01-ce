@@ -646,6 +646,212 @@ for await page in stream {                                 // first page synchro
 let past = try await estate.bitmapState(rowID: drawer.id, at: someEarlierDate)
 ```
 
+## § 7 — Swift/Rust Concordance
+
+This section tracks schema-level parity between the Swift and Rust ports.
+"Present" means the table or symbol is declared in both ports and produces
+bit-identical DDL. Gaps are tracked until resolved.
+
+| Element | Swift | Rust | Status | Notes |
+|---------|-------|------|--------|-------|
+| `drawers` table | `LocusKitSchema.drawersTable` (LocusKitSchema.swift:118) | `drawers_table()` (schema.rs:91) | Present | Generated columns and indices match |
+| `tunnels` table | `LocusKitSchema.tunnelsTable` (LocusKitSchema.swift:206) | `tunnels_table()` (schema.rs:186) | Present | `kind_id` default 1 matches |
+| `diary` table | `LocusKitSchema.diaryTable` (LocusKitSchema.swift:236) | `diary_table()` (schema.rs:222) | Present | |
+| `manifest` table | `LocusKitSchema.manifestTable` (LocusKitSchema.swift:257) | `manifest_table()` (schema.rs:250) | Present | |
+| `kg_facts` table | `LocusKitSchema.kgFactsTable` (LocusKitSchema.swift:321) | `kg_facts_table()` (schema.rs:271) | Present | `g_state_cluster` generated column matches |
+| `proposals` table | `LocusKitSchema.proposalsTable` (LocusKitSchema.swift:367) | `proposals_table()` (schema.rs:321) | Present | `candidateState` bitmap + lattice anchor columns match |
+| `associations` table | `LocusKitSchema.associationsTable` (LocusKitSchema.swift:416) | `associations_table()` (schema.rs:377) | Present | |
+| `learned_references` table | `LocusKitSchema.learnedReferencesTable` (LocusKitSchema.swift:461) | `learned_references_table()` (schema.rs:428) | Present | |
+| `node_bundles` table | `LocusKitSchema.nodeBundlesTable` (LocusKitSchema.swift:308) | `node_bundles_table()` (schema.rs:470) | Present | Three-part composite PK matches |
+| `container_fingerprints` table | `LocusKitSchema.containerFingerprintsTable` (LocusKitSchema.swift:283) | `container_fingerprints_table()` (schema.rs:506) | Present | |
+| `recall_trace` table | `LocusKitSchema.recallTraceTable` (LocusKitSchema.swift:499) | `recall_trace_table()` (schema.rs:542) | Present | `score` REAL nullable matches |
+| `keys` table (ENC-01) | `LocusKitSchema.keysTable` (LocusKitSchema.swift:532) | `keys_table()` (schema.rs:559) | Present | Added PAR-4-LK: key_id TEXT PK, algorithm TEXT, wrapped BLOB, created_at TIMESTAMP (ISO8601); no bitmap columns; no generated columns |
+
+**Date storage invariant:** all `timestamp` / `created_at` / `filedAt` columns use
+`ColumnType::Timestamp` in Rust (emitted as TEXT ISO8601 by PersistenceKit backends),
+matching Swift's `.timestamp(...)` — never REAL (Unix timestamp).
+
+**Schema version:** both ports declare `version = 1` with no migration ladder
+(`migrations` list is empty in Rust; no `ALTER TABLE` history in Swift). The ENC-01
+`keys` table was present in the Swift v1 declaration from the outset; this concordance
+row records that the Rust port now matches.
+
+### Public type surface — concept-level concordance
+
+One row per public concept. Each Swift symbol and Rust symbol is a real
+top-level declaration found in source; `file:line` cites the declaration
+site. **Visibility** is the actual visibility of both sides. **Shape rule**
+states how the two ports are allowed to differ. **Test/vector binding** names
+the conformance/parity test that proves Swift==Rust for the concept (the
+LP0 vector pair `LocusKitVectorsTests.swift` ↔ `rust/tests/lp0_vectors.rs`
+exercises the entity lifecycles end to end; the three bitmap-conformance
+pairs prove the adjective/operational/provenance enum encodings byte-for-byte).
+
+Recurring sanctioned shapes:
+- **Swift-enum-namespace / Rust free-fn module** — Swift uses a caseless
+  `public enum` as a namespace for `static func`s; Rust has no namespace-type
+  idiom and uses a `pub mod` of `pub fn`s. The Swift type exists; the Rust
+  counterpart is the module's functions (free functions are out of the audit's
+  type scope by design). Both ports implement the concept.
+- **Swift nested / Rust flat** — a type Swift nests inside its owning
+  store/stream is declared flat at module top level in Rust.
+- **Swift tuple / Rust named struct** — a method that returns an anonymous
+  labelled tuple in Swift returns a named `pub struct` in Rust.
+
+#### Entities (nouns)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Drawer | `Drawer` (Drawer.swift:31) | `Drawer` (drawer.rs:65) | public / pub | identical | `LocusKitVectorsTests.swift` ↔ `lp0_vectors.rs::lp0_drawer_lifecycle` | Confirmed |
+| Tunnel | `Tunnel` (Tunnel.swift:23) | `Tunnel` (tunnel.rs:39) | public / pub | identical | `LocusKitVectorsTests.swift` ↔ `lp0_vectors.rs::lp0_tunnel_traverse` | Confirmed |
+| KG fact | `KGFact` (KGFact.swift:54) | `KGFact` (kg_fact.rs:61) | public / pub | identical | `LocusKitVectorsTests.swift` ↔ `lp0_vectors.rs::lp0_kgfact_temporal` | Confirmed |
+| Diary entry | `DiaryEntry` (DiaryEntry.swift:23) | `DiaryEntry` (diary_entry.rs:35) | public / pub | identical | `DiaryEntryTests.swift` (structural; same columns as `diary_table`) | Confirmed |
+| Proposal | `Proposal` (Proposal.swift:74) | `Proposal` (proposal.rs:72) | public / pub | identical | `ProposalTests.swift` ↔ `proposal_tests.rs` | Confirmed |
+| Association | `Association` (Association.swift:67) | `Association` (association.rs:51) | public / pub | identical | `AssociationTests.swift` ↔ `association_tests.rs` | Confirmed |
+| Learned reference | `LearnedReference` (LearnedReference.swift:86) | `LearnedReference` (learned_reference.rs:132) | public / pub | identical | `LearnedReferenceTests.swift` ↔ `learned_reference_tests.rs` | Confirmed |
+| Container fingerprint | `ContainerFingerprint` (ContainerFingerprintStore.swift:40) | `ContainerFingerprint` (container_fingerprint_store.rs:62) | public / pub | identical | `ContainerFingerprintStoreTests.swift` | Confirmed |
+
+#### Adjective enums (proved by `adjective_bitmap_conformance.rs`)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Lifecycle state | `State` (Adjectives.swift:100) | `State` (adjectives.rs:53) | public / pub | identical | `AdjectiveBitmapConformanceTests.swift` ↔ `adjective_bitmap_conformance.rs::state_raw_values_match_verification_table` | Confirmed |
+| Trust | `Trust` (Adjectives.swift:144) | `Trust` (adjectives.rs:132) | public / pub | identical | `AdjectiveBitmapConformanceTests.swift` ↔ `adjective_bitmap_conformance.rs` | Confirmed |
+| Adjective sensitivity | `AdjectiveSensitivity` (Adjectives.swift:174) | `AdjectiveSensitivity` (adjectives.rs:184) | public / pub | identical | `AdjectiveBitmapConformanceTests.swift` ↔ `adjective_bitmap_conformance.rs` | Confirmed |
+| Adjective exportability | `AdjectiveExportability` (Adjectives.swift:192) | `AdjectiveExportability` (adjectives.rs:236) | public / pub | identical | `AdjectiveBitmapConformanceTests.swift` ↔ `adjective_bitmap_conformance.rs` | Confirmed |
+| State cluster | `StateCluster` (Filter.swift:46) | `StateCluster` (filter.rs:42) | public / pub | identical | `StateTransitionTests.swift` | Confirmed |
+
+#### Provenance enums (proved by `provenance_bitmap_conformance.rs`)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Source type | `SourceType` (Provenance.swift:68) | `SourceType` (provenance.rs:47) | public / pub | identical | `ProvenanceBitmapConformanceTests.swift` ↔ `provenance_bitmap_conformance.rs` | Confirmed |
+| Channel | `Channel` (Provenance.swift:103) | `Channel` (provenance.rs:109) | public / pub | identical | `ProvenanceBitmapConformanceTests.swift` ↔ `provenance_bitmap_conformance.rs` | Confirmed |
+| Confirmation | `Confirmation` (Provenance.swift:138) | `Confirmation` (provenance.rs:163) | public / pub | identical | `ProvenanceBitmapConformanceTests.swift` ↔ `provenance_bitmap_conformance.rs` | Confirmed |
+| Confidence | `Confidence` (Provenance.swift:156) | `Confidence` (provenance.rs:205) | public / pub | identical | `ProvenanceBitmapConformanceTests.swift` ↔ `provenance_bitmap_conformance.rs` | Confirmed |
+| Sensitivity | `Sensitivity` (Provenance.swift:178) | `Sensitivity` (provenance.rs:245) | public / pub | identical | `ProvenanceBitmapConformanceTests.swift` ↔ `provenance_bitmap_conformance.rs` | Confirmed |
+| Enrichment status | `EnrichmentStatus` (Provenance.swift:189) | `EnrichmentStatus` (provenance.rs:278) | public / pub | identical | `ProvenanceBitmapConformanceTests.swift` ↔ `provenance_bitmap_conformance.rs` | Confirmed |
+
+#### Operational enums / flag sets (proved by `operational_bitmap_conformance.rs`)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Capture channel | `CaptureChannel` (DrawerOperational.swift:62) | `CaptureChannel` (drawer_operational.rs:57) | public / pub | identical | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` | Confirmed |
+| Content kind | `ContentKind` (DrawerOperational.swift:79) | `ContentKind` (drawer_operational.rs:99) | public / pub | identical | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` | Confirmed |
+| Drawer feature flags | `DrawerFeatureFlags` (DrawerOperational.swift:101) | `DrawerFeatureFlags` (drawer_operational.rs:146) | public / pub | Swift `OptionSet` struct / Rust ZST struct of `const` bit masks (idiomatic; same bit layout) | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` (FIELD_MASK + per-bit table) | Confirmed |
+| Tunnel kind | `TunnelKind` (TunnelOperational.swift:39) | `TunnelKind` (tunnel_operational.rs:54) | public / pub | identical | `TunnelKindTests.swift` ↔ `capture_tunnel_tests.rs` | Confirmed |
+| Tunnel direction | `TunnelDirection` (TunnelOperational.swift:54) | `TunnelDirection` (tunnel_operational.rs:99) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
+| Tunnel lifecycle | `TunnelLifecycle` (TunnelOperational.swift:64) | `TunnelLifecycle` (tunnel_operational.rs:131) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
+| Tunnel origin class | `TunnelOriginClass` (TunnelOperational.swift:74) | `TunnelOriginClass` (tunnel_operational.rs:163) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
+| Tunnel strength | `TunnelStrength` (TunnelOperational.swift:88) | `TunnelStrength` (tunnel_operational.rs:201) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
+| Diary event class | `DiaryEventClass` (DiaryOperational.swift:34) | `DiaryEventClass` (diary_operational.rs:44) | public / pub | identical | `DiaryOperationalTests.swift` ↔ `diary_operational.rs` tests | Confirmed |
+| Diary severity | `DiarySeverity` (DiaryOperational.swift:55) | `DiarySeverity` (diary_operational.rs:94) | public / pub | identical | `DiaryOperationalTests.swift` | Confirmed |
+| Diary actor class | `DiaryActorClass` (DiaryOperational.swift:68) | `DiaryActorClass` (diary_operational.rs:135) | public / pub | identical | `DiaryOperationalTests.swift` | Confirmed |
+| Diary batch membership | `DiaryBatchMembership` (DiaryOperational.swift:80) | `DiaryBatchMembership` (diary_operational.rs:169) | public / pub | identical | `DiaryOperationalTests.swift` | Confirmed |
+| KG extractor class | `KGExtractorClass` (KGFactOperational.swift:49) | `KGExtractorClass` (kg_fact_operational.rs:53) | public / pub | identical | `KGFactTests.swift` ↔ `kg_fact_operational.rs` tests | Confirmed |
+| KG assertion kind | `KGAssertionKind` (KGFactOperational.swift:67) | `KGAssertionKind` (kg_fact_operational.rs:98) | public / pub | identical | `KGFactTests.swift` | Confirmed |
+| KG specificity | `KGSpecificity` (KGFactOperational.swift:84) | `KGSpecificity` (kg_fact_operational.rs:132) | public / pub | identical | `KGFactTests.swift` | Confirmed |
+| KG confidence band | `KGConfidenceBand` (KGFactOperational.swift:107) | `KGConfidenceBand` (kg_fact_operational.rs:181) | public / pub | identical | `KGFactTests.swift` | Confirmed |
+| Proposal kind | `ProposalKind` (ProposalOperational.swift:61) | `ProposalKind` (proposal_operational.rs:52) | public / pub | identical | `ProposalTests.swift` ↔ `proposal_tests.rs` | Confirmed |
+| Proposal target object type | `ProposalTargetObjectType` (ProposalOperational.swift:82) | `ProposalTargetObjectType` (proposal_operational.rs:97) | public / pub | identical | `ProposalTests.swift` | Confirmed |
+| Proposal confirmation source | `ProposalConfirmationSource` (ProposalOperational.swift:101) | `ProposalConfirmationSource` (proposal_operational.rs:134) | public / pub | identical | `ProposalTests.swift` | Confirmed |
+| Proposal generated-by class | `ProposalGeneratedByClass` (ProposalOperational.swift:117) | `ProposalGeneratedByClass` (proposal_operational.rs:165) | public / pub | identical | `ProposalTests.swift` | Confirmed |
+| Proposal confidence bucket | `ProposalConfidenceBucket` (ProposalOperational.swift:137) | `ProposalConfidenceBucket` (proposal_operational.rs:201) | public / pub | identical | `ProposalTests.swift` | Confirmed |
+| Association signal sources | `AssociationSignalSources` (AssociationOperational.swift:48) | `AssociationSignalSources` (association_operational.rs:48) | public / pub | Swift `OptionSet` struct / Rust newtype `struct(i64)` (same bit layout) | `AssociationTests.swift` ↔ `association_tests.rs` | Confirmed |
+| Association decay class | `AssociationDecayClass` (AssociationOperational.swift:91) | `AssociationDecayClass` (association_operational.rs:95) | public / pub | identical | `AssociationTests.swift` | Confirmed |
+| Association arity | `AssociationArity` (AssociationOperational.swift:107) | `AssociationArity` (association_operational.rs:139) | public / pub | identical | `AssociationTests.swift` | Confirmed |
+| Refresh policy | `RefreshPolicy` (LearnedReferenceOperational.swift:48) | `RefreshPolicy` (learned_reference.rs:51) | public / pub | identical | `LearnedReferenceTests.swift` ↔ `learned_reference_tests.rs` | Confirmed |
+| Drift severity | `DriftSeverity` (LearnedReferenceOperational.swift:69) | `DriftSeverity` (learned_reference.rs:77) | public / pub | identical | `LearnedReferenceTests.swift` | Confirmed |
+| Learn mode | `LearnMode` (LearnedReferenceOperational.swift:86) | `LearnMode` (learned_reference.rs:99) | public / pub | identical | `LearnedReferenceTests.swift` | Confirmed |
+| Learned reference source | `LearnedReferenceSource` (LearnedReferenceOperational.swift:97) | `LearnedReferenceSource` (learned_reference.rs:107) | public / pub | identical | `LearnedReferenceTests.swift` | Confirmed |
+
+#### Frames (verb argument bundles)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Capture frame | `CaptureFrame` (Frames.swift:25) | `CaptureFrame` (frames.rs:25) | public / pub | identical | `FrameTests.swift` ↔ `lp0_vectors.rs` (capture path) | Confirmed |
+| Tunnel capture frame | `TunnelCaptureFrame` (Frames.swift:138) | `TunnelCaptureFrame` (frames.rs:147) | public / pub | identical | `CaptureTunnelTests.swift` ↔ `capture_tunnel_tests.rs` | Confirmed |
+| Recall frame | `RecallFrame` (Frames.swift:197) | `RecallFrame` (filter.rs:194) | public / pub | identical (different source file per port) | `RecallPaginationTests.swift` ↔ `lp0_vectors.rs::lp0_recall_stream` | Confirmed |
+| Mutation kind | `MutationKind` (Frames.swift:236) | `MutationKind` (frames.rs:213) | public / pub | identical | `MutateMutationKindTests.swift` | Confirmed |
+| Learn frame | `LearnFrame` (Frames.swift:267) | `LearnFrame` (frames.rs:244) | public / pub | identical | `FrameTests.swift` | Confirmed |
+| Propose frame | `ProposeFrame` (Frames.swift:285) | `ProposeFrame` (frames.rs:265) | public / pub | identical | `FrameTests.swift` | Confirmed |
+| Associate frame | `AssociateFrame` (Frames.swift:306) | `AssociateFrame` (frames.rs:290) | public / pub | identical | `FrameTests.swift` | Confirmed |
+| Hydration level | `HydrationLevel` (Frames.swift:325) | `HydrationLevel` (filter.rs:56) | public / pub | identical (different source file per port) | `FrameTests.swift` | Confirmed |
+| Ordering | `Ordering` (Frames.swift:337) | `Ordering` (filter.rs:69) | public / pub | identical (different source file per port) | `RecallPaginationTests.swift` | Confirmed |
+| Filter | `Filter` (Filter.swift:67, `public indirect enum`) | `Filter` (filter.rs:94) | public / pub | Swift `indirect enum` (recursive) / Rust `enum` with boxed recursion (same case set) | `RecallPaginationTests.swift` ↔ `lp0_vectors.rs` (filtered recall) | Confirmed |
+| Threshold op | `ThresholdOp` (BitmapOps.swift:69) | `ThresholdOp` (bitmap_ops.rs:58) | public / pub | identical | `BitmapOpsTests.swift` | Confirmed |
+
+#### Identifier typealiases
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Row id | `RowID` (EstateTypes.swift:15) | `RowID` (estate_types.rs:17) | public / pub | identical (`typealias`/`type` = String) | N/A (structural) | Confirmed |
+| Lineage id | `LineageID` (Filter.swift:8, =UUID) | `LineageID` (filter.rs:31, =Uuid) | public / pub | identical alias; Swift `UUID` / Rust `Uuid` (platform UUID type) | `LineageTests.swift` | Confirmed |
+| Wikidata QID | `WikidataQID` (Filter.swift:19) | `WikidataQID` (filter.rs:34) | public / pub | identical (alias = String) | N/A (structural) | Confirmed |
+| Room id | `RoomID` (Filter.swift:12) | none — Rust passes `&str`/`String` directly at call sites; no port-level alias | public / (none) | Swift convenience alias (=String); Rust has no `type RoomID` alias | N/A (structural) | Confirmed |
+| Wing id | `WingID` (Filter.swift:16) | none — Rust passes `&str`/`String` directly at call sites; no port-level alias | public / (none) | Swift convenience alias (=String); Rust has no `type WingID` alias | N/A (structural) | Confirmed |
+| Provenance channel alias | `ProvenanceChannel` (Filter.swift:24, =`Channel`) | none — Rust references `Channel` directly | public / (none) | Swift convenience alias of `Channel`; the underlying `Channel` concept is concordant (see Provenance enums) | `ProvenanceBitmapConformanceTests.swift` (via `Channel`) | Confirmed |
+| Feature flag alias | `FeatureFlag` (Filter.swift:29, =`DrawerFeatureFlags`) | none — Rust references `DrawerFeatureFlags` directly | public / (none) | Swift convenience alias of `DrawerFeatureFlags`; the underlying flag set is concordant (see Operational) | `OperationalBitmapConformanceTests.swift` (via `DrawerFeatureFlags`) | Confirmed |
+
+#### Estate / store types
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Estate facade | `Estate` (Estate.swift:29, `public actor`) | `Estate` (estate.rs:48, `pub struct`) | public / pub | Swift `actor` (async, compiler-serialized) / Rust `struct` (sync; no async runtime — sanctioned, cf. NeuronKit policy-store seam) | `EstateTests.swift` / `EstateVerbTests.swift` ↔ `lp0_vectors.rs` (`Estate::create`) | Confirmed |
+| Owner credentials | `OwnerCredentials` (EstateTypes.swift:28) | `OwnerCredentials` (estate_types.rs:31) | public / pub | identical | `EstateTests.swift` | Confirmed |
+| Lattice anchor | `LatticeAnchor` (EstateTypes.swift:55) | `LatticeAnchor` (estate_types.rs:62) | public / pub | identical | `LatticeAnchorTests.swift` | Confirmed |
+| Estate error | `EstateError` (EstateTypes.swift:96) | `EstateError` (estate_types.rs:111) | public / pub | identical case set | `EstateTests.swift` | Confirmed |
+| Estate fingerprint families | `EstateFingerprintFamilies` (DrawerFingerprint.swift:68) | `EstateFingerprintFamilies` (drawer_fingerprint.rs:73) | public / pub | identical | `DrawerFingerprintTests.swift` | Confirmed |
+| Kit error | `LocusKitError` (LocusKitError.swift:11) | `LocusKitError` (error.rs:21) | public / pub | identical case set | `LocusKitVectorsTests.swift` (error paths) | Confirmed |
+| Bitmap state snapshot | `BitmapState` (AuditTypes.swift:27) | `BitmapState` (audit_types.rs:13) | public / pub | identical | `BitmapAuditTests.swift` ↔ `two_clock_ingest_tests.rs` | Confirmed |
+| Drawer store | `DrawerStore` (DrawerStore.swift:54, `public actor` over PersistenceKit `Storage`) | `DrawerStore` trait (drawer_store.rs:75) + `DrawerStoreCore` (drawer_store_inmemory.rs:138) + `InMemoryDrawerStore` (…:2177) + `SqliteDrawerStore` (drawer_store_sqlite.rs:75) + `PostgresDrawerStore` (drawer_store_postgres.rs:87) | public / pub | Architectural seam: Swift is ONE actor that abstracts the backend through PersistenceKit's `Storage` protocol (SQLite/Postgres/InMemory chosen at the PersistenceKit layer); Rust splits the backend into a `DrawerStore` trait with per-backend structs sharing `DrawerStoreCore`. Same backends reached at different layers — sanctioned, no async runtime in Rust. | `DrawerStoreTests.swift` ↔ `lp0_vectors.rs` (drives `InMemoryDrawerStore` via `dyn DrawerStore`) + `rust/tests/drawer_store_sqlite.rs` | Confirmed |
+| Container fingerprint store | `ContainerFingerprintStore` (ContainerFingerprintStore.swift:88, `actor`) | `ContainerFingerprintStore` (container_fingerprint_store.rs:130, `struct`) | public / pub | Swift `actor` / Rust `struct` (sync; no async runtime — sanctioned) | `ContainerFingerprintStoreTests.swift` | Confirmed |
+| Room-level fingerprint entry | `roomLevelEntries()` returns tuple `(wing, room, fingerprint)` (ContainerFingerprintStore.swift:124) | `RoomLevelEntry` (container_fingerprint_store.rs:122) | public / pub | Swift labelled tuple / Rust named `pub struct` (same fields) | `ContainerFingerprintStoreTests.swift` | Confirmed |
+| Node bundle store | `NodeBundleStore` (NodeBundleStore.swift:28, `actor`) | `NodeBundleStore` (node_bundle_store.rs:109, `struct`) | public / pub | Swift `actor` / Rust `struct` (sync; no async runtime — sanctioned) | `BundleMaterializerTests.swift` (exercises the store) | Confirmed |
+| Bundle kind | `BundleKind` (NodeBundleStore.swift:33, nested) | `BundleKind` (node_bundle_store.rs:68, flat) | public / pub | Swift nested in `NodeBundleStore` / Rust flat top-level (same case set) | `BundleMaterializerTests.swift` | Confirmed |
+| Room bundle | `rooms()` returns tuple `(room, bundle)` (NodeBundleStore.swift:120) | `RoomBundle` (node_bundle_store.rs:103) | public / pub | Swift labelled tuple / Rust named `pub struct` (same fields) | `BundleMaterializerTests.swift` | Confirmed |
+| Bundle materializer | `BundleMaterializer` (BundleMaterializer.swift:35) | `BundleMaterializer` (bundle_materializer.rs:65, `<'a, K: SubstrateKernel>`) | public / pub | identical concept; Rust is generic over the substrate kernel (lifetime + `K` param) | `BundleMaterializerTests.swift` | Confirmed |
+
+#### Recall / trace types
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Recall stream | `RecallStream` (RecallStream.swift:23, `AsyncSequence`) | `RecallStream` (recall_stream.rs:57) | public / pub | Swift `AsyncSequence` / Rust sync paginating iterator (no async runtime — sanctioned) | `RecallPaginationTests.swift` ↔ `lp0_vectors.rs::lp0_recall_stream` | Confirmed |
+| Recall page | `RecallPage` (RecallStream.swift:58, nested) | `RecallPage` (recall_stream.rs:34, flat) | public / pub | Swift nested in `RecallStream` / Rust flat top-level (same fields, `isLast`/`is_last`) | `RecallPaginationTests.swift` ↔ `lp0_vectors.rs::lp0_recall_stream` | Confirmed |
+| Recall trace item | `RecallTraceItem` (RecallTraceItem.swift:22) | `RecallTraceItem` (recall_trace_item.rs:31) | public / pub | identical | `RecallTraceItemTests.swift` ↔ `recall_trace` table | Confirmed |
+
+#### Summaries
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Wing summary | `WingSummary` (Summaries.swift:11) | `WingSummary` (summaries.rs:18) | public / pub | identical | `SummariesTests.swift` | Confirmed |
+| Room summary | `RoomSummary` (Summaries.swift:34) | `RoomSummary` (summaries.rs:46) | public / pub | identical | `SummariesTests.swift` | Confirmed |
+
+#### Manifest
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Manifest key | `ManifestKey` (Manifest.swift:6) | `ManifestKey` (manifest.rs:21) | public / pub | identical case set | `ManifestTests.swift` | Confirmed |
+| Manifest values | `ManifestValues` (Manifest.swift:78) | `ManifestValues` (manifest.rs:175) | public / pub | identical | `ManifestTests.swift` | Confirmed |
+
+#### Namespace / validator types (Swift-enum-namespace / Rust free-fn module)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---------|--------------|-------------|------------|------------|---------------------|--------|
+| Schema declaration | `LocusKitSchema` (LocusKitSchema.swift:74, caseless `enum`) | `mod schema` free fns (`schema()`/`drawers_table()`/… schema.rs:57+) | public / pub | Swift-enum-namespace / Rust free-fn module (same DDL — see § 7 table rows above) | per-table rows in § 7 above; `PackageBuildTests.swift` | Confirmed |
+| Drawer state validator | `DrawerStateValidator` (DrawerStateValidator.swift:41, caseless `enum`) | `mod drawer_state_validator` free fns (drawer_state_validator.rs:97) | public / pub | Swift-enum-namespace / Rust free-fn module (thin adapter to substrate row-state, per M1) | `StateTransitionTests.swift` ↔ substrate row-state conformance | Confirmed |
+| Forbidden-combination validator | `ForbiddenCombinationValidator` (ForbiddenCombinationValidator.swift:52, caseless `enum`) | `mod forbidden_combination_validator` `pub fn validate` (forbidden_combination_validator.rs:58) | public / pub | Swift-enum-namespace / Rust free-fn module (cookbook §9.5 forbidden combo) | `ForbiddenCombinationTests.swift` ↔ `forbidden_combination_validator.rs` inline tests | Confirmed |
+| Kit vocabulary | `LocusKitVocabulary` (LocusKitVocabulary.swift:28, caseless `enum`) | `mod vocabulary` free fns (`frozen()`/`union_slots()`, vocabulary.rs:90/22) | public / pub | Swift-enum-namespace / Rust free-fn module (frozen write-gate vocabulary) | `LocusKitVocabularyTests.swift` | Confirmed |
+| Bitmap evaluator | `BitmapEvaluator` (BitmapEvaluator.swift:59) — `internal struct` | `BitmapEvaluator` (bitmap_evaluator.rs:132) — `pub struct` (ZST) | internal / pub | Implementation-detail evaluator. Swift keeps it `internal` (entry point `BitmapEvaluator.evaluate` is module-private; cf. `EstateAudit.swift` note); Rust exposes it `pub` as a module-organisation choice. Not a contract concept either port commits to externally — same algorithm, different chosen visibility. | `EvaluatorTests.swift` ↔ `operational_bitmap_conformance.rs` (evaluation tier) | Confirmed |
+
+**Visibility-asymmetry note (`BitmapEvaluator`):** the only visibility
+asymmetry in the surface. Swift declares the evaluator `internal` and the
+Rust port declares it `pub`. The behaviour is conformance-bound identically
+(`EvaluatorTests.swift` ↔ `operational_bitmap_conformance.rs`), and neither
+port advertises it as a consumer-facing contract type, so this is recorded
+as Confirmed rather than DRIFT — but the asymmetry is flagged here so a
+future pass can decide whether Rust should narrow it to `pub(crate)`.
+
 ---
 
 *End of LocusKit Interface v0.8.*

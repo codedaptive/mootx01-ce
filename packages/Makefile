@@ -17,7 +17,7 @@
 # `audit-clear` removes those labels. Both delegate to audit-flags.sh.
 # Labels are local Finder xattrs only — not preserved by zip or git.
 
-.PHONY: clean audit-flags audit-clear
+.PHONY: clean audit-flags audit-clear concordance
 
 clean:
 	@echo "Cleaning build artifacts under $(CURDIR) ..."
@@ -33,3 +33,9 @@ audit-flags:
 
 audit-clear:
 	@bash audit-flags.sh clear
+
+# Concordance gate: fail if any public Swift/Rust type lacks a concordance row.
+# Same check CI runs (.github/workflows/concordance.yml). Run before committing
+# a new public type. Drop --strict for an advisory report.
+concordance:
+	@cd .. && python3 tools/concordance_audit/concordance_audit.py --strict

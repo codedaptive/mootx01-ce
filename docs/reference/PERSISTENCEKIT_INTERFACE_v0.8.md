@@ -474,9 +474,12 @@ public enum BackendConfiguration: Sendable {
     case inMemory
 }
 ```
-**Rust:** `pub struct EstateConfiguration { estate_id, backend, cache_config }` (the
-Rust version carries encryption config and cache config at v0.8),
+**Rust:** `pub struct EstateConfiguration { estate_id, backend, encryption_config, cache_config }`
+(as of PAR-5-PK the Rust version carries both encryption config and cache config,
+mirroring the Swift struct field-for-field),
 `pub enum BackendConfiguration { Sqlite{…}, Postgresql{…}, InMemory }`.
+`EstateConfiguration::new(estate_id, backend)` defaults both fields to plaintext /
+disabled, so call sites that use the constructor are unchanged.
 
 #### Backend entry points: `InMemoryStorage`, `SQLiteStorage`, `PostgreSQLStorage`
 
@@ -517,10 +520,14 @@ cited file. Promote a type into Tier 1 when a consumer adopts it.
   directly by consumers yet.)
 - **At-rest encryption:** `EncryptionMode` (`.plaintext`,
   `.rowEncryption`, `.fullDatabase` — modes 1–3),
-  `EstateEncryptionConfig` (mode + key identifier + `package`-scoped
-  AES-GCM-256 key; `.plaintext` default) — `EncryptionMode.swift`.
-  Consumers select a mode through `EstateConfiguration.encryptionConfig`
-  rather than naming these types.
+  `EstateEncryptionConfig` (mode + key identifier + `package`/`pub(crate)`-scoped
+  AES-GCM-256 key; `.plaintext` default) — `EncryptionMode.swift` (Swift),
+  `encryption.rs` (Rust). Consumers select a mode through
+  `EstateConfiguration.encryptionConfig` rather than naming these types.
+  Both ports ship behind the swappable `AeadProvider` seam: Swift's
+  `CryptoKitAeadProvider` and Rust's `AesGcmAeadProvider` are the defaults;
+  a FedRAMP/FIPS replacement drops in by conforming to the protocol/trait.
+  See `DECISION_RUST_AEAD_CRATE_2026-06-05.md`.
 - **Cache layer:** `EstateCacheConfig` (enabled flag, byte ceiling,
   sensitivity threshold clamped to ≤2; `.disabled` default),
   `CachingRowStore` (decorating `RowStore` with InMemory hot tier, LRU
@@ -661,6 +668,207 @@ try await storage.transaction { txn in
     try await txn.auditLog.append(event)
 }
 ```
+
+## § 7 — Swift/Rust Concordance
+
+The following types ship in both ports with equivalent semantics. The Rust
+names follow Rust conventions (snake_case fields, `snake_case()` methods);
+the Swift names follow Swift conventions (camelCase, dot-syntax initializers).
+
+### Full public-surface concordance
+
+One row per public concept. Every top-level public declaration in
+`Sources/**` (Swift) and `rust/src/**` (Rust, top-level `pub` only) is
+accounted for here, read-anchored to `file:line` in each port. The
+conformance binding is the actual parity test that proves Swift==Rust:
+the shared backend conformance suite is Swift
+`Tests/PersistenceKitConformance/ConformanceRunner.swift` applied to each
+backend (`PersistenceKitConformanceTests`, plus per-backend InMemory/SQLite/
+PostgreSQL conformance test targets) and Rust
+`rust/tests/conformance/mod.rs::run_all` driven from
+`rust/tests/inmemory_conformance.rs`, `sqlite_conformance.rs`,
+`postgres_conformance.rs`; both expose concept-named fixtures
+(`schemaFixtures`/`schema_fixtures`, `rowFixtures`/`row_fixtures`,
+`predicateFixtures`/`predicate_fixtures`, `vectorFixtures`/`vector_fixtures`,
+`auditFixtures`/`audit_fixtures`, `blobFixtures`/`blob_fixtures`,
+`transactionFixtures`/`transaction_fixtures`,
+`generatedColumnFixtures`/`generated_column_fixtures`,
+`appendOnlyFixtures`/`append_only_fixtures`). Closed value-model and
+predicate types additionally carry Swift unit suites in
+`Tests/PersistenceKitTests/*` mirrored by Rust `#[cfg(test)]` modules.
+
+Shape-rule shorthand: "async/sync seam" = Swift `async throws`, Rust
+synchronous `StorageResult<T>` — the sanctioned no-async-runtime parity
+seam declared in § 1 (cf. NeuronKit policy-store seam); "name idiom" = a
+Swift↔Rust spelling difference only (e.g. `SQLiteStorage`/`SqliteStorage`,
+`StorageError`/`StorageResult` throws-vs-Result).
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Top-level storage protocol | `Storage` (`Storage.swift:7`) | `Storage` (`storage.rs:87`) | public protocol / pub trait | async/sync seam; Rust `transaction` non-generic (object-safety, see § 2) | `ConformanceRunner.runAll` / `conformance/mod.rs::run_all` | Confirmed |
+| Transaction handle | `StorageTransaction` (`Transaction.swift:15`) | `StorageTransaction` (`storage.rs:74`) | public protocol / pub trait | async/sync seam | `transactionFixtures` / `transaction_fixtures` | Confirmed |
+| Isolation level | `IsolationLevel` (`Transaction.swift:9`) | `IsolationLevel` (`storage.rs:64`) | public enum / pub enum | identical (3 cases) | `transactionFixtures` / `transaction_fixtures` | Confirmed |
+| Row I/O sub-store | `RowStore` (`RowStore.swift:31`) | `RowStore` (`row_store.rs:8`) | public protocol / pub trait | async/sync seam | `rowFixtures` / `row_fixtures` | Confirmed |
+| Row primary key alias | `RowKey` (`RowStore.swift:7`) | `RowKey` (`types.rs:25`) | public typealias / pub type | identical (`UUID`/`uuid::Uuid`) | `rowFixtures` / `row_fixtures` | Confirmed |
+| Row value | `StorageRow` (`RowStore.swift:9`) | `StorageRow` (`types.rs:136`) | public struct / pub struct | identical (`[String:TypedValue]`/`HashMap`) | `rowFixtures` / `row_fixtures` | Confirmed |
+| Row handle | `RowHandle` (`RowStore.swift:21`) | `RowHandle` (`types.rs:159`) | public struct / pub struct | identical (table, key) | `rowFixtures` / `row_fixtures` | Confirmed |
+| Blob I/O sub-store | `BlobStore` (`BlobStore.swift:10`) | `BlobStore` (`blob_store.rs:7`) | public protocol / pub trait | async/sync seam | `blobFixtures` / `blob_fixtures` | Confirmed |
+| Blob key alias | `BlobKey` (`BlobStore.swift:8`) | `BlobKey` (`blob_store.rs:5`) | public typealias / pub type | identical (`String`) | `blobFixtures` / `blob_fixtures` | Confirmed |
+| Vector index sub-store | `VectorIndex` (`VectorIndex.swift:39`) | `VectorIndex` (`vector_index.rs:36`) | public protocol / pub trait | async/sync seam | `vectorFixtures` / `vector_fixtures` | Confirmed |
+| Distance metric | `DistanceMetric` (`VectorIndex.swift:9`) | `DistanceMetric` (`vector_index.rs:9`) | public enum / pub enum | identical (cosine, l2, dot) | `vectorFixtures` / `vector_fixtures` | Confirmed |
+| Index build params | `IndexParameters` (`VectorIndex.swift:15`) | `IndexParameters` (`vector_index.rs:16`) | public enum / pub enum | name idiom (`hnsw(m:efConstruction:)`/`Hnsw{m,ef_construction}`) | `vectorFixtures` / `vector_fixtures` | Confirmed |
+| Search params | `SearchParameters` (`VectorIndex.swift:21`) | `SearchParameters` (`vector_index.rs:23`) | public enum / pub enum | name idiom (`efSearch`/`ef_search`) | `vectorFixtures` / `vector_fixtures` | Confirmed |
+| k-NN result | `VectorSearchResult` (`VectorIndex.swift:27`) | `VectorSearchResult` (`vector_index.rs:30`) | public struct / pub struct | identical (key, distance, metadata) | `vectorFixtures` / `vector_fixtures` | Confirmed |
+| Audit log sub-store | `AuditLog` (`AuditLog.swift:24`) | `AuditLog` (`audit_log.rs:48`) | public protocol / pub trait | async/sync seam | `auditFixtures` / `audit_fixtures` | Confirmed |
+| Audit event | `AuditEvent` (SubstrateTypes, re-used via `import SubstrateTypes`) | `AuditEvent` (`audit_log.rs:31`) | public (SubstrateLib) / pub struct (crate-local mirror) | Swift re-uses SubstrateLib type; Rust mirrors it crate-locally (same fields) | `auditFixtures` / `audit_fixtures` | Confirmed |
+| Change observer | `StorageObserver` (`StorageObserver.swift:57`) | `StorageObserver` (`observer.rs:51`) | public protocol / pub trait | identical (AsyncStream vs callback model) | `InMemoryObserverTests` / `observer` unit tests | Confirmed |
+| Observer event kind | `StorageEvent` (`StorageObserver.swift:29`) | `StorageEvent` (`observer.rs:36`) | public enum / pub enum | identical (insert, update, delete) | `InMemoryObserverTests` / `observer` unit tests | Confirmed |
+| Table change record | `TableChange` (`StorageObserver.swift:35`) | `TableChange` (`observer.rs:43`) | public struct / pub struct | identical fields (table, event, rowKey, values, hlc) | `InMemoryObserverTests` / `observer` unit tests | Confirmed |
+| No-op observer | `NoOpObserver` (`NoOpObserver.swift:10`) | `NoOpObserver` (`observer.rs:64`) | public final class / pub struct | identical (empty-stream default) | `NoOpObserverTests` / `observer` unit tests | Confirmed |
+| Closed value model | `TypedValue` (`TypedValue.swift:26`) | `TypedValue` (`types.rs:29`) | public enum / pub enum | identical (13 cases, case-for-case) | `TypedValueTests` / `types` unit tests | Confirmed |
+| Column reference | `Column` (`Column.swift:9`) | `Column` (`types.rs:104`) | public struct / pub struct | identical (table, name; Comparable) | `ColumnTests` / `types` unit tests | Confirmed |
+| Column type tag | `ColumnType` (`Column.swift:24`) | `ColumnType` (`types.rs:120`) | public enum / pub enum | identical (11 cases) | `ColumnTests` / `types` unit tests | Confirmed |
+| Predicate algebra | `StoragePredicate` (`Predicate.swift:11`) | `StoragePredicate` (`predicate.rs:11`) | public indirect enum / pub enum | name idiom (`bitmaskAll`/`BitmaskAll`); Swift `indirect` | `predicateFixtures` / `predicate_fixtures` | Confirmed |
+| Order direction | `OrderDirection` (`Predicate.swift:69`) | `OrderDirection` (`predicate.rs:98`) | public enum / pub enum | identical (ascending, descending) | `predicateFixtures` / `predicate_fixtures` | Confirmed |
+| Order clause | `OrderClause` (`Predicate.swift:74`) | `OrderClause` (`predicate.rs:104`) | public struct / pub struct | identical (column, direction) | `predicateFixtures` / `predicate_fixtures` | Confirmed |
+| Schema declaration | `SchemaDeclaration` (`Schema.swift:9`) | `SchemaDeclaration` (`schema.rs:8`) | public struct / pub struct | identical (kitID, version, tables, indices, migrations) | `SchemaDeclarationTests` + `schemaFixtures` / `schema` unit + `schema_fixtures` | Confirmed |
+| Table declaration | `TableDeclaration` (`Schema.swift:31`) | `TableDeclaration` (`schema.rs:39`) | public struct / pub struct | identical (incl. `appendOnly`/`append_only`) | `schemaFixtures` / `schema_fixtures` | Confirmed |
+| Column declaration | `ColumnDeclaration` (`Schema.swift:66`) | `ColumnDeclaration` (`schema.rs:91`) | public struct / pub struct | identical (name, type, nullable, defaultValue) | `schemaFixtures` / `schema_fixtures` | Confirmed |
+| Index declaration | `IndexDeclaration` (`Schema.swift:85`) | `IndexDeclaration` (`schema.rs:155`) | public struct / pub struct | identical (name, table, columns, unique) | `schemaFixtures` / `schema_fixtures` | Confirmed |
+| Migration | `Migration` (`Schema.swift:99`) | `Migration` (`schema.rs:179`) | public struct / pub struct | identical (fromVersion, toVersion, operations) | `schemaFixtures` / `schema_fixtures` | Confirmed |
+| Schema operation | `SchemaOperation` (`Schema.swift:111`) | `SchemaOperation` (`schema.rs:186`) | public enum / pub enum | name idiom (`.custom(sqlite:postgresql:)`/`Custom{sqlite,postgresql}`) | `schemaFixtures` / `schema_fixtures` | Confirmed |
+| Generated column | `GeneratedColumn` (`GeneratedColumn.swift:44`) | `GeneratedColumn` (`generated_column.rs:23`) | public struct / pub struct | identical (name, type, expression) | `GeneratedExpressionTests` + `generatedColumnFixtures` / `generated_column` unit + `generated_column_fixtures` | Confirmed |
+| Generated expression | `GeneratedExpression` (`GeneratedColumn.swift:64`) | `GeneratedExpression` (`generated_column.rs:51`) | public indirect enum / pub enum | name idiom; Swift `indirect` | `GeneratedExpressionTests` / `generated_column` unit tests | Confirmed |
+| Estate configuration | `EstateConfiguration` (`EstateConfiguration.swift:8`) | `EstateConfiguration` (`storage.rs:15`) | public struct / pub struct | identical fields (see field-parity table below) | `ConformanceRunner.runAll` / `run_all` (backend selection) | Confirmed |
+| Backend selection | `BackendConfiguration` (`EstateConfiguration.swift:33`) | `BackendConfiguration` (`storage.rs:43`) | public enum / pub enum | name idiom (`.sqlite(url:)`/`Sqlite{...}`) | `ConformanceRunner.runAll` / `run_all` | Confirmed |
+| Estate cache config | `EstateCacheConfig` (`EstateCacheConfig.swift:23`) | `EstateCacheConfig` (`cache_config.rs:18`) | public struct / pub struct | identical (enabled, byte ceiling, sensitivity ≤2) | `EstateCacheConfigTests` / `cache_config_tests.rs` | Confirmed |
+| Caching row-store decorator | `CachingRowStore` (`CachingRowStore.swift:30`) | `CachingRowStore` (`caching_row_store.rs:211`) | public final class / pub struct | async/sync seam | `CachingRowStoreTests` / `caching_row_store_tests.rs` | Confirmed |
+| Cache invalidator | `CacheInvalidator` (`CacheInvalidator.swift:34`) | `CacheInvalidator` (`cache_invalidator.rs:27`) | public final class / pub struct | async/sync seam | `CacheWiringTests` / `cache_wiring_tests.rs` | Confirmed |
+| InMemory backend | `InMemoryStorage` (`InMemoryStorage.swift:25`) | `InMemoryStorage` (`inmemory.rs:70`) | public final class / pub struct | async/sync seam; identical entry point | `InMemoryConformanceTests` / `inmemory_conformance.rs` | Confirmed |
+| SQLite backend | `SQLiteStorage` (`SQLiteStorage.swift:23`) | `SqliteStorage` (`sqlite.rs:383`) | public final class / pub struct | name idiom (`SQLiteStorage`/`SqliteStorage`); Swift raw SQLite, Rust rusqlite bundled + sqlite-vec | `SQLiteConformanceTests` / `sqlite_conformance.rs` | Confirmed |
+| PostgreSQL backend | `PostgreSQLStorage` (`PostgreSQLStorage.swift:24`) | `PostgresStorage` (`postgres.rs:714`) | public final class / pub struct | name idiom (`PostgreSQLStorage`/`PostgresStorage`); both pgvector, schema-per-estate | `PostgreSQLConformanceTests` / `postgres_conformance.rs` | Confirmed |
+| Error model | `StorageError` (`StorageError.swift:5`) | `StorageError` (`error.rs:6`) | public enum / pub enum | identical (12 cases, case-for-case) | `StorageErrorTests` / `error` unit tests | Confirmed |
+| Result alias | (Swift uses `async throws`; no alias) | `StorageResult` (`error.rs:100`) | — / pub type | async/sync seam — Swift surfaces errors via `throws`, Rust via `Result<T, StorageError>` alias | `StorageErrorTests` / `error` unit tests | Confirmed |
+| Replication façade | `StorageReplicator` (`StorageReplicator.swift:62`) | (free fns `replicate`/`flush`/`hydrate`, `replication.rs:124`) | public enum (namespace) / pub fns | name idiom — Swift caseless-enum namespace of statics; Rust free functions in `replication` module | `ReplicationConformanceTests` / `replication.rs` `#[cfg(test)]` | Confirmed |
+| Replication mode | `ReplicationMode` (`ReplicationTypes.swift:24`) | `ReplicationMode` (`replication.rs:65`) | public enum / pub enum | identical (`.full`/`.incremental`) | `ReplicationConformanceTests` / `replication.rs` tests | Confirmed |
+| Replication cursor | `ReplicationCursor` (`ReplicationTypes.swift:50`) | `ReplicationCursor` (`replication.rs:78`) | public struct / pub struct | identical (hlcWatermark, rowsWritten, auditEventsWritten) | `ReplicationConformanceTests` / `replication.rs` tests | Confirmed |
+| Replication error | `ReplicationError` (`ReplicationTypes.swift:72`) | `ReplicationError` (`replication.rs:91`) | public enum / pub enum | identical (schemaMismatch, notImplemented, storageFailure) | `ReplicationConformanceTests` / `replication.rs` tests | Confirmed |
+
+No PersistenceKit public type is an Apple-platform binding: all three
+backends (InMemory, SQLite, PostgreSQL) and the crypto seam ship in both
+ports (Rust uses rusqlite + sqlite-vec, the `postgres` crate + pgvector,
+and the `aes-gcm` crate — the recorded C-1 exception, see
+`DECISION_RUST_AEAD_CRATE_2026-06-05.md`). There are therefore no
+Exempt rows and no new ignore-list proposals for this package.
+
+### Encryption types (PAR-4-PK / PAR-5-PK)
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `EncryptionMode` | `EncryptionMode` | Three cases: `plaintext`/`Plaintext`, `rowEncryption`/`RowEncryption`, `fullDatabase`/`FullDatabase` |
+| `EstateEncryptionConfig` | `EstateEncryptionConfig` | `mode`, `keyIdentifier`/`key_identifier`, key is `package`/`pub(crate)` scoped. Constructors: `.plaintext` static / `plaintext()`, `init(_ mode:)` / `row_encryption()`, `full_database()` |
+| `AeadProvider` (protocol) | `AeadProvider` (trait) | Two methods: `encrypt(_:key:)` / `encrypt(plaintext, key)`, `decrypt(_:key:)` / `decrypt(ciphertext, key)`. Conformers must generate a fresh random nonce per encrypt. Wire layout `[12-byte nonce][16-byte tag][ciphertext]` is identical in both ports |
+| `CryptoKitAeadProvider` | `AesGcmAeadProvider` | Default provider behind the seam. Swift uses CryptoKit AES.GCM; Rust uses the `aes-gcm` crate (C-1 exception). Both implement standard AES-GCM-256; cross-decryptable |
+| `RowCrypto` | `RowCrypto` | Thin wrapper calling through `AeadProvider`. Swift: `RowCrypto.encrypt(_:key:provider:)`. Rust: `RowCrypto::encrypt(plaintext, key, provider)`. Provider defaults to the CryptoKit/aes-gcm default |
+
+### AeadProvider seam design
+
+The seam lives in `PersistenceKitSQLite` (Swift) and `encryption.rs` (Rust),
+internal to the backend layer. No consumer names `AeadProvider` directly;
+`SQLiteBackend` / the Rust SQLite backend call `RowCrypto` which delegates
+to the provider. The default provider is wired at backend construction time
+and can be replaced by injecting an alternate conformer.
+
+Key invariants shared by both ports:
+- **Fresh nonce per encrypt.** Never reuse a nonce under a given key.
+- **No key logging.** Keys extracted to raw bytes for the provider interface;
+  the local binding is not stored or logged.
+- **Authentication on decrypt.** Tampered input throws, never returns corrupt plaintext.
+- **Wire layout.** `[12-byte nonce][16-byte GCM tag][ciphertext]` in both ports,
+  enabling cross-decryptability between Swift and Rust.
+
+### EstateConfiguration field parity (as of PAR-5-PK)
+
+| Field | Swift | Rust |
+|---|---|---|
+| Estate identifier | `estateID: UUID` | `estate_id: uuid::Uuid` |
+| Backend selection | `backend: BackendConfiguration` | `backend: BackendConfiguration` |
+| Encryption config | `encryptionConfig: EstateEncryptionConfig` | `encryption_config: EstateEncryptionConfig` |
+| Cache config | `cacheConfig: EstateCacheConfig` | `cache_config: EstateCacheConfig` |
+
+---
+
+## § 10 — PersistenceKitReplication module (§5 full-snapshot)
+
+**Added:** 2026-06-05, mission `pk-replication`.
+
+A new `PersistenceKitReplication` library target (Swift) and `replication` module
+(Rust) expose a generic full-snapshot primitive for copying estates between storage
+backends. No existing target gains a dependency on this library; consumers opt in
+by adding the dependency explicitly.
+
+### Types
+
+| Type | Swift | Rust | Role |
+|---|---|---|---|
+| `ReplicationMode` | `enum ReplicationMode: Sendable` | `enum ReplicationMode` | Controls scope: `.full` or `.incremental` (latter throws) |
+| `ReplicationCursor` | `struct ReplicationCursor: Sendable, Equatable` | `struct ReplicationCursor` | Watermark returned after flush/hydrate |
+| `ReplicationError` | `enum ReplicationError: Error, Sendable, Equatable` | `enum ReplicationError` | Closed error enum (schemaMismatch, notImplemented, storageFailure) |
+
+### Entry points
+
+| Name | Swift signature | Rust signature |
+|---|---|---|
+| `replicate` | `static func replicate(from:to:schema:mode:) async throws -> ReplicationCursor` | `pub fn replicate(source, destination, schema, mode) -> Result<ReplicationCursor, ReplicationError>` |
+| `flush` | `static func flush(from:into:schema:mode:) async throws -> ReplicationCursor` | `pub fn flush(source, destination, schema) -> Result<ReplicationCursor, ReplicationError>` |
+| `hydrate` | `static func hydrate(into:from:schema:) async throws -> ReplicationCursor` | `pub fn hydrate(in_memory, durable, schema) -> Result<ReplicationCursor, ReplicationError>` |
+
+### Swift/Rust concordance
+
+| Behavioural contract | Swift | Rust |
+|---|---|---|
+| Schema gate | `source.currentSchemaVersion(for: schema.kitID)` vs `destination.currentSchemaVersion(for: schema.kitID)`, both must equal `schema.version` | global `current_schema_version()` compared against `schema.version`; Rust trait has no per-kit version |
+| Atomicity | `destination.transaction(isolation: .serializable)` wrapping all row upserts + `auditLog.appendBatch` | `destination.transaction(IsolationLevel::Serializable, &mut \|txn\| { ... })` |
+| Generated column filter | `Set(table.generatedColumns.map(\.name))` | `table.generated_columns.iter().map(\|g\| g.name.clone()).collect::<BTreeSet<_>>()` |
+| Conflict columns | `table.primaryKey` (NOT `RowHandle.key`) | `table.primary_key` (NOT `RowHandle.key`) |
+| Audit copy path | `source.auditLog.iterate(after: nil, rowID: nil, limit: Int.max)` → `txn.auditLog.appendBatch` | `source.audit_log().iterate(None, None, usize::MAX)` → `audit_log.append_batch` |
+| Blob copy | Not implemented (no `listKeys()` on `BlobStore`; no GLK kit uses blobStore as of 2026-06-05) | Same |
+| HLC watermark | Max `HLC` across all row `.hlc` TypedValues + all `AuditEvent.hlc` | Same |
+| `incremental` | Throws `ReplicationError.notImplemented` | Returns `ReplicationError::NotImplemented` |
+
+### ReplicationCursor fields
+
+| Field | Swift | Rust | Meaning |
+|---|---|---|---|
+| HLC watermark | `hlcWatermark: HLC?` | `hlc_watermark: Option<HLC>` | Max HLC seen; `nil`/`None` if source was empty |
+| Row count | `rowsWritten: Int` | `rows_written: usize` | Total rows upserted across all tables |
+| Audit count | `auditEventsWritten: Int` | `audit_events_written: usize` | Total audit events copied |
+
+### Source files
+
+| Language | File |
+|---|---|
+| Swift | `Sources/PersistenceKitReplication/ReplicationTypes.swift` |
+| Swift | `Sources/PersistenceKitReplication/StorageReplicator.swift` |
+| Swift tests | `Tests/PersistenceKitReplicationTests/ReplicationConformanceTests.swift` |
+| Rust | `rust/src/replication.rs` (module `replication`) |
+| Package | `Package.swift` (product `PersistenceKitReplication`, target `PersistenceKitReplication`, testTarget `PersistenceKitReplicationTests`) |
+| Rust module | `rust/src/lib.rs` (`pub mod replication;`) |
+
+### Known deviations from Swift
+
+- The Rust `Storage` trait has no `currentSchemaVersion(for: kitID)`. The Rust
+  replication gate uses the global `current_schema_version()` and compares it
+  against `schema.version` directly. This is correct for single-kit-per-storage
+  estates (the common case in tests and current GLK usage). Multi-kit estates would
+  need a `current_schema_version_for(kit_id)` addition to the Rust trait — tracked
+  as a future extension.
+
+- Pre-existing bug F-HLC-01: `SQLiteConnection.bind(.hlc)` uses `SubstrateTypes.HLC.packed`
+  layout `(node<<56)|(logical<<40)|phys` but `SQLiteBackend.unpackHLC()` reads a different
+  bit layout, so HLC columns do NOT round-trip through SQLite. The replication primitive
+  is not affected (it copies TypedValue verbatim). The bug exists in the SQLite backend
+  independently of replication and is tracked as F-HLC-01 for a follow-on fix mission.
 
 ---
 
