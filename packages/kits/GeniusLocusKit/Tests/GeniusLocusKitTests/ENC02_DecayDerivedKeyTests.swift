@@ -1,6 +1,5 @@
 import Testing
 import Foundation
-import CryptoKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
@@ -101,17 +100,18 @@ struct ENC02_DecayDerivedKeyTests {
             )
         }
 
-        // The reconstructed key equals the secret hashed to a SymmetricKey,
-        // and is 32 bytes (feeds ENC-01 RowCrypto's AES-GCM-256 unchanged).
+        // The reconstructed key equals the secret hashed to a 32-byte scope key
+        // (feeds ENC-01 RowCrypto's AES-GCM-256 unchanged; no longer SymmetricKey,
+        // now [UInt8] after the CryptoKit→in-repo migration).
         let key = try LagrangeDecayKey.reconstruct(
             threshold: 3, provider: provider, now: issuedAt
         )
         let expected = LagrangeDecayKey.key(fromSecret: provider.secret)
         #expect(
-            key.withUnsafeBytes { Data($0) } == expected.withUnsafeBytes { Data($0) },
+            key == expected,
             "reconstructed key equals SHA-256 of the secret field element"
         )
-        #expect(key.bitCount / 8 == 32, "reconstructed scope key is 32 bytes")
+        #expect(key.count == 32, "reconstructed scope key is 32 bytes")
     }
 
     // MARK: - 2. Below threshold decays

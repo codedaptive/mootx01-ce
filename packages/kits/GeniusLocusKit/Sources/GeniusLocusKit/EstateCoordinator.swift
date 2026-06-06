@@ -134,6 +134,7 @@ public extension GeniusLocusKit {
             diaryStores[handle] = nil
             kgStores[handle] = nil
             matrixTiers[handle] = nil
+            nodeTopologyProviders[handle] = nil
             dropGrantSurface(for: handle)
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")
         }
@@ -142,6 +143,7 @@ public extension GeniusLocusKit {
         diaryStores[handle] = nil
         kgStores[handle] = nil
         matrixTiers[handle] = nil
+        nodeTopologyProviders[handle] = nil
         dropGrantSurface(for: handle)
         Self.log.info("closed estate \(handle.estateUUID, privacy: .public)")
     }

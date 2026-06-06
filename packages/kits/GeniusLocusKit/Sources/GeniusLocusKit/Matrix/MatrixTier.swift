@@ -641,6 +641,46 @@ public struct MatrixTier: Sendable, Equatable, Codable {
             temporalCausality.removeValue(forKey: key)
         }
     }
+
+    // MARK: - fullRebuild
+
+    /// Rebuild F, O, C, AND T from the unified audit log in a single call.
+    ///
+    /// Combines `rebuild(from:)` (which populates F, O, C, liveRowCount,
+    /// lastHLC) with `rebuildTemporal(from:)` (which populates T and
+    /// temporalWatermarkHLC) into one tier. Use this method when a complete
+    /// matrix rebuild is required (e.g., after hydrating an estate from
+    /// durable storage). The two-pass design is documented in the module
+    /// header: F/O/C derive from individual rows while T crosses pairs of
+    /// rows at different times, so a single-pass rebuild is not possible.
+    ///
+    /// This method lives inside the `MatrixTier` type because merging T into
+    /// an F/O/C tier requires writing `private(set)` stored properties
+    /// (`temporalCausality`, `temporalWatermarkHLC`) that are not writable
+    /// from external callers. The merge is safe: `addT` accumulates counts
+    /// rather than replacing them, preserving the invariant that each entry
+    /// is counted exactly once.
+    ///
+    /// The result is bit-identical to calling `rebuild` and `rebuildTemporal`
+    /// independently and combining their outputs — just without the
+    /// external-scope restriction.
+    public static func fullRebuild(from log: UnifiedAuditLog) -> MatrixTier {
+        // Pass 1: F, O, C, liveRowCount, lastHLC.
+        var tier = rebuild(from: log)
+
+        // Pass 2: T, temporalWatermarkHLC.
+        // Construct the T-only tier then merge its entries into `tier`.
+        let tTier = rebuildTemporal(from: log)
+
+        // Merge T entries. addT is private mutating on the same type, so
+        // `tier` (a var inside this static func) accepts the mutation.
+        for (key, count) in tTier.temporalCausality {
+            tier.addT(key: key, delta: count)
+        }
+        // Advance the temporal watermark to the value computed by the T pass.
+        tier.temporalWatermarkHLC = tTier.temporalWatermarkHLC
+        return tier
+    }
 }
 
 // MARK: - HLC ordering helper

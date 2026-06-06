@@ -305,6 +305,14 @@ fn encode_snapshot(s: &MatrixSnapshot) -> Vec<u8> {
         }
     }
 
+    // temporal_watermark_hlc — appended as a 16-byte trailer (i64 + i32 + i32).
+    // Snapshots produced by older builds that lack this trailer are loaded with
+    // HLC::ZERO fallback in decode_snapshot, mirroring Swift's
+    // `decodeIfPresent(HLC.self) ?? .zero` backward-compatibility path.
+    put_i64(&mut out, s.tier.temporal_watermark_hlc.physical_time);
+    put_i32(&mut out, s.tier.temporal_watermark_hlc.logical_count);
+    put_i32(&mut out, s.tier.temporal_watermark_hlc.node_id);
+
     out
 }
 
@@ -453,6 +461,30 @@ fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceErro
         curves.insert(id, MatrixCalibrationCurve { buckets });
     }
     let calibration = MatrixCalibrationRegistry { curves };
+
+    // temporal_watermark_hlc trailer — 16 bytes (i64 + i32 + i32).
+    //
+    // Snapshots written before this field was added have no trailing bytes.
+    // Decoding falls back to HLC::ZERO in that case, mirroring Swift's
+    // `decodeIfPresent(HLC.self, forKey: .temporalWatermarkHLC) ?? .zero`.
+    //
+    // A partial trailer (1–15 remaining bytes) is a malformed snapshot
+    // and returns SnapshotDecodeFailed so the caller falls back to rebuild.
+    let remaining = r.buf.len() - r.pos;
+    tier.temporal_watermark_hlc = match remaining {
+        0 => HLC::ZERO,
+        16 => {
+            let pt = r.i64()?;
+            let lc = r.i32()?;
+            let node = r.i32()?;
+            HLC::new(pt, lc, node)
+        }
+        n => {
+            return Err(MatrixPersistenceError::SnapshotDecodeFailed(format!(
+                "unexpected trailing bytes: {n} (expected 0 or 16)"
+            )));
+        }
+    };
 
     Ok(MatrixSnapshot {
         schema_version,

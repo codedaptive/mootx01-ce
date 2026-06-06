@@ -287,6 +287,305 @@ fn nmf_deterministic_across_runs() {
     assert_eq!(a.h, b.h);
 }
 
+// MARK: - rebuild_temporal conformance
+//
+// These tests mirror the Swift conformance tests in:
+//   StandingSignalsTests.rebuildTemporalPopulatesAndIsIdempotent
+//   RecallDirectorTests.rebuildTemporalWiresThroughRecallScoring
+//
+// The fixture: two captures 5 minutes apart on different fields.
+// Expected outcome: one T-matrix cell at lag bucket 8 (5 min → bucket 8),
+// and temporal_watermark_hlc advanced past HLC::ZERO.
+
+
+/// Mirrors Swift StandingSignalsTests.rebuildTemporalPopulatesAndIsIdempotent.
+///
+/// Two captures on different fields, 5 minutes apart (300_000 ms).
+/// After rebuild_temporal:
+///   - temporal_causality must be non-empty (the pair was within window).
+///   - temporal_watermark_hlc must be the HLC of the later entry.
+///   - A second rebuild_temporal on the same log must produce bit-identical
+///     temporal_causality and the same watermark (idempotent).
+#[test]
+fn rebuild_temporal_populates_t_and_is_idempotent() {
+    let h0 = HLC::new(0, 0, 1);
+    let h1 = HLC::new(300_000, 0, 1); // 5 minutes = 300_000 ms
+
+    let row_a = EntryUUID([0xAA; 16]);
+    let row_b = EntryUUID([0xBB; 16]);
+
+    let mut log = UnifiedAuditLog::new();
+    // Entry 0: capture on field "f.src" with bitmap value 1 at t=0.
+    log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(1), h0));
+    // Entry 1: capture on field "f.tgt" with bitmap value 2 at t+5min.
+    log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(2), h1));
+
+    let tier1 = MatrixTier::rebuild_temporal(&log);
+
+    // temporal_watermark_hlc must advance past HLC::ZERO.
+    assert!(
+        tier1.temporal_watermark_hlc > HLC::ZERO,
+        "rebuild_temporal must advance temporal_watermark_hlc past ZERO; got {:?}",
+        tier1.temporal_watermark_hlc
+    );
+    // Watermark is the HLC of the last entry processed.
+    assert_eq!(
+        tier1.temporal_watermark_hlc, h1,
+        "temporal_watermark_hlc must equal HLC of last entry"
+    );
+
+    // T must be non-empty: the two captures are within the 256-minute window.
+    assert!(
+        !tier1.temporal_causality.is_empty(),
+        "temporal_causality must be non-empty for entries within window"
+    );
+
+    // 5 minutes → lag bucket 8 (smallest bucket >= 5 in {1,2,4,8,...}).
+    let src = MatrixValueCoord::new("f.src", UnifiedAuditValue::Bitmap(1));
+    let tgt = MatrixValueCoord::new("f.tgt", UnifiedAuditValue::Bitmap(2));
+    let key = MatrixTemporalKey {
+        source: src,
+        target: tgt,
+        lag_bucket: 8,
+    };
+    assert_eq!(
+        tier1.temporal_causality.get(&key),
+        Some(&1),
+        "T cell (f.src→f.tgt, bucket=8) must equal 1"
+    );
+
+    // Idempotence: rebuilding from the same log twice gives identical T cells
+    // and the same watermark.
+    let tier2 = MatrixTier::rebuild_temporal(&log);
+    assert_eq!(
+        tier2.temporal_watermark_hlc, tier1.temporal_watermark_hlc,
+        "rebuild_temporal is deterministic: watermark must match on second rebuild"
+    );
+    assert_eq!(
+        tier2.temporal_causality, tier1.temporal_causality,
+        "rebuild_temporal is deterministic: T cells must be bit-identical on second rebuild"
+    );
+}
+
+/// Mirrors the out-of-window case in StandingSignalsTests and the fold
+/// unit tests: two captures > 256 minutes apart produce no T pairs.
+#[test]
+fn rebuild_temporal_ignores_entries_outside_window() {
+    let h0 = HLC::new(0, 0, 1);
+    // 257 minutes = 257 * 60_000 ms = 15_420_000 ms — past the 256-minute cap.
+    let h1 = HLC::new(257 * 60_000, 0, 1);
+
+    let row_a = EntryUUID([0xCC; 16]);
+    let row_b = EntryUUID([0xDD; 16]);
+
+    let mut log = UnifiedAuditLog::new();
+    log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(1), h0));
+    log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(2), h1));
+
+    let tier = MatrixTier::rebuild_temporal(&log);
+
+    // Watermark still advances (the entries were processed, just produced no pairs).
+    assert_eq!(tier.temporal_watermark_hlc, h1);
+    // T is empty — no pair within window.
+    assert!(
+        tier.temporal_causality.is_empty(),
+        "temporal_causality must be empty when entries are outside the window"
+    );
+}
+
+/// Null after-value contributes no coordinate per the Swift reference comment:
+/// "Null after-value contributes no coordinate; the entry advances the
+/// watermark but generates no T pairs."
+#[test]
+fn rebuild_temporal_null_value_advances_watermark_but_generates_no_pairs() {
+    let h0 = HLC::new(0, 0, 1);
+    let h1 = HLC::new(60_000, 0, 1); // 1 minute apart
+
+    let row_a = EntryUUID([0xEE; 16]);
+    let row_b = EntryUUID([0xFF; 16]);
+
+    let mut log = UnifiedAuditLog::new();
+    // First entry has null after-value — contributes no coord.
+    log.add(UnifiedAuditEntry::new(
+        AuditTier::Locus,
+        h0,
+        UnifiedAuditVerb::Capture,
+        row_a,
+        "f.src".to_string(),
+        UnifiedAuditValue::Null,
+        UnifiedAuditValue::Null,
+        None,
+    ));
+    // Second entry has a real value.
+    log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(3), h1));
+
+    let tier = MatrixTier::rebuild_temporal(&log);
+
+    // Watermark advances to the last entry.
+    assert_eq!(tier.temporal_watermark_hlc, h1);
+    // No pairs because the first entry had null after-value → no coord → no source.
+    assert!(
+        tier.temporal_causality.is_empty(),
+        "null after-value must not generate T pairs"
+    );
+}
+
+/// Non-capture/expunge verbs (e.g. Recall, Mutate) are ignored by rebuild_temporal.
+/// This mirrors the Swift filter: `.filter { $0.verb == .capture || $0.verb == .expunge }`.
+#[test]
+fn rebuild_temporal_ignores_non_capture_expunge_verbs() {
+    let h0 = HLC::new(0, 0, 1);
+    let h1 = HLC::new(60_000, 0, 1);
+
+    let row_a = EntryUUID([0x11; 16]);
+    let row_b = EntryUUID([0x22; 16]);
+
+    let mut log = UnifiedAuditLog::new();
+    // A Recall verb — should be ignored by rebuild_temporal.
+    log.add(UnifiedAuditEntry::new(
+        AuditTier::Locus,
+        h0,
+        UnifiedAuditVerb::Recall,
+        row_a,
+        "f.src".to_string(),
+        UnifiedAuditValue::Null,
+        UnifiedAuditValue::Bitmap(1),
+        None,
+    ));
+    // A Capture verb — should be processed.
+    log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(2), h1));
+
+    let tier = MatrixTier::rebuild_temporal(&log);
+
+    // The Recall entry is ignored — no source coord — so no T pairs.
+    assert!(
+        tier.temporal_causality.is_empty(),
+        "non-capture/expunge verbs must not contribute to T"
+    );
+    // Watermark advances to last capture entry.
+    assert_eq!(tier.temporal_watermark_hlc, h1);
+}
+
+// MARK: - temporal_watermark_hlc snapshot persistence (t3-temporal-watermark)
+//
+// These two tests enforce the conformance fix: the Rust MatrixSnapshot now
+// saves and restores temporal_watermark_hlc, mirroring Swift's Codable path
+// which uses `decodeIfPresent ?? .zero`.
+
+/// Round-trip: a MatrixTier with a known non-zero temporal_watermark_hlc
+/// must survive a snapshot save→load cycle with the watermark intact.
+///
+/// This test FAILS before the fix (temporal_watermark_hlc resets to ZERO
+/// after load) and PASSES after (encode_snapshot writes the trailer;
+/// decode_snapshot reads it back).
+#[test]
+fn snapshot_persists_temporal_watermark_hlc_round_trip() {
+    let tmp = std::env::temp_dir().join(format!(
+        "matrix-twm-rt-{}.bin",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _cleanup = scopeguard_remove(tmp.clone());
+
+    // Build a log and run rebuild_temporal so temporal_watermark_hlc
+    // is set to a known non-zero value (the HLC of the later entry).
+    let h0 = HLC::new(0, 0, 1);
+    let h1 = HLC::new(300_000, 0, 1); // 5 minutes = 300_000 ms
+    let row_a = EntryUUID([0xA1; 16]);
+    let row_b = EntryUUID([0xB1; 16]);
+
+    let mut log = UnifiedAuditLog::new();
+    log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(1), h0));
+    log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(2), h1));
+
+    // Use rebuild_temporal to populate temporal_watermark_hlc on the tier.
+    let t_tier = MatrixTier::rebuild_temporal(&log);
+    assert!(
+        t_tier.temporal_watermark_hlc > HLC::ZERO,
+        "precondition: rebuild_temporal must set a non-zero watermark"
+    );
+    let known_watermark = t_tier.temporal_watermark_hlc;
+
+    // Build a full MatrixSnapshot carrying this tier.
+    let backend =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
+    // Construct the snapshot via a custom save so we control the tier directly.
+    use genius_locus_kit::matrix::{MatrixSnapshot};
+    let snap_to_save = MatrixSnapshot::new(t_tier, MatrixCalibrationRegistry::new(), h1);
+    backend.save(&snap_to_save).expect("save must succeed");
+
+    // Load it back and verify temporal_watermark_hlc is preserved.
+    let backend2 =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
+    let loaded = backend2.load().expect("load must succeed").expect("snapshot must be present");
+
+    assert_eq!(
+        loaded.tier.temporal_watermark_hlc, known_watermark,
+        "temporal_watermark_hlc must survive snapshot round-trip; \
+         got {:?}, want {:?}",
+        loaded.tier.temporal_watermark_hlc, known_watermark
+    );
+}
+
+/// Backward-compat: loading a snapshot serialized WITHOUT the
+/// temporal_watermark_hlc trailer (an old-format snapshot) must produce
+/// temporal_watermark_hlc == HLC::ZERO, mirroring Swift's
+/// `decodeIfPresent(HLC.self, forKey: .temporalWatermarkHLC) ?? .zero`.
+///
+/// We simulate the old format by building the snapshot through the
+/// current save path and then truncating the last 16 bytes before loading.
+#[test]
+fn snapshot_backward_compat_missing_watermark_falls_back_to_zero() {
+    let tmp = std::env::temp_dir().join(format!(
+        "matrix-twm-bc-{}.bin",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _cleanup = scopeguard_remove(tmp.clone());
+
+    // Save a snapshot with a non-zero watermark so the file has the trailer.
+    let h1 = HLC::new(300_000, 0, 1);
+    let row_a = EntryUUID([0xA2; 16]);
+    let row_b = EntryUUID([0xB2; 16]);
+
+    let mut log = UnifiedAuditLog::new();
+    log.add(capture(row_a, "f.src", UnifiedAuditValue::Bitmap(1), HLC::new(0, 0, 1)));
+    log.add(capture(row_b, "f.tgt", UnifiedAuditValue::Bitmap(2), h1));
+    let t_tier = MatrixTier::rebuild_temporal(&log);
+
+    use genius_locus_kit::matrix::MatrixSnapshot;
+    let snap = MatrixSnapshot::new(t_tier, MatrixCalibrationRegistry::new(), h1);
+    let backend =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
+    backend.save(&snap).expect("save must succeed");
+
+    // Truncate the last 16 bytes to simulate an old-format snapshot that
+    // lacked the temporal_watermark_hlc trailer.
+    let mut bytes = std::fs::read(&tmp).expect("read back saved bytes");
+    let original_len = bytes.len();
+    assert!(
+        original_len >= 16,
+        "saved snapshot must be at least 16 bytes"
+    );
+    bytes.truncate(original_len - 16);
+    std::fs::write(&tmp, &bytes).expect("write truncated bytes");
+
+    // Load the truncated snapshot — must succeed with watermark == ZERO.
+    let backend2 =
+        MatrixPersistenceBackend::new(MatrixPersistenceMode::Snapshotted { file: tmp.clone() });
+    let loaded = backend2.load().expect("load must succeed").expect("snapshot must be present");
+
+    assert_eq!(
+        loaded.tier.temporal_watermark_hlc,
+        HLC::ZERO,
+        "old-format snapshot without watermark trailer must decode with HLC::ZERO fallback"
+    );
+}
+
 // Small RAII helper — pulls a path out at drop time without bringing
 // in the `scopeguard` crate.
 struct ScopeguardRemove(std::path::PathBuf);

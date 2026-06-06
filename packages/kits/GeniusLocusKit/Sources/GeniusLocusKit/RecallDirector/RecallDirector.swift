@@ -78,6 +78,18 @@ public extension GeniusLocusKit {
         case .unionBest:
             return try await recallUnionBest(
                 estate: estate, request: request, plan: plan, handle: handle)
+
+        case .nodeTreeNative:
+            // The nodeTreeNative mode injects host-tree topology edges into the
+            // StructureGraph via recallTunnels (the structural lens path), not via
+            // the scored drawer-recall path. For drawer retrieval, this mode
+            // delegates to the locusOnly bitmap lane so all estate drawers are
+            // reachable through the normal bitmap filter. The tree-edge union
+            // happens separately when the structural lenses call recallTunnels:
+            // GLK freezes the provider's treeEdges(scope:nil) result exactly once
+            // at that call (G1) and appends synthetic containment tunnels to the
+            // estate's stored tunnels before returning the union.
+            return try await recallLocusOnly(estate: estate, request: request, plan: plan)
         }
     }
 
