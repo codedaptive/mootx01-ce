@@ -70,6 +70,7 @@ pub fn schema() -> SchemaDeclaration {
             node_bundles_table(),
             container_fingerprints_table(),
             recall_trace_table(),
+            keys_table(),
         ],
         indices: indices(),
         migrations: Vec::new(),
@@ -558,6 +559,45 @@ fn recall_trace_table() -> TableDeclaration {
 }
 
 // ---------------------------------------------------------------------------
+// keys (ENC-01 encryption-key registry)
+// ---------------------------------------------------------------------------
+
+/// At-rest encryption key registry (Mission ENC-01;
+/// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 Appendix A.1). Maps a
+/// stable key identifier to the wrapped key bytes. `wrapped` holds the data
+/// key wrapped by the platform keystore (Secure Enclave / TPM); the registry
+/// must never hold a raw unwrapped key.
+///
+/// `created_at` is TEXT ISO8601 per the fleet date-storage rule — stored via
+/// `ColumnType::Timestamp` (PersistenceKit emits TEXT ISO8601 for that type).
+///
+/// `drawers.keyID` references `key_id`. A drawer record under an absent key is
+/// unreadable, not missing (Appendix A.1). Until the hardware-wrapping path is
+/// implemented, this table is intentionally empty — populating `wrapped` with
+/// an unwrapped key would be a security regression (ENC-01 scope note).
+///
+/// Column-for-column mirror of `LocusKitSchema.keysTable` in Swift:
+///   key_id    TEXT NOT NULL PRIMARY KEY   — stable opaque identifier
+///   algorithm TEXT NOT NULL               — e.g. "AES-GCM-256"
+///   wrapped   BLOB NOT NULL               — key bytes from platform keystore
+///   created_at TIMESTAMP (TEXT ISO8601)   — creation instant
+pub fn keys_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "keys".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("key_id"),
+            ColumnDeclaration::text("algorithm"),
+            ColumnDeclaration::blob("wrapped"),
+            ColumnDeclaration::timestamp("created_at"),
+        ],
+        primary_key: vec!["key_id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // indices
 // ---------------------------------------------------------------------------
 
@@ -736,10 +776,9 @@ mod tests {
     }
 
     /// Tables in the declared order, matching the Swift declaration.
-    /// `proposals` follows `kg_facts` (both noun tables). The Swift
-    /// schema additionally carries a `keys` table (ENC-01) the Rust
-    /// port does not yet mirror; that pre-existing divergence is
-    /// unrelated to this list.
+    /// `proposals` follows `kg_facts` (both noun tables). `keys` is the
+    /// ENC-01 encryption-key registry — last in both the Swift and Rust
+    /// declarations.
     #[test]
     fn table_count_and_order() {
         let names: Vec<String> = schema().tables.iter().map(|t| t.name.clone()).collect();
@@ -757,6 +796,7 @@ mod tests {
                 "node_bundles",
                 "container_fingerprints",
                 "recall_trace",
+                "keys",
             ]
         );
     }
@@ -919,6 +959,45 @@ mod tests {
                 "ext"
             ]
         );
+    }
+
+    /// Keys table mirrors the Swift ENC-01 declaration column-for-column:
+    /// key_id (TEXT PK), algorithm (TEXT), wrapped (BLOB), created_at (TIMESTAMP).
+    /// No generated columns, no bitmap columns — a plain registry. Dates are
+    /// TEXT ISO8601 (Timestamp type, fleet date-storage rule). `wrapped` is BLOB
+    /// so raw key bytes survive a round-trip without encoding, matching Swift's
+    /// `.blob("wrapped")`.
+    #[test]
+    fn keys_table_shape_matches_swift() {
+        let s = schema();
+        let k = s.tables.iter().find(|t| t.name == "keys").unwrap();
+        // Primary key is the stable key identifier
+        assert_eq!(k.primary_key, vec!["key_id".to_string()]);
+        // Exactly four columns in the same order as the Swift declaration
+        let names: Vec<&str> = k.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["key_id", "algorithm", "wrapped", "created_at"]);
+        // Column types: TEXT, TEXT, BLOB, Timestamp
+        use persistence_kit::types::ColumnType;
+        assert_eq!(k.columns[0].column_type, ColumnType::Text);
+        assert_eq!(k.columns[1].column_type, ColumnType::Text);
+        assert_eq!(k.columns[2].column_type, ColumnType::Blob);
+        assert_eq!(k.columns[3].column_type, ColumnType::Timestamp);
+        // No row-level boolean flags, no bitmaps — the registry is opaque;
+        // encryption state lives in drawers.keyID (NULL = plaintext, else encrypted).
+        for col in &k.columns {
+            assert!(
+                col.column_type != ColumnType::Bitmap,
+                "keys table must not carry a bitmap column"
+            );
+            assert!(
+                col.column_type != ColumnType::Bool,
+                "keys table must not carry a Bool stored column"
+            );
+        }
+        // No generated columns — the query path is key_id only
+        assert!(k.generated_columns.is_empty());
+        // Not append-only: keys can be rotated (replaced by a new key_id row)
+        assert!(!k.append_only);
     }
 
     /// Container fingerprints uses a composite primary key (wing, room)
