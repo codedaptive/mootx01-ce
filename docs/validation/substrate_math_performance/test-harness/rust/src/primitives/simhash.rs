@@ -618,8 +618,8 @@ fn encode_output(output: &JsonObject, encoder: &mut CanonicalBinaryEncoder) {
 // expand that u64 to a 32-byte seed via SplitMix-style avalanche
 // (matching the Swift mirror) before constructing the family.
 
-use substrate_kit::hyperplane::HyperplaneFamily as RealHyperplaneFamily;
-use substrate_kit::simhash as real_simhash;
+use substrate_types::hyperplane::HyperplaneFamily as RealHyperplaneFamily;
+use substrate_types::simhash as real_simhash;
 
 fn reference_simhash(
     input_words: &[u64],

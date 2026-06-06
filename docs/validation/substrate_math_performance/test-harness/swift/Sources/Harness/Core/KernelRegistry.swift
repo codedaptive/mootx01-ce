@@ -7,10 +7,10 @@
 //
 // On Apple platforms, every kernel listed here is always
 // available (the Swift package always compiles the SIMD path,
-// the BNNS path, the Metal path, and so on once they exist).
-// Future kernels with platform requirements (e.g. an AVX-512
-// shim for x86_64 Linux Swift, if such a thing ever ships)
-// will gate their entries with #if predicates here.
+// the Metal path, and so on once they exist). Future kernels
+// with platform requirements (e.g. an AVX-512 shim for x86_64
+// Linux Swift, if such a thing ever ships) will gate their
+// entries with #if predicates here.
 //
 // Mirror of test-harness/rust/src/harness/kernel_registry.rs.
 
@@ -29,16 +29,6 @@ public enum KernelRegistry {
         // supported target. If a future port needs to gate it,
         // do it here.
         out.append(.simd)
-        // BnnsKernel ships on Apple platforms (Accelerate is
-        // always present). On hypothetical Swift-on-Linux
-        // builds without Accelerate, kernel(of: .bnns) falls
-        // through to ScalarKernel; the registry should NOT
-        // include it there since the dispatcher's skip-on-
-        // mismatch policy would just exclude it from the
-        // sweep anyway. Gate explicitly.
-        #if canImport(Accelerate)
-        out.append(.bnns)
-        #endif
         // NeonKernel uses `import simd` which is broadly
         // available, but the kernel is meaningful only on
         // aarch64 (NEON instructions). Gate on the arch check

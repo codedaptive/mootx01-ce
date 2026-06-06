@@ -35,7 +35,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::bit_field;
+use substrate_kernel::bit_field;
 
 pub struct BitFieldMaskedEqualsPrimitive;
 

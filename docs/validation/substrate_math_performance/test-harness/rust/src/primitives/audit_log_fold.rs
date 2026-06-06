@@ -16,8 +16,8 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::audit_log_fold::AuditLogFold;
-use substrate_kit::hlc::HLC;
+use substrate_ml::audit_log_fold::AuditLogFold;
+use substrate_types::hlc::HLC;
 use substrate_kit::verbs::{AuditEvent, LatticeAnchor, NounType, RowId};
 
 pub struct AuditLogFoldPrimitive;

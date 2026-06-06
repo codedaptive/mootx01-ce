@@ -6,11 +6,11 @@ harness. It is the empirical foundation for the cookbook's §4.4
 portable kernel layer and §17 performance budgets.
 
 A new engineer (human or agent) joining substrate work reads
-this README and the constitutional spec
-(`../../engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`),
+this README, the decision index at `../../_internal/decisions/README.md`,
+and the Phase 2 final selection at
+`../../_internal/decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`,
 then is ready to extend the kernel layer with new backends or
-new ops. (The per-op kernel-selection decision records are kept in
-the development tree and are not shipped in the open-core edition.)
+new ops.
 
 ## Directory layout
 
@@ -24,8 +24,7 @@ substrate_math_performance/
 │   ├── Package.swift
 │   ├── glref-swift-PortableKernel.swift   trait + dispatcher + KernelKind
 │   ├── glref-swift-PortableKernel-SIMD.swift  SimdKernel (production default)
-│   ├── glref-swift-PortableKernel-BNNS.swift  BnnsKernel (rejected, retained)
-│   ├── glref-swift-PortableKernel-NEON.swift  NeonKernel (rejected, retained)
+│   ├── glref-swift-PortableKernel-NEON.swift  NeonKernel (retained)
 │   ├── glref-swift-PortableKernel-Metal.swift MetalKernel (rejected, retained)
 │   ├── glref-swift-HyperplaneFamily.swift
 │   ├── glref-swift-SimHash.swift
@@ -56,20 +55,21 @@ substrate_math_performance/
 ```
 
 The Rust reference port is no longer a single `rust/` tree here. After
-the four-package substrate refactor it is split across
+the 2026-05-29 four-package refactor it is split across
 `packages/libs/SubstrateTypes/rust/` (types: SimHash, Fingerprint256,
 HLC, Hamming), `packages/libs/SubstrateKernel/rust/` (kernel dispatch +
 SIMD), `packages/libs/SubstrateML/rust/` (ML primitives), and
 `packages/libs/SubstrateLib/rust/` (the orchestration layer). The current
-constitutional spec is
-`docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
-(the v0.36 cookbook is superseded and not retained in this edition).
+constitutional spec is `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
+(the v0.36 cookbook is archived under `docs/_internal/workhistory/architecture/`).
 
 The benchmark sweep (`stress-test`, `topk-bench`, Rust `stress_test`) is
 NOT present in this repo: the `StressTest/` and `TopKBench/` Swift sources
-and the Rust `stress_test` bin are not in the tree. Until they are ported,
-only the conformance binaries (`gen-vectors`, `validate-vectors`) build
-and run here.
+and the Rust `stress_test` bin were not carried over from the prior
+`mootx01-rc` tree. Until they are ported, only the conformance binaries
+(`gen-vectors`, `validate-vectors`) build and run here. Porting the sweep
+is tracked in
+`docs/_internal/workhistory/missions/MISSION_PERF_SWEEP_HARNESS.md`.
 
 ## What lives where
 
@@ -90,9 +90,12 @@ and run here.
   learned dispatch.
 - **Reference kernel implementations** live alongside the trait
   in `glref-{lang}-PortableKernel-{Kernel}.{ext}`. Phase 2
-  registered four: SimdKernel (production), BnnsKernel,
-  NeonKernel, MetalKernel. Three are retained for benchmarking
-  and conformance gates only.
+  registered four candidates; three remain after measurement:
+  SimdKernel (production), NeonKernel, MetalKernel. BnnsKernel
+  was removed 2026-06-06 after BNNSGraph measurement confirmed it
+  is slower than SimdKernel on every op (see decision-record
+  addenda for the per-op numbers). NeonKernel and MetalKernel are
+  retained for benchmarking and conformance gates.
 - **Test vectors** in `test-harness/vectors/` are the byte-
   identical conformance fixtures. The Swift scalar reference
   generates them via `gen-vectors`; every other kernel and
@@ -136,15 +139,15 @@ swift test                         # DispatcherTests + HarnessTests, all pass
 # Conformance gate: every kernel passes against every vector
 .build/release/validate-vectors ../vectors/hamming.json --kernel scalar
 .build/release/validate-vectors ../vectors/hamming.json --kernel simd
-.build/release/validate-vectors ../vectors/hamming.json --kernel bnns
 .build/release/validate-vectors ../vectors/hamming.json --kernel neon
 .build/release/validate-vectors ../vectors/hamming.json --kernel metal
 # Each prints CRC expected/actual and PASS or FAIL.
 ```
 
 The benchmark sweep (`stress-test`, `topk-bench`) is not yet ported to
-this repo (see the directory-layout note above). The commands below are
-the intended interface once those executables land:
+this repo (see the directory-layout note above and
+`MISSION_PERF_SWEEP_HARNESS.md`). The commands below are the intended
+interface once those executables land:
 
 ```sh
 # Benchmark sweep (produces JSON in benchmarks/results/{date}-{hw}/)

@@ -21,7 +21,7 @@
 // rationale on per-op kernel selection.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use substrate_kit::kernel::{KernelKind, PortableKernel, SubstrateKernel};
+use substrate_kernel::kernel::{KernelKind, PortableKernel, SubstrateKernel};
 
 // Stored as a u8 so we can use a plain atomic and avoid a Mutex.
 // Encoding mirrors KernelKind::parse / as_str.

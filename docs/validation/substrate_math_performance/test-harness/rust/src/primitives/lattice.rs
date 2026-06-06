@@ -23,7 +23,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::lattice_distance::UDCTreeDistance;
+use substrate_ml::lattice_distance::UDCTreeDistance;
 
 pub struct LatticePrimitive;
 

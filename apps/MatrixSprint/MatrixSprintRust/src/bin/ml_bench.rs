@@ -31,10 +31,10 @@ use std::time::{Duration, Instant};
 
 use harness::{hardware, SplitMix64};
 
-use substrate_kit::fingerprint256::Fingerprint256;
-use substrate_kit::hlc::HLC;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::hlc::HLC;
 use substrate_ml::moment_summary::TimeRange;
-use substrate_kit::hyperplane::HyperplaneFamily;
+use substrate_types::hyperplane::HyperplaneFamily;
 
 use substrate_ml::anomaly::AnomalyDetection;
 use substrate_ml::bradley_terry::{BradleyTerryEstimator, PreferenceObservation};

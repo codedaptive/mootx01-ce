@@ -1,0 +1,27 @@
+# SubstrateValidator (Rust) — standalone field validator of the substrate libs.
+#
+# Depends on the test-harness library crate, which carries the canonical
+# CanonicalBinaryEncoder + CRC32 and the per-primitive descriptors that call the
+# real packages/libs implementations. Depending on `harness` (rather than
+# re-deriving) guarantees this app emits the SAME ANSWERS as the validation
+# harness, by construction.
+#
+# The harness hard-wires substrate-kernel/simd-nightly in its direct dependency,
+# so depending on it requires the same pinned nightly toolchain (rust-toolchain.toml,
+# mirroring test-harness/rust). Default features keep kernel_registry::available()
+# reporting both Scalar and Simd, which backend A/B (subsystem 2) needs.
+[package]
+name = "substrate-validator"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "substrate-validator"
+path = "src/main.rs"
+
+[dependencies]
+# package name is geniuslocus-test-harness; its lib is `harness`. Alias the dep
+# key to `harness` so `use harness::...` resolves. Default features include the
+# simd-nightly passthrough so both Scalar and Simd kernels are available.
+harness = { path = "../../test-harness/rust", package = "geniuslocus-test-harness" }
+serde_json = { version = "1.0", features = ["preserve_order"] }

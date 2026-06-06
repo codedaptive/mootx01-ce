@@ -49,7 +49,7 @@ public struct PairingNonce: Sendable, Equatable {
         // ASCII lexicographic compare, "0F..." sorts AFTER "10..."
         // (because 'F' = 0x46 > '1' = 0x31), but raw byte compare
         // ranks 0x0F before 0x10. The Rust mirror compares raw
-        // bytes; Swift must agree byte-for-byte or the two legs
+        // bytes; Swift must agree byte-for-byte or the two ports
         // would derive different seeds and incompatible shared
         // hyperplane families. Cross-language conformance gate
         // catches this divergence.
@@ -125,7 +125,7 @@ public enum PairingHandshake {
 
     /// Expand a 64-bit seed to 32 bytes via 4 rounds of
     /// SplitMix64-style avalanche. Deterministic; matches the
-    /// Rust mirror so both legs produce identical families.
+    /// Rust mirror so both ports produce identical families.
     private static func expandSeedTo32(_ seed: UInt64) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: 32)
         var s = seed

@@ -147,7 +147,7 @@ baseline JSON files, committed.
 ## Milestone triggers
 
 Phase A done plus B and C substantially evidenced → Rust
-LocusKit port mission can begin. The Rust port needs the
+LocusKit port mission can begin. The Rust version needs the
 spec's claims as its conformance target; threshold-2 validation
 (implementation passes the spec's claims) suffices, threshold-3
 (application validation via Phase D) is not required for the

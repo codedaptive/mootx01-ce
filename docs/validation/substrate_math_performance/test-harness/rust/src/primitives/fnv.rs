@@ -28,7 +28,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::fnv;
+use substrate_types::fnv;
 
 pub struct FNVPrimitive;
 

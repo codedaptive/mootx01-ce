@@ -188,7 +188,6 @@ public struct ScalarKernel: SubstrateKernel {
 public enum KernelKind: String, Sendable {
     case scalar  = "scalar"
     case simd    = "simd"
-    case bnns    = "bnns"
     case neon    = "neon"
     case metal   = "metal"
     case avx512  = "avx512"
@@ -227,14 +226,6 @@ public enum PortableKernel {
         switch kind {
         case .scalar: return ScalarKernel()
         case .simd:   return SimdKernel()
-        case .bnns:
-            #if canImport(Accelerate)
-            return BnnsKernel()
-            #else
-            // Non-Apple platforms: BNNS unavailable; fall through
-            // to scalar so callers get a correct (if slow) result.
-            return ScalarKernel()
-            #endif
         case .neon:
             // NeonKernel uses Swift's `import simd` directly (no
             // arm_neon.h bridge). Available wherever the simd

@@ -35,9 +35,9 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::fingerprint256::Fingerprint256;
-use substrate_kit::hlc::HLC;
-use substrate_kit::moment_summary::{MomentSummary, RowLite, TimeRange};
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::hlc::HLC;
+use substrate_ml::moment_summary::{MomentSummary, RowLite, TimeRange};
 
 pub struct MomentSummaryPrimitive;
 

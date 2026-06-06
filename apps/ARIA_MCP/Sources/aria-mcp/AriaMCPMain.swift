@@ -6,6 +6,8 @@ import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
 import PersistenceKitPostgreSQL
+import ObserverSink
+import IntellectusLib
 
 // Entry point for the ARIA_MCP stdio server.
 //
@@ -181,8 +183,73 @@ struct AriaMCPMain {
         let tooling = ToolDispatcher(kit: kit, handle: handle)
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
         let server = StdioServer(dispatcher: dispatcher)
+
+        // Manager-telemetry self-report (MANAGER_1.0_PLAN.md §3 Phase 1: one real
+        // consumer wired end-to-end). Opt-in and fully additive: if
+        // ARIA_MCP_STATS_STORE is unset/empty this is a no-op and the MCP wire
+        // surface is byte-for-byte unchanged. When set, install a
+        // PersistenceStatsSink against the manager's store, drive IntellectusLib's
+        // gate from the store flag, and emit one startup metric. All failures are
+        // swallowed — telemetry must never affect the MCP server's behavior.
+        await installManagerTelemetryIfConfigured()
+
         Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools)")
         await server.run()
         Logging.stderr.log("ARIA_MCP exiting (stdin closed)")
+    }
+
+    /// Install the manager-telemetry sink if `ARIA_MCP_STATS_STORE` is set.
+    ///
+    /// This is the headless-ARIA self-report wiring (MANAGER_1.0_PLAN.md §3).
+    /// It is opt-in and additive: when the env var is unset or empty, this
+    /// returns immediately and the MCP server runs exactly as before.
+    ///
+    /// When set, it opens the manager's shared stats store (a second reader/
+    /// writer alongside moot-mgr; SQLite WAL handles concurrent access), installs
+    /// a `PersistenceStatsSink` with a stable per-process dropbox id, sets the
+    /// IntellectusLib gate from the store's monitoring flag, and emits one
+    /// startup metric so a wired pipeline shows immediate signal.
+    ///
+    /// Telemetry must never affect the server: any failure here is logged to
+    /// stderr and swallowed.
+    static func installManagerTelemetryIfConfigured() async {
+        let rawStorePath = ProcessInfo.processInfo.environment["ARIA_MCP_STATS_STORE"] ?? ""
+        guard !rawStorePath.isEmpty else { return }
+
+        do {
+            let storeURL = URL(fileURLWithPath: rawStorePath)
+            let store = try StatsStore(url: storeURL)
+            // open() is forward-only and seeds defaults only if absent, so it
+            // does not disturb a flag the manager already set.
+            try await store.open()
+
+            // Stable per-process dropbox id: process name + a short random suffix
+            // so concurrent ARIA instances attribute to distinct dropboxes.
+            let dropboxID = "aria-mcp-\(UUID().uuidString.prefix(8))"
+            let sink = PersistenceStatsSink(store: store, dropboxID: dropboxID)
+            Intellectus.install(sink: sink)
+
+            // Drive the IntellectusLib gate from the manager's flag. The
+            // store-level flag is re-checked per sample by the sink, so this
+            // initial read just lets the off-path stay free when monitoring is off.
+            let monitoringOn = try await store.isMonitoringEnabled()
+            Intellectus.setEnabled(monitoringOn)
+
+            // One startup metric — proves the pipeline end-to-end when the
+            // manager has monitoring on. Off-path is free when disabled.
+            Intellectus.report(.metric(
+                name: "aria.mcp.start",
+                value: 1.0,
+                tags: ["dropbox": dropboxID],
+                ts: Date().timeIntervalSince1970
+            ))
+
+            Logging.stderr.log(
+                "ARIA_MCP telemetry wired (store: \(rawStorePath), dropbox: \(dropboxID), monitoring: \(monitoringOn ? "on" : "off"))"
+            )
+        } catch {
+            // Telemetry is best-effort. A wiring failure must not stop the server.
+            Logging.stderr.log("ARIA_MCP telemetry wiring skipped (error: \(error))")
+        }
     }
 }

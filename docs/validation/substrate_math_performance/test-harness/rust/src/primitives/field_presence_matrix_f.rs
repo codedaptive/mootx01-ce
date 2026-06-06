@@ -36,7 +36,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::matrix_f::MatrixF;
+use substrate_types::matrix_f::MatrixF;
 
 const BIT_PRESENCE_BYTES: usize = 27; // 216 bits / 8
 

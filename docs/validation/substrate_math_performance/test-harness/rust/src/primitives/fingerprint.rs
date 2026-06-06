@@ -22,7 +22,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::fingerprint256::Fingerprint256;
+use substrate_types::fingerprint256::Fingerprint256;
 
 pub struct FingerprintPrimitive;
 

@@ -40,7 +40,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::eigenvalue_centrality::EigenvalueCentrality;
+use substrate_ml::eigenvalue_centrality::EigenvalueCentrality;
 
 pub struct EigenvalueCentralityPrimitive;
 

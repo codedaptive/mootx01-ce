@@ -16,7 +16,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::fft;
+use substrate_ml::fft;
 
 pub struct FFTPrimitive;
 

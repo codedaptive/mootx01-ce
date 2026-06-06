@@ -19,7 +19,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::pairing::PairingNonce;
+use substrate_ml::pairing::PairingNonce;
 
 pub struct PairingHandshakePrimitive;
 
