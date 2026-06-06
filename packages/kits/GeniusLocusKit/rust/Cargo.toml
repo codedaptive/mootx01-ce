@@ -19,6 +19,12 @@ path = "src/lib.rs"
 # always built byte-compatible anticipating exactly this wiring.
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+# SubstrateML (Layer 3 algorithms) is required so `MatrixTier::rebuild_temporal`
+# can delegate to `temporal_causality_fold::fold` — the canonical T-matrix engine
+# (cookbook §6.4). Mirrors the Swift dependency added 2026-06-04 per
+# DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md. Layering: GeniusLocusKit
+# (composition) → SubstrateML (algorithms) does NOT invert.
+substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 # The coordinator, handle, and lattice-overlap fan-out logic remain pure
 # Rust; LocusKit-equivalent recall is mocked through a trait in those
 # surfaces. The COW branch surface (src/branches), by contrast, IS the
@@ -35,3 +41,10 @@ persistence-kit = { path = "../../PersistenceKit/rust" }
 vectorkit = { path = "../../VectorKit/rust" }
 corpus-kit = { path = "../../CorpusKit/rust" }
 uuid = { version = "1", features = ["v4"] }
+# Crypto hygiene: zeroize scope keys on drop and on revoke. This is the
+# companion crate to aes-gcm (already a transitive dep via PersistenceKit);
+# adding it as a direct dep makes the dependency explicit and enables the
+# Zeroizing<> wrapper on mediated_keys storage.
+# C-1 rationale: crypto hygiene companion to the approved aes-gcm crate.
+# See DECISION_RUST_AEAD_CRATE_2026-06-05.
+zeroize = "1"

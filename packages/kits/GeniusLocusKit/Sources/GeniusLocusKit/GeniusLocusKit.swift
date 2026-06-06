@@ -154,6 +154,20 @@ public actor GeniusLocusKit {
     /// when the estate is closed.
     internal var preferenceStores: [EstateHandle: any PreferenceStore] = [:]
 
+    /// Per-estate node topology providers for the `.nodeTreeNative` recall mode.
+    ///
+    /// Populated via `registerNodeTopology(_:for:)`. When present, the GLK
+    /// `recallTunnels` path calls `provider.treeEdges(scope: nil)` exactly once
+    /// (G1 — read-once-and-freeze) and unions the returned containment edges with
+    /// the estate's stored tunnel edges before delivering the StructureGraph to the
+    /// structural lenses. When absent, `recallTunnels` returns only stored tunnels
+    /// (existing behaviour, unchanged). Dropped when the estate is closed.
+    ///
+    /// Topology boundary invariant (G4): this registry stores ONLY the three-method
+    /// NodeTopologyProvider adapter — no content is accessible through it. Any
+    /// node-content need routes through CorpusKit.
+    internal var nodeTopologyProviders: [EstateHandle: any NodeTopologyProvider] = [:]
+
     /// Construct an empty kit. The estate registry starts empty;
     /// callers admit estates via `open(storage:owner:)`.
     public init() {
@@ -310,6 +324,43 @@ public extension GeniusLocusKit {
     ///   - handle: The estate this store is associated with.
     func registerPreferenceStore(_ store: some PreferenceStore, for handle: EstateHandle) {
         preferenceStores[handle] = store
+    }
+}
+
+// MARK: - Node topology provider registration (w5-nodetree-native)
+
+public extension GeniusLocusKit {
+
+    /// Register a `NodeTopologyProvider` for the given estate handle.
+    ///
+    /// The provider gives GLK access to the host's parent-child node tree for the
+    /// `.nodeTreeNative` recall mode and for the structural lens path. When a
+    /// provider is registered, `recallTunnels(_:wing:)` calls
+    /// `provider.treeEdges(scope: nil)` EXACTLY ONCE at the start of each call
+    /// (G1 — read-once-and-freeze) and unions the frozen containment edges with the
+    /// estate's stored tunnel edges before returning. The provider is never called
+    /// again during that recall; determinism does not depend on provider stability
+    /// after the freeze point.
+    ///
+    /// Topology boundary invariant (G4, SPEC invariant I-G4): the provider exposes
+    /// exactly three methods (parentID / childIDs / treeEdges) and NO content
+    /// accessor. Any node-content need routes through CorpusKit. This seam will
+    /// never be widened.
+    ///
+    /// Async/sync asymmetry (G3, sanctioned): Swift is async; the Rust mirror is
+    /// synchronous. Conformance compares edge output, not call shape. This mirrors
+    /// the NeuronKit policy-store precedent.
+    ///
+    /// Re-registering replaces the existing entry for the handle. Pass `nil` to
+    /// deregister (no direct nil-pass API — close the estate and re-open without
+    /// re-registering). When no provider is registered, `recallTunnels` returns
+    /// only stored tunnels — existing behaviour unchanged.
+    ///
+    /// - Parameters:
+    ///   - provider: The host-side topology adapter.
+    ///   - handle:   The estate to associate this topology with. Must be open.
+    func registerNodeTopology(_ provider: any NodeTopologyProvider, for handle: EstateHandle) {
+        nodeTopologyProviders[handle] = provider
     }
 }
 

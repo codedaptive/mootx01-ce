@@ -154,6 +154,18 @@ public actor GeniusLocusKit {
     public func signalUnsubscribe(_ signalID: SignalID, subscription: SubscriptionID, in handle: EstateHandle) async throws
     public var openSchedulerCount: Int { get }
 
+    // Hydration (EstateHydration.swift) — t1-glk-hydrate:
+    // Open an in-memory estate hydrated from a durable (SQLite) backend.
+    // Schema gate: opens both backends with the composite GLK SchemaDeclaration
+    // (version 3: LocusKit v1 + VectorKit v1 + CorpusKit v1) before calling
+    // StorageReplicator.hydrate. Six-step sequence:
+    //   1. Schema open both sides. 2. Row + audit snapshot. 3. Estate open.
+    //   4. Audit log feed. 5. MatrixTier.fullRebuild (both passes).
+    // flush reverses the direction: writes in-memory state to durable.
+    public func open(inMemory: any Storage, owner: OwnerCredentials,
+                     hydrateFrom durable: any Storage) async throws -> EstateHandle
+    public func flush(from inMemory: any Storage, into durable: any Storage) async throws -> ReplicationCursor
+
     // Migration (MigrationAPI.swift) — SPEC B-14:
     public func importFromMemPalace(_ corpus: ExternalCorpus, targetStorage: any Storage,
                                     owner: OwnerCredentials, now: Date) async throws -> (EstateHandle, MigrationReport)
@@ -339,9 +351,10 @@ public struct IssueGrantResult: Sendable {
     public let grant: Grant; public let scopeKey: Data?   // non-nil only for handed-over / decay-derived custody
 }
 ```
-**Rust:** `pub struct FederatedRecallResult`, `pub enum
-FederatedReadRefusalReason`, `pub struct IssueGrantResult` mirror these in
-the `federation` module.
+**Rust:** `FederatedRecallResult`, `FederatedReadRefusalReason`, and
+`IssueGrantResult` are NOT yet present in the Rust port. The federation
+sub-surface is deferred to the GL3 track. Callers on the Rust side use
+`VerbDispatchError` to surface grant failures until GL3 ships.
 
 #### Grant model: `Grant`, `GrantOptions`, `GrantScope`, `GrantLifetime`, `CustodyMode`, `ReSharePermission`, `DriftRate`, `GrantError`
 
@@ -617,6 +630,8 @@ ExternalCorpus.load(from: URL) throws -> ExternalCorpus
 AuditChainVerifier.verify(_ log: UnifiedAuditLog) -> AuditChainReport
 AuditProjectionFold.project(_ log: UnifiedAuditLog) -> UnifiedProjection         // Tier 2
 MatrixTier.rebuild(from log: UnifiedAuditLog) -> MatrixTier                       // Tier 2
+MatrixTier.rebuildTemporal(from log: UnifiedAuditLog) -> MatrixTier               // Tier 2 — T matrix
+MatrixTier.fullRebuild(from log: UnifiedAuditLog) -> MatrixTier                   // Tier 2 — both passes (F/O/C + T)
 TrainingThresholdGate.transitionCount(in log: UnifiedAuditLog) -> Int            // Tier 2
 GeniusLocusKit.defaultStandingSignalNames -> [String]                            // static
 ```
@@ -694,6 +709,591 @@ _ = try await kit.issueGrant(handle, GrantOptions(granteeEstateID: other.estateU
 let federated = try await kit.federatedRecall(RecallFrame(filterChain: [.inWing("chemistry")]),
                                               from: handle, requestedBy: other, now: now)  // refuses absent a grant
 ```
+
+---
+
+## Swift/Rust Concordance — matrix rebuild surface (w4-rebuild-temporal)
+
+The `rebuild_temporal` function was ported to Rust in mission w4-rebuild-temporal
+(2026-06-05). Both rebuild entry points now exist in both languages. The Rust crate
+gains `substrate-ml` as a dependency to access `temporal_causality_fold::fold`
+(mirrors the Swift `import SubstrateML` added 2026-06-04 per
+DECISION_MATRIXT_HOURLY_CADENCE_2026-06-04.md).
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `MatrixTier.rebuild(from: UnifiedAuditLog) -> MatrixTier` | `MatrixTier::rebuild(log: &UnifiedAuditLog) -> MatrixTier` | Populates F, C, O; mirrors HLC-ordered bundle replay |
+| `MatrixTier.rebuildTemporal(from: UnifiedAuditLog) -> MatrixTier` | `MatrixTier::rebuild_temporal(log: &UnifiedAuditLog) -> MatrixTier` | Populates T + temporal_watermark_hlc; delegates to TemporalCausalityFold |
+| `MatrixTier.temporalWatermarkHLC: HLC` | `MatrixTier::temporal_watermark_hlc: HLC` | Persisted in both ports; Swift uses `decodeIfPresent ?? .zero`, Rust uses 16-byte trailer with fallback to `HLC::ZERO` for old snapshots |
+
+**Conformance:** `matrix_parity` test target exercises both `rebuild` and
+`rebuild_temporal` with the same canonical fixtures as the Swift `MatrixTierTests`
+and `StandingSignalsTests`. The four new `rebuild_temporal_*` tests assert:
+- T-matrix populated at correct lag bucket for intra-window pairs.
+- `temporal_watermark_hlc` advances to the last entry's HLC.
+- Idempotence: same log → same cells on second rebuild.
+- Out-of-window entries produce no T pairs.
+- Null after-value contributes no coordinate (watermark still advances).
+- Non-capture/expunge verbs are filtered.
+
+---
+
+## Swift/Rust Concordance — scored recall type system (PAR-4-GL2)
+
+The twelve types below were added to the Rust port in mission PAR-4-GL2
+(2026-06-05, branch w3-glk-recall). They live in
+`packages/kits/GeniusLocusKit/rust/src/recall.rs` and are re-exported from
+the crate root. The Swift originals are in
+`Sources/GeniusLocusKit/RecallDirector/`.
+
+| Swift type | Rust type | Rust location | Notes |
+|---|---|---|---|
+| `GLKRecallMode` | `GLKRecallMode` | `recall::GLKRecallMode` | 4 variants; `raw_value()` matches Swift rawValue strings |
+| `GLKRecallScoring` | `GLKRecallScoring` | `recall::GLKRecallScoring` | 3 variants |
+| `RecallEvidencePath` | `RecallEvidencePath` | `recall::RecallEvidencePath` | 10 variants; `raw_value()` matches Swift |
+| `RecallFallbackPolicy` | `RecallFallbackPolicy` | `recall::RecallFallbackPolicy` | 2 variants |
+| `RecallScoreVector` | `RecallScoreVector` | `recall::RecallScoreVector` | All 10 fields present; `locus(_:)` → `locus(v: f32)` factory; `ZERO` constant |
+| `RecallWeights` | `RecallWeights` | `recall::RecallWeights` | 7 fields; `uniform` → `UNIFORM` constant |
+| `RecallPlan` | `RecallPlan` | `recall::RecallPlan` | `effectiveMode` → `effective_mode`; `frontierK` → `frontier_k` |
+| `RecallHit` | `RecallHit` | `recall::RecallHit` | `drawer: Drawer?` → `drawer: Option<Drawer>`; `sources: Set<RecallEvidencePath>` → `sources: Vec<RecallEvidencePath>` |
+| `GLKRecallRequest` | `GLKRecallRequest` | `recall::GLKRecallRequest` | Builder API; defaults match Swift |
+| `GLKRecallResult` | `GLKRecallResult` | `recall::GLKRecallResult` | `.drawers()` convenience accessor |
+| `RecallUnionProfile` | `RecallUnionProfile` | `recall::RecallUnionProfile` | 6 fields; `ZERO` constant |
+| (implicit) `RecallLane` | `RecallLane` | `recall::RecallLane` | Not a separate Swift file; distilled from `RecallCandidateBuffer` source-bit constants |
+
+**Coordinator entry point:**
+
+| Swift | Rust |
+|---|---|
+| `func recall(_ handle: EstateHandle, _ request: GLKRecallRequest) async throws -> GLKRecallResult` | `fn recall_scored(&self, handle: &EstateHandle, request: GLKRecallRequest, now: i64) -> Result<GLKRecallResult, VerbDispatchError>` |
+
+**Scoring notes:**
+
+The Rust `recall_scored` implements the locusOnly and hybrid lanes. BM25 and
+vector sub-lanes return empty candidate sets in the Rust port until
+VectorKit/CorpusKit are wired to the coordinator (a follow-up mission).
+The ranking test (`b7_scored_rrf_produces_different_final_scores_than_raw`)
+confirms that `.rrf` and `.matrixAware` scoring produce different `final_score`
+values than `.raw` for the same content, satisfying the mission's acceptance
+criterion.
+
+The RRF formula matches Swift: `score = 1 / (k + rank + 1)`, `k = 60`,
+tie-break by `id` ascending.
+
+**ARIA_MCP wiring follow-up:**
+
+The ARIA Rust `run_memory_search` function (`apps/ARIA_MCP/rust/src/interface_tools.rs:168`)
+continues to use `coordinator.recall` (plain path) and its `scoring` parameter
+is not yet wired to `recall_scored`. Wiring the `scoring` arg through
+`recall_scored` is a follow-up mission (GL4 track) scoped separately.
+
+---
+
+## Swift/Rust Concordance — grant access-control surface (PAR-4-GL1)
+
+The grant subsystem was added to the Rust port in mission PAR-4-GL1
+(2026-06-05, branch w3-glk-grants). The Rust types live in
+`packages/kits/GeniusLocusKit/rust/src/grants/` and are re-exported from
+the crate root. The Swift originals are in
+`Sources/GeniusLocusKit/Grants/`.
+
+### Core grant types
+
+| Swift type | Rust type | Rust module | Notes |
+|---|---|---|---|
+| `GrantScope` | `GrantScope` | `grants::grant` | 5 variants; `signing_token()` byte-identical to Swift `signingToken` |
+| `GrantLifetime` | `GrantLifetime` | `grants::grant` | 3 variants; `Permanent`, `Until(f64)`, `DecayWindow { seconds: i64 }` |
+| `CustodyMode` | `CustodyMode` | `grants::grant` | 4 variants; Rust `DecayDerived` carries same 4 fields as Swift |
+| `ReSharePermission` | `ReSharePermission` | `grants::grant` | 3 variants; `signing_token()` byte-identical |
+| `DriftRate` | `DriftRate` | `grants::grant` | 3 variants: `Slow`, `Moderate`, `Fast` |
+| `GrantOptions` | `GrantOptions` | `grants::grant` | All 6 fields present; field naming snake_case |
+| `Grant` | `Grant` | `grants::grant` | `issued_at: f64` Apple reference seconds (matching `Date.timeIntervalSinceReferenceDate`) |
+| `IssueGrantResult` | `IssueGrantResult` | `grants::grant` | `scopeKey: Data?` → `scope_key: Option<Vec<u8>>`; Debug manually implemented — `scope_key` field is redacted as `"<REDACTED>"` |
+| `StoredGrant` | `StoredGrant` | `grants::grant` | `revokedAt: Date?` → `revoked_at: Option<f64>` Apple ref seconds |
+| `GrantError` | `GrantError` | `grants::grant` | 7 variants, all with matching discriminants |
+
+### Crypto primitive concordance
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `SubstrateKernel.SHA256.hash([UInt8])` | `substrate_kernel::sha256::hash(&[u8]) -> [u8;32]` | FIPS 180-4, in-repo, no CryptoKit |
+| `SubstrateKernel.GrantHKDF.deriveKey(inputKeyMaterial:salt:info:outputByteCount:)` | `substrate_kernel::hkdf::derive_key(ikm:&[u8], salt:&str, info:&[u8], output_byte_count:usize)` | RFC 5869 HKDF-SHA256, in-repo |
+| Fixed salt `"mootx01.grant.scope-key.v1"` | Same literal (`GRANT_SALT` constant) | Used for all grant scope-key and session-key derivations |
+| `LagrangeDecayKey.key(fromSecret:) -> [UInt8]` | `LagrangeDecayKey::key_from_secret(secret: &DecayFieldElement) -> [u8;32]` | SHA-256 of the GF(p) secret's big-endian bytes |
+| `LagrangeDecayKey.reconstruct(threshold:provider:now:) -> [UInt8]` | `LagrangeDecayKey::reconstruct(threshold:usize, provider:&dyn DecayShareProvider, now:f64) -> Result<[u8;32], GrantError>` | Lagrange at x=0 over GF(2^256-189); byte-identical |
+| `LagrangeDecayKey.interpolateConstantTerm(points:) -> DecayFieldElement` | `LagrangeDecayKey::interpolate_constant_term(points:&[DecaySharePoint]) -> DecayFieldElement` | Schoolbook 4×4-limb GF(p) multiply, Fermat inverse |
+
+### GF(p) field arithmetic concordance
+
+Prime `p = 2^256 − 189` (largest prime below 2^256).
+Limb layout: little-endian `[u64; 4]`, `limbs[0]` least significant.
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `DecayFieldElement` | `DecayFieldElement` | Identical limb layout and prime |
+| `init(reducingBigEndian:)` | `DecayFieldElement::from_big_endian(&[u8])` | 32-byte BE input, reduces mod p |
+| `bigEndianBytes()` | `DecayFieldElement::to_big_endian() -> [u8;32]` | 32 bytes, big-endian |
+| `adding(_:)` | `add(&self, other: &DecayFieldElement)` | Carry-fold via 189 |
+| `subtracting(_:)` | `sub(&self, other: &DecayFieldElement)` | Borrows p when needed |
+| `negated()` | `neg(&self)` | `0 - self` |
+| `multiplying(_:)` | `mul(&self, other: &DecayFieldElement)` | Schoolbook 4×4-limb, 8-limb product, then reduce |
+| `inverse()` | `inv(&self)` | Fermat: `a^(p-2)` via 256-bit square-and-multiply |
+| `DecaySharePoint` | `DecaySharePoint` | `x: DecayFieldElement`, `y: DecayFieldElement` |
+| `ReferenceDecayShareProvider` | `ReferenceDecayShareProvider` | Seeded from SHA-256 coefficient derivation, same Horner evaluation |
+
+### ScopeKeyVault / GrantStore concordance
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `ScopeKeyVault` actor | `ScopeKeyVault` struct | No async in Rust; coordinator serialises access; mediated keys stored as `Zeroizing<[u8;32]>` — zeroed on drop and revoke |
+| `issue(grant:identityKeyRawBytes:[UInt8])` | `issue(grant:&Grant, identity_key_raw:&[u8]) -> Result<Option<Vec<u8>>, GrantError>` | Same 3-mode dispatch |
+| `access(grant:now:)` | `access(grant:&Grant, now:f64) -> Result<Vec<u8>, GrantError>` | Session-key HKDF; `now` used for expiry only — NOT included in session info bytes |
+| `revoke(grantID:)` | `revoke(grant_id:Uuid)` | Drops mediated key (Zeroizing ensures zero on remove), inserts into revoked set |
+| `holdsScopeKey(for:)` | `holds_scope_key(id:Uuid) -> bool` | |
+| `GrantStore` actor | `GrantStore` struct | In-memory HashMap; Swift side persists to SQLite |
+| `insert(_:)` | `insert(grant:Grant)` | |
+| `get(id:)` | `get(id:Uuid) -> Option<&StoredGrant>` | |
+| `revoke(id:at:)` | `revoke(id:Uuid, now:f64) -> Result<(), GrantError>` | |
+| `active(at:)` | `active(now:f64) -> Vec<&StoredGrant>` | |
+
+### HKDF info-string format (cross-port byte-identity requirement)
+
+These exact UTF-8 strings are the HKDF `info` parameter for each derivation.
+Any deviation produces a completely different key. Both Swift and Rust use
+uppercase hyphenated UUID strings (`UUID.uuidString` / `.to_string().to_uppercase()`).
+
+| Derivation | info bytes | Swift source |
+|---|---|---|
+| Mode-1 scope key (mediated) | `"scope\|{grantID.uuidString}"` | `ScopeKeyVault.info(grantID:grantee:nil)` |
+| Mode-2 scope key (handed-over) | `"scope\|{grantID.uuidString}\|{granteeEstateID.uuidString}"` | `ScopeKeyVault.info(grantID:grantee:granteeEstateID)` |
+| Session key (mode-1 access) | `"session\|{grant.id.uuidString}"` | `ScopeKeyVault.access(grant:now:)` info line |
+
+**Mode-3 seed:** `Data(identityKeyRawBytes) + Data(grant.id.uuidString.utf8)` (68 bytes for a 32-byte key + 36-char UUID string). Passed **directly** to `ReferenceDecayShareProvider` — NOT hashed. The provider hashes it internally when deriving coefficients.
+
+**`EstateEncryptionConfig` (PersistenceKit):** Debug manually implemented — `key` field is redacted as `"<REDACTED>"`. Protects against accidental key exposure in log output.
+
+### EstateCoordinator grant entry points
+
+| Swift | Rust |
+|---|---|
+| `func issueGrant(_ handle: EstateHandle, _ options: GrantOptions, now: Date) async throws -> IssueGrantResult` | `fn issue_grant(&mut self, handle:&EstateHandle, options:GrantOptions, identity_key_raw:&[u8], now:f64) -> Result<IssueGrantResult, GrantError>` |
+| `func revokeGrant(_ handle: EstateHandle, grantID: UUID, now: Date) async throws` | `fn revoke_grant(&mut self, handle:&EstateHandle, grant_id:Uuid, now:f64) -> Result<(), GrantError>` |
+| `func grantStore(for handle: EstateHandle) async -> GrantStore?` | `fn grant_store(&self, handle:&EstateHandle) -> Option<&GrantStore>` |
+| `func scopeVault(for handle: EstateHandle) async -> ScopeKeyVault?` | `fn scope_vault(&self, handle:&EstateHandle) -> Option<&ScopeKeyVault>` |
+
+**Deviation note:** The Rust `issue_grant` takes `identity_key_raw: &[u8]` (raw key bytes)
+instead of a `Curve25519.Signing.PrivateKey` type. The Swift `VerbSurface.swift` caller
+extracts `.rawRepresentation` before delegating to the vault; the Rust coordinator
+receives raw bytes directly, with no CryptoKit dependency.
+
+**Conformance gate:** `tests/grants_parity.rs` verifies bit-identical output for
+GF(p) reconstruction (GRT-01 a/b/c), HKDF scope-key derivation (GRT-02 a/b),
+coordinator grant round-trips (GRT-03 a/b/c/d/e/f), and Swift-pinned cross-port
+vectors (GRT-04 a/b/c/d — added in w4-grant-crypto-fix, 2026-06-05).
+
+GRT-04 fixed inputs: `IKM=[0xAB;32]`, grant UUID `12345678-1234-1234-1234-123456789ABC`,
+grantee UUID `ABCDEF01-2345-6789-ABCD-EF0123456789`.
+
+| Test | info / seed | Expected (hex) |
+|---|---|---|
+| GRT-04a (mode-1 scope key) | `scope\|12345678-1234-1234-1234-123456789ABC` | `fd23318310153a0ce2d588d1d226a612b45eec75e50d71515472eb333075d8e8` |
+| GRT-04b (mode-2 scope key) | `scope\|12345678-...\|ABCDEF01-...` | `59daa03098c8d321ce970692bc4039c79f760a087c4c3746baac70bf098f4b8a` |
+| GRT-04c (mode-3 scope key) | seed=IKM++"12345678-...", NO SHA-256 | `910badf250681ddcd0be0c4e07126ad611d0658417f8b6ff2e1799552a1cc62b` |
+| GRT-04d (session key) | `session\|12345678-1234-1234-1234-123456789ABC` | `23d5883ce49e29115fd6ab209aeb1253d2863d8beff92308dce93952b4317d94` |
+
+Cross-port byte-identity now holds for all three custody modes and the session key.
+GRT-04d additionally asserts that the session key is invariant with respect to
+`now` (the timestamp does not appear in the HKDF info string).
+
+---
+
+## Swift/Rust Concordance — `.nodeTreeNative` recall mode + `NodeTopologyProvider` seam (w5-nodetree-native)
+
+The `NodeTopologyProvider` protocol/trait, `registerNodeTopology`, the fifth
+`GLKRecallMode` case, and the G1 read-once-freeze seam in `recallTunnels` were
+added in mission w5-nodetree-native (2026-06-05, branch `w5-nodetree-native`).
+
+### Asymmetry declaration (G3)
+
+The Swift protocol is `async` (actor-friendly); the Rust trait is synchronous
+(no async runtime in the Rust port). This asymmetry is sanctioned per the
+NeuronKit policy-store precedent. Conformance is proved by edge-output equality
+against a canonical fixed-edge test double — the call-shape difference does not
+affect result correctness.
+
+### `NodeTopologyProvider` protocol / trait
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `public protocol NodeTopologyProvider: Sendable` | `pub trait NodeTopologyProvider: Send + Sync` | G3: Swift async, Rust sync |
+| `func parentID(of nodeID: String) async -> String?` | `fn parent_id(&self, node_id: &str) -> Option<String>` | Non-recall use only — NOT called inside any deterministic recall path (G1) |
+| `func childIDs(of nodeID: String) async -> [String]` | `fn child_ids(&self, node_id: &str) -> Vec<String>` | Non-recall use only — NOT called inside any deterministic recall path (G1) |
+| `func treeEdges(scope: [String]?) async -> [(parent: String, child: String)]` | `fn tree_edges(&self, scope: Option<&[String]>) -> Vec<(String, String)>` | G1: called EXACTLY ONCE per `recallTunnels` call, result frozen |
+
+**G4 boundary invariant (LOCKED):** The protocol/trait declares EXACTLY these
+3 methods. No content accessor will ever be added. Node content routes through
+CorpusKit, not this seam.
+
+**Induced edge contract (LOCKED):** A pair `(parent, child)` is included in
+`treeEdges(scope:)` if and only if BOTH parent and child are members of `scope`.
+When `scope == nil` (Swift) / `scope == None` (Rust), the full forest is returned.
+
+### Test doubles
+
+| Swift | Rust | Purpose |
+|---|---|---|
+| `InstrumentedTopologyProvider` (`NodeTopologyProviderTests.swift`) | `MemoryTopologyProvider` (`node_topology.rs`) | Fixed-edge in-memory test double; canonical conformance (G2) |
+
+The canonical test tree used by both ports:
+
+```
+root → A, root → B, A → C, B → D
+```
+
+Induced scope `{root, A, C}` → edges `{root→A, A→C}` only (B∉scope).
+
+### `registerNodeTopology` — registration seam
+
+```swift
+// Swift (GeniusLocusKit actor extension)
+func registerNodeTopology(_ provider: any NodeTopologyProvider, for handle: EstateHandle)
+```
+
+```rust
+// Rust: not yet wired to EstateCoordinator — topology providers are held in
+// GeniusLocusKit actor state (Swift-only surface). The Rust port exposes
+// NodeTopologyProvider and MemoryTopologyProvider for cross-port conformance
+// testing; the coordinator register surface is a follow-up mission.
+```
+
+### `GLKRecallMode.nodeTreeNative` — 5th case
+
+| Swift raw value | Rust variant | Notes |
+|---|---|---|
+| `"nodeTreeNative"` | `GLKRecallMode::NodeTreeNative` | 5th case; `raw_value()` → `"nodeTreeNative"` |
+
+**Behaviour:** `.nodeTreeNative` delegates to the `locusOnly` recall lane for
+drawer retrieval. Tree-edge injection happens separately in `recallTunnels`
+(the structural-lens path), not in the scored recall path. This preserves
+B-1 layer discipline — CognitionKit recipes call `recallTunnels` and receive
+the enriched edge set without importing `NodeTopologyProvider`.
+
+### G1 read-once-freeze in `recallTunnels`
+
+`GeniusLocusKit.recallTunnels(_ handle:, wing:)` calls `provider.treeEdges(scope: nil)`
+EXACTLY ONCE at the top of the method. The result is frozen into a local constant
+before the estate tunnel read begins. No provider method is called again during
+this `recallTunnels` call or by any consumer of the returned array.
+
+When no provider is registered, the method returns only stored tunnels —
+identical to pre-`.nodeTreeNative` behaviour. The no-provider path is the
+zero-cost baseline.
+
+### Synthetic containment tunnel shape
+
+Tree edges are surfaced as `Tunnel` values with:
+
+| Field | Value |
+|---|---|
+| `id` | `"containment:<parent>:<child>"` |
+| `label` | `"containment"` |
+| `kind` | `.references` (TunnelKind has no `.containment` case; `label` is the discriminator) |
+| `sourceDrawerId` | parent node id |
+| `targetDrawerId` | child node id |
+| `addedBy` | `"nodeTopologyProvider"` |
+| `filedAt` | `.distantPast` (synthetic, not a real capture time) |
+
+### Conformance gate
+
+| Port | Test file | Tests |
+|---|---|---|
+| Swift | `Tests/GeniusLocusKitTests/NodeTopologyProviderTests.swift` | 7 acceptance gates (§6): no-provider unchanged, registered provider adds containment edges, read-once enforcement (G1), mode decode, recall delegation, scope-induced subset, call-count exactly one |
+| Rust | `tests/node_topology_parity.rs` | NT-1…NT-7: parent_id, child_ids, full forest, induced scope, root/leaf behavior, empty scope |
+| Rust (existing) | `tests/recall_scored_parity.rs` A-1 | Asserts `GLKRecallMode::NodeTreeNative.raw_value() == "nodeTreeNative"` (5th raw value) |
+
+---
+
+## Swift/Rust Concordance — full public-surface table (parity completion, 2026-06-05)
+
+This section completes the per-concept concordance for the entire top-level
+public surface of GeniusLocusKit in both ports, one row per public concept.
+Earlier sections above cover the matrix-rebuild, scored-recall, grant, and
+node-topology sub-surfaces in depth; this table is the read-anchored
+inventory of the remaining concepts and re-anchors the ones already covered
+so the audit keys on a single complete index. Every Swift and Rust symbol
+named below was confirmed by reading source (`file:line` cited in the
+location column). Shape rule states the sanctioned port difference, if any.
+Test/vector binding names the conformance/parity test that proves
+Swift==Rust (the `*_parity.rs` targets and their Swift twins; SPEC § 8,
+C-12). "N/A (structural)" marks a pure shape with no independent behavior.
+
+Idiom note (applies fleet-wide): Swift uppercases acronym suffixes
+(`RowID`, `RoomID`, `BranchID`, `SubscriptionID`) while Rust uses
+PascalCase (`RowId`, `RoomId`, `BranchId`); both are `String`/`Uuid`
+aliases. Foundation `UUID` on the Swift side is a `[u8;16]` newtype alias
+(`EstateUuid`) or a 16-byte newtype (`EntryUUID`) on the Rust side — same
+128-bit value, different host type. These are sanctioned idiom, not drift.
+
+### Verb surface, frames, and lexicon
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Capture frame | `CaptureFrame` (`Verbs/Frames.swift:17`, typealias of LocusKit) | `CaptureFrame` (`rust/src/verbs/frames.rs`) | public / pub | identical fields | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Recall frame | `RecallFrame` (`Verbs/Frames.swift:21`) | `RecallFrame` (`rust/src/verbs/frames.rs`) | public / pub | identical fields | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Learn frame | `LearnFrame` (`Verbs/Frames.swift:26`) | `LearnFrame` (`rust/src/verbs/frames.rs`) | public / pub | identical fields | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Mutate frame | `MutateFrame` (`Verbs/Frames.swift:81`) | `MutateFrame` (`rust/src/verbs/frames.rs`) | public / pub | identical fields | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Withdraw frame | `WithdrawFrame` (`Verbs/Frames.swift:62`) | `WithdrawFrame` (`rust/src/verbs/frames.rs`) | public / pub | identical fields | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Expunge frame | `ExpungeFrame` (`Verbs/Frames.swift:105`) | `ExpungeFrame` (`rust/src/verbs/frames.rs`) | public / pub | `confirmation: Bool` is transient input, not stored (I-10) | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Reanchor frame | `ReanchorFrame` (`Verbs/Frames.swift:130`) | `ReanchorFrame` (`rust/src/verbs/frames.rs`) | public / pub | identical fields | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Propose frame | `ProposeFrame` (`Verbs/Frames.swift:198`) | `ProposeFrame` (`rust/src/verbs/frames.rs`) | public / pub | identical fields | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Associate frame | `AssociateFrame` (`Verbs/Frames.swift:225`) | `AssociateFrame` (`rust/src/verbs/frames.rs`) | public / pub | identical fields | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Mutation kind | `MutationKind` (`Verbs/Frames.swift:30`, typealias of LocusKit) | `MutationKind` (`rust/src/brain/scheduler/api.rs:151`) | public / pub | same variants; Rust `CorrectSensitivity(i64)` etc. | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Lattice anchor | `LatticeAnchor` (`Verbs/Frames.swift:34`, typealias of LocusKit) | `LatticeAnchor` (`rust/src/verbs/frames.rs`) | public / pub | identical | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Row id | `RowID` (`Verbs/Frames.swift:38`, `= String`) | `RowId` (`rust/src/verbs/frames.rs:11`, `= String`); also `RowID` alias (`rust/src/brain/scheduler/api.rs:19`) | public / pub | idiom `RowID`/`RowId` | N/A (structural) | Confirmed |
+| Room id | `RoomID` (`Verbs/Frames.swift:41`, `= String`) | `RoomId` (`rust/src/verbs/frames.rs:14`, `= String`) | public / pub | idiom `RoomID`/`RoomId` | N/A (structural) | Confirmed |
+| Hydration level | `LocusKit.HydrationLevel` (re-exported via frames) | `HydrationLevel` (`rust/src/verbs/frames.rs:102`) | public / pub | mirrors `LocusKit.HydrationLevel` | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Result ordering | `LocusKit.Ordering` (re-exported via frames) | `Ordering` (`rust/src/verbs/frames.rs:110`) | public / pub | mirrors `LocusKit.Ordering` | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Learned reference | `LearnedReference` (`Verbs/Frames.swift:151`, typealias of LocusKit) | (LocusKit `LearnedReference`, re-exported) | public / pub | LocusKit-owned noun; GLK re-exports the Swift alias only | `verb_parity.rs` learn case / `VerbSurfaceTests.swift` | Confirmed |
+| Recall trace item | `RecallTraceItem` (`Verbs/Frames.swift:163`, typealias of LocusKit) | (LocusKit `RecallTraceItem`, re-exported) | public / pub | LocusKit-owned; GLK re-exports the Swift alias only | `RecallDirectorTests.swift` | Confirmed |
+| Diary entry | `DiaryEntry` (`Verbs/Frames.swift:172`, typealias of LocusKit) | `locus_kit::diary_entry::DiaryEntry` (re-exported via write-path) | public / pub | LocusKit-owned noun; GLK re-exports the Swift alias only | `coordinator_write_path_test.rs` / `KGFactVerbTests.swift` | Confirmed |
+| Adjective: sensitivity | `AdjectiveSensitivity` (`Verbs/Frames.swift:176`, typealias of LocusKit) | (LocusKit adjective; lexicon `Adjective`) | public / pub | LocusKit-owned adjective; Swift alias re-export | `parity.rs` lexicon / `VerbSurfaceTests.swift` | Confirmed |
+| Adjective: exportability | `AdjectiveExportability` (`Verbs/Frames.swift:180`, typealias of LocusKit) | (LocusKit adjective; lexicon `Adjective`) | public / pub | LocusKit-owned adjective; Swift alias re-export | `parity.rs` lexicon / `VerbSurfaceTests.swift` | Confirmed |
+| Proposal noun | `Proposal` (`Verbs/Frames.swift:184`, typealias of LocusKit) | (LocusKit `Proposal`; lexicon `Noun::Proposal`) | public / pub | LocusKit-owned noun; Swift alias re-export | `parity.rs` lexicon | Confirmed |
+| Association noun | `Association` (`Verbs/Frames.swift:188`, typealias of LocusKit) | (LocusKit `Association`; lexicon `Noun::Association`) | public / pub | LocusKit-owned noun; Swift alias re-export | `parity.rs` lexicon | Confirmed |
+| Verb dispatch error | `VerbError` (`Verbs/VerbError.swift:12`) | `VerbError` (`rust/src/verbs/surface.rs`) | public / pub | same 5 cases | `verb_parity.rs` / `VerbSurfaceTests.swift` | Confirmed |
+| Proposal taxonomy | `ProposalKind` (`Brain/ProposalKind.swift:44`) | `ProposalKind` (`rust/src/brain/scheduler/api.rs:206`) | public / pub | same raw strings; Rust re-exported as scheduler `SchedulerProposalKind` | `scheduler_parity.rs` / `StandingSignalSchedulerTests.swift` | Confirmed |
+| ARIA lexicon conformance | `AriaLexiconConformance` (`Verbs/AriaLexiconConformance.swift:20`) | `verbs::lexicon` (`Verb`/`Noun`/`Adjective`/`Acceptance`) (`rust/src/verbs/lexicon.rs`) | public enum / pub mod | Swift: one `enum` namespace of data-only maps; Rust: discrete `pub enum`s + `Acceptance` matrix helper (I-13) | `parity.rs` lexicon acceptance matrix / `VerbSurfaceTests.swift` | Confirmed |
+| Lexicon verb | (Swift uses `AriaLexiconLib.Verb` directly) | `Verb` (`rust/src/verbs/lexicon.rs:70`) | n/a / pub | Rust mirrors `AriaLexiconLib.Verb` in-crate (no cross-crate enum re-export) | `parity.rs` lexicon | Confirmed |
+| Lexicon verb flow | (Swift `AriaLexiconLib` flow data) | `VerbFlow` (`rust/src/verbs/lexicon.rs:131`) | n/a / pub | Rust mirrors AriaLexiconLib flow classification | `parity.rs` lexicon | Confirmed |
+| Lexicon noun | (Swift `AriaLexiconLib.Noun`) | `Noun` (`rust/src/verbs/lexicon.rs:140`) | n/a / pub | Rust mirrors `AriaLexiconLib.Noun` in-crate | `parity.rs` lexicon | Confirmed |
+| Lexicon noun role | (Swift `AriaLexiconLib` role data) | `NounRole` (`rust/src/verbs/lexicon.rs:181`) | n/a / pub | Rust mirrors AriaLexiconLib noun-role classification | `parity.rs` lexicon | Confirmed |
+| Lexicon adjective | (Swift `AriaLexiconLib.Adjective`) | `Adjective` (`rust/src/verbs/lexicon.rs:190`) | n/a / pub | Rust mirrors `AriaLexiconLib.Adjective` in-crate | `parity.rs` lexicon | Confirmed |
+| Lexicon acceptance matrix | (Swift `AriaLexiconConformance` § 7.2 helpers) | `Acceptance` (`rust/src/verbs/lexicon.rs:209`) | n/a / pub | Rust: stateless helper struct over the verb↔noun matrix | `parity.rs` lexicon acceptance | Confirmed |
+| Lexicon surface target | (Swift `AriaLexiconConformance` mapping result) | `SurfaceTarget` (`rust/src/verbs/lexicon.rs:256`) | n/a / pub | Rust: routing target struct for a (verb,noun) pair | `parity.rs` lexicon | Confirmed |
+
+### Coordinator, handle, fan-out, federation
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Composition coordinator | `GeniusLocusKit` (actor, `GeniusLocusKit.swift`) | `EstateCoordinator` (`rust/src/coordinator.rs:183`) | public actor / pub struct | Swift async actor / Rust sync struct (no async runtime — sanctioned, cf. NeuronKit policy-store seam) | `composition_conformance_tests.rs` / `CompositionConformanceTests.swift` | Confirmed |
+| Estate handle | `EstateHandle` (`EstateHandle.swift`) | `EstateHandle` (`rust/src/handle.rs`) | public / pub | identical fields | `composition_conformance_tests.rs` / `CoordinatorLifecycleTests.swift` | Confirmed |
+| Estate uuid | Foundation `UUID` (`EstateHandle.estateUUID`) | `EstateUuid = [u8;16]` (`rust/src/handle.rs:15`) | (platform) / pub | Swift uses Foundation `UUID`; Rust uses a 16-byte alias — same 128-bit value, idiom | `composition_conformance_tests.rs` | Confirmed |
+| Estate-handle id (scheduler) | (Swift `EstateHandle` used as key) | `EstateHandleID = String` (`rust/src/brain/scheduler/api.rs:26`) | n/a / pub | Rust: string key for per-estate scheduler maps; Swift keys on `EstateHandle` directly | `scheduler_parity.rs` | Confirmed |
+| Lattice region | `LatticeRegion` (`CrossEstateRead.swift:14`) | `LatticeRegion` (`rust/src/fan_out.rs`) | public / pub | identical closed interval | `composition_conformance_tests.rs` / `CrossEstateOverlapTests.swift` | Confirmed |
+| Per-estate recall contribution | `EstateRecallContribution` (`CrossEstateRead.swift:38`) | `EstateRecallContribution` (`rust/src/fan_out.rs`) | public / pub | identical | `composition_conformance_tests.rs` / `CrossEstateOverlapTests.swift` | Confirmed |
+| Coordinator/lifecycle error | `GeniusLocusKitError` (`GeniusLocusKitError.swift:22`) | `GeniusLocusKitError` (`rust/src/coordinator.rs`) | public / pub | same case set | `composition_conformance_tests.rs` / `GeniusLocusKitErrorTests.swift` | Confirmed |
+| Federated read result | `FederatedRecallResult` (`Federation/FederatedRecallResult.swift:27`) | none — deferred to GL3 track | public / — | Swift-only: federation sub-surface not yet ported (GL3); Rust callers surface grant failures via `VerbDispatchError` | `CrossEstateFederationTests.swift` (Swift-side) | DRIFT |
+| Federated read refusal reason | `FederatedReadRefusalReason` (`Federation/FederatedRecallResult.swift:69`) | none — deferred to GL3 track | public / — | Swift-only: payload of `crossEstateReadRefused`; GL3 will port | `CrossEstateFederationTests.swift` (Swift-side) | DRIFT |
+
+### Grants (see also "grant access-control surface (PAR-4-GL1)" above)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Issue-grant result | `IssueGrantResult` (`Grants/Grant.swift`) | `IssueGrantResult` (`grants::grant`) | public / pub | `scopeKey: Data?` → `scope_key: Option<Vec<u8>>`; Debug redacts | `grants_parity.rs::GRT-03` / `GRT01_GrantTests.swift` | Confirmed |
+
+### COW branching
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Branch handle | `BranchHandle` (protocol, `Branches/BranchHandle.swift:15`) | `EstateBranch` (`rust/src/branches.rs:109`) + `branch_handle_for` accessor | public protocol / pub struct | Swift: protocol with async methods / Rust: concrete struct, sync (no async runtime — sanctioned) | `composition_conformance_tests.rs` branch / `GLK_COW_01_BranchTests.swift` | Confirmed |
+| Branch id | `BranchID = UUID` (`Branches/BranchTypes.swift:8`) | `BranchId = Uuid` (`rust/src/branches.rs:36`) | public / pub | idiom `BranchID`/`BranchId` | N/A (structural) | Confirmed |
+| Drawer id (branch alias) | `DrawerID = RowID` (`Branches/BranchTypes.swift:12`) | (Rust uses `RowId` directly in branch APIs) | public / pub | Swift convenience alias of `RowID`; Rust uses `RowId` inline | N/A (structural) | Confirmed |
+| Branch status | `BranchStatus` (`Branches/BranchTypes.swift:22`) | `BranchStatus` (`rust/src/branches.rs`) | public / pub | same 4 variants | `GLK_COW_01_BranchTests.swift` | Confirmed |
+| Branch score | `BranchScore` (`Branches/BranchTypes.swift:39`) | `BranchScore` (`rust/src/branches.rs`) | public / pub | identical fields | `GLK_COW_01_BranchTests.swift` | Confirmed |
+| Differential report | `DifferentialReport` (`Branches/BranchTypes.swift:56`) | `DifferentialReport` (`rust/src/branches.rs`) | public / pub | identical fields | `GLK_COW_01_BranchTests.swift` | Confirmed |
+| Merge report | `MergeReport` (`Branches/BranchTypes.swift:88`) | `MergeReport` (`rust/src/branches.rs`) | public / pub | identical fields | `GLK_COW_01_BranchTests.swift` | Confirmed |
+| Branch error | (folded into `GeniusLocusKitError` cases on Swift side) | `BranchError` (`rust/src/branches.rs:80`) | n/a / pub | Rust splits branch failures into a dedicated enum; Swift carries them as `GeniusLocusKitError.branchNotTracked` / `.invalidPromotionTarget` | `GLK_COW_01_BranchTests.swift` (Swift) / branch parity (Rust) | Confirmed |
+
+### Unified audit log, projection, recovery
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Audit entry | `UnifiedAuditEntry` (`Audit/UnifiedAuditLog.swift:172`) | `UnifiedAuditEntry` (`rust/src/audit/log.rs`) | public / pub | byte-identical wire encoding | `audit_parity.rs` / `UnifiedAuditLogTests.swift` | Confirmed |
+| Audit entry map key | `UnifiedAuditEntryKey` (`Audit/UnifiedAuditLog.swift:396`) | (Rust keys `BTreeMap<[u8;32], …>` directly) | public / n/a | Swift needs a named `Hashable` dictionary key wrapping the 32-byte id; Rust uses the `[u8;32]` array as the map key directly — structural idiom | `audit_parity.rs` (entry dedup) / `UnifiedAuditLogTests.swift` | Confirmed |
+| Audit value | `UnifiedAuditValue` (`Audit/UnifiedAuditLog.swift:84`) | `UnifiedAuditValue` (`rust/src/audit/log.rs`) | public / pub | same 5 cases; byte-identical `wireBytes`/`wire_bytes` | `audit_parity.rs` / `UnifiedAuditLogTests.swift` | Confirmed |
+| Audit verb | `UnifiedAuditVerb` (`Audit/UnifiedAuditLog.swift:135`) | `UnifiedAuditVerb` (`rust/src/audit/log.rs`) | public / pub | same raw strings | `audit_parity.rs` / `UnifiedAuditLogTests.swift` | Confirmed |
+| Audit tier | `AuditTier` (`Audit/UnifiedAuditLog.swift:69`) | `AuditTier` (`rust/src/audit/log.rs`) | public / pub | `{locus, rag}` | `audit_parity.rs` / `UnifiedAuditLogTests.swift` | Confirmed |
+| Entry uuid (row id) | Foundation `UUID` (`UnifiedAuditEntry.rowID`) | `EntryUUID([u8;16])` (`rust/src/audit/log.rs:127`) | (platform) / pub | Swift Foundation `UUID`; Rust 16-byte newtype — same value, idiom | `audit_parity.rs` | Confirmed |
+| Chain report | `AuditChainReport` (`Audit/AuditChainReport.swift:23`) | (audit module `verify` returns equivalent) | public / pub | Rust returns the report shape from the module `verify` fn | `audit_parity.rs` chain / `GLK03_AuditIntegrationTests.swift` | Confirmed |
+| Chain verifier | `AuditChainVerifier` (`Audit/AuditChainVerifier.swift:43`) | `audit::verify` (`rust/src/audit/mod.rs`) | public enum / pub fn | Swift: caseless `enum` namespace with `static verify`; Rust: free `verify` fn | `audit_parity.rs` chain / `GLK03_AuditIntegrationTests.swift` | Confirmed |
+| Projection fold | `AuditProjectionFold` (`Audit/AuditProjection.swift:115`) | `audit::projection` fold (`rust/src/audit/projection.rs`) | public / pub | Swift: caseless `enum` with `static project`; Rust: module fn | `audit_parity.rs` projection / `GLK03_AuditIntegrationTests.swift` | Confirmed |
+| Unified projection | `UnifiedProjection` (`Audit/AuditProjection.swift:69`) | `UnifiedProjection` (`rust/src/audit/projection.rs`) | public / pub | identical | `audit_parity.rs` projection / `GLK03_AuditIntegrationTests.swift` | Confirmed |
+| Projection key | `UnifiedProjection.Key` (nested, `Audit/AuditProjection.swift:74`) | `UnifiedProjectionKey` (`rust/src/audit/projection.rs:28`) | public / pub | Swift nested `UnifiedProjection.Key` / Rust flat `UnifiedProjectionKey` | `audit_parity.rs` projection | Confirmed |
+| Row projection | `UnifiedRowProjection` (`Audit/AuditProjection.swift:42`) | `UnifiedRowProjection` (`rust/src/audit/projection.rs`) | public / pub | identical | `audit_parity.rs` projection | Confirmed |
+| Audit recovery | `AuditRecovery` (`Audit/AuditRecovery.swift:77`) | `AuditRecovery` (`rust/src/audit/recovery.rs`) | public / pub | identical | `audit_parity.rs` recovery / `GLK03_AuditIntegrationTests.swift` | Confirmed |
+| Recovery result | `AuditRecoveryResult` (`Audit/AuditRecovery.swift:46`) | `AuditRecoveryResult` (`rust/src/audit/recovery.rs`) | public / pub | identical | `audit_parity.rs` recovery | Confirmed |
+| Recovery divergence | `AuditRecoveryDivergence` (`Audit/AuditRecovery.swift:65`) | `AuditRecoveryDivergence` (`rust/src/audit/recovery.rs`) | public / pub | identical | `audit_parity.rs` recovery | Confirmed |
+| Recovery row mismatch | `AuditRecoveryDivergence.RowMismatch` (nested) | `RowMismatch` (`rust/src/audit/recovery.rs:59`) | public / pub | Swift nested `…Divergence.RowMismatch` / Rust flat `RowMismatch` | `audit_parity.rs` recovery | Confirmed |
+
+### Standing-signal scheduler and signal model
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Standing-signal scheduler | `StandingSignalScheduler` (actor, `Brain/StandingSignalScheduler.swift:62`) | `SerialLaneScheduler<D: Dispatcher>` (`rust/src/brain/scheduler/serial_lane.rs:122`) | public actor / pub struct | Swift async actor owning a QueueKit serial lane / Rust sync generic over a `Dispatcher` (no async runtime — sanctioned) | `scheduler_parity.rs` / `StandingSignalSchedulerTests.swift` | Confirmed |
+| Signal routing callback | `SignalDispatcher` (protocol, `Brain/StandingSignalScheduler.swift:512`) | `Dispatcher` (trait, `rust/src/brain/scheduler/serial_lane.rs:32`) | public protocol / pub trait | same routing contract; idiom name `SignalDispatcher`/`Dispatcher` | `scheduler_parity.rs` / `StandingSignalSchedulerTests.swift` | Confirmed |
+| No-op dispatcher | (Swift tests inject a closure dispatcher) | `NoopDispatcher` (`rust/src/brain/scheduler/serial_lane.rs:51`) | n/a / pub | Rust ships a concrete no-op `Dispatcher` for unsubscribed lanes; Swift uses an inline closure | `scheduler_parity.rs` | Confirmed |
+| Scheduler error | (folded into `GeniusLocusKitError` scheduler cases) | `SchedulerError` (`rust/src/brain/scheduler/schedule.rs:14`) | n/a / pub | Rust dedicated enum; Swift carries as `GeniusLocusKitError.schedulerSignalNotRegistered` / `.schedulerNotStarted` | `scheduler_parity.rs` | Confirmed |
+| Signal id | `SignalID` (`Brain/SignalSchedule.swift:13`) | `SignalID(String)` (`rust/src/brain/scheduler/api.rs:32`) | public / pub | identical newtype | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Subscription id | `SubscriptionID` (`Brain/SignalSchedule.swift:31`) | `SubscriptionID(String)` (`rust/src/brain/scheduler/api.rs:71`) | public / pub | identical newtype | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Signal trigger | `SignalTrigger` (`Brain/SignalSchedule.swift:56`) | `SignalTrigger` (`rust/src/brain/scheduler/api.rs:86`) | public / pub | identical variants | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Condition predicate | `ConditionPredicate` (`Brain/SignalSchedule.swift:70`) | `ConditionPredicate` (`rust/src/brain/scheduler/api.rs:93`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Resource cost estimate | `ResourceCostEstimate` (`Brain/SignalSchedule.swift:87`) | `ResourceCostEstimate` (`rust/src/brain/scheduler/api.rs:121`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Concurrency policy | `ConcurrencyPolicy` (`Brain/SignalSchedule.swift:108`) | `ConcurrencyPolicy` (`rust/src/brain/scheduler/api.rs:140`) | public / pub | identical variants | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Signal spec | `SignalSpec` (`Brain/SignalSchedule.swift:119`) | `SignalSpec` (`rust/src/brain/scheduler/api.rs:312`) | public / pub | identical fields | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Signal context | `SignalContext` (`Brain/SignalSchedule.swift:148`) | `SignalContext` (`rust/src/brain/scheduler/api.rs:339`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Signal emission | `SignalEmission` (`Brain/SignalSchedule.swift:178`) | `SignalEmission` (`rust/src/brain/scheduler/api.rs:285`) | public / pub | identical variants | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Proposal frame (signal) | `ProposalFrame` (`Brain/SignalSchedule.swift:207`) | `ProposalFrame` (`rust/src/brain/scheduler/api.rs:253`) | public / pub | identical; carries typed `ProposalKind` | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Association frame (signal) | `AssociationFrame` (`Brain/SignalSchedule.swift:225`) | `AssociationFrame` (`rust/src/brain/scheduler/api.rs:263`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Diagnostic report | `DiagnosticReport` (`Brain/SignalSchedule.swift:241`) | `DiagnosticReport` (`rust/src/brain/scheduler/api.rs:272`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Signal state | `SignalState` (`Brain/SignalSchedule.swift:259`) | `SignalState` (`rust/src/brain/scheduler/api.rs:350`) | public / pub | identical variants | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Signal route outcome | `SignalRouteOutcome` (`Brain/SignalSchedule.swift:280`) | `SignalRouteOutcome` (`rust/src/brain/scheduler/api.rs:373`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Signal report | `SignalReport` (`Brain/SignalSchedule.swift:301`) | `SignalReport` (`rust/src/brain/scheduler/api.rs:382`) | public / pub | identical | `scheduler_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+
+### Six v1 standing signals (+ temporal)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Dreaming signal | `DreamingSignal` (`Brain/Signals/DreamingSignal.swift:30`) | `DreamingSignal` (`rust/src/brain/signals/dreaming.rs`) | public / pub | identical spec factory | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Maintenance signal | `MaintenanceSignal` (`Brain/Signals/MaintenanceSignal.swift:32`) | `MaintenanceSignal` (`rust/src/brain/signals/maintenance.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Vector-similarity signal | `VectorSimilaritySignal` (`Brain/Signals/VectorSimilaritySignal.swift:29`) | `VectorSimilaritySignal` (`rust/src/brain/signals/vector_similarity.rs`) | public / pub | identical; Hamming threshold default 64 | `standing_signals_parity.rs`, `rag_wiring_parity.rs` / `RAGWiringTests.swift` | Confirmed |
+| Decay-sweep signal | `DecaySweepSignal` (`Brain/Signals/DecaySweepSignal.swift:24`) | `DecaySweepSignal` (`rust/src/brain/signals/decay_sweep.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| By-reference validity signal | `ByReferenceValiditySignal` (`Brain/Signals/ByReferenceValiditySignal.swift:27`) | `ByReferenceValiditySignal` (`rust/src/brain/signals/by_reference_validity.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| End-of-day tournament signal | `EndOfDayTournamentSignal` (`Brain/Signals/EndOfDayTournamentSignal.swift:25`) | `EndOfDayTournamentSignal` (`rust/src/brain/signals/end_of_day_tournament.rs`) | public / pub | identical | `standing_signals_parity.rs` / `StandingSignalsTests.swift` | Confirmed |
+| Temporal-causality signal | `TemporalCausalitySignal` (`Brain/Signals/TemporalCausalitySignal.swift:31`) | (T-matrix fold lives in `matrix::rebuild_temporal`; no standalone signal type) | public enum / n/a | Swift exposes a caseless `enum` namespace for the T-matrix signal helpers; Rust folds the same math into `MatrixTier::rebuild_temporal` (see matrix-rebuild concordance above) | `matrix_parity.rs` rebuild_temporal / `MatrixTierTests.swift`, `StandingSignalsTests.swift` | Confirmed |
+
+### Matrix tier (F/C/O/T model, NMF, calibration, persistence)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Field cell | `MatrixFieldCell` (`Matrix/MatrixTier.swift:57`) | `MatrixFieldCell` (`rust/src/matrix/matrix.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Value coordinate | `MatrixValueCoord` (`Matrix/MatrixTier.swift:73`) | `MatrixValueCoord` (`rust/src/matrix/matrix.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Co-occurrence key | `MatrixCoOccurKey` (`Matrix/MatrixTier.swift:86`) | `MatrixCoOccurKey` (`rust/src/matrix/matrix.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Temporal key | `MatrixTemporalKey` (`Matrix/MatrixTier.swift:117`) | `MatrixTemporalKey` (`rust/src/matrix/matrix.rs`) | public / pub | identical | `matrix_parity.rs` rebuild_temporal / `MatrixTierTests.swift` | Confirmed |
+| Calibration bucket | `MatrixCalibrationBucket` (`Matrix/Calibration.swift:22`) | `MatrixCalibrationBucket` (`rust/src/matrix/calibration.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Calibration outcome | `MatrixCalibrationOutcome` (`Matrix/Calibration.swift:36`) | `MatrixCalibrationOutcome` (`rust/src/matrix/calibration.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Calibration curve | `MatrixCalibrationCurve` (`Matrix/Calibration.swift:45`) | `MatrixCalibrationCurve` (`rust/src/matrix/calibration.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Calibration registry | `MatrixCalibrationRegistry` (`Matrix/Calibration.swift:101`) | `MatrixCalibrationRegistry` (`rust/src/matrix/calibration.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| NMF factorization | `MatrixNMFFactorization` (`Matrix/LatentFactors.swift:35`) | `MatrixNMFFactorization` (`rust/src/matrix/nmf.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| NMF engine | `MatrixNMF` (`Matrix/LatentFactors.swift:74`) | `MatrixNMF` (`rust/src/matrix/nmf.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Persistence mode | `MatrixPersistenceMode` (`Matrix/MatrixPersistence.swift:42`) | `MatrixPersistenceMode` (`rust/src/matrix/persistence.rs`) | public / pub | identical variants | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Snapshot | `MatrixSnapshot` (`Matrix/MatrixPersistence.swift:58`) | `MatrixSnapshot` (`rust/src/matrix/persistence.rs`) | public / pub | Both ports persist `temporal_watermark_hlc`; Swift via JSON Codable (`decodeIfPresent ?? .zero`), Rust via 16-byte binary trailer with `HLC::ZERO` fallback for old snapshots | `matrix_parity.rs` (snapshot_persists_temporal_watermark_hlc_round_trip, snapshot_backward_compat_missing_watermark_falls_back_to_zero) / `MatrixTierTests.swift` | Confirmed |
+| Persistence error | `MatrixPersistenceError` (`Matrix/MatrixPersistence.swift:78`) | `MatrixPersistenceError` (`rust/src/matrix/persistence.rs`) | public / pub | identical | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+| Persistence backend | `MatrixPersistenceBackend` (protocol, `Matrix/MatrixPersistence.swift:88`) | `MatrixPersistenceBackend` (trait, `rust/src/matrix/persistence.rs`) | public protocol / pub trait | same backend contract | `matrix_parity.rs` / `MatrixTierTests.swift` | Confirmed |
+
+### Training daemon and enrichment
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Threshold decision | `TrainingThresholdDecision` (`Training/ThresholdGate.swift:39`) | `TrainingThresholdDecision` (`rust/src/training/gate.rs`) | public / pub | identical | `training_parity.rs` / `TrainingDaemonTests.swift` | Confirmed |
+| Threshold gate | `TrainingThresholdGate` (`Training/ThresholdGate.swift:80`) | `TrainingThresholdGate` (`rust/src/training/gate.rs`) | public / pub | identical | `training_parity.rs` / `TrainingDaemonTests.swift` | Confirmed |
+| Daemon tick | `TrainingDaemonTick` (`Training/TrainingDaemon.swift:55`) | `TrainingDaemonTick` (`rust/src/training/daemon.rs`) | public / pub | identical | `training_parity.rs` / `TrainingDaemonTests.swift` | Confirmed |
+| Daemon report | `TrainingDaemonReport` (`Training/TrainingDaemon.swift:122`) | `TrainingDaemonReport` (`rust/src/training/daemon.rs`) | public / pub | identical | `training_parity.rs` / `TrainingDaemonTests.swift` | Confirmed |
+| Training daemon | `TrainingDaemon` (`Training/TrainingDaemon.swift:153`) | `TrainingDaemon` (`rust/src/training/daemon.rs`) | public / pub | Swift async tick / Rust sync (no async runtime — sanctioned) | `training_parity.rs` / `TrainingDaemonTests.swift` | Confirmed |
+| Enrichment pass result | `EnrichmentPassResult` (`Training/EnrichmentPipeline.swift:59`) | `EnrichmentPassResult` (`rust/src/training/pipeline.rs`) | public / pub | identical | `training_parity.rs` / `TrainingDaemonTests.swift` | Confirmed |
+| Enrichment pipeline | `EnrichmentPipeline` (`Training/EnrichmentPipeline.swift:126`) | `EnrichmentPipeline` (`rust/src/training/pipeline.rs`) | public / pub | identical | `training_parity.rs` / `TrainingDaemonTests.swift` | Confirmed |
+
+### Migration (MemPalace import + parallel run)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| External entry | `ExternalEntry` (`Migration/ExternalCorpus.swift:32`) | `ExternalEntry` (`rust/src/migration/mod.rs`) | public / pub | identical | `GLK_MIG_02_MigrationTests.swift` (Swift) / migration parity (Rust) | Confirmed |
+| External corpus | `ExternalCorpus` (`Migration/ExternalCorpus.swift:55`) | `ExternalCorpus` (`rust/src/migration/mod.rs`) | public / pub | identical (+ `hybrid_recall`) | `GLK_MIG_02_MigrationTests.swift` (Swift) / migration parity (Rust) | Confirmed |
+| Migration report | `MigrationReport` (`Migration/MigrationTypes.swift:18`) | `MigrationReport` (`rust/src/migration/mod.rs`) | public / pub | identical | `GLK_MIG_02_MigrationTests.swift` (Swift) / migration parity (Rust) | Confirmed |
+| Unmapped concept | `UnmappedConcept` (`Migration/MigrationTypes.swift:54`) | (carried as a field of Rust `MigrationReport`) | public / pub | Rust folds unmapped concepts into `MigrationReport`; Swift names the DTO | `GLK_MIG_02_MigrationTests.swift` | Confirmed |
+| Migration warning | `MigrationWarning` (`Migration/MigrationTypes.swift:75`) | (carried as a field of Rust `MigrationReport`) | public / pub | Rust folds warnings into `MigrationReport`; Swift names the DTO | `GLK_MIG_02_MigrationTests.swift` | Confirmed |
+| Parallel capture mode | `ParallelCaptureMode` (`Migration/MigrationTypes.swift:94`) | (Rust `ParallelRunHandle` ctor arg / enum in `migration` mod) | public / pub | Rust threads the mode through `ParallelRunHandle`; Swift names the standalone enum | `GLK_MIG_02_MigrationTests.swift` | Confirmed |
+| Migration verification | `MigrationVerification` (`Migration/MigrationTypes.swift:121`) | (Rust `MigrationVerification` in `migration` mod) | public / pub | identical variants | `GLK_MIG_02_MigrationTests.swift` | Confirmed |
+| Migration divergence | `MigrationDivergence` (`Migration/MigrationTypes.swift:139`) | (payload of Rust `MigrationVerification::Diverged`) | public / pub | Rust carries divergence as the verification payload; Swift names the DTO | `GLK_MIG_02_MigrationTests.swift` | Confirmed |
+| Migration error | `MigrationError` (`Migration/MigrationTypes.swift:162`) | `MigrationError` (`rust/src/migration/mod.rs`) | public / pub | same cases | `GLK_MIG_02_MigrationTests.swift` | Confirmed |
+| Parallel run handle | `ParallelRunHandle` (actor, `Migration/ParallelRunHandle.swift:33`) | `ParallelRunHandle` (`rust/src/migration/mod.rs`) | public actor / pub struct | Swift async actor / Rust sync struct (no async runtime — sanctioned) | `GLK_MIG_02_MigrationTests.swift` | Confirmed |
+
+### Recall cold-path seams (RECALL-GRAPH-001)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Graph cache | `GraphCache` (protocol, `GeniusLocusKit.swift:263`) | none — Swift-only cold-path seam | public protocol / — | Cold-path candidate-frontier graph lookup; held in `GeniusLocusKit` actor state. Rust recall does not yet wire a graph cache (follow-up mission, parallels the node-topology register seam) | `RecallDirectorTests.swift`, `RecallAbsentSignalTests.swift` (Swift) | DRIFT |
+| Preference store | `PreferenceStore` (protocol, `GeniusLocusKit.swift:280`) | none — Swift-only cold-path seam | public protocol / — | Cold-path preference-buffer lookup; held in `GeniusLocusKit` actor state. Rust recall does not yet wire a preference store (same follow-up as `GraphCache`) | `RecallDirectorTests.swift` (Swift) | DRIFT |
+
+**Drift summary (new this pass).** Four genuinely Swift-only public types
+with no Rust counterpart by design-deferral (not Apple platform bindings,
+so NOT auto-waived per the force-mirror standard):
+
+- `FederatedRecallResult`, `FederatedReadRefusalReason` — the grant-gated
+  federated-read result surface. Already declared deferred to the GL3 track
+  in § 2 Tier 1 ("NOT yet present in the Rust port"). Rust callers surface
+  grant failures via `VerbDispatchError` until GL3 ships. Tracked, not new
+  scope; recorded here as DRIFT so the parity ledger is honest.
+- `GraphCache`, `PreferenceStore` — the RECALL-GRAPH-001 cold-path seams.
+  Swift-only protocols held in actor state; the Rust recall path
+  (`recall_scored`) does not yet wire them. Same follow-up class as the
+  node-topology coordinator register seam (already noted Rust-side as a
+  follow-up mission). Recorded as DRIFT.
+
+No drift was found on the audit, projection, recovery, scheduler, signal,
+matrix, training, grant, branch, verb, frame, or lexicon surfaces — every
+public concept there has a confirmed, test-bound counterpart in both ports.
+
+No Apple-platform-binding types (Metal/BNNS/CoreML/CloudKit/Keychain) are
+exported at the top level of GeniusLocusKit; the grant crypto uses the
+in-repo `SubstrateKernel` (no CryptoKit), so no Exempt rows and no
+ignore-list additions are proposed for this package.
+
+---
+
+## Swift/Rust Concordance — hydrate-on-launch (t1-glk-hydrate)
+
+Both ports now expose estate hydration: open an in-memory estate rebuilt from
+a durable (SQLite) backend at launch. Added in mission t1-glk-hydrate (2026-06-05,
+branch t1-glk-hydrate).
+
+### GeniusLocusKitSchema / composite_schema
+
+| Concept | Swift | Rust | Notes |
+|---|---|---|---|
+| Composite schema declaration | `GeniusLocusKitSchema.estateSchemaDeclaration: SchemaDeclaration` (`GeniusLocusKitSchema.swift`) | `composite_schema() -> SchemaDeclaration` (`hydration.rs`) | kitID / kit_id = "GeniusLocusKit", version = 3 (LocusKit v1 + VectorKit v1 + CorpusKit v1). Aggregates all 14 tables + indices from component schemas. migrations = []. |
+
+### Hydrate-on-open surface
+
+| Concept | Swift | Rust | Notes |
+|---|---|---|---|
+| Open with hydration | `GeniusLocusKit.open(inMemory: any Storage, owner: OwnerCredentials, hydrateFrom: any Storage) async throws -> EstateHandle` (`EstateHydration.swift`) | `open_hydrating(in_memory: Arc<InMemoryStorage>, durable: &dyn Storage, owner: OwnerCredentials, now: i64) -> Result<HydratedEstate, HydrateError>` (`hydration.rs`) | Six-step sequence: schema open both sides → replication::hydrate → Estate::open → audit log feed → MatrixTier::full_rebuild. Swift returns the handle (matrix tier stored in actor state); Rust returns `HydratedEstate { estate, unified_log, matrix_tier }`. |
+| Flush in-memory → durable | `GeniusLocusKit.flush(from: any Storage, into: any Storage) async throws -> ReplicationCursor` (`EstateHydration.swift`) | `glk_flush(in_memory: &dyn Storage, durable: &dyn Storage) -> Result<ReplicationCursor, ReplicationError>` (`hydration.rs`, re-exported as `glk_flush`) | Opens both backends with composite schema then calls replication::flush. |
+| Hydrate result | `EstateHandle` (handle to actor-registered estate) | `pub struct HydratedEstate { pub estate: Estate, pub unified_log: UnifiedAuditLog, pub matrix_tier: MatrixTier }` (`hydration.rs`) | Swift actor stores tier in `matrixTiers[handle]`. Rust caller must register the estate via `EstateCoordinator::open_estate_directly`. |
+| Hydrate error | `GeniusLocusKitError` (Swift bubbles native errors) | `pub enum HydrateError { Replication(String), Estate(String), AuditFeed(String), Coordinator(String) }` (`hydration.rs`) | Rust stores `ReplicationError` as formatted string — `ReplicationError` only derives `Debug+PartialEq` (not `Clone+Eq`); formatting at boundary preserves full diagnostic while allowing `HydrateError: Clone+Eq`. |
+| Register hydrated estate | `open(inMemory:owner:hydrateFrom:)` registers into actor | `EstateCoordinator::open_estate_directly(estate: Estate, zoom_window_low: i64, zoom_window_high: i64) -> Result<EstateHandle, GeniusLocusKitError>` (`hydration.rs`) | Used by the hydration path to admit an already-opened `Estate` without a second `Estate::open` call. Also available to tests. |
+
+### Matrix rebuild concordance (full_rebuild)
+
+Both passes must run in sequence for a fully-populated `MatrixTier`:
+
+| Pass | Swift | Rust | What it populates |
+|---|---|---|---|
+| Pass 1 | `MatrixTier.rebuild(from:)` | `MatrixTier::rebuild(log)` | F, O, C matrices; `liveRowCount` / `live_row_count`; `lastHLC` / `last_hlc` |
+| Pass 2 | `MatrixTier.rebuildTemporal(from:)` | `MatrixTier::rebuild_temporal(log)` | T matrix; `temporalWatermarkHLC` / `temporal_watermark_hlc` |
+| Both | `MatrixTier.fullRebuild(from:) -> MatrixTier` (added in `MatrixTier.swift`) | `MatrixTier::full_rebuild(log: &UnifiedAuditLog) -> MatrixTier` (added in `matrix.rs`) | Runs rebuild + rebuild_temporal and merges into one tier. Swift merges via `addT`/`temporalWatermarkHLC` (inside-type access). Rust merges via direct field assignment. |
+
+A `temporalWatermarkHLC == .zero` / `temporal_watermark_hlc == HLC::ZERO` on
+a hydrated tier is a correctness signal that `full_rebuild` skipped pass 2.
+Both round-trip test suites assert this condition.
+
+### Hydrate round-trip test coverage
+
+| Test | Swift file | Rust file |
+|---|---|---|
+| Drawers + KGFacts recall equivalence | `HydrateRoundTripTests.hydrateRoundTripDrawersAndKGFacts` | `hydrate_parity::hydrate_round_trip_drawers_and_kg_facts` |
+| Matrix tier state equivalence (two-pass rebuild) | `HydrateRoundTripTests.hydrateRoundTripMatrixTierEquivalence` | `hydrate_parity::hydrate_round_trip_matrix_tier_equivalence` |
+
+### Hydrate sequence schema gate
+
+The `replication::hydrate` / `StorageReplicator.hydrate` gate checks that
+both source and destination report schema version ≥ `schema.version`. The
+composite GLK schema (version 3) must be opened on BOTH backends before
+calling hydrate or flush:
+
+- **Swift**: `storage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)` on both.
+  For SQLite this is `CREATE TABLE IF NOT EXISTS` + version bump (idempotent).
+  For InMemory this applies migrations only if `schema_version < schema.version`.
+- **Rust**: `storage.open(&composite_schema())` on both (same idempotency rules).
 
 ---
 

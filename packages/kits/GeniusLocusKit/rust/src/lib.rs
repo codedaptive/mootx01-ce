@@ -44,9 +44,17 @@ pub mod brain;
 pub mod branches;
 pub mod coordinator;
 pub mod fan_out;
+pub mod grants;
 pub mod handle;
+// hydration.rs — GLK-level hydrate-on-launch integration (Rust port of
+// EstateHydration.swift). Exposes `open_hydrating`, `flush`, and the
+// `composite_schema` declaration. Also adds `open_hydrating` to
+// `EstateCoordinator` via an impl block.
+pub mod hydration;
 pub mod matrix;
 pub mod migration;
+pub mod node_topology;
+pub mod recall;
 pub mod training;
 pub mod verbs;
 
@@ -75,6 +83,10 @@ pub use brain::signals::{
     VectorSimilaritySignal,
 };
 pub use migration::{ExternalCorpus, ExternalEntry};
+pub use hydration::{
+    bridge_audit_event, composite_schema, open_hydrating, flush as glk_flush,
+    HydratedEstate, HydrateError,
+};
 pub use coordinator::{EstateCoordinator, GeniusLocusKitError, VerbDispatchError};
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;
@@ -94,8 +106,19 @@ pub use training::{
     EnrichmentPassResult, EnrichmentPipeline, TrainingDaemon, TrainingDaemonReport,
     TrainingDaemonTick, TrainingThresholdDecision, TrainingThresholdGate,
 };
+pub use node_topology::{MemoryTopologyProvider, NodeTopologyProvider};
+pub use recall::{
+    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
+    RecallEvidencePath, RecallFallbackPolicy, RecallHit, RecallLane,
+    RecallPlan, RecallScoreVector, RecallUnionProfile, RecallWeights,
+};
 pub use verbs::{
     Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame,
     MutateFrame, MutationKind, Noun, NounRole, ProposeFrame, ReanchorFrame, RecallFrame,
     SurfaceTarget, Verb, VerbError, VerbFlow, WithdrawFrame, VERB_NAMES,
+};
+pub use grants::{
+    CustodyMode, DecayFieldElement, DecayShareProvider, DriftRate, Grant, GrantError,
+    GrantLifetime, GrantOptions, GrantScope, GrantStore, IssueGrantResult, LagrangeDecayKey,
+    ReSharePermission, ReferenceDecayShareProvider, ScopeKeyVault, StoredGrant,
 };

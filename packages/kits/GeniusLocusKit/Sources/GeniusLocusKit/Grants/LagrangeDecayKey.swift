@@ -1,5 +1,5 @@
 import Foundation
-import CryptoKit
+import SubstrateKernel
 
 // MARK: - Clean-room provenance (load-bearing legal text — do not edit)
 //
@@ -362,8 +362,11 @@ struct ReferenceDecayShareProvider: DecayShareProvider {
         // the seed alone (deterministic reconstruction).
         var coefficients: [DecayFieldElement] = []
         for index in 0..<Swift.max(threshold, 1) {
-            let material = seed + Data("decay-coef-\(index)".utf8)
-            let digest = SHA256.hash(data: material)
+            // Coefficient derivation uses the in-repo SHA-256 (SubstrateKernel.SHA256)
+            // rather than CryptoKit. Both implement FIPS 180-4 and produce byte-identical
+            // output, so this migration does not change the computed coefficients.
+            let material = [UInt8](seed) + [UInt8]("decay-coef-\(index)".utf8)
+            let digest = SHA256.hash(material)
             coefficients.append(DecayFieldElement(reducingBigEndian: Data(digest)))
         }
         self.secret = coefficients[0]
@@ -426,13 +429,14 @@ enum LagrangeDecayKey {
         return accumulator
     }
 
-    /// Hash the reconstructed field element (SHA-256) to a 32-byte
-    /// `SymmetricKey`. The field element is never used as key material
-    /// directly; hashing gives a uniform 256-bit key that feeds ENC-01's
-    /// `RowCrypto` (AES-GCM-256) unchanged.
-    static func key(fromSecret secret: DecayFieldElement) -> SymmetricKey {
-        let digest = SHA256.hash(data: secret.bigEndianBytes())
-        return SymmetricKey(data: Data(digest))
+    /// Hash the reconstructed field element (SHA-256) to a 32-byte scope key.
+    ///
+    /// The field element is never used as key material directly; hashing gives
+    /// a uniform 256-bit key that feeds ENC-01's `RowCrypto` (AES-GCM-256)
+    /// unchanged. Uses the in-repo SHA-256 (SubstrateKernel.SHA256) so the
+    /// output is byte-identical to the Rust port's `lagrange::key_from_secret`.
+    static func key(fromSecret secret: DecayFieldElement) -> [UInt8] {
+        SHA256.hash([UInt8](secret.bigEndianBytes()))
     }
 
     /// Reconstruct the scope key from a share provider at `now`.
@@ -441,12 +445,12 @@ enum LagrangeDecayKey {
     /// past recovery: throws `GrantError.keyDecayed` (Appendix B.7 — no
     /// partial recovery is attempted). Otherwise interpolates the secret
     /// from the first `threshold` still-valid shares and hashes it to the
-    /// scope key.
+    /// scope key (32 bytes, AES-256 width).
     static func reconstruct(
         threshold: Int,
         provider: DecayShareProvider,
         now: Date
-    ) throws -> SymmetricKey {
+    ) throws -> [UInt8] {
         let valid = provider.validShareCount(now: now)
         guard valid >= threshold else { throw GrantError.keyDecayed }
         // Drift consumes shares from the tail, so the first `valid` points

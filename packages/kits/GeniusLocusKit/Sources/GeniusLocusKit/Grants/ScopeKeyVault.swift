@@ -1,6 +1,6 @@
 import Foundation
-import CryptoKit
 import OSLog
+import SubstrateKernel
 
 /// Custody of scope keys for one estate's issued grants.
 ///
@@ -30,7 +30,10 @@ public actor ScopeKeyVault {
     private static let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
 
     /// Mode-1 scope keys held in custody, keyed by grant id.
-    private var mediatedKeys: [UUID: SymmetricKey] = [:]
+    /// 32-byte raw key material (AES-256 width). Stored as [UInt8] so the
+    /// grant surface carries no CryptoKit dependency; callers that need a
+    /// CryptoKit SymmetricKey can wrap with SymmetricKey(data:).
+    private var mediatedKeys: [UUID: [UInt8]] = [:]
 
     /// Grant ids that have been revoked. Checked first in `access` so a
     /// revoked grant fails closed even if a key somehow lingers.
@@ -53,28 +56,31 @@ public actor ScopeKeyVault {
     ///   surface); a defensive `experimentalModeNotActivated` is raised if
     ///   reached.
     ///
-    /// Modes 1 and 2 derive with HKDF-SHA256 over the estate's Ed25519
-    /// private key as input keying material, bound to the grant id (and,
-    /// for mode 2, the grantee) via the `info` parameter so two grants
-    /// never share a scope key. Mode 3's key comes from the Lagrange
-    /// reconstruction, not HKDF.
-    func issue(grant: Grant, identityKey: Curve25519.Signing.PrivateKey) throws -> Data? {
-        let ikm = SymmetricKey(data: identityKey.rawRepresentation)
+    /// Modes 1 and 2 derive with HKDF-SHA256 (in-repo `GrantHKDF`) over the
+    /// estate's Ed25519 identity key's raw bytes as input keying material,
+    /// bound to the grant id (and, for mode 2, the grantee) via the `info`
+    /// parameter so two grants never share a scope key. Mode 3's key comes
+    /// from the Lagrange reconstruction, not HKDF.
+    ///
+    /// The parameter is the raw 32-byte Ed25519 private key (not a CryptoKit
+    /// type) so this method carries no CryptoKit dependency; the signing op
+    /// that produces the grant signature stays in the caller (`VerbSurface`).
+    func issue(grant: Grant, identityKeyRawBytes: [UInt8]) throws -> Data? {
         switch grant.custodyMode {
         case .mediated:
-            let key = Self.deriveKey(ikm: ikm, info: Self.info(grantID: grant.id, grantee: nil))
+            let key = Self.deriveKey(ikm: identityKeyRawBytes, info: Self.info(grantID: grant.id, grantee: nil))
             mediatedKeys[grant.id] = key
             return nil
         case .handedOver:
-            let key = Self.deriveKey(ikm: ikm, info: Self.info(grantID: grant.id, grantee: grant.granteeEstateID))
-            return key.withUnsafeBytes { Data($0) }
+            let key = Self.deriveKey(ikm: identityKeyRawBytes, info: Self.info(grantID: grant.id, grantee: grant.granteeEstateID))
+            return Data(key)
         case .decayDerived(let threshold, let totalShares, let driftRate, _):
             // Seed the reference share provider deterministically from the
-            // estate identity key and the grant id, so this grant's
+            // estate identity key raw bytes and the grant id, so this grant's
             // decay-derived key is reproducible on demand and unique per
             // grant. (The production estate-internal share feed is out of
             // scope — ENC-03; this is the conformance reference provider.)
-            let seed = identityKey.rawRepresentation + Data(grant.id.uuidString.utf8)
+            let seed = Data(identityKeyRawBytes) + Data(grant.id.uuidString.utf8)
             let provider = ReferenceDecayShareProvider(
                 threshold: threshold,
                 totalShares: totalShares,
@@ -82,12 +88,12 @@ public actor ScopeKeyVault {
                 createdAt: grant.issuedAt,
                 seed: seed
             )
-            let key = try LagrangeDecayKey.reconstruct(
+            let keyBytes = try LagrangeDecayKey.reconstruct(
                 threshold: threshold, provider: provider, now: grant.issuedAt
             )
             // Retain nothing: no entry in mediatedKeys. Reads reconstruct
             // from shares until they drift past threshold K.
-            return key.withUnsafeBytes { Data($0) }
+            return Data(keyBytes)
         case .physicalDecay:
             throw GrantError.experimentalModeNotActivated
         }
@@ -122,9 +128,9 @@ public actor ScopeKeyVault {
         // long-lived scope key itself is never exposed to the read path.
         let session = Self.deriveKey(
             ikm: key,
-            info: Data("session|\(grant.id.uuidString)".utf8)
+            info: [UInt8]("session|\(grant.id.uuidString)".utf8)
         )
-        return session.withUnsafeBytes { Data($0) }
+        return Data(session)
     }
 
     // MARK: - Revoke
@@ -140,14 +146,18 @@ public actor ScopeKeyVault {
 
     // MARK: - Derivation
 
-    /// HKDF-SHA256 to a 256-bit symmetric key. A fixed salt is used
-    /// because the input keying material (the estate's Ed25519 private
-    /// key) is already high-entropy; per-grant separation comes from the
-    /// `info` binding, not the salt.
-    private static func deriveKey(ikm: SymmetricKey, info: Data) -> SymmetricKey {
-        HKDF<SHA256>.deriveKey(
+    /// HKDF-SHA256 (in-repo `GrantHKDF`) to a 256-bit key (32 bytes).
+    ///
+    /// A fixed salt is used because the input keying material (the estate's
+    /// Ed25519 raw private key bytes) is already high-entropy; per-grant
+    /// separation comes from the `info` binding, not the salt. The salt string
+    /// and the HKDF construction are byte-identical to the Rust port in
+    /// `genius_locus_kit::grants::scope_key_vault::derive_key`, so a scope
+    /// key derived on Apple Silicon is identical to one derived on Linux.
+    private static func deriveKey(ikm: [UInt8], info: [UInt8]) -> [UInt8] {
+        GrantHKDF.deriveKey(
             inputKeyMaterial: ikm,
-            salt: Data("mootx01.grant.scope-key.v1".utf8),
+            salt: "mootx01.grant.scope-key.v1",
             info: info,
             outputByteCount: 32
         )
@@ -155,10 +165,10 @@ public actor ScopeKeyVault {
 
     /// The HKDF `info` binding for a grant's scope key. Includes the
     /// grantee for mode 2 so a handed-over key is bound to its recipient.
-    private static func info(grantID: UUID, grantee: UUID?) -> Data {
+    private static func info(grantID: UUID, grantee: UUID?) -> [UInt8] {
         if let grantee {
-            return Data("scope|\(grantID.uuidString)|\(grantee.uuidString)".utf8)
+            return [UInt8]("scope|\(grantID.uuidString)|\(grantee.uuidString)".utf8)
         }
-        return Data("scope|\(grantID.uuidString)".utf8)
+        return [UInt8]("scope|\(grantID.uuidString)".utf8)
     }
 }

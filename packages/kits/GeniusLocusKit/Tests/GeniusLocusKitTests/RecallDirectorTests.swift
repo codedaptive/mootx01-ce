@@ -3,7 +3,7 @@
 // Coverage for the Recall Director API.
 //
 // Tests:
-//   1. GLKRecallMode Codable round-trip across all 4 cases
+//   1. GLKRecallMode Codable round-trip across all 5 cases (4 original + nodeTreeNative)
 //   2. GLKRecallScoring Codable round-trip across all 3 cases
 //   3. Legacy recall shim returns the same result as explicit locusOnly request
 //   4. locusOnly lane populates only .locusBitmap in each hit's sources
@@ -142,14 +142,14 @@ struct RecallDirectorTests {
 
     // MARK: - 1. GLKRecallMode Codable round-trip
 
-    /// All four `GLKRecallMode` cases must survive a JSON encode/decode round-trip.
+    /// All five `GLKRecallMode` cases must survive a JSON encode/decode round-trip.
     ///
     /// This pins the rawValue strings that will appear in persistence and MCP
     /// payloads. A changed rawValue is a breaking change; this test will catch it.
     @Test
-    func glkRecallModeDecodesAllFourCases() throws {
-        // Verify CaseIterable covers exactly 4 cases.
-        #expect(GLKRecallMode.allCases.count == 4)
+    func glkRecallModeDecodesAllFiveCases() throws {
+        // Verify CaseIterable covers exactly 5 cases (4 original + nodeTreeNative).
+        #expect(GLKRecallMode.allCases.count == 5)
 
         // Round-trip every case through JSON.
         let encoder = JSONEncoder()

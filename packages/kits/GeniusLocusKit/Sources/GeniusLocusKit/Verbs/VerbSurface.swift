@@ -99,7 +99,8 @@ public extension GeniusLocusKit {
     // MARK: - recallTunnels
 
     /// Recall the tunnels originating in `wing` from the estate addressed
-    /// by `handle` — the read over the estate's association graph.
+    /// by `handle`, unioned with any host-tree containment edges from a
+    /// registered `NodeTopologyProvider`.
     ///
     /// Resolves the handle through `estate(for:)` and returns the
     /// non-tombstoned drawer-to-drawer tunnels whose source is `wing`,
@@ -108,10 +109,81 @@ public extension GeniusLocusKit {
     /// tunnel successor) read; the recipe layer never reaches the substrate
     /// directly. Read-only; a wing with no tunnels reads empty.
     ///
+    /// G1 — read-once-and-freeze: when a `NodeTopologyProvider` is registered
+    /// for `handle`, `provider.treeEdges(scope: nil)` is called EXACTLY ONCE
+    /// at the top of this method. The result is frozen into a local constant
+    /// before the estate tunnel read begins. No subsequent provider call is
+    /// made during this method or any downstream computation that consumes
+    /// the returned array. The deterministic recall/lens path sees only the
+    /// frozen snapshot.
+    ///
+    /// G4 — topology boundary: the provider supplies ONLY edge topology
+    /// (parent/child id pairs). No node content crosses this boundary.
+    ///
+    /// B-1 — layer discipline: the structural lenses (CognitionKit) call
+    /// this method and receive the unioned edge set. They never import or
+    /// reference `NodeTopologyProvider` directly.
+    ///
+    /// When no provider is registered, the method returns only stored
+    /// tunnels — existing behaviour is unchanged (no-provider path is
+    /// identical to pre-.nodeTreeNative behaviour).
+    ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     func recallTunnels(_ handle: EstateHandle, wing: String) async throws -> [Tunnel] {
         let estate = try estate(for: handle)
-        return try await estate.tunnelsFromWing(wing)
+
+        // G1 — read-once-and-freeze. Call treeEdges exactly once here;
+        // no provider method is called again during this recall or by any
+        // consumer of the returned array.
+        let frozenTreeEdges: [(parent: String, child: String)]
+        if let provider = nodeTopologyProviders[handle] {
+            frozenTreeEdges = await provider.treeEdges(scope: nil)
+        } else {
+            // No provider registered — empty tree edge set, existing behaviour
+            // unchanged. Structural lenses see only stored tunnel edges.
+            frozenTreeEdges = []
+        }
+
+        // Read stored tunnels from the estate.
+        let storedTunnels = try await estate.tunnelsFromWing(wing)
+
+        // No tree edges → return stored tunnels only (identical to pre-registration
+        // behaviour; proved unchanged by test nodeTreeNative_noProvider_behaviorUnchanged).
+        guard !frozenTreeEdges.isEmpty else {
+            return storedTunnels
+        }
+
+        // Union: append synthetic containment tunnels from the frozen tree snapshot.
+        // Each tree edge (parent, child) becomes a Tunnel with:
+        //   - label: "containment" — the tag a lens uses to weight tree-vs-graph edges
+        //   - kind: .references — the closest existing TunnelKind vocabulary entry;
+        //     TunnelKind does not have a dedicated `containment` case (LocusKit is
+        //     immutable from this layer), so the label is the discriminator.
+        //   - sourceDrawerId / targetDrawerId: the node ids (parent → child direction)
+        //   - filedAt: .distantPast — synthetic tunnels have no real filing time;
+        //     .distantPast keeps them stable-sortable below real tunnels
+        //   - addedBy: "nodeTopologyProvider" — provenance marker
+        // All bitmap fields are 0 (default active/normal state).
+        let synthetic: [Tunnel] = frozenTreeEdges.map { edge in
+            Tunnel(
+                id: "containment:\(edge.parent):\(edge.child)",
+                sourceWing: wing,
+                sourceRoom: "topology",
+                sourceDrawerId: edge.parent,
+                targetWing: wing,
+                targetRoom: "topology",
+                targetDrawerId: edge.child,
+                label: "containment",
+                kind: .references,
+                adjectiveBitmap: 0,
+                operationalBitmap: 0,
+                provenanceBitmap: 0,
+                addedBy: "nodeTopologyProvider",
+                filedAt: .distantPast
+            )
+        }
+
+        return storedTunnels + synthetic
     }
 
     // MARK: - recallKGFacts
@@ -838,7 +910,10 @@ public extension GeniusLocusKit {
 
         let (store, vault) = try await ensureGrantSurface(for: handle)
         try await store.insert(grant)
-        let scopeKey = try await vault.issue(grant: grant, identityKey: identityKey)
+        // Pass raw key bytes rather than the CryptoKit PrivateKey so ScopeKeyVault
+        // carries no CryptoKit dependency. The signing op above (identityKey.signature)
+        // still uses CryptoKit; only the HKDF IKM path is raw bytes.
+        let scopeKey = try await vault.issue(grant: grant, identityKeyRawBytes: [UInt8](identityKey.rawRepresentation))
         // Emit the grant-issued audit entry now that the grant is
         // persisted and the scope key is in custody, so the estate's
         // unified chain records the grant lifecycle (FUP-C / GLK-03 seam).

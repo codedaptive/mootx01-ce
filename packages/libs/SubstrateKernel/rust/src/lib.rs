@@ -28,6 +28,9 @@ pub mod kernel_simd;
 pub mod bit_field;
 pub mod hamming_nn;
 pub mod sha256;
+// RFC 5869 HKDF-SHA256, built over sha256::hash. Added PAR-4-GL1 for the
+// grant scope-key derivation conformance gate (Swift↔Rust byte-identical).
+pub mod hkdf;
 
 pub use kernel::*;
 

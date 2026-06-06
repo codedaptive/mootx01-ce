@@ -18,6 +18,9 @@ use std::collections::HashMap;
 // substrate-kernel, or substrate-ml. CI catches drift four ways.
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
+use substrate_ml::temporal_causality_fold::{
+    fold as tcf_fold, TemporalAuditEntry, TemporalFieldCoord,
+};
 use substrate_types::hlc::HLC;
 
 use crate::audit::{AuditTier, EntryUUID, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb};
@@ -105,6 +108,14 @@ pub struct MatrixTier {
     pub temporal_causality: HashMap<MatrixTemporalKey, i64>,
     pub live_row_count: i64,
     pub last_hlc: HLC,
+    /// HLC of the last audit entry processed by `rebuild_temporal`.
+    ///
+    /// Mirrors Swift `MatrixTier.temporalWatermarkHLC`. The hourly
+    /// TemporalCausalitySignal uses this watermark to process only entries
+    /// that arrived since the last T-population pass, avoiding redundant
+    /// reprocessing of the full log. Initialized to `HLC::ZERO` (no pass
+    /// has run yet) and advanced by every `rebuild_temporal` call.
+    pub temporal_watermark_hlc: HLC,
 }
 
 impl Default for MatrixTier {
@@ -114,7 +125,8 @@ impl Default for MatrixTier {
             co_occurrence: HashMap::new(),
             temporal_causality: HashMap::new(),
             live_row_count: 0,
-            last_hlc: HLC::new(0, 0, 0),
+            last_hlc: HLC::ZERO,
+            temporal_watermark_hlc: HLC::ZERO,
         }
     }
 }
@@ -309,6 +321,175 @@ impl MatrixTier {
 
         tier
     }
+
+    /// Rebuild the T (temporal causality) matrix from the unified audit log.
+    ///
+    /// Mirrors Swift `MatrixTier.rebuildTemporal(from:)` exactly. This is
+    /// SEPARATE from `rebuild`, which populates F, C, and O. Temporal causality
+    /// crosses *pairs* of rows captured at different times; F/O derive from
+    /// individual rows. A full estate hydrate calls both:
+    ///
+    ///   let mut tier = MatrixTier::rebuild(&log);
+    ///   let t_tier   = MatrixTier::rebuild_temporal(&log);
+    ///   tier.temporal_causality    = t_tier.temporal_causality;
+    ///   tier.temporal_watermark_hlc = t_tier.temporal_watermark_hlc;
+    ///
+    /// Implementation:
+    ///   1. Filter log to capture/expunge verbs (same filter as `rebuild`).
+    ///   2. Convert each UnifiedAuditEntry → TemporalAuditEntry using the
+    ///      canonical after-value encoding:
+    ///        .Bitmap(v)   → "bitmap:{v}"
+    ///        .StringValue → "string:{s}"
+    ///        .Integer(v)  → "integer:{v}"
+    ///        .Bytes(b)    → "bytes:{count}"
+    ///        .Null        → empty coord list (no coordinate, watermark advances)
+    ///   3. Call `temporal_causality_fold::fold` with ZERO start watermark
+    ///      (full rebuild always replays the full log).
+    ///   4. Map each TemporalCausalityKey → (source, target, lag_bucket) and
+    ///      call `apply_temporal_event` for each delta.
+    ///   5. Set `temporal_watermark_hlc` to the fold's returned new_watermark.
+    ///
+    /// The rebuild is idempotent on the same log: replaying the same log twice
+    /// from a fresh MatrixTier produces a cell-equal result because T counts
+    /// pairs and the fold is deterministic.
+    pub fn rebuild_temporal(log: &UnifiedAuditLog) -> Self {
+        let mut tier = MatrixTier::new();
+
+        // Convert UnifiedAuditEntry to TemporalAuditEntry at the GeniusLocusKit
+        // boundary. Only capture and expunge verbs contribute to T (same filter
+        // as apply_capture on the hot path). ordered_entries is HLC-ascending,
+        // meeting temporal_causality_fold's precondition.
+        let temporal_entries: Vec<TemporalAuditEntry> = log
+            .ordered_entries()
+            .into_iter()
+            .filter(|e| {
+                matches!(e.verb, UnifiedAuditVerb::Capture | UnifiedAuditVerb::Expunge)
+            })
+            .map(|entry| {
+                let field_coords: Vec<TemporalFieldCoord> = match &entry.after_value {
+                    UnifiedAuditValue::Bitmap(v) => vec![TemporalFieldCoord::new(
+                        entry.field_path.clone(),
+                        format!("bitmap:{}", v),
+                    )],
+                    UnifiedAuditValue::StringValue(s) => vec![TemporalFieldCoord::new(
+                        entry.field_path.clone(),
+                        format!("string:{}", s),
+                    )],
+                    UnifiedAuditValue::Integer(v) => vec![TemporalFieldCoord::new(
+                        entry.field_path.clone(),
+                        format!("integer:{}", v),
+                    )],
+                    UnifiedAuditValue::Bytes(b) => vec![TemporalFieldCoord::new(
+                        entry.field_path.clone(),
+                        format!("bytes:{}", b.len()),
+                    )],
+                    // Null after-value contributes no coordinate; the entry
+                    // advances the watermark but generates no T pairs.
+                    // Mirrors Swift: "case .null: coords = []"
+                    UnifiedAuditValue::Null => vec![],
+                };
+                TemporalAuditEntry::new(entry.hlc, field_coords)
+            })
+            .collect();
+
+        // Full rebuild: start watermark at ZERO so the fold processes every
+        // entry as "new". Mirrors Swift: `startWatermark: .zero`.
+        let result = tcf_fold(
+            &temporal_entries,
+            Self::TEMPORAL_WINDOW_MINUTES as i32,
+            HLC::ZERO,
+        );
+
+        for (fold_key, delta) in result.deltas {
+            // Map TemporalCausalityKey → (source, target, delta_minutes) for
+            // apply_temporal_event. Pass lag_bucket directly as delta_minutes:
+            // apply_temporal_event calls lag_bucket_for_minutes internally
+            // and the bucket value maps to itself for every boundary value in
+            // {1,2,4,8,16,32,64,128}.
+            let src = MatrixValueCoord::new(
+                fold_key.source.field_path.clone(),
+                decode_value_repr(&fold_key.source.value_repr),
+            );
+            let tgt = MatrixValueCoord::new(
+                fold_key.target.field_path.clone(),
+                decode_value_repr(&fold_key.target.value_repr),
+            );
+            // lag_bucket is already a boundary value, so passing it as
+            // delta_minutes maps to the same bucket inside apply_temporal_event.
+            tier.apply_temporal_event(src, tgt, fold_key.lag_bucket as u32, delta);
+        }
+
+        tier.temporal_watermark_hlc = result.new_watermark;
+        tier
+    }
+
+    /// Rebuild all matrix components (F, O, C, T) from the unified audit log
+    /// in a single call.
+    ///
+    /// Mirrors `MatrixTier.fullRebuild(from:)` in Swift. Runs both passes and
+    /// merges the temporal tier's T matrix and watermark into the F/O/C tier:
+    ///
+    ///   Pass 1 (`rebuild`):          populates F, O, C, live_row_count, last_hlc.
+    ///   Pass 2 (`rebuild_temporal`): populates T, temporal_watermark_hlc.
+    ///
+    /// In Rust the `temporal_causality` and `temporal_watermark_hlc` fields are
+    /// public, so the merge is performed directly (unlike Swift where
+    /// `private(set)` required the merge to live inside the type). Both fields
+    /// are overwritten from the temporal tier because a fresh `MatrixTier::new()`
+    /// starts both at their zero values.
+    ///
+    /// Use this for hydrate-on-launch sequences (REPLICATION_GROUND_TRUTH.md §7)
+    /// where the ordering contract is:
+    ///   1. rows copied
+    ///   2. audit events copied
+    ///   3. matrix rebuild (both passes, in order)
+    pub fn full_rebuild(log: &UnifiedAuditLog) -> Self {
+        // Pass 1: F, O, C, live_row_count, last_hlc.
+        let mut tier = MatrixTier::rebuild(log);
+        // Pass 2: T, temporal_watermark_hlc.
+        let t_tier = MatrixTier::rebuild_temporal(log);
+        // Merge T into the F/O/C tier. Fields are pub in Rust so no helper needed.
+        tier.temporal_causality = t_tier.temporal_causality;
+        tier.temporal_watermark_hlc = t_tier.temporal_watermark_hlc;
+        tier
+    }
+}
+
+/// Decode a `TemporalFieldCoord.value_repr` string back to a
+/// `UnifiedAuditValue`. Mirrors Swift `MatrixTier.decodeValueRepr(_:)`.
+///
+/// Encoding (applied in `rebuild_temporal`):
+///   "bitmap:{v}"    → Bitmap(v)
+///   "string:{s}"    → StringValue(s)
+///   "integer:{v}"   → Integer(v)
+///   "bytes:{count}" → Bytes([]) (content not round-tripped; only field
+///                     identity matters for T-matrix keying)
+///   "null"          → Null
+///   anything else   → StringValue(repr) (safe fallback, matches Swift)
+fn decode_value_repr(repr: &str) -> UnifiedAuditValue {
+    if repr == "null" {
+        return UnifiedAuditValue::Null;
+    }
+    if let Some(rest) = repr.strip_prefix("bitmap:") {
+        if let Ok(v) = rest.parse::<u64>() {
+            return UnifiedAuditValue::Bitmap(v);
+        }
+    }
+    if let Some(rest) = repr.strip_prefix("integer:") {
+        if let Ok(v) = rest.parse::<i64>() {
+            return UnifiedAuditValue::Integer(v);
+        }
+    }
+    if repr.starts_with("bytes:") {
+        // Bytes content is not round-tripped; only the field identity
+        // matters for T-matrix keying.
+        return UnifiedAuditValue::Bytes(vec![]);
+    }
+    if let Some(rest) = repr.strip_prefix("string:") {
+        return UnifiedAuditValue::StringValue(rest.to_string());
+    }
+    // Safe fallback: treat unknown reprs as string values. Matches Swift.
+    UnifiedAuditValue::StringValue(repr.to_string())
 }
 
 fn add_signed<K: std::hash::Hash + Eq>(map: &mut HashMap<K, i64>, key: K, delta: i64) {
