@@ -20,7 +20,7 @@ interface contracts live in `docs/concepts/KIT_INTERFACE_DESIGN.md`.
 Packages compose bottom-up. Each layer depends only on layers below it.
 
 ```
-REASONING   CognitionKit        NeuronKit
+REASONING   CognitionKit        NeuronKit           VaultKit
 ORCHESTRAT  GeniusLocusKit
 STANDALONE  LocusKit            VectorKit           CorpusKit
 GROUNDING   LatticeLib          EideticLib
@@ -28,6 +28,8 @@ FOUNDATION  EngramLib           AriaLexiconLib
 STORAGE     PersistenceKit      ConvergenceKit      QueueKit
 SUBSTRATE   SubstrateLib  (orchestration: verbs + row-state automaton + AuditGate)
 MATH        SubstrateTypes      SubstrateKernel     SubstrateML
+TELEMETRY   IntellectusLib  (zero-dependency floor: stat model + sink + report gate)
+            ObserverSink    (PersistenceKit-backed StatsSink + SQLite stats store + retention)
 ```
 
 The substrate ships as **four packages** (DECISION_SUBSTRATELIB_PRESHIP_REFACTOR
@@ -40,6 +42,66 @@ addendum 2026-05-29): `SubstrateTypes` (pure data), `SubstrateKernel`
 ---
 
 ## Packages/libs/
+
+---
+
+### IntellectusLib
+
+**Role:** Substrate self-report telemetry faculty. The floor of the telemetry
+tree. Zero-dependency leaf — depends on nothing in the repo (std/Foundation
+only) so that SubstrateTypes, SubstrateKernel, and SubstrateLib can safely
+depend on it in Mission 2 without creating a layering cycle.
+
+**Provides:**
+- `StatSample` — the telemetry datum (`.metric` or `.event` variant)
+- `EventKind` — the verb class for topology events (`capture`/`think`)
+- `StatsSink` — protocol/trait for receiving `StatSample` values
+- `NoOpSink` — the default discard implementation (safe no-op)
+- `Intellectus` — global holder: installed sink + enabled flag
+- `report(_:)` (Swift autoclosure) / `report!` (Rust macro) — short-circuit
+  emission API: payload never evaluated when monitoring is off
+
+**Key invariant:** When monitoring is disabled (the default), the payload
+expression is **never evaluated**. Off-path cost: a single lock-free atomic-bool
+load + branch (Swift `Synchronization.Atomic<Bool>`, Rust
+`AtomicBool::load(Acquire)`; <1 ns). No allocation, no payload construction.
+
+**Does NOT:** No transport, no serialisation, no observer, no clock reads.
+Timestamps are caller-supplied (`now` as epoch seconds). The real reporting
+sink is installed by a host in a later mission.
+
+**Dependencies:** None (zero-dependency foundation leaf).
+**Languages:** Swift + Rust (conformance-gated, 17+3 tests each)
+**Spec:** `docs/reference/INTELLECTUSLIB_SPEC_v0.1.md`
+
+---
+
+### ObserverSink
+
+**Role:** The reusable telemetry sink + stats store — the bridge between
+IntellectusLib's self-report faculty and durable storage. A host installs its
+`PersistenceStatsSink` into `Intellectus`; each `StatSample` is serialised into
+a local SQLite stats database. The read-plane data source for the management
+console (moot-mgr).
+
+**Provides:**
+- `StatsStore` — the SQLite stats-store schema (`metric_samples`,
+  `event_samples`, a `control` flag table), open/migrate, the monitoring on/off
+  flag, retention (delete rows before a caller-supplied cutoff), and
+  `storageStats(now:)` DB-health via PersistenceKit `StorageIntrospection`
+- `PersistenceStatsSink` — `StatsSink` conformer that serialises each sample
+  into the correct table and honours the monitoring flag
+
+**Key invariant:** Timestamps stored TEXT(ISO8601); the stats store is
+`sync = None` — its own file, never an estate DB, never federated. Retention
+takes the cutoff as a parameter — no clock read inside the engine.
+
+**Does NOT:** No transport beyond the local SQLite write, no inference. It
+records what hosts self-report; the console reads it back.
+
+**Dependencies:** IntellectusLib, PersistenceKit (SQLite backend).
+**Languages:** Swift + Rust (conformance-gated, 12 tests each).
+**Spec:** `docs/reference/OBSERVERSINK_SPEC.md`
 
 ---
 
@@ -155,7 +217,7 @@ operation. Directory placement in `libs/` reflects this: LatticeLib produces
 and validates the FDC label space; it does not manage that space at runtime.
 
 **Dependencies:** None  
-**Languages:** Swift only (Rust port pending)  
+**Languages:** Swift + Rust (conformance-gated)  
 **Spec:** `docs/specs/MDCC_ANNEX_SPEC_v0.1.md`, `docs/specs/LATTICE_CITATION_UDC_WIKIDATA.md`
 
 ---
@@ -306,7 +368,7 @@ layer. One estate, structured content only. Use GeniusLocusKit when you
 need composition, vectors, or the Brain layer.
 
 **Dependencies:** PersistenceKit  
-**Languages:** Swift (Rust port pending)  
+**Languages:** Swift + Rust (conformance-gated)  
 **Spec:** `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`
 
 ---
@@ -430,7 +492,7 @@ StandingSignalScheduler. NeuronKit and CognitionKit never import QueueKit
 directly. One estate. One queue. One authority over serial dispatch.
 
 **Dependencies:** AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit  
-**Languages:** Swift (Rust port pending)  
+**Languages:** Swift + Rust (conformance-gated)  
 **Spec:** `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`, `docs/specs/NEURONKIT_SPEC_v0.1.md`
 
 ---
@@ -498,9 +560,27 @@ recipe-descriptor conformance anchor)
 
 ---
 
+### VaultKit
+
+**Role:** Encrypted vault export/import — projects an estate to a portable,
+file-based snapshot and back. Backs the ARIA `moot_vault_*` tool family
+(export, import, reconcile, status).
+
+**Provides:**
+- export an estate's drawers to a vault directory, and import a vault back
+  into an estate (path/key projection between human paths and estate keys)
+- vault reconcile + status surfaces consumed by the `moot_vault_*` tools
+
+**Dependencies:** GeniusLocusKit, LocusKit, EideticLib, PersistenceKit.
+**Languages:** Swift + Rust (conformance-gated).
+
+---
+
 ## Dependency Graph (ground truth from Package.swift)
 
 ```
+IntellectusLib  ← (none)   ← zero-dependency floor; Mission 2 wires SubstrateTypes etc. to depend on it
+ObserverSink    ← IntellectusLib, PersistenceKit (SQLite backend)   ← telemetry sink + stats store
 AriaLexiconLib  ← (none)
 SubstrateTypes  ← (none)
 SubstrateKernel ← SubstrateTypes
@@ -518,6 +598,7 @@ CorpusKit       ← VectorKit, PersistenceKit, ConvergenceKit, EngramLib, Substr
 GeniusLocusKit  ← AriaLexiconLib, CorpusKit, LocusKit, PersistenceKit, QueueKit, VectorKit, SubstrateTypes, SubstrateKernel
 NeuronKit       ← EideticLib, EngramLib, GeniusLocusKit, LocusKit, SubstrateTypes
 CognitionKit    ← GeniusLocusKit, NeuronKit, LocusKit, SubstrateTypes
+VaultKit        ← GeniusLocusKit, LocusKit, EideticLib, PersistenceKit
 ```
 
 Only LocusKit keeps a direct `SubstrateLib` dependency — it drives the
@@ -539,19 +620,21 @@ the precise sub-package(s) it uses.
 | QueueKit | ✅ | ✅ | Built + Python parity |
 | EngramLib | ✅ | ✅ | Built |
 | AriaLexiconLib | ✅ | ✅ | Built |
-| LatticeLib | ✅ | — | Rust port pending |
+| LatticeLib | ✅ | ✅ | Built |
 | EideticLib | ✅ | ✅ | Built |
-| LocusKit | ✅ | — | Rust port pending |
+| LocusKit | ✅ | ✅ | Built |
 | VectorKit | ✅ | ✅ | Built |
 | CorpusKit | ✅ | ✅ | Built |
-| GeniusLocusKit | ✅ | — | Rust port pending |
-| NeuronKit | ✅ | — | Rust port pending |
+| GeniusLocusKit | ✅ | ✅ | Built |
+| NeuronKit | ✅ | ✅ | Built |
 | CognitionKit | ✅ | ✅ | Built (18 recipes; descriptor conformance-gated) |
+| VaultKit | ✅ | ✅ | Built (encrypted vault export/import; moot_vault_* bridge) |
+| IntellectusLib | ✅ | ✅ | Built (17 tests each port; zero-dependency leaf) |
+| ObserverSink | ✅ | ✅ | Built (12 conformance tests each port; PersistenceKit-backed stats store) |
 
 No package has cleared the security/quality/slop review gate yet.
 Build status reflects functional tests only.
 
 ---
 
-*Last updated: 2026-06-05 (relocated LatticeLib from kits/ to libs/ section;
-reconciled "Why Kit not Lib" note with libs/ placement).*
+*Last updated: 2026-06-06 (full kit-status reconcile: added ObserverSink + VaultKit; corrected LatticeLib/LocusKit/GeniusLocusKit/NeuronKit to Built Swift+Rust per the v1.0 parity-complete sweep; fixed the IntellectusLib off-path note to the lock-free atomic gate).*

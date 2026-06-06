@@ -43,7 +43,7 @@ ARIA_MacOS, ARIA_iOS, and ARIA_Rust are demonstration apps, not end-user product
 
 Each demonstration module also carries detailed instructions written for agentic agents, so an agent can read the entire source and program against the kits autonomously. The demo is documentation that compiles, for both a human developer and an agent.
 
-ARIA_MacOS and ARIA_iOS are the Swift-side demonstrations. ARIA_Rust is the Rust-side demonstration, and it is required, not optional: the Swift and Rust implementations are conformance-gated against shared test vectors (ARIA.md), and the kits ship a Rust port in parallel, so a demonstration set with only Swift apps teaches only one of the two gated ports. ARIA_Rust shows a developer how to take the Rust kits, make a lib, and build a small monitoring binary, with the same agentic source instructions.
+ARIA_MacOS and ARIA_iOS are the Swift-side demonstrations. ARIA_Rust is the Rust-side demonstration, and it is required, not optional: the Swift and Rust implementations are conformance-gated against shared test vectors (ARIA.md), and the kits ship a Rust version in parallel, so a demonstration set with only Swift apps teaches only one of the two gated ports. ARIA_Rust shows a developer how to take the Rust kits, make a lib, and build a small monitoring binary, with the same agentic source instructions.
 
 ## Instance mode and the write surface
 

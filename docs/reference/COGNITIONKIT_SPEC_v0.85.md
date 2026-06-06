@@ -498,6 +498,59 @@ the federated summary overlaps. Agreement holds because the recipe shapes
 identically and the reasoning surface it sequences is itself cross-version
 deterministic (`NEURONKIT_SPEC_v0.85` C-Det).
 
+## § 11 — Self-report telemetry
+
+CognitionKit emits self-report metrics through IntellectusLib at recipe-run
+boundaries. Monitoring is **off by default**; off-path cost is a single
+atomic load plus branch (~1 ns, zero allocation).
+
+### § 11.1 — Emit contract
+
+Every foundational recipe emits a **start** and a **complete** metric using
+the stable name `"cognitionkit.recipe.run"`:
+
+| tag | start value | complete value |
+|---|---|---|
+| `recipe` | recipe name (e.g. `"grounded_synthesis"`) | same |
+| `status` | `"start"` | `"complete"` |
+| `step_count` | absent | number of items processed |
+
+The `step_count` for **GroundedSynthesis** is the number of recalled drawers
+(`drawer_count`). For **MigrationBenchmark** it is the number of plans
+benchmarked (`plans.count`).
+
+The `ts` field is epoch seconds captured once at the validated recipe-entry
+point (after capability and guard checks pass). The value is caller-supplied
+to the emit helper — no clock is read inside the emit function itself.
+
+### § 11.2 — Emit placement
+
+- **Start** is emitted AFTER all precondition guards (capability gate, empty
+  plans check, duplicate-name check). A metric is only emitted if the recipe
+  body will actually run.
+- **Complete** is emitted AFTER the return value is fully assembled and
+  BEFORE the `return` statement. The return value is identical whether
+  monitoring is on or off (C-Det invariant).
+
+### § 11.3 — Test isolation
+
+Tests that call recipe `run()` functions must hold the process-wide
+`CognitionTestMutex` for their entire duration. The mutex prevents a
+concurrent telemetry test that holds the Intellectus singleton enabled from
+receiving emissions from non-telemetry tests in its capturing sink.
+
+The Rust telemetry integration tests use a `static GLOBAL_LOCK:
+OnceLock<Mutex<()>>` acquired at the top of every test that touches the
+singleton.
+
+### § 11.4 — Conformance (C-Tel)
+
+**C-Tel (telemetry conformance):** when monitoring is disabled, both Swift
+and Rust recipe implementations emit zero metrics. When monitoring is
+enabled, each recipe emits exactly one start metric and one complete metric
+per invocation. The recipe's return value is bit-identical whether monitoring
+is on or off (C-Det extension: the telemetry path does not affect output).
+
 ---
 
 *End of CognitionKit Specification v0.85.*

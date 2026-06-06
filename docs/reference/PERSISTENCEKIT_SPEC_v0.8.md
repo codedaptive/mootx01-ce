@@ -377,3 +377,140 @@ a backend ships a VectorIndex) k-NN ordering. The Rust port proves this
 with a backend-agnostic conformance suite driven by a `Factory` over each
 backend; PostgreSQL runs against a live database when `PERSISTENCEKIT_PG_URL`
 is set (I-10).
+
+**C-11 (introspection field isolation):** SQLite-specific fields
+(`pageSize`, `pageCount`, `freelistPageCount`, `walFrameCount`) are nil
+on PostgreSQL and InMemory backends. PostgreSQL-specific fields
+(`cacheHitRatio`, `transactionCommitCount`, `transactionRollbackCount`,
+`deadlockCount`, `lockContention`) are nil on SQLite and InMemory
+backends. InMemory-specific fields (`rowCount`, `blobCount`,
+`vectorCount`) are nil on SQLite and PostgreSQL backends. No backend
+populates a field it does not own.
+
+## § 8 — StorageIntrospection — DB-layer stats surface
+
+**Added:** 2026-06-06, mission `PK_INTROSPECT_001`.
+
+`StorageIntrospection` is an optional-capability protocol, separate from
+`Storage`, that each backend conforms to. Consumers discover it with
+`as? StorageIntrospection`; existing `Storage`-only callers are
+unaffected. Its single method `stats(now:)` returns a closed value struct
+`StorageStats` with backend-specific subsets of fields populated; fields
+not relevant to the queried backend are nil.
+
+### Invariants
+
+**I-15 (additive only, no impact on Storage):** `StorageIntrospection` is
+declared as a separate protocol. `Storage` does not require it and is
+not modified. Every existing `Storage` call site compiles unchanged.
+
+**I-16 (deterministic timestamps):** `stats(now:)` accepts a `now: Date`
+parameter (Swift) / `now_secs: i64` (Rust). Neither port calls
+`Date()` / `SystemTime::now()` internally. Callers inject the timestamp.
+
+**I-17 (optional-or-zero field discipline):** every field in `StorageStats`
+that is not meaningful for a given backend is nil. Fields that are
+present are always non-negative numeric values; there are no sentinel
+values like -1. The single exception is `logicalSizeBytes`, which is
+always populated and is always ≥ 0.
+
+**I-18 (WAL frame count via filesystem, not checkpoint):** the SQLite
+backend reads WAL frame count from the WAL file's size on the
+filesystem (`pageSize + 24` bytes per frame after a 32-byte WAL header)
+rather than calling `PRAGMA wal_checkpoint`, which would acquire a lock.
+If the WAL file does not exist (WAL mode not yet entered), the value is
+0.
+
+**I-19 (rollback counter survives rollback):** the InMemory backend
+tracks rollback count outside its snapshotted `State` struct. The
+counter increments even when the transaction's snapshot is restored;
+restoring the snapshot does not reset the counter.
+
+### `StorageStats` fields
+
+| Field | Swift | Rust | Populated by |
+|---|---|---|---|
+| Logical DB size (bytes) | `logicalSizeBytes: Int64` | `logical_size_bytes: i64` | All backends |
+| Page size (bytes) | `pageSize: Int?` | `page_size: Option<i32>` | SQLite only |
+| Page count | `pageCount: Int?` | `page_count: Option<i32>` | SQLite only |
+| Freelist page count | `freelistPageCount: Int?` | `freelist_page_count: Option<i32>` | SQLite only |
+| WAL frame count | `walFrameCount: Int?` | `wal_frame_count: Option<i32>` | SQLite only |
+| Cache-hit ratio | `cacheHitRatio: Double?` | `cache_hit_ratio: Option<f64>` | PostgreSQL only |
+| Transaction commit count | `transactionCommitCount: Int64?` | `transaction_commit_count: Option<i64>` | PostgreSQL only |
+| Transaction rollback count | `transactionRollbackCount: Int64?` | `transaction_rollback_count: Option<i64>` | PostgreSQL/InMemory |
+| Deadlock count | `deadlockCount: Int64?` | `deadlock_count: Option<i64>` | PostgreSQL only |
+| Lock contention | `lockContention: Bool?` | `lock_contention: Option<bool>` | SQLite, PostgreSQL |
+| Row count | `rowCount: Int?` | `row_count: Option<usize>` | InMemory only |
+| Blob count | `blobCount: Int?` | `blob_count: Option<usize>` | InMemory only |
+| Vector count | `vectorCount: Int?` | `vector_count: Option<usize>` | InMemory only |
+| Captured at | `capturedAt: Date` | `captured_at_secs: i64` | All backends |
+
+### Per-backend sourcing
+
+**SQLite:** `PRAGMA page_size`, `PRAGMA page_count`, `PRAGMA freelist_count`.
+WAL frame count: filesystem stat of `<db-path>-wal`; formula
+`(fileSize - 32) / (pageSize + 24)` when `fileSize > 32`, else 0.
+Lock contention: probe `PRAGMA schema_version`; if the connection gets
+`SQLITE_LOCKED`, `lockContention = true`.
+`logicalSizeBytes = pageCount * pageSize`.
+
+**PostgreSQL:** `pg_database_size(current_database())` for `logicalSizeBytes`.
+`pg_stat_database WHERE datname = current_database()` for `blks_hit/(blks_hit+blks_read)` (cacheHitRatio),
+`xact_commit`, `xact_rollback`, `deadlocks`.
+`pg_locks WHERE NOT granted` count > 0 for `lockContention`.
+
+**InMemory:** `logicalSizeBytes` = sum of all stored blob payload byte counts.
+`rowCount` = total rows across all tables.
+`blobCount` = count of stored blob keys.
+`vectorCount` = count of stored vector entries.
+`transactionRollbackCount` = lifetime count of transactions that returned
+`Err` / threw (tracked outside `State` per I-19).
+
+## § 9 — Self-Report Telemetry (cp-persistencekit-report)
+
+Added 2026-06-06. Invariants that govern the telemetry surface wired
+to `StorageIntrospection` / `StorageStats`.
+
+**T-1 (off by default):** `Intellectus.isEnabled` / `Intellectus::is_enabled()`
+is `false` at process start. No metrics are emitted unless the operator
+explicitly enables monitoring. The telemetry path must never fire in test
+harnesses or production estates unless opted in.
+
+**T-2 (zero cost when disabled):** when monitoring is disabled, every call
+to `reportStorageStats` / `report_storage_stats` costs exactly one
+`AtomicBool` load + branch (~1 ns). No lock, no heap allocation,
+`stats(now:)` / `stats(now_secs)` is not called.
+
+**T-3 (caller-supplied timestamp):** the `now: Date` / `now_secs: i64`
+parameter is always injected by the caller. Neither Swift nor Rust
+implementations call `Date()` / `SystemTime::now()` internally.
+This is an instance of the global determinism rule: no engine calls a
+wall clock.
+
+**T-4 (results unchanged):** `reportStorageStats` does not modify any
+field of `StorageStats`, does not alter backend state, and does not change
+the value returned by a subsequent `stats(now:)` call with the same
+timestamp. The telemetry call is observationally equivalent to a no-op
+from the storage layer's perspective.
+
+**T-5 (telemetry errors are silent):** if `stats(now:)` throws (Swift) or
+returns `Err` (Rust), the error is logged at warning level (Swift OSLog) or
+silently dropped (Rust) and no metrics are emitted. Telemetry must never
+propagate an error to the caller or degrade the caller's execution path.
+
+**T-6 (nil / None fields skipped):** only non-nil (Swift) / non-None (Rust)
+`StorageStats` fields produce emitted metrics. Backends that do not support
+a field (e.g., InMemory does not support WAL fields) do not emit those
+metrics. This prevents misleading zero values and keeps the metric stream
+backend-specific without a dispatch table.
+
+**T-7 (metric namespace):** all metrics use the `persistence.db.*` prefix.
+Tag contract: every metric carries `"kit": "PersistenceKit"` and
+`"estate": <estateID>`. Full metric list in INTERFACE § 12.
+
+**T-8 (layering):** IntellectusLib is the telemetry floor. Its Rust crate
+(`intellectus-lib`) and Swift package (`IntellectusLib`) carry zero
+intra-repo dependencies. `PersistenceKit → IntellectusLib` is
+downstream→upstream; the dep direction does not invert the kit topology.
+Authority for the Package.swift / Cargo.toml addition:
+`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.

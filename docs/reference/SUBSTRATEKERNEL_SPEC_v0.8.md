@@ -40,7 +40,7 @@ implementations here, and its conformance vectors here.
 This package is a **Lib**: pure functions and value types with no
 managed state. The `SubstrateKernel` protocol declares the dispatch
 surface; concrete kernels (`ScalarKernel`, `SimdKernel`, `NeonKernel`,
-`BnnsKernel`, `MetalKernel`) implement it. Selection is at runtime
+`MetalKernel`) implement it. Selection is at runtime
 via `PortableKernel.dispatch(_:)` which picks the fastest available
 backend for the current device. Every backend produces bit-identical
 output to `ScalarKernel` on every input (I-7).
@@ -63,8 +63,7 @@ This specification defines:
 - The scalar kernel (`ScalarKernel`) — the canonical reference
   implementation, the oracle.
 - The platform-optimized kernels — `SimdKernel`, `NeonKernel`,
-  `BnnsKernel`, `MetalKernel`. Each is conformance-gated against
-  `ScalarKernel`.
+  `MetalKernel`. Each is conformance-gated against `ScalarKernel`.
 - The dispatch entry point — `PortableKernel.dispatch(_:)` (Swift)
   / kernel selection (Rust).
 - The `BitField` primitive — the substrate's parametric bit-field
@@ -164,13 +163,19 @@ Hardware-optimized backends. Selection priority (Swift, on Apple
 silicon):
 
 1. `MetalKernel` — GPU, best for batches > ~64K.
-2. `BnnsKernel` — Apple's BNNS framework, best for medium batches.
-3. `NeonKernel` — ARM NEON intrinsics, best for ARM CPU-only batches.
-4. `SimdKernel` — portable SIMD via the Swift Numerics layer, fallback.
-5. `ScalarKernel` — always available, fallback.
+2. `NeonKernel` — ARM NEON intrinsics, best for ARM CPU-only batches.
+3. `SimdKernel` — portable SIMD via the Swift Numerics layer; the
+   production default on aarch64 per Phase 2 measurement.
+4. `ScalarKernel` — always available, ultimate fallback.
+
+BnnsKernel was measured on 2026-06-06 (apple-m5-max, macOS 26.5) and
+removed: slower than SimdKernel on every op, with BNNSGraph matmul
+crashing on current macOS. See DECISION_OR_REDUCE_BACKENDS_2026-05-17,
+DECISION_HAMMING_BACKENDS_2026-05-17, and DECISION_SIMHASH_BACKENDS_2026-05-18
+addenda for the disposal numbers.
 
 Rust version today exposes `ScalarKernel` plus portable SIMD via the
-`simd-nightly` feature; NEON/BNNS/Metal Apple-specific backends are
+`simd-nightly` feature; NEON/Metal are Apple-specific backends
 implemented in the Swift version; the Rust version targets the
 non-Apple ecosystem and does not provide them.
 
@@ -229,3 +234,46 @@ gated by:
   on every candidate set, including tie-breaking order.
 
 The conformance vectors live in `tests/` directories of both legs.
+
+## § 8 — Telemetry (SUBSTRATE_REPORT_001, Phase 2)
+
+### § 8.1 Metric shape
+
+`PortableKernel.kernelForCurrentPlatform()` / `PortableKernel::for_current_platform()`
+emits one metric via `IntellectusLib` at the selection site:
+
+| Field | Value |
+|-------|-------|
+| `name` | `"substrate.kernel.backend_selected"` |
+| `value` | `1.0` (event-counter) |
+| `tags.backend` | the selected kernel kind's raw string (`"simd"`, `"scalar"`, …) |
+| `tags.arch` | compile-time arch tag (`"arm64"` / `"aarch64"` / `"x86_64"` / `"other"`) |
+| `ts` | caller-supplied epoch seconds (`Date().timeIntervalSince1970` in Swift; `SystemTime::now()` in Rust) |
+
+The metric is emitted once per factory call. It is a factory-level side-effect,
+not a hot-path operation: `kernelForCurrentPlatform()` is called at construction time,
+not inside any per-element loop.
+
+### § 8.2 Off-path gate
+
+When monitoring is **off** (the default), the `Intellectus.report(_:)` autoclosure
+(Swift) / `report!` macro body (Rust) is **never evaluated**. The off-path cost is a
+single `Atomic<Bool>` load + branch (~1 ns, lock-free). No clock is read. No string
+tags are allocated. The kernel's conformance-gated math output is therefore completely
+unaffected by the telemetry addition.
+
+### § 8.3 No runtime fallback metric
+
+The selection path in `kernelForCurrentPlatform()` is compile-time static (a `#if arch`
+predicate in Swift, a `#[cfg]` predicate in Rust). There is no runtime fallback in this
+factory. The `substrate.kernel.fallback` metric described in `MANAGER_1.0_PLAN.md §2`
+("fallback rate") is therefore **not emitted** from SubstrateKernel in v1.0. The fallback
+rate is N/A for this kit.
+
+### § 8.4 Dependency addition
+
+SubstrateKernel now depends on `IntellectusLib` (both `Package.swift` and `Cargo.toml`).
+`IntellectusLib` is a zero-dependency leaf; adding it as a SubstrateKernel dependency does
+not introduce a layering cycle. Authorized by:
+- `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md`
+- `MANAGER_1.0_PLAN.md §2` (SubstrateLib bullet: "kernel backend selected + fallback rate")

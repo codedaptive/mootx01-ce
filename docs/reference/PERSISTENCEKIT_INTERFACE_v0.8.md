@@ -34,7 +34,7 @@ targets:
   `Predicate.swift`, `Schema.swift`, `GeneratedColumn.swift`,
   `EstateConfiguration.swift`, `EstateCacheConfig.swift`,
   `CachingRowStore.swift`, `CacheInvalidator.swift`,
-  `EncryptionMode.swift`,
+  `EncryptionMode.swift`, `StorageIntrospection.swift`,
   `StorageError.swift`, `NoOpObserver.swift`.
 - `Sources/PersistenceKitInMemory/` — `InMemoryStorage` (test +
   conformance reference).
@@ -51,8 +51,8 @@ targets:
 - `src/storage.rs`, `row_store.rs`, `blob_store.rs`, `vector_index.rs`,
   `audit_log.rs`, `observer.rs`, `types.rs`, `predicate.rs`,
   `schema.rs`, `generated_column.rs`, `error.rs`, `cache_config.rs`,
-  `caching_row_store.rs`, `cache_invalidator.rs`, `inmemory.rs`,
-  `sqlite.rs`, `postgres.rs`.
+  `caching_row_store.rs`, `cache_invalidator.rs`, `introspection.rs`,
+  `inmemory.rs`, `sqlite.rs`, `postgres.rs`.
 - Traits are synchronous (`Result<T, StorageError>`); the Swift side is
   `async` because Swift actors require it, while the in-process Rust
   backends do no real async I/O. All three backends ship in both ports:
@@ -869,6 +869,237 @@ by adding the dependency explicitly.
   bit layout, so HLC columns do NOT round-trip through SQLite. The replication primitive
   is not affected (it copies TypedValue verbatim). The bug exists in the SQLite backend
   independently of replication and is tracked as F-HLC-01 for a follow-on fix mission.
+
+---
+
+## § 11 — StorageIntrospection surface (PK_INTROSPECT_001)
+
+**Added:** 2026-06-06, mission `PK_INTROSPECT_001`.
+
+### `StorageStats`
+
+Closed value struct returned by `StorageIntrospection.stats(now:)`.
+Fields not meaningful for a given backend are nil (SPEC § 8, I-17).
+
+**Swift:**
+
+```swift
+public struct StorageStats: Sendable, Equatable {
+    public let logicalSizeBytes: Int64
+    public let pageSize: Int?
+    public let pageCount: Int?
+    public let freelistPageCount: Int?
+    public let walFrameCount: Int?
+    public let cacheHitRatio: Double?
+    public let transactionCommitCount: Int64?
+    public let transactionRollbackCount: Int64?
+    public let deadlockCount: Int64?
+    public let lockContention: Bool?
+    public let rowCount: Int?
+    public let blobCount: Int?
+    public let vectorCount: Int?
+    public let capturedAt: Date
+
+    public init(
+        logicalSizeBytes: Int64,
+        pageSize: Int? = nil,
+        pageCount: Int? = nil,
+        freelistPageCount: Int? = nil,
+        walFrameCount: Int? = nil,
+        cacheHitRatio: Double? = nil,
+        transactionCommitCount: Int64? = nil,
+        transactionRollbackCount: Int64? = nil,
+        deadlockCount: Int64? = nil,
+        lockContention: Bool? = nil,
+        rowCount: Int? = nil,
+        blobCount: Int? = nil,
+        vectorCount: Int? = nil,
+        capturedAt: Date
+    )
+}
+```
+
+**Rust:**
+
+```rust
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageStats {
+    pub logical_size_bytes: i64,
+    pub page_size: Option<i32>,
+    pub page_count: Option<i32>,
+    pub freelist_page_count: Option<i32>,
+    pub wal_frame_count: Option<i32>,
+    pub cache_hit_ratio: Option<f64>,
+    pub transaction_commit_count: Option<i64>,
+    pub transaction_rollback_count: Option<i64>,
+    pub deadlock_count: Option<i64>,
+    pub lock_contention: Option<bool>,
+    pub row_count: Option<usize>,
+    pub blob_count: Option<usize>,
+    pub vector_count: Option<usize>,
+    pub captured_at_secs: i64,   // Unix seconds, caller-injected (I-16)
+}
+```
+
+### `StorageIntrospection`
+
+Optional-capability protocol separate from `Storage`. Consumers probe
+with `as? StorageIntrospection`; existing Storage call sites are
+unaffected (SPEC § 8, I-15).
+
+**Swift:**
+
+```swift
+/// Optional-capability protocol that backends conform to independently
+/// of `Storage`. Probe with `as? StorageIntrospection`.
+public protocol StorageIntrospection: Sendable {
+    /// Returns a snapshot of backend-specific storage statistics.
+    /// - Parameter now: caller-injected timestamp — never call Date() internally (I-16).
+    func stats(now: Date) async throws -> StorageStats
+}
+```
+
+**Rust:**
+
+```rust
+/// Optional introspection capability; separate from `Storage`.
+/// Probe with `downcast_ref::<ConcreteBackend>()` or `as dyn StorageIntrospection`.
+pub trait StorageIntrospection {
+    /// Returns a snapshot of backend-specific storage stats.
+    /// `now_secs`: caller-injected Unix timestamp in seconds (I-16).
+    fn stats(&self, now_secs: i64) -> StorageResult<StorageStats>;
+}
+```
+
+### Swift/Rust concordance
+
+| Concept | Swift | Rust | Notes |
+|---|---|---|---|
+| Stats value type | `StorageStats` (`StorageIntrospection.swift`) | `StorageStats` (`introspection.rs`) | `Sendable + Equatable` / `Debug + Clone + PartialEq` |
+| Protocol / trait | `StorageIntrospection` (`StorageIntrospection.swift`) | `StorageIntrospection` (`introspection.rs`) | Separate from `Storage`; optional capability |
+| Timestamp field | `capturedAt: Date` | `captured_at_secs: i64` | Both are caller-injected (I-16) |
+| SQLite conformer | `extension SQLiteStorage: StorageIntrospection` | `impl StorageIntrospection for SqliteStorage` | `SQLiteStorage.swift` / `sqlite.rs` |
+| PostgreSQL conformer | `extension PostgreSQLStorage: StorageIntrospection` | `impl StorageIntrospection for PostgresStorage` | `PostgreSQLStorage.swift` / `postgres.rs` |
+| InMemory conformer | `extension InMemoryStorage: StorageIntrospection` | `impl StorageIntrospection for InMemoryStorage` | `InMemoryStorage.swift` / `inmemory.rs` |
+| WAL frame count source | Filesystem stat of `<path>-wal` | `std::fs::metadata(&wal_path)` | No checkpoint lock (I-18) |
+| Rollback counter | `InMemoryStateActor.rollbackStats: Int64` | `rollback_count: Arc<Mutex<i64>>` | Outside snapshotted State (I-19) |
+
+### Source files
+
+| Language | File | Role |
+|---|---|---|
+| Swift | `Sources/PersistenceKit/StorageIntrospection.swift` | `StorageStats` struct + `StorageIntrospection` protocol |
+| Swift | `Sources/PersistenceKitSQLite/SQLiteStorage.swift` | `extension SQLiteStorage: StorageIntrospection` |
+| Swift | `Sources/PersistenceKitPostgreSQL/PostgreSQLStorage.swift` | `extension PostgreSQLStorage: StorageIntrospection` |
+| Swift | `Sources/PersistenceKitInMemory/InMemoryStorage.swift` | `extension InMemoryStorage: StorageIntrospection` |
+| Swift tests | `Tests/PersistenceKitSQLiteTests/SQLiteIntrospectionTests.swift` | 11 tests |
+| Swift tests | `Tests/PersistenceKitInMemoryTests/InMemoryIntrospectionTests.swift` | 10 tests |
+| Rust | `rust/src/introspection.rs` | `StorageStats` + `StorageIntrospection` trait |
+| Rust | `rust/src/sqlite.rs` | `impl StorageIntrospection for SqliteStorage` |
+| Rust | `rust/src/postgres.rs` | `impl StorageIntrospection for PostgresStorage` |
+| Rust | `rust/src/inmemory.rs` | `impl StorageIntrospection for InMemoryStorage` |
+| Rust tests | `rust/tests/inmemory_tests.rs` | 7 introspection tests appended |
+| Rust tests | `rust/tests/sqlite_conformance.rs` | 9 introspection tests appended |
+
+---
+
+## § 12 — Self-Report Telemetry Surface (cp-persistencekit-report)
+
+Added in mission `cp-persistencekit-report` (2026-06-06). Wires the
+existing `StorageIntrospection` / `StorageStats` surface to emit DB-layer
+health metrics via IntellectusLib. Off by default.
+
+### Swift
+
+**Source file:** `Sources/PersistenceKit/PersistenceKitTelemetry.swift`
+
+```swift
+/// Capture a StorageStats snapshot from `storage` and emit all non-nil
+/// fields as StatSample.metric samples via Intellectus.report.
+///
+/// When Intellectus.isEnabled is false (the default), returns immediately
+/// after a single AtomicBool load + branch without calling stats(now:).
+///
+/// Parameters:
+/// - storage: Any StorageIntrospection conformer.
+/// - estateID: Carried as the "estate" tag on every emitted metric.
+/// - now: Caller-supplied Date (determinism rule — never call Date() inside engine).
+public func reportStorageStats(
+    _ storage: any StorageIntrospection,
+    estateID: String,
+    now: Date
+) async
+```
+
+### Rust
+
+**Source file:** `rust/src/telemetry.rs`
+
+```rust
+/// Capture a StorageStats snapshot from `storage` and emit all non-None
+/// fields as StatSample::Metric samples via the report! macro.
+///
+/// When Intellectus::is_enabled() is false (the default), returns
+/// immediately after a single AtomicBool load + branch.
+pub fn report_storage_stats(
+    storage: &dyn StorageIntrospection,
+    estate_id: &str,
+    now_secs: i64,
+)
+```
+
+### Metric namespace
+
+All metrics are emitted in the `persistence.db.*` namespace.
+
+| Metric name | Backend | Description |
+|---|---|---|
+| `persistence.db.size_bytes` | All | Logical DB size in bytes |
+| `persistence.db.page_size` | SQLite | Page size in bytes |
+| `persistence.db.page_count` | SQLite | Total allocated pages |
+| `persistence.db.freelist_pages` | SQLite | Unused (freelist) pages |
+| `persistence.db.wal_frames` | SQLite | WAL frame count since last checkpoint |
+| `persistence.db.cache_hit_ratio` | PostgreSQL | Buffer-cache hit ratio (0.0–1.0) |
+| `persistence.db.tx_commits` | PostgreSQL | Committed transactions |
+| `persistence.db.tx_rollbacks` | PostgreSQL, InMemory | Rolled-back transactions |
+| `persistence.db.deadlocks` | PostgreSQL | Deadlock count |
+| `persistence.db.lock_contention` | SQLite, PostgreSQL | Lock contention flag (1.0/0.0) |
+| `persistence.db.row_count` | InMemory | Total row count across all tables |
+| `persistence.db.blob_count` | InMemory | Blob store entry count |
+| `persistence.db.vector_count` | InMemory | Vector store entry count |
+
+Fields that are `nil` / `None` for a given backend are not emitted.
+
+### Common tags
+
+Every emitted metric carries:
+
+```
+"kit":    "PersistenceKit"
+"estate": <estateID>
+```
+
+### Invariants
+
+See SPEC § 9 (T-1 through T-8) for the full invariant set.
+
+### IntellectusLib dependency
+
+- **Package.swift:** `PersistenceKit` target and both test targets depend on `IntellectusLib`.
+  Authority: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
+- **Cargo.toml:** `intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }`.
+  Layering: IntellectusLib has zero repo deps; `PersistenceKit → IntellectusLib` is
+  downstream→upstream, no cycle.
+
+### Test sources
+
+| Language | File | Tests |
+|---|---|---|
+| Swift | `Tests/PersistenceKitInMemoryTests/PersistenceKitTelemetryTests.swift` | 4 suites, 14 tests (InMemory backend) |
+| Swift | `Tests/PersistenceKitSQLiteTests/PersistenceKitSQLiteTelemetryTests.swift` | 4 suites, 4 tests (SQLite backend) |
+| Swift | `Tests/PersistenceKitInMemoryTests/GlobalTestLock.swift` | Actor mutex — Intellectus singleton isolation |
+| Swift | `Tests/PersistenceKitSQLiteTests/GlobalTestLock.swift` | Actor mutex — Intellectus singleton isolation |
+| Rust | `rust/tests/telemetry_tests.rs` | 10 tests (InMemory backend) |
 
 ---
 

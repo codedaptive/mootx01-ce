@@ -260,6 +260,61 @@ across ports (B-6, inherits SubstrateLib FloatSimHash parity).
 declares the same table with the `.appendOnly` conflict policy
 (I-2, § 5 B-5).
 
+## § 7 — Self-report telemetry (CORPUSKIT_REPORT_001)
+
+### 7.1 Overview
+
+CorpusKit emits substrate self-report telemetry via IntellectusLib when
+monitoring is enabled. Monitoring is **off** by default; the off-path
+cost is a single `AtomicBool` load + branch per emit site, with no
+allocation and no clock read.
+
+Telemetry is added to two operations: `BundleStore.insert` and
+`HybridRecall.recall`. Both Swift and Rust ports emit identically-named
+metrics with the same tags and value semantics.
+
+### 7.2 Emitted metrics
+
+**BundleStore.insert** (2 metrics, emitted after the full batch completes):
+
+| Metric name | Value | Tags |
+|---|---|---|
+| `corpuskit.ingest.latency_ms` | Wall time for the insert batch (ms, ≥ 0) | `kit=CorpusKit` |
+| `corpuskit.ingest.chunk_count` | Count of chunks in the batch (including idempotent no-ops) | `kit=CorpusKit` |
+
+An empty batch returns immediately with no metrics emitted (the early-return
+guard precedes the start-time capture).
+
+**HybridRecall.recall** (4 metrics, emitted after the result is assembled):
+
+| Metric name | Value | Tags |
+|---|---|---|
+| `corpuskit.recall.latency_ms` | Wall time for the full recall pipeline (ms, ≥ 0) | `kit=CorpusKit`, `model_id=<modelID>` |
+| `corpuskit.recall.vector_result_count` | Raw kNN candidate count before RRF fusion | `kit=CorpusKit`, `model_id=<modelID>` |
+| `corpuskit.recall.keyword_result_count` | Raw BM25 candidate count before RRF fusion | `kit=CorpusKit`, `model_id=<modelID>` |
+| `corpuskit.recall.result_count` | Final output count after RRF fusion and hydration | `kit=CorpusKit`, `model_id=<modelID>` |
+
+`limit == 0` returns early before any emit (early-return guard matches the
+normal control-flow guard).
+
+### 7.3 Off-path guarantee
+
+When `Intellectus.isEnabled` is `false` (the default), the `report!`/
+`Intellectus.report` macro evaluates to a single atomic load + branch.
+No timestamp is read, no payload is allocated, and no sink is called. The
+return value and every side effect of the enclosing operation are unchanged.
+
+### 7.4 Conformance
+
+Both ports produce identically-named metrics with the same value semantics
+(I-7). The telemetry test suites (`CorpusKitTelemetryTests.swift` /
+`corpuskit_telemetry_tests.rs`) verify:
+
+- **§1 disabled gate:** no `corpuskit.*` metric emitted when monitoring is off.
+- **§2 enabled gate:** exact counts (2 for insert, 4 for recall) when on.
+- **§3 metric shapes:** names, tags, and value ranges (latency ≥ 0, count == batch size).
+- **§4 conformance:** recall results are byte-identical with monitoring on and off.
+
 ## § 8 — Corpus actor (public entry point)
 
 ### 8.1 Purpose
@@ -328,3 +383,29 @@ rankings for shared test vectors (inherits C-1…C-7). The deterministic
 embedding (`.deterministic` / `Deterministic`) uses the same FNV-1a
 64-bit hash, LCG constants, and FloatSimHash seed (`0xC05BD15CA15D1B00`)
 in both ports.
+
+## § GLK_PROVISION_001 — Corpus lifecycle (destroyRecallIndex)
+
+Added: 2026-06-06. Called by GeniusLocusKit estate teardown.
+
+`destroyRecallIndex` (Swift) / `destroy_recall_index` (Rust) destroys the
+Corpus's active recall capability without deleting verbatim content:
+
+**What is destroyed:**
+- BM25 index entries (all chunks removed from the in-memory BM25 index)
+- `chunk_source_map` (in-memory reverse map cleared)
+- All vector rows in the internal VectorStore (via `destroyAllVectors`)
+
+**What is preserved:**
+- BundleStore `chunks` rows — the append-only invariant holds. Verbatim
+  content survives for audit and retention purposes. This is intentional:
+  destroying a MOOT invalidates its active recall surface, not its stored
+  verbatim content. A future storage-erasure primitive (redaction/compaction
+  layer) handles verbatim content erasure separately.
+
+**Invariant:** `destroyRecallIndex` calls the Corpus's internal VectorStore's
+`destroyAllVectors` — it does NOT need to be called separately by the caller.
+The caller (GLK's `destroy`) additionally calls `destroyAllVectors` on any
+_standalone_ VectorStore registered for the estate (which uses separate storage
+from the Corpus's internal VectorStore in the `.glk` / separate-corpusStorage
+case).

@@ -91,7 +91,7 @@ kernel instance for reuse. `Session` is `Sendable`.
 
 **I-4 (delegation):** all compute delegates to SubstrateLib kernels;
 EngramLib introduces no independent math and therefore inherits
-SubstrateLib's scalar-reference and cross-leg parity guarantees.
+SubstrateLib's scalar-reference and cross-port parity guarantees.
 
 ## § 5 — Behavioral contracts
 
@@ -136,6 +136,6 @@ vector (I-3).
 **C-3:** `union([])` == zero engram; `distances(probe:[])` == `[]`;
 `findNearest(…, in: [])` == `[]` / `nil` (B-2, B-3, B-5).
 
-**C-4 (cross-leg):** the Swift and Rust versions agree on distance,
+**C-4 (cross-port):** the Swift and Rust ports agree on distance,
 nearest, within, and union for every shared test vector (inherits
 SubstrateLib I-7).

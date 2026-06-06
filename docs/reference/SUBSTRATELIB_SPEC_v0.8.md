@@ -11,6 +11,7 @@ relates_to:
   - SUBSTRATEKERNEL_SPEC_v0.8.md    (Layer 2: hot-path primitives this package composes)
   - SUBSTRATEML_SPEC_v0.8.md        (Layer 3: cold-path algorithms this package composes)
   - DECISION_SUBSTRATELIB_PRESHIP_REFACTOR_2026-05-28.md (the four-package split + amendment retaining AuditGate; this is Layer 4)
+  - DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md (authorises adding IntellectusLib as a dep)
   - GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md  (§5 audit log, §9 row-state automaton, §10 the nine verbs, I-22 / I-25 / I-26 / I-30)
 purpose: |
   SubstrateLib is Layer 4 of the four-package substrate: the
@@ -88,13 +89,20 @@ This specification does NOT define:
 
 ```
               SubstrateLib              ← THIS PACKAGE (orchestration)
-                ↑    ↑    ↑
-       SubstrateML  ↑   SubstrateKernel
-                ↘  ↑  ↙
+                ↑    ↑    ↑    ↑
+       SubstrateML  ↑   SubstrateKernel ↑
+                ↘  ↑  ↙             IntellectusLib (telemetry floor)
               SubstrateTypes
 ```
 
-**Depends on:** `SubstrateTypes`, `SubstrateKernel`, `SubstrateML`.
+**Depends on:** `SubstrateTypes`, `SubstrateKernel`, `SubstrateML`,
+`IntellectusLib`.
+
+The `IntellectusLib` dependency was added in the P2 self-report
+mission (2026-06-06, branch `cp-substratelib-report`) per
+`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`. `IntellectusLib` is
+the zero-dependency telemetry floor (no substrate imports); it sits
+below SubstrateLib without inverting layering.
 
 **Consumed by:** `LocusKit` (the sole verb-driver consumer; the
 other kits read substrate types directly without going through the
@@ -264,3 +272,45 @@ this package ships conformance vectors:
   event sequence, produces an identical event across ports.
 
 The vectors live in `tests/` directories of both legs.
+
+## § 8 — Self-report telemetry
+
+SubstrateLib emits telemetry via `IntellectusLib`. The telemetry is
+**off by default** — when monitoring is disabled (the default), every
+`report!` / `Intellectus.report(_:)` call is a single atomic load
+plus branch (~1 ns). No `StatSample` is constructed, no lock is
+acquired, no allocation occurs on the off-path.
+
+### Emit sites
+
+| Metric name | Emitted at | Tags |
+|---|---|---|
+| `substratelib.verb.capture_count` | After successful `capture` | `noun_type` (NounType ordinal string) |
+| `substratelib.verb.reanchor_count` | After successful `reanchor` | — |
+| `substratelib.verb.mutate_count` | After successful `mutate` | `mutation_kind` (verb token) |
+| `substratelib.verb.withdraw_count` | After successful `withdraw` | — |
+| `substratelib.verb.expunge_count` | After successful `expunge` | — |
+| `substratelib.verb.recall_count` | After `recall` returns | `result_count` (row count string) |
+| `substratelib.audit_gate.admit_count` | After successful `AuditGate.admit` | `noun_type` |
+| `substratelib.audit_gate.reject_count` | After rejected `AuditGate.admit` | `violation` (gate violation name) |
+| `substratelib.write_gate.admitted_count` | Same as audit admit | `verb` |
+| `substratelib.write_gate.rejected_count` | Same as audit reject | `verb`, `reason` |
+
+### Determinism invariant
+
+Timestamps are caller-supplied (`ts: Double` Swift / `ts: f64` Rust
+— epoch seconds). SubstrateLib never reads a clock. The caller
+stamps once at the verb boundary and passes the value through.
+
+This is mandatory: SubstrateLib is the determinism floor. Any clock
+read inside the substrate would break federation determinism and
+the scalar/Metal/BLAS conformance guarantee.
+
+### Test isolation
+
+Tests that install a telemetry sink must not corrupt parallel test
+runs. The strategy is the `TsFilteredSink` pattern: each test picks
+a unique sentinel `Double` / `f64` and passes it as `ts:` to the
+verb call. The sink records only samples whose `ts` exactly equals
+the sentinel. Non-telemetry calls use `ts: 0.0`, which every
+ts-filtered sink discards.

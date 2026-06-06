@@ -14,7 +14,7 @@ documentation in `docs/reference/`. Every Kit and Lib in
 
 The split exists so that an agent given a scoped task ("implement
 X in KitY") can load only KitY's two files instead of the whole
-substrate, and so the Rust port can be authored against the same
+substrate, and so the Rust version can be authored against the same
 SPEC without re-deriving the contract.
 
 ## Templates

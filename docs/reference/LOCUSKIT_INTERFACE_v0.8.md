@@ -603,7 +603,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   swift test --package-path packages/kits/LocusKit
 ```
 
-(Target: `LocusKitTests`.)
+(Targets: `LocusKitTests`, `LocusKitTelemetryTests`.)
 
 **Rust:**
 
@@ -611,7 +611,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 cargo test -p locus-kit
 ```
 
-(Exercises the `DrawerStore` contract — SPEC § 8.)
+(Suites: inline `DrawerStore` contract tests — SPEC § 8;
+`locuskit_telemetry_tests.rs` — telemetry gate and conformance.)
 
 ## § 6 — Examples
 
@@ -851,6 +852,73 @@ Rust port declares it `pub`. The behaviour is conformance-bound identically
 port advertises it as a consumer-facing contract type, so this is recorded
 as Confirmed rather than DRIFT — but the asymmetry is flagged here so a
 future pass can decide whether Rust should narrow it to `pub(crate)`.
+
+---
+
+## § Telemetry — cp-locuskit-report
+
+Added: 2026-06-06. `DrawerStore` (via `DrawerStoreCore`) emits
+`locuskit.*` metrics via IntellectusLib when the global monitoring gate is
+enabled. Off by default.
+
+### Dependencies added
+
+- `Package.swift`: `IntellectusLib` in-repo dependency added to the
+  `LocusKit` target and `LocusKitTests` test target. Authority:
+  `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28` + `MANAGER_1.0_PLAN §4`.
+- `Cargo.toml`: `intellectus-lib = { path = "…/IntellectusLib/rust" }`
+  added under `[dependencies]`.
+
+### Emit surface
+
+| Swift call site | Metric emitted | Tags |
+|---|---|---|
+| `addDrawer(_:now:)` | `locuskit.drawer.capture_latency_ms` | `estate=<UUID>` |
+| `addDrawer(_:now:)` | `locuskit.drawer.capture_count` | `estate=<UUID>` |
+| `drawersIn(wing:)` | `locuskit.drawer.query_latency_ms` | `estate=<UUID>`, `query="wing"` |
+| `drawersIn(wing:)` | `locuskit.drawer.query_result_count` | `estate=<UUID>`, `query="wing"` |
+| `drawersIn(wing:room:)` | `locuskit.drawer.query_latency_ms` | `estate=<UUID>`, `query="wing_room"` |
+| `drawersIn(wing:room:)` | `locuskit.drawer.query_result_count` | `estate=<UUID>`, `query="wing_room"` |
+| `allDrawers()` | `locuskit.drawer.query_latency_ms` | `estate=<UUID>`, `query="all"` |
+| `allDrawers()` | `locuskit.drawer.query_result_count` | `estate=<UUID>`, `query="all"` |
+| `addKGFact(_:)` | `locuskit.kgfact.add_count` | `estate=<UUID>` |
+| `kgFacts(forDrawerID:)` | `locuskit.kgfact.query_result_count` | `estate=<UUID>`, `query="drawer"` |
+| `allKGFacts()` | `locuskit.kgfact.query_result_count` | `estate=<UUID>`, `query="all"` |
+| `addTunnel(_:)` | `locuskit.tunnel.add_count` | `estate=<UUID>` |
+
+Rust emit sites mirror Swift exactly (`add_drawer`, `drawers_in_wing`,
+`all_drawers`, `add_kg_fact`, `kg_facts_for_drawer`, `all_kg_facts`,
+`add_tunnel`). All in `DrawerStoreCore` (shared impl, auto-applies to
+`InMemoryDrawerStore`, `SqliteDrawerStore`, `PostgresDrawerStore`).
+
+### Test suite: `LocusKitTelemetryTests` (Swift)
+
+File: `Tests/LocusKitTests/LocusKitTelemetryTests.swift`
+
+Six serialised suites, all bodies serialised under `IntellectusTestMutex`
+(async actor mutex in `IntellectusTestLock.swift`). Enabled-path tests
+filter emitted metrics by `estate` tag to tolerate concurrent suites.
+
+- `§1 LocusKitTelemetry — disabled gate`: 3 tests — no metrics emitted
+  when monitoring is off (process-wide lock ensures zero-count assertion
+  is not corrupted by concurrent enabled-path tests).
+- `§2 LocusKitTelemetry — drawer capture emissions`: 4 tests — `addDrawer`
+  emits latency + count, value=1.0, non-negative latency, two-call=two-count.
+- `§3 LocusKitTelemetry — drawer query emissions`: 3 tests — query metrics
+  with correct query tags.
+- `§4 LocusKitTelemetry — KGFact emissions`: 3 tests — add_count and
+  query_result_count with correct query tags.
+- `§5 LocusKitTelemetry — tunnel emissions`: 2 tests — `addTunnel` emits
+  add_count, two-call=two-count.
+- `§6 LocusKitTelemetry — conformance`: 2 tests — results byte-identical
+  with monitoring on and off.
+
+### Test suite: `locuskit_telemetry_tests.rs` (Rust)
+
+File: `rust/tests/locuskit_telemetry_tests.rs`
+
+17 tests, all holding `GLOBAL_LOCK` (`OnceLock<Mutex<()>>`). Mirrors Swift
+suites §1–§6 above. Enabled-path tests filter by `estate` tag.
 
 ---
 

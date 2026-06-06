@@ -157,13 +157,13 @@ provides storage and the application does not bring its own.
 its own. `findNearest` delegates the batch bitcount to EngramLib, which
 routes to the substrate kernel (BNNS / NEON accelerated where
 available). VectorKit therefore inherits EngramLib's and SubstrateLib's
-scalar-reference and cross-leg parity guarantees.
+scalar-reference and cross-port parity guarantees.
 
 ## § 5 — Behavioral contracts
 
 **B-1 (provider determinism):** for a fixed inference closure and
 projection seed, `embed(text)` is deterministic — the same text yields
-the same engram across calls and across the Swift and Rust versions
+the same engram across calls and across the Swift and Rust ports
 (FloatSimHash is bit-identical per the substrate conformance harness).
 
 **B-2 (provider error surface):** `embed` surfaces inference failure as
@@ -264,7 +264,7 @@ ascending then `drawerID` ascending, truncated to `limit`; `limit`/`k`
 of zero and the empty corpus both yield empty (B-6).
 
 **C-5 (empty-input zero engram):** `embed("")` returns the canonical
-zero engram in both legs without invoking the inference closure (I-5,
+zero engram in both ports without invoking the inference closure (I-5,
 B-1).
 
 **C-6 (provider determinism):** for a fixed seed and closure, `embed`
@@ -275,7 +275,7 @@ distinct engrams for the same float vector (I-2, B-1).
 substring-matching `drawerID`s up to `limit`, ordered ascending, and the
 empty set when nothing matches (B-7).
 
-**C-8 (cross-leg):** the Swift and Rust versions agree on `embed` engrams
+**C-8 (cross-port):** the Swift and Rust ports agree on `embed` engrams
 (for shared seeds and float vectors), on `findNearest` ordering, and on
 `findByKeyword` results for every shared test vector — inheriting
 SubstrateLib's bit-identical FloatSimHash and EngramLib's
@@ -291,3 +291,72 @@ test. An empty element at position `i` in the input array yields
 B-11). Verified by `FloatSimHashEmbeddingProviderTests.testEmbedBatchDefaultImplHandlesMixedEmptyAndNonEmpty` (Swift)
 and `simhash_provider_tests::embed_batch_default_impl_handles_mixed_empty_and_non_empty`
 (Rust).
+
+## § VECTORKIT_REPORT_001 — Self-report telemetry
+
+Added: 2026-06-06 (VECTORKIT_REPORT_001). VectorStore now emits
+`vectorkit.*` metrics via IntellectusLib when monitoring is enabled. Off
+by default (the global enabled gate is `false`); the off-path cost is
+one `AtomicBool` load + branch per emit site (~1 ns, negligible).
+
+**Design invariant:** telemetry MUST NOT affect results. `addVector`,
+`findNearest`, and `findByKeyword` return byte-identical values whether
+monitoring is on or off. The emit call is placed after the operation
+completes, at the operation boundary; it never participates in the
+result computation path.
+
+### Metrics emitted
+
+| Metric name | Value | Tags | Emitted by |
+|---|---|---|---|
+| `vectorkit.index.insert_latency_ms` | Wall time for the upsert round-trip (ms) | `kit="VectorKit"`, `model_id=<modelID>` | `addVector` / `add_vector` |
+| `vectorkit.search.latency_ms` | Wall time for the full findNearest scan + top-K + sort (ms) | `kit="VectorKit"`, `model_id=<modelID>` | `findNearest` / `find_nearest` |
+| `vectorkit.search.result_count` | Number of matches returned (≤ limit) | `kit="VectorKit"`, `model_id=<modelID>` | `findNearest` / `find_nearest` |
+| `vectorkit.search.keyword_result_count` | Number of distinct drawer IDs returned | `kit="VectorKit"` | `findByKeyword` / `find_by_keyword` |
+
+### Tags
+
+- `kit`: always `"VectorKit"` — identifies the emitting kit.
+- `model_id`: the `modelID` argument to the operation. Present on insert
+  and search metrics; absent from keyword metrics (keyword search is not
+  model-scoped).
+- `estate` tag is **not** emitted. VectorStore wraps a `Storage` handle
+  and has no access to estate identity. If estate attribution is required,
+  the consumer installs a wrapping sink that injects the tag.
+
+### Off-path cost
+
+When monitoring is disabled (the default):
+- Swift: `Intellectus.report(_:)` evaluates its `@autoclosure` argument
+  only when `_enabled.load(.relaxed) == true`. One atomic load + branch.
+  The `Date().timeIntervalSince1970` start-time capture in `addVector`
+  and `findNearest` is unconditional; this is the only added overhead on
+  the disabled path.
+- Rust: the `report!` macro expands to `if Intellectus::is_enabled() { … }`.
+  One `AtomicBool::load(Acquire)` + branch. The `Instant::now()` start
+  capture is unconditional.
+
+### Parity
+
+The Swift and Rust ports emit the same four metric names with the same
+tag keys and values. The `ts` field is epoch seconds (f64) in both ports.
+Value semantics: latency_ms is wall-clock milliseconds (f64);
+count metrics are f64 with integer values.
+
+## § GLK_PROVISION_001 — VectorStore lifecycle (destroyAllVectors)
+
+Added: 2026-06-06. Called by GeniusLocusKit estate teardown.
+
+`destroyAllVectors` (Swift) / `destroy_all_vectors` (Rust) deletes all rows
+from the `vectors` table. This is the estate-destruction primitive called by
+`GeniusLocusKit.destroy(storage:corpusStorage:handle:)` when tearing down a
+provisioned estate.
+
+**Invariants:**
+- The backing storage schema is preserved; only data rows are deleted.
+- The caller (GLK) is responsible for closing the LocusKit estate before calling
+  this method.
+- The method does not close or remove the backing storage file.
+- Parity: Swift uses `StoragePredicate.like(column("id"), "%")` (any non-null id);
+  Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
+

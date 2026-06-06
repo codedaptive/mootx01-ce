@@ -4,7 +4,7 @@ authors: Bob Pankratz (via/ claude)
 date: <YYYY-MM-DD>
 version: v0.1
 package: <PackageName>
-languages: [swift]  # add "rust" once the Rust port lands
+languages: [swift]  # add "rust" once the Rust version lands
 relates_to:
   - <PACKAGE>_SPEC_v0.1.md  (the contract this interface implements)
 purpose: |
@@ -39,7 +39,7 @@ Filling this stub:
    leak — both are findings worth raising.
 4. Cross-reference SPEC by section ("see SPEC § 4.2 for ordering
    guarantees").
-5. Bilingual: if Rust port exists, paste Rust signatures alongside
+5. Bilingual: if Rust version exists, paste Rust signatures alongside
    Swift. If not, omit the rust block but keep `languages: [swift]`
    in frontmatter so the gap is visible.
 

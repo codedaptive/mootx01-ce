@@ -10,7 +10,7 @@ relates_to:
   - SUBSTRATETYPES_INTERFACE_v0.8.md  (Layer 1 types consumed)
   - SUBSTRATEKERNEL_INTERFACE_v0.8.md  (Layer 2 primitives consumed)
 purpose: |
-  Public API surface of SubstrateML in both ports. Twenty-five Swift
+  Public API surface of SubstrateML in both ports. Twenty-nine Swift
   files publish the cold-path algorithms over substrate types: the
   audit-log fold, matrix decay, Bradley-Terry estimation, NMF, FFT,
   eigenvalue centrality, lattice distance, anomaly / community
@@ -18,8 +18,10 @@ purpose: |
   partial-state recall, pairing handshake, tier-contribution
   fingerprint, tier-ascending query, action-outcome matrix, DP-OR
   reduction, LLM calibration curve, information theory, temporal
-  compression, pairwise association-rule mining, and bounded formal
-  concept analysis. The Rust mirror exposes the same shapes.
+  compression, temporal-causality fold, pairwise association-rule
+  mining, Apriori rule mining, row-attribute projection, bounded
+  formal concept analysis, and the Duquenne–Guigues concept-implication
+  basis. The Rust mirror exposes the same shapes.
 ---
 
 # SubstrateML Interface
@@ -28,7 +30,9 @@ purpose: |
 
 **Swift:** `packages/libs/SubstrateML/`
 
-- `Sources/SubstrateML/` — 25 files, one per algorithm or family.
+- `Sources/SubstrateML/` — 29 files, one per algorithm or family
+  (including `TemporalCausalityFold.swift`, `RowAttributeView.swift`,
+  `AprioriMining.swift`, and `ConceptImplications.swift`).
 - `Tests/SubstrateMLTests/` — unit + conformance.
 - `Package.swift` — depends on `SubstrateTypes`, `SubstrateKernel`.
 
@@ -55,30 +59,40 @@ SPEC § 5.1.
 
 ```swift
 public struct ProjectedRowState: Sendable, Equatable {
-    public let rowId: RowId
-    public let bitmaps: BitmapFields
-    public let latticeAnchor: LatticeAnchor?
-    public let state: RowState
-    public let asOf: HLC
+    public var rowId: UUID
+    public var nounType: NounType
+    public var stateRaw: UInt8
+    public var adjectiveBitmap: Int64
+    public var operationalBitmap: Int64
+    public var provenanceBitmap: Int64
+    public var latticeAnchor: LatticeAnchor
+    public var tombstoned: Bool
+    public var lastEventHLC: HLC
+    public init(rowId: UUID, nounType: NounType, stateRaw: UInt8, /* … */)
 }
 
 public enum AuditLogFold {
-    public static func projectStateAt(
-        rowId: RowId,
-        asOf: HLC,
-        log: GSetAuditLog
-    ) -> ProjectedRowState?
+    // Project from an unordered [AuditEvent] slice (the fold sorts by HLC).
     public static func projectCurrentState(
-        rowId: RowId,
-        log: GSetAuditLog
+        rowId: UUID, nounType: NounType, events: [AuditEvent]
     ) -> ProjectedRowState?
+    public static func projectStateAt(
+        rowId: UUID, nounType: NounType, events: [AuditEvent], asOf: HLC
+    ) -> ProjectedRowState?
+    public static func projectAll(
+        events: [AuditEvent], asOf: HLC? = nil,
+        nounTypeFor: (UUID) -> NounType
+    ) -> [UUID: ProjectedRowState]
 }
 ```
 
 ```rust
-pub struct ProjectedRowState { /* same fields */ }
-pub fn project_state_at(row_id: RowId, as_of: HLC, log: &GSetAuditLog) -> Option<ProjectedRowState>;
-pub fn project_current_state(row_id: RowId, log: &GSetAuditLog) -> Option<ProjectedRowState>;
+pub struct ProjectedRowState { /* same fields, snake_case */ }
+impl AuditLogFold {
+    pub fn project_current_state(row_id: u128, noun_type: NounType, events: &[AuditEvent]) -> Option<ProjectedRowState>;
+    pub fn project_state_at(row_id: u128, noun_type: NounType, events: &[AuditEvent], as_of: HLC) -> Option<ProjectedRowState>;
+    pub fn project_all(events: &[AuditEvent], as_of: Option<HLC>, /* noun_type_for */) -> HashMap<u128, ProjectedRowState>;
+}
 ```
 
 ### `DecayingMatrix`, `MatrixDecay`, `DecayHalfLives`
@@ -87,51 +101,79 @@ SPEC § 5.2.
 
 ```swift
 public struct DecayingMatrix: Sendable {
-    public let matrix: MatrixC          // or MatrixO, MatrixT — see overloads
-    public let lastTouched: HLC
+    public let rows: Int
+    public let cols: Int
+    public var values: [Double]
+    public let halfLifeSeconds: Double
+    public var lastDecayTimeSeconds: Int64
+    public init(rows: Int, cols: Int, /* values, halfLifeSeconds, … */)
 }
 public enum MatrixDecay {
-    public static func decay(_ m: DecayingMatrix, halfLife: TimeInterval, asOf: HLC) -> DecayingMatrix
+    public static func apply(to matrix: inout DecayingMatrix, /* asOf … */)
+    public static func decayFactor(elapsedSeconds: Double, /* halfLife … */) -> Double
+    public static func decayAndAdd(to matrix: inout DecayingMatrix, /* … */)
+    // Convenience overloads over the substrate matrices:
+    public static func applyExponentialDecay(to matrix: inout MatrixF, /* … */)
+    public static func applyExponentialDecay(to matrix: inout MatrixO, /* … */)
+    public static func applyExponentialDecay(to matrix: inout MatrixC, /* … */)
 }
 public enum DecayHalfLives {
-    public static let matrixC: TimeInterval = 30 * 86_400  // 30 days
-    public static let matrixO: TimeInterval = 14 * 86_400
-    public static let matrixT: TimeInterval =  7 * 86_400
+    public static let fieldPresenceSeconds:     Double = 90  * 86400
+    public static let correlationSeconds:       Double = 180 * 86400
+    public static let coActivationSeconds:      Double = 60  * 86400
+    public static let temporalCausalitySeconds: Double = 30  * 86400
+    public static let actionOutcomesSeconds:    Double = 365 * 86400
+    public static let calibrationSeconds:       Double = 730 * 86400
+    public static let wRankingSeconds:          Double = 90  * 86400
 }
 ```
 
 ```rust
-pub struct DecayingMatrix { /* same */ }
-pub fn decay(m: &DecayingMatrix, half_life_secs: f64, as_of: HLC) -> DecayingMatrix;
-pub mod decay_half_lives { pub const MATRIX_C: f64 = 30.0 * 86_400.0; /* ... */ }
+pub struct DecayingMatrix { pub rows: usize, pub cols: usize, pub values: Vec<f64>,
+                            pub half_life_seconds: f64, pub last_decay_time_seconds: i64 }
+// decay::apply / decay::decay_factor free functions; constants in decay::half_lives.
+pub mod half_lives { pub const FIELD_PRESENCE_SECONDS: f64 = 90.0 * 86400.0; /* … */ }
 ```
 
 ### `PreferenceObservation`, `BradleyTerryEstimator`
 
 SPEC § 5.3.
 
+A win-over-a-loser-set observation keyed by `UUID` row identifiers;
+the estimator is online SGD over a `[UUID: Double]` strength map.
+
 ```swift
 public struct PreferenceObservation: Sendable {
-    public let winner: UInt32
-    public let loser: UInt32
-    public let weight: Double           // > 0
+    public let winnerID: UUID
+    public let losers: [UUID]
+    public let weight: Double          // typically 1.0
+    public init(winnerID: UUID, losers: [UUID], weight: Double = 1.0)
 }
 public struct BradleyTerryEstimator: Sendable {
-    public init(itemCount: Int)
-    public mutating func update(_ obs: PreferenceObservation) throws
-    public func strength(_ item: UInt32) -> Double
-    public func strengths() -> [Double]
+    public private(set) var theta: [UUID: Double]
+    public let learningRate: Double
+    public let l2: Double
+    public init(learningRate: Double = 0.05, l2: Double = 0.001, /* … */)
+    public mutating func observe(_ obs: PreferenceObservation)
+    public mutating func observeBatch(_ observations: [PreferenceObservation])
+    public func strength(of rowID: UUID) -> Double
+    public func probability(_ a: UUID, beats b: UUID) -> Double
 }
 ```
 
 ```rust
-pub struct PreferenceObservation { pub winner: u32, pub loser: u32, pub weight: f64 }
-pub struct BradleyTerryEstimator { /* internal */ }
+pub struct PreferenceObservation { pub winner_id: RowId, pub losers: Vec<RowId>, pub weight: f64 }
+impl PreferenceObservation {
+    pub fn new(winner_id: RowId, losers: Vec<RowId>) -> Self;            // weight = 1.0
+    pub fn with_weight(winner_id: RowId, losers: Vec<RowId>, weight: f64) -> Self;
+}
+pub struct BradleyTerryEstimator { /* theta: HashMap<RowId, f64>, learning_rate, l2 */ }
 impl BradleyTerryEstimator {
-    pub fn new(item_count: usize) -> Self;
-    pub fn update(&mut self, obs: PreferenceObservation) -> Result<(), &'static str>;
-    pub fn strength(&self, item: u32) -> f64;
-    pub fn strengths(&self) -> Vec<f64>;
+    pub fn new(learning_rate: f64, l2: f64) -> Self;
+    pub fn observe(&mut self, obs: &PreferenceObservation);
+    pub fn observe_batch(&mut self, observations: &[PreferenceObservation]);
+    pub fn strength(&self, row_id: RowId) -> f64;
+    pub fn probability_beats(&self, a: RowId, b: RowId) -> f64;
 }
 ```
 
@@ -172,29 +214,40 @@ SPEC § 5.5.
 
 ```swift
 public struct Complex: Hashable, Sendable {
-    public let real: Double
-    public let imag: Double
+    public var real: Double
+    public var imag: Double
+    public init(real: Double, imag: Double)
+    public static let zero: Complex
+    public var magnitude: Double { get }
+    public var magnitudeSquared: Double { get }
+    public static func + (a: Complex, b: Complex) -> Complex
+    public static func - (a: Complex, b: Complex) -> Complex
+    public static func * (a: Complex, b: Complex) -> Complex
 }
 public enum FFT {
-    public static func forward(_ signal: [Complex]) -> [Complex]
-    public static func inverse(_ spectrum: [Complex]) -> [Complex]
-    public static func detectRhythm(signal: [Double], samplingRate: Double) -> RhythmResult
+    public static func forward(real input: [Double]) -> [Complex]   // length must be power of two
+    public static func magnitudeSpectrum(real input: [Double]) -> [Double]
 }
 public struct RhythmResult: Sendable, Hashable {
-    public let dominantFrequencyHz: Double
-    public let confidence: Double
+    public let dominantPeriodSeconds: Double?
+    public let spectralEnergy: Double
+    public let windowBuckets: Int
+    public let bucketDurationSeconds: Double
 }
 public enum RhythmAnalysis {
-    public static func analyze(signal: [Double], samplingRate: Double) -> RhythmResult
+    public static func analyze(series: [Double], bucketDurationSeconds: Double) -> RhythmResult
+    public static func analyze(fingerprints: [Fingerprint256], block: Int,
+                               bitPosition: Int, bucketDurationSeconds: Double) -> RhythmResult
 }
 ```
 
 ```rust
 pub struct Complex { pub real: f64, pub imag: f64 }
-pub fn fft_forward(signal: &[Complex]) -> Vec<Complex>;
-pub fn fft_inverse(spectrum: &[Complex]) -> Vec<Complex>;
-pub fn detect_rhythm(signal: &[f64], sampling_rate: f64) -> RhythmResult;
-pub struct RhythmResult { pub dominant_frequency_hz: f64, pub confidence: f64 }
+pub fn forward(real_input: &[f64]) -> Vec<Complex>;          // fft::forward
+pub fn magnitude_spectrum(real_input: &[f64]) -> Vec<f64>;
+pub struct RhythmResult { pub dominant_period_seconds: Option<f64>, pub spectral_energy: f64,
+                          pub window_buckets: usize, pub bucket_duration_seconds: f64 }
+pub fn analyze(series: &[f64], bucket_duration_seconds: f64) -> RhythmResult;  // fft::analyze
 ```
 
 ### `EigenvalueCentrality`
@@ -203,12 +256,21 @@ SPEC § 5.6.
 
 ```swift
 public enum EigenvalueCentrality {
-    public static func computeCentrality(graph: MatrixF, iterations: Int) -> [Double]
+    public typealias Adjacency = [[(neighbor: Int, weight: Double)]]
+    public static let defaultMaxIterations: Int = 100
+    public static let defaultTolerance: Double = 1.0e-6
+    public static func compute(
+        adjacency: Adjacency,
+        maxIterations: Int = defaultMaxIterations,
+        tolerance: Double = defaultTolerance
+    ) -> [Double]
 }
 ```
 
 ```rust
-pub fn eigenvalue_centrality(graph: &MatrixF, iterations: usize) -> Vec<f64>;
+impl EigenvalueCentrality {
+    pub fn compute(adjacency: &[Vec<(usize, f64)>], max_iterations: usize, tolerance: f64) -> Vec<f64>;
+}
 ```
 
 ### `RandomWalks`, `SplitMix64`
@@ -222,22 +284,37 @@ public struct SplitMix64 {
 }
 public enum RandomWalks {
     public typealias Adjacency = [[(neighbor: Int, weight: Double)]]
+    public static let defaultRestartProb: Double = 0.15
     // Precondition: every neighbor index in [0, N); every weight finite and ≥ 0.
     public static func walk(adjacency: Adjacency, start: Int, length: Int,
                             restartProb: Double = defaultRestartProb, seed: UInt64) -> [Int]
+    public static func walkWithRestart(adjacency: Adjacency, start: Int, length: Int,
+                                       restartProb: Double = defaultRestartProb, seed: UInt64) -> [Int]
     // Precondition: neighbors must be non-empty.
     public static func sampleWeighted(_ neighbors: [(neighbor: Int, weight: Double)],
                                       rng: inout SplitMix64) -> Int
+    public static func uniform01(_ rng: inout SplitMix64) -> Double
+}
+
+public struct SplitMix64 {
+    public var state: UInt64
+    public init(seed: UInt64)
+    public mutating func next() -> UInt64
 }
 ```
 
 ```rust
 pub struct SplitMix64 { pub state: u64 }
 impl SplitMix64 { pub fn new(seed: u64) -> Self; pub fn next(&mut self) -> u64; }
-// Same preconditions as Swift; violations panic.
-pub fn walk(adjacency: &[Vec<(usize, f64)>], start: usize, length: usize,
-            restart_prob: f64, seed: u64) -> Vec<usize>;
-pub fn sample_weighted(neighbors: &[(usize, f64)], rng: &mut SplitMix64) -> usize;
+impl RandomWalks {
+    // Same preconditions as Swift; violations panic.
+    pub fn walk(adjacency: &[Vec<(usize, f64)>], start: usize, length: usize,
+                restart_prob: f64, seed: u64) -> Vec<usize>;
+    pub fn walk_with_restart(adjacency: &[Vec<(usize, f64)>], start: usize, length: usize,
+                             restart_prob: f64, seed: u64) -> Vec<usize>;
+    pub fn sample_weighted(neighbors: &[(usize, f64)], rng: &mut SplitMix64) -> usize;
+    pub fn uniform01(rng: &mut SplitMix64) -> f64;
+}
 ```
 
 ### `LatticeAnchorStr`, `UDCTreeDistance`, `LatticeDistance`, `WikidataAdjacencyProvider`
@@ -246,31 +323,50 @@ SPEC § 5.7.
 
 ```swift
 public struct LatticeAnchorStr: Hashable, Sendable {
-    public let udcCode: String
+    public let udc: String
+    public let qid: UInt64
+    public init(udc: String, qid: UInt64 = 0)
 }
 public enum UDCTreeDistance {
-    public static func distance(_ a: LatticeAnchorStr, _ b: LatticeAnchorStr) -> Double
+    public static func longestCommonPrefixLength(_ a: String, _ b: String) -> Int
+    public static func distance(_ a: String, _ b: String) -> Double
 }
 public protocol WikidataAdjacencyProvider {
-    func areAdjacent(_ a: String, _ b: String) -> Bool
-}
-public enum LatticeDistance {
-    public static func combined(
-        _ a: LatticeAnchorStr,
-        _ b: LatticeAnchorStr,
-        wikidataAdjacency: (any WikidataAdjacencyProvider)?
-    ) -> Double
+    /// Q-IDs reachable from `qid` by one {subclass_of, instance_of, part_of} edge.
+    func neighbors(of qid: UInt64) -> Set<UInt64>
 }
 public enum WikidataGraphDistance {
-    public static func distance(_ a: String, _ b: String, provider: any WikidataAdjacencyProvider) -> Double
+    public static let maxDepth: Int = 4
+    public static let normalizationScale: Double = 3.0
+    public static func shortestPathLength(from a: UInt64, to b: UInt64,
+                                          provider: WikidataAdjacencyProvider, maxDepth: Int) -> Int?
+    public static func distance(from a: UInt64, to b: UInt64,
+                                provider: WikidataAdjacencyProvider, maxDepth: Int = maxDepth) -> Double
+}
+public enum LatticeDistance {
+    public static let defaultAlphaUDC: Double = 0.5
+    public static let defaultAlphaQID: Double = 0.5
+    // Hashed-LatticeAnchor proxy (binary equality):
+    public static func distance(_ a: LatticeAnchor, _ b: LatticeAnchor) -> Float32
+    public static func isInSubtree(_ child: LatticeAnchor, of parent: LatticeAnchor) -> Bool
+    // True combined UDC-tree + Wikidata-graph distance over the string form:
+    public static func distance(_ a: LatticeAnchorStr, _ b: LatticeAnchorStr,
+                                provider: WikidataAdjacencyProvider,
+                                alphaUDC: Double = defaultAlphaUDC,
+                                alphaQID: Double = defaultAlphaQID) -> Double
 }
 ```
 
 ```rust
-pub struct LatticeAnchorStr { pub udc_code: String }
-pub fn udc_tree_distance(a: &LatticeAnchorStr, b: &LatticeAnchorStr) -> f64;
-pub trait WikidataAdjacencyProvider { fn are_adjacent(&self, a: &str, b: &str) -> bool; }
-pub fn lattice_combined_distance(a: &LatticeAnchorStr, b: &LatticeAnchorStr, wikidata: Option<&dyn WikidataAdjacencyProvider>) -> f64;
+pub struct LatticeAnchorStr { pub udc: String, pub qid: u64 }
+pub trait WikidataAdjacencyProvider { /* neighbor query */ }
+impl UDCTreeDistance { pub fn distance(a: &str, b: &str) -> f64; }
+impl WikidataGraphDistance { pub fn distance(from: u64, to: u64, provider: &dyn WikidataAdjacencyProvider, max_depth: usize) -> f64; }
+impl LatticeDistance {
+    pub fn distance_hashed(a: &LatticeAnchor, b: &LatticeAnchor) -> f32;
+    pub fn distance(a: &LatticeAnchorStr, b: &LatticeAnchorStr,
+                    provider: &dyn WikidataAdjacencyProvider, alpha_udc: f64, alpha_qid: f64) -> f64;
+}
 ```
 
 ### `CompositeDistance`
@@ -279,62 +375,89 @@ SPEC § 5.8.
 
 ```swift
 public enum CompositeDistance {
-    public static func score(
-        semantic: Double,
-        temporal: Double,
-        lattice: Double,
-        weights: (Double, Double, Double)
+    public static let defaultAlphaLattice: Double = 0.5
+    public static let defaultAlphaFingerprint: Double = 0.5
+    public static let fingerprintTotalBits: Int = 256
+    public static func distance(
+        latticeDistance: Double,                 // must be in [0, 1]
+        fingerprintHammingDistance: Int,
+        alphaLattice: Double = defaultAlphaLattice,
+        alphaFingerprint: Double = defaultAlphaFingerprint,
+        compatibleSeedScope: Bool = true
     ) -> Double
 }
 ```
 
 ```rust
-pub fn composite_score(semantic: f64, temporal: f64, lattice: f64, weights: (f64, f64, f64)) -> f64;
+impl CompositeDistance {
+    pub fn distance(lattice_distance: f64, fingerprint_hamming_distance: i64,
+                    alpha_lattice: f64, alpha_fingerprint: f64,
+                    compatible_seed_scope: bool) -> f64;
+}
 ```
 
-### `StreamSourceFlag`, `AmbientSampleRow`, the five extractors + their samples, `FeatureExtractors`
+### `StreamSourceFlag`, `AmbientSampleRow`, the five extractors + their samples
 
 SPEC § 5.9. Five platform-specific extractor structs each take a typed
-`*Sample` and produce an `AmbientSampleRow`; `FeatureExtractors` is the
-namespace facade over them.
+`*Sample` and produce an `AmbientSampleRow` via
+`extract(_:hlc:rowId:)`. There is no `FeatureExtractors` facade type;
+each extractor is used directly.
+
+`StreamSourceFlag` is a single-bit-per-source bitmap (raw values are
+powers of two, not ordinals). `AmbientSampleRow` carries the raw
+`streamSource: UInt8` bitmap (field p06), not the enum directly. Each
+extractor is constructed with the per-block `[HyperplaneFamily]` and
+exposes an `extract` method.
 
 ```swift
 public enum StreamSourceFlag: UInt8, Sendable {
-    case coreLocation = 0, eventKit = 1, healthKit = 2, screenTime = 3, systemTelemetry = 4
+    case healthkit       = 0b0000_0001
+    case corelocation    = 0b0000_0010
+    case eventkit        = 0b0000_0100
+    case screentime      = 0b0000_1000
+    case systemTelemetry = 0b0001_0000
+    case latticeLookup   = 0b0010_0000
 }
 public struct AmbientSampleRow: Sendable {
-    public let source: StreamSourceFlag
-    public let hlc: HLC
+    public let rowId: RowId
+    public let captureHLC: HLC
+    public let streamSource: UInt8        // bitmap field p06
+    public let fingerprint: Fingerprint256
+    public let lattice: LatticeAnchor
     public let payload: Data
-    public let derivedFingerprint: Fingerprint256
+    public init(rowId: RowId, /* … */)
 }
-// Typed per-source samples (each `Sendable`, per cookbook §11.4):
-public struct HealthKitSample: Sendable { /* … */ }
-public struct CoreLocationSample: Sendable { /* … */ }
-public struct EventKitSample: Sendable { /* … */ }
-public struct ScreenTimeSample: Sendable { /* … */ }
-public struct SystemTelemetrySample: Sendable { /* … */ }
-// Concrete extractor structs, one per source:
-public struct CoreLocationExtractor { /* extract(_:CoreLocationSample) -> AmbientSampleRow */ }
-public struct EventKitExtractor { /* extract(_:EventKitSample) -> AmbientSampleRow */ }
-public struct HealthKitExtractor { /* extract(_:HealthKitSample) -> AmbientSampleRow */ }
-public struct ScreenTimeExtractor { /* extract(_:ScreenTimeSample) -> AmbientSampleRow */ }
-public struct SystemTelemetryExtractor { /* extract(_:SystemTelemetrySample) -> AmbientSampleRow */ }
-public enum FeatureExtractors {
-    public static func extractAmbientSample(source: StreamSourceFlag, rawRecord: Data, hlc: HLC) -> AmbientSampleRow
-    public static func extractHealthKit(sample: HealthKitSample) -> AmbientSampleRow
+// Typed per-source samples (each `Sendable`), e.g.:
+public struct HealthKitSample: Sendable {
+    public let quantityType: String       // "stepCount", "heartRate", …
+    public let value: Double
+    public let unit: String
+    public let startDate: TimeInterval
+    public let endDate: TimeInterval
+    public let sourceDevice: String
+    public init(quantityType: String, value: Double, unit: String, /* … */)
 }
+// CoreLocationSample / EventKitSample / ScreenTimeSample / SystemTelemetrySample — analogous.
+// Concrete extractor structs, one per source, constructed with the hyperplane families:
+public struct HealthKitExtractor {
+    public init(hyperplanes: [HyperplaneFamily])
+    // extract(_:HealthKitSample) -> AmbientSampleRow
+}
+// CoreLocationExtractor / EventKitExtractor / ScreenTimeExtractor /
+// SystemTelemetryExtractor — analogous (each init(hyperplanes:) + extract).
 ```
 
 ```rust
-pub enum StreamSourceFlag { CoreLocation, EventKit, HealthKit, ScreenTime, SystemTelemetry }
-pub struct AmbientSampleRow { /* same fields, snake_case */ }
-pub struct CoreLocationSample { /* … */ } pub struct EventKitSample { /* … */ }
-pub struct HealthKitSample { /* … */ } pub struct ScreenTimeSample { /* … */ }
-pub struct SystemTelemetrySample { /* … */ }
-pub struct CoreLocationExtractor; pub struct EventKitExtractor; pub struct HealthKitExtractor;
-pub struct ScreenTimeExtractor; pub struct SystemTelemetryExtractor;
-pub fn extract_ambient_sample(source: StreamSourceFlag, raw: &[u8], hlc: HLC) -> AmbientSampleRow;
+pub enum StreamSourceFlag { Healthkit, Corelocation, Eventkit, ScreenTime, SystemTelemetry, LatticeLookup }
+pub struct AmbientSampleRow { /* row_id, capture_hlc, stream_source: u8, fingerprint, lattice, payload */ }
+pub struct HealthKitSample { /* quantity_type, value, unit, start_date, end_date, source_device */ }
+// CoreLocationSample / EventKitSample / ScreenTimeSample / SystemTelemetrySample — analogous.
+pub struct HealthKitExtractor<'a> { /* borrows &[HyperplaneFamily] */ }
+impl<'a> HealthKitExtractor<'a> {
+    pub fn extract(&self, s: &HealthKitSample, hlc: HLC, row_id: u128) -> AmbientSampleRow;
+}
+// CoreLocationExtractor / EventKitExtractor / ScreenTimeExtractor /
+// SystemTelemetryExtractor<'a> — analogous.
 ```
 
 ### `FloatSimHash`
@@ -343,51 +466,76 @@ SPEC § 5.10.
 
 ```swift
 public enum FloatSimHash {
-    public static func sign(embedding: [Float], family: HyperplaneFamily) -> Fingerprint256
+    public static func project(vector: [Float], seed: UInt64) -> Fingerprint256
 }
 ```
 
 ```rust
-pub fn float_simhash_sign(embedding: &[f32], family: &HyperplaneFamily) -> Fingerprint256;
+pub fn project(vector: &[f32], seed: u64) -> Fingerprint256;   // float_simhash::project
 ```
 
 ### `RowLite`, `MomentSummary`
 
 SPEC § 5.11.
 
+`RowLite` is a lightweight (fingerprint, captureHLC) pair.
+`MomentSummary.summarize` OR-reduces the fingerprints of rows passing
+an `activeDuring` predicate and returns a single `Fingerprint256`.
+
 ```swift
 public struct RowLite: Sendable, Hashable {
-    public let count: Int
-    public let meanFingerprint: Fingerprint256
-    public let dominantLatticeAnchor: LatticeAnchor?
+    public let fingerprint: Fingerprint256
+    public let captureHLC: HLC
+    public init(fingerprint: Fingerprint256, captureHLC: HLC)
 }
 public enum MomentSummary {
-    public static func summarize(rows: [Row], window: TimeRange, asOf: HLC) -> RowLite
+    public static func summarize(rows: [Row], window: TimeRange,
+                                 activeDuring: (Row, TimeRange) -> Bool) -> Fingerprint256
+    public static func summarize(rows: [RowLite], window: TimeRange,
+                                 activeDuring: (RowLite, TimeRange) -> Bool) -> Fingerprint256
+    public static func capturedDuring(_ row: RowLite, _ window: TimeRange) -> Bool
+    public static func orReduce(_ fps: [Fingerprint256]) -> Fingerprint256
 }
 ```
 
 ```rust
-pub struct RowLite { /* same */ }
-pub fn moment_summarize(rows: &[Row], window: &TimeRange, as_of: HLC) -> RowLite;
+pub struct RowLite { pub fingerprint: Fingerprint256, pub capture_hlc: HLC }
+impl MomentSummary {
+    pub fn summarize(rows: &[RowLite], window: &TimeRange,
+                     active_during: impl Fn(&RowLite, &TimeRange) -> bool) -> Fingerprint256;
+    pub fn captured_during(row: &RowLite, window: &TimeRange) -> bool;
+}
 ```
 
 ### `PartialStateRecall`
 
 SPEC § 5.12.
 
+Per-block match/differ scoring over the four 64-bit blocks: a row
+scores high when it matches the anchor on `matchBlocks` and differs on
+`differBlocks`.
+
 ```swift
 public enum PartialStateRecall {
-    public static func recall(
-        query: Fingerprint256,
-        mask: Fingerprint256,
-        candidates: [Fingerprint256],
-        topK: Int
-    ) -> [HammingNNHit]
+    public static func score(rowFingerprint: Fingerprint256, anchor: Fingerprint256,
+                             matchBlocks: Set<Int>, differBlocks: Set<Int>) -> Double
+    public static func topK(
+        anchor: Fingerprint256,
+        rows: [(rowId: UUID, fingerprint: Fingerprint256)],
+        matchBlocks: Set<Int>, differBlocks: Set<Int>, k: Int
+    ) -> [(rowId: UUID, score: Double)]
+    public static func hammingBlocks(_ a: Fingerprint256, _ b: Fingerprint256, blocks: Set<Int>) -> Int
 }
 ```
 
 ```rust
-pub fn partial_state_recall(query: &Fingerprint256, mask: &Fingerprint256, candidates: &[Fingerprint256], top_k: usize) -> Vec<HammingNNHit>;
+impl PartialStateRecall {
+    pub fn score(row_fingerprint: &Fingerprint256, anchor: &Fingerprint256,
+                 match_blocks: &HashSet<usize>, differ_blocks: &HashSet<usize>) -> f64;
+    pub fn top_k(anchor: &Fingerprint256, rows: &[(u128, Fingerprint256)],
+                 match_blocks: &HashSet<usize>, differ_blocks: &HashSet<usize>, k: usize) -> Vec<(u128, f64)>;
+    pub fn hamming_blocks(a: &Fingerprint256, b: &Fingerprint256, blocks: &HashSet<usize>) -> u32;
+}
 ```
 
 ### `PairingNonce`, `PairingRecord`, `PairingHandshake`
@@ -396,29 +544,45 @@ SPEC § 5.13.
 
 ```swift
 public struct PairingNonce: Sendable, Equatable {
-    public let bytes: [UInt8]
-    public let issuedAt: HLC
+    public let bytes: [UInt8]   // 32 bytes
+    public init(bytes: [UInt8])
+    public func seedWith(estateA: UUID, estateB: UUID) -> UInt64
 }
 public struct PairingRecord: Sendable, Equatable {
-    public let peerId: String
-    public let establishedAt: HLC
-    public let signature: [UInt8]
+    public let peerEstate: UUID
+    public let federationCase: FederationCase
+    public let sharedFamilyKey: String     // "H_shared_<case>_<peer_uuid>"
+    public let pairedAt: HLC
+    public init(peerEstate: UUID, federationCase: FederationCase, /* … */)
 }
 public enum PairingHandshake {
-    public static func generateNonce(now: HLC) -> PairingNonce
-    public static func validate(nonce: PairingNonce, response: [UInt8]) -> Bool
-    // PairingAuditPayload — the audit record a handshake emits (nested):
+    public static func generateSharedFamily(nonce: PairingNonce, estateA: UUID, estateB: UUID,
+                                            density: Double = 1.0) -> [HyperplaneFamily]
+    public static func sharedFamilyKey(case federationCase: FederationCase, peerEstate: UUID) -> String
+    public static func buildPairEvent(peerEstate: UUID, /* … */) -> PairingAuditPayload
+    // The audit record a handshake emits (nested):
     public struct PairingAuditPayload: Sendable, Equatable {
-        public let peerId: String; public let nonce: PairingNonce; public let acceptedAt: HLC
+        public let mutationKind: String          // "pair" | "unpair"
+        public let peerEstate: UUID
+        public let federationCase: FederationCase
+        public let sharedFamilyHash: UInt64
+        public let hlc: HLC
+        public init(mutationKind: String, peerEstate: UUID, /* … */)
     }
 }
 ```
 
 ```rust
-pub struct PairingNonce { pub bytes: Vec<u8>, pub issued_at: HLC }
-pub struct PairingRecord { pub peer_id: String, pub established_at: HLC, pub signature: Vec<u8> }
-pub fn pairing_generate_nonce(now: HLC) -> PairingNonce;
-pub fn pairing_validate(nonce: &PairingNonce, response: &[u8]) -> bool;
+pub struct PairingNonce { pub bytes: Vec<u8> }
+impl PairingNonce { pub fn seed_with(&self, estate_a: u128, estate_b: u128) -> u64; }
+pub struct PairingRecord { pub peer_estate: u128, pub federation_case: FederationCase,
+                           pub shared_family_key: String, pub paired_at: HLC }
+pub struct PairingAuditPayload { pub mutation_kind: String, pub peer_estate: u128,
+                                 pub federation_case: FederationCase, pub shared_family_hash: u64, pub hlc: HLC }
+impl PairingHandshake {
+    pub fn generate_shared_family(nonce: &PairingNonce, estate_a: u128, estate_b: u128, density: f64) -> Vec<HyperplaneFamily>;
+    pub fn shared_family_key(federation_case: FederationCase, peer_estate: u128) -> String;
+}
 ```
 
 ### `FederationCase`, `TierContribution`, `TierContributionFingerprint`
@@ -427,23 +591,34 @@ SPEC § 5.14.
 
 ```swift
 public enum FederationCase: UInt32, Sendable {
-    case selfOnly = 0
-    case selfPlusPeers = 1
-    case peersOnly = 2
+    case household = 1
+    case fleet     = 2
+    case industry  = 3
 }
 public struct TierContribution: Sendable, Equatable {
-    public let tier: UInt8
-    public let fingerprints: [Fingerprint256]
+    public let estateUUID: UUID
+    public let federationCase: FederationCase
+    public let rowCount: UInt32
+    public let aggregate: Fingerprint256
+    public let hlc: HLC
+    public init(estateUUID: UUID, federationCase: FederationCase, /* … */)
 }
 public enum TierContributionFingerprint {
-    public static func combine(_ contributions: [TierContribution]) -> Fingerprint256
+    public static func build(estateUUID: UUID, case federationCase: FederationCase, /* … */) -> TierContribution
+    public static func encode(_ contrib: TierContribution) -> Data
+    public static func decode(_ data: Data) -> TierContribution?
 }
 ```
 
 ```rust
-pub enum FederationCase { SelfOnly, SelfPlusPeers, PeersOnly }
-pub struct TierContribution { pub tier: u8, pub fingerprints: Vec<Fingerprint256> }
-pub fn tier_contribution_combine(contributions: &[TierContribution]) -> Fingerprint256;
+pub enum FederationCase { Household = 1, Fleet = 2, Industry = 3 }
+pub struct TierContribution { pub estate_uuid: u128, pub federation_case: FederationCase,
+                              pub row_count: u32, pub aggregate: Fingerprint256, pub hlc: HLC }
+impl TierContributionFingerprint {
+    pub fn build(estate_uuid: u128, federation_case: FederationCase, /* … */) -> TierContribution;
+    pub fn encode(contrib: &TierContribution) -> Vec<u8>;
+    pub fn decode(data: &[u8]) -> Option<TierContribution>;
+}
 ```
 
 ### `TargetTier`, `TierAscendingQuery`, `PeerResponse`
@@ -452,35 +627,52 @@ SPEC § 5.14.
 
 ```swift
 public enum TargetTier: String, Sendable {
-    case t1, t2, t3
-}
-public struct PeerResponse: Sendable {
-    public let peerId: String
-    public let contribution: TierContribution
+    case peer              = "peer"
+    case fleetAggregate    = "fleet_aggregate"
+    case industryAggregate = "industry_aggregate"
 }
 public struct TierAscendingQuery: Sendable {
-    public let target: TargetTier
-    public let issuer: String
-    public let issuedAt: HLC
-    public func aggregate(_ responses: [PeerResponse]) -> Fingerprint256
+    public let originatingEstate: UUID
+    public let primitiveName: String
+    public let primitiveInput: Data         // canonical-encoded primitive params
+    public let targetTier: TargetTier
+    public let privacyBudget: DPParameters
+    public let queryHLC: HLC
+    public init(originatingEstate: UUID, primitiveName: String, /* … */)
+}
+public struct PeerResponse: Sendable {
+    public let peerEstate: UUID
+    public let contribution: RecallResult   // canonical recall vocabulary (SubstrateTypes)
+    public let consumedEpsilon: Float64
+    public let consumedDelta: Float64
 }
 public enum TierAscendingQueryProtocol {
-    // the wire-protocol namespace: request/response framing for a tier-ascending query
-    public static func frame(_ query: TierAscendingQuery) -> Data
+    public static func computeLocal(query: TierAscendingQuery, /* … */) -> RecallResult
+    public static func applyDPToContribution(_ result: RecallResult, /* params … */) -> RecallResult
+    public static func combine(local: RecallResult, /* peer responses … */) -> RecallResult
 }
 public struct PrivacyLedger: Sendable {
-    // running record of what crossed estate/tier boundaries during a query (DP accounting)
-    public init()
-    public mutating func record(source: StreamSourceFlag, epsilonSpent: Double)
-    public var totalEpsilon: Double { get }
+    public let dailyBudget: DPParameters
+    public init(dailyBudget: DPParameters = DPParameters())
+    public func remaining(peer: UUID) -> (epsilon: Float64, delta: Float64)
+    public func canConsume(peer: UUID, query: DPParameters) -> Bool
+    public mutating func consume(peer: UUID, query: DPParameters)
+    public mutating func dailyReset()
 }
 ```
 
 ```rust
-pub enum TargetTier { T1, T2, T3 }
-pub struct PeerResponse { /* … */ }
-pub struct TierAscendingQuery { /* … */ }
-impl TierAscendingQuery { pub fn aggregate(&self, responses: &[PeerResponse]) -> Fingerprint256; }
+pub enum TargetTier { Peer, FleetAggregate, IndustryAggregate }
+pub struct TierAscendingQuery { /* originating_estate, primitive_name, primitive_input,
+                                  target_tier, privacy_budget, query_hlc */ }
+pub struct PeerResponse { pub peer_estate: u128, pub contribution: RecallResult,
+                          pub consumed_epsilon: f64, pub consumed_delta: f64 }
+impl TierAscendingQueryProtocol {
+    pub fn compute_local(query: &TierAscendingQuery, /* … */) -> RecallResult;
+    pub fn apply_dp_to_contribution(result: &RecallResult, /* … */) -> RecallResult;
+    pub fn combine(local: &RecallResult, /* … */) -> RecallResult;
+}
+pub struct PrivacyLedger { /* daily_budget + per-peer spend */ }
 ```
 
 ### `ActionOutcomeKey`, `ActionOutcomeCell`, `ActionOutcomeMatrix`
@@ -505,8 +697,8 @@ public struct ActionOutcomeCell: Equatable, Sendable {
     public var successCount: UInt32
     public var totalCount: UInt32
     public var lastUpdateHLC: HLC
-    public var successRate: Float32       // successCount/totalCount; 0 when empty
-    public var wilsonLowerBound: Float32  // 95 % Wilson interval LB; always ≤ successRate
+    public var successRate: Float32 { get }       // computed: successCount/totalCount; 0 when empty
+    public var wilsonLowerBound: Float32 { get }  // computed: 95 % Wilson LB; always ≤ successRate
 }
 public struct ActionOutcomeMatrix: Sendable {
     public private(set) var cells: [ActionOutcomeKey: ActionOutcomeCell]
@@ -545,35 +737,54 @@ SPEC § 5.16.
 
 ```swift
 public struct DPParameters: Sendable {
-    public let epsilon: Double
-    public let delta: Double
+    public let epsilon: Float64
+    public let delta: Float64
+    public let kAnonymity: Int
+    public init(epsilon: Float64 = 1.0, delta: Float64 = 1e-9, kAnonymity: Int = 3)
 }
 public enum DPORReduction {
-    public static func reduce(window: [Fingerprint256], params: DPParameters) -> Fingerprint256
+    public static func reduce(fingerprints: [Fingerprint256],
+                              params: DPParameters,
+                              rngSeed: UInt64) -> Fingerprint256
 }
 ```
 
 ```rust
-pub struct DPParameters { pub epsilon: f64, pub delta: f64 }
-pub fn dp_or_reduce(window: &[Fingerprint256], params: &DPParameters) -> Fingerprint256;
+pub struct DPParameters { pub epsilon: f64, pub delta: f64, pub k_anonymity: usize }
+impl DPORReduction {
+    pub fn reduce(fingerprints: &[Fingerprint256], params: &DPParameters, rng_seed: u64) -> Fingerprint256;
+}
 ```
 
 ### `LLMCalibrationCurve`
 
 SPEC § 5.17.
 
+Bucketed reliability curve over (claimed-confidence, observed-outcome)
+pairs. Lives in the Rust `calibration` module.
+
 ```swift
 public struct LLMCalibrationCurve: Sendable {
-    public init(observations: [(predicted: Double, actual: Double)])
-    public func calibrate(_ prediction: Double) -> Double
+    public init()
+    public mutating func observe(claimedConfidence: Float32, actualOutcome: Bool)
+    public func actualRate(in bucket: Int) -> Float32?
+    public static func midpoint(of bucket: Int) -> Float32
+    public func expectedCalibrationError() -> Float32
+    public func brierScore() -> Float32
+    public mutating func decay(factor: Float32)
 }
 ```
 
 ```rust
-pub struct LLMCalibrationCurve { /* internal */ }
+// In substrate_ml::calibration
+pub struct LLMCalibrationCurve { /* per-bucket counters */ }
 impl LLMCalibrationCurve {
-    pub fn new(observations: &[(f64, f64)]) -> Self;
-    pub fn calibrate(&self, prediction: f64) -> f64;
+    pub fn new() -> Self;
+    pub fn observe(&mut self, claimed_confidence: f32, actual_outcome: bool);
+    pub fn actual_rate(&self, bucket: usize) -> Option<f32>;
+    pub fn expected_calibration_error(&self) -> f32;
+    pub fn brier_score(&self) -> f32;
+    pub fn decay(&mut self, factor: f32);
 }
 ```
 
@@ -583,16 +794,23 @@ SPEC § 5.18.
 
 ```swift
 public enum InformationTheory {
-    public static func entropy(_ distribution: [Double]) -> Double
-    public static func klDivergence(_ p: [Double], _ q: [Double]) -> Double
-    public static func mutualInformation(_ p: [Double], _ q: [Double], joint: [[Double]]) -> Double
+    public static func entropy(_ p: [Float32]) -> Float32
+    public static func mutualInformation(joint: [[Float32]]) -> Float32
+    public static func klDivergence(_ p: [Float32], _ q: [Float32]) -> Float32
+    public static func crossEntropy(_ p: [Float32], _ q: [Float32]) -> Float32
+    public static func jensenShannon(_ p: [Float32], _ q: [Float32]) -> Float32
+    public static func normalizedMutualInformation(joint: [[Float32]]) -> Float32
 }
 ```
 
 ```rust
-pub fn entropy(distribution: &[f64]) -> f64;
-pub fn kl_divergence(p: &[f64], q: &[f64]) -> f64;
-pub fn mutual_information(p: &[f64], q: &[f64], joint: &[Vec<f64>]) -> f64;
+// info_theory module (free functions / impl InformationTheory)
+pub fn entropy(p: &[f32]) -> f32;
+pub fn mutual_information(joint: &[Vec<f32>]) -> f32;
+pub fn kl_divergence(p: &[f32], q: &[f32]) -> f32;
+pub fn cross_entropy(p: &[f32], q: &[f32]) -> f32;
+pub fn jensen_shannon(p: &[f32], q: &[f32]) -> f32;
+pub fn normalized_mutual_information(joint: &[Vec<f32>]) -> f32;
 ```
 
 ### `WindowLevel`, `TemporalWindow`, `TemporalCompression`
@@ -601,21 +819,35 @@ SPEC § 5.19.
 
 ```swift
 public enum WindowLevel: Int, Comparable, Sendable {
-    case hour = 0, day = 1, week = 2, month = 3, season = 4, year = 5
+    case hour = 0, day = 1, week = 2, month = 3, quarter = 4, year = 5
 }
 public struct TemporalWindow: Equatable, Sendable {
+    public let startHLC: HLC
+    public let endHLC: HLC
     public let level: WindowLevel
-    public let range: TimeRange
+    public let fingerprint: Fingerprint256
+    public let rowCount: UInt32
+    public init(startHLC: HLC, endHLC: HLC, level: WindowLevel, /* … */)
+    public static func empty(level: WindowLevel) -> TemporalWindow
 }
 public enum TemporalCompression {
-    public static func compress(events: [AuditEvent], to: WindowLevel) -> [TemporalWindow: [AuditEvent]]
+    public static func compress(rows: [Fingerprint256], startHLC: HLC, endHLC: HLC,
+                                level: WindowLevel) -> TemporalWindow
+    public static func rollup(windows: [TemporalWindow], to targetLevel: WindowLevel) -> TemporalWindow
+    public static func cascadeRollup(hourWindows: [TemporalWindow],
+                                     upTo finalLevel: WindowLevel) -> [WindowLevel: [TemporalWindow]]
 }
 ```
 
 ```rust
-pub enum WindowLevel { Hour, Day, Week, Month, Season, Year }
-pub struct TemporalWindow { /* … */ }
-pub fn temporal_compress(events: &[AuditEvent], to: WindowLevel) -> HashMap<TemporalWindow, Vec<AuditEvent>>;
+pub enum WindowLevel { Hour, Day, Week, Month, Quarter, Year }
+pub struct TemporalWindow { pub start_hlc: HLC, pub end_hlc: HLC, pub level: WindowLevel,
+                            pub fingerprint: Fingerprint256, pub row_count: u32 }
+impl TemporalCompression {
+    pub fn compress(rows: &[Fingerprint256], start_hlc: HLC, end_hlc: HLC, level: WindowLevel) -> TemporalWindow;
+    pub fn rollup(windows: &[TemporalWindow], target_level: WindowLevel) -> TemporalWindow;
+    pub fn cascade_rollup(hour_windows: &[TemporalWindow], up_to: WindowLevel) -> HashMap<WindowLevel, Vec<TemporalWindow>>;
+}
 ```
 
 ### `AnomalyDetection`, `CommunityDetection`, `Calibration`
@@ -1000,6 +1232,51 @@ impl StabilityEstimator {
 }
 ```
 
+### `TemporalFieldCoord`, `TemporalAuditEntry`, `TemporalCausalityKey`, `TemporalCausalityFold`
+
+SPEC § 5.22. The temporal-causality fold scans capture/expunge audit
+entries within a sliding window and emits directional, lag-bucketed
+(source → target) coordinate-pair deltas for the T matrix.
+
+```swift
+public struct TemporalFieldCoord: Hashable, Sendable, Codable {
+    public let fieldPath: String
+    public let valueRepr: String           // e.g. "bitmap:42", "string:x", "integer:-1"
+    public init(fieldPath: String, valueRepr: String)
+}
+public struct TemporalAuditEntry: Sendable {
+    public let hlc: HLC
+    public let fieldCoords: [TemporalFieldCoord]
+    public init(hlc: HLC, fieldCoords: [TemporalFieldCoord])
+}
+public struct TemporalCausalityKey: Hashable, Sendable, Codable {
+    public let source: TemporalFieldCoord
+    public let target: TemporalFieldCoord
+    public let lagBucket: Int              // one of {1, 2, 4, 8, 16, 32, 64, 128} minutes
+    public init(source: TemporalFieldCoord, target: TemporalFieldCoord, lagBucket: Int)
+}
+public enum TemporalCausalityFold {
+    public static func lagBucket(forMinutes minutes: Int) -> Int
+    public static func fold(
+        entries: [TemporalAuditEntry],
+        windowMinutes: Int = defaultWindowMinutes,
+        startWatermark: HLC
+    ) -> (deltas: [(TemporalCausalityKey, Int64)], newWatermark: HLC)
+}
+```
+
+```rust
+pub struct TemporalFieldCoord { pub field_path: String, pub value_repr: String }
+pub struct TemporalAuditEntry { pub hlc: HLC, pub field_coords: Vec<TemporalFieldCoord> }
+pub struct TemporalCausalityKey { pub source: TemporalFieldCoord, pub target: TemporalFieldCoord, pub lag_bucket: i64 }
+/// Named result struct (Swift returns the equivalent anonymous tuple).
+pub struct FoldResult { pub deltas: Vec<(TemporalCausalityKey, i64)>, pub new_watermark: HLC }
+impl TemporalCausalityFold {
+    pub fn lag_bucket(minutes: i64) -> i64;
+    pub fn fold(entries: &[TemporalAuditEntry], window_minutes: i64, start_watermark: HLC) -> FoldResult;
+}
+```
+
 ## § 3 — Public functions
 
 `mineAssociationRules` / `mine_association_rules` is a free function in
@@ -1016,8 +1293,7 @@ error (the substrate convention); the table notes both forms.
 | `NMFAlternatingLeastSquares.factorize` precondition | non-rectangular, non-finite, or negative cell in `V` |
 | `RandomWalks.walk` precondition | neighbor index outside `[0, N)`, or non-finite/negative weight |
 | `RandomWalks.sampleWeighted` precondition | empty neighbor list |
-| `FFT.forward` / `.inverse` throws | non-power-of-two signal length |
-| `BradleyTerryEstimator.update` throws | `weight ≤ 0` |
+| `FFT.forward` / `RhythmAnalysis.analyze` precondition | non-power-of-two signal length (or non-positive bucket duration) |
 | `PairingHandshake.validate` returns `false` | signature mismatch |
 
 No other public surface raises errors; failure modes are non-error
@@ -1059,33 +1335,36 @@ import SubstrateTypes
 import SubstrateKernel
 import SubstrateML
 
-// Project a row's state as of a specific HLC.
-let projection = AuditLogFold.projectStateAt(rowId: someRowId, asOf: someHLC, log: log)
+// Project a row's state as of a specific HLC (events passed in any order).
+let projection = AuditLogFold.projectStateAt(
+    rowId: someRowId, nounType: .drawer, events: events, asOf: someHLC)
 
-// Decay a cooccurrence matrix over 7 days.
-let aged = MatrixDecay.decay(decaying, halfLife: DecayHalfLives.matrixC, asOf: now)
+// Decay a matrix in place using the field-presence half-life.
+var decaying = DecayingMatrix(rows: 36, cols: 6, /* … */)
+MatrixDecay.apply(to: &decaying /*, asOf: now */)
 
-// Train a Bradley-Terry estimator on five preference observations.
-var bt = BradleyTerryEstimator(itemCount: 4)
-for obs in observations { try bt.update(obs) }
-let strengths = bt.strengths()
+// Train a Bradley-Terry estimator on preference observations.
+var bt = BradleyTerryEstimator(learningRate: 0.05, l2: 0.001)
+for obs in observations { bt.observe(obs) }
+let s = bt.strength(of: someRowID)
 
-// Combine peer tier contributions into a federation fingerprint.
-let combined = TierContributionFingerprint.combine([peerA, peerB, peerC])
+// Build a tier-contribution wire record for federation.
+let contrib = TierContributionFingerprint.build(
+    estateUUID: myEstate, case: .household /*, … */)
 ```
 
 ```rust
 use substrate_types::*;
-use substrate_ml::{audit_log_fold, decay, bradley_terry, tier_contribution_fingerprint};
+use substrate_ml::{AuditLogFold, MatrixDecay, bradley_terry::BradleyTerryEstimator,
+                   TierContributionFingerprint};
 
-let projection = audit_log_fold::project_state_at(row_id, as_of, &log);
-let aged = decay::decay(&decaying, decay::half_lives::MATRIX_C, now);
+let projection = AuditLogFold::project_state_at(row_id, NounType::Drawer, &events, as_of);
 
-let mut bt = bradley_terry::BradleyTerryEstimator::new(4);
-for obs in &observations { bt.update(*obs)?; }
-let strengths = bt.strengths();
+let mut bt = BradleyTerryEstimator::new(0.05, 0.001);
+for obs in &observations { bt.observe(obs); }
+let s = bt.strength(some_row_id);
 
-let combined = tier_contribution_fingerprint::combine(&[peer_a, peer_b, peer_c]);
+let contrib = TierContributionFingerprint::build(my_estate, FederationCase::Household /*, … */);
 ```
 
 ## § 7 — Swift/Rust Concordance
@@ -1148,7 +1427,6 @@ the Swift suites against the same canonical inputs the Rust module tests use.
 | HealthKit extractor | `HealthKitExtractor` | `HealthKitExtractor<'a>` | public | identical (Rust borrows via lifetime) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
 | ScreenTime extractor | `ScreenTimeExtractor` | `ScreenTimeExtractor<'a>` | public | identical (Rust borrows via lifetime) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
 | SystemTelemetry extractor | `SystemTelemetryExtractor` | `SystemTelemetryExtractor<'a>` | public | identical (Rust borrows via lifetime) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
-| Feature-extractors facade | `FeatureExtractors` (enum) | — (`feature_extractors::extract_ambient_sample` free fn) | public | Swift enum namespace / Rust free fn (no type) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
 | Float SimHash namespace | `FloatSimHash` (enum) | — (`float_simhash::project` free fn) | public | Swift enum namespace / Rust free fn (no type) | `FloatSimHashTests.swift` / `rust:float_simhash::tests` | Confirmed |
 | Row-lite summary | `RowLite` | `RowLite` | public | identical | `MomentSummaryTests.swift` / `rust:moment_summary::tests` | Confirmed |
 | Moment-summary namespace | `MomentSummary` (enum) | `MomentSummary` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `MomentSummaryTests.swift` / `rust:moment_summary::tests` | Confirmed |
@@ -1157,7 +1435,7 @@ the Swift suites against the same canonical inputs the Rust module tests use.
 | Pairing record | `PairingRecord` | `PairingRecord` | public | identical | `PairingHandshakeTests.swift` / `rust:pairing::tests` | Confirmed |
 | Pairing-handshake namespace | `PairingHandshake` (enum) | `PairingHandshake` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `PairingHandshakeTests.swift` / `rust:pairing::tests` | Confirmed |
 | Pairing audit payload | `PairingHandshake.PairingAuditPayload` (nested) | `PairingAuditPayload` (flat) | public | Swift nested `Handshake.Payload` / Rust flat `PairingAuditPayload` | `PairingHandshakeTests.swift` / `rust:pairing::tests` | Confirmed |
-| Federation case | `FederationCase` (enum: UInt32) | `FederationCase` (enum) | public | identical (Rust drops discriminants) | `TierContributionFingerprintTests.swift` / `rust:tier_contribution::tests` | Confirmed |
+| Federation case | `FederationCase` (enum: UInt32) | `FederationCase` (enum) | public | identical — `household`/`fleet`/`industry` = 1/2/3 in both ports | `TierContributionFingerprintTests.swift` / `rust:tier_contribution::tests` | Confirmed |
 | Tier contribution | `TierContribution` | `TierContribution` | public | identical | `TierContributionFingerprintTests.swift` / `rust:tier_contribution::tests` | Confirmed |
 | Tier-contribution fingerprint namespace | `TierContributionFingerprint` (enum) | `TierContributionFingerprint` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `TierContributionFingerprintTests.swift` / `rust:tier_contribution::tests` | Confirmed |
 | Target tier | `TargetTier` (enum: String) | `TargetTier` (enum) | public | identical (Rust drops raw values) | `TierAscendingQueryTests.swift` / `rust:tier_query::tests` | Confirmed |
@@ -1206,11 +1484,13 @@ the Swift suites against the same canonical inputs the Rust module tests use.
 ### § 7.2 — Notes on apparent asymmetries (verified non-drift)
 
 - **Swift namespace enums with no Rust type** (`MatrixDecay`, `FFT`,
-  `RhythmAnalysis`, `FeatureExtractors`, `FloatSimHash`, `AprioriMining`):
+  `RhythmAnalysis`, `FloatSimHash`, `AprioriMining`):
   Swift groups the static functions under an empty `enum`; Rust exposes the
   same calls as module-level `pub fn`s (and `DecayHalfLives` as a `pub mod`
   of constants). No Rust top-level *type* is created. Behavior is bound by
-  the shared conformance suites cited above — not drift.
+  the shared conformance suites cited above — not drift. (The five
+  ambient-source extractors are concrete structs in both ports — there is
+  no `FeatureExtractors` facade type.)
 - **Rust unit-struct namespaces** (`AuditLogFold`, `NMFAlternatingLeastSquares`,
   `EigenvalueCentrality`, `RandomWalks`, `UDCTreeDistance`, `LatticeDistance`,
   `WikidataGraphDistance`, `CompositeDistance`, `MomentSummary`,
@@ -1276,3 +1556,64 @@ was a declared dependency of `substrate-ml`. It duplicated the canonical
 but prevented the canonical type from being used across module boundaries.
 Removed in favor of the canonical type; no semantic change (identical
 field layout, identical ordering implementation).
+
+## § 8 — VizGraph telemetry interface (cp-viz-signals)
+
+SPEC § 8.
+
+### `VizGraphSignals` (new)
+
+Canonical metric name constants for the five VizGraph telemetry signals.
+Both ports define the same string constants; use these at every call site
+to prevent typos from producing orphaned metrics.
+
+```swift
+// VizGraphSignals.swift
+public enum VizGraphSignals {
+    public static let communityAssignment: String  // "community.assignment"
+    public static let centralityScore: String       // "centrality.score"
+    public static let nmfFactor: String             // "nmf.factor"
+    public static let anomalyFlag: String           // "anomaly.flag"
+    public static let edgeDecayedWeight: String     // "edge.decayed_weight"
+}
+```
+
+```rust
+// viz_graph_signals.rs
+pub mod VizGraphSignals {
+    pub const COMMUNITY_ASSIGNMENT: &str;   // "community.assignment"
+    pub const CENTRALITY_SCORE: &str;       // "centrality.score"
+    pub const NMF_FACTOR: &str;             // "nmf.factor"
+    pub const ANOMALY_FLAG: &str;           // "anomaly.flag"
+    pub const EDGE_DECAYED_WEIGHT: &str;    // "edge.decayed_weight"
+}
+```
+
+### Updated algorithm signatures
+
+The following algorithms gained two optional/trailing parameters for
+VizGraph telemetry. The `estate` and `ts` parameters are forwarded
+directly to the IntellectusLib emit; they do not alter the algorithm's
+computation.
+
+**Swift** — all parameters have default values (`estate: String = ""`,
+`ts: Double = 0`), so existing callers require no changes.
+
+**Rust** — parameters are positional (`estate: &str`, `ts: f64`).
+Internal callers were updated to pass `"", 0.0`.
+
+| Algorithm | New Swift parameters | New Rust parameters |
+|---|---|---|
+| `CommunityDetection.detect` | `estate: String = ""`, `ts: Double = 0` | `estate: &str`, `ts: f64` |
+| `EigenvalueCentrality.compute` | `estate: String = ""`, `ts: Double = 0` | `estate: &str`, `ts: f64` |
+| `NMFAlternatingLeastSquares.factorize` | `estate: String = ""`, `ts: Double = 0` | `estate: &str`, `ts: f64` |
+| `AnomalyDetection.rollingZScore` | `estate: String = ""`, `ts: Double = 0` | `estate: &str`, `ts: f64` |
+| `AnomalyDetection.rollingModifiedZScore` | `estate: String = ""`, `ts: Double = 0` | `estate: &str`, `ts: f64` |
+| `MatrixDecay.apply(to:nowSeconds:)` | `estate: String = ""`, `ts: Double = 0` | `estate: &str`, `ts: f64` |
+
+### Dependency change
+
+`Package.swift` — `IntellectusLib` added to SubstrateML target and test
+target dependencies (authority: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
+
+`Cargo.toml` — `intellectus-lib = { path = "../../IntellectusLib/rust" }` added.

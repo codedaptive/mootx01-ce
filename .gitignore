@@ -38,7 +38,6 @@ Icon
 *.binary
 *.db
 .obsidian/
-.codegraph
 
 # Zip files
 *.zip
@@ -87,8 +86,4 @@ venv/
 *.test
 coverage.out
 coverage.html
-
-# Internal work history: archived to the EE repository, never committed here
-docs/blast_radius/
-docs/missions/
-docs/analysis/
+.codegraph/
