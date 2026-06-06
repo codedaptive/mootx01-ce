@@ -136,8 +136,12 @@ pub fn accepted_verbs(noun: Noun) -> Vec<Verb> {
         Noun::KgFact => &[Mutate, Withdraw, Expunge, Recall],
         Noun::Vector => &[],
         Noun::DiaryEntry => &[Recall],
-        Noun::Proposal => &[Mutate, Withdraw, Expunge, Recall],
-        Noun::Association => &[Mutate, Expunge, Recall],
+        // Proposal accepts Propose (the substrate-driven verb that creates it),
+        // plus the lifecycle verbs. Matches Swift: [.propose, .mutate, .withdraw, .expunge, .recall]
+        Noun::Proposal => &[Propose, Mutate, Withdraw, Expunge, Recall],
+        // Association accepts Associate (the substrate-driven verb that accumulates
+        // connective weight), plus the lifecycle verbs. Matches Swift: [.associate, .mutate, .expunge, .recall]
+        Noun::Association => &[Associate, Mutate, Expunge, Recall],
         Noun::LearnedReference => &[Learn, Mutate, Withdraw, Expunge, Recall],
     };
     set.to_vec()
@@ -197,6 +201,10 @@ mod tests {
         assert_eq!(caller.len() + substrate.len() + grounding.len(), 9);
     }
 
+    // Conformance gate: this test must match the Swift Acceptance.swift
+    // implementation exactly (interface doc constraint C-3). The matrix
+    // is pure vocabulary with zero platform binding — any divergence
+    // between Swift and Rust is a conformance failure.
     #[test]
     fn acceptance_matrix() {
         use Verb::*;
@@ -208,10 +216,14 @@ mod tests {
                    vec![Mutate, Withdraw, Expunge, Recall]);
         assert!(accepted_verbs(Noun::Vector).is_empty());
         assert_eq!(accepted_verbs(Noun::DiaryEntry), vec![Recall]);
+        // Proposal accepts Propose (the substrate-driven verb that creates it),
+        // plus the lifecycle verbs. Matches Swift: [.propose, .mutate, .withdraw, .expunge, .recall]
         assert_eq!(accepted_verbs(Noun::Proposal),
-                   vec![Mutate, Withdraw, Expunge, Recall]);
+                   vec![Propose, Mutate, Withdraw, Expunge, Recall]);
+        // Association accepts Associate (the substrate-driven verb that accumulates
+        // connective weight), plus the lifecycle verbs. Matches Swift: [.associate, .mutate, .expunge, .recall]
         assert_eq!(accepted_verbs(Noun::Association),
-                   vec![Mutate, Expunge, Recall]);
+                   vec![Associate, Mutate, Expunge, Recall]);
         assert_eq!(accepted_verbs(Noun::LearnedReference),
                    vec![Learn, Mutate, Withdraw, Expunge, Recall]);
     }
@@ -222,6 +234,12 @@ mod tests {
         assert!(!accepts(Noun::Drawer, Verb::Learn));
         assert!(accepts(Noun::LearnedReference, Verb::Learn));
         assert!(!accepts(Noun::Vector, Verb::Recall));
+        // Spot-check the previously-missing Propose/Associate rows to ensure
+        // the conformance gate now actually checks these cells.
+        assert!(accepts(Noun::Proposal, Verb::Propose));
+        assert!(!accepts(Noun::Proposal, Verb::Associate));
+        assert!(accepts(Noun::Association, Verb::Associate));
+        assert!(!accepts(Noun::Association, Verb::Propose));
     }
 
     #[test]

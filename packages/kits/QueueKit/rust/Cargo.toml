@@ -14,10 +14,19 @@ uuid       = { version = "1", features = ["v4"] }
 version  = "6"
 optional = true
 
+# persistence-kit is required only when the "persistencekit" feature is
+# enabled. The dependency is path-relative to the workspace so no
+# external version pin is needed. Gated to keep the default
+# (Filesystem-only) build free of the SQLite/PostgreSQL transitive deps.
+[dependencies.persistence-kit]
+path     = "../../PersistenceKit/rust"
+optional = true
+
 [features]
 default     = ["filesystem"]
 filesystem  = []
-persistencekit  = []
+# Enables the real PersistenceKitBackend and pulls in persistence-kit.
+persistencekit  = ["dep:persistence-kit"]
 watch       = ["notify"]
 
 [lib]
@@ -27,3 +36,10 @@ path = "src/lib.rs"
 [[test]]
 name = "conformance"
 path = "tests/conformance.rs"
+
+# Tests for ToolName + allowlist, QueueKitSchema, PersistenceKitBackend
+# round-trip, and QueueError variants. Requires the "persistencekit" feature.
+[[test]]
+name = "parity"
+path = "tests/parity.rs"
+required-features = ["persistencekit"]

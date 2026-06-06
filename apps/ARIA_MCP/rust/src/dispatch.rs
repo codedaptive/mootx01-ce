@@ -4,7 +4,7 @@
 //!   0. teachme pre-check — intercepts `teachme:true` before any runner fires
 //!   1. Federation tool (moot_federated_search)
 //!   2. Interface tools (Tier 1–5, 19 tools)
-//!   3. Vault tools (advertised; return error_result until VaultKit-Rust ships)
+//!   3. Vault tools (backed by vault-kit; ADR-VAULTKIT-002)
 //!   4. Recipe tools (moot_list_lenses, moot_synthesize, …)
 //!   5. Lens tools (moot_lens_keystones … moot_lens_concepts)
 //!   6. Unknown tool → methodNotFound error
@@ -28,7 +28,7 @@ use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 ///   0. teachme interception — returns guide before any runner fires
 ///   1. Federation tool (moot_federated_search)
 ///   2. Interface tools (Tier 1–5, 19 tools)
-///   3. Vault tools (advertised; return methodNotFound until VaultKit-Rust ships)
+///   3. Vault tools (backed by vault-kit; ADR-VAULTKIT-002)
 ///   4. Recipe tools (moot_list_lenses, moot_synthesize, …)
 ///   5. Lens tools (moot_lens_keystones … moot_lens_concepts)
 ///   post-dispatch: hint injection via CoachingEngine
@@ -58,13 +58,12 @@ pub fn dispatch_tool(
         return Ok(inject_hint(name, args, result));
     }
 
-    // 3. Vault tools — advertised in tools/list; return methodNotFound until
-    //    VaultKit-Rust ships (ADR-VAULTKIT-002). Clients discover vault capability
-    //    from the tool list; calls are rejected at the substrate level.
+    // 3. Vault tools — backed by vault-kit (VaultBridge + ObsidianAdapter +
+    //    DrawerMapping). The ARIA layer owns the SHA-256 sidecar manifest for
+    //    drift detection (ADR-VAULTKIT-002 decision b). No hint injection on
+    //    vault results — they carry filesystem paths, not coaching triggers.
     if name.starts_with("moot_vault_") {
-        return Ok(error_result(
-            "not yet implemented: vault tools require VaultKit-Rust (ADR-VAULTKIT-002)",
-        ));
+        return crate::vault_tools::dispatch_vault(name, args, registry);
     }
 
     // 4. Recipe tools

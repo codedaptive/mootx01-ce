@@ -529,4 +529,122 @@ let q2 = QueueKit(backend: PersistenceKitBackend(storage: storage))
 
 ---
 
+## § 7 — Swift/Rust Concordance
+
+Records the deliberate differences and sanctioned equivalences between the
+Swift and Rust ports. The parity gate is functional behaviour, not syntax.
+
+### `ToolName`
+
+| Swift | Rust |
+|---|---|
+| `public struct ToolName: Sendable, Hashable, Codable, RawRepresentable { public let rawValue: String }` | `pub struct ToolName(pub String);` |
+| `init(rawValue:)` | `ToolName::new(impl Into<String>)` |
+| `rawValue` property | `raw_value() -> &str` method |
+| Allowlist validation: not on the struct; callers validate at call sites | `validate(&[ToolName]) -> Result<(), QueueError>` method on the struct |
+
+Both ports carry the same semantics: `ToolName` is a string wrapper for a
+tool identifier; validation against a caller-supplied allowlist yields
+`unknownTool` / `UnknownTool` on mismatch.
+
+### `QueueKitSchema`
+
+| Swift | Rust |
+|---|---|
+| `public enum QueueKitSchema` (caseless enum as namespace) | `pub struct QueueKitSchema` (unit struct as namespace) |
+| `static let kitID = "QueueKit"` | `const KIT_ID: &'static str = "QueueKit"` |
+| `static let version = 1` | `const VERSION: i32 = 1` |
+| `static func declaration() -> SchemaDeclaration` | `fn declaration() -> SchemaDeclaration` |
+| `public let queueKitTableName = "queuekit_jobs"` (module-level) | `pub const QUEUE_KIT_TABLE_NAME: &str = "queuekit_jobs"` (module-level) |
+
+Schema shape is identical: same table name, same 12-column set, same 3
+indices, `append_only = false` enforced in both ports.
+
+### `PersistenceKitBackend`
+
+| Swift | Rust |
+|---|---|
+| `public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable` | `pub struct PersistenceKitBackend` implementing `QueueBackend` trait |
+| `init(storage: any Storage)` | `new(storage: Arc<dyn Storage>)` |
+| `static func openSchema(on storage: any Storage) async throws` | `fn open_schema(storage: &dyn Storage) -> Result<(), QueueError>` |
+| All methods `async throws` (Swift actor concurrency) | All methods synchronous `Result` (Rust Storage trait is sync) |
+| `storage.transaction(isolation: .serializable) { txn -> T in ... }` returns generic T | `storage.transaction(IsolationLevel::Serializable, &mut \|txn\| { ... })` captures results via environment |
+| `storage.observer.observe(table:events:)` returns `AsyncStream<TableChange>` | `storage.observer().observe(table, events)` returns `mpsc::Receiver<TableChange>` |
+
+Behavioural invariants are identical in both ports: write is a bare insert
+(no enclosing transaction), drain uses a serializable atomic claim with a
+`status="new"` guard, watch uses the observer as a wake signal and
+re-reads through `drainAvailable()`, complete guards on `status="cur"`.
+
+### `QueueError` variants
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `directoryCreationFailed(path:, underlying:)` | `DirectoryCreationFailed(String)` | Rust collapses path+error into one message |
+| `writeFailed(underlying:)` | `WriteFailed(String)` | |
+| `renameFailed(from:, to:, underlying:)` | `RenameFailed { from, to, msg }` | Struct variant matches Swift's associated-value shape |
+| `decodingFailed(jobID:, underlying:)` | `DecodingFailed(String)` | |
+| `unknownTool(ToolName)` | `UnknownTool(String)` | Rust carries the raw name string instead of a ToolName wrapper |
+| `jobNotFound(JobID)` | `JobNotFound(String)` | Rust carries the raw ID string |
+| `watcherFailed(underlying:)` | `WatcherFailed(String)` | |
+| `staleTmpFile(path:, age:)` | `StaleTmpFile { path: String, age_secs: f64 }` | Swift's `age: TimeInterval` = f64 seconds; Rust field named `age_secs` for clarity |
+| `backendUnavailable(detail:)` | `BackendUnavailable(String)` | |
+| `invalidTerminalStatus(ObservationStatus)` | `InvalidTerminalStatus(String)` | Rust carries the raw status string |
+
+### Identifier types: `JobId`/`JobID`, `StreamId`/`StreamID`, `SessionId`/`SessionID`
+
+The `Id` vs `ID` suffix difference is a **sanctioned Rust-idiom non-gap**.
+Swift uses `ID` (the conventional Apple/Swift uppercase acronym form);
+Rust uses `Id` (the conventional Rust CamelCase form). No rename is
+required or intended. This is recorded here as the canonical reference so
+future agents do not re-open the question.
+
+| Swift | Rust | Status |
+|---|---|---|
+| `JobID` | `JobId` | Sanctioned idiom difference — no rename |
+| `StreamID` | `StreamId` | Sanctioned idiom difference — no rename |
+| `SessionID` | `SessionId` | Sanctioned idiom difference — no rename |
+
+### Python port follow-up
+
+The Python port (`packages/kits/QueueKit/python/`) currently has no
+`ToolName` type and no allowlist validation. This is a known gap; the
+Python port covers the Filesystem backend only (SPEC § 7) and `ToolName`
+is a caller-validation concern that falls outside the Filesystem
+byte-identity contract. A follow-up mission should add `ToolName` to the
+Python port for completeness, but it is out of scope for PAR-4-QK /
+PAR-6-QK which targets Swift↔Rust parity only.
+
+### Concordance table — full public surface
+
+One row per public concept. Swift and Rust symbols are each a real
+declaration cited by `file:line`. "Shape rule" states how the two ports
+are allowed to differ; "Test/vector binding" names the actual
+conformance/parity test that proves Swift==Rust; "Status" is Confirmed
+(both present + test-bound), Exempt (Apple platform binding, no Rust
+counterpart by design), or DRIFT (public type with no sanctioned
+counterpart).
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| `Job` | `Job` (`Sources/QueueKit/Job.swift:167`) | `Job` (`rust/src/job.rs:130`) | both `public`/`pub` | identical (field-for-field; `priority` Int↔i32, `payload` Data↔Vec<u8>, `extensions` map of `CodableValue`) | Rust `conformance.rs::job_byte_identical`; Swift `SupportingTypeTests.swift::jobJSONRoundTrip` (shared Fixtures vectors) | Confirmed |
+| `JobID` / `JobId` | `JobID` (`Sources/QueueKit/Job.swift:22`) | `JobId` (`rust/src/job.rs:18`) | both public/pub | `ID`/`Id` sanctioned idiom; Swift RawRepresentable struct / Rust newtype | Swift `IdentifierTypeTests.swift::jobIDIs32LowercaseHex`; Rust `conformance.rs::job_byte_identical` (id round-trips in wire fixture) | Confirmed |
+| `StreamID` / `StreamId` | `StreamID` (`Sources/QueueKit/Job.swift:51`) | `StreamId` (`rust/src/job.rs:22`) | both public/pub | `ID`/`Id` sanctioned idiom | Rust `parity.rs::completed_filter_by_stream_id`; Swift `ConformanceTests.swift::area1Schema` | Confirmed |
+| `SessionID` / `SessionId` | `SessionID` (`Sources/QueueKit/Job.swift:68`) | `SessionId` (`rust/src/job.rs:26`) | both public/pub | `ID`/`Id` sanctioned idiom; `mint()` minted at claim time both ports | Rust `parity.rs::write_and_drain` (session minted on claim); Swift `ConformanceTests.swift::area1Schema` | Confirmed |
+| `ToolName` | `ToolName` (`Sources/QueueKit/Job.swift:80`) | `ToolName` (`rust/src/job.rs:35`) | both public/pub | Swift RawRepresentable struct, validation at call sites / Rust newtype with `validate(&[ToolName])` method (idiom placement of allowlist check) | Rust `parity.rs::tool_name_round_trip`, `tool_name_validate_found`, `tool_name_validate_not_found_returns_unknown_tool` | Confirmed |
+| `ObservationStatus` | `ObservationStatus` (`Sources/QueueKit/ObservationStatus.swift:9`) | `ObservationStatus` (`rust/src/job.rs:63`) | both public/pub | identical; Swift String-raw enum / Rust enum + `raw()`/`from_raw()`/`is_terminal()` (raw values match exactly) | Swift `SupportingTypeTests.swift::observationStatusRawValues`, `observationStatusTerminalDiscrimination`; Rust `conformance.rs::signal_byte_identical` | Confirmed |
+| `ArtifactRef` | `ArtifactRef` (`Sources/QueueKit/Job.swift:85`) | `ArtifactRef` (`rust/src/job.rs:99`) | both public/pub | identical; Swift assoc-value enum / Rust enum + `type_tag()`/`value()`; serialized `{type,value}` byte-identical | Swift `SupportingTypeTests.swift::artifactRefRoundTrip`; Rust `conformance.rs::signal_byte_identical` (artifact array in fixture) | Confirmed |
+| `SignalFile` | `SignalFile` (`Sources/QueueKit/Job.swift:321`) | `SignalFile` (`rust/src/job.rs:140`) | both public/pub | identical (`jobID`/`job_id`, `completedAt`/`completed_at` snake-case idiom) | Rust `conformance.rs::signal_byte_identical`; Swift `SupportingTypeTests.swift::signalFileJSONShape` / `ConformanceTests.swift::area3SignalCorrectness` | Confirmed |
+| `CodableValue` | `CodableValue` (`Sources/QueueKit/Job.swift:131`) | `CodableValue` (`rust/src/job.rs:127`) | both public/pub | Swift `indirect enum` (null/bool/int/double/string/array/object) / Rust `type CodableValue = serde_json::Value` (type alias) — sanctioned representation difference; both round-trip `Job.extensions` verbatim and byte-identically | Swift `ConformanceTests.swift::area5Extensions`; Rust `parity.rs::extensions_round_trip` | Confirmed |
+| `WireFormat` | `WireFormat` (`Sources/QueueKit/Job.swift:287`) | none — free functions `filename_for_job`/`sortable_hlc`/`encode_job`/`encode_signal`/`decode_job` (`rust/src/job.rs:237,229,288,302,318`) | Swift `public` caseless-enum namespace / Rust `pub fn` crate-root free functions | sanctioned: Swift groups the canonical encoder under a namespace enum; Rust exposes the identical operations as free functions (no namespace type). Byte-identity contract is the same. | Rust `conformance.rs::filename_byte_identical`, `job_byte_identical`; Swift `SupportingTypeTests.swift::filenameMatchesSpecExample`, `sortableHLCFormat`, `jobJSONRoundTrip` | Confirmed |
+| `QueueKit` (facade) | `QueueKit` (`Sources/QueueKit/QueueKit.swift:31`) | none — Rust callers hold `Box<dyn QueueBackend>` directly (`rust/src/backend.rs:6`) | Swift `public final class` / Rust: no facade type | sanctioned: Swift adds a facade that mounts one backend and renames verbs (send/drain/watch/reply); Rust calls the `QueueBackend` trait methods directly. Behaviour identical; the facade is a Swift-side ergonomic shell over the same backend contract. | Rust `parity.rs::write_and_drain`, `complete_moves_to_done` (exercise the backend the facade wraps); Swift `ConformanceTests.swift::area2Transitions` | Confirmed |
+| `QueueBackend` | `QueueBackend` (`Sources/QueueKit/QueueBackend.swift:9`) | `QueueBackend` (`rust/src/backend.rs:6`) | Swift `public protocol` / Rust `pub trait` | Swift `async throws` / Rust sync `Result` (no async runtime — sanctioned, cf. NeuronKit policy-store seam); method verbs `write`/`drainAvailable`/`complete`/`inFlight`/`completed`/`watch` identical | Rust `parity.rs::write_and_drain`, `drain_hlc_order`, `complete_rejects_non_terminal_status`; Swift `ConformanceTests.swift::area2Transitions` | Confirmed |
+| `FilesystemBackend` | `FilesystemBackend` (`Sources/QueueKit/FilesystemBackend.swift:44`) | `FilesystemBackend` (`rust/src/filesystem.rs:22`) | both public/pub | identical contract; Swift `init(root:hlcGenerator:)` / Rust `new(root, node_id)`; both produce byte-identical maildir files | Rust `conformance.rs::area4_concurrent_claim_filesystem`; Swift `FilesystemBackendTests.swift`, `ConformanceTests.swift::area4ConcurrentClaimFilesystem` | Confirmed |
+| `PersistenceKitBackend` | `PersistenceKitBackend` (`Sources/QueueKit/PersistenceKitBackend.swift:85`) | `PersistenceKitBackend` (`rust/src/persistencekit.rs:151`) | both public/pub | identical behaviour; Swift `async throws` / Rust sync `Result` (Storage trait is sync — sanctioned async/sync seam); serializable atomic claim both ports | Rust `parity.rs::write_and_drain`, `drain_is_empty_after_claiming`, `in_flight_returns_cur_jobs`; Swift `PersistenceKitBackendTests.swift` | Confirmed |
+| `QueueKitSchema` | `QueueKitSchema` (`Sources/QueueKit/PersistenceKitBackend.swift:37`) | `QueueKitSchema` (`rust/src/persistencekit.rs:63`) | both public/pub | Swift caseless-enum namespace / Rust unit struct namespace; same `kitID`/`version`/`declaration()`, same `queueKitTableName` constant, 12 columns, 3 indices, `append_only=false` | Rust `parity.rs::schema_kit_id_and_version`, `schema_table_name_constant`, `schema_declaration_has_required_columns`, `schema_declaration_has_three_indices`; Swift `ConformanceTests.swift::area1Schema` | Confirmed |
+| `QueueError` | `QueueError` (`Sources/QueueKit/QueueError.swift:7`) | `QueueError` (`rust/src/error.rs:14`) | both public/pub | category-equivalent; Rust collapses associated `Error`/path into a `String` message and folds `unknownTool`/`staleTmpFile` (not raised by the shipped Rust Filesystem backend); behavioural categories one-to-one | Rust `parity.rs::stale_tmp_file_error_carries_path_and_age`, `complete_rejects_non_terminal_status`, `complete_job_not_found`; Swift `ConformanceTests.swift::area2Transitions`, `area6StaleTmpRecovery` | Confirmed |
+| `MissionContext` | `MissionContext` (`Sources/QueueKit/Job.swift:254`) | none (no Rust or Python counterpart) | Swift `public struct` / no Rust symbol | NOT a platform binding — caller-domain convenience (Forge mission descriptor) encoded into the opaque `Job.payload`; QueueKit treats payload as opaque bytes (SPEC § 4, I-5). Per the force-mirror standard, "Swift-only by design" is not a waiver for a plain domain struct. | none (no parity test — no Rust counterpart to bind against) | DRIFT |
+
+---
+
 *End of QueueKit Interface v0.8.*

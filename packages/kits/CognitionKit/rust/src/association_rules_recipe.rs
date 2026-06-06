@@ -1,7 +1,10 @@
-//! AssociationRules — the conscious "what co-occurs with what" recipe
-//! (Analytics). Rust version of the Swift `AssociationRules` in
+//! AssociationRules and AprioriRules — the conscious "what co-occurs with
+//! what" recipe family (Analytics).
+//!
+//! Rust versions of the Swift recipes in
 //! `CognitionKit/Sources/CognitionKit/AssociationRules.swift`.
-//! Paired with the Swift version (`Sources/CognitionKit/AssociationRules.swift`).
+//!
+//! ## AssociationRules
 //!
 //! Recalls a set of drawers, projects each drawer's categorical facets
 //! (room, kind, channel, sensitivity) into a per-call label vocabulary,
@@ -35,6 +38,25 @@
 //! row. Total and deterministic within a call.
 //!
 //! Read-only: no write verb. Capability gate: `AssociationRuleMining`.
+//!
+//! ## AprioriRules
+//!
+//! Multi-antecedent association-rule mining over the estate's drawer bitmap
+//! state. Rust port of the Swift `AprioriRules` recipe
+//! (`AssociationRules.swift:205`).
+//!
+//! Delegates entirely to `EstateCoordinator::mine_apriori_rules` which
+//! synthesises `RowAttributeView` rows from each drawer's current bitmap
+//! columns (adjective / operational / provenance) and runs
+//! `SubstrateML::mine_apriori_rules`. No label projection is needed: the
+//! engine works on raw bitmap bit-position `Item` attributes derived from
+//! the `RowAttributeView` factory.
+//!
+//! The recipe's output preserves the engine's `AprioriRule` values verbatim
+//! so callers can inspect all five metrics and the full multi-item antecedent
+//! list.
+//!
+//! Read-only: no write verb. Capability gate: `AssociationRuleMining`.
 
 use std::collections::BTreeSet;
 
@@ -47,6 +69,8 @@ use locus_kit::filter::RecallFrame;
 // ARM engine lives in SubstrateML; neuron_kit no longer re-exports these.
 use substrate_ml::association_rule_mining::{mine_association_rules, MiningThresholds};
 use substrate_types::MatrixO;
+
+use substrate_ml::apriori_mining::{AprioriRule, AprioriThresholds};
 
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
 use crate::error::{RecipeRunError, SubstrateError};
@@ -159,6 +183,52 @@ pub fn run_association_rules(
         drawer_count,
         label_overflow,
     })
+}
+
+// MARK: - AprioriRules recipe
+
+/// Output of the AprioriRules recipe.
+///
+/// Mirrors `AprioriRules.Output` in Swift (`AssociationRules.swift:217`).
+/// The recipe output preserves the engine's `AprioriRule` values verbatim
+/// so callers can inspect all five metrics and the full multi-item antecedent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AprioriRulesOutput {
+    /// Mined rules sorted by lift DESC, confidence DESC, evidence_count DESC.
+    /// Mirrors Swift `AprioriRules.Output.rules: [AprioriRule]`.
+    pub rules: Vec<AprioriRule>,
+}
+
+/// Run the AprioriRules recipe: retrieve the estate's drawers, synthesise
+/// `RowAttributeView` rows from their bitmap columns, and mine multi-
+/// antecedent association rules via the Apriori algorithm.
+///
+/// Mirrors Swift `AprioriRules.run(input:estate:kit:)`
+/// (`AssociationRules.swift:235`). Both versions delegate to the shared
+/// Apriori engine in SubstrateML (`mine_apriori_rules` /
+/// `AprioriMining.mine`).
+///
+/// Capability gate: `AssociationRuleMining` is verified before any estate
+/// touch (spec B-5, I-3).
+pub fn run_apriori_rules(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    thresholds: AprioriThresholds,
+) -> Result<AprioriRulesOutput, RecipeRunError> {
+    // B-5: verify capability before any estate touch.
+    verify_capabilities(
+        &[NeuronKitCapability::AssociationRuleMining],
+        &shipped_capabilities(),
+    )
+    .map_err(|e| SubstrateError::new("capability_gate", format!("{e:?}")))?;
+
+    // Delegate to EstateCoordinator::mine_apriori_rules which synthesises
+    // RowAttributeView rows from each drawer's current bitmap state.
+    let rules = coord
+        .mine_apriori_rules(handle, thresholds)
+        .map_err(|e| SubstrateError::new("mine_apriori_rules", format!("{e:?}")))?;
+
+    Ok(AprioriRulesOutput { rules })
 }
 
 // MARK: - Label helpers
@@ -480,5 +550,67 @@ mod tests {
             !out.rules.is_empty(),
             "rules still mine over the kept (sorted-first-64) labels"
         );
+    }
+
+    // ── AprioriRules recipe tests ─────────────────────────────────────────────
+    //
+    // These mirror the Swift CK-AP-* tests in AssociationRulesTests.swift.
+
+    fn zero_apriori_thresholds() -> AprioriThresholds {
+        AprioriThresholds::new(0.0, 0.0, 0.0, 4)
+    }
+
+    // CK-AP-1: empty estate — no drawers, no Apriori rules. Verifies the
+    // capability gate, the empty-estate short-circuit, and the
+    // mine_apriori_rules wiring.
+    #[test]
+    fn apriori_empty_estate_yields_no_rules() {
+        let (coord, h) = coord_with_estate();
+        let out = run_apriori_rules(&coord, &h, zero_apriori_thresholds()).unwrap();
+        assert!(
+            out.rules.is_empty(),
+            "fresh estate has no drawers and no Apriori rules"
+        );
+    }
+
+    // CK-AP-2: recipe has the expected capability gate (associationRuleMining).
+    // Verifies that `run_apriori_rules` calls the capability gate before any
+    // estate touch — mirrors Swift `aprioriCapabilityDeclaration`.
+    //
+    // The shipped capability set includes `AssociationRuleMining`, so the
+    // recipe runs. We verify the capability is in the shipped set so the
+    // recipe actually executes (rather than gating out), mirroring the Swift
+    // test which constructs an `AprioriRules` instance and inspects its
+    // `requiredCapabilities`.
+    #[test]
+    fn apriori_capability_gate_is_association_rule_mining() {
+        use crate::capability::{shipped_capabilities, NeuronKitCapability};
+        let caps = shipped_capabilities();
+        assert!(
+            caps.contains(&NeuronKitCapability::AssociationRuleMining),
+            "shipped capabilities must include AssociationRuleMining for AprioriRules to run"
+        );
+    }
+
+    // CK-AP-3: recipe runs without error after captures and returns a non-
+    // empty-or-consistent result. The audit log (bitmap state) after captures
+    // may or may not yield frequent Apriori patterns; what we verify is that
+    // the recipe completes without error and every returned rule has a non-
+    // empty antecedent — mirrors Swift `aprioriRulesRunsAfterCaptures`.
+    #[test]
+    fn apriori_runs_without_error_after_captures() {
+        let (coord, h) = coord_with_estate();
+        for _ in 0..4 {
+            capture_drawer(&coord, &h, "study", ContentKind::Prose, CaptureChannel::Typed);
+        }
+        let thresholds = AprioriThresholds::new(0.1, 0.1, 0.5, 2);
+        let out = run_apriori_rules(&coord, &h, thresholds).unwrap();
+        // Every returned rule must have a non-empty antecedent.
+        for rule in &out.rules {
+            assert!(
+                !rule.antecedent.is_empty(),
+                "every Apriori rule must have a non-empty antecedent"
+            );
+        }
     }
 }

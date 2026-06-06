@@ -1,0 +1,27 @@
+[package]
+name = "vault-kit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "VaultKit — bidirectional bridge between a MOOT estate and a human-readable Markdown vault. Rust port of the Swift VaultKit package, per ADR-VAULTKIT-001 (f)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "vault_kit"
+path = "src/lib.rs"
+
+# Dependency rationale:
+#   genius-locus-kit: provides EstateCoordinator, EstateHandle, CaptureFrame,
+#     RecallFrame, VerbDispatchError — the verb surface VaultBridge calls.
+#   locus-kit: provides Drawer, Tunnel, TunnelCaptureFrame,
+#     TunnelKind, TunnelOriginClass — value types DrawerMapping produces.
+#   uuid: FNV-1a 128-bit lineageID is packed into a uuid::Uuid (byte-identical
+#     to the Swift UUID produced by DrawerMapping.lineageID(forStableSourceKey:)).
+#
+# Layering: vault-kit (above GLK) → genius-locus-kit → locus-kit.
+# No inversion. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+[dependencies]
+genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
+locus-kit = { path = "../../LocusKit/rust" }
+uuid = { version = "1", features = ["v4"] }

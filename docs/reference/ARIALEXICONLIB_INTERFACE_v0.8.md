@@ -10,7 +10,7 @@ relates_to:
 purpose: |
   Public API surface of AriaLexiconLib: the noun, verb, adjective, and
   flow enumerations, the verb-noun acceptance matrix, and the grammar
-  constant — in both the Swift and Rust versions. The companion SPEC
+  constant — in both the Swift and Rust ports. The companion SPEC
   document carries the behavioral contracts (invariants I-1…I-5,
   conformance C-1…C-5) these signatures satisfy.
 ---
@@ -234,8 +234,8 @@ swift test --package-path packages/libs/AriaLexiconLib
 ```
 
 (Run with the Xcode toolchain: prefix
-`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` so
-swift-testing resolves. Suite: `AriaLexiconLibTests`.)
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` so XCTest /
+swift-testing resolve. Suite: `AriaLexiconLibTests`.)
 
 **Rust:**
 
@@ -263,6 +263,74 @@ for noun in Noun.allCases {
 // Filter to caller-driven verbs.
 let caller = Verb.allCases.filter { $0.flow == .callerDriven }
 ```
+
+## § 7 — Concordance: Acceptance matrix membership
+
+The verb-noun acceptance matrix is pure vocabulary with zero platform
+binding. The membership must be identical between the Swift and Rust
+ports (SPEC § 7, C-3). Swift is the reference; the Rust `accepted_verbs`
+function must return exactly the same verb set for every noun.
+
+Canonical matrix (verified 2026-06-05 against Swift `Acceptance.swift`):
+
+| Noun | Accepted verbs |
+|---|---|
+| `Drawer` | capture, reanchor, mutate, withdraw, expunge, recall |
+| `Tunnel` | capture, mutate, withdraw, expunge, recall |
+| `KgFact` | mutate, withdraw, expunge, recall |
+| `Vector` | *(empty — substrate-managed, not directly verb-addressable)* |
+| `DiaryEntry` | recall |
+| `Proposal` | **propose**, mutate, withdraw, expunge, recall |
+| `Association` | **associate**, mutate, expunge, recall |
+| `LearnedReference` | learn, mutate, withdraw, expunge, recall |
+
+The `Proposal` row accepts `propose` because the substrate-driven `propose`
+verb is what creates a Proposal — the shape must accept the verb that
+produces it. The `Association` row accepts `associate` for the same reason:
+the substrate-driven `associate` verb accumulates connective weight into an
+Association.
+
+Conformance gate note: the Rust `acceptance_matrix` test pins the full
+verb set for every noun-row including `Propose` and `Associate`. Any
+regression in these rows will cause the test to fail immediately.
+
+## Swift/Rust Concordance
+
+One row per public concept. Each Swift and Rust symbol below was read from
+source (file:line cited). AriaLexiconLib is pure vocabulary with zero
+platform binding, so the bar is identical content across ports: same case
+sets, same role/flow partitions, same acceptance matrix. There are no Apple
+platform-bound types here, so nothing is Exempt; everything is force-mirrored.
+
+Two concepts differ in *shape* by sanctioned idiom, not in content:
+
+- Swift uses a caseless `enum` as a namespace for static members
+  (`Acceptance`, `AriaLexiconLib`); Rust has no caseless-enum-namespace idiom,
+  so the same surface is reified as free functions (`accepted_verbs`/`accepts`)
+  and a module-level `const` (`GRAMMAR`). The contract — the matrix membership
+  and the grammar sentence — is byte-for-byte identical and conformance-gated.
+  This is the same Swift-namespace / Rust-free-function seam sanctioned
+  elsewhere in the parity surface; it is not Swift-only contract surface.
+- Swift enum case spelling is camelCase raw-value-backed (`kgFact`,
+  `learnedReference`, `callerDriven`); Rust uses PascalCase variants
+  (`KgFact`, `LearnedReference`, `CallerDriven`). Idiomatic per-language
+  casing of the same case set.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Storage shape (the 8 nouns) | `Noun` enum (`Noun.swift:14`) | `Noun` enum (`lib.rs:37`) | public / pub | identical case set; Swift camelCase raw values / Rust PascalCase variants (idiom) | Swift `NounTests.swift` "eight storage shapes, drawer first"; Rust `lib.rs::drawer_is_primary` + `non_drawer_shapes_have_roles` | Confirmed |
+| Noun-to-drawer relationship | `NounRole` enum (`Noun.swift:45`) | `NounRole` enum (`lib.rs:22`) | public / pub | identical case set (primary/rung/structure/product) | Swift `NounTests.swift` "four roles partition the eight shapes 1/2/3/2"; Rust `lib.rs::non_drawer_shapes_have_roles` | Confirmed |
+| Primary noun marker + role map | `Noun.primary` / `Noun.role` (`Noun.swift:27`,`:30`) | `Noun::PRIMARY` / `Noun::role` (`lib.rs:56`,`:59`) | public / pub | Swift static `let` + computed property / Rust associated `const` + method (idiom) | Swift `NounTests.swift` "drawer is the one noun"; Rust `lib.rs::drawer_is_primary` | Confirmed |
+| Action vocabulary (the 9 verbs) | `Verb` enum (`Verb.swift:9`) | `Verb` enum (`lib.rs:79`) | public / pub | identical case set; Swift camelCase / Rust PascalCase (idiom) | Swift `VerbTests.swift` "nine verbs in canonical declaration order"; Rust `lib.rs::verb_count_is_nine` | Confirmed |
+| Verb initiator class | `Flow` enum (`Verb.swift:37`) | `Flow` enum (`lib.rs:71`) | public / pub | identical case set (callerDriven/substrateDriven/groundingDriven) | Swift `VerbTests.swift` "three flows partition the nine verbs 6/2/1"; Rust `lib.rs::verb_flows_partition` | Confirmed |
+| Flow map per verb | `Verb.flow` (`Verb.swift:21`) | `Verb::flow` (`lib.rs:99`) | public / pub | Swift computed property / Rust method (idiom) | Swift `VerbTests.swift` "Verb flows partition…"; Rust `lib.rs::verb_flows_partition` | Confirmed |
+| Adjective categories (the 4) | `Adjective` enum (`Adjective.swift:13`) | `Adjective` enum (`lib.rs:114`) | public / pub | identical case set (state/trust/sensitivity/exportability) | Swift `AdjectiveTests.swift` "category count fixed at four (I-8)" + "four categories are…"; Rust `lib.rs::adjective_count_is_four` | Confirmed |
+| The grammar sentence | `AriaLexiconLib.grammar` (`AriaLexiconLib.swift:13`,`:15`) | `GRAMMAR` const (`lib.rs:17`) | public / pub | Swift caseless-enum namespace static `let` / Rust module-level `const` (sanctioned namespace-vs-free seam) — content identical | Swift `LexiconTests.swift` "grammar sentence is stated"; Rust `lib.rs::grammar_stated` | Confirmed |
+| Verb-noun acceptance matrix | `Acceptance` enum: `verbs(for:)` / `accepts(_:_:)` (`Acceptance.swift:10`,`:14`,`:36`) | free fns `accepted_verbs` / `accepts` (`lib.rs:131`,`:151`) | public / pub | Swift caseless-enum namespace with statics / Rust free functions (sanctioned namespace-vs-free seam); Swift returns `Set<Verb>` (unordered) / Rust returns ordered `Vec<Verb>` — membership is the contract, not order | Swift `AcceptanceTests.swift::matrixMatchesSpec` + `acceptsIsMembershipEverywhere`; Rust `lib.rs::acceptance_matrix` + `accepts_agrees` (conformance gate, C-3) | Confirmed |
+
+All rows Status=Confirmed: every concept is present in both ports and
+behavior-bound by a conformance test. No DRIFT, no Exempt rows — there are no
+Apple platform bindings in this lib.
 
 ---
 

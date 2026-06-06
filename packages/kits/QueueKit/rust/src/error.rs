@@ -1,4 +1,12 @@
 // QueueError per spec §7.
+//
+// Variants mirror Swift's QueueError case-for-case with Rust idiom
+// adjustments:
+//   - Associated values carry String (not typed wrappers) because
+//     QueueError is returned across the QueueBackend trait boundary
+//     where type-erased error context is most useful.
+//   - UnknownTool carries the raw tool name string (Swift carries ToolName).
+//   - StaleTmpFile carries (path, age_secs) matching Swift's (path, age).
 
 use std::fmt;
 
@@ -8,8 +16,13 @@ pub enum QueueError {
     WriteFailed(String),
     RenameFailed { from: String, to: String, msg: String },
     DecodingFailed(String),
+    /// A ToolName was not found in the allowlist (Swift: unknownTool(ToolName)).
+    UnknownTool(String),
     JobNotFound(String),
     WatcherFailed(String),
+    /// A tmp/ file is older than the stale-sweep threshold.
+    /// `age_secs` mirrors Swift's TimeInterval (f64 seconds).
+    StaleTmpFile { path: String, age_secs: f64 },
     BackendUnavailable(String),
     InvalidTerminalStatus(String),
 }

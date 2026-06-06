@@ -226,7 +226,7 @@ mod tests {
         let mut sink = EstateDreamingSink::new(Arc::clone(&store), 3_000_000);
         let reader = StubReader;
         let reward = RecallTraceRewardSource;
-        let policy = DreamingPolicy { min_success_rate: 0.0, min_confidence: 0.7, min_attempts: 1 };
+        let policy = DreamingPolicy { min_success_rate: 0.0, min_confidence: 0.7, min_attempts: 1, tick_interval_ms: 30_000 };
         let mut daemon = DreamingDaemon::new(policy);
 
         let report = daemon.run_cycle(&reader, &reward, &mut sink);

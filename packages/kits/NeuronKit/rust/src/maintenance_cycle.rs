@@ -61,24 +61,81 @@ pub struct MaintenanceCycleReport {
 }
 
 /// Maintenance health-scan parameters the cycle reads, mirroring the Swift
-/// `MaintenancePolicy` fields the decision uses.
+/// `MaintenancePolicy` fields the decision uses (NEURONKIT_SPEC § 3.2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaintenancePolicy {
+    /// Tick cadence in milliseconds (spec default 300_000 / 5 minutes).
+    pub tick_interval_ms: i64,
+    /// How often the audit chain is re-verified, in milliseconds
+    /// (spec default 300_000 / 5 minutes).
+    pub audit_check_interval_ms: i64,
+    /// Age past which an active drawer is a decay candidate, in seconds
+    /// (spec default 2_592_000 / 30 days).
     pub decay_window_seconds: f64,
+    /// Grace period past which a tombstoned drawer is an expunge candidate,
+    /// in seconds (spec default 604_800 / 7 days).
     pub tombstone_grace_seconds: f64,
+    /// Per-room/wing fingerprint Hamming-distance drift fraction past which
+    /// a fingerprint-drift proposal is emitted (spec default 0.25).
     pub fingerprint_drift_threshold: f32,
+    /// LearnedReference source-drift threshold (spec default 0.25).
     pub by_reference_drift_threshold: f32,
 }
 
 impl Default for MaintenancePolicy {
-    /// Spec defaults (NEURONKIT_SPEC § 3.2).
+    /// Spec defaults (NEURONKIT_SPEC § 3.2):
+    /// 300_000 / 300_000 / 30d / 7d / 0.25 / 0.25.
     fn default() -> Self {
         Self {
+            tick_interval_ms: 300_000,
+            audit_check_interval_ms: 300_000,
             decay_window_seconds: 2_592_000.0,
             tombstone_grace_seconds: 604_800.0,
             fingerprint_drift_threshold: 0.25,
             by_reference_drift_threshold: 0.25,
         }
+    }
+}
+
+/// Persistence seam for the maintenance policy ("substrate-resident in
+/// manifest", NEURONKIT_SPEC § 3.2).
+///
+/// The daemon never touches the manifest directly (B-1). It loads and
+/// saves the policy through this trait. The production adapter binds
+/// these methods to the estate manifest once GLK exposes a manifest
+/// accessor; until then the seam is satisfied by an in-memory store.
+/// Mirrors `MaintenancePolicyStore` (Swift `MaintenancePolicy.swift`).
+pub trait MaintenancePolicyStore {
+    /// Load the persisted policy, or `None` if none has been saved (the
+    /// daemon then falls back to `MaintenancePolicy::default()`).
+    fn load_policy(&self) -> Option<MaintenancePolicy>;
+
+    /// Persist the policy. Subsequent `load_policy()` calls return it.
+    fn save_policy(&mut self, policy: MaintenancePolicy);
+}
+
+/// In-memory `MaintenancePolicyStore` for tests and for hosts that do not
+/// persist policy across process restarts.
+/// Mirrors `InMemoryMaintenancePolicyStore` (Swift `MaintenancePolicy.swift`).
+#[derive(Clone, Debug, Default)]
+pub struct InMemoryMaintenancePolicyStore {
+    stored: Option<MaintenancePolicy>,
+}
+
+impl InMemoryMaintenancePolicyStore {
+    /// Create an empty store, or seed it with an initial policy.
+    pub fn new(initial: Option<MaintenancePolicy>) -> Self {
+        Self { stored: initial }
+    }
+}
+
+impl MaintenancePolicyStore for InMemoryMaintenancePolicyStore {
+    fn load_policy(&self) -> Option<MaintenancePolicy> {
+        self.stored
+    }
+
+    fn save_policy(&mut self, policy: MaintenancePolicy) {
+        self.stored = Some(policy);
     }
 }
 
@@ -350,5 +407,40 @@ tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0"
         assert_eq!(second.decay_candidates, 1, "counts still report crossers");
         assert!(sink.diaries[1].entry.starts_with("maintenance cycle 2:"));
         assert!(sink.diaries[1].entry.contains("proposed 0, suppressed 5"));
+    }
+
+    // MPS-1: InMemoryMaintenancePolicyStore starts empty; save then load
+    // returns the saved policy (in-memory round-trip).
+    #[test]
+    fn mps1_in_memory_store_empty_then_round_trip() {
+        let mut store = InMemoryMaintenancePolicyStore::new(None);
+        assert!(store.load_policy().is_none(), "empty store returns None");
+        let custom = MaintenancePolicy {
+            tick_interval_ms: 60_000,
+            audit_check_interval_ms: 120_000,
+            decay_window_seconds: 1_296_000.0, // 15 days
+            tombstone_grace_seconds: 302_400.0,  // 3.5 days
+            fingerprint_drift_threshold: 0.15,
+            by_reference_drift_threshold: 0.10,
+        };
+        store.save_policy(custom);
+        let loaded = store.load_policy();
+        assert_eq!(loaded, Some(custom), "load returns saved policy");
+    }
+
+    // MPS-2: seed the store with an initial policy; overwrite with a second;
+    // the second is returned.
+    #[test]
+    fn mps2_save_overwrites_previous() {
+        let initial = MaintenancePolicy::default();
+        let mut store = InMemoryMaintenancePolicyStore::new(Some(initial));
+        assert_eq!(store.load_policy(), Some(initial));
+
+        let updated = MaintenancePolicy {
+            tick_interval_ms: 10_000,
+            ..initial
+        };
+        store.save_policy(updated);
+        assert_eq!(store.load_policy(), Some(updated), "second save overwrites first");
     }
 }

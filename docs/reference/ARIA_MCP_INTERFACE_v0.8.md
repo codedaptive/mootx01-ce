@@ -42,7 +42,15 @@ purpose: |
 - `Package.swift` — depends on GeniusLocusKit, LocusKit, PersistenceKit,
   NeuronKit, CognitionKit (path deps under `../../packages/`).
 
-**Rust:** none. ARIA_MCP is the external access surface above the substrate and is implemented in Swift.
+**Rust:** `apps/ARIA_MCP/rust/` — a wire-contract peer of the Swift server.
+The Rust binary is a parity sibling; the shipped runtime is the Swift binary
+(`installer/install.sh builds mootx01-mcp via swift build`). The Rust binary
+links the same 44-tool surface backed by the Rust kit stack (genius-locus-kit,
+locus-kit, vault-kit, cognition-kit, neuron-kit). As of stream t1-vault, all four
+`moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
+(`VaultBridge`, `ObsidianAdapter`, `DrawerMapping`) with a SHA-256 sidecar
+manifest owned by the ARIA layer (ADR-VAULTKIT-002 decision b).
+Cargo.toml path deps: `vault-kit` (new), `sha2` (new), plus existing kit deps.
 
 This is the external access surface above the substrate; it is not
 imported by any other package, so it is documented single-tier (its full
@@ -327,7 +335,16 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 tool projection, connection dispatch, file-memory validation, KG and
 journal dispatch, multi-estate routing, recipe/lens tools, vault tools,
 teachme guides and coaching hints.)
-No Rust version.
+
+```
+cargo test --manifest-path apps/ARIA_MCP/rust/Cargo.toml
+```
+
+(Rust test targets: `dispatch_tests` — 50 tests including 6 vault dispatch
+integration tests: missing-vaultPath INVALID_PARAMS, status-no-manifest,
+export-stamps-manifest, export-then-import, reconcile-no-manifest,
+reconcile-zero-drift. `jsonrpc_tests`, `persistence_tests`,
+`stdio_framing_tests`.)
 
 ## § 6 — Examples
 

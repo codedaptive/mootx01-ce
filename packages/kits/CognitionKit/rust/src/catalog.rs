@@ -192,6 +192,14 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![NeuronKitCapability::FormalConceptAnalysis],
         },
+        RecipeDescriptor {
+            name: "apriori_rules".into(),
+            version: "1.0.0".into(),
+            description:
+                "Read the estate's audit log and mine multi-antecedent association rules via the Apriori algorithm."
+                    .into(),
+            required_capabilities: vec![NeuronKitCapability::AssociationRuleMining],
+        },
     ]
 }
 
@@ -216,13 +224,14 @@ mod tests {
     fn catalog_lists_all_shipped_recipes() {
         // Both versions of every recipe ship, so every recipe registers
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational
-        // recipes plus the 14 reasoning lenses plus the 2 analytics lenses.
+        // recipes plus the 14 reasoning lenses plus the 3 analytics lenses.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
             names,
             vec![
                 "anticipate",
+                "apriori_rules",
                 "association_rules",
                 "bias",
                 "constellation",
@@ -342,5 +351,23 @@ mod tests {
         );
         let json = serde_json::to_string(&d).unwrap();
         assert!(json.contains("\"formalConceptAnalysis\""));
+    }
+
+    #[test]
+    fn apriori_rules_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift AprioriRules recipe metadata
+        // (`AssociationRules.swift:227-233`).
+        let d = recipe_descriptor("apriori_rules").unwrap();
+        assert_eq!(d.version, "1.0.0");
+        assert_eq!(
+            d.description,
+            "Read the estate's audit log and mine multi-antecedent association rules via the Apriori algorithm."
+        );
+        assert_eq!(
+            d.required_capabilities,
+            vec![NeuronKitCapability::AssociationRuleMining]
+        );
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"associationRuleMining\""));
     }
 }

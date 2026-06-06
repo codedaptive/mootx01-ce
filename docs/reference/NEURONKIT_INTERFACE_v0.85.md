@@ -949,4 +949,154 @@ let plan = NeuronKit.anticipate(observations: events, targetOutcome: 1, k: 3, mi
 
 ---
 
+## § 7 — Swift/Rust Concordance
+
+Cross-port parity as of PAR-4-NK + PAR-5-NK/6-NK/1B (2026-06-05).
+
+This is the authoritative one-row-per-concept parity table; every top-level
+public declaration in `Sources/NeuronKit/**` (Swift `public
+struct|enum|protocol|class|actor|typealias`) and `rust/src/**` (Rust
+top-level `pub struct|enum|trait|type`) is read-anchored to a row here.
+Cross-port behavioral parity for the pure engines and every § 7 lens is
+proved by the shared deterministic vector harness — Swift
+`LensVectorConformanceTests.swift` and Rust `rust/tests/lens_conformance.rs`
+replay the same JSON fixtures — plus the per-concept domain suites named
+below. The legacy sub-tables that follow the main table record the specific
+PAR-mission deltas and remain valid.
+
+### Concordance table
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Module namespace | `NeuronKit` (enum) `NeuronKit.swift:22` | `neuron_kit` crate free items `lib.rs` | `public` / `pub` | Swift roll-up enum carries `version` + extensions; Rust has no namespace type (free `VERSION` const + free fns) — sanctioned idiom | `NeuronKitTests.swift` | Confirmed |
+| Linguistic pipeline mode | `LinguisticPipelineMode` `NeuronKit.swift:136` | `LinguisticPipelineMode` `lattice_anchor.rs:55` | `public` / `pub` | identical (kebab serde; Rust always `DeterministicReference`) | `LatticeAnchorInferenceTests.swift` ; `lattice_anchor.rs` tests | Confirmed |
+| Lattice-anchor result | `LatticeAnchorInference` `LatticeAnchorInference.swift:21` | `LatticeAnchorInference` `lattice_anchor.rs:19` | `public` / `pub` | identical (snake/camel field idiom) | `LatticeAnchorInferenceTests.swift` ; `lattice_anchor.rs` tests | Confirmed |
+| Anchor confidence band | `AnchorConfidence` `LatticeAnchorInference.swift:70` | `AnchorConfidence` `lattice_anchor.rs:74` | `public` / `pub` | identical `u8`-raw enum | `LatticeAnchorInferenceTests.swift` | Confirmed |
+| Enrichment status | `EnrichmentStatus` `LatticeAnchorInference.swift:80` | `EnrichmentStatus` `lattice_anchor.rs:92` | `public` / `pub` | identical `u8`-raw enum | `LatticeAnchorInferenceTests.swift` | Confirmed |
+| Recall fusion tuning | `RecallFrameTuning` `HybridRecall.swift:94` | `RecallFrameTuning` `hybrid_recall.rs:31` | `public` / `pub` | identical (Swift `Int`/`Float`, Rust `i32`/`f32` idiom) | `HybridRecallTests.swift` ; `hybrid_recall.rs` tests | Confirmed |
+| Drawer row alias | `Drawer` typealias `HybridRecall.swift:53` | `DrawerRow` `hybrid_recall.rs:22` | `public` / `pub` | Swift aliases `LocusKit.Drawer` (storage truth); Rust has no estate dep so `DrawerRow` is a flat `{id, content}` projection — sanctioned (Rust: no LocusKit/EngramLib dep, SPEC I-17/I-18) | `HybridRecallTests.swift` ; `hybrid_recall.rs` rerank tests | Confirmed |
+| Recall page / stream | `RecallStream` (+ nested `Page`) `HybridRecall.swift:140` | `RecallPage` `hybrid_recall.rs:63` | `public` / `pub` | Swift `AsyncSequence` of `Page`; Rust sync `Vec<RecallPage>` (no async runtime — sanctioned, cf. policy-store seam) | `HybridRecallTests.swift` ; `hybrid_recall.rs` paging tests | Confirmed |
+| Context document | `ContextDocument` `ContextSynthesizer.swift:23` | `ContextDocument` `context_synthesizer.rs:16` | `public` / `pub` | identical fields | `ContextSynthesizerTests.swift` ; `context_synthesizer.rs` tests | Confirmed |
+| Context synthesizer | `ContextSynthesizer` (enum) `ContextSynthesizer.swift:77` | free fn `synthesize` `context_synthesizer.rs` | `public` / `pub` | Swift caseless-enum namespace `async` taking `EstateHandle`; Rust free `synthesize` takes explicit `&[DrawerRowMeta]` (no estate) — sanctioned (Rust: no estate dep) | `ContextSynthesizerTests.swift` ; `context_synthesizer.rs` tests | Confirmed |
+| Synthesis row metadata | (inline `Drawer` fields, Swift) | `DrawerRowMeta` `context_synthesizer.rs:32` | — / `pub` | Swift reads metadata off `Drawer`; Rust needs an explicit per-row meta struct since it has no `Drawer` — sanctioned (Rust: no estate dep) | `context_synthesizer.rs` tests | Confirmed |
+| Scenario profile | `ScenarioProfile` `ScenarioProfile.swift:34` | `ScenarioProfile` `scenario_profile.rs:23` | `public` / `pub` | identical (UUID→String, `[String:_]`→`BTreeMap` idiom; ISO8601 TEXT date) | `ScenarioProfileTests.swift` ; `scenario_profile.rs` tests | Confirmed |
+| Pairwise outcome | `PairwiseOutcome` `Tournament/PairwiseOutcome.swift:36` | `PairwiseOutcome` `tournament.rs:45` | `public` / `pub` | identical (`Int`/`i64` count idiom) | `BradleyTerryTests.swift` ; `tournament.rs` tests | Confirmed |
+| Bradley-Terry score | `BradleyTerryScore` `Tournament/BradleyTerryScore.swift:45` | `BradleyTerryScore` `tournament.rs:77` | `public` / `pub` | identical | `BradleyTerryTests.swift` ; `tournament.rs` tests | Confirmed |
+| Fitter error | `MOOTx01Error` `Tournament/BradleyTerry.swift:34` | `TournamentError` `tournament.rs:87` | `public` / `pub` | sanctioned name drift, cases mirror (SPEC § 6, C-6): Swift module `MOOTx01Error` vs crate-local `TournamentError` | `BradleyTerryTests.swift` ; `tournament.rs` tests | Confirmed |
+| Benchmark report | `BenchmarkReport` `BenchmarkAlgorithm.swift:19` | `BenchmarkReport` `benchmark_live.rs:30` | `public` / `pub` | identical scored fields (Swift adds `branchID`/`evaluatedAt` caller fields) | `NK_BR_01_BranchBenchmarkTests.swift` ; `benchmark_live.rs` tests | Confirmed |
+| Benchmark scoring core | `BenchmarkScoring` (enum, nested `Score`) `BenchmarkScoring.swift:23` | `BenchmarkScore` (+ free `score`) `benchmark_scoring.rs:21` | `public` / `pub` | Swift nested `BenchmarkScoring.Score` / Rust flat `BenchmarkScore`; pure scoring fn shared, fixture-gated | `BenchmarkScoringTests.swift` ; `benchmark_scoring.rs` tests | Confirmed |
+| Disqualification reason | `DisqualificationReason` `Tournament.swift:42` | `DisqualificationReason` `tournament_live.rs:26` | `public` / `pub` | identical | `TournamentTests.swift` ; `tournament_live.rs` tests | Confirmed |
+| Branch score | `BranchScore` `Tournament.swift:62` | `BranchScore` `tournament_live.rs:34` | `public` / `pub` | identical (Swift `branch: any BranchHandle` vs Rust id-string — Rust has no estate handle, sanctioned) | `TournamentTests.swift` ; `tournament_live.rs` tests | Confirmed |
+| Disqualified branch | `DisqualifiedBranch` `Tournament.swift:101` | `DisqualifiedBranch` `tournament_live.rs:43` | `public` / `pub` | identical (same handle idiom note) | `TournamentTests.swift` ; `tournament_live.rs` tests | Confirmed |
+| Tournament report | `TournamentReport` `Tournament.swift:133` | `TournamentReport` `tournament_live.rs:53` | `public` / `pub` | identical | `TournamentTests.swift` ; `tournament_live.rs` tests | Confirmed |
+| Keystone (structure) | `Keystone` `Lenses/Keystones.swift:8` | `Keystone` `keystones.rs:14` | `public` / `pub` | identical | `KeystonesTests.swift`/`StructureLensTests.swift` ; `lens_conformance.rs` + `keystones.rs` | Confirmed |
+| Constellation (structure) | `Constellation` `Lenses/Constellation.swift:9` | `Constellation` `constellation.rs:19` | `public` / `pub` | identical | `ConstellationTests.swift` ; `lens_conformance.rs` + `constellation.rs` | Confirmed |
+| Activation (structure) | `Activation` `Lenses/SpreadingActivation.swift:12` | `Activation` `spreading_activation.rs:14` | `public` / `pub` | identical (`Int`/`usize` node idiom) | `SpreadingActivationTests.swift` ; `lens_conformance.rs` + `spreading_activation.rs` | Confirmed |
+| Category momentum (topic) | `CategoryMomentum` `Lenses/ThemeWeather.swift:12` | `CategoryMomentum` `theme_weather.rs:11` | `public` / `pub` | identical | `ThemeWeatherTests.swift`/`TopicLensTests.swift` ; `lens_conformance.rs` + `theme_weather.rs` | Confirmed |
+| Theme loading (topic) | `ThemeLoading` `Lenses/LatentThemes.swift:11` | `ThemeLoading` `latent_themes.rs:13` | `public` / `pub` | identical (`Int`/`usize` index idiom) | `LatentThemesTests.swift` ; `lens_conformance.rs` + `latent_themes.rs` | Confirmed |
+| Latent themes (topic) | `LatentThemes` `Lenses/LatentThemes.swift:23` | `LatentThemes` `latent_themes.rs:21` | `public` / `pub` | identical | `LatentThemesTests.swift` ; `lens_conformance.rs` + `latent_themes.rs` | Confirmed |
+| Category bias (pref) | `CategoryBias` `Lenses/Bias.swift:11` | `CategoryBias` `bias.rs:22` | `public` / `pub` | identical | `BiasTests.swift`/`PreferenceLensTests.swift` ; `lens_conformance.rs` + `bias.rs` | Confirmed |
+| Preference strength (pref) | `PreferenceStrength` `Lenses/Bias.swift:27` | `PreferenceStrength` `bias.rs:32` | `public` / `pub` | identical (`Int`/`i64` count idiom) | `PreferenceLensTests.swift` ; `lens_conformance.rs` + `bias.rs` | Confirmed |
+| Action observation (pred) | `ActionObservation` `Lenses/Anticipation.swift:13` | `ActionObservation` `anticipation.rs:14` | `public` / `pub` | identical | `AnticipationTests.swift`/`PredictionLensTests.swift` ; `lens_conformance.rs` + `anticipation.rs` | Confirmed |
+| Action prediction (pred) | `ActionPrediction` `Lenses/Anticipation.swift:26` | `ActionPrediction` `anticipation.rs:23` | `public` / `pub` | identical | `PredictionLensTests.swift` ; `lens_conformance.rs` + `anticipation.rs` | Confirmed |
+| Anomaly (scan lens) | `Anomaly` `Lenses/AnomalyScan.swift:15` | `Anomaly` `anomaly_scan.rs:17` | `public` / `pub` | identical | `AnomalyScanTests.swift` ; `anomaly_scan.rs` tests | Confirmed |
+| Drift score (lens) | `DriftScore` `Lenses/Drift.swift:15` | `DriftScore` `drift.rs:17` | `public` / `pub` | identical (JS + KL divergence) | `DriftTests.swift` ; `drift.rs` tests | Confirmed |
+| Fingerprint block | `FingerprintBlock` `Lenses/PartialRecall.swift:20` | `FingerprintBlock` `partial_recall.rs:34` | `public` / `pub` | Swift `Int`-raw enum + `Set<FingerprintBlock>`; Rust enum + `as_block_index()->u8` with `HashSet<u8>` — API shape differs, semantics identical (see legacy sub-table) | `PartialRecallTests.swift`/`MindOverlapTests.swift` ; `lens_conformance.rs` partial_recall | Confirmed |
+| Partial-recall match | `PartialMatch` `Lenses/PartialRecall.swift:28` | (inline tuple return of `partial_recall`) `partial_recall.rs:57` | `public` / `pub fn` | Swift wraps `(rowID, score)` in a `PartialMatch` struct; Rust `partial_recall` returns the ranked matches inline (no wrapper type) — sanctioned shape idiom, behavior is vector-bound | `PartialRecallTests.swift` ; `lens_conformance.rs` partial_recall cases | Confirmed |
+| Dreaming policy | `DreamingPolicy` `Dreaming/DreamingPolicy.swift:24` | `DreamingPolicy` `dreaming_cycle.rs:107` | `public` / `pub` | identical (timer fields added to Rust in PAR-4-NK — see legacy sub-table) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Dreaming policy store | `DreamingPolicyStore` `Dreaming/DreamingPolicy.swift:71` | `DreamingPolicyStore` `dreaming_cycle.rs:138` | `public` / `pub` | Swift `async` protocol / Rust sync trait (no async runtime — sanctioned, policy-store seam) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| In-memory dreaming store | `InMemoryDreamingPolicyStore` (actor) `Dreaming/DreamingPolicy.swift:84` | `InMemoryDreamingPolicyStore` (struct) `dreaming_cycle.rs:151` | `public` / `pub` | Swift actor / Rust struct (sync, not actor-isolated — sanctioned, policy-store seam) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Dreaming trigger mode | `DreamingTriggerMode` `Dreaming/DreamingTriggerMode.swift:27` | (inline; only `.timer` live) | `public` / — | Swift enum; Rust has no separate trigger-mode type (only timer path live at v0.8, SPEC § 9) — sanctioned (Rust: daemon is timer-only, no event seam) | `DreamingDaemonTests.swift` | Confirmed |
+| Reward source kind | `RewardSourceKind` `Dreaming/RewardSource.swift:31` | `RewardSourceKind` `dreaming_cycle.rs:96` | `public` / `pub` | identical (PascalCase cases; see legacy sub-table) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Reward source | `RewardSource` `Dreaming/RewardSource.swift:46` | `RewardSource` `dreaming_cycle.rs:188` | `public` / `pub` | Swift protocol / Rust trait; `kind()` accessor added in PAR-4-NK (legacy sub-table) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Recall-trace reward source | `RecallTraceRewardSource` `Dreaming/RewardSource.swift:62` | `RecallTraceRewardSource` `dreaming_cycle.rs:198` | `public` / `pub` | identical (`used→1.0` else `0.0`) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Dreaming substrate reader | `DreamingSubstrateReader` `Dreaming/DreamingDaemon.swift:40` | `DreamingSubstrateReader` `dreaming_cycle.rs:173` | `public` / `pub` | Swift `async` protocol / Rust sync trait (no async runtime — sanctioned seam) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Dreaming proposal sink | `DreamingProposalSink` `Dreaming/DreamingDaemon.swift:70` | `DreamingProposalSink` `dreaming_cycle.rs:216` | `public` / `pub` | Swift `async` protocol / Rust sync trait (sanctioned seam) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Co-occurrence observation | `CoOccurrenceObservation` `Dreaming/DreamingDaemon.swift:81` | `CoOccurrenceObservation` `dreaming_cycle.rs:40` | `public` / `pub` | identical | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Dreaming cycle report | `DreamingCycleReport` `Dreaming/DreamingDaemon.swift:108` | `DreamingCycleReport` `dreaming_cycle.rs:79` | `public` / `pub` | identical | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Dreaming daemon | `DreamingDaemon` (actor) `Dreaming/DreamingDaemon.swift:143` | `DreamingDaemon` (struct) `dreaming_cycle.rs:236` | `public` / `pub` | Swift actor / Rust struct (sync seam, no async runtime — sanctioned) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
+| Estate dreaming reader | `EstateDreamingReader` `Dreaming/EstateDreamingReader.swift:31` | `EstateDreamingReader` `estate_dreaming_reader.rs:35` | `public` / `pub` | Swift binds GLK verbs / Rust generic over `DrawerStore` (no estate dep, sanctioned) | `EstateDreamingReaderTests.swift` ; `estate_dreaming_reader.rs` tests | Confirmed |
+| Estate dreaming sink | `EstateDreamingSink` `Dreaming/EstateDreamingSink.swift:45` | `EstateDreamingSink<S>` `estate_dreaming_sink.rs:55` | `public` / `pub` | Swift binds GLK verbs / Rust generic over `DrawerStore` (sanctioned) | `EstateDreamingSinkTests.swift` ; `estate_dreaming_sink.rs` tests | Confirmed |
+| Dreaming decision core | `DreamingDecision` (enum, nested `Observation`/`EmittedCandidate`/`Outcome`) `Dreaming/DreamingDecision.swift:29` | `dreaming_decision.rs` free fns + flat `Observation`/`EmittedCandidate`/`Outcome` | `public` / `pub` | Swift nests the decision sub-shapes under `DreamingDecision`; Rust declares them flat (`Observation` `:43`, `EmittedCandidate` `:53`, `Outcome` `:64`) — Swift nested X.Y / Rust flat XY | `DreamingDaemonTests.swift` ; `dreaming_decision.rs` tests (Bucket A shared fixtures) | Confirmed |
+| Dreaming-decision observation | `DreamingDecision.Observation` (nested) | `Observation` `dreaming_decision.rs:43` | `public` / `pub` | Swift nested / Rust flat | `dreaming_decision.rs` tests | Confirmed |
+| Dreaming-decision emitted candidate | `DreamingDecision.EmittedCandidate` (nested) | `EmittedCandidate` `dreaming_decision.rs:53` | `public` / `pub` | Swift nested / Rust flat | `dreaming_decision.rs` tests | Confirmed |
+| Dreaming-decision outcome | `DreamingDecision.Outcome` (nested) | `Outcome` `dreaming_decision.rs:64` | `public` / `pub` | Swift nested / Rust flat | `dreaming_decision.rs` tests | Confirmed |
+| Maintenance policy | `MaintenancePolicy` `Maintenance/MaintenancePolicy.swift:27` | `MaintenancePolicy` `maintenance_cycle.rs:66` | `public` / `pub` | identical (timer fields added Rust in PAR-4-NK) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Maintenance policy store | `MaintenancePolicyStore` `Maintenance/MaintenancePolicy.swift:101` | `MaintenancePolicyStore` `maintenance_cycle.rs:108` | `public` / `pub` | Swift `async` protocol / Rust sync trait (sanctioned seam) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| In-memory maintenance store | `InMemoryMaintenancePolicyStore` (actor) `Maintenance/MaintenancePolicy.swift:114` | `InMemoryMaintenancePolicyStore` (struct) `maintenance_cycle.rs:121` | `public` / `pub` | Swift actor / Rust struct (sync — sanctioned seam) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Maintenance substrate reader | `MaintenanceSubstrateReader` `Maintenance/MaintenanceSeams.swift:87` | `MaintenanceSubstrateReader` `maintenance_cycle.rs:163` | `public` / `pub` | Swift `async` protocol returning substrate types / Rust sync trait returning `MaintenanceScan` (no estate dep — sanctioned) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Maintenance proposal sink | `MaintenanceProposalSink` `Maintenance/MaintenanceSeams.swift:125` | `MaintenanceProposalSink` `maintenance_cycle.rs:169` | `public` / `pub` | Swift `async` protocol / Rust sync trait (sanctioned seam) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Learned-reference observation | `LearnedReferenceObservation` `Maintenance/MaintenanceSeams.swift:38` | (folded into `MaintenanceScan.reference_drift` `DriftRow`) | `public` / `pub` | Swift seam value type read async; Rust folds it into the gathered `MaintenanceScan` (`DriftRow` rows) since it has no estate dep — sanctioned shape idiom | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Fingerprint-drift observation | `FingerprintDriftObservation` `Maintenance/MaintenanceSeams.swift:64` | (folded into `MaintenanceScan.fingerprint_drift` `DriftRow`) | `public` / `pub` | Swift seam value type; Rust folds into `MaintenanceScan` `DriftRow` rows — sanctioned shape idiom | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Maintenance cycle report | `MaintenanceCycleReport` `Maintenance/MaintenanceSeams.swift:141` | `MaintenanceCycleReport` `maintenance_cycle.rs:51` | `public` / `pub` | identical | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Maintenance daemon | `MaintenanceDaemon` (actor) `Maintenance/MaintenanceDaemon.swift:48` | `MaintenanceDaemon` (struct) `maintenance_cycle.rs:194` | `public` / `pub` | Swift actor / Rust struct (sync seam — sanctioned) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Estate maintenance reader | `EstateMaintenanceReader` `Maintenance/EstateMaintenanceReader.swift:33` | `EstateMaintenanceReader` `estate_maintenance_reader.rs:59` | `public` / `pub` | Swift binds GLK verbs / Rust gathers `MaintenanceScan` (no estate dep — sanctioned) | `EstateMaintenanceReaderTests.swift` ; `estate_maintenance_reader.rs` tests | Confirmed |
+| Estate maintenance sink | `EstateMaintenanceSink` `Maintenance/EstateMaintenanceSink.swift:43` | `EstateMaintenanceSink<S>` `estate_maintenance_sink.rs:52` | `public` / `pub` | Swift binds GLK verbs / Rust generic over `DrawerStore` (sanctioned) | `EstateMaintenanceSinkTests.swift` ; `estate_maintenance_sink.rs` tests | Confirmed |
+| Maintenance gathered scan | (read via `MaintenanceSubstrateReader` async methods, Swift) | `MaintenanceScan` `maintenance_cycle.rs:147` | — / `pub` | Swift gathers scan inputs across async reader methods returning substrate types; Rust groups them into one `MaintenanceScan` struct (no estate dep) — sanctioned shape idiom | `maintenance_cycle.rs` tests | Confirmed |
+| Maintenance decision core | `MaintenanceDecision` (enum, nested `Category`/`Decision`/`AuditVerdict`/`AgedRow`/`DriftRow`/`Outcome`) `Maintenance/MaintenanceDecision.swift:33` | `maintenance_decision.rs` free `decide` + flat sub-types | `public` / `pub` | Swift nests sub-shapes under `MaintenanceDecision`; Rust declares them flat — Swift nested X.Y / Rust flat XY | `MaintenanceDaemonTests.swift` ; `maintenance_decision.rs` tests (Bucket A shared fixtures) | Confirmed |
+| Maintenance-decision category | `MaintenanceDecision.Category` (nested) | `Category` `maintenance_decision.rs:27` | `public` / `pub` | Swift nested / Rust flat | `maintenance_decision.rs` tests | Confirmed |
+| Maintenance-decision decision | `MaintenanceDecision.Decision` (nested) | `Decision` `maintenance_decision.rs:41` | `public` / `pub` | Swift nested / Rust flat | `maintenance_decision.rs` tests | Confirmed |
+| Maintenance-decision audit verdict | `MaintenanceDecision.AuditVerdict` (nested) | `AuditVerdict` `maintenance_decision.rs:52` | `public` / `pub` | Swift nested / Rust flat | `maintenance_decision.rs` tests | Confirmed |
+| Maintenance-decision aged row | `MaintenanceDecision.AgedRow` (nested) | `AgedRow` `maintenance_decision.rs:62` | `public` / `pub` | Swift nested / Rust flat | `maintenance_decision.rs` tests | Confirmed |
+| Maintenance-decision drift row | `MaintenanceDecision.DriftRow` (nested) | `DriftRow` `maintenance_decision.rs:70` | `public` / `pub` | Swift nested / Rust flat | `maintenance_decision.rs` tests | Confirmed |
+| Maintenance-decision outcome | `MaintenanceDecision.Outcome` (nested) | `Outcome` `maintenance_decision.rs:79` | `public` / `pub` | Swift nested / Rust flat | `maintenance_decision.rs` tests | Confirmed |
+| Maintenance-decision inputs | (flat parameter list of `MaintenanceDecision.decide`, Swift) | `Inputs<'a>` `maintenance_decision.rs:103` | — / `pub` | Swift passes a flat parameter list; Rust groups borrowed params in an `Inputs<'a>` struct for call-site readability — sanctioned Rust idiom | `maintenance_decision.rs` tests | Confirmed |
+| Seam: propose-frame out | (Swift `ProposeFrame` from GLK, not NeuronKit-owned) | `ProposeFrameOut` `dreaming_cycle.rs:60` / re-export `maintenance_cycle.rs:31` | — / `pub` | Rust owns a local `ProposeFrameOut` (param of both proposal sinks) because it has no GLK `ProposeFrame` dep — sanctioned; pub because external sink implementors must name it (see legacy sub-table) | `dreaming_cycle.rs`/`maintenance_cycle.rs` tests | Confirmed |
+| Seam: cycle diary entry | (Swift `DiaryEntry` from GLK, not NeuronKit-owned) | `DreamingDiaryEntry` `dreaming_cycle.rs:69` / `MaintenanceDiaryEntry` `maintenance_cycle.rs:40` | — / `pub` | Rust owns local diary-entry params (no GLK `DiaryEntry` dep) — sanctioned; pub because external sink implementors must name them (legacy sub-table) | `dreaming_cycle.rs`/`maintenance_cycle.rs` tests | Confirmed |
+| Seam: tunnel link | (Swift `Tunnel` from LocusKit) | `TunnelLink` `dreaming_cycle.rs:51` | — / `pub` | Rust owns a local `TunnelLink` (return of `DreamingSubstrateReader::existing_tunnels`) — no LocusKit `Tunnel` dep, sanctioned; pub for external implementors | `dreaming_cycle.rs` tests | Confirmed |
+| Seam: recall-trace item | (Swift `RecallTraceItem` from GLK) | `RecallTraceItem` `dreaming_cycle.rs:32` | — / `pub` | Rust owns a local `RecallTraceItem` (param of `RewardSource::reward`) — sanctioned; pub for external implementors | `dreaming_cycle.rs` tests | Confirmed |
+
+### Policy-store seam
+
+| Swift | Rust | Visibility | Notes |
+|---|---|---|---|
+| `DreamingPolicyStore` protocol | `DreamingPolicyStore` trait | `pub` | In `dreaming_cycle.rs` |
+| `InMemoryDreamingPolicyStore` actor | `InMemoryDreamingPolicyStore` struct | `pub` | In `dreaming_cycle.rs`; not actor-isolated in Rust (sync, no async runtime) |
+| `MaintenancePolicyStore` protocol | `MaintenancePolicyStore` trait | `pub` | In `maintenance_cycle.rs` |
+| `InMemoryMaintenancePolicyStore` actor | `InMemoryMaintenancePolicyStore` struct | `pub` | In `maintenance_cycle.rs`; same sync/non-actor note |
+
+### Reward-source taxonomy
+
+| Swift | Rust | Visibility | Notes |
+|---|---|---|---|
+| `RewardSourceKind` enum | `RewardSourceKind` enum | `pub` | `RecallTrace` / `ExplicitDiaryReward` cases; Rust uses PascalCase case names |
+| `RewardSource` protocol — `var kind: RewardSourceKind { get }` | `RewardSource` trait — `fn kind(&self) -> RewardSourceKind` | `pub` | Kind accessor added to Rust trait in PAR-4-NK |
+| `RewardSource` protocol — `func reward(for:) -> Float` | `RewardSource` trait — `fn reward(&self, item: &RecallTraceItem) -> f32` | `pub` | |
+| `RecallTraceRewardSource` struct | `RecallTraceRewardSource` struct | `pub` | `kind()` returns `RecallTrace`; `used → 1.0` otherwise `0.0` |
+
+### FingerprintBlock enum
+
+| Swift | Rust | Visibility | Notes |
+|---|---|---|---|
+| `FingerprintBlock` enum — `.structure`, `.concept`, `.temporal`, `.channel` | `FingerprintBlock` enum — `Structure`, `Concept`, `Temporal`, `Channel` | `pub` | In `partial_recall.rs`; Rust raw value same index as BLOCK_* constant |
+| `FingerprintBlock.rawValue: Int` | `FingerprintBlock::as_block_index() -> u8` | `pub` | Named accessor; Rust enum `as u8` conversion |
+| Swift uses `Set<FingerprintBlock>` | Rust uses `HashSet<u8>` via `as_block_index()` | — | API shape differs; semantics identical |
+| `BLOCK_STRUCTURE / CONCEPT / TEMPORAL / CHANNEL` constants | `BLOCK_STRUCTURE / BLOCK_CONCEPT / BLOCK_TEMPORAL / BLOCK_CHANNEL: u8` | `pub` | Constants retained alongside the enum for `HashSet<u8>` construction |
+
+### Seam helper types (pub — cannot demote)
+
+These types are parameters of the seam trait methods. Any external code implementing `DreamingProposalSink`, `MaintenanceProposalSink`, or `DreamingSubstrateReader` must be able to name them. Demotion to `pub(crate)` would break external implementors.
+
+| Type | Module | Why pub |
+|---|---|---|
+| `ProposeFrameOut` | `dreaming_cycle` | Parameter of `DreamingProposalSink::propose()` |
+| `DreamingDiaryEntry` | `dreaming_cycle` | Parameter of `DreamingProposalSink::record_cycle_diary()` |
+| `TunnelLink` | `dreaming_cycle` | Return type of `DreamingSubstrateReader::existing_tunnels()` |
+| `ProposeFrameOut` (re-exported as `MaintenanceProposeFrameOut`) | `maintenance_cycle` | Parameter of `MaintenanceProposalSink::propose()` |
+| `MaintenanceDiaryEntry` | `maintenance_cycle` | Parameter of `MaintenanceProposalSink::record_cycle_diary()` |
+
+### DreamingPolicy / MaintenancePolicy field completeness
+
+Rust structs gained the missing timer fields in PAR-4-NK to match Swift:
+
+| Swift field | Rust field | Default |
+|---|---|---|
+| `DreamingPolicy.tickIntervalMs: Int` | `DreamingPolicy.tick_interval_ms: i64` | `30_000` |
+| `MaintenancePolicy.tickIntervalMs: Int` | `MaintenancePolicy.tick_interval_ms: i64` | `300_000` |
+| `MaintenancePolicy.auditCheckIntervalMs: Int` | `MaintenancePolicy.audit_check_interval_ms: i64` | `300_000` |
+
+Previously the Rust structs only carried the threshold/window fields the decision core reads. The timer fields are held by the daemon for its tick-elapsed check; they are now present on the Rust config struct for store-seam round-trip fidelity.
+
+---
+
 *End of NeuronKit Interface v0.85.*

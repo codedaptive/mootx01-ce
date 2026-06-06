@@ -86,23 +86,86 @@ pub struct DreamingCycleReport {
     pub diary_entry: DreamingDiaryEntry,
 }
 
+/// Which reward signal a `RewardSource` derives reward from.
+///
+/// `recallTrace` is the only source available in v1. `explicitDiaryReward`
+/// is the documented seam for a future explicit `DiaryEntry.reward` source;
+/// the substrate field does not exist yet, so no v1 source reads it.
+/// Mirrors `RewardSourceKind` (Swift `RewardSource.swift`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RewardSourceKind {
+    /// Implicit relevance: `RecallTraceItem.used`. The v1 live source (C-15).
+    RecallTrace,
+    /// Explicit quality: `DiaryEntry.reward`. Future source; substrate field
+    /// absent in v1.
+    ExplicitDiaryReward,
+}
+
 /// Dreaming-policy gates, mirroring the Swift `DreamingPolicy` fields the
-/// cycle reads.
+/// cycle reads (NEURONKIT_SPEC § 3.1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DreamingPolicy {
+    /// Reward threshold (spec default 0.6).
     pub min_success_rate: f32,
+    /// Minimum contrastive confidence (spec default 0.7).
     pub min_confidence: f32,
+    /// Minimum co-occurrence attempts (spec default 3).
     pub min_attempts: i64,
+    /// Tick cadence in milliseconds (spec default 30_000).
+    pub tick_interval_ms: i64,
 }
 
 impl Default for DreamingPolicy {
-    /// Spec defaults (NEURONKIT_SPEC § 3.1).
+    /// Spec defaults (NEURONKIT_SPEC § 3.1): 0.6 / 0.7 / 3 / 30_000.
     fn default() -> Self {
         Self {
             min_success_rate: 0.6,
             min_confidence: 0.7,
-            min_attempts: 5,
+            min_attempts: 3,
+            tick_interval_ms: 30_000,
         }
+    }
+}
+
+/// Persistence seam for the dreaming policy ("substrate-resident in
+/// manifest", NEURONKIT_SPEC § 3.1).
+///
+/// The daemon never touches the manifest directly (B-1). It loads and
+/// saves the policy through this trait. The production adapter binds
+/// these methods to the estate manifest once GLK exposes a manifest
+/// accessor; until then the seam is satisfied by an in-memory store.
+/// Mirrors `DreamingPolicyStore` (Swift `DreamingPolicy.swift`).
+pub trait DreamingPolicyStore {
+    /// Load the persisted policy, or `None` if none has been saved (the
+    /// daemon then falls back to `DreamingPolicy::default()`).
+    fn load_policy(&self) -> Option<DreamingPolicy>;
+
+    /// Persist the policy. Subsequent `load_policy()` calls return it.
+    fn save_policy(&mut self, policy: DreamingPolicy);
+}
+
+/// In-memory `DreamingPolicyStore` for tests and for hosts that do not
+/// persist policy across process restarts.
+/// Mirrors `InMemoryDreamingPolicyStore` (Swift `DreamingPolicy.swift`).
+#[derive(Clone, Debug, Default)]
+pub struct InMemoryDreamingPolicyStore {
+    stored: Option<DreamingPolicy>,
+}
+
+impl InMemoryDreamingPolicyStore {
+    /// Create an empty store, or seed it with an initial policy.
+    pub fn new(initial: Option<DreamingPolicy>) -> Self {
+        Self { stored: initial }
+    }
+}
+
+impl DreamingPolicyStore for InMemoryDreamingPolicyStore {
+    fn load_policy(&self) -> Option<DreamingPolicy> {
+        self.stored
+    }
+
+    fn save_policy(&mut self, policy: DreamingPolicy) {
+        self.stored = Some(policy);
     }
 }
 
@@ -118,15 +181,27 @@ pub trait DreamingSubstrateReader {
 }
 
 /// Reward seam: derive a reward in `[0, 1]` from a recall-trace row.
+///
+/// Mirrors the Swift `RewardSource` protocol (NEURONKIT_SPEC § 3.1 step 1).
+/// Implementations must report their `kind()` so callers and conformance
+/// tests can assert which source is wired.
 pub trait RewardSource {
+    /// The signal this source derives reward from.
+    fn kind(&self) -> RewardSourceKind;
+
+    /// Derived reward for a recall-trace row, in `[0, 1]`.
     fn reward(&self, item: &RecallTraceItem) -> f32;
 }
 
 /// The v1 single-source reward: `used → 1.0`, otherwise `0.0` (C-15).
-/// Mirrors `RecallTraceRewardSource`.
+/// Mirrors `RecallTraceRewardSource` (Swift `RewardSource.swift`).
 pub struct RecallTraceRewardSource;
 
 impl RewardSource for RecallTraceRewardSource {
+    fn kind(&self) -> RewardSourceKind {
+        RewardSourceKind::RecallTrace
+    }
+
     fn reward(&self, item: &RecallTraceItem) -> f32 {
         if item.used {
             1.0
@@ -421,6 +496,79 @@ mod tests {
         // Two cycles => two diary entries; the second counts cycle 2.
         assert_eq!(sink.diaries.len(), 2);
         assert!(sink.diaries[1].entry.starts_with("dreaming cycle 2:"));
+    }
+
+    // PS-1: InMemoryDreamingPolicyStore starts empty; save then load returns
+    // the saved policy (in-memory round-trip).
+    #[test]
+    fn ps1_in_memory_store_empty_then_round_trip() {
+        let mut store = InMemoryDreamingPolicyStore::new(None);
+        // Empty store returns None.
+        assert!(store.load_policy().is_none(), "empty store returns None");
+        // Save a non-default policy; load returns it.
+        let custom = DreamingPolicy {
+            min_success_rate: 0.8,
+            min_confidence: 0.9,
+            min_attempts: 5,
+            tick_interval_ms: 60_000,
+        };
+        store.save_policy(custom);
+        let loaded = store.load_policy();
+        assert_eq!(loaded, Some(custom), "load returns saved policy");
+    }
+
+    // PS-2: Store seam lets a caller swap the policy a daemon uses. The new
+    // policy is loaded; the daemon then respects the new thresholds.
+    #[test]
+    fn ps2_store_seam_policy_swap() {
+        let mut store = InMemoryDreamingPolicyStore::new(None);
+        // Seed with a strict policy (min_attempts = 100 so nothing proposes).
+        let strict = DreamingPolicy {
+            min_success_rate: 0.6,
+            min_confidence: 0.7,
+            min_attempts: 100,
+            tick_interval_ms: 30_000,
+        };
+        store.save_policy(strict);
+        // Load it and verify the gate is strict.
+        let loaded = store.load_policy().unwrap_or_default();
+        let mut daemon = DreamingDaemon::new(loaded);
+        let reader = FakeReader {
+            traces: vec![trace("r1", true), trace("r2", true)],
+            observations: vec![obs("a", "b", 9, &["r1", "r2"])],
+            tunnels: vec![],
+        };
+        let mut sink = RecordingSink::default();
+        let report = daemon.run_cycle(&reader, &RecallTraceRewardSource, &mut sink);
+        // 9 attempts < 100 → nothing proposes.
+        assert_eq!(report.proposals_emitted.len(), 0, "strict policy blocks proposal");
+
+        // Swap to a lenient policy via the store.
+        let lenient = DreamingPolicy::default(); // min_attempts = 3
+        store.save_policy(lenient);
+        let loaded2 = store.load_policy().unwrap_or_default();
+        let mut daemon2 = DreamingDaemon::new(loaded2);
+        let mut sink2 = RecordingSink::default();
+        let report2 = daemon2.run_cycle(&reader, &RecallTraceRewardSource, &mut sink2);
+        // 9 attempts >= 3 → proposes.
+        assert_eq!(report2.proposals_emitted.len(), 1, "lenient policy allows proposal");
+    }
+
+    // RS-1: RecallTraceRewardSource.kind() returns RewardSourceKind::RecallTrace.
+    #[test]
+    fn rs1_recall_trace_reward_source_kind() {
+        let source = RecallTraceRewardSource;
+        assert_eq!(source.kind(), RewardSourceKind::RecallTrace);
+    }
+
+    // RS-2: Reward values: used → 1.0, unused → 0.0.
+    #[test]
+    fn rs2_recall_trace_reward_values() {
+        let source = RecallTraceRewardSource;
+        let used = RecallTraceItem { target: "t".to_string(), used: true };
+        let unused = RecallTraceItem { target: "t".to_string(), used: false };
+        assert_eq!(source.reward(&used), 1.0);
+        assert_eq!(source.reward(&unused), 0.0);
     }
 
     // DC-4: per-target reward keeps the strongest signal — a target used in

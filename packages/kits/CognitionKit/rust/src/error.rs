@@ -1,10 +1,14 @@
-//! CognitionKit's single recipe error type — Rust version of the Swift
-//! `RecipeError` enum in
-//! `CognitionKit/Sources/CognitionKit/RecipeError.swift`.
+//! CognitionKit's public error types — Rust versions of the Swift error types
+//! in `CognitionKit/Sources/CognitionKit/`:
+//!   - `RecipeError` (RecipeError.swift) — recipe guard failures
+//!   - `SubstrateError` / `RecipeRunError` — substrate operation failures
+//!   - `AnchorNotInRecalledSetError` (PartialCueRecall.swift:41) — the typed
+//!     error raised when the anchor drawer is absent from the recalled set
 //!
 //! The behavioural meaning of each case lives in COGNITIONKIT_SPEC § 5;
 //! this is the shipped shape. `Display` strings mirror the Swift
-//! `description` so a caller sees the same message across versions.
+//! `description` / `localizedDescription` so a caller sees the same
+//! message across versions.
 
 use crate::capability::NeuronKitCapability;
 use std::fmt;
@@ -158,9 +162,52 @@ impl fmt::Display for RecipeRunError {
 
 impl std::error::Error for RecipeRunError {}
 
+// ---------------------------------------------------------------------------
+// AnchorNotInRecalledSetError
+// ---------------------------------------------------------------------------
+
+/// The cue pointed at nothing: `anchor_id` was not in the recalled set.
+///
+/// Rust nominal counterpart of the Swift `AnchorNotInRecalledSetError` struct
+/// in `PartialCueRecall.swift:41`. When `run_partial_cue_recall` receives an
+/// `anchor_id` that is not present in the drawers returned by the recall
+/// frame, it raises this error (INTERFACE § 4 — Rust `SubstrateError` arm
+/// encodes the Swift propagated-`throws` path).
+///
+/// The `Display` format mirrors the Swift `localizedDescription`:
+/// `"AnchorNotInRecalledSetError: anchor drawer '{anchor_id}' not in recalled set"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorNotInRecalledSetError {
+    /// The anchor drawer id that was absent.
+    pub anchor_id: String,
+}
+
+impl AnchorNotInRecalledSetError {
+    /// Construct an error carrying the absent `anchor_id`.
+    pub fn new(anchor_id: impl Into<String>) -> Self {
+        Self {
+            anchor_id: anchor_id.into(),
+        }
+    }
+}
+
+impl fmt::Display for AnchorNotInRecalledSetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "AnchorNotInRecalledSetError: anchor drawer '{}' not in recalled set",
+            self.anchor_id
+        )
+    }
+}
+
+impl std::error::Error for AnchorNotInRecalledSetError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── RecipeError case parity ───────────────────────────────────────────────
 
     #[test]
     fn descriptions_mirror_swift() {
@@ -182,5 +229,182 @@ mod tests {
             provided: 0,
         };
         assert!(format!("{}", e3).contains("at least 1 branches, got 0"));
+    }
+
+    #[test]
+    fn all_six_recipe_error_cases_exist() {
+        // Structural parity gate: every case that exists in the Swift
+        // `RecipeError` enum must also exist in the Rust port. An exhaustive
+        // match here is a compile-time check — adding a case to one port and
+        // forgetting the other produces a Rust compile error.
+        use crate::capability::NeuronKitCapability;
+        let cases: Vec<RecipeError> = vec![
+            RecipeError::MissingCapability(NeuronKitCapability::HybridRecall),
+            RecipeError::InsufficientBranches {
+                minimum: 2,
+                provided: 1,
+            },
+            RecipeError::DuplicatePlanName("dup".into()),
+            RecipeError::SilentConceptLoss {
+                branch_id: "b1".into(),
+                lost_concepts: vec!["x".into()],
+            },
+            RecipeError::TournamentNoWinner {
+                disqualified_count: 3,
+            },
+            RecipeError::UserConfirmationRequired {
+                action: "promote".into(),
+            },
+        ];
+        // Exhaustive match — compiler enforces that every arm is covered.
+        for c in &cases {
+            let _ = match c {
+                RecipeError::MissingCapability(_) => "missingCapability",
+                RecipeError::InsufficientBranches { .. } => "insufficientBranches",
+                RecipeError::DuplicatePlanName(_) => "duplicatePlanName",
+                RecipeError::SilentConceptLoss { .. } => "silentConceptLoss",
+                RecipeError::TournamentNoWinner { .. } => "tournamentNoWinner",
+                RecipeError::UserConfirmationRequired { .. } => "userConfirmationRequired",
+            };
+        }
+        // All six descriptions carry the Swift-matching case-name prefix.
+        assert!(format!("{}", cases[0]).contains("missingCapability"));
+        assert!(format!("{}", cases[1]).contains("insufficientBranches"));
+        assert!(format!("{}", cases[2]).contains("duplicatePlanName"));
+        assert!(format!("{}", cases[3]).contains("silentConceptLoss"));
+        assert!(format!("{}", cases[4]).contains("tournamentNoWinner"));
+        assert!(format!("{}", cases[5]).contains("userConfirmationRequired"));
+    }
+
+    // ── SubstrateError ────────────────────────────────────────────────────────
+
+    #[test]
+    fn substrate_error_fields_and_description() {
+        let err = SubstrateError::new("derive_branch", "estate locked");
+        assert_eq!(err.operation, "derive_branch");
+        assert_eq!(err.detail, "estate locked");
+        // Description format: "SubstrateError.{op}: {detail}" — mirrors Swift.
+        assert_eq!(
+            format!("{}", err),
+            "SubstrateError.derive_branch: estate locked"
+        );
+    }
+
+    #[test]
+    fn substrate_error_equatable() {
+        let a = SubstrateError::new("recall", "timeout");
+        let b = SubstrateError::new("recall", "timeout");
+        let c = SubstrateError::new("capture", "timeout");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // ── RecipeRunError ────────────────────────────────────────────────────────
+
+    #[test]
+    fn recipe_run_error_recipe_arm() {
+        let inner = RecipeError::DuplicatePlanName("plan-x".into());
+        let err = RecipeRunError::Recipe(inner.clone());
+        // Description delegates to the inner RecipeError — no extra prefix.
+        assert_eq!(format!("{}", err), format!("{}", inner));
+        assert!(format!("{}", err).contains("duplicatePlanName"));
+    }
+
+    #[test]
+    fn recipe_run_error_substrate_arm() {
+        let inner = SubstrateError::new("benchmark", "corpus empty");
+        let err = RecipeRunError::Substrate(inner.clone());
+        // Description delegates to SubstrateError.
+        assert_eq!(format!("{}", err), format!("{}", inner));
+        assert!(format!("{}", err).contains("SubstrateError.benchmark"));
+    }
+
+    #[test]
+    fn recipe_run_error_from_recipe_error() {
+        // `From<RecipeError> for RecipeRunError` — mirrors Swift's `init(_:)`.
+        let inner = RecipeError::TournamentNoWinner {
+            disqualified_count: 2,
+        };
+        let err: RecipeRunError = inner.clone().into();
+        assert_eq!(err, RecipeRunError::Recipe(inner));
+    }
+
+    #[test]
+    fn recipe_run_error_from_substrate_error() {
+        // `From<SubstrateError> for RecipeRunError` — mirrors Swift's `init(_:)`.
+        let inner = SubstrateError::new("recall", "index missing");
+        let err: RecipeRunError = inner.clone().into();
+        assert_eq!(err, RecipeRunError::Substrate(inner));
+    }
+
+    #[test]
+    fn recipe_run_error_equatable() {
+        let a = RecipeRunError::Recipe(RecipeError::TournamentNoWinner {
+            disqualified_count: 2,
+        });
+        let b = RecipeRunError::Recipe(RecipeError::TournamentNoWinner {
+            disqualified_count: 2,
+        });
+        let c = RecipeRunError::Recipe(RecipeError::TournamentNoWinner {
+            disqualified_count: 3,
+        });
+        let d = RecipeRunError::Substrate(SubstrateError::new("x", "y"));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn recipe_run_error_exhaustive_match() {
+        // Compile-time case parity gate: if a variant is added to one port and
+        // forgotten in the other, this match produces a Rust compile error.
+        fn classify(e: &RecipeRunError) -> &'static str {
+            match e {
+                RecipeRunError::Recipe(_) => "recipe",
+                RecipeRunError::Substrate(_) => "substrate",
+            }
+        }
+        let r = RecipeRunError::Recipe(RecipeError::DuplicatePlanName("p".into()));
+        let s = RecipeRunError::Substrate(SubstrateError::new("op", "d"));
+        assert_eq!(classify(&r), "recipe");
+        assert_eq!(classify(&s), "substrate");
+    }
+
+    // ── AnchorNotInRecalledSetError ───────────────────────────────────────────
+
+    // CK-ERR-ANR-1: struct carries the anchor_id field.
+    #[test]
+    fn anchor_not_recalled_carries_anchor_id() {
+        let err = AnchorNotInRecalledSetError::new("drawer-42");
+        assert_eq!(err.anchor_id, "drawer-42");
+    }
+
+    // CK-ERR-ANR-2: Display format mirrors the Swift localizedDescription.
+    #[test]
+    fn anchor_not_recalled_display_mirrors_swift() {
+        let err = AnchorNotInRecalledSetError::new("abc-123");
+        let s = format!("{}", err);
+        // Swift: "AnchorNotInRecalledSetError: anchor drawer '{id}' not in recalled set"
+        assert!(s.contains("AnchorNotInRecalledSetError"), "missing type prefix: {s}");
+        assert!(s.contains("abc-123"), "missing anchor_id: {s}");
+        assert!(s.contains("not in recalled set"), "missing phrase: {s}");
+    }
+
+    // CK-ERR-ANR-3: equatable — same anchor_id compares equal.
+    #[test]
+    fn anchor_not_recalled_equatable() {
+        let a = AnchorNotInRecalledSetError::new("x");
+        let b = AnchorNotInRecalledSetError::new("x");
+        let c = AnchorNotInRecalledSetError::new("y");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // CK-ERR-ANR-4: implements std::error::Error (compile-time check).
+    #[test]
+    fn anchor_not_recalled_is_error() {
+        let err: Box<dyn std::error::Error> =
+            Box::new(AnchorNotInRecalledSetError::new("id"));
+        assert!(!format!("{}", err).is_empty());
     }
 }
