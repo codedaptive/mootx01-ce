@@ -49,6 +49,7 @@
 //   § 15.1  Dreaming daemon Rule 11 (daily community refresh)
 
 import Foundation
+import IntellectusLib
 
 public enum CommunityDetection {
 
@@ -63,8 +64,25 @@ public enum CommunityDetection {
     /// Run Louvain phase 1 (local-move) on the supplied graph.
     /// Returns a community label for each node, 0..K-1 where K
     /// is the number of communities discovered.
+    ///
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals.communityAssignment` with the number of
+    /// communities found, tagged by estate and node count. The emit
+    /// is a no-op (single atomic-bool load) when monitoring is off.
+    ///
+    /// - Parameters:
+    ///   - adjacency: The weighted adjacency list.
+    ///   - maxPasses: Maximum Louvain phase-1 passes (default 10).
+    ///   - estate: Estate identifier tag for VizGraph telemetry. Pass
+    ///             the estate ID known at the call site. Empty string
+    ///             suppresses the estate tag (monitoring still no-ops
+    ///             when disabled regardless of this value).
+    ///   - ts: Caller-supplied epoch seconds for telemetry. Never read
+    ///         a clock inside SubstrateML; the caller provides `ts`.
     public static func detect(adjacency: Adjacency,
-                               maxPasses: Int = 10) -> [Int] {
+                               maxPasses: Int = 10,
+                               estate: String = "",
+                               ts: Double = 0) -> [Int] {
         let n = adjacency.count
         if n == 0 { return [] }
 
@@ -137,7 +155,28 @@ public enum CommunityDetection {
         }
 
         // Renumber communities to 0..K-1 for canonical output.
-        return canonicalize(community)
+        let result = canonicalize(community)
+
+        // VizGraph emit: community.assignment signal at result boundary.
+        // The node→community partition is now complete; the Topology view
+        // can use community labels to colour-cluster nodes.
+        //
+        // Off-path when monitoring is disabled: single Atomic<Bool> load
+        // + branch (~1 ns). The autoclosure is NEVER evaluated when off,
+        // so community count arithmetic only runs when monitoring is on.
+        let communityCount = Set(result).count
+        Intellectus.report(.metric(
+            name: VizGraphSignals.communityAssignment,
+            value: Double(communityCount),
+            tags: [
+                "estate": estate,
+                "node_count": "\(n)",
+                "community_count": "\(communityCount)",
+            ],
+            ts: ts
+        ))
+
+        return result
     }
 
     /// Renumber labels so that the first node has label 0, the

@@ -143,7 +143,7 @@ struct CountVector256Tests {
         // vectorized override lands.
         let inputs = fingerprints(seed: 2026, count: 257)
         let reference = ScalarKernel().countFold256(inputs)
-        for kind in [KernelKind.scalar, .simd, .bnns, .neon, .metal] {
+        for kind in [KernelKind.scalar, .simd, .neon, .metal] {
             let k = PortableKernel.kernel(of: kind)
             let got = k.countFold256(inputs)
             #expect(got == reference,

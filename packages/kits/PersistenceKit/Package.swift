@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // Package.swift — PersistenceKit
 //
@@ -9,14 +9,22 @@
 //
 // Design per DECISION_STORAGEKIT_DESIGN_2026-05-19.md.
 // Eleven-kit graph per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
+//
+// cp-persistencekit-report (2026-06-06): added IntellectusLib as a
+// package dependency so the PersistenceKit core target can emit
+// storage-health metrics via Intellectus.report(_:). IntellectusLib is
+// the zero-dep telemetry floor; adding it here is strictly
+// downstream→upstream (PersistenceKit → IntellectusLib), no cycle.
+// Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 +
+//            MANAGER_1.0_PLAN §4 (P2 self-report coverage for PersistenceKit).
 
 import PackageDescription
 
 let package = Package(
     name: "PersistenceKit",
     platforms: [
-        .macOS(.v14),
-        .iOS(.v17),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(name: "PersistenceKit", targets: ["PersistenceKit"]),
@@ -32,6 +40,12 @@ let package = Package(
     dependencies: [
         .package(path: "../../libs/SubstrateTypes"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
+        // IntellectusLib: zero-dep telemetry floor. PersistenceKit emits DB-layer
+        // health metrics (size, WAL, cache, tx stats) via Intellectus.report(_:),
+        // which is a no-op when monitoring is disabled (the default). Off-path
+        // cost: one Atomic<Bool> load + branch (~1 ns, lock-free). No lock on
+        // the off-path. Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
     ],
     targets: [
         // Vendored sqlite-vec C amalgamation (asg017/sqlite-vec).
@@ -48,7 +62,13 @@ let package = Package(
         // Core protocols and types.
         .target(
             name: "PersistenceKit",
-            dependencies: ["SubstrateTypes"],
+            dependencies: [
+                "SubstrateTypes",
+                // IntellectusLib: PersistenceKitTelemetry.swift emits storage-health
+                // metrics via Intellectus.report(_:). Zero cost when monitoring is
+                // disabled (the default). Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+                "IntellectusLib",
+            ],
             path: "Sources/PersistenceKit"
         ),
 
@@ -101,12 +121,26 @@ let package = Package(
         ),
         .testTarget(
             name: "PersistenceKitInMemoryTests",
-            dependencies: ["PersistenceKit", "PersistenceKitInMemory", "PersistenceKitConformance", "SubstrateTypes"],
+            dependencies: [
+                "PersistenceKit",
+                "PersistenceKitInMemory",
+                "PersistenceKitConformance",
+                "SubstrateTypes",
+                // IntellectusLib for telemetry isolation tests (GlobalTestLock + CapturingSink).
+                "IntellectusLib",
+            ],
             path: "Tests/PersistenceKitInMemoryTests"
         ),
         .testTarget(
             name: "PersistenceKitSQLiteTests",
-            dependencies: ["PersistenceKit", "PersistenceKitSQLite", "PersistenceKitConformance", "SubstrateTypes"],
+            dependencies: [
+                "PersistenceKit",
+                "PersistenceKitSQLite",
+                "PersistenceKitConformance",
+                "SubstrateTypes",
+                // IntellectusLib for telemetry isolation tests (GlobalTestLock + CapturingSink).
+                "IntellectusLib",
+            ],
             path: "Tests/PersistenceKitSQLiteTests"
         ),
         .testTarget(

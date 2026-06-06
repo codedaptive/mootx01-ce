@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // Package.swift — SubstrateKernel
 //
@@ -35,8 +35,8 @@ import PackageDescription
 let package = Package(
     name: "SubstrateKernel",
     platforms: [
-        .macOS(.v14),
-        .iOS(.v17),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(
@@ -46,16 +46,24 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../SubstrateTypes"),
+        // IntellectusLib is the substrate's zero-dep telemetry leaf.
+        // Adding it here lets kernelForCurrentPlatform() emit the
+        // backend_selected metric at the selection site.
+        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 +
+        //            MANAGER_1.0_PLAN.md §2 (SubstrateLib bullet).
+        // Layering: IntellectusLib has zero repo deps; this is strictly
+        // downstream→upstream, no cycle.
+        .package(path: "../IntellectusLib"),
     ],
     targets: [
         .target(
             name: "SubstrateKernel",
-            dependencies: ["SubstrateTypes"],
+            dependencies: ["SubstrateTypes", "IntellectusLib"],
             path: "Sources/SubstrateKernel"
         ),
         .testTarget(
             name: "SubstrateKernelTests",
-            dependencies: ["SubstrateKernel", "SubstrateTypes"],
+            dependencies: ["SubstrateKernel", "SubstrateTypes", "IntellectusLib"],
             path: "Tests/SubstrateKernelTests"
         ),
     ]

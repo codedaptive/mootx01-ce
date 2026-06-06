@@ -43,6 +43,10 @@ pub mod audit;
 pub mod brain;
 pub mod branches;
 pub mod coordinator;
+// telemetry.rs — per-estate rollup metrics (GLK_ROLLUPS_001). Metric name
+// constants and the `glk_emit!` macro. Emit sites live in coordinator.rs at
+// open/close/provision/quiesce/drain and the verb-error remap boundary.
+pub mod telemetry;
 pub mod fan_out;
 pub mod grants;
 pub mod handle;
@@ -87,7 +91,11 @@ pub use hydration::{
     bridge_audit_event, composite_schema, open_hydrating, flush as glk_flush,
     HydratedEstate, HydrateError,
 };
-pub use coordinator::{EstateCoordinator, GeniusLocusKitError, VerbDispatchError};
+// GLK_PROVISION_001: estate provisioning and lifecycle types.
+pub use coordinator::{
+    EstateCoordinator, GeniusLocusKitError, VerbDispatchError,
+    EstateKind, EstateMountState, EstateProvisionParams, SyncMode,
+};
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;
 // Re-exports for B-1-compliant reader types: NeuronKit readers import these

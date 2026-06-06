@@ -4,6 +4,17 @@
 // GeniusLocusKit estate over in-memory storage — no mocks. Proves the
 // full through-line: GLK capture/recall → NeuronKit hybridRecall +
 // ContextSynthesizer → CognitionKit recipe output.
+//
+// ISOLATION: all tests that call GroundedSynthesis.run() acquire the
+// process-wide cognitionTestMutex (CognitionTestLock.swift). After the
+// cp-cognitionkit-report telemetry addition, recipe-run functions emit
+// to the Intellectus global singleton. A concurrent telemetry test that
+// holds the singleton enabled would otherwise receive this test's
+// emissions into its capturing sink and corrupt exact-count assertions.
+// This is the same discipline NeuronKit applies to BradleyTerry/Dreaming/
+// HybridRecall tests (IntellectusTestLock.swift).
+//
+// Tests that do NOT call run() (metadata-only) do not need the lock.
 
 import Testing
 import Foundation
@@ -44,43 +55,53 @@ struct GroundedSynthesisTests {
 
     @Test("synthesizes over recalled drawers")
     func synthesizesOverRecalledDrawers() async throws {
-        let (kit, handle) = try await makeEstate(capturing: [
-            "the organic chemistry of carbon compounds",
-            "carbon based life and biochemistry",
-            "introduction to quantum mechanics",
-        ])
+        // Acquire the process-wide lock: GroundedSynthesis.run emits
+        // cognitionkit.recipe.run to Intellectus; a concurrent telemetry
+        // test holding the singleton enabled would count this test's
+        // emissions in its capturing sink. See file-level comment.
+        try await withCognitionLock {
+            let (kit, handle) = try await makeEstate(capturing: [
+                "the organic chemistry of carbon compounds",
+                "carbon based life and biochemistry",
+                "introduction to quantum mechanics",
+            ])
 
-        // Recall the freshly-captured (unconfirmed) drawers. The recall
-        // evaluator defaults the confirmation axis to userConfirmed when
-        // unconstrained, so .unconfirmed is required to see them.
-        let input = GroundedSynthesis.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]))
-        let out = try await GroundedSynthesis().run(
-            input: input, estate: handle, kit: kit)
+            // Recall the freshly-captured (unconfirmed) drawers. The recall
+            // evaluator defaults the confirmation axis to userConfirmed when
+            // unconstrained, so .unconfirmed is required to see them.
+            let input = GroundedSynthesis.Input(
+                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]))
+            let out = try await GroundedSynthesis().run(
+                input: input, estate: handle, kit: kit)
 
-        #expect(out.drawerCount == 3)
-        #expect(!out.context.summary.isEmpty,
-                "summary should be populated for a non-empty recall")
-        // The dominant room is "lab" — the summary names it.
-        #expect(out.context.summary.contains("lab"),
-                "summary should name the dominant room")
-        // "carbon" appears in two drawers → a dominant pattern.
-        #expect(out.context.patterns.contains("carbon"),
-                "repeated token should surface as a pattern")
+            #expect(out.drawerCount == 3)
+            #expect(!out.context.summary.isEmpty,
+                    "summary should be populated for a non-empty recall")
+            // The dominant room is "lab" — the summary names it.
+            #expect(out.context.summary.contains("lab"),
+                    "summary should name the dominant room")
+            // "carbon" appears in two drawers → a dominant pattern.
+            #expect(out.context.patterns.contains("carbon"),
+                    "repeated token should surface as a pattern")
+        }
     }
 
     @Test("empty recall yields empty context")
     func emptyRecallYieldsEmptyContext() async throws {
-        let (kit, handle) = try await makeEstate(capturing: [])
+        // Acquire the lock: GroundedSynthesis.run emits to Intellectus.
+        // See file-level comment.
+        try await withCognitionLock {
+            let (kit, handle) = try await makeEstate(capturing: [])
 
-        let input = GroundedSynthesis.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]))
-        let out = try await GroundedSynthesis().run(
-            input: input, estate: handle, kit: kit)
+            let input = GroundedSynthesis.Input(
+                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]))
+            let out = try await GroundedSynthesis().run(
+                input: input, estate: handle, kit: kit)
 
-        #expect(out.drawerCount == 0)
-        #expect(out.context.summary.isEmpty)
-        #expect(out.context.patterns.isEmpty)
+            #expect(out.drawerCount == 0)
+            #expect(out.context.summary.isEmpty)
+            #expect(out.context.patterns.isEmpty)
+        }
     }
 
     @Test("capability metadata is declared")

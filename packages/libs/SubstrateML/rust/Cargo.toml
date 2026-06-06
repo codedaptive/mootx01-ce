@@ -14,3 +14,11 @@ path = "src/lib.rs"
 [dependencies]
 substrate-types  = { path = "../../SubstrateTypes/rust" }
 substrate-kernel = { path = "../../SubstrateKernel/rust" }
+# intellectus-lib is the zero-dep telemetry leaf. Adding it here lets the
+# five VizGraph algorithms emit community.assignment, centrality.score,
+# nmf.factor, anomaly.flag, and edge.decayed_weight signals when monitoring
+# is enabled.
+# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+# Layering: intellectus-lib has zero repo deps; substrate-ml is downstream.
+# No cycle introduced.
+intellectus-lib = { path = "../../IntellectusLib/rust" }

@@ -248,6 +248,39 @@ public actor Corpus {
         }
     }
 
+    // MARK: - Lifecycle (GLK_PROVISION_001)
+
+    /// Destroy the corpus's recall index.
+    ///
+    /// Clears the in-memory BM25 index, the chunk-source map, and all vector
+    /// rows from the VectorStore so this corpus no longer participates in recall.
+    ///
+    /// The BundleStore's `chunks` table is append-only (PersistenceKit schema
+    /// invariant enforced by write triggers). Chunk rows are not deleted by this
+    /// call — they remain in the backing storage for audit and migration purposes.
+    /// What is destroyed is the corpus's active recall capability: after this
+    /// call, `recall` returns empty results and `ingest` would re-index from
+    /// scratch.
+    ///
+    /// Called by `GeniusLocusKit.destroy(storage:corpusStorage:handle:)` as part
+    /// of the coordinated estate teardown path. The caller must ensure the estate
+    /// is closed (not in use) before calling this.
+    public func destroyRecallIndex() async throws {
+        // 1. Clear the in-memory BM25 index and chunk-source map.
+        //    BM25Index is a separate actor; clearing it requires removing each
+        //    tracked chunk. Since we are destroying everything, rebuild from empty.
+        let allChunks = try await bundleStore.allChunks()
+        for chunk in allChunks {
+            await bm25.remove(chunk.id)
+        }
+        chunkSourceMap.removeAll()
+
+        // 2. Delete all vector rows from the VectorStore.
+        //    VectorStore.destroyAllVectors() deletes every row in the vectors
+        //    table. Vectors are not append-only so deletion is permitted.
+        try await vectorStore.destroyAllVectors()
+    }
+
     /// BM25-only top-k recall at the source granularity, using a bounded min-heap.
     ///
     /// Returns the top-`limit` sources by BM25 keyword score for the query text.
@@ -412,7 +445,9 @@ extension EmbeddingModel {
 /// in CorpusKitProviders (FNV-1a 32-bit over UTF-8 bytes, folded into
 /// [2, vocabSize)). Defined here because CorpusKitProviders depends on
 /// CorpusKit — importing it from here would create a circular dependency.
-private struct CorpusDefaultTokenizer: Tokenizer {
+// Internal (not private) so HybridRecall.swift can tokenise queries
+// with the same vocabulary before calling BM25Index.topK(_:for:).
+struct CorpusDefaultTokenizer: Tokenizer {
     let vocabID: String
     let maxTokens: Int
     let padTokenID: Int32 = 0

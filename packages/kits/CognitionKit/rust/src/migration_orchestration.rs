@@ -22,8 +22,51 @@
 //! Live-estate execution still waits on the Rust LocusKit estate; a live
 //! adapter conforming to `RecipeSubstrate` is a future bridge.
 
+use std::time::SystemTime;
+
+use intellectus_lib::{report, StatSample};
+
 use crate::error::{RecipeError, RecipeRunError, SubstrateError};
 use crate::migration_ranking::{lost_concepts, rank, DisqualifiedCore, PlanOutcome, RankedPlan};
+
+// MARK: - Telemetry helpers
+
+/// Emit a recipe-start metric for migration_benchmark. `ts` is caller-captured
+/// epoch seconds. The report! macro short-circuits when monitoring is disabled:
+/// off-path cost is a single atomic load + branch, zero allocation.
+#[inline(always)]
+fn emit_recipe_start_mb(ts: f64) {
+    report!({
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("recipe".to_string(), "migration_benchmark".to_string());
+        tags.insert("status".to_string(), "start".to_string());
+        StatSample::metric(
+            crate::grounded_synthesis::METRIC_RECIPE_RUN.to_string(),
+            1.0,
+            tags,
+            ts,
+        )
+    });
+}
+
+/// Emit a recipe-complete metric for migration_benchmark. `step_count` is the
+/// number of plans benchmarked. Byte-identical output regardless of monitoring
+/// state (C-Det: return value is assembled before this call).
+#[inline(always)]
+fn emit_recipe_complete_mb(step_count: usize, ts: f64) {
+    report!({
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("recipe".to_string(), "migration_benchmark".to_string());
+        tags.insert("status".to_string(), "complete".to_string());
+        tags.insert("step_count".to_string(), step_count.to_string());
+        StatSample::metric(
+            crate::grounded_synthesis::METRIC_RECIPE_RUN.to_string(),
+            step_count as f64,
+            tags,
+            ts,
+        )
+    });
+}
 
 /// One origin reference entry — `(id, content)`, estate-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +180,18 @@ pub fn run_migration_benchmark<S: RecipeSubstrate>(
         return Err(RecipeError::DuplicatePlanName(dup).into());
     }
 
+    // Emit recipe-start AFTER all precondition guards so the metric only fires
+    // when the recipe body will actually run. Captures wall-clock once (mirrors
+    // the Swift `startTs = Date().timeIntervalSince1970` pattern — one clock
+    // read at the validated entry point, then passed to both start and complete
+    // so the pair shares the same ts anchor). NeuronKit Rust uses the same
+    // approach: SystemTime::now() in the function body, not in the caller.
+    let start_ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    emit_recipe_start_mb(start_ts);
+
     // Partition the origin ONCE — migratable vs dropped is plan-independent.
     let mut migratable: Vec<&OriginEntry> = Vec::new();
     let mut dropped: Vec<String> = Vec::new();
@@ -185,6 +240,14 @@ pub fn run_migration_benchmark<S: RecipeSubstrate>(
     }
 
     let ranked = rank(&outcomes);
+
+    // Emit recipe-complete. plan_count is finalised before this call so the
+    // return value is identical whether monitoring is on or off (C-Det
+    // conformance). step_count = plans.len() — the number of plans
+    // benchmarked, matching the Swift recipe's `input.plans.count`.
+    let plan_count = plans.len();
+    emit_recipe_complete_mb(plan_count, start_ts);
+
     Ok(CoreReport {
         plan_results,
         rankings: ranked.rankings,

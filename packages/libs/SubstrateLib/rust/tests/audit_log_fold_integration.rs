@@ -23,7 +23,7 @@ fn fp() -> Fingerprint256 {
 #[test]
 fn project_single_capture() {
     let mut s = Substrate::new(0xabcd_0000_0000_0000_0000_0000_0000_0000, HLC::new(0, 0, 1));
-    let id = s.capture(NounType::Drawer, 0, 0, 0, anchor(), fp(), None, None, "a").unwrap();
+    let id = s.capture(NounType::Drawer, 0, 0, 0, anchor(), fp(), None, None, "a", 0.0).unwrap();
     let proj = AuditLogFold::project_current_state(id, NounType::Drawer, &s.audit_events).unwrap();
     assert_eq!(proj.state_raw, 0); // active
     assert!(!proj.tombstoned);
@@ -32,8 +32,8 @@ fn project_single_capture() {
 #[test]
 fn project_capture_then_expunge_tombstoned() {
     let mut s = Substrate::new(0xabcd_0000_0000_0000_0000_0000_0000_0000, HLC::new(0, 0, 1));
-    let id = s.capture(NounType::Drawer, 0, 0, 0, anchor(), fp(), None, None, "a").unwrap();
-    s.expunge(id, "reason", "a").unwrap();
+    let id = s.capture(NounType::Drawer, 0, 0, 0, anchor(), fp(), None, None, "a", 0.0).unwrap();
+    s.expunge(id, "reason", "a", 0.0).unwrap();
     let proj = AuditLogFold::project_current_state(id, NounType::Drawer, &s.audit_events).unwrap();
     assert_eq!(proj.state_raw, 33);
     assert!(proj.tombstoned);
@@ -42,9 +42,9 @@ fn project_capture_then_expunge_tombstoned() {
 #[test]
 fn project_at_earlier_time() {
     let mut s = Substrate::new(0xabcd_0000_0000_0000_0000_0000_0000_0000, HLC::new(0, 0, 1));
-    let id = s.capture(NounType::Drawer, 0, 0, 0, anchor(), fp(), None, None, "a").unwrap();
+    let id = s.capture(NounType::Drawer, 0, 0, 0, anchor(), fp(), None, None, "a", 0.0).unwrap();
     let hlc_after_capture = s.hlc;
-    s.expunge(id, "reason", "a").unwrap();
+    s.expunge(id, "reason", "a", 0.0).unwrap();
     // At hlc_after_capture, the row was active.
     let earlier = AuditLogFold::project_state_at(
         id, NounType::Drawer, &s.audit_events, hlc_after_capture).unwrap();
@@ -60,9 +60,9 @@ fn project_at_earlier_time() {
 fn commutativity_under_permutation() {
     let mut s = Substrate::new(0xabcd_0000_0000_0000_0000_0000_0000_0000, HLC::new(0, 0, 1));
     let adj_pending: i64 = 1 | (2 << 18);
-    let id = s.capture(NounType::Proposal, adj_pending, 0, 0, anchor(), fp(), None, None, "a").unwrap();
+    let id = s.capture(NounType::Proposal, adj_pending, 0, 0, anchor(), fp(), None, None, "a", 0.0).unwrap();
     let adj_accepted: i64 = 3 | (2 << 18);
-    s.mutate(id, MutationKind::Confirm, adj_accepted, None, None, "user").unwrap();
+    s.mutate(id, MutationKind::Confirm, adj_accepted, None, None, "user", 0.0).unwrap();
 
     let p1 = AuditLogFold::project_current_state(id, NounType::Proposal, &s.audit_events).unwrap();
     let mut shuffled = s.audit_events.clone();
@@ -74,8 +74,8 @@ fn commutativity_under_permutation() {
 #[test]
 fn project_all_returns_one_entry_per_row() {
     let mut s = Substrate::new(0xabcd_0000_0000_0000_0000_0000_0000_0000, HLC::new(0, 0, 1));
-    let id1 = s.capture(NounType::Drawer, 0, 0, 0, anchor(), fp(), None, None, "a").unwrap();
-    let id2 = s.capture(NounType::AmbientSample, 0, 0, 0, anchor(), fp(), None, None, "a").unwrap();
+    let id1 = s.capture(NounType::Drawer, 0, 0, 0, anchor(), fp(), None, None, "a", 0.0).unwrap();
+    let id2 = s.capture(NounType::AmbientSample, 0, 0, 0, anchor(), fp(), None, None, "a", 0.0).unwrap();
     let all = AuditLogFold::project_all(&s.audit_events, None, |rid| {
         if rid == id1 { NounType::Drawer } else { NounType::AmbientSample }
     });

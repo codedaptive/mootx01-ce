@@ -33,6 +33,7 @@
 // per the deterministic-engine rule.
 
 import Foundation
+import IntellectusLib
 import SubstrateKernel
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -203,7 +204,18 @@ public actor DrawerStore {
     /// .superseded via mutateState(.superseded, via: .supersede)
     /// (which appends one sealed AuditEvent), and file a directional
     /// supersedes tunnel. Otherwise a plain gated capture.
+    ///
+    /// Telemetry: emits `locuskit.drawer.capture_latency_ms` and
+    /// `locuskit.drawer.capture_count` via IntellectusLib when monitoring
+    /// is enabled. Off by default; the emit call short-circuits after
+    /// a single Atomic<Bool> load when disabled.
     public func addDrawer(_ d: Drawer, now: Date = Date()) async throws {
+        // Capture start instant before any work. One epoch-seconds read
+        // per call; the elapsed is computed inside emitDrawerCapture only
+        // when monitoring is enabled, so this clock read is the only
+        // unconditional overhead added.
+        let startTs = Date().timeIntervalSince1970
+
         try Self.validateNonEmpty(d.wing, label: "wing")
         try Self.validateNonEmpty(d.room, label: "room")
         try Self.validateNonEmpty(d.content, label: "content")
@@ -226,6 +238,14 @@ public actor DrawerStore {
             // memory's log — so it is a gated write, not a bare INSERT.
             try await gatedCapture(d, now: now)
         }
+
+        // Emit drawer-capture telemetry at the operation boundary.
+        // The `startTs` clock is read unconditionally above; the emit
+        // itself (autoclosure + arithmetic) is skipped when monitoring is
+        // off. Estate tag uses the estate UUID: stable, estate-specific.
+        let nowTs = Date().timeIntervalSince1970
+        let estateTag = estateUuid.uuidString
+        emitDrawerCapture(start: startTs, now: nowTs, estateTag: estateTag)
     }
 
     /// Supersession cascade as one atomic transaction. The
@@ -309,7 +329,12 @@ public actor DrawerStore {
     }
 
     /// All non-tombstoned drawers in a wing, ordered by filedAt.
+    ///
+    /// Telemetry: emits `locuskit.drawer.query_latency_ms` and
+    /// `locuskit.drawer.query_result_count` (tag: query="wing") when
+    /// monitoring is enabled.
     public func drawersIn(wing: String) async throws -> [Drawer] {
+        let startTs = Date().timeIntervalSince1970
         let rows = try await storage.rowStore.query(
             table: "drawers",
             where: .and([
@@ -319,11 +344,26 @@ public actor DrawerStore {
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil
         )
-        return try rows.map(Self.drawerFromRow)
+        let result = try rows.map(Self.drawerFromRow)
+        // Emit query metrics at the operation boundary.
+        // query="wing" labels this as a per-wing query path for per-path
+        // latency dashboards. Off-path: single Atomic<Bool> load.
+        emitDrawerQuery(
+            start: startTs, now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "wing"
+        )
+        return result
     }
 
     /// All non-tombstoned drawers in a wing/room pair, ordered by filedAt.
+    ///
+    /// Telemetry: emits `locuskit.drawer.query_latency_ms` and
+    /// `locuskit.drawer.query_result_count` (tag: query="wing_room") when
+    /// monitoring is enabled.
     public func drawersIn(wing: String, room: String) async throws -> [Drawer] {
+        let startTs = Date().timeIntervalSince1970
         let rows = try await storage.rowStore.query(
             table: "drawers",
             where: .and([
@@ -334,7 +374,15 @@ public actor DrawerStore {
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil
         )
-        return try rows.map(Self.drawerFromRow)
+        let result = try rows.map(Self.drawerFromRow)
+        // query="wing_room" labels this as the per-wing/room path.
+        emitDrawerQuery(
+            start: startTs, now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "wing_room"
+        )
+        return result
     }
 
     /// All non-tombstoned drawers for a source file, ordered by
@@ -356,14 +404,29 @@ public actor DrawerStore {
     }
 
     /// Full-corpus scan ordered by filedAt, including tombstoned rows.
+    ///
+    /// Telemetry: emits `locuskit.drawer.query_latency_ms` and
+    /// `locuskit.drawer.query_result_count` (tag: query="all") when
+    /// monitoring is enabled.
     public func allDrawers() async throws -> [Drawer] {
+        let startTs = Date().timeIntervalSince1970
         let rows = try await storage.rowStore.query(
             table: "drawers",
             where: nil,
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil
         )
-        return try rows.map(Self.drawerFromRow)
+        let result = try rows.map(Self.drawerFromRow)
+        // query="all" labels this as the full-corpus path.
+        // This is the most expensive drawer read and the one most worth
+        // monitoring for latency regression in large estates.
+        emitDrawerQuery(
+            start: startTs, now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "all"
+        )
+        return result
     }
 
     // MARK: - Provenance mutation
@@ -946,6 +1009,10 @@ public actor DrawerStore {
     // MARK: - Tunnel CRUD
 
     /// Insert a tunnel. Conflicting ids surface as duplicateKey.
+    ///
+    /// Telemetry: emits `locuskit.tunnel.add_count` when monitoring is
+    /// enabled. Off by default; the emit call short-circuits after a
+    /// single Atomic<Bool> load when disabled.
     public func addTunnel(_ t: Tunnel) async throws {
         try Self.validateNonEmpty(t.sourceWing, label: "sourceWing")
         try Self.validateNonEmpty(t.sourceRoom, label: "sourceRoom")
@@ -955,6 +1022,12 @@ public actor DrawerStore {
         try Self.validateNonEmpty(t.addedBy, label: "addedBy")
         _ = try await storage.rowStore.insert(
             table: "tunnels", values: Self.tunnelValues(t))
+        // Emit tunnel-add metric at the operation boundary.
+        // Tunnel count tracks link density growth in the estate graph.
+        emitTunnelAdd(
+            now: Date().timeIntervalSince1970,
+            estateTag: estateUuid.uuidString
+        )
     }
 
     public func getTunnel(id: String) async throws -> Tunnel? {
@@ -1033,6 +1106,10 @@ public actor DrawerStore {
     /// `sourceDrawerID` may be `""` as an "unanchored fact" sentinel — used by
     /// the MCP surface when the caller asserts a freestanding triple not
     /// extracted from a specific drawer. Non-empty values are validated as usual.
+    ///
+    /// Telemetry: emits `locuskit.kgfact.add_count` when monitoring is
+    /// enabled. Off by default; the emit call short-circuits after a
+    /// single Atomic<Bool> load when disabled.
     public func addKGFact(_ f: KGFact) async throws {
         try Self.validateNonEmpty(f.subject, label: "subject")
         try Self.validateNonEmpty(f.predicate, label: "predicate")
@@ -1043,6 +1120,12 @@ public actor DrawerStore {
         // additional whitespace trimming).
         _ = try await storage.rowStore.insert(
             table: "kg_facts", values: Self.kgFactValues(f))
+        // Emit KGFact-add metric at the operation boundary.
+        // Tracks knowledge-graph growth rate per estate.
+        emitKGFactAdd(
+            now: Date().timeIntervalSince1970,
+            estateTag: estateUuid.uuidString
+        )
     }
 
     /// Transition a KGFact's state to withdrawn.
@@ -1077,6 +1160,9 @@ public actor DrawerStore {
     /// (excludes the rejected/accepted/tombstoned post-resolution
     /// states), ordered by filedAt ascending. The state-cluster gate
     /// uses the generated column so it is an indexed range scan.
+    ///
+    /// Telemetry: emits `locuskit.kgfact.query_result_count`
+    /// (tag: query="drawer") when monitoring is enabled.
     public func kgFacts(forDrawerID sourceDrawerID: String) async throws -> [KGFact] {
         let rows = try await storage.rowStore.query(
             table: "kg_facts",
@@ -1087,7 +1173,15 @@ public actor DrawerStore {
             orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil
         )
-        return try rows.map(Self.kgFactFromRow)
+        let result = try rows.map(Self.kgFactFromRow)
+        // query="drawer" labels the per-drawer KGFact query path.
+        emitKGFactQuery(
+            now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "drawer"
+        )
+        return result
     }
 
     // MARK: - Proposal CRUD
@@ -1337,6 +1431,9 @@ public actor DrawerStore {
     ///
     /// Mirrors `kgFacts(forDrawerID:)` but without the source-drawer
     /// predicate. Peer of the Rust `DrawerStore::all_kg_facts`.
+    ///
+    /// Telemetry: emits `locuskit.kgfact.query_result_count`
+    /// (tag: query="all") when monitoring is enabled.
     public func allKGFacts() async throws -> [KGFact] {
         let rows = try await storage.rowStore.query(
             table: "kg_facts",
@@ -1344,7 +1441,15 @@ public actor DrawerStore {
             orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil
         )
-        return try rows.map(Self.kgFactFromRow)
+        let result = try rows.map(Self.kgFactFromRow)
+        // query="all" labels the estate-wide KGFact query path.
+        emitKGFactQuery(
+            now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "all"
+        )
+        return result
     }
 
     /// All non-tombstoned diary entries estate-wide, ordered by `filedAt`

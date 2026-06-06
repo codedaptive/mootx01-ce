@@ -23,6 +23,9 @@
 //   For undirected graphs (A = A^T), hub and authority are identical;
 //   symmetrize before calling if undirected centrality is needed.
 
+use intellectus_lib::{StatSample, report};
+use crate::viz_graph_signals::VizGraphSignals;
+
 pub struct EigenvalueCentrality;
 
 impl EigenvalueCentrality {
@@ -45,10 +48,21 @@ impl EigenvalueCentrality {
     /// Choose SHIFT smaller than the smallest positive eigenvalue
     /// gap of the graphs we care about; 1.0 is conservative for
     /// the unit-weighted estate graphs we see in practice.
+    ///
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals::CENTRALITY_SCORE` with value 1.0 (completion
+    /// indicator), tagged by estate, node count, and iterations to
+    /// convergence. Off-path is a single AtomicBool load + branch.
+    ///
+    /// # Parameters
+    /// - `estate`: Estate identifier tag for VizGraph telemetry.
+    /// - `ts`: Caller-supplied epoch seconds. Never read a clock here.
     pub fn compute(
         adjacency: &[Vec<(usize, f64)>],
         max_iterations: usize,
         tolerance: f64,
+        estate: &str,
+        ts: f64,
     ) -> Vec<f64> {
         const SHIFT: f64 = 1.0;
         let n = adjacency.len();
@@ -60,7 +74,11 @@ impl EigenvalueCentrality {
         let mut x = vec![initial; n];
         let mut x_next = vec![0.0; n];
 
+        // Track iteration count for the VizGraph emit below.
+        let mut iterations_run = 0usize;
+
         for _ in 0..max_iterations {
+            iterations_run += 1;
             for v in x_next.iter_mut() {
                 *v = 0.0;
             }
@@ -80,6 +98,8 @@ impl EigenvalueCentrality {
             }
             let norm = sum_sq.sqrt();
             if norm < 1.0e-30 {
+                // Zero-norm: uniform fallback. Emit then return.
+                Self::emit_centrality(n, iterations_run, estate, ts);
                 return vec![initial; n];
             }
             for v in x_next.iter_mut() {
@@ -92,11 +112,40 @@ impl EigenvalueCentrality {
                 diff_sq += d * d;
             }
             if diff_sq.sqrt() < tolerance {
+                // Converged. Emit then return.
+                Self::emit_centrality(n, iterations_run, estate, ts);
                 return x_next;
             }
             std::mem::swap(&mut x, &mut x_next);
         }
+        // Iteration budget exhausted. Emit best estimate then return.
+        Self::emit_centrality(n, iterations_run, estate, ts);
         x
+    }
+
+    /// Emit the VizGraph `centrality.score` signal.
+    ///
+    /// Extracted so all three return paths in `compute()` share one
+    /// emit site. Off-path cost (monitoring disabled): single
+    /// AtomicBool load + branch — no allocation, no lock.
+    fn emit_centrality(n: usize, iterations: usize, estate: &str, ts: f64) {
+        // VizGraph emit: centrality.score — power iteration complete.
+        // Value 1.0 is a completion indicator (per-node scores are in
+        // the row_keystone_score column, not serialisable to a metric).
+        let n_str = n.to_string();
+        let it_str = iterations.to_string();
+        report!({
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("estate".to_string(), estate.to_string());
+            tags.insert("node_count".to_string(), n_str.clone());
+            tags.insert("iterations_to_convergence".to_string(), it_str.clone());
+            StatSample::metric(
+                VizGraphSignals::CENTRALITY_SCORE.to_string(),
+                1.0,
+                tags,
+                ts,
+            )
+        });
     }
 }
 
@@ -106,7 +155,7 @@ mod tests {
 
     #[test]
     fn empty_graph_yields_empty_vector() {
-        let result = EigenvalueCentrality::compute(&[], 100, 1.0e-6);
+        let result = EigenvalueCentrality::compute(&[], 100, 1.0e-6, "", 0.0);
         assert!(result.is_empty());
     }
 
@@ -114,7 +163,7 @@ mod tests {
     fn isolated_graph_yields_uniform_centrality() {
         // No edges: norm collapses, return uniform.
         let adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 5];
-        let result = EigenvalueCentrality::compute(&adj, 100, 1.0e-6);
+        let result = EigenvalueCentrality::compute(&adj, 100, 1.0e-6, "", 0.0);
         let expected = 1.0 / 5.0_f64.sqrt();
         for v in &result {
             assert!((v - expected).abs() < 1e-9);
@@ -133,7 +182,7 @@ mod tests {
             adj[0].push((leaf, 1.0));
             adj[leaf].push((0, 1.0));
         }
-        let result = EigenvalueCentrality::compute(&adj, 200, 1.0e-9);
+        let result = EigenvalueCentrality::compute(&adj, 200, 1.0e-9, "", 0.0);
         // Hub should be most central.
         let hub = result[0].abs();
         for leaf in 1..n {
@@ -155,7 +204,7 @@ mod tests {
         adj[2].push((1, 1.0));
         adj[0].push((2, 1.0));
         adj[2].push((0, 1.0));
-        let result = EigenvalueCentrality::compute(&adj, 200, 1.0e-9);
+        let result = EigenvalueCentrality::compute(&adj, 200, 1.0e-9, "", 0.0);
         let mut sum_sq = 0.0;
         for v in &result {
             sum_sq += v * v;
@@ -172,7 +221,7 @@ mod tests {
         adj[1].push((2, 1.0));
         adj[2].push((3, 1.0));
         adj[3].push((0, 1.0));
-        let result_unit = EigenvalueCentrality::compute(&adj, 300, 1.0e-9);
+        let result_unit = EigenvalueCentrality::compute(&adj, 300, 1.0e-9, "", 0.0);
 
         let mut adj_scaled = adj.clone();
         for edges in adj_scaled.iter_mut() {
@@ -180,7 +229,7 @@ mod tests {
                 e.1 *= 7.5;
             }
         }
-        let result_scaled = EigenvalueCentrality::compute(&adj_scaled, 300, 1.0e-9);
+        let result_scaled = EigenvalueCentrality::compute(&adj_scaled, 300, 1.0e-9, "", 0.0);
 
         for i in 0..4 {
             assert!((result_unit[i].abs() - result_scaled[i].abs()).abs() < 1e-6);

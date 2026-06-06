@@ -1,4 +1,16 @@
 // BundleStoreTests.swift
+//
+// Integration tests for BundleStore.
+//
+// INTELLECTUS LOCK: All tests that call store.insert (which emits
+// corpuskit.ingest.* metrics via BundleStore.insert) hold
+// GlobalTestLock.shared for their entire duration. This prevents
+// concurrent telemetry tests from seeing spurious emissions in their
+// capturing sinks.
+//
+// The @Suite(.serialized) on this suite serialises tests within the
+// suite; GlobalTestLock prevents interleaving with the telemetry
+// suite's emit-path tests across suites.
 
 import Testing
 import Foundation
@@ -20,7 +32,7 @@ import PersistenceKitInMemory
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 
-@Suite("BundleStore")
+@Suite("BundleStore", .serialized)
 struct BundleStoreTests {
 
     func makeStore() async throws -> BundleStore {
@@ -43,45 +55,53 @@ struct BundleStoreTests {
     }
 
     @Test func insertAndGet() async throws {
-        let store = try await makeStore()
-        let chunk = makeChunk("hello world")
-        try await store.insert([chunk])
-        let fetched = try await store.get(id: chunk.id)
-        #expect(fetched?.text == "hello world")
-        #expect(fetched?.sourceID == "doc-A")
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let chunk = makeChunk("hello world")
+            try await store.insert([chunk])
+            let fetched = try await store.get(id: chunk.id)
+            #expect(fetched?.text == "hello world")
+            #expect(fetched?.sourceID == "doc-A")
+        }
     }
 
     @Test func getMany() async throws {
-        let store = try await makeStore()
-        let chunks = (0..<5).map { makeChunk("chunk \($0)") }
-        try await store.insert(chunks)
-        let ids = chunks.map { $0.id }
-        let fetched = try await store.getMany(ids: ids)
-        #expect(fetched.count == 5)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let chunks = (0..<5).map { makeChunk("chunk \($0)") }
+            try await store.insert(chunks)
+            let ids = chunks.map { $0.id }
+            let fetched = try await store.getMany(ids: ids)
+            #expect(fetched.count == 5)
+        }
     }
 
     @Test func chunksForSource() async throws {
-        let store = try await makeStore()
-        let chunks = (0..<3).map { makeChunk("chunk \($0)") }
-        try await store.insert(chunks)
-        let forDoc = try await store.chunksForSource("doc-A")
-        #expect(forDoc.count == 3)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let chunks = (0..<3).map { makeChunk("chunk \($0)") }
+            try await store.insert(chunks)
+            let forDoc = try await store.chunksForSource("doc-A")
+            #expect(forDoc.count == 3)
+        }
     }
 
     @Test func metadataRoundtrip() async throws {
-        let store = try await makeStore()
-        let c = Chunk(
-            sourceID: "doc-B",
-            startOffset: 0,
-            length: 5,
-            text: "hello",
-            hlc: HLC(physicalTime: 100, logicalCount: 0, nodeID: 1),
-            metadata: ["author": "bob", "topic": "test"]
-        )
-        try await store.insert([c])
-        let fetched = try await store.get(id: c.id)
-        #expect(fetched?.metadata["author"] == "bob")
-        #expect(fetched?.metadata["topic"] == "test")
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let c = Chunk(
+                sourceID: "doc-B",
+                startOffset: 0,
+                length: 5,
+                text: "hello",
+                hlc: HLC(physicalTime: 100, logicalCount: 0, nodeID: 1),
+                metadata: ["author": "bob", "topic": "test"]
+            )
+            try await store.insert([c])
+            let fetched = try await store.get(id: c.id)
+            #expect(fetched?.metadata["author"] == "bob")
+            #expect(fetched?.metadata["topic"] == "test")
+        }
     }
 
     @Test func reinsertSameIDIsIdempotentNoOp() async throws {
@@ -90,34 +110,38 @@ struct BundleStoreTests {
         // not an error: the first write wins and the duplicate is
         // silently dropped. This is the invariant the sync layer's
         // .appendOnly conflict policy relies on.
-        let store = try await makeStore()
-        let c = makeChunk("original text")
-        try await store.insert([c])
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let c = makeChunk("original text")
+            try await store.insert([c])
 
-        // A second chunk carrying the same id but different content.
-        let dup = Chunk(
-            id: c.id,
-            sourceID: "doc-A",
-            startOffset: 0,
-            length: 12,
-            text: "changed text",
-            hlc: HLC(physicalTime: 200, logicalCount: 0, nodeID: 1)
-        )
-        // Must not throw, and must not mutate the stored row.
-        try await store.insert([dup])
+            // A second chunk carrying the same id but different content.
+            let dup = Chunk(
+                id: c.id,
+                sourceID: "doc-A",
+                startOffset: 0,
+                length: 12,
+                text: "changed text",
+                hlc: HLC(physicalTime: 200, logicalCount: 0, nodeID: 1)
+            )
+            // Must not throw, and must not mutate the stored row.
+            try await store.insert([dup])
 
-        let fetched = try await store.get(id: c.id)
-        #expect(fetched?.text == "original text")
-        let n = try await store.count()
-        #expect(n == 1)
+            let fetched = try await store.get(id: c.id)
+            #expect(fetched?.text == "original text")
+            let n = try await store.count()
+            #expect(n == 1)
+        }
     }
 
     @Test func count() async throws {
-        let store = try await makeStore()
-        let chunks = (0..<7).map { makeChunk("c\($0)") }
-        try await store.insert(chunks)
-        let n = try await store.count()
-        #expect(n == 7)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let chunks = (0..<7).map { makeChunk("c\($0)") }
+            try await store.insert(chunks)
+            let n = try await store.count()
+            #expect(n == 7)
+        }
     }
 
     // MARK: - Content-addressed id (Step 3.5 follow-up)
@@ -154,21 +178,23 @@ struct BundleStoreTests {
         // grow the store: content-addressed ids make the second pass a
         // batch of duplicate-key no-ops. This is the guarantee the
         // sync layer's .appendOnly conflict policy depends on.
-        let store = try await makeStore()
-        let c = Chunk(
-            sourceID: "doc-Z", startOffset: 0, length: 5, text: "hello",
-            hlc: HLC(physicalTime: 100, logicalCount: 0, nodeID: 1))
-        try await store.insert([c])
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let c = Chunk(
+                sourceID: "doc-Z", startOffset: 0, length: 5, text: "hello",
+                hlc: HLC(physicalTime: 100, logicalCount: 0, nodeID: 1))
+            try await store.insert([c])
 
-        // A fresh Chunk built from identical content gets the same id,
-        // even with a different HLC tag (hlc is not part of identity).
-        let again = Chunk(
-            sourceID: "doc-Z", startOffset: 0, length: 5, text: "hello",
-            hlc: HLC(physicalTime: 999, logicalCount: 0, nodeID: 2))
-        #expect(c.id == again.id)
-        try await store.insert([again])
+            // A fresh Chunk built from identical content gets the same id,
+            // even with a different HLC tag (hlc is not part of identity).
+            let again = Chunk(
+                sourceID: "doc-Z", startOffset: 0, length: 5, text: "hello",
+                hlc: HLC(physicalTime: 999, logicalCount: 0, nodeID: 2))
+            #expect(c.id == again.id)
+            try await store.insert([again])
 
-        let n = try await store.count()
-        #expect(n == 1)
+            let n = try await store.count()
+            #expect(n == 1)
+        }
     }
 }

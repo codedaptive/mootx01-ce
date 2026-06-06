@@ -1,9 +1,19 @@
 // Tests for BundleStore (persistence-kit-backed chunks table).
+//
+// INTELLECTUS LOCK: All tests that call store.insert (which emits
+// corpuskit.ingest.* metrics via BundleStore::insert) hold GLOBAL_LOCK
+// for their entire duration. This prevents concurrent telemetry tests
+// from seeing spurious emissions in their capturing sinks.
+//
+// Lock poisoning: if a prior test panicked while holding the lock,
+// `lock()` returns a PoisonError. We recover with `into_inner()` so
+// subsequent tests can still run.
 
 use corpus_kit::{BundleStore, Chunk};
+use intellectus_lib::Intellectus;
 use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -19,6 +29,20 @@ use std::sync::Arc;
 // ─────────────────────────────────────────────────────────────────
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
+
+// Process-wide serialisation lock shared with corpuskit_telemetry_tests.rs.
+// All tests that call BundleStore::insert hold this lock for their entire
+// duration so that concurrent enabled-path telemetry tests cannot see
+// their emissions in a capturing sink.
+static GLOBAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn global_lock() -> std::sync::MutexGuard<'static, ()> {
+    let mutex = GLOBAL_LOCK.get_or_init(|| Mutex::new(()));
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
 
 fn make_store() -> BundleStore {
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
@@ -46,6 +70,8 @@ fn sample_chunk(source: &str, offset: usize, text: &str, ts: i64) -> Chunk {
 
 #[test]
 fn insert_and_get_roundtrip() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
     let store = make_store();
     let c = sample_chunk("src-A", 0, "hello world", 100);
     let target_id = c.id;
@@ -60,6 +86,8 @@ fn insert_and_get_roundtrip() {
 
 #[test]
 fn get_returns_none_for_unknown_id() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
     let store = make_store();
     let result = store.get(Uuid::new_v4()).expect("get");
     assert!(result.is_none());
@@ -67,6 +95,8 @@ fn get_returns_none_for_unknown_id() {
 
 #[test]
 fn chunks_for_source_orders_by_start_offset_ascending() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
     let store = make_store();
     let c1 = sample_chunk("src-B", 200, "second", 200);
     let c2 = sample_chunk("src-B", 0, "first", 100);
@@ -81,6 +111,8 @@ fn chunks_for_source_orders_by_start_offset_ascending() {
 
 #[test]
 fn get_many_returns_requested_chunks() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
     let store = make_store();
     let c1 = sample_chunk("src-C", 0, "alpha", 1);
     let c2 = sample_chunk("src-C", 10, "beta", 2);
@@ -102,6 +134,8 @@ fn insert_idempotent_on_duplicate_id() {
     // a silent no-op: the first write wins and the stored row is not
     // mutated. This is the invariant the sync layer's AppendOnly
     // conflict policy relies on.
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
     let store = make_store();
     let c1 = sample_chunk("src-E", 0, "original", 1);
     let id = c1.id;
@@ -131,6 +165,8 @@ fn insert_idempotent_on_duplicate_id() {
 
 #[test]
 fn metadata_roundtrips_through_json() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
     let store = make_store();
     let hlc = HLC {
         physical_time: 1,
@@ -157,6 +193,8 @@ fn metadata_roundtrips_through_json() {
 
 #[test]
 fn all_chunks_returns_all_inserted() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
     let store = make_store();
     let c1 = sample_chunk("src-F", 0, "one", 1);
     let c2 = sample_chunk("src-G", 0, "two", 2);

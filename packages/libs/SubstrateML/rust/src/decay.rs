@@ -27,6 +27,9 @@
 // add new evidence; it can only forget. The substrate adds new
 // evidence ONLY through verb operations (cookbook § 10).
 
+use intellectus_lib::{StatSample, report};
+use crate::viz_graph_signals::VizGraphSignals;
+
 /// A rectangular floating-point matrix. The reference
 /// implementation uses a flat row-major `Vec<f64>` for
 /// transparency; the production NeuronKit Rust port uses
@@ -78,9 +81,36 @@ impl DecayingMatrix {
 /// current HLC physical_time (in seconds). If `now_seconds <=
 /// matrix.last_decay_time_seconds` this is a no-op (decay never
 /// goes backward).
-pub fn apply(matrix: &mut DecayingMatrix, now_seconds: i64) {
+///
+/// VizGraph telemetry: when monitoring is enabled, emits
+/// `VizGraphSignals::EDGE_DECAYED_WEIGHT` with the applied decay factor
+/// (1.0 when no-op). Tagged by estate, matrix dimensions, and elapsed
+/// seconds. Off-path is a single AtomicBool load + branch.
+///
+/// # Parameters
+/// - `estate`: Estate identifier tag for VizGraph telemetry.
+/// - `ts`: Caller-supplied epoch seconds. Never read a clock here.
+pub fn apply(matrix: &mut DecayingMatrix, now_seconds: i64,
+             estate: &str, ts: f64) {
     let dt = (now_seconds - matrix.last_decay_time_seconds) as f64;
     if dt <= 0.0 {
+        // No-op: elapsed time is zero or negative. Emit factor = 1.0 so
+        // the Topology view knows a decay check ran but nothing changed.
+        let rows_str = matrix.rows.to_string();
+        let cols_str = matrix.cols.to_string();
+        report!({
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("estate".to_string(), estate.to_string());
+            tags.insert("matrix_rows".to_string(), rows_str.clone());
+            tags.insert("matrix_cols".to_string(), cols_str.clone());
+            tags.insert("elapsed_seconds".to_string(), "0".to_string());
+            StatSample::metric(
+                VizGraphSignals::EDGE_DECAYED_WEIGHT.to_string(),
+                1.0,
+                tags,
+                ts,
+            )
+        });
         return;
     }
     let factor = (-dt * std::f64::consts::LN_2 / matrix.half_life_seconds).exp();
@@ -88,6 +118,27 @@ pub fn apply(matrix: &mut DecayingMatrix, now_seconds: i64) {
         *v *= factor;
     }
     matrix.last_decay_time_seconds = now_seconds;
+
+    // VizGraph emit: edge.decayed_weight — decay pass complete.
+    // Value = the multiplicative factor applied to every cell
+    // (0 < factor ≤ 1.0). The Topology view refreshes edge-weight
+    // rendering when the factor deviates significantly from 1.0.
+    let rows_str = matrix.rows.to_string();
+    let cols_str = matrix.cols.to_string();
+    let elapsed_str = (dt as i64).to_string();
+    report!({
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("estate".to_string(), estate.to_string());
+        tags.insert("matrix_rows".to_string(), rows_str.clone());
+        tags.insert("matrix_cols".to_string(), cols_str.clone());
+        tags.insert("elapsed_seconds".to_string(), elapsed_str.clone());
+        StatSample::metric(
+            VizGraphSignals::EDGE_DECAYED_WEIGHT.to_string(),
+            factor,
+            tags,
+            ts,
+        )
+    });
 }
 
 /// Compute the decay factor that would be applied for a given
@@ -103,11 +154,16 @@ pub fn decay_factor(elapsed_seconds: f64, half_life_seconds: f64) -> f64 {
 /// Apply decay AND add new evidence atomically. Decay first (to
 /// current time), then add. This is the canonical pattern for
 /// online updates from the verb layer.
+///
+/// Forwards empty estate and ts=0 to `apply`; callers that want
+/// VizGraph telemetry should call `apply` directly with their estate
+/// and ts values, then add separately.
 pub fn decay_and_add(matrix: &mut DecayingMatrix,
                      now_seconds: i64,
                      row: usize, col: usize,
                      increment: f64) {
-    apply(matrix, now_seconds);
+    // Empty estate and ts=0: no-op emit (monitoring off by default).
+    apply(matrix, now_seconds, "", 0.0);
     matrix.add(row, col, increment);
 }
 
@@ -147,7 +203,7 @@ mod tests {
     fn decay_halves_at_one_half_life() {
         let mut m = DecayingMatrix::new(1, 1, 100.0, 0);
         m.set(0, 0, 1.0);
-        apply(&mut m, 100);
+        apply(&mut m, 100, "", 0.0);
         // After exactly one half-life, value should be 0.5.
         assert!((m.get(0, 0) - 0.5).abs() < 1e-12);
     }
@@ -156,7 +212,7 @@ mod tests {
     fn decay_is_noop_when_no_time_elapsed() {
         let mut m = DecayingMatrix::new(1, 1, 100.0, 50);
         m.set(0, 0, 0.7);
-        apply(&mut m, 50);
+        apply(&mut m, 50, "", 0.0);
         assert_eq!(m.get(0, 0), 0.7);
     }
 
@@ -164,7 +220,7 @@ mod tests {
     fn decay_does_not_go_backward() {
         let mut m = DecayingMatrix::new(1, 1, 100.0, 100);
         m.set(0, 0, 0.7);
-        apply(&mut m, 50);  // earlier than last_decay_time
+        apply(&mut m, 50, "", 0.0);  // earlier than last_decay_time
         assert_eq!(m.get(0, 0), 0.7);
         assert_eq!(m.last_decay_time_seconds, 100);
     }
@@ -173,7 +229,7 @@ mod tests {
     fn decay_quarters_at_two_half_lives() {
         let mut m = DecayingMatrix::new(1, 1, 100.0, 0);
         m.set(0, 0, 1.0);
-        apply(&mut m, 200);
+        apply(&mut m, 200, "", 0.0);
         assert!((m.get(0, 0) - 0.25).abs() < 1e-12);
     }
 

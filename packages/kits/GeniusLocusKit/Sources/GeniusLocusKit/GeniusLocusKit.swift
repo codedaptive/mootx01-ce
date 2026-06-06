@@ -168,6 +168,16 @@ public actor GeniusLocusKit {
     /// node-content need routes through CorpusKit.
     internal var nodeTopologyProviders: [EstateHandle: any NodeTopologyProvider] = [:]
 
+    /// Per-estate mount lifecycle states (GLK_PROVISION_001).
+    ///
+    /// Tracks whether each open estate is fully mounted, quiesced, or draining.
+    /// Set to `.mounted` on `open` or `provision`; updated by `quiesce`, `drain`,
+    /// and `close`/`destroy`. Dropped when the handle is removed from the registry.
+    ///
+    /// The admin plane reads this registry via `mountState(for:)` to drive the
+    /// Estates view lifecycle badges in the moot-mgr GUI (ARIA_MCP_MANAGEMENT_GUI_SPEC §5.3).
+    internal var mountStates: [EstateHandle: EstateMountState] = [:]
+
     /// Construct an empty kit. The estate registry starts empty;
     /// callers admit estates via `open(storage:owner:)`.
     public init() {

@@ -686,3 +686,97 @@ fn append_only_allows_insert_rejects_update_and_delete() {
         .unwrap();
     assert_eq!(rows[0].get("amount"), Some(&TypedValue::Int(100)));
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// StorageIntrospection tests for InMemoryStorage.
+// ─────────────────────────────────────────────────────────────────────
+
+use persistence_kit::{StorageIntrospection, StorageStats};
+
+#[test]
+fn inmemory_introspection_row_count_zero_on_empty() {
+    // row_count must be 0 before any inserts.
+    let storage = make_storage();
+    let stats = storage.stats(0).unwrap();
+    assert_eq!(stats.row_count, Some(0));
+}
+
+#[test]
+fn inmemory_introspection_row_count_reflects_inserts() {
+    // row_count tracks the number of rows inserted across all tables.
+    let storage = make_storage();
+    let id1 = Uuid::new_v4();
+    let id2 = Uuid::new_v4();
+    storage
+        .row_store()
+        .insert("drawers", drawer_row(id1, "a", 0, 1))
+        .unwrap();
+    storage
+        .row_store()
+        .insert("drawers", drawer_row(id2, "b", 0, 2))
+        .unwrap();
+    let stats = storage.stats(0).unwrap();
+    assert_eq!(stats.row_count, Some(2));
+}
+
+#[test]
+fn inmemory_introspection_blob_count_reflects_puts() {
+    // blob_count tracks stored blob entries.
+    let storage = make_storage();
+    storage.blob_store().put("k1", b"hello").unwrap();
+    storage.blob_store().put("k2", b"world").unwrap();
+    let stats = storage.stats(0).unwrap();
+    assert_eq!(stats.blob_count, Some(2));
+}
+
+#[test]
+fn inmemory_introspection_logical_size_grows_with_blobs() {
+    // logical_size_bytes grows after adding a large blob.
+    let storage = make_storage();
+    let before = storage.stats(0).unwrap().logical_size_bytes;
+    let payload = vec![0xFFu8; 1024];
+    storage.blob_store().put("bigblob", &payload).unwrap();
+    let after = storage.stats(0).unwrap().logical_size_bytes;
+    assert!(after > before, "logical_size_bytes must grow after a large blob insert");
+}
+
+#[test]
+fn inmemory_introspection_rollback_count_increments() {
+    // transaction_rollback_count increments when the user block returns Err.
+    use persistence_kit::error::StorageError;
+    let storage = make_storage();
+    let before_stats = storage.stats(0).unwrap();
+    let before_rollbacks = before_stats.transaction_rollback_count.unwrap_or(0);
+
+    let _err = storage.transaction(
+        persistence_kit::IsolationLevel::Serializable,
+        &mut |_txn| {
+            Err(StorageError::BackendError { underlying: "forced rollback".into() })
+        },
+    );
+
+    let after_stats = storage.stats(0).unwrap();
+    let after_rollbacks = after_stats.transaction_rollback_count.unwrap_or(0);
+    assert_eq!(after_rollbacks, before_rollbacks + 1, "rollback_count must increment on rollback");
+}
+
+#[test]
+fn inmemory_introspection_sqlite_fields_are_none() {
+    // SQLite-specific fields must be None for InMemory backend.
+    let storage = make_storage();
+    let stats = storage.stats(0).unwrap();
+    assert_eq!(stats.page_size, None, "page_size must be None for InMemory");
+    assert_eq!(stats.page_count, None, "page_count must be None for InMemory");
+    assert_eq!(stats.freelist_page_count, None, "freelist_page_count must be None for InMemory");
+    assert_eq!(stats.wal_frame_count, None, "wal_frame_count must be None for InMemory");
+    assert_eq!(stats.lock_contention, None, "lock_contention must be None for InMemory");
+}
+
+#[test]
+fn inmemory_introspection_captured_at_matches_input() {
+    // captured_at_secs must equal the injected now_secs value.
+    let storage = make_storage();
+    let now = 1_700_000_000_i64;
+    let stats = storage.stats(now).unwrap();
+    assert_eq!(stats.captured_at_secs, now);
+}

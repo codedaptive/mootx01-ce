@@ -1,15 +1,24 @@
 //! BundleStore: persistence-kit-backed chunks table. Mirror of
 //! Swift's `BundleStore`. Schema mirrors the Swift declaration
 //! exactly.
+//!
+//! CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
+//! self-report telemetry to `insert`. The `report!` macro calls are
+//! placed at the operation boundary, after the batch completes,
+//! so storage behaviour is unchanged. When monitoring is disabled
+//! (the default), the macro expands to a single `AtomicBool::load +
+//! branch` — zero allocation, no clock.
 
 use crate::chunk::Chunk;
 use crate::error::{CorpusKitError, CorpusKitResult};
+use intellectus_lib::{report, StatSample};
 use persistence_kit::{
     Column, ColumnDeclaration, IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration,
     Storage, StorageError, StoragePredicate, StorageRow, TableDeclaration, TypedValue,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -82,10 +91,28 @@ impl BundleStore {
     /// key instead and surfaces StorageError::DuplicateKey, caught
     /// here as the documented no-op. The first write of a given id
     /// wins; chunks are immutable and content-addressed.
+    ///
+    /// Telemetry: emits `corpuskit.ingest.latency_ms` and
+    /// `corpuskit.ingest.chunk_count` when monitoring is enabled.
+    /// Both are emitted at the operation boundary after the last insert
+    /// attempt completes. Off-path: single `AtomicBool::load + branch`
+    /// per call via the `report!` macro. Mirrors Swift's
+    /// `BundleStore.insert` telemetry exactly.
     pub fn insert(&self, chunks: &[Chunk]) -> CorpusKitResult<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        // Capture start time before the I/O. The computed latency is
+        // forwarded to the sink only when monitoring is enabled (inside
+        // the report! macro's if-enabled guard).
+        let start_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+
         let row_store = self.storage.row_store();
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for chunk in chunks {
@@ -114,6 +141,35 @@ impl BundleStore {
                 Err(e) => return Err(CorpusKitError::StoreUnavailable(e.to_string())),
             }
         }
+
+        // Emit ingest telemetry at the operation boundary, after all
+        // insert attempts complete (including idempotent no-ops). The
+        // report! macro evaluates its argument only when monitoring is
+        // enabled; when disabled it is a single AtomicBool load + branch.
+        //
+        // corpuskit.ingest.latency_ms: wall time for the full batch insert.
+        // corpuskit.ingest.chunk_count: chunks in the batch (incl. no-ops).
+        // Mirrors the two Swift emit sites in BundleStore.insert.
+        let end_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let chunk_count = chunks.len();
+        report!(StatSample::metric(
+            "corpuskit.ingest.latency_ms".to_string(),
+            (end_ts - start_ts) * 1000.0,
+            [("kit".to_string(), "CorpusKit".to_string())]
+                .into_iter().collect(),
+            end_ts,
+        ));
+        report!(StatSample::metric(
+            "corpuskit.ingest.chunk_count".to_string(),
+            chunk_count as f64,
+            [("kit".to_string(), "CorpusKit".to_string())]
+                .into_iter().collect(),
+            end_ts,
+        ));
+
         Ok(())
     }
 

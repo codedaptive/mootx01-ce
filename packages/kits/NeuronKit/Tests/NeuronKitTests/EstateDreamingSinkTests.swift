@@ -104,47 +104,52 @@ struct EstateDreamingSinkTests {
 
     // MARK: - § 3  Integration: DreamingDaemon with real sink + stub reader
 
+    // triggerDreamingCycle() emits to the global Intellectus singleton.
+    // Acquires the process-wide lock to prevent races with concurrent
+    // telemetry tests that have enabled monitoring.
     @Test("integration: DreamingDaemon with EstateDreamingSink triggers a cycle and lands data")
     func integrationDaemonCycleLandsData() async throws {
-        let (kit, handle) = try await makeKit()
+        try await withIntellectusLock {
+            let (kit, handle) = try await makeKit()
 
-        // Populate the estate with two drawers in the same room so the
-        // co-occurrence algorithm in EstateDreamingReader can see a pair.
-        let room = "cooc-room"
-        _ = try await kit.capture(handle, captureFrame(content: "drawer A", room: room))
-        _ = try await kit.capture(handle, captureFrame(content: "drawer B", room: room))
+            // Populate the estate with two drawers in the same room so the
+            // co-occurrence algorithm in EstateDreamingReader can see a pair.
+            let room = "cooc-room"
+            _ = try await kit.capture(handle, captureFrame(content: "drawer A", room: room))
+            _ = try await kit.capture(handle, captureFrame(content: "drawer B", room: room))
 
-        // Build the production adapter pair.
-        let reader = EstateDreamingReader(handle: handle, kit: kit)
-        let sink = EstateDreamingSink(handle: handle, kit: kit)
-        let policyStore = InMemoryDreamingPolicyStore()
-        let daemon = NeuronKit.dreamingDaemon(
-            reader: reader,
-            sink: sink,
-            policyStore: policyStore
-        )
+            // Build the production adapter pair.
+            let reader = EstateDreamingReader(handle: handle, kit: kit)
+            let sink = EstateDreamingSink(handle: handle, kit: kit)
+            let policyStore = InMemoryDreamingPolicyStore()
+            let daemon = NeuronKit.dreamingDaemon(
+                reader: reader,
+                sink: sink,
+                policyStore: policyStore
+            )
 
-        // Set a lenient policy so the pair clears the confidence gate.
-        try await daemon.registerDreamingPolicy(
-            minSuccessRate: 0.0,
-            minConfidence: 0.0,
-            minAttempts: 1
-        )
+            // Set a lenient policy so the pair clears the confidence gate.
+            try await daemon.registerDreamingPolicy(
+                minSuccessRate: 0.0,
+                minConfidence: 0.0,
+                minAttempts: 1
+            )
 
-        let report = try await daemon.triggerDreamingCycle(now: testNow)
+            let report = try await daemon.triggerDreamingCycle(now: testNow)
 
-        // The cycle must have considered the co-occurrence pair and emitted
-        // exactly one diary entry regardless of proposal count.
-        #expect(report.candidatesConsidered >= 1, "should consider the drawer pair")
-        #expect(report.diaryEntry.agentName == "dreaming-daemon")
+            // The cycle must have considered the co-occurrence pair and emitted
+            // exactly one diary entry regardless of proposal count.
+            #expect(report.candidatesConsidered >= 1, "should consider the drawer pair")
+            #expect(report.diaryEntry.agentName == "dreaming-daemon")
 
-        // Diary entry must be in the estate.
-        let diaryEntries = try await kit.readDiaryEntries(
-            in: handle,
-            agentName: "dreaming-daemon",
-            lastN: 10
-        )
-        #expect(diaryEntries.count == 1, "exactly one diary entry per cycle")
-        #expect(diaryEntries[0].topic == "dreaming-cycle")
+            // Diary entry must be in the estate.
+            let diaryEntries = try await kit.readDiaryEntries(
+                in: handle,
+                agentName: "dreaming-daemon",
+                lastN: 10
+            )
+            #expect(diaryEntries.count == 1, "exactly one diary entry per cycle")
+            #expect(diaryEntries[0].topic == "dreaming-cycle")
+        }
     }
 }

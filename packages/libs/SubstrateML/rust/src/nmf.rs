@@ -13,6 +13,8 @@
 //   - All entries of V are >= 0 (Lee-Seung theorem requires V >= 0).
 
 use crate::random_walks::SplitMix64;
+use intellectus_lib::{StatSample, report};
+use crate::viz_graph_signals::VizGraphSignals;
 
 #[derive(Debug, Clone)]
 pub struct NMFFactorization {
@@ -26,11 +28,21 @@ pub struct NMFFactorization {
 pub struct NMFAlternatingLeastSquares;
 
 impl NMFAlternatingLeastSquares {
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals::NMF_FACTOR` with the final reconstruction error,
+    /// tagged by estate, matrix dimensions, and rank.
+    /// Off-path is a single AtomicBool load + branch — no allocation.
+    ///
+    /// # Parameters
+    /// - `estate`: Estate identifier tag for VizGraph telemetry.
+    /// - `ts`: Caller-supplied epoch seconds. Never read a clock here.
     pub fn factorize(v: &[Vec<f32>],
                      rank: usize,
                      max_iterations: usize,
                      tolerance: f32,
-                     seed: u64) -> NMFFactorization {
+                     seed: u64,
+                     estate: &str,
+                     ts: f64) -> NMFFactorization {
         assert!(!v.is_empty(), "V must have at least one row");
         let m = v.len();
         let n = v[0].len();
@@ -99,7 +111,35 @@ impl NMFAlternatingLeastSquares {
         }
 
         let final_error = Self::reconstruction_error(v, &w, &h);
-        NMFFactorization { w, h, rank, iterations, final_error }
+        let result = NMFFactorization { w, h, rank, iterations, final_error };
+
+        // VizGraph emit: nmf.factor — factorisation complete.
+        // Value = final reconstruction error (how well V ≈ W × H).
+        // The Topology theme-overlay layer uses W and H to assign
+        // latent-theme colours to nodes; this signal fires once the
+        // matrices are ready for that rendering pass.
+        //
+        // Off-path when monitoring is disabled: single AtomicBool load
+        // + branch. Closure is NEVER evaluated when monitoring is off.
+        let m_str = m.to_string();
+        let n_str = n.to_string();
+        let rank_str = rank.to_string();
+        let final_err_val = result.final_error as f64;
+        report!({
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("estate".to_string(), estate.to_string());
+            tags.insert("rows".to_string(), m_str.clone());
+            tags.insert("cols".to_string(), n_str.clone());
+            tags.insert("rank".to_string(), rank_str.clone());
+            StatSample::metric(
+                VizGraphSignals::NMF_FACTOR.to_string(),
+                final_err_val,
+                tags,
+                ts,
+            )
+        });
+
+        result
     }
 
     pub fn reconstruction_error(v: &[Vec<f32>], w: &[Vec<f32>], h: &[Vec<f32>]) -> f32 {

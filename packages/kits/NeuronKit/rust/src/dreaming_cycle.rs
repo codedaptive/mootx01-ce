@@ -23,6 +23,9 @@
 //! caller supplies any time-derived inputs through the seam.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use intellectus_lib::{report, StatSample};
 
 use crate::dreaming_decision::{self, candidate_key};
 
@@ -263,6 +266,25 @@ impl DreamingDaemon {
         Q: RewardSource,
         S: DreamingProposalSink,
     {
+        // Self-report: cycle-start event. Off-path cost is a single
+        // AtomicBool::load + branch (~1 ns). Matches the Swift DreamingDaemon
+        // emit site in DreamingDaemon.swift (NEURONKIT_REPORT_001).
+        let cycle_start_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        {
+            let mut start_tags = std::collections::HashMap::new();
+            start_tags.insert("status".to_string(), "start".to_string());
+            start_tags.insert("cycle".to_string(), self.cycle_count.to_string());
+            report!(StatSample::metric(
+                "neuronkit.dream.cycle".to_string(),
+                1.0,
+                start_tags,
+                cycle_start_ts,
+            ));
+        }
+
         // Step 1: reward retrieval. Keep the strongest signal per target.
         let traces = reader.recent_recall_traces();
         let mut reward_by_target: BTreeMap<String, f32> = BTreeMap::new();
@@ -324,6 +346,29 @@ impl DreamingDaemon {
         // Step 7: exactly one diary entry. The integer summary is
         // byte-identical to the Swift actor's.
         self.cycle_count += 1;
+
+        // Self-report: cycle-complete event with observation and proposal
+        // counts. Mirrors the Swift DreamingDaemon complete emit
+        // (NEURONKIT_REPORT_001). `proposals_emitted.len()` at this point is
+        // the final count for the cycle.
+        let cycle_complete_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        {
+            let mut complete_tags = std::collections::HashMap::new();
+            complete_tags.insert("status".to_string(), "complete".to_string());
+            complete_tags.insert("cycle".to_string(), self.cycle_count.to_string());
+            complete_tags.insert("drawers_touched".to_string(), observations.len().to_string());
+            complete_tags.insert("proposals".to_string(), proposals_emitted.len().to_string());
+            report!(StatSample::metric(
+                "neuronkit.dream.cycle".to_string(),
+                proposals_emitted.len() as f64,
+                complete_tags,
+                cycle_complete_ts,
+            ));
+        }
+
         let entry = DreamingDiaryEntry {
             agent_name: AGENT_NAME.to_string(),
             entry: format!(

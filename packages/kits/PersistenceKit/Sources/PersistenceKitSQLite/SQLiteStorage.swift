@@ -89,6 +89,19 @@ public final class SQLiteStorage: Storage, Sendable {
     }
 }
 
+// MARK: - StorageIntrospection
+
+extension SQLiteStorage: StorageIntrospection {
+    /// Capture a point-in-time snapshot of SQLite backend health.
+    ///
+    /// Sources each field via read-only PRAGMAs against the live connection.
+    /// The backend actor serializes the PRAGMA reads so results are consistent
+    /// within a single call (no other operation can interleave on the actor).
+    public func stats(now: Date) async throws -> StorageStats {
+        try await backend.storageStats(now: now)
+    }
+}
+
 // MARK: - Backend actor
 
 actor SQLiteBackend {
@@ -511,6 +524,101 @@ actor SQLiteBackend {
         if case .text(let keyID)? = values["keyID"], !keyID.isEmpty { return }
         throw StorageError.constraintViolation(detail:
             "content/keyID invariant: table '\(table)' on an encrypting estate received plaintext content with no keyID; the encryption seam did not run, so this row would be unreadable")
+    }
+
+    // MARK: - Introspection
+
+    /// Read DB-layer health statistics via read-only SQLite PRAGMAs plus
+    /// WAL-file stat inspection.
+    ///
+    /// PRAGMA choices and rationale:
+    ///
+    /// - `page_size`: The database page size in bytes. Set at creation time;
+    ///   constant for the lifetime of the file. Required to compute logical size
+    ///   and to derive WAL frame count from the WAL file size.
+    ///
+    /// - `page_count`: Total number of pages in the database file (including
+    ///   the freelist). Multiply by page_size for the raw on-disk size.
+    ///
+    /// - `freelist_count`: Number of unused (freelist) pages. A high ratio
+    ///   vs. page_count suggests the database should be VACUUMed to reclaim
+    ///   file space.
+    ///
+    /// WAL frame count via file size: `PRAGMA wal_checkpoint` acquires an
+    /// exclusive CHECKPOINTER lock and can return SQLITE_LOCKED if a concurrent
+    /// read or write is in progress on the same connection — even from inside
+    /// the actor. The safe alternative is to read the WAL file size directly
+    /// from the filesystem and derive the frame count.
+    ///
+    /// WAL frame size = page_size + 24 bytes (header per frame):
+    ///   - 24 bytes per-frame header (salt, checksum, page number, DB size).
+    /// The WAL file header is 32 bytes (excluded from frame calculation).
+    /// formula: frameCount = (walFileSize - 32) / (pageSize + 24)  iff walFileSize > 32.
+    ///
+    /// Lock contention: `PRAGMA schema_version` is a read-only meta-query
+    /// that touches no user data. If it fails with "locked", a process outside
+    /// this actor holds an exclusive lock on the database file. The actor
+    /// serializes all in-process access so contention is always external.
+    func storageStats(now: Date) throws -> StorageStats {
+        // page_size: constant for the DB file; returned as a single INTEGER row.
+        let pageSizeStmt = try connection.prepare("PRAGMA page_size")
+        defer { pageSizeStmt.finalize() }
+        let pageSize = try pageSizeStmt.step() ? Int(pageSizeStmt.columnInt64(0)) : 0
+
+        // page_count: total allocated pages (includes freelist pages).
+        let pageCountStmt = try connection.prepare("PRAGMA page_count")
+        defer { pageCountStmt.finalize() }
+        let pageCount = try pageCountStmt.step() ? Int(pageCountStmt.columnInt64(0)) : 0
+
+        // freelist_count: pages on the freelist (not yet reclaimed by VACUUM).
+        let freelistStmt = try connection.prepare("PRAGMA freelist_count")
+        defer { freelistStmt.finalize() }
+        let freelistCount = try freelistStmt.step() ? Int(freelistStmt.columnInt64(0)) : 0
+
+        // Logical size = page_count * page_size.
+        let logicalSize = Int64(pageCount) * Int64(pageSize)
+
+        // WAL frame count: derived from the WAL file size to avoid calling
+        // PRAGMA wal_checkpoint, which acquires a checkpointer lock and can
+        // fail SQLITE_LOCKED even from within the actor.
+        // WAL file = url.path + "-wal". Frame count = (fileSize - 32) / (pageSize + 24)
+        // when fileSize > 32 (i.e. the WAL file exists and has at least one frame).
+        // Returns 0 when the WAL file does not exist or is empty (no uncommitted frames).
+        let walFrameCount: Int? = {
+            guard pageSize > 0 else { return nil }
+            let walPath = connection.url.path + "-wal"
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: walPath),
+                  let fileSize = attrs[.size] as? Int,
+                  fileSize > 32 else {
+                return 0
+            }
+            // WAL header = 32 bytes; each frame = pageSize + 24 bytes.
+            return (fileSize - 32) / (pageSize + 24)
+        }()
+
+        // Lock contention: a read-only PRAGMA that touches no user data.
+        // SQLITE_LOCKED means a cross-process exclusive lock; the actor
+        // serializes all same-process access.
+        var lockContention = false
+        do {
+            let probeStmt = try connection.prepare("PRAGMA schema_version")
+            defer { probeStmt.finalize() }
+            _ = try probeStmt.step()
+        } catch let err as StorageError {
+            if case .backendError(let msg) = err, msg.contains("locked") {
+                lockContention = true
+            }
+        }
+
+        return StorageStats(
+            logicalSizeBytes: logicalSize,
+            pageSize: pageSize > 0 ? pageSize : nil,
+            pageCount: pageCount > 0 ? pageCount : nil,
+            freelistPageCount: freelistCount,
+            walFrameCount: walFrameCount,
+            lockContention: lockContention,
+            capturedAt: now
+        )
     }
 
     func countRows(table: String, where predicate: StoragePredicate?) throws -> Int {

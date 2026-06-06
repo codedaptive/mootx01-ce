@@ -7,6 +7,14 @@
 use std::collections::HashMap;
 
 use substrate_types::hlc::HLC;
+use crate::substrate_lib_telemetry::{
+    emit_verb_capture_count,
+    emit_verb_mutate_count,
+    emit_verb_withdraw_count,
+    emit_verb_expunge_count,
+    emit_verb_recall_count,
+    emit_verb_reanchor_count,
+};
 use substrate_types::fingerprint256::Fingerprint256;
 // F11 consolidation (2026-05-27): the canonical RowState enum
 // (cookbook §2.3 scale-gapped raws) lives in row_state.rs. This
@@ -205,6 +213,10 @@ impl Substrate {
     // § 10.1 — capture
     // ============================================================
 
+    /// - `ts`: Caller-supplied epoch seconds for telemetry.
+    ///   Pass `SystemTime::now()` at the verb boundary.
+    ///   Default 0.0 is intentionally not provided here — Rust callers
+    ///   must be explicit. SubstrateLib never reads a clock internally.
     pub fn capture(
         &mut self,
         noun_type: NounType,
@@ -216,6 +228,7 @@ impl Substrate {
         lineage_id: Option<RowId>,
         content: Option<Vec<u8>>,
         actor: &str,
+        ts: f64,
     ) -> Result<RowId, SubstrateError> {
         if lattice_anchor.is_null() {
             return Err(SubstrateError::MissingLatticeAnchor);
@@ -253,6 +266,11 @@ impl Substrate {
             "capture", row_id, None,
             (adjective_bitmap, operational_bitmap, provenance_bitmap),
             None, lattice_anchor, actor);
+
+        // Telemetry — off-path cost: single AtomicBool::load(Acquire) + branch.
+        // StatSample is never constructed when monitoring is disabled.
+        emit_verb_capture_count(&format!("{}", noun_type as u8), ts);
+
         Ok(row_id)
     }
 
@@ -265,6 +283,7 @@ impl Substrate {
         row_id: RowId,
         new_lattice_anchor: LatticeAnchor,
         actor: &str,
+        ts: f64,
     ) -> Result<(), SubstrateError> {
         let row = self.rows.get(&row_id).ok_or(SubstrateError::RowNotFound(row_id))?;
         if row.state == RowState::Tombstoned {
@@ -280,6 +299,10 @@ impl Substrate {
         row_mut.lattice_anchor = new_lattice_anchor;
         self.append_audit("reanchor", row_id, Some(before), after,
                            Some(old_anchor), new_lattice_anchor, actor);
+
+        // Telemetry — off-path cost: single AtomicBool::load(Acquire) + branch.
+        emit_verb_reanchor_count(ts);
+
         Ok(())
     }
 
@@ -295,6 +318,7 @@ impl Substrate {
         new_operational_bitmap: Option<i64>,
         new_provenance_bitmap: Option<i64>,
         actor: &str,
+        ts: f64,
     ) -> Result<(), SubstrateError> {
         let row = self.rows.get(&row_id).ok_or(SubstrateError::RowNotFound(row_id))?;
         if row.state == RowState::Tombstoned {
@@ -343,6 +367,10 @@ impl Substrate {
         let verb_full = format!("mutate.{}", verb);
         self.append_audit(&verb_full, row_id, Some(before), after,
                            Some(lattice_anchor), lattice_anchor, actor);
+
+        // Telemetry — off-path cost: single AtomicBool::load(Acquire) + branch.
+        emit_verb_mutate_count(verb, ts);
+
         Ok(())
     }
 
@@ -350,7 +378,7 @@ impl Substrate {
     // § 10.4 — withdraw
     // ============================================================
 
-    pub fn withdraw(&mut self, row_id: RowId, actor: &str) -> Result<(), SubstrateError> {
+    pub fn withdraw(&mut self, row_id: RowId, actor: &str, ts: f64) -> Result<(), SubstrateError> {
         let row = self.rows.get(&row_id).ok_or(SubstrateError::RowNotFound(row_id))?;
         if !can_transition(row.state, RowState::Withdrawn, "withdraw") {
             return Err(SubstrateError::InvalidStateTransition {
@@ -366,6 +394,10 @@ impl Substrate {
         let after = (new_adj, before.1, before.2);
         self.append_audit("withdraw", row_id, Some(before), after,
                            Some(lattice_anchor), lattice_anchor, actor);
+
+        // Telemetry — off-path cost: single AtomicBool::load(Acquire) + branch.
+        emit_verb_withdraw_count(ts);
+
         Ok(())
     }
 
@@ -378,6 +410,7 @@ impl Substrate {
         row_id: RowId,
         reason: &str,
         actor: &str,
+        ts: f64,
     ) -> Result<(), SubstrateError> {
         let row = self.rows.get(&row_id).ok_or(SubstrateError::RowNotFound(row_id))?;
         if row.state == RowState::Tombstoned {
@@ -407,6 +440,10 @@ impl Substrate {
         let actor_with_reason = format!("{}:{}", actor, reason);
         self.append_audit("expunge", row_id, Some(before), after,
                            Some(lattice_anchor), lattice_anchor, &actor_with_reason);
+
+        // Telemetry — off-path cost: single AtomicBool::load(Acquire) + branch.
+        emit_verb_expunge_count(ts);
+
         Ok(())
     }
 
@@ -414,11 +451,13 @@ impl Substrate {
     // § 10.6 — recall (read-only)
     // ============================================================
 
-    pub fn recall<F>(&self, predicate: F, as_of: Option<HLC>) -> Vec<&Row>
+    /// `ts`: Caller-supplied epoch seconds. Used only for telemetry tagging.
+    /// SubstrateLib never reads a clock internally.
+    pub fn recall<F>(&self, predicate: F, as_of: Option<HLC>, ts: f64) -> Vec<&Row>
     where
         F: Fn(&Row) -> bool,
     {
-        if let Some(cutoff) = as_of {
+        let result: Vec<&Row> = if let Some(cutoff) = as_of {
             let mut visible: std::collections::HashSet<RowId> =
                 std::collections::HashSet::new();
             for e in &self.audit_events {
@@ -432,7 +471,12 @@ impl Substrate {
                 .collect()
         } else {
             self.rows.values().filter(|r| predicate(r)).collect()
-        }
+        };
+
+        // Telemetry — off-path cost: single AtomicBool::load(Acquire) + branch.
+        emit_verb_recall_count(result.len(), ts);
+
+        result
     }
 
     // ============================================================
@@ -447,6 +491,7 @@ impl Substrate {
         lattice_anchor: LatticeAnchor,
         fingerprint: Fingerprint256,
         actor: &str,
+        ts: f64,
     ) -> Result<RowId, SubstrateError> {
         self.capture(
             NounType::Proposal,
@@ -458,6 +503,7 @@ impl Substrate {
             None,
             None,
             actor,
+            ts,
         )
     }
 
@@ -477,6 +523,7 @@ impl Substrate {
         lattice_anchor: LatticeAnchor,
         fingerprint: Fingerprint256,
         actor: &str,
+        ts: f64,
     ) -> Result<RowId, SubstrateError> {
         self.capture(
             NounType::Association,
@@ -488,6 +535,7 @@ impl Substrate {
             None,
             None,
             actor,
+            ts,
         )
     }
 
@@ -503,6 +551,7 @@ impl Substrate {
         lattice_anchor: LatticeAnchor,
         fingerprint: Fingerprint256,
         actor: &str,
+        ts: f64,
     ) -> Result<RowId, SubstrateError> {
         self.capture(
             NounType::LearnedReference,
@@ -514,6 +563,7 @@ impl Substrate {
             None,
             None,
             actor,
+            ts,
         )
     }
 
@@ -606,6 +656,7 @@ mod tests {
             .capture(
                 NounType::Drawer,
                 0, 0, 0, anchor(), dummy_fp(), None, None, "test",
+                0.0, // ts: non-telemetry test, 0.0 is discarded by any ts-filtered sink
             )
             .unwrap();
         assert_eq!(s.rows.get(&id).unwrap().state, RowState::Active);
@@ -618,7 +669,7 @@ mod tests {
     fn capture_proposal_creates_pending() {
         let mut s = fresh_substrate();
         let id = s
-            .propose(1, 0, 0, anchor(), dummy_fp(), "agent")
+            .propose(1, 0, 0, anchor(), dummy_fp(), "agent", 0.0)
             .unwrap();
         assert_eq!(s.rows.get(&id).unwrap().state, RowState::Pending);
     }
@@ -628,7 +679,7 @@ mod tests {
         let mut s = fresh_substrate();
         let res = s.capture(
             NounType::Drawer, 0, 0, 0,
-            LatticeAnchor::new(0, 0), dummy_fp(), None, None, "test",
+            LatticeAnchor::new(0, 0), dummy_fp(), None, None, "test", 0.0,
         );
         assert_eq!(res, Err(SubstrateError::MissingLatticeAnchor));
     }
@@ -639,10 +690,10 @@ mod tests {
         // Set adjective trust to "imported" (raw 2) so accepted+trust is legal.
         let adj_pending: i64 = 1 | (2 << 18); // state=pending(1), trust=imported(2)
         let id = s
-            .capture(NounType::Proposal, adj_pending, 0, 0, anchor(), dummy_fp(), None, None, "a")
+            .capture(NounType::Proposal, adj_pending, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0)
             .unwrap();
         let adj_accepted: i64 = 3 | (2 << 18); // state=accepted(3), trust=imported(2)
-        s.mutate(id, MutationKind::Confirm, adj_accepted, None, None, "user").unwrap();
+        s.mutate(id, MutationKind::Confirm, adj_accepted, None, None, "user", 0.0).unwrap();
         assert_eq!(s.rows.get(&id).unwrap().state, RowState::Accepted);
         assert_eq!(s.audit_events.len(), 2);
         assert!(s.audit_events[1].verb.contains("confirm"));
@@ -653,11 +704,11 @@ mod tests {
         let mut s = fresh_substrate();
         let adj_active: i64 = 0;
         let id = s
-            .capture(NounType::Drawer, adj_active, 0, 0, anchor(), dummy_fp(), None, None, "a")
+            .capture(NounType::Drawer, adj_active, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0)
             .unwrap();
         // Active → pending is not a legal transition.
         let adj_pending: i64 = 1;
-        let res = s.mutate(id, MutationKind::Confirm, adj_pending, None, None, "user");
+        let res = s.mutate(id, MutationKind::Confirm, adj_pending, None, None, "user", 0.0);
         assert!(matches!(res, Err(SubstrateError::InvalidStateTransition { .. })));
     }
 
@@ -667,7 +718,7 @@ mod tests {
         // sensitivity=48 (bits 6-11) AND exportability=32 (bits 12-17).
         let adj: i64 = (48i64 << 6) | (32i64 << 12);
         let res = s.capture(
-            NounType::Drawer, adj, 0, 0, anchor(), dummy_fp(), None, None, "test",
+            NounType::Drawer, adj, 0, 0, anchor(), dummy_fp(), None, None, "test", 0.0,
         );
         assert!(matches!(res, Err(SubstrateError::ForbiddenStateCombination(_))));
     }
@@ -677,9 +728,9 @@ mod tests {
         let mut s = fresh_substrate();
         let id = s
             .capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None,
-                      Some(b"hello".to_vec()), "test")
+                      Some(b"hello".to_vec()), "test", 0.0)
             .unwrap();
-        s.expunge(id, "GDPR-request", "user").unwrap();
+        s.expunge(id, "GDPR-request", "user", 0.0).unwrap();
         let row = s.rows.get(&id).unwrap();
         assert_eq!(row.state, RowState::Tombstoned);
         assert!(row.content.is_none());
@@ -690,10 +741,10 @@ mod tests {
     fn expunge_tombstoned_row_fails() {
         let mut s = fresh_substrate();
         let id = s
-            .capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "test")
+            .capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "test", 0.0)
             .unwrap();
-        s.expunge(id, "first", "user").unwrap();
-        let res = s.expunge(id, "second", "user");
+        s.expunge(id, "first", "user", 0.0).unwrap();
+        let res = s.expunge(id, "second", "user", 0.0);
         assert!(matches!(res, Err(SubstrateError::AlreadyTombstoned(_))));
     }
 
@@ -701,22 +752,22 @@ mod tests {
     fn withdraw_active_to_withdrawn() {
         let mut s = fresh_substrate();
         let id = s
-            .capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "test")
+            .capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "test", 0.0)
             .unwrap();
-        s.withdraw(id, "user").unwrap();
+        s.withdraw(id, "user", 0.0).unwrap();
         assert_eq!(s.rows.get(&id).unwrap().state, RowState::Withdrawn);
         // Re-confirm to active per cookbook (withdrawn, confirm → active).
         let adj_active: i64 = 0;
-        s.mutate(id, MutationKind::Confirm, adj_active, None, None, "user").unwrap();
+        s.mutate(id, MutationKind::Confirm, adj_active, None, None, "user", 0.0).unwrap();
         assert_eq!(s.rows.get(&id).unwrap().state, RowState::Active);
     }
 
     #[test]
     fn recall_filters_by_predicate() {
         let mut s = fresh_substrate();
-        s.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a").unwrap();
-        s.capture(NounType::AmbientSample, 0, 0, 0, anchor(), dummy_fp(), None, None, "a").unwrap();
-        let drawers = s.recall(|r| r.noun_type == NounType::Drawer, None);
+        s.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0).unwrap();
+        s.capture(NounType::AmbientSample, 0, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0).unwrap();
+        let drawers = s.recall(|r| r.noun_type == NounType::Drawer, None, 0.0);
         assert_eq!(drawers.len(), 1);
     }
 
@@ -724,9 +775,9 @@ mod tests {
     fn audit_events_advance_hlc() {
         let mut s = fresh_substrate();
         let h0 = s.hlc;
-        s.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a").unwrap();
+        s.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0).unwrap();
         let h1 = s.hlc;
-        s.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a").unwrap();
+        s.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0).unwrap();
         let h2 = s.hlc;
         assert!(h0 < h1);
         assert!(h1 < h2);
@@ -737,8 +788,8 @@ mod tests {
         // Same estate uuid + same call sequence → same row IDs.
         let mut s1 = Substrate::new(0xabcd_ef01_2345_6789_0000_0000_0000_0000, HLC::new(0, 0, 1));
         let mut s2 = Substrate::new(0xabcd_ef01_2345_6789_0000_0000_0000_0000, HLC::new(0, 0, 1));
-        let id1 = s1.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a").unwrap();
-        let id2 = s2.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a").unwrap();
+        let id1 = s1.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0).unwrap();
+        let id2 = s2.capture(NounType::Drawer, 0, 0, 0, anchor(), dummy_fp(), None, None, "a", 0.0).unwrap();
         assert_eq!(id1, id2);
     }
 }

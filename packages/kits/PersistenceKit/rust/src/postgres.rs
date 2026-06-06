@@ -970,6 +970,96 @@ impl Storage for PostgresStorage {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// StorageIntrospection — DB-layer health statistics for PostgreSQL.
+// ─────────────────────────────────────────────────────────────────────
+
+impl crate::introspection::StorageIntrospection for PostgresStorage {
+    /// Capture a point-in-time snapshot of PostgreSQL backend health.
+    ///
+    /// SQL rationale per query:
+    ///
+    /// `pg_database_size(current_database())` — returns the total on-disk size
+    /// of the current database in bytes, including tables, indexes, and TOAST.
+    ///
+    /// `pg_stat_database` — `blks_hit` and `blks_read` are cumulative counters
+    /// since the last stats reset. cache_hit_ratio = blks_hit / (blks_hit +
+    /// blks_read). A ratio near 1.0 means most reads are served from
+    /// shared_buffers. Returns None when blks_hit + blks_read == 0.
+    ///
+    /// `xact_commit` / `xact_rollback` / `deadlocks` — lifetime counters from
+    /// pg_stat_database. Monotonically increasing; callers diff successive
+    /// snapshots for rates.
+    ///
+    /// Lock contention: `pg_locks` with `granted = false` joined to the current
+    /// database OID. A non-zero count means at least one backend is currently
+    /// waiting for a lock in this database.
+    fn stats(&self, now_secs: i64) -> crate::error::StorageResult<crate::introspection::StorageStats> {
+        use crate::introspection::StorageStats;
+        use crate::error::StorageError;
+
+        let mut conn = self.checkout()?;
+        let client = conn.get_mut();
+
+        // Logical size.
+        let size_row = client
+            .query_one("SELECT pg_database_size(current_database()) AS sz", &[])
+            .map_err(|e| StorageError::BackendError { underlying: format!("pg_database_size: {e}") })?;
+        let logical_size: i64 = size_row.get::<_, i64>("sz");
+
+        // Cache hit ratio + transaction/deadlock counters from pg_stat_database.
+        let stat_row = client
+            .query_one(
+                "SELECT blks_hit, blks_read, xact_commit, xact_rollback, deadlocks \
+                 FROM pg_stat_database WHERE datname = current_database()",
+                &[],
+            )
+            .map_err(|e| StorageError::BackendError { underlying: format!("pg_stat_database: {e}") })?;
+
+        let blks_hit: i64 = stat_row.get::<_, i64>("blks_hit");
+        let blks_read: i64 = stat_row.get::<_, i64>("blks_read");
+        let total = blks_hit + blks_read;
+        let cache_hit_ratio = if total > 0 {
+            Some(blks_hit as f64 / total as f64)
+        } else {
+            None
+        };
+        let commit_count: i64 = stat_row.get::<_, i64>("xact_commit");
+        let rollback_count: i64 = stat_row.get::<_, i64>("xact_rollback");
+        let deadlock_count: i64 = stat_row.get::<_, i64>("deadlocks");
+
+        // Lock contention: any ungranted lock in the current database.
+        let lock_row = client
+            .query_one(
+                "SELECT COUNT(*) AS waiting \
+                 FROM pg_locks l \
+                 JOIN pg_database d ON d.oid = l.database \
+                 WHERE l.granted = false AND d.datname = current_database()",
+                &[],
+            )
+            .map_err(|e| StorageError::BackendError { underlying: format!("pg_locks: {e}") })?;
+        let waiting: i64 = lock_row.get::<_, i64>("waiting");
+        let lock_contention = waiting > 0;
+
+        Ok(StorageStats {
+            logical_size_bytes: logical_size,
+            page_size: None,
+            page_count: None,
+            freelist_page_count: None,
+            wal_frame_count: None,
+            cache_hit_ratio,
+            transaction_commit_count: Some(commit_count),
+            transaction_rollback_count: Some(rollback_count),
+            deadlock_count: Some(deadlock_count),
+            lock_contention: Some(lock_contention),
+            row_count: None,
+            blob_count: None,
+            vector_count: None,
+            captured_at_secs: now_secs,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Transaction context — routes all sub-store calls through one connection.
 //
 // PgTransactionContext wraps the single PooledClient checked out for the

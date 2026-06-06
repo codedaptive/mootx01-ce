@@ -591,6 +591,109 @@ impl StorageTransaction for SqliteStorage {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// StorageIntrospection — DB-layer health statistics.
+// ─────────────────────────────────────────────────────────────────────
+
+impl crate::introspection::StorageIntrospection for SqliteStorage {
+    /// Capture a point-in-time snapshot of SQLite backend health.
+    ///
+    /// PRAGMA choices:
+    ///
+    /// - `page_size`: constant for the DB file; required to derive WAL
+    ///   frame count from the file size.
+    /// - `page_count`: total allocated pages; multiply by page_size for
+    ///   raw file size.
+    /// - `freelist_count`: unused pages available for VACUUM reclaim.
+    ///
+    /// WAL frame count via file stat: `PRAGMA wal_checkpoint` acquires
+    /// a checkpointer lock and can fail with SQLITE_LOCKED when called from
+    /// inside a lock-holding Mutex guard. The safe alternative is to stat
+    /// the WAL file (`path + "-wal"`) directly.
+    /// WAL header = 32 bytes; each frame = page_size + 24 bytes.
+    /// Frame count = (file_size - 32) / (page_size + 24) when file_size > 32.
+    ///
+    /// Lock contention: `PRAGMA schema_version` is a read-only meta-query.
+    /// SQLITE_LOCKED on it means a cross-process exclusive lock; the Mutex
+    /// serializes same-process access.
+    fn stats(&self, now_secs: i64) -> crate::error::StorageResult<crate::introspection::StorageStats> {
+        use crate::introspection::StorageStats;
+        use crate::error::StorageError;
+
+        let guard = self.inner.lock().unwrap();
+
+        // page_size — constant; needed for logical-size and WAL frame math.
+        let page_size: i32 = guard
+            .conn
+            .query_row("PRAGMA page_size", [], |r| r.get::<_, i32>(0))
+            .map_err(|e| StorageError::BackendError { underlying: format!("pragma page_size: {e}") })?;
+
+        // page_count — total allocated pages (including freelist).
+        let page_count: i32 = guard
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get::<_, i32>(0))
+            .map_err(|e| StorageError::BackendError { underlying: format!("pragma page_count: {e}") })?;
+
+        // freelist_count — pages that VACUUM can reclaim.
+        let freelist_count: i32 = guard
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i32>(0))
+            .map_err(|e| StorageError::BackendError { underlying: format!("pragma freelist_count: {e}") })?;
+
+        let logical_size = i64::from(page_count) * i64::from(page_size);
+
+        // WAL frame count via filesystem stat — avoids calling PRAGMA wal_checkpoint,
+        // which acquires a checkpointer lock incompatible with the held Mutex guard.
+        // The WAL file path is the database path + "-wal".
+        let wal_frame_count: Option<i32> = if page_size > 0 {
+            let wal_path = match &self.config.backend {
+                BackendConfiguration::Sqlite { path, .. } => format!("{path}-wal"),
+                _ => String::new(),
+            };
+            match std::fs::metadata(&wal_path) {
+                Ok(meta) => {
+                    let file_size = meta.len();
+                    if file_size > 32 {
+                        // WAL header = 32 bytes; each frame = page_size + 24 bytes.
+                        let frame_size = u64::from(page_size as u32) + 24;
+                        Some(((file_size - 32) / frame_size) as i32)
+                    } else {
+                        Some(0)
+                    }
+                }
+                Err(_) => Some(0), // WAL file absent → no uncommitted frames.
+            }
+        } else {
+            None
+        };
+
+        // Lock contention: a trivial read-only PRAGMA that touches no user data.
+        // Returns SQLITE_LOCKED only when a cross-process exclusive lock exists
+        // (the Mutex above handles same-process serialization).
+        let lock_contention = guard
+            .conn
+            .query_row("PRAGMA schema_version", [], |r| r.get::<_, i32>(0))
+            .is_err();
+
+        Ok(StorageStats {
+            logical_size_bytes: logical_size,
+            page_size: if page_size > 0 { Some(page_size) } else { None },
+            page_count: if page_count > 0 { Some(page_count) } else { None },
+            freelist_page_count: Some(freelist_count),
+            wal_frame_count,
+            cache_hit_ratio: None,
+            transaction_commit_count: None,
+            transaction_rollback_count: None,
+            deadlock_count: None,
+            lock_contention: Some(lock_contention),
+            row_count: None,
+            blob_count: None,
+            vector_count: None,
+            captured_at_secs: now_secs,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // RowStore.
 // ─────────────────────────────────────────────────────────────────────
 

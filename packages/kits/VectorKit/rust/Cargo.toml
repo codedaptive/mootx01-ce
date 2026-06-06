@@ -14,9 +14,15 @@ path = "src/lib.rs"
 # Storage now flows through persistence-kit (any backend), not direct
 # rusqlite. EngramLib and SubstrateLib are still consumed for the
 # Engram type and the FloatSimHash projection. Rusqlite is gone.
+#
+# intellectus-lib: zero-dep telemetry floor. VectorStore emits search and
+# insert metrics via the report! macro, which is a no-op when monitoring is
+# disabled (the default). Off-path cost: one AtomicBool load + branch.
+# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
 [dependencies]
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 engram-lib = { path = "../../../libs/EngramLib/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
 uuid = { version = "1", features = ["v4"] }
+intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }

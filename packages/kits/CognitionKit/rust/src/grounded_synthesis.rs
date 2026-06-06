@@ -24,6 +24,7 @@ use std::collections::HashMap;
 
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
+use intellectus_lib::{report, StatSample};
 use locus_kit::filter::RecallFrame;
 use neuron_kit::{
     rerank, synthesize, ContextDocument, DrawerRow, DrawerRowMeta, RecallFrameTuning, RecallPage,
@@ -31,6 +32,45 @@ use neuron_kit::{
 
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
 use crate::error::{RecipeRunError, SubstrateError};
+
+// MARK: - Telemetry constants and helpers
+
+/// Stable metric name for recipe-run activity. Mirrors Swift
+/// `CognitionKitMetrics.recipeRun`.
+pub(crate) const METRIC_RECIPE_RUN: &str = "cognitionkit.recipe.run";
+
+/// Emit a recipe-start metric. `ts` is caller-supplied epoch seconds (f64).
+/// When monitoring is disabled, the report! macro argument is never evaluated:
+/// off-path cost is a single atomic load + branch.
+///
+/// Emits cognitionkit.recipe.run with status "start".
+#[inline(always)]
+pub(crate) fn emit_recipe_start(recipe: &str, ts: f64) {
+    // The report! macro short-circuits when Intellectus::is_enabled() is false.
+    // The HashMap construction only occurs on the on-path.
+    report!({
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("recipe".to_string(), recipe.to_string());
+        tags.insert("status".to_string(), "start".to_string());
+        StatSample::metric(METRIC_RECIPE_RUN.to_string(), 1.0, tags, ts)
+    });
+}
+
+/// Emit a recipe-complete metric. `step_count` is the number of discrete
+/// items processed (recalled drawers or benchmarked plans). When monitoring
+/// is disabled, zero cost.
+///
+/// Emits cognitionkit.recipe.run with status "complete" and step_count tag.
+#[inline(always)]
+pub(crate) fn emit_recipe_complete(recipe: &str, step_count: usize, ts: f64) {
+    report!({
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("recipe".to_string(), recipe.to_string());
+        tags.insert("status".to_string(), "complete".to_string());
+        tags.insert("step_count".to_string(), step_count.to_string());
+        StatSample::metric(METRIC_RECIPE_RUN.to_string(), step_count as f64, tags, ts)
+    });
+}
 
 /// Recipe output: the synthesized, provenance-grounded context document and
 /// the number of recalled drawers it was grounded on. Mirrors the Swift
@@ -61,6 +101,13 @@ pub fn run_grounded_synthesis(
         ],
         &shipped_capabilities(),
     )?;
+
+    // Emit recipe start AFTER the capability gate so we never fire a "start"
+    // for an invocation that will immediately throw. `now` is the
+    // caller-supplied timestamp — NEVER call a clock inside the engine
+    // (Rust parity of Swift determinism convention).
+    let start_ts = now as f64;
+    emit_recipe_start("grounded_synthesis", start_ts);
 
     // 1. Recall over the single GLK recall-verb boundary (now real). A recall
     //    failure (e.g. a stale handle) propagates as RecipeRunError::Substrate.
@@ -109,6 +156,11 @@ pub fn run_grounded_synthesis(
     };
     let drawer_count = page.rows.len();
     let context = synthesize(&page, &meta);
+
+    // Emit recipe complete. drawer_count is finalised before the emit call so
+    // the return value is identical whether monitoring is on or off (C-Det
+    // conformance: no output dependency on telemetry path).
+    emit_recipe_complete("grounded_synthesis", drawer_count, start_ts);
 
     Ok(GroundedOutput {
         context,

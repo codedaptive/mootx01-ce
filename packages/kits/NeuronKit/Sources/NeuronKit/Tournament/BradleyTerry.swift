@@ -26,6 +26,7 @@
 // invariant to the order of the `outcomes` array.
 
 import Foundation
+import IntellectusLib
 
 /// Structured errors raised by the Bradley-Terry fitter. Per the
 /// project convention, each module owns a typed `MOOTx01Error` enum
@@ -238,6 +239,29 @@ public func bradleyTerry(outcomes: [PairwiseOutcome]) throws -> [BradleyTerrySco
         if lhs.strength != rhs.strength { return lhs.strength > rhs.strength }
         return lhs.competitorID < rhs.competitorID
     }
+
+    // Emit Bradley-Terry update activity. The ts is the caller-supplied
+    // site's epoch seconds; here we read Date() once at the function boundary
+    // (a factory-level side-effect permitted per the determinism contract —
+    // the BT math itself uses no clock). When monitoring is off, zero cost.
+    //
+    // `neuronkit.tournament.bt_update`: one counter per completed fit.
+    // `neuronkit.tournament.competitor_count`: n competitors ranked.
+    // Both are metadata-only — no content crosses the telemetry boundary
+    // (GUI §4.4 Activity binds tournament-scoring activity to this metric).
+    Intellectus.report(.metric(
+        name: "neuronkit.tournament.bt_update",
+        value: 1.0,
+        tags: ["competitor_count": "\(scores.count)"],
+        ts: Date().timeIntervalSince1970
+    ))
+    Intellectus.report(.metric(
+        name: "neuronkit.tournament.competitor_count",
+        value: Double(scores.count),
+        tags: [:],
+        ts: Date().timeIntervalSince1970
+    ))
+
     return scores
 }
 

@@ -24,6 +24,11 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 uuid = { version = "1", features = ["v4"] }
+# IntellectusLib is the zero-dep telemetry floor. LocusKit emits
+# path, recall, and KG-fact operation metrics via the report! macro,
+# which is a no-op when monitoring is disabled (the default).
+# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 
 [dev-dependencies]
 # JSON parsing for LP-0 conformance vectors. Only used in tests/lp0_vectors.rs.

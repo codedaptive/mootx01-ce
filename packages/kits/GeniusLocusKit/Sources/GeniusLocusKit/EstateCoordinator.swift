@@ -1,4 +1,5 @@
 import Foundation
+import IntellectusLib
 import OSLog
 import LocusKit
 import PersistenceKit
@@ -87,7 +88,37 @@ public extension GeniusLocusKit {
         // log is fed lazily via feedAuditLog(for:); it starts empty so a
         // verify pass before any feed reports a clean, zero-entry chain.
         auditLogs[handle] = UnifiedAuditLog()
+        // Mark the estate mounted (GLK_PROVISION_001) so the admin plane
+        // can observe mount state without polling the registry directly.
+        mountStates[handle] = .mounted
         Self.log.info("opened estate \(handle.estateUUID, privacy: .public)")
+
+        // Telemetry: emit mount-state transition (GLK_ROLLUPS_001).
+        // The autoclosure is only evaluated when monitoring is enabled;
+        // the disabled-path cost is one Atomic<Bool> load (~1 ns).
+        let estateIDStr = handle.estateUUID.uuidString
+        Intellectus.report(.metric(
+            name: GLKMetricName.mountStateTransition,
+            value: 1.0,
+            tags: ["estate_id": estateIDStr, "state": "mounted"],
+            ts: Date().timeIntervalSince1970
+        ))
+
+        // Telemetry: emit noun count snapshot at admission time (GLK_ROLLUPS_001).
+        // Non-zero for re-opened existing estates; zero for freshly created ones.
+        // Drawer count is read lazily inside the autoclosure — only when monitoring
+        // is enabled — so there is zero overhead on the disabled path.
+        if Intellectus.isEnabled,
+           let liveEstate = registry[handle] {
+            let count = (try? await liveEstate.allDrawers().filter { $0.tombstonedAt == nil }.count) ?? 0
+            Intellectus.report(.metric(
+                name: GLKMetricName.nounCount,
+                value: Double(count),
+                tags: ["estate_id": estateIDStr],
+                ts: Date().timeIntervalSince1970
+            ))
+        }
+
         return handle
     }
 
@@ -135,6 +166,9 @@ public extension GeniusLocusKit {
             kgStores[handle] = nil
             matrixTiers[handle] = nil
             nodeTopologyProviders[handle] = nil
+            corpusKits[handle] = nil
+            vectorStores[handle] = nil
+            mountStates[handle] = nil
             dropGrantSurface(for: handle)
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")
         }
@@ -144,8 +178,24 @@ public extension GeniusLocusKit {
         kgStores[handle] = nil
         matrixTiers[handle] = nil
         nodeTopologyProviders[handle] = nil
+        // Drop corpus and vector store registrations (GLK_PROVISION_001):
+        // these are set by provision() and must be released with the estate.
+        // Register-only path (existing callers) also sets these via
+        // registerCorpus/registerVectorStore — both paths benefit from cleanup.
+        corpusKits[handle] = nil
+        vectorStores[handle] = nil
+        mountStates[handle] = nil
         dropGrantSurface(for: handle)
         Self.log.info("closed estate \(handle.estateUUID, privacy: .public)")
+
+        // Telemetry: emit mount-state transition to unmounted (GLK_ROLLUPS_001).
+        // Emitted after all registry cleanup so the closed state is authoritative.
+        Intellectus.report(.metric(
+            name: GLKMetricName.mountStateTransition,
+            value: 1.0,
+            tags: ["estate_id": handle.estateUUID.uuidString, "state": "unmounted"],
+            ts: Date().timeIntervalSince1970
+        ))
     }
 
     // MARK: - estate(for:)

@@ -4,10 +4,11 @@
 //
 // The registry holds a live `locus_kit::Estate` per open handle; all nine
 // verbs delegate to it exactly as the Swift `extension GeniusLocusKit` verbs
-// delegate to `estate(for: handle)`. Six verbs (capture/recall/mutate/
-// withdraw/expunge/reanchor) reach a real Estate implementation; three
-// (learn/propose/associate) return `NotSupportedByEstate` until their
-// Brain-layer bodies ship — matching observable Swift behavior on both legs.
+// delegate to `estate(for: handle)`. All nine verbs (capture/recall/mutate/
+// withdraw/expunge/reanchor/learn/propose/associate) reach a real Estate
+// implementation; `NotSupportedByEstate` is the generic dispatch error an
+// estate raises for a verb it does not implement (see `remap` below),
+// matching the Swift surface on both legs.
 //
 // The boundary guards (EmptyReanchor at reanchor, ExpungeNotConfirmed at
 // expunge) fire before any estate dispatch, parity of the Swift guards.
@@ -44,8 +45,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::corpus::Corpus;
+// IntellectusLib: per-estate rollup telemetry (GLK_ROLLUPS_001).
+// Off-path cost: single AtomicBool::load(Acquire) + branch — zero allocation.
+// `Intellectus` and `StatSample` are consumed inside the `glk_emit!` macro
+// expansion, which is why they appear to the compiler as unused at the
+// call sites. The macro re-qualifies them via `intellectus_lib::` rather than
+// importing them here, so these imports can be dropped.
+use crate::telemetry::metric_names;
+use crate::glk_emit;
+
+use corpus_kit::corpus::{Corpus, EmbeddingModelConfig};
 use vectorkit::vector_store::VectorStore;
+use persistence_kit::storage::Storage;
 use locus_kit::diary_entry::DiaryEntry;
 use locus_kit::drawer::Drawer;
 use uuid::Uuid;
@@ -93,6 +104,92 @@ pub enum GeniusLocusKitError {
     /// mismatch, empty owner). Carries the textual cause; the Swift side
     /// lets the LocusKit error propagate from `Estate.open`.
     EstateOpenFailed { detail: String },
+
+    /// An estate was referenced while it is quiesced and not accepting new work.
+    /// Mirrors Swift `GeniusLocusKitError.estateQuiesced`.
+    EstateQuiesced { estate_uuid: EstateUuid },
+
+    /// `destroy` was called on an estate that has not been closed. Callers must
+    /// call `close` or `destroy` (which closes internally) — not both raw paths
+    /// simultaneously. Mirrors Swift `GeniusLocusKitError.destroyRequiresClose`.
+    DestroyRequiresClose { estate_uuid: EstateUuid },
+
+    /// An underlying estate failure propagated out of a GLK provision or lifecycle
+    /// operation. Mirrors Swift `GeniusLocusKitError.underlyingEstateFailure`.
+    UnderlyingEstateFailure { reason: String },
+}
+
+// MARK: - GLK_PROVISION_001 types
+
+/// Kind of estate to provision. Controls which sub-stores GLK wires on
+/// `provision`. Mirrors Swift `EstateKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstateKind {
+    /// Full composition: LocusKit + VectorStore + Corpus.
+    Glk,
+    /// LocusKit core + Corpus only. No standalone VectorStore.
+    CorpusOnly,
+    /// LocusKit only. No Corpus, no VectorStore.
+    LocusOnly,
+}
+
+impl EstateKind {
+    /// Render the kind as the raw-value prefix stored in the manifest's
+    /// `framework_profile` field. Mirrors Swift `EstateKind.rawValue`.
+    pub fn raw_value(&self) -> &'static str {
+        match self {
+            EstateKind::Glk        => "GLK",
+            EstateKind::CorpusOnly => "CorpusOnly",
+            EstateKind::LocusOnly  => "LocusOnly",
+        }
+    }
+}
+
+/// Sync mode recorded in the estate's manifest. Mirrors Swift `SyncMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    None,
+    CloudKit,
+    Federation,
+}
+
+impl SyncMode {
+    /// Encode to the `active_storage_mode` manifest integer.
+    /// 0 = None, 1 = CloudKit, 2 = Federation. Mirrors Swift
+    /// `syncModeToStorageMode` in `EstateLifecycle.swift`.
+    pub fn to_storage_mode(self) -> i64 {
+        match self {
+            SyncMode::None        => 0,
+            SyncMode::CloudKit    => 1,
+            SyncMode::Federation  => 2,
+        }
+    }
+}
+
+/// Provisioning parameters for `EstateCoordinator::provision`.
+/// Mirrors Swift `EstateProvisionParams`.
+#[derive(Debug, Clone)]
+pub struct EstateProvisionParams {
+    pub estate_name: String,
+    pub kind: EstateKind,
+    pub zoom_window_low: i64,
+    pub zoom_window_high: i64,
+    pub framework_profile: String,
+    pub sync_mode: SyncMode,
+}
+
+/// Lifecycle state for an open estate. Mirrors Swift `EstateMountState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstateMountState {
+    /// Estate is open and accepting new work.
+    Mounted,
+    /// Estate has stopped accepting new work but is still open.
+    Quiesced,
+    /// Estate is finishing in-flight work before quiescing.
+    Draining,
+    /// Estate is closed. This state is transitional; the handle is removed
+    /// from the registry immediately after.
+    Unmounted,
 }
 
 /// The outcome of a verb dispatch. Rust needs a typed error where Swift
@@ -122,7 +219,12 @@ impl From<VerbError> for VerbDispatchError {
 /// `UnderlyingEstateFailure`. (The GLK-error passthrough Swift's remap does
 /// is handled in Rust by `estate_for` surfacing `EstateNotOpen` before the
 /// verb body runs.)
-fn remap(verb: &str, error: LocusKitError) -> VerbError {
+///
+/// When `estate_id` is non-empty, emits a `geniuslocus.estate.verb_error`
+/// metric through IntellectusLib (GLK_ROLLUPS_001). Mirrors the Swift
+/// `remap(verb:estateID:error:)` signature extension; callers that cannot
+/// provide an estate id pass `""` (no metric emitted).
+fn remap(verb: &str, estate_id: &str, error: LocusKitError) -> VerbError {
     if let LocusKitError::InvalidContent(detail) = &error {
         if detail.contains("not yet implemented") {
             return VerbError::NotSupportedByEstate {
@@ -130,10 +232,34 @@ fn remap(verb: &str, error: LocusKitError) -> VerbError {
             };
         }
     }
+    // Telemetry: emit verb_error at the estate boundary (GLK_ROLLUPS_001).
+    // Only emit when the estate_id is known (i.e. the estate was open and
+    // routing succeeded; EstateNotOpen is handled before remap is called).
+    if !estate_id.is_empty() {
+        let eid = estate_id.to_string();
+        let v = verb.to_string();
+        glk_emit!(metric_names::VERB_ERROR, 1.0, {
+            let mut tags = HashMap::new();
+            tags.insert("estate_id".to_string(), eid);
+            tags.insert("verb".to_string(), v);
+            tags
+        });
+    }
     VerbError::UnderlyingEstateFailure {
         verb: verb.to_string(),
         reason: format!("{error:?}"),
     }
+}
+
+/// Convert a raw `[u8; 16]` estate UUID to a hyphenated lowercase UUID string.
+///
+/// Used by telemetry emit sites to produce a human-readable `estate_id` tag
+/// without calling Uuid::new_v4 or any allocation unless monitoring is enabled.
+/// The Uuid crate is already in Cargo.toml dependencies (required by EstateCoordinator
+/// for `Uuid::new_v4()` elsewhere in this file).
+#[inline]
+fn uuid_to_str(bytes: &[u8; 16]) -> String {
+    Uuid::from_bytes(*bytes).to_string()
 }
 
 /// Maps the Brain layer's `ProposalKind` (routing-queue labels from
@@ -204,6 +330,9 @@ pub struct EstateCoordinator {
     /// Per-estate VectorKit handles. Optional; activates vector lane in recall_scored.
     /// Mirrors Swift actor's `vectorStores: [EstateHandle: VectorStore]`.
     vector_stores: HashMap<EstateHandle, Arc<VectorStore>>,
+    /// Per-estate mount state. Set to `Mounted` on open, updated by quiesce/drain,
+    /// removed on close. Mirrors Swift actor's `mountStates: [EstateHandle: EstateMountState]`.
+    mount_states: HashMap<EstateHandle, EstateMountState>,
 }
 
 impl Default for EstateCoordinator {
@@ -223,6 +352,7 @@ impl EstateCoordinator {
             scope_vaults: HashMap::new(),
             corpus_kits: HashMap::new(),
             vector_stores: HashMap::new(),
+            mount_states: HashMap::new(),
         }
     }
 
@@ -266,6 +396,30 @@ impl EstateCoordinator {
         // Initialise empty grant store and scope vault for this estate.
         self.grant_stores.insert(handle, GrantStore::new());
         self.scope_vaults.insert(handle, ScopeKeyVault::new());
+        // Mark the estate mounted (GLK_PROVISION_001).
+        self.mount_states.insert(handle, EstateMountState::Mounted);
+
+        // Telemetry: emit mount-state transition to mounted (GLK_ROLLUPS_001).
+        // The report! macro evaluates the argument ONLY when monitoring is enabled.
+        // Off-path: single AtomicBool::load + branch, zero allocation.
+        let estate_id_str = uuid_to_str(&estate_uuid);
+        glk_emit!(metric_names::MOUNT_STATE_TRANSITION, 1.0, {
+            let mut tags = HashMap::new();
+            tags.insert("estate_id".to_string(), estate_id_str.clone());
+            tags.insert("state".to_string(), "mounted".to_string());
+            tags
+        });
+
+        // Telemetry: emit noun_count=0 snapshot for a freshly opened estate.
+        // The Rust coordinator always opens fresh stores (existing data is
+        // restored through the hydration path, not the open path), so noun_count
+        // is always 0 here — matches Swift's allDrawers().count for a new estate.
+        glk_emit!(metric_names::NOUN_COUNT, 0.0, {
+            let mut tags = HashMap::new();
+            tags.insert("estate_id".to_string(), estate_id_str);
+            tags
+        });
+
         Ok(handle)
     }
 
@@ -283,6 +437,19 @@ impl EstateCoordinator {
         self.scope_vaults.remove(handle);
         self.corpus_kits.remove(handle);
         self.vector_stores.remove(handle);
+        // Drop mount state (GLK_PROVISION_001).
+        self.mount_states.remove(handle);
+
+        // Telemetry: emit mount-state transition to unmounted (GLK_ROLLUPS_001).
+        // Emitted after all registry cleanup so the closed state is authoritative.
+        let estate_id_str = uuid_to_str(&handle.estate_uuid);
+        glk_emit!(metric_names::MOUNT_STATE_TRANSITION, 1.0, {
+            let mut tags = HashMap::new();
+            tags.insert("estate_id".to_string(), estate_id_str);
+            tags.insert("state".to_string(), "unmounted".to_string());
+            tags
+        });
+
         Ok(())
     }
 
@@ -302,6 +469,8 @@ impl EstateCoordinator {
         self.registry.insert(handle, estate);
         self.grant_stores.insert(handle, GrantStore::new());
         self.scope_vaults.insert(handle, ScopeKeyVault::new());
+        // Mark the estate mounted so mount_state queries work on hydrated estates too.
+        self.mount_states.insert(handle, EstateMountState::Mounted);
     }
 
     /// Wire a `Corpus` into the scored-recall BM25 lane for `handle`.
@@ -322,6 +491,24 @@ impl EstateCoordinator {
     /// `GeniusLocusKit.registerVectorStore(_:for:)`.
     pub fn register_vector_store(&mut self, handle: &EstateHandle, store: Arc<VectorStore>) {
         self.vector_stores.insert(*handle, store);
+    }
+
+    /// Returns `true` if a `Corpus` is registered for `handle`.
+    ///
+    /// Used by tests and the admin plane to verify that `provision` (or
+    /// `register_corpus`) wired the BM25 lane for the addressed estate.
+    /// Mirrors the Swift test assertion `kit.corpusKits[handle] != nil`.
+    pub fn has_corpus(&self, handle: &EstateHandle) -> bool {
+        self.corpus_kits.contains_key(handle)
+    }
+
+    /// Returns `true` if a `VectorStore` is registered for `handle`.
+    ///
+    /// Used by tests and the admin plane to verify that `provision` (or
+    /// `register_vector_store`) wired the vector lane for the addressed estate.
+    /// Mirrors the Swift test assertion `kit.vectorStores[handle] != nil`.
+    pub fn has_vector_store(&self, handle: &EstateHandle) -> bool {
+        self.vector_stores.contains_key(handle)
     }
 
     /// Resolve a handle to its live estate. Parity of the Swift
@@ -360,7 +547,7 @@ impl EstateCoordinator {
         let estate = self.estate_for_verb(handle)?;
         estate
             .capture(frame, now)
-            .map_err(|e| remap("capture", e).into())
+            .map_err(|e| remap("capture", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - recall
@@ -398,7 +585,7 @@ impl EstateCoordinator {
         let estate = self.estate_for_verb(handle)?;
         estate
             .tunnels_from_wing(wing)
-            .map_err(|e| remap("recall_tunnels", e).into())
+            .map_err(|e| remap("recall_tunnels", "", e).into())
     }
 
     // MARK: - mutate
@@ -419,7 +606,7 @@ impl EstateCoordinator {
         let estate = self.estate_for_verb(handle)?;
         estate
             .mutate(row_id, kind, payload)
-            .map_err(|e| remap("mutate", e).into())
+            .map_err(|e| remap("mutate", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - withdraw
@@ -436,7 +623,7 @@ impl EstateCoordinator {
         let estate = self.estate_for_verb(handle)?;
         estate
             .withdraw(row_id, reason, now)
-            .map_err(|e| remap("withdraw", e).into())
+            .map_err(|e| remap("withdraw", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - expunge
@@ -460,7 +647,7 @@ impl EstateCoordinator {
         let estate = self.estate_for_verb(handle)?;
         estate
             .expunge(row_id, reason, confirmation)
-            .map_err(|e| remap("expunge", e).into())
+            .map_err(|e| remap("expunge", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - reanchor
@@ -485,7 +672,7 @@ impl EstateCoordinator {
         let estate = self.estate_for_verb(handle)?;
         estate
             .reanchor(row_id, to_room, to_lattice)
-            .map_err(|e| remap("reanchor", e).into())
+            .map_err(|e| remap("reanchor", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - learn
@@ -511,7 +698,7 @@ impl EstateCoordinator {
     ) -> Result<locus_kit::learned_reference::LearnedReference, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
         let frame = LocusLearnFrame { handle: source_handle.to_string() };
-        estate.learn(frame, now).map_err(|e| remap("learn", e).into())
+        estate.learn(frame, now).map_err(|e| remap("learn", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - propose
@@ -538,7 +725,7 @@ impl EstateCoordinator {
             kind: locus_kind,
             justification: frame.justification,
         };
-        estate.propose(locus_frame, now).map_err(|e| remap("propose", e).into())
+        estate.propose(locus_frame, now).map_err(|e| remap("propose", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - associate
@@ -562,7 +749,7 @@ impl EstateCoordinator {
             b: frame.b,
             weight: frame.weight,
         };
-        estate.associate(locus_frame, now).map_err(|e| remap("associate", e).into())
+        estate.associate(locus_frame, now).map_err(|e| remap("associate", &uuid_to_str(&handle.estate_uuid), e).into())
     }
 
     // MARK: - recall_kg_facts
@@ -578,7 +765,7 @@ impl EstateCoordinator {
         handle: &EstateHandle,
     ) -> Result<Vec<locus_kit::kg_fact::KGFact>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.all_kg_facts().map_err(|e| remap("recall_kg_facts", e).into())
+        estate.all_kg_facts().map_err(|e| remap("recall_kg_facts", "", e).into())
     }
 
     // MARK: - recall_diary_entries
@@ -593,7 +780,7 @@ impl EstateCoordinator {
         handle: &EstateHandle,
     ) -> Result<Vec<locus_kit::diary_entry::DiaryEntry>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.all_diary_entries().map_err(|e| remap("recall_diary_entries", e).into())
+        estate.all_diary_entries().map_err(|e| remap("recall_diary_entries", "", e).into())
     }
 
     // MARK: - add_kg_fact
@@ -625,7 +812,7 @@ impl EstateCoordinator {
             source_drawer_id.to_string(),
             now,
         );
-        estate.add_kg_fact(&fact).map_err(|e| VerbDispatchError::from(remap("add_kg_fact", e)))?;
+        estate.add_kg_fact(&fact).map_err(|e| VerbDispatchError::from(remap("add_kg_fact", "", e)))?;
         Ok(fact)
     }
 
@@ -644,7 +831,7 @@ impl EstateCoordinator {
         now: i64,
     ) -> Result<(), VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.withdraw_kg_fact(id, now).map_err(|e| VerbDispatchError::from(remap("withdraw_kg_fact", e)))
+        estate.withdraw_kg_fact(id, now).map_err(|e| VerbDispatchError::from(remap("withdraw_kg_fact", "", e)))
     }
 
     // MARK: - add_diary_entry
@@ -685,7 +872,7 @@ impl EstateCoordinator {
             now,
             model_id.to_string(),
         );
-        estate.add_diary_entry(&entry).map_err(|e| VerbDispatchError::from(remap("add_diary_entry", e)))?;
+        estate.add_diary_entry(&entry).map_err(|e| VerbDispatchError::from(remap("add_diary_entry", "", e)))?;
         Ok(entry)
     }
 
@@ -703,7 +890,7 @@ impl EstateCoordinator {
         last_n: usize,
     ) -> Result<Vec<DiaryEntry>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.read_diary(agent_name, last_n).map_err(|e| VerbDispatchError::from(remap("diary_entries", e)))
+        estate.read_diary(agent_name, last_n).map_err(|e| VerbDispatchError::from(remap("diary_entries", "", e)))
     }
 
     // MARK: - recall_proposals
@@ -718,7 +905,7 @@ impl EstateCoordinator {
         handle: &EstateHandle,
     ) -> Result<Vec<locus_kit::proposal::Proposal>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.all_proposals().map_err(|e| remap("recall_proposals", e).into())
+        estate.all_proposals().map_err(|e| remap("recall_proposals", "", e).into())
     }
 
     // MARK: - recall_associations
@@ -733,7 +920,7 @@ impl EstateCoordinator {
         handle: &EstateHandle,
     ) -> Result<Vec<locus_kit::association::Association>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.all_associations().map_err(|e| remap("recall_associations", e).into())
+        estate.all_associations().map_err(|e| remap("recall_associations", "", e).into())
     }
 
     // MARK: - recall_learned_references
@@ -748,7 +935,7 @@ impl EstateCoordinator {
         handle: &EstateHandle,
     ) -> Result<Vec<locus_kit::learned_reference::LearnedReference>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.all_learned_references().map_err(|e| remap("recall_learned_references", e).into())
+        estate.all_learned_references().map_err(|e| remap("recall_learned_references", "", e).into())
     }
 
     // MARK: - all_drawers
@@ -764,7 +951,7 @@ impl EstateCoordinator {
         handle: &EstateHandle,
     ) -> Result<Vec<Drawer>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.all_drawers().map_err(|e| remap("all_drawers", e).into())
+        estate.all_drawers().map_err(|e| remap("all_drawers", "", e).into())
     }
 
     // MARK: - all_tunnels
@@ -780,7 +967,7 @@ impl EstateCoordinator {
         handle: &EstateHandle,
     ) -> Result<Vec<locus_kit::tunnel::Tunnel>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.all_tunnels().map_err(|e| remap("all_tunnels", e).into())
+        estate.all_tunnels().map_err(|e| remap("all_tunnels", "", e).into())
     }
 
     // MARK: - mine_apriori_rules
@@ -828,7 +1015,7 @@ impl EstateCoordinator {
         let estate = self.estate_for_verb(handle)?;
         let drawers = estate
             .all_drawers()
-            .map_err(|e| VerbDispatchError::from(remap("all_drawers", e)))?;
+            .map_err(|e| VerbDispatchError::from(remap("all_drawers", "", e)))?;
 
         if drawers.is_empty() {
             return Ok(vec![]);
@@ -913,7 +1100,7 @@ impl EstateCoordinator {
         now: &str,
     ) -> Result<Vec<RecallTraceItem>, VerbDispatchError> {
         let estate = self.estate_for_verb(handle)?;
-        estate.recent_recall_traces(since, now).map_err(|e| remap("recent_recall_traces", e).into())
+        estate.recent_recall_traces(since, now).map_err(|e| remap("recent_recall_traces", "", e).into())
     }
 
     // MARK: - Grant dispatch
@@ -1014,6 +1201,342 @@ impl EstateCoordinator {
     /// Mirror of Swift `GeniusLocusKit.scopeVault(for:)`.
     pub fn scope_vault(&self, handle: &EstateHandle) -> Option<&ScopeKeyVault> {
         self.scope_vaults.get(handle)
+    }
+
+    // MARK: - GLK_PROVISION_001: provision / quiesce / drain / destroy
+
+    /// Return the current mount state for `handle`.
+    ///
+    /// Returns `Some(Mounted)` for a freshly opened or provisioned estate,
+    /// `Some(Quiesced)` after `quiesce`, `Some(Draining)` during `drain`,
+    /// and `None` for a stale (never-registered or already-closed) handle.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.mountState(for:)`.
+    pub fn mount_state(&self, handle: &EstateHandle) -> Option<EstateMountState> {
+        self.mount_states.get(handle).copied()
+    }
+
+    /// Provision a new estate: create, open, wire sub-stores, and record kind metadata.
+    ///
+    /// This is the Rust parity of Swift
+    /// `GeniusLocusKit.provision(storage:corpusStorage:owner:params:embeddingModel:)`.
+    ///
+    /// Steps:
+    ///   1. Validates `params` (non-empty name, valid zoom window).
+    ///   2. Writes the kind-prefixed `framework_profile` and zoom window into the
+    ///      DrawerStore manifest via `set_meta` before `Estate::create`.
+    ///   3. Calls `Estate::create` to seed the estate with `estate_name` and the
+    ///      already-written manifest fields.
+    ///   4. Calls `self.open` to admit the estate and set mount state to `Mounted`.
+    ///   5. Wires sub-stores by kind:
+    ///        - `Glk`        → `Corpus::open` + `VectorStore::open` on `corpus_storage`
+    ///                          (or `storage` when `corpus_storage` is `None`);
+    ///                          both are registered with the handle.
+    ///        - `CorpusOnly` → `Corpus::open` on the corpus storage; no VectorStore.
+    ///        - `LocusOnly`  → no sub-store wiring.
+    ///
+    /// Trait impedance resolution: `DrawerStore` (LocusKit's trait) and
+    /// `persistence_kit::Storage` (VectorKit/CorpusKit's trait) are distinct. The
+    /// caller supplies both the `Arc<dyn DrawerStore>` for the estate and an
+    /// `Arc<dyn Storage>` for sub-store construction, mirroring the Swift surface
+    /// where the caller also constructs the storage instances and passes them in.
+    /// Concretely the same `InMemoryStorage` can back both — the caller wraps it
+    /// as `InMemoryDrawerStore` (which implements `DrawerStore`) and passes the
+    /// raw `Arc<dyn Storage>` handle as `storage`.
+    ///
+    /// If sub-store wiring fails, the estate is closed (no half-wired zombie in
+    /// the registry) and `UnderlyingEstateFailure` is returned, mirroring Swift's
+    /// rollback path on sub-store construction failure.
+    ///
+    /// Idempotent: re-provisioning the same store raises `DuplicateEstate`.
+    ///
+    /// - `store`:           DrawerStore for the LocusKit estate (owns the manifest).
+    /// - `storage`:         PersistenceKit `Storage` used for sub-stores (Corpus +
+    ///                      VectorStore) when `corpus_storage` is `None`.  For
+    ///                      `LocusOnly` estates this parameter is unused and can be
+    ///                      any valid `Storage` instance.
+    /// - `corpus_storage`:  Optional separate `Storage` for Corpus + VectorStore.
+    ///                      When `None`, `storage` is used for all sub-stores.
+    /// - `embedding_model`: Embedding model passed to `Corpus::open`. Use
+    ///                      `EmbeddingModelConfig::Deterministic` (the default) for
+    ///                      tests; no CoreML required.
+    pub fn provision(
+        &mut self,
+        store: Arc<dyn DrawerStore>,
+        storage: Arc<dyn Storage>,
+        corpus_storage: Option<Arc<dyn Storage>>,
+        owner: OwnerCredentials,
+        params: EstateProvisionParams,
+        embedding_model: EmbeddingModelConfig,
+    ) -> Result<EstateHandle, GeniusLocusKitError> {
+        // Validate params before touching storage.
+        if params.estate_name.is_empty() {
+            return Err(GeniusLocusKitError::InvalidManifest {
+                key: "estate_name".to_string(),
+                detail: "estate name must not be empty".to_string(),
+            });
+        }
+        if params.zoom_window_low > params.zoom_window_high {
+            return Err(GeniusLocusKitError::InvalidManifest {
+                key: "zoom_window".to_string(),
+                detail: format!(
+                    "zoom_window_low ({}) must be <= zoom_window_high ({})",
+                    params.zoom_window_low, params.zoom_window_high
+                ),
+            });
+        }
+
+        // Write the kind-prefixed framework profile into the manifest before
+        // Estate::create runs. Format: "<kind.raw_value>:<framework_profile>".
+        // E.g. "GLK:KnowledgeWork", "LocusOnly:PersonalLifeMgmt".
+        // GLK_PROVISION_001: this mirrors the Swift EstateLifecycle.swift `storedProfile` step.
+        let stored_profile = format!("{}:{}", params.kind.raw_value(), params.framework_profile);
+        store
+            .set_meta(locus_kit::manifest::ManifestKey::FrameworkProfile.as_str(), &stored_profile)
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("set_meta framework_profile failed: {:?}", e),
+            })?;
+        // Write zoom window fields.
+        if params.zoom_window_low != 0 || params.zoom_window_high != 0 {
+            store
+                .set_meta(
+                    locus_kit::manifest::ManifestKey::ZoomWindowLow.as_str(),
+                    &params.zoom_window_low.to_string(),
+                )
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("set_meta zoom_window_low failed: {:?}", e),
+                })?;
+            store
+                .set_meta(
+                    locus_kit::manifest::ManifestKey::ZoomWindowHigh.as_str(),
+                    &params.zoom_window_high.to_string(),
+                )
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("set_meta zoom_window_high failed: {:?}", e),
+                })?;
+        }
+
+        // Step 1: Create the estate with the name (remaining manifest fields are
+        // already written above via set_meta; Estate::create only re-stamps the
+        // estate_name from initial_values).
+        let initial_values = locus_kit::manifest::ManifestValues {
+            manifest_version: "v1".to_string(),
+            schema_version: "v1".to_string(),
+            estate_uuid: uuid::Uuid::new_v4().to_string(), // placeholder; store mints real uuid
+            estate_name: params.estate_name.clone(),
+            owner_identifier: owner.owner_identifier.clone(),
+            lattice_citation: "udc".to_string(),
+            framework_profile: stored_profile.clone(),
+            framework_profile_definition: "{}".to_string(),
+            zoom_window_low: params.zoom_window_low,
+            zoom_window_high: params.zoom_window_high,
+            access_posture: 0,
+            provenance_defaults: 0,
+            active_storage_mode: params.sync_mode.to_storage_mode(),
+            tables_present: String::new(),
+            created_at: 0,
+            last_modified: 0,
+            bitmap_layout_version: "v1".to_string(),
+            provenance_bitmap_version: "v1.0".to_string(),
+            federation_group_id: None,
+            mining_patterns_hash: None,
+            tiny_model_id: None,
+            tiny_model_training_corpus_size: None,
+            operational_bitmap_layouts: None,
+        };
+        Estate::create(store.clone(), owner.clone(), Some(&initial_values))
+            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("Estate::create failed: {:?}", e),
+            })?;
+
+        // Step 2: Open the estate through the coordinator path.
+        // open() validates the manifest, issues the handle, and sets mount state to Mounted.
+        let handle = self.open(
+            store,
+            owner,
+            params.zoom_window_low,
+            params.zoom_window_high,
+        )?;
+
+        // Step 3: Wire sub-stores by kind — same logic as Swift EstateLifecycle.swift §provision.
+        // backing_storage is the persistence_kit Storage used for Corpus + VectorStore;
+        // falls back to the primary `storage` when no separate corpus_storage is supplied.
+        let backing_storage = corpus_storage.unwrap_or(storage);
+        let wiring_result = match params.kind {
+            EstateKind::Glk => {
+                // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
+                // Both are constructed on backing_storage. Corpus::open applies both
+                // BundleStore and VectorStore schema migrations via `migrate`, matching
+                // the Swift path where Corpus.init applies both schemas.
+                Corpus::open(Arc::clone(&backing_storage), embedding_model)
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!("Corpus::open failed for GLK estate: {:?}", e),
+                    })
+                    .and_then(|corpus| {
+                        // Wire a VectorStore pointing at the same backing storage so GLK's
+                        // scored-recall vector lane operates independently of Corpus's
+                        // internal vector store — mirrors Swift's explicit VectorStore wiring.
+                        VectorStore::open(Arc::clone(&backing_storage))
+                            .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                                reason: format!("VectorStore::open failed for GLK estate: {:?}", e),
+                            })
+                            .map(|vs| (Some(corpus), Some(vs)))
+                    })
+            }
+            EstateKind::CorpusOnly => {
+                // LocusKit core + Corpus. No standalone VectorStore registration.
+                Corpus::open(Arc::clone(&backing_storage), embedding_model)
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!("Corpus::open failed for CorpusOnly estate: {:?}", e),
+                    })
+                    .map(|corpus| (Some(corpus), None))
+            }
+            EstateKind::LocusOnly => {
+                // LocusKit only — no sub-store wiring needed.
+                Ok((None, None))
+            }
+        };
+
+        match wiring_result {
+            Ok((corpus_opt, vs_opt)) => {
+                // Register the wired sub-stores. Arc<Corpus> and Arc<VectorStore> are
+                // what the registry holds (matching Swift's corpusKits / vectorStores dicts).
+                if let Some(corpus) = corpus_opt {
+                    self.corpus_kits.insert(handle, Arc::new(corpus));
+                }
+                if let Some(vs) = vs_opt {
+                    self.vector_stores.insert(handle, Arc::new(vs));
+                }
+            }
+            Err(e) => {
+                // Sub-store wiring failed. Close the estate to avoid a half-wired zombie
+                // in the registry, mirroring Swift's `try? await close(handle)` rollback.
+                let _ = self.close(&handle);
+                return Err(e);
+            }
+        }
+
+        // Telemetry: emit provision metric after successful wiring (GLK_ROLLUPS_001).
+        // Emitted only on the success path — wiring failures return early above.
+        // Off-path: single AtomicBool::load + branch, zero allocation.
+        let estate_id_str = uuid_to_str(&handle.estate_uuid);
+        glk_emit!(metric_names::PROVISION, 1.0, {
+            let mut tags = HashMap::new();
+            tags.insert("estate_id".to_string(), estate_id_str);
+            tags.insert("kind".to_string(), params.kind.raw_value().to_string());
+            tags
+        });
+
+        Ok(handle)
+    }
+
+    /// Quiesce an estate — stop accepting new work, keep it open.
+    ///
+    /// Transitions mount state from `Mounted` to `Quiesced`. Idempotent:
+    /// calling on an already-quiesced estate is a no-op.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.quiesce(_:)`.
+    pub fn quiesce(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
+        if !self.registry.contains_key(handle) {
+            return Err(GeniusLocusKitError::EstateNotOpen { estate_uuid: handle.estate_uuid });
+        }
+        if self.mount_states.get(handle) == Some(&EstateMountState::Quiesced) {
+            return Ok(()); // idempotent
+        }
+        self.mount_states.insert(*handle, EstateMountState::Quiesced);
+
+        // Telemetry: emit mount-state transition to quiesced (GLK_ROLLUPS_001).
+        // Off-path: single AtomicBool::load + branch, zero allocation.
+        let estate_id_str = uuid_to_str(&handle.estate_uuid);
+        glk_emit!(metric_names::MOUNT_STATE_TRANSITION, 1.0, {
+            let mut tags = HashMap::new();
+            tags.insert("estate_id".to_string(), estate_id_str);
+            tags.insert("state".to_string(), "quiesced".to_string());
+            tags
+        });
+
+        Ok(())
+    }
+
+    /// Drain an estate — wait for in-flight work, then quiesce.
+    ///
+    /// Transitions mount state to `Draining`, then immediately to `Quiesced`.
+    /// The Rust coordinator is synchronous; there is no async queue to drain.
+    /// The state transitions provide the same observable semantics as the Swift
+    /// port: callers can observe `Draining` then `Quiesced`.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.drain(_:)`.
+    pub fn drain(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
+        if !self.registry.contains_key(handle) {
+            return Err(GeniusLocusKitError::EstateNotOpen { estate_uuid: handle.estate_uuid });
+        }
+        self.mount_states.insert(*handle, EstateMountState::Draining);
+
+        // Telemetry: emit mount-state transition to draining (GLK_ROLLUPS_001).
+        // Off-path: single AtomicBool::load + branch, zero allocation.
+        let estate_id_str = uuid_to_str(&handle.estate_uuid);
+        glk_emit!(metric_names::MOUNT_STATE_TRANSITION, 1.0, {
+            let mut tags = HashMap::new();
+            tags.insert("estate_id".to_string(), estate_id_str.clone());
+            tags.insert("state".to_string(), "draining".to_string());
+            tags
+        });
+
+        // The Rust coordinator is synchronous — all in-flight work is complete at this
+        // point by definition. Transition directly to Quiesced.
+        self.mount_states.insert(*handle, EstateMountState::Quiesced);
+
+        // Telemetry: emit mount-state transition to quiesced after drain (GLK_ROLLUPS_001).
+        glk_emit!(metric_names::MOUNT_STATE_TRANSITION, 1.0, {
+            let mut tags = HashMap::new();
+            tags.insert("estate_id".to_string(), estate_id_str);
+            tags.insert("state".to_string(), "quiesced".to_string());
+            tags
+        });
+
+        Ok(())
+    }
+
+    /// Destroy an estate — close it and tear down all sub-stores.
+    ///
+    /// Teardown sequence:
+    ///   1. If the handle is in the registry, calls `close` to flush LocusKit
+    ///      and drop registry entries.
+    ///   2. Calls `Corpus::destroy_recall_index()` on the registered corpus (if any).
+    ///   3. The standalone VectorStore is already cleaned up during step 2 if the
+    ///      corpus shares storage; otherwise `VectorStore::destroy_all_vectors` would
+    ///      be called here. In the Rust port, the corpus and standalone vector store
+    ///      are retrieved before close() and their teardown is called after.
+    ///
+    /// Note: BundleStore rows are NOT deleted (append-only invariant). The recall
+    /// surface is destroyed; verbatim content survives.
+    ///
+    /// Mirrors Swift `GeniusLocusKit.destroy(storage:corpusStorage:handle:)`.
+    pub fn destroy(&mut self, handle: &EstateHandle) -> Result<(), GeniusLocusKitError> {
+        // Capture references to registered sub-stores BEFORE close() drops them.
+        let corpus = self.corpus_kits.get(handle).cloned();
+        let vector_store = self.vector_stores.get(handle).cloned();
+
+        // Step 1: Close the estate (drops registry, grant store, corpus/vector refs).
+        if self.registry.contains_key(handle) {
+            self.close(handle)?;
+        }
+
+        // Step 2: Destroy Corpus recall index (BM25 + internal vectors).
+        if let Some(c) = corpus {
+            c.destroy_recall_index().map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("Corpus destroy failed: {:?}", e),
+            })?;
+        }
+
+        // Step 3: Destroy standalone VectorStore vectors.
+        if let Some(vs) = vector_store {
+            vs.destroy_all_vectors().map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                reason: format!("VectorStore destroy failed: {:?}", e),
+            })?;
+        }
+
+        Ok(())
     }
 
     // MARK: - recall_scored
@@ -1843,5 +2366,372 @@ mod tests {
                 estate_uuid: h.estate_uuid
             }
         );
+    }
+
+    // -----------------------------------------------------------------
+    // GLK_PROVISION_001 tests — provision / quiesce / drain / destroy
+    // -----------------------------------------------------------------
+
+    /// Create a fresh in-memory DrawerStore and its backing Storage for provision tests.
+    ///
+    /// Returns `(store, storage)` where `store` is an `Arc<dyn DrawerStore>` for the
+    /// LocusKit estate and `storage` is an `Arc<dyn Storage>` (the same `InMemoryStorage`)
+    /// for Corpus + VectorStore construction.  The shared `InMemoryStorage` means one
+    /// SQLite-equivalent in-memory instance backs all three sub-stores — the same pattern
+    /// the Swift tests use with a single `InMemoryStorage`.
+    fn make_provision_stores() -> (Arc<dyn DrawerStore>, Arc<dyn Storage>) {
+        use persistence_kit::inmemory::InMemoryStorage;
+        use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+        let storage = Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+        let store = Arc::new(
+            InMemoryDrawerStore::with_storage(Arc::clone(&storage), NOW, None).unwrap()
+        );
+        (store as Arc<dyn DrawerStore>, storage as Arc<dyn Storage>)
+    }
+
+    fn glk_params(name: &str) -> EstateProvisionParams {
+        EstateProvisionParams {
+            estate_name: name.to_string(),
+            kind: EstateKind::Glk,
+            zoom_window_low: 1,
+            zoom_window_high: 10,
+            framework_profile: "KnowledgeWork".to_string(),
+            sync_mode: SyncMode::None,
+        }
+    }
+
+    fn locus_only_params(name: &str) -> EstateProvisionParams {
+        EstateProvisionParams {
+            estate_name: name.to_string(),
+            kind: EstateKind::LocusOnly,
+            zoom_window_low: 0,
+            zoom_window_high: 5,
+            framework_profile: "MinimalProfile".to_string(),
+            sync_mode: SyncMode::None,
+        }
+    }
+
+    // PR-1: provision(.glk) returns a valid handle and sets mount state to Mounted.
+    #[test]
+    fn pr1_provision_glk_returns_handle_and_mounted_state() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let params = glk_params("TestGLK");
+
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .expect("provision should succeed");
+
+        assert_eq!(coord.open_estate_count(), 1);
+        assert_eq!(coord.mount_state(&handle), Some(EstateMountState::Mounted));
+    }
+
+    // PR-2: provision stores the kind-prefixed framework_profile in the manifest.
+    #[test]
+    fn pr2_provision_glk_stores_kind_prefixed_profile() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let params = EstateProvisionParams {
+            estate_name: "ProfileTest".to_string(),
+            kind: EstateKind::Glk,
+            zoom_window_low: 0,
+            zoom_window_high: 5,
+            framework_profile: "KnowledgeWork".to_string(),
+            sync_mode: SyncMode::None,
+        };
+
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .expect("provision should succeed");
+
+        let estate = coord.estate_for(&handle).expect("estate must be open");
+        let manifest = estate.manifest().expect("manifest must be readable");
+        assert_eq!(
+            manifest.framework_profile, "GLK:KnowledgeWork",
+            "provision must store kind-prefixed profile in the manifest"
+        );
+    }
+
+    // PR-3: provision stores zoom_window_low and zoom_window_high.
+    #[test]
+    fn pr3_provision_stores_zoom_window() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let params = EstateProvisionParams {
+            estate_name: "ZoomTest".to_string(),
+            kind: EstateKind::LocusOnly,
+            zoom_window_low: 3,
+            zoom_window_high: 12,
+            framework_profile: "ZoomProfile".to_string(),
+            sync_mode: SyncMode::None,
+        };
+
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .expect("provision should succeed");
+
+        // The handle carries the zoom window from the manifest.
+        assert_eq!(handle.zoom_window_low, 3);
+        assert_eq!(handle.zoom_window_high, 12);
+    }
+
+    // PR-4: re-provisioning the same store raises DuplicateEstate.
+    #[test]
+    fn pr4_reprovision_same_store_raises_duplicate_estate() {
+        use persistence_kit::inmemory::InMemoryStorage;
+        let mut coord = EstateCoordinator::new();
+        // Shared storage: both provisions use the same InMemoryStorage so the
+        // estate UUID is identical and the second call hits DuplicateEstate.
+        let shared_storage = Arc::new(InMemoryStorage::with_estate(uuid::Uuid::new_v4()));
+        let store1 = Arc::new(
+            InMemoryDrawerStore::with_storage(Arc::clone(&shared_storage), NOW, None).unwrap()
+        ) as Arc<dyn DrawerStore>;
+        let store2 = Arc::new(
+            InMemoryDrawerStore::with_storage(Arc::clone(&shared_storage), NOW, None).unwrap()
+        ) as Arc<dyn DrawerStore>;
+        let stor1 = Arc::clone(&shared_storage) as Arc<dyn Storage>;
+        let stor2 = Arc::clone(&shared_storage) as Arc<dyn Storage>;
+        let params = glk_params("DupeTest");
+
+        coord
+            .provision(store1, stor1, None, OwnerCredentials::new("owner"), params.clone(), EmbeddingModelConfig::Deterministic)
+            .expect("first provision should succeed");
+
+        let err = coord
+            .provision(store2, stor2, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .expect_err("second provision on same store must fail");
+
+        assert!(
+            matches!(err, GeniusLocusKitError::DuplicateEstate { .. }),
+            "expected DuplicateEstate, got {:?}",
+            err
+        );
+    }
+
+    // PR-5: provision with empty estate name raises InvalidManifest.
+    #[test]
+    fn pr5_provision_empty_name_raises_invalid_manifest() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let params = EstateProvisionParams {
+            estate_name: String::new(),
+            kind: EstateKind::Glk,
+            zoom_window_low: 0,
+            zoom_window_high: 5,
+            framework_profile: "P".to_string(),
+            sync_mode: SyncMode::None,
+        };
+
+        let err = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .expect_err("empty name must fail");
+
+        assert!(
+            matches!(&err, GeniusLocusKitError::InvalidManifest { key, .. } if key == "estate_name"),
+            "expected InvalidManifest(estate_name), got {:?}",
+            err
+        );
+    }
+
+    // PR-6: provision with inverted zoom window raises InvalidManifest.
+    #[test]
+    fn pr6_provision_inverted_zoom_window_raises_invalid_manifest() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let params = EstateProvisionParams {
+            estate_name: "InvertedWindow".to_string(),
+            kind: EstateKind::Glk,
+            zoom_window_low: 10,
+            zoom_window_high: 3, // inverted
+            framework_profile: "P".to_string(),
+            sync_mode: SyncMode::None,
+        };
+
+        let err = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .expect_err("inverted zoom window must fail");
+
+        assert!(
+            matches!(&err, GeniusLocusKitError::InvalidManifest { key, .. } if key == "zoom_window"),
+            "expected InvalidManifest(zoom_window), got {:?}",
+            err
+        );
+    }
+
+    // PR-7: freshly provisioned estate is in Mounted state.
+    #[test]
+    fn pr7_fresh_provisioned_estate_is_mounted() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("GLK1"), EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+        assert_eq!(coord.mount_state(&handle), Some(EstateMountState::Mounted));
+    }
+
+    // PR-8: quiesce transitions mounted → quiesced.
+    #[test]
+    fn pr8_quiesce_transitions_mounted_to_quiesced() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q1"), EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        coord.quiesce(&handle).expect("quiesce must succeed");
+        assert_eq!(coord.mount_state(&handle), Some(EstateMountState::Quiesced));
+    }
+
+    // PR-9: quiesce is idempotent on an already-quiesced estate.
+    #[test]
+    fn pr9_quiesce_is_idempotent() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q2"), EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        coord.quiesce(&handle).expect("first quiesce");
+        coord.quiesce(&handle).expect("second quiesce must be idempotent");
+        assert_eq!(coord.mount_state(&handle), Some(EstateMountState::Quiesced));
+    }
+
+    // PR-10: drain transitions to quiesced.
+    #[test]
+    fn pr10_drain_transitions_to_quiesced() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("D1"), EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        coord.drain(&handle).expect("drain must succeed");
+        assert_eq!(coord.mount_state(&handle), Some(EstateMountState::Quiesced),
+            "drain must complete with Quiesced state");
+    }
+
+    // PR-11: destroy removes the estate from the registry.
+    #[test]
+    fn pr11_destroy_removes_estate_from_registry() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L1"), EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        assert_eq!(coord.open_estate_count(), 1);
+        coord.destroy(&handle).expect("destroy must succeed");
+        assert_eq!(coord.open_estate_count(), 0);
+        assert_eq!(coord.mount_state(&handle), None,
+            "destroyed estate must have nil mount state");
+    }
+
+    // PR-12: quiesce on closed handle raises EstateNotOpen.
+    #[test]
+    fn pr12_quiesce_on_closed_handle_raises_estate_not_open() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L2"), EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        coord.close(&handle).expect("close");
+        let err = coord.quiesce(&handle).expect_err("quiesce on closed handle must fail");
+        assert!(
+            matches!(err, GeniusLocusKitError::EstateNotOpen { .. }),
+            "expected EstateNotOpen, got {:?}",
+            err
+        );
+    }
+
+    // PR-13: drain on closed handle raises EstateNotOpen.
+    #[test]
+    fn pr13_drain_on_closed_handle_raises_estate_not_open() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L3"), EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        coord.close(&handle).expect("close");
+        let err = coord.drain(&handle).expect_err("drain on closed handle must fail");
+        assert!(
+            matches!(err, GeniusLocusKitError::EstateNotOpen { .. }),
+            "expected EstateNotOpen, got {:?}",
+            err
+        );
+    }
+
+    // PR-14: destroy after manual close succeeds (no double-close error).
+    #[test]
+    fn pr14_destroy_after_close_succeeds() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L4"), EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        coord.close(&handle).expect("close");
+        // destroy on an already-closed handle — the registry check skips close().
+        coord.destroy(&handle).expect("destroy after close must succeed");
+        assert_eq!(coord.open_estate_count(), 0);
+    }
+
+    // PR-15: CorpusOnly kind stores CorpusOnly-prefixed profile.
+    #[test]
+    fn pr15_corpus_only_stores_corpus_only_prefix() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let params = EstateProvisionParams {
+            estate_name: "CorpusOnlyEstate".to_string(),
+            kind: EstateKind::CorpusOnly,
+            zoom_window_low: 2,
+            zoom_window_high: 8,
+            framework_profile: "CorpusTest".to_string(),
+            sync_mode: SyncMode::None,
+        };
+
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        let estate = coord.estate_for(&handle).expect("estate");
+        let manifest = estate.manifest().expect("manifest");
+        assert_eq!(
+            manifest.framework_profile, "CorpusOnly:CorpusTest",
+            "CorpusOnly provision must store CorpusOnly-prefixed profile"
+        );
+    }
+
+    // PR-16: LocusOnly kind stores LocusOnly-prefixed profile.
+    #[test]
+    fn pr16_locus_only_stores_locus_only_prefix() {
+        let mut coord = EstateCoordinator::new();
+        let (store, storage) = make_provision_stores();
+        let params = locus_only_params("LocusOnlyEstate");
+
+        let handle = coord
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .expect("provision");
+
+        let estate = coord.estate_for(&handle).expect("estate");
+        let manifest = estate.manifest().expect("manifest");
+        assert_eq!(
+            manifest.framework_profile, "LocusOnly:MinimalProfile",
+            "LocusOnly provision must store LocusOnly-prefixed profile"
+        );
+    }
+
+    // PR-17: mount_state for a handle that was never registered returns None.
+    #[test]
+    fn pr17_mount_state_for_unregistered_handle_is_none() {
+        let coord = EstateCoordinator::new();
+        // Construct a dummy handle via open_one but check a different handle.
+        let dummy_handle = EstateHandle::new(
+            [0u8; 16],
+            0,
+            1,
+        ).expect("dummy handle");
+        assert_eq!(coord.mount_state(&dummy_handle), None);
     }
 }

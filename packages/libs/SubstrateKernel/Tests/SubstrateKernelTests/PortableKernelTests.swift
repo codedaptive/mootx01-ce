@@ -5,8 +5,7 @@
 // reference, KernelKind, and the PortableKernel selector) plus the
 // backend specializations reachable on the build host —
 // PortableKernel-SIMD.swift (SimdKernel), PortableKernel-NEON.swift
-// (NeonKernel), PortableKernel-BNNS.swift (BnnsKernel),
-// PortableKernel-Metal.swift (MetalKernel).
+// (NeonKernel), PortableKernel-Metal.swift (MetalKernel).
 //
 // Mirrors the behavior set asserted by the Rust `kernel.rs` (10 tests)
 // and `kernel_simd.rs` (2 tests) `#[test]` modules:
@@ -26,10 +25,10 @@
 // beyond the Rust unit tests without narrowing any of their assertions.
 //
 // Backend gating mirrors how the Rust tests gate (Known Ambiguity #1):
-// SIMD/NEON behind `canImport(simd)`, BNNS behind `canImport(Accelerate)`,
-// Metal behind `canImport(Metal)` AND a non-nil `MTLCreateSystemDefaultDevice`
-// (the `MetalKernel?` initializer). Kernels the host can't run are
-// simply not exercised; the scalar reference is always present.
+// SIMD/NEON behind `canImport(simd)`, Metal behind `canImport(Metal)` AND
+// a non-nil `MTLCreateSystemDefaultDevice` (the `MetalKernel?` initializer).
+// Kernels the host can't run are simply not exercised; the scalar reference
+// is always present.
 
 import Testing
 @testable import SubstrateKernel
@@ -81,18 +80,15 @@ private func xorshiftFingerprints(initialState: UInt64, count: Int) -> [Fingerpr
 }
 
 /// Every kernel backend instantiable on the current build host. The
-/// scalar reference is always first. SIMD/NEON/BNNS/Metal are appended
-/// only where their platform predicates hold (and Metal only when a
-/// system GPU exists), exactly as the production `kernel(of:)` selector
-/// gates them.
+/// scalar reference is always first. SIMD/NEON/Metal are appended only
+/// where their platform predicates hold (and Metal only when a system
+/// GPU exists), exactly as the production `kernel(of:)` selector gates
+/// them.
 private func reachableKernels() -> [SubstrateKernel] {
     var kernels: [SubstrateKernel] = [ScalarKernel()]
     #if canImport(simd)
     kernels.append(SimdKernel())
     kernels.append(NeonKernel())
-    #endif
-    #if canImport(Accelerate)
-    kernels.append(BnnsKernel())
     #endif
     #if canImport(Metal)
     if let metal = MetalKernel() { kernels.append(metal) }
@@ -160,7 +156,7 @@ struct PortableKernelCountFoldTests {
     /// a `countFold256` override inherit the scalar reference and pass
     /// trivially; the gate becomes load-bearing the moment a vectorized
     /// override lands (SimdKernel already has one).
-    private let allKinds: [KernelKind] = [.scalar, .simd, .bnns, .neon, .metal, .avx512, .avx2]
+    private let allKinds: [KernelKind] = [.scalar, .simd, .neon, .metal, .avx512, .avx2]
 
     @Test("count-fold is byte-identical to the scalar reference across all kernel kinds")
     func countFoldConformanceAcrossKernels() {

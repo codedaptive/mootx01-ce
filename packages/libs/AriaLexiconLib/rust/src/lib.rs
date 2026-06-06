@@ -11,8 +11,6 @@
 // is fixed at nine and the adjective category count at four (spec
 // invariants I-7, I-8).
 
-#![allow(dead_code)]
-
 /// The grammar, stated. The contract every consumer composes.
 pub const GRAMMAR: &str =
     "Every call is one verb applied to a noun, optionally constrained by adjectives.";

@@ -37,9 +37,14 @@ struct BM25Tests {
         )
     }
 
+    /// Tokenise a query with the same tokenizer the test index uses.
+    func tokens(_ query: String) -> [String] {
+        DeterministicTokenizer().keywordTokens(query)
+    }
+
     @Test func emptyIndexReturnsEmpty() async {
         let idx = makeIndex()
-        let results = await idx.search("anything", limit: 10)
+        let results = await idx.topK(10, for: tokens("anything"))
         #expect(results.isEmpty)
     }
 
@@ -48,9 +53,9 @@ struct BM25Tests {
         let c1 = makeChunk("the quick brown fox jumps over the lazy dog")
         let c2 = makeChunk("a completely unrelated sentence about cats")
         await idx.index([c1, c2])
-        let hits = await idx.search("fox", limit: 5)
+        let hits = await idx.topK(5, for: tokens("fox"))
         #expect(!hits.isEmpty)
-        #expect(hits.first?.0 == c1.id, "fox-bearing chunk should rank first")
+        #expect(hits.first?.id == c1.id, "fox-bearing chunk should rank first")
     }
 
     @Test func higherTFRanksHigher() async {
@@ -58,8 +63,8 @@ struct BM25Tests {
         let c1 = makeChunk("cat cat cat cat cat")
         let c2 = makeChunk("cat and one other thing")
         await idx.index([c1, c2])
-        let hits = await idx.search("cat", limit: 5)
-        #expect(hits.first?.0 == c1.id, "higher TF should rank first")
+        let hits = await idx.topK(5, for: tokens("cat"))
+        #expect(hits.first?.id == c1.id, "higher TF should rank first")
     }
 
     @Test func removeCleansPostings() async {
@@ -71,7 +76,7 @@ struct BM25Tests {
         await idx.remove(c.id)
         let count2 = await idx.documentCount()
         #expect(count2 == 0)
-        let hits = await idx.search("ephemeral", limit: 5)
+        let hits = await idx.topK(5, for: tokens("ephemeral"))
         #expect(hits.isEmpty)
     }
 }

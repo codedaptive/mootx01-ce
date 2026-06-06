@@ -10,9 +10,18 @@
 // protocols. Backends (SQLite + sqlite-vec, PostgreSQL + pgvector,
 // InMemory) are selected at the application layer via
 // EstateConfiguration.
+//
+// VECTORKIT_REPORT_001 (2026-06-06): added IntellectusLib self-report
+// telemetry to addVector, findNearest, and findByKeyword. The emit calls
+// are placed at operation boundaries, after the result is computed, so
+// the mathematical behavior is unchanged. When monitoring is disabled
+// (the default), the Intellectus.report(_:) call short-circuits after
+// a single Atomic<Bool> load; the startTime clock read is the only
+// unconditional overhead added per operation.
 
 import EngramLib
 import Foundation
+import IntellectusLib
 import OSLog
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
@@ -48,6 +57,10 @@ import PersistenceKit
 /// ```
 /// UNIQUE constraint on (drawer_id, model_id) per spec I-4: one
 /// vector per drawer per model.
+///
+/// Telemetry: emits `vectorkit.*` metrics via IntellectusLib when
+/// monitoring is enabled. Off by default; the emit call is a
+/// short-circuited no-op (single Atomic<Bool> load) when disabled.
 public actor VectorStore {
 
     private let log = Logger(subsystem: "com.mootx01.kit", category: "VectorStore")
@@ -99,6 +112,11 @@ public actor VectorStore {
     /// Upsert a vector. If a row already exists for
     /// (drawerID, modelID), the existing row is updated in place;
     /// otherwise a new row is created.
+    ///
+    /// Telemetry: emits `vectorkit.index.insert_latency_ms` (wall time
+    /// for the upsert round-trip) when monitoring is enabled. The emit
+    /// is at the operation boundary — after the upsert completes — so
+    /// it never affects the stored value or any error thrown.
     public func addVector(
         drawerID: String,
         engram: Engram,
@@ -106,6 +124,11 @@ public actor VectorStore {
         modelVersion: String,
         filedAt: Date
     ) async throws {
+        // Capture start time before the I/O. One Date() read per
+        // call; the computed latency is only forwarded to the sink
+        // when monitoring is enabled (inside the @autoclosure guard).
+        let startTime = Date().timeIntervalSince1970
+
         let bytes = Data(engram.wireBytes)
         let values: [String: TypedValue] = [
             "id": .uuid(UUID()),
@@ -120,6 +143,18 @@ public actor VectorStore {
             values: values,
             conflictColumns: ["drawer_id", "model_id"]
         )
+
+        // Emit insert latency at the operation boundary.
+        // The model_id tag identifies which embedding model indexed
+        // this vector, so per-model insert cost is queryable.
+        // Off-path: single Atomic<Bool> load when monitoring is disabled.
+        let endTime = Date().timeIntervalSince1970
+        Intellectus.report(.metric(
+            name: "vectorkit.index.insert_latency_ms",
+            value: (endTime - startTime) * 1000.0,
+            tags: ["kit": "VectorKit", "model_id": modelID],
+            ts: endTime
+        ))
     }
 
     /// Fetch the engram stored under (drawerID, modelID), or nil
@@ -178,11 +213,20 @@ public actor VectorStore {
     /// RowStore remains at this layer pending a VectorIndex migration
     /// (sqlite-vec or pgvector) that would push the limit into the
     /// storage backend.
+    ///
+    /// Telemetry: emits `vectorkit.search.latency_ms` (wall time for
+    /// the full scan + top-K) and `vectorkit.search.result_count`
+    /// (number of matches returned, up to `limit`) when monitoring is
+    /// enabled. Both metrics are emitted at the operation boundary,
+    /// after the result is computed; the return value is unchanged.
     public func findNearest(
         probe: Engram,
         modelID: String,
         limit: Int
     ) async throws -> [VectorMatch] {
+        // Capture start time before the I/O and sort.
+        let startTime = Date().timeIntervalSince1970
+
         // O(N) row fetch: no vector index at this layer. A future mission wires
         // sqlite-vec (SQLite) or pgvector (PostgreSQL) to push the limit into
         // the storage layer and reduce this to O(k).
@@ -201,7 +245,7 @@ public actor VectorStore {
         )
         // Map Match.index back to stored[index] for drawerID and modelID.
         // Apply drawerID tie-break for determinism parity with the prior implementation.
-        return matches
+        let result = matches
             .map { m in
                 VectorMatch(drawerID: stored[m.index].drawerID,
                             distance: m.distance,
@@ -211,6 +255,27 @@ public actor VectorStore {
                 if $0.distance != $1.distance { return $0.distance < $1.distance }
                 return $0.drawerID < $1.drawerID
             }
+
+        // Emit search metrics at the operation boundary, after the result is
+        // computed. The autoclosure is evaluated only when monitoring is enabled.
+        // latency_ms covers the full operation (row fetch + Hamming top-K + sort).
+        // result_count is the final result set size (≤ limit).
+        let endTime = Date().timeIntervalSince1970
+        let resultCount = result.count
+        Intellectus.report(.metric(
+            name: "vectorkit.search.latency_ms",
+            value: (endTime - startTime) * 1000.0,
+            tags: ["kit": "VectorKit", "model_id": modelID],
+            ts: endTime
+        ))
+        Intellectus.report(.metric(
+            name: "vectorkit.search.result_count",
+            value: Double(resultCount),
+            tags: ["kit": "VectorKit", "model_id": modelID],
+            ts: endTime
+        ))
+
+        return result
     }
 
     /// Keyword pre-filter: returns drawer IDs whose drawer_id
@@ -220,6 +285,10 @@ public actor VectorStore {
     /// responsibility per the kit graph; VectorKit retains this
     /// surface for hybrid-retrieval callers that need a quick
     /// keyword pass against drawer identifiers.
+    ///
+    /// Telemetry: emits `vectorkit.search.keyword_result_count`
+    /// (number of distinct drawer IDs returned) when monitoring is
+    /// enabled. Emitted at the operation boundary, after deduplication.
     public func findByKeyword(_ query: String, limit: Int) async throws -> [String] {
         let rows = try await storage.rowStore.query(
             table: "vectors",
@@ -242,6 +311,17 @@ public actor VectorStore {
                 }
             }
         }
+
+        // Emit keyword search result count at the operation boundary.
+        // Off-path: single Atomic<Bool> load when monitoring is disabled.
+        let count = out.count
+        Intellectus.report(.metric(
+            name: "vectorkit.search.keyword_result_count",
+            value: Double(count),
+            tags: ["kit": "VectorKit"],
+            ts: Date().timeIntervalSince1970
+        ))
+
         return out
     }
 
@@ -254,6 +334,34 @@ public actor VectorStore {
                 .eq(Column(table: "vectors", name: "model_id"), .text(modelID))
             ])
         )
+    }
+
+    // MARK: - Lifecycle (GLK_PROVISION_001)
+
+    /// Destroy all vector rows in this store.
+    ///
+    /// Deletes every row from the `vectors` table. Called by
+    /// `GeniusLocusKit.destroy(storage:corpusStorage:handle:)` as part of the
+    /// coordinated estate teardown path. After this call the backing storage
+    /// still exists (schema intact) but contains no vector data.
+    ///
+    /// The caller (GLK) is responsible for closing the estate through LocusKit
+    /// before calling this method. This method does not close or remove the
+    /// backing storage file — that is the caller's responsibility.
+    ///
+    /// Marked `public` so GLK can reach it; not exposed on the ARIA surface
+    /// (no ARIA verb maps to raw store destruction — that is an admin-plane
+    /// operation gated through GLK's destroy verb).
+    public func destroyAllVectors() async throws {
+        // Delete every row from the vectors table. Storage.rowStore.delete
+        // with an always-true predicate (id is never null) clears all rows.
+        _ = try await storage.rowStore.delete(
+            table: "vectors",
+            // Use a predicate that matches every row: rows whose id is not
+            // the empty string (ids are UUID strings, always non-empty).
+            where: .like(Column(table: "vectors", name: "id"), "%")
+        )
+        log.info("VectorStore.destroyAllVectors: all rows deleted")
     }
 
     // MARK: - Row decode helper
@@ -280,4 +388,3 @@ public actor VectorStore {
         )
     }
 }
-

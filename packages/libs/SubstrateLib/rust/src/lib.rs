@@ -20,3 +20,13 @@ pub mod audit_gate;
 // === §9 Row-state automaton + §10 Verbs (the orchestration surface) ===
 pub mod row_state;
 pub mod verbs;
+
+// === Self-report telemetry (IntellectusLib integration) ===
+//
+// Metric name constants and emit helpers for the substratelib.* namespace.
+// Off-path cost: one AtomicBool::load(Acquire) + branch per call site when
+// monitoring is disabled (the default). No StatSample constructed, no lock
+// acquired, no allocation on the off-path.
+// Mirror: Swift/Sources/SubstrateLib/SubstrateLibTelemetry.swift
+pub mod substrate_lib_telemetry;
+pub use substrate_lib_telemetry::metric;

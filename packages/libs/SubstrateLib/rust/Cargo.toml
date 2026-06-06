@@ -52,6 +52,12 @@ serde = { version = "1", features = ["derive"], optional = true }
 substrate-types = { path = "../../SubstrateTypes/rust" }
 substrate-kernel = { path = "../../SubstrateKernel/rust" }
 substrate-ml = { path = "../../SubstrateML/rust" }
+# intellectus-lib is the zero-dependency telemetry floor: stat model +
+# StatsSink trait + Intellectus global holder + report! short-circuit macro.
+# It sits BELOW substrate-lib in the topology (no repo deps of its own),
+# so this dependency does not invert layering. Wired per PACKAGES.md
+# "Mission 2" note and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+intellectus-lib = { path = "../../IntellectusLib/rust" }
 serde_repr = { version = "0.1", optional = true }
 # Serde's built-in array impls only cover N ≤ 32. CountVector256's
 # [u32; 256] needs serde-big-array (a #[serde(with = "BigArray")]

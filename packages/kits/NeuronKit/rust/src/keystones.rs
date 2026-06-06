@@ -27,10 +27,15 @@ pub fn keystones(node_ids: &[String], edges: &[(String, String)], top_k: usize) 
     }
 
     let adjacency = structure_graph::build(node_ids, edges);
+    // estate and ts are empty/0: callers that want VizGraph telemetry
+    // should pass the estate id and a caller-supplied timestamp. The
+    // default empty values produce a no-op emit when monitoring is off.
     let scores = EigenvalueCentrality::compute(
         &adjacency,
         EigenvalueCentrality::DEFAULT_MAX_ITERATIONS,
         EigenvalueCentrality::DEFAULT_TOLERANCE,
+        "",
+        0.0,
     );
 
     let mut ranked: Vec<Keystone> = node_ids

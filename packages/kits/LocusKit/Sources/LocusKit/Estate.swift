@@ -210,6 +210,33 @@ public actor Estate {
                 value: name
             )
         }
+        // Write optional manifest fields from initialValues when supplied.
+        // These are consumed by the GLK provision path (GLK_PROVISION_001) to
+        // seed the kind-prefixed framework profile and zoom window from the
+        // EstateProvisionParams at creation time so they survive restarts.
+        if let iv = initialValues {
+            if !iv.frameworkProfile.isEmpty {
+                try await store.setMeta(
+                    key: ManifestKey.frameworkProfile.rawValue,
+                    value: iv.frameworkProfile
+                )
+            }
+            // Zoom window bounds: write only when the provisioning params supply
+            // non-default values (non-zero range). A zoomWindowLow of 0 with
+            // zoomWindowHigh of 0 means "not specified" — the default manifest
+            // row values are left intact for the existing Estate.create callers
+            // that do not pass a zoom window.
+            if iv.zoomWindowLow != 0 || iv.zoomWindowHigh != 0 {
+                try await store.setMeta(
+                    key: ManifestKey.zoomWindowLow.rawValue,
+                    value: String(iv.zoomWindowLow)
+                )
+                try await store.setMeta(
+                    key: ManifestKey.zoomWindowHigh.rawValue,
+                    value: String(iv.zoomWindowHigh)
+                )
+            }
+        }
         let containerFP: ContainerFingerprintStore
         do {
             containerFP = try await ContainerFingerprintStore(storage: storage)

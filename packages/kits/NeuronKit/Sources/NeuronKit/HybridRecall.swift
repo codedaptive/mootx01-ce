@@ -42,6 +42,7 @@
 
 import Foundation
 import GeniusLocusKit
+import IntellectusLib
 import LocusKit
 
 // Re-export the substrate's `Drawer` value type through NeuronKit so
@@ -77,9 +78,47 @@ public func hybridRecall(
     on glk: GeniusLocusKit,
     tuning: RecallFrameTuning = .default
 ) async throws -> RecallStream {
+    let start = Date().timeIntervalSince1970
     let drawers = try await glk.recall(handle, frame)
     let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: tuning)
-    return RecallStream(rows: reranked, pageSize: tuning.pageSize)
+    let stream = RecallStream(rows: reranked, pageSize: tuning.pageSize)
+
+    // Emit hybrid-recall telemetry at the operation boundary. The ts is
+    // caller-supplied epoch seconds per IntellectusLib's determinism contract.
+    // The `start` clock is read here (a factory-level side-effect), not inside
+    // the math engine. When monitoring is off (the default), the autoclosure is
+    // never evaluated — zero allocation, zero clock on the off-path.
+    //
+    // `neuronkit.recall.latency_ms`: wall time from verb call to rerank done.
+    // `neuronkit.recall.candidate_count`: drawers returned by the estate verb.
+    // `neuronkit.recall.result_count`: drawers after MMR rerank (same count).
+    // Both candidate and result counts are emitted so the Activity view can
+    // display funnel depth (MANAGER_1.0_PLAN §4, GUI §4.4 Activity).
+    let elapsed = (Date().timeIntervalSince1970 - start) * 1000.0
+    // Use the estate UUID string as the tag value — stable across re-opens
+    // of the same database, distinct per estate, never empty.
+    let estateTag = handle.estateUUID.uuidString
+
+    Intellectus.report(.metric(
+        name: "neuronkit.recall.latency_ms",
+        value: elapsed,
+        tags: ["estate": estateTag],
+        ts: Date().timeIntervalSince1970
+    ))
+    Intellectus.report(.metric(
+        name: "neuronkit.recall.candidate_count",
+        value: Double(drawers.count),
+        tags: ["estate": estateTag],
+        ts: Date().timeIntervalSince1970
+    ))
+    Intellectus.report(.metric(
+        name: "neuronkit.recall.result_count",
+        value: Double(reranked.count),
+        tags: ["estate": estateTag],
+        ts: Date().timeIntervalSince1970
+    ))
+
+    return stream
 }
 
 /// Hybrid recall tuning knobs. Per spec § 4.1: `bm25Weight` (0.3),

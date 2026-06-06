@@ -18,6 +18,7 @@
 //! loop walks the resulting `Vec` by index. Tally accumulation is
 //! commutative, so the result is invariant to `outcomes` order.
 
+use intellectus_lib::{report, StatSample};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -227,6 +228,33 @@ pub fn bradley_terry(
         Some(std::cmp::Ordering::Equal) | None => lhs.competitor_id.cmp(&rhs.competitor_id),
         Some(order) => order,
     });
+
+    // Self-report: one bt_update event + one competitor_count gauge per call.
+    // Off-path cost is a single AtomicBool::load + branch (~1 ns). Matches the
+    // Swift bradleyTerry emit sites in BradleyTerry.swift (NEURONKIT_REPORT_001).
+    let competitor_count = scores.len();
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let mut bt_tags = std::collections::HashMap::new();
+        bt_tags.insert("competitor_count".to_string(), competitor_count.to_string());
+        report!(StatSample::metric(
+            "neuronkit.tournament.bt_update".to_string(),
+            1.0,
+            bt_tags,
+            ts,
+        ));
+        report!(StatSample::metric(
+            "neuronkit.tournament.competitor_count".to_string(),
+            competitor_count as f64,
+            std::collections::HashMap::new(),
+            ts,
+        ));
+    }
+
     Ok(scores)
 }
 

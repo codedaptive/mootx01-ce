@@ -738,23 +738,29 @@ struct LensVectorConformanceTests {
         return v
     }
 
+    // computed(from:) calls HybridRecallEngine.rerank() and bradleyTerry()
+    // which both emit to the global Intellectus singleton. Acquire the
+    // process-wide mutex for the full duration of this test so no
+    // concurrent telemetry test sees phantom emissions.
     @Test("every lens reproduces the shared vectors bit-for-bit")
-    func lensesReproduceSharedVectors() throws {
-        let vectors = try load()
-        let live = computed(from: vectors)
+    func lensesReproduceSharedVectors() async throws {
+        try await withIntellectusLock {
+            let vectors = try load()
+            let live = computed(from: vectors)
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let expected = try encoder.encode(vectors)
-        let actual = try encoder.encode(live)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let expected = try encoder.encode(vectors)
+            let actual = try encoder.encode(live)
 
-        if ProcessInfo.processInfo.environment["RECORD_LENS_VECTORS"] == "1" {
-            try actual.write(to: Self.fixtureURL)
-            Issue.record("RECORD MODE: re-recorded \(Self.fixtureURL.lastPathComponent); rerun in verify mode")
-            return
+            if ProcessInfo.processInfo.environment["RECORD_LENS_VECTORS"] == "1" {
+                try actual.write(to: Self.fixtureURL)
+                Issue.record("RECORD MODE: re-recorded \(Self.fixtureURL.lastPathComponent); rerun in verify mode")
+                return
+            }
+
+            #expect(expected == actual,
+                    "cross-version drift: a lens no longer reproduces the shared vectors")
         }
-
-        #expect(expected == actual,
-                "cross-version drift: a lens no longer reproduces the shared vectors")
     }
 }

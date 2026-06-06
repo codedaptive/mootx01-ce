@@ -10,6 +10,10 @@
 use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::hyperplane::HyperplaneFamily;
 use substrate_types::count_vector::CountVector256;
+// report! uses $crate::Intellectus internally (the macro expands to
+// intellectus_lib::Intellectus::is_enabled() / ::report_sample()),
+// so only StatSample and the macro itself are directly referenced here.
+use intellectus_lib::{StatSample, report};
 
 pub trait SubstrateKernel: Send + Sync {
     /// Identify the concrete kernel kind. Useful for runtime
@@ -236,18 +240,67 @@ impl PortableKernel {
     /// On other platforms, returns `ScalarKernel`. Future
     /// platform-specific overlays may override this for AVX-512
     /// / AVX2 on x86_64.
+    ///
+    /// Telemetry: emits `substrate.kernel.backend_selected` via
+    /// IntellectusLib when monitoring is enabled. When monitoring is
+    /// OFF (the default), the `report!` macro body is never evaluated
+    /// and no clock is called (single atomic load + branch only).
+    /// No runtime fallback exists here — selection is compile-time-
+    /// static per arch, so no `substrate.kernel.fallback` is emitted
+    /// (MANAGER_1.0_PLAN §2).
     pub fn for_current_platform() -> Box<dyn SubstrateKernel> {
         #[cfg(all(target_arch = "aarch64", feature = "simd-nightly"))]
-        {
+        let selected: Box<dyn SubstrateKernel> = {
             // SimdKernel strictly dominates ScalarKernel on aarch64
             // for the SIMD-implemented ops; inherited scalar impls
             // are identical for the others. No threshold to learn.
-            return Box::new(crate::kernel_simd::SimdKernel::new());
-        }
+            Box::new(crate::kernel_simd::SimdKernel::new())
+        };
         #[cfg(not(all(target_arch = "aarch64", feature = "simd-nightly")))]
-        {
-            Box::new(ScalarKernel::new())
-        }
+        let selected: Box<dyn SubstrateKernel> = Box::new(ScalarKernel::new());
+
+        // Emit backend_selected telemetry. The ts is caller-supplied
+        // epoch seconds per IntellectusLib's determinism contract:
+        // the math engines never call a clock; this factory-level
+        // side-effect does. Monitoring is off by default, so the
+        // closure is never evaluated in normal (non-observer) runs,
+        // and no clock is called during conformance tests.
+        //
+        // The arch tag uses a compile-time string matching the cfg
+        // predicate above. Stable across the binary's lifetime.
+        report!({
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("backend".to_string(), selected.kind().as_str().to_string());
+            tags.insert("arch".to_string(), PortableKernel::current_arch_tag().to_string());
+            StatSample::metric(
+                "substrate.kernel.backend_selected".to_string(),
+                1.0,
+                tags,
+                ts,
+            )
+        });
+
+        selected
+    }
+
+    /// Compile-time-constant architecture tag for telemetry. Matches
+    /// the cfg predicate that drives the kernel selection above.
+    /// "aarch64" on Apple Silicon and ARM64 Linux; "x86_64" on Intel/AMD;
+    /// "other" on all remaining targets. Mirrors PortableKernel.currentArchTag
+    /// in the Swift port (arm64 vs aarch64 naming follows each language's
+    /// own arch identifier convention).
+    pub fn current_arch_tag() -> &'static str {
+        #[cfg(target_arch = "aarch64")]
+        { "aarch64" }
+        #[cfg(target_arch = "x86_64")]
+        { "x86_64" }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { "other" }
     }
 
     /// Explicit selector for the conformance harness.
