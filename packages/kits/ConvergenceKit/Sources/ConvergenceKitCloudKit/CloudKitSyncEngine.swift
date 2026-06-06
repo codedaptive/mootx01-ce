@@ -358,8 +358,19 @@ actor CloudKitStateActor {
                 table: decoded.table,
                 where: .eq(Column(table: decoded.table, name: syncedTable.primaryKeyColumn), .uuid(decoded.rowKey))
             )
-            if let first = existing?.first, case let .hlc(localHLC) = first["_syncHLC"] ?? .null {
-                if decoded.hlc < localHLC {
+            if let first = existing?.first {
+                // Recover the stored HLC from either `.hlc` (InMemory, where
+                // TypedValue is preserved verbatim) or `.int` (SQLite/Postgres,
+                // where the schema does not declare _syncHLC as .hlc so
+                // readColumn returns the raw packed integer). Both cases carry
+                // the canonical HLC.packed layout (node<<56 | logical<<40 | phys).
+                let localHLC: HLC?
+                switch first["_syncHLC"] ?? .null {
+                case .hlc(let h): localHLC = h
+                case .int(let i): localHLC = HLC(packed: UInt64(bitPattern: i))
+                default: localHLC = nil
+                }
+                if let localHLC, decoded.hlc < localHLC {
                     return
                 }
             }

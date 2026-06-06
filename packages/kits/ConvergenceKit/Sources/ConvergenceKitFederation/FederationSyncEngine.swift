@@ -85,33 +85,150 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
     }
 }
 
+// MARK: - PayloadKind
+
+/// Discriminator for the opaque payload carried by `SignedEnvelope`.
+/// The single-byte tag is embedded in the canonical signing bytes so the
+/// receiver knows how to decode the payload without ambiguity.
+///
+/// Variants are assigned stable byte values; never reuse a value.
+/// `syncRecordBatch` (0x01) is the only v1.0 variant. `fieldWriteEventBatch`
+/// (0x02) is reserved for the next-gen write-path payload (C1 extension point).
+public enum PayloadKind: UInt8, Sendable, Codable, Hashable {
+    /// A JSON-encoded array of `SyncRecord` values. The only v1.0 payload.
+    case syncRecordBatch = 0x01
+    // fieldWriteEventBatch = 0x02  — reserved; add when FieldWriteEvent
+    // wire format lands. Do not assign 0x02 to anything else.
+}
+
+// MARK: - Canonical signing bytes
+
+/// Build the canonical deterministic byte sequence that `SignedEnvelope.signature`
+/// covers.
+///
+/// Layout (all integers little-endian):
+///   sender_public_key (32 bytes, Ed25519 pubkey raw)
+///   payload_kind      (1 byte: PayloadKind raw value)
+///   payload_len       (4 bytes: LE uint32 count of payload bytes)
+///   payload           (payload_len bytes: opaque batch bytes)
+///   hlc.physicalTime  (8 bytes: LE int64)
+///   hlc.logicalCount  (4 bytes: LE int32)
+///   hlc.nodeID        (4 bytes: LE int32)
+///
+/// This encoding is byte-identical to the Rust `envelope_signing_bytes` in
+/// `federation.rs`. The signature must verify cross-port.
+///
+/// - Parameters:
+///   - senderPublicKey: 32-byte Ed25519 public key.
+///   - payloadKind: Discriminator for the payload's meaning.
+///   - payload: Opaque batch bytes (e.g. JSON-encoded `[SyncRecord]`).
+///   - hlc: Batch-level HLC timestamp packed into three integer fields.
+/// - Returns: The canonical bytes to sign or verify.
+public func envelopeSigningBytes(
+    senderPublicKey: Data,
+    payloadKind: PayloadKind,
+    payload: Data,
+    hlc: PackedHLC
+) -> Data {
+    var out = Data()
+    out.reserveCapacity(32 + 1 + 4 + payload.count + 8 + 4 + 4)
+
+    // 32-byte public key
+    out.append(contentsOf: senderPublicKey)
+
+    // 1-byte payload kind discriminator
+    out.append(payloadKind.rawValue)
+
+    // 4-byte LE length prefix for payload
+    var payloadLen = UInt32(payload.count).littleEndian
+    withUnsafeBytes(of: &payloadLen) { out.append(contentsOf: $0) }
+
+    // Payload bytes
+    out.append(payload)
+
+    // HLC: 8-byte LE physicalTime, 4-byte LE logicalCount, 4-byte LE nodeID
+    var pt = hlc.physicalTime.littleEndian
+    withUnsafeBytes(of: &pt) { out.append(contentsOf: $0) }
+    var lc = hlc.logicalCount.littleEndian
+    withUnsafeBytes(of: &lc) { out.append(contentsOf: $0) }
+    var ni = hlc.nodeID.littleEndian
+    withUnsafeBytes(of: &ni) { out.append(contentsOf: $0) }
+
+    return out
+}
+
+// MARK: - SignedEnvelope
+
+/// The authenticated wire envelope for federated sync.
+///
+/// Carries an opaque batch payload (discriminated by `payloadKind`) signed with
+/// the sender's Ed25519 key. The signature covers deterministic canonical bytes
+/// produced by `envelopeSigningBytes(...)`, not raw JSON — closing the
+/// relabel/replay seam and ensuring cross-port byte-identical verification.
+///
+/// `payloadKind` is a C1 extension point: v1.0 only knows `syncRecordBatch`;
+/// `fieldWriteEventBatch` is reserved for the next-gen write-path payload.
+/// A receiver that encounters an unknown `payloadKind` should reject the
+/// envelope as a conflict rather than crash.
+public struct SignedEnvelope: Sendable, Codable {
+    /// 32-byte Ed25519 public key of the sender.
+    public let senderPublicKey: Data
+    /// Discriminator for the opaque payload's type.
+    public let payloadKind: PayloadKind
+    /// Opaque canonical bytes for the batch (e.g. JSON-encoded `[SyncRecord]`
+    /// when `payloadKind == .syncRecordBatch`).
+    public let payload: Data
+    /// Ed25519 signature over `envelopeSigningBytes(senderPublicKey:payloadKind:payload:hlc:)`.
+    /// Not over raw payload bytes — this closes the relabel/replay seam.
+    public let signature: Data
+    /// Batch-level HLC timestamp. Strictly ordered after the records it carries
+    /// (the sender advances the clock once more after minting record HLCs).
+    public let hlc: PackedHLC
+
+    public init(
+        senderPublicKey: Data,
+        payloadKind: PayloadKind,
+        payload: Data,
+        signature: Data,
+        hlc: PackedHLC
+    ) {
+        self.senderPublicKey = senderPublicKey
+        self.payloadKind = payloadKind
+        self.payload = payload
+        self.signature = signature
+        self.hlc = hlc
+    }
+}
+
+// MARK: - Relay protocol
+
 /// Transport abstraction for federated sync. Swapping the implementation
 /// swaps the transport without touching the engine; the in-process
 /// `FederationRelay` below serves local peering and tests, and a hosted
 /// HTTPS/gRPC relay (a third-party SyncServer) is a drop-in conformer —
 /// this protocol is that extension point.
 public protocol Relay: Sendable {
-    /// Deliver a signed message to a recipient's inbox.
-    func send(to recipient: Data, message: SignedMessage)
-    /// Drain (and clear) the recipient's pending inbound messages.
-    func drain(for recipient: Data) -> [SignedMessage]
+    /// Deliver a signed envelope to a recipient's inbox.
+    func send(to recipient: Data, message: SignedEnvelope)
+    /// Drain (and clear) the recipient's pending inbound envelopes.
+    func drain(for recipient: Data) -> [SignedEnvelope]
 }
 
 /// Shared in-process relay used by paired engines for v1.0 (the
 /// local/test `Relay`). In production a hosted relay conforms instead.
 public final class FederationRelay: Relay, @unchecked Sendable {
     private let lock = NSLock()
-    private var inboxes: [Data: [SignedMessage]] = [:]  // keyed by recipient public key
+    private var inboxes: [Data: [SignedEnvelope]] = [:]  // keyed by recipient public key
 
     public init() {}
 
-    public func send(to recipient: Data, message: SignedMessage) {
+    public func send(to recipient: Data, message: SignedEnvelope) {
         lock.lock()
         defer { lock.unlock() }
         inboxes[recipient, default: []].append(message)
     }
 
-    public func drain(for recipient: Data) -> [SignedMessage] {
+    public func drain(for recipient: Data) -> [SignedEnvelope] {
         lock.lock()
         defer { lock.unlock() }
         let msgs = inboxes[recipient] ?? []
@@ -120,19 +237,7 @@ public final class FederationRelay: Relay, @unchecked Sendable {
     }
 }
 
-public struct SignedMessage: Sendable, Codable {
-    public let senderPublicKey: Data
-    public let payload: Data         // JSON-encoded [SyncRecord]
-    public let signature: Data       // Ed25519 over payload
-    public let hlc: PackedHLC
-
-    public init(senderPublicKey: Data, payload: Data, signature: Data, hlc: PackedHLC) {
-        self.senderPublicKey = senderPublicKey
-        self.payload = payload
-        self.signature = signature
-        self.hlc = hlc
-    }
-}
+// MARK: - FederationStateActor
 
 actor FederationStateActor {
     let localIdentity = LocalIdentity()
@@ -253,34 +358,48 @@ actor FederationStateActor {
             return SyncReceipt.empty
         }
 
-        let payload: Data
+        // Encode the batch to opaque bytes. SyncRecord has a conformance-gated
+        // wire format (JSON via Codable / serde_json). The envelope's canonical
+        // signing bytes wrap this payload with a length prefix so the boundary
+        // is unambiguous when computing the signature.
+        let payloadBytes: Data
         do {
-            payload = try JSONEncoder().encode(records)
+            payloadBytes = try JSONEncoder().encode(records)
         } catch {
             throw SyncError.encodingFailure(detail: "encode SyncRecords: \(error)")
         }
 
+        // Batch-level HLC: advance the clock once more so the envelope timestamp
+        // is strictly ordered after all record HLCs in the batch.
+        let batchHLC = PackedHLC(hlcGenerator.send(now: nowMillis()))
+
+        // Build canonical signing bytes and sign with sender's Ed25519 key.
+        // The signature covers (senderPublicKey || payloadKind || payload_len
+        // || payload || hlc) — not raw JSON — closing the relabel/replay seam.
+        let signingBytes = envelopeSigningBytes(
+            senderPublicKey: localIdentity.publicKey,
+            payloadKind: .syncRecordBatch,
+            payload: payloadBytes,
+            hlc: batchHLC
+        )
         let signature: Data
         do {
-            signature = try localIdentity.sign(payload)
+            signature = try localIdentity.sign(signingBytes)
         } catch {
-            throw SyncError.encodingFailure(detail: "sign: \(error)")
+            throw SyncError.encodingFailure(detail: "sign envelope: \(error)")
         }
 
-        // Envelope timestamp for this transmission. send(now:)
-        // advances the clock so each message envelope is strictly
-        // ordered after the records it carries.
-        let hlc = PackedHLC(hlcGenerator.send(now: nowMillis()))
-        let message = SignedMessage(
+        let envelope = SignedEnvelope(
             senderPublicKey: localIdentity.publicKey,
-            payload: payload,
+            payloadKind: .syncRecordBatch,
+            payload: payloadBytes,
             signature: signature,
-            hlc: hlc
+            hlc: batchHLC
         )
 
         var pushedCount = 0
         for peer in peers {
-            peer.relay.send(to: peer.publicKey, message: message)
+            peer.relay.send(to: peer.publicKey, message: envelope)
             pushedCount += records.count
         }
 
@@ -296,21 +415,45 @@ actor FederationStateActor {
         var conflicts = 0
 
         for peer in peers {
-            let messages = peer.relay.drain(for: localIdentity.publicKey)
-            for message in messages {
-                // Verify signature.
-                guard FederationSignature.verify(message.signature, of: message.payload, by: message.senderPublicKey) else {
+            let envelopes = peer.relay.drain(for: localIdentity.publicKey)
+            for envelope in envelopes {
+                // Reject unknown payload kinds to avoid misinterpreting future
+                // payload types. Known: .syncRecordBatch. Unknown kinds are
+                // counted as conflicts and logged; no crash.
+                guard envelope.payloadKind == .syncRecordBatch else {
                     conflicts += 1
-                    logger.error("signature verification failed from \(message.senderPublicKey.base64EncodedString())")
+                    logger.error("unknown payload kind \(envelope.payloadKind.rawValue) from \(envelope.senderPublicKey.base64EncodedString())")
                     continue
                 }
+
+                // Verify signature over canonical bytes (not raw payload).
+                // The sender signed envelopeSigningBytes(...); we reproduce
+                // the same bytes here for verification.
+                let signingBytes = envelopeSigningBytes(
+                    senderPublicKey: envelope.senderPublicKey,
+                    payloadKind: envelope.payloadKind,
+                    payload: envelope.payload,
+                    hlc: envelope.hlc
+                )
+                guard FederationSignature.verify(
+                    envelope.signature,
+                    of: signingBytes,
+                    by: envelope.senderPublicKey
+                ) else {
+                    conflicts += 1
+                    logger.error("signature verification failed from \(envelope.senderPublicKey.base64EncodedString())")
+                    continue
+                }
+
+                // Decode the batch from the opaque payload.
                 let records: [SyncRecord]
                 do {
-                    records = try JSONDecoder().decode([SyncRecord].self, from: message.payload)
+                    records = try JSONDecoder().decode([SyncRecord].self, from: envelope.payload)
                 } catch {
                     conflicts += 1
                     continue
                 }
+
                 for record in records {
                     do {
                         guard record.kitID == manifest.kitID else {
@@ -347,6 +490,11 @@ actor FederationStateActor {
     /// × conflict policy (four cases each). Each arm is a short operation —
     /// upsert, insert-if-absent, delete, or early-return. The length comes
     /// from the cross-product of cases, not from complex logic.
+    ///
+    /// Note: the `lastWriterWinsByHLC` arm currently performs an unconditional
+    /// upsert without comparing the incoming HLC against the stored row's HLC.
+    /// That LWW comparison bug is tracked separately and is out of scope here;
+    /// the envelope shape change does not alter this behavior.
     private func applyInbound(
         _ record: SyncRecord,
         syncedTable: SyncedTable,

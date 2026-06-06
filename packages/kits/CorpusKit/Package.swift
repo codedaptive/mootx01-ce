@@ -65,6 +65,10 @@ let package = Package(
                 "CorpusKit",
                 "CorpusKitProviders",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                // PersistenceKitSQLite is required by the SQLite-backed chunk HLC
+                // round-trip test (ChunkHLCRoundTripTests), which exercises the
+                // unpackHLC fix through BundleStore's actual SQLite storage path.
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
             ],
             path: "Tests/CorpusKitTests"
         ),

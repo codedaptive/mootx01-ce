@@ -689,4 +689,54 @@ let hits = try await HybridRecall.recall(
 
 ---
 
+## § 8 — Swift/Rust Concordance
+
+One row per public concept. Each Swift symbol and Rust symbol is a real
+top-level public declaration found in source (file:line cited). The
+shape rule states how (if at all) the two ports are allowed to differ.
+The test/vector binding names the conformance/parity test that proves
+Swift == Rust for that concept. Read-anchored: every row was confirmed
+against `Sources/**` and `rust/src/**` (plus `rust-providers/src/**`).
+
+Status legend: **Confirmed** = both present and test-bound;
+**Exempt** = Apple-platform binding, no Rust counterpart by design;
+**DRIFT** = parity gap that is not a sanctioned platform binding.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Chunk | `Chunk` (`Chunk.swift:34`) | `Chunk` (`chunk.rs:37`) | public struct / pub struct | identical fields; idiom: Swift `UUID`/`Int`/`[String:String]` ↔ Rust `Uuid`/`usize`/`BTreeMap`; content-addressed v5 id | `ChunkTests.swift` / `chunk_tests.rs` | Confirmed |
+| ScoredChunk | `ScoredChunk` (`Chunk.swift:147`) | `ScoredChunk` (`chunk.rs:136`) | public struct / pub struct | identical; Swift `Float`/`Float?` ↔ Rust `f32`/`Option<f32>` | `ChunkTests.swift` / `chunk_tests.rs` | Confirmed |
+| ChunkerConfiguration | `ChunkerConfiguration` (`Chunker.swift:29`) | `ChunkerConfiguration` (`chunker.rs:27`) | public struct / pub struct | identical; defaults 800/100/true (Swift default-arg init / Rust `Default`) | `ChunkerTests.swift` / `chunker_tests.rs` | Confirmed |
+| Chunker (namespace) | `Chunker` (`Chunker.swift:45`) | `chunk` / `chunk_with_default_hlc` free fns (`chunker.rs`) | public enum (caseless) / pub fn | Swift caseless-enum namespace `Chunker.chunk` / Rust module-level free functions — sanctioned stateless-namespace idiom; Rust adds explicit `now_millis` for determinism | `ChunkerTests.swift` / `chunker_tests.rs` | Confirmed |
+| BM25Parameters | `BM25Parameters` (`BM25Index.swift:16`) | `BM25Parameters` (`bm25_index.rs:13`) | public struct / pub struct | identical; defaults k1=1.5, b=0.75; Swift `Double` ↔ Rust `f64` | `BM25Tests.swift` / `bm25_tests.rs` | Confirmed |
+| BM25Index | `BM25Index` (`BM25Index.swift:25`) | `BM25Index` (`bm25_index.rs:38`) | public actor / pub struct | Swift `actor` (async isolation) / Rust owned state with `&mut self` mutators, `&self` reads — sanctioned actor↔owned-state seam; verbs `index`↔`index_documents`, `search`/`remove`/`documentCount`↔`document_count` | `BM25Tests.swift` / `bm25_tests.rs` | Confirmed |
+| BundleStore | `BundleStore` (`BundleStore.swift:53`) | `BundleStore` (`bundle_store.rs:29`) | public actor / pub struct | Swift `actor` over `Storage` / Rust `Arc<dyn Storage>`; Swift `async throws` ↔ Rust sync `CorpusKitResult`; Rust adds `open()` (schema apply). Append-only, idempotent | `BundleStoreTests.swift` / `bundle_store_tests.rs` | Confirmed |
+| HybridRecallConfiguration | `HybridRecallConfiguration` (`HybridRecall.swift:17`) | `HybridRecallConfiguration` (`hybrid_recall.rs:14`) | public struct / pub struct | identical; defaults 0.6/0.4/60/off; Swift `Double`/`Double?` ↔ Rust `f64`/`Option<f64>` | `HybridRecallTests.swift` / `hybrid_recall_tests.rs` | Confirmed |
+| HybridRecall (namespace) | `HybridRecall` (`HybridRecall.swift:36`) | `recall` free fn (`hybrid_recall.rs`) | public enum (caseless) / pub fn | Swift caseless-enum namespace `HybridRecall.recall` / Rust free function — sanctioned stateless-namespace idiom; Swift `async throws` ↔ Rust sync `CorpusKitResult` (no async runtime) | `HybridRecallTests.swift` / `hybrid_recall_tests.rs` | Confirmed |
+| Tokenizer | `Tokenizer` (`Tokenizer.swift:10`) | `Tokenizer` (`tokenizer.rs:8`) | public protocol / pub trait | identical surface; Swift protocol-extension default `keywordTokens` ↔ Rust trait default delegating to `default_keyword_tokens`; idiom `vocabID`↔`vocab_id`, `Int32`↔`i32` | `TokenizerTests.swift` / `tokenizer_tests.rs` | Confirmed |
+| CorpusKitSync | `CorpusKitSync` (`SyncManifest.swift:11`) | `CorpusKitSync` (`sync_manifest.rs:9`) | public enum (caseless) / pub struct | Swift caseless-enum namespace / Rust unit struct — sanctioned stateless-namespace idiom; both expose `manifest(...)→SyncManifest` (ConvergenceKit's type) | `SyncManifestTests.swift` / `hybrid_recall_tests.rs` (manifest exercised) | Confirmed |
+| CorpusKitError | `CorpusKitError` (`CorpusKitError.swift:5`) | `CorpusKitError` (`error.rs:4`) | public enum / pub enum | identical six cases; Rust adds `Display`+`Error` impls; case idiom `encodingFailure`↔`EncodingFailure` | `CorpusKitErrorTests.swift` / `chunk_tests.rs` + `error.rs` Display impl | Confirmed |
+| CorpusKitResult | (Swift uses `async throws`) | `CorpusKitResult` (`error.rs:28`) | — / pub type alias | Rust `Result<T, CorpusKitError>` alias ↔ Swift typed `throws` — sanctioned error-channel idiom (Swift has no Result-alias surface) | `chunk_tests.rs` / `corpus_tests.rs` (result threaded through) | Confirmed |
+| EmbeddingModel selector | `EmbeddingModel` (`CorpusKit.swift:40`) | `EmbeddingModelConfig` (`corpus.rs:56`) | public enum / pub enum | Swift four cases (`deterministic`/`miniLM`/`mpNet`/`embeddingGemma`); Rust `Deterministic` only — named cases are CoreML-bound (Apple platform binding); `.deterministic`↔`Deterministic` is the cross-port parity case | `CorpusTests.swift` / `corpus_tests.rs` (deterministic seed parity) | Confirmed |
+| Corpus | `Corpus` (`CorpusKit.swift:99`) | `Corpus` (`corpus.rs:113`) | public actor / pub struct | Swift `actor` (`init async throws`) / Rust `struct` (`open()`, `bm25: Mutex<BM25Index>`); Swift `async throws`+`Date` ↔ Rust sync `CorpusKitResult`+`now_millis` — sanctioned actor↔owned-state + async↔sync seam | `CorpusTests.swift` / `corpus_tests.rs` | Confirmed |
+| DeterministicTokenizer | `DeterministicTokenizer` (`DeterministicTokenizer.swift:16`) | `DeterministicTokenizer` (`rust-providers/.../deterministic_tokenizer.rs:34`) | public struct / pub struct | identical FNV-1a fold; Swift default-arg init ↔ Rust `new`/`with_parameters`/`Default`; lives in providers target both ports | `ProvidersTests.swift` / `deterministic_tokenizer_tests.rs` | Confirmed |
+| MiniLMTextProvider | `MiniLMTextProvider` (`MiniLMTextProvider.swift:41`) | none — Apple platform binding (CoreML) | public struct / — | Rust: none — Apple platform binding (CoreML inference loaded by host app); ONNX/Candle Rust providers deferred (SPEC § 9). Conforms to VectorKit `EmbeddingProvider` | `ProvidersTests.swift` (Swift-only) | Exempt |
+| MPNetTextProvider | `MPNetTextProvider` (`MPNetTextProvider.swift:31`) | none — Apple platform binding (CoreML) | public struct / — | Rust: none — Apple platform binding (CoreML); ONNX/Candle Rust provider deferred (SPEC § 9) | `ProvidersTests.swift` (Swift-only) | Exempt |
+| EmbeddingGemmaProvider | `EmbeddingGemmaProvider` (`EmbeddingGemmaProvider.swift:33`) | none — Apple platform binding (CoreML) | public struct / — | Rust: none — Apple platform binding (CoreML); ONNX/Candle Rust provider deferred (SPEC § 9) | `ProvidersTests.swift` (Swift-only) | Exempt |
+
+**Notes on the three text providers (Exempt rationale).** `MiniLMTextProvider`,
+`MPNetTextProvider`, and `EmbeddingGemmaProvider` each wrap a CoreML-backed
+inference closure that the host app supplies; CoreML is an Apple framework with
+no Rust counterpart. Per the doc body (§ 2, F11/SPEC § 9), the Rust
+`corpus-kit-providers` crate ships `DeterministicTokenizer` today and the
+ONNX/Candle-backed providers land in a follow-on mission once model bundles are
+wired in. These are sanctioned Apple-platform bindings, not parity drift: the
+behavioral parity surface (chunking, BM25, hybrid recall, content-addressed
+ids, deterministic embedding) is fully mirrored across both ports. They are
+proposed for the audit ignore-list (see `exempt_proposed`) because the
+deterministic path is the cross-port contract and these three are the
+platform-bound exceptions.
+
+---
+
 *End of CorpusKit Interface v0.8.*
