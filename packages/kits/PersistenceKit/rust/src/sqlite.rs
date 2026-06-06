@@ -74,14 +74,11 @@ fn to_sql(value: &TypedValue) -> SqlValue {
     }
 }
 
-/// Reconstruct an HLC from its packed integer (inverse of HLC::packed),
-/// matching the Swift unpack layout (physical << 16 | logical << 4 | node).
+/// Reconstruct an HLC from its packed integer. Uses the canonical
+/// inverse HLC::from_packed, which matches HLC::packed's layout
+/// (node<<56 | logical<<40 | physical).
 fn unpack_hlc(packed: u64) -> HLC {
-    HLC {
-        physical_time: ((packed >> 16) & 0xFFFF_FFFF_FFFF) as i64,
-        logical_count: ((packed >> 4) & 0xFFF) as i32,
-        node_id: (packed & 0xF) as i32,
-    }
+    HLC::from_packed(packed)
 }
 
 /// Read a SQLite value back into a TypedValue, using the column's declared
@@ -1303,5 +1300,153 @@ impl VectorIndex for SqliteVectorIndex {
             })
             .map_err(|e| map_sql_err(e, SVEC_META))?;
         Ok(n as usize)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// HLC round-trip tests
+//
+// These tests verify that an HLC stored to a .hlc column reads back
+// with bit-identical field values. They would FAIL against the old
+// unpack_hlc (wrong layout) and PASS after the HLC::from_packed fix.
+//
+// Known-answer: physical_time=0x0102030405, logical_count=0x0607, node_id=0x08
+// Canonical packed (node<<56 | logical<<40 | phys):
+//   = 0x08_0607_0102030405
+// Old wrong decode (physical<<16 | logical<<4 | node):
+//   physical = 0x0806070102030405 >> 16 = 0x080607010203 ≠ 0x0102030405
+// ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod hlc_roundtrip_tests {
+    use super::*;
+    use crate::{
+        BackendConfiguration, ColumnDeclaration, EstateConfiguration, SchemaDeclaration,
+        Storage, StoragePredicate, TableDeclaration, TypedValue,
+    };
+    use substrate_types::hlc::HLC;
+    use uuid::Uuid;
+
+    fn make_sqlite_storage() -> SqliteStorage {
+        let path = std::env::temp_dir()
+            .join(format!("hlc_rt_{}.sqlite", Uuid::new_v4()));
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("open sqlite");
+        let schema = SchemaDeclaration::new(
+            "hlc-test",
+            1,
+            vec![TableDeclaration::new(
+                "events",
+                vec![
+                    ColumnDeclaration::uuid("id"),
+                    ColumnDeclaration::hlc("stamp"), // .hlc so read_value returns TypedValue::Hlc
+                ],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("open schema");
+        storage
+    }
+
+    /// Insert `values` and return the first matching row. Uses
+    /// `Storage::row_store` explicitly to disambiguate from
+    /// `StorageTransaction::row_store` (both are implemented by
+    /// `SqliteStorage`, so a plain `.row_store()` call is ambiguous).
+    fn insert_and_query(
+        storage: &SqliteStorage,
+        values: std::collections::BTreeMap<String, TypedValue>,
+        row_id: Uuid,
+    ) -> Vec<StorageRow> {
+        let rs = Storage::row_store(storage);
+        rs.insert("events", values).expect("insert");
+        let pred = StoragePredicate::Eq(
+            crate::Column::new("events", "id"),
+            TypedValue::Uuid(row_id),
+        );
+        rs.query("events", Some(&pred), &[], None, None)
+            .expect("query")
+    }
+
+    #[test]
+    fn hlc_round_trip_known_answer() {
+        // physical_time fits in 40 bits, logical_count in 16 bits, node_id in 8 bits.
+        // These specific values expose the layout difference between the old wrong
+        // decode and the correct HLC::from_packed inverse.
+        let original = HLC::new(0x0102030405_i64, 0x0607, 0x08);
+        let storage = make_sqlite_storage();
+        let row_id = Uuid::new_v4();
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(row_id));
+        values.insert("stamp".into(), TypedValue::Hlc(original));
+
+        let rows = insert_and_query(&storage, values, row_id);
+        assert_eq!(rows.len(), 1);
+
+        // TypedValue::Hlc(HLC) — HLC is Copy so pattern gives a copy.
+        match rows[0].get("stamp") {
+            Some(TypedValue::Hlc(read_back)) => {
+                assert_eq!(
+                    read_back.physical_time, original.physical_time,
+                    "physical_time mismatch: {} ≠ {}", read_back.physical_time, original.physical_time
+                );
+                assert_eq!(
+                    read_back.logical_count, original.logical_count,
+                    "logical_count mismatch: {} ≠ {}", read_back.logical_count, original.logical_count
+                );
+                assert_eq!(
+                    read_back.node_id, original.node_id,
+                    "node_id mismatch: {} ≠ {}", read_back.node_id, original.node_id
+                );
+                assert_eq!(read_back, &original, "HLC must be bit-identical after round-trip");
+            }
+            other => panic!("expected TypedValue::Hlc, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hlc_zero_round_trip() {
+        let original = HLC::ZERO;
+        let storage = make_sqlite_storage();
+        let row_id = Uuid::new_v4();
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(row_id));
+        values.insert("stamp".into(), TypedValue::Hlc(original));
+        let rows = insert_and_query(&storage, values, row_id);
+
+        match rows[0].get("stamp") {
+            Some(TypedValue::Hlc(read_back)) => {
+                assert_eq!(read_back, &original);
+            }
+            other => panic!("expected TypedValue::Hlc, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hlc_max_fields_round_trip() {
+        // 40-bit physical_time max, 16-bit logical_count max, 0x7F node_id
+        // (avoids sign-extension edge case in i8 cast used by from_packed).
+        let original = HLC::new(0xFF_FFFF_FFFF_i64, 0xFFFF, 0x7F);
+        let storage = make_sqlite_storage();
+        let row_id = Uuid::new_v4();
+
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("id".into(), TypedValue::Uuid(row_id));
+        values.insert("stamp".into(), TypedValue::Hlc(original));
+        let rows = insert_and_query(&storage, values, row_id);
+
+        match rows[0].get("stamp") {
+            Some(TypedValue::Hlc(read_back)) => {
+                assert_eq!(read_back, &original);
+            }
+            other => panic!("expected TypedValue::Hlc, got {:?}", other),
+        }
     }
 }

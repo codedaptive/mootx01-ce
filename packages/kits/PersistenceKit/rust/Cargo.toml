@@ -25,3 +25,12 @@ chrono = "0.4"
 # Native-type features map UUID/TIMESTAMPTZ columns to uuid::Uuid /
 # chrono::DateTime<Utc>.
 postgres = { version = "0.19", features = ["with-uuid-1", "with-chrono-0_4"] }
+# AES-GCM-256 at-rest row encryption (PAR-5-PK). C-1 per-crate exception
+# recorded in DECISION_RUST_AEAD_CRATE_2026-06-05.md. Rationale: at-rest
+# AEAD; never hand-roll a cipher; random nonces are non-deterministic by
+# design so this is not conformance-byte-identity-gated.
+# getrandom feature required for OsRng-backed nonce generation on all targets.
+# Pinned to exact version for crypto supply-chain safety: a patch release to
+# aes-gcm could change AEAD behaviour and silently break cross-port
+# byte-identity of the ciphertext layout. Exact pinning prevents silent upgrades.
+aes-gcm = { version = "=0.10.3", features = ["aes"] }

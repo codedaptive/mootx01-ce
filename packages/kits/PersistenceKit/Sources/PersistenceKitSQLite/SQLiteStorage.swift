@@ -615,10 +615,10 @@ actor SQLiteBackend {
     }
 
     private func unpackHLC(_ packed: UInt64) -> HLC {
-        let physical = Int64((packed >> 16) & 0xFFFF_FFFF_FFFF)
-        let logical = Int32((packed >> 4) & 0xFFF)
-        let node = Int32(packed & 0xF)
-        return HLC(physicalTime: physical, logicalCount: logical, nodeID: node)
+        // Use the canonical inverse: HLC(packed:) matches HLC.packed's
+        // layout (node<<56 | logical<<40 | physical). The old inline
+        // decode used a different layout and silently corrupted reads.
+        return HLC(packed: packed)
     }
 
     private func unpackFingerprint(_ d: Data) -> Fingerprint256 {
@@ -784,11 +784,9 @@ actor SQLiteBackend {
 
     private func decodeAuditRow(_ stmt: SQLiteStatement) -> AuditEvent {
         let eventID = UUID(uuidString: stmt.columnText(0) ?? "") ?? UUID()
-        let hlcPacked = UInt64(bitPattern: stmt.columnInt64(1))
-        let physical = Int64((hlcPacked >> 16) & 0xFFFF_FFFF_FFFF)
-        let logical = Int32((hlcPacked >> 4) & 0xFFF)
-        let node = Int32(hlcPacked & 0xF)
-        let hlc = HLC(physicalTime: physical, logicalCount: logical, nodeID: node)
+        // Use the canonical inverse: HLC(packed:) matches HLC.packed's
+        // layout (node<<56 | logical<<40 | physical).
+        let hlc = HLC(packed: UInt64(bitPattern: stmt.columnInt64(1)))
         let estateUUID = UUID(uuidString: stmt.columnText(2) ?? "") ?? UUID()
         let rowId = UUID(uuidString: stmt.columnText(3) ?? "") ?? UUID()
         let verb = stmt.columnText(4) ?? ""

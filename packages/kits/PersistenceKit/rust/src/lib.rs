@@ -21,12 +21,14 @@ pub mod blob_store;
 pub mod cache_config;
 pub mod cache_invalidator;
 pub mod caching_row_store;
+pub mod encryption;
 pub mod error;
 pub mod generated_column;
 pub mod inmemory;
 pub mod observer;
 pub mod postgres;
 pub mod predicate;
+pub mod replication;
 pub mod row_store;
 pub mod schema;
 pub mod sqlite;
@@ -39,11 +41,16 @@ pub use blob_store::*;
 pub use cache_config::*;
 pub use cache_invalidator::CacheInvalidator;
 pub use caching_row_store::CachingRowStore;
+pub use encryption::{
+    AeadProvider, AesGcmAeadProvider, EncryptionMode, EstateEncryptionConfig, RowCrypto,
+};
 pub use error::*;
 pub use generated_column::*;
 pub use observer::*;
 pub use postgres::PostgresStorage;
 pub use predicate::*;
+// Replication types are not re-exported at crate root to avoid namespace collision.
+// Import them as `use persistence_kit::replication::{replicate, flush, hydrate, ...}`.
 pub use row_store::*;
 pub use schema::*;
 pub use sqlite::SqliteStorage;
@@ -57,3 +64,5 @@ mod cache_config_tests;
 mod cache_wiring_tests;
 #[cfg(test)]
 mod caching_row_store_tests;
+#[cfg(test)]
+mod encryption_tests;
