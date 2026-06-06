@@ -3,6 +3,7 @@ import EngramLib
 import PersistenceKit
 import PersistenceKitInMemory
 import Foundation
+import IntellectusLib
 @testable import VectorKit
 
 /// Tests for `VectorStore` — SQLite-backed CRUD over the `vectors`
@@ -10,9 +11,18 @@ import Foundation
 /// ID and version that produced it; the round-trip and multi-model
 /// tests below enforce that invariant.
 ///
-/// Each test creates a fresh database in a temporary directory and
-/// tears it down on completion so tests do not share state.
-@Suite("VectorStore")
+/// Each test creates a fresh InMemory store and discards it on
+/// completion so tests do not share state.
+///
+/// CRITICAL — GlobalTestLock:
+///   These tests call addVector, findNearest, and findByKeyword, all of
+///   which emit telemetry via the Intellectus global singleton when
+///   monitoring is enabled. VectorKitTelemetryTests runs concurrently in
+///   the same test binary and toggles the singleton. To prevent
+///   contamination, every test here acquires GlobalTestLock.shared for
+///   its entire duration, serialising with the telemetry suite.
+///   See GlobalTestLock.swift for the design rationale.
+@Suite("VectorStore", .serialized)
 struct VectorStoreTests {
 
     private func makeStore() async throws -> VectorStore {
@@ -27,122 +37,134 @@ struct VectorStoreTests {
     /// Round-trip: bytes written via `addVector` match bytes read via
     /// `getVector`. Confirms the Engram BLOB encoding is lossless.
     @Test func testAddGetRoundTripPreservesEngramBytes() async throws {
-        let store = try await makeStore()
-        let engram = Engram(blocks: 0xDEAD_BEEF_CAFE_BABE,
-                            0x0123_4567_89AB_CDEF,
-                            0xFFFF_0000_FFFF_0000,
-                            0x0000_FFFF_0000_FFFF)
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        try await store.addVector(drawerID: "drawer-A",
-                            engram: engram,
-                            modelID: "minilm",
-                            modelVersion: "1.0.0",
-                            filedAt: now)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let engram = Engram(blocks: 0xDEAD_BEEF_CAFE_BABE,
+                                0x0123_4567_89AB_CDEF,
+                                0xFFFF_0000_FFFF_0000,
+                                0x0000_FFFF_0000_FFFF)
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            try await store.addVector(drawerID: "drawer-A",
+                                engram: engram,
+                                modelID: "minilm",
+                                modelVersion: "1.0.0",
+                                filedAt: now)
 
-        let fetched = try await store.getVector(drawerID: "drawer-A",
-                                          modelID: "minilm")
-        #expect(fetched == engram)
+            let fetched = try await store.getVector(drawerID: "drawer-A",
+                                              modelID: "minilm")
+            #expect(fetched == engram)
+        }
     }
 
     /// Unknown drawer ID returns nil — `getVector` does not throw on
     /// missing rows, it surfaces absence as Optional.none.
     @Test func testGetVectorReturnsNilForUnknownDrawer() async throws {
-        let store = try await makeStore()
-        let result = try await store.getVector(drawerID: "never-existed",
-                                         modelID: "minilm")
-        #expect(result == nil)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let result = try await store.getVector(drawerID: "never-existed",
+                                             modelID: "minilm")
+            #expect(result == nil)
+        }
     }
 
     /// Two models for the same drawer: each is independently
     /// retrievable. Confirms `(drawer_id, model_id)` is the effective
     /// lookup key and the two rows do not collide.
     @Test func testMultipleModelsStoredForSameDrawer() async throws {
-        let store = try await makeStore()
-        let minilmEngram = Engram(blocks: 0x1111, 0x2222, 0x3333, 0x4444)
-        let gemmaEngram  = Engram(blocks: 0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD)
-        let now = Date(timeIntervalSince1970: 1_700_000_100)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let minilmEngram = Engram(blocks: 0x1111, 0x2222, 0x3333, 0x4444)
+            let gemmaEngram  = Engram(blocks: 0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD)
+            let now = Date(timeIntervalSince1970: 1_700_000_100)
 
-        try await store.addVector(drawerID: "drawer-X",
-                            engram: minilmEngram,
-                            modelID: "minilm",
-                            modelVersion: "1.0.0",
-                            filedAt: now)
-        try await store.addVector(drawerID: "drawer-X",
-                            engram: gemmaEngram,
-                            modelID: "gemma",
-                            modelVersion: "300m",
-                            filedAt: now)
+            try await store.addVector(drawerID: "drawer-X",
+                                engram: minilmEngram,
+                                modelID: "minilm",
+                                modelVersion: "1.0.0",
+                                filedAt: now)
+            try await store.addVector(drawerID: "drawer-X",
+                                engram: gemmaEngram,
+                                modelID: "gemma",
+                                modelVersion: "300m",
+                                filedAt: now)
 
-        let __r1 = try await store.getVector(drawerID: "drawer-X",
-                                           modelID: "minilm")
-        #expect(__r1 == minilmEngram)
-        let __r2 = try await store.getVector(drawerID: "drawer-X",
-                                           modelID: "gemma")
-        #expect(__r2 == gemmaEngram)
+            let __r1 = try await store.getVector(drawerID: "drawer-X",
+                                               modelID: "minilm")
+            #expect(__r1 == minilmEngram)
+            let __r2 = try await store.getVector(drawerID: "drawer-X",
+                                               modelID: "gemma")
+            #expect(__r2 == gemmaEngram)
+        }
     }
 
     /// `vectors(forDrawerID:)` returns all rows for one drawer in
     /// `filed_at` ASC order. Equal timestamps are not exercised here
     /// (mission spec calls for ASC order, no tiebreak guarantee).
     @Test func testVectorsForDrawerReturnsAllOrderedByFiledAtAscending() async throws {
-        let store = try await makeStore()
-        let e1 = Engram(blocks: 1, 0, 0, 0)
-        let e2 = Engram(blocks: 2, 0, 0, 0)
-        let e3 = Engram(blocks: 3, 0, 0, 0)
-        let t1 = Date(timeIntervalSince1970: 1_700_000_000)
-        let t2 = Date(timeIntervalSince1970: 1_700_000_100)
-        let t3 = Date(timeIntervalSince1970: 1_700_000_200)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let e1 = Engram(blocks: 1, 0, 0, 0)
+            let e2 = Engram(blocks: 2, 0, 0, 0)
+            let e3 = Engram(blocks: 3, 0, 0, 0)
+            let t1 = Date(timeIntervalSince1970: 1_700_000_000)
+            let t2 = Date(timeIntervalSince1970: 1_700_000_100)
+            let t3 = Date(timeIntervalSince1970: 1_700_000_200)
 
-        // Insert out of chronological order to exercise the ORDER BY.
-        try await store.addVector(drawerID: "drawer-Y", engram: e2,
-                            modelID: "mB", modelVersion: "1", filedAt: t2)
-        try await store.addVector(drawerID: "drawer-Y", engram: e3,
-                            modelID: "mC", modelVersion: "1", filedAt: t3)
-        try await store.addVector(drawerID: "drawer-Y", engram: e1,
-                            modelID: "mA", modelVersion: "1", filedAt: t1)
+            // Insert out of chronological order to exercise the ORDER BY.
+            try await store.addVector(drawerID: "drawer-Y", engram: e2,
+                                modelID: "mB", modelVersion: "1", filedAt: t2)
+            try await store.addVector(drawerID: "drawer-Y", engram: e3,
+                                modelID: "mC", modelVersion: "1", filedAt: t3)
+            try await store.addVector(drawerID: "drawer-Y", engram: e1,
+                                modelID: "mA", modelVersion: "1", filedAt: t1)
 
-        let all = try await store.vectors(forDrawerID: "drawer-Y")
-        #expect(all.count == 3)
-        #expect(all.map(\.engram) == [e1, e2, e3])
-        #expect(all.map(\.modelID) == ["mA", "mB", "mC"])
+            let all = try await store.vectors(forDrawerID: "drawer-Y")
+            #expect(all.count == 3)
+            #expect(all.map(\.engram) == [e1, e2, e3])
+            #expect(all.map(\.modelID) == ["mA", "mB", "mC"])
+        }
     }
 
     /// `deleteVector` removes exactly the matching `(drawer_id,
     /// model_id)` row; subsequent fetch returns nil.
     @Test func testDeleteVectorRemovesRow() async throws {
-        let store = try await makeStore()
-        let engram = Engram(blocks: 0x42, 0, 0, 0)
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        try await store.addVector(drawerID: "drawer-Z",
-                            engram: engram,
-                            modelID: "minilm",
-                            modelVersion: "1.0.0",
-                            filedAt: now)
-        try await store.deleteVector(drawerID: "drawer-Z", modelID: "minilm")
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let engram = Engram(blocks: 0x42, 0, 0, 0)
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            try await store.addVector(drawerID: "drawer-Z",
+                                engram: engram,
+                                modelID: "minilm",
+                                modelVersion: "1.0.0",
+                                filedAt: now)
+            try await store.deleteVector(drawerID: "drawer-Z", modelID: "minilm")
 
-        let __nil1 = try await store.getVector(drawerID: "drawer-Z",
-                                          modelID: "minilm")
-        #expect(__nil1 == nil)
+            let __nil1 = try await store.getVector(drawerID: "drawer-Z",
+                                              modelID: "minilm")
+            #expect(__nil1 == nil)
+        }
     }
 
     /// `modelID` and `modelVersion` round-trip on `vectors(forDrawerID:)`
     /// — the StoredVector record carries the spec I-4 tagging.
     @Test func testModelAndVersionRoundTrip() async throws {
-        let store = try await makeStore()
-        let engram = Engram(blocks: 0xAA, 0xBB, 0xCC, 0xDD)
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        try await store.addVector(drawerID: "drawer-V",
-                            engram: engram,
-                            modelID: "minilm-v6",
-                            modelVersion: "1.0.0-alpha.3",
-                            filedAt: now)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let engram = Engram(blocks: 0xAA, 0xBB, 0xCC, 0xDD)
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            try await store.addVector(drawerID: "drawer-V",
+                                engram: engram,
+                                modelID: "minilm-v6",
+                                modelVersion: "1.0.0-alpha.3",
+                                filedAt: now)
 
-        let rows = try await store.vectors(forDrawerID: "drawer-V")
-        #expect(rows.count == 1)
-        #expect(rows[0].drawerID == "drawer-V")
-        #expect(rows[0].modelID == "minilm-v6")
-        #expect(rows[0].modelVersion == "1.0.0-alpha.3")
-        #expect(rows[0].engram == engram)
+            let rows = try await store.vectors(forDrawerID: "drawer-V")
+            #expect(rows.count == 1)
+            #expect(rows[0].drawerID == "drawer-V")
+            #expect(rows[0].modelID == "minilm-v6")
+            #expect(rows[0].modelVersion == "1.0.0-alpha.3")
+            #expect(rows[0].engram == engram)
+        }
     }
 
     /// `addVector` twice with the same `(drawerID, modelID)` replaces
@@ -151,40 +173,44 @@ struct VectorStoreTests {
     /// row. Exercises the `ON CONFLICT(drawer_id, model_id) DO UPDATE`
     /// path required by mission Verification item 4.
     @Test func testAddVectorUpsertsOnSameDrawerAndModel() async throws {
-        let store = try await makeStore()
-        let first  = Engram(blocks: 1, 2, 3, 4)
-        let second = Engram(blocks: 5, 6, 7, 8)
-        let t1 = Date(timeIntervalSince1970: 1_700_000_000)
-        let t2 = Date(timeIntervalSince1970: 1_700_000_500)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let first  = Engram(blocks: 1, 2, 3, 4)
+            let second = Engram(blocks: 5, 6, 7, 8)
+            let t1 = Date(timeIntervalSince1970: 1_700_000_000)
+            let t2 = Date(timeIntervalSince1970: 1_700_000_500)
 
-        try await store.addVector(drawerID: "drawer-UP",
-                            engram: first,
-                            modelID: "minilm",
-                            modelVersion: "1.0.0",
-                            filedAt: t1)
-        try await store.addVector(drawerID: "drawer-UP",
-                            engram: second,
-                            modelID: "minilm",
-                            modelVersion: "1.0.1",
-                            filedAt: t2)
+            try await store.addVector(drawerID: "drawer-UP",
+                                engram: first,
+                                modelID: "minilm",
+                                modelVersion: "1.0.0",
+                                filedAt: t1)
+            try await store.addVector(drawerID: "drawer-UP",
+                                engram: second,
+                                modelID: "minilm",
+                                modelVersion: "1.0.1",
+                                filedAt: t2)
 
-        // The conflict path UPDATEs in place; the stored engram is the
-        // most recent one and only one row exists for this drawer.
-        let __r3 = try await store.getVector(drawerID: "drawer-UP",
-                                            modelID: "minilm")
-        #expect(__r3 == second)
-        let rows = try await store.vectors(forDrawerID: "drawer-UP")
-        #expect(rows.count == 1)
-        #expect(rows[0].engram == second)
-        #expect(rows[0].modelVersion == "1.0.1")
+            // The conflict path UPDATEs in place; the stored engram is the
+            // most recent one and only one row exists for this drawer.
+            let __r3 = try await store.getVector(drawerID: "drawer-UP",
+                                                modelID: "minilm")
+            #expect(__r3 == second)
+            let rows = try await store.vectors(forDrawerID: "drawer-UP")
+            #expect(rows.count == 1)
+            #expect(rows[0].engram == second)
+            #expect(rows[0].modelVersion == "1.0.1")
+        }
     }
 
     /// Fresh store: `vectors(forDrawerID:)` for an unknown drawer
     /// returns the empty array, not nil.
     @Test func testFreshStoreReturnsEmptyForUnknownDrawer() async throws {
-        let store = try await makeStore()
-        let rows = try await store.vectors(forDrawerID: "no-such-drawer")
-        #expect(rows.isEmpty)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let rows = try await store.vectors(forDrawerID: "no-such-drawer")
+            #expect(rows.isEmpty)
+        }
     }
 
     // MARK: - VEC-04 — findNearest / findByKeyword
@@ -219,19 +245,21 @@ struct VectorStoreTests {
     /// distance ascending. With a zero probe and the seeded corpus,
     /// the K=2 result must be the two engrams with smallest popcount.
     @Test func testFindNearestReturnsKResultsSortedByDistanceAscending() async throws {
-        let store = try await makeStore()
-        try await seedCorpus(store)
-        let probe = Engram(blocks: 0, 0, 0, 0)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            try await seedCorpus(store)
+            let probe = Engram(blocks: 0, 0, 0, 0)
 
-        let matches = try await store.findNearest(probe: probe,
-                                             modelID: "minilm",
-                                             limit: 2)
-        #expect(matches.count == 2)
-        #expect(matches.map(\.drawerID) == ["alpha-doc", "bravo-doc"])
-        #expect(matches.map(\.distance) == [1, 2])
-        // Verify sort order is preserved across the full result list.
-        for i in 1..<matches.count {
-            #expect(matches[i - 1].distance <= matches[i].distance)
+            let matches = try await store.findNearest(probe: probe,
+                                                 modelID: "minilm",
+                                                 limit: 2)
+            #expect(matches.count == 2)
+            #expect(matches.map(\.drawerID) == ["alpha-doc", "bravo-doc"])
+            #expect(matches.map(\.distance) == [1, 2])
+            // Verify sort order is preserved across the full result list.
+            for i in 1..<matches.count {
+                #expect(matches[i - 1].distance <= matches[i].distance)
+            }
         }
     }
 
@@ -239,50 +267,56 @@ struct VectorStoreTests {
     /// distance ascending. Probes a zero engram against a 4-row corpus
     /// with K=10 — must return 4 matches in popcount-ascending order.
     @Test func testFindNearestWithKLargerThanCorpusReturnsAllRows() async throws {
-        let store = try await makeStore()
-        try await seedCorpus(store)
-        let probe = Engram(blocks: 0, 0, 0, 0)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            try await seedCorpus(store)
+            let probe = Engram(blocks: 0, 0, 0, 0)
 
-        let matches = try await store.findNearest(probe: probe,
-                                             modelID: "minilm",
-                                             limit: 10)
-        #expect(matches.count == 4)
-        #expect(matches.map(\.drawerID) ==
-                       ["alpha-doc", "bravo-doc", "charlie-doc", "delta-doc"])
-        #expect(matches.map(\.distance) == [1, 2, 3, 4])
+            let matches = try await store.findNearest(probe: probe,
+                                                 modelID: "minilm",
+                                                 limit: 10)
+            #expect(matches.count == 4)
+            #expect(matches.map(\.drawerID) ==
+                           ["alpha-doc", "bravo-doc", "charlie-doc", "delta-doc"])
+            #expect(matches.map(\.distance) == [1, 2, 3, 4])
+        }
     }
 
     /// Empty store: `findNearest` returns the empty array without
     /// error. Absence is modeled as `[]`, not as a thrown error.
     @Test func testFindNearestOnEmptyStoreReturnsEmpty() async throws {
-        let store = try await makeStore()
-        let probe = Engram(blocks: 0xFFFF, 0, 0, 0)
-        let matches = try await store.findNearest(probe: probe,
-                                             modelID: "minilm",
-                                             limit: 5)
-        #expect(matches.isEmpty)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let probe = Engram(blocks: 0xFFFF, 0, 0, 0)
+            let matches = try await store.findNearest(probe: probe,
+                                                 modelID: "minilm",
+                                                 limit: 5)
+            #expect(matches.isEmpty)
+        }
     }
 
     /// Each `VectorMatch.drawerID` must correspond to the row whose
     /// engram produced the reported `distance`. Re-derive each match's
     /// distance from the stored engram and confirm the result agrees.
     @Test func testFindNearestIndicesMapToCorrectDrawerIDs() async throws {
-        let store = try await makeStore()
-        try await seedCorpus(store)
-        let probe = Engram(blocks: 0, 0, 0, 0)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            try await seedCorpus(store)
+            let probe = Engram(blocks: 0, 0, 0, 0)
 
-        let matches = try await store.findNearest(probe: probe,
-                                             modelID: "minilm",
-                                             limit: 4)
-        #expect(matches.count == 4)
-        for m in matches {
-            let stored = try await store.getVector(drawerID: m.drawerID,
-                                             modelID: "minilm")
-            #expect(stored != nil)
-            let computed = EngramLib.distance(probe, stored!)
-            #expect(m.distance == computed,
-                    "drawer \(m.drawerID): distance mismatch")
-            #expect(m.modelID == "minilm")
+            let matches = try await store.findNearest(probe: probe,
+                                                 modelID: "minilm",
+                                                 limit: 4)
+            #expect(matches.count == 4)
+            for m in matches {
+                let stored = try await store.getVector(drawerID: m.drawerID,
+                                                 modelID: "minilm")
+                #expect(stored != nil)
+                let computed = EngramLib.distance(probe, stored!)
+                #expect(m.distance == computed,
+                        "drawer \(m.drawerID): distance mismatch")
+                #expect(m.modelID == "minilm")
+            }
         }
     }
 
@@ -291,19 +325,23 @@ struct VectorStoreTests {
     /// `unicode61` tokenizer splits on hyphens), so a search for
     /// "alpha" finds "alpha-doc" but not "bravo-doc".
     @Test func testFindByKeywordReturnsMatchingDrawers() async throws {
-        let store = try await makeStore()
-        try await seedCorpus(store)
-        let hits = try await store.findByKeyword("alpha", limit: 10)
-        #expect(hits == ["alpha-doc"])
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            try await seedCorpus(store)
+            let hits = try await store.findByKeyword("alpha", limit: 10)
+            #expect(hits == ["alpha-doc"])
+        }
     }
 
     /// `findByKeyword` returns the empty array when no row matches —
     /// no thrown error, no nil.
     @Test func testFindByKeywordReturnsEmptyForNoMatch() async throws {
-        let store = try await makeStore()
-        try await seedCorpus(store)
-        let hits = try await store.findByKeyword("zebra", limit: 10)
-        #expect(hits.isEmpty)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            try await seedCorpus(store)
+            let hits = try await store.findByKeyword("zebra", limit: 10)
+            #expect(hits.isEmpty)
+        }
     }
 
     /// Hybrid retrieval: a drawer that is both a Hamming neighbour
@@ -311,39 +349,43 @@ struct VectorStoreTests {
     /// checks that the two retrieval modes are over the same corpus
     /// and do not partition rows.
     @Test func testHybridFindNearestAndFindByKeywordOverlap() async throws {
-        let store = try await makeStore()
-        try await seedCorpus(store)
-        let probe = Engram(blocks: 0, 0, 0, 0)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            try await seedCorpus(store)
+            let probe = Engram(blocks: 0, 0, 0, 0)
 
-        let nearest = try await store.findNearest(probe: probe,
-                                             modelID: "minilm",
-                                             limit: 4)
-        let keyword = try await store.findByKeyword("alpha", limit: 10)
+            let nearest = try await store.findNearest(probe: probe,
+                                                 modelID: "minilm",
+                                                 limit: 4)
+            let keyword = try await store.findByKeyword("alpha", limit: 10)
 
-        #expect(nearest.contains { $0.drawerID == "alpha-doc" })
-        #expect(keyword.contains("alpha-doc"))
+            #expect(nearest.contains { $0.drawerID == "alpha-doc" })
+            #expect(keyword.contains("alpha-doc"))
+        }
     }
 
     /// `findNearest` returns exactly `limit` results when the corpus is
     /// larger than `limit`. Inserts 100 vectors and requests 5 — the
     /// result count must be exactly 5.
     @Test func findNearestReturnsBoundedCountEqualToLimit() async throws {
-        let store = try await makeStore()
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        for i in 1...100 {
-            try await store.addVector(
-                drawerID: "drawer-\(String(format: "%03d", i))",
-                engram: Engram(blocks: UInt64(i), 0, 0, 0),
-                modelID: "minilm",
-                modelVersion: "1.0.0",
-                filedAt: now
-            )
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            for i in 1...100 {
+                try await store.addVector(
+                    drawerID: "drawer-\(String(format: "%03d", i))",
+                    engram: Engram(blocks: UInt64(i), 0, 0, 0),
+                    modelID: "minilm",
+                    modelVersion: "1.0.0",
+                    filedAt: now
+                )
+            }
+            let probe = Engram(blocks: 0, 0, 0, 0)
+            let result = try await store.findNearest(probe: probe,
+                                                     modelID: "minilm",
+                                                     limit: 5)
+            #expect(result.count == 5)
         }
-        let probe = Engram(blocks: 0, 0, 0, 0)
-        let result = try await store.findNearest(probe: probe,
-                                                 modelID: "minilm",
-                                                 limit: 5)
-        #expect(result.count == 5)
     }
 
     /// `findNearest` results are sorted by Hamming distance ascending.
@@ -351,14 +393,16 @@ struct VectorStoreTests {
     /// and a zero probe — verifies non-decreasing distance order over
     /// all 4 results.
     @Test func findNearestResultsAreSortedByDistanceAscending() async throws {
-        let store = try await makeStore()
-        try await seedCorpus(store)
-        let probe = Engram(blocks: 0, 0, 0, 0)
-        let matches = try await store.findNearest(probe: probe,
-                                                  modelID: "minilm",
-                                                  limit: 4)
-        for i in 1..<matches.count {
-            #expect(matches[i - 1].distance <= matches[i].distance)
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            try await seedCorpus(store)
+            let probe = Engram(blocks: 0, 0, 0, 0)
+            let matches = try await store.findNearest(probe: probe,
+                                                      modelID: "minilm",
+                                                      limit: 4)
+            for i in 1..<matches.count {
+                #expect(matches[i - 1].distance <= matches[i].distance)
+            }
         }
     }
 
@@ -370,25 +414,27 @@ struct VectorStoreTests {
     /// from the zero probe. The drawer with the lexicographically
     /// smaller ID ("aaa-drawer") must appear first.
     @Test func findNearestTieBreakByDrawerIDIsStable() async throws {
-        let store = try await makeStore()
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        // Both engrams have popcount 1 — identical distance from zero probe.
-        try await store.addVector(drawerID: "zzz-drawer",
-                                  engram: Engram(blocks: 1, 0, 0, 0),
-                                  modelID: "minilm",
-                                  modelVersion: "1.0.0",
-                                  filedAt: now)
-        try await store.addVector(drawerID: "aaa-drawer",
-                                  engram: Engram(blocks: 2, 0, 0, 0),
-                                  modelID: "minilm",
-                                  modelVersion: "1.0.0",
-                                  filedAt: now)
-        let probe = Engram(blocks: 0, 0, 0, 0)
-        let matches = try await store.findNearest(probe: probe,
-                                                  modelID: "minilm",
-                                                  limit: 2)
-        #expect(matches.count == 2)
-        #expect(matches[0].drawerID == "aaa-drawer")
-        #expect(matches[1].drawerID == "zzz-drawer")
+        try await GlobalTestLock.shared.withLock {
+            let store = try await makeStore()
+            let now = Date(timeIntervalSince1970: 1_700_000_000)
+            // Both engrams have popcount 1 — identical distance from zero probe.
+            try await store.addVector(drawerID: "zzz-drawer",
+                                      engram: Engram(blocks: 1, 0, 0, 0),
+                                      modelID: "minilm",
+                                      modelVersion: "1.0.0",
+                                      filedAt: now)
+            try await store.addVector(drawerID: "aaa-drawer",
+                                      engram: Engram(blocks: 2, 0, 0, 0),
+                                      modelID: "minilm",
+                                      modelVersion: "1.0.0",
+                                      filedAt: now)
+            let probe = Engram(blocks: 0, 0, 0, 0)
+            let matches = try await store.findNearest(probe: probe,
+                                                      modelID: "minilm",
+                                                      limit: 2)
+            #expect(matches.count == 2)
+            #expect(matches[0].drawerID == "aaa-drawer")
+            #expect(matches[1].drawerID == "zzz-drawer")
+        }
     }
 }

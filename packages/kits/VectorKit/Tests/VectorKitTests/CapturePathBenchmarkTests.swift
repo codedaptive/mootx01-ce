@@ -3,6 +3,7 @@ import SubstrateML
 import EngramLib
 import PersistenceKit
 import PersistenceKitInMemory
+import IntellectusLib
 import Foundation
 @testable import VectorKit
 
@@ -97,6 +98,11 @@ struct CapturePathBenchmarkTests {
     /// path, which is what the capture-path budget governs. Asserts
     /// P99 < 100 ms and median < 50 ms (iPhone budget, spec I-4 / R-3).
     @Test func testEndToEndCapturePathP99Under100Milliseconds() async throws {
+        // Acquire GlobalTestLock so the benchmark runs without CPU
+        // competition from VectorStoreTests or telemetry tests. Both
+        // those suites also hold GlobalTestLock; serialising here
+        // gives this benchmark exclusive machine access during measurement.
+        try await GlobalTestLock.shared.withLock {
         let provider = FloatSimHashEmbeddingProvider(
             modelID: "minilm-v6",
             modelVersion: "1.0.0",
@@ -137,6 +143,7 @@ struct CapturePathBenchmarkTests {
                 "VEC-05 capture-path P99 budget exceeded: \(stats.p99Ms) ms")
         #expect(stats.medianMs < 50.0,
                 "VEC-05 capture-path median budget exceeded: \(stats.medianMs) ms")
+        } // GlobalTestLock
     }
 
     // MARK: - Suite 2: VectorStore-only latency (always runs)
@@ -146,6 +153,7 @@ struct CapturePathBenchmarkTests {
     /// ms — the storage half of the capture-path budget, leaving the
     /// remaining ~95 ms for inference and projection on real hardware.
     @Test func testVectorStoreAddVectorP99Under5Milliseconds() async throws {
+        try await GlobalTestLock.shared.withLock {
         let store = try await Self.freshStore()
         // `Engram.zero` is the canonical empty value; reusing one
         // instance across all calls isolates storage cost from any
@@ -173,6 +181,7 @@ struct CapturePathBenchmarkTests {
 
         #expect(stats.p99Ms < 5.0,
                 "VEC-05 storage-only P99 budget exceeded: \(stats.p99Ms) ms")
+        } // GlobalTestLock
     }
 
     // MARK: - Suite 3: Retrieval latency (always runs)
@@ -190,6 +199,7 @@ struct CapturePathBenchmarkTests {
     /// the VEC-05 decision record for the kernel-only vs. pipeline-cost
     /// split.
     @Test func testFindNearestP99Under10MillisecondsOver10000VectorCorpus() async throws {
+        try await GlobalTestLock.shared.withLock {
         let store = try await Self.freshStore()
         let now = Date(timeIntervalSince1970: 1_700_000_200)
 
@@ -237,6 +247,7 @@ struct CapturePathBenchmarkTests {
 
         #expect(stats.p99Ms < 75.0,
                 "VEC-05 retrieval P99 budget exceeded: \(stats.p99Ms) ms")
+        } // GlobalTestLock
     }
 
     // MARK: - Suite 4: Hardware tier detection (always runs)

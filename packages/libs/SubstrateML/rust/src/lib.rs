@@ -5,7 +5,6 @@
 //! feature extraction. Consumed exclusively by reasoning-layer
 //! code (NeuronKit per the decision doc).
 
-#![allow(dead_code)]
 #![allow(clippy::needless_return)]
 #![allow(clippy::too_many_arguments)]
 
@@ -41,5 +40,9 @@ pub mod row_attribute_view;
 pub mod tier_contribution;
 pub mod tier_query;
 pub mod temporal_causality_fold;
+
+// VizGraph telemetry constants — metric names for the five graph-analytic
+// algorithms. Parity with Swift's VizGraphSignals.swift.
+pub mod viz_graph_signals;
 
 pub const VERSION: &str = "1.0.0-skeleton";

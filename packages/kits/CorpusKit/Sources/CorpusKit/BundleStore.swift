@@ -32,8 +32,16 @@
 // erasure of chunk content is handled at the bundle-algebra/erasure
 // layer (redaction, excision, compaction), not by an ad-hoc per-row
 // delete.
+//
+// CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
+// self-report telemetry to insert. The emit calls are placed at the
+// operation boundary, after the batch completes, so the storage
+// behaviour is unchanged. When monitoring is disabled (the default),
+// the Intellectus.report(_:) call short-circuits after a single
+// Atomic<Bool> load.
 
 import Foundation
+import IntellectusLib
 import SubstrateTypes
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
@@ -105,7 +113,21 @@ public actor BundleStore {
     /// first write of a given id wins; a later insert of the same id
     /// is dropped, which is correct because chunks are immutable and
     /// content-addressed.
+    ///
+    /// Telemetry: emits `corpuskit.ingest.latency_ms` (wall time for the
+    /// full batch insert) and `corpuskit.ingest.chunk_count` (number of
+    /// chunks in the batch, including idempotent no-ops) when monitoring is
+    /// enabled. Both are emitted at the operation boundary — after the last
+    /// insert attempt completes — so they cannot affect the stored values or
+    /// any thrown error. Off-path: single Atomic<Bool> load per call.
     public func insert(_ chunks: [Chunk]) async throws {
+        guard !chunks.isEmpty else { return }
+
+        // Capture start time before the I/O. One Date() read per
+        // call; the computed latency is forwarded to the sink only when
+        // monitoring is enabled (inside the @autoclosure guard).
+        let startTime = Date().timeIntervalSince1970
+
         for chunk in chunks {
             let metadataJSON: Data
             do {
@@ -134,6 +156,27 @@ public actor BundleStore {
                 continue
             }
         }
+
+        // Emit ingest telemetry at the operation boundary, after all inserts
+        // complete (including idempotent no-ops). The autoclosures are
+        // evaluated only when monitoring is enabled.
+        //
+        // corpuskit.ingest.latency_ms: wall time for the full batch insert.
+        // corpuskit.ingest.chunk_count: chunks in the batch (incl. no-ops).
+        let endTime = Date().timeIntervalSince1970
+        let chunkCount = chunks.count
+        Intellectus.report(.metric(
+            name: "corpuskit.ingest.latency_ms",
+            value: (endTime - startTime) * 1000.0,
+            tags: ["kit": "CorpusKit"],
+            ts: endTime
+        ))
+        Intellectus.report(.metric(
+            name: "corpuskit.ingest.chunk_count",
+            value: Double(chunkCount),
+            tags: ["kit": "CorpusKit"],
+            ts: endTime
+        ))
     }
 
     public func get(id: UUID) async throws -> Chunk? {

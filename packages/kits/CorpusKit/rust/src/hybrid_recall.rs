@@ -1,12 +1,21 @@
 //! Hybrid retrieval: vector kNN + BM25 keyword scoring fused via
 //! Reciprocal Rank Fusion (RRF). Mirror of Swift's `HybridRecall`.
+//!
+//! CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
+//! self-report telemetry to `recall`. The `report!` macro calls are
+//! placed at the operation boundary, after the result is assembled,
+//! so mathematical behaviour is unchanged. When monitoring is
+//! disabled (the default), the macro expands to a single
+//! `AtomicBool::load + branch` — zero allocation, no clock.
 
 use crate::bm25_index::BM25Index;
 use crate::bundle_store::BundleStore;
 use crate::chunk::ScoredChunk;
 use crate::error::{CorpusKitError, CorpusKitResult};
 use engram_lib::Engram;
+use intellectus_lib::{report, StatSample};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use vectorkit::VectorStore;
 
@@ -38,6 +47,17 @@ impl Default for HybridRecallConfiguration {
 /// pre-indexed `BM25Index`. Both candidate sets are fused via
 /// RRF; the resulting top-`limit` ids are hydrated through the
 /// `bundle_store`.
+///
+/// Telemetry: emits `corpuskit.recall.latency_ms`,
+/// `corpuskit.recall.vector_result_count`,
+/// `corpuskit.recall.keyword_result_count`, and
+/// `corpuskit.recall.result_count` when monitoring is enabled
+/// (off by default). All four are emitted at the operation
+/// boundary after the result is assembled — they cannot affect
+/// the return value. Off-path: single `AtomicBool::load + branch`
+/// per call via the `report!` macro.
+///
+/// Mirrors Swift's `HybridRecall.recall` telemetry exactly.
 // Eight parameters: probe/query/model_id/limit/config plus the three
 // substrate handles (vector_store, bm25, bundle_store) are each a
 // distinct input recall needs; bundling them into a struct would
@@ -57,12 +77,28 @@ pub fn recall(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    // Capture start time before the retrieval work. The computed latency
+    // is forwarded to the sink only when monitoring is enabled (inside
+    // the report! macro's if-enabled guard).
+    let start_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+
     let candidate_k = (limit * 4).max(32);
 
     let vector_results = vector_store
         .find_nearest(probe, model_id, candidate_k)
         .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
-    let keyword_results = bm25.search(query, candidate_k);
+    // Pre-tokenise using the index's own tokenizer vocabulary so top_k receives
+    // compatible tokens. Mirrors Swift HybridRecall using CorpusDefaultTokenizer.
+    let query_tokens = bm25.tokenize_query(query);
+    let keyword_results = bm25.top_k(candidate_k, &query_tokens);
+
+    // Capture raw counts before the vecs are consumed by the fusion loop.
+    // These are emitted as telemetry metrics at the operation boundary below.
+    let vector_result_count = vector_results.len();
+    let keyword_result_count = keyword_results.len();
 
     // (vectorScore, keywordScore, fusedScore) per uuid
     let mut fused: HashMap<Uuid, (f64, f64, f64)> = HashMap::new();
@@ -81,7 +117,7 @@ pub fn recall(
         let rrf = 1.0 / (config.rrf_k + (rank as f64 + 1.0));
         let contribution = rrf * config.keyword_weight;
         let entry = fused.entry(*id).or_insert((0.0, 0.0, 0.0));
-        entry.1 = *score;
+        entry.1 = *score as f64;
         entry.2 += contribution;
     }
 
@@ -120,5 +156,57 @@ pub fn recall(
             ),
         );
     }
+
+    // Emit recall telemetry at the operation boundary, after the result
+    // is assembled. The report! macro evaluates the argument only when
+    // monitoring is enabled; when disabled it is a single AtomicBool
+    // load + branch with no allocation.
+    //
+    // corpuskit.recall.latency_ms: wall time for the full pipeline.
+    // corpuskit.recall.vector_result_count: raw vector hits before RRF.
+    // corpuskit.recall.keyword_result_count: raw keyword hits before RRF.
+    // corpuskit.recall.result_count: final output count after hydration.
+    // Mirrors the four Swift emit sites in HybridRecall.recall.
+    let end_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let result_count = out.len();
+    let vector_count = vector_result_count;
+    let keyword_count = keyword_result_count;
+    let model_tag = model_id.to_string();
+    report!(StatSample::metric(
+        "corpuskit.recall.latency_ms".to_string(),
+        (end_ts - start_ts) * 1000.0,
+        [("kit".to_string(), "CorpusKit".to_string()),
+         ("model_id".to_string(), model_tag.clone())]
+            .into_iter().collect(),
+        end_ts,
+    ));
+    report!(StatSample::metric(
+        "corpuskit.recall.vector_result_count".to_string(),
+        vector_count as f64,
+        [("kit".to_string(), "CorpusKit".to_string()),
+         ("model_id".to_string(), model_tag.clone())]
+            .into_iter().collect(),
+        end_ts,
+    ));
+    report!(StatSample::metric(
+        "corpuskit.recall.keyword_result_count".to_string(),
+        keyword_count as f64,
+        [("kit".to_string(), "CorpusKit".to_string()),
+         ("model_id".to_string(), model_tag.clone())]
+            .into_iter().collect(),
+        end_ts,
+    ));
+    report!(StatSample::metric(
+        "corpuskit.recall.result_count".to_string(),
+        result_count as f64,
+        [("kit".to_string(), "CorpusKit".to_string()),
+         ("model_id".to_string(), model_tag)]
+            .into_iter().collect(),
+        end_ts,
+    ));
+
     Ok(out)
 }

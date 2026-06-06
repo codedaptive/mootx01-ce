@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // GeniusLocusKit — the composition layer.
 //
@@ -32,8 +32,8 @@ import PackageDescription
 let package = Package(
     name: "GeniusLocusKit",
     platforms: [
-        .macOS(.v15),
-        .iOS(.v18),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(
@@ -61,6 +61,14 @@ let package = Package(
         // Layering: GeniusLocusKit (composition) → SubstrateML (algorithms) does
         // NOT invert — SubstrateML is below GeniusLocusKit in the kit graph.
         .package(path: "../../libs/SubstrateML"),
+        // IntellectusLib is the zero-dependency telemetry floor. GeniusLocusKit
+        // emits per-estate rollup metrics at open/close/provision/quiesce/drain
+        // and at the verb-error boundary (GLK_ROLLUPS_001). When monitoring is
+        // disabled (the default), each emit is a single Atomic<Bool> load —
+        // zero allocation, no lock, results byte-identical to the pre-telemetry
+        // code. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28: layering is
+        // GeniusLocusKit (composition) → IntellectusLib (floor). No inversion.
+        .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
     ],
     targets: [
         .target(
@@ -84,6 +92,9 @@ let package = Package(
                 .product(name: "PersistenceKitReplication", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
+                // IntellectusLib: per-estate rollup telemetry (GLK_ROLLUPS_001).
+                // Off-path is a single Atomic<Bool> load — zero cost when disabled.
+                .product(name: "IntellectusLib", package: "IntellectusLib"),
             ],
             path: "Sources/GeniusLocusKit"
         ),
@@ -106,6 +117,9 @@ let package = Package(
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
+                // IntellectusLib: test suite needs to install capturing sinks
+                // and toggle the enabled flag for telemetry isolation tests.
+                .product(name: "IntellectusLib", package: "IntellectusLib"),
             ],
             path: "Tests/GeniusLocusKitTests"
         ),

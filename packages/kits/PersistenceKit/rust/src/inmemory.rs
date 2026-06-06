@@ -71,6 +71,10 @@ pub struct InMemoryStorage {
     configuration: EstateConfiguration,
     state: Arc<Mutex<State>>,
     hub: Arc<ObserverHub>,
+    /// Monotone counter of transaction rollbacks. Stored separately from
+    /// `state` because `state` is snapshot/restored on rollback — putting the
+    /// counter there would reset it on every rollback, losing the history.
+    rollback_count: Arc<Mutex<i64>>,
 }
 
 impl InMemoryStorage {
@@ -83,6 +87,7 @@ impl InMemoryStorage {
             configuration,
             state: Arc::new(Mutex::new(State::default())),
             hub: Arc::new(ObserverHub::new()),
+            rollback_count: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -175,6 +180,9 @@ impl Storage for InMemoryStorage {
             Ok(()) => Ok(()),
             Err(e) => {
                 *self.state.lock().unwrap() = snapshot;
+                // Record the rollback for introspection. The counter lives
+                // outside `state` so it is not itself rolled back.
+                *self.rollback_count.lock().unwrap() += 1;
                 Err(e)
             }
         }
@@ -193,6 +201,58 @@ impl StorageTransaction for InMemoryStorage {
     }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
         Storage::audit_log(self)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// StorageIntrospection — DB-layer health statistics for InMemory.
+// ─────────────────────────────────────────────────────────────────────
+
+impl crate::introspection::StorageIntrospection for InMemoryStorage {
+    /// Capture a point-in-time snapshot of InMemory backend health.
+    ///
+    /// logical_size_bytes: approximate in-memory footprint. Estimated as
+    /// 256 bytes per row (a conservative average for BTreeMap<String, TypedValue>
+    /// overhead per row) plus the exact byte count of stored blobs. This is a
+    /// relative health signal, not a precise allocator measurement.
+    ///
+    /// row_count: sum of all row counts across all tables.
+    /// blob_count: number of blob entries.
+    /// vector_count: number of vector entries.
+    /// transaction_rollback_count: incremented by `transaction()` on error.
+    ///
+    /// All SQLite- and PostgreSQL-specific fields are None.
+    fn stats(&self, now_secs: i64) -> crate::error::StorageResult<crate::introspection::StorageStats> {
+        use crate::introspection::StorageStats;
+
+        let state = self.state.lock().unwrap();
+
+        let row_count: usize = state.tables.values().map(|t| t.rows.len()).sum();
+        let blob_count: usize = state.blobs.len();
+        let vector_count: usize = state.vectors.len();
+
+        // Approximate size: 256 B average per row + exact blob bytes.
+        let blob_bytes: i64 = state.blobs.values().map(|b| b.len() as i64).sum();
+        let approx_bytes: i64 = row_count as i64 * 256 + blob_bytes;
+
+        let rollback = *self.rollback_count.lock().unwrap();
+
+        Ok(StorageStats {
+            logical_size_bytes: approx_bytes,
+            page_size: None,
+            page_count: None,
+            freelist_page_count: None,
+            wal_frame_count: None,
+            cache_hit_ratio: None,
+            transaction_commit_count: None,
+            transaction_rollback_count: Some(rollback),
+            deadlock_count: None,
+            lock_contention: None,
+            row_count: Some(row_count),
+            blob_count: Some(blob_count),
+            vector_count: Some(vector_count),
+            captured_at_secs: now_secs,
+        })
     }
 }
 

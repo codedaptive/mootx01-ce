@@ -318,12 +318,15 @@ impl Corpus {
         // Chunk-level BM25 hits: (chunk_uuid, bm25_score). Over-fetch by 4×
         // before source-level aggregation so after deduplication we still have
         // at least `limit` distinct sources. Mirrors Swift's 4× over-fetch.
+        // Pre-tokenise query before releasing the lock so top_k receives
+        // compatible tokens from the index's own tokenizer vocabulary.
         let chunk_hits = {
             let bm25 = match self.bm25.lock() {
                 Ok(guard) => guard,
                 Err(_) => return vec![],
             };
-            bm25.search(query, limit.saturating_mul(4))
+            let tokens = bm25.tokenize_query(query);
+            bm25.top_k(limit.saturating_mul(4), &tokens)
         };
 
         if chunk_hits.is_empty() {
@@ -355,6 +358,42 @@ impl Corpus {
         });
         ranked.truncate(limit);
         ranked
+    }
+
+    // MARK: - Lifecycle (GLK_PROVISION_001)
+
+    /// Destroy the entire recall index — clear BM25, chunk_source_map, and all
+    /// vectors.
+    ///
+    /// Called by `EstateCoordinator::destroy` as part of the coordinated estate
+    /// teardown path. After this call the corpus has no recall capability: BM25
+    /// scores zero for all queries and the vector lane returns no results.
+    ///
+    /// BundleStore rows (chunks) are NOT deleted — BundleStore is append-only per
+    /// PersistenceKit schema invariant. The verbatim content survives for audit;
+    /// the recall capability is destroyed. Mirrors Swift `Corpus.destroyRecallIndex()`.
+    pub fn destroy_recall_index(&self) -> CorpusKitResult<()> {
+        // Step 1: Collect all chunk IDs and clear BM25 index.
+        let all_chunks = self.bundle_store.all_chunks()?;
+        let mut bm25 = self
+            .bm25
+            .lock()
+            .map_err(|_| CorpusKitError::StoreUnavailable("BM25 lock poisoned".into()))?;
+        for chunk in &all_chunks {
+            bm25.remove(chunk.id);
+        }
+
+        // Step 2: Clear the chunk_source_map.
+        if let Ok(mut csm) = self.chunk_source_map.lock() {
+            csm.clear();
+        }
+
+        // Step 3: Delete all vector rows.
+        self.vector_store
+            .destroy_all_vectors()
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("destroy_recall_index vector teardown failed: {:?}", e)))?;
+
+        Ok(())
     }
 
     /// Remove a source document from the recall index.

@@ -47,8 +47,9 @@
 
 import Foundation
 import GeniusLocusKit
-import NeuronKit
+import IntellectusLib
 import LocusKit
+import NeuronKit
 
 /// One candidate migration plan. The fields are exactly those the
 /// shipped `capture` path honours — not the v0.1 spec's aspirational
@@ -213,6 +214,18 @@ public struct MigrationBenchmark: Recipe {
             throw RecipeError.duplicatePlanName(dup)
         }
 
+        // Capability and guard checks passed — the recipe will execute.
+        // Capture the recipe-start timestamp once at the validated entry.
+        // Emit is placed AFTER the precondition checks so the start metric
+        // only fires when the recipe body will actually run. When monitoring
+        // is disabled, emitRecipeStart is a single atomic load + branch:
+        // zero allocation, no clock read wasted.
+        let startTs = Date().timeIntervalSince1970
+        // Emit cognitionkit.recipe.run with status "start". The step_count
+        // for the paired "complete" event will be input.plans.count (the
+        // number of plans benchmarked — the unit of work for this recipe).
+        emitRecipeStart(name: name, ts: startTs)
+
         // Recipe-entry wall clock stamps each benchmark's evaluatedAt. A
         // conscious action happens at a real instant; this value affects
         // only the report timestamp, not any logic. Captured once so every
@@ -325,6 +338,12 @@ public struct MigrationBenchmark: Recipe {
             winnerPlanName: ranked.winner,
             rankings: rankings,
             disqualified: disqualified)
+
+        // Emit cognitionkit.recipe.run with status "complete". The step_count
+        // is input.plans.count — the number of plans benchmarked during this
+        // recipe invocation. Byte-identical output regardless of monitoring
+        // state (C-Det: the return value is already assembled above).
+        emitRecipeComplete(name: name, stepCount: input.plans.count, ts: startTs)
 
         return Output(
             benchmarkReports: benchmarkReports,

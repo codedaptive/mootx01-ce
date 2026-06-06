@@ -1,11 +1,17 @@
 // Tests for HybridRecall + CorpusKitSync manifest.
+//
+// INTELLECTUS LOCK: Tests that call bundle_store.insert (which emits
+// corpuskit.ingest.* metrics) or recall (which emits corpuskit.recall.*
+// metrics) hold GLOBAL_LOCK for their entire duration. The manifest test
+// does not touch emit-capable functions and does not need the lock.
 
 use corpus_kit::{recall, BM25Index, BundleStore, Chunk, CorpusKitSync, HybridRecallConfiguration};
 use corpus_kit_providers::DeterministicTokenizer;
 use engram_lib::Engram;
+use intellectus_lib::Intellectus;
 use persistence_kit::{inmemory::InMemoryStorage, Storage};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -24,8 +30,23 @@ use substrate_types::hlc::HLC;
 use uuid::Uuid;
 use vectorkit::VectorStore;
 
+// Process-wide serialisation lock shared with corpuskit_telemetry_tests.rs
+// and bundle_store_tests.rs. All tests that call BundleStore::insert or
+// recall hold this lock for their entire duration so that concurrent
+// telemetry tests cannot see their emissions in a capturing sink.
+static GLOBAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn global_lock() -> std::sync::MutexGuard<'static, ()> {
+    let mutex = GLOBAL_LOCK.get_or_init(|| Mutex::new(()));
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
 #[test]
 fn ragkitsync_manifest_shape_matches_swift() {
+    // Does not call insert or recall — no lock required.
     let manifest = CorpusKitSync::manifest("test-zone");
     assert_eq!(manifest.kit_id, "CorpusKit");
     assert_eq!(manifest.schema_version, 1);
@@ -40,6 +61,9 @@ fn ragkitsync_manifest_shape_matches_swift() {
 
 #[test]
 fn hybrid_recall_merges_vector_and_keyword_hits() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
+
     // Two storages with shared chunk ids: one for vector store,
     // one for bundle store. The drawer_id in vectorstore is the
     // chunk's UUID string.
@@ -114,6 +138,7 @@ fn hybrid_recall_merges_vector_and_keyword_hits() {
 
 #[test]
 fn hybrid_recall_with_limit_zero_returns_empty() {
+    // limit == 0 returns early before any emit-capable call — no lock required.
     let vector_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let vector_store = VectorStore::open(vector_storage).expect("vector store");
     let bundle_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
@@ -136,6 +161,8 @@ fn hybrid_recall_with_limit_zero_returns_empty() {
 
 #[test]
 fn hybrid_recall_empty_corpus_returns_empty() {
+    let _guard = global_lock();
+    Intellectus::set_enabled(false);
     let vector_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let vector_store = VectorStore::open(vector_storage).expect("vector store");
     let bundle_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));

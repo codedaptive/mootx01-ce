@@ -48,3 +48,10 @@ uuid = { version = "1", features = ["v4"] }
 # C-1 rationale: crypto hygiene companion to the approved aes-gcm crate.
 # See DECISION_RUST_AEAD_CRATE_2026-06-05.
 zeroize = "1"
+# IntellectusLib is the zero-dependency telemetry floor (GLK_ROLLUPS_001).
+# GeniusLocusKit emits per-estate rollup metrics at open/close/provision/quiesce/drain
+# and at the verb-error boundary. Off-path cost: single AtomicBool::load(Acquire) +
+# branch — zero allocation, no lock. Results byte-identical when disabled.
+# Layering: genius-locus-kit (composition) → intellectus-lib (floor). No inversion.
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust equivalent: no inversion rule).
+intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }

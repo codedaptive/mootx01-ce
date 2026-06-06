@@ -40,6 +40,7 @@
 //   § 15     Dreaming daemon rule 4 (monthly NMF rerun)
 
 import Foundation
+import IntellectusLib
 
 public struct NMFFactorization: Sendable {
     public let W: [[Float32]]      // m × k
@@ -63,11 +64,27 @@ public enum NMFAlternatingLeastSquares {
     /// Factorize V ≈ W × H with rank k via Lee-Seung multiplicative
     /// updates. SplitMix64-seeded initialization yields bit-identical
     /// results across cells given identical inputs.
+    ///
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals.nmfFactor` with the final reconstruction error,
+    /// tagged by estate, matrix dimensions, and rank. The emit is a
+    /// no-op (single atomic-bool load) when monitoring is off.
+    ///
+    /// - Parameters:
+    ///   - V: The input non-negative matrix (m × n).
+    ///   - rank: Target latent rank k.
+    ///   - maxIterations: Lee-Seung iteration cap.
+    ///   - tolerance: Convergence tolerance on reconstruction error.
+    ///   - seed: SplitMix64 seed for W/H initialisation.
+    ///   - estate: Estate identifier for VizGraph telemetry.
+    ///   - ts: Caller-supplied epoch seconds for telemetry.
     public static func factorize(V: [[Float32]],
                                  rank: Int,
                                  maxIterations: Int = 100,
                                  tolerance: Float32 = 1e-4,
-                                 seed: UInt64 = 0xDEADBEEFCAFEBABE)
+                                 seed: UInt64 = 0xDEADBEEFCAFEBABE,
+                                 estate: String = "",
+                                 ts: Double = 0)
                                 -> NMFFactorization {
         precondition(!V.isEmpty, "V must have at least one row")
         let m = V.count
@@ -172,8 +189,30 @@ public enum NMFAlternatingLeastSquares {
             H[kk] = row
         }
 
-        return NMFFactorization(W: W, H: H, rank: rank,
-                                iterations: iterations, finalError: finalError)
+        let result = NMFFactorization(W: W, H: H, rank: rank,
+                                      iterations: iterations, finalError: finalError)
+
+        // VizGraph emit: nmf.factor — factorisation complete.
+        // Value = final reconstruction error (how well V ≈ W × H).
+        // The Topology theme-overlay layer uses the factor matrices W and H
+        // to assign latent-theme colours to nodes; this signal fires once
+        // the matrices are ready for that rendering pass.
+        //
+        // Off-path when monitoring is disabled: single Atomic<Bool> load
+        // + branch. No arithmetic in the autoclosure unless monitoring is on.
+        Intellectus.report(.metric(
+            name: VizGraphSignals.nmfFactor,
+            value: Double(result.finalError),
+            tags: [
+                "estate": estate,
+                "rows": "\(m)",
+                "cols": "\(n)",
+                "rank": "\(rank)",
+            ],
+            ts: ts
+        ))
+
+        return result
     }
 
     /// Public reconstruction-error API on nested arrays. Keeps the

@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // Package.swift — SubstrateML
 //
@@ -36,8 +36,8 @@ import PackageDescription
 let package = Package(
     name: "SubstrateML",
     platforms: [
-        .macOS(.v14),
-        .iOS(.v17),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(
@@ -48,16 +48,24 @@ let package = Package(
     dependencies: [
         .package(path: "../SubstrateTypes"),
         .package(path: "../SubstrateKernel"),
+        // IntellectusLib is the zero-dep telemetry leaf. Adding it here
+        // lets the five VizGraph algorithms emit community.assignment,
+        // centrality.score, nmf.factor, anomaly.flag, and edge.decayed_weight
+        // signals when monitoring is enabled.
+        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        // Layering: IntellectusLib has zero repo deps (std only);
+        // SubstrateML is downstream — no cycle introduced.
+        .package(path: "../IntellectusLib"),
     ],
     targets: [
         .target(
             name: "SubstrateML",
-            dependencies: ["SubstrateTypes", "SubstrateKernel"],
+            dependencies: ["SubstrateTypes", "SubstrateKernel", "IntellectusLib"],
             path: "Sources/SubstrateML"
         ),
         .testTarget(
             name: "SubstrateMLTests",
-            dependencies: ["SubstrateML", "SubstrateTypes", "SubstrateKernel"],
+            dependencies: ["SubstrateML", "SubstrateTypes", "SubstrateKernel", "IntellectusLib"],
             path: "Tests/SubstrateMLTests"
         ),
     ]

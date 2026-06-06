@@ -1,4 +1,5 @@
 import Foundation
+import IntellectusLib
 import OSLog
 import CryptoKit
 import LocusKit
@@ -66,7 +67,7 @@ public extension GeniusLocusKit {
         do {
             return try await estate.capture(frame)
         } catch {
-            throw remap(verb: "capture", error: error)
+            throw remap(verb: "capture", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -254,7 +255,7 @@ public extension GeniusLocusKit {
         do {
             try await store.withdrawKGFact(id: rowID)
         } catch {
-            throw remap(verb: "retireKGFact", error: error)
+            throw remap(verb: "retireKGFact", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -331,7 +332,7 @@ public extension GeniusLocusKit {
         do {
             try await estate.mutate(rowID: frame.rowID, kind: frame.kind, payload: frame.payload)
         } catch {
-            throw remap(verb: "mutate", error: error)
+            throw remap(verb: "mutate", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -345,7 +346,7 @@ public extension GeniusLocusKit {
         do {
             try await estate.withdraw(rowID: frame.rowID, reason: frame.reason)
         } catch {
-            throw remap(verb: "withdraw", error: error)
+            throw remap(verb: "withdraw", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -371,7 +372,7 @@ public extension GeniusLocusKit {
                 confirmation: frame.confirmation
             )
         } catch {
-            throw remap(verb: "expunge", error: error)
+            throw remap(verb: "expunge", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -393,7 +394,7 @@ public extension GeniusLocusKit {
                 toLattice: frame.toLattice
             )
         } catch {
-            throw remap(verb: "reanchor", error: error)
+            throw remap(verb: "reanchor", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -415,7 +416,7 @@ public extension GeniusLocusKit {
         do {
             return try await estate.learn(frame, now: Date())
         } catch {
-            throw remap(verb: "learn", error: error)
+            throw remap(verb: "learn", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -440,7 +441,7 @@ public extension GeniusLocusKit {
         do {
             return try await estate.propose(locusFrame, now: Date())
         } catch {
-            throw remap(verb: "propose", error: error)
+            throw remap(verb: "propose", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -462,7 +463,7 @@ public extension GeniusLocusKit {
         do {
             return try await estate.associate(locusFrame, now: Date())
         } catch {
-            throw remap(verb: "associate", error: error)
+            throw remap(verb: "associate", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -822,7 +823,25 @@ public extension GeniusLocusKit {
     /// `GeniusLocusKitError` cases (notably `.estateNotOpen` raised by
     /// `estate(for:)`) are passed through unchanged so callers can
     /// distinguish a stale handle from a verb-level fault.
-    func remap(verb: String, error: Error) -> Error {
+    ///
+    /// When `estateID` is non-empty and monitoring is enabled, emits a
+    /// `geniuslocus.estate.verb_error` metric tagged with the verb name
+    /// and estate id (GLK_ROLLUPS_001). Off-path cost is one Atomic<Bool>
+    /// load (~1 ns) — no impact when monitoring is disabled.
+    func remap(verb: String, estateID: String = "", error: Error) -> Error {
+        // Telemetry: emit verb error at the GLK boundary (GLK_ROLLUPS_001).
+        // Only emitted when estateID is known; GeniusLocusKitError pass-through
+        // cases (estateNotOpen) originate before verb dispatch so estateID may
+        // be unavailable — those do not emit (they are routing errors, not
+        // verb errors, and the caller handles them directly).
+        if !estateID.isEmpty {
+            Intellectus.report(.metric(
+                name: GLKMetricName.verbError,
+                value: 1.0,
+                tags: ["estate_id": estateID, "verb": verb],
+                ts: Date().timeIntervalSince1970
+            ))
+        }
         if let glkError = error as? GeniusLocusKitError {
             return glkError
         }

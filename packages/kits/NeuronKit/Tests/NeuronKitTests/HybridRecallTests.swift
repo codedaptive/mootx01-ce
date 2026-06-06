@@ -6,6 +6,16 @@
 // estate verb — exercised by the dependency surface itself: this
 // file imports GeniusLocusKit and LocusKit only for the value types,
 // never for write paths).
+//
+// ISOLATION NOTE
+// Tests that call HybridRecallEngine.rerank() acquire the process-wide
+// intellectusTestMutex (IntellectusTestLock.swift) because rerank()
+// emits to the global Intellectus singleton. All affected test functions
+// are declared `async` to use withIntellectusLock uniformly. The
+// shingle/similarity tests do not emit and do not need the lock. Paging
+// tests (RecallStream) do not call rerank() directly and do not need
+// the lock; the one paging test that does call rerank()
+// (mmrRerankObservedOnEveryPage) holds the lock for its rerank() call.
 
 import Testing
 import Foundation
@@ -23,6 +33,7 @@ private typealias NKRecallStream = RecallStream
 struct HybridRecallEngineTests {
 
     // MARK: - shingles
+    // These tests do not call any emitting function; no lock needed.
 
     @Test("shingles is empty for empty input")
     func shinglesIsEmptyForEmptyInput() {
@@ -45,6 +56,7 @@ struct HybridRecallEngineTests {
     }
 
     // MARK: - shingleSimilarity
+    // These tests do not call any emitting function; no lock needed.
 
     @Test("identical strings have shingle similarity one")
     func shingleSimilarityIdenticalIsOne() {
@@ -77,74 +89,91 @@ struct HybridRecallEngineTests {
     }
 
     // MARK: - rerank
+    // These tests call HybridRecallEngine.rerank() which emits to the
+    // Intellectus singleton. Each is declared `async` and acquires the
+    // process-wide lock via withIntellectusLock.
 
     @Test("rerank of empty input returns empty")
-    func rerankEmptyInputReturnsEmpty() {
-        #expect(HybridRecallEngine.rerank(drawers: [], tuning: .default).isEmpty)
+    func rerankEmptyInputReturnsEmpty() async throws {
+        try await withIntellectusLock {
+            #expect(HybridRecallEngine.rerank(drawers: [], tuning: .default).isEmpty)
+        }
     }
 
     @Test("rerank of a single drawer is the identity")
-    func rerankSingleDrawerIsIdentity() {
-        let d = makeDrawer(id: "1", content: "chemistry")
-        let out = HybridRecallEngine.rerank(drawers: [d], tuning: .default)
-        #expect(out.map(\.id) == ["1"])
+    func rerankSingleDrawerIsIdentity() async throws {
+        try await withIntellectusLock {
+            let d = makeDrawer(id: "1", content: "chemistry")
+            let out = HybridRecallEngine.rerank(drawers: [d], tuning: .default)
+            #expect(out.map(\.id) == ["1"])
+        }
     }
 
     @Test("rerank preserves all input drawers")
-    func rerankPreservesAllInputDrawers() {
-        // C-8: MMR runs over the input set; every drawer must remain
-        // present in the output (MMR reorders, it does not filter).
-        let drawers = (1...5).map { i in
-            makeDrawer(id: "\(i)", content: "drawer body number \(i)")
+    func rerankPreservesAllInputDrawers() async throws {
+        try await withIntellectusLock {
+            // C-8: MMR runs over the input set; every drawer must remain
+            // present in the output (MMR reorders, it does not filter).
+            let drawers = (1...5).map { i in
+                makeDrawer(id: "\(i)", content: "drawer body number \(i)")
+            }
+            let out = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
+            #expect(Set(out.map(\.id)) == Set(drawers.map(\.id)))
+            #expect(out.count == drawers.count)
         }
-        let out = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
-        #expect(Set(out.map(\.id)) == Set(drawers.map(\.id)))
-        #expect(out.count == drawers.count)
     }
 
     @Test("rerank is deterministic across invocations")
-    func rerankDeterministicAcrossInvocations() {
-        let drawers = (0..<7).map { i in
-            makeDrawer(id: "row-\(i)", content: "alpha beta gamma item \(i)")
+    func rerankDeterministicAcrossInvocations() async throws {
+        try await withIntellectusLock {
+            let drawers = (0..<7).map { i in
+                makeDrawer(id: "row-\(i)", content: "alpha beta gamma item \(i)")
+            }
+            let first = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
+            let second = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
+            #expect(first.map(\.id) == second.map(\.id))
         }
-        let first = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
-        let second = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
-        #expect(first.map(\.id) == second.map(\.id))
     }
 
     @Test("rerank with lambda one is relevance-only ordering")
-    func rerankWithLambdaOneIsRelevanceOnlyOrdering() {
-        // λ = 1.0 disables the diversity term entirely. With L₁ == L₂
-        // (today's verb shape) the relevance term ties for every
-        // drawer; ties break in stable input order. So the output
-        // equals the input order.
-        let drawers = (0..<4).map { i in
-            makeDrawer(id: "id-\(i)", content: "content \(i)")
+    func rerankWithLambdaOneIsRelevanceOnlyOrdering() async throws {
+        try await withIntellectusLock {
+            // λ = 1.0 disables the diversity term entirely. With L₁ == L₂
+            // (today's verb shape) the relevance term ties for every
+            // drawer; ties break in stable input order. So the output
+            // equals the input order.
+            let drawers = (0..<4).map { i in
+                makeDrawer(id: "id-\(i)", content: "content \(i)")
+            }
+            let tuning = RecallFrameTuning(mmrLambda: 1.0)
+            let out = HybridRecallEngine.rerank(drawers: drawers, tuning: tuning)
+            #expect(out.map(\.id) == drawers.map(\.id))
         }
-        let tuning = RecallFrameTuning(mmrLambda: 1.0)
-        let out = HybridRecallEngine.rerank(drawers: drawers, tuning: tuning)
-        #expect(out.map(\.id) == drawers.map(\.id))
     }
 
     @Test("rerank with lambda zero favours diversity")
-    func rerankWithLambdaZeroFavoursDiversity() {
-        // λ = 0.0 picks the maximally diverse remaining drawer at
-        // each step. Two near-duplicate drawers and one disjoint
-        // drawer — the disjoint drawer should be selected second
-        // (after the first input), not third.
-        let near1 = makeDrawer(id: "near-1", content: "the quick brown fox")
-        let near2 = makeDrawer(id: "near-2", content: "the quick brown foxx")
-        let far   = makeDrawer(id: "far",    content: "zzz yyy xxx www")
-        let tuning = RecallFrameTuning(mmrLambda: 0.0)
-        let out = HybridRecallEngine.rerank(drawers: [near1, near2, far], tuning: tuning)
-        #expect(out.first?.id == "near-1")
-        #expect(out[1].id == "far")
-        #expect(out[2].id == "near-2")
+    func rerankWithLambdaZeroFavoursDiversity() async throws {
+        try await withIntellectusLock {
+            // λ = 0.0 picks the maximally diverse remaining drawer at
+            // each step. Two near-duplicate drawers and one disjoint
+            // drawer — the disjoint drawer should be selected second
+            // (after the first input), not third.
+            let near1 = makeDrawer(id: "near-1", content: "the quick brown fox")
+            let near2 = makeDrawer(id: "near-2", content: "the quick brown foxx")
+            let far   = makeDrawer(id: "far",    content: "zzz yyy xxx www")
+            let tuning = RecallFrameTuning(mmrLambda: 0.0)
+            let out = HybridRecallEngine.rerank(drawers: [near1, near2, far], tuning: tuning)
+            #expect(out.first?.id == "near-1")
+            #expect(out[1].id == "far")
+            #expect(out[2].id == "near-2")
+        }
     }
 }
 
 @Suite("Recall stream paging")
 struct RecallStreamTests {
+
+    // MARK: - Paging tests that do NOT call rerank() — no lock needed.
 
     @Test("empty stream emits one final page")
     func emptyStreamEmitsOneFinalPage() async {
@@ -192,8 +221,10 @@ struct RecallStreamTests {
         #expect(pageCount == 3)
     }
 
+    // MARK: - Paging test that calls rerank() — lock required.
+
     @Test("MMR rerank is observed on every page")
-    func mmrRerankObservedOnEveryPage() async {
+    func mmrRerankObservedOnEveryPage() async throws {
         // C-8: every emitted page is from the reranked sequence. The
         // engine reranks the full set before paging, so this holds by
         // construction — verified by checking the concatenation of
@@ -201,7 +232,10 @@ struct RecallStreamTests {
         let drawers = (0..<12).map { i in
             makeDrawer(id: "d-\(i)", content: "shared prefix \(i)")
         }
-        let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
+        // rerank() emits to Intellectus — hold the lock for this call.
+        let reranked = try await withIntellectusLock {
+            HybridRecallEngine.rerank(drawers: drawers, tuning: .default)
+        }
         let stream = NKRecallStream(rows: reranked, pageSize: 5)
         var emitted: [Drawer] = []
         for await page in stream {

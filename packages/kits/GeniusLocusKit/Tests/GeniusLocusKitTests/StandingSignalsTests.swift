@@ -98,9 +98,10 @@ struct StandingSignalsTests {
         }
     }
 
-    /// Legacy alias preserved to avoid churn on call sites that tested the
-    /// old no-route-failure contract. Now delegates to assertVerbBoundaryReached
-    /// since routeFailed is expected for scaffold signals with sentinel targets.
+    /// Verifies that every outcome in the list reached the verb boundary:
+    /// `.routed`, `.routedButVerbStubbed`, `.diagnosticRecorded`, or
+    /// `.routeFailed`. Route failures are expected for scaffold signals
+    /// with sentinel targets; this helper treats them as boundary-reached.
     private func assertNoRouteFailures(
         _ outcomes: [SignalRouteOutcome],
         sourceLocation: SourceLocation = #_sourceLocation

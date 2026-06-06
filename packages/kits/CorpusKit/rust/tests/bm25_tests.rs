@@ -9,11 +9,16 @@ fn make_index() -> BM25Index {
     BM25Index::new(Arc::new(DeterministicTokenizer::new()))
 }
 
+/// Tokenise a query with the same tokenizer the test index uses.
+fn tokens(idx: &BM25Index, query: &str) -> Vec<String> {
+    idx.tokenize_query(query)
+}
+
 #[test]
 fn empty_index_returns_empty_results() {
     let idx = make_index();
     assert_eq!(idx.document_count(), 0);
-    assert!(idx.search("anything", 10).is_empty());
+    assert!(idx.top_k(10, &tokens(&idx, "anything")).is_empty());
 }
 
 #[test]
@@ -21,7 +26,8 @@ fn single_document_match() {
     let mut idx = make_index();
     let id = Uuid::new_v4();
     idx.index_documents(vec![(id, "the quick brown fox jumps over the lazy dog")]);
-    let results = idx.search("quick fox", 10);
+    let toks = tokens(&idx, "quick fox");
+    let results = idx.top_k(10, &toks);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, id);
     assert!(results[0].1 > 0.0);
@@ -38,7 +44,8 @@ fn multiple_docs_rank_by_relevance() {
         (b, "alpha alpha alpha alpha"),
         (c, "epsilon zeta eta theta"),
     ]);
-    let results = idx.search("alpha", 3);
+    let toks = tokens(&idx, "alpha");
+    let results = idx.top_k(3, &toks);
     assert_eq!(results.len(), 2);
     // Document b has 4 occurrences of "alpha" so it must come first.
     assert_eq!(results[0].0, b);
@@ -52,7 +59,8 @@ fn search_with_limit() {
         let text = format!("keyword document {}", i);
         idx.index_documents(vec![(Uuid::new_v4(), text.as_str())]);
     }
-    let results = idx.search("keyword", 2);
+    let toks = tokens(&idx, "keyword");
+    let results = idx.top_k(2, &toks);
     assert_eq!(results.len(), 2);
 }
 
@@ -64,7 +72,7 @@ fn remove_drops_document_from_results() {
     assert_eq!(idx.document_count(), 1);
     idx.remove(id);
     assert_eq!(idx.document_count(), 0);
-    assert!(idx.search("removable", 10).is_empty());
+    assert!(idx.top_k(10, &tokens(&idx, "removable")).is_empty());
 }
 
 #[test]
@@ -73,7 +81,8 @@ fn custom_bm25_parameters() {
     let mut idx = BM25Index::with_parameters(tok, BM25Parameters::new(2.0, 0.5));
     let id = Uuid::new_v4();
     idx.index_documents(vec![(id, "custom parameters test")]);
-    let results = idx.search("custom", 5);
+    let toks = tokens(&idx, "custom");
+    let results = idx.top_k(5, &toks);
     assert_eq!(results.len(), 1);
 }
 
@@ -81,7 +90,8 @@ fn custom_bm25_parameters() {
 fn query_with_no_matching_terms_returns_empty() {
     let mut idx = make_index();
     idx.index_documents(vec![(Uuid::new_v4(), "alpha beta gamma")]);
-    let results = idx.search("zeta", 10);
+    let toks = tokens(&idx, "zeta");
+    let results = idx.top_k(10, &toks);
     assert!(results.is_empty());
 }
 
@@ -89,6 +99,7 @@ fn query_with_no_matching_terms_returns_empty() {
 fn empty_query_returns_empty_results() {
     let mut idx = make_index();
     idx.index_documents(vec![(Uuid::new_v4(), "alpha beta")]);
-    let results = idx.search("", 10);
+    let toks = tokens(&idx, "");
+    let results = idx.top_k(10, &toks);
     assert!(results.is_empty());
 }

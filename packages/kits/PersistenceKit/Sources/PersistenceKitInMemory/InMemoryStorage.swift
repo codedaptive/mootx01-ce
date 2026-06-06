@@ -94,8 +94,31 @@ public final class InMemoryStorage: Storage, Sendable {
             await stateActor.replace(with: finalState)
             return result
         } catch {
+            // Record the rollback so StorageIntrospection can surface it.
+            await stateActor.recordRollback()
             throw error
         }
+    }
+}
+
+// MARK: - StorageIntrospection
+
+extension InMemoryStorage: StorageIntrospection {
+    /// Capture a point-in-time snapshot of InMemory backend health.
+    ///
+    /// logicalSizeBytes is an approximation: 256 bytes per row (rough dict-of-TypedValue
+    /// overhead) plus the exact byte count of stored blobs. It is suitable as a relative
+    /// health signal, not an allocator measurement.
+    public func stats(now: Date) async -> StorageStats {
+        let snap = await stateActor.introspectionSnapshot()
+        return StorageStats(
+            logicalSizeBytes: snap.approxBytes,
+            transactionRollbackCount: snap.rollbackCount,
+            rowCount: snap.rowCount,
+            blobCount: snap.blobCount,
+            vectorCount: snap.vectorCount,
+            capturedAt: now
+        )
     }
 }
 
@@ -430,6 +453,39 @@ actor InMemoryStateActor {
     }
 
     func auditCount() -> Int { state.auditEvents.count }
+
+    // MARK: - Introspection
+
+    /// Capture an introspection snapshot from the current state.
+    ///
+    /// InMemory fields:
+    /// - logicalSizeBytes: approximate in-memory footprint, estimated as the
+    ///   sum of row count * 256 bytes (a conservative average per row for
+    ///   dict-of-TypedValue storage overhead) plus blob bytes.
+    ///   This is a rough signal, not a precise allocator measurement.
+    /// - rowCount: sum of all row counts across all tables.
+    /// - blobCount: number of blob entries.
+    /// - vectorCount: number of vector entries.
+    /// - transactionRollbackCount: incremented by InMemoryStorage.transaction()
+    ///   on error. The actor tracks this as a monotone counter.
+    func introspectionSnapshot() -> (rowCount: Int, blobCount: Int, vectorCount: Int, rollbackCount: Int64, approxBytes: Int64) {
+        let rows = state.tables.values.map { $0.rows.count }.reduce(0, +)
+        let blobs = state.blobs.count
+        let vectors = state.vectors.count
+        // Approximate size: row overhead (256 B avg) + actual blob bytes.
+        let blobBytes = state.blobs.values.map { Int64($0.count) }.reduce(0, +)
+        let approxBytes = Int64(rows) * 256 + blobBytes
+        return (rows, blobs, vectors, rollbackStats, approxBytes)
+    }
+
+    // Monotone rollback counter. Incremented by InMemoryStorage.transaction()
+    // when the user block throws. Used to surface the transactionRollbackCount
+    // field in StorageStats for callers that want to track error rates.
+    var rollbackStats: Int64 = 0
+
+    func recordRollback() {
+        rollbackStats += 1
+    }
 }
 
 // MARK: - In-memory state value types

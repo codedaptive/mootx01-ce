@@ -22,6 +22,7 @@
 //   § 15     Dreaming daemon rule 7 (anomaly scan)
 
 import Foundation
+import IntellectusLib
 
 public enum AnomalyDetection {
 
@@ -37,8 +38,21 @@ public enum AnomalyDetection {
 
     /// Rolling-window z-score using the supplied window as the
     /// baseline distribution. Empty window returns 0.
+    ///
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals.anomalyFlag` with the absolute z-score value,
+    /// tagged by estate, method ("z_score"), and window size.
+    /// Off-path is a single atomic-bool load.
+    ///
+    /// - Parameters:
+    ///   - window: Historical baseline sample window.
+    ///   - current: Value to score against the window.
+    ///   - estate: Estate identifier for VizGraph telemetry.
+    ///   - ts: Caller-supplied epoch seconds for telemetry.
     public static func rollingZScore(window: [Float32],
-                                     current: Float32) -> Float32 {
+                                     current: Float32,
+                                     estate: String = "",
+                                     ts: Double = 0) -> Float32 {
         guard !window.isEmpty else { return 0 }
         let n = Float32(window.count)
         let mean = window.reduce(0, +) / n
@@ -47,7 +61,26 @@ public enum AnomalyDetection {
             return acc + d * d
         } / n
         let stddev = variance.squareRoot()
-        return zScore(value: current, mean: mean, stddev: stddev)
+        let score = zScore(value: current, mean: mean, stddev: stddev)
+
+        // VizGraph emit: anomaly.flag — rolling z-score computation complete.
+        // The Topology view uses the absolute score to decide whether to
+        // mark this node or edge as anomalous (red highlight). Value is
+        // abs(z) so the sink can apply its own threshold; the caller can
+        // also use AnomalyDetection.isAnomalous(zScore:threshold:) on the
+        // returned value.
+        Intellectus.report(.metric(
+            name: VizGraphSignals.anomalyFlag,
+            value: Double(abs(score)),
+            tags: [
+                "estate": estate,
+                "method": "z_score",
+                "window_size": "\(window.count)",
+            ],
+            ts: ts
+        ))
+
+        return score
     }
 
     /// Modified z-score using median absolute deviation. More
@@ -64,8 +97,21 @@ public enum AnomalyDetection {
 
     /// Rolling modified z-score. Computes median and MAD from
     /// the window in-place.
+    ///
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals.anomalyFlag` with the absolute modified z-score,
+    /// tagged by estate, method ("modified_z_score"), and window size.
+    /// Off-path is a single atomic-bool load.
+    ///
+    /// - Parameters:
+    ///   - window: Historical baseline sample window.
+    ///   - current: Value to score against the window.
+    ///   - estate: Estate identifier for VizGraph telemetry.
+    ///   - ts: Caller-supplied epoch seconds for telemetry.
     public static func rollingModifiedZScore(window: [Float32],
-                                             current: Float32) -> Float32 {
+                                             current: Float32,
+                                             estate: String = "",
+                                             ts: Double = 0) -> Float32 {
         guard !window.isEmpty else { return 0 }
         // In-place sort on a single mutable copy instead of
         // `.sorted()` (which allocates a fresh array per call).
@@ -81,7 +127,24 @@ public enum AnomalyDetection {
         var deviations = window.map { abs($0 - median) }
         deviations.sort()
         let mad = deviations[deviations.count / 2]
-        return modifiedZScore(value: current, median: median, mad: mad)
+        let score = modifiedZScore(value: current, median: median, mad: mad)
+
+        // VizGraph emit: anomaly.flag — modified z-score computation complete.
+        // Method tag distinguishes this from the classic z-score path so the
+        // Topology view can apply different highlighting rules for heavy-tailed
+        // distributions (where modified z-score is more reliable).
+        Intellectus.report(.metric(
+            name: VizGraphSignals.anomalyFlag,
+            value: Double(abs(score)),
+            tags: [
+                "estate": estate,
+                "method": "modified_z_score",
+                "window_size": "\(window.count)",
+            ],
+            ts: ts
+        ))
+
+        return score
     }
 
     /// Apply the |z| ≥ threshold rule. Default threshold of 3.0

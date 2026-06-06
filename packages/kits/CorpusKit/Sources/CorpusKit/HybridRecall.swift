@@ -9,9 +9,18 @@
 // hits from VectorKit + keyword hits from BM25Index) are CorpusKit
 // concerns. NeuronKit's reasoning layer composes higher-level
 // recall pipelines on top.
+//
+// CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
+// self-report telemetry to recall. The emit calls are placed at the
+// operation boundary, after the result is assembled, so the
+// mathematical behaviour is unchanged. When monitoring is disabled
+// (the default), the Intellectus.report(_:) call short-circuits after
+// a single Atomic<Bool> load; the startTime clock read is the only
+// unconditional overhead added per operation.
 
 import Foundation
 import EngramLib
+import IntellectusLib
 import VectorKit
 
 public struct HybridRecallConfiguration: Sendable {
@@ -47,6 +56,17 @@ public enum HybridRecall {
     ///   - bm25: keyword index.
     ///   - bundleStore: chunk content store.
     ///   - configuration: weights, RRF constant, optional MMR.
+    /// Retrieve top-k chunks by hybrid (vector + keyword) scoring.
+    ///
+    /// Telemetry: emits `corpuskit.recall.latency_ms` (wall time for the
+    /// full hybrid pipeline including embedding, vector kNN, BM25, RRF,
+    /// and hydration), `corpuskit.recall.vector_result_count` (number of
+    /// vector hits from findNearest before RRF), `corpuskit.recall.keyword_result_count`
+    /// (number of keyword hits from BM25 before RRF), and
+    /// `corpuskit.recall.result_count` (final output count after RRF and
+    /// hydration) when monitoring is enabled. All four are emitted at the
+    /// operation boundary — after the result is assembled — so they cannot
+    /// affect the return value. Off-path: single Atomic<Bool> load per call.
     public static func recall(
         probe: Engram,
         query: String,
@@ -57,6 +77,11 @@ public enum HybridRecall {
         bundleStore: BundleStore,
         configuration: HybridRecallConfiguration = HybridRecallConfiguration()
     ) async throws -> [ScoredChunk] {
+        // Capture start time before the retrieval work. One Date() read per
+        // call; the computed latency is forwarded to the sink only when
+        // monitoring is enabled (inside the @autoclosure guard).
+        let startTime = Date().timeIntervalSince1970
+
         // Pull a generous candidate window from each side.
         let candidateK = max(limit * 4, 32)
 
@@ -65,7 +90,11 @@ public enum HybridRecall {
             modelID: modelID,
             limit: candidateK
         )
-        async let keywordHits = bm25.search(query, limit: candidateK)
+        // Pre-tokenise using the corpus-default vocabulary so topK(_:for:)
+        // receives compatible tokens. CorpusDefaultTokenizer is stateless;
+        // a fresh instance is equivalent to the one stored inside bm25.
+        let queryTokens = CorpusDefaultTokenizer().keywordTokens(query)
+        async let keywordHits = bm25.topK(candidateK, for: queryTokens)
 
         let vectorResults = try await vectorHits
         let keywordResults = await keywordHits
@@ -86,13 +115,13 @@ public enum HybridRecall {
             entry.2 += contribution
             fused[uuid] = entry
         }
-        for (rank, (id, score)) in keywordResults.enumerated() {
+        for (rank, hit) in keywordResults.enumerated() {
             let rrf = 1.0 / (configuration.rrfK + Double(rank + 1))
             let contribution = rrf * configuration.keywordWeight
-            var entry = fused[id] ?? (0, 0, 0)
-            entry.1 = score
+            var entry = fused[hit.id] ?? (0, 0, 0)
+            entry.1 = Double(hit.score)
             entry.2 += contribution
-            fused[id] = entry
+            fused[hit.id] = entry
         }
 
         var ranked = fused.map { (id, score) in
@@ -119,6 +148,47 @@ public enum HybridRecall {
                 keywordScore: entry.keywordScore == 0 ? nil : Float(entry.keywordScore)
             ))
         }
+
+        // Emit recall telemetry at the operation boundary, after the result
+        // is assembled. The autoclosures are evaluated only when monitoring
+        // is enabled; the startTime clock read (above) is the only
+        // unconditional overhead. When monitoring is off (the default),
+        // each call is a single Atomic<Bool> load + branch.
+        //
+        // corpuskit.recall.latency_ms: wall time for the full pipeline
+        //   (vector kNN + BM25 + RRF + hydration).
+        // corpuskit.recall.vector_result_count: raw vector hits before RRF.
+        // corpuskit.recall.keyword_result_count: raw keyword hits before RRF.
+        // corpuskit.recall.result_count: final output count after hydration.
+        let endTime = Date().timeIntervalSince1970
+        let resultCount = out.count
+        let vectorCount = vectorResults.count
+        let keywordCount = keywordResults.count
+        Intellectus.report(.metric(
+            name: "corpuskit.recall.latency_ms",
+            value: (endTime - startTime) * 1000.0,
+            tags: ["kit": "CorpusKit", "model_id": modelID],
+            ts: endTime
+        ))
+        Intellectus.report(.metric(
+            name: "corpuskit.recall.vector_result_count",
+            value: Double(vectorCount),
+            tags: ["kit": "CorpusKit", "model_id": modelID],
+            ts: endTime
+        ))
+        Intellectus.report(.metric(
+            name: "corpuskit.recall.keyword_result_count",
+            value: Double(keywordCount),
+            tags: ["kit": "CorpusKit", "model_id": modelID],
+            ts: endTime
+        ))
+        Intellectus.report(.metric(
+            name: "corpuskit.recall.result_count",
+            value: Double(resultCount),
+            tags: ["kit": "CorpusKit", "model_id": modelID],
+            ts: endTime
+        ))
+
         return out
     }
 }

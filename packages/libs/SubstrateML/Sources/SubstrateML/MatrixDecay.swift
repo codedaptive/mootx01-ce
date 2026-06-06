@@ -29,6 +29,7 @@
 
 import Foundation
 import SubstrateTypes
+import IntellectusLib
 
 /// A square or rectangular floating-point matrix. The reference
 /// implementation uses a flat row-major `[Double]` for
@@ -68,15 +69,64 @@ public enum MatrixDecay {
     /// current HLC physical_time (in seconds). If `nowSeconds <=
     /// matrix.lastDecayTimeSeconds` this is a no-op (decay never
     /// goes backward).
+    ///
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals.edgeDecayedWeight` with the decay factor applied,
+    /// tagged by estate, matrix dimensions, and elapsed seconds.
+    /// When Δt == 0 (no-op), the emitted value is 1.0 (factor = no decay).
+    /// Off-path is a single atomic-bool load.
+    ///
+    /// - Parameters:
+    ///   - matrix: The matrix to decay in-place.
+    ///   - nowSeconds: Current HLC physical_time in seconds.
+    ///   - estate: Estate identifier for VizGraph telemetry.
+    ///   - ts: Caller-supplied epoch seconds for telemetry.
     public static func apply(to matrix: inout DecayingMatrix,
-                              nowSeconds: Int64) {
+                              nowSeconds: Int64,
+                              estate: String = "",
+                              ts: Double = 0) {
         let dt = Double(nowSeconds - matrix.lastDecayTimeSeconds)
-        guard dt > 0 else { return }
+        guard dt > 0 else {
+            // No-op: elapsed time is zero. Emit factor = 1.0 (no decay
+            // occurred) so the Topology view knows a decay check ran but
+            // nothing changed. This distinguishes "daemon ran and found no
+            // work" from "daemon never ran."
+            Intellectus.report(.metric(
+                name: VizGraphSignals.edgeDecayedWeight,
+                value: 1.0,
+                tags: [
+                    "estate": estate,
+                    "matrix_rows": "\(matrix.rows)",
+                    "matrix_cols": "\(matrix.cols)",
+                    "elapsed_seconds": "0",
+                ],
+                ts: ts
+            ))
+            return
+        }
         let factor = exp(-dt * Double.ln2 / matrix.halfLifeSeconds)
         for i in 0..<matrix.values.count {
             matrix.values[i] *= factor
         }
         matrix.lastDecayTimeSeconds = nowSeconds
+
+        // VizGraph emit: edge.decayed_weight — decay pass complete.
+        // Value = the multiplicative factor applied to every cell
+        // (0 < factor ≤ 1.0). The Topology view uses this to decide
+        // whether to refresh edge-weight rendering (a factor close to 1
+        // means little has changed; a factor far below 1 means the graph
+        // has lost significant weight and the layout may shift).
+        Intellectus.report(.metric(
+            name: VizGraphSignals.edgeDecayedWeight,
+            value: factor,
+            tags: [
+                "estate": estate,
+                "matrix_rows": "\(matrix.rows)",
+                "matrix_cols": "\(matrix.cols)",
+                "elapsed_seconds": "\(Int(dt))",
+            ],
+            ts: ts
+        ))
     }
 
     /// Compute the decay factor that would be applied for a given

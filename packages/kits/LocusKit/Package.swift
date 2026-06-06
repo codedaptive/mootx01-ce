@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 // LocusKit — Loci databases for MOOTx01.
 //
 // Apple Silicon only (macOS 15 / iOS 18). Storage is provided by
@@ -16,14 +16,19 @@
 // Embedding generation, vector retrieval, the search pipeline, the
 // directory walker, and the MCP server are out of scope here and
 // ship in subsequent LOCI-* missions.
+//
+// cp-locuskit-report: added IntellectusLib self-report telemetry.
+// Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4
+// (P2 self-report coverage). Layering: IntellectusLib has zero repo deps;
+// adding it here is strictly downstream→upstream, no cycle.
 
 import PackageDescription
 
 let package = Package(
     name: "LocusKit",
     platforms: [
-        .macOS(.v15),
-        .iOS(.v18),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(
@@ -37,6 +42,12 @@ let package = Package(
         .package(path: "../../libs/SubstrateKernel"),
         .package(path: "../../libs/SubstrateML"),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
+        // IntellectusLib is the zero-dep telemetry floor. LocusKit emits
+        // path, recall, and KG-fact operation metrics via Intellectus.report(_:),
+        // which is a no-op when monitoring is disabled (the default).
+        // Off-path cost: one Atomic<Bool> load + branch (~1 ns). No lock on the
+        // off-path. Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+        .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
     ],
     targets: [
         .target(
@@ -47,6 +58,7 @@ let package = Package(
                 .product(name: "SubstrateKernel", package: "SubstrateKernel"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
+                "IntellectusLib",
             ],
             path: "Sources/LocusKit"
         ),
@@ -56,6 +68,7 @@ let package = Package(
                 "LocusKit",
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                "IntellectusLib",
             ],
             path: "Tests/LocusKitTests"
         ),

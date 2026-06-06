@@ -101,6 +101,12 @@ public struct Substrate {
 
     /// Create a new row. State defaults to .active for non-proposal
     /// noun types and .pending for proposals.
+    ///
+    /// - Parameter ts: Caller-supplied epoch seconds for telemetry.
+    ///   Pass `Date().timeIntervalSince1970` at the verb boundary.
+    ///   Defaults to 0.0 so existing callers need no changes.
+    ///   SubstrateLib never reads a clock internally — determinism
+    ///   is preserved across all callers.
     @discardableResult
     public mutating func capture(
         nounType: NounType,
@@ -111,7 +117,8 @@ public struct Substrate {
         fingerprint: Fingerprint256,
         lineageId: UUID? = nil,
         content: Data? = nil,
-        actor: String = "capture"
+        actor: String = "capture",
+        ts: Double = 0.0
     ) -> Result<UUID, SubstrateError> {
         if latticeAnchor.isNull { return .failure(.missingLatticeAnchor) }
 
@@ -159,6 +166,10 @@ public struct Substrate {
                      after: (adjectiveBitmap, operationalBitmap, provenanceBitmap),
                      beforeAnchor: nil, afterAnchor: latticeAnchor, actor: actor)
 
+        // Telemetry — off-path cost: single atomic load + branch; no
+        // metric constructed when monitoring is disabled (the default).
+        emitVerbCaptureCount(nounTypeRaw: "\(nounType.rawValue)", ts: ts)
+
         return .success(rowId)
     }
 
@@ -170,7 +181,8 @@ public struct Substrate {
     public mutating func reanchor(
         rowId: UUID,
         newLatticeAnchor: LatticeAnchor,
-        actor: String = "reanchor"
+        actor: String = "reanchor",
+        ts: Double = 0.0
     ) -> Result<(), SubstrateError> {
         guard var row = rows[rowId] else { return .failure(.rowNotFound(rowId)) }
         if row.state == .tombstoned { return .failure(.alreadyTombstoned(rowId)) }
@@ -188,6 +200,10 @@ public struct Substrate {
                      before: (row.adjectiveBitmap, row.operationalBitmap, row.provenanceBitmap),
                      after: (row.adjectiveBitmap, row.operationalBitmap, row.provenanceBitmap),
                      beforeAnchor: oldAnchor, afterAnchor: newLatticeAnchor, actor: actor)
+
+        // Telemetry — off-path cost: single atomic load + branch.
+        emitVerbReanchorCount(ts: ts)
+
         return .success(())
     }
 
@@ -210,7 +226,8 @@ public struct Substrate {
         newAdjectiveBitmap: Int64,
         newOperationalBitmap: Int64? = nil,
         newProvenanceBitmap: Int64? = nil,
-        actor: String = "mutate"
+        actor: String = "mutate",
+        ts: Double = 0.0
     ) -> Result<(), SubstrateError> {
         guard var row = rows[rowId] else { return .failure(.rowNotFound(rowId)) }
         if row.state == .tombstoned { return .failure(.alreadyTombstoned(rowId)) }
@@ -273,6 +290,10 @@ public struct Substrate {
                      before: beforeBitmaps, after: afterBitmaps,
                      beforeAnchor: row.latticeAnchor, afterAnchor: row.latticeAnchor,
                      actor: actor)
+
+        // Telemetry — off-path cost: single atomic load + branch.
+        emitVerbMutateCount(mutationKindToken: verbToken, ts: ts)
+
         return .success(())
     }
 
@@ -283,7 +304,8 @@ public struct Substrate {
     @discardableResult
     public mutating func withdraw(
         rowId: UUID,
-        actor: String = "withdraw"
+        actor: String = "withdraw",
+        ts: Double = 0.0
     ) -> Result<(), SubstrateError> {
         guard var row = rows[rowId] else { return .failure(.rowNotFound(rowId)) }
         if !RowStateAutomaton.canTransition(from: row.state, to: .withdrawn,
@@ -301,6 +323,10 @@ public struct Substrate {
                      after: (row.adjectiveBitmap, row.operationalBitmap, row.provenanceBitmap),
                      beforeAnchor: row.latticeAnchor, afterAnchor: row.latticeAnchor,
                      actor: actor)
+
+        // Telemetry — off-path cost: single atomic load + branch.
+        emitVerbWithdrawCount(ts: ts)
+
         return .success(())
     }
 
@@ -312,7 +338,8 @@ public struct Substrate {
     public mutating func expunge(
         rowId: UUID,
         reason: String,
-        actor: String = "expunge"
+        actor: String = "expunge",
+        ts: Double = 0.0
     ) -> Result<(), SubstrateError> {
         guard var row = rows[rowId] else { return .failure(.rowNotFound(rowId)) }
         if row.state == .tombstoned { return .failure(.alreadyTombstoned(rowId)) }
@@ -350,6 +377,10 @@ public struct Substrate {
                      after: (row.adjectiveBitmap, row.operationalBitmap, row.provenanceBitmap),
                      beforeAnchor: row.latticeAnchor, afterAnchor: row.latticeAnchor,
                      actor: actor + ":" + reason)
+
+        // Telemetry — off-path cost: single atomic load + branch.
+        emitVerbExpungeCount(ts: ts)
+
         return .success(())
     }
 
@@ -360,8 +391,13 @@ public struct Substrate {
     /// Filter rows by an arbitrary predicate. Production code uses
     /// the bit-slice tensor (§ 4.1); this reference uses the
     /// in-memory dict. Recall never mutates; no audit row.
+    ///
+    /// - Parameter ts: Caller-supplied epoch seconds for telemetry.
+    ///   Defaults to 0.0; pass `Date().timeIntervalSince1970` at the
+    ///   verb boundary. Never read a clock inside this method.
     public func recall(matching predicate: (Row) -> Bool,
-                        asOf hlc: HLC? = nil) -> [Row] {
+                        asOf hlc: HLC? = nil,
+                        ts: Double = 0.0) -> [Row] {
         let candidates: [Row]
         if let cutoff = hlc {
             // asOf reconstruction is the audit-log projection
@@ -377,7 +413,13 @@ public struct Substrate {
         } else {
             candidates = Array(rows.values)
         }
-        return candidates.filter(predicate)
+        let result = candidates.filter(predicate)
+
+        // Telemetry — off-path cost: single atomic load + branch.
+        // Emitted after filtering so result_count is accurate.
+        emitVerbRecallCount(resultCount: result.count, ts: ts)
+
+        return result
     }
 
     // ============================================================
@@ -539,14 +581,11 @@ public struct Substrate {
     }
 }
 
-// MARK: - Stub protocols / dependencies
+// MARK: - Type dependencies
 //
-// The reference depends on RowStateAutomaton, MatrixF, MatrixO,
-// MatrixT, HLC, Fingerprint256 from the sibling reference files.
-// Those are now imported directly when this file compiles inside
-// the GeniusLocusReference Swift package; previously this file
-// re-declared placeholder versions for standalone-readability,
-// which conflicted at link time.
+// RowStateAutomaton, MatrixF, MatrixO, MatrixT, HLC, and Fingerprint256
+// are imported from the sibling SubstrateTypes package. This file
+// compiles inside SubstrateLib and resolves them through that dependency.
 
 // MARK: - Verb properties (informally verified)
 //

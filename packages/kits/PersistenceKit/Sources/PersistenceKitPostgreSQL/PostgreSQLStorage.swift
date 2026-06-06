@@ -98,6 +98,26 @@ public final class PostgreSQLStorage: Storage, Sendable {
     }
 }
 
+// MARK: - StorageIntrospection
+
+extension PostgreSQLStorage: StorageIntrospection {
+    /// Capture a point-in-time snapshot of PostgreSQL backend health.
+    ///
+    /// Sources each field from the PostgreSQL statistics collector:
+    /// - logicalSizeBytes: pg_database_size(current_database()) — bytes
+    ///   used by the database on disk.
+    /// - cacheHitRatio: blks_hit / (blks_hit + blks_read) from
+    ///   pg_stat_database — the fraction of block reads served from
+    ///   shared_buffers vs. the OS or disk.
+    /// - transactionCommitCount / transactionRollbackCount / deadlockCount:
+    ///   xact_commit, xact_rollback, deadlocks from pg_stat_database.
+    /// - lockContention: any row in pg_locks with granted=false joined to
+    ///   the current database indicates a waiting lock.
+    public func stats(now: Date) async throws -> StorageStats {
+        try await backend.storageStats(now: now)
+    }
+}
+
 // MARK: - Backend actor
 
 actor PostgreSQLBackend {
@@ -193,6 +213,109 @@ actor PostgreSQLBackend {
 
     func applyMigrations(_ schema: SchemaDeclaration) async throws {
         try await open(schema: schema)
+    }
+
+    // MARK: - Introspection
+
+    /// Query PostgreSQL statistics views for backend health.
+    ///
+    /// SQL rationale per query:
+    ///
+    /// `pg_database_size`: returns the total on-disk size of the current
+    /// database in bytes. Includes all tables, indexes, TOAST, and WAL.
+    ///
+    /// `pg_stat_database`: one row per database; `blks_hit` and `blks_read`
+    /// are cumulative counters. The cache-hit ratio blks_hit/(blks_hit+blks_read)
+    /// measures how often PostgreSQL satisfied reads from shared_buffers vs.
+    /// requiring disk I/O. A ratio < 0.99 on a read-heavy workload is a
+    /// signal to increase shared_buffers.
+    ///
+    /// `xact_commit` / `xact_rollback` / `deadlocks`: lifetime counters
+    /// since the last statistics reset (pg_stat_reset()). Monotonically
+    /// increasing; callers diff successive snapshots for rates.
+    ///
+    /// Lock contention: `pg_locks` joined to `pg_database` where
+    /// `granted = false` AND `database = current database OID`. A non-zero
+    /// count means at least one backend is waiting to acquire a lock on a
+    /// relation in this database right now.
+    func storageStats(now: Date) async throws -> StorageStats {
+        let conn = try await pool.acquire()
+        defer { Task { await pool.release(conn) } }
+
+        // --- Logical size ---
+        var logicalSize: Int64 = 0
+        let sizeRows = try await conn.executeParameterized(
+            "SELECT pg_database_size(current_database())",
+            bindings: [],
+            logger: logger
+        )
+        for try await row in sizeRows {
+            let acc = row.makeRandomAccess()
+            if let cell = try? acc[0], let v = try? cell.decode(Int64.self, context: .default) {
+                logicalSize = v
+            }
+        }
+
+        // --- Buffer cache hit ratio + transaction and deadlock counters ---
+        var cacheHitRatio: Double? = nil
+        var commitCount: Int64? = nil
+        var rollbackCount: Int64? = nil
+        var deadlockCount: Int64? = nil
+
+        let statRows = try await conn.executeParameterized(
+            """
+            SELECT blks_hit, blks_read, xact_commit, xact_rollback, deadlocks
+            FROM pg_stat_database
+            WHERE datname = current_database()
+            """,
+            bindings: [],
+            logger: logger
+        )
+        for try await row in statRows {
+            let acc = row.makeRandomAccess()
+            let blksHit   = (try? acc["blks_hit"].decode(Int64.self, context: .default)) ?? 0
+            let blksRead  = (try? acc["blks_read"].decode(Int64.self, context: .default)) ?? 0
+            let total = blksHit + blksRead
+            if total > 0 {
+                cacheHitRatio = Double(blksHit) / Double(total)
+            }
+            commitCount   = (try? acc["xact_commit"].decode(Int64.self, context: .default))
+            rollbackCount = (try? acc["xact_rollback"].decode(Int64.self, context: .default))
+            deadlockCount = (try? acc["deadlocks"].decode(Int64.self, context: .default))
+        }
+
+        // --- Lock contention ---
+        // A non-zero count means at least one backend is waiting on a lock
+        // in the current database right now.
+        var lockContention = false
+        let lockRows = try await conn.executeParameterized(
+            """
+            SELECT COUNT(*) AS waiting
+            FROM pg_locks l
+            JOIN pg_database d ON d.oid = l.database
+            WHERE l.granted = false
+              AND d.datname = current_database()
+            """,
+            bindings: [],
+            logger: logger
+        )
+        for try await row in lockRows {
+            let acc = row.makeRandomAccess()
+            if let cell = try? acc["waiting"],
+               let v = try? cell.decode(Int64.self, context: .default) {
+                lockContention = v > 0
+            }
+        }
+
+        return StorageStats(
+            logicalSizeBytes: logicalSize,
+            cacheHitRatio: cacheHitRatio,
+            transactionCommitCount: commitCount,
+            transactionRollbackCount: rollbackCount,
+            deadlockCount: deadlockCount,
+            lockContention: lockContention,
+            capturedAt: now
+        )
     }
 
     /// Read the global (no-arg) schema version from the `schema_version` meta key.

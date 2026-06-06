@@ -25,6 +25,7 @@ pub mod encryption;
 pub mod error;
 pub mod generated_column;
 pub mod inmemory;
+pub mod introspection;
 pub mod observer;
 pub mod postgres;
 pub mod predicate;
@@ -33,6 +34,10 @@ pub mod row_store;
 pub mod schema;
 pub mod sqlite;
 pub mod storage;
+// cp-persistencekit-report (2026-06-06): self-report telemetry via IntellectusLib.
+// report_storage_stats wraps StorageIntrospection::stats and emits persistence.db.*
+// metrics. Off by default — zero cost when monitoring is disabled.
+pub mod telemetry;
 pub mod types;
 pub mod vector_index;
 
@@ -46,6 +51,8 @@ pub use encryption::{
 };
 pub use error::*;
 pub use generated_column::*;
+pub use introspection::{StorageIntrospection, StorageStats};
+pub use telemetry::report_storage_stats;
 pub use observer::*;
 pub use postgres::PostgresStorage;
 pub use predicate::*;

@@ -97,6 +97,19 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
     /// `matrix` lane is reserved for a future mission.
     case recallLaneUnavailable(RecallLane)
 
+    /// A verb was called on an estate whose mount state is `.quiesced` or
+    /// `.draining` — the estate is in a winding-down state and no new work
+    /// is accepted. The caller should wait for the estate to finish existing
+    /// work, then reopen or destroy it. The carried UUID is the estate's UUID.
+    case estateQuiesced(estateUUID: UUID)
+
+    /// `destroy(storage:corpusStorage:handle:)` was called on a handle that
+    /// is still in the `.mounted` or `.draining` state. The caller must call
+    /// `close(_:)` (or `quiesce` → `drain` → `close`) before destroying the
+    /// backing stores, so that in-flight work flushes cleanly and the audit
+    /// trail is consistent. The estate can be force-destroyed after close.
+    case destroyRequiresClose(estateUUID: UUID)
+
     public var description: String {
         switch self {
         case let .invalidManifest(key, detail):
@@ -121,6 +134,10 @@ public enum GeniusLocusKitError: Error, Sendable, Equatable, CustomStringConvert
             return "cross-estate read of \(source) by \(requester) refused: \(reason)"
         case let .recallLaneUnavailable(lane):
             return "recall lane '\(lane.rawValue)' is not available in this version"
+        case let .estateQuiesced(uuid):
+            return "estate \(uuid) is quiesced and not accepting new work"
+        case let .destroyRequiresClose(uuid):
+            return "destroy requires the estate \(uuid) to be closed first — call close() before destroy()"
         }
     }
 }

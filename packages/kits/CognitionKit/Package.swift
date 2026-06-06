@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 // CognitionKit, the behaviour-recipe layer of the MOOTx01 substrate —
 // the "conscious mind." CognitionKit assembles shipped NeuronKit
@@ -31,8 +31,8 @@ let package = Package(
     platforms: [
         // Aligned with GeniusLocusKit / NeuronKit (macOS 15 / iOS 18)
         // so the estate-handle and reasoning dependencies resolve cleanly.
-        .macOS(.v15),
-        .iOS(.v18),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(
@@ -45,6 +45,15 @@ let package = Package(
         .package(path: "../NeuronKit"),
         .package(path: "../LocusKit"),
         .package(path: "../../libs/SubstrateTypes"),
+        // IntellectusLib is the zero-dependency telemetry leaf.
+        // CognitionKit emits self-report metrics at recipe-run boundaries
+        // (cp-cognitionkit-report P2 self-report coverage;
+        // DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28). When monitoring is
+        // off (the default), every Intellectus.report(...) call is a single
+        // atomic load + branch — zero allocation, no clock. IntellectusLib
+        // depends on nothing; layering is safe (it is the new dependency
+        // floor below SubstrateKernel). Mirrors the NeuronKit pattern.
+        .package(path: "../../libs/IntellectusLib"),
         // SubstrateML provides the ARM engine (mineAssociationRules,
         // MiningThresholds, AssociationRule, Item) consumed by AssociationRules.swift.
         .package(path: "../../libs/SubstrateML"),
@@ -63,6 +72,8 @@ let package = Package(
                 .product(name: "NeuronKit", package: "NeuronKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                // Telemetry leaf — see dependency note above.
+                .product(name: "IntellectusLib", package: "IntellectusLib"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
             ],
             path: "Sources/CognitionKit"

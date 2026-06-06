@@ -7,6 +7,8 @@
 // deferred.
 
 use std::collections::HashMap;
+use intellectus_lib::{StatSample, report};
+use crate::viz_graph_signals::VizGraphSignals;
 
 pub struct CommunityDetection;
 
@@ -14,7 +16,19 @@ impl CommunityDetection {
     /// Run Louvain phase 1 on a symmetric weighted adjacency.
     /// Returns a canonical community label for each node, with
     /// labels 0..K-1 assigned in order of first appearance.
-    pub fn detect(adjacency: &[Vec<(usize, f64)>], max_passes: usize) -> Vec<usize> {
+    ///
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals::COMMUNITY_ASSIGNMENT` with the number of
+    /// communities found, tagged by estate and node count. Off-path
+    /// is a single AtomicBool load + branch — no allocation.
+    ///
+    /// # Parameters
+    /// - `adjacency`: The weighted adjacency list.
+    /// - `max_passes`: Maximum Louvain phase-1 passes.
+    /// - `estate`: Estate identifier tag for VizGraph telemetry.
+    /// - `ts`: Caller-supplied epoch seconds. Never read a clock here.
+    pub fn detect(adjacency: &[Vec<(usize, f64)>], max_passes: usize,
+                  estate: &str, ts: f64) -> Vec<usize> {
         let n = adjacency.len();
         if n == 0 {
             return Vec::new();
@@ -78,7 +92,36 @@ impl CommunityDetection {
             }
         }
 
-        Self::canonicalize(&community)
+        let result = Self::canonicalize(&community);
+
+        // VizGraph emit: community.assignment — Louvain partition complete.
+        // The node→community partition is now ready for the Topology view
+        // to colour-cluster nodes. community_count counts distinct labels
+        // in the canonical result.
+        //
+        // Off-path when monitoring is disabled: single AtomicBool load +
+        // branch. The closure is NEVER evaluated when monitoring is off.
+        let community_count = {
+            let mut seen = std::collections::HashSet::new();
+            for &label in &result { seen.insert(label); }
+            seen.len()
+        };
+        let n_str = n.to_string();
+        let cc_str = community_count.to_string();
+        report!({
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("estate".to_string(), estate.to_string());
+            tags.insert("node_count".to_string(), n_str.clone());
+            tags.insert("community_count".to_string(), cc_str.clone());
+            StatSample::metric(
+                VizGraphSignals::COMMUNITY_ASSIGNMENT.to_string(),
+                community_count as f64,
+                tags,
+                ts,
+            )
+        });
+
+        result
     }
 
     pub fn canonicalize(labels: &[usize]) -> Vec<usize> {
@@ -113,14 +156,14 @@ mod tests {
 
     #[test]
     fn empty_graph() {
-        let result = CommunityDetection::detect(&[], 10);
+        let result = CommunityDetection::detect(&[], 10, "", 0.0);
         assert!(result.is_empty());
     }
 
     #[test]
     fn disconnected_graph_one_community_per_node() {
         let adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); 4];
-        let result = CommunityDetection::detect(&adj, 10);
+        let result = CommunityDetection::detect(&adj, 10, "", 0.0);
         // With no edges, every node stays in its singleton.
         // Canonical: each becomes its own label in order.
         assert_eq!(result, vec![0, 1, 2, 3]);
@@ -136,7 +179,7 @@ mod tests {
             (0, 3, 0.01),
         ];
         let adj = symmetric_edges(6, &edges);
-        let result = CommunityDetection::detect(&adj, 20);
+        let result = CommunityDetection::detect(&adj, 20, "", 0.0);
         // {0,1,2} should share a label; {3,4,5} should share a label;
         // the two labels should differ.
         assert_eq!(result[0], result[1]);
@@ -150,7 +193,7 @@ mod tests {
     fn canonical_labels_start_at_zero() {
         let edges = vec![(0, 1, 1.0), (0, 2, 1.0), (1, 2, 1.0)];
         let adj = symmetric_edges(3, &edges);
-        let result = CommunityDetection::detect(&adj, 20);
+        let result = CommunityDetection::detect(&adj, 20, "", 0.0);
         // Canonical labels always start at 0 by convention
         // (canonicalize renumbers in order of first appearance).
         // For a pure-triangle input, phase 1 Louvain may not

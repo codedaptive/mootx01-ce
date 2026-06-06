@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 // NeuronKit, the algorithms layer of the MOOTx01 substrate. Hosts
 // autonomic functions (the enrichment daemon, dreaming, maintenance,
@@ -30,8 +30,8 @@ let package = Package(
         // Aligned with GeniusLocusKit (macOS 15 / iOS 18) so the
         // estate-handle dependency resolves cleanly. NeuronKit had no
         // platform-specific feature use at the prior floor (14 / 17).
-        .macOS(.v15),
-        .iOS(.v18),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(
@@ -41,6 +41,15 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../../libs/EideticLib"),
+        // IntellectusLib is the zero-dependency telemetry leaf.
+        // NeuronKit emits self-report metrics at hybrid recall, dreaming
+        // cycle, and Bradley-Terry boundaries (MANAGER_1.0_PLAN §4 P2
+        // self-report coverage; DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28).
+        // When monitoring is off (the default), every Intellectus.report(...)
+        // call is a single atomic load + branch — zero allocation, no clock.
+        // IntellectusLib depends on nothing; layering is safe (it is the
+        // new dependency floor below SubstrateKernel).
+        .package(path: "../../libs/IntellectusLib"),
         // GeniusLocusKit resolves `EstateHandle` and the nine estate
         // verbs (notably `recall`). All substrate writes flow through
         // this surface; NeuronKit calls no write API on LocusKit,
@@ -83,6 +92,8 @@ let package = Package(
             name: "NeuronKit",
             dependencies: [
                 .product(name: "EideticLib", package: "EideticLib"),
+                // Telemetry leaf — see dependency note above.
+                .product(name: "IntellectusLib", package: "IntellectusLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 // MMR distance primitive — see dependency note above.

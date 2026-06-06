@@ -31,6 +31,7 @@
 
 import Foundation
 import GeniusLocusKit
+import IntellectusLib
 import NeuronKit
 
 /// Recall + ground a query into a synthesized context document.
@@ -89,6 +90,19 @@ public struct GroundedSynthesis: Recipe {
         // Spec B-5: verify capabilities before any substrate touch.
         try verifyCapabilities(required: requiredCapabilities)
 
+        // Capture the recipe-start timestamp once at the entry boundary.
+        // Using timeIntervalSince1970 here (not inside the autoclosure) keeps
+        // the ts deterministic per the determinism contract — the emit macro
+        // would evaluate it lazily, which would be fine too, but this is
+        // explicit. When monitoring is disabled, emitRecipeStart is a single
+        // atomic load + branch: zero allocation, no clock read wasted.
+        let startTs = Date().timeIntervalSince1970
+        // Emit cognitionkit.recipe.run with status "start". Pairs with the
+        // "complete" emit at the function exit. When monitoring is off, the
+        // autoclosure inside emitRecipeStart is never evaluated (off-path cost:
+        // one Atomic<Bool>.load(.acquiring) + branch, ~1 ns).
+        emitRecipeStart(name: name, ts: startTs)
+
         // 1. Hybrid recall over the single GLK recall-verb boundary
         //    (NeuronKit B-1). Returns a paged, MMR-reranked stream.
         let stream = try await hybridRecall(
@@ -117,6 +131,13 @@ public struct GroundedSynthesis: Recipe {
         let context = try await ContextSynthesizer.synthesize(
             from: combined, estate: estate
         )
+
+        // Emit cognitionkit.recipe.run with status "complete". The step_count
+        // tag is the number of recalled drawers that fed the synthesis —
+        // the meaningful unit of work for this recipe. Byte-identical to
+        // the output whether monitoring is on or off (C-Det: telemetry is
+        // additive; allRows.count is already computed above).
+        emitRecipeComplete(name: name, stepCount: allRows.count, ts: startTs)
 
         return Output(context: context, drawerCount: allRows.count)
     }

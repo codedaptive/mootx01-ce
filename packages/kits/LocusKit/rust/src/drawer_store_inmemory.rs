@@ -783,15 +783,29 @@ impl DrawerStore for DrawerStoreCore {
         // capture event (prior==None branch runs ForbiddenCombinations),
         // so the standalone validator is retired here as for the mutators.
 
+        // Capture start instant before I/O for latency telemetry.
+        // Off-path cost when monitoring is disabled: one Instant::now()
+        // call per add_drawer, which is dominated by the storage write.
+        let _tel_start = std::time::Instant::now();
+        let _tel_now = _now as f64;
+
         let predecessor = self.find_active_predecessor(&drawer.lineage_id, &drawer.id)?;
-        match predecessor {
+        let result = match predecessor {
             Some(prior_id) => self.add_drawer_with_cascade(drawer, &prior_id),
             None => {
                 // Gated capture: genesis event + projection row. Capture is
                 // the moment of remembering — a gated write, not a bare INSERT.
                 self.gated_capture(drawer, _now)
             }
+        };
+
+        // Emit capture telemetry at the post-write operation boundary.
+        // This is additive: the return value and all side effects are
+        // already determined before emit_drawer_capture is called.
+        if result.is_ok() {
+            crate::telemetry::emit_drawer_capture(&_tel_start, _tel_now, &self.estate_uuid);
         }
+        result
     }
 
     fn get_drawer(&self, id: &str) -> Result<Option<Drawer>, LocusKitError> {
@@ -813,6 +827,9 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn drawers_in_wing(&self, wing: &str) -> Result<Vec<Drawer>, LocusKitError> {
+        // Capture start instant before I/O for latency telemetry.
+        let _tel_start = std::time::Instant::now();
+
         let rows = self
             .storage
             .row_store()
@@ -833,7 +850,13 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        Ok(rows.iter().map(drawer_from_row).collect())
+        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect();
+
+        // Emit query telemetry at the post-query operation boundary.
+        // now_secs=0.0 because drawers_in_wing has no caller-supplied timestamp.
+        // The start instant captures real wall time for the latency metric.
+        crate::telemetry::emit_drawer_query(&_tel_start, 0.0, drawers.len(), &self.estate_uuid, "wing");
+        Ok(drawers)
     }
 
     fn drawers_in_wing_room(&self, wing: &str, room: &str) -> Result<Vec<Drawer>, LocusKitError> {
@@ -892,6 +915,9 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
+        // Capture start instant before I/O for latency telemetry.
+        let _tel_start = std::time::Instant::now();
+
         let rows = self
             .storage
             .row_store()
@@ -906,7 +932,11 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        Ok(rows.iter().map(drawer_from_row).collect())
+        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect();
+
+        // Emit query telemetry at the post-query operation boundary.
+        crate::telemetry::emit_drawer_query(&_tel_start, 0.0, drawers.len(), &self.estate_uuid, "all");
+        Ok(drawers)
     }
 
     fn drawer_ids(&self) -> Result<Vec<RowID>, LocusKitError> {
@@ -1329,6 +1359,10 @@ impl DrawerStore for DrawerStoreCore {
             .row_store()
             .insert(T_TUNNELS, tunnel_values(tunnel))
             .map_err(map_storage_err)?;
+
+        // Emit tunnel-add telemetry at the post-insert boundary.
+        // Tracks link density growth between drawers per estate.
+        crate::telemetry::emit_tunnel_add(0.0, &self.estate_uuid);
         Ok(())
     }
 
@@ -1457,6 +1491,10 @@ impl DrawerStore for DrawerStoreCore {
             .row_store()
             .insert(T_KG_FACTS, kg_fact_values(fact))
             .map_err(map_storage_err)?;
+
+        // Emit KGFact-add telemetry at the post-insert boundary.
+        // Tracks knowledge-graph growth rate per estate.
+        crate::telemetry::emit_kgfact_add(0.0, &self.estate_uuid);
         Ok(())
     }
 
@@ -1529,7 +1567,12 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        Ok(rows.iter().map(kg_fact_from_row).collect())
+        let facts: Vec<KGFact> = rows.iter().map(kg_fact_from_row).collect();
+
+        // Emit KGFact-query telemetry at the post-query boundary.
+        // query="drawer" identifies the per-drawer query path.
+        crate::telemetry::emit_kgfact_query(0.0, facts.len(), &self.estate_uuid, "drawer");
+        Ok(facts)
     }
 
     // -----------------------------------------------------------------
@@ -2132,7 +2175,12 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        Ok(rows.iter().map(kg_fact_from_row).collect())
+        let facts: Vec<KGFact> = rows.iter().map(kg_fact_from_row).collect();
+
+        // Emit KGFact-query telemetry at the post-query boundary.
+        // query="all" identifies the estate-wide query path.
+        crate::telemetry::emit_kgfact_query(0.0, facts.len(), &self.estate_uuid, "all");
+        Ok(facts)
     }
 
     fn all_diary_entries(&self) -> Result<Vec<DiaryEntry>, LocusKitError> {
@@ -2531,11 +2579,12 @@ fn drawer_values(d: &Drawer) -> BTreeMap<String, TypedValue> {
     );
     m.insert("addedBy".to_string(), TypedValue::Text(d.added_by.clone()));
     m.insert("filedAt".to_string(), TypedValue::Timestamp(d.filed_at));
+    // event_time is always non-optional; always persist the resolved value.
+    // The SQLite column is nullable TEXT to support legacy rows pre-dating
+    // the column, but new writes always supply the ISO8601 timestamp.
     m.insert(
         "eventTime".to_string(),
-        d.event_time
-            .map(TypedValue::Timestamp)
-            .unwrap_or(TypedValue::Null),
+        TypedValue::Timestamp(d.event_time),
     );
     m.insert(
         "embeddingModelID".to_string(),
@@ -2919,13 +2968,13 @@ fn drawer_from_row(row: &StorageRow) -> Drawer {
         chunk_index: opt_int_value_of(row.get("chunkIndex")),
         added_by: string_value_of(row.get("addedBy")),
         filed_at: i64_value_of(row.get("filedAt")),
-        // Two-clock ingest (ING-01): backfill a NULL/absent eventTime to
-        // this row's filed_at. Rows written before the column existed read
-        // NULL here; the fallback gives them event_time == filed_at (the
-        // streaming-capture identity), realizing the backfill in the read
-        // path rather than via ALTER+UPDATE.
+        // Two-clock ingest (ING-01): coalesce NULL/absent eventTime to
+        // filed_at at the decode boundary. Rows written before the column
+        // existed carry NULL in SQLite; they decode to event_time == filed_at
+        // (the streaming-capture identity) without requiring ALTER+UPDATE.
+        // The in-struct type is non-optional, mirroring Swift Drawer.eventTime.
         event_time: opt_int_value_of(row.get("eventTime"))
-            .or_else(|| Some(i64_value_of(row.get("filedAt")))),
+            .unwrap_or_else(|| i64_value_of(row.get("filedAt"))),
         embedding_model_id: string_value_of(row.get("embeddingModelID")),
         tombstoned_at: opt_int_value_of(row.get("tombstonedAt")),
         removed_by_batch: opt_string_value_of(row.get("removedByBatch")),

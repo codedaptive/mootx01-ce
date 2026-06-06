@@ -15,6 +15,13 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
+# IntellectusLib is the zero-dependency telemetry leaf. NeuronKit emits
+# self-report metrics at hybrid recall, dreaming cycle, and tournament
+# boundaries (MANAGER_1.0_PLAN §4 P2 self-report coverage). When
+# monitoring is off (the default), the report! macro expands to a single
+# AtomicBool::load + branch — zero allocation, no clock. Layering-safe:
+# intellectus-lib depends only on std.
+intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 # EngramLib supplies the typed `Engram` (Fingerprint256) and its Hamming
 # `distance` primitive. NEURONKIT_SPEC § 4.1 step 4's standalone MMR rerank
 # (`mmr_rank` / `MMREngine`) derives relevance and inter-candidate

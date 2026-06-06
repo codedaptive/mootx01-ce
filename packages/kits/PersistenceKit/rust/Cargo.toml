@@ -16,6 +16,12 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 uuid = { version = "1", features = ["v4"] }
 # SQLite backend: bundled compiles SQLite from source (no system dep).
 rusqlite = { version = "0.31", features = ["bundled"] }
+# intellectus-lib: zero-dep telemetry floor. persistence-kit emits DB-layer
+# health metrics via the report! macro, which is a no-op when monitoring is
+# disabled (the default). Off-path cost: one AtomicBool load + branch.
+# Layering: intellectus-lib has no repo deps; this is downstream→upstream.
+# Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
+intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 # sqlite-vec extension (vec0 virtual table) for the SQLite VectorIndex,
 # registered against rusqlite's bundled SQLite via auto-extension.
 sqlite-vec = "0.1"

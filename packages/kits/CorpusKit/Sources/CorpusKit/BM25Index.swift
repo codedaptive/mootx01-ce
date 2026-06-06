@@ -60,44 +60,12 @@ public actor BM25Index {
         }
     }
 
-    /// Top-k BM25 scoring over the given query string.
-    @available(*, deprecated, renamed: "topK(_:for:)",
-        message: "search(_:limit:) performs an unbounded sort. Use topK(_:for:) for bounded O(M log k) recall.")
-    public func search(_ query: String, limit: Int) -> [(UUID, Double)] {
-        guard totalDocs > 0, limit > 0 else { return [] }
-        let queryTokens = tokenizer.keywordTokens(query)
-        guard !queryTokens.isEmpty else { return [] }
-        let avgDocLen = Double(totalLengthSum) / Double(totalDocs)
-        var scores: [UUID: Double] = [:]
-
-        for term in queryTokens {
-            guard let posting = postings[term], !posting.isEmpty else { continue }
-            // IDF with the +1 smoothing for non-negative scores.
-            let n = Double(posting.count)
-            let idf = log(1 + (Double(totalDocs) - n + 0.5) / (n + 0.5))
-            for (docID, tf) in posting {
-                let dl = Double(docLengths[docID] ?? 0)
-                let denom = Double(tf) + parameters.k1 * (1 - parameters.b + parameters.b * dl / max(avgDocLen, 1))
-                let contribution = idf * (Double(tf) * (parameters.k1 + 1)) / max(denom, 0.0001)
-                scores[docID, default: 0] += contribution
-            }
-        }
-
-        var ranked = scores.map { ($0.key, $0.value) }
-        ranked.sort {
-            if $0.1 != $1.1 { return $0.1 > $1.1 }
-            return $0.0.uuidString < $1.0.uuidString
-        }
-        if ranked.count > limit { ranked.removeLast(ranked.count - limit) }
-        return ranked
-    }
-
     public func documentCount() -> Int { totalDocs }
 
     /// Top-k BM25 scoring over pre-tokenised keyword tokens using a bounded min-heap.
     ///
-    /// Unlike `search(_:limit:)`, which tokenises internally and sorts all scored
-    /// documents (O(M log M)), this method:
+    /// The caller is responsible for tokenising the query with the same tokenizer
+    /// vocabulary used when documents were indexed. This method:
     /// 1. Accepts pre-tokenised tokens so the caller controls tokenisation and can
     ///    reuse tokens across multiple calls.
     /// 2. Maintains a min-heap of capacity `k` — O(M log k) — so the candidate set

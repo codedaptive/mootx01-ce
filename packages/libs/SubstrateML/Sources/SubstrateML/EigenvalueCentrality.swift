@@ -49,6 +49,7 @@
 //   § 15.1  Dreaming daemon Rule 10
 
 import Foundation
+import IntellectusLib
 
 public enum EigenvalueCentrality {
 
@@ -71,10 +72,24 @@ public enum EigenvalueCentrality {
     /// eigenvectors, breaking the +/- lambda oscillation that
     /// bipartite graphs (e.g. a star) exhibit under raw power
     /// iteration. Mirrors the Rust port's shift constant.
+    ///
+    /// VizGraph telemetry: when monitoring is enabled, emits
+    /// `VizGraphSignals.centralityScore` with value 1.0 (completion
+    /// indicator), tagged by estate, node count, and iteration count
+    /// to convergence. Off-path is a single atomic-bool load.
+    ///
+    /// - Parameters:
+    ///   - adjacency: Sparse adjacency list.
+    ///   - maxIterations: Power iteration cap.
+    ///   - tolerance: Convergence tolerance (L2 diff norm).
+    ///   - estate: Estate identifier for VizGraph telemetry.
+    ///   - ts: Caller-supplied epoch seconds for telemetry.
     public static func compute(
         adjacency: Adjacency,
         maxIterations: Int = defaultMaxIterations,
-        tolerance: Double = defaultTolerance
+        tolerance: Double = defaultTolerance,
+        estate: String = "",
+        ts: Double = 0
     ) -> [Double] {
         let shift: Double = 1.0
         let n = adjacency.count
@@ -85,7 +100,14 @@ public enum EigenvalueCentrality {
         var x = [Double](repeating: initial, count: n)
         var xNext = [Double](repeating: 0.0, count: n)
 
+        // Track iteration count to include in the VizGraph emit below.
+        // The iteration count tells the Topology view how expensive this
+        // run was (sparse well-connected graphs converge in ~10 iterations;
+        // poorly-connected ones hit the maxIterations cap).
+        var iterationsRun = 0
+
         for _ in 0..<maxIterations {
+            iterationsRun += 1
             // x_next = A^T @ x  (xNext[j] += w * x[i] for edge i→j — authority, not hub)
             for i in 0..<n {
                 xNext[i] = 0.0
@@ -105,7 +127,10 @@ public enum EigenvalueCentrality {
             for v in xNext { sumSq += v * v }
             let norm = sumSq.squareRoot()
             if norm < 1.0e-30 {
-                return [Double](repeating: initial, count: n)
+                // Zero-norm: uniform fallback. Emit completion then return.
+                let result = [Double](repeating: initial, count: n)
+                emitCentrality(n: n, iterations: iterationsRun, estate: estate, ts: ts)
+                return result
             }
             for i in 0..<n { xNext[i] /= norm }
 
@@ -116,11 +141,45 @@ public enum EigenvalueCentrality {
                 diffSq += d * d
             }
             if diffSq.squareRoot() < tolerance {
+                // Converged within tolerance. Emit completion then return.
+                emitCentrality(n: n, iterations: iterationsRun, estate: estate, ts: ts)
                 return xNext
             }
             swap(&x, &xNext)
         }
+        // Iteration budget exhausted without convergence. Emit and return
+        // best estimate.
+        emitCentrality(n: n, iterations: iterationsRun, estate: estate, ts: ts)
         return x
+    }
+
+    /// Emit the VizGraph `centrality.score` signal.
+    ///
+    /// Extracted so that all three return paths in `compute()` share
+    /// one emit site. Off-path cost (monitoring disabled): single
+    /// Atomic<Bool> load + branch — no allocation, no lock.
+    ///
+    /// - Parameters:
+    ///   - n: Node count (graph size).
+    ///   - iterations: Number of power-iteration steps that ran.
+    ///   - estate: Caller-supplied estate identifier tag.
+    ///   - ts: Caller-supplied epoch seconds.
+    private static func emitCentrality(n: Int, iterations: Int,
+                                        estate: String, ts: Double) {
+        // VizGraph emit: centrality.score — power iteration complete.
+        // Value 1.0 is a completion indicator (the per-node scores are
+        // stored in the row_keystone_score column per cookbook § 11.11;
+        // they cannot be serialised to a single scalar metric).
+        Intellectus.report(.metric(
+            name: VizGraphSignals.centralityScore,
+            value: 1.0,
+            tags: [
+                "estate": estate,
+                "node_count": "\(n)",
+                "iterations_to_convergence": "\(iterations)",
+            ],
+            ts: ts
+        ))
     }
 }
 

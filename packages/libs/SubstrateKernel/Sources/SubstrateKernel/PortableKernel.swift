@@ -43,6 +43,7 @@
 
 import Foundation
 import SubstrateTypes
+import IntellectusLib
 
 /// All hot-path operations the substrate dispatches to a kernel.
 /// Every kernel produces bit-identical output for the same inputs.
@@ -231,7 +232,6 @@ public struct ScalarKernel: SubstrateKernel {
 public enum KernelKind: String, Sendable {
     case scalar  = "scalar"
     case simd    = "simd"
-    case bnns    = "bnns"
     case neon    = "neon"
     case metal   = "metal"
     case avx512  = "avx512"
@@ -248,20 +248,65 @@ public enum PortableKernel {
     /// specialized kernels; the reference build falls back to scalar.
     /// Substrate ALWAYS provides the scalar reference; the platform-
     /// specific kernels are opt-in via build flags.
+    ///
+    /// Telemetry: emits `substrate.kernel.backend_selected` via
+    /// IntellectusLib when monitoring is enabled. When monitoring is
+    /// OFF (the default), the emission is a short-circuited no-op —
+    /// the payload autoclosure is never evaluated and no clock is
+    /// read. The selection itself is compile-time-static per arch;
+    /// no runtime fallback exists in this factory, so no
+    /// `substrate.kernel.fallback` metric is emitted (MANAGER_1.0_PLAN §2).
     public static func kernelForCurrentPlatform() -> SubstrateKernel {
         #if arch(arm64)
         // SimdKernel strictly dominates ScalarKernel on aarch64 for
         // the SIMD-implemented ops; inherited scalar impls are
         // identical for the others. No threshold to learn.
-        return SimdKernel()
+        let selected = SimdKernel()
         #else
         // Other platforms: the reference dispatch returns scalar.
         // Platform-specific overlays compile in a
         // kernelForCurrentPlatform override that returns AVX-512 /
         // AVX2 implementations.
-        return ScalarKernel()
+        let selected = ScalarKernel()
         #endif
+
+        // Emit backend_selected telemetry. The ts is caller-supplied
+        // epoch seconds per IntellectusLib's determinism contract: the
+        // math engines never call a clock; this factory-level side-effect
+        // does. Monitoring is off by default, so the autoclosure below
+        // is never evaluated in normal (non-observer) runs and no clock
+        // is called in tests.
+        //
+        // The arch tag uses a compile-time string matching the Swift
+        // conditional (#if arch(arm64)). This is stable — the tag never
+        // changes at runtime for a given binary.
+        Intellectus.report(.metric(
+            name: "substrate.kernel.backend_selected",
+            value: 1.0,
+            tags: [
+                "backend": selected.kind.rawValue,
+                "arch": PortableKernel.currentArchTag,
+            ],
+            ts: Date().timeIntervalSince1970
+        ))
+
+        return selected
     }
+
+    // MARK: - Internal helpers
+
+    /// Compile-time-constant architecture tag for telemetry. Matches
+    /// the Swift conditional that drives the kernel selection above.
+    /// "arm64" on Apple Silicon and aarch64 Linux; "x86_64" elsewhere.
+    static let currentArchTag: String = {
+        #if arch(arm64)
+        return "arm64"
+        #elseif arch(x86_64)
+        return "x86_64"
+        #else
+        return "other"
+        #endif
+    }()
 
     /// Explicit kernel selector for the conformance test harness.
     /// The harness runs every kernel against the same inputs and
@@ -270,14 +315,6 @@ public enum PortableKernel {
         switch kind {
         case .scalar: return ScalarKernel()
         case .simd:   return SimdKernel()
-        case .bnns:
-            #if canImport(Accelerate)
-            return BnnsKernel()
-            #else
-            // Non-Apple platforms: BNNS unavailable; fall through
-            // to scalar so callers get a correct (if slow) result.
-            return ScalarKernel()
-            #endif
         case .neon:
             // NeonKernel uses Swift's `import simd` directly (no
             // arm_neon.h bridge). Available wherever the simd

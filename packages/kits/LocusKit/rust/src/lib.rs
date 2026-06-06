@@ -151,6 +151,7 @@ pub mod recall_stream;
 pub mod recall_trace_item;
 pub mod schema;
 pub mod summaries;
+pub mod telemetry;
 pub mod tunnel;
 pub mod tunnel_operational;
 pub mod vocabulary;

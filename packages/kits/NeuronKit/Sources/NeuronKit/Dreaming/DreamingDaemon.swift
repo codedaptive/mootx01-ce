@@ -31,6 +31,7 @@
 
 import Foundation
 import GeniusLocusKit
+import IntellectusLib
 
 /// Read surface the dreaming daemon mines (NEURONKIT_SPEC § 3.1 tick
 /// steps 1–2 and 5). Dependency seam; `EstateDreamingReader` is the
@@ -294,6 +295,19 @@ public actor DreamingDaemon {
     // MARK: - The seven-step tick (§ 3.1)
 
     private func runCycle(now: Date) async throws -> DreamingCycleReport {
+        // Emit cycle-start event. The ts is the caller-supplied `now` converted
+        // to epoch seconds — deterministic; no clock called here. When monitoring
+        // is off (the default), the autoclosure is never evaluated.
+        // `neuronkit.dream.cycle` with status "start" marks the boundary where
+        // the daemon begins reading the substrate (Activity view, GUI §4.4).
+        let cycleStartTs = now.timeIntervalSince1970
+        Intellectus.report(.metric(
+            name: "neuronkit.dream.cycle",
+            value: 1.0,
+            tags: ["status": "start", "cycle": "\(cycleCount + 1)"],
+            ts: cycleStartTs
+        ))
+
         // ── Step 1: reward retrieval via the RewardSource seam ──────────
         // v1 single-source: recent RecallTraceItem rows, mapped through
         // the reward source (used → 1.0, unused → 0.0). The explicit
@@ -376,6 +390,25 @@ public actor DreamingDaemon {
             embeddingModelID: ""
         )
         try await sink.recordCycleDiary(entry)
+
+        // Emit cycle-complete event. `drawers_touched` is the number of
+        // co-occurrence observations considered (the substrate rows the daemon
+        // mined this cycle). `proposals` is the emission count. Both are
+        // metadata-only — no drawer content crosses the telemetry boundary.
+        // `neuronkit.dream.cycle` with status "complete" closes the boundary
+        // pair opened by the "start" event above (GUI §4.4 Activity: blue
+        // recall-class lexicon, dreaming-daemon cycle).
+        Intellectus.report(.metric(
+            name: "neuronkit.dream.cycle",
+            value: Double(emitted.count),
+            tags: [
+                "status": "complete",
+                "cycle": "\(cycleCount)",
+                "drawers_touched": "\(observations.count)",
+                "proposals": "\(emitted.count)",
+            ],
+            ts: now.timeIntervalSince1970
+        ))
 
         lastTickAt = now
         return DreamingCycleReport(
