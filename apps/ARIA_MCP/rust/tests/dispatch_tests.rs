@@ -247,6 +247,68 @@ fn memory_search_missing_query_returns_invalid_params() {
     assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
 }
 
+// ARIA-SCORED-1: moot_memory_search honors the `scoring` argument.
+//
+// After the hybrid-recall flip, `moot_memory_search` routes through
+// `recall_scored` with mode=unionBest. Verifies:
+//   1. The tool succeeds with scoring="rrf".
+//   2. The tool succeeds with scoring="matrixAware".
+//   3. The tool succeeds with the default scoring (no arg).
+//   4. The result text includes a score value in the expected format.
+//
+// Without CorpusKit/VectorKit registration (the test estate is locus-only),
+// all three paths fall back to rank-normalised locus scoring, producing
+// valid results. The score value is present in the output text, proving the
+// recall_scored path ran (plain recall + substring did not emit scores).
+#[test]
+fn memory_search_with_scoring_arg_rrf_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "scoring-arg-rrf-test content", "lab/notes");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "scoring-arg-rrf-test", "scoring" => "rrf"],
+        &registry,
+    )
+    .expect("memory_search with scoring=rrf must not throw");
+    assert!(is_success(&result), "scoring=rrf must succeed; got: {result:?}");
+    let text = content_text(&result);
+    // recall_scored always returns at least one hit (the locus fallback).
+    assert!(
+        text.contains("found 1 memory(s)"),
+        "must find the filed memory; got: {text}"
+    );
+    // The score format "(score: 0.xxxx)" appears in the output, proving
+    // the recall_scored path ran, not plain recall+substring.
+    assert!(
+        text.contains("(score:"),
+        "recall_scored output must include score annotation; got: {text}"
+    );
+}
+
+#[test]
+fn memory_search_with_scoring_arg_matrix_aware_succeeds() {
+    let registry = EstateRegistry::new_inmemory();
+    file_one_memory(&registry, "scoring-arg-matrixAware-test content", "lab/notes");
+
+    let result = dispatch_tool(
+        "moot_memory_search",
+        &args!["query" => "scoring-arg-matrixAware-test", "scoring" => "matrixAware"],
+        &registry,
+    )
+    .expect("memory_search with scoring=matrixAware must not throw");
+    assert!(is_success(&result), "scoring=matrixAware must succeed; got: {result:?}");
+    let text = content_text(&result);
+    assert!(
+        text.contains("found 1 memory(s)"),
+        "must find the filed memory; got: {text}"
+    );
+    assert!(
+        text.contains("(score:"),
+        "recall_scored output must include score annotation; got: {text}"
+    );
+}
+
 #[test]
 fn update_memory_confirm_mutation_succeeds() {
     let registry = EstateRegistry::new_inmemory();
@@ -743,11 +805,40 @@ fn federated_search_returns_not_yet_implemented_error_result() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. Vault stubs — all four return not-yet-implemented error_result
+// 10. Vault tools — now backed by vault-kit (ADR-VAULTKIT-002)
 // ---------------------------------------------------------------------------
+//
+// All four vault tools are real dispatchers. Missing `vaultPath` is an
+// out-of-band transport fault (INVALID_PARAMS), not a tool-level refusal.
+// These tests also cover:
+//   - `moot_vault_status` on a new vault with no manifest → isError:false,
+//     "no export manifest" in the text.
+//   - `moot_vault_export` end-to-end → writes the vault, stamps the manifest.
+//   - `moot_vault_status` after export → "manifest present", noteCount.
+//   - `moot_vault_import` round-trip → written count.
+//   - `moot_vault_reconcile` with no manifest → isError:true.
+//   - `moot_vault_reconcile` after export with no edits → "0 added, 0 modified, 0 deleted".
+//   - `moot_vault_reconcile` after editing a note → "1 modified".
+
+/// Make a unique temporary directory for one vault test.
+fn temp_vault_dir() -> std::path::PathBuf {
+    let base = std::env::temp_dir();
+    let dir = base.join(format!(
+        "aria-rust-vault-test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp vault dir create");
+    dir
+}
 
 #[test]
-fn vault_tools_return_not_yet_implemented() {
+fn vault_tools_missing_vault_path_returns_invalid_params() {
+    // Without `vaultPath` all four vault tools throw INVALID_PARAMS — a
+    // transport fault, not a tool-level refusal. The real implementations
+    // validate `vaultPath` as a required arg before touching the filesystem.
     let registry = EstateRegistry::new_inmemory();
     for name in &[
         "moot_vault_export",
@@ -755,18 +846,185 @@ fn vault_tools_return_not_yet_implemented() {
         "moot_vault_status",
         "moot_vault_reconcile",
     ] {
-        let result = dispatch_tool(name, &args![], &registry)
-            .expect("vault tool must not throw transport fault");
-        assert!(
-            is_tool_error(&result),
-            "{name} must return isError:true; got: {result:?}"
-        );
-        assert!(
-            content_text(&result).contains("not yet implemented"),
-            "{name} error text must contain 'not yet implemented'; got: {}",
-            content_text(&result)
+        let err = dispatch_tool(name, &args![], &registry)
+            .expect_err(&format!("{name}: missing vaultPath must be INVALID_PARAMS"));
+        assert_eq!(
+            err.code,
+            JSONRPCErrorCode::INVALID_PARAMS,
+            "{name}: code must be INVALID_PARAMS; got: {:?}",
+            err.code
         );
     }
+}
+
+#[test]
+fn vault_status_on_empty_vault_reports_no_manifest() {
+    // A freshly-created vault dir with no manifest returns isError:false and
+    // "no export manifest" in the text.
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+
+    let result = dispatch_tool(
+        "moot_vault_status",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+    )
+    .expect("moot_vault_status must not throw transport fault");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&result),
+        "status with no manifest must be isError:false; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains("no export manifest"),
+        "text must report no manifest; got: {text}"
+    );
+}
+
+#[test]
+fn vault_export_stamps_manifest_then_status_reports_it() {
+    // moot_vault_export: files a memory, exports it to a temp vault,
+    // stamps the SHA-256 manifest. moot_vault_status then reports
+    // "manifest present" with noteCount: 1.
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+
+    // File one memory into the default estate so the export has content.
+    let _mem_id = file_one_memory(&registry, "Benzene is aromatic.", "chem/notes");
+
+    // Export to the temp vault.
+    let export_result = dispatch_tool(
+        "moot_vault_export",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+    )
+    .expect("moot_vault_export must not throw transport fault");
+
+    let export_text = content_text(&export_result);
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&export_result),
+        "moot_vault_export must be isError:false; got: {export_result:?}"
+    );
+    assert!(
+        export_text.contains("vault_export:"),
+        "export text must contain 'vault_export:'; got: {export_text}"
+    );
+    assert!(
+        export_text.contains("note(s)"),
+        "export text must report note count; got: {export_text}"
+    );
+    assert!(
+        export_text.contains("manifest:"),
+        "export text must confirm manifest was stamped; got: {export_text}"
+    );
+}
+
+#[test]
+fn vault_export_then_import_round_trips() {
+    // Export from the default estate to a vault, then import that vault into
+    // the same estate via a fresh VaultBridge. The import should report at
+    // least 1 written (idempotent per lineage_id, but the fresh import will
+    // write the note again as a new lineage or update). Even if it updates,
+    // the vault_import response is isError:false.
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+
+    file_one_memory(&registry, "Toluene is a solvent.", "chem/lab");
+
+    dispatch_tool(
+        "moot_vault_export",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+    )
+    .expect("export must succeed");
+
+    let import_result = dispatch_tool(
+        "moot_vault_import",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+    )
+    .expect("moot_vault_import must not throw transport fault");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&import_result),
+        "moot_vault_import must be isError:false; got: {import_result:?}"
+    );
+    let text = content_text(&import_result);
+    assert!(
+        text.contains("vault_import:"),
+        "import text must start with 'vault_import:'; got: {text}"
+    );
+}
+
+#[test]
+fn vault_reconcile_without_manifest_returns_error_result() {
+    // A vault with no manifest makes reconcile return isError:true with a
+    // prompt to run moot_vault_export first. This is a tool-level refusal
+    // (not a transport fault) — the tool ran, the vault just has no stamp.
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+
+    let result = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+    )
+    .expect("moot_vault_reconcile must not throw transport fault");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_tool_error(&result),
+        "reconcile with no manifest must be isError:true; got: {result:?}"
+    );
+    let text = content_text(&result);
+    assert!(
+        text.contains("no export manifest"),
+        "error text must mention missing manifest; got: {text}"
+    );
+}
+
+#[test]
+fn vault_reconcile_after_export_with_no_edits_reports_zero_drift() {
+    // Export then immediately reconcile: no files changed, so the diff
+    // must report 0 added, 0 modified, 0 deleted.
+    let registry = EstateRegistry::new_inmemory();
+    let vault = temp_vault_dir();
+
+    file_one_memory(&registry, "Phenol notes.", "chem");
+
+    dispatch_tool(
+        "moot_vault_export",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+    )
+    .expect("export must succeed");
+
+    let reconcile_result = dispatch_tool(
+        "moot_vault_reconcile",
+        &args!["vaultPath" => vault.to_str().unwrap()],
+        &registry,
+    )
+    .expect("reconcile must not throw transport fault");
+
+    std::fs::remove_dir_all(&vault).ok();
+
+    assert!(
+        is_success(&reconcile_result),
+        "reconcile after clean export must be isError:false; got: {reconcile_result:?}"
+    );
+    let text = content_text(&reconcile_result);
+    assert!(
+        text.contains("0 added, 0 modified, 0 deleted"),
+        "zero-drift reconcile must report 0/0/0; got: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------

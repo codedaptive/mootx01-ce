@@ -33,7 +33,9 @@
 //! # Surface boundary
 //!
 //! 44 tools: 19 interface (Tier 1–5), 1 federation, 4 recipe, 16 lens, 4 vault.
-//! Vault tools are advertised and return methodNotFound until VaultKit-Rust ships.
+//! Vault tools are backed by `vault-kit` (`VaultBridge`, `ObsidianAdapter`,
+//! `DrawerMapping`). The ARIA layer owns the SHA-256 sidecar manifest for drift
+//! detection (ADR-VAULTKIT-002 decision b).
 //! SQLite persistence: `ARIA_MCP_SQLITE_PATH`. PostgreSQL: `ARIA_MCP_POSTGRES_URL`.
 
 pub mod coaching_engine;
@@ -48,3 +50,4 @@ pub mod server;
 pub mod session_protocol;
 pub mod teachme_guides;
 pub mod tool_list;
+pub mod vault_tools;

@@ -20,7 +20,7 @@ use locus_kit::filter::RecallFrame;
 use neuron_kit::{partial_recall, BLOCK_CONCEPT, BLOCK_STRUCTURE, BLOCK_TEMPORAL};
 use substrate_types::RowId;
 
-use crate::error::{RecipeRunError, SubstrateError};
+use crate::error::{AnchorNotInRecalledSetError, RecipeRunError, SubstrateError};
 
 /// Which facet of the anchor to match on — the three recalls one cue affords.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,11 +89,14 @@ pub fn run_partial_cue_recall(
         rows.push((RowId(id_by_index.len() as u128), fp));
         id_by_index.push(d.id.clone());
     }
+    // Anchor absent from the recalled set — raise the nominal typed error
+    // (mirrors Swift's `throw AnchorNotInRecalledSetError(anchorID:)` in
+    // `PartialCueRecall.swift:100`). Wrapped in `SubstrateError` so the
+    // return type stays `RecipeRunError`; callers can inspect the detail
+    // string for the `AnchorNotInRecalledSetError` prefix.
     let anchor_fp = anchor_fp.ok_or_else(|| {
-        SubstrateError::new(
-            "anchor",
-            format!("anchor drawer '{anchor_id}' not in recalled set"),
-        )
+        let typed = AnchorNotInRecalledSetError::new(anchor_id);
+        SubstrateError::new("anchor", format!("{typed}"))
     })?;
 
     let (match_blocks, differ_blocks) = mode.blocks();
@@ -186,7 +189,9 @@ mod tests {
     }
 
     // CK-FL-2: an anchor id not in the recalled set is a substrate error
-    // (the cue points at nothing).
+    // (the cue points at nothing). The SubstrateError detail carries the
+    // `AnchorNotInRecalledSetError` description so callers can identify
+    // the cause — mirrors Swift's typed `throw AnchorNotInRecalledSetError`.
     #[test]
     fn ck_fl2_unknown_anchor_errors() {
         let (coord, h) = coord_with_parent();
@@ -197,6 +202,16 @@ mod tests {
         assert!(
             matches!(err, RecipeRunError::Substrate(_)),
             "unknown anchor is a substrate error, got {err:?}"
+        );
+        // The detail string carries the nominal AnchorNotInRecalledSetError
+        // description so callers can distinguish this from other substrate faults.
+        assert!(
+            format!("{err}").contains("AnchorNotInRecalledSetError"),
+            "error detail must name AnchorNotInRecalledSetError: {err}"
+        );
+        assert!(
+            format!("{err}").contains("no-such-id"),
+            "error detail must carry the anchor_id: {err}"
         );
     }
 }

@@ -20,6 +20,11 @@ path = "src/main.rs"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = { version = "1" }
 uuid        = { version = "1", features = ["v4"] }
+# SHA-256 for the ARIA-layer drift-detection sidecar manifest
+# (ADR-VAULTKIT-002 decision b). Already in the lock file as a transitive
+# dep; adding as direct dep so the version is explicit and stable.
+sha2        = { version = "0.10", features = [] }
+digest      = { version = "0.10" }
 
 # Kit path deps. From apps/ARIA_MCP/rust/, the repo root is ../../../
 cognition-kit    = { path = "../../../packages/kits/CognitionKit/rust" }
@@ -27,6 +32,11 @@ genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 locus-kit        = { path = "../../../packages/kits/LocusKit/rust" }
 neuron-kit       = { path = "../../../packages/kits/NeuronKit/rust" }
 substrate-ml     = { path = "../../../packages/libs/SubstrateML/rust" }
+# vault-kit: VaultBridge + ObsidianAdapter + DrawerMapping — backing the
+# moot_vault_* tool family. In-repo path dep permitted per
+# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; dep recorded in
+# ADR-VAULTKIT-002 decision (e) Rust analog.
+vault-kit        = { path = "../../../packages/kits/VaultKit/rust" }
 # The estate registry opens in-memory estates using InMemoryStorage and
 # InMemoryDrawerStore — both production-path for v1. persistence-kit is
 # a regular dep, not dev-only, because it is used in the lib (estate_registry).

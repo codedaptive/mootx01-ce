@@ -13,14 +13,51 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 pub use substrate_types::hlc::HLC;
 
+/// Job identifier: 32 lowercase hex chars, no hyphens (spec §6).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct JobId(pub String);
 
+/// Stream identifier: URL-safe, ≤ 64 chars (spec §4).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StreamId(pub String);
 
+/// Session identifier minted by the backend at claim time (spec §4).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
+
+/// Tool name used in allowlist validation (spec §9).
+///
+/// The allowlist is caller-defined; QueueKit validates that any ToolName
+/// submitted in a job's extensions is in the registered set when the
+/// backend chooses to enforce it. The Rust port exposes the type for
+/// allowlist construction; enforcement is backend-specific.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ToolName(pub String);
+
+impl ToolName {
+    /// Construct from a raw string. Mirrors Swift's `init(rawValue:)`.
+    pub fn new(raw: impl Into<String>) -> Self {
+        ToolName(raw.into())
+    }
+
+    /// The raw string value. Mirrors Swift's `rawValue`.
+    pub fn raw_value(&self) -> &str {
+        &self.0
+    }
+
+    /// Validate that this ToolName appears in `allowlist`.
+    /// Returns `Err(QueueError::UnknownTool)` if not found.
+    pub fn validate(
+        &self,
+        allowlist: &[ToolName],
+    ) -> Result<(), crate::error::QueueError> {
+        if allowlist.contains(self) {
+            Ok(())
+        } else {
+            Err(crate::error::QueueError::UnknownTool(self.0.clone()))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObservationStatus {

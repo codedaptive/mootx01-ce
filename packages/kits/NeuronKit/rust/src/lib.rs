@@ -66,8 +66,9 @@ pub use constellation::{constellations, Constellation};
 pub use context_synthesizer::{synthesize, ContextDocument, DrawerRowMeta};
 pub use dreaming_cycle::{
     tunnel_key, CoOccurrenceObservation, DreamingCycleReport, DreamingDaemon, DreamingPolicy,
-    DreamingProposalSink, DreamingSubstrateReader, ProposeFrameOut, RecallTraceItem,
-    RecallTraceRewardSource, RewardSource, TunnelLink,
+    DreamingPolicyStore, DreamingProposalSink, DreamingSubstrateReader, InMemoryDreamingPolicyStore,
+    ProposeFrameOut, RecallTraceItem, RecallTraceRewardSource, RewardSource, RewardSourceKind,
+    TunnelLink,
 };
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
@@ -95,8 +96,9 @@ pub use lattice_anchor::{
     AnchorConfidence, EnrichmentStatus, LatticeAnchorInference, LinguisticPipelineMode,
 };
 pub use maintenance_cycle::{
-    MaintenanceCycleReport, MaintenanceDaemon, MaintenanceDiaryEntry, MaintenancePolicy,
-    MaintenanceProposalSink, MaintenanceScan, MaintenanceSubstrateReader,
+    InMemoryMaintenancePolicyStore, MaintenanceCycleReport, MaintenanceDaemon,
+    MaintenanceDiaryEntry, MaintenancePolicy, MaintenancePolicyStore, MaintenanceProposalSink,
+    MaintenanceScan, MaintenanceSubstrateReader,
     ProposeFrameOut as MaintenanceProposeFrameOut,
 };
 pub use maintenance_decision::{
@@ -107,7 +109,7 @@ pub use maintenance_decision::{
 pub use mind_overlap::{dp_summary, summary_overlap};
 pub use mmr_rank::{mmr_rank, mmr_select};
 pub use partial_recall::{
-    partial_recall, BLOCK_CHANNEL, BLOCK_CONCEPT, BLOCK_STRUCTURE, BLOCK_TEMPORAL,
+    partial_recall, FingerprintBlock, BLOCK_CHANNEL, BLOCK_CONCEPT, BLOCK_STRUCTURE, BLOCK_TEMPORAL,
 };
 pub use scenario_profile::ScenarioProfile;
 pub use spreading_activation::{spreading_activation, Activation};
@@ -172,7 +174,11 @@ mod tests {
 
     #[test]
     fn nonsense_term_produces_enrichment_status_none() {
-        let inference = infer_lattice_anchor("qwertyzxcvb nonsense");
+        // Pure gibberish only — a single real dictionary word resolves
+        // through the FDC encoder, so the fixture must contain no real
+        // words. Mirrors the Swift NeuronKit fixture
+        // (LatticeAnchorInferenceTests.swift) exactly.
+        let inference = infer_lattice_anchor("zxcvqwertyasdfgh qwertyzxcvb");
         assert_eq!(inference.code, "");
         assert!(inference.wikidata_qid.is_none());
         assert_eq!(
@@ -182,19 +188,19 @@ mod tests {
     }
 
     #[test]
-    fn lookup_stub_yields_enrichment_status_none() {
-        // The Rust eidetic_lib::lookup is a not-implemented stub
-        // until the FDC runtime (GNO-FDC-06/07) lands, so every
-        // term currently infers an empty anchor with status None.
-        // When the FDC encoder lands, this becomes the
-        // "chemistry => QidCompleted" parity assertion the Swift
-        // version already makes.
+    fn chemistry_term_produces_qid_completed_status() {
+        // EideticLib resolves "chemistry" to an FDC code with a populated
+        // Wikidata QID, so the enrichment status is QidCompleted. Parity
+        // with the Swift NeuronKit assertion. The exact FDC code string is
+        // LatticeLib's conformance concern (single-token encode parity is
+        // tracked separately) — this test asserts the enrichment STATUS,
+        // matching what the Swift port asserts.
         let inference = infer_lattice_anchor("chemistry");
-        assert_eq!(inference.code, "");
-        assert!(inference.wikidata_qid.is_none());
+        assert!(!inference.code.is_empty());
+        assert!(inference.wikidata_qid.is_some());
         assert_eq!(
             inference.enrichment_status_bits,
-            EnrichmentStatus::None.raw()
+            EnrichmentStatus::QidCompleted.raw()
         );
     }
 

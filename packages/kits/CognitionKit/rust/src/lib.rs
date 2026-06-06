@@ -19,7 +19,7 @@
 //!    (Keystones, LatentThemes, TrustLens, Drift, Contradiction,
 //!    Constellation, ThemeWeather, FeelsLike, TunnelSuccessor,
 //!    EstateDivergence, Anticipate, MindOverlap, Bias, FreeAssociation,
-//!    AssociationRules, FormalConcepts). Every lens recipe is paired with
+//!    AssociationRules, AprioriRules, FormalConcepts). Every lens recipe is paired with
 //!    a Swift version in `Sources/CognitionKit/` (SPEC C-7 satisfied) and
 //!    registered in BOTH versions' catalogs with byte-identical descriptors,
 //!    per `docs/engineering/LENS_DISCOVERABILITY_DECISION_v2.0_2026-06-02.md`
@@ -57,7 +57,8 @@ pub mod tunnel_successor_recipe;
 
 pub use anticipate_recipe::run_anticipate;
 pub use association_rules_recipe::{
-    run_association_rules, AssociationRuleResult, AssociationRulesOutput,
+    run_apriori_rules, run_association_rules, AprioriRulesOutput, AssociationRuleResult,
+    AssociationRulesOutput,
 };
 pub use bias_recipe::{run_bias, BiasReport};
 pub use capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
@@ -65,7 +66,7 @@ pub use catalog::{recipe_catalog, recipe_descriptor, recipe_names, RecipeDescrip
 pub use constellation_recipe::run_constellation;
 pub use contradiction_recipe::{run_contradiction, ContradictionOutput};
 pub use drift_recipe::{run_drift, DriftOutput};
-pub use error::{RecipeError, RecipeRunError, SubstrateError};
+pub use error::{AnchorNotInRecalledSetError, RecipeError, RecipeRunError, SubstrateError};
 pub use estate_divergence_recipe::{run_estate_divergence, EstateDivergence};
 pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
 pub use formal_concepts_recipe::{run_formal_concepts, FormalConceptResult, FormalConceptsOutput};

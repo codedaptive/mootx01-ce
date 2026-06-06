@@ -1,10 +1,10 @@
 ---
 title: VaultKit Interface
-version: 1.0
-status: draft
+version: 1.1
+status: active
 spec_type: kit
-authors: Bilby (stream vk)
-date: 2026-06-03
+authors: Bilby (stream vk), Newton (stream w2-vaultkit)
+date: 2026-06-05
 relates_to:
   - docs/decisions/ADR-VAULTKIT-001.md
   - docs/reference/GENIUSLOCUSKIT_INTERFACE_v0.8.md
@@ -18,6 +18,11 @@ relates_to:
 > dispatch daemon before commit. This is the recovered interface spec;
 > place it at `docs/reference/VAULTKIT_INTERFACE.md` when the kit is
 > re-dispatched and merged. See the completion report.
+
+> **Swift/Rust parity (2026-06-05):** the Rust crate
+> `packages/kits/VaultKit/rust/` was added in stream `w2-vaultkit`
+> (Newton). All public types now have Rust equivalents. See
+> §§ Swift/Rust Concordance below.
 
 VaultKit bridges a MOOT estate to a human-readable Markdown vault in both
 directions. The substrate stays authoritative; the vault is a projection
@@ -138,12 +143,45 @@ reported, never actioned (no drawer is expunged).
 - **Dates** serialized in LocusKit's ISO8601 form (`.withInternetDateTime`
   + `.withFractionalSeconds`).
 
+## Swift/Rust Concordance
+
+The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
+`vault-kit`, lib target `vault_kit`). It was added in stream `w2-vaultkit`
+(2026-06-05). One row per ported type.
+
+| Swift type | Rust type | Module | Notes |
+|---|---|---|---|
+| `Block` | `Block` | `vault_kit::note_ir` | Identical field names (`kind`, `text`). `Block::markdown(text)` convenience matches Swift default. |
+| `WikiLink` | `WikiLink` | `vault_kit::note_ir` | `alias: Option<String>` matches Swift `alias: String?`. |
+| `SourceRef` | `SourceRef` | `vault_kit::note_ir` | `byte_size: Option<i64>` (Rust) vs `byteSize: Int?` (Swift). |
+| `OccurredAt` | `OccurredAt` | `vault_kit::note_ir` | `iso8601: String` in both. No `Date`-typed field in Rust (language-neutral boundary). |
+| `NoteIR` | `NoteIR` | `vault_kit::note_ir` | `flattenedBody` -> `flattened_body()`. `frontmatter: [String:String]` -> `HashMap<String,String>`. |
+| `VaultAdapter` (protocol) | `VaultAdapter` (trait) | `vault_kit::vault_adapter` | `toIR(vaultURL:)` -> `to_ir(&Path)`. `fromIR(_:to:)` -> `from_ir(&[NoteIR], &Path)`. |
+| `ObsidianAdapter` | `ObsidianAdapter` | `vault_kit::obsidian_adapter` | Identical parsing behavior. Round-trip equality holds. Hidden files skipped. |
+| `DrawerMapping` | `DrawerMapping` | `vault_kit::drawer_mapping` | `classifyOnImport` -> `classify_on_import`. EideticLib not linked in Rust V1 (feature-flag-off path). |
+| `DrawerMapping.ImportOutcome` | `ImportOutcome` | `vault_kit::drawer_mapping` | Same three cases: `Written`, `Updated`, `Skipped`. |
+| `DrawerMapping.lineageID(forStableSourceKey:)` | `DrawerMapping::lineage_id(key)` | `vault_kit::drawer_mapping` | FNV-1a 128-bit. Produces byte-identical `UUID`/`Uuid` for all inputs. Verified by `tests/fnv_vector.rs`. |
+| `ImportReport` | `ImportReport` | `vault_kit::vault_bridge` | `drawersWritten` -> `drawers_written`, etc. `Int` -> `usize`. |
+| `VaultBridge` | `VaultBridge<'a>` | `vault_kit::vault_bridge` | Rust is synchronous (no `async`); `now: i64` (ms-since-epoch) passed by caller. |
+| `VaultKitError` (n/a — Swift throws) | `VaultKitError` | `vault_kit::error` | `Io`, `AdapterError`, `I5Violation`, `VerbError` cases. |
+
+### Conformance anchor
+
+`DrawerMapping::lineage_id` (Rust) and `DrawerMapping.lineageID(forStableSourceKey:)` (Swift) are cross-language conformance anchors. Both implement FNV-1a 128-bit over the key's UTF-8 bytes with the standard constants, then pack the 128-bit result big-endian into 16 UUID bytes. The test file `packages/kits/VaultKit/rust/tests/fnv_vector.rs` asserts bit-identical output for five canonical inputs including the empty string (which hashes to the raw FNV-1a offset basis).
+
+### Deferred (Rust V1)
+
+- EideticLib FDC classification (structural support present, `classify_on_import` flag honoured, lookup always returns `None` — equivalent to the feature-flag-off path in Swift).
+- Async `VaultBridge` methods (synchronous in Rust V1; the GLK Rust coordinator is synchronous).
+- ARIA_MCP `moot_vault_*` Rust mirror (ADR-VAULTKIT-002 decision a; out of scope per mission scope limit).
+
 ## Out of scope (later missions)
 
-Rust `moot_vault_*` mirror (future VaultKit-Rust-port mission); CorpusKit
-RAG bundling; substrate-level origin-date and `SourceRef` primitive
-(stream bp); attachment blob custody; the watched-source scheduler and the
-real QueueKit enqueue (leg a) + dream → Proposal → Debrief consumption (a
-later, separately-gated mission). The ARIA_MCP `moot_vault_*` tool family
-and drift detection are **delivered** by stream va (see the tool-family
+Rust `moot_vault_*` ARIA_MCP mirror (now that VaultKit-Rust exists, a
+follow-up mission wires it); CorpusKit RAG bundling; substrate-level
+origin-date and `SourceRef` primitive (stream bp); attachment blob
+custody; the watched-source scheduler and the real QueueKit enqueue
+(leg a) + dream → Proposal → Debrief consumption (a later,
+separately-gated mission). The ARIA_MCP `moot_vault_*` tool family and
+drift detection are **delivered** by stream va (see the tool-family
 section above and ADR-VAULTKIT-002).

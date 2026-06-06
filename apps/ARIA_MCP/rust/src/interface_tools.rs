@@ -161,38 +161,75 @@ fn run_file_memory(
     }
 }
 
-/// Search memories in the estate. Requires `query`.
+/// Search memories in the estate using hybrid BM25+vector scored recall.
 ///
-/// Performs an unfiltered recall then returns all rows whose content contains
-/// the query. Mirrors Swift `runMemorySearch`.
+/// Requires `query`. Optional `scoring` (raw/rrf/matrixAware, default
+/// "matrixAware") and `limit` (default 20). Decodes the scoring argument
+/// and routes through `recall_scored` with mode=unionBest, matching
+/// Swift `runMemorySearch` which also uses unionBest+matrixAware defaults.
+///
+/// Previously used plain `recall` + substring filter. Now uses `recall_scored`
+/// with a `GLKRecallRequest`, so ranked and BM25/vector-scored results are
+/// returned when CorpusKit/VectorKit stores are registered for the estate.
 fn run_memory_search(
     args: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
+    use genius_locus_kit::recall::{
+        GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
+    };
+
     let estate = registry.resolve(args, "estateID")?;
     let query = require_string(args, "query")?;
 
+    // Decode optional `scoring` argument. Defaults to matrixAware to match Swift.
+    let scoring_str = args
+        .get("scoring")
+        .and_then(|v| v.as_str())
+        .unwrap_or("matrixAware");
+    let scoring = match scoring_str {
+        "raw"         => GLKRecallScoring::Raw,
+        "rrf"         => GLKRecallScoring::Rrf,
+        "matrixAware" => GLKRecallScoring::MatrixAware,
+        _             => GLKRecallScoring::MatrixAware, // safe fallback
+    };
+
+    // Decode optional `limit` argument. Defaults to 20.
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.max(1) as usize)
+        .unwrap_or(20_usize);
+
+    // Decode optional `filter` for the recall frame; default to Unconfirmed.
     let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+
+    let request = GLKRecallRequest::new(frame)
+        .with_mode(GLKRecallMode::UnionBest)
+        .with_scoring(scoring)
+        .with_limit(limit)
+        .with_fallback(RecallFallbackPolicy::AllowDegraded)
+        .with_query_text(query.to_string());
+
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
-    let drawers = coord
-        .recall(&estate.handle, frame, now)
+    let result = coord
+        .recall_scored(&estate.handle, request, now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
-    let hits: Vec<_> = drawers
-        .iter()
-        .filter(|d| {
-            d.content.contains(query)
-                || d.room.contains(query)
-                || d.wing.contains(query)
-        })
-        .collect();
-
-    let mut lines = vec![format!("found {} memory(s)", hits.len())];
-    for d in &hits {
-        let preview: String = d.content.chars().take(60).collect();
-        lines.push(format!("{}  [{}]  {}", d.id, d.room, preview));
+    let mut lines = vec![format!("found {} memory(s)", result.hits.len())];
+    for hit in result.hits.iter().take(50) {
+        let preview: String = hit
+            .drawer
+            .as_ref()
+            .map(|d| d.content.chars().take(120).collect())
+            .unwrap_or_else(|| "(not hydrated)".to_string());
+        let room = hit.drawer.as_ref().map(|d| d.room.as_str()).unwrap_or("");
+        lines.push(format!(
+            "{}  [{}]  {}  (score: {:.4})",
+            hit.id, room, preview, hit.score.final_score
+        ));
     }
     Ok(text_result(&lines.join("\n")))
 }
