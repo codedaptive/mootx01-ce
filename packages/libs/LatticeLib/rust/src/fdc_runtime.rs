@@ -20,6 +20,7 @@ use crate::fdc_frame::FdcFrame;
 use crate::fdc_matcher::{FdcMatcher, ScoreMode};
 use crate::fdc_signatures::FdcSignatures;
 use crate::lexicon::CanonicalizationLexicon;
+use crate::novel_token_cache::init_shared_cache;
 use crate::word_class_table::WordClassTableCache;
 
 // Pinned descent cutoff (cookbook §6.1). 1 = any overlap continues descent.
@@ -57,7 +58,18 @@ fn get_bundle() -> Option<&'static Bundle> {
         let lexicon = CanonicalizationLexicon::from_json(LEXICON_JSON)?;
         let frame = FdcFrame::from_json(FRAME_JSON)?;
         let signatures = FdcSignatures::from_json(SIGS_JSON)?;
+        // Parse the raw table struct first to extract the version string for the
+        // novel-token cache, then build the membership-set cache from the same data.
+        let raw_table: crate::word_class_table::WordClassTable =
+            serde_json::from_slice(TABLE_JSON).ok()?;
+        let table_version_str = raw_table.table_version.clone();
         let table = WordClassTableCache::from_json(TABLE_JSON)?;
+        // Initialize the process-wide novel-token cache, stamped with the bundled
+        // table version. Mirrors Swift's `sharedNovelCache` static let which reads
+        // `WordClassTableCache.table?.tableVersion ?? ""` at initialization.
+        // OnceLock contract: if called more than once (e.g., in tests), the second
+        // call is a no-op.
+        init_shared_cache(&table_version_str);
 
         let version = signatures.version.clone();
         // The runtime ships ScoreMode::Idf (Mission #4 Phase B.2): IDF-weighting

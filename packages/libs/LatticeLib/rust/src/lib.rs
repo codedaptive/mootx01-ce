@@ -38,6 +38,8 @@ pub mod fdc_signatures;
 pub mod concept_bag;
 pub mod fdc_matcher;
 pub mod fdc_runtime;
+pub mod code;
+pub mod novel_token_cache;
 
 pub use fdc_runtime::Fdc;
 pub use fdc_matcher::FdcMatcher;
@@ -45,3 +47,8 @@ pub use concept_bag::build_bag;
 pub use lexicon::CanonicalizationLexicon;
 pub use fdc_frame::{FdcFrame, FdcEntry};
 pub use word_class::WordClass;
+pub use code::{is_well_formed, integer_base, MAX_EXTENSION_DIGITS};
+pub use novel_token_cache::{
+    NovelTokenCache, PoolEntry, PoolSubmission, POOL_SUBMIT_THRESHOLD, SHARED_NOVEL_CACHE,
+    pool_tag,
+};

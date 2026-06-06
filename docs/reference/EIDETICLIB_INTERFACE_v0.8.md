@@ -279,6 +279,89 @@ let anchor = lookup("organic chemistry research");
 // anchor.confidence  — 32 (medium) for a resolved code, 0 for a miss
 ```
 
+## § 7 — Swift/Rust Concordance
+
+Status as of PAR-3B-EL (2026-06-05). Swift is the reference of record.
+
+### `LatticeCodeState` enum
+
+| Aspect | Swift | Rust | Status |
+|---|---|---|---|
+| Type | `enum LatticeCodeState` (Sendable, Hashable, Codable) | `enum LatticeCodeState` (Serialize, Deserialize) | Parity |
+| Cases | `.malformed(String)`, `.known(String)`, `.pending(String)` | `Malformed(String)`, `Known(String)`, `Pending(String)` | Parity |
+| `rawCode` / `raw_code()` | computed var returning the associated value | method returning `&str` | Parity |
+| `isWellFormed` / `is_well_formed()` | computed Bool | method returning bool | Parity |
+| JSON round-trip | Codable (`enum`-keyed encoding) | Serde tagged enum (`#[serde(tag="state", content="code")]`) | Parity — round-trip tested |
+| Source | `Sources/EideticLib/LatticeCodeState.swift` | `rust/src/lattice_code_state.rs` | |
+
+### `LatticeCodeGrammar`
+
+| Aspect | Swift | Rust | Status |
+|---|---|---|---|
+| Type | `enum LatticeCodeGrammar` (caseless namespace) | `struct LatticeCodeGrammar` (unit struct) | Equivalent |
+| `maxExtensionDigits` / `MAX_EXTENSION_DIGITS` | `public static let maxExtensionDigits: Int = 8` | `pub const MAX_EXTENSION_DIGITS: usize = 8` | Parity — locked |
+| `isWellFormed(_:)` / `is_well_formed(_:)` | grammar: 3 ASCII digits, optional `.` + 1–8 ASCII digits | Same grammar | Parity — shared test vectors |
+| Source | `Sources/EideticLib/LatticeCodeState.swift` | `rust/src/lattice_code_state.rs` | |
+
+### `classifyLatticeCode` / `classify_lattice_code`
+
+| Aspect | Swift | Rust | Status |
+|---|---|---|---|
+| Signature | `EideticLib.classifyLatticeCode(_ code: String, knownCodes: Set<String>) -> LatticeCodeState` | `classify_lattice_code(code: &str, known_codes: &HashSet<String>) -> LatticeCodeState` | Parity |
+| Behavior | malformed → `.malformed`; in knownCodes → `.known`; else → `.pending` | Same logic | Parity |
+| FDC data loaded | No — grammar check only | No — grammar check only | Parity |
+| Source | `Sources/EideticLib/EideticLib.swift` | `rust/src/lattice_code_state.rs` (fn) + `rust/src/lib.rs` (re-export as `classify`) | |
+
+### `lookup` / `lookup`
+
+| Aspect | Swift | Rust | Status |
+|---|---|---|---|
+| Signature | `EideticLib.lookup(_ term: String) -> Anchor` | `pub fn lookup(term: &str) -> Anchor` | Parity |
+| Delegation | `FDC.encodeAnchor(term)` in LatticeLib | `Fdc::encode_anchor(term)` in lattice-lib | Parity — wired in PAR-3B-EL |
+| Confidence for resolved code | 32 (medium) | 32 (medium) | Parity |
+| Confidence for unresolved | 0 | 0 | Parity |
+| `notImplemented` / `not_implemented()` | returned only if `FDC.isAvailable == false` | returned only if `Fdc::is_available() == false` | Parity |
+| Behavioral tests | Pass (74/74 Swift) | Pass (40/40 Rust) | Parity |
+| Exact-code conformance (SharedVectors/lookup_vectors.json v2) | Pass (77/77 Swift) | Pass (43/43 Rust) | Parity — closed w3-latticelib-fdc |
+| Source | `Sources/EideticLib/EideticLib.swift` | `rust/src/lib.rs` | |
+
+### `Anchor` struct
+
+| Aspect | Swift | Rust | Status |
+|---|---|---|---|
+| Fields | `code: String`, `wikidataQID: String?`, `confidence: UInt8`, `dataVersion: String` | `code: String`, `wikidata_qid: Option<String>`, `confidence: u8`, `data_version: String` | Parity |
+| `notImplemented` / `not_implemented()` | `Anchor(code: "", ..., dataVersion: "0.1.0-stub")` | `Anchor { code: "", ..., data_version: "0.1.0-stub" }` | Parity |
+| JSON | Codable (camelCase keys) | Serde `rename_all = "camelCase"` | Parity |
+| Source | `Sources/EideticLib/EideticLib.swift` | `rust/src/anchor.rs` | |
+
+### Conformance gate — lookup_vectors.json (schema_version 2)
+
+Updated in mission w3-latticelib-fdc (2026-06-05). The previous
+schema_version 1 carried an `expected_udc` field populated with UDC
+(Universal Decimal Classification) codes — a completely different
+classification system from the FDC codes that LatticeLib produces. No test
+ever consumed those v1 vectors, so no test was failing; the gap was invisible.
+
+The v1 "Open finding" that documented a "LatticeLib Rust single-token accuracy
+gap" was based on incorrect diagnosis. Investigation showed:
+
+- `FDC.encode("chemistry")` in Swift: `"501"` (not `"54"`)
+- `Fdc::encode("chemistry")` in Rust: `"501"` (identical)
+- Both engines are already in full parity for single-token inputs
+
+The v1 `expected_udc` value `"54"` was a UDC code for Chemistry (a UDC
+discipline code), not an FDC code. The mismatch was between UDC and FDC,
+not between Swift and Rust.
+
+**Resolution (w3-latticelib-fdc):**
+- `lookup_vectors.json` updated to schema_version 2: `expected_udc` renamed
+  to `expected_code`, values corrected to actual FDC codes verified against
+  both engines
+- 13 new single-token vectors added to LatticeLib's `fdc_conformance.json`,
+  all passing 65/65 (Rust) and 32/32 (Swift)
+- New cross-language conformance tests: `LookupConformanceTests.swift` (Swift,
+  77/77) and `rust/tests/lookup_conformance_test.rs` (Rust, 43/43)
+
 ---
 
 *End of EideticLib Interface v0.8.*

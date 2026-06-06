@@ -15,11 +15,22 @@
 // and intentional — cookbook §2.2/§8: "novel-token tagging is
 // platform-divergent BY DESIGN; the static table is the cross-platform-
 // guaranteed surface." The Apple NLTagger fallback is explicitly not ported.
+//
+// NOVEL-TOKEN RECORDING
+// After classifying a novel token as Other, the result is recorded into
+// SHARED_NOVEL_CACHE — mirroring `tagNovelToken` in WordClassTagger.swift which
+// calls `sharedNovelCache.record(token: lowered, wordClass: tagged)` for both
+// the Apple and non-Apple paths. The cache is initialized by `fdc_runtime.rs`
+// when the bundled artifacts are loaded (stamped with the table version). If the
+// cache has not been initialized yet (SHARED_NOVEL_CACHE not set), the record
+// call is silently skipped — this matches the Swift behavior when
+// `WordClassTableCache.table` is nil (tableVersion defaults to "").
 
 use std::collections::HashSet;
 use serde::Deserialize;
 
 use crate::word_class::WordClass;
+use crate::novel_token_cache::SHARED_NOVEL_CACHE;
 
 /// The parsed word-class table (matches JSON schema of WordClassTable.swift).
 #[derive(Debug, Deserialize)]
@@ -55,7 +66,10 @@ impl WordClassTableCache {
     /// `LatticeLib.wordClass`: "The verb set is checked before the noun set,
     /// so a token listed under both resolves to `.verb`").
     /// Novel tokens (not in either set) return WordClass::Other — the
-    /// deterministic stub mirroring the Swift non-Apple path.
+    /// deterministic stub mirroring the Swift non-Apple path — and the result
+    /// is recorded in `SHARED_NOVEL_CACHE` (mirroring `tagNovelToken` in Swift
+    /// which calls `sharedNovelCache.record` for both the Apple and non-Apple
+    /// paths).
     pub fn word_class(&self, token: &str) -> WordClass {
         let lowered = token.to_lowercase();
         if lowered.is_empty() {
@@ -68,9 +82,13 @@ impl WordClassTableCache {
         if self.noun_set.contains(&lowered) {
             return WordClass::Noun;
         }
-        // Novel token: deterministic stub returns Other.
-        // This mirrors Swift's `hmmViterbiTag` (non-Apple path) which
-        // returns `.other` until the HMM artifact is bundled.
+        // Novel token: deterministic stub returns Other, mirroring
+        // `hmmViterbiTag` in Swift (non-Apple path). Record into the
+        // process-wide novel-token cache — fire-and-forget, does not affect
+        // the returned WordClass (mirrors `tagNovelToken` in WordClassTagger.swift).
+        if let Some(cache) = SHARED_NOVEL_CACHE.get() {
+            cache.record(&lowered, WordClass::Other);
+        }
         WordClass::Other
     }
 }

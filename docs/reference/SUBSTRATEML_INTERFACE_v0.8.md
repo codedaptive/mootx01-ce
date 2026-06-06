@@ -1048,6 +1048,9 @@ returns (empty, `nil`, default-valued).
   - `ConceptImplicationsTests.swift`
 - **Rust:** per-module `#[cfg(test)] mod tests` blocks, plus
   `tests/` for cross-port conformance.
+  - `row_attribute_view::tests` — 15 tests for `RowAttributeView::from`, dedup, sort, extraction rules.
+  - `tier_query::tests` — 9 tests for `TierAscendingQueryProtocol` (DP, combine, CI) and `PrivacyLedger`.
+  - `temporal_causality_fold::tests` — existing 7 tests; now uses canonical `substrate_types::HLC`.
 
 ## § 6 — Examples
 
@@ -1084,3 +1087,192 @@ let strengths = bt.strengths();
 
 let combined = tier_contribution_fingerprint::combine(&[peer_a, peer_b, peer_c]);
 ```
+
+## § 7 — Swift/Rust Concordance
+
+This section enumerates the COMPLETE top-level public surface of SubstrateML
+in both ports, one row per public concept. Each Swift symbol and each Rust
+symbol below was read from source (file:line cited inline in the prose under
+§ 2 and verified against the live tree on 2026-06-05). Every row is anchored
+to the real conformance test that proves the two ports agree.
+
+Cross-cutting Rust idioms (do not constitute drift): snake_case identifiers,
+`Vec<T>` for Swift arrays, `Option<T>` for Swift optionals, `u128` for Swift
+`UUID`, unit-struct namespaces (`pub struct X;` + `impl X`) where Swift uses
+`enum X { static func … }`, and Rust free functions / `pub mod` constants
+where Swift attaches the same call to a namespace enum. These are sanctioned
+per SPEC § 1 ("naming differs by port convention; results are bit-for-bit
+identical for federation-affecting algorithms").
+
+Test-binding convention below: `Foo.swift` denotes the Swift conformance
+suite `Tests/SubstrateMLTests/Foo.swift`; `rust:<module>::tests` denotes the
+inline `#[cfg(test)] mod tests` block in `rust/src/<module>.rs`. Bit-for-bit
+cross-port agreement for the federation-affecting algorithms is asserted by
+the Swift suites against the same canonical inputs the Rust module tests use.
+
+### § 7.1 — Full concept table
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Projected row state | `ProjectedRowState` | `ProjectedRowState` | public | identical (snake_case fields) | `AuditLogFoldTests.swift` / `rust:audit_log_fold::tests` | Confirmed |
+| Audit-log fold namespace | `AuditLogFold` (enum) | `AuditLogFold` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `AuditLogFoldTests.swift` / `rust:audit_log_fold::tests` | Confirmed |
+| Decaying matrix | `DecayingMatrix` | `DecayingMatrix` | public | identical (f64 cells) | `MatrixDecayTests.swift` / `rust:decay::tests` | Confirmed |
+| Matrix-decay namespace | `MatrixDecay` (enum) | — (`decay::apply`/`decay_factor` free fns) | public | Swift enum namespace / Rust free fn (no type) | `MatrixDecayTests.swift` / `rust:decay::tests` | Confirmed |
+| Decay half-lives | `DecayHalfLives` (enum) | `decay::half_lives` (pub mod consts) | public | Swift enum-of-statics / Rust `pub mod` constants | `MatrixDecayTests.swift` / `rust:decay::tests` | Confirmed |
+| Preference observation | `PreferenceObservation` | `PreferenceObservation` | public | identical | `BradleyTerryTests.swift` / `rust:bradley_terry::tests` | Confirmed |
+| Bradley-Terry estimator | `BradleyTerryEstimator` | `BradleyTerryEstimator` | public | Swift `throws` / Rust `Result<…,&'static str>` | `BradleyTerryTests.swift` / `rust:bradley_terry::tests` | Confirmed |
+| NMF factorization result | `NMFFactorization` | `NMFFactorization` | public | identical (W/H → w/h) | `NMFTests.swift`, `NMFDomainTests.swift` / `rust:nmf::tests` | Confirmed |
+| NMF-ALS namespace | `NMFAlternatingLeastSquares` (enum) | `NMFAlternatingLeastSquares` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace; Swift precondition / Rust panic | `NMFTests.swift` / `rust:nmf::tests` | Confirmed |
+| Complex number | `Complex` | `Complex` | public | identical | `FFTTests.swift` / `rust:fft::tests` | Confirmed |
+| FFT namespace | `FFT` (enum) | — (`fft::forward`/`inverse` free fns) | public | Swift enum namespace / Rust free fn (no type) | `FFTTests.swift` / `rust:fft::tests` | Confirmed |
+| Rhythm result | `RhythmResult` | `RhythmResult` | public | identical | `FFTTests.swift` / `rust:fft::tests` | Confirmed |
+| Rhythm-analysis namespace | `RhythmAnalysis` (enum) | — (`fft::analyze` free fn) | public | Swift enum namespace / Rust free fn (no type) | `FFTTests.swift` / `rust:fft::tests` | Confirmed |
+| Eigenvalue centrality namespace | `EigenvalueCentrality` (enum) | `EigenvalueCentrality` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `EigenvalueCentralityTests.swift`, `EigenvalueCentralityDirectedTests.swift` / `rust:eigenvalue_centrality::tests` | Confirmed |
+| SplitMix64 RNG | `SplitMix64` | `SplitMix64` | public | identical (deterministic seed) | `RandomWalksTests.swift` / `rust:random_walks::tests` | Confirmed |
+| Random-walks namespace | `RandomWalks` (enum) | `RandomWalks` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace; Swift precondition / Rust panic | `RandomWalksTests.swift`, `RandomWalksDomainTests.swift` / `rust:random_walks::tests` | Confirmed |
+| Lattice anchor (string) | `LatticeAnchorStr` | `LatticeAnchorStr` | public | identical | `LatticeDistanceTests.swift` / `rust:lattice_distance::tests` | Confirmed |
+| UDC tree distance namespace | `UDCTreeDistance` (enum) | `UDCTreeDistance` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `LatticeDistanceTests.swift` / `rust:lattice_distance::tests` | Confirmed |
+| Wikidata adjacency provider | `WikidataAdjacencyProvider` (protocol) | `WikidataAdjacencyProvider` (trait) | public | Swift protocol / Rust trait | `LatticeDistanceTests.swift` / `rust:lattice_distance::tests` | Confirmed |
+| Lattice distance namespace | `LatticeDistance` (enum) | `LatticeDistance` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `LatticeDistanceTests.swift` / `rust:lattice_distance::tests` | Confirmed |
+| Wikidata graph distance namespace | `WikidataGraphDistance` (enum) | `WikidataGraphDistance` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `LatticeDistanceTests.swift` / `rust:lattice_distance::tests` | Confirmed |
+| Composite distance namespace | `CompositeDistance` (enum) | `CompositeDistance` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `CompositeDistanceTests.swift` / `rust:composite_distance::tests` | Confirmed |
+| Stream-source flag | `StreamSourceFlag` (enum: UInt8) | `StreamSourceFlag` (enum) | public | identical (Rust drops explicit discriminants) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| Ambient sample row | `AmbientSampleRow` | `AmbientSampleRow` | public | identical (snake_case fields) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| HealthKit sample | `HealthKitSample` | `HealthKitSample` | public | identical | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| CoreLocation sample | `CoreLocationSample` | `CoreLocationSample` | public | identical | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| EventKit sample | `EventKitSample` | `EventKitSample` | public | identical | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| ScreenTime sample | `ScreenTimeSample` | `ScreenTimeSample` | public | identical | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| SystemTelemetry sample | `SystemTelemetrySample` | `SystemTelemetrySample` | public | identical | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| CoreLocation extractor | `CoreLocationExtractor` | `CoreLocationExtractor<'a>` | public | identical (Rust borrows via lifetime) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| EventKit extractor | `EventKitExtractor` | `EventKitExtractor<'a>` | public | identical (Rust borrows via lifetime) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| HealthKit extractor | `HealthKitExtractor` | `HealthKitExtractor<'a>` | public | identical (Rust borrows via lifetime) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| ScreenTime extractor | `ScreenTimeExtractor` | `ScreenTimeExtractor<'a>` | public | identical (Rust borrows via lifetime) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| SystemTelemetry extractor | `SystemTelemetryExtractor` | `SystemTelemetryExtractor<'a>` | public | identical (Rust borrows via lifetime) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| Feature-extractors facade | `FeatureExtractors` (enum) | — (`feature_extractors::extract_ambient_sample` free fn) | public | Swift enum namespace / Rust free fn (no type) | `FeatureExtractorsTests.swift` / `rust:feature_extractors::tests` | Confirmed |
+| Float SimHash namespace | `FloatSimHash` (enum) | — (`float_simhash::project` free fn) | public | Swift enum namespace / Rust free fn (no type) | `FloatSimHashTests.swift` / `rust:float_simhash::tests` | Confirmed |
+| Row-lite summary | `RowLite` | `RowLite` | public | identical | `MomentSummaryTests.swift` / `rust:moment_summary::tests` | Confirmed |
+| Moment-summary namespace | `MomentSummary` (enum) | `MomentSummary` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `MomentSummaryTests.swift` / `rust:moment_summary::tests` | Confirmed |
+| Partial-state recall namespace | `PartialStateRecall` (enum) | `PartialStateRecall` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `PartialStateRecallTests.swift`, `PartialStateRecallValidationTests.swift` / `rust:partial_state_recall::tests` | Confirmed |
+| Pairing nonce | `PairingNonce` | `PairingNonce` | public | identical | `PairingHandshakeTests.swift` / `rust:pairing::tests` | Confirmed |
+| Pairing record | `PairingRecord` | `PairingRecord` | public | identical | `PairingHandshakeTests.swift` / `rust:pairing::tests` | Confirmed |
+| Pairing-handshake namespace | `PairingHandshake` (enum) | `PairingHandshake` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `PairingHandshakeTests.swift` / `rust:pairing::tests` | Confirmed |
+| Pairing audit payload | `PairingHandshake.PairingAuditPayload` (nested) | `PairingAuditPayload` (flat) | public | Swift nested `Handshake.Payload` / Rust flat `PairingAuditPayload` | `PairingHandshakeTests.swift` / `rust:pairing::tests` | Confirmed |
+| Federation case | `FederationCase` (enum: UInt32) | `FederationCase` (enum) | public | identical (Rust drops discriminants) | `TierContributionFingerprintTests.swift` / `rust:tier_contribution::tests` | Confirmed |
+| Tier contribution | `TierContribution` | `TierContribution` | public | identical | `TierContributionFingerprintTests.swift` / `rust:tier_contribution::tests` | Confirmed |
+| Tier-contribution fingerprint namespace | `TierContributionFingerprint` (enum) | `TierContributionFingerprint` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `TierContributionFingerprintTests.swift` / `rust:tier_contribution::tests` | Confirmed |
+| Target tier | `TargetTier` (enum: String) | `TargetTier` (enum) | public | identical (Rust drops raw values) | `TierAscendingQueryTests.swift` / `rust:tier_query::tests` | Confirmed |
+| Peer response | `PeerResponse` | `PeerResponse` | public | identical | `TierAscendingQueryTests.swift` / `rust:tier_query::tests` | Confirmed |
+| Tier-ascending query | `TierAscendingQuery` | `TierAscendingQuery` | public | identical | `TierAscendingQueryTests.swift` / `rust:tier_query::tests` | Confirmed |
+| Tier-ascending query protocol namespace | `TierAscendingQueryProtocol` (enum) | `TierAscendingQueryProtocol` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `TierAscendingQueryTests.swift` / `rust:tier_query::tests` | Confirmed |
+| Privacy ledger (DP accounting) | `PrivacyLedger` | `PrivacyLedger` | public | identical | `TierAscendingQueryTests.swift` / `rust:tier_query::tests` | Confirmed |
+| Action-outcome key | `ActionOutcomeKey` | `ActionOutcomeKey` | public | identical (6-bit fields, < 64) | `ActionOutcomeMatrixTests.swift` / `rust:action_outcome::tests` | Confirmed |
+| Action-outcome cell | `ActionOutcomeCell` | `ActionOutcomeCell` | public | Swift stored `successRate`/`wilsonLowerBound` / Rust methods | `ActionOutcomeMatrixTests.swift` / `rust:action_outcome::tests` | Confirmed |
+| Action-outcome matrix | `ActionOutcomeMatrix` | `ActionOutcomeMatrix` | public | identical (Wilson-ranked topActions) | `ActionOutcomeMatrixTests.swift` / `rust:action_outcome::tests` | Confirmed |
+| DP parameters | `DPParameters` | `DPParameters` | public | identical | `DPORReductionTests.swift` / `rust:dp_or_reduce::tests` | Confirmed |
+| DP-OR reduction namespace | `DPORReduction` (enum) | `DPORReduction` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `DPORReductionTests.swift` / `rust:dp_or_reduce::tests` | Confirmed |
+| LLM calibration curve | `LLMCalibrationCurve` | `LLMCalibrationCurve` (mod `calibration`) | public | identical (Rust in `calibration` module) | `LLMCalibrationCurveTests.swift` / `rust:calibration::tests` | Confirmed |
+| Information-theory namespace | `InformationTheory` (enum) | `InformationTheory` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `InformationTheoryTests.swift`, `NormalizedMutualInformationGuardTests.swift` / `rust:info_theory::tests` | Confirmed |
+| Window level | `WindowLevel` (enum: Int) | `WindowLevel` (enum) | public | identical (Rust drops discriminants) | `TemporalCompressionTests.swift` / `rust:temporal_compression::tests` | Confirmed |
+| Temporal window | `TemporalWindow` | `TemporalWindow` | public | identical | `TemporalCompressionTests.swift` / `rust:temporal_compression::tests` | Confirmed |
+| Temporal-compression namespace | `TemporalCompression` (enum) | `TemporalCompression` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `TemporalCompressionTests.swift` / `rust:temporal_compression::tests` | Confirmed |
+| Anomaly-detection namespace | `AnomalyDetection` (enum) | `AnomalyDetection` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `AnomalyDetectionTests.swift` / `rust:anomaly` (inline asserts) | Confirmed |
+| Community-detection namespace | `CommunityDetection` (enum) | `CommunityDetection` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `CommunityDetectionTests.swift` / `rust:community_detection::tests` | Confirmed |
+| Association-rule item | `Item` | `Item` (mod `association_rule_mining`) | public | identical (packed UInt16/u16 key) | `AssociationRuleMiningTests.swift` / `rust:association_rule_mining::tests` | Confirmed |
+| Association rule | `AssociationRule` | `AssociationRule` | public | identical | `AssociationRuleMiningTests.swift` / `rust:association_rule_mining::tests` | Confirmed |
+| Mining thresholds | `MiningThresholds` | `MiningThresholds` | public | identical | `AssociationRuleMiningTests.swift` / `rust:association_rule_mining::tests` | Confirmed |
+| Row-audit value | `RowAuditValue` (enum) | `RowAuditValue` (enum, mod `row_attribute_view`) | public | identical (`bitmap`/`integer`/`null` → `Bitmap`/`Integer`/`Null`) | `RowAttributeViewTests.swift` / `rust:row_attribute_view::tests` | Confirmed |
+| Row-audit entry | `RowAuditEntry` | `RowAuditEntry` | public | Swift `UUID` / Rust `u128` row id | `RowAttributeViewTests.swift` / `rust:row_attribute_view::tests` | Confirmed |
+| Row-attribute view | `RowAttributeView` | `RowAttributeView` | public | identical (vocab cap 64, latest-HLC dedup) | `RowAttributeViewTests.swift` / `rust:row_attribute_view::tests` | Confirmed |
+| Apriori thresholds | `AprioriThresholds` | `AprioriThresholds` (mod `apriori_mining`) | public | identical | `AprioriMiningTests.swift` / `rust:apriori_mining::tests` | Confirmed |
+| Apriori rule | `AprioriRule` | `AprioriRule` | public | identical (Swift `evidenceCount: Int` / Rust `evidence_count: usize`) | `AprioriMiningTests.swift`, `AprioriMiningTieBreakTests.swift` / `rust:apriori_mining::tests` | Confirmed |
+| Apriori-mining namespace | `AprioriMining` (enum) | — (`apriori_mining::mine_apriori_rules` free fn) | public | Swift enum namespace / Rust free fn (no type) | `AprioriMiningTests.swift`, `AprioriMiningTieBreakTests.swift` / `rust:apriori_mining::tests` | Confirmed |
+| Formal attribute | `FormalAttribute` | `FormalAttribute` (mod `formal_concept_analysis`) | public | identical (Comparable/Ord) | `FormalConceptAnalysisTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Formal concept | `FormalConcept` | `FormalConcept` | public | identical (`stability: Double?` / `Option<f64>`) | `FormalConceptAnalysisTests.swift`, `FormalConceptStabilityTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Formal context | `FormalContext` | `FormalContext` | public | Swift nested `RowID` typealias / Rust flat `RowId` type | `FormalConceptAnalysisTests.swift`, `FormalContextFromRowAttributeViewTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Formal-context row id | `FormalContext.RowID` (nested typealias = UInt32) | `RowId` (flat `pub type RowId = u32`) | public | Swift nested typealias / Rust flat type alias | `FormalConceptAnalysisTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Bounded concept miner | `BoundedConceptMiner` | `BoundedConceptMiner` | public | identical (Swift default-arg init / Rust `new` + `new_with_seed_mode`) | `FormalConceptAnalysisTests.swift`, `FormalConceptAnalysisMultiSeedTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Stability estimator namespace | `StabilityEstimator` (enum) | `StabilityEstimator` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `FormalConceptStabilityTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Seed mode | `SeedMode` (enum) | `SeedMode` (enum) | public | identical (`single`/`multi` → `Single`/`Multi`) | `FormalConceptAnalysisMultiSeedTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Cover delta | `CoverDelta` | `CoverDelta` | public | Swift `Set<FormalAttribute>` / Rust sorted `Vec` | `FormalConceptAnalysisCoverDeltasTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Concept cover deltas | `ConceptCoverDeltas` | `ConceptCoverDeltas` | public | identical | `FormalConceptAnalysisCoverDeltasTests.swift` / `rust:formal_concept_analysis::tests` | Confirmed |
+| Implication | `Implication` | `Implication` (mod `concept_implications`) | public | Swift `Set<FormalAttribute>` / Rust sorted `Vec` | `ConceptImplicationsTests.swift` / `rust:concept_implications::tests` | Confirmed |
+| Concept implications | `ConceptImplications` | `ConceptImplications` | public | Swift `conceptImplications(over:context:…)` static / Rust `compute(context:…)` (no pre-mined arg) | `ConceptImplicationsTests.swift` / `rust:concept_implications::tests` | Confirmed |
+| Temporal field coordinate | `TemporalFieldCoord` | `TemporalFieldCoord` | public | identical | `TemporalCausalityFoldTests.swift` / `rust:temporal_causality_fold::tests` | Confirmed |
+| Temporal audit entry | `TemporalAuditEntry` | `TemporalAuditEntry` | public | identical | `TemporalCausalityFoldTests.swift` / `rust:temporal_causality_fold::tests` | Confirmed |
+| Temporal causality key | `TemporalCausalityKey` | `TemporalCausalityKey` | public | identical | `TemporalCausalityFoldTests.swift` / `rust:temporal_causality_fold::tests` | Confirmed |
+| Temporal-causality fold namespace | `TemporalCausalityFold` (enum) | `TemporalCausalityFold` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `TemporalCausalityFoldTests.swift` / `rust:temporal_causality_fold::tests` | Confirmed |
+| Temporal-causality fold result | `(deltas:, newWatermark:)` tuple return | `FoldResult` (flat struct) | public | Swift anonymous tuple return / Rust named result struct (same fields: `deltas`, `new_watermark`) | `TemporalCausalityFoldTests.swift` / `rust:temporal_causality_fold::tests` | Confirmed |
+
+### § 7.2 — Notes on apparent asymmetries (verified non-drift)
+
+- **Swift namespace enums with no Rust type** (`MatrixDecay`, `FFT`,
+  `RhythmAnalysis`, `FeatureExtractors`, `FloatSimHash`, `AprioriMining`):
+  Swift groups the static functions under an empty `enum`; Rust exposes the
+  same calls as module-level `pub fn`s (and `DecayHalfLives` as a `pub mod`
+  of constants). No Rust top-level *type* is created. Behavior is bound by
+  the shared conformance suites cited above — not drift.
+- **Rust unit-struct namespaces** (`AuditLogFold`, `NMFAlternatingLeastSquares`,
+  `EigenvalueCentrality`, `RandomWalks`, `UDCTreeDistance`, `LatticeDistance`,
+  `WikidataGraphDistance`, `CompositeDistance`, `MomentSummary`,
+  `PartialStateRecall`, `PairingHandshake`, `TierContributionFingerprint`,
+  `TierAscendingQueryProtocol`, `DPORReduction`, `InformationTheory`,
+  `TemporalCompression`, `AnomalyDetection`, `CommunityDetection`,
+  `StabilityEstimator`, `TemporalCausalityFold`): Rust names the namespace as
+  `pub struct X;` with an `impl X`; Swift uses `enum X`. Same call surface.
+- **`FoldResult`** (Rust) and **`PairingAuditPayload`** (flat in Rust, nested
+  `PairingHandshake.PairingAuditPayload` in Swift) and **`RowId`** (flat Rust
+  `pub type`, nested `FormalContext.RowID` in Swift) are idiomatic
+  flattening / named-return shapes, NOT Swift-only/Rust-only contract gaps.
+  Each is paired in the table above with Status=Confirmed and the test that
+  proves the shapes carry identical data.
+- **No DRIFT and no Apple-platform-bound (Exempt) types** exist in
+  SubstrateML. The package is pure cold-path math/CRDT with no Metal/BNNS/
+  CoreML/CloudKit/Keychain surface; every concept has a real counterpart in
+  both ports.
+
+### § 7.3 — Prior-wave reconciliation history
+
+Populated by PAR-1C + PAR-3A-SM (2026-06-05). Lists the symbols added or
+reconciled in earlier waves. All rows are functionally 1:1; Rust idioms differ
+(snake_case, `Vec` for Swift arrays, `u128` for Swift `UUID`, `Option` for
+Swift optionals).
+
+### Audit-projection types (new in PAR-1C)
+
+| Swift | Rust module | Rust type/fn | Notes |
+|---|---|---|---|
+| `RowAuditValue` | `row_attribute_view` | `pub enum RowAuditValue` | `Bitmap(u64)`, `Integer(i64)`, `Null` |
+| `RowAuditEntry` | `row_attribute_view` | `pub struct RowAuditEntry` | `row_id: u128` mirrors Swift `UUID`; `hlc: HLC` from `substrate_types` |
+| `RowAttributeView` | `row_attribute_view` | `pub struct RowAttributeView` | `attributes: Vec<(u8, u8)>` sorted ascending |
+| `RowAttributeView.from(auditEntries:)` | `row_attribute_view` | `RowAttributeView::from(audit_entries: &[RowAuditEntry])` | Same algorithm: vocab cap 64, latest-HLC dedup, sorted output by (tier, row_id UUID string) |
+
+### Recall vocabulary (reconciled in PAR-3A-SM — Lite types removed)
+
+The prior `RecallScoreLite` / `RecallResultLite` stand-ins in
+`tier_query.rs` have been removed. The module now uses the canonical
+recall vocabulary from `substrate_types`, which is the force-mirror of
+the Swift vocabulary in `SubstrateTypes/RecallTypes.swift`.
+
+| Swift (SubstrateTypes) | Rust (`substrate_types`) | Notes |
+|---|---|---|
+| `RecallScore` | `RecallScore` | `row_id: RowId` (newtype `u128`), `score: f32` |
+| `RecallResult` | `RecallResult` | `rows`, `breakdown: DistanceBreakdown`, `confidence_interval: Option<(f32,f32)>`, `primitive_name` |
+| `DistanceBreakdown` | `DistanceBreakdown` | Four `f32` contributions; `ZERO` constant |
+| `RowProjection` | `RowProjection` | `row_id`, `capture_hlc`, `fingerprint`, `lattice`, `bitmaps: (u64,u64,u64)`, `row_state: u8` |
+
+`TierAscendingQuery`, `PeerResponse`, `TierAscendingQueryProtocol`, and
+`PrivacyLedger` in `tier_query.rs` now use `RecallResult` and
+`RecallScore` from `substrate_types` throughout.
+
+### HLC deduplication (PAR-1E fix, applied in PAR-1C)
+
+| Was | Now |
+|---|---|
+| Local `HLC` struct in `temporal_causality_fold.rs` | `use substrate_types::HLC` |
+
+The local struct was a compilation convenience from before `substrate-types`
+was a declared dependency of `substrate-ml`. It duplicated the canonical
+`HLC` fields (`physical_time: i64`, `logical_count: i32`, `node_id: i32`)
+but prevented the canonical type from being used across module boundaries.
+Removed in favor of the canonical type; no semantic change (identical
+field layout, identical ordering implementation).
