@@ -1,14 +1,14 @@
 // Paths.swift
 //
-// Resolves the user data directory that mootx01-mcp opens. Pure
+// Resolves the user data directory that mootx01 opens. Pure
 // path math — no filesystem touching — so the logic is unit-testable
 // without spawning a process or writing under the user's home.
 //
 // macOS-only per LAUNCH_PLAN.md §"The Monday cut". The single
 // supported location is the standard Application Support directory:
-//   ~/Library/Application Support/MOOTx01/
+//   ~/Library/Application Support/com.mootx01.ce/
 // The estate database lives at:
-//   ~/Library/Application Support/MOOTx01/estate.sqlite
+//   ~/Library/Application Support/com.mootx01.ce/estate.sqlite
 //
 // MOOTX01_DATA_DIR overrides the resolved directory when set and
 // non-empty. The override exists for the installer's bash smoke
@@ -59,7 +59,7 @@ public enum MootPaths {
         return homeDirectory
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("MOOTx01", isDirectory: true)
+            .appendingPathComponent("com.mootx01.ce", isDirectory: true)
     }
 
     /// Estate database URL inside `dataDirectory`. Pure path
@@ -102,6 +102,60 @@ public enum MootPaths {
         homeDirectory
             .appendingPathComponent(".claude", isDirectory: true)
             .appendingPathComponent("settings.json", isDirectory: false)
+    }
+
+    /// Directory under the user's home where the `mootx01` binary is
+    /// placed on `mootx01 install`. Mirrors codegraph's `~/.codegraph`
+    /// versioned install root; for mootx01 the binary lives directly at
+    /// `<home>/.mootx01/bin/mootx01` (single self-contained executable —
+    /// no vendored runtime to version, so the simpler flat layout is used
+    /// instead of codegraph's `versions/<tag>` + `current` symlink).
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: `<home>/.mootx01/bin`. Does not touch the filesystem.
+    public static func installedBinaryDirURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent(".mootx01", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+    }
+
+    /// Absolute path of the placed `mootx01` binary inside the install
+    /// directory. This is the path the installer writes into every MCP
+    /// client's `mcpServers.<name>.command` so the entry never points at
+    /// a CWD or dev-tree location.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: `<home>/.mootx01/bin/mootx01`. Does not touch the filesystem.
+    public static func installedBinaryURL(homeDirectory: URL) -> URL {
+        installedBinaryDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("mootx01", isDirectory: false)
+    }
+
+    /// Directory where the PATH launcher symlink is created. Mirrors
+    /// codegraph's `~/.local/bin` default — the XDG-conventional location
+    /// for user-installed executables.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: `<home>/.local/bin`. Does not touch the filesystem.
+    public static func localBinDirURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent(".local", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+    }
+
+    /// Absolute path of the PATH launcher symlink. Points at
+    /// `installedBinaryURL`. Putting this on `$PATH` makes `mootx01`
+    /// resolvable from any shell.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: `<home>/.local/bin/mootx01`. Does not touch the filesystem.
+    public static func binarySymlinkURL(homeDirectory: URL) -> URL {
+        localBinDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("mootx01", isDirectory: false)
     }
 
     /// URL of the project-local Claude Code settings file.

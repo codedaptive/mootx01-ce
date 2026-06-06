@@ -30,14 +30,33 @@ struct InstallCommand: AsyncParsableCommand {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let local = location == "local"
 
-        // Resolve binary path: use the running binary's own path so the
-        // config entry always points at the installed mootx01 binary.
-        let binaryPath = CommandLine.arguments.first ?? "/usr/local/bin/mootx01"
+        // Resolve the SOURCE binary (the running executable). We never
+        // write this path into a client config — instead we copy it to a
+        // stable install location and write THAT path. `Bundle.main.executablePath`
+        // is the resolved absolute path of the running executable; the
+        // fallback resolves argv[0] against the current directory.
+        let sourcePath = Bundle.main.executablePath
+            ?? URL(fileURLWithPath: CommandLine.arguments.first ?? "/usr/local/bin/mootx01")
+                .standardizedFileURL.path
 
         let clients = try AgentPicker.pick(yes: yes, target: target, homeDirectory: home)
         guard !clients.isEmpty else {
             print("No clients selected. Run `mootx01 install --target <id>` to install a specific client.")
             return
+        }
+
+        // Place the binary FIRST and use its installed absolute path as the
+        // config `command`. This is the core fix: configs point at
+        // ~/.mootx01/bin/mootx01 (a stable location), never at the CWD or
+        // dev-tree path the binary happened to run from.
+        let binaryPath: String
+        do {
+            binaryPath = try Installer.placeBinary(sourcePath: sourcePath, homeDirectory: home)
+            print("Placed binary at \(binaryPath)")
+            print("Linked   \(MootPaths.binarySymlinkURL(homeDirectory: home).path)")
+        } catch {
+            print("Could not place binary: \(error)")
+            throw error
         }
 
         print("\nInstalling mootx01 into \(clients.count) client(s)...")
@@ -88,6 +107,19 @@ struct InstallCommand: AsyncParsableCommand {
         if !skipped.isEmpty {
             print("Skipped (errors): \(skipped.joined(separator: ", "))")
         }
+        // If ~/.local/bin is not on PATH, the symlink won't resolve as a
+        // bare `mootx01` command — print the same kind of note codegraph
+        // does. (MCP clients use the absolute config path regardless, so
+        // this only affects running `mootx01` by name in a shell.)
+        let localBinDir = MootPaths.localBinDirURL(homeDirectory: home).path
+        let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        let onPath = pathEnv.split(separator: ":").contains { String($0) == localBinDir }
+        if !onPath {
+            print("")
+            print("\(localBinDir) is not on your PATH. Add it:")
+            print("  export PATH=\"\(localBinDir):$PATH\"")
+        }
+
         print("")
         print("Run `mootx01 status` to confirm your setup.")
     }

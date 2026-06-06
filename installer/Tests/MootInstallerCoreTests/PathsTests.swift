@@ -83,6 +83,38 @@ final class PathsTests: XCTestCase {
         XCTAssertEqual(settingsURL.path, "/Users/test/myproject/.claude/settings.json")
     }
 
+    func testInstalledBinaryURLIsUnderDotMootx01Bin() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        XCTAssertEqual(
+            MootPaths.installedBinaryURL(homeDirectory: home).path,
+            "/Users/test/.mootx01/bin/mootx01"
+        )
+    }
+
+    func testInstalledBinaryDirURLIsUnderDotMootx01() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        XCTAssertEqual(
+            MootPaths.installedBinaryDirURL(homeDirectory: home).path,
+            "/Users/test/.mootx01/bin"
+        )
+    }
+
+    func testBinarySymlinkURLIsUnderLocalBin() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        XCTAssertEqual(
+            MootPaths.binarySymlinkURL(homeDirectory: home).path,
+            "/Users/test/.local/bin/mootx01"
+        )
+    }
+
+    func testLocalBinDirURLIsUnderLocal() {
+        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
+        XCTAssertEqual(
+            MootPaths.localBinDirURL(homeDirectory: home).path,
+            "/Users/test/.local/bin"
+        )
+    }
+
     func testGlobalAndLocalClaudeSettingsURLShareFilename() {
         // Both helpers must agree on the filename component so that code
         // choosing between global and local settings targets is consistent.
