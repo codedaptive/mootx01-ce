@@ -1,0 +1,36 @@
+[package]
+name = "observer-sink"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "ObserverSink — reusable PersistenceKit-backed StatsSink + stats-store schema + retention for the MOOTx01 manager pipeline (Phase 0.5)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "observer_sink"
+path = "src/lib.rs"
+
+[dependencies]
+# IntellectusLib: StatsSink trait and StatSample datum.
+# Zero-dep floor crate; layering is correct (observer-sink is downstream).
+intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
+
+# PersistenceKit: Storage trait, SchemaDeclaration, RowStore.
+# The SQLite backend (SqliteStorage) is used for the stats store.
+persistence-kit = { path = "../../../kits/PersistenceKit/rust" }
+
+# JSON encoding for the tag map (flat string-string map).
+serde_json = "1"
+# BTreeMap for deterministic JSON key ordering (matches Swift's .sortedKeys).
+# Also used for the tag map type.
+
+# UUID generation for synthetic row primary keys.
+uuid = { version = "1", features = ["v4"] }
+
+# chrono: ISO-8601 timestamp formatting (TEXT date columns, schema invariant).
+# Already a transitive dep via persistence-kit; declared here for direct use.
+chrono = "0.4"
+
+[dev-dependencies]
+# No external test deps needed; using std only in tests.
