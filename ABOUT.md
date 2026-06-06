@@ -4,17 +4,11 @@
 
 ---
 
-MOOTx01 is the personal knowledge substrate. It is a family of composable kits that store, search, relate, and reason over a person's knowledge, runs locally, and is owned by the user. A single running instance is a MOOT. The product is GeniusLocusKit in union with the two BrainKits (NeuronKit and CognitionKit).
-
-ARIA is the language inside the product. ARIA expands as Augmented Recall and Inference Architecture. It is the interface specification and its grammar — one noun, nine verbs, four adjective categories — not a server, a library, or a product. ARIA is what makes a MOOT portable and reachable across implementations. ARIA stays open and free for everyone; the user's estate stays private to the user. You do not sell ARIA. You sell MOOTx01, and ARIA is the property that makes it portable and ownable.
-
----
-
-## You've had the moment.
+You've had the moment.
 
 You're three weeks into a project with your AI. You've explained the same constraint four times. You explain it a fifth, and it nods, and on the next prompt it forgets again. Or you come back to the chat that solved the problem last Tuesday and it doesn't know you. Or you switch tools because the new one is supposedly better, and you realize you have to start over. Every preference, every piece of context, every thing your last AI finally understood, gone.
 
-You felt something. A specific kind of frustration. Not at the AI, exactly. At the waste.
+You felt something. A specific kind of anger. Not at the AI, exactly. At the waste.
 
 That feeling has a cause. And the cause has a shape.
 

@@ -9,13 +9,13 @@ relates_to:
   - SUBSTRATEKERNEL_SPEC_v0.8.md  (the contract this interface implements)
   - SUBSTRATETYPES_INTERFACE_v0.8.md  (Layer 1 types this package consumes)
 purpose: |
-  Public API surface of SubstrateKernel in both ports. Eight Swift
+  Public API surface of SubstrateKernel in both ports. Nine Swift
   files publish the `SubstrateKernel` protocol, four concrete kernel
-  backends, the `PortableKernel` dispatch namespace, and three
-  primitives (`BitField`, `SHA256`, `HammingNN`). The Rust mirror
-  exposes the same shapes with Rust-idiomatic names; today only the
-  scalar kernel and portable SIMD ship in Rust (NEON / BNNS / Metal
-  are Swift-specific).
+  backends, the `PortableKernel` dispatch namespace, and four
+  primitives (`BitField`, `SHA256`, `GrantHKDF`, `HammingNN`). The
+  Rust mirror exposes the same shapes with Rust-idiomatic names; today
+  only the scalar kernel and portable SIMD ship in Rust (NEON / BNNS /
+  Metal are Swift-specific).
 ---
 
 # SubstrateKernel Interface
@@ -24,14 +24,15 @@ purpose: |
 
 **Swift:** `packages/libs/SubstrateKernel/`
 
-- `Sources/SubstrateKernel/` — 8 files:
-  - `PortableKernel.swift` — protocol + `ScalarKernel` + dispatch
-  - `PortableKernel-SIMD.swift` — portable SIMD backend
-  - `PortableKernel-NEON.swift` — ARM NEON backend
-  - `PortableKernel-BNNS.swift` — Apple BNNS framework backend
-  - `PortableKernel-Metal.swift` — Metal GPU backend
+- `Sources/SubstrateKernel/` — 9 files:
+  - `PortableKernel.swift` — `SubstrateKernel` protocol + `ScalarKernel`
+    + `KernelKind` + `PortableKernel` dispatch namespace
+  - `PortableKernel-SIMD.swift` — portable SIMD backend (`SimdKernel`)
+  - `PortableKernel-NEON.swift` — ARM NEON backend (`NeonKernel`)
+  - `PortableKernel-Metal.swift` — Metal GPU backend (`MetalKernel`)
   - `BitField.swift` — parametric bit-field primitive
   - `SHA256.swift` — SHA-256 primitive
+  - `HKDF.swift` — RFC 5869 HKDF-SHA256 (`GrantHKDF`)
   - `HammingNN.swift` — Hamming nearest-neighbor primitive
 - `Tests/SubstrateKernelTests/` — unit + conformance.
 - `Package.swift` — depends on `SubstrateTypes`.
@@ -39,16 +40,19 @@ purpose: |
 **Rust:** `packages/libs/SubstrateKernel/rust/`
 
 - `src/lib.rs` — crate root.
-- `src/kernel.rs` — `SubstrateKernel` trait + `ScalarKernel`.
-- `src/kernel_simd.rs` — portable SIMD backend (feature
+- `src/kernel.rs` — `SubstrateKernel` trait + `ScalarKernel` +
+  `KernelKind` + `PortableKernel` dispatch.
+- `src/kernel_simd.rs` — portable SIMD backend (`SimdKernel`, feature
   `simd-nightly`).
-- `src/bit_field.rs`, `src/sha256.rs`, `src/hamming_nn.rs`.
+- `src/bit_field.rs`, `src/sha256.rs`, `src/hkdf.rs`, `src/hamming_nn.rs`.
 - `tests/` — conformance.
 - `Cargo.toml` — depends on `substrate-types`.
 
-Naming differs by port convention (Swift `PortableKernel.dispatch()` /
-Rust `select_kernel()`; Swift `ScalarKernel()` / Rust `ScalarKernel`);
-the *results* are bit-for-bit identical (SPEC § 7, I-7).
+Naming differs by port convention (Swift `PortableKernel.kernelForCurrentPlatform()`
+/ Rust `PortableKernel::for_current_platform()`; Swift `ScalarKernel()` /
+Rust `ScalarKernel::new()`); the *results* are bit-for-bit identical
+(SPEC § 7, I-7). NEON / Metal are Apple-platform-only backends with no
+Rust counterpart; the Rust port covers aarch64 through `SimdKernel`.
 
 ## § 2 — Public types
 
@@ -61,14 +65,24 @@ The dispatch surface. SPEC § 5.1.
 ```swift
 public protocol SubstrateKernel: Sendable {
     var kind: KernelKind { get }
+    func popcount64(_ x: UInt64) -> Int
     func hammingDistance256(_ a: Fingerprint256, _ b: Fingerprint256) -> Int
-    func simhashSign(input: SimHashInput, family: HyperplaneFamily) -> Fingerprint256
     func orReduce256(_ fingerprints: [Fingerprint256]) -> Fingerprint256
-    func xor256(_ a: Fingerprint256, _ b: Fingerprint256) -> Fingerprint256
+    func hammingTopK(probe: Fingerprint256, candidates: [Fingerprint256],
+                     k: Int) -> [(index: Int, distance: Int)]
+    func simhashCompute(subhashes: [UInt64],
+                        families: [HyperplaneFamily]) -> Fingerprint256
+    // Batched variants (default impls loop over the pair-at-a-time ops):
+    func hammingDistanceBatch(probe: Fingerprint256,
+                              candidates: [Fingerprint256]) -> [Int]
+    func simhashBlockBatch(inputs: [[UInt64]], family: HyperplaneFamily) -> [UInt64]
+    func orReduceBatch(batches: [[Fingerprint256]]) -> [Fingerprint256]
+    func countFold256(_ fingerprints: [Fingerprint256]) -> CountVector256
+    func countFoldBatch(batches: [[Fingerprint256]]) -> [CountVector256]
 }
 
 public enum KernelKind: String, Sendable {
-    case scalar, simd, neon, bnns, metal
+    case scalar, simd, neon, metal, avx512, avx2
 }
 ```
 
@@ -76,15 +90,29 @@ public enum KernelKind: String, Sendable {
 
 ```rust
 pub trait SubstrateKernel: Send + Sync {
-    fn kind(&self) -> KernelKind;
+    fn kind(&self) -> KernelKind { KernelKind::Scalar }   // default
+    fn popcount64(&self, x: u64) -> u32;
     fn hamming_distance_256(&self, a: &Fingerprint256, b: &Fingerprint256) -> u32;
-    fn simhash_sign(&self, input: &SimHashInput, family: &HyperplaneFamily) -> Fingerprint256;
     fn or_reduce_256(&self, fingerprints: &[Fingerprint256]) -> Fingerprint256;
-    fn xor_256(&self, a: &Fingerprint256, b: &Fingerprint256) -> Fingerprint256;
+    fn hamming_top_k(&self, probe: &Fingerprint256, candidates: &[Fingerprint256],
+                     k: usize) -> Vec<(usize, u32)>;
+    fn simhash_block(&self, input: &[u64], family: &HyperplaneFamily) -> u64;
+    // batched variants with default impls:
+    fn hamming_distance_batch(&self, probe: &Fingerprint256, candidates: &[Fingerprint256]) -> Vec<u32>;
+    fn simhash_block_batch(&self, inputs: &[Vec<u64>], family: &HyperplaneFamily) -> Vec<u64>;
+    fn or_reduce_batch(&self, batches: &[Vec<Fingerprint256>]) -> Vec<Fingerprint256>;
+    fn count_fold_256(&self, fingerprints: &[Fingerprint256]) -> CountVector256;
+    fn count_fold_batch(&self, batches: &[Vec<Fingerprint256>]) -> Vec<CountVector256>;
 }
 
-pub enum KernelKind { Scalar, Simd, Neon, Bnns, Metal }
+pub enum KernelKind { Scalar, Simd, Neon, Avx512, Avx2 }   // no Bnns/Metal (Apple-only)
 ```
+
+Note the SimHash port idiom: Swift's `simhashCompute(subhashes:families:)`
+takes all four block subhashes and returns the composed 256-bit
+fingerprint; the Rust `simhash_block(input, family)` signs a single
+block (`u64`) and the caller composes the four blocks. Results are
+bit-identical.
 
 ### `ScalarKernel`
 
@@ -108,7 +136,7 @@ impl ScalarKernel { pub fn new() -> Self { Self } }
 impl SubstrateKernel for ScalarKernel { /* pure Rust */ }
 ```
 
-### `SimdKernel`, `NeonKernel`, `BnnsKernel`, `MetalKernel`
+### `SimdKernel`, `NeonKernel`, `MetalKernel`
 
 Hardware-optimized backends. SPEC § 5.3.
 
@@ -117,12 +145,11 @@ Hardware-optimized backends. SPEC § 5.3.
 ```swift
 public struct SimdKernel: SubstrateKernel { public init(); /* impl */ }
 public struct NeonKernel: SubstrateKernel { public init(); /* impl */ }
-public struct BnnsKernel: SubstrateKernel { public init(); /* impl */ }
 public struct MetalKernel: SubstrateKernel { public init?(); /* impl, init? since GPU may be unavailable */ }
 ```
 
-**Rust:** `SimdKernel` only (feature `simd-nightly`); NEON / BNNS /
-Metal Swift-specific by design.
+**Rust:** `SimdKernel` only (feature `simd-nightly`); NEON / Metal
+are Swift-specific Apple-platform backends by design.
 
 ### `PortableKernel`
 
@@ -133,20 +160,33 @@ Selection / dispatch entry. SPEC § 5.3.
 ```swift
 public enum PortableKernel {
     /// Pick the fastest available kernel for the current device.
-    public static func dispatch() -> any SubstrateKernel
-    /// Force selection of a specific kernel (testing).
-    public static func dispatch(force: KernelKind) -> any SubstrateKernel
-    /// List backends available on the current device.
-    public static var available: [KernelKind] { get }
+    /// Emits `substrate.kernel.backend_selected` via IntellectusLib
+    /// when monitoring is enabled; no-op when disabled. (SPEC § 8)
+    public static func kernelForCurrentPlatform() -> SubstrateKernel
+    /// Select a specific kernel kind (testing / forced selection).
+    /// Does NOT emit telemetry — conformance harness selector only.
+    public static func kernel(of kind: KernelKind) -> SubstrateKernel
+    /// Conformance assertion helper: two kernels agree bit-for-bit.
+    public static func assertEqual(_ lhs: SubstrateKernel, _ rhs: SubstrateKernel, /* … */)
+    /// Compile-time architecture tag for telemetry.
+    /// "arm64" / "x86_64" / "other". (SPEC § 8.1)
+    static let currentArchTag: String
 }
 ```
 
-**Rust:**
+**Rust** (`PortableKernel` is a namespace struct, not free functions):
 
 ```rust
-pub fn select_kernel() -> Box<dyn SubstrateKernel>;
-pub fn select_kernel_kind(kind: KernelKind) -> Option<Box<dyn SubstrateKernel>>;
-pub fn available_kernels() -> Vec<KernelKind>;
+impl PortableKernel {
+    /// Emits `substrate.kernel.backend_selected` via the report! macro
+    /// when monitoring is enabled; single atomic load when disabled. (SPEC § 8)
+    pub fn for_current_platform() -> Box<dyn SubstrateKernel>;
+    pub fn of_kind(kind: KernelKind) -> Box<dyn SubstrateKernel>;
+    pub fn assert_equal(lhs: &dyn SubstrateKernel, rhs: &dyn SubstrateKernel, /* … */);
+    /// Compile-time architecture tag for telemetry.
+    /// "aarch64" / "x86_64" / "other". (SPEC § 8.1)
+    pub fn current_arch_tag() -> &'static str;
+}
 ```
 
 ### `BitField`
@@ -157,32 +197,29 @@ Parametric bit-field write/read. SPEC § 5.4.
 
 ```swift
 public enum BitField {
-    public static func writeField(
-        into bitmap: Int64,
-        value: Int64,
-        shift: Int,
-        width: Int
-    ) -> Int64
-    public static func extractField(
-        _ bitmap: Int64,
-        shift: Int,
-        width: Int
-    ) -> Int64
-    public static func maskedEquals(
-        _ a: Int64,
-        _ b: Int64,
-        shift: Int,
-        width: Int
-    ) -> Bool
+    public static func extractField(_ bitmap: Int64, shift: Int, width: Int) -> Int64
+    public static func writeField(_ value: Int64, into bitmap: Int64,
+                                  shift: Int, width: Int) -> Int64
+    public static func maskedEquals(_ bitmap: Int64, mask: Int64, expected: Int64) -> Bool
+    public static func extractFlag(_ bitmap: Int64, bit: Int) -> Bool
+    public static func writeFlag(_ flag: Bool, into bitmap: Int64, bit: Int) -> Int64
+    public static func popcount(_ value: Int64) -> Int
+    public static func hammingDistance(_ a: Int64, _ b: Int64) -> Int
+    public static func xorFold<S: Sequence>(_ values: S) -> Int64 where S.Element == Int64
 }
 ```
 
-**Rust:**
+**Rust** (`src/bit_field.rs`, module free functions):
 
 ```rust
-pub fn write_field(bitmap: i64, value: i64, shift: u32, width: u32) -> i64;
 pub fn extract_field(bitmap: i64, shift: u32, width: u32) -> i64;
-pub fn masked_equals(a: i64, b: i64, shift: u32, width: u32) -> bool;
+pub fn write_field(value: i64, into_bitmap: i64, shift: u32, width: u32) -> i64;
+pub fn masked_equals(bitmap: i64, mask: i64, expected: i64) -> bool;
+pub fn extract_flag(bitmap: i64, bit: u32) -> bool;
+pub fn write_flag(flag: bool, into_bitmap: i64, bit: u32) -> i64;
+pub fn popcount(value: i64) -> i32;
+pub fn hamming_distance(a: i64, b: i64) -> i32;
+pub fn xor_fold<I: IntoIterator<Item = i64>>(values: I) -> i64;
 ```
 
 ### `SHA256`
@@ -193,17 +230,38 @@ SHA-256 primitive. SPEC § 5.5.
 
 ```swift
 public enum SHA256 {
-    public static func hash256(_ data: Data) -> [UInt8]          // 32 bytes
-    public static func hash256(_ bytes: [UInt8]) -> [UInt8]
-    public static func hash256AsFingerprint(_ data: Data) -> Fingerprint256
+    public static func hash(_ bytes: [UInt8]) -> [UInt8]    // 32-byte digest
 }
 ```
 
-**Rust:**
+**Rust** (`src/sha256.rs`, module free function):
 
 ```rust
-pub fn sha256(data: &[u8]) -> [u8; 32];
-pub fn sha256_as_fingerprint(data: &[u8]) -> Fingerprint256;
+pub fn hash(bytes: &[u8]) -> [u8; 32];
+```
+
+### `GrantHKDF`
+
+RFC 5869 HKDF-SHA256 key derivation over the in-repo SHA-256. SPEC
+§ 5.5. Used for grant scope-key derivation (PAR-4-GL1).
+
+**Swift:**
+
+```swift
+public enum GrantHKDF {
+    public static func deriveKey(
+        inputKeyMaterial: [UInt8],
+        salt: String,
+        info: [UInt8],
+        outputByteCount: Int
+    ) -> [UInt8]
+}
+```
+
+**Rust** (`src/hkdf.rs`, module free function):
+
+```rust
+pub fn derive_key(ikm: &[u8], salt: &str, info: &[u8], output_byte_count: usize) -> Vec<u8>;
 ```
 
 ### `HammingNN`
@@ -214,36 +272,44 @@ Hamming nearest-neighbor. SPEC § 5.6.
 
 ```swift
 public struct HammingNNHit: Hashable, Sendable {
-    public let index: Int
+    public let rowID: UUID
     public let distance: Int
+    public init(rowID: UUID, distance: Int)
 }
 
 public enum HammingNN {
-    public static func search(
-        query: Fingerprint256,
-        candidates: [Fingerprint256],
-        topK: Int
-    ) -> [HammingNNHit]
+    // `candidates` iterates (rowID, fingerprint) pairs; `blocks`
+    // defaults to all four for full-256-bit distance.
+    public static func topK<S: Sequence>(
+        anchor: Fingerprint256,
+        candidates: S,
+        k: Int,
+        blocks: BlockMask = .all
+    ) -> [HammingNNHit] where S.Element == (UUID, Fingerprint256)
 }
 ```
 
-**Rust:**
+**Rust** (`src/hamming_nn.rs`, module free function):
 
 ```rust
-pub struct HammingNNHit { pub index: usize, pub distance: u32 }
-pub fn hamming_nn_search(
-    query: &Fingerprint256,
-    candidates: &[Fingerprint256],
-    top_k: usize,
-) -> Vec<HammingNNHit>;
+pub struct HammingNNHit { pub row_id: u128, pub distance: u32 }
+pub fn top_k<I>(
+    anchor: &Fingerprint256,
+    candidates: I,
+    k: usize,
+    blocks: u8,
+) -> Vec<HammingNNHit>
+where I: IntoIterator<Item = (u128, Fingerprint256)>;
 ```
 
 ## § 3 — Public functions
 
 All operations on this package are methods on the `SubstrateKernel`
 protocol implementations or static functions on the primitive
-namespaces (`BitField`, `SHA256`, `HammingNN`). No free top-level
-functions outside those surfaces.
+namespaces (`BitField`, `SHA256`, `GrantHKDF`, `HammingNN`). No free
+top-level functions outside those surfaces. (In the Rust port these
+namespaces are modules of free functions: `bit_field::`, `sha256::`,
+`hkdf::`, `hamming_nn::`.)
 
 ## § 4 — Errors
 
@@ -254,10 +320,11 @@ reaching a kernel call.
 ## § 5 — Conformance test entry points
 
 - **Swift:** `Tests/SubstrateKernelTests/`
-  - `KernelConformanceTests.swift` — every backend × every operation
-    × shared vectors
+  - `PortableKernelTests.swift` — every backend × every operation
+    × shared vectors (dispatcher, conformance, count-fold, top-K)
   - `BitFieldTests.swift` — round-trip vectors, K-4 preservation
-  - `SHA256Tests.swift` — RFC 6234 + substrate-specific vectors
+  - `SHA256Tests.swift` — NIST FIPS 180-4 vectors
+  - `HKDFTests.swift` — RFC 5869 vectors + grant scope-key vector
   - `HammingNNTests.swift` — top-K vectors, tie-breaking order
 - **Rust:** `tests/kernel_conformance.rs`, plus per-module
   `#[cfg(test)] mod tests` blocks.
@@ -269,49 +336,49 @@ import SubstrateTypes
 import SubstrateKernel
 
 // Dispatch the best available kernel for the device.
-let kernel = PortableKernel.dispatch()
-let a = Fingerprint256(words: (0x1, 0, 0, 0))
-let b = Fingerprint256(words: (0xff, 0, 0, 0))
+let kernel = PortableKernel.kernelForCurrentPlatform()
+let a = Fingerprint256(block0: 0x1, block1: 0, block2: 0, block3: 0)
+let b = Fingerprint256(block0: 0xff, block1: 0, block2: 0, block3: 0)
 let d = kernel.hammingDistance256(a, b)
 
 // Force-select the scalar reference (testing).
-let scalar = PortableKernel.dispatch(force: .scalar)
+let scalar = PortableKernel.kernel(of: .scalar)
 let dScalar = scalar.hammingDistance256(a, b)
 assert(d == dScalar, "I-7 conformance: every backend matches scalar")
 
 // BitField operation: write the state field (bits 0-5) of a
 // drawer's adjective bitmap.
 let priorAdj: Int64 = 0x0000_0000_0000_0040  // bit 6 set
-let nextAdj = BitField.writeField(into: priorAdj, value: 33, shift: 0, width: 6)
+let nextAdj = BitField.writeField(33, into: priorAdj, shift: 0, width: 6)
 let stateField = BitField.extractField(nextAdj, shift: 0, width: 6)
 assert(stateField == 33)
 
-// SHA-256 over an audit-event payload.
-let payload = Data("capture|<rowId>|<hlc>".utf8)
-let id = SHA256.hash256AsFingerprint(payload)
+// SHA-256 over an audit-event payload (32-byte digest).
+let payload = Array("capture|<rowId>|<hlc>".utf8)
+let id = SHA256.hash(payload)
 
-// Hamming nearest neighbor over a candidate set.
-let query = Fingerprint256(words: (0, 0, 0, 0))
-let candidates = [a, b, query]
-let hits = HammingNN.search(query: query, candidates: candidates, topK: 2)
-// hits[0].index == 2 (the query itself), hits[0].distance == 0
+// Hamming nearest neighbor over a (rowID, fingerprint) candidate set.
+let q = Fingerprint256.zero
+let candidates: [(UUID, Fingerprint256)] = [(UUID(), a), (UUID(), b), (UUID(), q)]
+let hits = HammingNN.topK(anchor: q, candidates: candidates, k: 2)
+// hits[0] is the exact self-match (distance == 0)
 ```
 
 ```rust
 use substrate_types::Fingerprint256;
-use substrate_kernel::{select_kernel, bit_field, sha256, hamming_nn};
+use substrate_kernel::{PortableKernel, bit_field, sha256};
 
-let kernel = select_kernel();
-let a = Fingerprint256::from_words((0x1, 0, 0, 0));
-let b = Fingerprint256::from_words((0xff, 0, 0, 0));
+let kernel = PortableKernel::for_current_platform();
+let a = Fingerprint256::new(0x1, 0, 0, 0);
+let b = Fingerprint256::new(0xff, 0, 0, 0);
 let d = kernel.hamming_distance_256(&a, &b);
 
 let prior_adj: i64 = 0x0000_0000_0000_0040;
-let next_adj = bit_field::write_field(prior_adj, 33, 0, 6);
+let next_adj = bit_field::write_field(33, prior_adj, 0, 6);
 let state_field = bit_field::extract_field(next_adj, 0, 6);
 assert_eq!(state_field, 33);
 
-let id = sha256::sha256_as_fingerprint(b"capture|<rowId>|<hlc>");
+let id = sha256::hash(b"capture|<rowId>|<hlc>");
 ```
 
 ## Swift/Rust Concordance
@@ -329,7 +396,7 @@ differences, not drift.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
 | Kernel dispatch contract | `SubstrateKernel` protocol — `PortableKernel.swift:49` | `SubstrateKernel` trait — `rust/src/kernel.rs:14` | public / `pub` | Swift `protocol: Sendable` / Rust `trait: Send + Sync`; Swift `Int` returns, Rust `u32`; Swift `simhashCompute(subhashes:families:) -> Fingerprint256` (4-block) / Rust `simhash_block(input,family) -> u64` (single block, caller composes 4) — sanctioned idiom split | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference bit-for-bit" — `PortableKernelTests.swift:270` / Rust per-module `#[cfg(test)] mod tests` in `kernel.rs` | Confirmed |
-| Kernel kind tag | `KernelKind` enum — `PortableKernel.swift:231` | `KernelKind` enum — `rust/src/kernel.rs:182` | public / `pub` | Swift `String`-raw cases `scalar/simd/neon/bnns/metal/avx512/avx2`; Rust cases `Scalar/Simd/Neon/Avx512/Avx2` (no `Bnns`/`Metal` — those are Apple-only backends with no Rust kernel). Case-name idiom lowercase vs CamelCase. Rust adds `parse`/`as_str` string round-trip; Swift uses raw value | `PortableKernelDispatcherTests` "of_kind(.scalar)…" / "for_current_platform picks SIMD on arm64" — `PortableKernelTests.swift:108,125` | Confirmed |
+| Kernel kind tag | `KernelKind` enum — `PortableKernel.swift:231` | `KernelKind` enum — `rust/src/kernel.rs:182` | public / `pub` | Swift `String`-raw cases `scalar/simd/neon/metal/avx512/avx2`; Rust cases `Scalar/Simd/Neon/Avx512/Avx2` (no `Metal` — Apple-only backend with no Rust kernel). Case-name idiom lowercase vs CamelCase. Rust adds `parse`/`as_str` string round-trip; Swift uses raw value | `PortableKernelDispatcherTests` "of_kind(.scalar)…" / "for_current_platform picks SIMD on arm64" — `PortableKernelTests.swift:108,125` | Confirmed |
 | Scalar reference kernel | `ScalarKernel` struct — `PortableKernel.swift:166` | `ScalarKernel` struct — `rust/src/kernel.rs:108` | public / `pub` | Swift `init()` / Rust `new()` + `Default`. The canonical oracle both ports gate against | `PortableKernelConformanceTests` (scalar is the oracle) — `PortableKernelTests.swift:270`; Rust conformance `#[cfg(test)]` in `kernel.rs` | Confirmed |
 | Portable SIMD kernel | `SimdKernel` struct — `PortableKernel-SIMD.swift:39` | `SimdKernel` struct — `rust/src/kernel_simd.rs:44` | public / `pub` | Swift `import simd` (always built) / Rust gated behind `simd-nightly` Cargo feature (`#![cfg(feature = "simd-nightly")]`); both compile to NEON on aarch64. Behavior byte-identical to scalar | `PortableKernelCountFoldTests` "SIMD count-fold matches scalar…" / `PortableKernelDispatcherTests` "of_kind(.simd)…" — `PortableKernelTests.swift:176,113` | Confirmed |
 | Kernel selection / dispatch entry | `PortableKernel` enum (namespace) — `PortableKernel.swift:241` | `PortableKernel` struct (namespace) — `rust/src/kernel.rs:224` | public / `pub` | Swift `enum` of `static func`s: `kernelForCurrentPlatform()`, `kernel(of:)`; Rust `struct` with assoc fns `for_current_platform() -> Box<dyn …>`, `of_kind(KernelKind) -> Box<dyn …>`. Swift returns `SubstrateKernel` existential / Rust `Box<dyn SubstrateKernel>` — sanctioned port idiom | `PortableKernelDispatcherTests` "for_current_platform picks SIMD on arm64, scalar elsewhere" — `PortableKernelTests.swift:125` | Confirmed |
@@ -339,7 +406,6 @@ differences, not drift.
 | Hamming-NN top-K search | `HammingNN` enum (namespace) — `HammingNN.swift:51` | `hamming_nn` module — `rust/src/hamming_nn.rs` (free fn `top_k:67`) | public / `pub` | Swift `HammingNN.topK(anchor:candidates:k:blocks:) -> [HammingNNHit]` / Rust `hamming_nn::top_k(anchor,candidates,k,blocks) -> Vec<HammingNNHit>`. Swift `blocks: BlockMask` / Rust `blocks: u8` bitmask — same block semantics, type idiom. Concept anchored on Swift `HammingNN` enum | `HammingNNTests` "top-1 finds the exact self-match" / "top-K sorted ascending" — `HammingNNTests.swift:20`; `HammingNNTopKTieBreakTests:14` / Rust `top_one_finds_self`, `top_k_returns_sorted_ascending` in `hamming_nn.rs:132` | Confirmed |
 | Hamming-NN hit record | `HammingNNHit` struct — `HammingNN.swift:32` | `HammingNNHit` struct — `rust/src/hamming_nn.rs:37` | public / `pub` | Swift `rowID: UUID` + `distance: Int` (`Hashable, Sendable`) / Rust `row_id: u128` + `distance: u32` (`Ord`/`PartialOrd` for heap+sort). UUID ↔ u128 and Int ↔ u32 are sanctioned port idioms; tie-break is rowID/row_id ascending in both (UUID string order and u128 order agree on conformance IDs) | `HammingNNTopKTieBreakTests` "equal-distance hits return in rowID-ascending order" — `HammingNNTopKTieBreakTests.swift:22` / Rust `top_k_returns_sorted_ascending` — `hamming_nn.rs:153` | Confirmed |
 | NEON kernel backend | `NeonKernel` struct — `PortableKernel-NEON.swift:39` | none — `import simd` Apple-Silicon NEON lane (no `pub` Rust kernel; Rust covers aarch64 via `SimdKernel` under `simd-nightly`) | public / — | Rust: none — Apple-Silicon `import simd` platform binding; the Rust port's aarch64 NEON path is `SimdKernel`, not a distinct `NeonKernel`. No separate cross-port contract type | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Exempt |
-| BNNS kernel backend | `BnnsKernel` struct — `PortableKernel-BNNS.swift:176` | none — Apple `Accelerate`/BNNS framework (`#if canImport(Accelerate)`) | public / — | Rust: none — Apple platform binding (Accelerate/BNNS is an Apple-only system framework; the Rust port uses scalar + portable SIMD) | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Exempt |
 | Metal GPU kernel backend | `MetalKernel` struct — `PortableKernel-Metal.swift:109` | none — Apple `Metal` framework (`#if canImport(Metal)`, `init?` since GPU may be unavailable) | public / — | Rust: none — Apple platform binding (Metal is an Apple-only GPU system framework; the Rust port uses scalar + portable SIMD). Already on the audit ignore-list | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Exempt |
 
 ### Concordance notes
@@ -348,16 +414,18 @@ differences, not drift.
   interface cited symbols that do not exist in source (e.g.
   `xor256`/`xor_256` and `simhashSign`/`simhash_sign` on the protocol;
   `SHA256.hash256` / `hash256AsFingerprint`; `BitField.writeField(into:value:…)`
-  arg order; `select_kernel()` free fns). The concordance above is anchored
-  on the SHIPPED symbols read at the cited `file:line`. The legacy §2 code
-  blocks are illustrative and known-stale; the concordance table is the
-  read-anchored source of truth for the public surface.
+  arg order; `select_kernel()` free fns). The §2 code blocks above have
+  been corrected to the SHIPPED symbols read at the cited `file:line`;
+  this concordance table is the read-anchored source of truth and §2 now
+  agrees with it.
 - **Apple-platform exemptions.** `MetalKernel` (already on the audit
-  ignore-list), `BnnsKernel` (Accelerate/BNNS), and `NeonKernel` (`import
-  simd` Apple-Silicon lane) are Apple platform bindings with no distinct
-  Rust kernel type — the Rust port covers aarch64 through `SimdKernel`
-  under the `simd-nightly` feature plus the scalar fallback. They carry
-  Exempt rows here. `BnnsKernel` and `NeonKernel` are proposed for the
-  shared ignore-list (orchestrator applies); their Exempt rows already
-  satisfy the audit by name presence.
+  ignore-list) and `NeonKernel` (`import simd` Apple-Silicon lane) are
+  Apple platform bindings with no distinct Rust kernel type — the Rust
+  port covers aarch64 through `SimdKernel` under the `simd-nightly`
+  feature plus the scalar fallback. They carry Exempt rows here.
+  `NeonKernel` is proposed for the shared ignore-list (orchestrator
+  applies); its Exempt row already satisfies the audit by name presence.
+  `BnnsKernel` was removed from the tree on 2026-06-06 after measurement
+  confirmed it is slower than SimdKernel on every op and its BNNSGraph
+  matmul path crashes on macOS 26.5.
 

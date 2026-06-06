@@ -52,10 +52,10 @@ let package = Package(
         .executable(name: "sidecar-demo", targets: ["sidecar-demo"]),
     ],
     dependencies: [
-        .package(name: "ARIA_MCP", path: "../../apps/ARIA_MCP"),
-        .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
-        .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
-        .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
+        .package(name: "ARIA_MCP", path: "../ARIA_MCP"),
+        .package(name: "GeniusLocusKit", path: "../GeniusLocusKit"),
+        .package(name: "LocusKit", path: "../LocusKit"),
+        .package(name: "PersistenceKit", path: "../PersistenceKit"),
     ],
     targets: [
         .target(

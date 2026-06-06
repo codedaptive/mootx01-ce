@@ -604,20 +604,6 @@ Mathematical guarantee: setting `γ=0` reduces the system to pure vector + BM25 
 
 We don't take the math at face value. The Rev 1.x benchmark cycle (§13) sweeps `γ ∈ [0.0, 0.5]` against the LongMemEval-S held-out split (NOT the dev split, NOT the full split with the 17-question controversy) and picks the value that maximizes recall@5. If the answer is `γ=0`, hierarchy provides no signal on this benchmark and we configure default to 0. We're honest about whatever the data shows.
 
-### 8.4 Label-embedding as Pattern 3 (deferred to Rev 1.x)
-
-A second pattern that lets hierarchy help: prepend `[wing: X] [room: Y]` to the drawer's content before embedding. The embedding model treats the hierarchy as semantic content — queries that mention the room name land closer to its drawers naturally. This is free at query time; the cost is at ingest.
-
-We defer to Rev 1.x because:
-
-- It changes ingest behavior, so changing it later requires re-embedding the whole corpus.
-- The boost-as-rerank pattern (§8.1–8.2) gives most of the benefit with no ingest-time commitment.
-- We want empirical numbers from the boost variant before adding label-embedding on top.
-
-If Rev 1.x experimentation shows label-embedding adds another point or two of recall, we add it as a Rev 2.0 ingest option with a one-time re-embed migration tool.
-
----
-
 ## 9. Ingest pipeline — the directory walker
 
 ### 9.1 What `nexus-mcp mine` does
@@ -689,14 +675,6 @@ Every drawer carries:
 ### 9.5 Resume-safety detail
 
 The miner writes a `.mining-progress` row to the `meta` table at each batch commit, recording the mine root and the file path it last processed. On restart, the miner reads this row and skips files lexicographically before that path. This is sufficient because the walk order is deterministic (alphabetical within each directory level via Foundation's `enumerator`).
-
-### 9.6 What's deferred
-
-- **Apple ecosystem ingest sources** (Calendar, Mail, Contacts, Messages with consent) — Q22 from scope. Each source has its own permission flow and EventKit/EKEventStore plumbing. Rev 3.x once iOS variant exists.
-- **PDF/Office document extraction** — needs PDFKit / NSAttributedString parsing. Rev 1.x via a separate `nexus-mcp mine --documents` subcommand with extension-specific handlers.
-- **Spotlight integration on macOS** — let Spotlight tell us what's indexable. Rev 2.x stretch goal.
-
----
 
 ## 10. MemPalace compatibility and migration
 
@@ -1232,44 +1210,6 @@ Day 2:
 ```
 
 The critical path is LOCI-3 → LOCI-5 → LOCI-7 → LOCI-8. If LOCI-3 (CorpusKit) lands fast, the rest pipelines smoothly.
-
----
-
-## 17. Open questions and known risks
-
-### 17.1 Open questions for Bob
-
-| # | Question | Default |
-|---|---|---|
-| Q22 | Case 2 standalone-app general-purpose RAG ingest sources — Calendar, Mail, Contacts via consent flows; Spotlight; ad-hoc folders. Which first? Defer to Rev 3.0 mission spec. | folders + .gitignore-aware miner shipped Rev 1.0; everything else Rev 3.0 |
-| Q23 | Domain-based security model — wing-level access tokens vs entitlement-based gating. Defer to Rev 3.x mission spec. | wing-level via cap key scoping |
-| Q30 | MCP installation — Homebrew formula, signed pkg installer, ship inside Nexus.app helper bundle, or all of the above? Rev 1.x decision. | start with raw binary + manual config edit; Homebrew formula in Rev 1.x |
-| Q31 | EmbeddingGemma quantization default — int4 (smaller, faster, ~1pt recall loss) or fp16 (full quality, larger). Rev 1.x measure-and-decide. | int4 default for Rev 1.0 ship; revisit after benchmarks |
-| Q32 | Should `loci_get_aaak_spec` actually return the AAAK spec doc, or just be a stub for MemPalace-compatibility namespace? | return the spec, port from MemPalace's `dialect.py` constants |
-| Q33 | Cross-encoder reranker model — `ms-marco-MiniLM-L-6-v2` is the obvious pick but there are larger/better options. Rev 1.x decision. | `ms-marco-MiniLM-L-6-v2` for Rev 1.x, evaluate alternatives |
-
-### 17.2 Known technical risks
-
-**EmbeddingGemma CoreML conversion** — September-2025 model on Gemma 3 architecture. Conversion is doable; the transformer-style attention is well-understood by Apple's `coremltools`. Risk is in tokenizer handling — Gemma uses a SentencePiece-style tokenizer that needs to ship as a separate artifact alongside the `.mlmodelc`. Time budget: 4–8 hours of one Bilby stream. Mitigation: LOCI-2 (MiniLM only) ships first to validate the conversion path; LOCI-4 (mpnet + EmbeddingGemma) follows.
-
-**RAG-1 mystery** — The task record TASK-NEX-2026-0004 is marked `status: "merged"` but no commits touch `CorpusKit/` on develop. Investigation needed before LOCI-3 dispatches. Possible causes: mission was abandoned, mission was completed on a different branch that wasn't pushed, task record was prematurely marked merged. Skippy reads the recovery notes and the mission spec carefully before re-dispatching; if CorpusKit code does exist somewhere we should locate and resurrect rather than rebuild. (Action item for Skippy: investigate before LOCI-3 mission goes out. Outcome captured as a note in the LOCI-3 mission spec.)
-
-**MCP Swift library** — there's no first-party Apple MCP library. We either: (a) hand-roll a stdio MCP server (~300 lines, well-bounded, MCP protocol is straightforward JSON-RPC), or (b) use a community Swift MCP package if one exists with a license we like. LOCI-7 mission spec investigates and chooses; if hand-rolled, the implementation is small enough to live entirely inside ARIA_MCP.
-
-**Concurrent Bilby streams hitting the same Package.swift** — LOCI-1 and LOCI-3 both need to add new Swift Package files; they don't conflict on Package.swift directly because each ships a separate Package.swift in its own subdirectory. LOCI-7 introduces the new executable target and may need to touch an existing Package.swift — that's the one mission with cross-stream serialization risk. The dispatch ordering above handles it (LOCI-7 runs after the embedding-side streams have stabilized).
-
-**Cross-encoder addition to default pipeline** — If Rev 1.x finds the cross-encoder is "always on" worthy, we re-evaluate the default-OFF stance. Latency budget allows it; the question is whether the extra recall justifies the per-query cost.
-
-### 17.3 What we're explicitly choosing not to ship
-
-These were considered and rejected for Rev 1.0:
-
-- **iCloud Drive sync of the SQLite file.** Corruption risk from WAL desync during sync. CKSyncEngine in Rev 2.x is the right path.
-- **Core Data + CloudKit.** Forces Core Data over our SQLite; fights sqlite-vec virtual tables. Wrong abstraction.
-- **AAAK as a search mode.** Empirically regressive on benchmarks. Harness only.
-- **Hard wing/room WHERE filters as default.** Recall regression. Available via opt-in `strictHierarchy: true` flag, documented as anti-pattern.
-- **Bundling all three embedding models on every install.** Increases binary size unnecessarily. Rev 1.x lazy-download or build-time selection (config + just-in-time CoreML compilation). Rev 1.0 ships with all three for simplicity, accepting the ~750 MB bundled-model cost.
-- **Real-time streaming search results.** MCP supports streaming; we don't use it for search because the latency budget is small enough that batching the full result is simpler. Revisit Rev 1.x if measured cold-start dominates.
 
 ---
 

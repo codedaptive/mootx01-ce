@@ -372,4 +372,59 @@ which is data so a conformance harness checks both ports agree:
 
 ---
 
+## § cp-locuskit-report — Self-report telemetry
+
+Added: 2026-06-06 (cp-locuskit-report). `DrawerStore` (via `DrawerStoreCore`)
+now emits `locuskit.*` metrics via IntellectusLib when monitoring is enabled.
+Off by default (the global enabled gate is `false`); the off-path cost is
+one `AtomicBool` load + branch per emit site (~1 ns, negligible).
+
+**Design invariant:** telemetry MUST NOT affect results. All nine emit sites
+return byte-identical values whether monitoring is on or off. The emit call is
+placed after the operation completes, at the operation boundary; it never
+participates in the result computation path.
+
+### Metrics emitted
+
+| Metric name | Value | Tags | Emitted by |
+|---|---|---|---|
+| `locuskit.drawer.capture_latency_ms` | Wall time for the `addDrawer` round-trip (ms) | `estate=<UUID>` | `addDrawer` / `add_drawer` |
+| `locuskit.drawer.capture_count` | 1.0 per successful capture | `estate=<UUID>` | `addDrawer` / `add_drawer` |
+| `locuskit.drawer.query_latency_ms` | Wall time for the drawer query (ms) | `estate=<UUID>`, `query=<label>` | `drawersIn(wing:)`, `drawersIn(wing:room:)`, `allDrawers()` |
+| `locuskit.drawer.query_result_count` | Drawer rows returned (f64) | `estate=<UUID>`, `query=<label>` | `drawersIn(wing:)`, `drawersIn(wing:room:)`, `allDrawers()` |
+| `locuskit.kgfact.add_count` | 1.0 per successful KGFact insert | `estate=<UUID>` | `addKGFact` / `add_kg_fact` |
+| `locuskit.kgfact.query_result_count` | KGFact rows returned (f64) | `estate=<UUID>`, `query=<label>` | `kgFacts(forDrawerID:)`, `allKGFacts()` |
+| `locuskit.tunnel.add_count` | 1.0 per successful tunnel insert | `estate=<UUID>` | `addTunnel` / `add_tunnel` |
+
+### Tags
+
+- `estate`: UUID string of the estate. Every metric carries this tag so
+  per-estate statistics are queryable. Tests filter by estate tag to isolate
+  emissions across concurrent test suites.
+- `query`: short label identifying the query variant. Present on all query
+  metrics. Values: `"wing"` (`drawersIn(wing:)`), `"wing_room"`
+  (`drawersIn(wing:room:)`), `"all"` (`allDrawers()`, `allKGFacts()`),
+  `"drawer"` (`kgFacts(forDrawerID:)`).
+
+### Off-path cost
+
+When monitoring is disabled (the default):
+- Swift: `Intellectus.report(_:)` evaluates its `@autoclosure` argument
+  only when `_enabled.load(.relaxed) == true`. One atomic load + branch.
+  `Date().timeIntervalSince1970` start-time captures in `addDrawer` and
+  `drawersIn` are unconditional (one `Date()` call per operation on the
+  disabled path).
+- Rust: the `report!` macro expands to `if Intellectus::is_enabled() { … }`.
+  One `AtomicBool::load(Acquire)` + branch. `Instant::now()` captures in
+  `add_drawer` and `drawers_in_wing` are unconditional.
+
+### Parity
+
+The Swift and Rust ports emit the same seven metric names with the same
+tag keys and values. The `ts` field is epoch seconds (f64) in both ports.
+Value semantics: latency_ms is wall-clock milliseconds (f64); count metrics
+are f64 with integer values.
+
+---
+
 *End of LocusKit Specification v0.8.*

@@ -698,3 +698,69 @@ It is bit-for-bit conformance-gated:
   Both ports (Swift SubstrateML and Rust `substrate_ml`) must
   reproduce all metrics bit-for-bit. `conviction == +infinity`
   is encoded as IEEE-754 `+Inf` (`0x000000000000f07f` LE).
+
+## § 8 — VizGraph telemetry layer
+
+SubstrateML's five graph-analytic algorithms emit IntellectusLib telemetry
+signals at their result boundary. This is the **VizGraph layer** — the
+set of signals the moot-mgr Topology view reads to visualize graph-analytic
+results in real time.
+
+### § 8.1 Design principles
+
+- **Off by default.** Monitoring is disabled at process start. The
+  off-path cost is a single atomic-bool load plus a branch (~1 ns).
+  The result value is bit-identical whether monitoring is enabled or
+  disabled — the emit is a pure side-effect that does not alter outputs.
+
+- **Caller-supplied timestamps.** The `ts: Double` parameter is the
+  caller's wall-clock epoch time. SubstrateML never reads a clock
+  internally per invariant ML-1 (every algorithm here is pure).
+
+- **Estate tagging.** The `estate: String` parameter is forwarded to
+  the metric's `tags` dictionary. Callers at the substrate layer pass
+  `""` when no estate context is available; kit-layer callers
+  (LocusKit, GeniusLocusKit) pass the estate identifier.
+
+### § 8.2 The five VizGraph signals
+
+| Metric name              | Algorithm                       | Value                  | Tags                                              |
+|--------------------------|--------------------------------|------------------------|--------------------------------------------------|
+| `community.assignment`   | `CommunityDetection.detect`    | community count        | estate, node_count, community_count              |
+| `centrality.score`       | `EigenvalueCentrality.compute` | 1.0 (completion)       | estate, node_count, iterations_to_convergence    |
+| `nmf.factor`             | `NMFAlternatingLeastSquares.factorize` | final reconstruction error | estate, rows, cols, rank            |
+| `anomaly.flag`           | `AnomalyDetection.rollingZScore` / `rollingModifiedZScore` | abs(z-score) | estate, method, window_size |
+| `edge.decayed_weight`    | `MatrixDecay.apply`            | applied decay factor   | estate, matrix_rows, matrix_cols, elapsed_seconds|
+
+Canonical metric name constants live in `VizGraphSignals.swift` (Swift)
+and `viz_graph_signals.rs` (Rust). The string values are identical across
+both ports.
+
+### § 8.3 Emit site contract
+
+Each algorithm emits exactly one sample per call when monitoring is
+enabled. Early-return paths behave as follows:
+
+- `CommunityDetection.detect`: empty input → returns immediately with
+  no emit (no graph, no community signal to report).
+- `MatrixDecay.apply`: `dt == 0` (no time elapsed) → emits one sample
+  with `value = 1.0` (identity factor, elapsed_seconds="0"). This
+  distinguishes "the daemon checked but found no work" from "the daemon
+  never ran."
+
+All other algorithms: one sample unconditionally when monitoring is enabled.
+
+### § 8.4 Dependency
+
+IntellectusLib is a declared dependency of SubstrateML
+(authority: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
+The VizGraph emit is the only use of IntellectusLib in this package.
+
+### § 8.5 Conformance
+
+The emit does not affect algorithm outputs. The conformance requirement
+for each algorithm (§ 7) is extended to include a monitoring conformance
+check: the algorithm must produce bit-identical output when called with
+monitoring enabled versus disabled, for the same inputs and seed. This is
+verified by the `conformance*` tests in `VizGraphSignalsTests.swift` and
+`viz_graph_signals_tests.rs`.

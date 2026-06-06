@@ -260,11 +260,15 @@ binding; the catalog descriptor matches the Swift values (§ 7).
 
 ## § 6 — Reasoning-lens recipes (SPEC § 4.2)
 
-The fourteen lens recipes. **Rust signatures are shipped** in
-`packages/kits/CognitionKit/rust/src/*_recipe.rs`. The **Swift versions are
-the contracted target (SPEC C-7) and are not yet authored** — each must be
-written before its lens can graduate into the catalog (SPEC § 8). They are
-listed here as the surface both versions must converge on.
+The fourteen lens recipes. **Both ports are authored** (SPEC C-7): the
+Rust signatures ship in `packages/kits/CognitionKit/rust/src/*_recipe.rs`
+and the Swift versions ship as caseless-`enum` namespaces with a
+`public static func run` in `Sources/CognitionKit/*.swift` (each `…Lens`
+or bare-name enum; see the concordance below for the per-lens symbol and
+test binding). The Rust signatures are reproduced below as the canonical
+shape both ports converge on; the Swift entry points mirror them per the
+sanctioned Swift-namespace ↔ Rust-free-`run_*`-fn idiom (concordance
+naming-pattern note).
 
 Every lens `run_*` takes the estate coordinator and handle, a recall frame
 or wing/anchor, lens-specific parameters, and (where it recalls) a `now`;
@@ -427,8 +431,14 @@ pub fn recipe_names() -> Vec<String>;
 
 The descriptor strings and field shape match across versions byte-for-byte
 (SPEC § 8, C-8). The catalog lists exactly the recipes present in both
-versions — today **grounded_synthesis** and **migration_benchmark**; a lens
-recipe enters only when both versions land together (SPEC § 8).
+versions; a recipe enters only when both ports land together (SPEC § 8).
+Today that is all nineteen shipped recipes: the two foundational recipes
+**grounded_synthesis** and **migration_benchmark**, the fourteen reasoning
+lenses (`keystones`, `constellation`, `free_association`, `latent_themes`,
+`theme_weather`, `bias`, `drift`, `contradiction`, `trust_grounded_synthesis`,
+`partial_cue_recall`, `anticipate`, `tunnel_successor`, `mind_overlap`,
+`estate_divergence`), and the three knowledge-discovery recipes
+`association_rules`, `apriori_rules`, and `formal_concepts`.
 
 ---
 
@@ -475,11 +485,11 @@ every row, so it is stated once here rather than repeated:
 | Capability set | `NeuronKitCapability` enum (`NeuronKitCapability.swift:34`) | `NeuronKitCapability` enum (`capability.rs:19`) | public both | 8 cases; camelCase ↔ PascalCase; `rawValue`/`raw_value` strings match byte-for-byte | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
 | Shipped capabilities | `shippedNeuronKitCapabilities` let (`NeuronKitCapability.swift:81`) | `shipped_capabilities()` fn (`capability.rs:82`) | public both | Swift constant `Set` / Rust fn returning `Vec` (same membership) | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
 | Capability verify | `verifyCapabilities(...)` fn (`NeuronKitCapability.swift:93`) | `verify_capabilities(...)` fn (`capability.rs:93`) | public both | Swift `throws` / Rust `Result` — deterministic first-missing order matches | `NeuronKitCapabilityTests.swift` + `capability.rs #[cfg(test)]` | Confirmed |
-| Recipe error | `RecipeError` enum (`RecipeError.swift:24`) | `RecipeError` enum (`error.rs:14`) | public both | 6 cases — names, payloads, `description`/`Display` strings match byte-for-byte | `RecipeErrorTests.swift` + `error.rs #[cfg(test)]` (case-mirror gate) | Confirmed |
-| Substrate error | `SubstrateError` struct (`RecipeRunError.swift:36`) | `SubstrateError` struct (`error.rs:98`) | public both | `operation: String, detail: String`; `"SubstrateError.{op}: {detail}"` | `RecipeRunErrorTests.swift` + `error.rs #[cfg(test)]` | Confirmed |
-| Run-error wrapper | `RecipeRunError` enum (`RecipeRunError.swift:70`) | `RecipeRunError` enum (`error.rs:131`) | public both | 2 cases `.recipe`/`.substrate`; Swift `init`+`asRunError`, Rust `From` impls | `RecipeRunErrorTests.swift` (15) + `error.rs #[cfg(test)]` (case-mirror gate) | Confirmed |
+| Recipe error | `RecipeError` enum (`RecipeError.swift:24`) | `RecipeError` enum (`error.rs:18`) | public both | 6 cases — names, payloads, `description`/`Display` strings match byte-for-byte | `RecipeErrorTests.swift` + `error.rs #[cfg(test)]` (case-mirror gate) | Confirmed |
+| Substrate error | `SubstrateError` struct (`RecipeRunError.swift:36`) | `SubstrateError` struct (`error.rs:102`) | public both | `operation: String, detail: String`; `"SubstrateError.{op}: {detail}"` | `RecipeRunErrorTests.swift` + `error.rs #[cfg(test)]` | Confirmed |
+| Run-error wrapper | `RecipeRunError` enum (`RecipeRunError.swift:70`) | `RecipeRunError` enum (`error.rs:135`) | public both | 2 cases `.recipe`/`.substrate`; Swift `init`+`asRunError`, Rust `From` impls | `RecipeRunErrorTests.swift` (15) + `error.rs #[cfg(test)]` (case-mirror gate) | Confirmed |
 | Recipe descriptor | `RecipeDescriptor` struct (`RecipeCatalog.swift:21`) | `RecipeDescriptor` struct (`catalog.rs:20`) | public both | identical fields; Rust serde-renames `required_capabilities`→`requiredCapabilities` | `RecipeCatalogTests.swift` + `catalog.rs #[cfg(test)]` | Confirmed |
-| Catalog accessors | `RecipeCatalog` enum (`RecipeCatalog.swift:57`) | `recipe_catalog()` / `recipe_descriptor(_)` / `recipe_names()` (`catalog.rs:33,200,206`) | public both | Swift enum-namespace static members / Rust free fns; descriptor strings byte-for-byte | `RecipeCatalogTests.swift` + `catalog.rs #[cfg(test)]` | Confirmed |
+| Catalog accessors | `RecipeCatalog` enum (`RecipeCatalog.swift:57`) | `recipe_catalog()` / `recipe_descriptor(_)` / `recipe_names()` (`catalog.rs:33,208,214`) | public both | Swift enum-namespace static members / Rust free fns; descriptor strings byte-for-byte | `RecipeCatalogTests.swift` + `catalog.rs #[cfg(test)]` | Confirmed |
 
 ### Foundational recipes (SPEC § 4.1)
 
@@ -513,10 +523,9 @@ every row, so it is stated once here rather than repeated:
 
 ### Reasoning-lens recipes (SPEC § 4.2)
 
-> NOTE — supersedes § 6: the prior § 6 claim "the Swift lens versions
-> are not yet authored" is **STALE**. All fourteen lenses are authored
-> in both ports today (Swift caseless-`enum` namespaces with a
-> `public static func run`; Rust free `run_*` fns).
+> NOTE: all fourteen lenses are authored in both ports (Swift
+> caseless-`enum` namespaces with a `public static func run`; Rust free
+> `run_*` fns), as § 6 states. Each row below is read-anchored to both.
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
@@ -538,7 +547,7 @@ every row, so it is stated once here rather than repeated:
 | Partial-cue recall (associative) | `PartialCueRecall` enum (`PartialCueRecall.swift:62`) | `run_partial_cue_recall` fn (`feels_like_recipe.rs:59`) | public both | Swift enum-namespace `static run` / Rust free fn | `PartialCueRecallTests.swift` + `feels_like_recipe.rs #[cfg(test)]` | Confirmed |
 | Cue mode | `CueMode` enum (`PartialCueRecall.swift:9`) | `CueMode` enum (`feels_like_recipe.rs:27`) | public both | 3 cases `feelsLike`/`aboutThis`/`fromThen` ↔ `FeelsLike`/`AboutThis`/`FromThen` | `PartialCueRecallTests.swift` + `feels_like_recipe.rs #[cfg(test)]` | Confirmed |
 | Cue match | `CueMatch` struct (`PartialCueRecall.swift:28`) | `CueMatch` struct (`feels_like_recipe.rs:50`) | public both | `id: String`, `score: Double/f64`; identical | `PartialCueRecallTests.swift` + `feels_like_recipe.rs #[cfg(test)]` | Confirmed |
-| Anchor-not-recalled error | `AnchorNotInRecalledSetError` struct (`PartialCueRecall.swift:41`) | `AnchorNotInRecalledSetError` struct (`error.rs`) | public both | Swift `public struct … : Error, Equatable`; Rust `#[derive(Debug, Clone, PartialEq, Eq)]` + `std::error::Error`. Wrapped in `SubstrateError` at the `RecipeRunError` boundary (return type unchanged); `Display` string matches Swift prefix so callers can identify it. | `PartialCueRecallTests.swift` + `error.rs #[cfg(test)]` (4 tests: field, display, equatable, Error impl) | Confirmed |
+| Anchor-not-recalled error | `AnchorNotInRecalledSetError` struct (`PartialCueRecall.swift:41`) | `AnchorNotInRecalledSetError` struct (`error.rs:180`) | public both | Swift `public struct … : Error, Equatable`; Rust `#[derive(Debug, Clone, PartialEq, Eq)]` + `std::error::Error`. Wrapped in `SubstrateError` at the `RecipeRunError` boundary (return type unchanged); `Display` string matches Swift prefix so callers can identify it. | `PartialCueRecallTests.swift` + `error.rs #[cfg(test)]` (4 tests: field, display, equatable, Error impl) | Confirmed |
 | Anticipate (prediction) | `Anticipate` enum (`Anticipate.swift:29`) | `run_anticipate` fn (`anticipate_recipe.rs:54`) | public both | Swift enum-namespace `static run` / Rust free fn; result `ActionPrediction` from NeuronKit | `AnticipateTests.swift` + `anticipate_recipe.rs #[cfg(test)]` | Confirmed |
 | Tunnel successor (prediction) | `TunnelSuccessor` enum (`TunnelSuccessor.swift:30`) | `run_tunnel_successor` fn (`tunnel_successor_recipe.rs:35`) | public both | Swift enum-namespace `static run` / Rust free fn | `TunnelSuccessorTests.swift` + `tunnel_successor_recipe.rs #[cfg(test)]` | Confirmed |
 | Successor result | `Successor` struct (`TunnelSuccessor.swift:6`) | `Successor` struct (`tunnel_successor_recipe.rs:27`) | public both | `id: String`, `weight: Int/usize`; identical | `TunnelSuccessorTests.swift` + `tunnel_successor_recipe.rs #[cfg(test)]` | Confirmed |
@@ -601,6 +610,70 @@ proposed for the audit ignore-list.
 
 **Post-closure drift register: empty.** All known Swift/Rust gaps in
 CognitionKit are confirmed closed as of 2026-06-05.
+
+## § 8 — Telemetry API (SPEC § 11)
+
+Added: cp-cognitionkit-report P2, 2026-06-06.
+
+CognitionKit emits self-report metrics through IntellectusLib. The emit API
+is internal to each recipe — callers do not invoke it directly.
+
+### Swift
+
+```swift
+// CognitionKitTelemetry.swift (module-internal)
+public enum CognitionKitMetrics {
+    /// Stable metric name for recipe-run activity.
+    public static let recipeRun = "cognitionkit.recipe.run"
+}
+
+// Module-internal helpers — not part of the public API.
+@inline(__always)
+func emitRecipeStart(name: String, ts: Double)
+
+@inline(__always)
+func emitRecipeComplete(name: String, stepCount: Int, ts: Double)
+```
+
+Both helpers call `Intellectus.report(.metric(...))`. When
+`Intellectus.isEnabled` is false, the `@autoclosure` argument is never
+evaluated: off-path cost is a single atomic load plus branch.
+
+### Rust
+
+```rust
+// grounded_synthesis.rs (pub(crate))
+pub(crate) const METRIC_RECIPE_RUN: &str = "cognitionkit.recipe.run";
+
+pub(crate) fn emit_recipe_start(recipe: &str, ts: f64)
+pub(crate) fn emit_recipe_complete(recipe: &str, step_count: usize, ts: f64)
+
+// migration_orchestration.rs (module-private)
+fn emit_recipe_start_mb(ts: f64)
+fn emit_recipe_complete_mb(step_count: usize, ts: f64)
+```
+
+All helpers call the `report!` macro which short-circuits when monitoring is
+disabled.
+
+### Emit sites
+
+| Recipe | Language | Start placement | Complete placement |
+|---|---|---|---|
+| GroundedSynthesis | Swift | After `verifyCapabilities` | Before `return Output(...)` |
+| GroundedSynthesis | Rust | After `verify_capabilities(...)` | Before `Ok(GroundedOutput { ... })` |
+| MigrationBenchmark | Swift | After `guard !input.plans.isEmpty` + `firstDuplicate` checks | Before `return Output(...)` |
+| MigrationBenchmark | Rust | After `first_duplicate` check | Before `Ok(CoreReport { ... })` |
+
+### Swift/Rust concordance for telemetry
+
+| Concept | Swift | Rust | Notes |
+|---|---|---|---|
+| Metric name constant | `CognitionKitMetrics.recipeRun` | `METRIC_RECIPE_RUN` | Same string value |
+| Start emit helper | `emitRecipeStart(name:ts:)` | `emit_recipe_start(recipe, ts)` | Internal/pub(crate) |
+| Complete emit helper | `emitRecipeComplete(name:stepCount:ts:)` | `emit_recipe_complete(recipe, step_count, ts)` | Internal/pub(crate) |
+| GroundedSynthesis step_count | `allRows.count` (drawer count) | `drawer_count` (recalled drawer count) | Parity: same value |
+| MigrationBenchmark step_count | `input.plans.count` | `plans.len()` | Parity: same value |
 
 ---
 

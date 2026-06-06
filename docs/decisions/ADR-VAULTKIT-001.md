@@ -72,6 +72,16 @@ filesystem traversal and Markdown/YAML parsing, and the only V1 consumers
 are the macOS app and the ARIA_MCP Swift side. No Rust `VaultKit` target
 is added in this mission.
 
+> **Superseded (2026-06-06).** This decision no longer holds. The parity
+> workstream ported the entire VaultKit crate to Rust
+> (`packages/kits/VaultKit/rust/` — NoteIR, VaultBridge, DrawerMapping,
+> ObsidianAdapter, VaultAdapter) and wired the Rust `moot_vault_*` tools
+> (`apps/ARIA_MCP/rust/src/vault_tools.rs`), conformance-gated
+> (PARITY_WAVE_PROGRESS, 2026-06-05). VaultKit ships **Swift + Rust at
+> parity**. Per the parity-is-absolute standing rule (Bob, 2026-06-06 —
+> "we wouldn't do a swift-only version"), Swift-only is not a shippable
+> end state.
+
 ## Decision (f) — Language-neutral `NoteIR` boundary
 
 `NoteIR` (and `Block`, `WikiLink`, `SourceRef`, `OccurredAt`) is the

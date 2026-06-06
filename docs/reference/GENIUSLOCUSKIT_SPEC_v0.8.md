@@ -917,4 +917,137 @@ and `Input.maxPremiseSize` (default 4). Multi-seed is accessible by
 constructing the `Input.miner` with `seedMode: .multi`. The recipe gates
 on `.formalConceptAnalysis` (unchanged).
 
+## § GLK_PROVISION_001 — Composition-aware estate provisioning and lifecycle
+
+Added: 2026-06-06. Manager P6 enabler.
+
+### Overview
+
+The `provision` method is the GLK-owned create+open+wire path for new estates.
+It replaces the three-step caller pattern (`Estate.create` + `GLK.open` +
+`registerCorpus`/`registerVectorStore`) with a single coordinated call that:
+
+1. Seeds the LocusKit manifest with the kind-prefixed framework profile and
+   zoom window.
+2. Opens the estate through the standard coordinator path (issues an `EstateHandle`).
+3. Wires sub-stores (Corpus, VectorStore) according to `EstateKind`.
+
+### EstateKind
+
+| Kind          | LocusKit | Corpus | VectorStore |
+|---------------|----------|--------|-------------|
+| `.glk`        | yes      | yes    | yes         |
+| `.corpusOnly` | yes      | yes    | no          |
+| `.locusOnly`  | yes      | no     | no          |
+
+### Framework profile encoding
+
+The `frameworkProfile` parameter is stored in the manifest as
+`"<kind.rawValue>:<frameworkProfile>"` (e.g. `"GLK:KnowledgeWork"`). This
+encoding allows the estate kind to be inferred from the manifest after a process
+restart without requiring a separate manifest key.
+
+### EstateMountState
+
+All open estates carry an `EstateMountState`:
+
+| State       | Meaning                                           |
+|-------------|---------------------------------------------------|
+| `.mounted`  | Open and accepting new work.                      |
+| `.quiesced` | Not accepting new work; estate still open.        |
+| `.draining` | Finishing in-flight work; transitions to quiesced.|
+| `.unmounted`| Transitional; estate closed immediately after.   |
+
+`mountState(for:)` returns the current state, or `nil` for a stale handle.
+
+### Lifecycle sequence
+
+The expected admin-plane teardown sequence is:
+```
+provision → (operate) → quiesce → drain → destroy
+```
+
+`destroy` internally calls `close` if the estate is still open, then tears
+down sub-stores: `Corpus.destroyRecallIndex()` (BM25 cleared, vectors deleted)
+and `VectorStore.destroyAllVectors()`. BundleStore chunks are NOT deleted
+(append-only invariant — verbatim content survives for audit purposes).
+
+### Invariants
+
+- `provision` is idempotent at the "estate already exists" level: re-provisioning
+  the same storage raises `.duplicateEstate`.
+- Sub-store wiring failures in `provision` roll back by closing the handle before
+  re-throwing, so no half-wired zombie estates are left in the registry.
+- `quiesce` is idempotent: calling on an already-quiesced estate is a no-op.
+- The existing `open` + `registerCorpus` + `registerVectorStore` caller path is
+  unchanged. All existing callers continue to work. `provision` is purely additive.
+
+---
+
+## § GLK_ROLLUPS_001 — Per-Estate Rollup Telemetry
+
+### Overview
+
+GeniusLocusKit emits per-estate rollup metrics through `IntellectusLib`
+at the estate-coordination and lifecycle boundaries. All metrics are in
+the `geniuslocus.estate.*` namespace to distinguish them from per-kit
+metrics emitted by LocusKit (`locus.*`), VectorKit (`vector.*`), and
+CorpusKit (`corpus.*`).
+
+### Off-path cost
+
+Telemetry is gated by a single `Atomic<Bool>.load(.acquiring)` +
+branch in `Intellectus.report(_:)`. When monitoring is disabled
+(the default), the payload `@autoclosure` is never evaluated: zero
+allocation, no lock, ~1 ns. Results are byte-identical whether
+monitoring is on or off.
+
+### Metric namespace
+
+| Metric name | Description | Tags |
+|---|---|---|
+| `geniuslocus.estate.mount_state_transition` | Estate lifecycle state change | `estate_id`, `state` |
+| `geniuslocus.estate.provision` | Estate provisioned (create + open + wired) | `estate_id`, `kind` |
+| `geniuslocus.estate.noun_count` | Drawer count snapshot at admission | `estate_id` |
+| `geniuslocus.estate.verb_error` | Verb error at estate boundary (remap) | `estate_id`, `verb` |
+
+`state` values: `mounted`, `quiesced`, `draining`, `unmounted`.
+
+`kind` values: `GLK`, `CorpusOnly`, `LocusOnly`.
+
+### Emit sites
+
+| Method | Metric emitted | Condition |
+|---|---|---|
+| `open()` | `mount_state_transition` (state=mounted) + `noun_count` | After registry insert |
+| `close()` | `mount_state_transition` (state=unmounted) | After registry cleanup |
+| `provision()` | `provision` (kind tag) | On wiring success only |
+| `quiesce()` | `mount_state_transition` (state=quiesced) | After mount state update |
+| `drain()` | `mount_state_transition` (state=draining) then (state=quiesced) | Both transitions emitted |
+| `remap(verb:estateID:error:)` | `verb_error` | For nine ARIA verbs with non-empty estate_id |
+
+`EstateNotOpen` routing errors (stale handle at `close`, `quiesce`,
+`drain`) do NOT emit `verb_error` — those are routing errors, not
+verb-surface errors. Only errors that pass through `remap` emit.
+
+### Conformance
+
+Swift and Rust implementations are parity-gated:
+
+- **Swift**: `GeniusLocusKitTelemetryTests.swift` — 17 tests, §1-§7.
+  Isolation: `.serialized` outer suite + `withIntellectusLock()` actor
+  mutex per test function.
+- **Rust**: `glk_telemetry_tests.rs` — 14 tests, §1-§7.
+  Isolation: `static GLOBAL_LOCK: OnceLock<Mutex<()>>` with poison
+  recovery.
+
+Both test suites verify:
+- §1 Disabled gate: no metric emitted when monitoring is OFF.
+- §2 Mount-state transitions: open emits mounted, close emits unmounted.
+- §3 Provision: provision metric with correct kind tag.
+- §4 Lifecycle: quiesce emits quiesced; drain emits draining then quiesced.
+- §5 Noun count: open emits noun_count=0 for fresh estates.
+- §6 Verb error: stale handle at close does NOT emit verb_error.
+- §7 Conformance: estate coordination results identical with monitoring ON vs OFF.
+
 *End of GeniusLocusKit Specification v0.8.*

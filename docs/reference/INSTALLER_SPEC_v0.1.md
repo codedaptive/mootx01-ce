@@ -110,23 +110,3 @@ conformance harness. -->
 **C-1:** <Statement.>
 
 **C-2:** <Statement.>
-
-## § 8 — Out of scope
-
-<!-- Things that look like they might belong here but live
-elsewhere. Each entry points at where the concern actually
-lives. -->
-
-- <concern> → see `<OTHER_PACKAGE>_SPEC.md`
-
-## § 9 — Open questions
-
-<!-- Optional. List unresolved questions and link to the open-
-questions doc if applicable. Delete this section if there are no
-open questions. -->
-
-- <question>
-
----
-
-*End of Installer Specification v0.1.*

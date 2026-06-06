@@ -367,6 +367,26 @@ pub fn delete_vector(&self, drawer_id: &str, model_id: &str)
     -> Result<(), VectorKitError>;
 ```
 
+### `VectorStore.destroyAllVectors` / `destroy_all_vectors` — GLK_PROVISION_001
+
+Deletes all rows from the `vectors` table. Called by
+`GeniusLocusKit.destroy(storage:corpusStorage:handle:)` as part of
+coordinated estate teardown. After this call the backing storage is intact
+(schema preserved) but contains no vector data. The caller is responsible for
+closing the estate before calling this method.
+
+**Swift:**
+
+```swift
+public func destroyAllVectors() async throws
+```
+
+**Rust:**
+
+```rust
+pub fn destroy_all_vectors(&self) -> Result<(), VectorKitError>;
+```
+
 ## § 4 — Errors
 
 Cases match one-for-one across ports so cross-language conformance tests
@@ -405,7 +425,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 ```
 
 (Targets: `EmbeddingProviderTests`, `FloatSimHashEmbeddingProviderTests`,
-`VectorStoreTests`, `CapturePathBenchmarkTests`.)
+`VectorStoreTests`, `CapturePathBenchmarkTests`, `VectorKitTelemetryTests`.)
 
 **Rust:**
 
@@ -413,7 +433,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 cargo test -p vectorkit
 ```
 
-(Suites: `simhash_provider_tests.rs`, `vector_store_tests.rs`.)
+(Suites: `simhash_provider_tests.rs`, `vector_store_tests.rs`,
+`vectorkit_telemetry_tests.rs`.)
 
 ## § 6 — Examples
 
@@ -467,6 +488,67 @@ Swift-only or Rust-only contract types.
 | Nearest-neighbour result | `VectorMatch` (`Sources/VectorKit/VectorMatch.swift:20`) | `VectorMatch` (`rust/src/vector_store.rs:45`) | public struct / pub struct | identical; ordering by distance asc then drawer id asc (Swift `Comparable` `<` / Rust `Ord`+`PartialOrd`); `distance` Swift `Int` / Rust `i32`, range 0…256 | `VectorMatchTests.swift::testComparableOrdersByDistanceAscending`, `testSortingProducesDistanceAscendingOrder` ↔ `vector_store_tests.rs::find_nearest_returns_k_results_sorted_by_distance_ascending` | Confirmed |
 | PersistenceKit-backed store | `VectorStore` (`Sources/VectorKit/VectorStore.swift:51`) | `VectorStore` (`rust/src/vector_store.rs:67`) | public actor / pub struct | Swift `actor` (async CRUD mirrors PersistenceKit `RowStore`) / Rust `struct` over `Arc<dyn Storage>`, sync CRUD — sanctioned (no async runtime). Construction: Swift `init(storage:)` / Rust `new` + `open`. Schema: `schemaDeclaration` / `schema_declaration()` | `VectorStoreTests.swift::testAddGetRoundTripPreservesEngramBytes`, `testFindNearestReturnsKResultsSortedByDistanceAscending`, `testFindByKeywordReturnsMatchingDrawers` ↔ `vector_store_tests.rs::add_get_round_trip_preserves_engram_bytes`, `find_nearest_returns_k_results_sorted_by_distance_ascending`, `find_by_keyword_returns_matching_drawers` | Confirmed |
 | Error enum | `VectorKitError` (`Sources/VectorKit/VectorKitError.swift:5`) | `VectorKitError` (`rust/src/error.rs:7`) | public enum / pub enum | identical case-for-case: `embeddingFailed`/`EmbeddingFailed`, `modelUnavailable`/`ModelUnavailable`, `storeUnavailable`/`StoreUnavailable`, `notFound`/`NotFound` (Swift lowerCamel / Rust UpperCamel — idiom) | `VectorKitErrorTests.swift::testIsThrowableErrorAndPreservesPayload`, `FloatSimHashEmbeddingProviderTests.swift::testInferenceFailurePropagates` ↔ `simhash_provider_tests.rs::inference_failure_surfaces_as_embedding_failed` | Confirmed |
+
+## § Telemetry — VECTORKIT_REPORT_001
+
+Added: 2026-06-06. VectorStore emits `vectorkit.*` metrics via
+IntellectusLib when the global monitoring gate is enabled. Off by default.
+
+### Dependencies added
+
+- `Package.swift`: `IntellectusLib` in-repo dependency added to the
+  `VectorKit` target and `VectorKitTests` test target. Authority:
+  `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28` + `MANAGER_1.0_PLAN §4`.
+- `Cargo.toml`: `intellectus-lib = { path = "…/IntellectusLib/rust" }`
+  added under `[dependencies]`.
+
+### Emit surface
+
+| Swift call site | Metric emitted | Tags |
+|---|---|---|
+| `addVector(drawerID:engram:modelID:modelVersion:filedAt:)` | `vectorkit.index.insert_latency_ms` | `kit="VectorKit"`, `model_id=<modelID>` |
+| `findNearest(probe:modelID:limit:)` | `vectorkit.search.latency_ms` | `kit="VectorKit"`, `model_id=<modelID>` |
+| `findNearest(probe:modelID:limit:)` | `vectorkit.search.result_count` | `kit="VectorKit"`, `model_id=<modelID>` |
+| `findByKeyword(_:limit:)` | `vectorkit.search.keyword_result_count` | `kit="VectorKit"` |
+
+Rust emit sites mirror the Swift ones exactly (`add_vector`, `find_nearest`,
+`find_by_keyword`).
+
+### Test suite: `VectorKitTelemetryTests` (Swift)
+
+File: `Tests/VectorKitTests/VectorKitTelemetryTests.swift`
+
+Four serialised suites, all bodies serialised under `GlobalTestLock`
+(async mutex in `GlobalTestLock.swift`):
+
+- `§1 VectorKitTelemetry — disabled gate`: 3 tests — no metrics emitted
+  when monitoring is off.
+- `§2 VectorKitTelemetry — enabled gate`: 3 tests — exact metric counts
+  when monitoring is on (counts filtered to `vectorkit.*` namespace to
+  exclude substrate-layer emissions from EngramLib/SubstrateKernel).
+- `§3 VectorKitTelemetry — metric shapes`: 3 tests — metric names, values,
+  and tags conform to spec.
+- `§4 VectorKitTelemetry — conformance`: 2 tests — results are
+  byte-identical with monitoring on and off.
+
+### Test suite: `vectorkit_telemetry_tests` (Rust)
+
+File: `rust/tests/vectorkit_telemetry_tests.rs`
+
+11 tests serialised under `GLOBAL_LOCK: OnceLock<Mutex<()>>`. Mirrors
+the Swift suite. Count assertions filter to `vectorkit.*` prefix to
+exclude `substrate.kernel.backend_selected` emitted by SubstrateKernel
+via EngramLib.
+
+### GlobalTestLock isolation invariant
+
+All tests in the `VectorKitTests` binary that call VectorStore emit
+methods MUST hold `GlobalTestLock.shared` for their entire duration:
+
+- `VectorStoreTests` — added `withLock` to all 15 tests.
+- `CapturePathBenchmarkTests` — added `withLock` to the 3 VectorStore-
+  exercising tests so benchmark P99 assertions have exclusive CPU access.
+- `VectorKitTelemetryTests` — all test bodies wrapped in `withLock`.
 
 ---
 

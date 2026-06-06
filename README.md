@@ -67,18 +67,24 @@ Two status dimensions are tracked. **Build** is whether the kit is functional wi
 | Kit | Use it to build | Build | Security Review |
 |-----|-----------------|-------|--------|
 | **AriaLexiconLib** | The reified ARIA grammar: verbs, nouns, adjectives, and the acceptance matrix, with zero dependencies | ✅ Built (Swift + Rust) | ⏳ Pending |
-| **CognitionKit** | Behaviour recipes: FulcrumDailyFraming, ScenarioSkill, composable workflows | 🔲 Planned | ⏳ Pending |
+| **CognitionKit** | Behaviour recipes: named, composable workflows (18 recipes, descriptor conformance-gated) | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **ConvergenceKit** | Sync abstraction: CloudKit, Federation, None behind one protocol | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **CorpusKit** | A private RAG database: content-plus-vector bundles, hybrid retrieval, no cloud dependency | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **EideticLib** | Deterministic text-to-anchor: term in, FDC code plus Wikidata Q-ID out; ships with a frozen reference snapshot | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **EngramLib** | Typed 256-bit Engram API on SubstrateLib | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **GeniusLocusKit** | Spatial memory + RAG + knowledge graph: nine verbs, Brain layer, N estates | ✅ Built (Swift + Rust) | ⏳ Pending |
-| **LatticeLib** | Frame Decimal Classification: original Dewey-like spine, clean-room from Wikidata CC0, assembler + canon + lookup | ✅ Built (Swift) | ⏳ Pending |
+| **IntellectusLib** | Zero-dependency telemetry floor: the stat model, the sink protocol, and the gated self-report faculty each kit uses to record its own layer's stats (off is free — a single atomic-bool check) | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **LatticeLib** | Frame Decimal Classification: original Dewey-like spine, clean-room from Wikidata CC0, assembler + canon + lookup | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **LocusKit** | A spatial memory system: wings, rooms, drawers, typed tunnels, KG facts, bitmap-indexed content, full audit trail | ✅ Built (Swift + Rust) | ⏳ Pending |
-| **NeuronKit** | AI algorithms: hybrid recall, dreaming daemon, Bradley-Terry, SolverBandit | 🔧 In progress | ⏳ Pending |
+| **NeuronKit** | AI algorithms: hybrid recall, dreaming daemon, Bradley-Terry, SolverBandit | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **ObserverSink** | The reusable telemetry sink + stats store: a PersistenceKit-backed `StatsSink` that serialises self-report samples into a local, sync-disabled SQLite stats database with retention — the read-plane data source for the management console | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **PersistenceKit** | Storage abstraction: SQLite, PostgreSQL, InMemory backends behind one protocol | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **QueueKit** | A fill-and-drain job queue: RAM and database backends, serial dispatch, audit-ordered claims | ✅ Built (Swift + Rust) | ⏳ Pending |
-| **SubstrateLib** | Math foundation: SimHash fingerprints, Hamming distance, audit CRDT, kernel dispatch | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **SubstrateKernel** | Hot-path bit operations: SimHash/Hamming kernels, content + seal hashing, bitmap fields, kernel dispatch (scalar/SIMD/Metal) | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **SubstrateLib** | Substrate orchestration: the nine verbs, the row-state automaton, and the AuditGate over the three substrate sub-packages | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **SubstrateML** | Cold-path learning + graph algorithms: community detection, eigenvalue centrality, NMF, association rules, anomaly, matrix decay | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **SubstrateTypes** | The data bedrock: Fingerprint256, HLC, the audit CRDT, and the value types every kit speaks — zero compute | ✅ Built (Swift + Rust) | ⏳ Pending |
+| **VaultKit** | Encrypted vault export/import: the `moot_vault_*` bridge for portable, file-based estate snapshots | ✅ Built (Swift + Rust) | ⏳ Pending |
 | **VectorKit** | On-device semantic search: embed locally, store model-tagged vectors, query by ANN (HNSW) or hybrid BM25-plus-vector | ✅ Built (Swift + Rust) | ⏳ Pending |
 
 ### ARIA
@@ -89,6 +95,7 @@ Two status dimensions are tracked. **Build** is whether the kit is functional wi
 | **ARIA_MacOS** | macOS demonstration: shows the sidecar pattern over the SDK | 🔲 After ARIA_MCP | ⏳ Pending |
 | **ARIA_iOS** | iOS demonstration: Rev 3.0, after macOS stable | 🔲 After ARIA_MacOS | ⏳ Pending |
 | **ARIA_Rust** | Rust demonstration: required for conformance parity with Swift demos | 🔲 After ARIA_MacOS | ⏳ Pending |
+| **moot-mgr** | Management & monitoring console: the resident multi-estate host — estate provisioning + lifecycle, the self-report monitoring dashboard (server/estates/pipeline/activity), and the live node-link Topology view; cross-platform web + macOS menu-bar | 🔧 Foundation built | ⏳ Pending |
 
 **Legend.** ✅ Built means functional with tests green. 🔧 In progress means a stream is live against it. 🔲 means planned, with the mission or gating dependency shown. ⏳ Review pending means the kit has not yet cleared the security, quality-control, and slop-review gate; no kit has cleared it yet.
 
@@ -119,10 +126,11 @@ The near-term path to a usable release, in order:
 
 1. **Finish the Brain layer.** Complete NeuronKit (the AI algorithms — hybrid recall, the dreaming daemon, Bradley-Terry, SolverBandit) and CognitionKit (the named, composable behaviour recipes). These are the last two kits in the stack; everything below them is built.
 2. **Ship the ARIA MCP reference server.** A reference implementation of the MCP server that exposes a MOOTx01 estate over the ARIA grammar, so anyone can compile it and use their MOOT from an agentic chat or coding harness — Claude, Claude Code, or any MCP-capable client.
-3. **Full security sweep.** A complete security, quality-control, and hardening pass across the substrate and the MCP server. No kit has cleared this gate yet; this is where that happens, before the server is put in front of people who did not build it themselves.
-4. **Binary package for non-compiler users.** A precompiled, installable binary of the MCP reference server, so people who do not want to build from source can install a hardened binary and run it. The binary follows the security sweep deliberately: the first artifact aimed at non-developers is also the first one that has been hardened.
-5. **Multilple Side Car and Small Expriement apps with embedded** A reference set of application to increase awareness of the sidecar and embedding possibilities in the system
-6. And a rather large number of idea roadblock by several days getting the house in order for you'all to be able to navigate all this
+3. **Ship the management & monitoring console (`moot-mgr`).** The operator's application for running and watching MOOTs. It is the resident host that **creates and manages multiple estates** — a stepped provisioning flow with a per-estate backend (SQLite, PostgreSQL, or in-memory) and full lifecycle (mount, quiesce, drain, destroy) — and a **self-reporting monitoring layer** where each kit records the facts about its own layer, behind a flow-down on/off switch, into a local stats database. That data surfaces as a read-only dashboard (server health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view of the knowledge graph) plus a gated admin surface for the privileged actions. It is built cross-platform — a web dashboard served over loopback plus a macOS menu-bar agent — so it serves both the Swift and the PC/Linux builds from one codebase.
+4. **Full security sweep.** A complete security, quality-control, and hardening pass across the substrate, the MCP server, and the management console. No kit has cleared this gate yet; this is where that happens, before any of it is put in front of people who did not build it themselves.
+5. **Binary package for non-compiler users.** A precompiled, installable binary of the MCP reference server and the management console, so people who do not want to build from source can install a hardened binary and run it. The binary follows the security sweep deliberately: the first artifact aimed at non-developers is also the first one that has been hardened.
+6. **Multilple Side Car and Small Expriement apps with embedded** A reference set of application to increase awareness of the sidecar and embedding possibilities in the system
+7. And a rather large number of idea roadblock by several days getting the house in order for you'all to be able to navigate all this
 
 This roadmap describes intended sequence, not committed dates.
 
@@ -142,8 +150,10 @@ mootx01/
 │   │   ├── SubstrateLib/      Orchestration: verbs + row-state automaton
 │   │   ├── EngramLib/         Typed Engram API
 │   │   ├── AriaLexiconLib/    Reified ARIA grammar
-│   │   ├── LatticeLib/        Frame Decimal Classification (Swift only — no Rust port)
-│   │   └── EideticLib/        Text-to-anchor utility
+│   │   ├── LatticeLib/        Frame Decimal Classification (Swift + Rust)
+│   │   ├── EideticLib/        Text-to-anchor utility
+│   │   ├── IntellectusLib/    Zero-dependency telemetry floor (gated self-report faculty)
+│   │   └── ObserverSink/      Telemetry sink + SQLite stats store (read-plane source)
 │   ├── kits/
 │   │   ├── LocusKit/          Spatial memory + KG
 │   │   ├── VectorKit/         Vector search
@@ -153,10 +163,12 @@ mootx01/
 │   │   ├── CorpusKit/         RAG bundles
 │   │   ├── GeniusLocusKit/    Composition + Brain layer
 │   │   ├── NeuronKit/         AI algorithms
-│   │   └── CognitionKit/      Behaviour recipes (planned)
+│   │   ├── CognitionKit/      Behaviour recipes (18 recipes)
+│   │   └── VaultKit/          Encrypted vault export/import (moot_vault_*)
 │   ├── PACKAGES.md            Package catalog
 ├── apps/
 │   ├── ARIA_MCP/              MCP server exposing ARIA over the network
+│   ├── moot-mgr/             Management & monitoring console (resident host; in progress)
 │   └── MatrixSprint/          Cross-language benchmark harness (in progress)
 ├── examples/
 │   ├── SDK/                   SDK samples

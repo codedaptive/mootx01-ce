@@ -507,4 +507,45 @@ generator (SplitMix64).
 
 ---
 
+## § 10 Self-Report Telemetry (NEURONKIT_REPORT_001)
+
+NeuronKit emits substrate self-report metrics via IntellectusLib at three
+operation boundaries. Monitoring is off by default; the off-path cost is
+a single atomic load plus branch (~1 ns), never evaluates the payload
+autoclosure, and never allocates. Telemetry is strictly additive:
+algorithm results are bit-identical regardless of monitoring state. This
+is enforced by the §5 conformance gate in both the Swift and Rust test
+suites.
+
+### 10.1 Metric namespace and tag contract
+
+All NeuronKit metrics use the prefix `neuronkit.*`. The `estate` tag
+is emitted on recall surfaces where an `EstateHandle` is in scope.
+
+| Metric name | Value | Tags | Emit site |
+|---|---|---|---|
+| `neuronkit.recall.latency_ms` | elapsed wall-clock milliseconds | `estate` (UUID string) | After rerank in `hybridRecall()` |
+| `neuronkit.recall.candidate_count` | drawer count before rerank | `estate` (UUID string) | After rerank in `hybridRecall()` |
+| `neuronkit.recall.result_count` | drawer count after rerank | `estate` (UUID string) | After rerank in `hybridRecall()` |
+| `neuronkit.dream.cycle` | 1.0 (start) or proposal count (complete) | `status` ("start"/"complete"), `cycle` (N), `drawers_touched` (complete only), `proposals` (complete only) | Start and completion of `DreamingDaemon.runCycle()` |
+| `neuronkit.tournament.bt_update` | 1.0 | `competitor_count` (string) | End of `bradleyTerry(outcomes:)`, after sort |
+| `neuronkit.tournament.competitor_count` | competitor count | none | End of `bradleyTerry(outcomes:)`, after sort |
+
+### 10.2 Conformance gate
+
+Conformance requirement: for every test vector, algorithm outputs
+(reranked drawer order, BradleyTerry strength scores, dreaming cycle
+reports) are bit-identical with monitoring ON and monitoring OFF. The
+Swift `@Suite("§5", .serialized)` and Rust `§5` tests enforce this.
+
+### 10.3 Dependency
+
+IntellectusLib is the zero-dependency telemetry leaf. NeuronKit declares
+it as an in-repo dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+The declaration cites MANAGER_1.0_PLAN §4 P2 (self-report coverage).
+Layering is safe: IntellectusLib depends only on the Swift/Rust standard
+library and does not depend on NeuronKit or any substrate kit.
+
+---
+
 *End of NeuronKit Specification v0.85.*

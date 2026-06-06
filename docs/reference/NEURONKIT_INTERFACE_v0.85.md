@@ -67,6 +67,11 @@ purpose: |
   `learnedPreference`, `CategoryBias`, `PreferenceStrength`
 - `Sources/NeuronKit/Lenses/Anticipation.swift` — `anticipate`,
   `ActionObservation`, `ActionPrediction`
+- `Sources/NeuronKit/Lenses/AnomalyScan.swift` — `anomalies`, `Anomaly`
+- `Sources/NeuronKit/Lenses/Drift.swift` — `drift`, `DriftScore`
+- `Sources/NeuronKit/Lenses/PartialRecall.swift` — `partialRecall`,
+  `FingerprintBlock`, `PartialMatch`
+- `Sources/NeuronKit/Lenses/MindOverlap.swift` — `dpSummary`, `summaryOverlap`
 - `Sources/NeuronKit/Dreaming/` — `DreamingDaemon`, `DreamingPolicy`
   (+ `DreamingPolicyStore`, `InMemoryDreamingPolicyStore`),
   `DreamingTriggerMode`, `RewardSource` (+ `RewardSourceKind`,
@@ -84,7 +89,9 @@ purpose: |
   `src/tournament.rs`
 - the reasoning lenses: `src/keystones.rs`, `src/constellation.rs`,
   `src/spreading_activation.rs`, `src/theme_weather.rs`,
-  `src/latent_themes.rs`, `src/bias.rs`, `src/anticipation.rs`
+  `src/latent_themes.rs`, `src/bias.rs`, `src/anticipation.rs`,
+  `src/anomaly_scan.rs`, `src/drift.rs`, `src/partial_recall.rs`,
+  `src/mind_overlap.rs`, `src/structure_graph.rs` (shared adjacency builder)
 - depends on `eidetic-lib`, `serde`, `serde_json`, and — for the gated
   lens math — `substrate-ml` (centrality, communities, random-walk,
   decay, action-outcome matrix, Bradley-Terry) and `genius-locus-kit`
@@ -464,6 +471,29 @@ public struct ActionPrediction: Sendable, Equatable, Codable {
     public let count: UInt32                   // observations supporting this action
     public init(action: UInt8, successRate: Float, count: UInt32)
 }
+
+// § 7.5 Anomaly / drift / partial-recall lenses
+public struct Anomaly: Sendable, Equatable, Codable {
+    public let index: Int                      // series position flagged
+    public let zScore: Float                   // signed z-score of the entry
+    public init(index: Int, zScore: Float)
+}
+
+public struct DriftScore: Sendable, Equatable, Codable {
+    public let jensenShannon: Float            // symmetric, bounded — primary drift signal
+    public let klDivergence: Float             // D(p‖q), asymmetric
+    public init(jensenShannon: Float, klDivergence: Float)
+}
+
+public enum FingerprintBlock: Int, Sendable, Equatable, Codable, CaseIterable {
+    case structure = 0, concept = 1, temporal = 2, channel = 3
+}
+
+public struct PartialMatch: Sendable, Equatable, Codable {
+    public let rowID: UUID
+    public let score: Double                   // combined match/differ score
+    public init(rowID: UUID, score: Double)
+}
 ```
 
 **Rust:**
@@ -490,6 +520,15 @@ pub struct PreferenceStrength {
 // § 7.4 Prediction
 pub struct ActionObservation { pub action: u8, pub outcome: u8, pub success: bool }
 pub struct ActionPrediction { pub action: u8, pub success_rate: f32, pub count: u32 }
+
+// § 7.5 Anomaly / drift / partial-recall lenses
+pub struct Anomaly { pub index: usize, pub z_score: f32 }
+pub struct DriftScore { pub jensen_shannon: f32, pub kl_divergence: f32 }
+pub enum FingerprintBlock { Structure = 0, Concept = 1, Temporal = 2, Channel = 3 }
+impl FingerprintBlock { pub fn as_block_index(self) -> u8; }   // raw u8 block index
+// partial_recall returns Vec<(RowId, f64)> inline — no PartialMatch wrapper type
+pub const BLOCK_STRUCTURE: u8; pub const BLOCK_CONCEPT: u8;
+pub const BLOCK_TEMPORAL: u8;  pub const BLOCK_CHANNEL: u8;
 ```
 
 ### Dreaming daemon surface
@@ -819,6 +858,20 @@ extension NeuronKit {
     // § 7.4 Prediction.
     public static func anticipate(observations: [ActionObservation], targetOutcome: UInt8,
                                   k: Int, minObservations: UInt32) -> [ActionPrediction]
+
+    // § 7.5 Anomaly / drift / partial-recall.
+    public static func anomalies(values: [Float], threshold: Float) -> [Anomaly]
+    public static func drift(from p: [Float], to q: [Float]) -> DriftScore
+    public static func partialRecall(anchor: Fingerprint256,
+                                     rows: [(rowID: UUID, fingerprint: Fingerprint256)],
+                                     matchBlocks: Set<FingerprintBlock>,
+                                     differBlocks: Set<FingerprintBlock>,
+                                     k: Int) -> [PartialMatch]
+
+    // Mind overlap — differentially-private aggregate summary + cross-estate overlap.
+    public static func dpSummary(fingerprints: [Fingerprint256], epsilon: Double,
+                                 delta: Double, kAnonymity: Int, seed: UInt64) -> Fingerprint256
+    public static func summaryOverlap(_ a: Fingerprint256, _ b: Fingerprint256) -> Double
 }
 ```
 
@@ -845,6 +898,18 @@ pub fn learned_preference(records: &[(String, i64, i64)])
 // § 7.4 Prediction
 pub fn anticipate(observations: &[ActionObservation], target_outcome: u8,
                   k: usize, min_observations: u32) -> Vec<ActionPrediction>;
+
+// § 7.5 Anomaly / drift / partial-recall
+pub fn anomalies(values: &[f32], threshold: f32) -> Vec<Anomaly>;
+pub fn drift(p: &[f32], q: &[f32]) -> DriftScore;
+pub fn partial_recall(anchor: Fingerprint256, rows: &[(RowId, Fingerprint256)],
+                      match_blocks: &HashSet<u8>, differ_blocks: &HashSet<u8>,
+                      k: usize) -> Vec<(RowId, f64)>;   // inline tuples, no PartialMatch type
+
+// Mind overlap
+pub fn dp_summary(fingerprints: &[Fingerprint256], epsilon: f64, delta: f64,
+                  k_anonymity: usize, seed: u64) -> Fingerprint256;
+pub fn summary_overlap(a: Fingerprint256, b: Fingerprint256) -> f64;
 ```
 
 ## § 4 — Errors
@@ -889,7 +954,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 `ScenarioProfileTests`, `TournamentTests`, and the lens suites
 `KeystonesTests`, `ConstellationTests`, `SpreadingActivationTests`,
 `ThemeWeatherTests`, `LatentThemesTests`, `BiasTests`,
-`AnticipationTests`.)
+`AnticipationTests`, `AnomalyScanTests`, `DriftTests`,
+`PartialRecallTests`, `MindOverlapTests`, `StructureLensTests`, and
+the cross-port `LensVectorConformanceTests`.)
 
 **Rust:**
 
@@ -1003,6 +1070,7 @@ PAR-mission deltas and remain valid.
 | Drift score (lens) | `DriftScore` `Lenses/Drift.swift:15` | `DriftScore` `drift.rs:17` | `public` / `pub` | identical (JS + KL divergence) | `DriftTests.swift` ; `drift.rs` tests | Confirmed |
 | Fingerprint block | `FingerprintBlock` `Lenses/PartialRecall.swift:20` | `FingerprintBlock` `partial_recall.rs:34` | `public` / `pub` | Swift `Int`-raw enum + `Set<FingerprintBlock>`; Rust enum + `as_block_index()->u8` with `HashSet<u8>` — API shape differs, semantics identical (see legacy sub-table) | `PartialRecallTests.swift`/`MindOverlapTests.swift` ; `lens_conformance.rs` partial_recall | Confirmed |
 | Partial-recall match | `PartialMatch` `Lenses/PartialRecall.swift:28` | (inline tuple return of `partial_recall`) `partial_recall.rs:57` | `public` / `pub fn` | Swift wraps `(rowID, score)` in a `PartialMatch` struct; Rust `partial_recall` returns the ranked matches inline (no wrapper type) — sanctioned shape idiom, behavior is vector-bound | `PartialRecallTests.swift` ; `lens_conformance.rs` partial_recall cases | Confirmed |
+| Mind overlap (function-only lens) | `dpSummary` / `summaryOverlap` `Lenses/MindOverlap.swift:21,46` | `dp_summary` / `summary_overlap` `mind_overlap.rs:24,46` | `public` / `pub fn` | function-only lens, no new result type (returns `Fingerprint256` / `Double`); identical math (DP-OR reduction + 192-bit content-block overlap) | `MindOverlapTests.swift` ; `lens_conformance.rs` mind_overlap cases | Confirmed |
 | Dreaming policy | `DreamingPolicy` `Dreaming/DreamingPolicy.swift:24` | `DreamingPolicy` `dreaming_cycle.rs:107` | `public` / `pub` | identical (timer fields added to Rust in PAR-4-NK — see legacy sub-table) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
 | Dreaming policy store | `DreamingPolicyStore` `Dreaming/DreamingPolicy.swift:71` | `DreamingPolicyStore` `dreaming_cycle.rs:138` | `public` / `pub` | Swift `async` protocol / Rust sync trait (no async runtime — sanctioned, policy-store seam) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
 | In-memory dreaming store | `InMemoryDreamingPolicyStore` (actor) `Dreaming/DreamingPolicy.swift:84` | `InMemoryDreamingPolicyStore` (struct) `dreaming_cycle.rs:151` | `public` / `pub` | Swift actor / Rust struct (sync, not actor-isolated — sanctioned, policy-store seam) | `DreamingDaemonTests.swift` ; `dreaming_cycle.rs` tests | Confirmed |
@@ -1096,6 +1164,55 @@ Rust structs gained the missing timer fields in PAR-4-NK to match Swift:
 | `MaintenancePolicy.auditCheckIntervalMs: Int` | `MaintenancePolicy.audit_check_interval_ms: i64` | `300_000` |
 
 Previously the Rust structs only carried the threshold/window fields the decision core reads. The timer fields are held by the daemon for its tick-elapsed check; they are now present on the Rust config struct for store-seam round-trip fidelity.
+
+---
+
+## § Telemetry interface additions (NEURONKIT_REPORT_001)
+
+### Swift: new import
+
+```swift
+import IntellectusLib
+```
+
+Added to `HybridRecall.swift`, `DreamingDaemon.swift`, and
+`BradleyTerry.swift`. No change to any public function signature.
+
+### Swift: new Package.swift dependency
+
+```swift
+// Package.swift — NeuronKit target
+.product(name: "IntellectusLib", package: "IntellectusLib"),
+```
+
+### Rust: new Cargo.toml dependency
+
+```toml
+intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
+```
+
+Added to `NeuronKit/rust/Cargo.toml`.
+
+### Emit sites (both ports)
+
+| Function | Language | Metric(s) emitted |
+|---|---|---|
+| `hybridRecall()` / `hybrid_recall::rerank` | Swift | `neuronkit.recall.latency_ms`, `neuronkit.recall.candidate_count`, `neuronkit.recall.result_count` |
+| `DreamingDaemon.runCycle()` / `DreamingDaemon::run_cycle` | Swift + Rust | `neuronkit.dream.cycle` (status=start), `neuronkit.dream.cycle` (status=complete) |
+| `bradleyTerry(outcomes:)` / `bradley_terry` | Swift + Rust | `neuronkit.tournament.bt_update`, `neuronkit.tournament.competitor_count` |
+
+Note: `hybridRecall` recall-latency metrics are Swift-only (the Rust
+`rerank` function is a pure math function without an `EstateHandle`
+in scope). The dreaming cycle and tournament metrics are emitted on
+both ports.
+
+### Conformance invariant
+
+`Intellectus.setEnabled(false)` / `Intellectus::set_enabled(false)` is
+the off-path gate. When disabled: zero metric emissions, zero
+autoclosure evaluation, zero allocation. Algorithm output is
+bit-identical on and off (enforced by §5 conformance tests in both
+Swift and Rust suites).
 
 ---
 

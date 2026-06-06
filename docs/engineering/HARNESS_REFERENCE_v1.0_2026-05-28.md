@@ -43,10 +43,10 @@ test vector (32 cases each, CRC-pinned). Drift between the two
 languages would be caught by CI in the next harness run.
 
 The harness lives at
-`/Users/bob/devlop/mootx01-ce/docs/validation/substrate_math_performance/test-harness/`.
+`/Users/bob/devlop/mootx01-ee/docs/validation/substrate_math_performance/test-harness/`.
 The reference implementations these primitives wrap are distributed
 across the four substrate packages under
-`/Users/bob/devlop/mootx01-ce/packages/libs/` (SubstrateTypes,
+`/Users/bob/devlop/mootx01-ee/packages/libs/` (SubstrateTypes,
 SubstrateKernel, SubstrateML, and SubstrateLib; Swift + Rust legs side
 by side). The §2.0 map gives each primitive's package; §6 explains the
 split.
@@ -88,7 +88,7 @@ Each row tells an agent four things:
 4. **What the operation does** (one line).
 
 All file paths are relative to the repo root
-`/Users/bob/devlop/mootx01-ce/`.
+`/Users/bob/devlop/mootx01-ee/`.
 
 ### §2.0. Where each primitive lives (four-package map)
 
@@ -314,7 +314,7 @@ algorithms. Higher-level than bitops but still bandwidth-bounded.
   "everything observed in a time window" primitive.
   *Note:* Swift takes the full production `Row` type; Rust takes
   a minimal `RowLite { fingerprint, capture_hlc }` stub. The
-  harness bridges this asymmetry — both legs produce identical
+  harness bridges this asymmetry — both ports produce identical
   output. New code that calls `summarize` should pass whichever
   type its language exposes; results are equivalent.
 
@@ -440,7 +440,7 @@ the following:
 
 4. **Order-determinism.** Where floating-point summation order
    matters (e.g. `eigenvalue_centrality`'s inner product),
-   both legs iterate inputs in identical order. Don't reorder.
+   both ports iterate inputs in identical order. Don't reorder.
 
 5. **No private state.** Harness primitives test pure functions
    or stateless update operations. Anywhere the substrate
@@ -691,7 +691,7 @@ passes:
 
 ```bash
 # Full gate sweep, both languages, on-disk vectors:
-cd /Users/bob/devlop/mootx01-ce/docs/validation/substrate_math_performance/test-harness/swift
+cd /Users/bob/devlop/mootx01-ee/docs/validation/substrate_math_performance/test-harness/swift
 for v in ../vectors/*.json; do
   name=$(basename "$v" .json)
   swift_result=$(.build/debug/validate-vectors "$v" 2>&1 | tail -1)

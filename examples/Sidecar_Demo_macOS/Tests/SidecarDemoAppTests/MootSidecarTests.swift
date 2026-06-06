@@ -1,4 +1,4 @@
-import Testing
+import XCTest
 import Foundation
 import AriaMCP
 @testable import SidecarDemoApp
@@ -13,39 +13,36 @@ import AriaMCP
 /// We do not re-test the dispatcher's protocol semantics — ARIA_MCP's
 /// own tests own that. We only check that `MootSidecar` produces a
 /// correctly-wired dispatcher.
-@Suite("MootSidecar glue wiring")
-struct MootSidecarTests {
+final class MootSidecarTests: XCTestCase {
 
-    @Test("in-memory attach exposes a non-empty projected tool surface")
-    func attachInMemoryReturnsDispatcherWithToolSurface() async throws {
+    func testAttachInMemoryReturnsDispatcherWithToolSurface() async throws {
         let sidecar = try await MootSidecar.attachInMemory()
 
         // A non-empty tool surface proves AriaLexicon's verb-noun
         // matrix projected. The exact count is owned by AriaLexicon
         // and changes with the lexicon, so the test only asserts
         // non-emptiness.
-        #expect(
-            sidecar.dispatcher.tools.count > 0,
+        XCTAssertGreaterThan(
+            sidecar.dispatcher.tools.count,
+            0,
             "Sidecar dispatcher should expose the projected tool surface"
         )
     }
 
-    @Test("in-memory attach respects a custom identity")
-    func attachInMemoryRespectsCustomIdentity() async throws {
+    func testAttachInMemoryRespectsCustomIdentity() async throws {
         let identity = MootSidecar.Identity(
             name: "ExampleCorp-Notes-Sidecar",
             version: "9.9.9"
         )
         let sidecar = try await MootSidecar.attachInMemory(identity: identity)
 
-        #expect(sidecar.identity.name == "ExampleCorp-Notes-Sidecar")
-        #expect(sidecar.identity.version == "9.9.9")
-        #expect(sidecar.dispatcher.info.name == "ExampleCorp-Notes-Sidecar")
-        #expect(sidecar.dispatcher.info.version == "9.9.9")
+        XCTAssertEqual(sidecar.identity.name, "ExampleCorp-Notes-Sidecar")
+        XCTAssertEqual(sidecar.identity.version, "9.9.9")
+        XCTAssertEqual(sidecar.dispatcher.info.name, "ExampleCorp-Notes-Sidecar")
+        XCTAssertEqual(sidecar.dispatcher.info.version, "9.9.9")
     }
 
-    @Test("initialize handshake announces the sidecar identity")
-    func initializeHandshakeAnnouncesSidecarIdentity() async throws {
+    func testInitializeHandshakeAnnouncesSidecarIdentity() async throws {
         let identity = MootSidecar.Identity(
             name: "Sidecar_Demo_macOS-test",
             version: "0.0.1"
@@ -58,16 +55,16 @@ struct MootSidecarTests {
             params: .object(["protocolVersion": .string("2024-11-05")])
         )
         let rawResponse = await sidecar.dispatcher.handle(request)
-        let response = try #require(rawResponse)
+        let response = try XCTUnwrap(rawResponse)
 
         guard case .result(let result) = response.payload else {
-            Issue.record("initialize returned error: \(response.payload)")
+            XCTFail("initialize returned error: \(response.payload)")
             return
         }
-        let serverInfo = try #require(
+        let serverInfo = try XCTUnwrap(
             result.objectValue?["serverInfo"]?.objectValue
         )
-        #expect(serverInfo["name"] == .string("Sidecar_Demo_macOS-test"))
-        #expect(serverInfo["version"] == .string("0.0.1"))
+        XCTAssertEqual(serverInfo["name"], .string("Sidecar_Demo_macOS-test"))
+        XCTAssertEqual(serverInfo["version"], .string("0.0.1"))
     }
 }

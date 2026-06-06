@@ -21,10 +21,7 @@ communicates with the kit stack exclusively through ARIA_MCP.
 NeuronKit and GeniusLocusKit. It sits alongside NeuronKit as a peer and calls
 into the system through three distinct modes depending on what the caller needs.
 
-**Compiled applications bypass ARIA_MCP entirely.** Fulcrum, ARIA_MacOS,
-ARIA_iOS, and any other application that compiles the kit library directly
-calls GeniusLocusKit, NeuronKit, and CognitionKit in-process with no MCP
-overhead and no schema versioning indirection.
+**Compiled applications bypass ARIA_MCP entirely. Those compile the kit library directly and call GeniusLocusKit, NeuronKit, and CognitionKit in-process with no MCP overhead and no schema versioning indirection.
 
 **The three call modes are not equal in weight:**
 

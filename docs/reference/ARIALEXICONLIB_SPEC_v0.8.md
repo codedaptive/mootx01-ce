@@ -15,7 +15,7 @@ purpose: |
   acceptance matrix. It carries the words and their relationships and
   nothing else — no behavior, no storage, no state. Every MOOTx01 kit
   and every ARIA surface conforms to this vocabulary, so the Swift and
-  Rust versions are conformance-gated to agree on the words themselves.
+  Rust ports are conformance-gated to agree on the words themselves.
   The companion INTERFACE document carries the type signatures.
 ---
 
@@ -49,7 +49,7 @@ This specification defines:
   four.
 - The verb-noun acceptance matrix: which verbs each noun accepts.
 - The grammar contract string.
-- The cross-leg conformance obligation (Swift and Rust agree on every
+- The cross-port conformance obligation (Swift and Rust agree on every
   value).
 
 This specification does NOT define:
@@ -97,7 +97,7 @@ its storage shape.
 `Drawer`. Every other shape has a non-primary role (`rung`, `structure`,
 or `product`).
 
-**I-4 (cross-leg value identity):** the Swift and Rust versions declare
+**I-4 (cross-port value identity):** the Swift and Rust ports declare
 the same cases, in the same names, in the same order, and the same
 `Acceptance` matrix. Neither port leads; both must agree (conformance
 gate, § 7).
@@ -137,7 +137,7 @@ the consumer, not here.)
 ## § 7 — Conformance requirements
 
 **C-1:** `Verb.allCases.count == 9` and `Adjective.allCases.count == 4`
-(I-1, I-2). The Rust port's `Verb::ALL` and `Adjective::ALL` have the
+(I-1, I-2). The Rust version's `Verb::ALL` and `Adjective::ALL` have the
 same lengths.
 
 **C-2:** `Noun.primary == .drawer`, and exactly one noun reports
@@ -154,24 +154,7 @@ expunge, recall}.
 **C-4:** the flow partition (B-3) and role partition (B-2) hold for
 every verb and noun.
 
-**C-5 (cross-leg, I-4):** the Swift port and the Rust port produce
+**C-5 (cross-port, I-4):** the Swift version and the Rust version produce
 identical case names, ordering, flow/role assignments, and acceptance
 sets. The shared conformance harness asserts this; a divergence fails
 the gate before either port ships.
-
-## § 8 — Out of scope
-
-- Adjective *values* (state/trust/sensitivity members) → see
-  `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` § 5.5 and the LocusKit value
-  enums.
-- Verb *semantics* and dispatch → see `LOCUSKIT_SPEC_v0.8.md` and
-  `GENIUSLOCUSKIT_SPEC_v0.8.md`.
-- MCP projection of the matrix → see `ARIA_MCP_SPEC_v0.8.md` § 2.
-
-## § 9 — Open questions
-
-None.
-
----
-
-*End of AriaLexiconLib Specification v0.8.*

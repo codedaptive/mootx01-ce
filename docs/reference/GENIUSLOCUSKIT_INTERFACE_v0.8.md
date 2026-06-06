@@ -30,7 +30,7 @@ purpose: |
 
 **Swift:** `packages/kits/GeniusLocusKit/`
 
-- `Sources/GeniusLocusKit/` — 46 files. The `GeniusLocusKit` actor and
+- `Sources/GeniusLocusKit/` — 71 files. The `GeniusLocusKit` actor and
   its registry (`GeniusLocusKit.swift`), the coordinator/verb/fan-out/
   federation/grant/branch/migration extensions, and the Brain layer under
   `Brain/`, `Matrix/`, `Training/`, `Audit/`.
@@ -50,9 +50,11 @@ Rust version is synchronous (`EstateCoordinator` struct, a stateless verb
 `Surface`, `SerialLaneScheduler`). Value-level results agree across the
 whole surface (SPEC § 8, I-15).
 
-> **Two-tier surface.** GeniusLocusKit declares 116 public types in the
-> Swift version, of which 36 are referenced by another package (NeuronKit,
-> ARIA_MCP; measured 2026-05-27). One of those 36 (`Key`, i.e.
+> **Two-tier surface.** GeniusLocusKit declares 118 top-level public
+> nominal types (plus 18 public typealiases) in the Swift version, of
+> which 36 are referenced by another package (NeuronKit, ARIA_MCP;
+> type-count re-measured 2026-06-05, cross-package count as of
+> 2026-05-27). One of those 36 (`Key`, i.e.
 > `UnifiedProjection.Key`) is a common-word coincidence; the genuinely
 > consumed contract is the ~35 types in Tier 1 below — the actor, the verb
 > frames, the recall results, the fan-out/federation/grant/branch/audit/
@@ -82,6 +84,28 @@ public actor GeniusLocusKit {
     public func open(storage: any Storage, owner: OwnerCredentials) async throws -> EstateHandle
     public func close(_ handle: EstateHandle) async throws
     public func estate(for handle: EstateHandle) throws -> LocusKit.Estate
+
+    // Composition-aware provisioning and lifecycle (EstateLifecycle.swift) — GLK_PROVISION_001:
+    // provision() is the GLK-owned create+open+wire path. It seeds the manifest with the
+    // kind-prefixed framework profile and zoom window, then wires sub-stores (Corpus,
+    // VectorStore) based on EstateKind. Idempotent re-provision raises .duplicateEstate.
+    // quiesce/drain update EstateMountState; destroy closes the estate and tears down all
+    // sub-stores (BM25 + vectors cleared; BundleStore chunks preserved — append-only invariant).
+    public func provision(
+        storage: any Storage,
+        corpusStorage: (any Storage)? = nil,
+        owner: OwnerCredentials,
+        params: EstateProvisionParams,
+        embeddingModel: EmbeddingModel = .deterministic
+    ) async throws -> EstateHandle
+    public func mountState(for handle: EstateHandle) -> EstateMountState?
+    public func quiesce(_ handle: EstateHandle) async throws
+    public func drain(_ handle: EstateHandle) async throws
+    public func destroy(
+        storage: any Storage,
+        corpusStorage: (any Storage)? = nil,
+        handle: EstateHandle
+    ) async throws
 
     // Unified nine-verb surface (VerbSurface.swift) — SPEC B-2/B-3:
     public func capture(_ handle: EstateHandle, _ frame: CaptureFrame) async throws -> Drawer
@@ -748,7 +772,7 @@ the crate root. The Swift originals are in
 
 | Swift type | Rust type | Rust location | Notes |
 |---|---|---|---|
-| `GLKRecallMode` | `GLKRecallMode` | `recall::GLKRecallMode` | 4 variants; `raw_value()` matches Swift rawValue strings |
+| `GLKRecallMode` | `GLKRecallMode` | `recall::GLKRecallMode` | 5 variants (incl. `.nodeTreeNative`, added w5-nodetree-native — see that concordance section below); `raw_value()` matches Swift rawValue strings |
 | `GLKRecallScoring` | `GLKRecallScoring` | `recall::GLKRecallScoring` | 3 variants |
 | `RecallEvidencePath` | `RecallEvidencePath` | `recall::RecallEvidencePath` | 10 variants; `raw_value()` matches Swift |
 | `RecallFallbackPolicy` | `RecallFallbackPolicy` | `recall::RecallFallbackPolicy` | 2 variants |
@@ -1075,7 +1099,7 @@ aliases. Foundation `UUID` on the Swift side is a `[u8;16]` newtype alias
 
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
-| Composition coordinator | `GeniusLocusKit` (actor, `GeniusLocusKit.swift`) | `EstateCoordinator` (`rust/src/coordinator.rs:183`) | public actor / pub struct | Swift async actor / Rust sync struct (no async runtime — sanctioned, cf. NeuronKit policy-store seam) | `composition_conformance_tests.rs` / `CompositionConformanceTests.swift` | Confirmed |
+| Composition coordinator | `GeniusLocusKit` (actor, `GeniusLocusKit.swift`) | `EstateCoordinator` (`rust/src/coordinator.rs:195`) | public actor / pub struct | Swift async actor / Rust sync struct (no async runtime — sanctioned, cf. NeuronKit policy-store seam) | `composition_conformance_tests.rs` / `CompositionConformanceTests.swift` | Confirmed |
 | Estate handle | `EstateHandle` (`EstateHandle.swift`) | `EstateHandle` (`rust/src/handle.rs`) | public / pub | identical fields | `composition_conformance_tests.rs` / `CoordinatorLifecycleTests.swift` | Confirmed |
 | Estate uuid | Foundation `UUID` (`EstateHandle.estateUUID`) | `EstateUuid = [u8;16]` (`rust/src/handle.rs:15`) | (platform) / pub | Swift uses Foundation `UUID`; Rust uses a 16-byte alias — same 128-bit value, idiom | `composition_conformance_tests.rs` | Confirmed |
 | Estate-handle id (scheduler) | (Swift `EstateHandle` used as key) | `EstateHandleID = String` (`rust/src/brain/scheduler/api.rs:26`) | n/a / pub | Rust: string key for per-estate scheduler maps; Swift keys on `EstateHandle` directly | `scheduler_parity.rs` | Confirmed |
@@ -1294,6 +1318,86 @@ calling hydrate or flush:
   For SQLite this is `CREATE TABLE IF NOT EXISTS` + version bump (idempotent).
   For InMemory this applies migrations only if `schema_version < schema.version`.
 - **Rust**: `storage.open(&composite_schema())` on both (same idempotency rules).
+
+---
+
+---
+
+## GLK_ROLLUPS_001 — IntellectusLib Telemetry
+
+### Dependency
+
+GeniusLocusKit depends on `IntellectusLib` (the zero-dependency
+telemetry leaf library). This dependency is additive and non-inverting:
+`GeniusLocusKit` (composition layer) → `IntellectusLib` (floor).
+
+- **Swift**: `Package.swift` target `GeniusLocusKit` declares
+  `.product(name: "IntellectusLib", package: "IntellectusLib")` in both
+  `target` and `testTarget` dependencies. Citation:
+  `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
+- **Rust**: `Cargo.toml` declares
+  `intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }`.
+  Citation: `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28` (Rust layering
+  equivalent: no inversion rule).
+
+### Swift surface
+
+```swift
+// In GeniusLocusKitTelemetry.swift:
+enum GLKMetricName {
+    static let mountStateTransition = "geniuslocus.estate.mount_state_transition"
+    static let provision           = "geniuslocus.estate.provision"
+    static let nounCount           = "geniuslocus.estate.noun_count"
+    static let verbError           = "geniuslocus.estate.verb_error"
+}
+
+@inline(__always)
+func glkEmit(name: String, value: Double, tags: [String: String], now: Date)
+
+// EstateCoordinator.swift — extended remap with estate_id (default ""):
+private func remap(verb: String, estateID: String = "", error: Error) -> Error
+```
+
+All emit sites inside `open`, `close`, `provision`, `quiesce`, `drain`,
+and the nine ARIA verb `remap` call sites pass
+`estateID: handle.estateUUID.uuidString`.
+
+### Rust surface
+
+```rust
+// In telemetry.rs:
+pub mod metric_names {
+    pub const MOUNT_STATE_TRANSITION: &str = "geniuslocus.estate.mount_state_transition";
+    pub const PROVISION:              &str = "geniuslocus.estate.provision";
+    pub const NOUN_COUNT:             &str = "geniuslocus.estate.noun_count";
+    pub const VERB_ERROR:             &str = "geniuslocus.estate.verb_error";
+}
+pub fn now_secs() -> f64;
+
+// glk_emit! macro (coordinator.rs):
+glk_emit!(metric_names::MOUNT_STATE_TRANSITION, 1.0, { /* HashMap */ });
+
+// coordinator.rs — extended remap signature:
+fn remap(verb: &str, estate_id: &str, error: LocusKitError) -> VerbError
+
+// uuid_to_str helper:
+fn uuid_to_str(bytes: &[u8; 16]) -> String
+```
+
+All nine ARIA verb `remap` call sites pass
+`&uuid_to_str(&handle.estate_uuid)`. Utility method call sites (e.g.
+`add_kg_fact`, `recall_kg_facts`) pass `""` (no metric emitted).
+
+### Test isolation pattern
+
+Both ports use a process-wide lock to prevent concurrent tests from
+leaking metrics into each other's capturing sinks:
+
+- **Swift**: `IntellectusTestMutex` (actor-based FIFO cooperative mutex)
+  defined in `Tests/.../IntellectusTestLock.swift`. Every test that
+  touches the singleton calls `withIntellectusLock { ... }`.
+- **Rust**: `static GLOBAL_LOCK: OnceLock<Mutex<()>>` with `into_inner()`
+  poison recovery. Every test calls `global_lock()` first.
 
 ---
 

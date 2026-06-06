@@ -559,7 +559,89 @@ pub type CorpusKitResult<T> = Result<T, CorpusKitError>;
 // implements std::fmt::Display + std::error::Error
 ```
 
-## § 5 — Conformance test entry points
+## § 5 — Self-report telemetry (CORPUSKIT_REPORT_001)
+
+CorpusKit emits substrate self-report telemetry via IntellectusLib when
+monitoring is enabled. Off by default; off-path cost is one
+`AtomicBool` load + branch. See SPEC § 7 for the full contract.
+
+### IntellectusLib dependency
+
+Both ports add IntellectusLib as a dependency (non-breaking addition to
+`Package.swift` and `Cargo.toml`, authorized by
+`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`).
+
+**Swift:** `Package.swift` in `packages/kits/CorpusKit/` adds
+`.product(name: "IntellectusLib", package: "IntellectusLib")` to both
+the `CorpusKit` target and the `CorpusKitTests` target.
+
+**Rust:** `Cargo.toml` in `packages/kits/CorpusKit/rust/` adds
+`intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }`.
+
+### Emit sites
+
+**Swift** (`HybridRecall.swift`, `BundleStore.swift`):
+```swift
+import IntellectusLib
+// Inside BundleStore.insert (after batch completes):
+Intellectus.report(.metric(name: "corpuskit.ingest.latency_ms",
+    value: (endTime - startTime) * 1000.0,
+    tags: ["kit": "CorpusKit"], ts: endTime))
+Intellectus.report(.metric(name: "corpuskit.ingest.chunk_count",
+    value: Double(chunkCount), tags: ["kit": "CorpusKit"], ts: endTime))
+
+// Inside HybridRecall.recall (after result assembled):
+Intellectus.report(.metric(name: "corpuskit.recall.latency_ms", ...))
+Intellectus.report(.metric(name: "corpuskit.recall.vector_result_count", ...))
+Intellectus.report(.metric(name: "corpuskit.recall.keyword_result_count", ...))
+Intellectus.report(.metric(name: "corpuskit.recall.result_count", ...))
+```
+
+**Rust** (`bundle_store.rs`, `hybrid_recall.rs`):
+```rust
+use intellectus_lib::{report, StatSample};
+// Inside BundleStore::insert (after loop completes):
+report!(StatSample::metric("corpuskit.ingest.latency_ms".to_string(),
+    (end_ts - start_ts) * 1000.0,
+    [("kit".to_string(), "CorpusKit".to_string())].into_iter().collect(),
+    end_ts));
+// ... and chunk_count, recall.latency_ms, recall.vector_result_count,
+//     recall.keyword_result_count, recall.result_count
+```
+
+### Test isolation pattern (Swift)
+
+Process-wide lock required because Swift Testing parallelises suites
+and the `Intellectus` singleton is process-global. Pattern:
+
+```swift
+// New file: Tests/CorpusKitTests/GlobalTestLock.swift
+actor GlobalTestLock {
+    static let shared = GlobalTestLock()
+    private var isLocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func acquire() async { ... }
+    func release() { ... }
+    func withLock<T>(_ body: () async throws -> T) async throws -> T { ... }
+}
+```
+
+Every test that calls `BundleStore.insert`, `BundleStore.get`,
+`HybridRecall.recall`, or any other emit-capable function holds
+`GlobalTestLock.shared.withLock { }` and its suite carries `.serialized`.
+
+### Test isolation pattern (Rust)
+
+```rust
+static GLOBAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+fn global_lock() -> std::sync::MutexGuard<'static, ()> {
+    let mutex = GLOBAL_LOCK.get_or_init(|| Mutex::new(()));
+    match mutex.lock() { Ok(g) => g, Err(p) => p.into_inner() }
+}
+// Each test: let _guard = global_lock();
+```
+
+## § 6 — Conformance test entry points
 
 **Swift:**
 
@@ -581,7 +663,7 @@ cargo test -p corpus-kit-providers
 (The `corpus-kit` integration tests pull `corpus-kit-providers` as a
 dev-dependency for the `DeterministicTokenizer` fixture.)
 
-## § 6 — Corpus actor (public entry point)
+## § 7 — Corpus actor (public entry point)
 
 ### `EmbeddingModel` (Swift) / `EmbeddingModelConfig` (Rust)
 
@@ -640,6 +722,12 @@ public actor Corpus {
 
     /// Total chunks in BundleStore (does not decrease after remove).
     public func count() async throws -> Int
+
+    // GLK_PROVISION_001 — estate lifecycle primitive:
+    /// Destroy the entire recall index. Clears BM25, chunk_source_map, and all
+    /// vectors. BundleStore rows (chunks) are NOT deleted (append-only invariant).
+    /// Called by GeniusLocusKit.destroy(storage:corpusStorage:handle:).
+    public func destroyRecallIndex() async throws
 }
 ```
 
@@ -657,12 +745,16 @@ impl Corpus {
     pub fn recall(&self, query: &str, limit: usize, now_millis: i64) -> CorpusKitResult<Vec<ScoredChunk>>;
     pub fn remove(&self, source_id: &str) -> CorpusKitResult<()>;
     pub fn count(&self) -> CorpusKitResult<usize>;
+
+    // GLK_PROVISION_001 — estate lifecycle primitive:
+    /// Clear BM25 + chunk_source_map + all vectors. BundleStore rows preserved.
+    pub fn destroy_recall_index(&self) -> CorpusKitResult<()>;
 }
 ```
 
 ---
 
-## § 7 — Examples
+## § 8 — Examples
 
 ```swift
 import CorpusKit
@@ -689,7 +781,7 @@ let hits = try await HybridRecall.recall(
 
 ---
 
-## § 8 — Swift/Rust Concordance
+## § 9 — Swift/Rust Concordance
 
 One row per public concept. Each Swift symbol and Rust symbol is a real
 top-level public declaration found in source (file:line cited). The
@@ -723,6 +815,9 @@ Status legend: **Confirmed** = both present and test-bound;
 | MiniLMTextProvider | `MiniLMTextProvider` (`MiniLMTextProvider.swift:41`) | none — Apple platform binding (CoreML) | public struct / — | Rust: none — Apple platform binding (CoreML inference loaded by host app); ONNX/Candle Rust providers deferred (SPEC § 9). Conforms to VectorKit `EmbeddingProvider` | `ProvidersTests.swift` (Swift-only) | Exempt |
 | MPNetTextProvider | `MPNetTextProvider` (`MPNetTextProvider.swift:31`) | none — Apple platform binding (CoreML) | public struct / — | Rust: none — Apple platform binding (CoreML); ONNX/Candle Rust provider deferred (SPEC § 9) | `ProvidersTests.swift` (Swift-only) | Exempt |
 | EmbeddingGemmaProvider | `EmbeddingGemmaProvider` (`EmbeddingGemmaProvider.swift:33`) | none — Apple platform binding (CoreML) | public struct / — | Rust: none — Apple platform binding (CoreML); ONNX/Candle Rust provider deferred (SPEC § 9) | `ProvidersTests.swift` (Swift-only) | Exempt |
+| Telemetry — ingest | `Intellectus.report` ×2 in `BundleStore.insert` emitting `corpuskit.ingest.latency_ms` + `corpuskit.ingest.chunk_count` | `report!` ×2 in `BundleStore::insert` | internal emit / internal emit | identical metric names, tags (`kit=CorpusKit`), value semantics; SPEC § 7.2 | `CorpusKitTelemetryTests.swift` §1-§4 / `corpuskit_telemetry_tests.rs` §1-§4 | Confirmed |
+| Telemetry — recall | `Intellectus.report` ×4 in `HybridRecall.recall` emitting `corpuskit.recall.*` | `report!` ×4 in `hybrid_recall::recall` | internal emit / internal emit | identical metric names, tags (`kit=CorpusKit`, `model_id`), value semantics; SPEC § 7.2 | `CorpusKitTelemetryTests.swift` §1-§4 / `corpuskit_telemetry_tests.rs` §1-§4 | Confirmed |
+| GlobalTestLock (Swift test fixture) | `GlobalTestLock` (`GlobalTestLock.swift`) | `static GLOBAL_LOCK: OnceLock<Mutex<()>>` (per test file) | test-target only / test-target only | FIFO async actor mutex (Swift) / OnceLock<Mutex> with poison recovery (Rust) — both serialise access to the process-wide Intellectus singleton across parallel test suites | `CorpusKitTelemetryTests.swift` / `corpuskit_telemetry_tests.rs` | Confirmed |
 
 **Notes on the three text providers (Exempt rationale).** `MiniLMTextProvider`,
 `MPNetTextProvider`, and `EmbeddingGemmaProvider` each wrap a CoreML-backed

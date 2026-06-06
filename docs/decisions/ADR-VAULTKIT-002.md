@@ -121,3 +121,24 @@ tests pass unchanged (additive-only).
   builds the dream → Proposal → Debrief consumption side.
 - Deletion handling (human-confirmed drawer expunge) — downstream.
 - Per-note tunnel-source disambiguation (carried over from ADR-VAULTKIT-001) — still open.
+
+## Addendum (2026-06-06) — Decision (a) superseded: VaultKit is Swift + Rust at parity
+
+Decision (a) recorded a **Swift-only** `moot_vault_*` tool family with the
+Rust mirror "deliberately deferred," on the premise (ADR-VAULTKIT-001
+Decision (e)) that VaultKit ships no Rust target. **That premise is
+superseded.** The parity workstream (PARITY_WAVE_PROGRESS, 2026-06-05 —
+two days after this ADR) completed:
+
+- the **VaultKit Rust crate** (`packages/kits/VaultKit/rust/` — NoteIR,
+  VaultBridge, DrawerMapping with FNV-1a 128-bit lineageID, VaultAdapter,
+  ObsidianAdapter), conformance-gated; and
+- the **Rust `moot_vault_*` wiring** (`apps/ARIA_MCP/rust/src/vault_tools.rs`
+  + `tool_list.rs`), backed by `vault-kit`.
+
+VaultKit now ships **Swift + Rust at parity**. The open question "Rust
+`moot_vault_*` mirror — future mission" is therefore **CLOSED (done)**, and
+the guidance "post-flight must not flag the unmirrored Rust side as drift"
+no longer applies — the Rust side **is** mirrored and parity *is* the bar.
+Per the parity-is-absolute standing rule (Bob, 2026-06-06 — "we wouldn't do
+a swift-only version"), a Swift-only kit is not a shippable end state.

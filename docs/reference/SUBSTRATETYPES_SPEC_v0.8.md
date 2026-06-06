@@ -278,7 +278,7 @@ raises, no concurrency errors (the package has no concurrent state).
 ## § 7 — Conformance requirements
 
 Per I-7 and the conformance gate (cookbook §17.6, M8), this package
-ships shared conformance vectors that the Swift and Rust versions must
+ships shared conformance vectors that the Swift and Rust ports must
 both pass:
 
 - **Fingerprint256 vectors:** XOR identity, XOR commutativity, XOR

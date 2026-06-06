@@ -87,8 +87,10 @@ data integrity, the federation trust boundary, the access perimeter, or
 the chain-of-custody guarantees — report it privately rather than opening
 a public issue.
 
-> **Security contact:** see [SECURITY.md](SECURITY.md) for the private
-> reporting channels and what to expect after you report.
+> **Security contact:** _to be published._ Until a dedicated security
+> contact is listed here, send security reports through the private
+> channel noted in the repository's security policy, or contact the
+> maintainers directly rather than filing a public issue.
 
 We will acknowledge a security report, work the problem privately, and
 coordinate disclosure once a fix has tested out and shipped to the
@@ -106,4 +108,3 @@ focused on the work. That covers it.
 *This document describes the contribution process before 1.0. It will be
 revised at the 1.0 release to cover the pull-request workflow, the CLA,
 and the security contact in full.*
-

@@ -45,13 +45,6 @@ turns architectural assertions into testable propositions.
 notes, and legacy product names. Preserved for traceability; not
 authoritative.
 
-**A note on `missions/` and `blast_radius/`.**
-These are staging directories for in-flight work records: mission
-charters, blast radius assessments, and preflight and postflight
-notes. Their contents are internal work history and are archived to
-the enterprise repository, so the directories here are intentionally
-empty and their contents are not tracked.
-
 ## Conventions
 
 Documents use UPPER_SNAKE_CASE naming. Versioned documents carry a
