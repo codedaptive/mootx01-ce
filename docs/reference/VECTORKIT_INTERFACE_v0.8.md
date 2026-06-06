@@ -8,7 +8,7 @@ languages: [swift, rust]
 relates_to:
   - VECTORKIT_SPEC_v0.8.md  (the contract this interface implements)
 purpose: |
-  Public API surface of VectorKit in both legs: the EmbeddingProvider
+  Public API surface of VectorKit in both ports: the EmbeddingProvider
   abstraction, the built-in FloatSimHashEmbeddingProvider, the
   StoredVector record, the VectorStore CRUD surface, the VectorMatch
   result type, and the VectorKitError enum. The companion SPEC carries
@@ -449,6 +449,24 @@ let probe = try await provider.embed("yellow notepad")
 let hits = try await store.findNearest(probe: probe, modelID: "minilm-v6", limit: 10)
 // hits: [VectorMatch] sorted near → far, each tagged "minilm-v6"
 ```
+
+## § 7 — Swift/Rust Concordance
+
+Every top-level public concept in VectorKit, mapped Swift↔Rust with the
+shape rule that governs how the two ports may differ and the actual
+conformance test that proves they agree. Read-anchored: each symbol was
+verified in source at the cited file:line. The surface is a clean 1:1 —
+six public types, identical names, no Apple-platform-bound types, no
+Swift-only or Rust-only contract types.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Embedding abstraction | `EmbeddingProvider` (`Sources/VectorKit/EmbeddingProvider.swift:15`) | `EmbeddingProvider` (`rust/src/embedding_provider.rs:21`) | public protocol / pub trait | identical surface (`modelID`/`model_id`, `modelVersion`/`model_version`, `embed`, `embedBatch`/`embed_batch`); Swift `async throws` / Rust sync `Result` — sanctioned (no async runtime in the Rust port). `embedBatch` default impl: Swift public extension / Rust trait body | `EmbeddingProviderTests.swift::testEmbedReturnsEngram`, `testEmbedEmptyStringReturnsZeroEngram` ↔ `simhash_provider_tests.rs::empty_text_returns_zero_engram` | Confirmed |
+| Built-in deterministic provider | `FloatSimHashEmbeddingProvider` (`Sources/VectorKit/FloatSimHashEmbeddingProvider.swift:36`) | `FloatSimHashEmbeddingProvider` (`rust/src/simhash_embedding_provider.rs:43`) | public struct / pub struct | identical; host inference closure (Swift `@Sendable (String) async throws -> [Float]` / Rust `Fn(&str) -> Result<Vec<f32>, String> + Send + Sync`) projected via canonical SubstrateLib FloatSimHash with per-provider `projectionSeed`/`projection_seed` | `FloatSimHashEmbeddingProviderTests.swift::testEmbedIsDeterministicForSameText`, `testDifferentSeedsProduceDifferentEngrams` ↔ `simhash_provider_tests.rs::provider_embed_is_deterministic_for_same_text`, `different_providers_produce_different_engrams_for_same_text` | Confirmed |
+| Storage record | `StoredVector` (`Sources/VectorKit/StoredVector.swift:11`) | `StoredVector` (`rust/src/vector_store.rs:32`) | public struct / pub struct | fields identical except timestamp: Swift `filedAt: Date` (round-tripped through TEXT ISO8601) / Rust `filed_at: i64` (Unix epoch seconds, `TypedValue::Timestamp`) — sanctioned date-storage seam, value-equivalent across ports | `StoredVectorTests.swift::testInitRetainsAllFields`, `VectorStoreTests.swift::testModelAndVersionRoundTrip` ↔ `vector_store_tests.rs::model_and_version_round_trip`, `add_get_round_trip_preserves_engram_bytes` | Confirmed |
+| Nearest-neighbour result | `VectorMatch` (`Sources/VectorKit/VectorMatch.swift:20`) | `VectorMatch` (`rust/src/vector_store.rs:45`) | public struct / pub struct | identical; ordering by distance asc then drawer id asc (Swift `Comparable` `<` / Rust `Ord`+`PartialOrd`); `distance` Swift `Int` / Rust `i32`, range 0…256 | `VectorMatchTests.swift::testComparableOrdersByDistanceAscending`, `testSortingProducesDistanceAscendingOrder` ↔ `vector_store_tests.rs::find_nearest_returns_k_results_sorted_by_distance_ascending` | Confirmed |
+| PersistenceKit-backed store | `VectorStore` (`Sources/VectorKit/VectorStore.swift:51`) | `VectorStore` (`rust/src/vector_store.rs:67`) | public actor / pub struct | Swift `actor` (async CRUD mirrors PersistenceKit `RowStore`) / Rust `struct` over `Arc<dyn Storage>`, sync CRUD — sanctioned (no async runtime). Construction: Swift `init(storage:)` / Rust `new` + `open`. Schema: `schemaDeclaration` / `schema_declaration()` | `VectorStoreTests.swift::testAddGetRoundTripPreservesEngramBytes`, `testFindNearestReturnsKResultsSortedByDistanceAscending`, `testFindByKeywordReturnsMatchingDrawers` ↔ `vector_store_tests.rs::add_get_round_trip_preserves_engram_bytes`, `find_nearest_returns_k_results_sorted_by_distance_ascending`, `find_by_keyword_returns_matching_drawers` | Confirmed |
+| Error enum | `VectorKitError` (`Sources/VectorKit/VectorKitError.swift:5`) | `VectorKitError` (`rust/src/error.rs:7`) | public enum / pub enum | identical case-for-case: `embeddingFailed`/`EmbeddingFailed`, `modelUnavailable`/`ModelUnavailable`, `storeUnavailable`/`StoreUnavailable`, `notFound`/`NotFound` (Swift lowerCamel / Rust UpperCamel — idiom) | `VectorKitErrorTests.swift::testIsThrowableErrorAndPreservesPayload`, `FloatSimHashEmbeddingProviderTests.swift::testInferenceFailurePropagates` ↔ `simhash_provider_tests.rs::inference_failure_surfaces_as_embedding_failed` | Confirmed |
 
 ---
 

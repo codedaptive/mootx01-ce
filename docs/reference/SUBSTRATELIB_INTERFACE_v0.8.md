@@ -11,7 +11,7 @@ relates_to:
   - SUBSTRATEKERNEL_INTERFACE_v0.8.md  (Layer 2 primitives consumed)
   - SUBSTRATEML_INTERFACE_v0.8.md     (Layer 3 algorithms consumed)
 purpose: |
-  Public API surface of SubstrateLib in both legs. Three Swift files
+  Public API surface of SubstrateLib in both ports. Three Swift files
   publish the nine substrate verbs (`Verbs.Substrate`), the row-state
   automaton (`RowStateAutomaton`), and the AuditGate write-gate
   (`AuditGate.admit`). The Rust mirror exposes the same shapes with
@@ -345,6 +345,76 @@ helper types. No free top-level functions.
 - **Rust:** per-module `#[cfg(test)] mod tests` plus
   `tests/wire_format_conformance.rs` and
   `tests/bitmap_field_constants_conformance.rs`.
+
+## Swift/Rust Concordance
+
+Read-anchored from source (Swift `Sources/SubstrateLib/**`, Rust
+`rust/src/**`). One row per public concept. Every Swift and Rust
+symbol below is a real declaration cited by file:line. Behavior
+parity is proven by the per-port unit tests (same scenarios both
+sides) plus the two cross-port wire/constant conformance suites.
+
+Shape-difference convention used in this table: SubstrateLib is a
+pure, stateless kernel-layer lib — no async, no Apple frameworks —
+so there are **no platform-exempt types here**. The recurring
+sanctioned shape difference is *namespacing*: Swift groups stateless
+operations under a caseless `enum` namespace (`AuditGate`,
+`RowStateAutomaton`, `ForbiddenCombinations`, `VocabularyValidator`),
+whereas the Rust port expresses the same operations as free functions
+in the corresponding module (`audit_gate::admit`,
+`row_state::transition`/`validate`, `row_state::check_forbidden_combinations`,
+`audit_gate::freeze`). The *concept* is present in both ports; only
+the host construct differs. Likewise, types Swift nests inside a
+parent (`FieldSlot.Column`, `Substrate.MutationKind`) are flat
+top-level types in Rust (`Column`, `MutationKind`).
+
+Shared value-type enums (`RowState`, `RowVerb`, `RowStateError`,
+`NounType`, `LatticeAnchor`, `HLC`, `AuditEvent`, `Fingerprint256`)
+live in the Layer-1 `SubstrateTypes` / `substrate-types` package and
+are documented in `SUBSTRATETYPES_INTERFACE_v0.8.md`; SubstrateLib
+consumes them by import/`pub use`, so they are not re-rowed here.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Row identifier alias | `RowId` (typealias = UUID) — `Sources/SubstrateLib/Verbs.swift:49` | `RowId` (newtype `RowId(u128)`, re-exported from `substrate-types`; used at `rust/src/verbs.rs:42`, `rust/src/audit_gate.rs:194`) | public both | Swift `typealias UUID` / Rust `RowId(u128)` newtype — wire-compatible (128-bit), idiom diff | `WireFormatConformanceTests.swift::testAuditEntryRowIDIsUUIDString` ↔ `tests/wire_format_conformance.rs::audit_entry_row_id_is_uppercase_uuid_string` | Confirmed |
+| Verb-driver error surface | `SubstrateError` (enum) — `Sources/SubstrateLib/Verbs.swift:56` | `SubstrateError` (enum) — `rust/src/verbs.rs:38` | public both | identical (case set differs only by Swift extras `proposalRequired`/`nonProposalCannotUseProposalVerb` carried by the Swift reference driver; shared cases align) | `VerbsTests.swift::testMutateRejectsInvalidTransition` ↔ `rust/src/verbs.rs::tests` (mutate transition rejection) | Confirmed |
+| In-memory verb driver | `Substrate` (struct) — `Sources/SubstrateLib/Verbs.swift:77` | `Substrate` (struct) — `rust/src/verbs.rs:171` | public both | identical: stateful reference struct; Swift `mutating func` ↔ Rust `&mut self` methods (capture/reanchor/mutate/withdraw/expunge/recall/propose/associate/learn) | `VerbsTests.swift::testCaptureCreatesActiveRow` ↔ `rust/src/verbs.rs::tests` (capture creates active row) | Confirmed |
+| Named mutation operations | `Substrate.MutationKind` (nested enum, raw `String`) — `Sources/SubstrateLib/Verbs.swift:198` | `MutationKind` (flat enum, `token()` wire string) — `rust/src/verbs.rs:79` | public both | Swift nested `Substrate.MutationKind` / Rust flat `MutationKind`; Swift `rawValue` ↔ Rust `token()` for the wire token | `VerbsTests.swift::testMutateConfirmPendingToAccepted` ↔ `rust/src/verbs.rs::tests` (mutate confirm) | Confirmed |
+| Row-state automaton namespace | `RowStateAutomaton` (caseless enum: `transitions`, `transition(from:on:)`, `validate`, `canTransition`) — `Sources/SubstrateLib/RowStateAutomaton.swift:50` | `row_state` module free fns: `transition`, `validate` — `rust/src/row_state.rs:114,132` | public both | Swift enum-namespace / Rust module free fns (sanctioned namespacing diff — no async runtime, pure stateless ops) | `RowStateAutomatonTests.swift::testPendingToActiveViaObserve` ↔ `rust/src/row_state.rs::tests` (transition table) | Confirmed |
+| Transition-table key | `TransitionKey` (struct) — `Sources/SubstrateLib/RowStateAutomaton.swift:201` | `TransitionKey` (struct) — `rust/src/row_state.rs:36` | public both | identical `(from, on/verb)` composite key | `RowStateAutomatonTests.swift::testValidateRejectsIllegalTransitions` ↔ `rust/src/row_state.rs::tests` (illegal transition) | Confirmed |
+| Three-column bitmap snapshot | `BitmapFields` (struct: adjective/operational/provenance `UInt64`) — `Sources/SubstrateLib/RowStateAutomaton.swift:214` | `BitmapFields` (struct: adjective/operational/provenance `u64`) — `rust/src/row_state.rs:122` | public both | identical | `BitmapFieldConstantsConformanceTests.swift` ↔ `tests/bitmap_field_constants_conformance.rs` | Confirmed |
+| Forbidden-combination check (I-22) | `ForbiddenCombinations` (caseless enum: `check(state:fields:)`) — `Sources/SubstrateLib/RowStateAutomaton.swift:234` | `check_forbidden_combinations` (free fn) — `rust/src/row_state.rs:156` | public both | Swift enum-namespace / Rust free fn (sanctioned namespacing diff) | `RowStateAutomatonTests.swift::testI22SecretCannotBeExportable` ↔ `rust/src/row_state.rs::tests` (I-22 secret/public) | Confirmed |
+| Bitmap column tag | `FieldSlot.Column` (nested enum, raw `UInt8`) — `Sources/SubstrateLib/AuditGate.swift:52` | `Column` (flat enum) — `rust/src/audit_gate.rs:49` | public both | Swift nested `FieldSlot.Column` / Rust flat `Column` | `AuditGateTests.swift::testNoClobber` ↔ `rust/src/audit_gate.rs::tests` (read-modify-write preserves bits) | Confirmed |
+| Declared field-slot | `FieldSlot` (struct) — `Sources/SubstrateLib/AuditGate.swift:51` | `FieldSlot` (struct) — `rust/src/audit_gate.rs:52` | public both | identical layout (column/shift/width/label/legalValues); Swift `Int` shift/width ↔ Rust `u32`, idiom diff | `AuditGateTests.swift::testOverWidthValueRejectedNotTruncated` ↔ `rust/src/audit_gate.rs::tests` (over-width value rejected) | Confirmed |
+| Admitted vocabulary | `Vocabulary` (struct, `static basis`, `slot(for:)`) — `Sources/SubstrateLib/AuditGate.swift:134` | `Vocabulary` (struct, `basis()` free fn, `slot_for`) — `rust/src/audit_gate.rs:120` | public both | identical concept; Swift `static let basis` ↔ Rust `basis()` fn; union constructed only via freeze both sides | `AuditGateTests.swift::testFreezeRejectsBasisCollision` ↔ `rust/src/audit_gate.rs::tests` (basis collision) | Confirmed |
+| Vocabulary-freeze errors | `VocabularyError` (enum) — `Sources/SubstrateLib/AuditGate.swift:205` | `VocabularyError` (enum) — `rust/src/audit_gate.rs:132` | public both | identical case set (overlap / basisCollision / malformedWidth / valueExceedsWidth) | `AuditGateTests.swift::testFreezeRejectsOverlap` / `testFreezeRejectsMalformedWidth` / `testFreezeRejectsValueExceedingWidth` ↔ `rust/src/audit_gate.rs::tests` (freeze rejections) | Confirmed |
+| Vocabulary freeze/validate | `VocabularyValidator` (caseless enum: `freeze(union:)`) — `Sources/SubstrateLib/AuditGate.swift:221` | `freeze` (free fn) — `rust/src/audit_gate.rs:141` | public both | Swift enum-namespace / Rust free fn (sanctioned namespacing diff) | `AuditGateTests.swift::testFreezeRejectsOverlap` ↔ `tests/audit_gate.rs::tests` `freeze` rejections (`rust/src/audit_gate.rs::tests`) | Confirmed |
+| Single field write request | `FieldWrite` (struct: slot + value) — `Sources/SubstrateLib/AuditGate.swift:257` | `FieldWrite` (struct: slot + value) — `rust/src/audit_gate.rs:175` | public both | identical; Swift `Int64` value ↔ Rust `i64` | `AuditGateTests.swift::testUndeclaredFieldRejected` ↔ `rust/src/audit_gate.rs::tests` (undeclared field) | Confirmed |
+| Gate violation surface | `GateViolation` (enum) — `Sources/SubstrateLib/AuditGate.swift:268` | `GateViolation` (enum) — `rust/src/audit_gate.rs:178` | public both | identical case set (undeclaredField / illegalValue / basisViolation / stateInconsistentWithVerb); **this is the actual `admit` error return on both ports** | `AuditGateTests.swift::testIllegalValueRejected` ↔ `rust/src/audit_gate.rs::tests` (illegal value) | Confirmed |
+| The write gate | `AuditGate` (caseless enum: `admit(...) -> Result<AuditEvent, GateViolation>`) — `Sources/SubstrateLib/AuditGate.swift:284` | `audit_gate::admit(...) -> Result<AuditEvent, GateViolation>` (free fn) — `rust/src/audit_gate.rs:191` | public both | Swift enum-namespace / Rust free fn (sanctioned namespacing diff); deterministic content-ID + canonical snapshot event both sides | `AuditGateTests.swift::testContentIDDeterministicAndStable` ↔ `rust/src/audit_gate.rs::tests` (content-id determinism) + `WireFormatConformanceTests.swift` ↔ `tests/wire_format_conformance.rs` (canonical event wire) | Confirmed |
+
+### Correction note (read-anchored)
+
+The prose in § 2 above predates this concordance pass and is wrong on
+two points the audit-anchored table above corrects:
+
+1. **`AuditGateError` does not exist.** `AuditGate.admit` returns
+   `Result<AuditEvent, GateViolation>` on **both** ports
+   (`Sources/SubstrateLib/AuditGate.swift:302`,
+   `rust/src/audit_gate.rs:203`). The `GateViolation` row is the
+   authoritative gate-error surface; the § 2 `AuditGateError` block,
+   the § 4 `AuditGateError.*` rows, and the `BasisViolation(RowStateError)`
+   variant are stale and not present in source.
+2. **The Rust port is stateful for verbs and free-function for gates.**
+   § 2 sketches Rust `substrate` as a function-only module and shows a
+   `RowStateAutomaton`/`audit_gate` type-namespace shape; in source
+   `Substrate` is a real `struct` with `&mut self` verb methods, and
+   the gate/automaton/freeze operations are module free functions
+   (no Rust namespace type). The Shape-rule column records these as
+   the sanctioned namespacing difference, not drift.
+
+These are documentation-only corrections to a draft interface doc; no
+code parity gap is implied (the table rows are all `Confirmed`).
 
 ## § 6 — Examples
 

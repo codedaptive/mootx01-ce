@@ -9,7 +9,7 @@ relates_to:
   - SUBSTRATEKERNEL_SPEC_v0.8.md  (the contract this interface implements)
   - SUBSTRATETYPES_INTERFACE_v0.8.md  (Layer 1 types this package consumes)
 purpose: |
-  Public API surface of SubstrateKernel in both legs. Eight Swift
+  Public API surface of SubstrateKernel in both ports. Eight Swift
   files publish the `SubstrateKernel` protocol, four concrete kernel
   backends, the `PortableKernel` dispatch namespace, and three
   primitives (`BitField`, `SHA256`, `HammingNN`). The Rust mirror
@@ -313,3 +313,51 @@ assert_eq!(state_field, 33);
 
 let id = sha256::sha256_as_fingerprint(b"capture|<rowId>|<hlc>");
 ```
+
+## Swift/Rust Concordance
+
+Read-anchored map of the package's TOP-LEVEL public surface in both
+ports. Every Swift symbol and Rust symbol below was confirmed in
+source at the cited `file:line`. One row per public concept.
+
+Naming idiom across the table: Swift `CamelCase` methods / Rust
+`snake_case`; Swift namespaced `enum`/`struct` of static functions
+vs Rust free functions in a `mod` (e.g. Swift `BitField.extractField`
+/ Rust `bit_field::extract_field`). These are sanctioned port-idiom
+differences, not drift.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Kernel dispatch contract | `SubstrateKernel` protocol — `PortableKernel.swift:49` | `SubstrateKernel` trait — `rust/src/kernel.rs:14` | public / `pub` | Swift `protocol: Sendable` / Rust `trait: Send + Sync`; Swift `Int` returns, Rust `u32`; Swift `simhashCompute(subhashes:families:) -> Fingerprint256` (4-block) / Rust `simhash_block(input,family) -> u64` (single block, caller composes 4) — sanctioned idiom split | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference bit-for-bit" — `PortableKernelTests.swift:270` / Rust per-module `#[cfg(test)] mod tests` in `kernel.rs` | Confirmed |
+| Kernel kind tag | `KernelKind` enum — `PortableKernel.swift:231` | `KernelKind` enum — `rust/src/kernel.rs:182` | public / `pub` | Swift `String`-raw cases `scalar/simd/neon/bnns/metal/avx512/avx2`; Rust cases `Scalar/Simd/Neon/Avx512/Avx2` (no `Bnns`/`Metal` — those are Apple-only backends with no Rust kernel). Case-name idiom lowercase vs CamelCase. Rust adds `parse`/`as_str` string round-trip; Swift uses raw value | `PortableKernelDispatcherTests` "of_kind(.scalar)…" / "for_current_platform picks SIMD on arm64" — `PortableKernelTests.swift:108,125` | Confirmed |
+| Scalar reference kernel | `ScalarKernel` struct — `PortableKernel.swift:166` | `ScalarKernel` struct — `rust/src/kernel.rs:108` | public / `pub` | Swift `init()` / Rust `new()` + `Default`. The canonical oracle both ports gate against | `PortableKernelConformanceTests` (scalar is the oracle) — `PortableKernelTests.swift:270`; Rust conformance `#[cfg(test)]` in `kernel.rs` | Confirmed |
+| Portable SIMD kernel | `SimdKernel` struct — `PortableKernel-SIMD.swift:39` | `SimdKernel` struct — `rust/src/kernel_simd.rs:44` | public / `pub` | Swift `import simd` (always built) / Rust gated behind `simd-nightly` Cargo feature (`#![cfg(feature = "simd-nightly")]`); both compile to NEON on aarch64. Behavior byte-identical to scalar | `PortableKernelCountFoldTests` "SIMD count-fold matches scalar…" / `PortableKernelDispatcherTests` "of_kind(.simd)…" — `PortableKernelTests.swift:176,113` | Confirmed |
+| Kernel selection / dispatch entry | `PortableKernel` enum (namespace) — `PortableKernel.swift:241` | `PortableKernel` struct (namespace) — `rust/src/kernel.rs:224` | public / `pub` | Swift `enum` of `static func`s: `kernelForCurrentPlatform()`, `kernel(of:)`; Rust `struct` with assoc fns `for_current_platform() -> Box<dyn …>`, `of_kind(KernelKind) -> Box<dyn …>`. Swift returns `SubstrateKernel` existential / Rust `Box<dyn SubstrateKernel>` — sanctioned port idiom | `PortableKernelDispatcherTests` "for_current_platform picks SIMD on arm64, scalar elsewhere" — `PortableKernelTests.swift:125` | Confirmed |
+| Parametric bit-field primitive | `BitField` enum (namespace) — `BitField.swift:45` | `bit_field` module — `rust/src/bit_field.rs` (free fns: `extract_field:54`, `write_field:77`, `masked_equals:120`, `extract_flag:131`, `write_flag:142`, `popcount:158`, `hamming_distance:165`, `xor_fold:175`) | public / `pub` | Swift namespaced `static func` (`extractField`/`writeField`/`maskedEquals`/`extractFlag`/`writeFlag`/`popcount`/`hammingDistance`/`xorFold`) vs Rust free fns in a `mod`; Swift `Int`/`Int64` & labeled args, Rust `i64`/`u32` & positional — sanctioned idiom. `writeField(_ value:into:…)` arg-order matches Rust `write_field(value, into_bitmap, …)`. Note: audit keys on the type concept `BitField`; the Rust counterpart is a module of free fns, not a `pub` type, so the concept is anchored on the Swift `BitField` enum | `BitFieldTests` round-trip/extract/write vectors — `BitFieldTests.swift:22` (15 `@Test`s) / Rust `#[cfg(test)] mod tests` in `bit_field.rs:183` (cookbook §2.3 layout round-trip) | Confirmed |
+| SHA-256 primitive | `SHA256` enum (namespace) — `SHA256.swift:26` | `sha256` module — `rust/src/sha256.rs` (free fn `hash:17`) | public / `pub` | Swift `SHA256.hash(_ bytes:[UInt8]) -> [UInt8]` (32) / Rust `sha256::hash(&[u8]) -> [u8; 32]`. FIPS 180-4, dependency-free, byte-identical. Swift namespaced enum vs Rust module of free fns — sanctioned idiom; concept anchored on Swift `SHA256` enum | `SHA256Tests` NIST vectors (empty / "abc" / 56-byte / 1M 'a' / 32-byte length) — `SHA256Tests.swift:17` / Rust NIST `#[cfg(test)] mod tests` in `sha256.rs:104` | Confirmed |
+| HKDF-SHA256 key derivation | `GrantHKDF` enum (namespace) — `HKDF.swift:37` | `hkdf` module — `rust/src/hkdf.rs` (free fn `derive_key:34`) | public / `pub` | Swift `GrantHKDF.deriveKey(inputKeyMaterial:salt:info:outputByteCount:) -> [UInt8]` / Rust `hkdf::derive_key(ikm,salt,info,output_byte_count) -> Vec<u8>`. RFC 5869 over the in-repo SHA-256, byte-identical Apple Silicon ↔ Linux (PAR-4-GL1 grant scope-key gate). Swift namespaced enum vs Rust module — sanctioned idiom; concept anchored on Swift `GrantHKDF` enum | Cross-port grant-domain vector: Rust `hkdf.rs::grant_hkdf_scope_key_vector` (`rust/src/hkdf.rs:207`, asserts `fd2331…`) ↔ Swift `HKDFTests` `grantDomainScopeKeyVector` — `HKDFTests.swift:16`; both gated on RFC 5869 A.1/A.3 vectors | Confirmed |
+| Hamming-NN top-K search | `HammingNN` enum (namespace) — `HammingNN.swift:51` | `hamming_nn` module — `rust/src/hamming_nn.rs` (free fn `top_k:67`) | public / `pub` | Swift `HammingNN.topK(anchor:candidates:k:blocks:) -> [HammingNNHit]` / Rust `hamming_nn::top_k(anchor,candidates,k,blocks) -> Vec<HammingNNHit>`. Swift `blocks: BlockMask` / Rust `blocks: u8` bitmask — same block semantics, type idiom. Concept anchored on Swift `HammingNN` enum | `HammingNNTests` "top-1 finds the exact self-match" / "top-K sorted ascending" — `HammingNNTests.swift:20`; `HammingNNTopKTieBreakTests:14` / Rust `top_one_finds_self`, `top_k_returns_sorted_ascending` in `hamming_nn.rs:132` | Confirmed |
+| Hamming-NN hit record | `HammingNNHit` struct — `HammingNN.swift:32` | `HammingNNHit` struct — `rust/src/hamming_nn.rs:37` | public / `pub` | Swift `rowID: UUID` + `distance: Int` (`Hashable, Sendable`) / Rust `row_id: u128` + `distance: u32` (`Ord`/`PartialOrd` for heap+sort). UUID ↔ u128 and Int ↔ u32 are sanctioned port idioms; tie-break is rowID/row_id ascending in both (UUID string order and u128 order agree on conformance IDs) | `HammingNNTopKTieBreakTests` "equal-distance hits return in rowID-ascending order" — `HammingNNTopKTieBreakTests.swift:22` / Rust `top_k_returns_sorted_ascending` — `hamming_nn.rs:153` | Confirmed |
+| NEON kernel backend | `NeonKernel` struct — `PortableKernel-NEON.swift:39` | none — `import simd` Apple-Silicon NEON lane (no `pub` Rust kernel; Rust covers aarch64 via `SimdKernel` under `simd-nightly`) | public / — | Rust: none — Apple-Silicon `import simd` platform binding; the Rust port's aarch64 NEON path is `SimdKernel`, not a distinct `NeonKernel`. No separate cross-port contract type | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Exempt |
+| BNNS kernel backend | `BnnsKernel` struct — `PortableKernel-BNNS.swift:176` | none — Apple `Accelerate`/BNNS framework (`#if canImport(Accelerate)`) | public / — | Rust: none — Apple platform binding (Accelerate/BNNS is an Apple-only system framework; the Rust port uses scalar + portable SIMD) | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Exempt |
+| Metal GPU kernel backend | `MetalKernel` struct — `PortableKernel-Metal.swift:109` | none — Apple `Metal` framework (`#if canImport(Metal)`, `init?` since GPU may be unavailable) | public / — | Rust: none — Apple platform binding (Metal is an Apple-only GPU system framework; the Rust port uses scalar + portable SIMD). Already on the audit ignore-list | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Exempt |
+
+### Concordance notes
+
+- **Doc-vs-code corrections folded in.** Earlier prose sections of this
+  interface cited symbols that do not exist in source (e.g.
+  `xor256`/`xor_256` and `simhashSign`/`simhash_sign` on the protocol;
+  `SHA256.hash256` / `hash256AsFingerprint`; `BitField.writeField(into:value:…)`
+  arg order; `select_kernel()` free fns). The concordance above is anchored
+  on the SHIPPED symbols read at the cited `file:line`. The legacy §2 code
+  blocks are illustrative and known-stale; the concordance table is the
+  read-anchored source of truth for the public surface.
+- **Apple-platform exemptions.** `MetalKernel` (already on the audit
+  ignore-list), `BnnsKernel` (Accelerate/BNNS), and `NeonKernel` (`import
+  simd` Apple-Silicon lane) are Apple platform bindings with no distinct
+  Rust kernel type — the Rust port covers aarch64 through `SimdKernel`
+  under the `simd-nightly` feature plus the scalar fallback. They carry
+  Exempt rows here. `BnnsKernel` and `NeonKernel` are proposed for the
+  shared ignore-list (orchestrator applies); their Exempt rows already
+  satisfy the audit by name presence.
+
