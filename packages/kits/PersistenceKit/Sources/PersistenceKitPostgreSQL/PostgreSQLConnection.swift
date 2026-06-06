@@ -146,11 +146,9 @@ private func decodeCell(_ cell: PostgresRandomAccessRow.Element, type: ColumnTyp
             return .json(Data(s.utf8))
         case .hlc:
             let i: Int64 = try cell.decode(Int64.self, context: .default)
-            let packed = UInt64(bitPattern: i)
-            let physical = Int64(packed >> 16)
-            let logical = Int32(truncatingIfNeeded: (packed >> 4) & 0xFFF)
-            let node = Int32(truncatingIfNeeded: packed & 0xF)
-            return .hlc(HLC(physicalTime: physical, logicalCount: logical, nodeID: node))
+            // Use the canonical inverse: HLC(packed:) matches HLC.packed's
+            // layout (node<<56 | logical<<40 | physical).
+            return .hlc(HLC(packed: UInt64(bitPattern: i)))
         case .fingerprint:
             let d: ByteBuffer = try cell.decode(ByteBuffer.self, context: .default)
             let data = Data(buffer: d)

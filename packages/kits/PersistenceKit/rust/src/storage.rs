@@ -3,6 +3,7 @@
 use crate::audit_log::AuditLog;
 use crate::blob_store::BlobStore;
 use crate::cache_config::EstateCacheConfig;
+use crate::encryption::EstateEncryptionConfig;
 use crate::error::StorageResult;
 use crate::observer::StorageObserver;
 use crate::row_store::RowStore;
@@ -14,6 +15,11 @@ use std::sync::Arc;
 pub struct EstateConfiguration {
     pub estate_id: uuid::Uuid,
     pub backend: BackendConfiguration,
+    /// At-rest encryption configuration for this estate (PAR-5-PK). Defaults
+    /// to `EstateEncryptionConfig::plaintext()` so existing call sites are
+    /// unchanged: a plaintext estate behaves exactly as before, with no crypto
+    /// on any path. Mirrors Swift's `EstateConfiguration.encryptionConfig`.
+    pub encryption_config: EstateEncryptionConfig,
     /// Cache configuration for this estate (Mission PK-CACHE-A). Defaults
     /// to `EstateCacheConfig::disabled()` so existing call sites are unchanged:
     /// a disabled-cache estate behaves exactly as before.
@@ -21,13 +27,13 @@ pub struct EstateConfiguration {
 }
 
 impl EstateConfiguration {
-    /// Construct an estate configuration. `cache_config` defaults to disabled
-    /// so existing `EstateConfiguration::new(id, backend)` call sites compile
-    /// and behave identically.
+    /// Construct an estate configuration with plaintext encryption (the default)
+    /// and disabled cache. Existing call sites compile and behave identically.
     pub fn new(estate_id: uuid::Uuid, backend: BackendConfiguration) -> Self {
         EstateConfiguration {
             estate_id,
             backend,
+            encryption_config: EstateEncryptionConfig::plaintext(),
             cache_config: EstateCacheConfig::disabled(),
         }
     }

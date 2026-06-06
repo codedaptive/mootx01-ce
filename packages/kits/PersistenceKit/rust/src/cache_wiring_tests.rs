@@ -13,6 +13,7 @@
 //! the shared state.
 
 use crate::cache_config::EstateCacheConfig;
+use crate::encryption::EstateEncryptionConfig;
 use crate::inmemory::InMemoryStorage;
 use crate::predicate::StoragePredicate;
 use crate::schema::{ColumnDeclaration, SchemaDeclaration, TableDeclaration};
@@ -60,6 +61,8 @@ fn make_inmemory(cache_enabled: bool) -> InMemoryStorage {
     let config = EstateConfiguration {
         estate_id: Uuid::new_v4(),
         backend: BackendConfiguration::InMemory,
+        // Plaintext mode: the cache-wiring tests do not exercise encryption.
+        encryption_config: EstateEncryptionConfig::plaintext(),
         // When enabled: 10 MiB ceiling, sensitivity threshold 2 (max non-Secret).
         // When disabled: disabled() is the zero-change default.
         cache_config: if cache_enabled {
@@ -184,6 +187,8 @@ fn make_sqlite(cache_enabled: bool) -> SqliteStorage {
             path: path.to_string_lossy().into_owned(),
             busy_timeout_secs: 5.0,
         },
+        // Plaintext mode: the cache-wiring tests do not exercise encryption.
+        encryption_config: EstateEncryptionConfig::plaintext(),
         cache_config: if cache_enabled {
             EstateCacheConfig::new(true, 10_000_000, 2)
         } else {
