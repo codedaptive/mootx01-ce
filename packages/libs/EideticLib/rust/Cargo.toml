@@ -14,3 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# LatticeLib provides the FDC runtime (Fdc::encode_anchor) that lookup
+# delegates to — the same dependency relationship as Swift EideticLib's
+# `import LatticeLib`. Acyclic: LatticeLib does not depend on EideticLib.
+lattice-lib = { path = "../../LatticeLib/rust" }

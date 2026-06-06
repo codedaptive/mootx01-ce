@@ -37,6 +37,7 @@ pub mod decay;
 pub mod dp_or_reduce;
 pub mod pairing;
 pub mod partial_state_recall;
+pub mod row_attribute_view;
 pub mod tier_contribution;
 pub mod tier_query;
 pub mod temporal_causality_fold;

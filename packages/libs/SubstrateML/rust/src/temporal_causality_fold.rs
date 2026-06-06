@@ -28,44 +28,7 @@
 //   5. deltaMap aggregates per-key; output in stable insertion order.
 
 use std::collections::HashMap;
-
-// ---------------------------------------------------------------------------
-// HLC — minimal local representation matching SubstrateTypes.HLC
-//
-// The Rust substrate-types crate owns the canonical HLC. This module
-// duplicates only the fields needed for ordering and minute-delta math so
-// it compiles without a transitive crate dependency.
-// ---------------------------------------------------------------------------
-
-/// Hybrid Logical Clock timestamp. Ordered lexicographically by
-/// (physical_time, logical_count, node_id), identical to the Swift port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HLC {
-    /// Wall-clock milliseconds since Unix epoch.
-    pub physical_time: i64,
-    /// Monotonic counter for same-physical-time events.
-    pub logical_count: i32,
-    /// Per-replica tie-breaker.
-    pub node_id: i32,
-}
-
-impl HLC {
-    pub const ZERO: HLC = HLC { physical_time: 0, logical_count: 0, node_id: 0 };
-}
-
-impl PartialOrd for HLC {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for HLC {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.physical_time.cmp(&other.physical_time)
-            .then(self.logical_count.cmp(&other.logical_count))
-            .then(self.node_id.cmp(&other.node_id))
-    }
-}
+use substrate_types::HLC;
 
 // ---------------------------------------------------------------------------
 // Input types
