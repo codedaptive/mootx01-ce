@@ -1,12 +1,13 @@
 ---
 title: VaultKit Interface
-version: 1.1
+version: 1.2
 status: active
 spec_type: kit
-authors: Bilby (stream vk), Newton (stream w2-vaultkit)
+authors: Bilby (stream vk), Newton (stream w2-vaultkit, stream cp-vault-bidir)
 date: 2026-06-05
 relates_to:
   - docs/decisions/ADR-VAULTKIT-001.md
+  - docs/decisions/DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md
   - docs/reference/GENIUSLOCUSKIT_INTERFACE_v0.8.md
   - docs/reference/LOCUSKIT_INTERFACE_v0.8.md
 ---
@@ -23,6 +24,13 @@ relates_to:
 > `packages/kits/VaultKit/rust/` was added in stream `w2-vaultkit`
 > (Newton). All public types now have Rust equivalents. See
 > §§ Swift/Rust Concordance below.
+
+> **Bidirectional identity + export scope (2026-06-05, stream cp-vault-bidir):**
+> Two decisions were implemented in lockstep on both ports.
+> (1) `VaultExportScope` enum with default `.believed` fixes the confirmed-drop
+> bug. (2) Filenames use `<room>/<slug>.md` (no wing prefix); the `moot_id`
+> frontmatter key carries `drawer.lineageID` making round-trips rename-safe.
+> See `DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md`.
 
 VaultKit bridges a MOOT estate to a human-readable Markdown vault in both
 directions. The substrate stays authoritative; the vault is a projection
@@ -53,7 +61,29 @@ public struct NoteIR: Codable, Sendable, Equatable {
     public var originalPath: String
     public var originDate: OccurredAt?
     public var source: SourceRef?
+    /// Stable substrate lineage UUID from the `moot_id` frontmatter key.
+    /// When present, used as the lineageID on re-import instead of FNV(stableSourceKey),
+    /// making the note's identity rename-safe. Set on export by DrawerMapping.noteIR;
+    /// parsed on import by ObsidianAdapter. Carries drawer.lineageID (the STABLE UUID,
+    /// not drawer.id which supersession re-mints).
+    public var mootID: UUID?
     public var flattenedBody: String { get }
+}
+```
+
+### `VaultExportScope`
+
+Controls which drawers are included in an export. Mirrors LocusKit `Filter` chains.
+Default is `.believed` — fixes the confirmed-drop bug of the old hard-coded `.unconfirmed`.
+
+```swift
+public enum VaultExportScope: String, Sendable, CaseIterable {
+    case believed    // [.currentlyBelieve, .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly]),
+                     //  .any([.trustworthy, .requiresConfirmation])] — DEFAULT
+    case exportable  // [.exportable, .currentlyBelieve, .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly])]
+    case confirmed   // [.userConfirmed, .currentlyBelieve]
+    case unconfirmed // [.unconfirmed, .currentlyBelieve] — the old hard-coded behavior
+    var filterChain: [Filter] { get }
 }
 ```
 
@@ -80,6 +110,16 @@ non-empty, UDC from EideticLib or the `"000"` fallback, deterministic
 `lineageID` from `stableSourceKey`) and `.references`/`.imported` tunnels
 per wikilink.
 
+Export filename rule (Decision B1): stableSourceKey = `"<room>/<slug>"` where slug is
+the first Markdown heading, else the first non-empty line, sanitized to `[a-z0-9-]`
+max 60 characters, with UUID-prefix fallback. Wing rides the `wing:` frontmatter key
+(not the path). `moot_id` frontmatter key carries `drawer.lineageID` (the STABLE UUID).
+
+Identity resolution on import (priority order):
+1. `NoteIR.mootID` (set by `ObsidianAdapter.toIR` from `moot_id` frontmatter)
+2. `frontmatter["moot_id"]` → parse as UUID
+3. FNV-1a 128-bit hash of `stableSourceKey`
+
 ### `VaultBridge` (facade)
 
 ```swift
@@ -87,7 +127,10 @@ public struct VaultBridge: Sendable {
     public init(kit: GeniusLocusKit,
                 adapter: VaultAdapter = ObsidianAdapter(),
                 mapping: DrawerMapping = DrawerMapping())
-    public func export(estate handle: EstateHandle, to vaultURL: URL) async throws
+    /// `scope` defaults to `.believed`. Pass an explicit scope to limit the export.
+    public func export(estate handle: EstateHandle,
+                       to vaultURL: URL,
+                       scope: VaultExportScope = .believed) async throws
     public func importVault(at vaultURL: URL, into handle: EstateHandle) async throws -> ImportReport
 }
 
@@ -99,17 +142,15 @@ public struct ImportReport: Sendable, Equatable {
 
 ## ARIA_MCP tool family — `moot_vault_*` (stream va, ADR-VAULTKIT-002)
 
-The Swift ARIA_MCP dispatch exposes `VaultBridge` (plus drift detection
-and a candidate seam) as four tools, dispatched by name above the lexicon
-projection like the recipe and lens tools (`ToolProvenance.vault`). The
-shipped MCP binary is the Swift port, so this is the shipped surface; the
-Rust mirror is deliberately deferred (ADR-VAULTKIT-002 decision a). All
+The ARIA_MCP dispatch exposes `VaultBridge` (plus drift detection and a
+candidate seam) as four tools. Both the Swift and Rust ports are live. All
 four require `vaultPath`; `export`/`import` accept an optional `estateID`
-(omit for the default estate).
+(omit for the default estate). `moot_vault_export` accepts an optional
+`scope` argument (see `VaultExportScope`).
 
 | Tool | Args | Effect |
 |---|---|---|
-| `moot_vault_export` | `vaultPath`, `estateID?` | `VaultBridge.export`, then stamp the drift manifest. Result: note count + path. |
+| `moot_vault_export` | `vaultPath`, `estateID?`, `scope?` | `VaultBridge.export(scope:)`, then stamp the drift manifest. Result: note count + path + scope used. `scope` defaults to `"believed"`. |
 | `moot_vault_import` | `vaultPath`, `estateID?` | `VaultBridge.importVault`. Result: `ImportReport` counts. |
 | `moot_vault_status` | `vaultPath` | Report manifest presence + note count + last-export time. Pure filesystem read. |
 | `moot_vault_reconcile` | `vaultPath` | Re-hash notes, diff vs the manifest, return the drift set + candidates. |
@@ -155,14 +196,15 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 | `WikiLink` | `WikiLink` | `vault_kit::note_ir` | `alias: Option<String>` matches Swift `alias: String?`. |
 | `SourceRef` | `SourceRef` | `vault_kit::note_ir` | `byte_size: Option<i64>` (Rust) vs `byteSize: Int?` (Swift). |
 | `OccurredAt` | `OccurredAt` | `vault_kit::note_ir` | `iso8601: String` in both. No `Date`-typed field in Rust (language-neutral boundary). |
-| `NoteIR` | `NoteIR` | `vault_kit::note_ir` | `flattenedBody` -> `flattened_body()`. `frontmatter: [String:String]` -> `HashMap<String,String>`. |
+| `NoteIR` | `NoteIR` | `vault_kit::note_ir` | `flattenedBody` -> `flattened_body()`. `frontmatter: [String:String]` -> `HashMap<String,String>`. `mootID: UUID?` -> `moot_id: Option<Uuid>`. `NoteIR(mootID:)` -> `NoteIR::with_moot_id(…, moot_id)`. |
+| `VaultExportScope` | `VaultExportScope` | `vault_kit::vault_export_scope` | Same 4 cases. `filterChain: [Filter]` -> `filter_chain() -> Vec<Filter>`. `rawValue` -> `as_str()`. Rust `Default` = `Believed`. Rust uses `Filter::ModelConfirmedOnly` (pending rename to match Swift `automatedConfirmedOnly` in a future parity pass). |
 | `VaultAdapter` (protocol) | `VaultAdapter` (trait) | `vault_kit::vault_adapter` | `toIR(vaultURL:)` -> `to_ir(&Path)`. `fromIR(_:to:)` -> `from_ir(&[NoteIR], &Path)`. |
-| `ObsidianAdapter` | `ObsidianAdapter` | `vault_kit::obsidian_adapter` | Identical parsing behavior. Round-trip equality holds. Hidden files skipped. |
-| `DrawerMapping` | `DrawerMapping` | `vault_kit::drawer_mapping` | `classifyOnImport` -> `classify_on_import`. EideticLib not linked in Rust V1 (feature-flag-off path). |
+| `ObsidianAdapter` | `ObsidianAdapter` | `vault_kit::obsidian_adapter` | Identical parsing behavior. Round-trip equality holds. Hidden files skipped. Parses `moot_id` frontmatter key into `NoteIR.moot_id`. |
+| `DrawerMapping` | `DrawerMapping` | `vault_kit::drawer_mapping` | `classifyOnImport` -> `classify_on_import`. EideticLib not linked in Rust V1 (feature-flag-off path). `slug(from:id:)` -> `slug(content, id)`. `sanitizeSlug(_:)` -> `sanitize_slug(input)`. `noteIR(from:references:)` -> `note_ir_from(drawer, refs)`. `export(kit:handle:scope:)` -> `export(coord, handle, now, scope)`. |
 | `DrawerMapping.ImportOutcome` | `ImportOutcome` | `vault_kit::drawer_mapping` | Same three cases: `Written`, `Updated`, `Skipped`. |
 | `DrawerMapping.lineageID(forStableSourceKey:)` | `DrawerMapping::lineage_id(key)` | `vault_kit::drawer_mapping` | FNV-1a 128-bit. Produces byte-identical `UUID`/`Uuid` for all inputs. Verified by `tests/fnv_vector.rs`. |
 | `ImportReport` | `ImportReport` | `vault_kit::vault_bridge` | `drawersWritten` -> `drawers_written`, etc. `Int` -> `usize`. |
-| `VaultBridge` | `VaultBridge<'a>` | `vault_kit::vault_bridge` | Rust is synchronous (no `async`); `now: i64` (ms-since-epoch) passed by caller. |
+| `VaultBridge` | `VaultBridge<'a>` | `vault_kit::vault_bridge` | Rust is synchronous (no `async`); `now: i64` (ms-since-epoch) passed by caller. `export(estate:to:scope:)` -> `export(handle, vault_path, now, scope)`. |
 | `VaultKitError` (n/a — Swift throws) | `VaultKitError` | `vault_kit::error` | `Io`, `AdapterError`, `I5Violation`, `VerbError` cases. |
 
 ### Conformance anchor
@@ -173,15 +215,14 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 
 - EideticLib FDC classification (structural support present, `classify_on_import` flag honoured, lookup always returns `None` — equivalent to the feature-flag-off path in Swift).
 - Async `VaultBridge` methods (synchronous in Rust V1; the GLK Rust coordinator is synchronous).
-- ARIA_MCP `moot_vault_*` Rust mirror (ADR-VAULTKIT-002 decision a; out of scope per mission scope limit).
+- `Filter::ModelConfirmedOnly` rename to `automatedConfirmedOnly` (Rust LocusKit naming parity; the `VaultExportScope` comment documents this gap).
+
+Note: ARIA_MCP `moot_vault_*` Rust mirror is delivered (stream cp-vault-bidir). ADR-VAULTKIT-002 decision a is superseded by `DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md`.
 
 ## Out of scope (later missions)
 
-Rust `moot_vault_*` ARIA_MCP mirror (now that VaultKit-Rust exists, a
-follow-up mission wires it); CorpusKit RAG bundling; substrate-level
-origin-date and `SourceRef` primitive (stream bp); attachment blob
-custody; the watched-source scheduler and the real QueueKit enqueue
-(leg a) + dream → Proposal → Debrief consumption (a later,
-separately-gated mission). The ARIA_MCP `moot_vault_*` tool family and
-drift detection are **delivered** by stream va (see the tool-family
-section above and ADR-VAULTKIT-002).
+CorpusKit RAG bundling; substrate-level origin-date and `SourceRef` primitive
+(stream bp); attachment blob custody; the watched-source scheduler and the real
+QueueKit enqueue (leg a) + dream → Proposal → Debrief consumption (a later,
+separately-gated mission). The Rust `Filter::ModelConfirmedOnly` rename to
+`automatedConfirmedOnly` (a future LocusKit-Rust parity pass).
