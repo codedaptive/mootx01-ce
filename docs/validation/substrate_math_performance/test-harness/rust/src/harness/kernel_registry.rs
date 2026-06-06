@@ -11,7 +11,7 @@
 // Metal) are Swift-only and never appear on the Rust side
 // (Rust exists for non-Apple ports per project policy).
 
-use substrate_kit::kernel::KernelKind;
+use substrate_kernel::kernel::KernelKind;
 
 /// Ordered list of kernel kinds available on this build. The
 /// order is stable across runs so JSON output is reproducible.

@@ -16,8 +16,8 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::fingerprint256::Fingerprint256;
-use substrate_kit::hamming_nn;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_kernel::hamming_nn;
 
 pub struct HammingNNPrimitive;
 

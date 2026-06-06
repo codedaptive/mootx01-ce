@@ -16,9 +16,9 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::fingerprint256::Fingerprint256;
-use substrate_kit::hlc::HLC;
-use substrate_kit::tier_contribution::{
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::hlc::HLC;
+use substrate_ml::tier_contribution::{
     FederationCase, TierContributionFingerprint,
 };
 

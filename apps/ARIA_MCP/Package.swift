@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // ARIA_MCP — the local stdio MCP server.
 //
@@ -28,8 +28,8 @@ import PackageDescription
 let package = Package(
     name: "ARIA_MCP",
     platforms: [
-        .macOS(.v15),
-        .iOS(.v18),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(name: "AriaMCP", targets: ["AriaMCP"]),
@@ -51,6 +51,15 @@ let package = Package(
         // and recorded in ADR-VAULTKIT-002. Layering is downstream→upstream
         // (ARIA_MCP app → VaultKit kit); no inversion.
         .package(name: "VaultKit", path: "../../packages/kits/VaultKit"),
+        // ObserverSink + IntellectusLib: the manager-telemetry pipeline. The
+        // aria-mcp executable (NOT the AriaMCP library) installs a
+        // PersistenceStatsSink against the manager's stats store and drives
+        // Intellectus.setEnabled from the store flag, so the headless ARIA
+        // deployment self-reports when the manager turns monitoring on. App →
+        // lib layering, no inversion. Recorded in MOOT_MGR_001_BLAST_RADIUS.md
+        // (conditional MUST_UPDATE) citing MANAGER_1.0_PLAN.md §1/§3.
+        .package(name: "ObserverSink", path: "../../packages/libs/ObserverSink"),
+        .package(name: "IntellectusLib", path: "../../packages/libs/IntellectusLib"),
     ],
     targets: [
         .target(
@@ -83,6 +92,12 @@ let package = Package(
                 // Both ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH set → exit 1.
                 // Only ARIA_MCP_POSTGRES_URL set → PostgreSQLStorage (lazy pool).
                 .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
+                // Manager-telemetry self-report wiring (executable-only — the
+                // JSON-RPC library surface is untouched). Installs a
+                // PersistenceStatsSink against the manager's store when
+                // ARIA_MCP_STATS_STORE is set; silent no-op otherwise.
+                .product(name: "ObserverSink", package: "ObserverSink"),
+                .product(name: "IntellectusLib", package: "IntellectusLib"),
             ],
             path: "Sources/aria-mcp"
         ),

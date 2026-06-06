@@ -52,9 +52,9 @@ use std::time::{Duration, Instant};
 use harness::SplitMix64;
 use harness::{hardware, kernel_registry};
 
-use substrate_kit::fingerprint256::Fingerprint256;
-use substrate_kit::hyperplane::HyperplaneFamily;
-use substrate_kit::kernel::{KernelKind, PortableKernel, SubstrateKernel};
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::hyperplane::HyperplaneFamily;
+use substrate_kernel::kernel::{KernelKind, PortableKernel, SubstrateKernel};
 
 const DEFAULT_SEED: u64 = 0xCAFEBABEDEADBEEFu64;
 const BATCH_SIZES: [usize; 9] = [1, 2, 4, 8, 16, 32, 64, 128, 256];

@@ -43,8 +43,8 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::fingerprint256::Fingerprint256 as RealFingerprint256;
-use substrate_kit::or_reduce as real_or_reduce;
+use substrate_types::fingerprint256::Fingerprint256 as RealFingerprint256;
+use substrate_types::or_reduce as real_or_reduce;
 
 pub struct ORReducePrimitive;
 

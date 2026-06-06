@@ -23,7 +23,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::hlc::HLC;
+use substrate_types::hlc::HLC;
 
 pub struct HLCPrimitive;
 

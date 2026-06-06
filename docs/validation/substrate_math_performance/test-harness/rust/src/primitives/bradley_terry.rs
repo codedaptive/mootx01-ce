@@ -34,7 +34,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::bradley_terry::{
+use substrate_ml::bradley_terry::{
     BradleyTerryEstimator, PreferenceObservation, RowId,
 };
 

@@ -1,10 +1,10 @@
 // BackendAB.swift — subsystem 2 (backend A/B) for the Swift app.
 //
 // Runs the shipping lib's kernel-dispatched ops under each AVAILABLE kernel
-// backend (scalar / simd / bnns / metal) over deterministic inputs and asserts
-// the results are byte-identical across backends — the four-way conformance
-// invariant (every backend must match the scalar reference bit-for-bit) checked
-// at runtime in the shipping binary. Swift carries the richer kernel set; the
+// backend (scalar / simd / neon / metal) over deterministic inputs and asserts
+// the results are byte-identical across backends — the conformance invariant
+// (every backend must match the scalar reference bit-for-bit) checked at
+// runtime in the shipping binary. Swift carries the richer kernel set; the
 // Rust app only has scalar/simd.
 import Foundation
 import Harness
@@ -19,7 +19,7 @@ enum BackendAB {
         // Resolve the kernels actually available on this build. PortableKernel
         // .kernel(of:) falls back to scalar for an unavailable backend, so we keep
         // only kernels whose reported .kind matches what we asked for.
-        let candidates: [KernelKind] = [.scalar, .simd, .bnns, .metal]
+        let candidates: [KernelKind] = [.scalar, .simd, .neon, .metal]
         var kernels: [(KernelKind, any SubstrateKernel)] = []
         for k in candidates {
             let kern = PortableKernel.kernel(of: k)

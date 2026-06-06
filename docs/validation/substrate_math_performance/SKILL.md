@@ -9,7 +9,7 @@ description: |
   the conformance gate (byte-identical to scalar reference), and
   the two formal decline gates for candidate rejection without
   measurement. Trigger on phrases including "substrate", "kernel",
-  "GeniusLocus", "SimdKernel", "BnnsKernel", "MetalKernel",
+  "GeniusLocus", "SimdKernel", "MetalKernel",
   "cookbook §4.4", "Phase 2", "methodology gate", "engineering
   by wallet", "stress-test", "topk-bench", "validate-vectors",
   or "decision record". Do NOT trigger on general performance

@@ -47,8 +47,8 @@ use std::time::{Duration, Instant};
 use harness::SplitMix64;
 use harness::{hardware, kernel_registry};
 
-use substrate_kit::fingerprint256::Fingerprint256;
-use substrate_kit::kernel::{KernelKind, PortableKernel, SubstrateKernel};
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_kernel::kernel::{KernelKind, PortableKernel, SubstrateKernel};
 
 const DEFAULT_SEED: u64 = 0xCAFEBABEDEADBEEFu64;
 

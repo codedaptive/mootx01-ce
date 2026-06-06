@@ -1,0 +1,6 @@
+# Mirror the test-harness toolchain: depending on the harness crate pulls
+# substrate-kernel with simd-nightly (portable_simd), which needs nightly.
+# Keep this channel in lockstep with ../../test-harness/rust/rust-toolchain.toml.
+[toolchain]
+channel = "nightly-2026-05-16"
+components = ["rustc", "cargo", "rust-std"]

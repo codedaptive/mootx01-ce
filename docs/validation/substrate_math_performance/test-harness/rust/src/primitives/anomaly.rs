@@ -28,7 +28,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::anomaly::AnomalyDetection;
+use substrate_ml::anomaly::AnomalyDetection;
 
 pub struct AnomalyPrimitive;
 

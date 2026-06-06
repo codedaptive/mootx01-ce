@@ -22,7 +22,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::info_theory::InformationTheory;
+use substrate_ml::info_theory::InformationTheory;
 
 pub struct InfoTheoryPrimitive;
 

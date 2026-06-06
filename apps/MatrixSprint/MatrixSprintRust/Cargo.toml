@@ -28,13 +28,15 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # output schema) with the conformance harness library.
 harness = { package = "geniuslocus-test-harness", path = "../../../docs/validation/substrate_math_performance/test-harness/rust" }
 
-# Same path-2 dep as the harness: the canonical substrate Rust
-# port. The `simd-nightly` feature is passed through so
-# `KernelKind::Simd` resolves to `kernel_simd::SimdKernel`
-# instead of falling back to `ScalarKernel`.
-substrate-kit = { path = "../../../packages/libs/SubstrateLib/rust", package = "substrate-lib", features = ["simd-nightly"] }
+# Substrate sub-crates (four-package split, 2026-05-29). MatrixSprint
+# benchmarks types + kernel + ML primitives; it does not drive verbs,
+# so it does not depend on substrate-lib. The `simd-nightly` feature is
+# passed through to substrate-kernel so `KernelKind::Simd` resolves to
+# `kernel_simd::SimdKernel` instead of falling back to `ScalarKernel`.
+substrate-types = { path = "../../../packages/libs/SubstrateTypes/rust" }
+substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust", features = ["simd-nightly"] }
 substrate-ml = { path = "../../../packages/libs/SubstrateML/rust" }
 
 [features]
 default = ["simd-nightly"]
-simd-nightly = ["harness/simd-nightly", "substrate-kit/simd-nightly"]
+simd-nightly = ["harness/simd-nightly", "substrate-kernel/simd-nightly"]

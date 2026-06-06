@@ -16,7 +16,7 @@ use crate::harness::{
 };
 use crate::primitives::registry::{CaseResult, PrimitiveDescriptor, ValidationResult};
 
-use substrate_kit::nmf::NMFAlternatingLeastSquares;
+use substrate_ml::nmf::NMFAlternatingLeastSquares;
 
 pub struct NMFPrimitive;
 
