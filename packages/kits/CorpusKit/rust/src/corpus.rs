@@ -110,10 +110,21 @@ fn make_deterministic_provider() -> FloatSimHashEmbeddingProvider {
 /// Lifecycle: construct via `Corpus::open`, then call `ingest` to add
 /// documents and `recall` to query. `BundleStore` is append-only, so
 /// `remove` clears the recall index without deleting content rows.
+///
+/// `chunk_source_map` is an in-memory reverse map from chunk UUID to
+/// source_id (drawer ID). It is maintained in lockstep with the BM25
+/// index during `ingest` and `remove`, mirroring the Swift `Corpus` actor's
+/// `chunkSourceMap` dictionary. This allows `bm25_top_k_by_source` to
+/// aggregate chunk-level BM25 scores to source (drawer) level without
+/// a secondary storage query, matching the Swift path exactly.
 pub struct Corpus {
     bundle_store: BundleStore,
     /// Mutex guards mutable BM25 index operations (index_documents / remove).
     bm25: Mutex<BM25Index>,
+    /// In-memory reverse map: chunk UUID → source_id (drawer ID).
+    /// Maintained in lockstep with the BM25 index during ingest and remove.
+    /// Mirrors Swift's `chunkSourceMap: [UUID: String]` on the Corpus actor.
+    chunk_source_map: Mutex<std::collections::HashMap<uuid::Uuid, String>>,
     vector_store: VectorStore,
     provider: Box<dyn EmbeddingProvider>,
 }
@@ -153,6 +164,7 @@ impl Corpus {
         Ok(Corpus {
             bundle_store,
             bm25: Mutex::new(bm25),
+            chunk_source_map: Mutex::new(std::collections::HashMap::new()),
             vector_store,
             provider,
         })
@@ -184,6 +196,16 @@ impl Corpus {
                 .lock()
                 .map_err(|_| CorpusKitError::StoreUnavailable("BM25 lock poisoned".into()))?;
             bm25.index_documents(chunks.iter().map(|c| (c.id, c.text.as_str())));
+        }
+
+        // Maintain the chunk→source_id reverse map in lockstep with the BM25
+        // index. This mirrors Swift's chunkSourceMap update in Corpus.ingest.
+        // The map allows bm25_top_k_by_source to aggregate chunk-level scores
+        // to source (drawer) level without a secondary storage query.
+        if let Ok(mut csm) = self.chunk_source_map.lock() {
+            for chunk in &chunks {
+                csm.insert(chunk.id, source_id.to_string());
+            }
         }
 
         // Fan-out: embed each chunk and store the vector. The
@@ -246,6 +268,95 @@ impl Corpus {
         )
     }
 
+    /// Embed `text` using the corpus's configured embedding model.
+    ///
+    /// Exposes the embedding surface so GeniusLocusKit's RecallDirector
+    /// can produce a probe `Engram` for the vector lane without accessing
+    /// the provider directly. Mirrors Swift `Corpus.embed(_:)`.
+    ///
+    /// Returns an error when the embedding provider fails (e.g. empty input
+    /// routed to a model that requires non-empty text).
+    pub fn embed(&self, text: &str) -> CorpusKitResult<engram_lib::Engram> {
+        self.provider
+            .embed(text)
+            .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))
+    }
+
+    /// Return the model identifier this corpus was configured with.
+    ///
+    /// Used by the GLK vector lane to match stored vectors to the correct
+    /// model so cross-model Hamming comparisons cannot occur.
+    /// Mirrors Swift `Corpus.modelID`.
+    pub fn model_id(&self) -> &str {
+        self.provider.model_id()
+    }
+
+    /// BM25 keyword top-k by source (drawer) ID.
+    ///
+    /// Runs the BM25 index over `query`, aggregates chunk-level scores to
+    /// source (drawer) level by taking the maximum chunk score per source,
+    /// and returns up to `limit` `(source_id, score)` pairs sorted descending
+    /// by score (source_id ascending on tie, for determinism).
+    ///
+    /// The `source_id` is the value passed as `source_id` to `Corpus::ingest`.
+    /// For the GLK hybrid-recall path the caller ingests with
+    /// `source_id = drawer_id`, so the returned IDs are drawer IDs directly.
+    ///
+    /// The chunk→source reverse lookup uses the in-memory `chunk_source_map`
+    /// maintained in lockstep with the BM25 index during `ingest` and `remove`,
+    /// mirroring Swift's `chunkSourceMap` dictionary on the `Corpus` actor.
+    ///
+    /// Returns an empty Vec when the query produces no tokens, the BM25
+    /// index is empty, or `limit` is zero. Never returns an error.
+    ///
+    /// Mirrors Swift `Corpus.bm25TopKBySource(query:limit:)`.
+    pub fn bm25_top_k_by_source(&self, query: &str, limit: usize) -> Vec<(String, f32)> {
+        if limit == 0 || query.is_empty() {
+            return vec![];
+        }
+
+        // Chunk-level BM25 hits: (chunk_uuid, bm25_score). Over-fetch by 4×
+        // before source-level aggregation so after deduplication we still have
+        // at least `limit` distinct sources. Mirrors Swift's 4× over-fetch.
+        let chunk_hits = {
+            let bm25 = match self.bm25.lock() {
+                Ok(guard) => guard,
+                Err(_) => return vec![],
+            };
+            bm25.search(query, limit.saturating_mul(4))
+        };
+
+        if chunk_hits.is_empty() {
+            return vec![];
+        }
+
+        // Aggregate chunk-level scores to source level using the in-memory
+        // reverse map. Take max chunk score per source (same as Swift).
+        let csm = match self.chunk_source_map.lock() {
+            Ok(guard) => guard,
+            Err(_) => return vec![],
+        };
+        let mut source_scores: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+        for (chunk_uuid, score) in &chunk_hits {
+            if let Some(source_id) = csm.get(chunk_uuid) {
+                let entry = source_scores.entry(source_id.clone()).or_insert(0.0_f32);
+                *entry = entry.max(*score as f32);
+            }
+        }
+        drop(csm);
+
+        // Sort descending by score, source_id ascending on tie (deterministic).
+        let mut ranked: Vec<(String, f32)> = source_scores.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        ranked.truncate(limit);
+        ranked
+    }
+
     /// Remove a source document from the recall index.
     ///
     /// Removes the source's chunks from BM25 and deletes their vectors
@@ -262,6 +373,13 @@ impl Corpus {
             self.vector_store
                 .delete_vector(&chunk.id.to_string(), self.provider.model_id())
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+        }
+        // Remove chunk entries from the reverse map so bm25_top_k_by_source
+        // does not return stale source IDs for removed chunks.
+        if let Ok(mut csm) = self.chunk_source_map.lock() {
+            for chunk in &chunks {
+                csm.remove(&chunk.id);
+            }
         }
         Ok(())
     }

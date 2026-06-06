@@ -33,9 +33,9 @@ purpose: |
   `CKRecordMapping`, `DecodedRecord`
 - `Sources/ConvergenceKitFederation/` — `FederationSyncEngine`,
   `Relay` (transport protocol), `FederationRelay` (in-process `Relay`),
-  `SignedMessage`, `LocalIdentity`, `PeerIdentity`,
-  `FederationSignature`, `HyperplaneFamilySpec`, `PairingProposal`,
-  `PairingAcceptance`
+  `SignedEnvelope`, `PayloadKind`, `envelopeSigningBytes(...)`,
+  `LocalIdentity`, `PeerIdentity`, `FederationSignature`,
+  `HyperplaneFamilySpec`, `PairingProposal`, `PairingAcceptance`
 - `Tests/ConvergenceKitConformance/` — shared fixtures; per-backend test
   targets; `Package.swift`
 
@@ -52,8 +52,9 @@ Four library products: `ConvergenceKit`, `ConvergenceKitNone`,
 - `src/engine.rs` — the `SyncEngine` trait
 - `src/none.rs` — `NoSyncEngine`
 - `src/federation.rs` — `FederationSyncEngine`, `Relay` (transport
-  trait), `FederationRelay` (in-process `impl Relay`), `SignedRecord`,
-  `LocalIdentity`, `PeerIdentity`, `verify_signature`
+  trait), `FederationRelay` (in-process `impl Relay`), `SignedEnvelope`,
+  `PayloadKind`, `envelope_signing_bytes`, `LocalIdentity`,
+  `PeerIdentity`, `verify_signature`
 - `src/pairing.rs` — `HyperplaneFamilySpec`, `PairingProposal`,
   `PairingAcceptance`, `proposal_signing_bytes`
 
@@ -374,22 +375,39 @@ public final class FederationSyncEngine: SyncEngine, Sendable {
 // Relay`, so a hosted HTTPS/gRPC SyncServer relay drops in with no engine
 // change. `FederationRelay` is the in-process implementation (local + tests).
 public protocol Relay: Sendable {
-    func send(to recipient: Data, message: SignedMessage)
-    func drain(for recipient: Data) -> [SignedMessage]
+    func send(to recipient: Data, message: SignedEnvelope)
+    func drain(for recipient: Data) -> [SignedEnvelope]
 }
 
 public final class FederationRelay: Relay, @unchecked Sendable {
     public init()
-    public func send(to recipient: Data, message: SignedMessage)
-    public func drain(for recipient: Data) -> [SignedMessage]
+    public func send(to recipient: Data, message: SignedEnvelope)
+    public func drain(for recipient: Data) -> [SignedEnvelope]
 }
 
-public struct SignedMessage: Sendable, Codable {
+/// Discriminator for the opaque payload carried by `SignedEnvelope`.
+/// `syncRecordBatch` (0x01) is the only v1.0 variant. `fieldWriteEventBatch`
+/// (0x02) is reserved for the next-gen write-path payload (C1 extension point).
+public enum PayloadKind: UInt8, Sendable, Codable, Hashable {
+    case syncRecordBatch = 0x01
+}
+
+/// Build the canonical deterministic byte sequence that `SignedEnvelope.signature`
+/// covers. Byte-identical to Rust `envelope_signing_bytes`. Layout: see comment
+/// in `FederationSyncEngine.swift`.
+public func envelopeSigningBytes(
+    senderPublicKey: Data, payloadKind: PayloadKind,
+    payload: Data, hlc: PackedHLC
+) -> Data
+
+public struct SignedEnvelope: Sendable, Codable {
     public let senderPublicKey: Data
-    public let payload: Data            // JSON-encoded [SyncRecord]
-    public let signature: Data          // Ed25519 over payload
-    public let hlc: PackedHLC
-    public init(senderPublicKey: Data, payload: Data, signature: Data, hlc: PackedHLC)
+    public let payloadKind: PayloadKind  // discriminator for opaque payload
+    public let payload: Data             // opaque batch bytes (JSON [SyncRecord] for .syncRecordBatch)
+    public let signature: Data           // Ed25519 over envelopeSigningBytes(...), not raw payload
+    public let hlc: PackedHLC            // batch-level HLC, strictly after per-record HLCs
+    public init(senderPublicKey: Data, payloadKind: PayloadKind, payload: Data,
+                signature: Data, hlc: PackedHLC)
 }
 
 public struct PeerIdentity: Sendable, Hashable {
@@ -436,15 +454,15 @@ impl FederationSyncEngine {
     pub fn new(identity: Arc<LocalIdentity>, relay: Arc<dyn Relay>) -> Self;
     pub fn peer_identity(&self) -> &PeerIdentity;
     /// Rust v1.0 outbox is explicit; observer-driven path is deferred (SPEC § 9).
-    pub fn enqueue(&self, record: SyncRecord) -> SyncResult<()>;
+    pub fn enqueue(&mut self, record: SyncRecord) -> SyncResult<()>;
 }
 
 // Transport abstraction (hosted-sync hook): the engine holds `Arc<dyn
 // Relay>`, so a hosted SyncServer relay drops in with no engine change.
 // `FederationRelay` is the in-process implementation (local + tests).
 pub trait Relay: Send + Sync {
-    fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedRecord>;
-    fn broadcast(&self, from: &PeerIdentity, envelope: SignedRecord);
+    fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedEnvelope>;
+    fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
 }
 
 pub struct FederationRelay { /* … */ }                         // also Default
@@ -452,14 +470,30 @@ impl FederationRelay {
     pub fn new() -> Self;
 }
 impl Relay for FederationRelay {
-    fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedRecord>;
-    fn broadcast(&self, from: &PeerIdentity, envelope: SignedRecord);
+    fn register(&self, identity: PeerIdentity) -> std::sync::mpsc::Receiver<SignedEnvelope>;
+    fn broadcast(&self, from: &PeerIdentity, envelope: SignedEnvelope);
 }
 
-pub struct SignedRecord {
-    pub record: SyncRecord,
-    pub signer: [u8; 32],
-    pub signature: [u8; 64],
+/// Discriminator for the opaque payload carried by `SignedEnvelope`.
+/// `SyncRecordBatch` (0x01) is the only v1.0 variant. `FieldWriteEventBatch`
+/// (0x02) is reserved for the next-gen write-path payload (C1 extension point).
+#[repr(u8)]
+pub enum PayloadKind { SyncRecordBatch = 0x01 }
+
+/// Build the canonical deterministic byte sequence that `SignedEnvelope.signature`
+/// covers. Byte-identical to Swift `envelopeSigningBytes`. Layout: see comment
+/// in `federation.rs`.
+pub fn envelope_signing_bytes(
+    sender_public_key: &[u8; 32], payload_kind: PayloadKind,
+    payload: &[u8], hlc: &PackedHLC,
+) -> Vec<u8>;
+
+pub struct SignedEnvelope {
+    pub sender_public_key: [u8; 32],
+    pub payload_kind: PayloadKind,   // discriminator for opaque payload
+    pub payload: Vec<u8>,            // opaque batch bytes (JSON [SyncRecord] for SyncRecordBatch)
+    pub signature: [u8; 64],         // Ed25519 over envelope_signing_bytes(...), not raw payload
+    pub hlc: PackedHLC,              // batch-level HLC, strictly after per-record HLCs
 }
 
 pub struct PeerIdentity { pub public_key: [u8; 32] }
@@ -609,6 +643,95 @@ let a = FederationSyncEngine(), b = FederationSyncEngine()
 let relay: any Relay = FederationRelay()
 try await a.pair(with: b, via: relay, family: HyperplaneFamilySpec(seed: 0x5EED))
 ```
+
+## § 7 — Swift/Rust Concordance
+
+One row per public contract concept. Each Swift symbol and Rust symbol
+is a real top-level declaration in source (file:line cited). "Shape
+rule" states the sanctioned port difference; "Test binding" names the
+actual conformance/parity test that proves Swift ≡ Rust.
+
+### Core protocol + lifecycle
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Sync engine lifecycle contract | `SyncEngine` (`Sources/ConvergenceKit/SyncEngine.swift:22`) | `SyncEngine` (`rust/src/engine.rs:23`) | public protocol / pub trait | Swift async (`async throws`, `: Sendable`) / Rust sync (`&mut self`, `: Send`; `subscribe` → mpsc `Receiver` vs `AsyncStream`) — sanctioned, cf. PersistenceKit no-async-runtime seam | `none_engine_tests.rs::enable_succeeds_when_disabled` / `NoSyncEngineTests.swift`; federation: `federation_tests.rs::engine_enable_disable_state_transitions` | Confirmed |
+
+### Manifest / configuration value types
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Sync direction | `SyncDirection` (`Sources/ConvergenceKit/SyncTypes.swift:23`) | `SyncDirection` (`rust/src/types.rs:8`) | public enum / pub enum | Swift `String`-raw lowerCamel cases / Rust UpperCamel cases — identical variant set | `none_engine_tests.rs::synced_table_defaults_are_bidirectional_and_lww` | Confirmed |
+| Conflict policy | `ConflictPolicy` (`Sources/ConvergenceKit/SyncTypes.swift:30`) | `ConflictPolicy` (`rust/src/types.rs:17`) | public enum / pub enum | Swift `String`-raw / Rust plain enum; same 4 variants, both default LWW-by-HLC | `federation_inbound_event_tests.rs::remote_delete_rejected_under_append_only`; `…_under_local_wins_row_exists`; `…_under_lww` | Confirmed |
+| Synced-table declaration | `SyncedTable` (`Sources/ConvergenceKit/SyncTypes.swift:43`) | `SyncedTable` (`rust/src/types.rs:31`) | public struct / pub struct | Swift memberwise `init` w/ defaults / Rust `new` + builder (`with_direction`, `with_conflict_policy`); serde defaults mirror Swift defaults | `none_engine_tests.rs::synced_table_defaults_are_bidirectional_and_lww` | Confirmed |
+| Sync manifest | `SyncManifest` (`Sources/ConvergenceKit/SyncTypes.swift:65`) | `SyncManifest` (`rust/src/types.rs:71`) | public struct / pub struct | identical fields; Swift `table(named:)` / Rust `table_named`; `schemaVersion: Int` vs `schema_version: i32` | `ConvergenceKitCoreTypeTests.swift::manifestRoundtripCodable`; `none_engine_tests.rs::manifest_lookup_finds_known_table` | Confirmed |
+
+### Cycle result + observation value types
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Cycle receipt | `SyncReceipt` (`Sources/ConvergenceKit/SyncTypes.swift:89`) | `SyncReceipt` (`rust/src/types.rs:100`) | public struct / pub struct | Swift `timestamp: Date` / Rust `timestamp_secs: i64` (Unix epoch); counts `Int` vs `usize`; both expose `empty` | `none_engine_tests.rs::push_pull_after_enable_returns_empty_receipts`; `federation_tests.rs::two_peer_push_pull_roundtrip` | Confirmed |
+| Event-stream payload | `SyncEvent` (`Sources/ConvergenceKit/SyncTypes.swift:106`) | `SyncEvent` (`rust/src/types.rs:133`) | public enum / pub enum | Swift labelled-associated cases / Rust struct-variant cases; same 5 variants | `federation_tests.rs::subscriber_receives_push_completed_event` | Confirmed |
+| Coarse UI state | `SyncState` (`Sources/ConvergenceKit/SyncTypes.swift:115`) | `SyncState` (`rust/src/types.rs:143`) | public enum / pub enum | Swift `case error` / Rust `Errored`; Swift `Date?` / Rust `Option<i64>` secs; same 4 states | `none_engine_tests.rs::state_transitions_with_enable_disable`; `federation_tests.rs::engine_enable_disable_state_transitions` | Confirmed |
+
+### Wire format (`SyncRecord` and TypedValue boxing)
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Wire record | `SyncRecord` (`Sources/ConvergenceKit/SyncRecord.swift:28`) | `SyncRecord` (`rust/src/record.rs:199`) | public struct / pub struct | identical fields; `rowKey: UUID` vs `row_key: Uuid`; Codable JSON ↔ serde_json wire-compatible | `ConvergenceKitCoreTypeTests.swift::syncRecordRoundtrip`; `wire_format_tests.rs::sync_record_serde_json_roundtrips` | Confirmed |
+| Event kind | `SyncEventKind` (`Sources/ConvergenceKit/SyncRecord.swift:57`) | `SyncEventKind` (`rust/src/record.rs:32`) | public enum / pub enum | Swift `init(from:)`/`asStorageEvent` / Rust `From`/`Into<StorageEvent>`; same insert/update/delete | `wire_format_tests.rs::storage_event_to_sync_event_kind_bidirectional` | Confirmed |
+| Packed HLC | `PackedHLC` (`Sources/ConvergenceKit/SyncRecord.swift:81`) | `PackedHLC` (`rust/src/record.rs:60`) | public struct / pub struct | Swift `Int64`/`Int32` fields / Rust `i64`/`i32`; both bridge `HLC` | `ConvergenceKitCoreTypeTests.swift::packedHLCRoundtrip`; `wire_format_tests.rs::packed_hlc_roundtrips` | Confirmed |
+| Fingerprint wire | `FingerprintWire` (`Sources/ConvergenceKit/SyncRecord.swift:178`) | `FingerprintWire` (`rust/src/record.rs:88`) | public struct / pub struct | Swift 4×`UInt64` blocks / Rust 4×`u64`; both bridge `Fingerprint256` | `ConvergenceKitCoreTypeTests.swift::fingerprintRoundtrip`; `wire_format_tests.rs::fingerprint_wire_roundtrips` | Confirmed |
+| Typed-value box | `SyncValueBox` (`Sources/ConvergenceKit/SyncRecord.swift:121`) | `SyncValueBox` (`rust/src/record.rs:116`) | public struct / pub enum | Swift outer `struct{kind,payload}` wrapping nested `enum Payload` / Rust flat `enum` w/ `#[serde(tag="kind",content="payload")]` — same tagged JSON wire; Swift `.bytes`/`.timestamp` ↔ Rust `Blob`/`Timestamp`(i64), Swift array nesting ↔ Rust `Array` | `wire_format_tests.rs::typed_value_{null,int,bitmap,text,blob,uuid,hlc,fingerprint,array}_roundtrips` | Confirmed |
+| Typed-value map | `SyncValueMap` (`Sources/ConvergenceKit/SyncRecord.swift:100`) | `SyncValueMap` (`rust/src/record.rs:179`) | public struct / pub struct | Swift `[String:SyncValueBox]` / Rust `BTreeMap`; Swift `asTypedValues` / Rust `from_typed`/`into_typed` | `wire_format_tests.rs::sync_value_map_roundtrips` | Confirmed |
+
+### Backends — None
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| No-op engine (local-first default) | `NoSyncEngine` (`Sources/ConvergenceKitNone/ConvergenceKitNone.swift:29`) | `NoSyncEngine` (`rust/src/none.rs:20`) | public final class / pub struct | Swift `final class` / Rust `struct` (+`Default`); both conform to the engine contract, all cycles return `.empty` | `NoSyncEngineTests.swift`; `none_engine_tests.rs::push_pull_after_enable_returns_empty_receipts` | Confirmed |
+
+### Backends — Federation
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Federation engine | `FederationSyncEngine` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift:39`) | `FederationSyncEngine` (`rust/src/federation.rs:174`) | public final class / pub struct | Swift `pair(with:via:family:)` actor-driven observer path / Rust explicit `enqueue` outbox (observer path deferred, SPEC §9); `init()` vs `new(identity, relay)` | `FederationStubTests.swift`; `federation_tests.rs::two_peer_push_pull_roundtrip`; `federation_inbound_event_tests.rs::remote_insert_still_replicates` | Confirmed |
+| Transport abstraction | `Relay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift:93`) | `Relay` (`rust/src/federation.rs:122`) | public protocol / pub trait | Same hosted-relay seam, different verb shape: Swift inbox `send`/`drain` (poll) / Rust `register`(→`Receiver`)/`broadcast` (push). Both carry the signed envelope; bound `Sendable` vs `Send + Sync` | `federation_tests.rs::two_peer_push_pull_roundtrip` (drives the in-proc relay end-to-end) | Confirmed |
+| In-process relay | `FederationRelay` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift:102`) | `FederationRelay` (`rust/src/federation.rs:133`) | public final class / pub struct | Swift `NSLock`-guarded inboxes / Rust `Mutex` + mpsc senders (+`Default`); same in-process semantics | `federation_tests.rs::two_peer_push_pull_roundtrip`; `federation_inbound_event_tests.rs::setup_pair` | Confirmed |
+| Signed wire envelope | `SignedEnvelope` (`Sources/ConvergenceKitFederation/FederationSyncEngine.swift`), `PayloadKind` (same file), `envelopeSigningBytes(...)` (same file) | `SignedEnvelope` (`rust/src/federation.rs`), `PayloadKind` (same file), `envelope_signing_bytes` (same file) | public struct+enum+func / pub struct+enum+fn | Unified batch envelope: both ports carry `sender_public_key` (32B Ed25519), `payload_kind` (C1 tag: `syncRecordBatch`=0x01), opaque `payload` (JSON `[SyncRecord]` batch), `signature` (Ed25519 over canonical bytes — NOT raw JSON), `hlc` (batch-level). Canonical signing bytes are deterministic and byte-identical cross-port; golden vector in both test suites. `payload_kind` is the C1 extension point for `fieldWriteEventBatch`. Shape rule: Swift `Data`/`UInt8` vs Rust `Vec<u8>`/`u8` — same encoding | Swift: `SignedEnvelopeConformanceTests.swift::goldenVector`, `::signAndVerifyRoundtrip`, `::signedEnvelopeCodableRoundtrip`; federation push/pull end-to-end via `FederationStubTests.swift`. Rust: `federation_tests.rs::envelope_signing_bytes_golden_vector`, `::envelope_sign_and_verify_roundtrip`, `::pull_rejects_tampered_signature` | Confirmed |
+| Peer identity | `PeerIdentity` (`Sources/ConvergenceKitFederation/FederationIdentity.swift:25`) | `PeerIdentity` (`rust/src/federation.rs:31`) | public struct / pub struct | Swift `publicKey: Data` (32B Ed25519) / Rust `public_key: [u8;32]` | `FederationIdentityTests.swift`; `federation_tests.rs::local_identity_signs_and_verifies` | Confirmed |
+| Local identity (signing key) | `LocalIdentity` (`Sources/ConvergenceKitFederation/FederationIdentity.swift:33`) | `LocalIdentity` (`rust/src/federation.rs:42`) | public struct / pub struct | Swift `Curve25519.Signing.PrivateKey` (CryptoKit) / Rust ed25519-dalek key; Swift `init()`/`init(privateKeyBytes:)`/`sign` ↔ Rust `generate`/`from_secret`/`secret_bytes`/`public_key_bytes`/`sign`. Crypto backend differs by platform but both are Ed25519, byte-compatible keys/signatures | `FederationIdentityTests.swift::signAndVerifyRoundtrip`; `federation_tests.rs::local_identity_roundtrips_through_secret_bytes` | Confirmed |
+| Signature verification | `FederationSignature` (`Sources/ConvergenceKitFederation/FederationIdentity.swift:54`) | `verify_signature` (`rust/src/federation.rs`, free `pub fn`) | public enum (static `verify`) / pub free fn | Swift wraps verify in a caseless namespace enum / Rust exposes a free function — same Ed25519 verify behavior, no Rust namespace type by idiom | `FederationIdentityTests.swift::verifyRejectsTamperedPayload`, `verifyRejectsWrongKey`, `verifyRejectsMalformedKey`; `federation_tests.rs::local_identity_signs_and_verifies` | Confirmed |
+
+### Federation pairing handshake
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Hyperplane family spec | `HyperplaneFamilySpec` (`Sources/ConvergenceKitFederation/HyperplaneFamilyExchange.swift:26`) | `HyperplaneFamilySpec` (`rust/src/pairing.rs:12`) | public struct / pub struct | Swift `seed: UInt64`, `dimension: Int=256` (default init) / Rust `seed: u64`, `dimension: u32`; `new(seed)`=256 + `with_dimension` | `HyperplaneFamilyExchangeTests.swift`; `federation_tests.rs::pairing_proposal_signing_bytes_are_deterministic` | Confirmed |
+| Pairing proposal | `PairingProposal` (`Sources/ConvergenceKitFederation/HyperplaneFamilyExchange.swift:41`) | `PairingProposal` (`rust/src/pairing.rs:28`) | public struct / pub struct | Swift `Data` fields / Rust `Vec<u8>`; same `proposerPublicKey`/`proposedFamily`/`nonce` | `HyperplaneFamilyExchangeTests.swift`; `federation_tests.rs::pairing_proposal_signing_bytes_are_deterministic` | Confirmed |
+| Pairing acceptance | `PairingAcceptance` (`Sources/ConvergenceKitFederation/HyperplaneFamilyExchange.swift:53`) | `PairingAcceptance` (`rust/src/pairing.rs:36`) | public struct / pub struct | Swift `Data` / Rust `Vec<u8>`; same accepter/acceptedFamily/signatureOfProposal | `HyperplaneFamilyExchangeTests.swift`; `federation_tests.rs::pairing_acceptance_verifies_proposer_signature` | Confirmed |
+| Proposal signing bytes | (Swift: inline in `HyperplaneFamilyExchange` pairing path) | `proposal_signing_bytes` (`rust/src/pairing.rs`, free `pub fn`) | n/a / pub free fn | Canonical signing-byte helper; Swift computes the same bytes inline during pairing rather than as a standalone symbol | `federation_tests.rs::pairing_proposal_signing_bytes_are_deterministic`; `…::pairing_acceptance_verifies_proposer_signature` | Confirmed |
+
+### Error model
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Sync error enum | `SyncError` (`Sources/ConvergenceKit/SyncTypes.swift:123`) | `SyncError` (`rust/src/types.rs:161`) | public enum / pub enum | Swift `Error, Equatable` w/ labelled associated values / Rust struct-variant enum + `std::error::Error`+`Display`; same 10 categories. Named `SyncError` (not `ConvergenceKitError`) by stable wire convention | `ConvergenceKitCoreTypeTests.swift::syncErrorEquality`; `federation_tests.rs::pull_rejects_kit_mismatch`, `…::pull_rejects_schema_mismatch` | Confirmed |
+| Result alias | (Swift: `throws` — no result type) | `SyncResult<T>` (`rust/src/types.rs:199`) | n/a / pub type alias | Swift uses `throws`; Rust port has no async runtime so it returns `Result<T, SyncError>` aliased as `SyncResult` — sanctioned async/throws ↔ Result seam | exercised by every Rust engine test (return type of all fallible verbs), e.g. `none_engine_tests.rs::enable_twice_returns_already_enabled` | Confirmed |
+
+### CloudKit backend — Apple-platform-bound (Exempt)
+
+CloudKit is an Apple framework with no Rust counterpart by design
+(ConvergenceKit exposes CloudKit/Federation/None behind one protocol;
+only Federation/None have Rust ports). These types are already on the
+audit ignore-list.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| CloudKit engine | `CloudKitSyncEngine` (`Sources/ConvergenceKitCloudKit/CloudKitSyncEngine.swift:35`) | — | public final class / — | Rust: none — Apple platform binding (CloudKit) | `CloudKitStubTests.swift` (gated on configured test container) | Exempt |
+| CKRecord ↔ row mapping | `CKRecordMapping` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift:27`) | — | public enum / — | Rust: none — Apple platform binding (CloudKit) | `CKRecordMappingTests.swift` | Exempt |
+| Decoded CKRecord | `DecodedRecord` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift:190`) | — | public struct / — | Rust: none — Apple platform binding (CloudKit) | `CKRecordMappingTests.swift` | Exempt |
+| CloudKit sync metadata | `SyncMeta` (`Sources/ConvergenceKitCloudKit/CKRecordMapping.swift:184`) | — | public struct / — | Rust: none — Apple platform binding (CloudKit) | `CKRecordMappingTests.swift` | Exempt |
 
 ---
 
