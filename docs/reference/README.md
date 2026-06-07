@@ -9,7 +9,7 @@ authoritative "what does it do, signed in writing" layer.
 
 ## Per-kit specifications
 
-**[`COGNITIONKIT_SPEC_v0.1.md`](COGNITIONKIT_SPEC_v0.1.md)** — the
+**[`COGNITIONKIT_SPEC_v0.85.md`](COGNITIONKIT_SPEC_v0.85.md)** — the
 behaviour recipe layer. Sequences NeuronKit reasoning calls into
 named workflows. Contains no algorithms of its own.
 
