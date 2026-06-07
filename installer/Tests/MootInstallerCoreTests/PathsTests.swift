@@ -17,7 +17,7 @@ final class PathsTests: XCTestCase {
         )
         XCTAssertEqual(
             resolved.path,
-            "/Users/test/Library/Application Support/MOOTx01"
+            "/Users/test/Library/Application Support/com.mootx01.ce"
         )
     }
 
@@ -38,16 +38,16 @@ final class PathsTests: XCTestCase {
         )
         XCTAssertEqual(
             resolved.path,
-            "/Users/test/Library/Application Support/MOOTx01"
+            "/Users/test/Library/Application Support/com.mootx01.ce"
         )
     }
 
     func testEstateURLAppendsFixedFilename() {
-        let dir = URL(fileURLWithPath: "/Users/test/Library/Application Support/MOOTx01", isDirectory: true)
+        let dir = URL(fileURLWithPath: "/Users/test/Library/Application Support/com.mootx01.ce", isDirectory: true)
         let estate = MootPaths.estateURL(in: dir)
         XCTAssertEqual(
             estate.path,
-            "/Users/test/Library/Application Support/MOOTx01/estate.sqlite"
+            "/Users/test/Library/Application Support/com.mootx01.ce/estate.sqlite"
         )
     }
 
