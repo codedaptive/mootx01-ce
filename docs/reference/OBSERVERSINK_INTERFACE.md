@@ -3,7 +3,7 @@ title: ObserverSink Interface
 version: 1.0
 status: active
 spec_type: kit
-authors: Newton (substrate specialist), Skippy
+authors: MOOTx01 maintainers
 date: 2026-06-06
 relates_to:
   - docs/reference/OBSERVERSINK_SPEC.md

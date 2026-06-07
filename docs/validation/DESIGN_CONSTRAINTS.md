@@ -94,15 +94,15 @@ DESIGN_CONSTRAINTS.md, and CLAIMS_LEDGER.md."
 ## History
 
 This document opened during the anchor-extractor design
-conversation on 2026-05-22, after two consecutive overreaches by
-Skippy (proposing an LLM API call, then proposing ONNX Runtime as
-a substrate dependency) that violated the unstated but
-constitutional no-external-dependencies rule. Bob articulated C-1
+conversation on 2026-05-22, after two consecutive proposals
+(an LLM API call, then ONNX Runtime as a substrate dependency)
+that violated the unstated but constitutional
+no-external-dependencies rule. Bob articulated C-1
 explicitly; C-2 follows from the kernel-ladder pattern already in
 the substrate; C-3 formalizes Invariant I-14; C-4 follows from the
 audit and reproducibility requirements.
 
-The earlier KG fact recording EmbeddingGemma_300M as the
+The earlier record naming EmbeddingGemma_300M as the
 production default embedding model is superseded by this
 document. Vector tier rung 3 in the substrate uses TF-IDF over
 framework-profile vocabulary; neural embedding models are a

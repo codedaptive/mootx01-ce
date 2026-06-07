@@ -1,13 +1,12 @@
 ---
 status: draft
-authors: Bob Pankratz (via/ claude)
+authors: Bob Pankratz
 date: 2026-05-06
 supersedes: nothing — this is the founding Loci document
 relates_to:
   - docs/concepts/MOOTX01_SPEC.md
-  - GeniusLocusKit/README.md (shipped via TASK-NEX-2026-0008/0009)
+  - GeniusLocusKit/README.md
 scope: Nexus product line, ARIA_MCP standalone deployment
-review_cycle: morning review by Bob, then revise → /draft revisions → mission authoring
 ---
 
 # Loci Mode — Product Specification (v0.1 draft)
@@ -16,9 +15,9 @@ review_cycle: morning review by Bob, then revise → /draft revisions → missio
 
 This document specifies **Loci Mode** of ARIA_MCP — the standalone, AI-support-only deployment of the Genius Locus memory engine. Loci Mode is the drop-in MemPalace replacement that ships first; **Genius Mode** (full Simple Machines integration with FNode anchoring) is a separate spec authored later when Fulcrum integration begins.
 
-The reader's expected goal is to understand the full Loci product top to bottom — what it is, what it ships in each rev, what its data model and API look like, how it preserves MemPalace's design pillars, how it beats MemPalace's performance honestly, what the open questions are, and which Bilby missions decompose from this spec.
+The reader's expected goal is to understand the full Loci product top to bottom — what it is, what it ships in each rev, what its data model and API look like, how it preserves MemPalace's design pillars, how it beats MemPalace's performance honestly, what the open questions are, and how the work decomposes from this spec.
 
-This is a draft for Bob's morning review. After review and any revisions, individual Bilby missions will be authored from §16's mission decomposition.
+This is a draft for review. After review and any revisions, individual work items are decomposed from §16.
 
 ---
 
@@ -114,7 +113,7 @@ These are the architectural commitments inherited from MemPalace verbatim. Loci 
        ▼                      ▼
 ┌──────────────────┐  ┌──────────────────────────────────────┐
 │ GeniusLocusKit   │  │ CorpusKit                               │
-│ (SHIPPED)        │  │ (NOT YET BUILT — RAG-1 mission)      │
+│ (SHIPPED)        │  │ (NOT YET BUILT — RAG-1 work)         │
 │                  │  │                                      │
 │ Entities + facts │  │ sqlite-vec backend                   │
 │ Temporal queries │  │ Metal cosine compute                 │
@@ -142,7 +141,7 @@ These are the architectural commitments inherited from MemPalace verbatim. Loci 
 
 ### 3.3 What this spec adds
 
-- **CorpusKit** — vector storage layer. Builds against the existing `MISSION_RAG_1_RAGKIT.md` spec (already authored). Resurrects in Rev 1.0 (see §16 mission LOCI-3).
+- **CorpusKit** — vector storage layer. Builds against the existing `MISSION_RAG_1_RAGKIT.md` spec (already authored). Resurrects in Rev 1.0 (see §16, LOCI-3).
 - **LociKit** — new Swift Package wrapping GeniusLocusKit + CorpusKit with MemPalace's drawer/wing/room/tunnel/diary surface, embedding provider abstraction, and search pipeline.
 - **ARIA_MCP** — populated with the MCP server library code and capability key model. (The directory exists; no code yet.)
 - **nexus-mcp executable** — new target, either inside `ARIA_MCP/Package.swift` or as a top-level Swift Package with ARIA_MCP as a dependency. Standalone binary that Claude Desktop invokes.
@@ -188,7 +187,7 @@ Each owner kit is responsible for its own `CREATE TABLE IF NOT EXISTS` migration
 
 ### 4.2 Loci-owned table shapes (new in this spec)
 
-Schema is descriptive here; the actual `CREATE TABLE` statements live in mission specs.
+Schema is descriptive here; the actual `CREATE TABLE` statements live in the work-item specs.
 
 #### `drawers` — verbatim atoms
 
@@ -337,7 +336,7 @@ public actor LociKit {
 
 `SearchQuery` carries the query string, optional wing/room filters (which become *boost signals*, not hard filters — see §8), result limit, and max-distance threshold. `SearchResult` carries the drawer, similarity score, and a hierarchy-boost score breakdown for explainability.
 
-`Drawer`, `Tunnel`, `DiaryEntry`, `WingSummary`, `RoomSummary`, `Taxonomy`, `StoreStatus`, `Receipt`, `ReclaimReport` are public Codable Sendable structs — full shapes in mission specs.
+`Drawer`, `Tunnel`, `DiaryEntry`, `WingSummary`, `RoomSummary`, `Taxonomy`, `StoreStatus`, `Receipt`, `ReclaimReport` are public Codable Sendable structs — full shapes in the work-item specs.
 
 ### 5.2 MCP tool surface — exposed by nexus-mcp
 
@@ -385,7 +384,7 @@ to:
 }
 ```
 
-and gets the same tool surface with renamed tool names. We provide a one-page migration crib in Rev 1.0 docs (§9, mission LOCI-9).
+and gets the same tool surface with renamed tool names. We provide a one-page migration crib in Rev 1.0 docs (§9, LOCI-9).
 
 ### 5.3 CLI surface — nexus-mcp commands
 
@@ -469,7 +468,7 @@ public protocol EmbeddingProvider: Sendable {
 | `MpnetProvider` | `mpnet-base-v2` | 768 | 384 | ~110 MB | Apache 2.0 | English-only alternative. Targets 98%+ on LongMemEval-S. Cleaner license than EmbeddingGemma. |
 | `EmbeddingGemmaProvider` | `embedding-gemma-300m` | 768 | 2048 | ~600 MB (or ~200 MB int4 quantized) | Gemma Terms of Use | **Production default for new stores.** 100+ languages, longest context, best-in-class under 500M parameters. |
 
-All three are CoreML-converted at build time. The conversion tooling lives in `LociKit/Tools/coreml-convert/` (see §16, mission LOCI-2). Conversion produces `.mlmodelc` bundles that ship in the binary's resource bundle.
+All three are CoreML-converted at build time. The conversion tooling lives in `LociKit/Tools/coreml-convert/` (see §16, LOCI-2). Conversion produces `.mlmodelc` bundles that ship in the binary's resource bundle.
 
 ### 6.3 The license caveat for EmbeddingGemma
 
@@ -769,7 +768,7 @@ The master key is shown once at init. Losing it is recoverable only by accessing
 
 ### 11.4 Defer to Fulcrum spec
 
-The full capability key model — token rotation, scope delegation, wing-level access — is already specified in the Fulcrum spec. Rev 1.0 implements only the master + read flavors above. Rev 2.0 (when write tools are exposed externally) adopts the rest of the Fulcrum-specified model, which by then will be battle-tested in Fulcrum integration. Skippy will read the relevant Fulcrum sections at Rev 2.0 design time rather than re-inventing.
+The full capability key model — token rotation, scope delegation, wing-level access — is already specified in the Fulcrum spec. Rev 1.0 implements only the master + read flavors above. Rev 2.0 (when write tools are exposed externally) adopts the rest of the Fulcrum-specified model, which by then will be battle-tested in Fulcrum integration. The relevant Fulcrum sections are read at Rev 2.0 design time rather than re-invented.
 
 ### 11.5 Configuration of Claude Desktop
 
@@ -824,7 +823,7 @@ The cap key passes through environment variables (Claude Desktop's standard conf
 - Domain-based security model
 - Public write tools on MCP surface
 
-**Mission count: 8.** See §16.
+**Work-item count: 8.** See §16.
 
 ### 12.2 Rev 1.x — production hardening, benchmark suite
 
@@ -833,14 +832,14 @@ The cap key passes through environment variables (Claude Desktop's standard conf
 **Scope:**
 - Comprehensive benchmark suite: LongMemEval-S, LoCoMo, BEAM. Reproducibility scripts.
 - AAAK harness as a separate target — for honest comparison runs against MemPalace's published numbers.
-- Cross-encoder reranker as opt-in (mission LOCI-1X-1).
+- Cross-encoder reranker as opt-in (LOCI-1X-1).
 - Multi-stage retrieval (Pattern 2) for users with many wings.
 - Search pipeline parameter tuning (γ, vector/BM25 weights) against held-out splits.
 - PDF / Office document ingest via PDFKit handlers.
 - Performance profiling and optimization passes.
 - Better installation (Homebrew formula, signed pkg installer).
 
-**Mission count target: 6.**
+**Work-item count target: 6.**
 
 ### 12.3 Rev 2.0 — write/restructure on public MCP, soft delete, receipts
 
@@ -856,7 +855,7 @@ The cap key passes through environment variables (Claude Desktop's standard conf
 - Capability key model expansion per Fulcrum spec.
 - Label-embedding (Pattern 3) as opt-in ingest mode with one-time re-embed migration.
 
-**Mission count target: 8–10.**
+**Work-item count target: 8–10.**
 
 ### 12.4 Rev 2.x — iCloud sync, Apple system embedding
 
@@ -868,7 +867,7 @@ The cap key passes through environment variables (Claude Desktop's standard conf
 - `SystemEmbeddingProvider` implementation that dispatches to Apple's June-shipped models. Default for new stores on supported OS versions.
 - Sync footprint optimization: re-embed lazy/on-demand for large stores.
 
-**Mission count target: 5–7.**
+**Work-item count target: 5–7.**
 
 ### 12.5 Rev 3.0 — iOS variant, standalone Mac app shell (Case 2 from scope)
 
@@ -880,7 +879,7 @@ The cap key passes through environment variables (Claude Desktop's standard conf
 - App Store and Mac App Store readiness.
 - Apple ecosystem ingest sources begin: Calendar (EventKit), Reminders, Contacts (with user consent flows).
 
-**Mission count target: 8–10.**
+**Work-item count target: 8–10.**
 
 ### 12.6 Rev 3.x — domain-based security, multi-source ingest, Genius Mode entry
 
@@ -1095,14 +1094,13 @@ The benchmark harness (§13) runs nightly on a small subset of LongMemEval-S (50
 
 ---
 
-## 16. Mission decomposition for Rev 1.0
+## 16. Work decomposition for Rev 1.0
 
-Eight missions, parallelizable into three streams. Each is sized to fit the dispatch-ops `≤3 files preferred` rule (some exceed slightly; those need SARC-1 spec validation per the standing process).
+Eight work items, parallelizable into three tracks. Each is sized small (some exceed the preferred file count slightly; those need extra spec validation).
 
 ### Wave 1 — foundation, parallel
 
 **LOCI-1 — LociKit package skeleton + Drawer/Wing/Room types**
-- Branch: `stream/lc-loci-types`
 - New Swift Package at `LociKit/` with public API skeleton, Drawer/Tunnel/DiaryEntry/WingSummary/RoomSummary types as Codable Sendable structs, error enum.
 - DrawerStore class with SQLite schema (no embeddings yet — that lands in LOCI-3).
 - Tests for type round-trips and store CRUD.
@@ -1111,7 +1109,6 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 - **Parallel safe with:** LOCI-2, LOCI-3.
 
 **LOCI-2 — EmbeddingProvider protocol + MiniLM CoreML implementation**
-- Branch: `stream/le-embeddings-minilm`
 - New module `LociKit/Sources/LociKit/Embedding/` with the `EmbeddingProvider` protocol.
 - CoreML conversion script (Python, lives in `Tools/coreml-convert/`) for MiniLM.
 - `MiniLMProvider` Swift implementation.
@@ -1122,8 +1119,7 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 - **Parallel safe with:** LOCI-1, LOCI-3.
 
 **LOCI-3 — CorpusKit Swift Package per existing MISSION_RAG_1_RAGKIT.md**
-- Branch: `stream/lr-ragkit`
-- Resurrects the RAG-1 mission scoped at TASK-NEX-2026-0004. Specification already exists; mission file already authored. We re-dispatch.
+- Resurrects the RAG-1 work scoped at TASK-NEX-2026-0004. Specification already exists.
 - ~12 files, net-new.
 - **Depends on:** nothing.
 - **Parallel safe with:** LOCI-1, LOCI-2.
@@ -1131,7 +1127,6 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 ### Wave 2 — additional providers, parallel
 
 **LOCI-4 — mpnet + EmbeddingGemma providers**
-- Branch: `stream/lp-embeddings-rest`
 - Two more `EmbeddingProvider` implementations following the LOCI-2 pattern.
 - CoreML conversion script extensions for both models.
 - Bundled `.mlmodelc` artifacts.
@@ -1142,7 +1137,6 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 ### Wave 3 — composition, sequential
 
 **LOCI-5 — LociKit search pipeline + KG passthrough**
-- Branch: `stream/ls-search-pipeline`
 - Wires LociKit to GeniusLocusKit (Vanilla composition) for KG ops.
 - Wires LociKit to CorpusKit for embedding storage and KNN.
 - Implements the hybrid re-rank pipeline (§7).
@@ -1153,7 +1147,6 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 - **Depends on:** LOCI-1, LOCI-2, LOCI-3.
 
 **LOCI-6 — Directory walker / miner**
-- Branch: `stream/lm-miner`
 - `nexus-mcp mine` subcommand and supporting code.
 - Idempotent walking, .gitignore handling, chunking via NaturalLanguage.
 - Resume-safety via `.mining-progress` meta row.
@@ -1162,7 +1155,6 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 - **Depends on:** LOCI-5.
 
 **LOCI-7 — ARIA_MCP MCP server library + nexus-mcp executable**
-- Branch: `stream/ln-mcp-server`
 - ARIA_MCP module with MCP stdio handler, capability key model, tool dispatch.
 - `nexus-mcp` Swift executable target wrapping ARIA_MCP + LociKit.
 - Subcommand parsing for `serve`, `init`, `mine`, `status`, `issue-key`, etc.
@@ -1171,7 +1163,6 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 - **Depends on:** LOCI-5, LOCI-6.
 
 **LOCI-8 — Migration tool extension + AAAK harness skeleton + docs**
-- Branch: `stream/ld-docs-migration`
 - Extend existing `migrate-from-mempalace` to cover drawers, tunnels, diary.
 - AAAK harness target skeleton (algorithm port from MemPalace's `dialect.py`, no benchmark data yet).
 - README, MCP tool reference, install guide, Claude Desktop config example.
@@ -1179,9 +1170,9 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 - ~6 files, edits to existing CLI plus net-new harness.
 - **Depends on:** LOCI-1 (drawer schema), LOCI-5 (search for parity check).
 
-### Mission risk profile
+### Work-item risk profile
 
-| Mission | Risk | Reason |
+| Work item | Risk | Reason |
 |---|---|---|
 | LOCI-1 | low | Net-new types, no integration |
 | LOCI-2 | medium | First CoreML conversion — MiniLM has well-trodden conversion path, but first time in our build |
@@ -1194,7 +1185,7 @@ Eight missions, parallelizable into three streams. Each is sized to fit the disp
 
 ### Parallelization plan
 
-Three Bilby streams running simultaneously can bring this in within Bob's 2-day window:
+Three tracks running simultaneously can bring this in within a 2-day window:
 
 ```
 Day 1:
@@ -1234,7 +1225,7 @@ The critical path is LOCI-3 → LOCI-5 → LOCI-7 → LOCI-8. If LOCI-3 (CorpusK
 | **MCP** | Model Context Protocol — JSON-RPC-over-stdio standard for AI agents to call tools. |
 | **modelID** | Stable string tag identifying which embedding model produced a vector. Stored on every drawer/diary row. |
 | **ARIA_MCP** | The standalone Swift binary `nexus-mcp` plus the ARIA_MCP library code that powers it. |
-| **CorpusKit** | Vector storage Swift Package (sqlite-vec backend). Not yet built; mission scoped. |
+| **CorpusKit** | Vector storage Swift Package (sqlite-vec backend). Not yet built; scoped. |
 | **read key** | Capability key permitting read tools only. Default for external MCP clients in Rev 1.0. |
 | **room** | Metadata string on a drawer — second-level mnemonic grouping. Not a first-class table row. |
 | **room_match** | Search-time signal: 1.0 if drawer's room matches query's predicted room, else 0. Contributes to hybrid re-rank score. |
@@ -1270,15 +1261,15 @@ The critical path is LOCI-3 → LOCI-5 → LOCI-7 → LOCI-8. If LOCI-3 (CorpusK
 
 This is a v0.1 draft. Expected revision points:
 
-1. **The "RAG-1 mystery"** in §17.2 — Skippy investigates the actual state before LOCI-3 dispatches. Outcome may simplify or complicate the mission decomposition.
+1. **The "RAG-1 mystery"** in §17.2 — the actual state is investigated before LOCI-3 begins. Outcome may simplify or complicate the work decomposition.
 2. **Mode-naming stability** — "Genius" / "Loci" was locked. Confirm the inner-actor `Mode` enum case naming (`.loci(databaseURL:embeddingProvider:)`) is consistent with the product surface.
 3. **Capability key storage** — Keychain vs SQLite table. Spec leaves this slightly open in §11.1; resolve before LOCI-7.
-4. **Mission count and parallelization** — eight missions with three parallel streams is the proposed plan. Bob may want to compress further or add streams. Worth a sanity check against actual machine capacity.
+4. **Work-item count and parallelization** — eight work items with three parallel tracks is the proposed plan. This may be compressed further or expanded. Worth a sanity check against actual machine capacity.
 5. **EmbeddingGemma license** — Bob said ship as default; spec documents the license caveat but does not ask Bob to re-confirm. If reviewing changes the call (e.g. Bob decides Apache-only is the right ethical position for a memory product), `mpnet-base-v2` becomes the default with a single config-default change in LOCI-4.
-6. **AAAK harness as `LOCI-8`** — bundled with docs/migration. Could split out as `LOCI-9` if Bilby capacity allows. Sequencing-irrelevant; cosmetic.
+6. **AAAK harness as `LOCI-8`** — bundled with docs/migration. Could split out as `LOCI-9` if capacity allows. Sequencing-irrelevant; cosmetic.
 7. **Q22/Q23/Q30–Q33** — answer or accept defaults at any time. Defaults won't block Rev 1.0 ship.
 
-After Bob's review, Skippy revises this artifact, then authors individual Bilby mission files for LOCI-1 through LOCI-8 and dispatches them in waves per §16.
+After review, this artifact is revised, then individual work-item specs for LOCI-1 through LOCI-8 are authored and scheduled in waves per §16.
 
 ---
 

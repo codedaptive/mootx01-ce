@@ -19,14 +19,14 @@ public enum VerbError: Error, Sendable, CustomStringConvertible {
     case underlyingEstateFailure(verb: String, reason: String)
 
     /// The verb is part of the nine-verb vocabulary but the underlying
-    /// estate does not yet support it. Today this applies to `mutate`'s
-    /// non-confirm state-axis kinds (`.reject`, `.contest`, `.resolve`,
-    /// `.supersede`, `.revive`) — LocusKit raises an error for those
-    /// and the GLK boundary remaps it to this case. All other verbs
-    /// (`propose`, `associate`, `learn`, `expunge`, `reanchor`) are
-    /// fully live. The verb surface raises this uniformly so callers
-    /// can branch on a single case rather than pattern-matching on
-    /// LocusKit's internal error strings.
+    /// estate does not implement it. All nine verbs — and every `mutate`
+    /// kind (`.confirm`, `.reject`, `.contest`, `.resolve`, `.accept`,
+    /// `.supersede`, `.revive`, `.correctSensitivity`, `.correctTrust`) —
+    /// reach a live Estate today, so no current path raises this. It is
+    /// the generic dispatch error reserved for an estate type that omits
+    /// a verb: the GLK boundary remaps a LocusKit "not yet implemented"
+    /// stub error to this case so callers branch on a single case rather
+    /// than pattern-matching on LocusKit's internal error strings.
     case notSupportedByEstate(verb: String)
 
     /// The combination of verb and noun is rejected by the AriaLexicon

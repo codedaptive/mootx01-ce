@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // MatrixSprint — Swift port
 //
@@ -20,7 +20,7 @@ import PackageDescription
 
 let package = Package(
     name: "MatrixSprint",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v26)],
     products: [
         .executable(name: "stress-test", targets: ["StressTest"]),
         .executable(name: "topk-bench",  targets: ["TopKBench"]),

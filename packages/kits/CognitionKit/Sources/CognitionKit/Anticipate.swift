@@ -30,9 +30,9 @@ public enum Anticipate {
 
     /// Drop the confirmation-level filters from a chain — the recipe
     /// re-adds exactly one per recall, so a caller-supplied confirmation
-    /// filter must not survive to conflict. (`automatedConfirmedOnly` is
-    /// the F13 vocabulary for the tier the Rust filter set still calls
-    /// `ModelConfirmedOnly`.)
+    /// filter must not survive to conflict. Rust mirrors this as
+    /// `AutomatedConfirmedOnly` (renamed from `ModelConfirmedOnly` in F13
+    /// parity pass; see `anticipate_recipe.rs`).
     private static func withoutConfirmationLevel(_ chain: [Filter]) -> [Filter] {
         chain.filter { filter in
             switch filter {

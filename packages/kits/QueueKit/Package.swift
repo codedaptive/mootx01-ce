@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // Package.swift — QueueKit
 //
@@ -12,7 +12,7 @@ import PackageDescription
 
 let package = Package(
     name: "QueueKit",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v26), .iOS(.v26)],
     products: [
         .library(name: "QueueKit", targets: ["QueueKit"]),
     ],

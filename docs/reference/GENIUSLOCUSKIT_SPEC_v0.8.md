@@ -808,12 +808,11 @@ Returns an empty array (no error) when no `MatrixTier` has been registered.
      `CooccurrenceKey` 6-bit value constraint).
    - `.bitmap(v)` where `v.nonzeroBitCount == 1` → value = bit position.
    - Multi-bit `.bitmap`, `.string`, `.bytes`, `.null` → skipped (no lossless
-     6-bit encoding; documented INTENTIONALLY_LEFT in the MX-2 Blast Radius
-     Report).
+     6-bit encoding; intentionally not encoded).
 3. Emit both directed cells `(a,b)` and `(b,a)` from each upper-triangle entry.
 4. Add diagonal `O[A,A] = liveRowCount` for each observed item (conservative
    upper-bound approximation for single-item support; full correctness requires
-   a future mission that stores diagonal counts in `MatrixTier`).
+   a future change that stores diagonal counts in `MatrixTier`).
 
 ### Apriori entry point
 

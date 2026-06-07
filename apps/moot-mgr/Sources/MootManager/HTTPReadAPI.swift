@@ -35,12 +35,11 @@
 // ===========================================================================
 //
 // Implementation note: the listening + per-connection I/O run on a dedicated
-// background Thread using POSIX sockets (POSIXSocket.swift). NWListener was the
-// mission's first choice but cannot bind a server socket in this build
-// environment (EINVAL); the POSIX path is zero-dependency (system libc) and
-// enforces the same loopback-only boundary directly. See the completion report.
-// Each request that needs the store hops onto the MootManager actor via an
-// async Task; the socket fd stays owned by the connection handler.
+// background Thread using POSIX sockets (POSIXSocket.swift). NWListener cannot
+// bind a server socket in this build environment (EINVAL); the POSIX path is
+// zero-dependency (system libc) and enforces the same loopback-only boundary
+// directly. Each request that needs the store hops onto the MootManager actor
+// via an async Task; the socket fd stays owned by the connection handler.
 
 import Foundation
 import OSLog

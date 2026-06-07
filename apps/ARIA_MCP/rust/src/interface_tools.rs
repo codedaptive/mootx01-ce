@@ -15,8 +15,8 @@
 //!
 //! `moot_file_fact`, `moot_retire_fact`, and `moot_write_journal` call
 //! `coordinator.add_kg_fact`, `coordinator.withdraw_kg_fact`, and
-//! `coordinator.add_diary_entry` respectively. These methods landed via the
-//! GLK Rust write-path mission, so the runners now perform real writes.
+//! `coordinator.add_diary_entry` respectively. These methods are part of the
+//! GLK Rust write path, so the runners now perform real writes.
 //!
 //! # Server defaults (mirrors Swift `ToolDispatch.swift` constants)
 //!

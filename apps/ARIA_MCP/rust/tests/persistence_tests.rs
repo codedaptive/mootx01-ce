@@ -2,8 +2,7 @@
 //!
 //! Tests the SQLite-backed and PostgreSQL-backed `EstateRegistry` constructors
 //! and the persistence round-trip at the dispatch layer. These tests are
-//! isolated from the dispatch suite (tests/dispatch_tests.rs) to avoid edit
-//! contention with a queued mission that owns that file's next edit.
+//! kept in a separate file from the dispatch suite (tests/dispatch_tests.rs).
 //!
 //! # PostgreSQL tests
 //!

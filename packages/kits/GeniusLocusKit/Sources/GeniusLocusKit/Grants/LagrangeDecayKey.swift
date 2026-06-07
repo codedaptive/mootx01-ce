@@ -326,7 +326,7 @@ protocol DecayShareProvider: Sendable {
 /// drift on a fixed schedule keyed off `now` and the grant's `DriftRate`
 /// so the threshold-crossing behavior is testable without a live feed.
 ///
-/// Note (Perkins A-4): until ENC-03 lands a production share pool, this
+/// Note: until ENC-03 lands a production share pool, this
 /// struct IS the code that runs for mode-3 grants on confirmed IP
 /// clearance — `ScopeKeyVault.issue` builds it on the live issue path. It
 /// is "reference" in the sense that its shares are seeded deterministically

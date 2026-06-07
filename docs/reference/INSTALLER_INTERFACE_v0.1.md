@@ -1,158 +1,275 @@
 ---
-status: stub
+status: draft
 authors: Bob Pankratz (via/ claude)
 date: 2026-05-26
 version: v0.1
 package: Installer
-languages: [swift]  # add "rust" once the Rust version lands
+languages: [swift]  # Swift-only; no Rust port (CLI/installer app, not a kit)
 relates_to:
   - INSTALLER_SPEC_v0.1.md  (the contract this interface implements)
 purpose: |
-  Public API surface of Installer. Type signatures, method
-  shapes, error enums. The companion SPEC document carries the
-  behavioral contracts that these signatures must satisfy.
+  Public API surface of the Installer. Type signatures, method
+  shapes, error enums, and the `mootx01` CLI command surface. The
+  companion SPEC document carries the behavioral contracts that
+  these signatures must satisfy.
 ---
 
 # Installer Interface
 
-<!--
-TEMPLATE INSTRUCTIONS (delete this block when filling in):
-
-This is the API surface. It says what the package exposes and in
-what shape. Every type, function, and error this package
-publishes appears here with its actual signature, per language.
-Behavioral promises do NOT live here — those live in SPEC and are
-cited by section number.
-
-Filling this stub:
-1. Replace every <placeholder>.
-2. For each public type, function, and error: paste the actual
-   signature from the source tree. Strip implementation; keep
-   only the public surface.
-3. For every section: list every public member. Missing members
-   indicate either an INTERFACE gap or an unwanted-public-API
-   leak — both are findings worth raising.
-4. Cross-reference SPEC by section ("see SPEC § 4.2 for ordering
-   guarantees").
-5. Bilingual: if Rust version exists, paste Rust signatures alongside
-   Swift. If not, omit the rust block but keep `languages: [swift]`
-   in frontmatter so the gap is visible.
-
-Source of truth at fill time:
-  Swift:  Packages/kits/Installer/Sources/Installer/
-  Rust:   <crate-path>/src/
-  Tests:  Packages/kits/Installer/Tests/InstallerTests/
--->
-
 ## § 1 — Package layout
 
-<!-- Where this package lives in the source tree, per language. -->
+**Swift:** `installer/`
 
-**Swift:** `Packages/kits/Installer/`
-
-- `Sources/Installer/` — public API + implementation
-- `Tests/InstallerTests/` — conformance tests
+- `Sources/MootInstallerCore/` — the `MootInstallerCore` library:
+  install/uninstall logic, client detection, path resolution, estate
+  database management, permissions writing
+  - `Installer.swift` — `Installer` (install / writeMOOTmd / uninstall)
+  - `Paths.swift` — `MootPaths`
+  - `ClientConfig.swift` — `MCPClient`, `MCPClients`, `MCPServerEntry`,
+    `MCPServerEntryBuilder`
+  - `AgentPicker.swift` — `AgentPicker`, `AgentPickerError`
+  - `DatabaseManager.swift` — `DatabaseManager`, `MOOTx01DatabaseError`
+  - `PermissionsWriter.swift` — `PermissionsWriter`
+- `Sources/mootx01/` — the `mootx01` executable
+  - `MootMain.swift` — `@main Mootx01` root `AsyncParsableCommand`
+  - `Commands/` — `ServeCommand`, `InstallCommand`, `UninstallCommand`,
+    `DbCommand` (+ `DbCreate`/`DbList`/`DbOpen`/`DbDelete`),
+    `StatusCommand`, `QueryCommand`
+- `Tests/MootInstallerCoreTests/` — conformance tests
 - `Package.swift` — manifest
 
-**Rust:** `<crate-path>/`
+Two products: `.library(name: "MootInstallerCore")` and
+`.executable(name: "mootx01")`. The executable depends on
+swift-argument-parser (CLI app exception — not a kit) plus the
+in-repo products AriaMCP, AriaLexiconLib, GeniusLocusKit, LocusKit,
+PersistenceKit, PersistenceKitSQLite.
 
-- `src/` — public API + implementation
-- `tests/` — conformance tests
-- `Cargo.toml` — manifest
+**Rust:** none. The installer is a Swift-only CLI/host app; it is not
+a substrate kit and has no Rust parity port.
 
 ## § 2 — Public types
 
-<!-- One subsection per public type. For each: a one-line prose
-description, then bilingual code blocks. -->
+### `Installer`
 
-### `<TypeName>`
-
-<One-line description. Cite SPEC if relevant.>
-
-**Swift:**
+Caseless-enum namespace for the install/uninstall operations against an
+MCP client's JSON (or Continue YAML) config.
 
 ```swift
-public struct <TypeName>: Sendable, Codable {
-    // TODO: fill in from Sources/Installer/<TypeName>.swift
+public enum Installer {
+    public static func install(
+        client: MCPClient,
+        binaryPath: String,
+        homeDirectory: URL,
+        workingDirectory: URL,
+        local: Bool
+    ) throws
+
+    public static func writeMOOTmd(
+        homeDirectory: URL,
+        local: Bool,
+        workingDirectory: URL
+    ) throws
+
+    public static func uninstall(
+        client: MCPClient,
+        homeDirectory: URL,
+        workingDirectory: URL,
+        local: Bool
+    ) throws
 }
 ```
 
-**Rust:**
+### `MootPaths`
 
-```rust
-pub struct <TypeName> {
-    // TODO: fill in from <crate-path>/src/<type_name>.rs
+Path/constant resolution for the data directory, estate database, and
+Claude/MCP config locations.
+
+```swift
+public enum MootPaths {
+    public static let dataDirEnvVar: String            // "MOOTX01_DATA_DIR"
+    public static let estateFileName: String           // "estate.sqlite"
+    public static let defaultOwnerIdentifier: String   // "mootx01-user"
+
+    public static func resolveDataDirectory(
+        environment: [String: String],
+        homeDirectory: URL
+    ) -> URL
+    public static func estateURL(in dataDirectory: URL) -> URL
+    public static func localMCPConfigURL(workingDirectory: URL) -> URL
+    public static func globalClaudeSettingsURL(homeDirectory: URL) -> URL
+    public static func localClaudeSettingsURL(workingDirectory: URL) -> URL
+}
+```
+
+### `MCPClient`, `MCPClients`
+
+A supported MCP client and the registry of supported clients.
+
+```swift
+public struct MCPClient: Sendable, Equatable {
+    public let id: String
+    public let displayName: String
+    public let configPath: String
+    public let serverName: String
+    public let detectPath: String?
+    public let localConfigPath: String?
+    public init(id: String, displayName: String, configPath: String,
+                serverName: String, detectPath: String? = nil,
+                localConfigPath: String? = nil)
+    public func isPresent(homeDirectory: URL) -> Bool
+}
+
+public enum MCPClients {
+    public static let serverName: String          // "mootx01"
+    public static let supported: [MCPClient]       // claude-desktop, claude-code,
+                                                   // cursor, cline, continue
+}
+```
+
+### `MCPServerEntry`, `MCPServerEntryBuilder`
+
+The server-entry value written into each client's config, and its
+builder.
+
+```swift
+public struct MCPServerEntry: Sendable, Equatable, Codable {
+    public let command: String
+    public let args: [String]
+    public let env: [String: String]
+    public init(command: String, args: [String] = [], env: [String: String] = [:])
+}
+
+public enum MCPServerEntryBuilder {
+    public static func entry(binaryPath: String) -> MCPServerEntry
+    public static func entryJSON(binaryPath: String) throws -> String
+}
+```
+
+### `AgentPicker`
+
+Selects which detected MCP clients to wire, with an interactive prompt
+fallback.
+
+```swift
+public enum AgentPicker {
+    public static func pick(
+        yes: Bool,
+        target: String?,
+        homeDirectory: URL
+    ) throws -> [MCPClient]
+}
+```
+
+### `DatabaseManager`
+
+Estate-database lifecycle on disk (create / list / open / delete /
+purge) and active-estate selection.
+
+```swift
+public enum DatabaseManager {
+    public static func estateURL(for name: String, in dataDirectory: URL) -> URL
+    public static func activeEstateName(in dataDirectory: URL) throws -> String
+    public static func setActiveEstate(_ name: String, in dataDirectory: URL) throws
+    public static func createEstate(name: String, in dataDirectory: URL) throws
+    public static func listEstates(in dataDirectory: URL) -> [String]
+    public static func deleteEstate(name: String, in dataDirectory: URL) throws
+    public static func purgeDefaultEstate(in dataDirectory: URL) throws
+}
+```
+
+### `PermissionsWriter`
+
+Merges the ARIA tool permission allowlist into a Claude settings file.
+
+```swift
+public enum PermissionsWriter {
+    public static let ariaToolNames: [String]      // 22 moot_* tool names
+    public static let permissionEntries: [String]  // ariaToolNames mapped to permission strings
+    public static func merge(into settingsURL: URL) throws
+    public static func remove(from settingsURL: URL) throws
 }
 ```
 
 ## § 3 — Public functions
 
-<!-- One subsection per public function or method group. -->
+The library exposes no free functions; all operations are static
+members of the caseless-enum namespaces in § 2.
 
-### `<functionName>`
+### CLI command surface (`mootx01` executable)
 
-<One-line description. Cite SPEC § N for the behavioral contract.>
+The root command is `@main struct Mootx01: AsyncParsableCommand`
+(command name `mootx01`). Subcommands:
 
-**Swift:**
+| Subcommand | Command name | Platforms |
+|---|---|---|
+| `ServeCommand` | `serve` | macOS only (default subcommand) |
+| `InstallCommand` | `install` | all |
+| `UninstallCommand` | `uninstall` | all |
+| `DbCommand` | `db` (subcommands: `create`, `list`, `open`, `delete`) | all |
+| `StatusCommand` | `status` | all |
+| `QueryCommand` | `query` | all |
 
-```swift
-public func <functionName>(...) async throws -> <ReturnType>
-```
-
-**Rust:**
-
-```rust
-pub async fn <function_name>(...) -> Result<<ReturnType>, <ErrorType>>
-```
+On non-macOS platforms `serve` is omitted (it requires the Apple-only
+MCP server runtime); on macOS `serve` is the default subcommand so a
+bare `mootx01` invocation in an MCP client config starts the server.
 
 ## § 4 — Errors
 
-<!-- The error enum cases, per language. The behavioral meaning
-of each category lives in SPEC § 6; this section is the shape. -->
-
-**Swift:**
-
 ```swift
-public enum InstallerError: Error, Sendable {
-    case <case>(<associatedValues>)
-    // TODO: fill in remaining cases from Sources/Installer/Errors.swift
+public enum AgentPickerError: Error, CustomStringConvertible {
+    case unknownClient(String)
+}
+
+public enum MOOTx01DatabaseError: Error, CustomStringConvertible {
+    case alreadyExists(String)
+    case notFound(String)
+    case invalidName(String)
+    case deleteDefault
 }
 ```
 
-**Rust:**
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum InstallerError {
-    // TODO: fill in from <crate-path>/src/error.rs
-}
-```
+Install/uninstall and path operations throw the underlying
+Foundation/PersistenceKit errors directly (FileManager, JSON
+decoding, SQLite open) rather than a dedicated `InstallerError` enum.
 
 ## § 5 — Conformance test entry points
 
-<!-- How to run the conformance harness for this package, per
-language. -->
-
-**Swift:**
-
 ```
-swift test --package-path Packages/kits/Installer
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  swift test --package-path installer
 ```
 
-**Rust:**
+(Target: `MootInstallerCoreTests`.)
 
-```
-cargo test -p <crate-name>
-```
-
-## § 6 — Examples (optional)
-
-<!-- One or two minimal usage examples that exercise the most
-common path. Delete this section if examples live elsewhere
-(e.g., in package README). -->
+## § 6 — Examples
 
 ```swift
-// TODO: minimal usage example
+import MootInstallerCore
+import Foundation
+
+let home = FileManager.default.homeDirectoryForCurrentUser
+let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+// Pick the MCP clients to wire (non-interactive: all detected).
+let clients = try AgentPicker.pick(yes: true, target: nil, homeDirectory: home)
+
+// Wire mootx01 into each client's config (global install).
+for client in clients {
+    try Installer.install(
+        client: client,
+        binaryPath: "/usr/local/bin/mootx01",
+        homeDirectory: home,
+        workingDirectory: cwd,
+        local: false
+    )
+}
+
+// Resolve the data dir and the active estate database.
+let dataDir = MootPaths.resolveDataDirectory(
+    environment: ProcessInfo.processInfo.environment,
+    homeDirectory: home
+)
+let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 ```
 
 ---

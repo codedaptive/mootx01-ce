@@ -3,12 +3,10 @@ title: ObserverSink Specification
 version: 1.0
 status: active
 spec_type: kit
-authors: Newton (substrate specialist), Skippy
+authors: MOOTx01 maintainers
 date: 2026-06-06
 relates_to:
   - docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md
-  - docs/_internal/workhistory/analysis/MANAGER_1.0_PLAN.md
-  - docs/_internal/workhistory/analysis/blast_radius/OBSERVERSINK_001_BLAST_RADIUS.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
 ---
 
@@ -61,8 +59,8 @@ packages/libs/ObserverSink/
 | `IntellectusLib` | ObserverSink depends on | Provides `StatsSink` protocol and `StatSample` datum |
 | `PersistenceKit` + `PersistenceKitSQLite` | ObserverSink depends on | Provides `Storage` protocol and `SQLiteStorage` backend |
 
-Layering is correct and non-inverting. Per `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`,
-the in-repo dependency additions are recorded in `OBSERVERSINK_001_BLAST_RADIUS.md`.
+Layering is correct and non-inverting. The in-repo dependency additions follow
+`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
 
 ---
 

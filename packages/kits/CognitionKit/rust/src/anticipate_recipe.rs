@@ -29,7 +29,7 @@ use neuron_kit::{anticipate, ActionObservation, ActionPrediction};
 
 use crate::error::{RecipeRunError, SubstrateError};
 
-/// Drop the confirmation-level filters (`UserConfirmed` / `ModelConfirmedOnly`
+/// Drop the confirmation-level filters (`UserConfirmed` / `AutomatedConfirmedOnly`
 /// / `Unconfirmed`) from a chain — the recipe re-adds exactly one per recall,
 /// so a caller-supplied confirmation filter must not survive to conflict.
 fn without_confirmation_level(chain: &[Filter]) -> Vec<Filter> {
@@ -38,7 +38,7 @@ fn without_confirmation_level(chain: &[Filter]) -> Vec<Filter> {
         .filter(|f| {
             !matches!(
                 f,
-                Filter::UserConfirmed | Filter::ModelConfirmedOnly | Filter::Unconfirmed
+                Filter::UserConfirmed | Filter::AutomatedConfirmedOnly | Filter::Unconfirmed
             )
         })
         .cloned()

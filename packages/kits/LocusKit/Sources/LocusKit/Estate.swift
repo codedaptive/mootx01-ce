@@ -11,12 +11,11 @@ import PersistenceKit
 ///
 /// The nine verb methods (`capture`, `recall`, `mutate`, `withdraw`,
 /// `expunge`, `reanchor`, `learn`, `propose`, `associate`) are added
-/// by LOCI_V035_14 as extension methods once the frame types
-/// (`CaptureFrame`, `RecallFrame`, etc.) exist. This mission delivers
-/// the lifecycle and manifest-introspection surface only; that is
-/// intentional, because a conforming `Estate` is useful on its own for
-/// manifest inspection and bitmap-layout-version validation, and the
-/// split keeps each mission's blast radius small.
+/// as extension methods once the frame types (`CaptureFrame`,
+/// `RecallFrame`, etc.) exist. This type delivers the lifecycle and
+/// manifest-introspection surface only; that is intentional, because a
+/// conforming `Estate` is useful on its own for manifest inspection and
+/// bitmap-layout-version validation, and the split keeps each change small.
 ///
 /// Storage is injected. `Estate.open` and `Estate.create` take an
 /// `any Storage` rather than a file path, matching the fleet
@@ -364,6 +363,6 @@ public actor Estate {
     // The nine verbs (capture, recall, mutate, withdraw, expunge,
     // reanchor, learn, propose, associate) are declared as
     // `extension Estate` in EstateVerbs.swift once the frame types
-    // exist. Splitting the verbs into mission 14 keeps each mission's
-    // blast radius tractable; mission 13 ships a usable Estate handle.
+    // exist. Keeping the verbs in a separate extension keeps each
+    // change tractable; this declaration ships a usable Estate handle.
 }

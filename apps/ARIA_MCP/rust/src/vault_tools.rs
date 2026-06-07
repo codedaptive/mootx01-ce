@@ -30,7 +30,7 @@ use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use vault_kit::{DrawerMapping, ImportReport, ObsidianAdapter, VaultBridge};
+use vault_kit::{DrawerMapping, ImportReport, ObsidianAdapter, VaultBridge, VaultExportScope};
 
 // ---------------------------------------------------------------------------
 // Manifest data structures
@@ -95,7 +95,11 @@ pub fn dispatch_vault(
     let vault_path = PathBuf::from(vault_path_str);
 
     match name {
-        "moot_vault_export" => run_export(args, registry, &vault_path),
+        "moot_vault_export" => {
+            // Parse the optional `scope` argument before delegating.
+            let scope = parse_scope(args.get("scope"))?;
+            run_export(args, registry, &vault_path, scope)
+        }
         "moot_vault_import" => run_import(args, registry, &vault_path),
         "moot_vault_status" => run_status(&vault_path),
         "moot_vault_reconcile" => run_reconcile(&vault_path),
@@ -116,16 +120,18 @@ pub fn dispatch_vault(
 /// Steps:
 /// 1. Resolve the target estate.
 /// 2. Build a `VaultBridge` with `ObsidianAdapter` and `DrawerMapping::default()`.
-/// 3. Call `bridge.export(handle, vault_path, now)` to write the `.md` files.
+/// 3. Call `bridge.export(handle, vault_path, now, scope)` to write the `.md` files.
 /// 4. Hash every `.md` under the vault root (excluding hidden dirs) with SHA-256.
 /// 5. Write the sidecar manifest at `.moot/export-manifest.json`.
 ///
+/// `scope` controls which drawers are included (default `VaultExportScope::Believed`).
 /// `now` is sampled at the handler boundary — this is a real wall-clock event
 /// (the export instant), matching the same precedent in Swift's handler.
 fn run_export(
     args: &BTreeMap<String, crate::jsonrpc::JsonValue>,
     registry: &EstateRegistry,
     vault_path: &Path,
+    scope: VaultExportScope,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let open = registry.resolve(args, "estateID")?;
     let coord = open.coord.lock().map_err(|_| {
@@ -142,7 +148,7 @@ fn run_export(
     );
 
     let now_ms = wall_now_ms();
-    bridge.export(&open.handle, vault_path, now_ms).map_err(|e| {
+    bridge.export(&open.handle, vault_path, now_ms, scope).map_err(|e| {
         JSONRPCError::new(
             JSONRPCErrorCode::INTERNAL_ERROR,
             format!("vault_export: bridge export failed: {e:?}"),
@@ -164,13 +170,44 @@ fn run_export(
     })?;
 
     Ok(text_result(&format!(
-        "vault_export: {} note(s) → {}\nmanifest: {} (sha256 ×{})\nexportedAt: {}",
+        "vault_export: {} note(s) → {}\nmanifest: {} (sha256 ×{})\nexportedAt: {}\nscope: {}",
         manifest.note_count,
         vault_path.display(),
         MANIFEST_RELATIVE_PATH,
         manifest.files.len(),
         manifest.exported_at,
+        scope.as_str(),
     )))
+}
+
+/// Parse the optional `scope` argument from the MCP tool input.
+///
+/// - Absent or `null` → `VaultExportScope::Believed` (the default).
+/// - Known string → the matching scope.
+/// - Unknown string → `JSONRPCError::invalidParams` with the list of valid values.
+///
+/// Mirrors Swift `VaultTools.parseScope(_:)`.
+fn parse_scope(
+    value: Option<&crate::jsonrpc::JsonValue>,
+) -> Result<VaultExportScope, JSONRPCError> {
+    match value {
+        None => Ok(VaultExportScope::default()),
+        Some(v) => {
+            let s = v.as_str().unwrap_or("");
+            if s.is_empty() {
+                return Ok(VaultExportScope::default());
+            }
+            VaultExportScope::from_str(s).ok_or_else(|| {
+                JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown export scope: \"{s}\". Valid values: {}",
+                        VaultExportScope::all_strs().join(", ")
+                    ),
+                )
+            })
+        }
+    }
 }
 
 /// `moot_vault_import` — import a Markdown vault into the estate via the

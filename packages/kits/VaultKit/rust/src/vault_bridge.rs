@@ -11,6 +11,7 @@
 use crate::drawer_mapping::{DrawerMapping, ImportOutcome};
 use crate::error::VaultKitError;
 use crate::vault_adapter::VaultAdapter;
+use crate::vault_export_scope::VaultExportScope;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
 use locus_kit::{
     filter::{Filter, HydrationLevel, Ordering, RecallFrame},
@@ -70,7 +71,14 @@ impl<'a> VaultBridge<'a> {
 
     // MARK: - Export
 
-    /// Project an estate to a Markdown vault. Mirrors Swift `VaultBridge.export(estate:to:)`.
+    /// Project an estate to a Markdown vault. Mirrors Swift `VaultBridge.export(estate:to:scope:)`.
+    ///
+    /// `scope` controls which drawers are included in the export (default
+    /// `VaultExportScope::Believed` when called through `run_export` in
+    /// `vault_tools.rs`). Use `VaultExportScope::Confirmed` to export only
+    /// user-confirmed drawers, `VaultExportScope::Unconfirmed` for the
+    /// capture-inbox view, or `VaultExportScope::Exportable` for publicly-
+    /// exportable drawers only.
     ///
     /// `now` is milliseconds-since-epoch, supplied by the caller.
     pub fn export(
@@ -78,8 +86,9 @@ impl<'a> VaultBridge<'a> {
         handle: &EstateHandle,
         vault_path: &Path,
         now: i64,
+        scope: VaultExportScope,
     ) -> Result<(), VaultKitError> {
-        let notes = self.mapping.export(self.coordinator, handle, now)?;
+        let notes = self.mapping.export(self.coordinator, handle, now, scope)?;
         self.adapter.from_ir(&notes, vault_path)?;
         Ok(())
     }

@@ -49,6 +49,11 @@ public struct ObsidianAdapter: VaultAdapter {
             // serialized, so it round-trips through the frontmatter map.
             let originISO = frontmatter["created"] ?? frontmatter["date"]
             let originDate = originISO.map { OccurredAt(iso8601: $0) }
+            // moot_id: the stable substrate lineage UUID. When present, this
+            // makes the re-import identity-preserving regardless of filename
+            // changes — the UUID wins over the stable-source-key FNV hash as
+            // the lineageID for the capture frame.
+            let mootID = frontmatter["moot_id"].flatMap { UUID(uuidString: $0) }
 
             notes.append(NoteIR(
                 stableSourceKey: stableKey,
@@ -58,7 +63,8 @@ public struct ObsidianAdapter: VaultAdapter {
                 tags: tags,
                 originalPath: folder,
                 originDate: originDate,
-                source: nil
+                source: nil,
+                mootID: mootID
             ))
         }
 

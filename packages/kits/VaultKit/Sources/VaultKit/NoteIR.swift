@@ -12,6 +12,18 @@ import Foundation
 // values. The Swift types here are the V1 *home* of the contract, not
 // the contract itself — a non-Swift producer round-trips the same IR
 // through a mechanical port.
+//
+// ## Bidirectional identity (Decision cp-vault-bidir)
+//
+// `NoteIR.mootID` carries the STABLE lineage UUID from the substrate —
+// the `lineageID` of the originating drawer, not `drawer.id` (which the
+// supersession cascade re-mints). On export, `DrawerMapping.noteIR`
+// writes `moot_id: <lineageID>` into frontmatter and sets this field. On
+// import, `ObsidianAdapter.toIR` reads `moot_id` from frontmatter and
+// sets this field. `DrawerMapping.makeCaptureFrame` uses it as the
+// frame's `lineageID` so a re-import of an exported note maps to the
+// same substrate lineage — even after the human renames the file
+// (filename is no longer the identity anchor; `moot_id` is).
 
 // MARK: - Block
 
@@ -201,6 +213,18 @@ public struct NoteIR: Codable, Sendable, Equatable {
     /// attachments. Drives the `.hasAttachments` feature flag on import.
     public var source: SourceRef?
 
+    /// The substrate lineage UUID of the originating drawer, when known.
+    ///
+    /// Set by `DrawerMapping.noteIR` on export (from `drawer.lineageID`)
+    /// and by `ObsidianAdapter.toIR` on import (parsed from the `moot_id`
+    /// frontmatter key). `DrawerMapping.makeCaptureFrame` uses this value
+    /// as the import frame's `lineageID` so the substrate's supersession
+    /// cascade maps the re-import to the same lineage even after a human
+    /// renames the file. When absent (a note that was never exported by
+    /// VaultKit), the stable-source-key FNV derivation is used as the
+    /// lineage fallback — same as the original behaviour.
+    public var mootID: UUID?
+
     public init(
         stableSourceKey: String,
         body: [Block],
@@ -209,7 +233,8 @@ public struct NoteIR: Codable, Sendable, Equatable {
         tags: [String] = [],
         originalPath: String = "",
         originDate: OccurredAt? = nil,
-        source: SourceRef? = nil
+        source: SourceRef? = nil,
+        mootID: UUID? = nil
     ) {
         self.stableSourceKey = stableSourceKey
         self.body = body
@@ -219,6 +244,7 @@ public struct NoteIR: Codable, Sendable, Equatable {
         self.originalPath = originalPath
         self.originDate = originDate
         self.source = source
+        self.mootID = mootID
     }
 
     /// The note body flattened to a single string — blocks joined in

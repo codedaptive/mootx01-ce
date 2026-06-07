@@ -25,10 +25,8 @@
 //                        direct dependency; the byte shape matches the
 //                        SubstrateLib reference so the conformance
 //                        relationship is preserved when wired through.
-//                        See blast-radius report for the dependency
-//                        rationale.
 //
-// Cross-tier ordering (mission §"Known Ambiguities"):
+// Cross-tier ordering:
 //
 //   HLC supplies a total order across both tiers per cookbook §5.2.
 //   The fold sorts the union of entries lexicographically by

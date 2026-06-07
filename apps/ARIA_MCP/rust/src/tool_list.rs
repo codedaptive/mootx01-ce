@@ -69,9 +69,10 @@ pub fn build_tool_list() -> serde_json::Value {
         tools.push(lens_tool(lens_name));
     }
 
-    // Vault (4) — advertised; return methodNotFound until VaultKit-Rust ships
-    // (ADR-VAULTKIT-002). Clients discover vault capability from this list.
-    tools.push(vault_tool("moot_vault_export", "Export the estate to a portable vault archive."));
+    // Vault (4) — both Swift and Rust ports are live (ADR-VAULTKIT-002 decision a is
+    // superseded; see DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md).
+    // `moot_vault_export` accepts an optional `scope` argument (default "believed").
+    tools.push(vault_export_tool());
     tools.push(vault_tool("moot_vault_import", "Import a vault archive into the estate."));
     tools.push(vault_tool("moot_vault_status", "Report the current vault sync state."));
     tools.push(vault_tool("moot_vault_reconcile", "Reconcile diverged vault and estate state."));
@@ -679,11 +680,44 @@ fn lens_schema(name: &str) -> serde_json::Value {
 // Vault tools — advertised; return methodNotFound until VaultKit-Rust ships
 // ---------------------------------------------------------------------------
 
+/// `moot_vault_export` — has an optional `scope` argument not shared by the
+/// other three vault tools.
+fn vault_export_tool() -> serde_json::Value {
+    json!({
+        "name": "moot_vault_export",
+        "description": "Export the estate to a portable vault archive.",
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "vaultPath": string_schema("Filesystem path to the vault directory."),
+                "scope": scope_schema()
+            }),
+            json!(["vaultPath"])
+        )))
+    })
+}
+
+/// Schema for the `scope` argument accepted by `moot_vault_export`.
+///
+/// Four values are valid. Absent = "believed" (the default). Mirrors Swift
+/// `VaultTools.scopeSchema`.
+fn scope_schema() -> serde_json::Value {
+    json!({
+        "type": "string",
+        "description": "Which drawers to include. One of: believed (default — currently-believed drawers with any confirmation state), exportable (drawers marked as publicly exportable), confirmed (user-confirmed only), unconfirmed (capture inbox only). Omit to use the default (believed).",
+        "enum": ["believed", "exportable", "confirmed", "unconfirmed"]
+    })
+}
+
 fn vault_tool(name: &str, description: &str) -> serde_json::Value {
     json!({
         "name": name,
         "description": description,
-        "inputSchema": with_teachme(with_estate_id(object_schema(json!({}), json!([]))))
+        "inputSchema": with_teachme(with_estate_id(object_schema(
+            json!({
+                "vaultPath": string_schema("Filesystem path to the vault directory.")
+            }),
+            json!(["vaultPath"])
+        )))
     })
 }
 

@@ -29,7 +29,7 @@
 //! - Swift maintains a `containerFP` OR aggregate for fingerprint pruning
 //!   (spec § 11.5). The Rust port omits this because `Estate.store` does
 //!   not carry a `containerFP` field and adding one would modify the landed
-//!   estate.rs body (out of scope per BRR). The unpruned path —
+//!   estate.rs body (out of scope here). The unpruned path —
 //!   `store.all_drawers()` filtered to non-tombstoned — is used instead,
 //!   which is sound (correct, just slower for large corpora at which point
 //!   the SQLite backend and fingerprint pruning land together).
@@ -213,8 +213,10 @@ impl Estate {
         drawer.wikidata_qid = frame.lattice_anchor.wikidata_qid;
         drawer.wikidata_qids_secondary = frame.lattice_anchor.wikidata_qids_secondary;
         // Two-clock ingest (ING-01): caller-supplied event time for bulk
-        // historical ingestion; streaming capture defaults to now.
-        drawer.event_time = Some(frame.event_time.unwrap_or(now));
+        // historical ingestion; streaming capture defaults to now. Resolves
+        // eagerly: CaptureFrame.event_time is Option (legitimately optional
+        // input frame), but Drawer.event_time is non-optional — fold here.
+        drawer.event_time = frame.event_time.unwrap_or(now);
 
         self.store.add_drawer(&drawer, now)?;
         Ok(drawer)
@@ -242,8 +244,7 @@ impl Estate {
     /// an event for the tunnel it files — it inserts the tunnel row directly,
     /// and `add_tunnel` does the same. Source is ground truth: to stay
     /// byte-identical to what the cascade produces, standalone tunnel capture
-    /// matches the cascade and files via the bare-insert `add_tunnel`. (Doc/
-    /// source drift noted in the completion report.)
+    /// matches the cascade and files via the bare-insert `add_tunnel`.
     ///
     /// `now` (epoch seconds) is threaded in per the deterministic-clock rule.
     ///
@@ -344,7 +345,7 @@ impl Estate {
         // Fetch all drawers and filter to non-tombstoned (live corpus).
         // The unpruned path is used because Estate.store carries no
         // containerFP field (adding one would modify the landed estate.rs
-        // body, which is out of scope per the BRR for LP-1F).
+        // body, which is out of scope here).
         let live: Vec<Drawer> = self
             .store
             .all_drawers()

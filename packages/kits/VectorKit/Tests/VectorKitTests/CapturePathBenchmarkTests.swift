@@ -64,8 +64,7 @@ import Foundation
 /// `#if arch(arm64)` and verifies that the platform-selected kernel
 /// (whichever it is) produces correct distances through `EngramLib`'s
 /// public API — same engram distance = 0, bit-inverse distance = 256.
-/// The deviation is logged in `docs/analysis/blast_radius/VEC_05_BLAST_RADIUS.md`
-/// (Smythe W1) and in the VEC-05 decision record.
+/// The deviation is documented in the VEC-05 decision record.
 ///
 /// **Execution model.** These four suites assert wall-clock latency
 /// budgets (P99 / median). Under XCTest the methods ran serially, so

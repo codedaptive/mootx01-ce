@@ -402,10 +402,10 @@ enum TeachmeGuides {
         Example:
           { "entry": "Decided to implement teachme as a pre-check in dispatch
             before any runner fires. Cleaner than per-tool interception.",
-            "agent": "bilby" }
+            "agent": "mcp-agent" }
 
         Response:
-          wrote journal entry for bilby
+          wrote journal entry for mcp-agent
 
         Common mistakes:
           - Filing session context into moot_file_memory; use the journal for
@@ -425,10 +425,10 @@ enum TeachmeGuides {
           - moot_memory_search — to search the broader memory store
 
         Example:
-          { "agent": "bilby", "last_n": 5 }
+          { "agent": "mcp-agent", "last_n": 5 }
 
         Response:
-          journal for bilby: N entry(s)
+          journal for mcp-agent: N entry(s)
           [<iso8601>]  <entry preview…>
 
         Common mistakes:

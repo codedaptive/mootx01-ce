@@ -63,14 +63,16 @@ struct DrawerMappingTests {
 
     @Test("export projects a drawer + references tunnel to a NoteIR")
     func exportProjection() {
+        let knownLineage = UUID(uuidString: "12345678-0000-0000-0000-000000000001")!
         let drawer = Drawer(
             id: "drawer-1",
-            content: "exported content",
+            content: "# Aromatics\nA study of arene rings.",
             wing: "wing_owner",
             room: "research",
             addedBy: "tester",
             filedAt: Date(timeIntervalSince1970: 1_700_000_000),
             embeddingModelID: "m",
+            lineageID: knownLineage,
             udcCode: "004"
         )
         let tunnel = Tunnel(
@@ -87,12 +89,61 @@ struct DrawerMappingTests {
         )
 
         let note = DrawerMapping.noteIR(from: drawer, references: [tunnel])
-        #expect(note.stableSourceKey == "wing_owner/research/drawer-1")
-        #expect(note.flattenedBody == "exported content")
+        // Path: room/slug.md — wing prefix dropped; slug from first heading.
+        #expect(note.stableSourceKey == "research/aromatics")
+        #expect(note.flattenedBody.contains("A study of arene rings."))
         #expect(note.frontmatter["udc"] == "004")
         #expect(note.frontmatter["wing"] == "wing_owner")
         #expect(note.frontmatter["room"] == "research")
-        #expect(note.originalPath == "wing_owner/research")
+        // moot_id is the STABLE lineage UUID, not drawer.id.
+        #expect(note.frontmatter["moot_id"] == knownLineage.uuidString)
+        #expect(note.mootID == knownLineage)
+        // originalPath is the room only — no wing prefix.
+        #expect(note.originalPath == "research")
         #expect(note.links == [WikiLink(target: "Benzene", alias: nil, raw: "Benzene")])
+    }
+
+    @Test("slug derived from first heading, else first line, else UUID fallback")
+    func slugDerivation() {
+        let id = UUID()
+        // Heading case.
+        #expect(DrawerMapping.slug(from: "# My Note Title\nbody", id: id) == "my-note-title")
+        // First-line case (no heading).
+        #expect(DrawerMapping.slug(from: "Hello World!", id: id) == "hello-world")
+        // Punctuation collapse.
+        #expect(DrawerMapping.slug(from: "A note: with 'special' chars!", id: id) == "a-note-with-special-chars")
+        // Empty content → UUID prefix.
+        let fallback = DrawerMapping.slug(from: "   ", id: id)
+        #expect(fallback.hasPrefix("note-"))
+        // Heading on any line wins over a preceding non-heading first line.
+        #expect(DrawerMapping.slug(from: "intro\n# Real Title\n", id: id) == "real-title")
+    }
+
+    @Test("moot_id in frontmatter wins over stableSourceKey FNV for lineageID")
+    func mootIDWinsOverFNV() {
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let lineage = UUID()
+        let note = NoteIR(
+            stableSourceKey: "some/other/path",
+            body: [Block(text: "content")],
+            frontmatter: ["room": "r", "moot_id": lineage.uuidString],
+            mootID: lineage
+        )
+        let (frame, _) = mapping.makeCaptureFrame(for: note, content: "content")
+        // The mootID from NoteIR must win over the FNV hash of the stable key.
+        #expect(frame.lineageID == lineage)
+    }
+
+    @Test("absent moot_id falls back to FNV lineage derivation")
+    func absentMootIDFallsBack() {
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let note = NoteIR(
+            stableSourceKey: "inbox/my-note",
+            body: [Block(text: "some human note")],
+            frontmatter: ["room": "inbox"]
+        )
+        let (frame, _) = mapping.makeCaptureFrame(for: note, content: "some human note")
+        let expected = DrawerMapping.lineageID(forStableSourceKey: "inbox/my-note")
+        #expect(frame.lineageID == expected)
     }
 }

@@ -6,7 +6,7 @@ created: 2026-05-17
 updated: 2026-05-17
 accepted_by: bob
 accepted_at: 2026-05-17
-authors: Bob Pankratz (via/ claude)
+authors: Bob Pankratz
 audience: engineers (human and agent) implementing or extending Forge daemons
 relates_to:
   - docs/concepts/FORGE_OVERVIEW.md
@@ -35,10 +35,10 @@ it points at QueueKit and specifies only the cross-cutting
 protocol concerns that belong in canon regardless of the
 implementing kit.
 
-The QueueKit design particulars live in the MemPalace today
-(design rationale, mailq trade-offs, atomic-rename mechanics,
-the comparison against alternatives the user walked through).
-When QueueKit is implemented as a Swift package per Pass 4 work,
+The QueueKit design particulars (design rationale, mailq
+trade-offs, atomic-rename mechanics, and the comparison against
+alternatives) are pending formal capture.
+When QueueKit is implemented as a Swift package,
 its formal specification will land at
 `Packages/QueueKit/docs/QUEUEKIT_SPEC_v1.1.md` (or the equivalent
 canonical path agreed at implementation time). This document
@@ -48,8 +48,7 @@ Until then, this document specifies the protocol-level concerns
 that the three daemon implementations (Swift, Rust, Python) must
 agree on independently of QueueKit's library API. Those concerns
 are: protocol versioning, the extension mechanism, the conformance
-test profiles, the relationship to ddfactory, and the harness-
-portability rationale.
+test profiles, and the harness-portability rationale.
 
 ## Why the protocol is public
 
@@ -76,8 +75,8 @@ shape.
 
 QueueKit is the Swift package that implements the queue protocol.
 Its design draws from the POSIX maildir pattern (the same shape
-used by mail transfer agents for decades) and from the
-operational experience of the ddfactory prototype.
+used by mail transfer agents for decades) and from operational
+experience with an earlier filesystem-queue prototype.
 
 The key QueueKit properties the protocol depends on:
 
@@ -194,30 +193,14 @@ Rust version reuses the vector data through cross-language test
 infrastructure; the Python port reuses the behavioral
 expectations from the same vectors.
 
-## Relationship to ddfactory
+## Relationship to earlier prototypes
 
-ddfactory is the prototype dispatch system being used to build
-Forge. ddfactory is not a production system, has no users beyond
-the Forge project itself, and carries no API or data contract
-that Forge inherits. When Forge GUI ships, ddfactory is
-retired: it shuts down, the operator switches to Forge GUI, and
-the ddfactory repository remains as historical reference only.
-
-This protocol is not designed for backward compatibility with
-ddfactory. The two systems are independent. Any signal-format
-resemblance is a coincidence of shape, not a compatibility
-commitment; QueueKit's signal format is what it is because
-text-line key-value is the simplest atomic-write-friendly form,
-not because ddfactory used the same shape. The directory layout
-intentionally differs from ddfactory's. No Forge daemon reads
-ddfactory's queue. No ddfactory worker reads Forge's queue.
-
-Migration of in-flight ddfactory state to Forge state is out of
-scope. When Forge GUI is ready, ddfactory stops accepting new
-work; in-flight ddfactory missions complete or are abandoned at
-the operator's discretion; the operator starts submitting work
-to Forge GUI. ddfactory is frozen per
-`docs/doctrine/DDFACTORY_FROZEN.md`.
+This protocol carries no backward-compatibility obligation to any
+earlier filesystem-queue prototype. Any signal-format resemblance
+is a coincidence of shape, not a compatibility commitment;
+QueueKit's signal format is what it is because text-line key-value
+is the simplest atomic-write-friendly form. Migration of any
+in-flight state from a prior prototype is out of scope.
 
 ## What this specification does not cover
 
@@ -225,13 +208,10 @@ to Forge GUI. ddfactory is frozen per
   schema, the state-transition table, and the API surface.**
   Those are QueueKit's spec. When `Packages/QueueKit/docs/QUEUEKIT_SPEC_v1.1.md`
   lands, it is the authoritative source for these specifics.
-  Until then, the MemPalace carries the design particulars.
-- **The contents of mission specification files.** Those are
-  documented separately under `docs/concepts/MISSION_SPEC.md` (to
-  be authored).
-- **The contents of completion reports.** Those are documented
-  under `docs/concepts/COMPLETION_REPORT_FORMAT.md` (to be
-  authored).
+- **The contents of job specification files.** Those are
+  documented separately (to be authored).
+- **The contents of job outcome records.** Those are documented
+  separately (to be authored).
 - **Worker-internal behavior.** Workers are anything that can
   conform to the protocol; their internal architecture is
   outside Forge's scope per the queue-is-exposed principle.
@@ -248,7 +228,7 @@ This document is updated when:
 
 - The QueueKit spec lands at its canonical path. The
   cross-references in this document become concrete instead of
-  pointing at MemPalace.
+  pending.
 - A protocol version bumps. A new ADR records the bump; this
   document's versioning section reflects the new version.
 - The conformance test profile expectations change. The

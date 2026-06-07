@@ -202,7 +202,7 @@ public actor GrantStore {
     /// here; a decoded mode-3 grant is faithful in its discriminant only.
     /// `experimentalIPClearanceConfirmed` decodes as `true` because a
     /// persisted mode-3 grant was, by construction, issued with clearance.
-    /// Security note (Perkins A-1): this flag is reconstructed, not
+    /// Security note: this flag is reconstructed, not
     /// authentic caller intent. Do NOT treat the flag on a decoded grant
     /// as an authorization decision — the IP-clearance gate must only ever
     /// key off a caller-supplied `GrantOptions`, never a decoded `Grant`.

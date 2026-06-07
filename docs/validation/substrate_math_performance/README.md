@@ -61,15 +61,14 @@ HLC, Hamming), `packages/libs/SubstrateKernel/rust/` (kernel dispatch +
 SIMD), `packages/libs/SubstrateML/rust/` (ML primitives), and
 `packages/libs/SubstrateLib/rust/` (the orchestration layer). The current
 constitutional spec is `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
-(the v0.36 cookbook is archived under `docs/_internal/workhistory/architecture/`).
+(the v0.36 cookbook is archived).
 
 The benchmark sweep (`stress-test`, `topk-bench`, Rust `stress_test`) is
 NOT present in this repo: the `StressTest/` and `TopKBench/` Swift sources
 and the Rust `stress_test` bin were not carried over from the prior
 `mootx01-rc` tree. Until they are ported, only the conformance binaries
 (`gen-vectors`, `validate-vectors`) build and run here. Porting the sweep
-is tracked in
-`docs/_internal/workhistory/missions/MISSION_PERF_SWEEP_HARNESS.md`.
+is a tracked follow-up.
 
 ## What lives where
 

@@ -4,15 +4,15 @@
 // control channel. NO external packages — these wrap the system C socket API
 // (libc / Darwin), which is the zero-dependency path the kit rules require.
 //
-// WHY NOT Network.framework: the mission's first choice was NWListener, but
-// NWListener cannot bind a *listening* server socket in the command-line build
+// WHY NOT Network.framework: NWListener was the first choice, but it
+// cannot bind a *listening* server socket in the command-line build
 // environment used here (it returns POSIXErrorCode 22 / EINVAL on every
 // configuration, including an unrestricted TCP listener — a non-app-bundle
 // constraint). The security requirements are mechanism-independent, so the
-// listeners are built on POSIX sockets, which bind correctly. See the
-// completion report's deviation note. The security boundary (loopback-only
-// bind, UDS at 0600) is enforced identically — arguably more directly, since
-// the bind address and file mode are set explicitly here.
+// listeners are built on POSIX sockets, which bind correctly. The security
+// boundary (loopback-only bind, UDS at 0600) is enforced identically —
+// arguably more directly, since the bind address and file mode are set
+// explicitly here.
 
 import Foundation
 

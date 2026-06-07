@@ -1,7 +1,7 @@
 ---
 status: decided
 question: How should VaultKit export/import preserve identity across round-trips, and how should export scope be selected?
-authors: Bob, Bilby
+authors: Bob Pankratz
 date: 2026-06-05
 relates_to:
   - docs/reference/VAULTKIT_INTERFACE.md

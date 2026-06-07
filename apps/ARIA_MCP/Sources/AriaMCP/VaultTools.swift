@@ -7,15 +7,14 @@
 // matched by name ABOVE the lexicon projection (these tools have no
 // (verb, noun) pair, so `parseToolName` would reject them).
 //
-// ## Swift-only by design (ADR-VAULTKIT-002)
+// ## Shipped MCP binary
 //
 // The shipped MCP binary is the Swift port (installer/install.sh builds
-// `mootx01-mcp` via `swift build`). The Rust `aria-mcp` mirror is a
-// parity sibling, not the shipped runtime, and VaultKit ships no Rust
-// target — so there is nothing to mirror yet. The Rust `moot_vault_*`
-// mirror is deliberately deferred to the future VaultKit-Rust-port
-// mission. This asymmetry is documented and intentional; it is not
-// dispatch drift.
+// `mootx01-mcp` via `swift build`). The Rust `aria-mcp` bin (`apps/ARIA_MCP/rust/`)
+// is a parity sibling; both ports are live and in sync (see ADR-VAULTKIT-002,
+// and the new ADR recorded in cp-vault-bidir which documents that the Rust
+// mirror has landed). The `moot_vault_*` tools are wired in both dispatch
+// surfaces.
 //
 // ## Drift detection owns its own hash stamp
 //
@@ -93,6 +92,7 @@ enum VaultTools {
                     properties: [
                         "vaultPath": vaultPathSchema,
                         "estateID": estateIDSchema,
+                        "scope": scopeSchema,
                     ],
                     required: ["vaultPath"]),
                 provenance: .vault),
@@ -147,8 +147,10 @@ enum VaultTools {
         case "moot_vault_export":
             // export/import target an estate, resolved through the
             // dispatcher's own registry exactly like the lexicon tools.
+            // Parse the optional scope string; default to .believed.
+            let scope = try parseScope(args["scope"])
             return try await runExport(
-                kit: kit, handle: try resolveHandle(args), vaultURL: vaultURL)
+                kit: kit, handle: try resolveHandle(args), vaultURL: vaultURL, scope: scope)
 
         case "moot_vault_import":
             return try await runImport(
@@ -177,10 +179,11 @@ enum VaultTools {
     /// computation — same precedent as `LensTools` sampling `Date()`); the
     /// manifest build itself is deterministic given `now`.
     private static func runExport(
-        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL
+        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
+        scope: VaultExportScope = .believed
     ) async throws -> JSONValue {
         let bridge = VaultBridge(kit: kit)
-        try await bridge.export(estate: handle, to: vaultURL)
+        try await bridge.export(estate: handle, to: vaultURL, scope: scope)
 
         let manifest = try buildManifest(vaultURL: vaultURL, now: Date())
         try writeManifest(manifest, to: vaultURL)
@@ -188,6 +191,7 @@ enum VaultTools {
         return ToolDispatcher.textResult("""
         vault_export: \(manifest.noteCount) note(s) → \(vaultURL.path)
         manifest: \(manifestRelativePath) (sha256 ×\(manifest.files.count))
+        scope: \(scope.rawValue)
         exportedAt: \(manifest.exportedAt)
         """)
     }
@@ -381,6 +385,36 @@ enum VaultTools {
 
     private static var estateIDSchema: JSONValue {
         stringSchema("Optional UUID of the open estate to target. Omit for the default estate.")
+    }
+
+    /// Schema for the optional `scope` argument on `moot_vault_export`.
+    private static var scopeSchema: JSONValue {
+        stringSchema(
+            "Export scope: believed (default), exportable, confirmed, unconfirmed. " +
+            "Controls which drawers are included. " +
+            "'believed' exports all currently-believed drawers regardless of confirmation state. " +
+            "'exportable' restricts to drawers marked as public. " +
+            "'confirmed' restricts to user-confirmed drawers. " +
+            "'unconfirmed' is the capture-inbox (pre-review) subset."
+        )
+    }
+
+    /// Parse the optional `scope` argument to a `VaultExportScope`.
+    ///
+    /// - Returns the named scope, or `.believed` when the argument is absent.
+    /// - Throws `JSONRPCError.invalidParams` when the argument is present but
+    ///   names an unknown scope. Clear error surfaces to the MCP client.
+    private static func parseScope(_ value: JSONValue?) throws -> VaultExportScope {
+        guard let strValue = value?.stringValue, !strValue.isEmpty else {
+            return .believed   // absent or empty → default
+        }
+        guard let scope = VaultExportScope(rawValue: strValue) else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown export scope '\(strValue)'. " +
+                    "Valid values: \(VaultExportScope.allCases.map(\.rawValue).joined(separator: ", "))")
+        }
+        return scope
     }
 
     private static func objectSchema(

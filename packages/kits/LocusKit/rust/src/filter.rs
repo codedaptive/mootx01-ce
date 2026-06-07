@@ -133,8 +133,9 @@ pub enum Filter {
     /// Rows where confirmation ≥ UserConfirmed. Prepended as the
     /// default when no provenance filter is present.
     UserConfirmed,
-    /// Rows where confirmation == ModelConfirmed only (not user).
-    ModelConfirmedOnly,
+    /// Rows where confirmation == AutomatedConfirmed only (not user/peer/actuator).
+    /// Mirrors Swift `automatedConfirmedOnly`; was `ModelConfirmedOnly` in v0.35 (F13 rename).
+    AutomatedConfirmedOnly,
     /// Rows that are unconfirmed.
     Unconfirmed,
     /// Rows with this source type.

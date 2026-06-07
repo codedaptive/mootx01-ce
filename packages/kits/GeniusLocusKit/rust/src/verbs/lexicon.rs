@@ -45,11 +45,12 @@ pub enum VerbError {
     /// leak across the GLK boundary.
     UnderlyingEstateFailure { verb: String, reason: String },
 
-    /// The verb is part of the nine-verb vocabulary but the
-    /// underlying estate does not yet support it. Today this is the
-    /// case for the same verbs as on the Swift side: mutate,
-    /// expunge, reanchor, learn, propose, associate (when their
-    /// Brain-layer bodies have not yet shipped).
+    /// The verb is part of the nine-verb vocabulary but the underlying
+    /// estate does not implement it. All nine verbs reach a real Estate
+    /// in the default estate today; this variant is the generic dispatch
+    /// error reserved for an estate type that omits a verb, surfaced by
+    /// `remap` when the estate returns a `not yet implemented` stub.
+    /// Parity of the Swift surface.
     NotSupportedByEstate { verb: String },
 
     /// The combination of verb and noun is rejected by the §7.2

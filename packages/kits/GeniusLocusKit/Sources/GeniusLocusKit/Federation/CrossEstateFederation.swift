@@ -136,7 +136,7 @@ public extension GeniusLocusKit {
         // grants, select the one with the highest contentLevel — this
         // gives the requester the maximum access they are legitimately
         // entitled to and prevents a lower-level grant from shadowing a
-        // higher-level one when both are active (Perkins A-2).
+        // higher-level one when both are active.
         let authorizing = matching
             .filter { grant in
                 guard let expiry = grant.lifetime.expiry(issuedAt: grant.issuedAt) else {
@@ -173,7 +173,7 @@ public extension GeniusLocusKit {
         // rows; callers issuing grants at higher contentLevel progressively
         // unlock elevated, restricted, and secret rows.
         let contentMax = authorizingGrant.contentLevel
-        // Fail-open note (Perkins A-3): `Drawer.adjectiveSensitivity`
+        // Fail-open note: `Drawer.adjectiveSensitivity`
         // falls back to `.normal` (rawValue 0) for any bitmap value that
         // doesn't match a valid AdjectiveSensitivity case. A corrupt row
         // therefore passes this gate at contentLevel >= 0 (all grants).

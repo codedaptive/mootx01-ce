@@ -1,0 +1,19 @@
+[package]
+name = "intellectus-lib"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "IntellectusLib — substrate self-report telemetry faculty. Zero-dependency leaf: stat model, StatsSink trait, no-op default sink, thread-safe global holder with atomic enabled flag, short-circuit report! macro."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "intellectus_lib"
+path = "src/lib.rs"
+
+# No repo dependencies — this is the floor of the dependency tree.
+# std only (atomics, Mutex, Arc).
+[dependencies]
+
+[dev-dependencies]
+# No external test deps needed.

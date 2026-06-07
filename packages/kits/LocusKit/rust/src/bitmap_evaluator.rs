@@ -284,7 +284,7 @@ impl BitmapEvaluator {
     fn is_bitmap_prov_filter(f: &Filter) -> bool {
         match f {
             Filter::UserConfirmed
-            | Filter::ModelConfirmedOnly
+            | Filter::AutomatedConfirmedOnly
             | Filter::Unconfirmed
             | Filter::SourceType(_)
             | Filter::Channel(_)
@@ -460,7 +460,7 @@ impl BitmapEvaluator {
                 ThresholdOp::GreaterThanOrEqual,
                 PROV_USER_CONFIRMED,
             ),
-            Filter::ModelConfirmedOnly => and_mask(
+            Filter::AutomatedConfirmedOnly => and_mask(
                 prov,
                 PROV_CONFIRM_MASK,
                 Confirmation::AutomatedConfirmed.raw_value() << PROV_CONFIRM_SHIFT,
@@ -916,12 +916,12 @@ mod tests {
     }
 
     #[test]
-    fn model_confirmed_only_admits_model_excludes_user() {
+    fn automated_confirmed_only_admits_automated_excludes_user() {
         let store = make_store();
         let mut model = base_drawer("m");
         model.provenance = Confirmation::AutomatedConfirmed.raw_value() << 18;
         let user = base_drawer("u"); // base_drawer already sets UserConfirmed
-        let frame = make_frame(vec![Filter::ModelConfirmedOnly]);
+        let frame = make_frame(vec![Filter::AutomatedConfirmedOnly]);
         let result = BitmapEvaluator::evaluate(&frame, &[model, user], store.as_ref()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "m");
@@ -1252,7 +1252,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Provenance channel mask carry-over — explicit Smythe Advisory 2 guard
+    // Provenance channel mask carry-over — explicit guard
     // -----------------------------------------------------------------
 
     #[test]

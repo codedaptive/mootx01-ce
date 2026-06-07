@@ -36,6 +36,34 @@ struct VaultBridgeTests {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Count `.md` files under `vaultURL`, skipping hidden files. Synchronous
+    /// helper used to verify export output without async enumeration.
+    private func countMDFiles(in vaultURL: URL) -> Int {
+        var count = 0
+        guard let enumerator = FileManager.default.enumerator(
+            at: vaultURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+        while let next = enumerator.nextObject() as? URL {
+            if next.pathExtension == "md" { count += 1 }
+        }
+        return count
+    }
+
+    /// Return first `.md` file under `vaultURL`, skipping hidden files. Nil if none.
+    private func firstMDFile(in vaultURL: URL) -> URL? {
+        guard let enumerator = FileManager.default.enumerator(
+            at: vaultURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+        while let next = enumerator.nextObject() as? URL {
+            if next.pathExtension == "md" { return next }
+        }
+        return nil
+    }
+
     /// Build a one-note fixture vault with a wikilink. Returns the vault URL.
     private func seedVault() throws -> URL {
         let vault = makeTempVault()
@@ -54,6 +82,23 @@ struct VaultBridgeTests {
     /// Count currently-believed drawers in an estate.
     private func currentDrawers(_ kit: GeniusLocusKit, _ handle: EstateHandle) async throws -> [Drawer] {
         try await kit.recall(handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full))
+    }
+
+    // MARK: - currentlyBelieve recall helper (for scope tests)
+
+    /// Count currently-believed drawers using the default `.believed` scope,
+    /// which includes confirmed and unconfirmed.
+    private func believedDrawers(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle
+    ) async throws -> [Drawer] {
+        // `.believed` scope filter chain: currentlyBelieve + any confirmation + any trust.
+        try await kit.recall(handle, RecallFrame(
+            filterChain: [
+                .currentlyBelieve,
+                .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly]),
+                .any([.trustworthy, .requiresConfirmation]),
+            ],
+            hydrationLevel: .full))
     }
 
     // MARK: - Import writes drawers + tunnels
@@ -166,6 +211,124 @@ struct VaultBridgeTests {
 
         let drawers = try await currentDrawers(kit, handle)
         #expect(drawers.first?.udcCode == "000")
+    }
+
+    // MARK: - Export scope tests
+
+    @Test("confirmed drawers ARE included in the default .believed scope export")
+    func believedScopeIncludesConfirmedDrawers() async throws {
+        // This is the confirmed-drop bug fix: previously confirmed drawers
+        // were silently excluded because the filter was hard-coded to
+        // .unconfirmed. The .believed scope must include both.
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // Import a note (it lands as unconfirmed by default).
+        let sourceVault = try seedVault()
+        defer { try? FileManager.default.removeItem(at: sourceVault) }
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        _ = try await bridge.importVault(at: sourceVault, into: handle)
+
+        // Confirm the drawer. `mutate` with `.confirm` moves the
+        // confirmation state from unconfirmed → userConfirmed.
+        let drawers = try await currentDrawers(kit, handle)
+        let drawer = try #require(drawers.first)
+        try await kit.mutate(handle, MutateFrame(rowID: drawer.id, kind: .confirm))
+
+        // Export with default scope (`.believed`).
+        // The confirmed drawer MUST appear in the vault.
+        try await bridge.export(estate: handle, to: vault)
+
+        // The vault must contain exactly one note.
+        #expect(countMDFiles(in: vault) == 1, "confirmed drawer must be exported under .believed scope")
+    }
+
+    @Test("unconfirmed scope exports only unconfirmed drawers (legacy behavior)")
+    func unconfirmedScopeExportsOnlyUnconfirmed() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        let sourceVault = try seedVault()
+        defer { try? FileManager.default.removeItem(at: sourceVault) }
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        _ = try await bridge.importVault(at: sourceVault, into: handle)
+
+        // Confirm the drawer.
+        let drawers = try await currentDrawers(kit, handle)
+        let drawer = try #require(drawers.first)
+        try await kit.mutate(handle, MutateFrame(rowID: drawer.id, kind: .confirm))
+
+        // Export with .unconfirmed scope — the confirmed drawer is excluded.
+        try await bridge.export(estate: handle, to: vault, scope: .unconfirmed)
+
+        // After confirmation the drawer is NOT unconfirmed, so it must be absent.
+        #expect(countMDFiles(in: vault) == 0, "confirmed drawer must be excluded under .unconfirmed scope")
+    }
+
+    // MARK: - moot_id round-trip identity tests
+
+    @Test("export→re-import preserves lineage via moot_id (no duplicate drawers)")
+    func mootIDPreservesLineageOnRoundTrip() async throws {
+        let (kit, handle) = try await openEstate()
+        let sourceVault = try seedVault()
+        let exportVault = makeTempVault()
+        defer {
+            try? FileManager.default.removeItem(at: sourceVault)
+            try? FileManager.default.removeItem(at: exportVault)
+        }
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        let first = try await bridge.importVault(at: sourceVault, into: handle)
+        #expect(first.drawersWritten == 1)
+
+        // Export — moot_id is written into frontmatter.
+        try await bridge.export(estate: handle, to: exportVault)
+
+        // Re-import the exported vault. The moot_id must map back to the
+        // SAME lineage, so it supersedes rather than duplicates.
+        let second = try await bridge.importVault(at: exportVault, into: handle)
+        #expect(second.drawersWritten == 0)
+        #expect(second.drawersUpdated == 1, "re-import via moot_id must supersede")
+
+        // Drawer count stable at 1.
+        let drawers = try await currentDrawers(kit, handle)
+        #expect(drawers.count == 1)
+    }
+
+    @Test("renaming exported file but keeping moot_id preserves lineage on re-import")
+    func renamedFileWithMootIDPreservesLineage() async throws {
+        let (kit, handle) = try await openEstate()
+        let sourceVault = try seedVault()
+        let exportVault = makeTempVault()
+        defer {
+            try? FileManager.default.removeItem(at: sourceVault)
+            try? FileManager.default.removeItem(at: exportVault)
+        }
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        _ = try await bridge.importVault(at: sourceVault, into: handle)
+        try await bridge.export(estate: handle, to: exportVault)
+
+        // Find the exported .md file, rename it.
+        let original = try #require(firstMDFile(in: exportVault))
+        let renamed = original.deletingLastPathComponent()
+            .appendingPathComponent("completely-different-name.md")
+        try FileManager.default.moveItem(at: original, to: renamed)
+
+        // Re-import the vault with the renamed file. moot_id in frontmatter
+        // must win over the new filename's FNV-derived key.
+        let report = try await bridge.importVault(at: exportVault, into: handle)
+        // Must supersede (not write a new drawer) even though the file was renamed.
+        #expect(report.drawersWritten == 0)
+        #expect(report.drawersUpdated == 1, "moot_id must win over filename after rename")
+        let drawers = try await currentDrawers(kit, handle)
+        #expect(drawers.count == 1, "rename must not create a duplicate drawer")
     }
 
     // MARK: - End-to-end export → import → equivalence

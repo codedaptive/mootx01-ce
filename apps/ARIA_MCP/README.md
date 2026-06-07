@@ -101,7 +101,7 @@ ARIA_MCP builds in **Phase 4**, last. It sits on top of GeniusLocusKit and wraps
 - `docs/reference/ARIA_MCP_SPEC_v0.2.md` — full spec
 - `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` — Appendix A.3 (schema versioning), § 9 (access), I-13 (federation)
 
-## Mission placement rules
+## Code placement rules
 
 **Belongs here** if it: defines MCP tool schemas, implements schema versioning validation, implements authentication token validation, implements cross-estate mediation, implements webhook registration or delivery, implements write policy enforcement.
 
