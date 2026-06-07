@@ -3,7 +3,8 @@ status: draft specification, v0.2
 supersedes_in_part: ARIA_MCP_SPEC_v0.1.md (the three-call-mode framing and the all-modes-required conformance rule)
 authors: Bob Pankratz (via/ claude)
 date: 2026-05-22
-version: 0.2
+version: 0.2.1
+revised: 2026-06-07 — transport correction (§5, §9): mootx01 is the headless resident HTTP MCP server that triggers its own Brain cycles; stdio is the fallback. HTTP moves from v1.1 to v1.0.
 relates_to:
   - ../canon/MOOTX01_AND_ARIA_CANON.md (the definitions this spec projects from)
   - ARIA_MCP_SPEC_v0.1.md (the transactional tool schemas and error model carry forward)
@@ -22,7 +23,8 @@ ARIA_MCP is the external interface to a MOOTx01 substrate. v0.1 defined it as a 
 - ARIA is the interface specification (Augmented Recall and Inference Architecture), reached three ways: the ARIA_MCP server, the Native API (the SDK), and the Embedded library (ARIA.md). This spec covers the ARIA_MCP consumption surface. ARIA_MCP is the first surface built; it carries ARIA over MCP without adding or changing semantics, thin over the SDK and bounded by it.
 - ARIA serves a MOOTx01 instance. A MOOTx01 instance is GLK plus the two BrainKits, NeuronKit and CognitionKit (canon). The write surface is always GLK; reads may be lensed narrower.
 - Delivery is phased (§ 9). v0.1 stated that an implementation supporting only transactional calls is not conformant; v0.2 replaces that with a release plan. The rich primitive surface is the north star.
-- v1.0 wraps a full MOOTx01 instance. v1.1 lets the MCP provision a narrow instance (just LocusKit or just CorpusKit) and route across a fleet in API mode. The Custom Connector (remote HTTP) and the config-writing installer are also v1.1, the installer a candidate for v1.0.
+- v1.0 wraps a full MOOTx01 instance. v1.1 lets the MCP provision a narrow instance (just LocusKit or just CorpusKit) and route across a fleet in API mode. API-mode fleet routing is v1.1; the *local* Streamable-HTTP transport is v1.0 (see the transport correction below). The config-writing installer ships in v1.0.
+- **v0.2.1 transport correction (2026-06-07).** mootx01 is the **headless resident server** that wraps the whole vertical (ARIA → GeniusLocusKit → kits → substrate) in one process. Its **primary mode is a resident HTTP MCP server**, and because it owns the stack it **triggers its own Brain cycles** — dreaming, enrichment, maintenance, and the standing-signal scheduler run on mootx01's own pump loop. **stdio is the fallback** transport of the same server (PoC, testing, migrations). Local Streamable HTTP therefore moves from v1.1 into **v1.0**; only remote/multi-tenant HTTP, OAuth, and API-mode fleet routing remain v1.1. **moot-mgr** is the separate GUI control + monitor surface for the headless daemon (for users who do not use the CLI). Native apps are **v2**. See §5 and §9.
 
 The detailed transactional tool schemas and the error model in v0.1 sections 5 and 10 carry forward unchanged and are referenced, not repeated, here.
 
@@ -69,7 +71,13 @@ The two substrate-driven verbs, propose and associate, stay out of the tool surf
 
 ## § 5. Always the server, and transport
 
-ARIA is always the MCP server; it never acts as a client of another MCP server. Transport by release. v1.0 uses local stdio: the server is launched by the client as a subprocess and speaks JSON-RPC over stdin and stdout. The transport is hand-rolled, no MCP SDK dependency, following the dependency-free pattern of the MemPalace MCP server: a tool registry, a request dispatcher over initialize, ping, notifications, tools/list, and tools/call, and a read-write loop. One hard rule carries over: stdout carries only JSON-RPC, and all logging goes to stderr. v1.1 adds Streamable HTTP for the Custom Connector path, behind the same dispatcher and tool router, so the handlers do not change with the transport.
+ARIA is always the MCP server; it never acts as a client of another MCP server. Both transports are hand-rolled, no MCP SDK dependency, behind one dispatcher and tool router so the handlers do not change with the transport. One hard rule carries over to both: only JSON-RPC crosses the wire, and all logging goes to stderr.
+
+**Primary transport (v1.0): resident local HTTP.** mootx01 runs as a long-lived, headless process bound to loopback (`127.0.0.1:<port>`), speaking JSON-RPC 2.0 over HTTP POST with SSE for server→client streaming (MCP "Streamable HTTP"). Because the process is resident and owns the whole stack down to the substrate, it is also what **triggers the Brain** — the pump loop that drives dreaming, enrichment, maintenance, and the standing-signal scheduler runs inside this server (see §9 and §17). This is the mode `mootx01 install` wires by default, registered under launchd so it starts at login and restarts on exit.
+
+**Fallback transport: local stdio.** The same server, launched by a client as a subprocess, speaking JSON-RPC over stdin/stdout (newline-delimited, the MemPalace dependency-free pattern: tool registry; dispatcher over initialize, ping, notifications, tools/list, tools/call; read-write loop). stdio is the simple path — proof-of-concept, testing, and the fallback for operations like migrations — and is ephemeral: it lives only while the client holds it, so it does **not** pump the Brain. The tool/JSON-RPC surface is byte-identical to the HTTP transport.
+
+Remote/multi-tenant HTTP (the Custom Connector path: internet-hosted https, OAuth, scoped tokens) remains v1.1; only the *local* loopback HTTP transport is v1.0.
 
 ## § 6. Client compatibility (verified 2026-05-22)
 
@@ -88,9 +96,9 @@ The conclusion: tools are universal across the local clients, resources and prom
 
 ## § 7. Install and connection protocols
 
-Local stdio, manual configuration (the v1.0 path). Each client registers a stdio server with a command and arguments, then restarts: Claude Desktop in claude_desktop_config.json then quit and restart; Claude Code via claude mcp add or project .mcp.json; Gemini CLI via gemini mcp add or settings.json; Cursor in ~/.cursor/mcp.json; OpenClaw in its mcpServers registry. This works but requires hand-editing JSON and restarting, per client and per device.
+Installer-written configuration (v1.0, the default path). `mootx01 install` detects which clients are present and merges the mootx01 entry into each client's configuration file — a guarded merge that preserves existing entries — then prompts the restart. It also registers the resident daemon under launchd and points the wired clients at it. This is a guarded file merge plus service registration, not new protocol. (See the transport correction: the daemon's primary endpoint is local HTTP; the stdio entry below is the fallback.)
 
-Installer-written configuration (v1.1, candidate for v1.0). An ARIA installer detects which clients are present and merges the ARIA stdio entry into each client's configuration file, a guarded merge that preserves existing entries, then prompts the restart. This removes the JSON editing without remote hosting, and it generalizes across all clients, where the Claude Desktop extension bundle would cover only one. It is a guarded file merge plus a restart prompt, not new protocol, so it is a reasonable v1.0 stretch.
+Local stdio, manual configuration (the fallback / PoC path). Without the installer, each client can register a stdio server with a command and arguments, then restart: Claude Desktop in claude_desktop_config.json then quit and restart; Claude Code via claude mcp add or project .mcp.json; Gemini CLI via gemini mcp add or settings.json; Cursor in ~/.cursor/mcp.json; OpenClaw in its mcpServers registry. This works but requires hand-editing JSON and restarting, per client and per device — and an stdio entry is ephemeral, so it does not pump the Brain. Suitable for testing, PoC, and migrations.
 
 Custom Connector, remote HTTP (v1.1). The easiest install for the user: in the client's Connectors settings, add a custom connector, paste the URL, authenticate. No file editing, no restart, and resources and prompts surface natively. The cost is that this path requires an internet-hosted https endpoint and authentication, commonly OAuth, so it is not a local-host mechanism. That is why it is v1.1.
 
@@ -102,13 +110,15 @@ Schema versioning is retained from v0.1 section 3. Every tool call carries a sch
 
 ## § 9. Release plan
 
-v1.0, full MOOTx01. ARIA wraps a full MOOTx01 instance, GLK plus NeuronKit and CognitionKit, over local stdio, always the server. The caller-driven verbs project as MCP tools whose schemas are generated from the lexicon and the acceptance matrix: capture, recall, mutate, withdraw, expunge, reanchor, learn, plus a status tool. Writes always target GLK; recall is hybrid by default and accepts a CorpusKit-only or LocusKit-only read lens. Resources and prompts are advertised in capabilities and implemented opportunistically. The schema-version gate, the local-owner credential seam, and the write-policy seam are present. Install is by manual client configuration. Swift first; the Rust version is a fast-follow.
+v1.0, full MOOTx01, resident. ARIA wraps a full MOOTx01 instance, GLK plus NeuronKit and CognitionKit — the whole vertical from ARIA down to the substrate in one headless process. Its primary transport is the resident loopback HTTP MCP server (§5); stdio is the fallback. Because it is resident and owns the stack, it runs the Brain pump (§17) that triggers dreaming, enrichment, maintenance, and the standing-signal scheduler — the continuous-operation behavior the architecture spec requires. The caller-driven verbs project as MCP tools whose schemas are generated from the lexicon and the acceptance matrix: capture, recall, mutate, withdraw, expunge, reanchor, learn, plus a status tool. Writes always target GLK; recall is hybrid by default and accepts a CorpusKit-only or LocusKit-only read lens. Resources and prompts are advertised in capabilities and implemented opportunistically. The schema-version gate, the local-owner credential seam, and the write-policy seam are present. Install is automated (`mootx01 install`): it wires clients to the HTTP endpoint and registers the daemon under launchd. The GUI control + monitor surface for the headless daemon is moot-mgr (a separate process; see MOOT_MGR_SPEC). Swift first; the Rust version is a fast-follow.
 
 Dependency. v1.0 as defined depends on the two BrainKits, which are unbuilt: NeuronKit is Mission 9 and CognitionKit is Mission 10. ARIA v1.0 therefore sequences after those missions. A GLK-only transactional server is buildable now against the shipped GeniusLocusKit, but that is a pre-v1.0 spike, not v1.0, because it lacks the BrainKits that make the instance MOOTx01.
 
-v1.1. The MCP can provision a narrow instance, just LocusKit or just CorpusKit, rather than only wrapping a pre-built MOOTx01. API-mode fleet routing across many instances. The Custom Connector path: Streamable HTTP, OAuth, and the owner and scoped token model. The config-writing installer (candidate for pull-forward into v1.0). The richer read surface: resources with subscriptions, prompts, and completions.
+v1.1. The MCP can provision a narrow instance, just LocusKit or just CorpusKit, rather than only wrapping a pre-built MOOTx01. API-mode fleet routing across many instances. The **remote** Custom Connector path — internet-hosted https, OAuth, and the owner and scoped token model (the *local* loopback HTTP transport already ships in v1.0). The richer read surface: resources with subscriptions, prompts, and completions.
 
-Beyond v1.1. The client-initiated primitives, gated on capable clients: sampling, so the BrainKits borrow the caller's model and the substrate stays model-independent; elicitation, so human gates are native; tasks, so long-running NeuronKit calls and CognitionKit recipes are durable. Then full remote, multi-tenant operation at scale.
+v2. Native apps (macOS/iOS) over the headless daemon — expected sooner than later. The HTTP daemon remains the engine they drive; the GUI moves from the moot-mgr web console toward first-class native clients.
+
+Beyond. The client-initiated primitives, gated on capable clients: sampling, so the BrainKits borrow the caller's model and the substrate stays model-independent; elicitation, so human gates are native; tasks, so long-running NeuronKit calls and CognitionKit recipes are durable. Then full remote, multi-tenant operation at scale.
 
 The placement of resources, prompts, completions, sampling, elicitation, and tasks across v1.1 and beyond is a proposal, not a fixed boundary, and can move with client support and need.
 
@@ -309,7 +319,9 @@ trigger wins and subsequent checks are skipped.
 
 ## § 14. Design note: moot_estate_ping replaces moot_estate_reconnect
 
-ARIA_MCP is a long-running stdio process. It opens one estate at startup and
+ARIA_MCP is a long-running process (resident HTTP in the primary mode; the
+stdio fallback is also long-lived for the duration of the client session). It
+opens one estate at startup and
 holds the handle for the lifetime of the process. There is no transient
 disconnection state in this design: a `GeniusLocusKit` estate handle is either
 registered in the actor's registry (open) or absent (`.estateNotOpen`). There
@@ -353,3 +365,38 @@ rather than decomposing a query into a triple structure before calling.
 A single `query` field matches how LLMs are trained to express retrieval
 intent. Per-field decomposition would be appropriate for a developer-facing
 SPARQL-style interface; it is not appropriate for the AI-client surface.
+
+## § 17. Resident lifecycle, the Brain pump, and telemetry self-report (v0.2.1)
+
+mootx01 is headless and resident. In the primary (HTTP) mode it is a long-lived
+process — registered under launchd by `mootx01 install` — that opens its estate
+once and serves until stopped. Because the same process owns the whole vertical
+(ARIA → GeniusLocusKit → kits → substrate), two responsibilities that have no
+home in an ephemeral stdio server live here.
+
+### 17.1 The Brain pump (dream trigger)
+
+The Brain daemons — NeuronKit's dreaming, enrichment, and maintenance daemons,
+and GLK's `StandingSignalDaemon` scheduler — are deterministic and
+caller-pumped: `now` is always supplied by the caller; a daemon never reads the
+clock itself (GENIUSLOCUS_ARCHITECTURE_SPEC; NEURONKIT_SPEC B-4/C-1). The
+resident server owns the **pump loop**: the single scheduler that calls each
+daemon's `pump(now:)`/`runCycle(now:)` on its policy cadence. Determinism is
+preserved — the loop is the only place `now` enters, and it is the only
+scheduler. Cadences come from policy/env. This is the mechanism that realizes
+the architecture spec's "continuous-operation behavior … overnight enrichment":
+without a resident host pumping it, the Brain never fires, which is why the
+stdio fallback (ephemeral, per-client) does not dream.
+
+### 17.2 Telemetry self-report
+
+The resident server installs ObserverSink's `PersistenceStatsSink` against the
+manager's stats store and drives the IntellectusLib gate from that store's
+monitoring flag — the same opt-in, off-by-default contract documented in
+MOOT_MGR_SPEC §8 and INTELLECTUSLIB_SPEC I-6. Because the process is resident,
+the report is continuous (not just during a client request). The wiring is
+gated by `ARIA_MCP_STATS_STORE`; `mootx01 install` sets it to the manager store
+path so the headless daemon is observable by moot-mgr out of the box, while the
+off-by-default flag still governs whether any sample actually flows. moot-mgr
+reads this store and, through its control channel, signals the daemon
+(monitoring on/off, admin lifecycle, Brain signals).

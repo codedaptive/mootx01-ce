@@ -9,7 +9,7 @@ relates_to:
   - ARIA_MCP_SPEC_v0.2.md  (the behavioral contract; MCP-INT-01 adds §11 AI-client surface)
   - GENIUSLOCUSKIT_SPEC_v0.8.md  (the estate verb surface tools dispatch to)
 purpose: |
-  Public API surface of ARIA_MCP — the stdio MCP server that exposes
+  Public API surface of ARIA_MCP — the MCP server that exposes
   GeniusLocusKit estates over Model Context Protocol. Documents the JSON-RPC
   transport, the JSONValue wire type, the five-tier AI-client tool surface, the
   multi-estate tool dispatcher, the teachme guide engine, the coaching hint
@@ -19,6 +19,17 @@ purpose: |
   MCP-INT-03 to add the static protocol block to estate_status and the full
   cognition menu to moot_list_lenses.
   The companion SPEC carries the behavioral contracts.
+
+  TRANSPORT NOTE (v0.2.1 spec correction, 2026-06-07): the types documented
+  here — `StdioServer` and the newline-delimited JSON-RPC loop — are the
+  *implemented* surface and are the **fallback** transport (PoC, testing,
+  migrations). Per ARIA_MCP_SPEC §5/§17 the **primary** mode is the resident
+  loopback HTTP MCP server, which is not yet implemented; when it lands it sits
+  behind the same `ARIA_MCPDispatcher` (handlers unchanged) and this interface
+  gains the HTTP server type alongside `StdioServer`. The resident server also
+  hosts the Brain pump (dream trigger) and the telemetry self-report; both are
+  documented in the SPEC and wired in the resident executable, not in the
+  `AriaMCP` JSON-RPC library.
 ---
 
 # ARIA_MCP Interface
