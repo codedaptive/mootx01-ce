@@ -32,18 +32,16 @@
 //   IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (lib) → moot-mgr (app)
 //
 // Dependency additions per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28:
-//   ObserverSink, IntellectusLib, PersistenceKit/PersistenceKitSQLite are
-//   recorded as MUST_UPDATE items in MOOT_MGR_001_BLAST_RADIUS.md, citing
-//   MANAGER_1.0_PLAN.md §1/§4. No external (third-party) Swift dependencies.
+//   ObserverSink, IntellectusLib, PersistenceKit/PersistenceKitSQLite.
+//   No external (third-party) Swift dependencies.
 //
-//   GeniusLocusKit + PersistenceKitInMemory added by cp-mootmgr-admin (P6 admin
-//   plane): the resident host converges with the serve core to HOST and PROVISION
-//   estates (MANAGER_1.0_PLAN.md §1, §4 P6). The admin plane invokes GLK's
-//   provision / quiesce / drain / destroy / mountState surface (EstateProvision.swift
-//   / EstateLifecycle.swift) to create and tear down real MOOTs through the
-//   substrate — never a side-door DB file (concepts §1.8). InMemory is added so
-//   the admin plane can provision volatile estates (GUI SPEC §4.2 flags InMemory
-//   loudly). Recorded as MUST_UPDATE items in cp-mootmgr-admin_BLAST_RADIUS.md.
+//   GeniusLocusKit + PersistenceKitInMemory support the P6 admin plane:
+//   the resident host converges with the serve core to HOST and PROVISION
+//   estates. The admin plane invokes GLK's provision / quiesce / drain /
+//   destroy / mountState surface (EstateProvision.swift / EstateLifecycle.swift)
+//   to create and tear down real MOOTs through the substrate — never a
+//   side-door DB file (concepts §1.8). InMemory is added so the admin plane
+//   can provision volatile estates (GUI SPEC §4.2 flags InMemory loudly).
 //   Layering: moot-mgr is a top-level APP depending on a KIT (downstream→upstream)
 //   — no inversion. No external (third-party) Swift dependencies are introduced.
 //

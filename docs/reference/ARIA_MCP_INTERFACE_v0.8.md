@@ -43,8 +43,10 @@ purpose: |
   NeuronKit, CognitionKit (path deps under `../../packages/`).
 
 **Rust:** `apps/ARIA_MCP/rust/` — a wire-contract peer of the Swift server.
-The Rust binary is a parity sibling; the shipped runtime is the Swift binary
-(`installer/install.sh builds mootx01-mcp via swift build`). The Rust binary
+The Rust binary is a parity sibling; the shipped runtime is the Swift binary —
+the `mootx01` executable target in `installer/Package.swift`, which links the
+`AriaMCP` library and runs `mootx01 serve` (the default subcommand on macOS).
+The Rust binary
 links the same 44-tool surface backed by the Rust kit stack (genius-locus-kit,
 locus-kit, vault-kit, cognition-kit, neuron-kit). As of stream t1-vault, all four
 `moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
@@ -137,6 +139,7 @@ public struct ProjectedTool: Sendable, Equatable {
     public let provenance: ToolProvenance
 }
 public enum ToolProjection {
+    public static let toolNamePrefix: String         // "moot_" — product namespace on every tool name
     public static func tools() -> [ProjectedTool]   // all 44 tools (interface+federation+recipe+vault)
     public static func federationTool() -> ProjectedTool
 }
@@ -284,7 +287,7 @@ public struct ARIA_MCPDispatcher: Sendable {
     public func handle(_ request: JSONRPCRequest) async -> JSONRPCResponse?
 }
 
-public struct StdioServer: Sendable {
+public struct StdioServer {
     public let dispatcher: ARIA_MCPDispatcher
     public init(dispatcher: ARIA_MCPDispatcher)
     public func run(input: FileHandle = .standardInput, output: FileHandle = .standardOutput) async
@@ -340,7 +343,7 @@ teachme guides and coaching hints.)
 cargo test --manifest-path apps/ARIA_MCP/rust/Cargo.toml
 ```
 
-(Rust test targets: `dispatch_tests` — 50 tests including 6 vault dispatch
+(Rust test targets: `dispatch_tests` — 52 tests including 6 vault dispatch
 integration tests: missing-vaultPath INVALID_PARAMS, status-no-manifest,
 export-stamps-manifest, export-then-import, reconcile-no-manifest,
 reconcile-zero-drift. `jsonrpc_tests`, `persistence_tests`,

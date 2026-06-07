@@ -102,11 +102,14 @@ pub struct Drawer {
     /// streaming capture this equals `filed_at`. For bulk historical
     /// ingestion callers supply the original authorship date. The
     /// fingerprint's capture-week bucket keys off this field, not
-    /// `filed_at` (ING-01, two-clock ingest). Epoch seconds; None when
-    /// the stored row pre-dates the column (backfilled to `filed_at` on
-    /// read). Stored as TEXT ISO8601 at the SQLite boundary per the fleet
-    /// date-storage rule.
-    pub event_time: Option<i64>,
+    /// `filed_at` (ING-01, two-clock ingest). Epoch seconds. Always
+    /// non-optional: resolved eagerly to `filed_at` at construction or
+    /// decode so the struct never carries an absent value. Mirrors Swift
+    /// `Drawer.eventTime: Date` (non-optional, folded to `filedAt` on
+    /// decode). Stored as TEXT ISO8601 at the SQLite boundary per the
+    /// fleet date-storage rule; the column is nullable to support legacy
+    /// rows pre-dating the column, but the in-struct type is not.
+    pub event_time: i64,
 
     /// Identifier of the embedding model that produced (or will
     /// produce) the vector for this drawer.
@@ -184,7 +187,11 @@ impl Drawer {
             chunk_index: None,
             added_by: added_by.into(),
             filed_at,
-            event_time: None,
+            // Eager resolution: streaming capture → event_time == filed_at by
+            // default. Callers doing bulk historical ingest assign event_time
+            // immediately after construction; the estate_verbs capture path
+            // always resolves from the CaptureFrame before calling add_drawer.
+            event_time: filed_at,
             embedding_model_id: embedding_model_id.into(),
             tombstoned_at: None,
             removed_by_batch: None,

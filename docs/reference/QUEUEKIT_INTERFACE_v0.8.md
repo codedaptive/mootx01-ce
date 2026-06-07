@@ -172,8 +172,11 @@ public struct ToolName: Sendable, Hashable, Codable, RawRepresentable {
 ```
 
 **Rust:** `pub struct JobId(pub String);`, `pub struct StreamId(pub String);`,
-`pub struct SessionId(pub String);` (no `ToolName` in the Rust version —
-allowlist validation is unimplemented, SPEC § 9).
+`pub struct SessionId(pub String);`, `pub struct ToolName(pub String);`. The
+Rust `ToolName` exposes `new(impl Into<String>)`, `raw_value() -> &str`, and
+`validate(&self, allowlist: &[ToolName]) -> Result<(), QueueError>` (yields
+`QueueError::UnknownTool` on mismatch). `SessionId` is minted by the backend
+at claim time.
 
 ### `ObservationStatus`
 
@@ -450,18 +453,22 @@ pub enum QueueError {
     WriteFailed(String),
     RenameFailed { from: String, to: String, msg: String },
     DecodingFailed(String),
+    UnknownTool(String),
     JobNotFound(String),
     WatcherFailed(String),
+    StaleTmpFile { path: String, age_secs: f64 },
     BackendUnavailable(String),
     InvalidTerminalStatus(String),
 }
 ```
 
-The Rust enum collapses the Swift `unknownTool` and `staleTmpFile`
-cases (neither is raised by the shipped Rust Filesystem backend);
-otherwise the categories correspond one-to-one. Python raises a single
-`QueueError` exception class carrying a message. The behavioural
-contract (SPEC § 6) is identical across ports.
+The Rust enum carries all ten categories one-to-one with the Swift
+cases; it collapses each Swift associated `Error`/path value into a
+single `String` message (and `ToolName`/`JobID`/`ObservationStatus`
+payloads into their raw `String`), and renames the stale-tmp age field
+to `age_secs` for clarity. Python raises a single `QueueError`
+exception class carrying a message. The behavioural contract (SPEC § 6)
+is identical across ports.
 
 ## § 5 — Conformance test entry points
 
@@ -642,7 +649,7 @@ counterpart).
 | `FilesystemBackend` | `FilesystemBackend` (`Sources/QueueKit/FilesystemBackend.swift:44`) | `FilesystemBackend` (`rust/src/filesystem.rs:22`) | both public/pub | identical contract; Swift `init(root:hlcGenerator:)` / Rust `new(root, node_id)`; both produce byte-identical maildir files | Rust `conformance.rs::area4_concurrent_claim_filesystem`; Swift `FilesystemBackendTests.swift`, `ConformanceTests.swift::area4ConcurrentClaimFilesystem` | Confirmed |
 | `PersistenceKitBackend` | `PersistenceKitBackend` (`Sources/QueueKit/PersistenceKitBackend.swift:85`) | `PersistenceKitBackend` (`rust/src/persistencekit.rs:151`) | both public/pub | identical behaviour; Swift `async throws` / Rust sync `Result` (Storage trait is sync — sanctioned async/sync seam); serializable atomic claim both ports | Rust `parity.rs::write_and_drain`, `drain_is_empty_after_claiming`, `in_flight_returns_cur_jobs`; Swift `PersistenceKitBackendTests.swift` | Confirmed |
 | `QueueKitSchema` | `QueueKitSchema` (`Sources/QueueKit/PersistenceKitBackend.swift:37`) | `QueueKitSchema` (`rust/src/persistencekit.rs:63`) | both public/pub | Swift caseless-enum namespace / Rust unit struct namespace; same `kitID`/`version`/`declaration()`, same `queueKitTableName` constant, 12 columns, 3 indices, `append_only=false` | Rust `parity.rs::schema_kit_id_and_version`, `schema_table_name_constant`, `schema_declaration_has_required_columns`, `schema_declaration_has_three_indices`; Swift `ConformanceTests.swift::area1Schema` | Confirmed |
-| `QueueError` | `QueueError` (`Sources/QueueKit/QueueError.swift:7`) | `QueueError` (`rust/src/error.rs:14`) | both public/pub | category-equivalent; Rust collapses associated `Error`/path into a `String` message and folds `unknownTool`/`staleTmpFile` (not raised by the shipped Rust Filesystem backend); behavioural categories one-to-one | Rust `parity.rs::stale_tmp_file_error_carries_path_and_age`, `complete_rejects_non_terminal_status`, `complete_job_not_found`; Swift `ConformanceTests.swift::area2Transitions`, `area6StaleTmpRecovery` | Confirmed |
+| `QueueError` | `QueueError` (`Sources/QueueKit/QueueError.swift:7`) | `QueueError` (`rust/src/error.rs:14`) | both public/pub | all ten variants present in both ports (incl. `UnknownTool`, `StaleTmpFile`); Rust collapses each associated `Error`/path/wrapper payload into a `String` message (`StaleTmpFile` stays a struct variant, `age` → `age_secs`); behavioural categories one-to-one | Rust `parity.rs::stale_tmp_file_error_carries_path_and_age`, `complete_rejects_non_terminal_status`, `complete_job_not_found`; Swift `ConformanceTests.swift::area2Transitions`, `area6StaleTmpRecovery` | Confirmed |
 | `MissionContext` | `MissionContext` (`Sources/QueueKit/Job.swift:254`) | none (no Rust or Python counterpart) | Swift `public struct` / no Rust symbol | NOT a platform binding — caller-domain convenience (Forge mission descriptor) encoded into the opaque `Job.payload`; QueueKit treats payload as opaque bytes (SPEC § 4, I-5). Per the force-mirror standard, "Swift-only by design" is not a waiver for a plain domain struct. | none (no parity test — no Rust counterpart to bind against) | DRIFT |
 
 ---

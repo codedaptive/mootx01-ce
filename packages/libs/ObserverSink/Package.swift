@@ -22,9 +22,7 @@
 //   IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (this lib)
 //
 // Dependency additions per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28:
-//   IntellectusLib and PersistenceKit/PersistenceKitSQLite are recorded as
-//   MUST_UPDATE items in OBSERVERSINK_001_BLAST_RADIUS.md, citing
-//   MANAGER_1.0_PLAN.md §4.
+//   IntellectusLib and PersistenceKit/PersistenceKitSQLite.
 //
 // Platform floor: macOS 26 / iOS 26 (Tahoe), matching the project-wide
 // AI-capable OS floor and the IntellectusLib/PersistenceKit floors.

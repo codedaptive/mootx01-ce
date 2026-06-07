@@ -163,6 +163,20 @@ pub struct NoteIR {
     /// Optional pointer to an external source artifact (attachment).
     /// `None` for plain notes; populated by producers that carry attachments.
     pub source: Option<SourceRef>,
+
+    /// The substrate lineage UUID from the `moot_id` frontmatter key.
+    ///
+    /// When present (populated by `ObsidianAdapter::to_ir` or set explicitly
+    /// by `DrawerMapping::note_ir_from` on export), this UUID is used as the
+    /// `lineage_id` for the capture frame on re-import — making the note's
+    /// identity rename-safe. The FNV derivation from `stable_source_key` is
+    /// the fallback when this is `None`.
+    ///
+    /// Decision B1: `moot_id` carries `drawer.lineage_id` (the STABLE UUID),
+    /// not `drawer.id` (which the supersession cascade re-mints on every
+    /// capture). This is the cross-language conformance anchor for identity.
+    /// Mirrors Swift `NoteIR.mootID: UUID?`.
+    pub moot_id: Option<uuid::Uuid>,
 }
 
 impl NoteIR {
@@ -176,6 +190,23 @@ impl NoteIR {
         origin_date: Option<OccurredAt>,
         source: Option<SourceRef>,
     ) -> Self {
+        Self::with_moot_id(stable_source_key, body, frontmatter, links, tags, original_path, origin_date, source, None)
+    }
+
+    /// Construct a `NoteIR` with an explicit `moot_id`. Used by
+    /// `ObsidianAdapter::to_ir` when the frontmatter carries `moot_id` and by
+    /// `DrawerMapping::note_ir_from` on export.
+    pub fn with_moot_id(
+        stable_source_key: impl Into<String>,
+        body: Vec<Block>,
+        frontmatter: std::collections::HashMap<String, String>,
+        links: Vec<WikiLink>,
+        tags: Vec<String>,
+        original_path: impl Into<String>,
+        origin_date: Option<OccurredAt>,
+        source: Option<SourceRef>,
+        moot_id: Option<uuid::Uuid>,
+    ) -> Self {
         Self {
             stable_source_key: stable_source_key.into(),
             body,
@@ -185,6 +216,7 @@ impl NoteIR {
             original_path: original_path.into(),
             origin_date,
             source,
+            moot_id,
         }
     }
 

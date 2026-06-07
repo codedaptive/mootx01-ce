@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // VaultKit — bidirectional bridge between a MOOT estate and a
 // human-readable Markdown vault (Obsidian as the first adapter).
@@ -33,8 +33,8 @@ import PackageDescription
 let package = Package(
     name: "VaultKit",
     platforms: [
-        .macOS(.v15),
-        .iOS(.v18),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(

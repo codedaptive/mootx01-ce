@@ -79,12 +79,24 @@ public struct VaultBridge: Sendable {
     // MARK: - Export
 
     /// Project an estate to a Markdown vault — drawers → notes,
-    /// `.references` tunnels → wikilinks, wing/room → folders,
+    /// `.references` tunnels → wikilinks, room → folders,
     /// provenance/anchors → frontmatter. One vault per MOOT.
-    public func export(estate handle: EstateHandle, to vaultURL: URL) async throws {
-        let notes = try await mapping.export(kit: kit, handle: handle)
+    ///
+    /// - Parameters:
+    ///   - handle: the estate to project.
+    ///   - vaultURL: the vault root directory to write under.
+    ///   - scope: which drawers to include. Defaults to `.believed`,
+    ///     which includes all currently-believed drawers regardless of
+    ///     confirmation state — fixing the confirmed-drop bug from the
+    ///     previous `.unconfirmed`-only filter.
+    public func export(
+        estate handle: EstateHandle,
+        to vaultURL: URL,
+        scope: VaultExportScope = .believed
+    ) async throws {
+        let notes = try await mapping.export(kit: kit, handle: handle, scope: scope)
         try adapter.fromIR(notes, to: vaultURL)
-        Self.log.info("exported \(notes.count, privacy: .public) notes to vault")
+        Self.log.info("exported \(notes.count, privacy: .public) notes to vault (scope: \(scope.rawValue, privacy: .public))")
     }
 
     // MARK: - Import

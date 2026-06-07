@@ -56,8 +56,7 @@ let package = Package(
         // PersistenceStatsSink against the manager's stats store and drives
         // Intellectus.setEnabled from the store flag, so the headless ARIA
         // deployment self-reports when the manager turns monitoring on. App →
-        // lib layering, no inversion. Recorded in MOOT_MGR_001_BLAST_RADIUS.md
-        // (conditional MUST_UPDATE) citing MANAGER_1.0_PLAN.md §1/§3.
+        // lib layering, no inversion.
         .package(name: "ObserverSink", path: "../../packages/libs/ObserverSink"),
         .package(name: "IntellectusLib", path: "../../packages/libs/IntellectusLib"),
     ],

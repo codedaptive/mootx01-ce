@@ -19,14 +19,14 @@ artifacts each phase produces, most importantly `CLAIMS_LEDGER.md`.
 
 ## Status header
 
-| Phase | Title                              | Status       | Routing       | Depends on |
+| Phase | Title                              | Status       | Mode          | Depends on |
 |-------|------------------------------------|--------------|---------------|------------|
-| A     | Claims ledger                      | in_progress  | direct        | (none)     |
-| B     | Invariant negative-test suite      | not_started  | direct        | A          |
-| C     | Theorem demonstrations             | not_started  | direct        | A          |
-| D     | MemPalace migration benchmark      | not_started  | direct (+wormhole bounded) | A, B, C |
-| E     | Adversarial harness                | not_started  | wormhole      | B, C       |
-| F     | Continuous performance gates       | not_started  | wormhole      | B, C       |
+| A     | Claims ledger                      | in_progress  | interactive   | (none)     |
+| B     | Invariant negative-test suite      | not_started  | interactive   | A          |
+| C     | Theorem demonstrations             | not_started  | interactive   | A          |
+| D     | MemPalace migration benchmark      | not_started  | interactive (+batched bounded) | A, B, C |
+| E     | Adversarial harness                | not_started  | batched       | B, C       |
+| F     | Continuous performance gates       | not_started  | batched       | B, C       |
 
 ## Phases
 
@@ -90,7 +90,7 @@ Output: theorem demonstration code, committed.
 The load-bearing validation. Migrates the existing MemPalace
 corpus (Bob's working memory substrate, several months of
 content) into a GeniusLocus estate via the four-branch
-parallel-run methodology already KG-recorded. Compares each
+parallel-run methodology. Compares each
 branch's recall quality, structural fidelity, and behavioral
 parity against the MemPalace baseline.
 
@@ -158,30 +158,30 @@ and recall parity → NeuronKit and CognitionKit work can begin.
 Those layers compose on actual learned behavior from a real
 corpus; threshold-3 validation is the trigger.
 
-Phase D winning branch promoted → MemPalace retired, Skippy
-reads from GeniusLocus on next session. This is a separate
-decision, not part of Phase D itself.
+Phase D winning branch promoted → MemPalace retired, the
+working memory substrate reads from GeniusLocus on next session.
+This is a separate decision, not part of Phase D itself.
 
-## Routing policy
+## Execution-mode policy
 
-Default: direct work in this chat for richer context curation
-and authenticity of the record. The recursive insight is that
-the validation work is also the corpus-building work for
-Phase D, so dense diary entries and KG facts during Phases A
-through C make Phase D's migration benchmark more substantive.
+Default: interactive work for richer context curation and
+authenticity of the record. The recursive insight is that the
+validation work is also the corpus-building work for Phase D, so
+a dense working record during Phases A through C makes Phase D's
+migration benchmark more substantive.
 
-Bilby and the wormhole are escape valves for bounded mechanical
-missions only, flagged per-item in the ledger. Phase E and F
-default to wormhole because the work is largely template-fitting
+Batched execution is an escape valve for bounded mechanical work
+only, flagged per-item in the ledger. Phases E and F default to
+batched execution because the work is largely template-fitting
 (fuzz harness pattern, CI gate pattern); the rest default to
-direct.
+interactive.
 
-Once GLK passes Phase D and the winning branch promotes, bilby
-gains substrate-grade memory (GLK as primary, MemPalace as
-backstop) and the routing default inverts for NeuronKit and
-CognitionKit: bilby primary, direct work for architecture and
-analysis. The validation work bootstraps the tooling for the
-work that follows it.
+Once GLK passes Phase D and the winning branch promotes, the
+working memory substrate gains substrate-grade memory (GLK as
+primary, MemPalace as backstop) and the default inverts for
+NeuronKit and CognitionKit: batched primary, interactive work
+for architecture and analysis. The validation work bootstraps
+the tooling for the work that follows it.
 
 ## KG predicate vocabulary
 
@@ -227,8 +227,8 @@ schedule top 3 levels, curated Wikidata subset of common
 entities). Conformance-gated against shared vectors in the
 existing test-harness pattern.
 
-Routing: direct work in chat. Context-dense, design-sensitive,
-in-tree implementation.
+Mode: interactive. Context-dense, design-sensitive, in-tree
+implementation.
 
 ### M2: Apple NaturalLanguage compile-time acceleration
 
@@ -240,7 +240,7 @@ the flag is enabled. Same pattern as the kernel layer's
 is mutually exclusive with cross-language conformance and is
 declared federation-disabled in the build configuration.
 
-Routing: direct work in chat.
+Mode: interactive.
 
 ### M3: Anchor agreement test
 
@@ -270,7 +270,7 @@ Decision matrix from the data:
   provenance bitmap tracks which extractor produced each
   anchor and queries can filter or reconcile.
 
-Routing: direct work in chat. Day-sized once M1 and M2 land.
+Mode: interactive. Day-sized once M1 and M2 land.
 
 ### Phase D entry criteria amendment
 
@@ -286,10 +286,10 @@ opening and closing sequence so cross-session continuity holds.
 
 Opening, before any work:
 
-1. Read the diary for `skippy/mootx01`, last 3 entries.
-2. Query the KG for `validation_phase_status` and for the
-   active phase's relevant entities.
-3. Run `mempalace_search` on the active phase's topic.
+1. Read the working record's last 3 validation entries.
+2. Query the knowledge graph for `validation_phase_status` and for
+   the active phase's relevant entities.
+3. Search the working record on the active phase's topic.
 4. Read `VALIDATION_PLAN.md`, `DESIGN_CONSTRAINTS.md`, and
    `CLAIMS_LEDGER.md` to confirm phase status, constitutional
    constraints, entry criteria, and the next step.
@@ -297,8 +297,8 @@ Opening, before any work:
 Closing, after the work:
 
 5. Update this plan's Session log subsection with what landed.
-6. Update KG facts using the declared vocabulary above.
-7. Write a diary entry tagged `validation-phase-X-checkpoint`.
+6. Update knowledge-graph facts using the declared vocabulary above.
+7. Write a working-record entry tagged `validation-phase-X-checkpoint`.
 8. Commit any deliverable that landed.
 
 ## Session log
@@ -308,10 +308,10 @@ Append-only. Most recent at the top.
 ### 2026-05-22 (late): Design conversation; constraints doc opened; Phase D prerequisites recorded
 
 Design conversation surfaced two corrections that materially
-revise the substrate's text-to-anchor story. First, Skippy
-reached for an LLM API call as a deployment option; Bob rejected
-on determinism and supply-chain grounds. Second, Skippy reached
-for ONNX Runtime as a model runtime; Bob rejected on the same
+revise the substrate's text-to-anchor story. First, an LLM API
+call was raised as a deployment option; Bob rejected it
+on determinism and supply-chain grounds. Second, ONNX Runtime
+was raised as a model runtime; Bob rejected it on the same
 grounds and articulated the broader constitutional rule that
 the substrate has no external runtime dependencies, period.
 
@@ -322,7 +322,7 @@ every session.
 
 Anchor extractor is now deterministic in-tree, both languages,
 conformance-gated. Vector tier rung 3 is TF-IDF over
-framework-profile vocabulary; the prior KG fact recording
+framework-profile vocabulary; the prior record naming
 EmbeddingGemma_300M as production default is superseded.
 
 Three bounded missions (M1, M2, M3) sit between the current
@@ -351,10 +351,11 @@ section 3) enumerated as ledger rows. Phase A continues next
 session with theorems, hot-path budgets, protocol contracts,
 and decision-record claims.
 
-Initial routing decision: Phases A through D run direct from
-this chat per Bob's directive on curation and context
-authenticity. Phases E and F default to wormhole when they
-arrive. The directive's deeper rationale: the validation work
-is also the corpus-building work for Phase D, and direct work
-produces richer KG facts and diary entries that the migration
-benchmark will then have to preserve and recall correctly.
+Initial execution-mode decision: Phases A through D run
+interactively per Bob's directive on curation and context
+authenticity. Phases E and F default to batched execution when
+they arrive. The directive's deeper rationale: the validation
+work is also the corpus-building work for Phase D, and
+interactive work produces a richer working record that the
+migration benchmark will then have to preserve and recall
+correctly.

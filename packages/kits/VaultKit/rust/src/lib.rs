@@ -41,6 +41,7 @@ pub mod note_ir;
 pub mod obsidian_adapter;
 pub mod vault_adapter;
 pub mod vault_bridge;
+pub mod vault_export_scope;
 
 pub use drawer_mapping::{DrawerMapping, ImportOutcome};
 pub use error::VaultKitError;
@@ -48,3 +49,4 @@ pub use note_ir::{Block, NoteIR, OccurredAt, SourceRef, WikiLink};
 pub use obsidian_adapter::ObsidianAdapter;
 pub use vault_adapter::VaultAdapter;
 pub use vault_bridge::{ImportReport, VaultBridge};
+pub use vault_export_scope::VaultExportScope;

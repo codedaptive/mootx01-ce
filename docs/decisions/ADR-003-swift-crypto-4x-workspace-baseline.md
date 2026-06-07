@@ -1,10 +1,10 @@
 # ADR-003 — swift-crypto 4.x is the Workspace Dependency Baseline
 
-- Status: Accepted — unified 2026-06-03 (mission DEPENDENCY_AND_WARNING_HYGIENE_001)
+- Status: Accepted — unified 2026-06-03
 - Date: 2026-06-03
-- Deciders: Bob (Commander)
-- Scope: All Swift packages in mootx01-ee that pull swift-crypto (directly or via vapor/postgres-nio); the shared transitive-dependency pin policy
-- Evidence: DEPENDENCY_AND_WARNING_HYGIENE_001 Blast Radius Report + completion report (Smythe pre-flight version map; Perkins security review of the federation identity signing surface). Companion to the C-1 zero-external-dependency doctrine and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+- Deciders: Bob Pankratz
+- Scope: All Swift packages that pull swift-crypto (directly or via vapor/postgres-nio); the shared transitive-dependency pin policy
+- Evidence: dependency-and-warning-hygiene impact analysis (workspace version map; security review of the federation identity signing surface). Companion to the C-1 zero-external-dependency doctrine and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
 
 ## Context
 
@@ -41,7 +41,7 @@ never a 3.x floor, to keep the workspace on one version.
   ConvergenceKit federation, and `Insecure.SHA1.hash` (content addressing) in
   CorpusKit. All are API-stable across 3.x→4.x. The bump required **zero source
   changes**; all touched packages build and test green on 4.5.0.
-- Security (Perkins review): the Ed25519 raw key encoding is the RFC 8410/8032
+- Security review: the Ed25519 raw key encoding is the RFC 8410/8032
   fixed 32-byte representation — library-independent and wire/persistence stable.
   Keys already persisted (as `rawRepresentation` blobs in the PersistenceKit
   estate audit-log metadata) survive the bump with no migration. Ed25519
@@ -50,16 +50,12 @@ never a 3.x floor, to keep the workspace on one version.
 ## Consequences
 
 - Single, auditable crypto/nio version across the workspace.
-- One root remains un-unified: `examples/Sidecar_Demo_macOS` cannot re-resolve
-  because its `Package.swift` references a non-existent `../ARIA_MCP` path
-  (pre-existing breakage). A follow-on mission must fix that path to complete
-  workspace-wide unification.
+- All package roots resolve under the unified baseline.
 - This ADR does not alter the C-1 zero-external-dependency constraint:
   swift-crypto and postgres-nio remain the pre-existing, approved external
   dependencies; no new third-party dependency is introduced.
 
 ## Status note
 
-This convention was previously recorded only in the (gitignored) mission BRR and
-completion report. This ADR is its canonical, discoverable home so the baseline
+This ADR is the canonical, discoverable home for this convention so the baseline
 does not drift silently.

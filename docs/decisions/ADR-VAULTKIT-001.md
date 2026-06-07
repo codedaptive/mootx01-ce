@@ -1,7 +1,7 @@
 ---
 status: decided
 question: How does VaultKit bridge a MOOT estate to a human-readable Markdown vault in both directions without altering the substrate?
-authors: Bilby (stream vk)
+authors: MOOTx01 maintainers
 date: 2026-06-03
 relates_to:
   - docs/reference/VAULTKIT_INTERFACE.md
@@ -9,7 +9,7 @@ relates_to:
   - docs/reference/LOCUSKIT_INTERFACE_v0.8.md
 supersedes: none
 context:
-  - Net-new Tier-3 mission VK; zero edits to existing code.
+  - Net-new kit; zero edits to existing code.
   - Inverts Karpathy's "LLM maintains a Markdown wiki" pattern — the substrate stays authoritative; the vault is a projection (export) or external source (import).
   - First adapter is Obsidian, behind a modular VaultAdapter seam.
 ---
@@ -43,9 +43,8 @@ it behind a second estate boundary would defeat recall and cross-linking.
 `byteSize`), never the bytes. VaultKit does not copy attachment blobs into
 the substrate. Rationale: vaults can hold large binaries; the substrate's
 verbatim-content pillar is about text, and blob custody is a separate
-concern. Promotion of `SourceRef` to a substrate primitive is a future
-Tier-1 mission (Stream bp); here it is a kit-level value type that rides
-frontmatter.
+concern. Promotion of `SourceRef` to a substrate primitive is future
+work; here it is a kit-level value type that rides frontmatter.
 
 ## Decision (c) — A modular `VaultAdapter` seam
 
@@ -70,17 +69,15 @@ introduced.
 V1 ships Swift only (Bob-confirmed). The bridge's heavy lifting is
 filesystem traversal and Markdown/YAML parsing, and the only V1 consumers
 are the macOS app and the ARIA_MCP Swift side. No Rust `VaultKit` target
-is added in this mission.
+is added at this stage.
 
-> **Superseded (2026-06-06).** This decision no longer holds. The parity
-> workstream ported the entire VaultKit crate to Rust
+> **Superseded (2026-06-06).** This decision no longer holds. The entire
+> VaultKit crate was ported to Rust
 > (`packages/kits/VaultKit/rust/` — NoteIR, VaultBridge, DrawerMapping,
-> ObsidianAdapter, VaultAdapter) and wired the Rust `moot_vault_*` tools
-> (`apps/ARIA_MCP/rust/src/vault_tools.rs`), conformance-gated
-> (PARITY_WAVE_PROGRESS, 2026-06-05). VaultKit ships **Swift + Rust at
-> parity**. Per the parity-is-absolute standing rule (Bob, 2026-06-06 —
-> "we wouldn't do a swift-only version"), Swift-only is not a shippable
-> end state.
+> ObsidianAdapter, VaultAdapter) and the Rust `moot_vault_*` tools were
+> wired (`apps/ARIA_MCP/rust/src/vault_tools.rs`), conformance-gated.
+> VaultKit ships **Swift + Rust at parity**. Per the parity-is-absolute
+> standing rule, Swift-only is not a shippable end state.
 
 ## Decision (f) — Language-neutral `NoteIR` boundary
 
@@ -147,8 +144,8 @@ case, bitmap bit, or SQLite column was introduced.
 ## Open questions (deferred, not blocking)
 
 - Substrate-level origin-date field (currently rides frontmatter) — a
-  future Tier-1 primitive mission (Stream bp).
-- `SourceRef` promotion to a substrate primitive — Stream bp.
+  future primitive.
+- `SourceRef` promotion to a substrate primitive — future work.
 - Attachment blob custody — out of scope; pointer-only in V1.
-- Per-note tunnel-source disambiguation — A2 (Stream va).
-- RAG bundling of imported bodies (CorpusKit) — a later mission.
+- Per-note tunnel-source disambiguation — A2.
+- RAG bundling of imported bodies (CorpusKit) — later work.

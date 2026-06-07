@@ -7,7 +7,7 @@
 // CKRecord objects are constructed and read entirely in process, the
 // same way the existing CloudKit stub test instantiates CloudKit types.
 //
-// Note (per Smythe pre-flight): CKRecordMapping.decode() reads CKRecord
+// Note: CKRecordMapping.decode() reads CKRecord
 // values back as NS-bridged objects, so integers decode as `.int`, not
 // `.bitmap` — the `.bitmap` discriminator is not carried on the wire.
 // The round-trip asserts `.int`, matching that documented behavior.

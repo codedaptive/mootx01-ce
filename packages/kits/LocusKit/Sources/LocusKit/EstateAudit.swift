@@ -27,10 +27,9 @@ import SubstrateTypes
 /// The XOR-fold reconstruction in `bitmapState` re-implements the
 /// spec § 6.8 formula inline rather than calling
 /// `BitmapEvaluator.reconstructBitmap` — that helper is `private` on
-/// `BitmapEvaluator` and the mission explicitly chose not to broaden
-/// its visibility. Holding the two implementations apart costs ~6
-/// lines of duplication and avoids a cross-file private->internal
-/// rewrite that would expand the mission's blast radius.
+/// `BitmapEvaluator` and its visibility is intentionally not broadened.
+/// Holding the two implementations apart costs ~6 lines of duplication
+/// and avoids a cross-file private->internal rewrite.
 public extension Estate {
 
     // MARK: - auditTrail

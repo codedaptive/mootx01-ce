@@ -43,8 +43,8 @@ emit_asset() {
 // (HTTPReadAPI) so the host ships as one self-contained binary with NO
 // filesystem static-root. Because lookups go through a fixed allow-list
 // (`asset(for:)`) rather than mapping a request path onto a directory, there is
-// no path-traversal surface (blast-radius note §Security). The editable source
-// of truth is DashboardAssets/{index.html,app.css,app.js}.
+// no path-traversal surface. The editable source of truth is
+// DashboardAssets/{index.html,app.css,app.js}.
 
 import Foundation
 

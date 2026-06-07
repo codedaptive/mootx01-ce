@@ -30,12 +30,13 @@
 
 use crate::error::VaultKitError;
 use crate::note_ir::{NoteIR, OccurredAt, WikiLink};
+use crate::vault_export_scope::VaultExportScope;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
 use locus_kit::{
     drawer::Drawer,
     drawer_operational::{CaptureChannel, DrawerFeatureFlags},
     estate_types::LatticeAnchor,
-    filter::{Filter, HydrationLevel, Ordering, RecallFrame},
+    filter::{HydrationLevel, Ordering, RecallFrame},
     frames::{CaptureFrame, TunnelCaptureFrame},
     provenance::{Channel, SourceType},
     tunnel::Tunnel,
@@ -106,7 +107,12 @@ impl DrawerMapping {
     // MARK: - Export: estate → IR
 
     /// Read an estate's drawers and outgoing `.references` tunnels and project
-    /// each drawer to a `NoteIR`. Mirrors Swift `DrawerMapping.export(kit:handle:)`.
+    /// each drawer to a `NoteIR`. Mirrors Swift `DrawerMapping.export(kit:handle:scope:)`.
+    ///
+    /// `scope` controls which drawers are included. Defaults to `.believed`
+    /// when called via `export(coordinator, handle, now)` (through
+    /// `VaultBridge::export`). Passing an explicit scope lets callers limit
+    /// the export to confirmed, unconfirmed, or publicly-exportable drawers.
     ///
     /// `now` is the snapshot instant in milliseconds-since-epoch, passed by the
     /// caller so this function is deterministic (no internal wall-clock access).
@@ -115,11 +121,14 @@ impl DrawerMapping {
         coordinator: &EstateCoordinator,
         handle: &EstateHandle,
         now: i64,
+        scope: VaultExportScope,
     ) -> Result<Vec<NoteIR>, VaultKitError> {
-        // Recall with the `Unconfirmed` filter — the same "everything I
-        // captured" idiom GLK uses internally.
+        // Build the recall frame from the scope's filter chain. The recall
+        // evaluator supplies per-axis defaults (sensitivity, trust) for any
+        // axis not addressed by the chain — sensitivity stays at normal so
+        // export never surfaces elevated/restricted/secret content.
         let recall_frame = RecallFrame {
-            filter_chain: vec![Filter::Unconfirmed],
+            filter_chain: scope.filter_chain(),
             hydration_level: HydrationLevel::Full,
             limit: None,
             ordering: Ordering::ByCaptureTimeDesc,
@@ -165,8 +174,18 @@ impl DrawerMapping {
     /// Pure projection of one drawer + its outgoing `.references` tunnels to a
     /// `NoteIR`. No substrate access — testable in isolation. Mirrors Swift
     /// `DrawerMapping.noteIR(from:references:)`.
+    ///
+    /// Decision B1 changes vs the V1 shape:
+    ///   - stable_source_key: `"<room>/<slug>"` — no wing prefix, slug from content.
+    ///   - frontmatter gains `moot_id`: the drawer's `lineage_id` UUID string
+    ///     (the STABLE UUID, not `drawer.id` which the supersession cascade re-mints).
+    ///   - original_path: the room only — no wing prefix (one vault, one owner).
+    ///   - NoteIR.moot_id: set to `drawer.lineage_id` for identity pass-through.
     pub fn note_ir_from(drawer: &Drawer, references: &[&Tunnel]) -> NoteIR {
-        let stable_key = format!("{}/{}/{}", drawer.wing, drawer.room, drawer.id);
+        // Human-readable slug from the drawer's content. Collision-safe via UUID suffix.
+        let slug = Self::slug(&drawer.content, &drawer.id);
+        // Path: room/slug — no wing prefix (wing rides frontmatter).
+        let stable_key = format!("{}/{}", drawer.room, slug);
 
         let mut frontmatter: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -175,9 +194,14 @@ impl DrawerMapping {
         frontmatter.insert("udc".to_owned(), drawer.udc_code.clone());
         frontmatter.insert("addedBy".to_owned(), drawer.added_by.clone());
         frontmatter.insert("embeddingModelID".to_owned(), drawer.embedding_model_id.clone());
+        // moot_id: the STABLE lineage UUID. On re-import this wins over the FNV
+        // hash of the stable_source_key as the lineage_id for the capture frame.
+        // Using lineage_id (not drawer.id) ensures renames and re-exports don't
+        // mint a new lineage — the drawer is always found by its stable UUID.
+        frontmatter.insert("moot_id".to_owned(), drawer.lineage_id.to_string());
         // Origin date rides frontmatter (no substrate origin-date column).
         // `created:` is the Obsidian key the adapter reads back.
-        let event_ms = drawer.event_time.unwrap_or(drawer.filed_at);
+        let event_ms = drawer.event_time;
         let event_iso = ms_to_iso8601(event_ms);
         frontmatter.insert("created".to_owned(), event_iso.clone());
 
@@ -194,16 +218,87 @@ impl DrawerMapping {
             .map(|t| WikiLink::new(t.label.clone(), None, t.label.clone()))
             .collect();
 
-        NoteIR::new(
+        NoteIR::with_moot_id(
             stable_key,
             vec![crate::note_ir::Block::markdown(drawer.content.clone())],
             frontmatter,
             links,
             vec![],
-            format!("{}/{}", drawer.wing, drawer.room),
+            drawer.room.clone(), // original_path: room only — no wing prefix
             Some(OccurredAt::new(event_iso)),
             None,
+            Some(drawer.lineage_id), // moot_id: the stable lineage UUID
         )
+    }
+
+    // MARK: - Slug derivation (Decision B1)
+
+    /// Derive a human-readable slug from a note's content for use in the
+    /// vault filename. The slug is derived from the first Markdown heading
+    /// (`# text`) encountered on any line, falling back to the first
+    /// non-empty line. Sanitized to `[a-z0-9-]` max 60 characters.
+    /// A UUID-prefix fallback is used when content is empty or all-whitespace.
+    ///
+    /// Mirrors Swift `DrawerMapping.slug(from:id:)`.
+    pub fn slug(content: &str, id: &str) -> String {
+        let mut first_line: Option<String> = None;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(heading) = trimmed.strip_prefix("# ") {
+                // First heading on any line wins.
+                return Self::sanitize_slug(heading);
+            }
+            // Capture the first non-empty, non-heading line as fallback.
+            if first_line.is_none() {
+                first_line = Some(trimmed.to_owned());
+            }
+        }
+        if let Some(line) = first_line {
+            let s = Self::sanitize_slug(&line);
+            if !s.is_empty() {
+                return s;
+            }
+        }
+        // UUID-prefix fallback for empty/whitespace-only content.
+        // Truncate the id to a short prefix (8 hex chars) for readability.
+        let prefix = id.replace('-', "");
+        format!("note-{}", &prefix[..8.min(prefix.len())])
+    }
+
+    /// Sanitize a string into a slug: lowercase, collapse sequences of
+    /// non-alphanumeric characters to a single `-`, trim leading/trailing
+    /// `-`, truncate to 60 characters. Mirrors Swift `DrawerMapping.sanitizeSlug(_:)`.
+    pub fn sanitize_slug(input: &str) -> String {
+        let lowered = input.to_lowercase();
+        // Replace any run of non-alphanumeric chars with a single `-`.
+        let mut result = String::with_capacity(lowered.len());
+        let mut last_was_sep = true; // start true to trim leading `-`
+        for ch in lowered.chars() {
+            if ch.is_alphanumeric() {
+                result.push(ch);
+                last_was_sep = false;
+            } else if !last_was_sep {
+                result.push('-');
+                last_was_sep = true;
+            }
+        }
+        // Trim trailing `-`
+        let trimmed = result.trim_end_matches('-');
+        // Truncate at word boundary up to 60 chars.
+        if trimmed.len() <= 60 {
+            trimmed.to_owned()
+        } else {
+            // Find the last `-` at or before char 60, or truncate hard.
+            let end = &trimmed[..60];
+            if let Some(pos) = end.rfind('-') {
+                end[..pos].to_owned()
+            } else {
+                end.to_owned()
+            }
+        }
     }
 
     // MARK: - Import: IR → estate via the capture seam
@@ -354,7 +449,24 @@ impl DrawerMapping {
         // Provenance: SourceType::Imported + Channel::FileImport record the import origin.
         frame.source_type = SourceType::Imported;
         frame.provenance_channel = Channel::FileImport;
-        frame.lineage_id = Some(Self::lineage_id(note.stable_source_key.as_str()));
+        // Identity resolution priority (Decision B1):
+        //   1. note.moot_id — explicit UUID from frontmatter `moot_id` (rename-safe).
+        //   2. frontmatter["moot_id"] string → parse as UUID (fallback when adapter
+        //      could not pre-parse).
+        //   3. FNV-1a 128-bit hash of stable_source_key (original idempotency anchor).
+        //
+        // Using moot_id from the note ensures a re-import after a vault rename
+        // still finds the existing drawer by lineage — the note's identity is the
+        // substrate's lineage_id, not the file path.
+        let lineage = note
+            .moot_id
+            .or_else(|| {
+                note.frontmatter
+                    .get("moot_id")
+                    .and_then(|s| Uuid::parse_str(s).ok())
+            })
+            .unwrap_or_else(|| Self::lineage_id(note.stable_source_key.as_str()));
+        frame.lineage_id = Some(lineage);
         frame.feature_flags = feature_flags;
         // Event time from origin date, if available.
         frame.event_time = note.origin_date.as_ref().and_then(|o| iso8601_to_ms(&o.iso8601));
@@ -560,5 +672,107 @@ mod tests {
         assert!(s.contains('.'));
         let back = iso8601_to_ms(&s).expect("should parse back");
         assert_eq!(back, ms);
+    }
+
+    #[test]
+    fn slug_from_heading() {
+        let id = "12345678-0000-0000-0000-000000000001";
+        assert_eq!(
+            DrawerMapping::slug("# My Note Title\nbody text", id),
+            "my-note-title"
+        );
+    }
+
+    #[test]
+    fn slug_from_first_line_no_heading() {
+        let id = "12345678-0000-0000-0000-000000000001";
+        assert_eq!(
+            DrawerMapping::slug("Hello World!", id),
+            "hello-world"
+        );
+    }
+
+    #[test]
+    fn slug_punctuation_collapse() {
+        let id = "12345678-0000-0000-0000-000000000001";
+        assert_eq!(
+            DrawerMapping::slug("A note: with 'special' chars!", id),
+            "a-note-with-special-chars"
+        );
+    }
+
+    #[test]
+    fn slug_empty_content_produces_uuid_prefix() {
+        let id = "12345678-0000-0000-0000-000000000001";
+        let result = DrawerMapping::slug("   ", id);
+        assert!(result.starts_with("note-"), "expected 'note-' prefix, got: {result}");
+    }
+
+    #[test]
+    fn slug_heading_on_any_line_wins() {
+        // A heading on line 2 overrides a non-heading first line.
+        let id = "12345678-0000-0000-0000-000000000001";
+        assert_eq!(
+            DrawerMapping::slug("intro\n# Real Title\n", id),
+            "real-title"
+        );
+    }
+
+    #[test]
+    fn moot_id_wins_over_fnv_in_make_capture_frame() {
+        use std::collections::HashMap;
+        use crate::note_ir::Block;
+
+        let mapping = DrawerMapping::new("tester", "model-v1", false);
+        let lineage = Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000001").unwrap();
+        let mut frontmatter = HashMap::new();
+        frontmatter.insert("room".to_owned(), "r".to_owned());
+        frontmatter.insert("moot_id".to_owned(), lineage.to_string());
+
+        let note = NoteIR::with_moot_id(
+            "some/other/path",
+            vec![Block::markdown("content")],
+            frontmatter,
+            vec![],
+            vec![],
+            "",
+            None,
+            None,
+            Some(lineage),
+        );
+        let (frame, _) = mapping.make_capture_frame(&note, "content");
+        assert_eq!(
+            frame.lineage_id,
+            Some(lineage),
+            "moot_id must override the FNV hash"
+        );
+    }
+
+    #[test]
+    fn absent_moot_id_falls_back_to_fnv() {
+        use std::collections::HashMap;
+        use crate::note_ir::Block;
+
+        let mapping = DrawerMapping::new("tester", "model-v1", false);
+        let mut frontmatter = HashMap::new();
+        frontmatter.insert("room".to_owned(), "inbox".to_owned());
+
+        let note = NoteIR::new(
+            "inbox/my-note",
+            vec![Block::markdown("some human note")],
+            frontmatter,
+            vec![],
+            vec![],
+            "inbox",
+            None,
+            None,
+        );
+        let (frame, _) = mapping.make_capture_frame(&note, "some human note");
+        let expected = DrawerMapping::lineage_id("inbox/my-note");
+        assert_eq!(
+            frame.lineage_id,
+            Some(expected),
+            "absent moot_id must fall back to FNV derivation"
+        );
     }
 }

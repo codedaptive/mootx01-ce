@@ -19,7 +19,7 @@
 //
 // Registration in this cut = consumers emit with a dropbox_id; the manager
 // reads/groups by it. A formal registrations/heartbeat table is a noted
-// FOLLOW-UP, not in this mission.
+// FOLLOW-UP.
 //
 // Threading: MootManager is an actor — the manager process is single-instance,
 // and actor isolation gives a clean Sendable boundary around the open store.
@@ -60,9 +60,8 @@ public actor MootManager {
     /// Held on the actor (in-process) rather than persisted: the Phase-1
     /// `StatsStore` exposes only typed monitoring/retention-cutoff control
     /// accessors and no generic control upsert, so a custom window cannot be
-    /// durably written without modifying ObserverSink (out of this mission's
-    /// directory — see the blast-radius note). The default-window path is
-    /// unaffected; a restart falls back to the configured default. Durable
+    /// durably written without modifying ObserverSink. The default-window path
+    /// is unaffected; a restart falls back to the configured default. Durable
     /// custom-window persistence is a noted follow-up.
     private var retentionOverride: TimeInterval?
 
@@ -71,8 +70,8 @@ public actor MootManager {
     ///
     /// Tracked on the actor (not read back from the store's control row): the
     /// Phase-1 `StatsStore` has no public reader for its `retention_cutoff`
-    /// control row, and adding one would mean editing ObserverSink (outside this
-    /// mission's directory). The host runs the retention loop in-process, so the
+    /// control row, and adding one would mean editing ObserverSink (a separate
+    /// module). The host runs the retention loop in-process, so the
     /// actor is the authoritative owner of "what cutoff did we last apply." It
     /// holds the epoch-zero sentinel until the first pass runs (matching the
     /// store's own seed value, so the API reports the same "never" before the

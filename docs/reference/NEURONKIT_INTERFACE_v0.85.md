@@ -1,6 +1,6 @@
 ---
 status: draft
-authors: Bob Pankratz (via Skippy)
+authors: Bob Pankratz
 date: 2026-06-01
 version: v0.85
 supersedes: NEURONKIT_INTERFACE_v0.8.md

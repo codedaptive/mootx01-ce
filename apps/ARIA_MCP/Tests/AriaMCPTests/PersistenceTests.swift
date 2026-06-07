@@ -23,13 +23,11 @@ import PersistenceKitSQLite
 /// estate recall finds the drawer.
 ///
 /// Seam note: the ToolDispatcher / ARIA_MCPDispatcher construction seam
-/// prevents a full dispatcher-layer round-trip without refactoring beyond
-/// mission scope (the dispatcher takes a pre-opened handle; there is no
-/// "open a new dispatcher from a path" helper in the library). The round-
-/// trip is therefore at the GLK layer, which is the actual persistence
-/// seam. The dispatcher is exercised for config-behaviour tests and for
-/// the existing ServerTests suite. See the SEAM_GAP discovery in the
-/// mission completion report.
+/// prevents a full dispatcher-layer round-trip (the dispatcher takes a
+/// pre-opened handle; there is no "open a new dispatcher from a path" helper
+/// in the library). The round-trip is therefore at the GLK layer, which is
+/// the actual persistence seam. The dispatcher is exercised for
+/// config-behaviour tests and for the existing ServerTests suite.
 ///
 /// `.serialized`: tests interact with the filesystem; keep them sequential
 /// to avoid temp-file collisions and to preserve sqlite WAL state.

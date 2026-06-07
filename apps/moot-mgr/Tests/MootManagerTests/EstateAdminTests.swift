@@ -80,8 +80,8 @@ struct EstateAdminProvisionTests {
             // LocusOnly wires no Corpus/VectorStore sub-stores, so it exercises the
             // SQLite-backed provisioning path cleanly. (GLK's full .glk kind currently
             // covers only the InMemory backend in its own provision tests — its Corpus
-            // sub-store rebuild on a fresh SQLite file is a GLK/CorpusKit concern noted
-            // in the completion report, outside this app's directory.)
+            // sub-store rebuild on a fresh SQLite file is a GLK/CorpusKit concern,
+            // outside this app's directory.)
             let result = try await admin.provision(req(name: "Durable", kind: "LocusOnly", backend: "SQLite"))
             #expect(result.ok)
             // The admin engine creates the estates dir and one .sqlite file in it.

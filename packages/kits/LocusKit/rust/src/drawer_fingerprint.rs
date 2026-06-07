@@ -126,8 +126,8 @@ impl EstateFingerprintFamilies {
             substrate_types::fnv::hash16(&drawer.lineage_id.to_string()),
             // Fingerprint keys off event_time (ING-01): bulk historical ingest
             // must bucket to the original authorship week, not the ingest instant.
-            // Fall back to filed_at for rows pre-dating the column.
-            capture_week_bucket(drawer.event_time.unwrap_or(drawer.filed_at)),
+            // event_time is always non-optional (resolved eagerly at construction/decode).
+            capture_week_bucket(drawer.event_time),
             // Drawers carry no defer pattern; null per I-17.
             0,
             // Drawers carry no completion gradient; null per I-17.

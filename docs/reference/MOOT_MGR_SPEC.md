@@ -3,12 +3,10 @@ title: moot-mgr Specification
 version: 1.0
 status: draft
 spec_type: kit
-authors: Bilby, Skippy
+authors: MOOTx01 maintainers
 date: 2026-06-06
 relates_to:
   - docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md
-  - docs/_internal/workhistory/analysis/MANAGER_1.0_PLAN.md
-  - docs/_internal/workhistory/analysis/blast_radius/MOOT_MGR_001_BLAST_RADIUS.md
   - docs/reference/OBSERVERSINK_SPEC.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
 ---
@@ -51,8 +49,8 @@ IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (lib) → moot-
 ```
 
 In-repo dependencies are declared in `Package.swift` per
-DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 and recorded in
-MOOT_MGR_001_BLAST_RADIUS.md. Zero external (third-party) Swift dependencies.
+DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28. Zero external (third-party) Swift
+dependencies.
 
 ## 3. Store ownership
 

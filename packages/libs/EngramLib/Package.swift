@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // EngramLib — product-facing Swift library for 256-bit engram
 // similarity and retrieval. Wraps SubstrateLib's kernel layer
@@ -14,8 +14,8 @@ import PackageDescription
 let package = Package(
     name: "EngramLib",
     platforms: [
-        .macOS(.v14),
-        .iOS(.v17),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(

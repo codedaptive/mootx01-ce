@@ -115,8 +115,16 @@ fn collect_md_files(
                 .get("created")
                 .or_else(|| frontmatter.get("date"))
                 .map(|s| OccurredAt::new(s.clone()));
+            // moot_id: the stable substrate lineage UUID. When present, the
+            // re-import identity uses this UUID rather than the FNV hash of
+            // the stable_source_key — making the note rename-safe. Mirrors
+            // Swift `ObsidianAdapter.toIR` where `mootID` is parsed from
+            // frontmatter and passed to `NoteIR(mootID:)`.
+            let moot_id = frontmatter
+                .get("moot_id")
+                .and_then(|s| uuid::Uuid::parse_str(s).ok());
 
-            out.push(NoteIR::new(
+            out.push(NoteIR::with_moot_id(
                 stable_key,
                 vec![Block::markdown(body)],
                 frontmatter,
@@ -125,6 +133,7 @@ fn collect_md_files(
                 folder,
                 origin_date,
                 None,
+                moot_id,
             ));
         }
     }

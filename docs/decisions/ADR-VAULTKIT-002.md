@@ -1,7 +1,7 @@
 ---
 status: decided
 question: How does ARIA_MCP expose VaultKit's VaultBridge as a tool family, detect vault drift, and feed vault edits to the downstream loop without touching the substrate, QueueKit, or the Rust port?
-authors: Bilby (stream va)
+authors: MOOTx01 maintainers
 date: 2026-06-03
 relates_to:
   - docs/reference/VAULTKIT_INTERFACE.md
@@ -9,8 +9,8 @@ relates_to:
   - docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md
 supersedes: none
 context:
-  - Bounded-additive mission VA (stream va); adds a moot_vault_* tool family to the Swift ARIA_MCP dispatch.
-  - Prereq stream vk merged — VaultBridge (export/importVault) is importable.
+  - Bounded-additive change; adds a moot_vault_* tool family to the Swift ARIA_MCP dispatch.
+  - Prerequisite: VaultBridge (export/importVault) is importable.
   - The shipped MCP binary is the Swift port (installer/install.sh builds mootx01-mcp via swift build); the Rust aria-mcp bin is a parity sibling.
 ---
 
@@ -18,15 +18,15 @@ context:
 
 ## Context
 
-Mission VA exposes VaultKit's `VaultBridge` to MCP clients as the
+This change exposes VaultKit's `VaultBridge` to MCP clients as the
 `moot_vault_*` tool family (`export`, `import`, `status`, `reconcile`),
 adds drift detection, and wires a candidate-enqueue seam so vault edits
-become queued candidates for the downstream dreaming/Proposal loop. The
-mission produces candidates only; it never builds the dreaming loop or
-writes Proposals. This record captures the three load-bearing decisions
-the mission's scope flagged, plus the two seam decisions reality forced.
+become queued candidates for the downstream dreaming/Proposal loop. It
+produces candidates only; it never builds the dreaming loop or writes
+Proposals. This record captures the three load-bearing decisions, plus
+the two seam decisions reality forced.
 
-## Decision (a) — The Swift-only tool family is intentional, not dispatch drift
+## Decision (a) — The Swift-only tool family is intentional, not drift
 
 The shipped MCP binary is the **Swift** port: `installer/install.sh`
 builds it with `swift build -c release --product mootx01-mcp`. The Rust
@@ -35,8 +35,8 @@ is Swift-first and ships **no Rust target** (ADR-VAULTKIT-001 decision e),
 so there is nothing on the Rust side to mirror yet. The `moot_vault_*`
 family is therefore wired in the Swift dispatch (`Sources/AriaMCP/...`)
 only. The Rust `moot_vault_*` mirror is **deliberately deferred** to the
-future VaultKit-Rust-port mission. This asymmetry is documented and
-intentional; post-flight must not flag the unmirrored Rust side as drift.
+future VaultKit Rust port. This asymmetry is documented and
+intentional; the unmirrored Rust side is not drift.
 The tools carry a dedicated `ToolProvenance.vault` so the projection is
 self-describing.
 
@@ -78,7 +78,7 @@ added/modified file, reconcile surfaces a candidate carrying the
 `DrawerMapping` derives on export), the vault path, and the new content
 hash — enough for the downstream loop to parse and stage. **A2 does not
 parse edits into Proposals and writes to no Proposal noun.** Consumption
-(dream → staged Proposal → Debrief) is a later, separately-gated mission.
+(dream → staged Proposal → Debrief) is later, separately-gated work.
 
 ## Decision (d) — Candidate seam is return-only (QueueKit leg b)
 
@@ -86,13 +86,12 @@ QueueKit's only public enqueue is `QueueKit.send(_ job: Job)`, which
 requires a **mounted QueueKit instance** (a root URL + an `HLCGenerator`
 clock). The `ToolDispatcher` carries only `kit` + `handle` — no queue
 instance — and wiring one (choosing a queue root, threading an HLC clock
-through `Server` → dispatcher) would exceed the mission's bounded-additive
+through `Server` → dispatcher) would exceed this change's bounded-additive
 scope and break the determinism rule (an HLC clock is wall-clock state).
 A `Job` is also a dispatch record, not a natural "vault candidate." So
 reconcile **returns** the candidate list in its tool result; enqueue is
-deferred to the gated downstream mission. Per the mission's Part 1
-instruction, no QueueKit API is invented or extended (QueueKit is on the
-MUST NOT MODIFY list).
+deferred to the gated downstream work. No QueueKit API is invented or
+extended (QueueKit is left unmodified).
 
 ## Decision (e) — ARIA_MCP gains an in-repo dependency on VaultKit
 
@@ -115,9 +114,9 @@ tests pass unchanged (additive-only).
 
 ## Open questions (deferred, not blocking)
 
-- Rust `moot_vault_*` mirror — the future VaultKit-Rust-port mission.
+- Rust `moot_vault_*` mirror — the future VaultKit Rust port.
 - Wiring a real QueueKit instance into ARIA_MCP so reconcile enqueues
-  (leg a) instead of returning — the gated downstream mission that also
+  (leg a) instead of returning — gated downstream work that also
   builds the dream → Proposal → Debrief consumption side.
 - Deletion handling (human-confirmed drawer expunge) — downstream.
 - Per-note tunnel-source disambiguation (carried over from ADR-VAULTKIT-001) — still open.
@@ -127,8 +126,8 @@ tests pass unchanged (additive-only).
 Decision (a) recorded a **Swift-only** `moot_vault_*` tool family with the
 Rust mirror "deliberately deferred," on the premise (ADR-VAULTKIT-001
 Decision (e)) that VaultKit ships no Rust target. **That premise is
-superseded.** The parity workstream (PARITY_WAVE_PROGRESS, 2026-06-05 —
-two days after this ADR) completed:
+superseded.** The Rust parity work (2026-06-05 — two days after this ADR)
+completed:
 
 - the **VaultKit Rust crate** (`packages/kits/VaultKit/rust/` — NoteIR,
   VaultBridge, DrawerMapping with FNV-1a 128-bit lineageID, VaultAdapter,
@@ -137,8 +136,8 @@ two days after this ADR) completed:
   + `tool_list.rs`), backed by `vault-kit`.
 
 VaultKit now ships **Swift + Rust at parity**. The open question "Rust
-`moot_vault_*` mirror — future mission" is therefore **CLOSED (done)**, and
-the guidance "post-flight must not flag the unmirrored Rust side as drift"
-no longer applies — the Rust side **is** mirrored and parity *is* the bar.
-Per the parity-is-absolute standing rule (Bob, 2026-06-06 — "we wouldn't do
-a swift-only version"), a Swift-only kit is not a shippable end state.
+`moot_vault_*` mirror — future work" is therefore **CLOSED (done)**, and
+the earlier guidance that the unmirrored Rust side was not drift no longer
+applies — the Rust side **is** mirrored and parity *is* the bar.
+Per the parity-is-absolute standing rule, a Swift-only kit is not a
+shippable end state.

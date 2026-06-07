@@ -193,15 +193,12 @@ public extension Estate {
     /// `AuditGate.admit`). The supersession cascade does **not** emit such
     /// an event for the tunnel it files — `addDrawerWithCascade` inserts the
     /// tunnel row directly via `rowStore.insert`, with no audit entry, and
-    /// `DrawerStore.addTunnel` does the same. Source is ground truth
-    /// (mission "Read First"): to stay byte-identical to what the cascade
-    /// produces — the mission's load-bearing requirement, and the explicit
-    /// "do not create a divergent tunnel-creation path" gate — standalone
-    /// tunnel capture matches the cascade and files via the bare-insert
-    /// `addTunnel`. (The mission text's "mirror drawer capture's genesis
-    /// event" reflects a doc/source drift: cascade-born tunnels carry no
-    /// genesis event, so mirroring drawer capture literally would *create*
-    /// the divergence the mission forbids. See the completion report.)
+    /// `DrawerStore.addTunnel` does the same. To stay byte-identical to
+    /// what the cascade produces — and to avoid creating a divergent
+    /// tunnel-creation path — standalone tunnel capture matches the cascade
+    /// and files via the bare-insert `addTunnel`. Cascade-born tunnels carry
+    /// no genesis event, so mirroring drawer capture's genesis event here
+    /// would *create* a divergence rather than remove one.
     ///
     /// `Date()` is called once at this public boundary — mirroring the
     /// drawer overload and CLAUDE.md's deterministic-time rule.

@@ -3,7 +3,7 @@ title: VaultKit Interface
 version: 1.2
 status: active
 spec_type: kit
-authors: Bilby (stream vk), Newton (stream w2-vaultkit, stream cp-vault-bidir)
+authors: MOOTx01 maintainers
 date: 2026-06-05
 relates_to:
   - docs/decisions/ADR-VAULTKIT-001.md
@@ -14,18 +14,11 @@ relates_to:
 
 # VaultKit Interface
 
-> **Recovery note (2026-06-03):** this document and the kit it describes
-> were authored in stream `vk` but the worktree was reclaimed by the
-> dispatch daemon before commit. This is the recovered interface spec;
-> place it at `docs/reference/VAULTKIT_INTERFACE.md` when the kit is
-> re-dispatched and merged. See the completion report.
-
 > **Swift/Rust parity (2026-06-05):** the Rust crate
-> `packages/kits/VaultKit/rust/` was added in stream `w2-vaultkit`
-> (Newton). All public types now have Rust equivalents. See
-> §§ Swift/Rust Concordance below.
+> `packages/kits/VaultKit/rust/` was added. All public types now have
+> Rust equivalents. See §§ Swift/Rust Concordance below.
 
-> **Bidirectional identity + export scope (2026-06-05, stream cp-vault-bidir):**
+> **Bidirectional identity + export scope (2026-06-05):**
 > Two decisions were implemented in lockstep on both ports.
 > (1) `VaultExportScope` enum with default `.believed` fixes the confirmed-drop
 > bug. (2) Filenames use `<room>/<slug>.md` (no wing prefix); the `moot_id`
@@ -83,7 +76,7 @@ public enum VaultExportScope: String, Sendable, CaseIterable {
     case exportable  // [.exportable, .currentlyBelieve, .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly])]
     case confirmed   // [.userConfirmed, .currentlyBelieve]
     case unconfirmed // [.unconfirmed, .currentlyBelieve] — the old hard-coded behavior
-    var filterChain: [Filter] { get }
+    public var filterChain: [Filter] { get }
 }
 ```
 
@@ -197,7 +190,7 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 | `SourceRef` | `SourceRef` | `vault_kit::note_ir` | `byte_size: Option<i64>` (Rust) vs `byteSize: Int?` (Swift). |
 | `OccurredAt` | `OccurredAt` | `vault_kit::note_ir` | `iso8601: String` in both. No `Date`-typed field in Rust (language-neutral boundary). |
 | `NoteIR` | `NoteIR` | `vault_kit::note_ir` | `flattenedBody` -> `flattened_body()`. `frontmatter: [String:String]` -> `HashMap<String,String>`. `mootID: UUID?` -> `moot_id: Option<Uuid>`. `NoteIR(mootID:)` -> `NoteIR::with_moot_id(…, moot_id)`. |
-| `VaultExportScope` | `VaultExportScope` | `vault_kit::vault_export_scope` | Same 4 cases. `filterChain: [Filter]` -> `filter_chain() -> Vec<Filter>`. `rawValue` -> `as_str()`. Rust `Default` = `Believed`. Rust uses `Filter::ModelConfirmedOnly` (pending rename to match Swift `automatedConfirmedOnly` in a future parity pass). |
+| `VaultExportScope` | `VaultExportScope` | `vault_kit::vault_export_scope` | Same 4 cases. `filterChain: [Filter]` -> `filter_chain() -> Vec<Filter>`. `rawValue` -> `as_str()`. Rust `Default` = `Believed`. Rust uses `Filter::AutomatedConfirmedOnly` (mirrors Swift `automatedConfirmedOnly`). |
 | `VaultAdapter` (protocol) | `VaultAdapter` (trait) | `vault_kit::vault_adapter` | `toIR(vaultURL:)` -> `to_ir(&Path)`. `fromIR(_:to:)` -> `from_ir(&[NoteIR], &Path)`. |
 | `ObsidianAdapter` | `ObsidianAdapter` | `vault_kit::obsidian_adapter` | Identical parsing behavior. Round-trip equality holds. Hidden files skipped. Parses `moot_id` frontmatter key into `NoteIR.moot_id`. |
 | `DrawerMapping` | `DrawerMapping` | `vault_kit::drawer_mapping` | `classifyOnImport` -> `classify_on_import`. EideticLib not linked in Rust V1 (feature-flag-off path). `slug(from:id:)` -> `slug(content, id)`. `sanitizeSlug(_:)` -> `sanitize_slug(input)`. `noteIR(from:references:)` -> `note_ir_from(drawer, refs)`. `export(kit:handle:scope:)` -> `export(coord, handle, now, scope)`. |
@@ -215,8 +208,6 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 
 - EideticLib FDC classification (structural support present, `classify_on_import` flag honoured, lookup always returns `None` — equivalent to the feature-flag-off path in Swift).
 - Async `VaultBridge` methods (synchronous in Rust V1; the GLK Rust coordinator is synchronous).
-- `Filter::ModelConfirmedOnly` rename to `automatedConfirmedOnly` (Rust LocusKit naming parity; the `VaultExportScope` comment documents this gap).
-
 Note: ARIA_MCP `moot_vault_*` Rust mirror is delivered (stream cp-vault-bidir). ADR-VAULTKIT-002 decision a is superseded by `DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md`.
 
 ## Out of scope (later missions)
@@ -224,5 +215,4 @@ Note: ARIA_MCP `moot_vault_*` Rust mirror is delivered (stream cp-vault-bidir). 
 CorpusKit RAG bundling; substrate-level origin-date and `SourceRef` primitive
 (stream bp); attachment blob custody; the watched-source scheduler and the real
 QueueKit enqueue (leg a) + dream → Proposal → Debrief consumption (a later,
-separately-gated mission). The Rust `Filter::ModelConfirmedOnly` rename to
-`automatedConfirmedOnly` (a future LocusKit-Rust parity pass).
+separately-gated mission).

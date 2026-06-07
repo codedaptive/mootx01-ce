@@ -64,19 +64,26 @@ public struct DrawerMapping: Sendable {
     /// Read an estate's drawers and outgoing `.references` tunnels and
     /// project each drawer to a `NoteIR`.
     ///
-    /// Drawers are recalled with the `.unconfirmed` filter — the same
-    /// "everything I captured" idiom GeniusLocusKit uses internally to
-    /// snapshot an estate (imported drawers are captured but not
-    /// confirmed, so this is the filter that surfaces them). Tunnels are
-    /// read per wing; only `.references` edges originating at the drawer
-    /// become wikilinks (ADR-VAULTKIT-001 (a)/(d)).
+    /// Drawers are recalled using the `scope` parameter's filter chain.
+    /// The default scope `.believed` includes currently-believed drawers
+    /// with any confirmation state — fixing the confirmed-drop bug that
+    /// occurred when the filter was hard-coded to `.unconfirmed` (confirmed
+    /// drawers were silently excluded from export). Tunnels are read per
+    /// wing; only `.references` edges originating at the drawer become
+    /// wikilinks (ADR-VAULTKIT-001 (a)/(d)).
+    ///
+    /// - Parameters:
+    ///   - kit: the open `GeniusLocusKit` instance.
+    ///   - handle: the estate handle.
+    ///   - scope: which drawers to include. Defaults to `.believed`.
     public func export(
         kit: GeniusLocusKit,
-        handle: EstateHandle
+        handle: EstateHandle,
+        scope: VaultExportScope = .believed
     ) async throws -> [NoteIR] {
         let drawers = try await kit.recall(
             handle,
-            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full)
+            RecallFrame(filterChain: scope.filterChain, hydrationLevel: .full)
         )
         // Fetch tunnels once per distinct source wing, not once per drawer.
         var tunnelsByWing: [String: [Tunnel]] = [:]
@@ -93,13 +100,29 @@ public struct DrawerMapping: Sendable {
     }
 
     /// Pure projection of one drawer (+ its outgoing `.references`
-    /// tunnels) to a `NoteIR`. No substrate access — testable in
-    /// isolation.
+    /// tunnels) to a `NoteIR`. No substrate access — testable in isolation.
+    ///
+    /// ## Filename / path (Decision cp-vault-bidir)
+    ///
+    /// The vault path is `"<room>/<slug>.md"` — the wing prefix is dropped
+    /// because one vault has one owner (wing rides frontmatter). The slug
+    /// is derived from the first markdown heading or the first non-empty
+    /// content line, sanitized to a safe filename character set. On
+    /// collision within the caller's export set, a short suffix derived
+    /// from `drawer.lineageID` is appended. The result is deterministic
+    /// given the drawer.
+    ///
+    /// ## `moot_id` frontmatter (Decision cp-vault-bidir)
+    ///
+    /// `moot_id` is the STABLE lineage UUID (`drawer.lineageID`) — not
+    /// `drawer.id`, which the supersession cascade re-mints on every
+    /// write. Re-importing an exported note with `moot_id` maps back to
+    /// the same substrate lineage regardless of filename changes.
     static func noteIR(from drawer: Drawer, references: [Tunnel]) -> NoteIR {
-        // The stable key encodes wing/room so the vault folder tree
-        // mirrors the estate's wing/room placement on export, and so a
-        // re-read recovers the same key.
-        let stableKey = "\(drawer.wing)/\(drawer.room)/\(drawer.id)"
+        // Path: room/slug.md — wing prefix dropped (one vault, one owner;
+        // wing rides frontmatter). The stable key carries NO wing prefix.
+        let slug = Self.slug(from: drawer.content, id: drawer.lineageID)
+        let stableKey = "\(drawer.room)/\(slug)"
 
         var frontmatter: [String: String] = [
             "wing": drawer.wing,
@@ -112,6 +135,10 @@ public struct DrawerMapping: Sendable {
             // Origin date rides frontmatter (no substrate origin-date column
             // in scope). `created:` is the Obsidian key the adapter reads back.
             "created": OccurredAt(date: drawer.eventTime).iso8601,
+            // moot_id: the STABLE lineage UUID, not drawer.id. This is the
+            // round-trip identity anchor: a re-import maps via moot_id to
+            // the same substrate lineage even if the user renames the file.
+            "moot_id": drawer.lineageID.uuidString,
         ]
         if let qid = drawer.wikidataQID, !qid.isEmpty {
             frontmatter["wikidataQID"] = qid
@@ -127,10 +154,92 @@ public struct DrawerMapping: Sendable {
             frontmatter: frontmatter,
             links: links,
             tags: [],
-            originalPath: "\(drawer.wing)/\(drawer.room)",
+            originalPath: drawer.room,
             originDate: OccurredAt(date: drawer.eventTime),
-            source: nil
+            source: nil,
+            mootID: drawer.lineageID
         )
+    }
+
+    // MARK: - Slug derivation
+
+    /// Derive a deterministic human-readable slug from a drawer's content.
+    ///
+    /// Algorithm:
+    /// 1. If the content contains a Markdown `# Heading`, use the heading text.
+    /// 2. Otherwise use the first non-empty line.
+    /// 3. Sanitize: lowercase, replace non-alphanumeric runs with `-`,
+    ///    trim leading/trailing hyphens, truncate to 60 chars.
+    /// 4. If the result is empty after sanitization, use a fallback derived
+    ///    from the first 8 chars of the lineage UUID.
+    ///
+    /// The `id` parameter is used as the suffix source when the caller needs
+    /// to disambiguate collisions within an export set (the caller is
+    /// responsible for detecting and applying the suffix — this function
+    /// returns the base slug only).
+    static func slug(from content: String, id: UUID) -> String {
+        let lines = content.split(
+            separator: "\n",
+            omittingEmptySubsequences: true
+        ).map { String($0) }
+
+        // Try the first markdown heading first, else the first line.
+        var source = ""
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("#") {
+                // Strip the leading `#` tokens and whitespace.
+                let stripped = trimmed.drop(while: { $0 == "#" || $0 == " " })
+                if !stripped.isEmpty {
+                    source = String(stripped)
+                    break
+                }
+            } else if source.isEmpty, !trimmed.isEmpty {
+                source = trimmed
+            }
+        }
+
+        let sanitized = sanitizeSlug(source)
+
+        if sanitized.isEmpty {
+            // No usable text — fall back to a short UUID-derived suffix so the
+            // slug is always non-empty and collision-free within the estate.
+            return "note-" + id.uuidString.prefix(8).lowercased()
+        }
+        return sanitized
+    }
+
+    /// Sanitize a raw string into a filesystem-safe slug.
+    ///
+    /// - Lowercases the string.
+    /// - Replaces any run of characters that are not `[a-z0-9-]` with a single
+    ///   `-` (spaces, punctuation, etc. all collapse to one hyphen).
+    /// - Trims leading and trailing hyphens.
+    /// - Truncates to 60 characters.
+    private static func sanitizeSlug(_ s: String) -> String {
+        guard !s.isEmpty else { return "" }
+        var result = s.lowercased()
+        // Collapse non-alphanumeric runs to a single hyphen.
+        var out = ""
+        var lastWasHyphen = false
+        for ch in result {
+            if ch.isLetter || ch.isNumber {
+                out.append(ch)
+                lastWasHyphen = false
+            } else {
+                if !lastWasHyphen { out.append("-") }
+                lastWasHyphen = true
+            }
+        }
+        result = out
+        // Trim leading/trailing hyphens.
+        result = result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        // Truncate.
+        if result.count > 60 {
+            result = String(result.prefix(60)).trimmingCharacters(
+                in: CharacterSet(charactersIn: "-"))
+        }
+        return result
     }
 
     // MARK: - Import: IR → estate via the capture seam
@@ -225,6 +334,18 @@ public struct DrawerMapping: Sendable {
     ///
     /// Pure with respect to the substrate; the only outside call is the
     /// deterministic, network-free `EideticLib.lookup`.
+    ///
+    /// ## Identity resolution (Decision cp-vault-bidir)
+    ///
+    /// The `lineageID` on the frame is resolved in priority order:
+    ///   1. `note.mootID` — the stable lineage UUID stamped on export.
+    ///      Present when the note was exported by VaultKit. Wins over the
+    ///      filename-derived FNV hash so a human can rename the file freely
+    ///      without breaking the round-trip identity.
+    ///   2. The frontmatter `moot_id` string parsed as a UUID (defensive
+    ///      fallback for notes where `mootID` was not propagated in-process).
+    ///   3. `lineageID(forStableSourceKey:)` — FNV-1a over the vault path,
+    ///      used for brand-new human notes that were never exported by VaultKit.
     func makeCaptureFrame(for note: NoteIR, content: String) -> (CaptureFrame, classified: Bool) {
         // Room: explicit frontmatter wins; else the note's folder; else a
         // non-empty default so I-5's room guard holds.
@@ -255,6 +376,14 @@ public struct DrawerMapping: Sendable {
         if !note.links.isEmpty { flags.insert(.hasLinks) }
         if note.source != nil { flags.insert(.hasAttachments) }
 
+        // Identity resolution (see doc comment above):
+        //   1. mootID field (set by ObsidianAdapter when frontmatter has moot_id)
+        //   2. moot_id frontmatter string → UUID (defensive parse)
+        //   3. FNV derivation from stableSourceKey (brand-new human notes)
+        let resolvedLineageID: UUID = note.mootID
+            ?? nonEmpty(note.frontmatter["moot_id"]).flatMap { UUID(uuidString: $0) }
+            ?? Self.lineageID(forStableSourceKey: note.stableSourceKey)
+
         let frame = CaptureFrame(
             content: content,
             channel: .importedFile,
@@ -270,7 +399,7 @@ public struct DrawerMapping: Sendable {
             // and Channel.fileImport (raw 3) record the import origin.
             provenanceChannel: .fileImport,
             sourceType: .imported,
-            lineageID: Self.lineageID(forStableSourceKey: note.stableSourceKey),
+            lineageID: resolvedLineageID,
             eventTime: note.originDate?.date,
             featureFlags: flags
         )
