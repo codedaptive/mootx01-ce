@@ -94,7 +94,8 @@ public enum PrimitiveRegistry {
         FieldPresenceMatrixFPrimitive.descriptor,
         FNVPrimitive.descriptor,
         BitFieldMaskedEqualsPrimitive.descriptor,
-        // Additional primitives registered here as they land.
+        AssociationRuleMiningPrimitive.descriptor,
+        FormalConceptAnalysisPrimitive.descriptor,
     ]
 
     public static func find(_ name: String) -> PrimitiveDescriptor? {

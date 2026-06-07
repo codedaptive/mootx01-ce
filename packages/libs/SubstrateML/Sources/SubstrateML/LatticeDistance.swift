@@ -17,12 +17,10 @@
 // UDC tree distance uses longest common prefix (in characters):
 //   d_udc(a, b) = (len(a) - len(lcp))
 //               + (len(b) - len(lcp))
-//   normalized = d_udc / (len(a) + len(b))   ∈ [0, 1]
+//   normalized = d_udc / max(len(a), len(b))   ∈ [0, 1]
 //
-// Divisor is (len(a) + len(b)), NOT max(len(a), len(b)).
-// Proof of bound: when lcp = 0, raw = len(a) + len(b) = divisor,
-// so d_udc = 1.0 at worst. Using max(len) would allow d_udc > 1
-// (e.g., "004" vs "37": raw=5, max=3, d=5/3 ≈ 1.667).
+// Divisor is max(len(a), len(b)) per glref oracle (cookbook § 8.3).
+// Guard: when both strings are empty (maxLen = 0) return 0.0.
 //
 // Wikidata graph distance uses BFS over the subclass-of /
 // instance-of / part-of edge set, bounded to depth 4, then
@@ -70,22 +68,22 @@ public enum UDCTreeDistance {
         return i
     }
 
-    /// UDC tree distance normalized to [0, 1].
+    /// UDC tree distance per glref oracle (cookbook § 8.3).
     ///
-    /// Formula: raw = (lenA - lcp) + (lenB - lcp), divisor = lenA + lenB.
-    /// Proof of [0,1] bound: raw_max = lenA + lenB when lcp = 0, so
-    /// raw / divisor ≤ 1.0 always. When both strings are empty the
-    /// guard returns 0.0.
+    /// Formula: raw = (lenA - lcp) + (lenB - lcp), divisor = max(lenA, lenB).
+    /// Guard: both-empty strings are equal (caught by the identity check);
+    /// when maxLen = 0, return 0.0.
     public static func distance(_ a: String, _ b: String) -> Double {
         if a == b { return 0.0 }
         let lenA = a.count
         let lenB = b.count
-        // Guard: both empty strings are equal (handled above); a non-empty
-        // vs empty pair yields lenA + lenB > 0.
-        if lenA + lenB == 0 { return 0.0 }
+        let maxLen = max(lenA, lenB)
+        // Guard: both-empty are equal and caught above; a non-empty vs
+        // empty pair yields maxLen > 0. Explicit guard to match glref.
+        if maxLen == 0 { return 0.0 }
         let lcp = longestCommonPrefixLength(a, b)
         let raw = Double((lenA - lcp) + (lenB - lcp))
-        return raw / Double(lenA + lenB)
+        return raw / Double(maxLen)
     }
 }
 

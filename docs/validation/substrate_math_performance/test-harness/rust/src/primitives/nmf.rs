@@ -57,8 +57,9 @@ impl NMFPrimitive {
                 v.push(row);
             }
 
+            // estate="" + ts=0.0: telemetry off — harness must not emit VizGraph signals.
             let result = NMFAlternatingLeastSquares::factorize(
-                &v, rank, max_iterations, tolerance, inner_seed);
+                &v, rank, max_iterations, tolerance, inner_seed, "", 0.0);
 
             let v_arr: Vec<JsonValue> = v.iter().map(|row| {
                 JsonValue::Array(row.iter().map(|f| JsonValue::String(f32_hex(*f))).collect())
@@ -165,8 +166,9 @@ fn validate_case(c: &VectorCase, encoder: &mut CanonicalBinaryEncoder) -> CaseRe
         }
     }
 
+    // estate="" + ts=0.0: telemetry off — harness must not emit VizGraph signals.
     let result = NMFAlternatingLeastSquares::factorize(
-        &v, rank, max_iterations, tolerance, inner_seed);
+        &v, rank, max_iterations, tolerance, inner_seed, "", 0.0);
 
     let expected_iterations = match parse_u32(c.expected_output.get("iterations")) {
         Some(v) => v as usize, None => return fail_case(c, "missing expected iterations") };

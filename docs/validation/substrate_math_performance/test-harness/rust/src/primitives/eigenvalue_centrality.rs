@@ -63,8 +63,9 @@ impl EigenvalueCentralityPrimitive {
         for i in 0..case_count {
             let spec = generate_case_spec(i, &mut rng);
             let adjacency = build_adjacency(spec.n, &spec.edges);
+            // estate="" + ts=0.0: telemetry off — harness must not emit VizGraph signals.
             let centrality = EigenvalueCentrality::compute(
-                &adjacency, spec.max_iterations, spec.tolerance);
+                &adjacency, spec.max_iterations, spec.tolerance, "", 0.0);
 
             let edges_arr: Vec<JsonValue> = spec.edges.iter().map(|edge| {
                 let mut o: JsonObject = BTreeMap::new();
@@ -185,7 +186,8 @@ fn validate_case(c: &VectorCase, encoder: &mut CanonicalBinaryEncoder) -> CaseRe
     }
 
     let adjacency = build_adjacency(n, &edges);
-    let actual = EigenvalueCentrality::compute(&adjacency, max_iter, tolerance);
+    // estate="" + ts=0.0: telemetry off — harness must not emit VizGraph signals.
+    let actual = EigenvalueCentrality::compute(&adjacency, max_iter, tolerance, "", 0.0);
 
     let expected_arr = match c.expected_output.get("centrality") {
         Some(JsonValue::Array(a)) => a,
