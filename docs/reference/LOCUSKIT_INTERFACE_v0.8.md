@@ -144,7 +144,7 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
                 wikidataQID: String? = nil, wikidataQidsSecondary: String? = nil)
 
     // Computed accessors (no Bool stored property, I-2):
-    public var sourceType: SourceType; public var confirmation: ConfirmationState
+    public var sourceType: SourceType; public var confirmation: Confirmation
     public var confidence: Confidence; public var channel: Channel; public var sensitivity: Sensitivity
     public var state: State; public var adjectiveSensitivity: AdjectiveSensitivity
     public var exportability: AdjectiveExportability; public var trust: Trust
@@ -324,7 +324,7 @@ public indirect enum Filter: Sendable {
     // trust:       trustworthy, requiresConfirmation, trust(Trust), trustAtMost(Trust)
     // sensitivity: sensitivity(AdjectiveSensitivity), sensitivityAtMost(AdjectiveSensitivity)
     // export:      exportable, contained
-    // provenance:  userConfirmed, modelConfirmedOnly, unconfirmed, sourceType(SourceType),
+    // provenance:  userConfirmed, automatedConfirmedOnly, unconfirmed, sourceType(SourceType),
     //              channel(ProvenanceChannel), confidenceAtLeast(Confidence)
     // operational: captureChannel(CaptureChannel), contentKind(ContentKind), hasFeatureFlag(FeatureFlag)
     // structural:  inRoom(RoomID), inWing(WingID), lineageID(LineageID), createdAfter(Date),
@@ -385,22 +385,23 @@ All `Int64`-backed; decode with safe fallback to the neutral case (SPEC C-1).
 Bit layouts per architecture spec § 5.5 / § 5.6 and `Q1_DECISION_PROVENANCE_BITMAP`.
 
 ```swift
-// adjective bitmap (Adjectives.swift)
-public enum State: Int { case active=0, pending, contested, superseded, decayed, withdrawn, expired, rejected, accepted, tombstoned }
-public enum Trust: Int, Comparable { case verbatim=0, observed, imported, canonical, derived, proposed }
-public enum AdjectiveSensitivity: Int { case normal=0, elevated=4, restricted=8, secret=12 }   // scale-gapped
-public enum AdjectiveExportability: Int { case private_=0, public_=8 }
-// operational bitmap (DrawerOperational.swift)
-public enum CaptureChannel: Int { case typed=0, voiced, ocr, importedFile, sensor }
-public enum ContentKind: Int { case prose=0, code, transcript, list, structuredJSON, imageCaption }
-public struct DrawerFeatureFlags: OptionSet { /* hasAttachments(8), hasVoice(9), hasImage(10), hasLinks(11), isPinned(12) */ }
+// adjective bitmap (Adjectives.swift) — scale-gapped raws per cookbook §2.3 (F13/v0.6)
+public enum State: Int { case active=0, pending=1, contested=2, accepted=3, superseded=16, decayed=17, withdrawn=18, expired=19, rejected=32, tombstoned=33 }
+public enum Trust: Int, Comparable { case verbatim=0, observed, imported, canonical, derived, proposed, ambient }   // ambient=6 NEW in v0.6
+public enum AdjectiveSensitivity: Int { case normal=0, elevated=16, restricted=32, secret=48 }   // scale-gapped
+public enum AdjectiveExportability: Int { case private_=0, public_=32 }
+// operational bitmap (DrawerOperational.swift) — cookbook §2.4
+public enum CaptureChannel: Int { case typed=0, voiced, ocr, importedFile, sensor, actuator }   // actuator=5 NEW in v0.6
+public enum ContentKind: Int { case prose=0, code, transcript, list, structuredJSON, imageCaption, fingerprintOnly }   // fingerprintOnly=6 NEW in v0.6
+public struct DrawerFeatureFlags: OptionSet { /* hasAttachments(12), hasVoice(13), hasImage(14), hasLinks(15), isPinned(16) */ }
 public typealias FeatureFlag = DrawerFeatureFlags
-// provenance bitmap (Provenance.swift)
-public enum SourceType: Int { case unknown=0, observed, userStated, modelInferred, externalDoc, instruction, imported, derived }
-public enum ConfirmationState: Int { case unconfirmed=0, modelConfirmed, userConfirmed, contested, superseded, tombstoned }
-public enum Confidence: Int, Comparable { case unknown=0, low, mediumLow, medium, mediumHigh, high, certain }
-public enum Channel: Int { case unknown=0, directChat, slack, email, teams, discord, matrix, telegram, whatsapp, cli, api, mcp, fileImport, web, voice }
-public enum Sensitivity: Int { case normal=0, elevated, restricted, secret }   // 2-bit, distinct from AdjectiveSensitivity
+// provenance bitmap (Provenance.swift) — cookbook §2.5 (F13/v0.6)
+public enum SourceType: Int { case user=0, observed, imported, canonical, derived, federationAggregate, tierAggregate, pairedEstate, ambient, actuator }
+public enum Confirmation: Int { case unconfirmed=0, userConfirmed, automatedConfirmed, peerConfirmed, actuatorConfirmed }   // F13 rename from ConfirmationState
+public enum Confidence: Int, Comparable { case null=0, low=16, medium=32, high=48, verified=56 }   // scale-gapped (F13: was unknown=0..certain=6)
+public enum Channel: Int { case uiTyped=0, uiVoiced, mcpAgent, fileImport, apiGrounding, federationInbound, dreamProposal, dreamAssociation, dreamMiningResult, deviceSensor=15, actuatorOutcome=16 }
+public enum Sensitivity: Int { case normal=0, elevated=16, restricted=32, secret=48 }   // scale-gapped, mirrors AdjectiveSensitivity
+public enum EnrichmentStatus: Int { case none=0, qidPending, qidCompleted, closureCached }   // NEW in v0.6 §2.5 (QID resolution lifecycle)
 public typealias ProvenanceChannel = Channel
 public typealias Vector = [Float]      // vector recall composes via VectorKit
 ```
