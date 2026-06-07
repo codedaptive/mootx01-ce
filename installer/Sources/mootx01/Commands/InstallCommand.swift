@@ -25,6 +25,9 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip writing to settings.json (do not grant tool permissions).")
     var noPermissions: Bool = false
 
+    @Flag(name: .long, help: "Skip installing the moot-mgr management console as a background launchd service (macOS).")
+    var noManager: Bool = false
+
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -107,6 +110,48 @@ struct InstallCommand: AsyncParsableCommand {
         if !skipped.isEmpty {
             print("Skipped (errors): \(skipped.joined(separator: ", "))")
         }
+
+        // Install + launch the moot-mgr management console as a background
+        // launchd LaunchAgent. moot-mgr ships beside mootx01 in the macOS
+        // release archive, so its source is the sibling of the running binary.
+        // macOS-only: launchd is the service manager and moot-mgr is macOS-only.
+        #if os(macOS)
+        if !noManager {
+            let mgrSource = URL(fileURLWithPath: sourcePath)
+                .resolvingSymlinksInPath()
+                .deletingLastPathComponent()
+                .appendingPathComponent("moot-mgr")
+                .path
+            do {
+                if let mgrPath = try Installer.placeMgrBinary(sourceMgrPath: mgrSource, homeDirectory: home) {
+                    switch LaunchAgent.install(mgrBinaryPath: mgrPath, homeDirectory: home) {
+                    case let .installed(plistPath, dashboardURL):
+                        print("")
+                        print("  ✓ Management console running in the background (launchd: \(MootPaths.launchAgentLabel))")
+                        print("    Dashboard:   \(dashboardURL)")
+                        print("    LaunchAgent: \(plistPath)")
+                    case let .launchctlFailed(message):
+                        print("")
+                        print("  ✗ Could not start the management console via launchd: \(message)")
+                        print("    Start it manually any time with:  moot-mgr serve")
+                    case .binaryNotFound:
+                        // placeMgrBinary returned a path but the file vanished;
+                        // treat as "not available" and stay quiet beyond a hint.
+                        print("")
+                        print("  ⓘ Management console binary missing — run `moot-mgr serve` manually.")
+                    }
+                } else {
+                    print("")
+                    print("  ⓘ moot-mgr console not found beside mootx01 — skipping the background")
+                    print("    service. Install via the release (install.sh) or build apps/moot-mgr,")
+                    print("    then re-run `mootx01 install`.")
+                }
+            } catch {
+                print("  ✗ Could not place moot-mgr: \(error)")
+            }
+        }
+        #endif
+
         // If ~/.local/bin is not on PATH, the symlink won't resolve as a
         // bare `mootx01` command — print the same kind of note codegraph
         // does. (MCP clients use the absolute config path regardless, so

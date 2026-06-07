@@ -175,4 +175,57 @@ public enum MootPaths {
             .appendingPathComponent(".claude", isDirectory: true)
             .appendingPathComponent("settings.json", isDirectory: false)
     }
+
+    // MARK: - moot-mgr management console (launchd LaunchAgent)
+
+    /// Absolute path of the placed `moot-mgr` binary (the management &
+    /// monitoring console). Sits beside `mootx01` in the install directory;
+    /// the launchd LaunchAgent's `ProgramArguments` point at this stable path
+    /// so the service survives moving or rebuilding the source tree.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in tests.
+    /// - Returns: `<home>/.mootx01/bin/moot-mgr`. Does not touch the filesystem.
+    public static func installedMgrBinaryURL(homeDirectory: URL) -> URL {
+        installedBinaryDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("moot-mgr", isDirectory: false)
+    }
+
+    /// PATH launcher symlink for `moot-mgr`, so `moot-mgr` resolves from any
+    /// shell the same way `mootx01` does.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in tests.
+    /// - Returns: `<home>/.local/bin/moot-mgr`. Does not touch the filesystem.
+    public static func mgrSymlinkURL(homeDirectory: URL) -> URL {
+        localBinDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("moot-mgr", isDirectory: false)
+    }
+
+    /// Directory for the moot-mgr LaunchAgent's stdout/stderr log files.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in tests.
+    /// - Returns: `<home>/.mootx01/logs`. Does not touch the filesystem.
+    public static func logsDirURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent(".mootx01", isDirectory: true)
+            .appendingPathComponent("logs", isDirectory: true)
+    }
+
+    /// launchd job label for the moot-mgr resident-host LaunchAgent. Used as
+    /// the plist `Label`, the plist filename stem, and the `launchctl`
+    /// bootstrap/bootout target (`gui/<uid>/<label>`).
+    public static let launchAgentLabel: String = "com.mootx01.mgr"
+
+    /// Path of the moot-mgr LaunchAgent property list. Per-user LaunchAgents
+    /// live under `~/Library/LaunchAgents`; launchd loads them into the user's
+    /// GUI domain at login.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in tests.
+    /// - Returns: `<home>/Library/LaunchAgents/com.mootx01.mgr.plist`. Does
+    ///   not touch the filesystem.
+    public static func launchAgentPlistURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("LaunchAgents", isDirectory: true)
+            .appendingPathComponent("\(launchAgentLabel).plist", isDirectory: false)
+    }
 }

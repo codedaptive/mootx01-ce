@@ -109,6 +109,68 @@ public enum Installer {
         return destURL.path
     }
 
+    /// Copy the `moot-mgr` console binary into the install directory beside
+    /// `mootx01` and symlink it onto PATH. Same overwrite-safe contract as
+    /// `placeBinary`. moot-mgr ships next to mootx01 in the macOS release
+    /// archive, so its source is the sibling of the running executable.
+    ///
+    /// Returns `nil` (rather than throwing) when there is no moot-mgr to
+    /// install — `sourceMgrPath` is absent/missing AND nothing is already
+    /// placed. That happens for a dev build of `mootx01` alone, or a Linux
+    /// install; the caller skips the LaunchAgent in that case.
+    ///
+    /// - Parameters:
+    ///   - sourceMgrPath: absolute path of the moot-mgr binary to copy
+    ///     (the sibling of the running `mootx01`), or `nil` if unknown.
+    ///   - homeDirectory: user's home directory. Inject in tests.
+    /// - Returns: the placed binary path, or `nil` when nothing was installed.
+    /// - Throws: filesystem errors (copy, chmod, or symlink failure).
+    @discardableResult
+    public static func placeMgrBinary(
+        sourceMgrPath: String?,
+        homeDirectory: URL
+    ) throws -> String? {
+        let fm = FileManager.default
+        let destURL = MootPaths.installedMgrBinaryURL(homeDirectory: homeDirectory)
+        let binDir = MootPaths.installedBinaryDirURL(homeDirectory: homeDirectory)
+        let symlinkURL = MootPaths.mgrSymlinkURL(homeDirectory: homeDirectory)
+        let localBinDir = MootPaths.localBinDirURL(homeDirectory: homeDirectory)
+
+        // Resolve the source only if one was supplied and actually exists.
+        var realSource: URL?
+        if let sourceMgrPath, fm.fileExists(atPath: sourceMgrPath) {
+            realSource = URL(fileURLWithPath: sourceMgrPath).resolvingSymlinksInPath()
+        }
+        // Nothing to copy and nothing already placed → no console to install.
+        if realSource == nil && !fm.fileExists(atPath: destURL.path) {
+            return nil
+        }
+
+        try fm.createDirectory(at: binDir, withIntermediateDirectories: true)
+
+        // Copy only when the source differs from the destination (a re-install
+        // run against the already-placed copy has nothing to do).
+        if let realSource,
+           realSource.standardizedFileURL.path != destURL.standardizedFileURL.path {
+            if fm.fileExists(atPath: destURL.path)
+                || (try? fm.destinationOfSymbolicLink(atPath: destURL.path)) != nil {
+                try fm.removeItem(at: destURL)
+            }
+            try fm.copyItem(at: realSource, to: destURL)
+        }
+
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destURL.path)
+
+        try fm.createDirectory(at: localBinDir, withIntermediateDirectories: true)
+        if (try? fm.destinationOfSymbolicLink(atPath: symlinkURL.path)) != nil
+            || fm.fileExists(atPath: symlinkURL.path) {
+            try fm.removeItem(at: symlinkURL)
+        }
+        try fm.createSymbolicLink(at: symlinkURL, withDestinationURL: destURL)
+
+        return destURL.path
+    }
+
     /// Remove the placed binary and its PATH symlink. Inverse of
     /// `placeBinary`. Safe to call when nothing was installed.
     ///
@@ -122,11 +184,17 @@ public enum Installer {
     public static func removePlacedBinary(homeDirectory: URL) throws {
         let fm = FileManager.default
         let symlinkURL = MootPaths.binarySymlinkURL(homeDirectory: homeDirectory)
+        let mgrSymlinkURL = MootPaths.mgrSymlinkURL(homeDirectory: homeDirectory)
         let installRoot = homeDirectory.appendingPathComponent(".mootx01", isDirectory: true)
 
-        if (try? fm.destinationOfSymbolicLink(atPath: symlinkURL.path)) != nil
-            || fm.fileExists(atPath: symlinkURL.path) {
-            try fm.removeItem(at: symlinkURL)
+        // Remove both PATH symlinks (mootx01 + moot-mgr). The install root
+        // rmrf below takes the binaries and logs; the symlinks live under
+        // ~/.local/bin and must be unlinked separately.
+        for link in [symlinkURL, mgrSymlinkURL] {
+            if (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil
+                || fm.fileExists(atPath: link.path) {
+                try fm.removeItem(at: link)
+            }
         }
         if fm.fileExists(atPath: installRoot.path) {
             try fm.removeItem(at: installRoot)
