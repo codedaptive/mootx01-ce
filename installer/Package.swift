@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // Installer — the mootx01 unified CLI binary.
 //
@@ -28,7 +28,7 @@ let package = Package(
     // #if os(macOS) — SPM compiles only the cross-platform subcommands
     // (install, uninstall, db, status, query) on Linux.
     platforms: [
-        .macOS(.v15),
+        .macOS(.v26),
     ],
     products: [
         .library(name: "MootInstallerCore", targets: ["MootInstallerCore"]),

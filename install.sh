@@ -5,7 +5,7 @@
 # Downloads a prebuilt mootx01 binary from GitHub Releases and places it on
 # your PATH. No Swift toolchain, no build tools, no clone required.
 #
-#   curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ee/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh
 #
 # Then wire it into your AI clients (interactive menu):
 #   mootx01 install
@@ -20,13 +20,13 @@
 #   MOOTX01_INSTALL_DIR  binary location   (default: ~/.mootx01/bin)
 #   MOOTX01_BIN_DIR      PATH symlink dir   (default: ~/.local/bin)
 #
-# NOTE on distribution: curl-install requires the release assets (and this
-# script) to be reachable on a PUBLIC repo. `codedaptive/mootx01-ee` is the
-# development repo; for public distribution point REPO at the public
-# (open-core / CE) repo that publishes the releases.
+# NOTE on distribution: this points at the PUBLIC open-core repo
+# `codedaptive/mootx01-ce`, which publishes the release assets. The private
+# `codedaptive/mootx01-ee` repo is the development source; it is cloned to the
+# CE repo for public distribution and is never installed from directly.
 set -eu
 
-REPO="${MOOTX01_REPO:-codedaptive/mootx01-ee}"
+REPO="${MOOTX01_REPO:-codedaptive/mootx01-ce}"
 INSTALL_DIR="${MOOTX01_INSTALL_DIR:-$HOME/.mootx01/bin}"
 BIN_DIR="${MOOTX01_BIN_DIR:-$HOME/.local/bin}"
 
