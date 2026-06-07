@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── macOS builds (arm64 + x86_64) ─────────────────────────────────────────
+  build-macos-arm64:
+    name: Build macOS arm64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binaries
+        run: |
+          # mootx01 = MCP server + management CLI; moot-mgr = the management
+          # console (resident host + loopback dashboard). Both ship in the macOS
+          # archive. moot-mgr is macOS-only (.macOS(.v26), GeniusLocusKit-backed),
+          # so it is built here and on x86_64 but not on the Linux jobs.
+          swift build -c release --package-path installer --product mootx01
+          swift build -c release --package-path apps/moot-mgr --product moot-mgr
+
+      - name: Package binaries
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ASSET="mootx01-${VERSION}-macos-arm64.tar.gz"
+          cp installer/.build/release/mootx01 mootx01
+          cp apps/moot-mgr/.build/release/moot-mgr moot-mgr
+          tar -czf "${ASSET}" mootx01 moot-mgr
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: ${{ env.ASSET }}
+
+  build-macos-x86_64:
+    name: Build macOS x86_64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binaries (cross-compile to x86_64)
+        run: |
+          # Both binaries cross-compiled to x86_64; see the arm64 job for the
+          # mootx01/moot-mgr split rationale (moot-mgr is macOS-only).
+          swift build -c release --package-path installer --product mootx01 --arch x86_64
+          swift build -c release --package-path apps/moot-mgr --product moot-mgr --arch x86_64
+
+      - name: Package binaries
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ASSET="mootx01-${VERSION}-macos-x86_64.tar.gz"
+          cp installer/.build/release/mootx01 mootx01
+          cp apps/moot-mgr/.build/release/moot-mgr moot-mgr
+          tar -czf "${ASSET}" mootx01 moot-mgr
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64
+          path: ${{ env.ASSET }}
+
+  # ── Linux builds (x86_64 + arm64) ─────────────────────────────────────────
+  # Linux binaries include install/uninstall/db/status/query subcommands.
+  # The serve subcommand requires macOS (AriaMCP + GeniusLocusKit declare
+  # .macOS(.v15)) and is excluded via #if os(macOS) in ServeCommand.swift.
+  build-linux-x86_64:
+    name: Build Linux x86_64
+    runs-on: ubuntu-22.04
+    container:
+      image: swift:6.0-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: swift build -c release --package-path installer --product mootx01
+
+      - name: Package binary
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ASSET="mootx01-${VERSION}-linux-x86_64.tar.gz"
+          cp installer/.build/release/mootx01 mootx01
+          tar -czf "${ASSET}" mootx01
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: ${{ env.ASSET }}
+
+  build-linux-arm64:
+    name: Build Linux arm64
+    runs-on: ubuntu-22.04-arm64
+    container:
+      image: swift:6.0-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: swift build -c release --package-path installer --product mootx01
+
+      - name: Package binary
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ASSET="mootx01-${VERSION}-linux-arm64.tar.gz"
+          cp installer/.build/release/mootx01 mootx01
+          tar -czf "${ASSET}" mootx01
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: ${{ env.ASSET }}
+
+  # ── Create GitHub release + attach assets ──────────────────────────────────
+  release:
+    name: Create Release
+    needs:
+      - build-macos-arm64
+      - build-macos-x86_64
+      - build-linux-x86_64
+      - build-linux-arm64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all assets
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+
+      - name: Generate checksums.txt
+        working-directory: assets
+        run: |
+          # Collect all .tar.gz files from subdirs into one flat dir.
+          mkdir -p flat
+          find . -name '*.tar.gz' -exec cp {} flat/ \;
+          cd flat
+          sha256sum *.tar.gz > ../checksums.txt
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            assets/checksums.txt
+            assets/flat/*.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -31,9 +31,9 @@ INSTALL_DIR="${MOOTX01_INSTALL_DIR:-$HOME/.mootx01/bin}"
 BIN_DIR="${MOOTX01_BIN_DIR:-$HOME/.local/bin}"
 
 if [ "${1:-}" = "--uninstall" ]; then
-  rm -f "$BIN_DIR/mootx01"
+  rm -f "$BIN_DIR/mootx01" "$BIN_DIR/moot-mgr"
   rm -rf "$HOME/.mootx01"
-  echo "mootx01 binary removed ($HOME/.mootx01 and $BIN_DIR/mootx01)."
+  echo "mootx01 + moot-mgr removed ($HOME/.mootx01, $BIN_DIR/mootx01, $BIN_DIR/moot-mgr)."
   echo "MCP-client config entries are left intact; run \`mootx01 uninstall\` before this to remove them."
   exit 0
 fi
@@ -75,8 +75,9 @@ fi
 [ -n "$version" ] || { echo "mootx01: could not resolve latest version; set MOOTX01_VERSION (e.g. MOOTX01_VERSION=v1.0.0)." >&2; exit 1; }
 case "$version" in v*) ;; *) version="v$version" ;; esac
 
-# 3. Download + extract. The release tarball contains the bare `mootx01`
-#    binary at its root (release.yml: `tar -czf ASSET mootx01`).
+# 3. Download + extract. The macOS release tarball contains two bare binaries
+#    at its root — `mootx01` and `moot-mgr` (the management console); Linux
+#    archives carry `mootx01` only (release.yml: `tar -czf ASSET mootx01 [moot-mgr]`).
 asset="mootx01-${version}-${target}.tar.gz"
 url="https://github.com/$REPO/releases/download/$version/$asset"
 echo "Installing mootx01 $version ($target)..."
@@ -86,15 +87,26 @@ curl -fsSL "$url" -o "$tmp/mootx01.tar.gz" || { echo "mootx01: download failed: 
 tar -xzf "$tmp/mootx01.tar.gz" -C "$tmp"
 [ -f "$tmp/mootx01" ] || { echo "mootx01: archive did not contain the expected binary." >&2; exit 1; }
 
-# 4. Place the binary and symlink it onto PATH (same layout `mootx01 install`
-#    uses, so curl-install and source-install converge).
+# 4. Place the binaries and symlink them onto PATH (same layout `mootx01
+#    install` uses, so curl-install and source-install converge).
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$tmp/mootx01" "$INSTALL_DIR/mootx01"
 mkdir -p "$BIN_DIR"
 ln -sf "$INSTALL_DIR/mootx01" "$BIN_DIR/mootx01"
-
 echo "Installed  $INSTALL_DIR/mootx01"
 echo "Linked     $BIN_DIR/mootx01"
+
+# moot-mgr (the management & monitoring console) ships only in the macOS
+# archive; place it the same way when the extracted tree carries it.
+mgr_installed=0
+if [ -f "$tmp/moot-mgr" ]; then
+  install -m 0755 "$tmp/moot-mgr" "$INSTALL_DIR/moot-mgr"
+  ln -sf "$INSTALL_DIR/moot-mgr" "$BIN_DIR/moot-mgr"
+  echo "Installed  $INSTALL_DIR/moot-mgr"
+  echo "Linked     $BIN_DIR/moot-mgr"
+  mgr_installed=1
+fi
+
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *)
@@ -106,3 +118,9 @@ esac
 echo ""
 echo "Next: wire mootx01 into your AI clients (interactive menu):"
 echo "  mootx01 install"
+if [ "$mgr_installed" = "1" ]; then
+  echo ""
+  echo "Management console: \`mootx01 install\` registers moot-mgr as a background"
+  echo "launchd service (starts now, restarts at login) — dashboard at"
+  echo "http://127.0.0.1:7077. Or run it yourself any time with \`moot-mgr serve\`."
+fi

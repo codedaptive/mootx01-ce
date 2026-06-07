@@ -69,13 +69,21 @@ struct UninstallCommand: AsyncParsableCommand {
             print("  ✗ Could not remove permissions: \(error)")
         }
 
-        // Remove the placed binary (~/.mootx01) and the PATH symlink
-        // (~/.local/bin/mootx01). Inverse of install's placeBinary; mirrors
-        // codegraph's `--uninstall` which removes both the install dir and
-        // the launcher symlink.
+        // Stop and remove the moot-mgr management console LaunchAgent BEFORE
+        // deleting its binary, so the running service is booted out of launchd
+        // first (otherwise launchd keeps respawning a now-missing executable).
+        #if os(macOS)
+        LaunchAgent.uninstall(homeDirectory: home)
+        print("  ✓ Stopped and removed the management console (launchd).")
+        #endif
+
+        // Remove the placed binaries (~/.mootx01) and the PATH symlinks
+        // (~/.local/bin/mootx01, ~/.local/bin/moot-mgr). Inverse of install's
+        // placeBinary/placeMgrBinary; mirrors codegraph's `--uninstall` which
+        // removes both the install dir and the launcher symlink.
         do {
             try Installer.removePlacedBinary(homeDirectory: home)
-            print("  ✓ Removed placed binary and PATH symlink.")
+            print("  ✓ Removed placed binaries and PATH symlinks.")
         } catch {
             print("  ✗ Could not remove placed binary: \(error)")
         }
