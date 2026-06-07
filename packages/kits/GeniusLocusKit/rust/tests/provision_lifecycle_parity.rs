@@ -36,9 +36,11 @@ use genius_locus_kit::coordinator::{
 };
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::storage::Storage;
+use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────
@@ -616,4 +618,137 @@ fn destroy_one_estate_does_not_orphan_siblings_sub_stores() {
     assert!(coord.has_corpus(&h2), "estate 2 corpus must remain registered");
     assert!(coord.has_vector_store(&h2), "estate 2 vector_store must remain registered");
     assert_eq!(coord.open_estate_count(), 1, "only estate 1 was destroyed");
+}
+
+// MARK: - T13: provision(Glk) on SQLite file backend — regression guard
+//
+// This mirrors the Swift `EstateProvisionSQLiteTests.provisionGLKOnSQLiteSucceedsAndEstateIsUsable`
+// test added in cp-glk-sqlite-fix. The Rust port was NOT affected by the
+// `no such table: chunks` bug (SqliteStorage::migrate calls apply_schema which
+// always creates tables), but we add a parity test here to keep the four-way
+// conformance gate honest: any future regression in the Rust SQLite path will
+// be caught by this test.
+//
+// Helpers follow the hydrate_parity.rs pattern: SqliteDrawerStore::from_path for
+// the estate, a second SqliteStorage for Corpus/VectorStore, temp files cleaned
+// up after the test.
+
+/// Build a SQLite estate store at a unique temp path. Returns (store, path) for cleanup.
+fn make_sqlite_drawer_store() -> (SqliteDrawerStore, std::path::PathBuf) {
+    let path = std::env::temp_dir()
+        .join(format!("glk-provision-sqlite-{}.sqlite", Uuid::new_v4()));
+    let store = SqliteDrawerStore::from_path(
+        path.to_string_lossy().as_ref(),
+        NOW,
+        None,
+        5.0,
+    )
+    .expect("SqliteDrawerStore::from_path must succeed");
+    (store, path)
+}
+
+/// Build a SqliteStorage at a unique temp path for Corpus/VectorStore.
+/// Returns (Arc<dyn Storage>, path) for cleanup.
+fn make_sqlite_corpus_storage() -> (Arc<dyn Storage>, std::path::PathBuf) {
+    let path = std::env::temp_dir()
+        .join(format!("glk-provision-corpus-{}.sqlite", Uuid::new_v4()));
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage = SqliteStorage::new(config).expect("SqliteStorage::new must succeed");
+    (Arc::new(storage) as Arc<dyn Storage>, path)
+}
+
+/// Remove a SQLite file and its WAL/SHM sidecars.
+fn cleanup_sqlite_file(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+}
+
+/// T13a — provision(.glk) on a SQLite file backend succeeds.
+///
+/// Before the Swift fix for cp-glk-sqlite-fix, `Corpus::open` called
+/// `storage.migrate(to: BundleStore.schemaDeclaration)` on a fresh file and then
+/// `bundleStore.allChunks()` → `no such table: chunks`. The Rust `SqliteStorage::migrate`
+/// always calls `apply_schema` (which creates tables), so the Rust port never had this
+/// bug — but we test it here to maintain parity and catch future regressions.
+#[test]
+fn t13a_provision_glk_on_sqlite_backend_succeeds() {
+    let (drawer_store, estate_path) = make_sqlite_drawer_store();
+    let (corpus_storage, corpus_path) = make_sqlite_corpus_storage();
+
+    let mut coord = EstateCoordinator::new();
+    let store = Arc::new(drawer_store) as Arc<dyn DrawerStore>;
+    // Pass corpus_storage separately so Corpus/VectorStore use the dedicated SQLite file.
+    // The estate's primary storage is derived from the DrawerStore's internal storage handle;
+    // we pass InMemoryStorage as the unused `storage` parameter (the coordinator uses the
+    // storage only for sub-store wiring when corpus_storage is None — here it is not None).
+    let primary_storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4())) as Arc<dyn Storage>;
+
+    let handle = coord
+        .provision(
+            store,
+            primary_storage,
+            Some(corpus_storage),
+            OwnerCredentials::new("sqlite-provision-test"),
+            glk_params("SQLiteGLKEstate"),
+            EmbeddingModelConfig::Deterministic,
+        )
+        .expect("provision(Glk) on SQLite backend must not fail — no such table: chunks regression guard");
+
+    // Sub-stores must be wired.
+    assert!(coord.has_corpus(&handle), "provision(Glk) on SQLite must wire a Corpus");
+    assert!(coord.has_vector_store(&handle), "provision(Glk) on SQLite must wire a VectorStore");
+    assert_eq!(
+        coord.mount_state(&handle),
+        Some(EstateMountState::Mounted),
+        "SQLite-backed estate must be Mounted after provision"
+    );
+
+    // Lifecycle round-trip: quiesce → destroy cleans registry.
+    coord.quiesce(&handle).expect("quiesce must succeed");
+    coord.destroy(&handle).expect("destroy must succeed");
+    assert_eq!(coord.open_estate_count(), 0, "registry must be empty after destroy");
+    assert!(!coord.has_corpus(&handle), "corpus registration must be cleared after destroy");
+    assert!(!coord.has_vector_store(&handle), "vector_store registration must be cleared after destroy");
+
+    cleanup_sqlite_file(&estate_path);
+    cleanup_sqlite_file(&corpus_path);
+}
+
+/// T13b — provision(.corpusOnly) on a SQLite file backend succeeds.
+#[test]
+fn t13b_provision_corpus_only_on_sqlite_backend_succeeds() {
+    let (drawer_store, estate_path) = make_sqlite_drawer_store();
+    let (corpus_storage, corpus_path) = make_sqlite_corpus_storage();
+
+    let mut coord = EstateCoordinator::new();
+    let store = Arc::new(drawer_store) as Arc<dyn DrawerStore>;
+    let primary_storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4())) as Arc<dyn Storage>;
+
+    let handle = coord
+        .provision(
+            store,
+            primary_storage,
+            Some(corpus_storage),
+            OwnerCredentials::new("sqlite-corpus-only-test"),
+            corpus_only_params("SQLiteCorpusOnlyEstate"),
+            EmbeddingModelConfig::Deterministic,
+        )
+        .expect("provision(CorpusOnly) on SQLite backend must succeed");
+
+    // Corpus wired; no standalone VectorStore for CorpusOnly estates.
+    assert!(coord.has_corpus(&handle), "provision(CorpusOnly) on SQLite must wire a Corpus");
+    assert!(!coord.has_vector_store(&handle), "provision(CorpusOnly) on SQLite must NOT wire a standalone VectorStore");
+
+    coord.destroy(&handle).expect("destroy must succeed");
+    assert_eq!(coord.open_estate_count(), 0);
+
+    cleanup_sqlite_file(&estate_path);
+    cleanup_sqlite_file(&corpus_path);
 }

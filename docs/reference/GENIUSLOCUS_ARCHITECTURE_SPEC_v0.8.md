@@ -1031,7 +1031,7 @@ public indirect enum Filter {
 
     // Provenance queries
     case userConfirmed               // confirmation ≥ user_confirmed
-    case modelConfirmedOnly          // confirmation == model_confirmed (excludes user_confirmed)
+    case automatedConfirmedOnly      // confirmation == automated_confirmed (excludes user_confirmed)
     case unconfirmed                 // confirmation == unconfirmed
     case sourceType(SourceType)
     case channel(ProvenanceChannel)

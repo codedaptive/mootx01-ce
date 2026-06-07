@@ -16,6 +16,10 @@
 //   T10 quiesce stale handle   — raises estateNotOpen
 //   T11 drain stale handle     — raises estateNotOpen
 //   T12 destroy after close    — succeeds (close already ran, just clears recall index)
+//   T13 provision(.glk) on SQLite — durable file path: provision + capture + recall +
+//       quiesce + destroy all succeed without "no such table: chunks" (regression guard
+//       for cp-glk-sqlite-fix: the Corpus sub-store schema was never created when
+//       migrate(to:) was called on a fresh SQLite file without a prior open call)
 
 import Testing
 import Foundation
@@ -24,6 +28,7 @@ import CorpusKit
 import VectorKit
 import PersistenceKit
 import PersistenceKitInMemory
+import PersistenceKitSQLite
 @testable import GeniusLocusKit
 
 // MARK: - Helpers
@@ -591,7 +596,145 @@ struct EstateProvisionSeparateStorageTests {
             corpusStorage: corpusStorage,
             handle: handle
         )
-        let count = await kit.openEstateCount
-        #expect(count == 0)
+        let separateCount = await kit.openEstateCount
+        #expect(separateCount == 0)
+    }
+}
+
+// MARK: - T13: provision(.glk) on SQLite file backend (regression guard cp-glk-sqlite-fix)
+
+/// SQLite-file provision tests.
+///
+/// Prior to cp-glk-sqlite-fix, `provision(kind: .glk)` on a SQLite backend failed
+/// with "no such table: chunks". The root cause: `Corpus.init` calls
+/// `storage.migrate(to: BundleStore.schemaDeclaration)`, but `SQLiteStorage.migrate(to:)`
+/// called `applyMigrations` which only ran pending SQL migration steps — it never
+/// created the tables declared in the schema. `InMemoryStorage.migrate(to:)` does create
+/// tables, which is why all prior provision tests (using InMemory) passed.
+///
+/// These tests exercise the durable path and act as a regression guard.
+@Suite("EstateProvision — SQLite file backend (cp-glk-sqlite-fix regression guard)")
+struct EstateProvisionSQLiteTests {
+
+    /// Create a SQLite-backed storage at a unique temp path.
+    /// The file is created fresh; the caller is responsible for cleanup.
+    private func makeSQLiteStorage() throws -> (SQLiteStorage, URL) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glk-sqlite-provision-\(UUID().uuidString).sqlite")
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: url)
+        ))
+        return (storage, url)
+    }
+
+    /// Remove a SQLite file and its WAL / SHM sidecars.
+    private func cleanup(_ url: URL) {
+        let fm = FileManager.default
+        for suffix in ["", "-wal", "-shm"] {
+            let target = URL(fileURLWithPath: url.path + suffix)
+            try? fm.removeItem(at: target)
+        }
+    }
+
+    /// provision(.glk) on a fresh SQLite file must succeed and the estate must be usable.
+    ///
+    /// Regression: before cp-glk-sqlite-fix this test threw
+    ///   "no such table: chunks"
+    /// during Corpus.init's allChunks() call because migrate(to:) did not create tables.
+    @Test
+    func provisionGLKOnSQLiteSucceedsAndEstateIsUsable() async throws {
+        let (storage, url) = try makeSQLiteStorage()
+        defer { cleanup(url) }
+
+        let kit = GeniusLocusKit()
+        let params = EstateProvisionParams(
+            estateName: "SQLiteGLKEstate",
+            kind: .glk,
+            zoomWindowLow: 0,
+            zoomWindowHigh: 10,
+            frameworkProfile: "KnowledgeWork",
+            syncMode: .none
+        )
+        let owner = OwnerCredentials(ownerIdentifier: "sqlite-provision-test")
+
+        // Must not throw. Before the fix this raised "no such table: chunks".
+        let handle = try await kit.provision(
+            storage: storage,
+            owner: owner,
+            params: params
+        )
+
+        // Estate is mounted and both sub-stores are wired.
+        let mountState = await kit.mountState(for: handle)
+        #expect(mountState == .mounted)
+
+        let corpus = await kit.corpusKits[handle]
+        let vs = await kit.vectorStores[handle]
+        #expect(corpus != nil, "provision(.glk) on SQLite must wire a Corpus")
+        #expect(vs != nil, "provision(.glk) on SQLite must wire a VectorStore")
+
+        // Capture a drawer so the estate has real content, using the GLK verb surface.
+        let frame = CaptureFrame(
+            content: "SQLite durable provision round-trip test content.",
+            channel: .typed,
+            room: "sqlite-provision-tests",
+            latticeAnchor: .udc("000.000"),
+            addedBy: "sqlite-provision-test",
+            embeddingModelID: "test-model-v1"
+        )
+        let drawer = try await kit.capture(handle, frame)
+        #expect(!drawer.id.isEmpty, "captured drawer must have a non-empty id")
+
+        // allDrawers on the underlying estate must include the captured row.
+        let estate = try await kit.estate(for: handle)
+        let drawers = try await estate.allDrawers()
+        #expect(!drawers.isEmpty, "captured drawer must be retrievable after SQLite provision")
+
+        // Lifecycle: quiesce then destroy must succeed cleanly.
+        try await kit.quiesce(handle)
+        let quiescedState = await kit.mountState(for: handle)
+        #expect(quiescedState == .quiesced)
+
+        try await kit.destroy(storage: storage, handle: handle)
+        let afterDestroyCount = await kit.openEstateCount
+        #expect(afterDestroyCount == 0, "destroy must remove SQLite-backed estate from registry")
+    }
+
+    /// provision(.corpusOnly) on a fresh SQLite file must also succeed.
+    ///
+    /// corpusOnly uses the same Corpus.init → migrate(to:) path as .glk; verifying
+    /// this kind ensures the fix covers all corpus-bearing kinds.
+    @Test
+    func provisionCorpusOnlyOnSQLiteSucceeds() async throws {
+        let (storage, url) = try makeSQLiteStorage()
+        defer { cleanup(url) }
+
+        let kit = GeniusLocusKit()
+        let params = EstateProvisionParams(
+            estateName: "SQLiteCorpusOnlyEstate",
+            kind: .corpusOnly,
+            zoomWindowLow: 0,
+            zoomWindowHigh: 5,
+            frameworkProfile: "CorpusTest",
+            syncMode: .none
+        )
+        let owner = OwnerCredentials(ownerIdentifier: "sqlite-provision-test")
+
+        // Must not throw.
+        let handle = try await kit.provision(
+            storage: storage,
+            owner: owner,
+            params: params
+        )
+
+        let corpus = await kit.corpusKits[handle]
+        let vs = await kit.vectorStores[handle]
+        #expect(corpus != nil, "corpusOnly provision on SQLite must wire a Corpus")
+        #expect(vs == nil, "corpusOnly provision on SQLite must NOT wire a standalone VectorStore")
+
+        try await kit.destroy(storage: storage, handle: handle)
+        let sqliteCount = await kit.openEstateCount
+        #expect(sqliteCount == 0)
     }
 }
