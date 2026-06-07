@@ -320,6 +320,29 @@ impl StatsSink for PersistenceStatsSink {
 
 ---
 
+## Swift/Rust Concordance
+
+The complete top-level public surface of ObserverSink, one row per public
+concept, each present in BOTH ports. The Swift and Rust shapes were read from
+the sections above; the schema-name constants are itemised separately in the
+schema-constants parity table that follows. Status `Confirmed` means the two
+ports agree under the conformance suite cited.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| Stats store | `StatsStore` (final class) | `StatsStore` (struct) | public / pub | Swift `async` actor-safe `final class` / Rust sync `struct`; same SQLite schema + control rows | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
+| Metric row | `MetricRow` | `MetricRow` | public / pub | Swift `ts: Date` (decoded from ISO-8601) / Rust `ts_epoch: f64`; `rowID: UUID` / `row_id: Uuid`; same fields otherwise | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
+| Event row | `EventRow` | `EventRow` | public / pub | Swift `nounType: Int`/`ts: Date` / Rust `noun_type: i64`/`ts_epoch: f64`; Swift `rowIDStr` / Rust `estate_row_id`; same fields otherwise | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
+| Schema-name namespace | `StatsStoreSchema` (enum-of-statics) | `StatsStoreSchema` (unit struct + consts) | public / pub | Swift caseless enum of `static let` / Rust `pub struct` with `pub const`s; same string values (see schema-constants table below) | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
+| Persistence stats sink | `PersistenceStatsSink` | `PersistenceStatsSink` | public / pub | Swift `struct: StatsSink` (async Task for I/O) / Rust `struct impl StatsSink` (sync); both gate on the store monitoring flag and never throw to the caller | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
+
+No DRIFT and no Apple-platform-bound (Exempt) types: every ObserverSink
+public type ships in both ports. `StatsSink` and `StatSample` are the
+contract surface of IntellectusLib (documented in its own concordance) and
+are referenced here, not redeclared.
+
+---
+
 ## Schema constants parity table
 
 | Swift | Rust | Value |

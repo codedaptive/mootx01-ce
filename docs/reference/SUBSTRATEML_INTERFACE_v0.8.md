@@ -1480,6 +1480,7 @@ the Swift suites against the same canonical inputs the Rust module tests use.
 | Temporal causality key | `TemporalCausalityKey` | `TemporalCausalityKey` | public | identical | `TemporalCausalityFoldTests.swift` / `rust:temporal_causality_fold::tests` | Confirmed |
 | Temporal-causality fold namespace | `TemporalCausalityFold` (enum) | `TemporalCausalityFold` (unit struct) | public | Swift enum namespace / Rust unit-struct namespace | `TemporalCausalityFoldTests.swift` / `rust:temporal_causality_fold::tests` | Confirmed |
 | Temporal-causality fold result | `(deltas:, newWatermark:)` tuple return | `FoldResult` (flat struct) | public | Swift anonymous tuple return / Rust named result struct (same fields: `deltas`, `new_watermark`) | `TemporalCausalityFoldTests.swift` / `rust:temporal_causality_fold::tests` | Confirmed |
+| VizGraph signal names | `VizGraphSignals` (enum-of-statics) | `VizGraphSignals` (`pub mod` consts) | public | Swift caseless enum of `static let` metric-name strings / Rust `pub mod` of `pub const` strings — same five names (`community.assignment`, `centrality.score`, `nmf.factor`, `anomaly.flag`, `edge.decayed_weight`) | `VizGraphSignalsTests.swift` / `rust:viz_graph_signals_tests` | Confirmed |
 
 ### § 7.2 — Notes on apparent asymmetries (verified non-drift)
 
@@ -1499,6 +1500,15 @@ the Swift suites against the same canonical inputs the Rust module tests use.
   `TemporalCompression`, `AnomalyDetection`, `CommunityDetection`,
   `StabilityEstimator`, `TemporalCausalityFold`): Rust names the namespace as
   `pub struct X;` with an `impl X`; Swift uses `enum X`. Same call surface.
+- **Metric-name namespace as PascalCase `pub mod`** (`VizGraphSignals`):
+  the VizGraph telemetry metric names ship as a Swift caseless `enum` of
+  `static let` strings and a Rust `pub mod VizGraphSignals` of `pub const`
+  strings. The Rust module is deliberately PascalCase (not the usual
+  snake_case) so call sites read `VizGraphSignals::COMMUNITY_ASSIGNMENT`,
+  mirroring Swift `VizGraphSignals.communityAssignment`. Same five names,
+  same string values — a namespace-as-type concept, not drift. (This is the
+  one PascalCase `pub mod` in the tree; the lowercase `decay::half_lives`
+  above is the ordinary-module variant paired with Swift `DecayHalfLives`.)
 - **`FoldResult`** (Rust) and **`PairingAuditPayload`** (flat in Rust, nested
   `PairingHandshake.PairingAuditPayload` in Swift) and **`RowId`** (flat Rust
   `pub type`, nested `FormalContext.RowID` in Swift) are idiomatic

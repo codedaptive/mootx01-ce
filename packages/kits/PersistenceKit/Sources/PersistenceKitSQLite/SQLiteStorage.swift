@@ -164,6 +164,39 @@ actor SQLiteBackend {
     }
 
     func applyMigrations(_ schema: SchemaDeclaration) throws {
+        // Retain the schema declaration so queryRows can resolve declared column
+        // types (bool, uuid, timestamp, bitmap, hlc) when migrate(to:) is called
+        // directly without a prior openSchema call. openSchema also sets this;
+        // keeping both sites in sync ensures the hint is always present.
+        if schemaDeclaration == nil {
+            schemaDeclaration = schema
+        }
+
+        // Ensure the migrations bookkeeping table and all user-declared tables
+        // exist before running pending migration steps. This matches the Rust
+        // apply_schema path (open and migrate both call apply_schema) and
+        // InMemoryStorage.applyMigrationsInner (which creates tables as its first
+        // step). The guard is necessary because migrate(to:) may be called on a
+        // fresh SQLite file without a prior open(schema:) call — for example,
+        // Corpus.init calls storage.migrate(to: BundleStore.schemaDeclaration)
+        // directly. Without this step the chunks table does not exist and the
+        // first allChunks() call fails with "no such table: chunks".
+        //
+        // CREATE TABLE IF NOT EXISTS and CREATE INDEX IF NOT EXISTS are both
+        // idempotent: calling them on an already-initialised storage is a no-op,
+        // so the existing callers that invoke migrate(to:) after open(schema:) are
+        // unaffected.
+        try connection.exec(SQLiteSchema.migrationsTableSQL)
+        for table in schema.tables {
+            try connection.exec(SQLiteSchema.createTable(table))
+            for trigger in SQLiteSchema.appendOnlyTriggers(table) {
+                try connection.exec(trigger)
+            }
+        }
+        for index in schema.indices {
+            try connection.exec(SQLiteSchema.createIndex(index))
+        }
+
         let current = try currentSchemaVersion(kitID: schema.kitID)
         guard current < schema.version else { return }
 
