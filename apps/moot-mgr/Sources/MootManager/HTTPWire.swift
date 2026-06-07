@@ -112,11 +112,17 @@ struct HTTPRequest: Sendable {
 
 // MARK: - HTTPResponse
 
-/// A response the read-API can send: a buffered JSON/status response, a 404,
-/// or the held-open SSE event stream.
+/// A response the read-API can send: a buffered JSON/status response, a static
+/// asset (the read-plane dashboard's HTML/CSS/JS), a 404, or the held-open SSE
+/// event stream.
 enum HTTPResponse: Sendable {
     /// A complete buffered response with a status code and JSON body.
     case json(status: Int, body: Data)
+    /// A 200 static asset (dashboard HTML/CSS/JS) with its own content-type.
+    /// Served read-only on the loopback listener (the dashboard is read-only;
+    /// GUI SPEC §2.1). `Cache-Control: no-store` so a redeployed binary's UI is
+    /// never served stale from a local browser cache.
+    case asset(contentType: String, body: Data)
     /// 404 Not Found.
     case notFound
     /// The SSE live tail — the API holds the connection open and streams.
@@ -130,6 +136,11 @@ enum HTTPResponse: Sendable {
         case let .json(status, body):
             POSIXSocket.sendAll(fd, Self.head(status: status, contentType: "application/json", length: body.count) + body)
             return false
+        case let .asset(contentType, body):
+            // no-store: a loopback dashboard should always pick up a freshly
+            // built binary's UI, never a browser-cached older asset.
+            POSIXSocket.sendAll(fd, Self.head(status: 200, contentType: contentType, length: body.count, cacheControl: "no-store") + body)
+            return false
         case .notFound:
             let body = Data(#"{"error":"not_found"}"#.utf8)
             POSIXSocket.sendAll(fd, Self.head(status: 404, contentType: "application/json", length: body.count) + body)
@@ -140,13 +151,18 @@ enum HTTPResponse: Sendable {
     }
 
     /// Build an HTTP/1.1 response head (status line + standard headers).
-    static func head(status: Int, contentType: String, length: Int) -> Data {
+    ///
+    /// - Parameter cacheControl: An optional `Cache-Control` value. JSON
+    ///   responses omit it (default); static assets pass `no-store` so a local
+    ///   browser never serves a stale UI after the binary is rebuilt.
+    static func head(status: Int, contentType: String, length: Int, cacheControl: String? = nil) -> Data {
         let reason = Self.reason(status)
+        let cacheLine = cacheControl.map { "Cache-Control: \($0)\r\n" } ?? ""
         let head = """
         HTTP/1.1 \(status) \(reason)\r
         Content-Type: \(contentType)\r
         Content-Length: \(length)\r
-        Connection: close\r
+        \(cacheLine)Connection: close\r
         \r
 
         """

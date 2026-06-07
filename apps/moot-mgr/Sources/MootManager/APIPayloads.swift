@@ -88,12 +88,22 @@ public struct EstatePayload: Codable, Sendable, Equatable {
 }
 
 /// Envelope for GET /api/estates.
+///
+/// Two sections: the event-derived rollups (`estates` — every estate the host
+/// has SEEN in the stats stream, including externally self-reporting ones) and
+/// the admin section (`admin` — the estates the host itself PROVISIONS and mounts,
+/// carrying their kind/backend/mount-state, GUI SPEC §4.2). The admin section is
+/// nil on a host with no admin plane wired (the observer-only CLI cut).
 public struct EstatesPayload: Codable, Sendable, Equatable {
-    /// Per-estate rollups, sorted by id for stable output.
+    /// Per-estate event rollups, sorted by id for stable output.
     public let estates: [EstatePayload]
+    /// Admin-hosted estates with their mount-state badges, or nil when the host
+    /// has no admin plane.
+    public let admin: EstateAdminPayload?
 
-    public init(estates: [EstatePayload]) {
+    public init(estates: [EstatePayload], admin: EstateAdminPayload? = nil) {
         self.estates = estates
+        self.admin = admin
     }
 }
 
@@ -155,6 +165,191 @@ public struct ConfigPayload: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: - GraphPayload (GET /api/graph)
+
+/// The Topology node-link snapshot (PoC spec §4.1, GUI SPEC Topology section).
+///
+/// ## What the resident host can actually source
+///
+/// moot-mgr is a PURE OBSERVER (Package.swift): it owns the ObserverSink
+/// `StatsStore` and nothing else. It has NO estate database and NO MCP client,
+/// so the graph STRUCTURE the PoC spec idealises — per-node `NounType` rows and
+/// per-edge tunnel/kgFact/association relations — is NOT reachable from here.
+/// That structure lives in the live estate and is reached over the mootx01 MCP
+/// (`moot_estate_map` / `moot_connection_map`), a path the resident host does
+/// not have.
+///
+/// What the host CAN read is the VizGraph telemetry the SubstrateML analytics
+/// emit through IntellectusLib → ObserverSink when monitoring is on
+/// (`SubstrateML/VizGraphSignals.swift`). Those are **aggregate completion
+/// signals** — per-estate community count, centrality-pass completion, anomaly
+/// z-score, NMF reconstruction error, edge-decay factor — keyed by `estate` in
+/// the metric tags, NOT per-node row_id→score maps. (The per-node centrality
+/// scores are deliberately stored in the estate's own `row_keystone_score`
+/// column per VizGraphSignals.swift, not in the stats store.)
+///
+/// So this payload serves the analytic overlay that IS available (`analytics`,
+/// `communities`) and reports the missing structure honestly: `nodes`/`edges`
+/// are empty, `structurePending` is `true`, and `pending` enumerates the gap.
+/// The A1 honesty pattern (APIPayloads header): a faked node graph in a read
+/// API is worse than an absent one — the Topology view renders an explicit
+/// pending state, never invented nodes.
+///
+/// CONTENT-SAFETY INVARIANT (concepts §1.6): every field here is metadata only
+/// — identifiers, integer enums, float scores, ISO-8601 timestamps. No drawer
+/// text, no KGFact predicates, no rung content (PoC spec §7).
+public struct GraphPayload: Codable, Sendable, Equatable {
+    /// Graph nodes. EMPTY in this cut — node structure requires the live estate
+    /// (see the type doc); the resident host cannot source it, so it is left
+    /// empty rather than fabricated.
+    public let nodes: [GraphNodePayload]
+    /// Graph edges. EMPTY in this cut — same reason as `nodes`.
+    public let edges: [GraphEdgePayload]
+    /// Per-estate community rollups derived from the `community.assignment`
+    /// VizGraph signal (count + brand-derived colour). Available without
+    /// structure because the signal carries the community count per estate.
+    public let communities: [GraphCommunityPayload]
+    /// The VizGraph analytic-signal summary the host could read from the stats
+    /// store — one row per (estate, signal) with the latest value + freshness.
+    public let analytics: [GraphAnalyticPayload]
+    /// True when per-node/per-edge structure is not available from the resident
+    /// host (always true in this cut). The renderer reads this to show the
+    /// honest pending state instead of an empty canvas implying "no graph".
+    public let structurePending: Bool
+    /// Human-readable reasons structure is pending — the enumerated gap the
+    /// Topology view surfaces (never silently empty).
+    public let pending: [String]
+    /// The estate filter echoed back (the `?estate=` query value, or "all" when
+    /// unfiltered). Accepted-but-not-yet-acted-on while structure is pending.
+    public let estate: String
+    /// ISO-8601 UTC timestamp this snapshot was assembled.
+    public let snapshotTs: String
+
+    public init(
+        nodes: [GraphNodePayload],
+        edges: [GraphEdgePayload],
+        communities: [GraphCommunityPayload],
+        analytics: [GraphAnalyticPayload],
+        structurePending: Bool,
+        pending: [String],
+        estate: String,
+        snapshotTs: String
+    ) {
+        self.nodes = nodes
+        self.edges = edges
+        self.communities = communities
+        self.analytics = analytics
+        self.structurePending = structurePending
+        self.pending = pending
+        self.estate = estate
+        self.snapshotTs = snapshotTs
+    }
+}
+
+/// One graph node (PoC spec §4.1). Structural — sourced from the live estate's
+/// `NounType` rows, which the resident host cannot reach (see `GraphPayload`).
+/// The shape is defined so the renderer and the doc agree on the contract for
+/// when estate access lands; the array is empty in this cut.
+public struct GraphNodePayload: Codable, Sendable, Equatable {
+    /// Row identifier (UUID string) — an identifier, never content.
+    public let id: String
+    /// `NounType` ordinal (SubstrateTypes) selecting the node's visual treatment.
+    public let nounType: Int
+    /// Louvain community id this node belongs to (drives cluster colour).
+    public let communityId: Int
+    /// Eigenvalue-centrality score in [0, 1]; scales the rendered radius.
+    public let centrality: Double
+    /// Whether anomaly detection flagged this node as a structural outlier.
+    public let anomaly: Bool
+    /// ISO-8601 UTC timestamp of the node's last activity, or nil.
+    public let lastActiveTs: String?
+
+    public init(
+        id: String, nounType: Int, communityId: Int,
+        centrality: Double, anomaly: Bool, lastActiveTs: String?
+    ) {
+        self.id = id
+        self.nounType = nounType
+        self.communityId = communityId
+        self.centrality = centrality
+        self.anomaly = anomaly
+        self.lastActiveTs = lastActiveTs
+    }
+}
+
+/// One graph edge (PoC spec §4.1). Structural — empty in this cut for the same
+/// reason as `GraphNodePayload`.
+public struct GraphEdgePayload: Codable, Sendable, Equatable {
+    /// Source node id (UUID string).
+    public let source: String
+    /// Target node id (UUID string).
+    public let target: String
+    /// "tunnel" | "kgFact" | "association" | "nmf_bond" (PoC spec §1.2).
+    public let edgeType: String
+    /// Raw edge weight in [0, 1].
+    public let weight: Double
+    /// MatrixDecay-decayed weight in [0, 1] (drives opacity + pull).
+    public let decayedWeight: Double
+
+    public init(source: String, target: String, edgeType: String, weight: Double, decayedWeight: Double) {
+        self.source = source
+        self.target = target
+        self.edgeType = edgeType
+        self.weight = weight
+        self.decayedWeight = decayedWeight
+    }
+}
+
+/// A community rollup derived from the `community.assignment` VizGraph signal.
+/// Available without structure — the signal carries the community count and
+/// node count per estate in its tags / value.
+public struct GraphCommunityPayload: Codable, Sendable, Equatable {
+    /// Synthetic community index (0-based) within its estate. Hashed to a colour
+    /// by the renderer; without per-node assignments these are placeholders for
+    /// the legend's "N communities" readout, not node memberships.
+    public let id: Int
+    /// The estate this community count belongs to.
+    public let estate: String
+    /// Brand-derived colour for the community swatch (orange/blue family).
+    public let color: String
+
+    public init(id: Int, estate: String, color: String) {
+        self.id = id
+        self.estate = estate
+        self.color = color
+    }
+}
+
+/// One VizGraph analytic-signal summary row: the latest value the resident host
+/// read from the stats store for a (estate, signal) pair, plus its freshness.
+///
+/// These ARE serveable from the resident host (the analytic overlay the mission
+/// asks for) because they are aggregate completion metrics tagged by estate.
+public struct GraphAnalyticPayload: Codable, Sendable, Equatable {
+    /// The estate the signal was emitted for.
+    public let estate: String
+    /// Canonical signal name (`VizGraphSignals.*`): "community.assignment",
+    /// "centrality.score", "nmf.factor", "anomaly.flag", "edge.decayed_weight".
+    public let signal: String
+    /// The latest sample value (semantics per VizGraphSignals.swift — e.g.
+    /// community count, completion indicator, reconstruction error, z-score,
+    /// decay factor).
+    public let value: Double
+    /// ISO-8601 UTC timestamp of the latest sample for this (estate, signal).
+    public let ts: String
+    /// Number of samples retained for this (estate, signal) — a freshness/volume
+    /// hint for the overlay.
+    public let sampleCount: Int
+
+    public init(estate: String, signal: String, value: Double, ts: String, sampleCount: Int) {
+        self.estate = estate
+        self.signal = signal
+        self.value = value
+        self.ts = ts
+        self.sampleCount = sampleCount
+    }
+}
+
 // MARK: - ControlResult (POST /api/control/* and UDS responses)
 
 /// Result of a gated control verb. Returned as JSON over both the token+Origin
@@ -168,6 +363,41 @@ public struct ControlResult: Codable, Sendable, Equatable {
     public init(ok: Bool, detail: String) {
         self.ok = ok
         self.detail = detail
+    }
+}
+
+// MARK: - ControlResponse (uniform envelope for applyControl)
+
+/// A pre-encoded control-verb response: the JSON body plus the `ok` flag used to
+/// pick the HTTP status code. The gated control surfaces (`handleControl` over
+/// HTTP, `ControlChannel.serve` over UDS) both call `applyControl` and need ONE
+/// encode path even though different verbs return different result shapes —
+/// `ControlResult` (monitoring/retention) vs `EstateAdminResult` (admin). The
+/// envelope encodes the concrete result once, here, so the call sites stay shape-
+/// agnostic: they read `ok` for the status and write `json` verbatim.
+public struct ControlResponse: Sendable {
+    /// Whether the verb succeeded (drives the HTTP status: 200 vs 400).
+    public let ok: Bool
+    /// The encoded JSON body of the concrete result (sorted-keys, compact).
+    public let json: Data
+
+    /// Wrap a concrete `Encodable` result, encoding it once. A failed encode
+    /// degrades to a minimal `{"ok":false,…}` body so a surface never sends
+    /// empty bytes.
+    public static func of<T: Encodable>(_ result: T) -> ControlResponse {
+        // `ok` is recovered from the encoded JSON so the envelope does not need a
+        // shared protocol across the two result types: both encode an "ok" key.
+        if let data = try? APIJSON.encode(result),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let ok = obj["ok"] as? Bool {
+            return ControlResponse(ok: ok, json: data)
+        }
+        return ControlResponse(ok: false, json: Data(#"{"ok":false,"detail":"encode"}"#.utf8))
+    }
+
+    private init(ok: Bool, json: Data) {
+        self.ok = ok
+        self.json = json
     }
 }
 

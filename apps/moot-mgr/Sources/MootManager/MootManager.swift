@@ -356,6 +356,129 @@ public actor MootManager {
         )
     }
 
+    /// Build the `GET /api/graph` payload: the Topology node-link snapshot.
+    ///
+    /// ## Data sources and the structure gap
+    ///
+    /// moot-mgr is a pure observer — it owns the ObserverSink stats store and
+    /// has no estate DB or MCP client. Graph STRUCTURE (per-node `NounType`
+    /// rows, per-edge tunnel/kgFact/association relations) lives in the live
+    /// estate, reached over the mootx01 MCP (`moot_estate_map` /
+    /// `moot_connection_map`) — a path this host does not have. So `nodes` and
+    /// `edges` are empty and `structurePending` is true, with the gap
+    /// enumerated in `pending`. No nodes/edges are fabricated (A1 honesty
+    /// pattern; PoC spec §4.1 content boundary).
+    ///
+    /// What this host CAN source is the VizGraph telemetry the SubstrateML
+    /// analytics emit through IntellectusLib → ObserverSink when monitoring is
+    /// on (`VizGraphSignals`). Those metric samples are aggregate completion
+    /// signals tagged by `estate`; this builder reads them from the stats store,
+    /// keeps the latest sample per (estate, signal), and projects them as the
+    /// analytic overlay (`analytics`) plus a per-estate community rollup
+    /// (`communities`) derived from `community.assignment`.
+    ///
+    /// - Parameters:
+    ///   - now: Current time, stamped as the snapshot timestamp (caller owns the
+    ///     clock — determinism applies to engines, not this projection).
+    ///   - estate: Optional estate filter (the `?estate=` query value). Echoed
+    ///     back; sampling/scoping is a no-op while structure is pending.
+    /// - Returns: A `GraphPayload`.
+    /// - Throws: `StorageError` / `ManagerError.notStarted`.
+    public func graphPayload(now: Date, estate: String? = nil) async throws -> GraphPayload {
+        let store = try requireStore()
+
+        // The canonical VizGraph signal names (SubstrateML/VizGraphSignals.swift).
+        // Kept inline (not imported from SubstrateML) so moot-mgr does not take a
+        // dependency on the analytics layer just to recognise its metric names —
+        // these strings are the wire contract between emitter and reader.
+        let vizSignals: Set<String> = [
+            "community.assignment", "centrality.score", "nmf.factor",
+            "anomaly.flag", "edge.decayed_weight",
+        ]
+
+        // Read all metric samples and keep only the VizGraph telemetry. Phase-1
+        // retention bounds the store, so a full scan + in-process filter is fine
+        // (same approach as status()/serverPayload()).
+        let metrics = try await store.queryMetrics(dropboxID: nil)
+        let vizMetrics = metrics.filter { vizSignals.contains($0.name) }
+
+        // Group by (estate, signal). Estate is a metric tag (VizGraphSignals);
+        // samples missing it are bucketed under "unknown" rather than dropped.
+        struct Key: Hashable { let estate: String; let signal: String }
+        var latest: [Key: MetricRow] = [:]
+        var counts: [Key: Int] = [:]
+        for m in vizMetrics {
+            // Honour the optional estate filter against the sample's estate tag.
+            let est = m.tags["estate"] ?? "unknown"
+            if let estate, !estate.isEmpty, estate != "all", est != estate { continue }
+            let key = Key(estate: est, signal: m.name)
+            counts[key, default: 0] += 1
+            if let prev = latest[key] {
+                if m.ts > prev.ts { latest[key] = m }
+            } else {
+                latest[key] = m
+            }
+        }
+
+        // Analytic overlay rows, sorted (estate, signal) for byte-stable output.
+        let analytics = latest.keys
+            .sorted { $0.estate != $1.estate ? $0.estate < $1.estate : $0.signal < $1.signal }
+            .map { key -> GraphAnalyticPayload in
+                let row = latest[key]!
+                return GraphAnalyticPayload(
+                    estate: key.estate,
+                    signal: key.signal,
+                    value: row.value,
+                    ts: Self.iso8601String(from: row.ts),
+                    sampleCount: counts[key] ?? 0
+                )
+            }
+
+        // Per-estate community rollup from the `community.assignment` signal,
+        // whose value is the number of communities discovered for that estate
+        // (VizGraphSignals.swift). One swatch per community, brand-derived colour.
+        var communities: [GraphCommunityPayload] = []
+        for key in latest.keys.sorted(by: { $0.estate < $1.estate })
+            where key.signal == "community.assignment" {
+            let communityCount = max(0, Int(latest[key]!.value.rounded()))
+            for i in 0..<communityCount {
+                communities.append(GraphCommunityPayload(
+                    id: i, estate: key.estate, color: Self.communityColor(i)
+                ))
+            }
+        }
+
+        // The structure gap, enumerated honestly (A1 pattern). Always pending in
+        // this cut — the resident host cannot reach the estate graph.
+        let pending = [
+            "nodes: per-node NounType rows require the live estate (mootx01 MCP moot_estate_map) — not reachable from the resident observer host",
+            "edges: tunnel/kgFact/association relations require the live estate (mootx01 MCP moot_connection_map) — not reachable from the resident observer host",
+            "per-node centrality / community / anomaly: stored in the estate's row_keystone_score column, not in the observer stats store (VizGraphSignals.swift)",
+        ]
+
+        return GraphPayload(
+            nodes: [],
+            edges: [],
+            communities: communities,
+            analytics: analytics,
+            structurePending: true,
+            pending: pending,
+            estate: (estate?.isEmpty == false ? estate! : "all"),
+            snapshotTs: Self.iso8601String(from: now)
+        )
+    }
+
+    /// A brand-derived community colour for swatch index `i` (orange/blue family
+    /// with desaturated mid-range fills, PoC spec §3.1). Deterministic by index
+    /// so the legend is stable across snapshots; cycles for large community sets.
+    static func communityColor(_ i: Int) -> String {
+        let palette = [
+            "#ff8c00", "#3ab4ff", "#ffb74d", "#64c8ff",
+            "#b478ff", "#00d28c", "#ff5078", "#ffc83c",
+        ]
+        return palette[i % palette.count]
+    }
+
     /// Project an `EventRow` to its metadata-only wire payload.
     /// Centralised so the SSE path and the snapshot path emit identical shapes.
     static func projectEvent(_ e: EventRow) -> EventPayload {

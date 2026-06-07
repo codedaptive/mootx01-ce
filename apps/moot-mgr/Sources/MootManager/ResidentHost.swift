@@ -34,17 +34,24 @@ public struct ResidentHostConfig: Sendable {
     public let controlToken: String
     /// Filesystem path for the gated control UDS (created at 0600).
     public let controlSocketPath: String
+    /// Directory under which the admin plane creates SQLite-backed estate stores
+    /// (one file per estate). The admin engine (`EstateAdmin`) provisions real
+    /// MOOTs here through GLK. Defaults beside the stats store
+    /// (<store-dir>/estates). InMemory estates do not touch it.
+    public let estatesDirectory: URL
 
     public init(
         manager: ManagerConfig,
         httpPort: UInt16,
         controlToken: String,
-        controlSocketPath: String
+        controlSocketPath: String,
+        estatesDirectory: URL
     ) {
         self.manager = manager
         self.httpPort = httpPort
         self.controlToken = controlToken
         self.controlSocketPath = controlSocketPath
+        self.estatesDirectory = estatesDirectory
     }
 
     // MARK: - Environment variable names / defaults
@@ -55,6 +62,8 @@ public struct ResidentHostConfig: Sendable {
     public static let controlTokenEnvKey = "MOOT_MGR_CONTROL_TOKEN"
     /// Env var overriding the UDS control-socket path.
     public static let controlSocketEnvKey = "MOOT_MGR_CONTROL_SOCKET"
+    /// Env var overriding the admin-plane estates directory.
+    public static let estatesDirEnvKey = "MOOT_MGR_ESTATES_DIR"
 
     /// Default loopback HTTP port for the read-API.
     public static let defaultHTTPPort: UInt16 = 7077
@@ -78,11 +87,17 @@ public struct ResidentHostConfig: Sendable {
         let socket = environment[controlSocketEnvKey]
             ?? manager.storeURL.deletingLastPathComponent()
                 .appendingPathComponent("control.sock", isDirectory: false).path
+        // Admin estates default to a sibling "estates" directory of the stats
+        // store, so a fresh install provisions estates beside the manager's data.
+        let estatesDir = environment[estatesDirEnvKey].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? manager.storeURL.deletingLastPathComponent()
+                .appendingPathComponent("estates", isDirectory: true)
         return ResidentHostConfig(
             manager: manager,
             httpPort: port,
             controlToken: token,
-            controlSocketPath: socket
+            controlSocketPath: socket,
+            estatesDirectory: estatesDir
         )
     }
 }
@@ -94,6 +109,7 @@ public actor ResidentHost {
 
     private let config: ResidentHostConfig
     private let manager: MootManager
+    private let admin: EstateAdmin
     private var httpAPI: HTTPReadAPI?
     private var control: ControlChannel?
     private var retentionTask: Task<Void, Never>?
@@ -115,6 +131,7 @@ public actor ResidentHost {
     ) {
         self.config = config
         self.manager = MootManager(config: config.manager)
+        self.admin = EstateAdmin(estatesDirectory: config.estatesDirectory)
         self.startInstant = startInstant
         self.clock = clock
     }
@@ -133,7 +150,8 @@ public actor ResidentHost {
             port: config.httpPort,
             controlToken: config.controlToken,
             startInstant: startInstant,
-            clock: clock
+            clock: clock,
+            admin: admin
         )
         try await api.start()
         self.httpAPI = api
@@ -168,6 +186,12 @@ public actor ResidentHost {
     /// The owned manager, for in-process consumers/tests. `nonisolated` because
     /// `manager` is an immutable `let` (an actor reference is `Sendable`).
     public nonisolated func managerHandle() -> MootManager { manager }
+
+    /// The owned admin engine, for in-process consumers/tests. `nonisolated`
+    /// because `admin` is an immutable `let` (an actor reference is `Sendable`).
+    /// Production callers reach admin verbs only through the gated control
+    /// surface; this handle is for the in-process read reflection and tests.
+    public nonisolated func adminHandle() -> EstateAdmin { admin }
 
     // MARK: - Retention loop
 

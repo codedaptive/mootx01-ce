@@ -36,6 +36,17 @@
 //   recorded as MUST_UPDATE items in MOOT_MGR_001_BLAST_RADIUS.md, citing
 //   MANAGER_1.0_PLAN.md §1/§4. No external (third-party) Swift dependencies.
 //
+//   GeniusLocusKit + PersistenceKitInMemory added by cp-mootmgr-admin (P6 admin
+//   plane): the resident host converges with the serve core to HOST and PROVISION
+//   estates (MANAGER_1.0_PLAN.md §1, §4 P6). The admin plane invokes GLK's
+//   provision / quiesce / drain / destroy / mountState surface (EstateProvision.swift
+//   / EstateLifecycle.swift) to create and tear down real MOOTs through the
+//   substrate — never a side-door DB file (concepts §1.8). InMemory is added so
+//   the admin plane can provision volatile estates (GUI SPEC §4.2 flags InMemory
+//   loudly). Recorded as MUST_UPDATE items in cp-mootmgr-admin_BLAST_RADIUS.md.
+//   Layering: moot-mgr is a top-level APP depending on a KIT (downstream→upstream)
+//   — no inversion. No external (third-party) Swift dependencies are introduced.
+//
 // Platform floor: macOS 26 / iOS 26 (Tahoe) — matches the project-wide
 // AI-capable OS floor and the ObserverSink/IntellectusLib/PersistenceKit floors.
 // The package also builds on Linux Swift (no Apple-only API in the core).
@@ -61,8 +72,13 @@ let package = Package(
         .package(name: "IntellectusLib", path: "../../packages/libs/IntellectusLib"),
         // PersistenceKit: Storage protocol, StorageIntrospection, StorageStats.
         // PersistenceKitSQLite: the SQLite backend behind the store (SQLite default,
-        // MANAGER_1.0_PLAN.md §5 item 2).
+        // MANAGER_1.0_PLAN.md §5 item 2). PersistenceKitInMemory: volatile backend
+        // for admin-plane InMemory estates (cp-mootmgr-admin).
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
+        // GeniusLocusKit: the composition layer the admin plane drives to provision
+        // and tear down estates (provision/quiesce/drain/destroy/mountState).
+        // cp-mootmgr-admin, MANAGER_1.0_PLAN.md §4 P6.
+        .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
     ],
     targets: [
         .target(
@@ -72,8 +88,16 @@ let package = Package(
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
             ],
-            path: "Sources/MootManager"
+            path: "Sources/MootManager",
+            // DashboardAssets/ holds the EDITABLE source of the read-plane web UI
+            // (index.html, app.css, app.js) plus the generator that embeds them
+            // into StaticAssets.swift. The served copy is the generated Swift
+            // constant, so the asset files themselves are excluded from the build
+            // (they are not Swift sources and must not be bundled as resources).
+            exclude: ["DashboardAssets"]
         ),
         .executableTarget(
             name: "moot-mgr",
@@ -90,6 +114,8 @@ let package = Package(
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
             ],
             path: "Tests/MootManagerTests"
         ),

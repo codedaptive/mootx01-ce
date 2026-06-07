@@ -31,6 +31,11 @@ private func makeTempSocketPath() -> String {
     "/tmp/mmc-\(UUID().uuidString.prefix(8)).sock"
 }
 
+private func makeTempEstatesDir() -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("moot-mgr-estates-\(UUID().uuidString)", isDirectory: true)
+}
+
 private let testToken = "0123456789abcdef0123456789abcdef"
 
 /// Start a host and return it plus the control socket path.
@@ -39,7 +44,8 @@ private func makeStartedHost(socketPath: String) async throws -> ResidentHost {
         manager: ManagerConfig(storeURL: makeTempStoreURL(), retentionWindow: 7200),
         httpPort: 0,
         controlToken: testToken,
-        controlSocketPath: socketPath
+        controlSocketPath: socketPath,
+        estatesDirectory: makeTempEstatesDir()
     )
     let host = ResidentHost(config: cfg)
     try await host.start()
