@@ -56,7 +56,9 @@ impl AnomalyPrimitive {
             }
             let current = f32_from_u64_signed(rng.next(), 100.0);
 
-            let z = AnomalyDetection::rolling_z_score(&window, current);
+            // estate="" + ts=0.0: telemetry off — harness is a conformance
+            // oracle and must not emit VizGraph signals, only compute and compare.
+            let z = AnomalyDetection::rolling_z_score(&window, current, "", 0.0);
 
             let window_arr: Vec<JsonValue> = window.iter()
                 .map(|v| JsonValue::String(f32_hex(*v))).collect();
@@ -141,7 +143,8 @@ fn validate_case(c: &VectorCase, encoder: &mut CanonicalBinaryEncoder) -> CaseRe
             diagnostic: Some("missing current".into()) },
     };
 
-    let actual = AnomalyDetection::rolling_z_score(&window, current);
+    // estate="" + ts=0.0: telemetry off — harness must not emit signals.
+    let actual = AnomalyDetection::rolling_z_score(&window, current, "", 0.0);
 
     let expected = match c.expected_output.get("z_score") {
         Some(JsonValue::String(s)) => match parse_f32_hex(s) {

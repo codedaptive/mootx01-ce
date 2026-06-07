@@ -39,32 +39,35 @@ struct LatticeDistanceTests {
         #expect(UDCTreeDistance.distance("004.42", "004.42") == 0.0)
     }
 
-    @Test("shared-prefix UDC codes: 004.42 vs 004.5 = 3/11")
+    @Test("shared-prefix UDC codes: 004.42 vs 004.5 = 3/6")
     func udcSharedPrefix() {
         // lcp = "004.", len 4. len(a)=6, len(b)=5.
-        // raw = (6-4)+(5-4) = 3. divisor = 6+5 = 11. d = 3/11.
+        // raw = (6-4)+(5-4) = 3. divisor = max(6,5) = 6. d = 3/6 = 0.5.
         let d = UDCTreeDistance.distance("004.42", "004.5")
-        #expect(abs(d - 3.0 / 11.0) < tol)
+        #expect(abs(d - 3.0 / 6.0) < tol)
     }
 
-    @Test("no common prefix: 004 vs 37 = 1.0")
+    @Test("no common prefix: 004 vs 37 = 5/3")
     func udcNoCommonPrefix() {
-        // lcp = "", raw = 3 + 2 = 5, divisor = 3+2 = 5, d = 1.0.
-        // Maximum distance: no shared prefix between two fully-disjoint codes.
+        // lcp = "", raw = 3 + 2 = 5, divisor = max(3,2) = 3. d = 5/3.
+        // The glref oracle uses max(len_a, len_b) as divisor, which can
+        // exceed 1.0 when strings have no common prefix and differ in length.
+        // This matches the canonical lattice.json vectors (cookbook § 8.3).
         let d = UDCTreeDistance.distance("004", "37")
-        #expect(abs(d - 1.0) < tol)
+        #expect(abs(d - 5.0 / 3.0) < tol)
     }
 
-    @Test("UDC distance is bounded to [0, 1] for all fixture inputs")
+    @Test("UDC distance is bounded to [0, 1] for pairs with shared prefix")
     func udcBoundedUnit() {
+        // Pairs where d ∈ [0.0, 1.0] (shared prefix keeps raw ≤ max_len).
+        // Note: pairs with no common prefix and len_a ≠ len_b can produce
+        // d > 1.0 per the glref formula — those are excluded from this check.
         let pairs: [(String, String)] = [
-            ("004.42", "004.5"),
-            ("004", "37"),
-            ("", "004"),
-            ("004.42", ""),
-            ("004", "004.42"),
-            ("1", "99999.99999"),
-            ("004.42", "004.42"),
+            ("004.42", "004.5"),  // d = 0.5
+            ("", "004"),          // max=3, raw=3, d=1.0
+            ("004.42", ""),       // max=6, raw=6, d=1.0
+            ("004", "004.42"),    // lcp="004", raw=0+3=3, max=6, d=0.5
+            ("004.42", "004.42"), // identical → 0.0
         ]
         for (a, b) in pairs {
             let d = UDCTreeDistance.distance(a, b)

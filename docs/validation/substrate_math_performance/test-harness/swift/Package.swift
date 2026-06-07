@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // Swift package for the GeniusLocus reference test harness.
 //
@@ -24,7 +24,10 @@ import PackageDescription
 
 let package = Package(
     name: "GeniusLocusTestHarness",
-    platforms: [.macOS(.v14)],
+    // macOS 26 required by SubstrateML and its transitive deps (SubstrateTypes,
+    // SubstrateKernel, IntellectusLib). Bumped from v14 when SubstrateML was
+    // added to validate association_rule_mining and formal_concept_analysis vectors.
+    platforms: [.macOS(.v26)],
     products: [
         .executable(name: "gen-vectors",      targets: ["GenVectors"]),
         .executable(name: "validate-vectors", targets: ["ValidateVectors"]),
@@ -32,6 +35,13 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../../GeniusLocusReference"),
+        // SubstrateML wired in so the Swift harness can validate
+        // association_rule_mining and formal_concept_analysis vectors using
+        // the production Swift implementations, matching the Rust harness.
+        // SubstrateTypes, SubstrateKernel, and IntellectusLib are brought
+        // in transitively by SubstrateML.
+        // Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        .package(path: "../../../../../packages/libs/SubstrateML"),
     ],
     targets: [
         .executableTarget(
@@ -39,6 +49,7 @@ let package = Package(
             dependencies: [
                 "Harness",
                 .product(name: "GeniusLocusReference", package: "GeniusLocusReference"),
+                .product(name: "SubstrateML", package: "SubstrateML"),
             ]
         ),
         .executableTarget(
@@ -46,12 +57,14 @@ let package = Package(
             dependencies: [
                 "Harness",
                 .product(name: "GeniusLocusReference", package: "GeniusLocusReference"),
+                .product(name: "SubstrateML", package: "SubstrateML"),
             ]
         ),
         .target(
             name: "Harness",
             dependencies: [
                 .product(name: "GeniusLocusReference", package: "GeniusLocusReference"),
+                .product(name: "SubstrateML", package: "SubstrateML"),
             ]
         ),
         .testTarget(

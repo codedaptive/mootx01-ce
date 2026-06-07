@@ -85,7 +85,8 @@ impl MatrixDecayPrimitive {
                 }
             }
 
-            decay::apply(&mut matrix, now_seconds);
+            // estate="" + ts=0.0: telemetry off — harness must not emit VizGraph signals.
+            decay::apply(&mut matrix, now_seconds, "", 0.0);
 
             let initial_arr: Vec<JsonValue> = initial_values.iter()
                 .map(|v| JsonValue::String(f64_hex(*v))).collect();
@@ -198,7 +199,8 @@ fn validate_case(c: &VectorCase, encoder: &mut CanonicalBinaryEncoder) -> CaseRe
             matrix.set(r, col, initial_values[r * cols + col]);
         }
     }
-    decay::apply(&mut matrix, now_seconds);
+    // estate="" + ts=0.0: telemetry off — harness must not emit VizGraph signals.
+    decay::apply(&mut matrix, now_seconds, "", 0.0);
 
     let expected_last_decay = match c.expected_output.get("final_last_decay_time_seconds") {
         Some(JsonValue::Integer(n)) => *n,

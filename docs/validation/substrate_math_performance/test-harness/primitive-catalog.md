@@ -10,11 +10,11 @@ registries in:
 - Swift: `test-harness/swift/Sources/Harness/Primitives/PrimitiveRegistry.swift`
 - Rust: `test-harness/rust/src/primitives/registry.rs`
 
-Last updated: 2026-05-29 (file paths reconciled to post-Phase 6 layout: SubstrateTypes / SubstrateKernel / SubstrateML).
+Last updated: 2026-06-06 (added association_rule_mining and formal_concept_analysis; fixed lattice divisor to max(lenA,lenB) per glref oracle).
 
 ## Conformance state
 
-All 24 primitives below pass the four-way cross-language
+All 26 primitives below pass the four-way cross-language
 conformance gate:
 
 | Vector file generated in | Validated by Swift | Validated by Rust |
@@ -66,6 +66,12 @@ both languages for every primitive.
 | `nmf` | `0x300bf633` | §6.9 | `SubstrateML/Sources/SubstrateML/NMFAlternatingLeastSquares.swift` | `SubstrateML/rust/src/nmf.rs` |
 | `eigenvalue_centrality` | `0x1a9039ea` | §7.2 | `SubstrateML/Sources/SubstrateML/EigenvalueCentrality.swift` | `SubstrateML/rust/src/eigenvalue_centrality.rs` |
 | `audit_log_fold` | `0xa747722e` | §5.3+§8.15 | `SubstrateLib/Sources/SubstrateLib/AuditLogFold.swift` | `SubstrateLib/rust/glref-rust-audit_log_fold.rs` |
+| `association_rule_mining` | `0xdd61f0d0` | §6.3 | `SubstrateML/Sources/SubstrateML/AssociationRuleMining.swift` | `SubstrateML/rust/src/association_rule_mining.rs` |
+| `formal_concept_analysis` | `0xfeb1a9e9` | §8 (pure engine) | `SubstrateML/Sources/SubstrateML/FormalConceptAnalysis.swift` | `SubstrateML/rust/src/formal_concept_analysis.rs` |
+
+Note: `association_rule_mining` and `formal_concept_analysis` use hand-crafted
+vectors (Rust generator, not RNG-seeded). The Swift harness validates them
+using the production SubstrateML implementations; generate() throws for both.
 
 ## Harness sources
 

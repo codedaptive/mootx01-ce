@@ -41,26 +41,26 @@ impl UDCTreeDistance {
         i
     }
 
-    /// UDC tree distance normalized to [0, 1].
+    /// UDC tree distance per glref oracle (cookbook § 8.3).
     ///
-    /// Formula: raw = (len_a - lcp) + (len_b - lcp), divisor = len_a + len_b.
-    /// Proof of [0,1] bound: raw_max = len_a + len_b when lcp = 0, so
-    /// raw / divisor ≤ 1.0 always. Both-empty is handled by equality
-    /// check above; non-empty vs empty yields len_a + len_b > 0.
+    /// Formula: raw = (len_a - lcp) + (len_b - lcp), divisor = max(len_a, len_b).
+    /// Guard: both-empty strings are equal (caught by the identity check);
+    /// when max_len = 0, return 0.0.
     pub fn distance(a: &str, b: &str) -> f64 {
         if a == b {
             return 0.0;
         }
         let len_a = a.chars().count();
         let len_b = b.chars().count();
-        // Guard: both-empty are equal (caught above); at least one non-empty
-        // means len_a + len_b > 0.
-        if len_a + len_b == 0 {
+        let max_len = len_a.max(len_b);
+        // Guard: both-empty are equal and caught above; a non-empty vs
+        // empty pair yields max_len > 0. Explicit guard to match glref.
+        if max_len == 0 {
             return 0.0;
         }
         let lcp = Self::longest_common_prefix_length(a, b);
         let raw = ((len_a - lcp) + (len_b - lcp)) as f64;
-        raw / (len_a + len_b) as f64
+        raw / max_len as f64
     }
 }
 
@@ -197,30 +197,32 @@ mod tests {
     #[test]
     fn udc_shared_prefix() {
         // "004.42" vs "004.5": lcp = "004.", len 4. len(a)=6, len(b)=5.
-        // raw = (6-4) + (5-4) = 3. divisor = 6+5 = 11. d = 3/11.
+        // raw = (6-4) + (5-4) = 3. divisor = max(6,5) = 6. d = 3/6 = 0.5.
         let d = UDCTreeDistance::distance("004.42", "004.5");
-        assert!((d - 3.0 / 11.0).abs() < 1e-9);
+        assert!((d - 3.0 / 6.0).abs() < 1e-9);
     }
 
     #[test]
     fn udc_no_common_prefix() {
-        // "004" vs "37": lcp = "", raw = 3 + 2 = 5, divisor = 3+2 = 5.
-        // d = 5/5 = 1.0 (maximum distance, no shared prefix).
+        // "004" vs "37": lcp = "", raw = 3 + 2 = 5, divisor = max(3,2) = 3.
+        // d = 5/3 ≈ 1.667. The glref oracle uses max(len_a, len_b) as divisor
+        // which can exceed 1.0 when strings have no common prefix and differ
+        // in length. This matches the canonical lattice.json vectors.
         let d = UDCTreeDistance::distance("004", "37");
-        assert!((d - 1.0).abs() < 1e-9);
+        assert!((d - 5.0 / 3.0).abs() < 1e-9);
     }
 
     #[test]
     fn udc_bounded_unit() {
-        // Every fixture output must be in [0.0, 1.0].
+        // Pairs where d ∈ [0.0, 1.0] (shared prefix keeps raw ≤ max_len).
+        // Note: pairs with no common prefix and len_a ≠ len_b can exceed 1.0
+        // per the glref formula — those are excluded from this bounded check.
         let pairs: &[(&str, &str)] = &[
-            ("004.42", "004.5"),
-            ("004", "37"),
-            ("", "004"),
-            ("004.42", ""),
-            ("004", "004.42"),
-            ("1", "99999.99999"),
-            ("004.42", "004.42"),
+            ("004.42", "004.5"),  // d = 0.5
+            ("", "004"),          // max=3, raw=3, d=1.0
+            ("004.42", ""),       // max=6, raw=6, d=1.0
+            ("004", "004.42"),    // lcp="004", raw=0+3=3, max=6, d=0.5
+            ("004.42", "004.42"), // identical → 0.0
         ];
         for &(a, b) in pairs {
             let d = UDCTreeDistance::distance(a, b);

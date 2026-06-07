@@ -104,9 +104,12 @@ fn measure_anomaly(rng: &mut SplitMix64, warmup: Duration, measure: Duration) ->
     for &n in &[100usize, 1_000, 10_000, 100_000] {
         let window: Vec<f32> = (0..n).map(|_| rand_f32_01(rng)).collect();
         let current = rand_f32_01(rng);
-        let t = time_loop(warmup, measure, || { let _ = AnomalyDetection::rolling_z_score(&window, current); });
+        // estate="" + ts=0 = telemetry off (no ObserverSink emit), so the
+        // bench times pure compute. Swift's port defaults these; Rust has no
+        // default args, so they are passed explicitly.
+        let t = time_loop(warmup, measure, || { let _ = AnomalyDetection::rolling_z_score(&window, current, "", 0.0); });
         out.push(make("anomaly_z_score", format!("n={}", n), t));
-        let t = time_loop(warmup, measure, || { let _ = AnomalyDetection::rolling_modified_z_score(&window, current); });
+        let t = time_loop(warmup, measure, || { let _ = AnomalyDetection::rolling_modified_z_score(&window, current, "", 0.0); });
         out.push(make("anomaly_modified_z_score", format!("n={}", n), t));
     }
     out
@@ -149,7 +152,8 @@ fn measure_community_detection(rng: &mut SplitMix64, warmup: Duration, measure: 
     let mut out = Vec::new();
     for &n in &[50usize, 200, 1_000] {
         let adjacency = build_adjacency(rng, n);
-        let t = time_loop(warmup, measure, || { let _ = CommunityDetection::detect(&adjacency, 10); });
+        // estate="" + ts=0.0: telemetry off — bench times pure compute.
+        let t = time_loop(warmup, measure, || { let _ = CommunityDetection::detect(&adjacency, 10, "", 0.0); });
         out.push(make("community_detection", format!("n={}", n), t));
     }
     out
@@ -166,7 +170,8 @@ fn measure_eigenvalue_centrality(rng: &mut SplitMix64, warmup: Duration, measure
     let mut out = Vec::new();
     for &n in &[50usize, 200, 1_000] {
         let adjacency = build_adjacency(rng, n);
-        let t = time_loop(warmup, measure, || { let _ = EigenvalueCentrality::compute(&adjacency, 100, 1e-6); });
+        // estate="" + ts=0 = telemetry off; bench times pure compute.
+        let t = time_loop(warmup, measure, || { let _ = EigenvalueCentrality::compute(&adjacency, 100, 1e-6, "", 0.0); });
         out.push(make("eigenvalue_centrality", format!("n={}", n), t));
     }
     out
@@ -304,7 +309,8 @@ fn measure_nmf(_rng: &mut SplitMix64, warmup: Duration, measure: Duration) -> Ve
             if rank >= m.min(n) { continue; }
             let mut rng = SplitMix64::new(DEFAULT_SEED ^ ((m * 1000 + n * 10 + rank) as u64));
             let v: Vec<Vec<f32>> = (0..m).map(|_| (0..n).map(|_| rand_f32_01(&mut rng)).collect()).collect();
-            let t = time_loop(warmup, measure, || { let _ = NMFAlternatingLeastSquares::factorize(&v, rank, 25, 1e-4, DEFAULT_SEED); });
+            // estate="" + ts=0 = telemetry off; bench times pure compute.
+            let t = time_loop(warmup, measure, || { let _ = NMFAlternatingLeastSquares::factorize(&v, rank, 25, 1e-4, DEFAULT_SEED, "", 0.0); });
             out.push(make("nmf_factorize", format!("m={},n={},rank={}", m, n, rank), t));
         }
     }
