@@ -125,8 +125,8 @@ public actor ControlChannel {
             return (line.trimmingCharacters(in: .whitespacesAndNewlines), Data())
         }()
 
-        let result = await api.applyControl(path: path, body: body)
-        var out = (try? APIJSON.encode(result)) ?? Data(#"{"ok":false,"detail":"encode"}"#.utf8)
+        let response = await api.applyControl(path: path, body: body)
+        var out = response.json
         out.append(Data("\n".utf8))
         POSIXSocket.sendAll(fd, out)
     }

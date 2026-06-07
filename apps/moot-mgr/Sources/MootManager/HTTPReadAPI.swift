@@ -62,6 +62,14 @@ public actor HTTPReadAPI {
     /// The manager the API reads from and dispatches control verbs to.
     private let manager: MootManager
 
+    /// The admin engine that provisions and tears down estates. Optional: a host
+    /// configured without an admin plane (the pure-observer CLI cut) leaves this
+    /// nil, and the admin verbs then report "admin plane not available" rather
+    /// than 404 — the gate still applies, there is simply nothing to drive. When
+    /// present, the admin verbs in `applyControl` route to it. Reached ONLY after
+    /// the gate (see the SECURITY BOUNDARY block) — admin is a privileged write.
+    private let admin: EstateAdmin?
+
     /// The TCP port requested on 127.0.0.1 (0 = OS-assigned).
     private let requestedPort: UInt16
 
@@ -99,18 +107,24 @@ public actor HTTPReadAPI {
     ///                   (treated as "no credential" — see `isAuthorized`).
     ///   - startInstant: The host start time (for uptime).
     ///   - clock:        Injected clock for snapshot timestamps.
+    ///   - admin:        The admin engine for estate provisioning/lifecycle. nil
+    ///                   for a read-only/observer host (admin verbs then report
+    ///                   "not available"). Defaulted so existing call sites are
+    ///                   unchanged.
     public init(
         manager: MootManager,
         port: UInt16,
         controlToken: String,
         startInstant: Date,
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        admin: EstateAdmin? = nil
     ) {
         self.manager = manager
         self.requestedPort = port
         self.controlToken = controlToken
         self.startInstant = startInstant
         self.clock = clock
+        self.admin = admin
     }
 
     // MARK: - Lifecycle
@@ -189,9 +203,25 @@ public actor HTTPReadAPI {
                 uptimeSeconds: max(0, Int(self.clock().timeIntervalSince(self.startInstant)))
             ) }
         case ("GET", "/api/estates"):
-            return await jsonResponse { try await self.manager.estatesPayload() }
+            // Merge the admin section (host-provisioned estates + mount state)
+            // into the event-derived rollups. Read-only projection — the admin
+            // engine's mutating verbs live on the gated control surface, never
+            // here (GUI SPEC §4.2: the Estates view reads mount state, dispatches
+            // lifecycle over the control channel).
+            return await jsonResponse {
+                let base = try await self.manager.estatesPayload()
+                let adminSection = await self.admin?.payload()
+                return EstatesPayload(estates: base.estates, admin: adminSection)
+            }
         case ("GET", "/api/config"):
             return await jsonResponse { try await self.manager.configPayload() }
+        case ("GET", "/api/graph"):
+            // Topology snapshot. The optional ?estate= filter is parsed and
+            // forwarded; structure is pending (the resident host has no estate
+            // access — see MootManager.graphPayload), so the host serves the
+            // available VizGraph analytic overlay and marks nodes/edges pending.
+            let estate = Self.queryValue("estate", in: request.query)
+            return await jsonResponse { try await self.manager.graphPayload(now: self.clock(), estate: estate) }
         case ("GET", "/api/events"):
             // SSE live-tail when requested (Accept: text/event-stream or
             // ?stream=1); otherwise a one-shot JSON snapshot.
@@ -199,6 +229,16 @@ public actor HTTPReadAPI {
             return await jsonResponse { try await self.manager.eventsPayload() }
         case ("POST", let path) where path.hasPrefix("/api/control/"):
             return await handleControl(request)
+        case ("GET", let path):
+            // The read-plane web dashboard (P4): a GET that is not an /api/*
+            // route is matched against the fixed static-asset allow-list. The
+            // allow-list (StaticAssets.asset) maps only "/", "/index.html",
+            // "/app.css", "/app.js" — there is no directory mapping, so an
+            // arbitrary path cannot traverse the filesystem. Anything off the
+            // list is 404. Static serving rides the same loopback-only listener
+            // and is read-only (GUI SPEC §2.1).
+            guard let asset = StaticAssets.asset(for: path) else { return .notFound }
+            return .asset(contentType: asset.contentType, body: Data(asset.body.utf8))
         default:
             return .notFound
         }
@@ -232,37 +272,114 @@ public actor HTTPReadAPI {
             return .json(status: 401, body: Data(#"{"error":"unauthorized"}"#.utf8))
         }
         // 3. Apply the verb.
-        let result = await applyControl(path: request.path, body: request.body)
-        return .json(status: result.ok ? 200 : 400, body: (try? APIJSON.encode(result)) ?? Data())
+        let response = await applyControl(path: request.path, body: request.body)
+        return .json(status: response.ok ? 200 : 400, body: response.json)
     }
 
     /// Apply a control verb identified by the request path. Shared by the HTTP
-    /// control surface and (via `ControlChannel`) the UDS surface.
+    /// control surface and (via `ControlChannel`) the UDS surface, so both gated
+    /// surfaces have identical semantics.
+    ///
+    /// Read/retention verbs (monitoring/retention) return a `ControlResult`.
+    /// Admin verbs (estate provision/lifecycle) return a richer
+    /// `EstateAdminResult` (estate UUID + mount state). Both are surfaced through
+    /// the `ControlResponse` envelope so a single encode path serves both
+    /// surfaces; callers read `response.ok` for the status code and encode
+    /// `response.json` verbatim.
     ///
     /// Verbs:
-    ///   POST /api/control/monitoring/on   → enable monitoring
-    ///   POST /api/control/monitoring/off  → disable monitoring
-    ///   POST /api/control/retention       → set retention; body {"seconds":N}
-    func applyControl(path: String, body: Data) async -> ControlResult {
+    ///   POST /api/control/monitoring/on       → enable monitoring
+    ///   POST /api/control/monitoring/off      → disable monitoring
+    ///   POST /api/control/retention           → set retention; body {"seconds":N}
+    ///   POST /api/control/estate/provision    → provision a new estate (body: EstateAdminRequest)
+    ///   POST /api/control/estate/quiesce      → quiesce  (body: EstateLifecycleRequest)
+    ///   POST /api/control/estate/drain        → drain    (body: EstateLifecycleRequest)
+    ///   POST /api/control/estate/destroy      → destroy  (body: EstateLifecycleRequest, confirmName required)
+    func applyControl(path: String, body: Data) async -> ControlResponse {
         switch path {
         case "/api/control/monitoring/on":
-            do { try await manager.setMonitoring(true); return ControlResult(ok: true, detail: "monitoring: ON") }
-            catch { return ControlResult(ok: false, detail: "error") }
+            do { try await manager.setMonitoring(true); return .of(ControlResult(ok: true, detail: "monitoring: ON")) }
+            catch { return .of(ControlResult(ok: false, detail: "error")) }
         case "/api/control/monitoring/off":
-            do { try await manager.setMonitoring(false); return ControlResult(ok: true, detail: "monitoring: OFF") }
-            catch { return ControlResult(ok: false, detail: "error") }
+            do { try await manager.setMonitoring(false); return .of(ControlResult(ok: true, detail: "monitoring: OFF")) }
+            catch { return .of(ControlResult(ok: false, detail: "error")) }
         case "/api/control/retention":
             guard
                 let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                 let seconds = (obj["seconds"] as? NSNumber)?.intValue,
                 seconds > 0
-            else { return ControlResult(ok: false, detail: "invalid retention seconds") }
+            else { return .of(ControlResult(ok: false, detail: "invalid retention seconds")) }
             do {
                 try await manager.setRetention(window: TimeInterval(seconds))
-                return ControlResult(ok: true, detail: "retention: \(seconds)s")
-            } catch { return ControlResult(ok: false, detail: "invalid retention seconds") }
+                return .of(ControlResult(ok: true, detail: "retention: \(seconds)s"))
+            } catch { return .of(ControlResult(ok: false, detail: "invalid retention seconds")) }
+        case "/api/control/estate/provision",
+             "/api/control/estate/quiesce",
+             "/api/control/estate/drain",
+             "/api/control/estate/destroy":
+            return await applyAdminControl(path: path, body: body)
         default:
-            return ControlResult(ok: false, detail: "unknown control verb")
+            return .of(ControlResult(ok: false, detail: "unknown control verb"))
+        }
+    }
+
+    /// Dispatch an admin verb to the `EstateAdmin` engine. Reached only from
+    /// `applyControl` — and therefore only AFTER the gate (token+Origin over
+    /// HTTP, or 0600 UDS). A host with no admin engine wired reports the verb as
+    /// unavailable rather than 404, so the gate boundary is unchanged.
+    private func applyAdminControl(path: String, body: Data) async -> ControlResponse {
+        guard let admin else {
+            return .of(EstateAdminResult(ok: false, detail: "admin plane not available on this host"))
+        }
+        let decoder = JSONDecoder()
+        do {
+            switch path {
+            case "/api/control/estate/provision":
+                let req = try decoder.decode(EstateAdminRequest.self, from: body)
+                return .of(try await admin.provision(req))
+            case "/api/control/estate/quiesce":
+                let req = try decoder.decode(EstateLifecycleRequest.self, from: body)
+                return .of(try await admin.quiesce(req))
+            case "/api/control/estate/drain":
+                let req = try decoder.decode(EstateLifecycleRequest.self, from: body)
+                return .of(try await admin.drain(req))
+            case "/api/control/estate/destroy":
+                let req = try decoder.decode(EstateLifecycleRequest.self, from: body)
+                return .of(try await admin.destroy(req))
+            default:
+                return .of(EstateAdminResult(ok: false, detail: "unknown admin verb"))
+            }
+        } catch let error as AdminError {
+            // Map the engine's structured validation/guard errors to a refusal
+            // result (ok:false) — these are caller errors, not host faults.
+            return .of(EstateAdminResult(ok: false, detail: Self.adminErrorDetail(error)))
+        } catch let error as DecodingError {
+            return .of(EstateAdminResult(ok: false, detail: "malformed admin request body: \(Self.decodingDetail(error))"))
+        } catch {
+            // GLK / storage failure — a host-side fault. Report ok:false with the
+            // reason so the wizard surfaces which phase failed (concepts §1.8).
+            logger.error("admin verb \(path, privacy: .public) failed: \(String(describing: error))")
+            return .of(EstateAdminResult(ok: false, detail: "estate operation failed: \(error)"))
+        }
+    }
+
+    /// Human-readable detail for an `AdminError`, surfaced in the verb result.
+    static func adminErrorDetail(_ error: AdminError) -> String {
+        switch error {
+        case let .invalidRequest(detail): return "invalid request: \(detail)"
+        case let .unknownEstate(uuid): return "unknown estate '\(uuid)'"
+        case .destroyConfirmMismatch: return "destroy refused: confirm name does not match the estate name"
+        }
+    }
+
+    /// A short reason string for a `DecodingError` (which field/shape was wrong).
+    static func decodingDetail(_ error: DecodingError) -> String {
+        switch error {
+        case let .keyNotFound(key, _): return "missing field '\(key.stringValue)'"
+        case let .typeMismatch(_, ctx): return ctx.debugDescription
+        case let .valueNotFound(_, ctx): return ctx.debugDescription
+        case let .dataCorrupted(ctx): return ctx.debugDescription
+        @unknown default: return "decoding error"
         }
     }
 
@@ -354,6 +471,22 @@ public actor HTTPReadAPI {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         close(fd)
+    }
+
+    /// Extract a single query-string value by key from a raw `a=b&c=d` query.
+    ///
+    /// Returns the percent-decoded value for `key`, or nil if absent. Only the
+    /// first occurrence is honoured. Used by `GET /api/graph` for the optional
+    /// `?estate=` filter; kept tiny and dependency-free (the wire parser does not
+    /// decompose the query itself).
+    static func queryValue(_ key: String, in query: String) -> String? {
+        for pair in query.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard kv.first.map(String.init) == key else { continue }
+            let raw = kv.count > 1 ? String(kv[1]) : ""
+            return raw.removingPercentEncoding ?? raw
+        }
+        return nil
     }
 
     /// Parse an ISO-8601 UTC timestamp produced by `MootManager.iso8601String`.

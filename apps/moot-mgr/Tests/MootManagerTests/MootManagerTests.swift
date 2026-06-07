@@ -39,10 +39,20 @@ private func makeStartedManager(
 
 // MARK: - End-to-end integration (the Phase-1 verify line)
 
+// This suite mutates the PROCESS-GLOBAL `Intellectus` switch (install +
+// setEnabled(true)). Other suites in this target now drive GLK provisioning,
+// whose lifecycle verbs emit through the same global `Intellectus` sink — so a
+// concurrent provision during this test's enabled window would land foreign
+// telemetry in this test's store and inflate its counts. The whole test body
+// runs under the process-wide `intellectusTestMutex` (IntellectusTestLock.swift)
+// so it cannot interleave with the admin-plane GLK tests, which take the same
+// lock. (`.serialized` alone only orders within one suite, not across suites —
+// see the GLK telemetry-suite note.)
 struct MootManagerIntegrationTests {
 
     @Test("End-to-end: monitoring ON → emit → land → retention → monitoring OFF → silent")
     func endToEndPipeline() async throws {
+        try await withIntellectusLock {
         // Window is small so the cutoff math is easy to reason about in the test.
         let manager = try await makeStartedManager(retentionWindow: 1000)
         defer { Task { await manager.stop() } }
@@ -117,6 +127,7 @@ struct MootManagerIntegrationTests {
                 "no new metric after monitoring OFF")
         #expect(try await store.queryEvents(dropboxID: dropboxID).count == 1,
                 "no new event after monitoring OFF")
+        }  // withIntellectusLock
     }
 
     /// Poll the store until the dropbox has at least the expected counts, or

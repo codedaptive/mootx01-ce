@@ -45,7 +45,9 @@ private func makeStartedHost(
         manager: ManagerConfig(storeURL: makeTempStoreURL(), retentionWindow: 1000),
         httpPort: 0,                       // OS-assigned
         controlToken: testToken,
-        controlSocketPath: makeTempSocketPath()
+        controlSocketPath: makeTempSocketPath(),
+        estatesDirectory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("mm-estates-\(UUID().uuidString)", isDirectory: true)
     )
     let host = ResidentHost(config: cfg, startInstant: Date(timeIntervalSince1970: 1000),
                             clock: { Date(timeIntervalSince1970: 2000) })

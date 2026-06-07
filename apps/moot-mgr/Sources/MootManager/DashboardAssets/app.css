@@ -1,0 +1,230 @@
+/*
+  moot-mgr read-plane dashboard styles (P4).
+
+  MOOTx01 design tokens from GUI SPEC §1.1/§1.2. Color is never the sole signal
+  (§8): every status carries a label and/or shape alongside its hue. Accents
+  (orange/blue) are reserved for large numerals, icons, fills, and bold labels —
+  never small body text on dark — to keep WCAG AA contrast (§8).
+
+  No web fonts: the design system names Bebas Neue / Outfit / JetBrains Mono;
+  on a loopback dashboard we cannot fetch them, so each family degrades to its
+  system fallback (Impact / system-ui / ui-monospace).
+*/
+:root{
+  --bg:#06070e; --bg2:#090b14; --bg3:#0d1020; --surface2:#12162a; --surface3:#181d34;
+  --text:#f0eeea; --hi:#c8c4bc; --muted:#8a8aaa; --faint:#56566e;
+  --accent:#ff8c00; --accent2:#3ab4ff;
+  --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.13);
+  --ba:rgba(255,140,0,.25); --ba2:rgba(58,180,255,.25);
+  --adim:rgba(255,140,0,.10); --adim2:rgba(58,180,255,.08);
+  --ok:#3ab4ff; --warn:#ffb74d; --err:#ff5d6c;
+  --font-d:"Bebas Neue",Impact,sans-serif;
+  --font-u:"Outfit",system-ui,-apple-system,sans-serif;
+  --font-m:"JetBrains Mono",ui-monospace,Menlo,monospace;
+  --r:10px; --rsm:7px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:var(--font-u); background:var(--bg); color:var(--text);
+  font-size:14px; line-height:1.45; letter-spacing:.1px; -webkit-font-smoothing:antialiased;
+  overflow:hidden;
+}
+/* atmosphere — orange-top / blue-bottom glows + faint scanline (§1.4), kept low so data stays legible */
+body::before{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+  background:
+    radial-gradient(680px 460px at 80% -10%, var(--adim), transparent 68%),
+    radial-gradient(620px 620px at -6% 112%, var(--adim2), transparent 70%),
+    repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.032) 3px,rgba(0,0,0,.032) 4px),
+    linear-gradient(180deg,#080a14 0%,#06070e 100%);
+}
+.app{position:relative; z-index:1; display:grid; grid-template-columns:212px 1fr; grid-template-rows:auto 1fr; height:100vh}
+
+/* TOP BAR */
+.topbar{
+  grid-column:1 / -1; display:flex; align-items:center; gap:18px; padding:0 20px; height:60px;
+  border-bottom:1px solid var(--border);
+  background:linear-gradient(180deg,rgba(22,24,31,.9),rgba(16,18,24,.78));
+}
+.brand{display:flex; align-items:center; gap:11px}
+.chip{width:28px;height:28px;flex:none;filter:drop-shadow(0 0 6px rgba(255,140,0,.45))}
+.chip .core{transform-origin:center; animation:corepulse 2.6s ease-in-out infinite}
+@keyframes corepulse{0%,100%{opacity:1}50%{opacity:.62}}
+.wordmark{display:flex; flex-direction:column; line-height:1}
+.wordmark b{font-family:var(--font-d); font-weight:600; font-size:19px; letter-spacing:.6px}
+.wordmark span{font-size:9.5px; color:var(--muted); letter-spacing:2.2px; text-transform:uppercase; margin-top:3px}
+.sep{width:1px; height:28px; background:var(--border)}
+.meta-strip{display:flex; align-items:center; gap:14px; flex-wrap:wrap}
+.right{margin-left:auto; display:flex; align-items:center; gap:10px}
+.pill{
+  display:inline-flex; align-items:center; gap:7px; padding:5px 11px; border-radius:999px;
+  font-size:11px; font-weight:600; letter-spacing:.4px; border:1px solid var(--border2);
+  background:var(--surface2); color:var(--hi);
+}
+.pill.running{color:var(--ok); border-color:var(--ba2); background:rgba(58,180,255,.10)}
+.pill.stopped{color:var(--err); border-color:rgba(255,93,108,.3); background:rgba(255,93,108,.10)}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor;position:relative}
+.pill.running .dot::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--ok);animation:ping 1.8s ease-out infinite}
+@keyframes ping{0%{transform:scale(.6);opacity:.9}100%{transform:scale(2.4);opacity:0}}
+.tag{font-family:var(--font-m); font-size:11px; color:var(--muted)}
+.tag b{color:var(--hi); font-weight:500}
+
+/* SIDE NAV */
+.sidenav{
+  display:flex; flex-direction:column; gap:2px; padding:14px 10px; border-right:1px solid var(--border);
+  background:linear-gradient(180deg,var(--bg2),var(--bg));
+}
+.navitem{
+  text-align:left; background:transparent; border:1px solid transparent; color:var(--muted);
+  font-family:var(--font-u); font-size:13px; font-weight:500; padding:9px 12px; border-radius:var(--rsm);
+  cursor:pointer; transition:background .14s, color .14s;
+}
+.navitem:hover{background:var(--surface2); color:var(--text)}
+.navitem.on{background:var(--adim); border-color:var(--ba); color:var(--text)}
+.navitem:focus-visible{outline:2px solid var(--ba2); outline-offset:1px}
+
+/* MAIN */
+.main{overflow:auto; padding:26px 30px 40px}
+.view{display:none; animation:fade .25s ease}
+.view.on{display:block}
+@keyframes fade{from{opacity:0; transform:translateY(4px)}to{opacity:1; transform:none}}
+@media (prefers-reduced-motion:reduce){
+  .view,.chip .core,.pill.running .dot::after{animation:none}
+}
+.title{font-family:var(--font-d); font-size:27px; font-weight:600; letter-spacing:.5px}
+.sub{color:var(--muted); font-size:12.5px; margin:4px 0 20px; max-width:760px}
+
+/* metric cards */
+.cards{display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; margin-bottom:22px}
+.card{
+  background:linear-gradient(180deg,var(--bg3),var(--bg2)); border:1px solid var(--border);
+  border-radius:var(--r); padding:16px 18px;
+}
+.card .clabel{font-size:10.5px; text-transform:uppercase; letter-spacing:1.4px; color:var(--muted)}
+.card .cval{font-family:var(--font-d); font-size:34px; line-height:1.05; margin-top:6px; color:var(--text)}
+.card .cval.blue{color:var(--accent2)}
+.card .cval.orange{color:var(--accent)}
+.card .cunit{font-family:var(--font-m); font-size:12px; color:var(--muted); margin-left:6px}
+
+/* panels */
+.panel{
+  background:linear-gradient(180deg,var(--bg3),var(--bg2)); border:1px solid var(--border);
+  border-radius:var(--r); padding:18px 20px; margin-bottom:18px;
+}
+.phead{font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:1.2px; color:var(--hi); margin-bottom:10px}
+.note{color:var(--muted); font-size:12.5px; max-width:720px; margin-bottom:12px}
+.note em{color:var(--warn); font-style:normal}
+
+/* n/a pending chips */
+.naprow{display:flex; flex-wrap:wrap; gap:8px}
+.nachip{
+  display:inline-flex; align-items:center; gap:7px; font-family:var(--font-m); font-size:11px;
+  padding:5px 10px; border-radius:999px; border:1px dashed var(--border2); color:var(--muted);
+  background:var(--surface2);
+}
+.nachip::before{content:"n/a"; color:var(--warn); font-weight:700; font-size:9px; letter-spacing:.5px}
+
+/* estates */
+.estates{display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:14px}
+.estate{
+  background:linear-gradient(180deg,var(--bg3),var(--bg2)); border:1px solid var(--border);
+  border-radius:var(--r); padding:16px 18px;
+}
+.estate .ename{font-family:var(--font-m); font-size:14px; font-weight:500; color:var(--text); word-break:break-all}
+.estate .erow{display:flex; justify-content:space-between; margin-top:10px; font-size:12px; color:var(--muted)}
+.estate .erow b{font-family:var(--font-m); color:var(--hi); font-weight:500}
+
+/* pipeline */
+.strip{display:flex; align-items:center; gap:6px; margin-bottom:18px; flex-wrap:wrap}
+.stage{
+  flex:1; min-width:110px; text-align:center; background:var(--surface2); border:1px solid var(--border);
+  border-radius:var(--rsm); padding:12px 8px;
+}
+.stage .sname{font-size:10px; text-transform:uppercase; letter-spacing:1px; color:var(--muted)}
+.stage .sval{font-family:var(--font-d); font-size:22px; margin-top:4px; color:var(--accent2)}
+.stage.pending .sval{color:var(--muted); font-size:13px; font-family:var(--font-m)}
+.arrow{color:var(--faint); font-size:18px}
+.flow{display:flex; flex-direction:column; gap:6px; font-family:var(--font-m); font-size:12px}
+.flow .frow{display:flex; gap:10px; color:var(--hi)}
+.flow .frow .k{font-weight:700}
+.k.capture{color:var(--accent)}
+.k.think{color:var(--accent2)}
+
+/* activity */
+.actbar{display:flex; align-items:center; gap:14px; margin-bottom:14px; flex-wrap:wrap}
+.btn{
+  background:var(--surface3); border:1px solid var(--border2); color:var(--text); font-family:var(--font-u);
+  font-size:12px; font-weight:500; padding:7px 14px; border-radius:var(--rsm); cursor:pointer;
+}
+.btn:hover{background:var(--surface2)}
+.btn:focus-visible{outline:2px solid var(--ba2); outline-offset:1px}
+.filter{
+  flex:1; min-width:200px; background:var(--bg2); border:1px solid var(--border2); color:var(--text);
+  font-family:var(--font-m); font-size:12px; padding:7px 12px; border-radius:var(--rsm);
+}
+.filter:focus-visible{outline:2px solid var(--ba2); outline-offset:0}
+.dtable{width:100%; border-collapse:collapse; font-size:12px}
+.dtable th{
+  text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:1.1px; color:var(--muted);
+  padding:8px 10px; border-bottom:1px solid var(--border2); position:sticky; top:-26px; background:var(--bg);
+}
+.dtable td{padding:8px 10px; border-bottom:1px solid var(--border); font-family:var(--font-m); color:var(--hi)}
+.dtable tr:hover td{background:var(--surface2)}
+.kind-capture{color:var(--accent)}
+.kind-think{color:var(--accent2)}
+
+/* topology (P5) — Sigma-style canvas + controls + overlays */
+.topo-bar{display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px}
+.topo-controls{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+.topo-label{font-size:10px; text-transform:uppercase; letter-spacing:1.1px; color:var(--muted)}
+.topo-select{
+  background:var(--bg2); border:1px solid var(--border2); color:var(--text);
+  font-family:var(--font-m); font-size:12px; padding:6px 10px; border-radius:var(--rsm);
+}
+.topo-select:focus-visible{outline:2px solid var(--ba2); outline-offset:0}
+.topo-stage{
+  position:relative; width:100%; height:calc(100vh - 200px); min-height:380px;
+  border:1px solid var(--border); border-radius:var(--r); overflow:hidden;
+  background:radial-gradient(900px 600px at 50% 40%, rgba(58,180,255,.04), transparent 70%), var(--bg2);
+}
+.topo-canvas{position:absolute; inset:0}
+.topo-canvas canvas{cursor:grab}
+.topo-canvas canvas:active{cursor:grabbing}
+/* honest pending overlay (centered) */
+.topo-pending{
+  position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; text-align:center; color:var(--muted); pointer-events:none; padding:24px;
+}
+.stubmark{font-size:60px; color:var(--faint); margin-bottom:14px}
+.topo-pending h2{font-family:var(--font-d); font-size:24px; color:var(--hi); letter-spacing:1px}
+.topo-pending p{max-width:560px; font-size:12.5px; margin-top:8px; line-height:1.6}
+/* activity feed (bottom-left, 3 lines, auto-fade) — PoC spec §6.4 */
+.topo-feed{
+  position:absolute; left:14px; bottom:14px; display:flex; flex-direction:column; gap:4px;
+  font-family:var(--font-m); font-size:11px; pointer-events:none; max-width:70%;
+}
+.topo-feed .fline{
+  display:flex; align-items:center; gap:8px; color:var(--hi); background:rgba(6,7,14,.55);
+  padding:3px 9px; border-radius:999px; border:1px solid var(--border);
+  animation:feedfade 8s ease forwards;
+}
+.topo-feed .fdot{width:7px; height:7px; border-radius:50%; flex:none}
+.topo-feed .fdot.capture{background:var(--accent)}
+.topo-feed .fdot.think{background:var(--accent2)}
+@keyframes feedfade{0%{opacity:0}8%{opacity:1}80%{opacity:1}100%{opacity:0}}
+@media (prefers-reduced-motion:reduce){ .topo-feed .fline{animation:none} }
+/* legend (bottom-right): the VizGraph analytic signals available from the host */
+.topo-legend{
+  position:absolute; right:14px; bottom:14px; display:flex; flex-direction:column; gap:6px;
+  background:rgba(6,7,14,.62); border:1px solid var(--border); border-radius:var(--rsm);
+  padding:10px 12px; font-family:var(--font-m); font-size:10.5px; color:var(--muted); max-width:260px;
+}
+.topo-legend .lhead{font-weight:700; color:var(--hi); letter-spacing:.6px; text-transform:uppercase; font-size:9.5px}
+.topo-legend .lrow{display:flex; justify-content:space-between; gap:12px}
+.topo-legend .lrow b{color:var(--hi); font-weight:500}
+.topo-legend .lswatches{display:flex; gap:4px; flex-wrap:wrap; margin-top:2px}
+.topo-legend .lsw{width:11px; height:11px; border-radius:3px}
+
+/* loading / empty */
+.empty{color:var(--muted); font-size:13px; font-style:italic; padding:18px 0}

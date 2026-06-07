@@ -1,0 +1,235 @@
+// GraphAPITests.swift
+//
+// P5 verify line: the resident host serves the Topology read endpoint
+// (GET /api/graph) and the vendored Sigma-style renderer asset (/sigma.js).
+//
+// /api/graph projects the VizGraph analytic overlay the resident host CAN read
+// from the ObserverSink stats store (per-estate community count, centrality /
+// anomaly / NMF / decay completion signals), and marks per-node/per-edge
+// STRUCTURE as pending — moot-mgr is a pure observer with no estate access, so
+// it serves what is available and never fabricates nodes/edges (A1 honesty
+// pattern). All of /api/graph rides the same 127.0.0.1-only, read-only listener.
+
+import Testing
+import Foundation
+import ObserverSink
+@testable import MootManager
+
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
+
+// MARK: - Helpers (a started host on an OS-assigned loopback port)
+
+private func makeTempStoreURL() -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("moot-mgr-graph-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("stats.sqlite", isDirectory: false)
+}
+
+private func makeTempSocketPath() -> String {
+    "/tmp/mm-gr-\(UUID().uuidString.prefix(8)).sock"
+}
+
+private let grToken = "0123456789abcdef0123456789abcdef"
+
+private func makeStartedHost(
+    seed: (StatsStore) async throws -> Void = { _ in }
+) async throws -> (host: ResidentHost, port: UInt16) {
+    let cfg = ResidentHostConfig(
+        manager: ManagerConfig(storeURL: makeTempStoreURL(), retentionWindow: 1000),
+        httpPort: 0,
+        controlToken: grToken,
+        controlSocketPath: makeTempSocketPath(),
+        estatesDirectory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("mm-estates-\(UUID().uuidString)", isDirectory: true)
+    )
+    let host = ResidentHost(config: cfg, startInstant: Date(timeIntervalSince1970: 1000),
+                            clock: { Date(timeIntervalSince1970: 2000) })
+    try await host.start()
+    let store = try await host.managerHandle().statsStore()
+    try await seed(store)
+    let port = await host.boundHTTPPort()
+    return (host, port)
+}
+
+private func httpGET(port: UInt16, path: String) async throws
+    -> (status: Int, contentType: String?, body: String)
+{
+    let req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+    let (data, response) = try await URLSession.shared.data(for: req)
+    let http = response as? HTTPURLResponse
+    return (http?.statusCode ?? -1,
+            http?.value(forHTTPHeaderField: "Content-Type"),
+            String(data: data, encoding: .utf8) ?? "")
+}
+
+private func jsonObject(port: UInt16, path: String) async throws -> [String: Any] {
+    let (data, _) = try await URLSession.shared.data(
+        for: URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!))
+    return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+}
+
+/// Seed the five canonical VizGraph signals for one estate.
+private func seedVizGraph(_ store: StatsStore, estate: String) async throws {
+    try await store.insertMetric(name: "community.assignment", value: 3,
+                                 tags: ["estate": estate, "node_count": "12", "community_count": "3"],
+                                 ts: 100, dropboxID: "substrateml")
+    try await store.insertMetric(name: "centrality.score", value: 1.0,
+                                 tags: ["estate": estate, "node_count": "12"],
+                                 ts: 110, dropboxID: "substrateml")
+    try await store.insertMetric(name: "anomaly.flag", value: 2.4,
+                                 tags: ["estate": estate, "method": "z_score"],
+                                 ts: 120, dropboxID: "substrateml")
+    try await store.insertMetric(name: "nmf.factor", value: 0.07,
+                                 tags: ["estate": estate, "rank": "4"],
+                                 ts: 130, dropboxID: "substrateml")
+    try await store.insertMetric(name: "edge.decayed_weight", value: 0.85,
+                                 tags: ["estate": estate, "elapsed_seconds": "60"],
+                                 ts: 140, dropboxID: "substrateml")
+}
+
+// MARK: - /api/graph shape
+
+struct GraphAPITests {
+
+    @Test("GET /api/graph returns the topology snapshot envelope shape")
+    func graphEnvelopeShape() async throws {
+        let (host, port) = try await makeStartedHost { try await seedVizGraph($0, estate: "home") }
+        defer { Task { await host.stop() } }
+
+        let (status, ctype, _) = try await httpGET(port: port, path: "/api/graph")
+        #expect(status == 200)
+        #expect(ctype?.hasPrefix("application/json") == true)
+
+        let obj = try await jsonObject(port: port, path: "/api/graph")
+        for key in ["nodes", "edges", "communities", "analytics",
+                    "structurePending", "pending", "estate", "snapshotTs"] {
+            #expect(obj[key] != nil, "missing /api/graph field: \(key)")
+        }
+    }
+
+    @Test("Structure is pending and nodes/edges are empty, never fabricated")
+    func structurePending() async throws {
+        let (host, port) = try await makeStartedHost { try await seedVizGraph($0, estate: "home") }
+        defer { Task { await host.stop() } }
+        let obj = try await jsonObject(port: port, path: "/api/graph")
+        #expect((obj["structurePending"] as? Bool) == true)
+        #expect((obj["nodes"] as? [Any])?.isEmpty == true)
+        #expect((obj["edges"] as? [Any])?.isEmpty == true)
+        // The gap is enumerated honestly, not silently empty.
+        #expect((obj["pending"] as? [Any])?.isEmpty == false)
+    }
+
+    @Test("Analytic overlay surfaces the five VizGraph signals from the store")
+    func analyticsOverlay() async throws {
+        let (host, port) = try await makeStartedHost { try await seedVizGraph($0, estate: "home") }
+        defer { Task { await host.stop() } }
+        let obj = try await jsonObject(port: port, path: "/api/graph")
+        let analytics = obj["analytics"] as? [[String: Any]] ?? []
+        let signals = Set(analytics.compactMap { $0["signal"] as? String })
+        #expect(signals == ["community.assignment", "centrality.score",
+                            "nmf.factor", "anomaly.flag", "edge.decayed_weight"])
+        // Each row carries estate, value, ts, sampleCount.
+        let row = try #require(analytics.first)
+        for key in ["estate", "signal", "value", "ts", "sampleCount"] {
+            #expect(row.keys.contains(key), "missing analytic row field: \(key)")
+        }
+    }
+
+    @Test("community.assignment value drives the community swatch count")
+    func communityRollup() async throws {
+        let (host, port) = try await makeStartedHost { try await seedVizGraph($0, estate: "home") }
+        defer { Task { await host.stop() } }
+        let obj = try await jsonObject(port: port, path: "/api/graph")
+        let communities = obj["communities"] as? [[String: Any]] ?? []
+        // Seeded community.assignment value = 3 → three swatches for "home".
+        #expect(communities.count == 3)
+        let row = try #require(communities.first)
+        for key in ["id", "estate", "color"] {
+            #expect(row.keys.contains(key), "missing community row field: \(key)")
+        }
+        #expect((row["estate"] as? String) == "home")
+    }
+
+    @Test("?estate= filters the analytic overlay to one estate")
+    func estateFilter() async throws {
+        let (host, port) = try await makeStartedHost { store in
+            try await seedVizGraph(store, estate: "home")
+            try await seedVizGraph(store, estate: "work")
+        }
+        defer { Task { await host.stop() } }
+
+        let all = try await jsonObject(port: port, path: "/api/graph")
+        let allEstates = Set(((all["analytics"] as? [[String: Any]]) ?? [])
+            .compactMap { $0["estate"] as? String })
+        #expect(allEstates == ["home", "work"])
+        #expect((all["estate"] as? String) == "all")
+
+        let filtered = try await jsonObject(port: port, path: "/api/graph?estate=work")
+        let oneEstate = Set(((filtered["analytics"] as? [[String: Any]]) ?? [])
+            .compactMap { $0["estate"] as? String })
+        #expect(oneEstate == ["work"])
+        #expect((filtered["estate"] as? String) == "work")
+    }
+
+    @Test("Non-VizGraph metrics are excluded from the graph overlay")
+    func excludesNonVizMetrics() async throws {
+        let (host, port) = try await makeStartedHost { store in
+            try await seedVizGraph(store, estate: "home")
+            try await store.insertMetric(name: "locus.op", value: 1,
+                                         tags: ["estate": "home"], ts: 200, dropboxID: "locuskit")
+        }
+        defer { Task { await host.stop() } }
+        let obj = try await jsonObject(port: port, path: "/api/graph")
+        let signals = Set(((obj["analytics"] as? [[String: Any]]) ?? [])
+            .compactMap { $0["signal"] as? String })
+        #expect(!signals.contains("locus.op"))
+    }
+
+    @Test("Empty store yields an honest empty overlay, still pending")
+    func emptyStore() async throws {
+        let (host, port) = try await makeStartedHost()
+        defer { Task { await host.stop() } }
+        let obj = try await jsonObject(port: port, path: "/api/graph")
+        #expect((obj["analytics"] as? [Any])?.isEmpty == true)
+        #expect((obj["communities"] as? [Any])?.isEmpty == true)
+        #expect((obj["structurePending"] as? Bool) == true)
+    }
+}
+
+// MARK: - /sigma.js vendored asset
+
+struct SigmaAssetServingTests {
+
+    @Test("GET /sigma.js serves the vendored renderer with the JS content-type")
+    func sigmaServed() async throws {
+        let (host, port) = try await makeStartedHost()
+        defer { Task { await host.stop() } }
+        let (status, ctype, body) = try await httpGET(port: port, path: "/sigma.js")
+        #expect(status == 200)
+        #expect(ctype?.hasPrefix("text/javascript") == true)
+        // The vendored renderer exposes the Sigma-style graph API the topology
+        // driver consumes; assert the public entry point is present.
+        #expect(body.contains("Sigma"))
+    }
+
+    @Test("Asset allow-list includes /sigma.js and still rejects off-list paths")
+    func allowListIncludesSigma() {
+        #expect(StaticAssets.asset(for: "/sigma.js") != nil)
+        #expect(StaticAssets.asset(for: "/sigma.js.bak") == nil)
+        #expect(StaticAssets.asset(for: "/../sigma.js") == nil)
+    }
+
+    @Test("The dashboard loads /sigma.js and the Topology view binds /api/graph")
+    func dashboardWiresTopology() async throws {
+        let (host, port) = try await makeStartedHost()
+        defer { Task { await host.stop() } }
+        let (_, _, html) = try await httpGET(port: port, path: "/")
+        #expect(html.contains("/sigma.js"))
+        let (_, _, js) = try await httpGET(port: port, path: "/app.js")
+        #expect(js.contains("/api/graph"))
+    }
+}
