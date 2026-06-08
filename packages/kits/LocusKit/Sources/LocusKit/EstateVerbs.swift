@@ -748,7 +748,7 @@ public extension Estate {
     ///     boundary per CLAUDE.md deterministic-clock rule).
     /// - Returns: the stored `Proposal` with its generated id and bitmaps set.
     /// - Throws: `LocusKitError.drawerNotFound` if `frame.target` does not exist.
-    public func propose(_ frame: ProposeFrame, now: Date) async throws -> Proposal {
+    func propose(_ frame: ProposeFrame, now: Date) async throws -> Proposal {
         guard !frame.target.isEmpty else {
             throw LocusKitError.invalidContent("propose target must not be empty")
         }
@@ -817,7 +817,7 @@ public extension Estate {
     ///     on any missing endpoint.
     ///   - now: deterministic write timestamp.
     /// - Returns: the stored `Association` with its generated id and bitmaps set.
-    public func associate(_ frame: AssociateFrame, now: Date) async throws -> Association {
+    func associate(_ frame: AssociateFrame, now: Date) async throws -> Association {
         guard !frame.a.isEmpty else {
             throw LocusKitError.invalidContent("associate endpoint a must not be empty")
         }
@@ -879,7 +879,7 @@ public extension Estate {
     ///   - now: deterministic write timestamp.
     /// - Returns: the stored `LearnedReference` with its generated id.
     /// - Throws: `LocusKitError.invalidContent` if `frame.handle` is empty.
-    public func learn(_ frame: LearnFrame, now: Date) async throws -> LearnedReference {
+    func learn(_ frame: LearnFrame, now: Date) async throws -> LearnedReference {
         guard !frame.handle.isEmpty else {
             throw LocusKitError.invalidContent("learn handle must not be empty")
         }
