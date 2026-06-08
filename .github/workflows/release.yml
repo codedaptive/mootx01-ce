@@ -122,6 +122,39 @@ jobs:
           name: linux-arm64
           path: ${{ env.ASSET }}
 
+  # ── Windows build (x86_64) ────────────────────────────────────────────────
+  # The installer package is Swift-only; Swift has no Windows toolchain. The
+  # Windows binary is built from the Rust vertical (apps/ARIA_MCP/rust) and
+  # renamed to mootx01.exe so install.ps1 and the asset-naming convention align.
+  build-windows-x86_64:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        run: cargo build --release --manifest-path apps/ARIA_MCP/rust/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Package binary
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $asset = "mootx01-${version}-windows-x86_64.zip"
+          Copy-Item "apps/ARIA_MCP/rust/target/x86_64-pc-windows-msvc/release/aria-mcp.exe" "mootx01.exe"
+          Compress-Archive -Path "mootx01.exe" -DestinationPath $asset
+          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: ${{ env.ASSET }}
+
   # ── Create GitHub release + attach assets ──────────────────────────────────
   release:
     name: Create Release
@@ -130,6 +163,7 @@ jobs:
       - build-macos-x86_64
       - build-linux-x86_64
       - build-linux-arm64
+      - build-windows-x86_64
     runs-on: ubuntu-22.04
     steps:
       - name: Download all assets
@@ -140,18 +174,18 @@ jobs:
       - name: Generate checksums.txt
         working-directory: assets
         run: |
-          # Collect all .tar.gz files from subdirs into one flat dir.
+          # Collect all release archives from subdirs into one flat dir.
           mkdir -p flat
-          find . -name '*.tar.gz' -exec cp {} flat/ \;
+          find . -name '*.tar.gz' -o -name '*.zip' | xargs -I{} cp {} flat/
           cd flat
-          sha256sum *.tar.gz > ../checksums.txt
+          sha256sum * > ../checksums.txt
 
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             assets/checksums.txt
-            assets/flat/*.tar.gz
+            assets/flat/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
