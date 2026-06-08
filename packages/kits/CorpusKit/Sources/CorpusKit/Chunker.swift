@@ -25,7 +25,7 @@ import EideticLib
 import SubstrateTypes
 
 /// Chunking parameters. Defaults match the substrate reference
-/// (LOCI_MODE_SPEC: 800 char target with 100 char overlap).
+/// (800-char target with 100-char overlap).
 public struct ChunkerConfiguration: Sendable {
     public let targetChars: Int
     public let overlapChars: Int

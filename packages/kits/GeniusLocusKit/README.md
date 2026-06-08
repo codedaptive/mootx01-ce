@@ -75,7 +75,7 @@ Per `docs/reference/GENIUSLOCUSKIT_SPEC_v0.8.md`:
 - `docs/reference/GENIUSLOCUSKIT_SPEC_v0.8.md` — kit spec
 - `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
 
-## Mission placement rules
+## Scope
 
 **Belongs here** if it touches: N-estate coordination, cross-estate operations, composition of the three substrate kits, Brain layer, federation, the eight noun shapes, theorem demonstrations.
 

@@ -934,7 +934,7 @@ impl Storage for PostgresStorage {
                 // match arm, so ctx.conn still holds an Arc clone here. With
                 // ctx dropped, `shared` is the sole holder and the
                 // try_unwrap below is guaranteed to succeed on the discard
-                // path (Adams re-review Finding #1: without this drop,
+                // path (without this drop,
                 // try_unwrap failed silently and the broken connection was
                 // checked back in via PooledClient::drop).
                 drop(ctx);

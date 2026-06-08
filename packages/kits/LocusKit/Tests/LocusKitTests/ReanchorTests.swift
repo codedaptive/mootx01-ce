@@ -15,7 +15,7 @@ import Testing
 ///   2. `Estate.reanchor` — the verb wrapper. Empty-input guard (both nil →
 ///      `invalidContent`), drawerNotFound, forwards to `DrawerStore.reanchorGated`.
 ///
-/// Coverage:
+/// Coverage mandated by VERB-REA-01 BRR:
 ///   - reanchor to a new room moves the drawer (peek/recall reflects new room)
 ///   - reanchor to a new lattice updates the anchor
 ///   - empty reanchor → `invalidContent`

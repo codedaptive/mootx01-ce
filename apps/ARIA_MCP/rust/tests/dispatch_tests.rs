@@ -555,8 +555,8 @@ fn fact_timeline_on_empty_estate_returns_zero() {
 
 #[test]
 fn file_fact_round_trips_through_coordinator() {
-    // moot_file_fact now calls coordinator.add_kg_fact (part of the GLK
-    // write path). It returns a success result carrying the filed
+    // moot_file_fact now calls coordinator.add_kg_fact (landed via the GLK
+    // write-path mission). It returns a success result carrying the filed
     // fact id; the fact is then discoverable via moot_fact_search.
     let registry = EstateRegistry::new_inmemory();
     // The substrate requires a non-empty source_drawer_id; file a memory to

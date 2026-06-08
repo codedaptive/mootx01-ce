@@ -86,8 +86,9 @@ let package = Package(
                 // Required by EstateHydration.swift — open(inMemory:owner:hydrateFrom:)
                 // and rebuildDerivedAccelerators(for:) call StorageReplicator.hydrate to
                 // populate an in-memory estate from a durable backend on launch.
-                // Dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28. Layering is
-                // upstream→downstream (PersistenceKit ← GeniusLocusKit); no inversion.
+                // Dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28: recorded in
+                // GLK_HYDRATE_01_BLAST_RADIUS.md §Symbol 2. Layering is upstream→downstream
+                // (PersistenceKit ← GeniusLocusKit); no inversion.
                 .product(name: "PersistenceKitReplication", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
@@ -112,6 +113,7 @@ let package = Package(
                 // PersistenceKitSQLite is required by HydrateRoundTripTests.swift — the
                 // round-trip test flushes to an on-disk SQLite backend and hydrates back
                 // into a fresh InMemory instance to verify logical equivalence.
+                // Blast-radius citation: GLK_HYDRATE_01_BLAST_RADIUS.md §New files item 3.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "QueueKit", package: "QueueKit"),
                 .product(name: "SubstrateML", package: "SubstrateML"),

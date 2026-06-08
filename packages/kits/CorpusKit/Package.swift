@@ -1,8 +1,6 @@
 // swift-tools-version:6.2
 //
 // CorpusKit -- retrieval-augmented generation storage and retrieval.
-// Mission 7 of the eleven-kit graph refactor per
-// DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
 //
 // Two targets:
 //   CorpusKit           -- core surface (chunkers, BM25, bundle store,

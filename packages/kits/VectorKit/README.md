@@ -63,11 +63,10 @@ VectorKit builds in **parallel with LocusKit** (Phase 1). It has no dependency o
 ## Key specs
 
 - `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`; I-4 (model tagging), I-12 (substrate composition), § 15.1
-- `docs/specs/LOCI_MODE_SPEC_v0.1.md`; embedding provider hierarchy, model choices
 - `docs/specs/GENIUSLOCUS_IMPLEMENTATION_PLAN_v0.35.md`; § 2, VectorKit done-definition
 - `docs/validation/substrate_math_performance/`; `glref-swift-HammingNN.swift`, `glref-swift-SimHash.swift`, `glref-swift-HyperplaneFamily.swift`
 
-## Mission placement rules
+## Scope
 
 **Belongs here** if it touches: `EmbeddingProvider` protocol, CoreML adapters, vector storage schema, HNSW index, BM25 index, nearest-neighbour query, Metal cosine kernels, model+version tagging.
 

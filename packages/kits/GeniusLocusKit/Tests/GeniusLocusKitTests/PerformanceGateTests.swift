@@ -61,8 +61,8 @@ struct PerformanceGateTests {
 
     /// Time `GeniusLocusKit.capture` over a synthetic capture stream and
     /// assert the P99 latency lands under the iPhone budget. The harness
-    /// records P50, P95, P99, and max for the verification log so
-    /// results can be compared against past runs.
+    /// records P50, P95, P99, and max for the verification log so the
+    /// completion report can compare against past runs.
     ///
     /// Sample size: 200 captures. The implementation plan calls for
     /// 1000 over an 8-hour day; 200 is sufficient to land a stable P99

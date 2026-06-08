@@ -53,8 +53,8 @@ public struct ManagerConfig: Sendable, Equatable {
     public static let storeFileName = "stats.sqlite"
 
     /// The bundle-style data-dir convention reused for the manager's store
-    /// location. Matches the `com.mootx01.ce` convention so the manager's
-    /// data sits alongside other MOOTx01 CE data.
+    /// location. Matches the `com.mootx01.ce` convention referenced in the
+    /// mission so the manager's data sits alongside other MOOTx01 CE data.
     public static let dataDirBundleID = "com.mootx01.ce"
 
     // MARK: - Resolved values

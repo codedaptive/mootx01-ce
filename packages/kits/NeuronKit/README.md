@@ -61,7 +61,7 @@ Use NeuronKit to add to any GeniusLocusKit application:
 - `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` — every algorithm NeuronKit implements is specified here
 - `docs/decisions/DECISION_ACCELERATOR_ROUTING_2026-05-16.md` — mandatory before any kernel mission
 
-## Mission placement rules
+## Scope
 
 **Belongs here** if it: implements a named algorithm from the Cookbook (§§ 3–15), implements an autonomic daemon, implements reasoning functions called by CognitionKit, implements the PortableKernel / accelerator backend.
 

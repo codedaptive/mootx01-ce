@@ -86,7 +86,7 @@ The two patterns coexist; subscribe stays open while push/pull run.
 
 ## 8. CloudKit and Federation can run side by side
 
-A single PersistenceKit instance can have both a ConvergenceKit-CloudKit engine and a ConvergenceKit-Federation engine enabled simultaneously. The manifests pick different zones / peer sets; the engines observe the same StorageObserver independently. Multi-backend deployments (Fulcrum syncs FNode via CloudKit between user's devices AND federates GeniusLocus estate with partner via ConvergenceKit-Federation) are natively supported.
+A single PersistenceKit instance can have both a ConvergenceKit-CloudKit engine and a ConvergenceKit-Federation engine enabled simultaneously. The manifests pick different zones / peer sets; the engines observe the same StorageObserver independently. Multi-backend deployments (an app syncs its entities via CloudKit between a user's devices AND federates a GeniusLocus estate with a partner via ConvergenceKit-Federation) are natively supported.
 
 The cost is two observer subscriptions per table. Document the resource use in the application.
 
