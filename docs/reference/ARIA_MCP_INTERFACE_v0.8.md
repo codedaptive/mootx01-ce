@@ -9,7 +9,7 @@ relates_to:
   - ARIA_MCP_SPEC_v0.2.md  (the behavioral contract; MCP-INT-01 adds §11 AI-client surface)
   - GENIUSLOCUSKIT_SPEC_v0.8.md  (the estate verb surface tools dispatch to)
 purpose: |
-  Public API surface of ARIA_MCP — the stdio MCP server that exposes
+  Public API surface of ARIA_MCP — the MCP server that exposes
   GeniusLocusKit estates over Model Context Protocol. Documents the JSON-RPC
   transport, the JSONValue wire type, the five-tier AI-client tool surface, the
   multi-estate tool dispatcher, the teachme guide engine, the coaching hint
@@ -19,6 +19,22 @@ purpose: |
   MCP-INT-03 to add the static protocol block to estate_status and the full
   cognition menu to moot_list_lenses.
   The companion SPEC carries the behavioral contracts.
+
+  TRANSPORT NOTE (v0.2.1 spec correction, 2026-06-07): two transports are
+  implemented behind the same `ARIA_MCPDispatcher` (handlers unchanged).
+  **Fallback:** `StdioServer` + the newline-delimited JSON-RPC loop (PoC,
+  testing, migrations). **Primary (v1.0):** `HTTPServer`
+  (`Sources/AriaMCP/HTTPServer.swift`; Rust `rust/src/http_server.rs`) — a
+  loopback Streamable-HTTP transport (POST JSON-RPC → `application/json`)
+  bound to `127.0.0.1`, selected when `MOOTX01_HTTP_PORT` is set (default
+  4242; `AriaMCPMain`/`main.rs` branch), with a per-request body cap from
+  `MOOTX01_HTTP_MAX_BODY_BYTES` (default 4 MiB). It consumes the shared
+  `LoopbackHTTP` lib (Swift) / hand-rolled `std::net` (Rust), wire-identical
+  across both. SSE server-push (`LoopbackHTTP.SSEStream`) is ready but unused
+  until there are notifications to push (Brain pump phase). Still pending: the
+  resident Brain pump (dream trigger) and telemetry self-report, and launchd
+  resident-mode wiring — documented in the SPEC, wired in the resident
+  executable, not in the `AriaMCP` JSON-RPC library.
 ---
 
 # ARIA_MCP Interface
@@ -30,14 +46,17 @@ purpose: |
 - `Sources/AriaMCP/` — the `AriaMCP` library: JSON-RPC envelope + error
   codes (`JSONRPC.swift`), the `JSONValue` wire type (`JSONValue.swift`),
   OSLog/stderr logging (`Logging.swift`), the server dispatcher + stdio
-  loop (`Server.swift`), the five-tier tool projection (`ToolProjection.swift`),
+  loop (`Server.swift`), the loopback HTTP transport (`HTTPServer.swift`,
+  consuming `LoopbackHTTP`), the resident Brain pump (`BrainPump.swift`),
+  the five-tier tool projection (`ToolProjection.swift`),
   the estate dispatcher + interface runners (`ToolDispatch.swift`),
   per-tool usage guide strings (`TeachmeGuides.swift`),
   coaching-hint trigger logic (`CoachingEngine.swift`),
   CognitionKit recipe tools (`RecipeTools.swift`), reasoning-lens tools
   (`LensTools.swift`), vault control tools (`VaultTools.swift`).
 - `Sources/aria-mcp/` — the `aria-mcp` executable (`AriaMCPMain.swift`):
-  opens an estate and runs the stdio loop.
+  opens an estate and runs the selected transport — stdio by default, the
+  resident loopback HTTP transport when `MOOTX01_HTTP_PORT` is set.
 - `Tests/AriaMCPTests/`
 - `Package.swift` — depends on GeniusLocusKit, LocusKit, PersistenceKit,
   NeuronKit, CognitionKit (path deps under `../../packages/`).
@@ -271,9 +290,10 @@ public struct ToolDispatcher: Sendable {
 }
 ```
 
-### Server — `ARIA_MCPDispatcher` / `StdioServer`
+### Server — `ARIA_MCPDispatcher` / `StdioServer` / `HTTPServer`
 
-The method router and the newline-delimited stdio loop.
+The transport-neutral method router and the two transports that drive it: the
+newline-delimited stdio loop and the loopback HTTP (Streamable-HTTP) transport.
 
 ```swift
 public struct ARIA_MCPDispatcher: Sendable {
@@ -294,6 +314,34 @@ public struct StdioServer {
     public func handleFrame(_ frame: Data, output: FileHandle) async
     public func write(_ response: JSONRPCResponse, to output: FileHandle)
 }
+
+// Loopback Streamable-HTTP transport (v1.0). POST JSON-RPC -> application/json
+// via the same dispatcher; loopback-only bind; no auth (CE) but a CSRF/DNS-rebinding
+// Origin guard (non-loopback Origin -> 403). Rust mirror: rust/src/http_server.rs.
+public struct HTTPServer: Sendable {
+    public let dispatcher: ARIA_MCPDispatcher
+    public let port: UInt16            // default 4242; 0 = OS-assigned (tests)
+    public let maxBodyBytes: Int       // default 4 MiB
+    public init(dispatcher: ARIA_MCPDispatcher, port: UInt16 = 4242, maxBodyBytes: Int = 4 * 1024 * 1024)
+    public func run() async throws     // resident; returns only on bind failure
+    public func bind() throws -> (fd: Int32, port: UInt16)   // bind without accepting (tests)
+}
+
+// Resident Brain pump. Drives dreaming + maintenance (NeuronKit) and
+// the standing-signal scheduler (GLK) on each daemon's own cadence; `now` is
+// injected once per tick (the loop is the only scheduler; daemons never read the
+// clock). Spawned alongside HTTPServer in resident mode; stdio does not pump.
+// In-memory cadence policy in P2 (manifest store is P3). Base tick env
+// MOOTX01_BRAIN_TICK_MS (default 5000ms).
+public actor BrainPump {
+    public init(kit: GeniusLocusKit, handle: EstateHandle,
+                baseTickMs: Int = 5000, clock: @escaping @Sendable () -> Date = { Date() })
+    public func run() async                 // loops until the task is cancelled (shutdown)
+    public struct TickReport: Sendable {
+        public let dreamingFired: Bool; public let maintenanceFired: Bool; public let signalsTicked: Bool
+    }
+    @discardableResult public func tick(now: Date) async -> TickReport   // one iteration (tests)
+}
 ```
 
 ### Logging
@@ -313,8 +361,9 @@ MCP methods are routed by `ARIA_MCPDispatcher.handle(_:)`:
 capability), `ping`, `tools/list` (from `ToolProjection.tools()`),
 `tools/call` (→ `ToolDispatcher.dispatch(name:arguments:)`). The
 `aria-mcp` executable wires a `GeniusLocusKit` estate into a
-`ToolDispatcher`, builds an `ARIA_MCPDispatcher`, and runs
-`StdioServer.run()`. Behavioral contracts: SPEC.
+`ToolDispatcher`, builds an `ARIA_MCPDispatcher`, and runs the selected
+transport: `StdioServer.run()` by default, or `HTTPServer.run()` when
+`MOOTX01_HTTP_PORT` is set. Behavioral contracts: SPEC.
 
 ## § 4 — Errors
 
@@ -334,7 +383,8 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   swift test --package-path apps/ARIA_MCP
 ```
 
-(Targets: `AriaMCPTests` — JSON-RPC, stdio framing, server, five-tier
+(Targets: `AriaMCPTests` — JSON-RPC, stdio framing, HTTP transport
+(`HTTPServerTests`, loopback round-trips), server, five-tier
 tool projection, connection dispatch, file-memory validation, KG and
 journal dispatch, multi-estate routing, recipe/lens tools, vault tools,
 teachme guides and coaching hints.)
@@ -347,7 +397,8 @@ cargo test --manifest-path apps/ARIA_MCP/rust/Cargo.toml
 integration tests: missing-vaultPath INVALID_PARAMS, status-no-manifest,
 export-stamps-manifest, export-then-import, reconcile-no-manifest,
 reconcile-zero-drift. `jsonrpc_tests`, `persistence_tests`,
-`stdio_framing_tests`.)
+`stdio_framing_tests`, `http_transport_tests` — 4 loopback HTTP round-trips
+(initialize, tools/list, non-POST 405, malformed-body parse error).)
 
 ## § 6 — Examples
 

@@ -6,10 +6,10 @@ import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
 import PersistenceKitPostgreSQL
-import ObserverSink
-import IntellectusLib
+import AriaResident
 
-// Entry point for the ARIA_MCP stdio server.
+// Entry point for the ARIA_MCP server (stdio or loopback HTTP transport,
+// selected by MOOTX01_HTTP_PORT).
 //
 // Backend selection follows a four-state precedence ladder driven by two
 // environment variables. No trimming on either variable — a whitespace-only
@@ -182,74 +182,54 @@ struct AriaMCPMain {
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "0.1.0")
         let tooling = ToolDispatcher(kit: kit, handle: handle)
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
-        let server = StdioServer(dispatcher: dispatcher)
 
-        // Manager-telemetry self-report (MANAGER_1.0_PLAN.md §3 Phase 1: one real
-        // consumer wired end-to-end). Opt-in and fully additive: if
-        // ARIA_MCP_STATS_STORE is unset/empty this is a no-op and the MCP wire
-        // surface is byte-for-byte unchanged. When set, install a
-        // PersistenceStatsSink against the manager's store, drive IntellectusLib's
-        // gate from the store flag, and emit one startup metric. All failures are
-        // swallowed — telemetry must never affect the MCP server's behavior.
-        await installManagerTelemetryIfConfigured()
+        // Resident mode runs the full resident wiring (telemetry + Brain pump +
+        // continuous monitoring gate) via the shared AriaResident runner; stdio is
+        // ephemeral and gets only a startup-once telemetry read.
+        let statsStorePath = ProcessInfo.processInfo.environment["ARIA_MCP_STATS_STORE"]
 
-        Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools)")
-        await server.run()
-        Logging.stderr.log("ARIA_MCP exiting (stdin closed)")
-    }
-
-    /// Install the manager-telemetry sink if `ARIA_MCP_STATS_STORE` is set.
-    ///
-    /// This is the headless-ARIA self-report wiring (MANAGER_1.0_PLAN.md §3).
-    /// It is opt-in and additive: when the env var is unset or empty, this
-    /// returns immediately and the MCP server runs exactly as before.
-    ///
-    /// When set, it opens the manager's shared stats store (a second reader/
-    /// writer alongside moot-mgr; SQLite WAL handles concurrent access), installs
-    /// a `PersistenceStatsSink` with a stable per-process dropbox id, sets the
-    /// IntellectusLib gate from the store's monitoring flag, and emits one
-    /// startup metric so a wired pipeline shows immediate signal.
-    ///
-    /// Telemetry must never affect the server: any failure here is logged to
-    /// stderr and swallowed.
-    static func installManagerTelemetryIfConfigured() async {
-        let rawStorePath = ProcessInfo.processInfo.environment["ARIA_MCP_STATS_STORE"] ?? ""
-        guard !rawStorePath.isEmpty else { return }
-
-        do {
-            let storeURL = URL(fileURLWithPath: rawStorePath)
-            let store = try StatsStore(url: storeURL)
-            // open() is forward-only and seeds defaults only if absent, so it
-            // does not disturb a flag the manager already set.
-            try await store.open()
-
-            // Stable per-process dropbox id: process name + a short random suffix
-            // so concurrent ARIA instances attribute to distinct dropboxes.
-            let dropboxID = "aria-mcp-\(UUID().uuidString.prefix(8))"
-            let sink = PersistenceStatsSink(store: store, dropboxID: dropboxID)
-            Intellectus.install(sink: sink)
-
-            // Drive the IntellectusLib gate from the manager's flag. The
-            // store-level flag is re-checked per sample by the sink, so this
-            // initial read just lets the off-path stay free when monitoring is off.
-            let monitoringOn = try await store.isMonitoringEnabled()
-            Intellectus.setEnabled(monitoringOn)
-
-            // One startup metric — proves the pipeline end-to-end when the
-            // manager has monitoring on. Off-path is free when disabled.
-            Intellectus.report(.metric(
-                name: "aria.mcp.start",
-                value: 1.0,
-                tags: ["dropbox": dropboxID],
-                ts: Date().timeIntervalSince1970
-            ))
-
-            Logging.stderr.log(
-                "ARIA_MCP telemetry wired (store: \(rawStorePath), dropbox: \(dropboxID), monitoring: \(monitoringOn ? "on" : "off"))"
+        // Transport select. stdio is the default (testing, migrations, PoC). When
+        // MOOTX01_HTTP_PORT is set, run the resident loopback HTTP MCP transport
+        // via the shared AriaResident runner — the v1 primary transport for the
+        // resident daemon (ARIA_MCP_SPEC §5). Both transports drive the same
+        // dispatcher; the JSON-RPC surface is identical. Resident HTTP mode is
+        // long-lived (launchd); stdio exits on stdin close.
+        let rawHTTPPort = ProcessInfo.processInfo.environment["MOOTX01_HTTP_PORT"] ?? ""
+        if !rawHTTPPort.isEmpty {
+            guard let portValue = UInt16(rawHTTPPort) else {
+                fputs("ARIA_MCP fatal: MOOTX01_HTTP_PORT='\(rawHTTPPort)' is not a valid TCP port (0–65535).\n", stderr)
+                exit(1)
+            }
+            let config = AriaResident.ResidentConfig(
+                port: portValue,
+                maxBodyBytes: AriaResident.httpMaxBodyBytes(),
+                brainTickMs: AriaResident.brainTickMs(),
+                monitoringPollMs: AriaResident.monitoringPollMs(),
+                statsStorePath: statsStorePath
             )
-        } catch {
-            // Telemetry is best-effort. A wiring failure must not stop the server.
-            Logging.stderr.log("ARIA_MCP telemetry wiring skipped (error: \(error))")
+            let gateSuffix = (statsStorePath?.isEmpty == false) ? " + monitoring gate" : ""
+            Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools, HTTP transport + Brain pump\(gateSuffix))")
+            do {
+                // Resident: returns only on bind failure (the runner otherwise
+                // never returns; launchd/SIGTERM ends the process). The runner
+                // throws rather than exit()-ing so the caller owns lifecycle.
+                try await AriaResident.runResidentDaemon(
+                    dispatcher: dispatcher, kit: kit, handle: handle, config: config
+                )
+            } catch {
+                fputs("ARIA_MCP fatal: cannot bind HTTP transport on 127.0.0.1:\(portValue): \(error)\n", stderr)
+                exit(1)
+            }
+            Logging.stderr.log("ARIA_MCP exiting (HTTP transport stopped)")
+        } else {
+            // stdio: ephemeral, per-client. Startup-once telemetry only (no
+            // continuous gate — the process does not outlive the client session).
+            _ = await AriaResident.installManagerTelemetry(storePath: statsStorePath)
+            let server = StdioServer(dispatcher: dispatcher)
+            Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools, stdio transport)")
+            await server.run()
+            Logging.stderr.log("ARIA_MCP exiting (stdin closed)")
         }
     }
+
 }

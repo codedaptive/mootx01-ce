@@ -3,7 +3,14 @@
 Three orientation guides at three depths. Pick the one that matches
 why you arrived.
 
-## The three guides
+## The guides
+
+**[`INSTALLING_MOOTX01.md`](INSTALLING_MOOTX01.md)** — installation
+guide. What `mootx01 install` sets up, how the resident background daemon
+works, how your AI clients connect (shared HTTP daemon vs per-client stdio),
+install flags, how to turn monitoring on, and the edge cases you'll hit.
+Start here if you're setting MOOTx01 up for the first time or troubleshooting
+a client connection.
 
 **[`SUBSTRATE_FOR_USERS.md`](SUBSTRATE_FOR_USERS.md)** — plain
 language. What MOOTx01 is, what the machinery does under the floor,

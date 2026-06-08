@@ -592,3 +592,244 @@ pub trait DrawerStore: Send + Sync {
         Ok(Vec::new())
     }
 }
+
+// ── Blanket impl: Arc<dyn DrawerStore> as a DrawerStore ──────────────────────
+//
+// Allows callers that hold a type-erased `Arc<dyn DrawerStore>` to pass it
+// directly into generic functions and types that require `S: DrawerStore`.
+// The `BrainPump` in ARIA_MCP uses this: it receives the registry's
+// `Arc<dyn DrawerStore>` at construction and passes it to `EstateDreamingSink`
+// and `EstateMaintenanceSink`, both of which are generic over `S: DrawerStore`.
+// Every method delegates to the inner trait object via `self.as_ref()`.
+//
+// `DrawerStore` is object-safe (no generic methods, no `Self`-sized bounds),
+// so this blanket impl is sound. `Arc<dyn DrawerStore>` is `Send + Sync`
+// because `DrawerStore: Send + Sync` — the underlying store is the same
+// concrete object either way.
+#[allow(clippy::too_many_arguments)]
+impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
+    fn read_manifest(&self) -> Result<ManifestValues, LocusKitError> {
+        self.as_ref().read_manifest()
+    }
+    fn set_meta(&self, key: &str, value: &str) -> Result<(), LocusKitError> {
+        self.as_ref().set_meta(key, value)
+    }
+    fn get_meta(&self, key: &str) -> Result<Option<String>, LocusKitError> {
+        self.as_ref().get_meta(key)
+    }
+    fn add_drawer(&self, drawer: &Drawer, now: i64) -> Result<(), LocusKitError> {
+        self.as_ref().add_drawer(drawer, now)
+    }
+    fn get_drawer(&self, id: &str) -> Result<Option<Drawer>, LocusKitError> {
+        self.as_ref().get_drawer(id)
+    }
+    fn drawers_in_wing(&self, wing: &str) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().drawers_in_wing(wing)
+    }
+    fn drawers_in_wing_room(&self, wing: &str, room: &str) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().drawers_in_wing_room(wing, room)
+    }
+    fn drawers_by_source(&self, source_file: &str) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().drawers_by_source(source_file)
+    }
+    fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().all_drawers()
+    }
+    fn drawer_ids(&self) -> Result<Vec<RowID>, LocusKitError> {
+        self.as_ref().drawer_ids()
+    }
+    fn mutate_provenance(
+        &self,
+        drawer_id: &str,
+        new_provenance: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().mutate_provenance(drawer_id, new_provenance, changed_by, reason, now)
+    }
+    fn mutate_adjective(
+        &self,
+        drawer_id: &str,
+        new_adjective: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().mutate_adjective(drawer_id, new_adjective, changed_by, reason, now)
+    }
+    fn mutate_operational(
+        &self,
+        drawer_id: &str,
+        new_operational: i64,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().mutate_operational(drawer_id, new_operational, changed_by, reason, now)
+    }
+    fn mutate_state(
+        &self,
+        drawer_id: &str,
+        new_state: State,
+        via: RowVerb,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().mutate_state(drawer_id, new_state, via, changed_by, reason, now)
+    }
+    fn expunge_gated(
+        &self,
+        drawer_id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().expunge_gated(drawer_id, changed_by, reason, now)
+    }
+    fn reanchor_gated(
+        &self,
+        drawer_id: &str,
+        to_room: Option<&str>,
+        to_lattice: Option<crate::estate_types::LatticeAnchor>,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().reanchor_gated(drawer_id, to_room, to_lattice, changed_by, reason, now)
+    }
+    fn add_tunnel(&self, tunnel: &Tunnel) -> Result<(), LocusKitError> {
+        self.as_ref().add_tunnel(tunnel)
+    }
+    fn get_tunnel(&self, id: &str) -> Result<Option<Tunnel>, LocusKitError> {
+        self.as_ref().get_tunnel(id)
+    }
+    fn tunnels_from_wing(&self, wing: &str) -> Result<Vec<Tunnel>, LocusKitError> {
+        self.as_ref().tunnels_from_wing(wing)
+    }
+    fn tunnels_from_wing_room(&self, wing: &str, room: &str) -> Result<Vec<Tunnel>, LocusKitError> {
+        self.as_ref().tunnels_from_wing_room(wing, room)
+    }
+    fn tunnels_to_wing(&self, wing: &str) -> Result<Vec<Tunnel>, LocusKitError> {
+        self.as_ref().tunnels_to_wing(wing)
+    }
+    fn all_tunnels(&self) -> Result<Vec<Tunnel>, LocusKitError> {
+        self.as_ref().all_tunnels()
+    }
+    fn add_kg_fact(&self, fact: &KGFact) -> Result<(), LocusKitError> {
+        self.as_ref().add_kg_fact(fact)
+    }
+    fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
+        self.as_ref().withdraw_kg_fact(id, now)
+    }
+    fn get_kg_fact(&self, id: &str) -> Result<Option<KGFact>, LocusKitError> {
+        self.as_ref().get_kg_fact(id)
+    }
+    fn kg_facts_for_drawer(&self, source_drawer_id: &str) -> Result<Vec<KGFact>, LocusKitError> {
+        self.as_ref().kg_facts_for_drawer(source_drawer_id)
+    }
+    fn add_proposal(&self, proposal: &Proposal) -> Result<(), LocusKitError> {
+        self.as_ref().add_proposal(proposal)
+    }
+    fn get_proposal(&self, id: &str) -> Result<Option<Proposal>, LocusKitError> {
+        self.as_ref().get_proposal(id)
+    }
+    fn proposals_for_target(&self, target_row_id: &str) -> Result<Vec<Proposal>, LocusKitError> {
+        self.as_ref().proposals_for_target(target_row_id)
+    }
+    fn add_association(&self, association: &Association) -> Result<(), LocusKitError> {
+        self.as_ref().add_association(association)
+    }
+    fn get_association(&self, id: &str) -> Result<Option<Association>, LocusKitError> {
+        self.as_ref().get_association(id)
+    }
+    fn associations_from(&self, wing: &str, room: &str) -> Result<Vec<Association>, LocusKitError> {
+        self.as_ref().associations_from(wing, room)
+    }
+    fn associations_to(&self, wing: &str, room: &str) -> Result<Vec<Association>, LocusKitError> {
+        self.as_ref().associations_to(wing, room)
+    }
+    fn add_learned_reference(&self, reference: &LearnedReference) -> Result<(), LocusKitError> {
+        self.as_ref().add_learned_reference(reference)
+    }
+    fn get_learned_reference(&self, id: &str) -> Result<Option<LearnedReference>, LocusKitError> {
+        self.as_ref().get_learned_reference(id)
+    }
+    fn learned_references_from_source(
+        &self,
+        source_catalog_id: &str,
+    ) -> Result<Vec<LearnedReference>, LocusKitError> {
+        self.as_ref().learned_references_from_source(source_catalog_id)
+    }
+    fn add_diary_entry(&self, entry: &DiaryEntry) -> Result<(), LocusKitError> {
+        self.as_ref().add_diary_entry(entry)
+    }
+    fn get_diary_entry(&self, id: &str) -> Result<Option<DiaryEntry>, LocusKitError> {
+        self.as_ref().get_diary_entry(id)
+    }
+    fn read_diary(
+        &self,
+        agent_name: &str,
+        last_n: usize,
+    ) -> Result<Vec<DiaryEntry>, LocusKitError> {
+        self.as_ref().read_diary(agent_name, last_n)
+    }
+    fn read_diary_in_wing(
+        &self,
+        agent_name: &str,
+        wing: &str,
+        last_n: usize,
+    ) -> Result<Vec<DiaryEntry>, LocusKitError> {
+        self.as_ref().read_diary_in_wing(agent_name, wing, last_n)
+    }
+    fn insert_recall_trace(&self, item: &RecallTraceItem) -> Result<(), LocusKitError> {
+        self.as_ref().insert_recall_trace(item)
+    }
+    fn get_recall_trace(&self, id: &str) -> Result<Option<RecallTraceItem>, LocusKitError> {
+        self.as_ref().get_recall_trace(id)
+    }
+    fn recall_trace_since(&self, since: &str) -> Result<Vec<RecallTraceItem>, LocusKitError> {
+        self.as_ref().recall_trace_since(since)
+    }
+    fn recent_recall_traces(
+        &self,
+        since: &str,
+        now: &str,
+    ) -> Result<Vec<RecallTraceItem>, LocusKitError> {
+        self.as_ref().recent_recall_traces(since, now)
+    }
+    fn mark_recall_trace_used(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
+        self.as_ref().mark_recall_trace_used(id, now)
+    }
+    fn audit_events_for_row(
+        &self,
+        row_id: &str,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.as_ref().audit_events_for_row(row_id)
+    }
+    fn list_wings(&self) -> Result<Vec<WingSummary>, LocusKitError> {
+        self.as_ref().list_wings()
+    }
+    fn list_rooms(&self, wing: Option<&str>) -> Result<Vec<RoomSummary>, LocusKitError> {
+        self.as_ref().list_rooms(wing)
+    }
+    fn taxonomy(&self) -> Result<Vec<WingSummary>, LocusKitError> {
+        self.as_ref().taxonomy()
+    }
+    fn all_proposals(&self) -> Result<Vec<Proposal>, LocusKitError> {
+        self.as_ref().all_proposals()
+    }
+    fn all_associations(&self) -> Result<Vec<Association>, LocusKitError> {
+        self.as_ref().all_associations()
+    }
+    fn all_learned_references(&self) -> Result<Vec<LearnedReference>, LocusKitError> {
+        self.as_ref().all_learned_references()
+    }
+    fn all_kg_facts(&self) -> Result<Vec<KGFact>, LocusKitError> {
+        self.as_ref().all_kg_facts()
+    }
+    fn all_diary_entries(&self) -> Result<Vec<DiaryEntry>, LocusKitError> {
+        self.as_ref().all_diary_entries()
+    }
+}

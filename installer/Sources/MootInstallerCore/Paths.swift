@@ -228,4 +228,46 @@ public enum MootPaths {
             .appendingPathComponent("LaunchAgents", isDirectory: true)
             .appendingPathComponent("\(launchAgentLabel).plist", isDirectory: false)
     }
+
+    /// launchd job label for the resident mootx01 daemon (the headless HTTP MCP
+    /// server + Brain pump). Distinct from the moot-mgr agent so the two services
+    /// load independently.
+    public static let daemonLabel: String = "com.mootx01.daemon"
+
+    /// Path of the resident mootx01 daemon LaunchAgent property list.
+    ///
+    /// - Returns: `<home>/Library/LaunchAgents/com.mootx01.daemon.plist`. Does
+    ///   not touch the filesystem.
+    public static func daemonPlistURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("LaunchAgents", isDirectory: true)
+            .appendingPathComponent("\(daemonLabel).plist", isDirectory: false)
+    }
+
+    /// The moot-mgr stats-store path the resident daemon self-reports to
+    /// (`ARIA_MCP_STATS_STORE`). Mirrors moot-mgr's `ManagerConfig` default —
+    /// `<data-dir>/moot-mgr/stats.sqlite` — so the daemon writes exactly where
+    /// moot-mgr reads.
+    ///
+    /// - Parameter dataDir: the resolved app-support data dir (`com.mootx01.ce`).
+    public static func daemonStatsStorePath(dataDir: URL) -> String {
+        dataDir
+            .appendingPathComponent("moot-mgr", isDirectory: true)
+            .appendingPathComponent("stats.sqlite", isDirectory: false)
+            .path
+    }
+
+    /// The resident daemon's loopback HTTP port — the single source of truth for
+    /// both the daemon plist's `MOOTX01_HTTP_PORT` and the URL MCP clients are
+    /// wired to over HTTP. moot-mgr's dashboard owns 7077; the daemon
+    /// owns this.
+    public static let defaultResidentPort: Int = 4242
+
+    /// The resident daemon's MCP endpoint URL that HTTP-capable clients are wired
+    /// to (so they share the one running daemon + its Brain pump, rather than
+    /// spawning their own stdio instance). The server accepts POST at any path.
+    public static var residentEndpointURL: String {
+        "http://127.0.0.1:\(defaultResidentPort)"
+    }
 }
