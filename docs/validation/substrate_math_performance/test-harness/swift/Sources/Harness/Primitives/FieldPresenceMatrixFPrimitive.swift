@@ -316,7 +316,7 @@ public enum FieldPresenceMatrixFPrimitive {
     }
 
     private static func allBitsSet() -> [UInt8] {
-        var out = [UInt8](repeating: 0xFF, count: bitPresenceBytes)
+        let out = [UInt8](repeating: 0xFF, count: bitPresenceBytes)
         // 216 bits exactly; last byte has 8 bits, all 216 fit.
         // 27 bytes × 8 = 216. Perfect alignment, no spare bits.
         // (If the count were different, mask the spare bits to 0.)

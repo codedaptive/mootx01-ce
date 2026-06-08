@@ -2,7 +2,7 @@
 
 ConvergenceKit replicates PersistenceKit operations across device or perimeter boundaries. Third foundation kit in the eleven-kit family per `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md`. Design settled in `docs/decisions/DECISION_SYNCKIT_DESIGN_2026-05-19.md`.
 
-ConvergenceKit's only consumer is PersistenceKit. Downstream kits (QueueKit, GeniusLocusKit, Fulcrum's FNode store) get sync for free by enabling ConvergenceKit on their PersistenceKit instance. They never call ConvergenceKit directly.
+ConvergenceKit's only consumer is PersistenceKit. Downstream kits (QueueKit, GeniusLocusKit, and app-level entity stores) get sync for free by enabling ConvergenceKit on their PersistenceKit instance. They never call ConvergenceKit directly.
 
 ## Status (2026-05-19)
 
@@ -10,7 +10,7 @@ ConvergenceKit's only consumer is PersistenceKit. Downstream kits (QueueKit, Gen
 |---|---|
 | ConvergenceKit (core protocols + types) | Complete |
 | ConvergenceKitNone | Complete; production-ready passthrough |
-| ConvergenceKitCloudKit | Complete v1.0; port of Fulcrum's CloudSync target, generalized per SyncManifest |
+| ConvergenceKitCloudKit | Complete v1.0; generalized CloudSync engine per SyncManifest |
 | ConvergenceKitFederation | Complete v1.0; in-process pairing via FederationRelay; Ed25519 signed messages |
 | Conformance fixture suite | Pending |
 
@@ -112,4 +112,4 @@ Once shipped, public API follows semantic versioning. Adding a case to `SyncDire
 
 ## Next missions
 
-This kit is mission 3 of eleven. Mission 4 is EngramLib refactor (smallest, quick win). The remaining substrate kits (LocusKit, VectorKit, CorpusKit), GeniusLocusKit, NeuronKit, CognitionKit, and the Fulcrum integration consume ConvergenceKit through this kit's public surface.
+ConvergenceKit sits in the substrate's storage layer. The remaining substrate kits (LocusKit, VectorKit, CorpusKit), GeniusLocusKit, NeuronKit, CognitionKit, and app integrations consume ConvergenceKit through this kit's public surface.

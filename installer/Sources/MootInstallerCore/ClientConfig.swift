@@ -8,12 +8,13 @@
 // install logic stay aligned.
 //
 // LAUNCH_PLAN.md §"The Monday cut": the installer wires the MCP
-// into Claude and "other clients." Monday's tracked clients are
-// five widely-used MCP hosts: Claude Desktop, Claude Code,
-// Cursor, Cline, and Continue. Each entry uses the stdio transport;
-// the command is the absolute path the installer writes the
-// binary to. Args are empty — mootx01-mcp reads MOOTX01_DATA_DIR
-// from the environment if the user wants a non-default location.
+// into Claude and "other clients." Tracked clients are five widely-used
+// MCP hosts: Claude Desktop, Claude Code, Cursor, Cline, and Continue.
+// Entry transport is PER-CLIENT (see ADR-LOOPBACKHTTP-001): HTTP for Claude Code,
+// Cursor, Cline, and Continue — wired to the resident daemon's loopback
+// endpoint so concurrent clients share the one running daemon + Brain
+// pump. Claude Desktop stays stdio (its native local-HTTP needs an
+// mcp-remote bridge); its command is the absolute placed binary path.
 //
 // Each client carries a `detectPath` that the installer probes before
 // touching any config. Clients not found on the machine are skipped,
@@ -54,13 +55,28 @@ public struct MCPClient: Sendable, Equatable {
     /// local-mode substitution for them.
     public let localConfigPath: String?
 
+    /// Whether this client accepts a LOCAL HTTP MCP endpoint in its config, so
+    /// the installer wires it to the resident daemon over HTTP (sharing the one
+    /// running daemon + Brain pump) instead of a stdio `command` entry that
+    /// spawns its own ephemeral instance. `false` → stdio (e.g. Claude Desktop,
+    /// whose native local-HTTP needs an mcp-remote bridge). See ADR-LOOPBACKHTTP-001.
+    public let supportsLocalHTTP: Bool
+
+    /// For JSON HTTP clients, whether the entry carries an explicit
+    /// `"type": "http"` field. Claude Code and Cline require it; Cursor infers
+    /// HTTP from a bare `url`. Ignored for stdio clients and for Continue (YAML,
+    /// handled separately). See ADR-LOOPBACKHTTP-001.
+    public let httpEntryIncludesType: Bool
+
     public init(
         id: String,
         displayName: String,
         configPath: String,
         serverName: String,
         detectPath: String? = nil,
-        localConfigPath: String? = nil
+        localConfigPath: String? = nil,
+        supportsLocalHTTP: Bool = false,
+        httpEntryIncludesType: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -68,6 +84,8 @@ public struct MCPClient: Sendable, Equatable {
         self.serverName = serverName
         self.detectPath = detectPath
         self.localConfigPath = localConfigPath
+        self.supportsLocalHTTP = supportsLocalHTTP
+        self.httpEntryIncludesType = httpEntryIncludesType
     }
 
     /// Returns `true` if this client appears to be installed on the machine.
@@ -122,12 +140,18 @@ public enum MCPClients {
     ///                     scans for saoudrizwan.claude-dev-* prefix)
     ///   Continue        → .continue (config directory written on first launch)
     public static let supported: [MCPClient] = [
+        // Transport per client (see ADR-LOOPBACKHTTP-001): clients are wired to the resident
+        // daemon over HTTP where their config schema accepts a local HTTP/url
+        // entry, so concurrent clients share the one running daemon + Brain pump.
+        // Claude Desktop stays stdio — its native local-HTTP needs an mcp-remote
+        // bridge, so the stdio `command` entry is the reliable path.
         MCPClient(
             id: "claude-desktop",
             displayName: "Claude Desktop",
             configPath: "Library/Application Support/Claude/claude_desktop_config.json",
             serverName: serverName,
-            detectPath: "/Applications/Claude.app"
+            detectPath: "/Applications/Claude.app",
+            supportsLocalHTTP: false  // local-HTTP needs an mcp-remote bridge → stdio
         ),
         MCPClient(
             id: "claude-code",
@@ -139,14 +163,18 @@ public enum MCPClients {
             detectPath: ".claude.json",
             // Claude Code supports project-local MCP config via .mcp.json in
             // the project root. Other clients are global-only (nil).
-            localConfigPath: ".mcp.json"
+            localConfigPath: ".mcp.json",
+            supportsLocalHTTP: true,
+            httpEntryIncludesType: true  // {"type":"http","url":...}
         ),
         MCPClient(
             id: "cursor",
             displayName: "Cursor",
             configPath: ".cursor/mcp.json",
             serverName: serverName,
-            detectPath: "/Applications/Cursor.app"
+            detectPath: "/Applications/Cursor.app",
+            supportsLocalHTTP: true,
+            httpEntryIncludesType: false  // Cursor infers HTTP from a bare url
         ),
         MCPClient(
             id: "cline",
@@ -155,14 +183,17 @@ public enum MCPClients {
             serverName: serverName,
             // detectPath is the parent directory; isPresent enumerates it
             // for a saoudrizwan.claude-dev-* prefix (see isPresent implementation).
-            detectPath: ".vscode/extensions"
+            detectPath: ".vscode/extensions",
+            supportsLocalHTTP: true,
+            httpEntryIncludesType: true  // {"type":"http","url":...}
         ),
         MCPClient(
             id: "continue",
             displayName: "Continue",
             configPath: ".continue/mcpServers/mootx01.yaml",
             serverName: serverName,
-            detectPath: ".continue"
+            detectPath: ".continue",
+            supportsLocalHTTP: true  // YAML: type: streamable-http (installContinue)
         ),
     ]
 }

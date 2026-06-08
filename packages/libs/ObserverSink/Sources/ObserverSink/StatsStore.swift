@@ -577,11 +577,9 @@ public final class StatsStore: Sendable {
     /// its status surface. This is the store's *own* storage — distinct from
     /// any observed estate's storage.
     ///
-    /// Implemented by probing the backing storage for the optional
-    /// `StorageIntrospection` capability (`as? StorageIntrospection`). All
-    /// PersistenceKit backends conform, so for the SQLite-backed store this
-    /// always returns a value; the optional return keeps the surface honest
-    /// for a hypothetical non-introspectable backend.
+    /// Implemented via the backing storage's `StorageIntrospection`
+    /// capability. The SQLite backend conforms directly, so this always
+    /// returns a value; the optional return type is kept for API stability.
     ///
     /// - Parameter now: The timestamp to stamp on the snapshot (determinism
     ///   rule: the caller owns the clock; no `Date()` inside the store).
@@ -589,7 +587,8 @@ public final class StatsStore: Sendable {
     ///   support introspection.
     /// - Throws: `StorageError` on I/O failure while gathering statistics.
     public func storageStats(now: Date) async throws -> StorageStats? {
-        guard let introspectable = storage as? StorageIntrospection else { return nil }
+        // SQLiteStorage conforms to StorageIntrospection directly.
+        let introspectable = storage as StorageIntrospection
         return try await introspectable.stats(now: now)
     }
 

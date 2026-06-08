@@ -189,7 +189,7 @@ public struct PortableCognitionBundle: Sendable {
         // header
         var version = bundleVersion.bigEndian
         out.append(Data(bytes: &version, count: 4))
-        var uuid = withUnsafeBytes(of: estateUUID.uuid) { Data($0) }
+        let uuid = withUnsafeBytes(of: estateUUID.uuid) { Data($0) }
         out.append(uuid)
         var hlc = generatedAt.packed.bigEndian
         out.append(Data(bytes: &hlc, count: 8))

@@ -195,6 +195,10 @@ pub struct MaintenanceDaemon {
     pub policy: MaintenancePolicy,
     proposed_keys: std::collections::BTreeSet<String>,
     cycle_count: i64,
+    /// Epoch-seconds timestamp of the last `pump` fire, or `None` on first
+    /// call. Used by `pump` for interval gating — the daemon never reads the
+    /// system clock; the caller injects `now`.
+    last_fire_epoch_secs: Option<f64>,
 }
 
 impl MaintenanceDaemon {
@@ -203,12 +207,61 @@ impl MaintenanceDaemon {
             policy,
             proposed_keys: std::collections::BTreeSet::new(),
             cycle_count: 0,
+            last_fire_epoch_secs: None,
         }
+    }
+
+    /// Interval-gated pump — the entry point for the resident loop.
+    ///
+    /// Mirrors Swift `MaintenanceDaemon.pump(now:)`:
+    /// - First call always fires (no prior fire timestamp).
+    /// - Subsequent calls fire only when `policy.tick_interval_ms` has elapsed
+    ///   since the last fire.
+    /// - Returns `Some(report)` when the cycle ran, `None` when the interval
+    ///   has not elapsed.
+    ///
+    /// DETERMINISM: `now_epoch_secs` is injected by the caller. The daemon
+    /// never reads `SystemTime::now()`. The caller (the resident pump loop)
+    /// reads the clock once per tick and passes it to every daemon, guaranteeing
+    /// that all daemons in a single tick operate on the same `now`.
+    pub fn pump<R, S>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        sink: &mut S,
+    ) -> Option<MaintenanceCycleReport>
+    where
+        R: MaintenanceSubstrateReader,
+        S: MaintenanceProposalSink,
+    {
+        // Gate: fire if this is the first call or the interval has elapsed.
+        let interval_secs = self.policy.tick_interval_ms as f64 / 1000.0;
+        let should_fire = match self.last_fire_epoch_secs {
+            None => true, // first call always fires
+            Some(last) => (now_epoch_secs - last) >= interval_secs,
+        };
+        if !should_fire {
+            return None;
+        }
+        self.last_fire_epoch_secs = Some(now_epoch_secs);
+        Some(self.run_cycle(now_epoch_secs, reader, sink))
     }
 
     /// Run one maintenance cycle (steps 0-6) against the seams. Mirrors
     /// `MaintenanceDaemon.runCycle`.
-    pub fn run_cycle<R, S>(&mut self, reader: &R, sink: &mut S) -> MaintenanceCycleReport
+    ///
+    /// DETERMINISM: `now_epoch_secs` is the injected timestamp the caller
+    /// supplies. Maintenance currently does not use it for telemetry timestamps
+    /// (no self-report emit in v1), but the parameter is carried here to
+    /// enforce the conformance contract: neither dreaming nor maintenance reads
+    /// the system clock internally. Future callers that add telemetry to this
+    /// cycle will use `now_epoch_secs` rather than calling `SystemTime::now()`.
+    pub fn run_cycle<R, S>(
+        &mut self,
+        _now_epoch_secs: f64,
+        reader: &R,
+        sink: &mut S,
+    ) -> MaintenanceCycleReport
     where
         R: MaintenanceSubstrateReader,
         S: MaintenanceProposalSink,
@@ -344,7 +397,7 @@ mod tests {
         let reader = FakeReader { scan: full_scan() };
         let mut sink = RecordingSink::default();
         let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
-        let report = d.run_cycle(&reader, &mut sink);
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
 
         assert_eq!(report.proposals_emitted.len(), 5);
         assert_eq!(report.forbidden_combinations, 1);
@@ -383,7 +436,7 @@ tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0"
         let reader = FakeReader { scan };
         let mut sink = RecordingSink::default();
         let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
-        let report = d.run_cycle(&reader, &mut sink);
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
         assert_eq!(report.proposals_emitted.len(), 1);
         assert_eq!(report.proposals_emitted[0].target, "audit-break-2000");
         assert_eq!(report.proposals_emitted[0].kind, "other:audit_integrity");
@@ -398,10 +451,10 @@ tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0"
         let mut sink = RecordingSink::default();
         let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
 
-        let first = d.run_cycle(&reader, &mut sink);
+        let first = d.run_cycle(1_000_000.0, &reader, &mut sink);
         assert_eq!(first.proposals_emitted.len(), 5);
 
-        let second = d.run_cycle(&reader, &mut sink);
+        let second = d.run_cycle(1_300_000.0, &reader, &mut sink);
         assert_eq!(second.proposals_emitted.len(), 0);
         assert_eq!(second.suppressed_duplicates, 5);
         assert_eq!(second.decay_candidates, 1, "counts still report crossers");
@@ -442,5 +495,52 @@ tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0"
         };
         store.save_policy(updated);
         assert_eq!(store.load_policy(), Some(updated), "second save overwrites first");
+    }
+
+    // ─── Pump cadence tests (mirror Swift BrainPumpTests cadence suite) ───
+
+    fn empty_reader() -> FakeReader {
+        FakeReader { scan: MaintenanceScan::default() }
+    }
+
+    // PC-M1: first pump call always fires regardless of interval (no prior
+    // fire timestamp). Mirrors Swift `testMaintenancePumpFirstCallAlwaysFires`.
+    #[test]
+    fn pc_m1_pump_first_call_always_fires() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        // tick_interval_ms = 300_000 (5 min). At t=0 there is no prior fire.
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let result = d.pump(0.0, &reader, &mut sink);
+        assert!(result.is_some(), "first pump call must always fire");
+    }
+
+    // PC-M2: a call before the interval has elapsed returns None.
+    // Mirrors Swift `testMaintenancePumpSkipsBeforeInterval`.
+    #[test]
+    fn pc_m2_pump_skips_before_interval() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy { tick_interval_ms: 300_000, ..MaintenancePolicy::default() });
+        // First call fires (t=0).
+        let first = d.pump(0.0, &reader, &mut sink);
+        assert!(first.is_some(), "first call must fire");
+        // Second call at t=299 s — interval (300 s) has not elapsed.
+        let before = d.pump(299.0, &reader, &mut sink);
+        assert!(before.is_none(), "call before interval must return None");
+    }
+
+    // PC-M3: a call at exactly the interval boundary fires.
+    // Mirrors Swift `testMaintenancePumpFiresAtInterval`.
+    #[test]
+    fn pc_m3_pump_fires_at_interval() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy { tick_interval_ms: 300_000, ..MaintenancePolicy::default() });
+        // First call fires at t=0.
+        let _ = d.pump(0.0, &reader, &mut sink);
+        // Call at t=300 s — exactly at the interval boundary.
+        let at_boundary = d.pump(300.0, &reader, &mut sink);
+        assert!(at_boundary.is_some(), "call at interval boundary must fire");
     }
 }

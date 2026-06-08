@@ -17,13 +17,14 @@
 //     rows, and delegates to `AprioriMining.mine(rows:thresholds:)`.
 //     Returns `[AprioriRule]`.
 //
-// Approximations:
+// Approximations (documented in MX-2 Blast Radius Report,
+// INTENTIONALLY_LEFT items):
 //
 //   - MatrixTier.coOccurrence stores only upper-triangle pairs (no
 //     diagonal). Single-item support O[A,A] is estimated as
 //     `liveRowCount` (an upper bound). Confidence and lift are
 //     therefore conservative lower bounds. Full correctness requires a
-//     follow-up that extends MatrixTier to store diagonal counts.
+//     separate mission that extends MatrixTier to store diagonal counts.
 //
 //   - Multi-bit `.bitmap`, `.string`, and `.bytes` coordinate values
 //     cannot be projected losslessly into the 6-bit Item model and are
@@ -152,7 +153,8 @@ private extension GeniusLocusKit {
                 return (field, UInt8(b.trailingZeroBitCount))
             default:
                 // Multi-bit bitmaps, strings, bytes, null: no lossless 6-bit
-                // encoding exists. These coordinates are intentionally skipped.
+                // encoding exists. These coordinates are documented as
+                // INTENTIONALLY_LEFT in the MX-2 Blast Radius Report.
                 return nil
             }
         }

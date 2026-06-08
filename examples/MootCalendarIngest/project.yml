@@ -1,0 +1,50 @@
+# MootCalendarIngest — xcodegen project definition
+#
+# This example demonstrates one idea: you can give a LEGACY app you cannot
+# change (Apple Calendar) a memory by READING its data and writing that data
+# into the MOOT. Calendar itself is never modified — we only read from it.
+#
+# Generate the Xcode project from this file with:
+#     xcodegen generate
+#
+# Generate the project with `xcodegen generate`, then build with xcodebuild.
+
+name: MootCalendarIngest
+
+options:
+  bundleIdPrefix: com.codedaptive.mootx01.examples
+  # iOS 26 / macOS 26 are the MOOTx01 SDK deployment floors. This app is
+  # iOS-only (EventKit calendar UX targets iPhone/iPad), but the option block
+  # lists both for template consistency.
+  deploymentTarget: { iOS: "26.0", macOS: "26.0" }
+  createIntermediateGroups: true
+
+packages:
+  # The MootGateway Swift package. `../../apps/Mootx01` is the package root;
+  # the product we depend on is "MootGateway" (see the target's dependencies).
+  Mootx01: { path: ../../apps/Mootx01 }
+
+targets:
+  MootCalendarIngest:
+    type: application
+    # iOS ONLY. EventKit's full-access calendar flow and this app's UX are
+    # built for iPhone/iPad. We do not list macOS here.
+    platform: iOS
+    sources: [App]
+    dependencies:
+      # Link the MootGateway product. `import MootGateway` then gives us
+      # MootBridge, GatewayRuntime, GatewayCall, and the App Intent types.
+      - { package: Mootx01, product: MootGateway }
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.examples.mootcalendaringest
+        PRODUCT_NAME: MootCalendarIngest
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # REQUIRED by EventKit: iOS refuses calendar access without a usage
+        # string. GENERATE_INFOPLIST_FILE folds this key into the synthesized
+        # Info.plist. The user sees this exact sentence in the permission alert.
+        INFOPLIST_KEY_NSCalendarsUsageDescription: "MootCalendarIngest reads this week's calendar events to file them into your MOOT. It can also create sample events for demonstration."

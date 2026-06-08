@@ -90,14 +90,21 @@ impl ServerConfig {
             // succeeds even when the database is temporarily unreachable;
             // the first tool call that touches the estate surfaces any
             // connection error. Matches Swift's AriaMCPMain postgres branch.
-            eprintln!("aria-mcp: opening PostgreSQL estate at {postgres_url:?}");
+            // Redact userinfo before logging — the URL may contain
+            // user:password@host, which would leak credentials to stderr / log
+            // aggregators. Log host only, matching the Swift side
+            // (URL(string:)?.host ?? "configured").
+            eprintln!("aria-mcp: opening PostgreSQL estate at {}", redact_postgres_url(&postgres_url));
             match EstateRegistry::new_postgres(&postgres_url, "aria-mcp-default") {
                 Ok(reg) => {
                     eprintln!("aria-mcp: PostgreSQL estate ready");
                     reg
                 }
                 Err(e) => {
-                    eprintln!("{e}");
+                    // Scrub any verbatim occurrence of the connection string from
+                    // the error before logging, so credentials never reach stderr
+                    // (parity with the Swift fatal-path redaction).
+                    eprintln!("{}", format!("{e}").replace(&postgres_url, "[REDACTED]"));
                     std::process::exit(1);
                 }
             }
@@ -251,5 +258,46 @@ fn write_response<W: Write>(response: &crate::jsonrpc::JSONRPCResponse, writer: 
         Err(e) => {
             eprintln!("aria-mcp: serialization error: {e}");
         }
+    }
+}
+
+/// Reduce a PostgreSQL connection string to its host for safe logging, dropping
+/// any `user:password@` userinfo. Returns `"configured"` when no host can be
+/// extracted. Mirrors the Swift side's `URL(string:)?.host ?? "configured"`.
+pub fn redact_postgres_url(url: &str) -> String {
+    // scheme://[user[:pass]@]host[:port][/db][?params]
+    let after_scheme = url.split("://").nth(1).unwrap_or("");
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    // Drop userinfo: keep everything after the last '@'.
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    // Drop the port.
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    if host.is_empty() {
+        "configured".to_owned()
+    } else {
+        host.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_postgres_url;
+
+    #[test]
+    fn strips_userinfo_and_port() {
+        assert_eq!(
+            redact_postgres_url("postgres://user:secret@db.example.com:5432/estate"),
+            "db.example.com"
+        );
+    }
+
+    #[test]
+    fn host_only_url_passes_through() {
+        assert_eq!(redact_postgres_url("postgres://db.example.com/estate"), "db.example.com");
+    }
+
+    #[test]
+    fn unparseable_returns_configured() {
+        assert_eq!(redact_postgres_url("not a url"), "configured");
     }
 }

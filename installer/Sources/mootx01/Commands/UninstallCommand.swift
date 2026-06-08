@@ -75,6 +75,8 @@ struct UninstallCommand: AsyncParsableCommand {
         #if os(macOS)
         LaunchAgent.uninstall(homeDirectory: home)
         print("  ✓ Stopped and removed the management console (launchd).")
+        LaunchAgent.uninstallDaemon(homeDirectory: home)
+        print("  ✓ Stopped and removed the resident mootx01 daemon (launchd).")
         #endif
 
         // Remove the placed binaries (~/.mootx01) and the PATH symlinks

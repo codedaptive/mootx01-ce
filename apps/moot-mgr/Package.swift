@@ -9,7 +9,7 @@
 //   A PURE OBSERVER. It never hosts an estate DB. It owns the central
 //   ObserverSink StatsStore (SQLite), the global monitoring on/off switch
 //   (the flag row in the store), and the retention window. Consumers
-//   (ARIA_MCP, Fulcrum, …) host their own estates and, when the flag is on,
+//   (ARIA_MCP and other hosts) host their own estates and, when the flag is on,
 //   write their dropbox rows directly into this store.
 //
 // What lives here:
@@ -32,16 +32,18 @@
 //   IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (lib) → moot-mgr (app)
 //
 // Dependency additions per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28:
-//   ObserverSink, IntellectusLib, PersistenceKit/PersistenceKitSQLite.
-//   No external (third-party) Swift dependencies.
+//   ObserverSink, IntellectusLib, PersistenceKit/PersistenceKitSQLite are
+//   recorded as required updates in the change-impact analysis, citing
+//   MANAGER_1.0_PLAN.md §1/§4. No external (third-party) Swift dependencies.
 //
-//   GeniusLocusKit + PersistenceKitInMemory support the P6 admin plane:
-//   the resident host converges with the serve core to HOST and PROVISION
-//   estates. The admin plane invokes GLK's provision / quiesce / drain /
-//   destroy / mountState surface (EstateProvision.swift / EstateLifecycle.swift)
-//   to create and tear down real MOOTs through the substrate — never a
-//   side-door DB file (concepts §1.8). InMemory is added so the admin plane
-//   can provision volatile estates (GUI SPEC §4.2 flags InMemory loudly).
+//   GeniusLocusKit + PersistenceKitInMemory added by cp-mootmgr-admin (P6 admin
+//   plane): the resident host converges with the serve core to HOST and PROVISION
+//   estates (MANAGER_1.0_PLAN.md §1, §4 P6). The admin plane invokes GLK's
+//   provision / quiesce / drain / destroy / mountState surface (EstateProvision.swift
+//   / EstateLifecycle.swift) to create and tear down real MOOTs through the
+//   substrate — never a side-door DB file (concepts §1.8). InMemory is added so
+//   the admin plane can provision volatile estates (GUI SPEC §4.2 flags InMemory
+//   loudly). Recorded in the change-impact analysis.
 //   Layering: moot-mgr is a top-level APP depending on a KIT (downstream→upstream)
 //   — no inversion. No external (third-party) Swift dependencies are introduced.
 //
@@ -77,6 +79,14 @@ let package = Package(
         // and tear down estates (provision/quiesce/drain/destroy/mountState).
         // cp-mootmgr-admin, MANAGER_1.0_PLAN.md §4 P6.
         .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
+        // LoopbackHTTP: the shared zero-dependency loopback HTTP/1.1 server
+        // (POSIXSocket + HTTPWire), extracted FROM this package in P1a so the
+        // resident mootx01 MCP daemon and moot-mgr share one audited
+        // loopback-bind implementation instead of two drifting copies. App→lib
+        // (downstream→upstream), no inversion; LoopbackHTTP has zero deps.
+        // Permitted per CLAUDE.md "Package.swift / Cargo.toml edits — controlled,
+        // not forbidden"; ADR-LOOPBACKHTTP-001.
+        .package(name: "LoopbackHTTP", path: "../../packages/libs/LoopbackHTTP"),
     ],
     targets: [
         .target(
@@ -88,6 +98,7 @@ let package = Package(
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
             ],
             path: "Sources/MootManager",
             // DashboardAssets/ holds the EDITABLE source of the read-plane web UI

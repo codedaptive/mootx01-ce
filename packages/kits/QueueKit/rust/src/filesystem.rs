@@ -5,8 +5,10 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
@@ -28,6 +30,17 @@ struct HlcGenState {
     node_id: i32,
     last_physical: i64,
     last_logical: i32,
+}
+
+/// Opens `path` for exclusive write creation (O_CREAT | O_EXCL).
+/// On Unix the file is created with mode 0o644; Windows has no
+/// equivalent octal permission model so the mode call is omitted.
+fn create_exclusive(path: &Path) -> std::io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o644);
+    opts.open(path)
 }
 
 impl FilesystemBackend {
@@ -103,9 +116,7 @@ impl QueueBackend for FilesystemBackend {
         let new_path = self.new_dir().join(&filename);
 
         // Step 3: O_CREAT | O_EXCL
-        let mut f = OpenOptions::new()
-            .write(true).create_new(true).mode(0o644)
-            .open(&tmp_path)
+        let mut f = create_exclusive(&tmp_path)
             .map_err(|e| QueueError::WriteFailed(format!("O_EXCL: {}", e)))?;
         // Steps 4 + 5 + 6
         f.write_all(&encoded).map_err(QueueError::from)?;
@@ -222,8 +233,7 @@ impl QueueBackend for FilesystemBackend {
         let sig_data = encode_signal(&sig);
         let sig_tmp = self.tmp_dir().join(format!("{}.signal", job_id.0));
         let sig_final = self.done_dir().join(format!("{}.signal", job_id.0));
-        let mut f = OpenOptions::new().write(true).create_new(true)
-            .mode(0o644).open(&sig_tmp)
+        let mut f = create_exclusive(&sig_tmp)
             .map_err(|e| QueueError::WriteFailed(e.to_string()))?;
         f.write_all(&sig_data).map_err(QueueError::from)?;
         f.sync_data().map_err(QueueError::from)?;
