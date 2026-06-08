@@ -127,6 +127,15 @@ impl DrawerMapping {
         // evaluator supplies per-axis defaults (sensitivity, trust) for any
         // axis not addressed by the chain — sensitivity stays at normal so
         // export never surfaces elevated/restricted/secret content.
+        //
+        // VK-EXPORT-FIX parity note: `limit: None` is correct here and does NOT
+        // apply a 50-cap in the Rust port. The coordinator's `recall` delegates to
+        // `estate.recall(frame, now).collect_all()`, which drains all pages
+        // regardless of `RecallStream::DEFAULT_PAGE_SIZE`. In the Swift port the
+        // GLK convenience overload `recall(_:_:RecallFrame)` defaults the
+        // `GLKRecallRequest.limit` to 50 when `frame.limit` is `None`; the Swift
+        // fix is to set `frame.limit = 10_000_000`. No such default exists in the
+        // Rust coordinator path, so `limit: None` is the correct unbounded form.
         let recall_frame = RecallFrame {
             filter_chain: scope.filter_chain(),
             hydration_level: HydrationLevel::Full,
