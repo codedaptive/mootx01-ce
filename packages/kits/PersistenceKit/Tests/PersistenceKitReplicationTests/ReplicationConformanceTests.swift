@@ -157,7 +157,7 @@ private func tombstonedItemRow(
 /// Tests that assert exact HLC column values through SQLite use InMemory↔InMemory
 /// pairs only. Cross-backend (InMemory↔SQLite) tests use the events table for
 /// composite-PK and append-only verification but do not assert HLC column values.
-/// See finding F-HLC-01 for the pre-existing bug analysis.
+/// See the completion report finding F-HLC-01 for the pre-existing bug analysis.
 private func eventRow(
     topicID: UUID,
     seq: Int64,
@@ -374,7 +374,7 @@ struct ReplicationConformanceTests {
         // Compare all columns except hlc_stamp due to pre-existing SQLite backend bug
         // (F-HLC-01): SQLiteConnection binds HLC using SubstrateTypes packed format but
         // SQLiteBackend.unpackHLC reads it with a different bit layout, so HLC column
-        // values do not round-trip correctly through SQLite.
+        // values do not round-trip correctly through SQLite. See completion report.
         for (src, dst) in zip(sourceEvents, hydratedEvents) {
             for (key, value) in src where key != "hlc_stamp" {
                 #expect(dst[key] == value, "events.\(key) mismatch after SQLite round-trip")

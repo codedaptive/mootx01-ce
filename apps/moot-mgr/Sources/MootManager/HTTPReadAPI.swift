@@ -35,14 +35,16 @@
 // ===========================================================================
 //
 // Implementation note: the listening + per-connection I/O run on a dedicated
-// background Thread using POSIX sockets (POSIXSocket.swift). NWListener cannot
-// bind a server socket in this build environment (EINVAL); the POSIX path is
-// zero-dependency (system libc) and enforces the same loopback-only boundary
-// directly. Each request that needs the store hops onto the MootManager actor
-// via an async Task; the socket fd stays owned by the connection handler.
+// background Thread using POSIX sockets (LoopbackHTTP.POSIXSocket). NWListener was the
+// mission's first choice but cannot bind a server socket in this build
+// environment (EINVAL); the POSIX path is zero-dependency (system libc) and
+// enforces the same loopback-only boundary directly. See the completion report.
+// Each request that needs the store hops onto the MootManager actor via an
+// async Task; the socket fd stays owned by the connection handler.
 
 import Foundation
 import OSLog
+import LoopbackHTTP
 
 #if canImport(Glibc)
 import Glibc
@@ -176,19 +178,18 @@ public actor HTTPReadAPI {
 
     /// Serve one accepted connection: read the request, route it, respond.
     private func serve(_ fd: Int32) async {
-        defer {
-            // The SSE path closes the fd itself when the stream ends; the
-            // buffered path is closed here. We always close at the end of serve
-            // for the non-stream paths.
-        }
         guard let request = HTTPRequest.read(fd: fd) else { close(fd); return }
-        let response = await route(request)
-        let keepOpen = response.send(fd: fd)
-        if keepOpen {
-            await streamEvents(fd: fd)   // SSE: streamEvents closes fd when done.
-        } else {
-            close(fd)
+        // The SSE live-tail is the one streaming path. Decide it here, before
+        // routing: LoopbackHTTP's response writer is buffered-only, and the
+        // stream's source + lifetime are the consumer's (ADR-LOOPBACKHTTP-001).
+        // streamEvents owns the fd from here and closes it when the stream ends.
+        if request.method == "GET", request.path == "/api/events", request.wantsEventStream {
+            await streamEvents(fd: fd)
+            return
         }
+        let response = await route(request)
+        response.send(fd: fd)
+        close(fd)
     }
 
     // MARK: - Routing
@@ -222,9 +223,9 @@ public actor HTTPReadAPI {
             let estate = Self.queryValue("estate", in: request.query)
             return await jsonResponse { try await self.manager.graphPayload(now: self.clock(), estate: estate) }
         case ("GET", "/api/events"):
-            // SSE live-tail when requested (Accept: text/event-stream or
-            // ?stream=1); otherwise a one-shot JSON snapshot.
-            if request.wantsEventStream { return .eventStream }
+            // SSE live-tail (Accept: text/event-stream or ?stream=1) is handled
+            // in serve(_:) before routing; here we serve the one-shot JSON
+            // snapshot.
             return await jsonResponse { try await self.manager.eventsPayload() }
         case ("POST", let path) where path.hasPrefix("/api/control/"):
             return await handleControl(request)
@@ -433,15 +434,11 @@ public actor HTTPReadAPI {
     /// by a deadline so a forgotten client cannot run forever in a headless
     /// context; the browser reconnects automatically.
     func streamEvents(fd: Int32) async {
-        let head = """
-        HTTP/1.1 200 OK\r
-        Content-Type: text/event-stream\r
-        Cache-Control: no-cache\r
-        Connection: keep-alive\r
-        \r
-
-        """
-        guard POSIXSocket.sendAll(fd, Data(head.utf8)) else { close(fd); return }
+        // LoopbackHTTP owns the SSE wire framing (the text/event-stream head and
+        // the `data: …` frame encoding); this method owns the stream's source
+        // (the store poll), its cadence, and the connection lifetime.
+        let sse = SSEStream(fd: fd)
+        guard sse.writeHead() else { close(fd); return }
 
         var lastSent = Date(timeIntervalSince1970: 0)
         let deadline = clock().addingTimeInterval(3600)
@@ -461,7 +458,7 @@ public actor HTTPReadAPI {
                 if let d = Self.parseISO(ev.ts) { lastSent = max(lastSent, d) }
                 if let data = try? APIJSON.encode(ev),
                    let json = String(data: data, encoding: .utf8) {
-                    if !POSIXSocket.sendAll(fd, Data("data: \(json)\n\n".utf8)) {
+                    if !sse.send(json) {
                         sendFailed = true; break
                     }
                 }

@@ -285,7 +285,7 @@ NeuronKit's reasoning surface is mostly total — edge inputs (empty
 candidate lists, `k <= 0`, empty corpora, empty lens inputs) return
 empty / neutral results rather than throwing. The one family that raises
 typed errors is the Bradley-Terry fitter and its preference-lens caller,
-which own NeuronKit's `MOOTx01Error` enum per the fleet convention (one
+which own NeuronKit's `MOOTx01Error` enum per the project convention (one
 typed error enum per owning module, never optionals plus logging).
 Daemon and branch operations surface upstream GeniusLocusKit verb errors
 unchanged.

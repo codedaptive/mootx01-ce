@@ -64,7 +64,7 @@ import Foundation
 /// `#if arch(arm64)` and verifies that the platform-selected kernel
 /// (whichever it is) produces correct distances through `EngramLib`'s
 /// public API — same engram distance = 0, bit-inverse distance = 256.
-/// The deviation is documented in the VEC-05 decision record.
+/// The deviation is intentional and documented in the VEC-05 decision record.
 ///
 /// **Execution model.** These four suites assert wall-clock latency
 /// budgets (P99 / median). Under XCTest the methods ran serially, so
@@ -357,7 +357,7 @@ struct CapturePathBenchmarkTests {
             "Bob asked about the migration plan, see thread 14",
             "follow up next Tuesday on the SaaS contract",
             "decision: defer the Q3 roadmap until budget closes",
-            "research: compare Nexus vs Fulcrum capture latency",
+            "research: compare capture latency across backends",
             "remember to file the expense report by Friday end of day",
             "personal: gym at 6am, then groceries on the way home",
             "design note — engram bit assignments are stable across v1",

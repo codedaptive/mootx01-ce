@@ -1,7 +1,7 @@
 ---
 status: decided
 question: How should VaultKit export/import preserve identity across round-trips, and how should export scope be selected?
-authors: Bob Pankratz
+authors: Bob Pankratz, MOOTx01 maintainers
 date: 2026-06-05
 relates_to:
   - docs/reference/VAULTKIT_INTERFACE.md
@@ -81,7 +81,7 @@ F13; Rust had kept the old name). **This is now closed in both ports** (verified
 2026-06-06): Rust `Filter::AutomatedConfirmedOnly` (`packages/kits/LocusKit/rust/src/filter.rs`,
 "Mirrors Swift `automatedConfirmedOnly`; was `ModelConfirmedOnly` in v0.35 (F13 rename)")
 matches Swift `Filter.automatedConfirmedOnly` (`Filter.swift`); the `bitmap_evaluator.rs`
-call sites + tests use the renamed variant.
+call sites and tests use the renamed variant.
 
 Correction to the original framing: this note previously read "being closed in a
 follow-on LocusKit-Rust pass." Deferring a parity drift to a "follow-on pass" is the
@@ -91,6 +91,6 @@ record the closure rather than a deferral.
 
 ## Status
 
-Decided and implemented both ports (Swift `4c353d67`, Rust `fb21eb0d`, interface doc
+Decided and implemented on both ports (Swift `4c353d67`, Rust `fb21eb0d`, interface doc
 `b34a6520`). All four suites green (Swift VaultKit 24 / ARIA_MCP 112; Rust VaultKit 22 /
 ARIA_MCP 84). Concordance audit clean.

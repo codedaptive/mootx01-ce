@@ -50,7 +50,7 @@ LocusKit is the right kit when you need exactly one estate. For coordinating mul
 - `.claude/skills/bitmap-patterns/SKILL.md` — mandatory before any bitmap mission
 - `.claude/skills/substrate-engineering/SKILL.md` — mandatory before any algorithm mission
 
-## Mission placement rules
+## Scope
 
 **Belongs here** if it touches: storage nouns, bitmap columns, DrawerStore, the single Estate actor and its verbs, Filter algebra, bitmap evaluator, audit enforcement, state/combination validation.
 

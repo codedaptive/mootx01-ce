@@ -1,0 +1,48 @@
+# xcodegen spec for MootNotepad — a notes app whose entire store is a MOOT.
+#
+# Regenerate the Xcode project with:   xcodegen generate   (run in this folder)
+#
+# Universal: one app target built for BOTH iOS and macOS from the same App/
+# sources. Real App Intents register because this is a true app bundle — Xcode
+# runs the App Intents metadata extractor over the app plus the linked
+# MootGateway product, which is what makes MootNotepadShortcuts callable.
+
+name: MootNotepad
+options:
+  bundleIdPrefix: com.codedaptive.mootx01.examples
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+
+packages:
+  # The local MootGateway package — the MOOT seam every example builds on.
+  Mootx01:
+    path: ../../apps/Mootx01
+
+targets:
+  MootNotepad:
+    type: application
+    # Universal: the SwiftUI + MootGateway code compiles unchanged for both.
+    platform: [iOS, macOS]
+    sources:
+      - path: App
+    dependencies:
+      # We depend on MootGateway (the bridge + intents), not GatewayUI — this
+      # example builds its OWN UI on top of the MOOT rather than reusing the
+      # shared gateway UI, which is the whole point of the example.
+      - package: Mootx01
+        product: MootGateway
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.examples.mootnotepad
+        PRODUCT_NAME: MootNotepad
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_CFBundleDisplayName: "MootNotepad"
+        # No special entitlements: the MOOT lives in the app sandbox as a plain
+        # SQLite file (Application Support), so no extra usage descriptions or
+        # capabilities are required.

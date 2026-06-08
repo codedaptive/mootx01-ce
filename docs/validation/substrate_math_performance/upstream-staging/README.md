@@ -21,6 +21,6 @@ Staging them in this directory preserves them at a clearly-marked location that 
 
 ## Note on RecallTypes
 
-Four types were extracted from `glref-swift-CognitionKit.swift` and moved DOWN into SubstrateLib (not up to staging): RecallScore, DistanceBreakdown, RecallResult, and RowProjection. These are substrate-layer wire types that federation (TierAscendingQuery) and downstream cognition both consume; keeping them in SubstrateLib avoids redefinition drift across kits. The extraction is in `/Users/bob/devlop/mootx01/SubstrateLib/Sources/SubstrateLib/RecallTypes.swift`.
+Four types were extracted from `glref-swift-CognitionKit.swift` and moved DOWN into SubstrateLib (not up to staging): RecallScore, DistanceBreakdown, RecallResult, and RowProjection. These are substrate-layer wire types that federation (TierAscendingQuery) and downstream cognition both consume; keeping them in SubstrateLib avoids redefinition drift across kits. The extraction is in `packages/libs/SubstrateLib/Sources/SubstrateLib/RecallTypes.swift`.
 
 When `glref-swift-CognitionKit.swift` is promoted into NeuronKit and CognitionKit during missions 9 and 10, the type definitions for RecallScore, DistanceBreakdown, RecallResult, and RowProjection MUST be removed from the upstream file (it should import them from SubstrateLib instead).

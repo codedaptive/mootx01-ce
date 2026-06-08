@@ -38,8 +38,8 @@ final class LaunchAgentTests: XCTestCase {
 
     func testMakePlistContainsBinaryServeAndKeepAlive() {
         let plist = LaunchAgent.makePlist(
-            mgrBinaryPath: "/Users/test/.mootx01/bin/moot-mgr",
             label: "com.mootx01.mgr",
+            programArguments: ["/Users/test/.mootx01/bin/moot-mgr", "serve"],
             stdoutPath: "/Users/test/.mootx01/logs/moot-mgr.out.log",
             stderrPath: "/Users/test/.mootx01/logs/moot-mgr.err.log"
         )
@@ -51,9 +51,51 @@ final class LaunchAgentTests: XCTestCase {
         XCTAssertTrue(plist.contains("<string>Background</string>"))
         XCTAssertTrue(plist.contains("moot-mgr.out.log"))
         XCTAssertTrue(plist.contains("moot-mgr.err.log"))
+        // A plist with no env dict must NOT emit an EnvironmentVariables key.
+        XCTAssertFalse(plist.contains("<key>EnvironmentVariables</key>"))
         // Well-formed enough to parse as a property list.
         let data = Data(plist.utf8)
         XCTAssertNoThrow(try PropertyListSerialization.propertyList(from: data, format: nil))
+    }
+
+    func testDaemonPlistCarriesEnvironmentVariables() throws {
+        let plist = LaunchAgent.makePlist(
+            label: MootPaths.daemonLabel,
+            programArguments: ["/Users/test/.mootx01/bin/mootx01", "serve"],
+            stdoutPath: "/Users/test/.mootx01/logs/mootx01-daemon.out.log",
+            stderrPath: "/Users/test/.mootx01/logs/mootx01-daemon.err.log",
+            environmentVariables: [
+                "MOOTX01_HTTP_PORT": "4242",
+                "MOOTX01_DATA_DIR": "/Users/test/Library/Application Support/com.mootx01.ce",
+                "ARIA_MCP_STATS_STORE": "/Users/test/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite",
+            ]
+        )
+        XCTAssertTrue(plist.contains("<string>com.mootx01.daemon</string>"))
+        XCTAssertTrue(plist.contains("<key>EnvironmentVariables</key>"))
+        XCTAssertTrue(plist.contains("<key>MOOTX01_HTTP_PORT</key>"))
+        XCTAssertTrue(plist.contains("<string>4242</string>"))
+        XCTAssertTrue(plist.contains("<key>ARIA_MCP_STATS_STORE</key>"))
+        // Parses as a real plist, and the env round-trips to the right values.
+        let data = Data(plist.utf8)
+        let obj = try PropertyListSerialization.propertyList(from: data, format: nil)
+        let dict = try XCTUnwrap(obj as? [String: Any])
+        let env = try XCTUnwrap(dict["EnvironmentVariables"] as? [String: String])
+        XCTAssertEqual(env["MOOTX01_HTTP_PORT"], "4242")
+        XCTAssertEqual(env["ARIA_MCP_STATS_STORE"], "/Users/test/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite")
+    }
+
+    func testDaemonPaths() {
+        let home = URL(fileURLWithPath: "/Users/test")
+        XCTAssertEqual(MootPaths.daemonLabel, "com.mootx01.daemon")
+        XCTAssertEqual(
+            MootPaths.daemonPlistURL(homeDirectory: home).path,
+            "/Users/test/Library/LaunchAgents/com.mootx01.daemon.plist"
+        )
+        let dataDir = URL(fileURLWithPath: "/Users/test/Library/Application Support/com.mootx01.ce")
+        XCTAssertEqual(
+            MootPaths.daemonStatsStorePath(dataDir: dataDir),
+            "/Users/test/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite"
+        )
     }
 
     func testXmlEscapeHandlesSpecialCharacters() {
@@ -63,8 +105,8 @@ final class LaunchAgentTests: XCTestCase {
         )
         // An ampersand in a path must not break plist parsing.
         let plist = LaunchAgent.makePlist(
-            mgrBinaryPath: "/Users/a&b/moot-mgr",
             label: "com.mootx01.mgr",
+            programArguments: ["/Users/a&b/moot-mgr", "serve"],
             stdoutPath: "/tmp/o.log",
             stderrPath: "/tmp/e.log"
         )

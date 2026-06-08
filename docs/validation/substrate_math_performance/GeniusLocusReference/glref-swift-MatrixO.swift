@@ -91,7 +91,7 @@ public struct MatrixO: Sendable, Equatable {
 
     public init(entries: [(key: CooccurrenceKey, count: Int64)]) {
         // Sort and dedupe defensively.
-        var sorted = entries.sorted { $0.key < $1.key }
+        let sorted = entries.sorted { $0.key < $1.key }
         var deduped: [(key: CooccurrenceKey, count: Int64)] = []
         for entry in sorted {
             if let last = deduped.last, last.key == entry.key {

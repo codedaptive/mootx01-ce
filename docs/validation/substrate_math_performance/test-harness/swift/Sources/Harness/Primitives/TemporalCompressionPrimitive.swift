@@ -152,7 +152,7 @@ public enum TemporalCompressionPrimitive {
 
         let actual = TemporalCompression.rollup(windows: windows, to: targetLevel)
 
-        guard case .dict(let _) = JSONValue.dict(c.expectedOutput) else {
+        guard case .dict = JSONValue.dict(c.expectedOutput) else {
             return fail(c, "expected_output not dict")
         }
         guard let expected = parseWindow(c.expectedOutput) else {

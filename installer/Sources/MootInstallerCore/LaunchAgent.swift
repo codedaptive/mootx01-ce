@@ -53,46 +53,63 @@ public enum LaunchAgent {
     /// cannot corrupt the plist.
     ///
     /// - Parameters:
-    ///   - mgrBinaryPath: absolute path of the placed `moot-mgr` binary.
     ///   - label: launchd job label (also the plist `Label`).
+    ///   - programArguments: the binary path + args (e.g. `[binary, "serve"]`).
     ///   - stdoutPath: file the job's stdout is appended to.
     ///   - stderrPath: file the job's stderr is appended to.
+    ///   - environmentVariables: optional `EnvironmentVariables` dict — the
+    ///     resident mootx01 daemon needs this (MOOTX01_HTTP_PORT etc.); the
+    ///     moot-mgr agent passes none. Emitted in sorted order so the plist is
+    ///     deterministic (testable).
     /// - Returns: the complete plist XML document.
     public static func makePlist(
-        mgrBinaryPath: String,
         label: String,
+        programArguments: [String],
         stdoutPath: String,
-        stderrPath: String
+        stderrPath: String,
+        environmentVariables: [String: String] = [:]
     ) -> String {
-        let bin = xmlEscape(mgrBinaryPath)
-        let out = xmlEscape(stdoutPath)
-        let err = xmlEscape(stderrPath)
-        let lbl = xmlEscape(label)
-        return """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(lbl)</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>\(bin)</string>
-                <string>serve</string>
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
-            <key>ProcessType</key>
-            <string>Background</string>
-            <key>StandardOutPath</key>
-            <string>\(out)</string>
-            <key>StandardErrorPath</key>
-            <string>\(err)</string>
-        </dict>
-        </plist>
-        """
+        // Assembled line-by-line (not a single multi-line literal) so the
+        // optional EnvironmentVariables block can't trip Swift's multi-line-string
+        // indentation rules.
+        var lines: [String] = [
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">",
+            "<plist version=\"1.0\">",
+            "<dict>",
+            "    <key>Label</key>",
+            "    <string>\(xmlEscape(label))</string>",
+            "    <key>ProgramArguments</key>",
+            "    <array>",
+        ]
+        for arg in programArguments {
+            lines.append("        <string>\(xmlEscape(arg))</string>")
+        }
+        lines.append("    </array>")
+        if !environmentVariables.isEmpty {
+            lines.append("    <key>EnvironmentVariables</key>")
+            lines.append("    <dict>")
+            for (key, value) in environmentVariables.sorted(by: { $0.key < $1.key }) {
+                lines.append("        <key>\(xmlEscape(key))</key>")
+                lines.append("        <string>\(xmlEscape(value))</string>")
+            }
+            lines.append("    </dict>")
+        }
+        lines.append(contentsOf: [
+            "    <key>RunAtLoad</key>",
+            "    <true/>",
+            "    <key>KeepAlive</key>",
+            "    <true/>",
+            "    <key>ProcessType</key>",
+            "    <string>Background</string>",
+            "    <key>StandardOutPath</key>",
+            "    <string>\(xmlEscape(stdoutPath))</string>",
+            "    <key>StandardErrorPath</key>",
+            "    <string>\(xmlEscape(stderrPath))</string>",
+            "</dict>",
+            "</plist>",
+        ])
+        return lines.joined(separator: "\n")
     }
 
     /// Minimal XML text-content escaping for plist string values.
@@ -133,8 +150,8 @@ public enum LaunchAgent {
                 withIntermediateDirectories: true
             )
             let plist = makePlist(
-                mgrBinaryPath: mgrBinaryPath,
                 label: label,
+                programArguments: [mgrBinaryPath, "serve"],
                 stdoutPath: stdoutPath,
                 stderrPath: stderrPath
             )
@@ -143,30 +160,71 @@ public enum LaunchAgent {
             return .launchctlFailed("could not write LaunchAgent plist: \(error)")
         }
 
+        let result = bootstrapJob(plistURL: plistURL, label: label)
+        guard result.ok else { return .launchctlFailed(result.detail) }
+        return .installed(plistPath: plistURL.path, dashboardURL: defaultDashboardURL)
+    }
+
+    /// Write the resident mootx01 daemon plist (with EnvironmentVariables) and
+    /// load + start it under launchd, mirroring `install` but for the
+    /// `com.mootx01.daemon` label. The `environment` dict becomes the plist's
+    /// `EnvironmentVariables` — at minimum `MOOTX01_HTTP_PORT` (which switches
+    /// `mootx01 serve` into resident HTTP mode), plus the data dir and the
+    /// stats-store path so the daemon self-reports to moot-mgr out of the box.
+    public static func installDaemon(
+        binaryPath: String,
+        homeDirectory: URL,
+        environment: [String: String]
+    ) -> Status {
+        let fm = FileManager.default
+        guard fm.isExecutableFile(atPath: binaryPath) else { return .binaryNotFound }
+
+        let plistURL = MootPaths.daemonPlistURL(homeDirectory: homeDirectory)
+        let logsDir = MootPaths.logsDirURL(homeDirectory: homeDirectory)
+        let stdoutPath = logsDir.appendingPathComponent("mootx01-daemon.out.log").path
+        let stderrPath = logsDir.appendingPathComponent("mootx01-daemon.err.log").path
+        let label = MootPaths.daemonLabel
+
+        do {
+            try fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let plist = makePlist(
+                label: label,
+                programArguments: [binaryPath, "serve"],
+                stdoutPath: stdoutPath,
+                stderrPath: stderrPath,
+                environmentVariables: environment
+            )
+            try plist.write(to: plistURL, atomically: true, encoding: .utf8)
+        } catch {
+            return .launchctlFailed("could not write daemon LaunchAgent plist: \(error)")
+        }
+
+        let result = bootstrapJob(plistURL: plistURL, label: label)
+        guard result.ok else { return .launchctlFailed(result.detail) }
+        let port = environment["MOOTX01_HTTP_PORT"] ?? "4242"
+        return .installed(plistPath: plistURL.path, dashboardURL: "http://127.0.0.1:\(port)")
+    }
+
+    /// bootout → bootstrap (legacy load fallback) → kickstart for a written
+    /// plist. Shared by `install` and `installDaemon` so both agents load
+    /// identically.
+    private static func bootstrapJob(plistURL: URL, label: String) -> (ok: Bool, detail: String) {
         let domain = "gui/\(getuid())"
         let target = "\(domain)/\(label)"
-
-        // Tear down any prior instance so bootstrap doesn't fail with "service
-        // already loaded". Ignore the result — it errors when nothing is loaded.
+        // Tear down any prior instance so bootstrap doesn't fail "already loaded".
         _ = runLaunchctl(["bootout", target])
-
-        // Modern load path (macOS 11+): bootstrap into the per-user GUI domain.
         let boot = runLaunchctl(["bootstrap", domain, plistURL.path])
         if boot.code != 0 {
-            // Fall back to the legacy load for older launchd, then surface the
-            // error only if that also fails.
             let legacy = runLaunchctl(["load", "-w", plistURL.path])
             if legacy.code != 0 {
                 let detail = boot.output.isEmpty ? legacy.output : boot.output
-                return .launchctlFailed(detail.trimmingCharacters(in: .whitespacesAndNewlines))
+                return (false, detail.trimmingCharacters(in: .whitespacesAndNewlines))
             }
         }
-
-        // RunAtLoad should already have started it; kickstart makes "running
-        // now" explicit and restarts it if a stale instance lingered.
+        // RunAtLoad already started it; kickstart makes "running now" explicit.
         _ = runLaunchctl(["kickstart", "-k", target])
-
-        return .installed(plistPath: plistURL.path, dashboardURL: defaultDashboardURL)
+        return (true, "")
     }
 
     /// Stop and remove the LaunchAgent. Idempotent — safe when nothing is
@@ -178,6 +236,21 @@ public enum LaunchAgent {
         let fm = FileManager.default
         let plistURL = MootPaths.launchAgentPlistURL(homeDirectory: homeDirectory)
         let target = "gui/\(getuid())/\(MootPaths.launchAgentLabel)"
+
+        _ = runLaunchctl(["bootout", target])
+
+        if (try? fm.destinationOfSymbolicLink(atPath: plistURL.path)) != nil
+            || fm.fileExists(atPath: plistURL.path) {
+            try? fm.removeItem(at: plistURL)
+        }
+    }
+
+    /// Stop and remove the resident mootx01 daemon LaunchAgent
+    /// (`com.mootx01.daemon`). Idempotent. Call before deleting the binary.
+    public static func uninstallDaemon(homeDirectory: URL) {
+        let fm = FileManager.default
+        let plistURL = MootPaths.daemonPlistURL(homeDirectory: homeDirectory)
+        let target = "gui/\(getuid())/\(MootPaths.daemonLabel)"
 
         _ = runLaunchctl(["bootout", target])
 

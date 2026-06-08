@@ -3,12 +3,10 @@ title: moot-mgr Specification
 version: 1.0
 status: draft
 spec_type: kit
-authors: Bilby, Skippy
+authors: MOOTx01 maintainers
 date: 2026-06-06
 relates_to:
   - docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md
-  - docs/_internal/workhistory/analysis/MANAGER_1.0_PLAN.md
-  - docs/_internal/workhistory/analysis/blast_radius/MOOT_MGR_001_BLAST_RADIUS.md
   - docs/reference/OBSERVERSINK_SPEC.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
 ---
@@ -28,9 +26,9 @@ estate DB or runs the substrate stack**. It does both **observe** mootx01
 (reading the central stats store it owns) **and control/signal** it — the global
 monitoring on/off switch, the retention window, the admin lifecycle
 (provision / quiesce / drain / destroy), and Brain signals all flow from
-moot-mgr to the mootx01 daemon over the control channel (MANAGER_1.0_PLAN.md §1).
+moot-mgr to the mootx01 daemon over the control channel (the Phase 1 plan §1).
 
-This spec describes the **Phase 1 manager spine** (MANAGER_1.0_PLAN.md §3): store
+This spec describes the **Phase 1 manager spine** (the Phase 1 plan §3): store
 ownership, the on/off control, retention, and the CLI read/status surface. The
 HTTP read-plane dashboard (Phase 3) and the macOS menu-bar shell (Phase 5) are
 out of scope for this document and will extend it when built.
@@ -44,7 +42,7 @@ Per parity-is-absolute, Swift-only is not the end state.
 
 ## 2. Component layout
 
-`apps/moot-mgr` (MANAGER_1.0_PLAN.md §4, RESOLVED name):
+`apps/moot-mgr` (the Phase 1 plan §4, RESOLVED name):
 
 | Target | Kind | Contents |
 |---|---|---|
@@ -59,8 +57,7 @@ IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (lib) → moot-
 ```
 
 In-repo dependencies are declared in `Package.swift` per
-DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 and recorded in
-MOOT_MGR_001_BLAST_RADIUS.md. Zero external (third-party) Swift dependencies.
+DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28. Zero external (third-party) Swift dependencies.
 
 ## 3. Store ownership
 
@@ -159,7 +156,7 @@ print to stderr and exit `1`; success prints to stdout and exits `0`.
 
 ## 8. One real consumer wired end-to-end (headless ARIA_MCP)
 
-Per MANAGER_1.0_PLAN.md §3, a headless ARIA server is wired as the first real
+Per the Phase 1 plan §3, a headless ARIA server is wired as the first real
 consumer. The wiring is **executable-only and opt-in**: when
 `ARIA_MCP_STATS_STORE` is set, the server opens the manager's store, installs a
 `PersistenceStatsSink`, drives `Intellectus.setEnabled` from the store flag, and

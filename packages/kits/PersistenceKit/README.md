@@ -116,4 +116,4 @@ Once shipped, public API follows semantic versioning. Adding a case to TypedValu
 
 ## Next missions
 
-This kit is mission 2 of the eleven-mission sequence from the kit graph reframe. Mission 3 is ConvergenceKit. Subsequent missions consume PersistenceKit through the protocols documented here and in INTERFACE_DOCTRINE.md.
+PersistenceKit is the substrate's storage foundation. Downstream kits consume PersistenceKit through the protocols documented here and in INTERFACE_DOCTRINE.md.
