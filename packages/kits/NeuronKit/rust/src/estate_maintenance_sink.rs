@@ -49,7 +49,12 @@ use crate::maintenance_cycle::{MaintenanceDiaryEntry, MaintenanceProposalSink, P
 /// where `counter` increments per write. This satisfies the substrate's
 /// non-empty ID requirement and the fleet determinism rule (no RNG inside
 /// engines).
-pub struct EstateMaintenanceSink<S: DrawerStore> {
+///
+/// The `?Sized` bound on `S` allows `Arc<dyn DrawerStore>` to be used as the
+/// store type — `Arc<dyn DrawerStore>` implements `DrawerStore` via the blanket
+/// impl in `locus_kit::drawer_store`, so callers that hold a type-erased store
+/// (e.g. the BrainPump) can pass it directly without a double-Arc wrapper.
+pub struct EstateMaintenanceSink<S: DrawerStore + ?Sized> {
     store: Arc<S>,
     /// Deterministic timestamp for all rows written this cycle (epoch
     /// seconds). Passed at construction; not derived from the system clock.
@@ -61,7 +66,7 @@ pub struct EstateMaintenanceSink<S: DrawerStore> {
     pub write_errors: Vec<String>,
 }
 
-impl<S: DrawerStore> EstateMaintenanceSink<S> {
+impl<S: DrawerStore + ?Sized> EstateMaintenanceSink<S> {
     /// Construct a sink over `store` with timestamps at `now`.
     ///
     /// `now` is explicit for determinism per the fleet rule; callers supply
@@ -85,7 +90,7 @@ impl<S: DrawerStore> EstateMaintenanceSink<S> {
     }
 }
 
-impl<S: DrawerStore> MaintenanceProposalSink for EstateMaintenanceSink<S> {
+impl<S: DrawerStore + ?Sized> MaintenanceProposalSink for EstateMaintenanceSink<S> {
     /// Emit a remediation proposal (step 5). Translates `ProposeFrameOut` to
     /// a `locus_kit::Proposal` and calls `store.add_proposal`. A "maintenance"
     /// UDC lattice anchor satisfies the substrate's non-empty requirement.
@@ -220,7 +225,7 @@ mod tests {
         let policy = MaintenancePolicy::default();
         let mut daemon = MaintenanceDaemon::new(policy);
 
-        let report = daemon.run_cycle(&reader, &mut sink);
+        let report = daemon.run_cycle(3_000_000.0, &reader, &mut sink);
 
         assert!(sink.write_errors.is_empty(), "write errors: {:?}", sink.write_errors);
         // One decay proposal emitted.

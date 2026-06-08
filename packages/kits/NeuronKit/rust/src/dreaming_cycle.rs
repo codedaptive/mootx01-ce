@@ -23,7 +23,6 @@
 //! caller supplies any time-derived inputs through the seam.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use intellectus_lib::{report, StatSample};
 
@@ -241,6 +240,10 @@ pub struct DreamingDaemon {
     consolidated: BTreeMap<String, f32>,
     proposed_keys: BTreeSet<String>,
     cycle_count: i64,
+    /// Epoch-seconds timestamp of the last `pump` fire, or `None` on first
+    /// call. Used by `pump` for interval gating — the daemon never reads the
+    /// system clock; the caller injects `now`.
+    last_fire_epoch_secs: Option<f64>,
 }
 
 impl DreamingDaemon {
@@ -250,13 +253,60 @@ impl DreamingDaemon {
             consolidated: BTreeMap::new(),
             proposed_keys: BTreeSet::new(),
             cycle_count: 0,
+            last_fire_epoch_secs: None,
         }
+    }
+
+    /// Interval-gated pump — the entry point for the resident loop.
+    ///
+    /// Mirrors Swift `DreamingDaemon.pump(now:)`:
+    /// - First call always fires (no prior fire timestamp).
+    /// - Subsequent calls fire only when `policy.tick_interval_ms` has elapsed
+    ///   since the last fire.
+    /// - Returns `Some(report)` when the cycle ran, `None` when the interval
+    ///   has not elapsed.
+    ///
+    /// DETERMINISM: `now_epoch_secs` is injected by the caller. The daemon
+    /// never reads `SystemTime::now()`. The caller (the resident pump loop)
+    /// reads the clock once per tick and passes it to every daemon, guaranteeing
+    /// that all daemons in a single tick operate on the same `now`.
+    pub fn pump<R, Q, S>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        reward_source: &Q,
+        sink: &mut S,
+    ) -> Option<DreamingCycleReport>
+    where
+        R: DreamingSubstrateReader,
+        Q: RewardSource,
+        S: DreamingProposalSink,
+    {
+        // Gate: fire if this is the first call or the interval has elapsed.
+        let interval_secs = self.policy.tick_interval_ms as f64 / 1000.0;
+        let should_fire = match self.last_fire_epoch_secs {
+            None => true, // first call always fires
+            Some(last) => (now_epoch_secs - last) >= interval_secs,
+        };
+        if !should_fire {
+            return None;
+        }
+        self.last_fire_epoch_secs = Some(now_epoch_secs);
+        Some(self.run_cycle(now_epoch_secs, reader, reward_source, sink))
     }
 
     /// Run one dreaming cycle (steps 1-7) against the seams. Mirrors
     /// `DreamingDaemon.runCycle` step for step.
+    ///
+    /// DETERMINISM: `now_epoch_secs` is the injected timestamp the caller
+    /// supplies for all cycle-start and cycle-complete telemetry events. No
+    /// `SystemTime::now()` call exists in the cycle path — the caller (the
+    /// resident pump loop via `pump`, or a test harness) owns the clock.
+    /// This is the conformance contract: cycle-timestamp drift between Rust and
+    /// Swift cannot occur because neither side reads the wall clock internally.
     pub fn run_cycle<R, Q, S>(
         &mut self,
+        now_epoch_secs: f64,
         reader: &R,
         reward_source: &Q,
         sink: &mut S,
@@ -269,10 +319,12 @@ impl DreamingDaemon {
         // Self-report: cycle-start event. Off-path cost is a single
         // AtomicBool::load + branch (~1 ns). Matches the Swift DreamingDaemon
         // emit site in DreamingDaemon.swift (NEURONKIT_REPORT_001).
-        let cycle_start_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
+        //
+        // The start and complete timestamps both use the injected `now_epoch_secs`
+        // — the same instant the caller observed. This keeps telemetry
+        // deterministic in tests (no wall-clock jitter) and enforces the
+        // conformance contract (cycle timestamps are not sourced from SystemTime).
+        let cycle_start_ts = now_epoch_secs;
         {
             let mut start_tags = std::collections::HashMap::new();
             start_tags.insert("status".to_string(), "start".to_string());
@@ -351,10 +403,12 @@ impl DreamingDaemon {
         // counts. Mirrors the Swift DreamingDaemon complete emit
         // (NEURONKIT_REPORT_001). `proposals_emitted.len()` at this point is
         // the final count for the cycle.
-        let cycle_complete_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
+        //
+        // The complete timestamp reuses `now_epoch_secs` (the injected instant)
+        // rather than reading the system clock again. The cycle duration is
+        // sub-millisecond in all benchmarked cases; the conformance benefit
+        // (determinism, no wall-clock dependency) outweighs the tiny imprecision.
+        let cycle_complete_ts = now_epoch_secs;
         {
             let mut complete_tags = std::collections::HashMap::new();
             complete_tags.insert("status".to_string(), "complete".to_string());
@@ -466,7 +520,8 @@ mod tests {
         };
         let mut sink = RecordingSink::default();
         let mut d = DreamingDaemon::new(DreamingPolicy::default());
-        let report = d.run_cycle(&reader, &RecallTraceRewardSource, &mut sink);
+        // Injected now — deterministic test timestamp (epoch-seconds f64).
+        let report = d.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink);
 
         assert_eq!(report.candidates_considered, 1);
         assert_eq!(report.proposals_emitted.len(), 1);
@@ -497,7 +552,7 @@ mod tests {
         };
         let mut sink = RecordingSink::default();
         let mut d = DreamingDaemon::new(DreamingPolicy::default());
-        let report = d.run_cycle(&reader, &RecallTraceRewardSource, &mut sink);
+        let report = d.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink);
         assert_eq!(report.proposals_emitted.len(), 0);
         assert!(report.suppressed_duplicates >= 1);
     }
@@ -517,7 +572,7 @@ mod tests {
             observations: vec![obs("a", "b", 9, &["r1", "r2"])],
             tunnels: vec![],
         };
-        let first = d.run_cycle(&r1, &RecallTraceRewardSource, &mut sink);
+        let first = d.run_cycle(1_000_000.0, &r1, &RecallTraceRewardSource, &mut sink);
         assert_eq!(first.proposals_emitted.len(), 1);
         assert!(first.candidate_scores[&key] >= 0.7);
 
@@ -526,7 +581,7 @@ mod tests {
             observations: vec![obs("a", "b", 9, &["r1", "r2"])],
             tunnels: vec![],
         };
-        let second = d.run_cycle(&r2, &RecallTraceRewardSource, &mut sink);
+        let second = d.run_cycle(1_030_000.0, &r2, &RecallTraceRewardSource, &mut sink);
         assert_eq!(
             second.proposals_emitted.len(),
             0,
@@ -584,7 +639,7 @@ mod tests {
             tunnels: vec![],
         };
         let mut sink = RecordingSink::default();
-        let report = daemon.run_cycle(&reader, &RecallTraceRewardSource, &mut sink);
+        let report = daemon.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink);
         // 9 attempts < 100 → nothing proposes.
         assert_eq!(report.proposals_emitted.len(), 0, "strict policy blocks proposal");
 
@@ -594,7 +649,7 @@ mod tests {
         let loaded2 = store.load_policy().unwrap_or_default();
         let mut daemon2 = DreamingDaemon::new(loaded2);
         let mut sink2 = RecordingSink::default();
-        let report2 = daemon2.run_cycle(&reader, &RecallTraceRewardSource, &mut sink2);
+        let report2 = daemon2.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink2);
         // 9 attempts >= 3 → proposes.
         assert_eq!(report2.proposals_emitted.len(), 1, "lenient policy allows proposal");
     }
@@ -627,9 +682,53 @@ mod tests {
         };
         let mut sink = RecordingSink::default();
         let mut d = DreamingDaemon::new(DreamingPolicy::default());
-        let report = d.run_cycle(&reader, &RecallTraceRewardSource, &mut sink);
+        let report = d.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink);
         assert_eq!(report.reward_by_target["r1"], 1.0);
         assert_eq!(report.candidates_considered, 0);
         assert_eq!(report.proposals_emitted.len(), 0);
+    }
+
+    // ─── Pump cadence tests (mirror Swift BrainPumpTests cadence suite) ───
+
+    // PC-D1: first pump call always fires regardless of interval (no prior
+    // fire timestamp). Mirrors Swift `testDreamingPumpFirstCallAlwaysFires`.
+    #[test]
+    fn pc_d1_pump_first_call_always_fires() {
+        let reader = FakeReader { traces: vec![], observations: vec![], tunnels: vec![] };
+        let mut sink = RecordingSink::default();
+        // tick_interval_ms = 30_000 (30 s). At t=0 there is no prior fire,
+        // so the call fires unconditionally.
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        let result = d.pump(0.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(result.is_some(), "first pump call must always fire");
+    }
+
+    // PC-D2: a call before the interval has elapsed returns None (no-fire).
+    // Mirrors Swift `testDreamingPumpSkipsBeforeInterval`.
+    #[test]
+    fn pc_d2_pump_skips_before_interval() {
+        let reader = FakeReader { traces: vec![], observations: vec![], tunnels: vec![] };
+        let mut sink = RecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy { tick_interval_ms: 30_000, ..DreamingPolicy::default() });
+        // First call fires (t=0).
+        let first = d.pump(0.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(first.is_some(), "first call must fire");
+        // Second call at t=29 s — interval (30 s) has not elapsed.
+        let before = d.pump(29.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(before.is_none(), "call before interval must return None");
+    }
+
+    // PC-D3: a call at exactly the interval boundary fires. Mirrors Swift
+    // `testDreamingPumpFiresAtInterval`.
+    #[test]
+    fn pc_d3_pump_fires_at_interval() {
+        let reader = FakeReader { traces: vec![], observations: vec![], tunnels: vec![] };
+        let mut sink = RecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy { tick_interval_ms: 30_000, ..DreamingPolicy::default() });
+        // First call fires at t=0.
+        let _ = d.pump(0.0, &reader, &RecallTraceRewardSource, &mut sink);
+        // Call at t=30 s — exactly at the interval boundary.
+        let at_boundary = d.pump(30.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(at_boundary.is_some(), "call at interval boundary must fire");
     }
 }

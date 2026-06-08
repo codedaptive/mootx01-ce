@@ -13,8 +13,8 @@ code against a stable surface.
 
 Two parallel implementations:
 
-- **Swift**: `/Users/bob/devlop/mootx01/EngramLib` (SwiftPM)
-- **Rust**: `/Users/bob/devlop/mootx01/engram-kit` (Cargo)
+- **Swift**: this package (SwiftPM)
+- **Rust**: `./rust` — the `engram-kit` crate (Cargo)
 
 API shape is parallel across both. Naming follows each language's
 idiom (`findNearest` / `find_nearest`).
@@ -29,7 +29,7 @@ Then `import EngramLib`.
 
 **Rust:**
 ```toml
-engram-kit = { path = "../engram-kit" }
+engram-kit = { path = "../EngramLib/rust" }
 ```
 Then `use engram_kit::{Engram, EngramLib, EngramExt, Match};`.
 
@@ -193,5 +193,5 @@ construction overhead per call.
 - The test harness
 
 Those live under the kit. Engineers maintaining the kernel layer
-work in `/Users/bob/devlop/mootx01/docs/validation/substrate_math_performance/`
-and consult that directory's AGENT_HOWTO.md. Different job.
+work in `docs/validation/substrate_math_performance/` and consult
+that directory's AGENT_HOWTO.md. Different job.

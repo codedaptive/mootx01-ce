@@ -23,13 +23,15 @@
 //   response: "{\"detail\":\"...\",\"ok\":true}\n"
 // ===========================================================================
 //
-// Implementation: a POSIX Unix-domain listening socket (POSIXSocket.swift). NO
-// external packages. (NWListener cannot bind a server UDS at a chosen path in
-// this environment; the POSIX path binds and chmods 0600 directly.) The accept
+// Implementation: a POSIX Unix-domain listening socket (LoopbackHTTP.POSIXSocket). NO
+// external packages. (NWListener was the mission's first choice but cannot bind
+// a server UDS at a chosen path in this environment; the POSIX path binds and
+// chmods 0600 directly — see the completion report's deviation note.) The accept
 // loop runs on a dedicated thread; each connection is served on the actor.
 
 import Foundation
 import OSLog
+import LoopbackHTTP
 
 #if canImport(Glibc)
 import Glibc

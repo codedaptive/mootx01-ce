@@ -216,6 +216,7 @@ public enum Installer {
     public static func install(
         client: MCPClient,
         binaryPath: String,
+        daemonURL: String,
         homeDirectory: URL,
         workingDirectory: URL,
         local: Bool
@@ -228,12 +229,31 @@ public enum Installer {
         )
 
         if client.id == "continue" {
-            try installContinue(configURL: configURL, binaryPath: binaryPath)
+            // HTTP-capable → streamable-http YAML pointing at the daemon; else
+            // the stdio command entry.
+            try installContinue(
+                configURL: configURL,
+                binaryPath: binaryPath,
+                httpURL: client.supportsLocalHTTP ? daemonURL : nil
+            )
         } else {
+            // HTTP-capable clients are wired to the resident daemon over HTTP so
+            // concurrent clients share the one running daemon + Brain pump.
+            // Cursor infers HTTP from a bare url; Claude Code / Cline require an
+            // explicit "type":"http". Non-HTTP clients (Claude Desktop) get the
+            // stdio command entry (each spawns its own ephemeral instance).
+            let entry: [String: Any]
+            if client.supportsLocalHTTP {
+                entry = client.httpEntryIncludesType
+                    ? ["type": "http", "url": daemonURL]
+                    : ["url": daemonURL]
+            } else {
+                entry = ["command": binaryPath, "args": [], "env": [:] as [String: String]]
+            }
             try installJSON(
                 configURL: configURL,
                 serverName: client.serverName,
-                binaryPath: binaryPath
+                entry: entry
             )
         }
     }
@@ -309,7 +329,7 @@ public enum Installer {
     private static func installJSON(
         configURL: URL,
         serverName: String,
-        binaryPath: String
+        entry: [String: Any]
     ) throws {
         var root: [String: Any]
         if FileManager.default.fileExists(atPath: configURL.path) {
@@ -319,9 +339,10 @@ public enum Installer {
             root = [:]
         }
 
-        // Merge: root["mcpServers"]["mootx01"] = {command, args, env}
+        // Merge in place: root["mcpServers"]["mootx01"] = entry (stdio command
+        // entry, or an HTTP {type?,url} entry — built by the caller per client).
         var mcpServers = root["mcpServers"] as? [String: Any] ?? [:]
-        mcpServers[serverName] = ["command": binaryPath, "args": [], "env": [:] as [String: String]]
+        mcpServers[serverName] = entry
         root["mcpServers"] = mcpServers
 
         let dir = configURL.deletingLastPathComponent()
@@ -354,15 +375,25 @@ public enum Installer {
 
     // MARK: - Continue YAML helper
 
-    private static func installContinue(configURL: URL, binaryPath: String) throws {
+    private static func installContinue(configURL: URL, binaryPath: String, httpURL: String?) throws {
         let dir = configURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // Continue expects a minimal YAML structure for each MCP server config.
-        // We write only the fields it requires; the format is stable per Continue docs.
-        let yaml = """
-        command: \(binaryPath)
-        args: []
-        """
+        // HTTP-capable → streamable-http with a url (shares the resident daemon);
+        // otherwise the stdio command entry. Only the required fields are written;
+        // the format is stable per Continue docs.
+        let yaml: String
+        if let httpURL {
+            yaml = """
+            type: streamable-http
+            url: \(httpURL)
+            """
+        } else {
+            yaml = """
+            command: \(binaryPath)
+            args: []
+            """
+        }
         try yaml.write(to: configURL, atomically: true, encoding: .utf8)
     }
 

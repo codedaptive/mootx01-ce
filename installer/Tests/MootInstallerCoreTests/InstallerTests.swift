@@ -25,6 +25,7 @@ struct InstallerTests {
         try Installer.install(
             client: client,
             binaryPath: binaryPath,
+            daemonURL: MootPaths.residentEndpointURL,
             homeDirectory: home,
             workingDirectory: cwd,
             local: false
@@ -35,7 +36,30 @@ struct InstallerTests {
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let servers = obj?["mcpServers"] as? [String: Any]
         let entry = servers?[client.serverName] as? [String: Any]
+        // Claude Code is HTTP-wired to the resident daemon: {"type":"http","url":...}.
+        #expect(entry?["type"] as? String == "http")
+        #expect(entry?["url"] as? String == MootPaths.residentEndpointURL)
+        #expect(entry?["command"] == nil, "HTTP client must not get a stdio command entry")
+    }
+
+    @Test("Claude Desktop gets a stdio command entry (no native local-HTTP)")
+    func claudeDesktopStaysStdio() throws {
+        let home = try makeSandboxHome()
+        defer { cleanupSandbox(home) }
+
+        let client = MCPClients.supported.first { $0.id == "claude-desktop" }!
+        let binaryPath = "/usr/local/bin/mootx01"
+        try Installer.install(
+            client: client, binaryPath: binaryPath,
+            daemonURL: MootPaths.residentEndpointURL,
+            homeDirectory: home, workingDirectory: URL(fileURLWithPath: "/tmp"),
+            local: false
+        )
+        let configURL = home.appendingPathComponent(client.configPath)
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as? [String: Any]
+        let entry = (obj?["mcpServers"] as? [String: Any])?[client.serverName] as? [String: Any]
         #expect(entry?["command"] as? String == binaryPath)
+        #expect(entry?["url"] == nil, "stdio client must not get an HTTP url entry")
     }
 
     @Test("install into existing config merges without losing other keys")
@@ -58,6 +82,7 @@ struct InstallerTests {
 
         try Installer.install(
             client: client, binaryPath: "/bin/mootx01",
+            daemonURL: MootPaths.residentEndpointURL,
             homeDirectory: home, workingDirectory: URL(fileURLWithPath: "/tmp"),
             local: false
         )
@@ -78,11 +103,13 @@ struct InstallerTests {
         let cwd = URL(fileURLWithPath: "/tmp")
 
         try Installer.install(client: client, binaryPath: "/bin/mootx01",
+                              daemonURL: MootPaths.residentEndpointURL,
                               homeDirectory: home, workingDirectory: cwd, local: false)
         let configURL = home.appendingPathComponent(client.configPath)
         let firstContent = try Data(contentsOf: configURL)
 
         try Installer.install(client: client, binaryPath: "/bin/mootx01",
+                              daemonURL: MootPaths.residentEndpointURL,
                               homeDirectory: home, workingDirectory: cwd, local: false)
         let secondContent = try Data(contentsOf: configURL)
 
@@ -98,6 +125,7 @@ struct InstallerTests {
         let cwd = URL(fileURLWithPath: "/tmp")
 
         try Installer.install(client: client, binaryPath: "/bin/mootx01",
+                              daemonURL: MootPaths.residentEndpointURL,
                               homeDirectory: home, workingDirectory: cwd, local: false)
         try Installer.uninstall(client: client, homeDirectory: home, workingDirectory: cwd, local: false)
 
@@ -220,9 +248,13 @@ struct InstallerTests {
         defer { try? FileManager.default.removeItem(at: source) }
         let placed = try Installer.placeBinary(sourcePath: source.path, homeDirectory: home)
 
-        let client = MCPClients.supported.first { $0.id == "claude-code" }!
+        // Claude Desktop is the stdio client, so its config `command` must be the
+        // absolute placed path (HTTP clients carry a url instead — see
+        // installCreatesConfig / claudeDesktopStaysStdio).
+        let client = MCPClients.supported.first { $0.id == "claude-desktop" }!
         try Installer.install(
             client: client, binaryPath: placed,
+            daemonURL: MootPaths.residentEndpointURL,
             homeDirectory: home, workingDirectory: URL(fileURLWithPath: "/tmp"), local: false
         )
 
@@ -283,14 +315,16 @@ struct InstallerTests {
 
         try Installer.install(
             client: client, binaryPath: binaryPath,
+            daemonURL: MootPaths.residentEndpointURL,
             homeDirectory: home, workingDirectory: URL(fileURLWithPath: "/tmp"),
             local: false
         )
 
         let configURL = home.appendingPathComponent(client.configPath)
         let content = try String(contentsOf: configURL, encoding: .utf8)
-        #expect(content.contains("command:"))
-        #expect(content.contains(binaryPath))
+        // Continue is HTTP-wired to the resident daemon: streamable-http + url.
+        #expect(content.contains("type: streamable-http"))
+        #expect(content.contains("url: \(MootPaths.residentEndpointURL)"))
     }
 
     // MARK: - Claude Code --local mode
@@ -304,6 +338,7 @@ struct InstallerTests {
         let client = MCPClients.supported.first { $0.id == "claude-code" }!
         try Installer.install(
             client: client, binaryPath: "/bin/mootx01",
+            daemonURL: MootPaths.residentEndpointURL,
             homeDirectory: home, workingDirectory: cwd, local: true
         )
 
