@@ -26,7 +26,7 @@ import Foundation
 /// `tombstonedAt` and `removedByBatch` belong to the soft-delete
 /// machinery added in Rev 2.0. They are present on the schema
 /// from Rev 1.0 so the layout never needs to migrate; both are
-/// nil on every drawer written through the current write path and
+/// nil on every drawer written today and
 /// are not read by any query.
 public struct Drawer: Equatable, Hashable, Codable, Sendable {
 

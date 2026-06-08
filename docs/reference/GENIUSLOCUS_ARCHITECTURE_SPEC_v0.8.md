@@ -30,7 +30,7 @@ Implementers writing code against the architecture. Reviewers verifying that an 
 
 In scope: the storage tiers, bitmap layouts, action verbs, adjective system, lattice citation rules, manifest schema, audit-trail semantics, standing-signals operational model, error modes, security and provenance rules, extensibility mechanisms, and conformance requirements that define a GeniusLocus.
 
-Out of scope: any specific application built atop GeniusLocusKit (Fulcrum, AI Brain, repo-craft); any specific tiny-model architecture trained against a GeniusLocus; any specific user interface; any specific access surface (ARIA_MCP, the MCP server) beyond noting that an access surface composes GeniusLoci and is not the substrate's concern.
+Out of scope: any specific application built atop GeniusLocusKit; any specific tiny-model architecture trained against a GeniusLocus; any specific user interface; any specific access surface (ARIA_MCP, the MCP server) beyond noting that an access surface composes GeniusLoci and is not the substrate's concern.
 
 ---
 

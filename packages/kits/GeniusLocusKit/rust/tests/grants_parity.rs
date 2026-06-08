@@ -337,7 +337,7 @@ fn grt03f_grant_store_populated_after_issue() {
 }
 
 // ---------------------------------------------------------------------------
-// GRT-04 — Swift-pinned cross-port vectors (security-review finding)
+// GRT-04 — Swift-pinned cross-port vectors
 //
 // These tests pin Rust's derived bytes to SWIFT-COMPUTED expected values.
 // They fail against the OLD buggy Rust code (wrong info-string format, wrong

@@ -7,7 +7,6 @@
 //
 // Refactored 2026-05-19 to depend on the promoted SubstrateLib
 // package instead of the upstream-staging GeniusLocusReference.
-// Mission 4 of the eleven-kit graph refactor.
 
 import PackageDescription
 

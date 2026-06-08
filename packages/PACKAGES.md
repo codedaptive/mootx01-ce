@@ -335,7 +335,7 @@ One estate. One queue. One authority over serial dispatch.
 
 **Dependencies:** SubstrateLib, PersistenceKit  
 **Languages:** Swift + Rust + Python (three-way conformance parity)  
-**Spec:** `docs/specs/QUEUEKIT_SPEC.md`, `docs/specs/QUEUE_PROTOCOL_SPEC.md`
+**Spec:** `docs/specs/QUEUEKIT_SPEC.md`
 
 ---
 

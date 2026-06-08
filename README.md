@@ -198,6 +198,7 @@ mootx01/
 │   │             CorpusKit · GeniusLocusKit · NeuronKit · CognitionKit · VaultKit
 │   └── PACKAGES.md
 ├── apps/         ARIA_MCP (MCP server) · moot-mgr (management console) · MatrixSprint (benchmarks)
+├── examples/     SDK samples · Sidecar_Demo_macOS
 ├── installer/    First-run installer
 └── docs/         start-here · concepts · reference · decisions · engineering · validation · archive
 ```

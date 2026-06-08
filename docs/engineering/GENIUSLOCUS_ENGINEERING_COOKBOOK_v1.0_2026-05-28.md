@@ -783,8 +783,8 @@ Input vector x: concatenation of
 
 Total: 64 bits.
 
-This block is what makes posture-aware retrieval work (Fulcrum
-augmentation, leverage scoring) — it encodes "how the user has been
+This block is what makes posture-aware retrieval work
+(augmentation, leverage scoring) — it encodes "how the user has been
 treating this row" not just "when it was captured."
 
 ### §3.5. Block 3 — Channel + source
@@ -3854,7 +3854,7 @@ PortableKernel.kernelForCurrentPlatform():
 Every measurement above is reproducible from a stress-test
 invocation at the cited commit on apple-m5-max. The procedure:
 
-  1. `git checkout <commit>` in the nexus repo.
+  1. `git checkout <commit>` in the repository.
   2. `cd docs/validation/substrate_math_performance/test-harness/swift`
   3. `swift build -c release`
   4. `.build/release/stress-test --kernel simd --quick` (or
