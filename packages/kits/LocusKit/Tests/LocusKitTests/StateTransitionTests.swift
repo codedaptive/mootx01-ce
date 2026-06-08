@@ -14,9 +14,9 @@ import Testing
 /// mirroring `BitmapAuditTests`'s fixture shape.
 ///
 /// Note on the type name: the state enum is `State` in
-/// `Adjectives.swift`. An earlier placeholder name `DrawerState` was
-/// used for clarity, but the shipped type is `State` and the
-/// validator's parameter types reflect that.
+/// `Adjectives.swift`. An earlier draft used the placeholder name
+/// `DrawerState` for clarity, but the shipped type is `State` and
+/// the validator's parameter types reflect that.
 @Suite("StateTransitionTests")
 struct StateTransitionTests {
 

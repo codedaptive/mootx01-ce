@@ -388,6 +388,18 @@ the architecture spec's "continuous-operation behavior … overnight enrichment"
 without a resident host pumping it, the Brain never fires, which is why the
 stdio fallback (ephemeral, per-client) does not dream.
 
+**Status — IMPLEMENTED (Swift).** `BrainPump`
+(`apps/ARIA_MCP/Sources/AriaMCP/BrainPump.swift`) is spawned in the resident
+HTTP branch of `AriaMCPMain` alongside the transport; stdio does not pump. The
+loop reads `now` once per tick and drives `dreaming.pump(now:)`,
+`maintenance.pump(now:)`, and `kit.signalTick(in:now:)`; each daemon self-gates
+on its policy interval. Base tick is `MOOTX01_BRAIN_TICK_MS` (default 5 s). The
+standing-signal tick is a benign no-op until a signal is registered (signal
+registration is a later phase). Cadence policy is in-memory in P2; the
+manifest-backed store lands in P3. The **Rust pump is an immediate follow-on** —
+the Rust daemons (`run_cycle`) need a determinism refactor (inject `now`) before
+they can be host-pumped.
+
 ### 17.2 Telemetry self-report
 
 The resident server installs ObserverSink's `PersistenceStatsSink` against the
@@ -400,3 +412,26 @@ path so the headless daemon is observable by moot-mgr out of the box, while the
 off-by-default flag still governs whether any sample actually flows. moot-mgr
 reads this store and, through its control channel, signals the daemon
 (monitoring on/off, admin lifecycle, Brain signals).
+
+**Status — Swift continuous gate IMPLEMENTED; installer-default wiring pending; Rust = separate item.**
+
+- **On/off switch (pre-existing):** the store's `monitoring` flag (ObserverSink
+  `StatsStore.isMonitoringEnabled`/`setMonitoringEnabled`, toggled via
+  `moot-mgr monitoring on|off`) + the env-gated wiring
+  (`installManagerTelemetryIfConfigured`, runs for both transports).
+- **Continuous gate (Swift, IMPLEMENTED):** in resident mode
+  `AriaMCPMain` polls the store flag every `MOOTX01_MONITORING_POLL_MS`
+  (default 5 s) and drives `Intellectus.setEnabled` from it, so flipping
+  monitoring via moot-mgr takes effect on the RUNNING daemon (the OFF→ON case,
+  which previously needed a restart). "Off is free" preserved (when off,
+  `isEnabled` stays false → `report()` no-ops). Validated live (flag flipped
+  externally → daemon logged `monitoring gate: on` within one poll).
+- **Installer default (pending):** `mootx01 install` will set `ARIA_MCP_STATS_STORE`
+  to the manager store via the launchd plist `EnvironmentVariables` so the
+  resident daemon self-reports out of the box. Until then it self-reports only
+  when `ARIA_MCP_STATS_STORE` is set manually.
+- **Rust vertical (SEPARATE ITEM — not built):** the Rust ARIA_MCP daemon wires
+  NO telemetry at all (no `installManagerTelemetryIfConfigured` equivalent),
+  though ObserverSink and IntellectusLib both have Rust ports. Porting the full
+  Rust self-report path (sink install + env gate + continuous gate) is its own
+  mission, tracked separately — not half-built here.

@@ -323,8 +323,8 @@ public struct GraphCommunityPayload: Codable, Sendable, Equatable {
 /// One VizGraph analytic-signal summary row: the latest value the resident host
 /// read from the stats store for a (estate, signal) pair, plus its freshness.
 ///
-/// These ARE serveable from the resident host (the analytic overlay) because
-/// they are aggregate completion metrics tagged by estate.
+/// These ARE serveable from the resident host (the analytic overlay the mission
+/// asks for) because they are aggregate completion metrics tagged by estate.
 public struct GraphAnalyticPayload: Codable, Sendable, Equatable {
     /// The estate the signal was emitted for.
     public let estate: String

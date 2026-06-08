@@ -13,7 +13,8 @@
 // across identical call sequences. The Swift reference assigns
 // `UUID()` (random) per capture, so row-ID determinism is a Rust-only
 // port property, NOT a Swift behavior. The Swift-faithful assertion
-// here is row-ID uniqueness.
+// here is row-ID uniqueness; the divergence is recorded in the
+// completion report Discoveries.
 
 import Foundation
 import Testing

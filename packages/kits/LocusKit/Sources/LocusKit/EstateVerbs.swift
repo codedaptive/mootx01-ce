@@ -193,12 +193,15 @@ public extension Estate {
     /// `AuditGate.admit`). The supersession cascade does **not** emit such
     /// an event for the tunnel it files — `addDrawerWithCascade` inserts the
     /// tunnel row directly via `rowStore.insert`, with no audit entry, and
-    /// `DrawerStore.addTunnel` does the same. To stay byte-identical to
-    /// what the cascade produces — and to avoid creating a divergent
-    /// tunnel-creation path — standalone tunnel capture matches the cascade
-    /// and files via the bare-insert `addTunnel`. Cascade-born tunnels carry
-    /// no genesis event, so mirroring drawer capture's genesis event here
-    /// would *create* a divergence rather than remove one.
+    /// `DrawerStore.addTunnel` does the same. Source is ground truth
+    /// (mission "Read First"): to stay byte-identical to what the cascade
+    /// produces — the mission's load-bearing requirement, and the explicit
+    /// "do not create a divergent tunnel-creation path" gate — standalone
+    /// tunnel capture matches the cascade and files via the bare-insert
+    /// `addTunnel`. (The mission text's "mirror drawer capture's genesis
+    /// event" reflects a doc/source drift: cascade-born tunnels carry no
+    /// genesis event, so mirroring drawer capture literally would *create*
+    /// the divergence the mission forbids. See the completion report.)
     ///
     /// `Date()` is called once at this public boundary — mirroring the
     /// drawer overload and CLAUDE.md's deterministic-time rule.
@@ -745,7 +748,7 @@ public extension Estate {
     ///     boundary per CLAUDE.md deterministic-clock rule).
     /// - Returns: the stored `Proposal` with its generated id and bitmaps set.
     /// - Throws: `LocusKitError.drawerNotFound` if `frame.target` does not exist.
-    public func propose(_ frame: ProposeFrame, now: Date) async throws -> Proposal {
+    func propose(_ frame: ProposeFrame, now: Date) async throws -> Proposal {
         guard !frame.target.isEmpty else {
             throw LocusKitError.invalidContent("propose target must not be empty")
         }
@@ -814,7 +817,7 @@ public extension Estate {
     ///     on any missing endpoint.
     ///   - now: deterministic write timestamp.
     /// - Returns: the stored `Association` with its generated id and bitmaps set.
-    public func associate(_ frame: AssociateFrame, now: Date) async throws -> Association {
+    func associate(_ frame: AssociateFrame, now: Date) async throws -> Association {
         guard !frame.a.isEmpty else {
             throw LocusKitError.invalidContent("associate endpoint a must not be empty")
         }
@@ -876,7 +879,7 @@ public extension Estate {
     ///   - now: deterministic write timestamp.
     /// - Returns: the stored `LearnedReference` with its generated id.
     /// - Throws: `LocusKitError.invalidContent` if `frame.handle` is empty.
-    public func learn(_ frame: LearnFrame, now: Date) async throws -> LearnedReference {
+    func learn(_ frame: LearnFrame, now: Date) async throws -> LearnedReference {
         guard !frame.handle.isEmpty else {
             throw LocusKitError.invalidContent("learn handle must not be empty")
         }

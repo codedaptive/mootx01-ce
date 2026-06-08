@@ -1,7 +1,7 @@
 // CloudKitSyncEngine.swift
 //
-// CloudKit-backed sync. Generalized port of Fulcrum's
-// SyncCoordinator pattern: setup zone + subscription, push
+// CloudKit-backed sync. A generalized SyncCoordinator
+// pattern: setup zone + subscription, push
 // pending local changes, pull remote changes since last token,
 // apply via PersistenceKit.
 //

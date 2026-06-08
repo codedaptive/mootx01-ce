@@ -52,7 +52,13 @@ use crate::dreaming_cycle::{DreamingDiaryEntry, DreamingProposalSink, ProposeFra
 /// Row IDs are generated deterministically: `dreaming-<now>-<counter>`, where
 /// `counter` increments per write. This satisfies the substrate's non-empty ID
 /// requirement and the fleet determinism rule (no RNG inside engines).
-pub struct EstateDreamingSink<S: DrawerStore> {
+///
+/// The `?Sized` bound on `S` allows `Arc<dyn DrawerStore>` to be used as the
+/// store type — `Arc<dyn DrawerStore>` implements `DrawerStore` via the blanket
+/// impl in `locus_kit::drawer_store`, so callers that hold a type-erased store
+/// (e.g. the BrainPump, which receives the registry's `Arc<dyn DrawerStore>`)
+/// can pass it directly without a double-Arc wrapper.
+pub struct EstateDreamingSink<S: DrawerStore + ?Sized> {
     store: Arc<S>,
     /// Deterministic timestamp for all rows written this cycle (epoch
     /// seconds). Passed at construction; not derived from the system clock.
@@ -64,7 +70,7 @@ pub struct EstateDreamingSink<S: DrawerStore> {
     pub write_errors: Vec<String>,
 }
 
-impl<S: DrawerStore> EstateDreamingSink<S> {
+impl<S: DrawerStore + ?Sized> EstateDreamingSink<S> {
     /// Construct a sink over `store` with timestamps at `now`.
     ///
     /// `now` is explicit for determinism per the fleet rule; callers supply
@@ -88,7 +94,7 @@ impl<S: DrawerStore> EstateDreamingSink<S> {
     }
 }
 
-impl<S: DrawerStore> DreamingProposalSink for EstateDreamingSink<S> {
+impl<S: DrawerStore + ?Sized> DreamingProposalSink for EstateDreamingSink<S> {
     /// Emit a proposal row (step 6). Translates `ProposeFrameOut` to a
     /// `locus_kit::Proposal` and calls `store.add_proposal`. A "dreaming"
     /// UDC lattice anchor satisfies the substrate's non-empty requirement.
@@ -229,7 +235,7 @@ mod tests {
         let policy = DreamingPolicy { min_success_rate: 0.0, min_confidence: 0.7, min_attempts: 1, tick_interval_ms: 30_000 };
         let mut daemon = DreamingDaemon::new(policy);
 
-        let report = daemon.run_cycle(&reader, &reward, &mut sink);
+        let report = daemon.run_cycle(3_000_000.0, &reader, &reward, &mut sink);
 
         assert!(sink.write_errors.is_empty(), "write errors: {:?}", sink.write_errors);
         // Cycle emitted at least one proposal (high-reward pair clears gate).

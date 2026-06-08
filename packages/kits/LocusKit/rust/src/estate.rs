@@ -14,7 +14,7 @@
 //! `bitmap_state`) live in `estate_audit.rs`. Splitting the spine
 //! from the verbs mirrors the Swift split into `Estate.swift` /
 //! `EstateAudit.swift` / `EstateVerbs.swift` and keeps each
-//! change tractable.
+//! sub-mission's blast radius tractable.
 //!
 //! Per `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` §7.8.1.
 

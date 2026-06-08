@@ -215,7 +215,7 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - corpus: The `Corpus` actor for BM25 and embedding recall.
     ///   - handle: The estate this corpus is associated with. Must be open.
-    public func registerCorpus(_ corpus: Corpus, for handle: EstateHandle) {
+    func registerCorpus(_ corpus: Corpus, for handle: EstateHandle) {
         corpusKits[handle] = corpus
     }
 
@@ -231,7 +231,7 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - store: The `VectorStore` for Hamming nearest-neighbour recall.
     ///   - handle: The estate this store is associated with. Must be open.
-    public func registerVectorStore(_ store: VectorStore, for handle: EstateHandle) {
+    func registerVectorStore(_ store: VectorStore, for handle: EstateHandle) {
         vectorStores[handle] = store
     }
 
@@ -253,7 +253,7 @@ public extension GeniusLocusKit {
     /// - Parameters:
     ///   - tier:   The in-memory `MatrixTier` snapshot to use for recall scoring.
     ///   - handle: The estate this tier is associated with. Must be open.
-    public func registerMatrixTier(_ tier: MatrixTier, for handle: EstateHandle) {
+    func registerMatrixTier(_ tier: MatrixTier, for handle: EstateHandle) {
         matrixTiers[handle] = tier
     }
 }

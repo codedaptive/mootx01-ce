@@ -112,7 +112,7 @@ public struct EstateLifecycleRequest: Codable, Sendable, Equatable {
 
 /// The result of an admin verb. Carries the gate-style `ok`/`detail` plus, on a
 /// successful provision, the new estate's identity so the wizard can show it and
-/// the fleet view can pick it up.
+/// the management view can pick it up.
 public struct EstateAdminResult: Codable, Sendable, Equatable {
     /// Whether the verb succeeded.
     public let ok: Bool

@@ -305,7 +305,7 @@ holder.report(|| StatSample::metric(…));
 Run at commit time:
 
 ```
-$ cd /Users/bob/devlop/mootx01-ee-cp-intellectus && python3 tools/concordance_audit/concordance_audit.py
+$ python3 tools/concordance_audit/concordance_audit.py   # from the repository root
 ```
 
 IntellectusLib: ADVISORY pass — all public types (`StatSample`, `EventKind`,

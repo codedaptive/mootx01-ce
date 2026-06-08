@@ -238,7 +238,9 @@ fn run_cycle_emits_start_and_complete() {
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
     let reader = FakeReader { observations: vec![] };
     let mut recording_sink = RecordingSink::default();
-    let _ = daemon.run_cycle(&reader, &neuron_kit::RecallTraceRewardSource, &mut recording_sink);
+    // Injected now (epoch-seconds f64) — determinism contract: the daemon
+    // never reads SystemTime; the caller supplies the timestamp.
+    let _ = daemon.run_cycle(1_000_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut recording_sink);
 
     let cycle_metrics = sink.all_named("neuronkit.dream.cycle");
     assert_eq!(cycle_metrics.len(), 2,
@@ -280,8 +282,8 @@ fn two_run_cycle_calls_emit_four_metrics() {
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
     let reader = FakeReader { observations: vec![] };
     let mut s = RecordingSink::default();
-    let _ = daemon.run_cycle(&reader, &neuron_kit::RecallTraceRewardSource, &mut s);
-    let _ = daemon.run_cycle(&reader, &neuron_kit::RecallTraceRewardSource, &mut s);
+    let _ = daemon.run_cycle(1_000_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut s);
+    let _ = daemon.run_cycle(1_030_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut s);
 
     assert_eq!(sink.all_named("neuronkit.dream.cycle").len(), 4,
         "two run_cycle calls must emit 4 neuronkit.dream.cycle metrics");
@@ -301,7 +303,7 @@ fn run_cycle_emits_nothing_when_disabled() {
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
     let reader = FakeReader { observations: vec![] };
     let mut s = RecordingSink::default();
-    let _ = daemon.run_cycle(&reader, &neuron_kit::RecallTraceRewardSource, &mut s);
+    let _ = daemon.run_cycle(1_000_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut s);
 
     assert_eq!(sink.count(), 0,
         "run_cycle must not emit when monitoring is disabled");
@@ -334,7 +336,7 @@ fn drawers_touched_tag_matches_observation_count() {
     let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
     let reader = FakeReader { observations: obs };
     let mut s = RecordingSink::default();
-    let _ = daemon.run_cycle(&reader, &neuron_kit::RecallTraceRewardSource, &mut s);
+    let _ = daemon.run_cycle(1_000_000.0, &reader, &neuron_kit::RecallTraceRewardSource, &mut s);
 
     let complete_metric = sink.all_named("neuronkit.dream.cycle").into_iter().find(|s| {
         if let StatSample::Metric { tags, .. } = s {
@@ -495,7 +497,7 @@ fn dreaming_cycle_report_identical_with_and_without_telemetry() {
     let mut daemon_off = DreamingDaemon::new(DreamingPolicy::default());
     let reader_off = FakeReader { observations: obs.clone() };
     let mut sink_off = RecordingSink::default();
-    let report_off = daemon_off.run_cycle(&reader_off, &neuron_kit::RecallTraceRewardSource, &mut sink_off);
+    let report_off = daemon_off.run_cycle(1_000_000.0, &reader_off, &neuron_kit::RecallTraceRewardSource, &mut sink_off);
 
     // ON path.
     let capture_sink = Arc::new(CapturingSink::new());
@@ -504,7 +506,7 @@ fn dreaming_cycle_report_identical_with_and_without_telemetry() {
     let mut daemon_on = DreamingDaemon::new(DreamingPolicy::default());
     let reader_on = FakeReader { observations: obs.clone() };
     let mut sink_on = RecordingSink::default();
-    let report_on = daemon_on.run_cycle(&reader_on, &neuron_kit::RecallTraceRewardSource, &mut sink_on);
+    let report_on = daemon_on.run_cycle(1_000_000.0, &reader_on, &neuron_kit::RecallTraceRewardSource, &mut sink_on);
 
     // Cycle outcomes must be identical.
     assert_eq!(report_off.candidates_considered, report_on.candidates_considered);

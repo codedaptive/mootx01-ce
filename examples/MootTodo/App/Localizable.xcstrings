@@ -1,0 +1,70 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "app.title" : {
+      "comment" : "Navigation title for the MootTodo example app.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : { "state" : "translated", "value" : "MootTodo" }
+        }
+      }
+    },
+    "todos.section.title" : {
+      "comment" : "Header above the to-do list (the app's primary store).",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : { "state" : "translated", "value" : "To-Dos" }
+        }
+      }
+    },
+    "search.section.title" : {
+      "comment" : "Header above the MOOT search results (the parallel estate).",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : { "state" : "translated", "value" : "Memory Search Results" }
+        }
+      }
+    },
+    "search.empty.hint" : {
+      "comment" : "Shown when no MOOT search has run yet.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : { "state" : "translated", "value" : "Search the MOOT to see what it remembers." }
+        }
+      }
+    },
+    "todos.add.placeholder" : {
+      "comment" : "Placeholder for the add-a-todo text field.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : { "state" : "translated", "value" : "New to-do" }
+        }
+      }
+    },
+    "todos.add.button" : {
+      "comment" : "Label for the add-a-todo button.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : { "state" : "translated", "value" : "Add" }
+        }
+      }
+    },
+    "search.placeholder" : {
+      "comment" : "Placeholder for the search-the-MOOT text field.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : { "state" : "translated", "value" : "Search memory" }
+        }
+      }
+    },
+    "search.button" : {
+      "comment" : "Label for the search-the-MOOT button.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : { "state" : "translated", "value" : "Search" }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

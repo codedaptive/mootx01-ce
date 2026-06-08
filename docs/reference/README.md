@@ -42,16 +42,6 @@ framing and the all-modes-required conformance rule). The
 transactional tool schemas and the error model in v0.1 carry
 forward and remain active reference.
 
-**[`QUEUE_PROTOCOL_SPEC_v1.0.md`](QUEUE_PROTOCOL_SPEC_v1.0.md)** —
-the language-agnostic queue protocol that QueueKit implements.
-The wire and on-disk contract any conforming daemon must satisfy,
-regardless of language.
-
-**[`LOCI_MODE_SPEC_v0.1.md`](LOCI_MODE_SPEC_v0.1.md)** — the
-standalone, AI-support-only deployment of the GeniusLocus memory
-engine. Drop-in MemPalace replacement; precedes the full Simple
-Machines integration ("Genius Mode") that will land later.
-
 ## Encoder spec
 
 **[`FDC_ENCODER_CANONICAL_v1.0.md`](FDC_ENCODER_CANONICAL_v1.0.md)** —

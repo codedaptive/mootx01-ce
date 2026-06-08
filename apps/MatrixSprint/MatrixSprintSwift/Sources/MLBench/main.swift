@@ -29,7 +29,7 @@ struct Measurement {
 }
 
 func timeLoop(warmupNs: UInt64, measureNs: UInt64, _ body: () -> Void) -> (Int, UInt64, UInt64, UInt64) {
-    var clock = ContinuousClock()
+    let clock = ContinuousClock()
     let warmupEnd = DispatchTime.now().uptimeNanoseconds + warmupNs
     while DispatchTime.now().uptimeNanoseconds < warmupEnd { body() }
     let measureEnd = DispatchTime.now().uptimeNanoseconds + measureNs

@@ -81,9 +81,18 @@ public struct DrawerMapping: Sendable {
         handle: EstateHandle,
         scope: VaultExportScope = .believed
     ) async throws -> [NoteIR] {
+        // VK-EXPORT-FIX: pass an explicit limit so the GLK convenience overload
+        // does not apply its default cap of 50. Export is a full projection of
+        // all believed drawers — it is a pure filter scan (no query, no scoring),
+        // so returning the complete set in stable order is correct. The limit is
+        // set to 10_000_000 (ten million) rather than Int.max because the Recall
+        // Director computes `frontierK = min(max(limit * 4, 64), 256)` on line 55
+        // of RecallDirector.swift and `Int.max * 4` overflows in Swift debug builds.
+        // Ten million is unreachable by any realistic estate; the locusOnly lane
+        // drains all pages until exhausted well before this limit.
         let drawers = try await kit.recall(
             handle,
-            RecallFrame(filterChain: scope.filterChain, hydrationLevel: .full)
+            RecallFrame(filterChain: scope.filterChain, hydrationLevel: .full, limit: 10_000_000)
         )
         // Fetch tunnels once per distinct source wing, not once per drawer.
         var tunnelsByWing: [String: [Tunnel]] = [:]

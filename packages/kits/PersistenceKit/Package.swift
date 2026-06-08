@@ -33,7 +33,8 @@ let package = Package(
         .library(name: "PersistenceKitPostgreSQL", targets: ["PersistenceKitPostgreSQL"]),
         // Replication primitive (§5 full-snapshot flush/hydrate).
         // Depends only on the core PersistenceKit protocol surface — no backend
-        // target gains a dependency on this library.
+        // target gains a dependency on this library. Recorded in the Blast Radius
+        // Report for this mission (pk-replication, NET-NEW module addition).
         .library(name: "PersistenceKitReplication", targets: ["PersistenceKitReplication"]),
     ],
     dependencies: [
