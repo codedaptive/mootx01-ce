@@ -1,0 +1,25 @@
+name: MootTodo
+options:
+  bundleIdPrefix: com.codedaptive.mootx01.examples
+  deploymentTarget: { iOS: "26.0", macOS: "26.0" }
+  createIntermediateGroups: true
+packages:
+  Mootx01: { path: ../../apps/Mootx01 }
+targets:
+  MootTodo:
+    type: application
+    # Universal: the SwiftUI body and the sidecar model compile unchanged for
+    # both platforms, so MootTodo ships on iOS and macOS from one source set.
+    platform: [iOS, macOS]
+    sources: [App]
+    dependencies:
+      - { package: Mootx01, product: MootGateway }
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.codedaptive.mootx01.examples.moottodo
+        PRODUCT_NAME: MootTodo
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1,2"

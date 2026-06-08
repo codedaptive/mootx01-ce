@@ -59,8 +59,8 @@ packages/libs/ObserverSink/
 | `IntellectusLib` | ObserverSink depends on | Provides `StatsSink` protocol and `StatSample` datum |
 | `PersistenceKit` + `PersistenceKitSQLite` | ObserverSink depends on | Provides `Storage` protocol and `SQLiteStorage` backend |
 
-Layering is correct and non-inverting. The in-repo dependency additions follow
-`DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`.
+Layering is correct and non-inverting. Per `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`,
+the in-repo dependency additions are recorded in the change-impact analysis for ObserverSink.
 
 ---
 

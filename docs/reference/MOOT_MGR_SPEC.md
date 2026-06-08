@@ -15,12 +15,20 @@ relates_to:
 
 ## 1. Purpose
 
-`moot-mgr` is the standalone MOOTx01 observer/manager process. It is a **pure
-observer**: it never hosts an estate DB. It owns the central stats store, the
-global monitoring on/off switch, and the retention window
-(MANAGER_1.0_PLAN.md §1).
+`moot-mgr` is the standalone **GUI control + monitor surface for the headless
+mootx01 daemon** — the way people who do not use the command line watch and
+control mootx01. mootx01 itself is the headless resident server that owns the
+whole stack (ARIA → substrate) and triggers its own Brain cycles
+(ARIA_MCP_SPEC §17); moot-mgr never owns that stack.
 
-This spec describes the **Phase 1 manager spine** (MANAGER_1.0_PLAN.md §3): store
+"**Pure observer**" is therefore scoped precisely: moot-mgr **never hosts an
+estate DB or runs the substrate stack**. It does both **observe** mootx01
+(reading the central stats store it owns) **and control/signal** it — the global
+monitoring on/off switch, the retention window, the admin lifecycle
+(provision / quiesce / drain / destroy), and Brain signals all flow from
+moot-mgr to the mootx01 daemon over the control channel (the Phase 1 plan §1).
+
+This spec describes the **Phase 1 manager spine** (the Phase 1 plan §3): store
 ownership, the on/off control, retention, and the CLI read/status surface. The
 HTTP read-plane dashboard (Phase 3) and the macOS menu-bar shell (Phase 5) are
 out of scope for this document and will extend it when built.
@@ -34,7 +42,7 @@ Per parity-is-absolute, Swift-only is not the end state.
 
 ## 2. Component layout
 
-`apps/moot-mgr` (MANAGER_1.0_PLAN.md §4, RESOLVED name):
+`apps/moot-mgr` (the Phase 1 plan §4, RESOLVED name):
 
 | Target | Kind | Contents |
 |---|---|---|
@@ -49,8 +57,7 @@ IntellectusLib (floor) → PersistenceKit (kit) → ObserverSink (lib) → moot-
 ```
 
 In-repo dependencies are declared in `Package.swift` per
-DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28. Zero external (third-party) Swift
-dependencies.
+DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28. Zero external (third-party) Swift dependencies.
 
 ## 3. Store ownership
 
@@ -149,13 +156,24 @@ print to stderr and exit `1`; success prints to stdout and exits `0`.
 
 ## 8. One real consumer wired end-to-end (headless ARIA_MCP)
 
-Per MANAGER_1.0_PLAN.md §3, the headless `aria-mcp` server is wired as the first
-real consumer. The wiring is **executable-only and opt-in**: when
-`ARIA_MCP_STATS_STORE` is set, `aria-mcp` opens the manager's store, installs a
+Per the Phase 1 plan §3, a headless ARIA server is wired as the first real
+consumer. The wiring is **executable-only and opt-in**: when
+`ARIA_MCP_STATS_STORE` is set, the server opens the manager's store, installs a
 `PersistenceStatsSink`, drives `Intellectus.setEnabled` from the store flag, and
 emits a startup metric. When the env var is unset, the MCP wire surface is
 unchanged. The `AriaMCP` JSON-RPC library is untouched. (A finer-grained
 per-tool-call metric is a follow-up.)
+
+**Resident-daemon note (v0.2.1 transport correction).** The consumer that
+matters for an installed user is the **resident `mootx01` HTTP daemon**, not the
+standalone `aria-mcp` PoC binary — `mootx01` is the headless server that wraps
+the full stack and triggers its own Brain (ARIA_MCP_SPEC §17). It carries the
+same env-gated self-report wiring, and `mootx01 install` sets
+`ARIA_MCP_STATS_STORE` to this manager's store path so the daemon is observable
+out of the box. Because the daemon is resident, its self-report is continuous
+rather than per-session — which is what makes the dashboard's "observed estates"
+view populate. The off-by-default monitoring flag still governs whether any
+sample flows.
 
 ## 9. Phase-1 verification
 

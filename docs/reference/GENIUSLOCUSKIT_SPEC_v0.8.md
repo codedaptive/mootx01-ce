@@ -602,7 +602,7 @@ The Rust port (`NeuronKit/rust/src/estate_dreaming_sink.rs`) implements the
 same adapter over a `DrawerStore` trait reference. Propose calls
 `store.add_proposal` with a `LatticeAnchor::udc("dreaming")` placeholder;
 record-cycle-diary calls `store.add_diary_entry`. Row IDs are deterministic:
-`dreaming-<now>-<counter>` per the fleet determinism rule (no RNG in engines).
+`dreaming-<now>-<counter>` per the determinism rule (no RNG in engines).
 
 ## § MATRIXT_HOURLY — T-matrix population signal (MX-1, 2026-06-04)
 
@@ -808,11 +808,11 @@ Returns an empty array (no error) when no `MatrixTier` has been registered.
      `CooccurrenceKey` 6-bit value constraint).
    - `.bitmap(v)` where `v.nonzeroBitCount == 1` → value = bit position.
    - Multi-bit `.bitmap`, `.string`, `.bytes`, `.null` → skipped (no lossless
-     6-bit encoding; intentionally not encoded).
+     6-bit encoding; intentionally omitted).
 3. Emit both directed cells `(a,b)` and `(b,a)` from each upper-triangle entry.
 4. Add diagonal `O[A,A] = liveRowCount` for each observed item (conservative
    upper-bound approximation for single-item support; full correctness requires
-   a future change that stores diagonal counts in `MatrixTier`).
+   a future mission that stores diagonal counts in `MatrixTier`).
 
 ### Apriori entry point
 

@@ -50,15 +50,15 @@
       "description": "add_diary_entry sets wing = 'wing_<agent_name>' and room = 'diary'. Mirrors the Swift DreamingWrites / DrawerStore wing-per-agent convention.",
       "operation": "add_diary_entry",
       "input": {
-        "agent_name": "skippy",
+        "agent_name": "alice",
         "entry": "session note",
         "topic": "session-2026-06-05",
         "embedding_model_id": "text-embedding-3-small",
         "now": 1700000000
       },
       "expected": {
-        "agent_name": "skippy",
-        "wing": "wing_skippy",
+        "agent_name": "alice",
+        "wing": "wing_alice",
         "room": "diary",
         "entry": "session note",
         "topic": "session-2026-06-05",
@@ -71,7 +71,7 @@
       "description": "When embedding_model_id is empty, add_diary_entry substitutes 'no-embedding'. Mirrors Swift DreamingWrites.addDiaryEntry guard: autonomous diary writes carry no embedding.",
       "operation": "add_diary_entry",
       "input": {
-        "agent_name": "bilby",
+        "agent_name": "carol",
         "entry": "work log",
         "topic": "mission-abc",
         "embedding_model_id": "",
@@ -85,9 +85,9 @@
       "id": "diary_entries_last_n",
       "description": "diary_entries returns at most last_n entries, newest first. Multiple entries for the same agent are capped by last_n.",
       "operation": "diary_entries",
-      "precondition": "5 entries added for agent 'skippy' at filed_at 1700000000..1700000004",
+      "precondition": "5 entries added for agent 'alice' at filed_at 1700000000..1700000004",
       "input": {
-        "agent_name": "skippy",
+        "agent_name": "alice",
         "last_n": 3
       },
       "expected": {
@@ -98,14 +98,14 @@
       "id": "diary_entries_agent_isolation",
       "description": "diary_entries filters by agent_name. Entries from other agents do not appear in the result.",
       "operation": "diary_entries",
-      "precondition": "1 entry for 'skippy', 1 entry for 'bilby'",
+      "precondition": "1 entry for 'alice', 1 entry for 'carol'",
       "input": {
-        "agent_name": "skippy",
+        "agent_name": "alice",
         "last_n": 10
       },
       "expected": {
         "count": 1,
-        "all_agent_names": ["skippy"]
+        "all_agent_names": ["alice"]
       }
     }
   ]
