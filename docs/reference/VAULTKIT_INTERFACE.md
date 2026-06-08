@@ -14,9 +14,14 @@ relates_to:
 
 # VaultKit Interface
 
+> **Recovery note (2026-06-03):** this document and the kit it describes
+> were produced in a prior change but were not committed before the
+> working branch was cleaned up. This is the recovered interface spec.
+
 > **Swift/Rust parity (2026-06-05):** the Rust crate
-> `packages/kits/VaultKit/rust/` was added. All public types now have
-> Rust equivalents. See §§ Swift/Rust Concordance below.
+> `packages/kits/VaultKit/rust/` was added in a subsequent workstream.
+> All public types now have Rust equivalents. See
+> §§ Swift/Rust Concordance below.
 
 > **Bidirectional identity + export scope (2026-06-05):**
 > Two decisions were implemented in lockstep on both ports.
@@ -133,7 +138,7 @@ public struct ImportReport: Sendable, Equatable {
 }
 ```
 
-## ARIA_MCP tool family — `moot_vault_*` (stream va, ADR-VAULTKIT-002)
+## ARIA_MCP tool family — `moot_vault_*` (ADR-VAULTKIT-002)
 
 The ARIA_MCP dispatch exposes `VaultBridge` (plus drift detection and a
 candidate seam) as four tools. Both the Swift and Rust ports are live. All
@@ -180,8 +185,8 @@ reported, never actioned (no drawer is expunged).
 ## Swift/Rust Concordance
 
 The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
-`vault-kit`, lib target `vault_kit`). It was added in stream `w2-vaultkit`
-(2026-06-05). One row per ported type.
+`vault-kit`, lib target `vault_kit`). It was added in 2026-06-05. One row
+per ported type.
 
 | Swift type | Rust type | Module | Notes |
 |---|---|---|---|
@@ -208,7 +213,7 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 
 - EideticLib FDC classification (structural support present, `classify_on_import` flag honoured, lookup always returns `None` — equivalent to the feature-flag-off path in Swift).
 - Async `VaultBridge` methods (synchronous in Rust V1; the GLK Rust coordinator is synchronous).
-Note: ARIA_MCP `moot_vault_*` Rust mirror is delivered (stream cp-vault-bidir). ADR-VAULTKIT-002 decision a is superseded by `DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md`.
+Note: ARIA_MCP `moot_vault_*` Rust mirror is delivered (see DECISION_VAULT_BIDIRECTIONAL_IDENTITY_AND_SCOPE_2026-06-05.md). ADR-VAULTKIT-002 decision a is superseded by that document.
 
 ## Out of scope (later missions)
 

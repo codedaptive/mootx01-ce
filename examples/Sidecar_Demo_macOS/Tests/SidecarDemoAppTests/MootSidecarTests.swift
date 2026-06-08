@@ -1,0 +1,70 @@
+import XCTest
+import Foundation
+import AriaMCP
+@testable import SidecarDemoApp
+
+/// Smoke coverage for `MootSidecar`. The sidecar is glue, so the tests
+/// verify the glue: an in-memory attach succeeds, the dispatcher carries
+/// a non-empty tool surface (proving the AriaLexicon verb-noun
+/// projection wired through), and the dispatcher answers the MCP
+/// `initialize` handshake with the identity the sidecar was constructed
+/// with.
+///
+/// We do not re-test the dispatcher's protocol semantics — ARIA_MCP's
+/// own tests own that. We only check that `MootSidecar` produces a
+/// correctly-wired dispatcher.
+final class MootSidecarTests: XCTestCase {
+
+    func testAttachInMemoryReturnsDispatcherWithToolSurface() async throws {
+        let sidecar = try await MootSidecar.attachInMemory()
+
+        // A non-empty tool surface proves AriaLexicon's verb-noun
+        // matrix projected. The exact count is owned by AriaLexicon
+        // and changes with the lexicon, so the test only asserts
+        // non-emptiness.
+        XCTAssertGreaterThan(
+            sidecar.dispatcher.tools.count,
+            0,
+            "Sidecar dispatcher should expose the projected tool surface"
+        )
+    }
+
+    func testAttachInMemoryRespectsCustomIdentity() async throws {
+        let identity = MootSidecar.Identity(
+            name: "ExampleCorp-Notes-Sidecar",
+            version: "9.9.9"
+        )
+        let sidecar = try await MootSidecar.attachInMemory(identity: identity)
+
+        XCTAssertEqual(sidecar.identity.name, "ExampleCorp-Notes-Sidecar")
+        XCTAssertEqual(sidecar.identity.version, "9.9.9")
+        XCTAssertEqual(sidecar.dispatcher.info.name, "ExampleCorp-Notes-Sidecar")
+        XCTAssertEqual(sidecar.dispatcher.info.version, "9.9.9")
+    }
+
+    func testInitializeHandshakeAnnouncesSidecarIdentity() async throws {
+        let identity = MootSidecar.Identity(
+            name: "Sidecar_Demo_macOS-test",
+            version: "0.0.1"
+        )
+        let sidecar = try await MootSidecar.attachInMemory(identity: identity)
+
+        let request = JSONRPCRequest(
+            id: .integer(1),
+            method: "initialize",
+            params: .object(["protocolVersion": .string("2024-11-05")])
+        )
+        let rawResponse = await sidecar.dispatcher.handle(request)
+        let response = try XCTUnwrap(rawResponse)
+
+        guard case .result(let result) = response.payload else {
+            XCTFail("initialize returned error: \(response.payload)")
+            return
+        }
+        let serverInfo = try XCTUnwrap(
+            result.objectValue?["serverInfo"]?.objectValue
+        )
+        XCTAssertEqual(serverInfo["name"], .string("Sidecar_Demo_macOS-test"))
+        XCTAssertEqual(serverInfo["version"], .string("0.0.1"))
+    }
+}

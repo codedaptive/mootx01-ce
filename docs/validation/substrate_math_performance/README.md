@@ -6,20 +6,20 @@ harness. It is the empirical foundation for the cookbook's §4.4
 portable kernel layer and §17 performance budgets.
 
 A new engineer (human or agent) joining substrate work reads
-this README, the decision index at `../../_internal/decisions/README.md`,
-and the Phase 2 final selection at
-`../../_internal/decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`,
+this README and the Phase 2 final selection decision record,
 then is ready to extend the kernel layer with new backends or
 new ops.
+
+The kernel-maintenance operating guides (agent orientation and Claude
+skill descriptor) are internal documents maintained at
+`docs/_internal/substrate_math/AGENT_HOWTO.md` and
+`docs/_internal/substrate_math/SKILL.md`.
 
 ## Directory layout
 
 ```
 substrate_math_performance/
 ├── README.md                              this file
-├── AGENT_HOWTO.md                         orientation for agentic
-│                                           programming agents
-├── SKILL.md                               Claude skill descriptor
 ├── GeniusLocusReference/                  Swift reference port (library only)
 │   ├── Package.swift
 │   ├── glref-swift-PortableKernel.swift   trait + dispatcher + KernelKind
@@ -68,7 +68,7 @@ NOT present in this repo: the `StressTest/` and `TopKBench/` Swift sources
 and the Rust `stress_test` bin were not carried over from the prior
 `mootx01-rc` tree. Until they are ported, only the conformance binaries
 (`gen-vectors`, `validate-vectors`) build and run here. Porting the sweep
-is a tracked follow-up.
+is tracked as a backlog item (MISSION_PERF_SWEEP_HARNESS).
 
 ## What lives where
 
