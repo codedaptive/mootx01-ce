@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // Sidecar_Demo_macOS — the headline sidecar demonstration.
 //
@@ -25,7 +25,7 @@
 //      Desktop, Claude Code, MemPalace, the `mcp` CLI) can reach the
 //      attached MOOT.
 //
-// Dependencies are listed as sibling-package paths because every kit in
+// Dependencies are listed as repo-relative package paths because every kit in
 // this repository is published the same way (see ARIA_MCP/Package.swift).
 // QueueKit, VectorKit, CorpusKit are transitive through GeniusLocusKit and
 // are intentionally NOT listed here; adding them would only create
@@ -35,7 +35,7 @@
 // package (see PersistenceKit/Package.swift). It must be listed explicitly
 // because PersistenceKit's default library product does not bundle it.
 //
-// Platforms: macOS 15+ / iOS 18+ — same floor as ARIA_MCP and the rest
+// Platforms: macOS 26 / iOS 26 — same floor as ARIA_MCP and the rest
 // of the kit stack. The "macOS" in the package name reflects the demo's
 // home; nothing in the code is macOS-only.
 
@@ -44,18 +44,18 @@ import PackageDescription
 let package = Package(
     name: "Sidecar_Demo_macOS",
     platforms: [
-        .macOS(.v15),
-        .iOS(.v18),
+        .macOS(.v26),
+        .iOS(.v26),
     ],
     products: [
         .library(name: "SidecarDemoApp", targets: ["SidecarDemoApp"]),
         .executable(name: "sidecar-demo", targets: ["sidecar-demo"]),
     ],
     dependencies: [
-        .package(name: "ARIA_MCP", path: "../ARIA_MCP"),
-        .package(name: "GeniusLocusKit", path: "../GeniusLocusKit"),
-        .package(name: "LocusKit", path: "../LocusKit"),
-        .package(name: "PersistenceKit", path: "../PersistenceKit"),
+        .package(name: "ARIA_MCP", path: "../../apps/ARIA_MCP"),
+        .package(name: "GeniusLocusKit", path: "../../packages/kits/GeniusLocusKit"),
+        .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
+        .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
     ],
     targets: [
         .target(

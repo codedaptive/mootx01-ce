@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.2
 //
 // SubstrateValidator (Swift) — the primary field validator of the substrate libs.
 //
@@ -12,7 +12,7 @@ import PackageDescription
 
 let package = Package(
     name: "SubstrateValidator",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v26)],
     products: [
         .executable(name: "substrate-validator", targets: ["SubstrateValidator"]),
     ],
