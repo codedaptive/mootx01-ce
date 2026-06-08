@@ -1,10 +1,10 @@
 # ADR-003 — swift-crypto 4.x is the Workspace Dependency Baseline
 
-- Status: Accepted — unified 2026-06-03
+- Status: Accepted — unified 2026-06-03 (mission DEPENDENCY_AND_WARNING_HYGIENE_001)
 - Date: 2026-06-03
-- Deciders: Bob Pankratz
-- Scope: All Swift packages that pull swift-crypto (directly or via vapor/postgres-nio); the shared transitive-dependency pin policy
-- Evidence: dependency-and-warning-hygiene impact analysis (workspace version map; security review of the federation identity signing surface). Companion to the C-1 zero-external-dependency doctrine and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+- Deciders: Bob (Commander)
+- Scope: All Swift packages in mootx01-ee that pull swift-crypto (directly or via vapor/postgres-nio); the shared transitive-dependency pin policy
+- Evidence: DEPENDENCY_AND_WARNING_HYGIENE_001 change-impact report + completion report (dependency version map; security review of the federation identity signing surface). Companion to the C-1 zero-external-dependency doctrine and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
 
 ## Context
 
@@ -50,12 +50,16 @@ never a 3.x floor, to keep the workspace on one version.
 ## Consequences
 
 - Single, auditable crypto/nio version across the workspace.
-- All package roots resolve under the unified baseline.
+- One root remains un-unified: `examples/Sidecar_Demo_macOS` cannot re-resolve
+  because its `Package.swift` references a non-existent `../ARIA_MCP` path
+  (pre-existing breakage). A follow-on mission must fix that path to complete
+  workspace-wide unification.
 - This ADR does not alter the C-1 zero-external-dependency constraint:
   swift-crypto and postgres-nio remain the pre-existing, approved external
   dependencies; no new third-party dependency is introduced.
 
 ## Status note
 
-This ADR is the canonical, discoverable home for this convention so the baseline
+This convention was previously recorded only in the (gitignored) mission BRR and
+completion report. This ADR is its canonical, discoverable home so the baseline
 does not drift silently.

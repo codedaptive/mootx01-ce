@@ -36,7 +36,7 @@ before the next language began.
 with the following error:
 
 ```
-/Users/bob/devlop/mootx01-rc/docs/validation/substrate_math_performance/
+docs/validation/substrate_math_performance/
 test-harness/swift/Sources/Harness/Primitives/PrimitiveRegistry.swift:96:9:
 error: cannot find 'BitFieldMaskedEqualsPrimitive' in scope
 ```

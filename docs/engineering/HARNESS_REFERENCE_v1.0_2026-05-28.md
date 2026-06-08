@@ -43,10 +43,10 @@ test vector (32 cases each, CRC-pinned). Drift between the two
 languages would be caught by CI in the next harness run.
 
 The harness lives at
-`/Users/bob/devlop/mootx01-ee/docs/validation/substrate_math_performance/test-harness/`.
+`docs/validation/substrate_math_performance/test-harness/` (repo-relative).
 The reference implementations these primitives wrap are distributed
 across the four substrate packages under
-`/Users/bob/devlop/mootx01-ee/packages/libs/` (SubstrateTypes,
+`packages/libs/` (SubstrateTypes,
 SubstrateKernel, SubstrateML, and SubstrateLib; Swift + Rust legs side
 by side). The §2.0 map gives each primitive's package; §6 explains the
 split.
@@ -87,8 +87,7 @@ Each row tells an agent four things:
 3. **What pins the cross-language equivalence** (test vector + CRC).
 4. **What the operation does** (one line).
 
-All file paths are relative to the repo root
-`/Users/bob/devlop/mootx01-ee/`.
+All file paths in this document are relative to the repository root.
 
 ### §2.0. Where each primitive lives (four-package map)
 
@@ -691,7 +690,7 @@ passes:
 
 ```bash
 # Full gate sweep, both languages, on-disk vectors:
-cd /Users/bob/devlop/mootx01-ee/docs/validation/substrate_math_performance/test-harness/swift
+cd docs/validation/substrate_math_performance/test-harness/swift
 for v in ../vectors/*.json; do
   name=$(basename "$v" .json)
   swift_result=$(.build/debug/validate-vectors "$v" 2>&1 | tail -1)

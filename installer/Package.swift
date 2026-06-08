@@ -57,6 +57,11 @@ let package = Package(
                 // On Linux these products are unavailable; ServeCommand.swift uses
                 // #if os(macOS) guards so the Linux build omits the serve subcommand.
                 .product(name: "AriaMCP", package: "ARIA_MCP"),
+                // AriaResident: the shared resident-daemon runner (HTTP transport +
+                // Brain pump + telemetry/monitoring gate). `mootx01 serve` calls it
+                // when resident (MOOTX01_HTTP_PORT/--http) so the product binary and
+                // aria-mcp run identical resident wiring (ADR-LOOPBACKHTTP-001).
+                .product(name: "AriaResident", package: "ARIA_MCP"),
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),

@@ -30,7 +30,8 @@ import Foundation
 /// }
 /// ```
 ///
-/// This type follows the spec shape, with two reconciliations:
+/// This type follows the spec shape, with two reconciliations noted in the
+/// completion report:
 ///
 /// - `source: SourceCatalogEntry` → `sourceCatalogID: String`. The
 ///   `SourceCatalogEntry` type is not implemented anywhere in the codebase

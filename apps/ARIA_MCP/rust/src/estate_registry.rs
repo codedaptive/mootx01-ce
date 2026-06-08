@@ -54,10 +54,13 @@ const INIT_NOW: i64 = 1_700_000_000;
 // open race on the same file.
 const SQLITE_BUSY_TIMEOUT_SECS: f64 = 5.0;
 
-/// An opened estate in the registry: coordinator + handle pair.
+/// An opened estate in the registry: coordinator + handle + store triple.
 ///
 /// The coordinator is the dispatch surface; the handle identifies which
-/// estate within the coordinator to target for a given tool call.
+/// estate within the coordinator to target for a given tool call. The store
+/// is the same `Arc<dyn DrawerStore>` that was passed to `coord.open(...)` —
+/// retained here so the BrainPump can construct its sinks against the live
+/// estate without needing the coordinator lock for write access.
 #[derive(Clone)]
 pub struct OpenEstate {
     /// Shared coordinator — all estates registered on the same server
@@ -66,6 +69,11 @@ pub struct OpenEstate {
     pub coord: Arc<std::sync::Mutex<EstateCoordinator>>,
     pub handle: EstateHandle,
     pub estate_id: Uuid,
+    /// The live DrawerStore backing this estate. The same Arc is held by
+    /// the coordinator internally; this clone lets callers (e.g. BrainPump)
+    /// write proposals/diary entries directly without routing through the
+    /// coordinator's MCP verb layer.
+    pub store: Arc<dyn DrawerStore>,
 }
 
 /// The estate registry the dispatcher uses to resolve `estateID` arguments.
@@ -98,12 +106,13 @@ impl EstateRegistry {
         let handle = coord
             .lock()
             .unwrap()
-            .open(store, OwnerCredentials::new(DEFAULT_OWNER), 0, 100)
+            .open(Arc::clone(&store), OwnerCredentials::new(DEFAULT_OWNER), 0, 100)
             .expect("default estate open must succeed");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
             estate_id,
+            store,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
@@ -150,12 +159,13 @@ impl EstateRegistry {
         let handle = coord
             .lock()
             .unwrap()
-            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
             .expect("default sqlite estate open must succeed");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
             estate_id,
+            store,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
@@ -177,12 +187,13 @@ impl EstateRegistry {
             .coord
             .lock()
             .unwrap()
-            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
             .expect("additional estate open must succeed");
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
             handle,
             estate_id,
+            store,
         };
         self.extras.insert(estate_id, estate);
         estate_id
@@ -209,12 +220,13 @@ impl EstateRegistry {
             .coord
             .lock()
             .unwrap()
-            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
             .expect("additional sqlite estate open must succeed");
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
             handle,
             estate_id,
+            store,
         };
         self.extras.insert(estate_id, estate);
         Ok(estate_id)
@@ -260,12 +272,13 @@ impl EstateRegistry {
         let handle = coord
             .lock()
             .unwrap()
-            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
             .expect("default postgres estate open must succeed");
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
             estate_id,
+            store,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
@@ -299,12 +312,13 @@ impl EstateRegistry {
             .coord
             .lock()
             .unwrap()
-            .open(store, OwnerCredentials::new(owner), 0, 100)
+            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
             .expect("additional postgres estate open must succeed");
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
             handle,
             estate_id,
+            store,
         };
         self.extras.insert(estate_id, estate);
         Ok(estate_id)

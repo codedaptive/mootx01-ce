@@ -133,4 +133,10 @@ That is what MOOTx01 is built on.
 
 ---
 
+Ready to set it up? [`INSTALLING_MOOTX01.md`](INSTALLING_MOOTX01.md) walks
+through what the installer does, how the resident daemon works, and how your
+AI clients connect.
+
+---
+
 *A plain-language overview. Derived from the developers' and maintainers' guides. The full mathematical treatment is held internally.*

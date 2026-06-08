@@ -28,6 +28,9 @@ struct InstallCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Skip installing the moot-mgr management console as a background launchd service (macOS).")
     var noManager: Bool = false
 
+    @Flag(name: .long, help: "Skip registering the resident mootx01 daemon (HTTP MCP server + Brain pump) as a background launchd service (macOS).")
+    var noDaemon: Bool = false
+
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -72,6 +75,7 @@ struct InstallCommand: AsyncParsableCommand {
                 try Installer.install(
                     client: client,
                     binaryPath: binaryPath,
+                    daemonURL: MootPaths.residentEndpointURL,
                     homeDirectory: home,
                     workingDirectory: cwd,
                     local: local
@@ -148,6 +152,40 @@ struct InstallCommand: AsyncParsableCommand {
                 }
             } catch {
                 print("  ✗ Could not place moot-mgr: \(error)")
+            }
+        }
+        #endif
+
+        // Register the resident mootx01 daemon (HTTP MCP server + Brain pump +
+        // telemetry) as a launchd LaunchAgent so it runs at login and restarts on
+        // exit — this is the headless daemon the wired clients connect to over
+        // HTTP. The plist env switches `mootx01 serve` into resident mode
+        // (MOOTX01_HTTP_PORT=4242) and points telemetry at moot-mgr's stats store
+        // so the console observes it out of the box. macOS-only (launchd).
+        #if os(macOS)
+        if !noDaemon {
+            let dataDir = MootPaths.resolveDataDirectory(
+                environment: ProcessInfo.processInfo.environment,
+                homeDirectory: home
+            )
+            let daemonEnv = [
+                "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
+                "MOOTX01_DATA_DIR": dataDir.path,
+                "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
+            ]
+            switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
+            case let .installed(plistPath, endpointURL):
+                print("")
+                print("  ✓ Resident mootx01 daemon running in the background (launchd: \(MootPaths.daemonLabel))")
+                print("    MCP endpoint: \(endpointURL)")
+                print("    LaunchAgent:  \(plistPath)")
+            case let .launchctlFailed(message):
+                print("")
+                print("  ✗ Could not start the resident daemon via launchd: \(message)")
+                print("    Start it manually any time with:  mootx01 serve --http 4242")
+            case .binaryNotFound:
+                print("")
+                print("  ⓘ mootx01 binary missing — run `mootx01 serve --http 4242` manually.")
             }
         }
         #endif

@@ -85,9 +85,10 @@ struct TunnelBitmapTests {
     func operationalBitmapRoundTrip() async throws {
         // 0x0801 = bit 11 set (strength=.strong rawValue 4 stored in
         // bits 9–11) + bit 0 set (direction=.bidirectional rawValue 1).
-        // The value 0x0401 with strength=.strong would require strength's
-        // raw value 4 at bits 9–11 to be stored as bit 10 alone (= raw
-        // value 2 = .normal), so the spec-correct value is used here.
+        // Mission specifies the value 0x0401 with strength=.strong; that
+        // would require strength's raw value 4 at bits 9–11 to be stored
+        // as bit 10 alone (= raw value 2 = .normal), so we use the
+        // spec-correct value here. See completion report deviations.
         let store = try await DrawerStore(storage: TestStorage.sqlite(freshStoreURL()))
         let original = Tunnel(
             id: "t-op",

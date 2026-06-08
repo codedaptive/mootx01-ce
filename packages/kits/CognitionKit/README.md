@@ -49,7 +49,7 @@ Use CognitionKit to add to any GeniusLocusKit + NeuronKit application:
 - `docs/specs/NEURONKIT_SPEC_v0.1.md` — every capability CognitionKit can call into
 - `docs/validation/substrate_math_performance/glref-swift-CognitionKit.swift` — reference implementation of the 18 retrieval primitives (§11)
 
-## Mission placement rules
+## Scope
 
 **Belongs here** if it: defines or modifies a `Recipe` conformance, sequences NeuronKit calls into a named workflow, handles webhook registration or confirmation.
 

@@ -21,7 +21,7 @@ struct EstateVerbTests {
     @Test("capture round-trips a drawer with correct fields")
     func capture_roundTrip() async throws {
         let (estate, _) = try await makeEstate()
-        // CaptureChannel has no `.manual` case in shipped code;
+        // CaptureChannel has no `.manual` case in shipped code (see BRR);
         // `.typed` is the canonical typed-input channel.
         let frame = CaptureFrame(
             content: "Hello LocusKit",

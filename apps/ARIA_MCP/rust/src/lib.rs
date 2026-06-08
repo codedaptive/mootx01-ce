@@ -38,10 +38,12 @@
 //! detection (ADR-VAULTKIT-002 decision b).
 //! SQLite persistence: `ARIA_MCP_SQLITE_PATH`. PostgreSQL: `ARIA_MCP_POSTGRES_URL`.
 
+pub mod brain_pump;
 pub mod coaching_engine;
 pub mod dispatch;
 pub mod dispatcher;
 pub mod estate_registry;
+pub mod http_server;
 pub mod interface_tools;
 pub mod jsonrpc;
 pub mod lens_tools;

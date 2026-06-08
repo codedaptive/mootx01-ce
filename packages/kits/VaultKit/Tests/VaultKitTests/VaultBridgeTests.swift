@@ -331,6 +331,61 @@ struct VaultBridgeTests {
         #expect(drawers.count == 1, "rename must not create a duplicate drawer")
     }
 
+    // MARK: - Export cap regression: >50 drawers must all be exported
+
+    /// Regression test for the VK-EXPORT-FIX defect: DrawerMapping.export was
+    /// calling recall with no explicit limit, which caused the GLK overload to
+    /// default to a cap of 50. An estate with more than 50 believed drawers
+    /// therefore silently exported only the first 50.
+    ///
+    /// This test builds a synthetic estate with 60 believed drawers, exports it,
+    /// and asserts that the exported NoteIR count equals the believed-drawer count,
+    /// NOT ≤50. It is intentionally written to fail before the fix is applied.
+    @Test("export includes ALL believed drawers when estate exceeds 50 (regression: VK-EXPORT-FIX)")
+    func exportExceedsDefaultCapOf50() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // Capture 60 distinct believed drawers directly via GLK.
+        // Room, addedBy, and embeddingModelID are non-empty so I-5 holds.
+        let targetCount = 60
+        for i in 0..<targetCount {
+            let frame = CaptureFrame(
+                content: "Drawer number \(i): unique synthetic content for the VK-EXPORT-FIX regression test.",
+                channel: .importedFile,
+                room: "export-regression",
+                latticeAnchor: LatticeAnchor(udcCode: "000"),
+                addedBy: "vaultkit-test",
+                embeddingModelID: "vaultkit-noembed-v1"
+            )
+            _ = try await kit.capture(handle, frame)
+        }
+
+        // Verify that we actually have 60 believed drawers before the export.
+        // Use Int.max limit to bypass the GLK overload's 50 default — this is
+        // specifically verifying substrate state, not testing the overload.
+        let believed = try await kit.recall(handle, RecallFrame(
+            filterChain: [
+                .currentlyBelieve,
+                .any([.userConfirmed, .unconfirmed, .automatedConfirmedOnly]),
+                .any([.trustworthy, .requiresConfirmation]),
+            ],
+            hydrationLevel: .bitmapOnly,
+            limit: 10_000_000
+        ))
+        #expect(believed.count == targetCount, "precondition: 60 believed drawers must be inserted")
+
+        // Export via DrawerMapping.export directly so we can count NoteIRs without
+        // writing to disk (the file-system round-trip is tested elsewhere).
+        let mapping = DrawerMapping()
+        let notes = try await mapping.export(kit: kit, handle: handle, scope: .believed)
+
+        // THE CRITICAL ASSERTION: every believed drawer must appear in the export.
+        // Before the fix this returned ≤50, so the assertion would fail with 50 < 60.
+        #expect(notes.count == believed.count, "export must return all 60 believed drawers (50-cap defect if <60)")
+    }
+
     // MARK: - End-to-end export → import → equivalence
 
     @Test("export an estate, import the produced vault into a fresh estate, structural equivalence holds")

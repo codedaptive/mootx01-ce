@@ -1,18 +1,20 @@
 // POSIXSocket.swift
 //
-// Thin POSIX-socket helpers for the moot-mgr loopback read-API and the UDS
-// control channel. NO external packages — these wrap the system C socket API
-// (libc / Darwin), which is the zero-dependency path the kit rules require.
+// Thin POSIX-socket helpers for loopback TCP listeners and UDS control channels.
+// NO external packages — these wrap the system C socket API (libc / Darwin),
+// which is the zero-dependency path the kit rules require.
 //
-// WHY NOT Network.framework: NWListener was the first choice, but it
-// cannot bind a *listening* server socket in the command-line build
-// environment used here (it returns POSIXErrorCode 22 / EINVAL on every
-// configuration, including an unrestricted TCP listener — a non-app-bundle
-// constraint). The security requirements are mechanism-independent, so the
-// listeners are built on POSIX sockets, which bind correctly. The security
-// boundary (loopback-only bind, UDS at 0600) is enforced identically —
-// arguably more directly, since the bind address and file mode are set
-// explicitly here.
+// WHY NOT Network.framework: the first choice was NWListener, but NWListener
+// cannot bind a *listening* server socket in the command-line build environment
+// used here (it returns POSIXErrorCode 22 / EINVAL on every configuration,
+// including an unrestricted TCP listener — a non-app-bundle constraint). The
+// security requirements are mechanism-independent, so the listeners are built on
+// POSIX sockets, which bind correctly. The security boundary (loopback-only
+// bind, UDS at 0600) is enforced identically — arguably more directly, since the
+// bind address and file mode are set explicitly here.
+//
+// Extracted to LoopbackHTTP per ADR-LOOPBACKHTTP-001 so moot-mgr and the
+// resident mootx01 daemon share one audited loopback-bind implementation.
 
 import Foundation
 
@@ -24,10 +26,10 @@ import Darwin
 
 // MARK: - POSIXSocket
 
-/// Minimal blocking-socket helpers shared by the TCP read-API listener and the
-/// UDS control listener. All calls are synchronous; callers run them off the
+/// Minimal blocking-socket helpers shared by TCP read-API listeners and UDS
+/// control listeners. All calls are synchronous; callers run them off the
 /// cooperative pool (a dedicated Thread or `Task.detached`).
-enum POSIXSocket {
+public enum POSIXSocket {
 
     /// Bind a TCP listening socket to 127.0.0.1:port and start listening.
     ///
@@ -38,7 +40,7 @@ enum POSIXSocket {
     /// - Parameter port: Requested port; 0 lets the OS assign one.
     /// - Returns: `(fd, boundPort)` — the listening descriptor and the actual port.
     /// - Throws: `SocketError` on any syscall failure.
-    static func listenLoopbackTCP(port: UInt16) throws -> (fd: Int32, port: UInt16) {
+    public static func listenLoopbackTCP(port: UInt16) throws -> (fd: Int32, port: UInt16) {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw SocketError.syscall("socket", errno) }
 
@@ -87,7 +89,7 @@ enum POSIXSocket {
     /// - Parameter path: Filesystem path for the socket.
     /// - Returns: The listening descriptor.
     /// - Throws: `SocketError` on any syscall failure.
-    static func listenUnix(path: String) throws -> Int32 {
+    public static func listenUnix(path: String) throws -> Int32 {
         unlink(path) // remove a stale socket if present (ignore failure)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -130,14 +132,14 @@ enum POSIXSocket {
 
     /// Accept one connection on a listening fd. Returns the connection fd, or
     /// nil if accept was interrupted/failed (the caller decides whether to retry).
-    static func acceptOne(_ listenFD: Int32) -> Int32? {
+    public static func acceptOne(_ listenFD: Int32) -> Int32? {
         let cfd = accept(listenFD, nil, nil)
         return cfd >= 0 ? cfd : nil
     }
 
     /// Read up to `max` bytes. Returns the data read (possibly empty on EOF) or
     /// nil on error.
-    static func recv(_ fd: Int32, max: Int) -> Data? {
+    public static func recv(_ fd: Int32, max: Int) -> Data? {
         var buf = [UInt8](repeating: 0, count: max)
         let n = buf.withUnsafeMutableBytes { read(fd, $0.baseAddress, max) }
         if n < 0 { return nil }
@@ -146,7 +148,7 @@ enum POSIXSocket {
 
     /// Write all of `data` to the fd. Returns true on success.
     @discardableResult
-    static func sendAll(_ fd: Int32, _ data: Data) -> Bool {
+    public static func sendAll(_ fd: Int32, _ data: Data) -> Bool {
         var remaining = data
         while !remaining.isEmpty {
             let written = remaining.withUnsafeBytes { ptr -> Int in
@@ -162,7 +164,7 @@ enum POSIXSocket {
 // MARK: - SocketError
 
 /// Structured socket error (project error-handling rule: enums, not optionals).
-enum SocketError: Error, Sendable, Equatable {
+public enum SocketError: Error, Sendable, Equatable {
     /// A named syscall failed with this errno.
     case syscall(String, Int32)
     /// The UDS path did not fit the fixed `sun_path` buffer.
