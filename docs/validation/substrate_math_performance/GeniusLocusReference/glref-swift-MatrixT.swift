@@ -125,7 +125,7 @@ public struct MatrixT: Sendable, Equatable {
     }
 
     public init(entries: [(key: CausalityKey, count: Int64)]) {
-        var sorted = entries.sorted { $0.key < $1.key }
+        let sorted = entries.sorted { $0.key < $1.key }
         var deduped: [(key: CausalityKey, count: Int64)] = []
         for entry in sorted {
             if let last = deduped.last, last.key == entry.key {

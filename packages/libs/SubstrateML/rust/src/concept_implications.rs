@@ -46,7 +46,7 @@
 //! Implication output is sorted: premise size ascending, lex premise,
 //! lex conclusion.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use crate::formal_concept_analysis::{FormalAttribute, FormalContext};
 
 // MARK: - Types
