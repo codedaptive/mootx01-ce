@@ -8,7 +8,7 @@
 //! Per `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` §§ 7.1 / 7.8.3.
 
 use crate::adjectives::{AdjectiveSensitivity, Trust};
-use crate::drawer_operational::{CaptureChannel, ContentKind, DrawerFeatureFlags};
+use crate::drawer_operational::{CaptureChannel, ContentKind};
 use crate::estate_types::LatticeAnchor;
 use crate::filter::LineageID;
 use crate::provenance::{Channel, Sensitivity, SourceType};
