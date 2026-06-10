@@ -43,6 +43,54 @@ tracked in the [claims ledger](docs/validation/CLAIMS_LEDGER.md), and
 the caveat in [Current posture](#current-posture) applies to all of
 them.
 
+## What this does not defend against
+
+Limits as plainly as possible.
+
+**Your machine is the boundary.** An estate is a local database file
+owned by your user account. Any process running as you can read that
+file directly: a malicious app, a compromised tool, a person at your
+unlocked keyboard. None of the application controls (sensitivity
+tiers, export gates, receipts) defend against code already running on
+your machine. At that level the protections are the operating
+system's: file permissions, FileVault, and your own judgment about
+what you install. The committed exception is encryption at rest for
+`secret` rows under a key only you hold, scheduled for the v1.x
+series. That is the one layer built to survive a hostile local
+process. Until it ships, `secret` means excluded from recall and from
+every bulk channel. It does not mean unreadable on disk.
+
+**The AI reads what you let it recall.** This is a knowledge engine.
+Anything the AI can recall can leave through a conversation, slowly
+and one context at a time. No memory product can prevent that and
+remain useful. What the substrate controls is the bulk path: mass
+export is gated by tier, private content requires its owner present,
+and every bulk operation writes a receipt. The goal is that fast,
+lossless, silent egress is impossible. A slow trickle is the cost of
+having a useful engine, and the audit trail is how you see one.
+
+**The gates protect the owner's front door.** Export gating, owner
+key prompts, and receipts exist to stop a legitimate install from
+being driven into bulk egress by a compromised agent, a bad
+configuration, or an accident. They are not a defense against someone
+who already owns the machine. Seatbelts, not armor plate.
+
+## Verifying your binary
+
+This is open source. Anyone can build a version with the locks
+removed, and a modified build sees only the data on machines where
+someone chooses to run it. What you can verify is that the build you
+installed is the one we shipped:
+
+- Release artifacts publish SHA-256 checksums in `checksums.txt`
+  alongside each release. The installer verifies them before
+  extraction. You can check by hand with `shasum -a 256`.
+- macOS binaries are Developer ID signed and notarized. Verify with
+  `codesign --verify` and `spctl --assess`.
+
+If the checksum or signature does not match, the binary is not ours.
+Nothing in this document applies to it.
+
 ## Reporting a vulnerability
 
 **Do not open a public issue for a security problem.**
