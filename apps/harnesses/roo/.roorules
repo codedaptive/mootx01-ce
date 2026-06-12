@@ -1,0 +1,14 @@
+# MOOTx01 Automatic Memory
+
+Use MOOTx01 for memory-dependent work. Recall first, reason second, write back
+what matters.
+
+- Orient: `moot_estate_ping`, `moot_estate_status`, `moot_read_journal`.
+- Recall: `moot_memory_search`, `moot_recall_precise`, `moot_fact_search`.
+- Analyze: `moot_list_lenses`, `moot_lens_*`, `moot_synthesize`.
+- Write: `moot_file_memory`, `moot_file_fact`, `moot_link_memories`, `moot_write_journal`.
+- Correct: confirm, update, withdraw, retire stale facts.
+- Dream: `moot_dream` after bulk import or major growth.
+
+If unavailable, say so.
+
