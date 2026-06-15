@@ -114,6 +114,11 @@ Follow these rules strictly:
 
 ## Install Flow
 
+> **Before running any command, parse `docs/start-here/AI_INSTALL_MANIFEST.json`.** It carries the
+> current install commands, ports, verification commands, adapter locations, and the files an
+> install may modify, as structured data. This runbook explains the *why*; the manifest is the
+> deterministic *what* to act on (and still confirm against the live repo).
+
 ### 1. Identify Platform
 
 Check the platform before choosing commands.
