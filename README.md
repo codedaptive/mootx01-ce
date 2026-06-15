@@ -75,7 +75,7 @@ mootx01 install        # also starts the console in the background
 
 A read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface for estate provisioning and lifecycle. macOS only at 0.8-alpha. Opt out with `mootx01 install --no-manager`.
 
-*Prefer source?* `swift build -c release --package-path apps/ARIA_MCP` (macOS 26+), or `cargo build --release` in `apps/ARIA_MCP/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
+*Prefer source?* `swift build -c release --package-path apps/aria-mcp-server` (macOS 26+), or `cargo build --release` in `apps/aria-mcp-server/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
 
 Then, from your agent — the ARIA grammar, one verb on a noun:
 
@@ -149,7 +149,7 @@ Foundation:
     VaultKit        Encrypted, portable, file-based estate export/import
 ```
 
-**Access layer (ARIA):** `ARIA_MCP` (MCP server — expose any estate to Claude, Claude Code, or any MCP client) · `ARIA_MacOS` / `ARIA_iOS` / `ARIA_Rust` (demonstration apps) · **`moot-mgr`** (the management & monitoring console: a resident multi-estate host with estate provisioning + lifecycle, a self-report dashboard, and a live node-link Topology view — cross-platform web + macOS).
+**Access layer (ARIA):** `aria-mcp` (MCP server — expose any estate to Claude, Claude Code, or any MCP client) · `ARIA_MacOS` / `ARIA_iOS` / `ARIA_Rust` (demonstration apps) · **`moot-mgr`** (the management & monitoring console: a resident multi-estate host with estate provisioning + lifecycle, a self-report dashboard, and a live node-link Topology view — cross-platform web + macOS).
 
 ### Build status
 
@@ -193,13 +193,13 @@ Intended sequence, not committed dates:
 mootx01/
 ├── packages/
 │   ├── libs/     SubstrateTypes · SubstrateKernel · SubstrateML · SubstrateLib · EngramLib
-│   │             AriaLexiconLib · LatticeLib · EideticLib · IntellectusLib · ObserverSink
+│   │             AriaLexiconLib · LatticeLib · EideticLib · IntellectusLib · ObserverSink · LoopbackHTTP
 │   ├── kits/     LocusKit · VectorKit · PersistenceKit · ConvergenceKit · QueueKit
-│   │             CorpusKit · GeniusLocusKit · NeuronKit · CognitionKit · VaultKit
+│   │             CorpusKit · GeniusLocusKit · NeuronKit · CognitionKit · VaultKit · AriaMcpKit
 │   └── PACKAGES.md
-├── apps/         ARIA_MCP (MCP server) · moot-mgr (management console) · MatrixSprint (benchmarks)
-├── examples/     SDK samples · Sidecar_Demo_macOS
-├── installer/    First-run installer
+├── apps/         aria-mcp-server (MCP server) · mootx01 (CLI) · moot-mgr (console)
+│                 Mootx01-App (Apple app) · moot-math-benchmark · moot-agent-skills
+├── examples/     SDK · SidecarDemo · MootNotepad · MootTodo · MootCalendarIngest
 └── docs/         start-here · concepts · reference · decisions · engineering · validation · archive
 ```
 
