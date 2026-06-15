@@ -80,7 +80,7 @@ successor's `AGENTS.md`.
 
 The cross-language-pinned conformance vectors pass four-way across the
 split. See
-`../../../docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md` for the
+`../../../docs/engineering/HARNESS_REFERENCE.md` for the
 canonical index and verification commands, and cookbook v1.0 §20 + the
 2026-05-29 addendum for the split rationale.
 
