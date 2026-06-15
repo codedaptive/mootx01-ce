@@ -1,5 +1,3 @@
-<!-- File: docs/start-here/INSTALL_SURFACE.md -->
-
 # MOOTx01 CE Install Surface
 
 This document is the install fact sheet for humans and AI assistants.
@@ -30,13 +28,28 @@ A product install should leave the user with:
 
 ## User-Facing Install Flow
 
+A complete install is **two phases**. Phase 1 installs the runtime and gives the AI the
+tools; Phase 2 makes the AI actually *use* them. Stopping after Phase 1 leaves a user whose
+tools are installed but whose AI does not instinctively reach for them.
+
+### Phase 1 — Install the runtime
+
 1. Download or build the product binary.
 2. Run `mootx01 install`.
 3. Choose which AI clients to wire.
 4. Start or register the resident daemon if supported.
 5. Start or register `moot-mgr` if supported.
-6. Verify with `mootx01 status`.
+6. Verify with `mootx01 status` (and the session-start tool checks under Verification below).
 7. Restart AI clients if needed.
+
+### Phase 2 — Activate MOOTx01 agent behavior
+
+8. Install the matching harness adapter from `apps/moot-agent-skills/<client>/` into the
+   client's rules/skills config — **only after** Phase 1 verifies. This is what teaches the
+   AI to reach for MOOTx01 automatically (memory, recall, facts, links, grounded synthesis)
+   instead of waiting to be told. Keep `apps/moot-agent-skills/shared/` nearby as reference;
+   do not load all of it into context.
+9. Confirm with the three prompts in `apps/moot-agent-skills/README.md`.
 
 ## Platform Matrix
 
