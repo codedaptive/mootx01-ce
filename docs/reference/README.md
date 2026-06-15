@@ -1,12 +1,11 @@
 ---
 title: Reference Directory Index
-version: 1.0.0
+version: 1.0.1
 status: active
-date: 2026-06-14
+date: 2026-06-15
 description: Index of the reference contract surface — the SPEC and INTERFACE documents for every kit, lib, protocol, and canonical encoder.
 authors: MOOTx01 maintainers
 relates_to:
-  - docs/CLAUDE.md
   - VERSIONING.md
 ---
 

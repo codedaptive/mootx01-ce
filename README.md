@@ -70,7 +70,7 @@ Downloads the latest mootx01 release to `~/.mootx01/bin`. Upgrade by re-running;
 
 ```bash
 mootx01 install        # also starts the console in the background
-# dashboard → http://127.0.0.1:7077      manual control → moot-mgr serve
+# dashboard → http://127.0.0.1:4200      manual control → moot-mgr serve
 ```
 
 A read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface for estate provisioning and lifecycle. macOS only at 1.0.0-beta. Opt out with `mootx01 install --no-manager`.
