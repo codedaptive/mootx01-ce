@@ -27,7 +27,7 @@ ARIA_iOS is the iOS application shell. It:
 ## Key specs to read before contributing
 
 1. `docs/canon/MOOTX01_SPEC.md` — the MOOTx01 product specification
-2. `docs/specs/ARIA_MCP_SPEC_v0.1.md` — the kit this target calls into
+2. `docs/specs/ARIA_MCP_SPEC.md` — the kit this target calls into
 
 ## Scope
 
@@ -46,6 +46,6 @@ ARIA_iOS is the iOS application shell. It:
 
 The MOOTx01 ecosystem app — universal macOS + iOS + iPadOS, the Apple
 presentation layer (App Intents, Shortcuts, Siri) over the clean engine —
-lives at `apps/Mootx01/` (architecture: `docs/decisions/ADR-005`), with its
+lives at `apps/Mootx01-App/` (architecture: `docs/decisions/ADR-005`), with its
 lexicon→Apple mapping. Developer examples that build on the same `MootGateway`
 SDK live in `examples/Moot{Notepad,Todo,CalendarIngest}/`.
