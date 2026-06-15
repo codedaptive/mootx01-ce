@@ -113,9 +113,9 @@ add at the end, never reorder, and update the wire encoding tests.
 
 ## Related docs
 
-- `../../../docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md` §6.1
+- `../../../docs/engineering/HARNESS_REFERENCE.md` §6.1
   — what lives here.
-- `../../../docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
+- `../../../docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md`
   §2 (data model), §3 (fingerprint), §5 (audit log).
 
 ## License

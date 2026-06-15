@@ -27,6 +27,7 @@ use std::collections::HashMap;
 
 use crate::hlc::HLC;
 use crate::fingerprint256::Fingerprint256;
+use crate::row::RowId;
 
 /// The nine cookbook verbs (§ 10) plus migration / system verbs.
 #[cfg_attr(feature = "serde-support", derive(serde::Serialize, serde::Deserialize))]
@@ -71,9 +72,6 @@ pub enum AuditValue {
     Integer(i64),
 }
 
-/// Row identifier — 128-bit UUID.
-pub type RowID = u128;
-
 /// One immutable entry in the audit log.
 ///
 /// `id` is a deterministic content hash: SHA-256 over the wire
@@ -89,7 +87,7 @@ pub struct AuditEntry {
     pub verb: AuditVerb,
     #[cfg_attr(feature = "serde-support",
                serde(rename = "rowID", with = "row_id_uuid"))]
-    pub row_id: RowID,
+    pub row_id: RowId,
     #[cfg_attr(feature = "serde-support", serde(rename = "fieldPath"))]
     pub field_path: String,            // e.g. "adjective.state"
     #[cfg_attr(feature = "serde-support", serde(rename = "beforeValue"))]
@@ -99,7 +97,7 @@ pub struct AuditEntry {
     #[cfg_attr(feature = "serde-support",
                serde(rename = "originRowID", with = "row_id_uuid_option",
                      skip_serializing_if = "Option::is_none", default))]
-    pub origin_row_id: Option<RowID>,
+    pub origin_row_id: Option<RowId>,
 }
 
 /// G-Set audit log. Pure CRDT semantics: only `add` and `merge`
@@ -144,26 +142,25 @@ impl<'de> serde::Deserialize<'de> for GSetAuditLog {
     }
 }
 
-// MARK: - RowID UUID-string serde helpers
+// MARK: - RowId UUID-string serde helpers
 //
 // Swift's `UUID` type Codable encodes as an UPPERCASE hyphenated
 // UUID string (e.g. "550E8400-E29B-41D4-A716-446655440000"). The
-// SubstrateLib Rust mirror uses `pub type RowID = u128`; we
-// can't impl traits directly on the alias, so attach the
+// canonical Rust type is `RowId(u128)` from row.rs; we attach the
 // conversion via `#[serde(with = "row_id_uuid")]` on every
-// AuditEntry field that carries a RowID.
+// AuditEntry field that carries a RowId.
 //
-// The conversion treats the u128 as 16 big-endian bytes and
+// The conversion treats the inner u128 as 16 big-endian bytes and
 // formats / parses them in the canonical 8-4-4-4-12 hex layout,
 // matching Swift's output exactly (uppercase hex).
 
 #[cfg(feature = "serde-support")]
 mod row_id_uuid {
-    use super::RowID;
+    use super::RowId;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(id: &RowID, s: S) -> Result<S::Ok, S::Error> {
-        let b = id.to_be_bytes();
+    pub fn serialize<S: Serializer>(id: &RowId, s: S) -> Result<S::Ok, S::Error> {
+        let b = id.0.to_be_bytes();
         let uuid_str = format!(
             "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
@@ -172,12 +169,12 @@ mod row_id_uuid {
         s.serialize_str(&uuid_str)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RowID, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RowId, D::Error> {
         let s = String::deserialize(d)?;
         parse_uuid(&s).map_err(serde::de::Error::custom)
     }
 
-    pub(super) fn parse_uuid(s: &str) -> Result<RowID, String> {
+    pub(super) fn parse_uuid(s: &str) -> Result<RowId, String> {
         let hex_only: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
         if hex_only.len() != 32 {
             return Err(format!(
@@ -190,23 +187,23 @@ mod row_id_uuid {
             bytes[i] = u8::from_str_radix(&hex_only[i*2..(i+1)*2], 16)
                 .map_err(|_| "invalid hex in UUID".to_string())?;
         }
-        Ok(u128::from_be_bytes(bytes))
+        Ok(RowId(u128::from_be_bytes(bytes)))
     }
 }
 
 #[cfg(feature = "serde-support")]
 mod row_id_uuid_option {
-    use super::RowID;
+    use super::RowId;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(id: &Option<RowID>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(id: &Option<RowId>, s: S) -> Result<S::Ok, S::Error> {
         match id {
             Some(v) => super::row_id_uuid::serialize(v, s),
             None => s.serialize_none(),
         }
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RowID>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RowId>, D::Error> {
         let opt = Option::<String>::deserialize(d)?;
         match opt {
             Some(s) => Ok(Some(
@@ -264,7 +261,7 @@ impl GSetAuditLog {
 
     /// Entries scoped to a single row, in HLC order. Drives the
     /// row-state automaton (cookbook § 9).
-    pub fn entries_for_row(&self, row_id: RowID) -> Vec<AuditEntry> {
+    pub fn entries_for_row(&self, row_id: RowId) -> Vec<AuditEntry> {
         let mut v: Vec<AuditEntry> = self.entries.values()
             .filter(|e| e.row_id == row_id)
             .cloned()
@@ -312,7 +309,7 @@ mod tests {
     use super::*;
 
     fn make_entry(id_byte: u8, physical_time: i64, node_id: i32,
-                  row_id: RowID) -> AuditEntry {
+                  row_id: RowId) -> AuditEntry {
         AuditEntry {
             id: [id_byte; 32],
             hlc: HLC::new(physical_time, 0, node_id),
@@ -328,7 +325,7 @@ mod tests {
     #[test]
     fn add_is_idempotent() {
         let mut log = GSetAuditLog::new();
-        let e = make_entry(0xAA, 1000, 1, 1);
+        let e = make_entry(0xAA, 1000, 1, RowId(1));
         log.add(e.clone());
         log.add(e.clone());
         assert_eq!(log.len(), 1);
@@ -336,8 +333,8 @@ mod tests {
 
     #[test]
     fn merge_is_commutative() {
-        let e1 = make_entry(0x01, 1000, 1, 1);
-        let e2 = make_entry(0x02, 2000, 2, 1);
+        let e1 = make_entry(0x01, 1000, 1, RowId(1));
+        let e2 = make_entry(0x02, 2000, 2, RowId(1));
 
         let mut a = GSetAuditLog::from_entries(vec![e1.clone()]);
         let b = GSetAuditLog::from_entries(vec![e2.clone()]);
@@ -354,7 +351,7 @@ mod tests {
 
     #[test]
     fn merge_is_idempotent() {
-        let e = make_entry(0x05, 1000, 1, 1);
+        let e = make_entry(0x05, 1000, 1, RowId(1));
         let mut log = GSetAuditLog::from_entries(vec![e]);
         let copy = log.clone();
         log.merge(&copy);
@@ -363,9 +360,9 @@ mod tests {
 
     #[test]
     fn ordered_entries_are_hlc_sorted() {
-        let e1 = make_entry(0x01, 3000, 1, 1);
-        let e2 = make_entry(0x02, 1000, 1, 1);
-        let e3 = make_entry(0x03, 2000, 1, 1);
+        let e1 = make_entry(0x01, 3000, 1, RowId(1));
+        let e2 = make_entry(0x02, 1000, 1, RowId(1));
+        let e3 = make_entry(0x03, 2000, 1, RowId(1));
         let log = GSetAuditLog::from_entries(vec![e1, e2, e3]);
         let ordered = log.ordered_entries();
         assert_eq!(ordered[0].hlc.physical_time, 1000);
@@ -375,9 +372,9 @@ mod tests {
 
     #[test]
     fn entries_since_excludes_cutoff() {
-        let e1 = make_entry(0x01, 1000, 1, 1);
-        let e2 = make_entry(0x02, 2000, 1, 1);
-        let e3 = make_entry(0x03, 3000, 1, 1);
+        let e1 = make_entry(0x01, 1000, 1, RowId(1));
+        let e2 = make_entry(0x02, 2000, 1, RowId(1));
+        let e3 = make_entry(0x03, 3000, 1, RowId(1));
         let log = GSetAuditLog::from_entries(vec![e1, e2, e3]);
         let cutoff = HLC::new(2000, 0, 1);
         let since = log.entries_since(&cutoff);
