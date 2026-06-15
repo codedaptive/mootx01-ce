@@ -34,6 +34,7 @@ $REPO        = if ($env:MOOTX01_REPO)        { $env:MOOTX01_REPO }        else {
 $INSTALL_DIR = if ($env:MOOTX01_INSTALL_DIR) { $env:MOOTX01_INSTALL_DIR } else { Join-Path $HOME ".mootx01\bin" }
 $BIN_DIR     = if ($env:MOOTX01_BIN_DIR)     { $env:MOOTX01_BIN_DIR }     else { Join-Path $HOME ".local\bin" }
 $BINARY      = Join-Path $INSTALL_DIR "mootx01.exe"
+$MGR_BINARY  = Join-Path $INSTALL_DIR "moot-mgr.exe"
 $SERVER_NAME = "mootx01"
 $RESIDENT_URL = "http://127.0.0.1:4242"
 
@@ -311,7 +312,7 @@ try {
     exit 1
 }
 
-# 3. Extract + place binary
+# 3. Extract + place binaries
 Expand-Archive (Join-Path $tmpDir $asset) -DestinationPath $tmpDir -Force
 if (-not (Test-Path (Join-Path $tmpDir "mootx01.exe"))) {
     Write-Error "Archive did not contain mootx01.exe"
@@ -321,9 +322,19 @@ if (-not (Test-Path (Join-Path $tmpDir "mootx01.exe"))) {
 
 New-Item -ItemType Directory -Force $INSTALL_DIR | Out-Null
 Copy-Item -Force (Join-Path $tmpDir "mootx01.exe") $BINARY
-Remove-Item -Recurse -Force $tmpDir
-
 Write-Host "  Installed $BINARY"
+
+# moot-mgr.exe (the management & monitoring console) ships in the Windows
+# archive alongside mootx01.exe. Place it beside mootx01.exe so the
+# `mootx01 install` follow-up registers the mgr Task Scheduler task (it keys
+# off moot-mgr.exe sitting next to mootx01.exe — see commands/install.rs).
+$mgrSrc = Join-Path $tmpDir "moot-mgr.exe"
+if (Test-Path $mgrSrc) {
+    Copy-Item -Force $mgrSrc $MGR_BINARY
+    Write-Host "  Installed $MGR_BINARY"
+}
+
+Remove-Item -Recurse -Force $tmpDir
 
 # 4. Add the install dir (which holds mootx01.exe) to the user PATH so `mootx01`
 #    is callable by name, including the `mootx01 install` follow-up below. Windows
