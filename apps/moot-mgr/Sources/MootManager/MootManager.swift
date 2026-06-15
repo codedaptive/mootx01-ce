@@ -28,6 +28,53 @@ import Foundation
 import OSLog
 import ObserverSink
 import PersistenceKit
+import AriaLexiconLib
+import CognitionKit
+import LatticeLib
+
+// MARK: - Stored graph snapshot helpers (internal for tests)
+
+/// Decodable envelope for the topology snapshot stored in `topology_snapshots`
+/// by the autonomic governor. Only the fields moot-mgr needs to compose into
+/// `GraphPayload` are decoded; the `analytics` overlay is sourced locally from
+/// the stats store.
+///
+/// Nodes/edges decode as the shared `GraphNodePayload`/`GraphEdgePayload`
+/// wire shapes, so per-entity fields (`createdTs`, `tombstonedTs` — the
+/// VIZ_V2 dissolution timestamp on tombstoned drawers/tunnels) pass through
+/// unchanged: absent-key-tolerant on decode, explicit JSON null on re-encode.
+struct StoredGraphPayload: Decodable {
+    let nodes: [GraphNodePayload]
+    let edges: [GraphEdgePayload]
+    let structurePending: Bool
+    /// Raw community descriptors written by the governor.
+    /// Optional so a snapshot predating VIZ_V2 still decodes; nil falls back
+    /// to the local count-only rollup.
+    let communities: [ARIACommunityDescriptor]?
+    /// ISO-8601 instant the governor produced this snapshot. Optional so
+    /// older snapshots without the field still decode.
+    let generatedTs: String?
+}
+
+/// One raw community descriptor on the ARIA_MCP graph wire (VIZ_V2 contract):
+/// `{id, size, dominantUdcCode}`. The dominant UDC code is enriched to an FDC
+/// heading label and dropped at this proxy — it never crosses to the browser
+/// (content boundary keeps labels only).
+struct ARIACommunityDescriptor: Decodable {
+    /// Louvain community id (matches `GraphNodePayload.communityId`).
+    let id: Int
+    /// Member-drawer count.
+    let size: Int
+    /// Most frequent non-empty `udcCode` among the community's member drawers;
+    /// "" when none. Optional-tolerant decode for older daemons.
+    let dominantUdcCode: String?
+
+    init(id: Int, size: Int, dominantUdcCode: String?) {
+        self.id = id
+        self.size = size
+        self.dominantUdcCode = dominantUdcCode
+    }
+}
 
 // MARK: - MootManager
 
@@ -79,7 +126,34 @@ public actor MootManager {
     /// first roll-off).
     private var lastRetentionCutoff: Date = Date(timeIntervalSince1970: 0)
 
+    /// Single-slot cache of the decoded + FDC-enriched topology snapshot,
+    /// keyed by (estate filter, raw snapshot bytes). The governor rewrites
+    /// the snapshot only when estate content changes; the dashboard polls
+    /// far more often — a hit skips the ~1MB JSONDecoder pass and every
+    /// FDC label lookup (see graphPayload).
+    private var topologyEnrichmentCache: (
+        estateKey: String?, raw: Data,
+        nodes: [GraphNodePayload], edges: [GraphEdgePayload],
+        communities: [GraphCommunityPayload]?, generatedTs: String?
+    )? = nil
+
     private let logger = Logger(subsystem: "com.mootx01.kit", category: "MootManager")
+
+    // MARK: - ARIA_MCP proxy
+
+    /// Base URL for ARIA_MCP read endpoints. Read from `ARIA_MCP_API_BASE` at
+    /// process start; defaults to the standard resident-daemon loopback address.
+    private static let ariaAPIBase: String =
+        ProcessInfo.processInfo.environment["ARIA_MCP_API_BASE"] ?? "http://127.0.0.1:4242"
+
+    /// Ephemeral URLSession for ARIA_MCP read requests. Short 3-second timeout
+    /// so the pure-observer host degrades gracefully when the daemon is unreachable.
+    private static let ariaSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3.0
+        config.timeoutIntervalForResource = 3.0
+        return URLSession(configuration: config)
+    }()
 
     // MARK: - Initialisation
 
@@ -277,6 +351,12 @@ public actor MootManager {
 
     /// Build the `GET /api/server` payload.
     ///
+    /// Includes live process metrics (RSS, CPU, RPC count, connections, protocol
+    /// version, kernel backend) when the corresponding server.* and
+    /// substrate.kernel.backend_selected samples exist in the store. All server-metric
+    /// fields default to nil when no samples exist — the dashboard renders n/a chips
+    /// for nil fields rather than fabricating values.
+    ///
     /// - Parameters:
     ///   - now: Current time, stamped on the DB-health snapshot (caller owns the clock).
     ///   - uptimeSeconds: Whole seconds the resident host has been running.
@@ -285,21 +365,151 @@ public actor MootManager {
     public func serverPayload(now: Date, uptimeSeconds: Int) async throws -> ServerPayload {
         let store = try requireStore()
         let monitoringEnabled = try await store.isMonitoringEnabled()
-        let metrics = try await store.queryMetrics(dropboxID: nil)
+        // countMetrics() issues a SQL COUNT(*) — no row decoding, O(1) cost.
+        let totalMetrics = try await store.countMetrics()
         let events = try await store.queryEvents(dropboxID: nil)
         let estateCount = Set(events.map(\.estate)).count
         let health = try await store.storageStats(now: now)
+
+        // Fetch ALL metric rows so we can both read the latest value of each named
+        // server metric AND compute per-dropbox sample counts and delta-derived rates
+        // in a single store round-trip. The Phase-1 retention window keeps this set
+        // bounded (default 3600 s × ~2 samples/min = a few thousand rows at most).
+        let allMetrics = try await store.queryMetrics(dropboxID: nil)
+
+        // --- Server metric extraction (latest + second-latest per named metric) ---
+        // Keep the two most-recent samples per server metric name so we can compute
+        // delta-based rates without a second query.
+        let serverMetricNames: Set<String> = [
+            "server.rss_mb", "server.cpu_user_ms", "server.rpc_count",
+            "server.connections", "server.proto_version",
+            "substrate.kernel.backend_selected",
+        ]
+        // latestByName[name] = (newer, older) — older is nil until the second sample arrives.
+        var latestByName: [String: (MetricRow, MetricRow?)] = [:]
+        for m in allMetrics where serverMetricNames.contains(m.name) {
+            if let (prev, _) = latestByName[m.name] {
+                if m.ts > prev.ts {
+                    // m is newer than current best — demote current best to the second slot
+                    latestByName[m.name] = (m, prev)
+                } else if latestByName[m.name]?.1 == nil || m.ts > latestByName[m.name]!.1!.ts {
+                    // m is older than current best but newer than current second-best
+                    latestByName[m.name] = (prev, m)
+                }
+            } else {
+                latestByName[m.name] = (m, nil)
+            }
+        }
+
+        let rssMb       = latestByName["server.rss_mb"].map { $0.0.value }
+        let cpuUserMs   = latestByName["server.cpu_user_ms"].map { $0.0.value }
+        let rpcCount    = latestByName["server.rpc_count"].map { Int($0.0.value) }
+        let connections = latestByName["server.connections"].map { Int($0.0.value) }
+        // protoVersion is carried in the "version" tag on the server.proto_version sample.
+        let protoVersion  = latestByName["server.proto_version"].flatMap { $0.0.tags["version"] }
+        // kernelBackend is carried in the "backend" tag on the backend_selected sample.
+        let kernelBackend = latestByName["substrate.kernel.backend_selected"].flatMap { $0.0.tags["backend"] }
+
+        // --- Delta-derived rates ---
+        // rpcRate: delta RPC count / wall seconds between the two most-recent samples.
+        // Nil when fewer than two samples exist (cold start, monitoring just enabled).
+        let rpcRate: Double? = {
+            guard let (newer, older) = latestByName["server.rpc_count"],
+                  let olderRow = older else { return nil }
+            let wallSeconds = newer.ts.timeIntervalSince(olderRow.ts)
+            guard wallSeconds > 0 else { return nil }
+            return max(0, newer.value - olderRow.value) / wallSeconds
+        }()
+
+        // cpuPct: (delta cpu_user_ms / wall_ms) * 100. Approximates the user-mode
+        // CPU fraction consumed by this process between the two most-recent samples.
+        let cpuPct: Double? = {
+            guard let (newer, older) = latestByName["server.cpu_user_ms"],
+                  let olderRow = older else { return nil }
+            let wallMs = newer.ts.timeIntervalSince(olderRow.ts) * 1000.0
+            guard wallMs > 0 else { return nil }
+            return min(100.0, max(0, (newer.value - olderRow.value) / wallMs * 100.0))
+        }()
+
+        // --- Per-dropbox summaries for the Connects tab and Overview observers panel ---
+        // Build metric and event counts per dropbox from the all-metrics scan and the
+        // already-fetched events. First-seen / last-seen are derived from sample timestamps.
+        var metricCountByDropbox: [String: Int] = [:]
+        var lastMetricTsByDropbox: [String: Date] = [:]
+        for m in allMetrics {
+            metricCountByDropbox[m.dropboxID, default: 0] += 1
+            if let prev = lastMetricTsByDropbox[m.dropboxID] {
+                if m.ts > prev { lastMetricTsByDropbox[m.dropboxID] = m.ts }
+            } else {
+                lastMetricTsByDropbox[m.dropboxID] = m.ts
+            }
+        }
+        var eventCountByDropbox: [String: Int] = [:]
+        var lastEventTsByDropbox: [String: Date] = [:]
+        for e in events {
+            eventCountByDropbox[e.dropboxID, default: 0] += 1
+            if let prev = lastEventTsByDropbox[e.dropboxID] {
+                if e.ts > prev { lastEventTsByDropbox[e.dropboxID] = e.ts }
+            } else {
+                lastEventTsByDropbox[e.dropboxID] = e.ts
+            }
+        }
+        let allDropboxIDs = Set(metricCountByDropbox.keys).union(Set(eventCountByDropbox.keys))
+        let byDropbox: [DropboxSummaryPayload] = allDropboxIDs.sorted().map { id in
+            let lastMetric = lastMetricTsByDropbox[id]
+            let lastEvent  = lastEventTsByDropbox[id]
+            // Pick the more-recent of the metric and event timestamps for last-seen.
+            let lastSeen: Date?
+            switch (lastMetric, lastEvent) {
+            case let (m?, e?) where m > e: lastSeen = m
+            case let (_, e?):              lastSeen = e
+            case let (m?, _):              lastSeen = m
+            case (nil, nil):               lastSeen = nil
+            }
+            return DropboxSummaryPayload(
+                name: id,
+                metricCount: metricCountByDropbox[id] ?? 0,
+                eventCount: eventCountByDropbox[id] ?? 0,
+                lastSeenISO: lastSeen.map { Self.iso8601String(from: $0) }
+            )
+        }
+
+        // --- NeuronKit capabilities from CognitionKit compile-time constant ---
+        // shippedNeuronKitCapabilities is a Set<NeuronKitCapability> defined as a let
+        // constant in CognitionKit. Sorted for stable JSON output.
+        let capabilities = shippedNeuronKitCapabilities.map(\.rawValue).sorted()
+
         return ServerPayload(
             monitoringEnabled: monitoringEnabled,
             uptimeSeconds: uptimeSeconds,
             estateCount: estateCount,
-            totalMetrics: metrics.count,
+            totalMetrics: totalMetrics,
             totalEvents: events.count,
-            storeSizeBytes: health?.logicalSizeBytes ?? 0
+            storeSizeBytes: health?.logicalSizeBytes ?? 0,
+            storePageCount: health?.pageCount,
+            storeFreelistPageCount: health?.freelistPageCount,
+            storeWalFrameCount: health?.walFrameCount,
+            storeCacheHitRatio: health?.cacheHitRatio,
+            storeTransactionCommitCount: health?.transactionCommitCount,
+            storeRowCount: health?.rowCount,
+            rssMb: rssMb,
+            cpuUserMs: cpuUserMs,
+            rpcCount: rpcCount,
+            connections: connections,
+            protoVersion: protoVersion,
+            kernelBackend: kernelBackend,
+            rpcRate: rpcRate,
+            cpuPct: cpuPct,
+            byDropbox: byDropbox,
+            capabilities: capabilities
         )
     }
 
-    /// Build the `GET /api/estates` payload: per-estate event rollups.
+    /// Build the `GET /api/estates` payload: per-estate event rollups with queue stats.
+    ///
+    /// Event counts are derived from the event-level estate tag. Queue and gate
+    /// metrics are read from the latest queue.* and locuskit.gate.* metric samples,
+    /// keyed by the `estate` tag. When no samples exist for an estate, `queue` is nil.
     ///
     /// - Returns: An `EstatesPayload`, estates sorted by id.
     /// - Throws: `StorageError` / `ManagerError.notStarted`.
@@ -320,14 +530,69 @@ public actor MootManager {
                 lastTs[e.estate] = e.ts
             }
         }
-        let rollups = counts.keys.sorted().map { id in
-            EstatePayload(
+
+        // Read only the queue metric rows by name via SQL IN predicate.
+        // No in-process filter needed — the named rows arrive directly.
+        let queueMetricNames: Set<String> = [
+            "queue.depth", "queue.drain_count", "queue.idle_nonempty",
+            "queue.latency_p50_ms", "queue.latency_p95_ms",
+            "queue.head_of_line_age_s",
+            "locuskit.gate.admit_count", "locuskit.gate.reject_count",
+        ]
+        let queueMetrics = try await store.queryMetricsByNames(queueMetricNames)
+
+        // Group by (estate, metric-name): keep the most-recent sample per key.
+        struct QKey: Hashable { let estate: String; let metric: String }
+        var latest: [QKey: MetricRow] = [:]
+        for m in queueMetrics {
+            let est = m.tags["estate"] ?? "unknown"
+            let key = QKey(estate: est, metric: m.name)
+            if let prev = latest[key] {
+                if m.ts > prev.ts { latest[key] = m }
+            } else {
+                latest[key] = m
+            }
+        }
+
+        // Build a QueueStats for each estate that has any queue metric samples.
+        func latestValue(estate: String, metric: String) -> Double? {
+            latest[QKey(estate: estate, metric: metric)].map { $0.value }
+        }
+
+        let rollups = counts.keys.sorted().map { id -> EstatePayload in
+            // Build QueueStats only when at least one queue sample exists for this estate.
+            let hasQueueData = queueMetricNames.contains { latestValue(estate: id, metric: $0) != nil }
+            let queueStats: QueueStats? = hasQueueData ? QueueStats(
+                depth: latestValue(estate: id, metric: "queue.depth"),
+                drainCount: latestValue(estate: id, metric: "queue.drain_count"),
+                idleNonempty: latestValue(estate: id, metric: "queue.idle_nonempty").map { $0 > 0 },
+                latencyP50Ms: latestValue(estate: id, metric: "queue.latency_p50_ms"),
+                latencyP95Ms: latestValue(estate: id, metric: "queue.latency_p95_ms"),
+                headOfLineAgeS: latestValue(estate: id, metric: "queue.head_of_line_age_s"),
+                gateAdmitCount: latestValue(estate: id, metric: "locuskit.gate.admit_count"),
+                gateRejectCount: latestValue(estate: id, metric: "locuskit.gate.reject_count")
+            ) : nil
+            return EstatePayload(
                 id: id,
                 eventCount: counts[id] ?? 0,
-                lastEventTs: lastTs[id].map { Self.iso8601String(from: $0) }
+                lastEventTs: lastTs[id].map { Self.iso8601String(from: $0) },
+                queue: queueStats
             )
         }
-        return EstatesPayload(estates: rollups)
+        // Try to proxy ARIA_MCP for the admin/hosted estate list. On failure
+        // (daemon unreachable, decode error) return nil admin so the caller falls
+        // back to its local admin source (HTTPReadAPI merges adminSection ?? base.admin).
+        var ariaAdmin: EstateAdminPayload? = nil
+        if let url = URL(string: Self.ariaAPIBase + "/api/admin/estates") {
+            do {
+                let (data, _) = try await Self.ariaSession.data(from: url)
+                ariaAdmin = try JSONDecoder().decode(EstateAdminPayload.self, from: data)
+            } catch {
+                logger.debug("ARIA_MCP admin/estates proxy unavailable: \(String(describing: error))")
+            }
+        }
+
+        return EstatesPayload(estates: rollups, admin: ariaAdmin)
     }
 
     /// Build the `GET /api/events` payload: the most-recent events, newest first.
@@ -356,32 +621,57 @@ public actor MootManager {
         )
     }
 
+    /// Build the `GET /api/lexicon` payload: the ARIA grammar as static JSON.
+    ///
+    /// Enumerates AriaLexiconLib compile-time enums (Noun, Verb, Adjective) and the
+    /// Acceptance matrix, then appends LatticeLib FDC metadata. No store access —
+    /// all data is derived from compile-time constants, so this method never throws
+    /// a StorageError and does not need the store to be started. Declared `async`
+    /// for consistency with the rest of the payload surface (called from an actor).
+    ///
+    /// - Returns: A `LexiconPayload` ready for JSON encoding.
+    public func lexiconPayload() async -> LexiconPayload {
+        let nouns      = Noun.allCases.map(\.rawValue)
+        let verbs      = Verb.allCases.map(\.rawValue)
+        let adjectives = Adjective.allCases.map(\.rawValue)
+
+        // Build the acceptance matrix: noun raw value → sorted array of accepted verb raw values.
+        var acceptance: [String: [String]] = [:]
+        for noun in Noun.allCases {
+            acceptance[noun.rawValue] = Acceptance.verbs(for: noun).map(\.rawValue).sorted()
+        }
+
+        return LexiconPayload(
+            nouns: nouns,
+            verbs: verbs,
+            adjectives: adjectives,
+            acceptance: acceptance,
+            fdcAvailable: FDC.isAvailable,
+            fdcDataVersion: FDC.dataVersion,
+            latticeVersion: LatticeLib.version
+        )
+    }
+
     /// Build the `GET /api/graph` payload: the Topology node-link snapshot.
     ///
-    /// ## Data sources and the structure gap
+    /// ## Data sources
     ///
-    /// moot-mgr is a pure observer — it owns the ObserverSink stats store and
-    /// has no estate DB or MCP client. Graph STRUCTURE (per-node `NounType`
-    /// rows, per-edge tunnel/kgFact/association relations) lives in the live
-    /// estate, reached over the mootx01 MCP (`moot_estate_map` /
-    /// `moot_connection_map`) — a path this host does not have. So `nodes` and
-    /// `edges` are empty and `structurePending` is true, with the gap
-    /// enumerated in `pending`. No nodes/edges are fabricated (A1 honesty
-    /// pattern; PoC spec §4.1 content boundary).
+    /// **Structure (nodes/edges):** read from the shared stats store's
+    /// `topology_snapshots` table. The autonomic governor writes a snapshot row
+    /// per estate on its cadence (default 300s); when no snapshot is available
+    /// yet (governor startup pass not complete) `structurePending` is `true`
+    /// and `nodes`/`edges` are empty. The A1 honesty pattern: a faked node
+    /// graph is worse than an absent one (PoC spec §4.1 content boundary).
     ///
-    /// What this host CAN source is the VizGraph telemetry the SubstrateML
-    /// analytics emit through IntellectusLib → ObserverSink when monitoring is
-    /// on (`VizGraphSignals`). Those metric samples are aggregate completion
-    /// signals tagged by `estate`; this builder reads them from the stats store,
-    /// keeps the latest sample per (estate, signal), and projects them as the
-    /// analytic overlay (`analytics`) plus a per-estate community rollup
-    /// (`communities`) derived from `community.assignment`.
+    /// **Analytic overlay (analytics/communities):** always sourced locally from
+    /// the ObserverSink stats store (VizGraph signals emitted by SubstrateML).
     ///
     /// - Parameters:
     ///   - now: Current time, stamped as the snapshot timestamp (caller owns the
     ///     clock — determinism applies to engines, not this projection).
-    ///   - estate: Optional estate filter (the `?estate=` query value). Echoed
-    ///     back; sampling/scoping is a no-op while structure is pending.
+    ///   - estate: Optional estate filter (the `?estate=` query value). Used as
+    ///     the estate key for the store lookup; also filters the local analytic
+    ///     overlay to the matching estate tag.
     /// - Returns: A `GraphPayload`.
     /// - Throws: `StorageError` / `ManagerError.notStarted`.
     public func graphPayload(now: Date, estate: String? = nil) async throws -> GraphPayload {
@@ -396,11 +686,9 @@ public actor MootManager {
             "anomaly.flag", "edge.decayed_weight",
         ]
 
-        // Read all metric samples and keep only the VizGraph telemetry. Phase-1
-        // retention bounds the store, so a full scan + in-process filter is fine
-        // (same approach as status()/serverPayload()).
-        let metrics = try await store.queryMetrics(dropboxID: nil)
-        let vizMetrics = metrics.filter { vizSignals.contains($0.name) }
+        // Read only the five VizGraph signal rows by name via SQL IN predicate.
+        // No in-process filter needed — the named rows arrive directly.
+        let vizMetrics = try await store.queryMetricsByNames(vizSignals)
 
         // Group by (estate, signal). Estate is a metric tag (VizGraphSignals);
         // samples missing it are bucketed under "unknown" rather than dropped.
@@ -434,60 +722,166 @@ public actor MootManager {
                 )
             }
 
-        // Per-estate community rollup from the `community.assignment` signal,
+        // Fallback community rollup from the `community.assignment` signal,
         // whose value is the number of communities discovered for that estate
-        // (VizGraphSignals.swift). One swatch per community, brand-derived colour.
+        // (VizGraphSignals.swift). The signal carries only the count, so each
+        // entry is a count-only placeholder: nil label (no udcCode locally),
+        // size 0 (memberships unknown), id = running legend index. Replaced by
+        // ARIA's enriched descriptors when the proxy succeeds below.
         var communities: [GraphCommunityPayload] = []
         for key in latest.keys.sorted(by: { $0.estate < $1.estate })
             where key.signal == "community.assignment" {
             let communityCount = max(0, Int(latest[key]!.value.rounded()))
-            for i in 0..<communityCount {
+            for _ in 0..<communityCount {
                 communities.append(GraphCommunityPayload(
-                    id: i, estate: key.estate, color: Self.communityColor(i)
+                    id: communities.count, label: nil, size: 0
                 ))
             }
         }
 
-        // The structure gap, enumerated honestly (A1 pattern). Always pending in
-        // this cut — the resident host cannot reach the estate graph.
-        let pending = [
-            "nodes: per-node NounType rows require the live estate (mootx01 MCP moot_estate_map) — not reachable from the resident observer host",
-            "edges: tunnel/kgFact/association relations require the live estate (mootx01 MCP moot_connection_map) — not reachable from the resident observer host",
-            "per-node centrality / community / anomaly: stored in the estate's row_keystone_score column, not in the observer stats store (VizGraphSignals.swift)",
+        // Read the topology snapshot from the shared stats store.
+        // The governor writes one row per estate UUID on its cadence; when no
+        // snapshot has been written yet (fresh start, first duty not complete),
+        // returns structurePending:true with the honest enumeration below.
+        var liveNodes: [GraphNodePayload] = []
+        var liveEdges: [GraphEdgePayload] = []
+        var structurePending = true
+        var generatedTs: String? = nil
+        var pendingReasons: [String] = [
+            "topology snapshot not yet available — the autonomic governor has not completed its first duty cycle",
         ]
 
+        // Estate filter "all"/empty/nil — the dashboard's DEFAULT view — reads
+        // the newest snapshot across all estates (nil key); an explicit estate
+        // filter reads that estate's row.
+        let estateKey: String? = (estate?.isEmpty == false && estate != "all") ? estate : nil
+        if let snapshotData = try? await store.latestTopologySnapshot(estate: estateKey) {
+            // Enrichment cache: the snapshot only changes when the governor
+            // writes (and the dirty check means: only when the estate
+            // changed), but the dashboard polls far more often. Decoding the
+            // ~1MB payload and running the FDC label enrichment on every
+            // poll re-derives identical results — so the decoded+enriched
+            // product is cached, keyed by (estateKey, raw bytes). The byte
+            // compare is a ~50µs memcmp; a hit skips the JSONDecoder pass
+            // and all FDC lookups. Single-slot: the dashboard polls one
+            // estate view at a time, and an estate-filter switch just
+            // repopulates on the next request.
+            if let cached = topologyEnrichmentCache,
+               cached.estateKey == estateKey, cached.raw == snapshotData {
+                liveNodes = cached.nodes
+                liveEdges = cached.edges
+                structurePending = false
+                generatedTs = cached.generatedTs
+                pendingReasons = []
+                if let enriched = cached.communities { communities = enriched }
+            } else if let stored = try? JSONDecoder().decode(StoredGraphPayload.self, from: snapshotData),
+                      !stored.structurePending {
+                liveNodes = stored.nodes
+                liveEdges = stored.edges
+                structurePending = false
+                generatedTs = stored.generatedTs
+                pendingReasons = []
+                // VIZ_V2 L3: prefer governor's real community descriptors,
+                // enriched with FDC labels (raw dominantUdcCode dropped here).
+                // Keep the local count-only rollup when the snapshot predates
+                // the communities field.
+                var enriched: [GraphCommunityPayload]? = nil
+                if let raw = stored.communities {
+                    enriched = Self.enrichCommunities(raw)
+                    communities = enriched!
+                }
+                topologyEnrichmentCache = (estateKey, snapshotData,
+                                           stored.nodes, stored.edges,
+                                           enriched, stored.generatedTs)
+            }
+        }
+
         return GraphPayload(
-            nodes: [],
-            edges: [],
+            nodes: liveNodes,
+            edges: liveEdges,
             communities: communities,
             analytics: analytics,
-            structurePending: true,
-            pending: pending,
+            structurePending: structurePending,
+            pending: pendingReasons,
+            generatedTs: generatedTs,
             estate: (estate?.isEmpty == false ? estate! : "all"),
             snapshotTs: Self.iso8601String(from: now)
         )
     }
 
-    /// A brand-derived community colour for swatch index `i` (orange/blue family
-    /// with desaturated mid-range fills, PoC spec §3.1). Deterministic by index
-    /// so the legend is stable across snapshots; cycles for large community sets.
-    static func communityColor(_ i: Int) -> String {
-        let palette = [
-            "#ff8c00", "#3ab4ff", "#ffb74d", "#64c8ff",
-            "#b478ff", "#00d28c", "#ff5078", "#ffc83c",
-        ]
-        return palette[i % palette.count]
+    // MARK: - Lattice snapshot (GET /api/lattice)
+
+    /// Build the `GET /api/lattice` payload: active lattice addresses with
+    /// drawer counts, proxied from ARIA_MCP and annotated with FDC labels.
+    ///
+    /// Proxies ARIA_MCP's `GET /api/lattice` endpoint (which groups non-tombstoned
+    /// drawers by their `udcCode` and returns code + count pairs). On any
+    /// failure — daemon unreachable, decode error, timeout — returns
+    /// `pending: true` with an empty address list so the dashboard degrades
+    /// gracefully. Labels are resolved from the bundled `FDCFrame` via
+    /// `FDC.label(for:)` without touching the estate; nil label means the
+    /// code is MDCC or otherwise not in the current FDC frame.
+    ///
+    /// CONTENT-SAFETY INVARIANT: only classification codes, FDC heading labels
+    /// (from the bundled taxonomy, not from estate content), and integer counts
+    /// cross this surface.
+    public func latticePayload() async -> LatticeSnapshotPayload {
+        // The ARIA_MCP raw proxy response shape (code + count only, no labels).
+        struct ARIALatticeAddress: Decodable { let code: String; let count: Int }
+        struct ARIALatticePayload: Decodable { let addresses: [ARIALatticeAddress] }
+
+        guard let url = URL(string: Self.ariaAPIBase + "/api/lattice") else {
+            return LatticeSnapshotPayload(addresses: [], pending: true)
+        }
+        do {
+            let (data, _) = try await Self.ariaSession.data(from: url)
+            let proxy = try JSONDecoder().decode(ARIALatticePayload.self, from: data)
+            let addresses = proxy.addresses.map { entry in
+                LatticeAddressPayload(
+                    code: entry.code,
+                    label: FDC.label(for: entry.code),
+                    count: entry.count
+                )
+            }
+            return LatticeSnapshotPayload(addresses: addresses, pending: false)
+        } catch {
+            logger.debug("ARIA_MCP lattice proxy unavailable: \(String(describing: error))")
+            return LatticeSnapshotPayload(addresses: [], pending: true)
+        }
+    }
+
+    /// Enrich ARIA community descriptors to the browser wire shape (VIZ_V2 L3):
+    /// `{id, size, dominantUdcCode}` → `{id, label, size}`.
+    ///
+    /// The dominant UDC code is resolved to its FDC heading label via
+    /// `FDC.label(for:)` (bundled taxonomy — never estate content) and then
+    /// DROPPED: a raw classification code is an estate-derived datum and stays
+    /// behind this content boundary; only the heading label crosses. An empty,
+    /// MDCC, or unknown code yields a nil label (JSON null). ARIA's
+    /// size-descending order is preserved.
+    static func enrichCommunities(_ raw: [ARIACommunityDescriptor]) -> [GraphCommunityPayload] {
+        raw.map { descriptor in
+            GraphCommunityPayload(
+                id: descriptor.id,
+                // FDC.label(for:) returns nil for "" — no special-casing needed.
+                label: FDC.label(for: descriptor.dominantUdcCode ?? ""),
+                size: descriptor.size
+            )
+        }
     }
 
     /// Project an `EventRow` to its metadata-only wire payload.
     /// Centralised so the SSE path and the snapshot path emit identical shapes.
+    /// An empty `rowIDStr` projects to nil so the wire carries null, never ""
+    /// (VIZ_V2 L1 contract).
     static func projectEvent(_ e: EventRow) -> EventPayload {
         EventPayload(
             ts: iso8601String(from: e.ts),
             kind: e.kind,
             nounType: e.nounType,
             estate: e.estate,
-            dropbox: e.dropboxID
+            dropbox: e.dropboxID,
+            drawerId: e.rowIDStr.isEmpty ? nil : e.rowIDStr
         )
     }
 

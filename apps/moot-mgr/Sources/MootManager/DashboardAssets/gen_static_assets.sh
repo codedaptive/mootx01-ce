@@ -9,15 +9,34 @@
 # filesystem static-root (and therefore no path-traversal surface). This script
 # is the one-way sync: edit the asset files, run this, commit both.
 #
+# Usage:
+#   gen_static_assets.sh              — writes to the default source-tree path
+#   gen_static_assets.sh <out_path>   — writes to <out_path> instead (used by
+#                                       the CI lint gate to write to a temp file
+#                                       for comparison without touching the live
+#                                       StaticAssets.swift)
+#
 # It embeds each asset in a Swift extended-delimiter raw string ( #"""..."""# )
 # so no character in the assets needs escaping. If an asset ever contains the
 # closing delimiter sequence, this script aborts (raise the delimiter then).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-out="$here/../StaticAssets.swift"
 
-for f in index.html app.css app.js sigma.js; do
+# Optional output-path override for CI lint gate temp-dir comparisons.
+out="${1:-$here/../StaticAssets.swift}"
+
+# Fast exit: skip regeneration when the output is already newer than every
+# asset source. Keeps incremental builds fast when DashboardAssets/ is unchanged.
+if [ -f "$out" ] && \
+   [ "$out" -nt "$here/index.html" ] && \
+   [ "$out" -nt "$here/app.css" ] && \
+   [ "$out" -nt "$here/app.js" ]; then
+  echo "StaticAssets.swift is up to date, skipping regeneration"
+  exit 0
+fi
+
+for f in index.html app.css app.js; do
   if grep -qF '"""#' "$here/$f"; then
     echo "ERROR: $f contains the raw-string close delimiter; raise the delimiter." >&2
     exit 1
@@ -61,7 +80,6 @@ HEADER
   emit_asset indexHTML index.html
   emit_asset appCSS app.css
   emit_asset appJS app.js
-  emit_asset sigmaJS sigma.js
 
   cat <<'FOOTER'
     // MARK: Lookup
@@ -74,8 +92,8 @@ HEADER
 
     /// Resolve a request path to an embedded asset, or `nil` for anything not on
     /// the allow-list. The list is fixed (no directory mapping), so an arbitrary
-    /// path cannot escape it — `/`, `/index.html`, `/app.css`, `/app.js`,
-    /// `/sigma.js` only. Everything else returns `nil` and the caller answers 404.
+    /// path cannot escape it — `/`, `/index.html`, `/app.css`, `/app.js` only.
+    /// Everything else returns `nil` and the caller answers 404.
     static func asset(for path: String) -> Asset? {
         switch path {
         case "/", "/index.html":
@@ -84,11 +102,6 @@ HEADER
             return Asset(body: appCSS, contentType: "text/css; charset=utf-8")
         case "/app.js":
             return Asset(body: appJS, contentType: "text/javascript; charset=utf-8")
-        case "/sigma.js":
-            // The vendored, self-contained Topology renderer (no CDN). See
-            // DashboardAssets/sigma.js for why it is vendored rather than the
-            // upstream graphology+Sigma bundle.
-            return Asset(body: sigmaJS, contentType: "text/javascript; charset=utf-8")
         default:
             return nil
         }

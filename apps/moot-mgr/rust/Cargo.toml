@@ -1,0 +1,54 @@
+[package]
+name = "moot-mgr"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "moot-mgr Rust twin — the Rust vertical's counterpart to the Swift moot-mgr observer/manager + resident multi-plane host. A headless Linux server that owns the central ObserverSink stats store (the global monitoring switch + retention window), serves the loopback HTTP read-API dashboard, exposes a gated UDS control channel, and provisions/tears down estates through GeniusLocusKit (admin plane). Wire-contract peer of the Swift host; internal architecture is idiomatic Rust. Per the no-FFI law this binary is a COMPLETE Rust vertical — it never calls Swift, Swift never calls it. The macOS SwiftUI GUI is NOT ported (Rust targets headless Linux); the host serves the same language-neutral web dashboard assets."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# lib + bin: the lib is the host/manager logic (testable), the bin is the CLI
+# entry point (serve / monitoring / retention / status), mirroring moot-bridge
+# and ARIA_MCP's lib+bin split.
+[lib]
+name = "moot_mgr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "moot-mgr"
+path = "src/main.rs"
+
+[dependencies]
+# JSON encode/decode for the read-API payloads and admin request bodies. The
+# Swift host uses Foundation's JSONEncoder/JSONDecoder with .sortedKeys; the
+# Rust port uses serde_json with sorted-key output (BTreeMap-backed maps) for
+# the same byte-stable wire shape. Already the accepted JSON dep across the
+# Rust app tree (ARIA_MCP, moot-bridge).
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+# UUID generation for estate ids in the admin plane. Already accepted across
+# the kit + app tree (ARIA_MCP, GeniusLocusKit).
+uuid       = { version = "1", features = ["v4"] }
+
+# In-repo kit path deps. From apps/moot-mgr/rust/, the repo root is ../../../
+# Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 — the host composes
+# these kits (it is the composition/host layer, not a primitive). Recorded as
+# CONSUMED in the mission blast-radius report.
+#
+# observer-sink: the central StatsStore (SQLite) the manager owns — the global
+# monitoring switch, the retention window, and the read/status surface.
+observer-sink    = { path = "../../../packages/libs/ObserverSink/rust" }
+# persistence-kit: EstateCacheConfig + EstateConfiguration + InMemoryStorage for
+# the cache-on estate-construction path (DEBT-1), and CachingRowStore identity
+# for the cache proof. StatsStore is built on SqliteStorage from this crate.
+persistence-kit  = { path = "../../../packages/kits/PersistenceKit/rust" }
+# locus-kit: InMemoryDrawerStore (the DrawerStore the estate opens over) +
+# OwnerCredentials/CaptureFrame/RecallFrame/Filter/Drawer for the admin plane.
+locus-kit        = { path = "../../../packages/kits/LocusKit/rust" }
+# corpus-kit: EmbeddingModelConfig for Corpus::open inside provision (the
+# provision-with-corpus path that lights the BM25 lane — DEBT-2).
+corpus-kit       = { path = "../../../packages/kits/CorpusKit/rust" }
+# genius-locus-kit: EstateCoordinator::provision (provision-with-corpus, DEBT-2)
+# + lifecycle (quiesce/drain/destroy) + capture_with_mode/recall_scored for the
+# BM25 proof. This is the composition surface the admin plane drives.
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }

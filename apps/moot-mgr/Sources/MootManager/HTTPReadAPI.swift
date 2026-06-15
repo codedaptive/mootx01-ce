@@ -203,23 +203,25 @@ public actor HTTPReadAPI {
                 uptimeSeconds: max(0, Int(self.clock().timeIntervalSince(self.startInstant)))
             ) }
         case ("GET", "/api/estates"):
-            // Merge the admin section (host-provisioned estates + mount state)
-            // into the event-derived rollups. Read-only projection — the admin
-            // engine's mutating verbs live on the gated control surface, never
-            // here (GUI SPEC §4.2: the Estates view reads mount state, dispatches
-            // lifecycle over the control channel).
+            // Merge the admin section into the event-derived rollups.
+            // Priority: local EstateAdmin (host-provisioned, when wired) over the
+            // ARIA_MCP proxy (base.admin, populated by MootManager.estatesPayload()).
+            // On a pure-observer host (no admin engine), adminSection is nil and
+            // the proxy data surfaces unmodified (adminSection ?? base.admin).
+            // Read-only — the admin engine's mutating verbs live on the gated
+            // control surface (GUI SPEC §4.2).
             return await jsonResponse {
                 let base = try await self.manager.estatesPayload()
                 let adminSection = await self.admin?.payload()
-                return EstatesPayload(estates: base.estates, admin: adminSection)
+                return EstatesPayload(estates: base.estates, admin: adminSection ?? base.admin)
             }
         case ("GET", "/api/config"):
             return await jsonResponse { try await self.manager.configPayload() }
         case ("GET", "/api/graph"):
-            // Topology snapshot. The optional ?estate= filter is parsed and
-            // forwarded; structure is pending (the resident host has no estate
-            // access — see MootManager.graphPayload), so the host serves the
-            // available VizGraph analytic overlay and marks nodes/edges pending.
+            // Topology snapshot. The optional ?estate= filter selects which
+            // estate's snapshot to serve from the shared stats store. When no
+            // snapshot has been written (governor startup pass not yet complete)
+            // the response is structurePending:true with an empty graph.
             let estate = Self.queryValue("estate", in: request.query)
             return await jsonResponse { try await self.manager.graphPayload(now: self.clock(), estate: estate) }
         case ("GET", "/api/events"):
@@ -227,6 +229,16 @@ public actor HTTPReadAPI {
             // in serve(_:) before routing; here we serve the one-shot JSON
             // snapshot.
             return await jsonResponse { try await self.manager.eventsPayload() }
+        case ("GET", "/api/lexicon"):
+            // ARIA grammar + LatticeLib metadata as static JSON. All data is
+            // compile-time constant (AriaLexiconLib enums, LatticeLib version).
+            // No store access — safe to serve even before monitoring starts.
+            return await jsonResponse { await self.manager.lexiconPayload() }
+        case ("GET", "/api/lattice"):
+            // Active lattice addresses (UDC/MDCC codes) with drawer counts,
+            // proxied from ARIA_MCP and annotated with FDC heading labels.
+            // Degrades to empty list when ARIA_MCP is unreachable (pending:true).
+            return await jsonResponse { await self.manager.latticePayload() }
         case ("POST", let path) where path.hasPrefix("/api/control/"):
             return await handleControl(request)
         case ("GET", let path):

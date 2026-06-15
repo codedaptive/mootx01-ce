@@ -1,0 +1,768 @@
+// manager.rs — Rust twin of the Swift moot-mgr MootManager.swift.
+//
+// The manager core: store ownership, the global monitoring on/off switch, the
+// retention window, and the read/status + HTTP-payload surface. A PURE OBSERVER
+// — it never hosts an estate DB (the admin plane in estate_admin.rs does that).
+//
+// Responsibilities:
+//   1. Own the ObserverSink StatsStore (SQLite) at a configurable path; migrate
+//      on start.
+//   2. Own the global on/off switch — set_monitoring writes the control flag row.
+//      THAT is the broadcast: consumers' sinks read the flag.
+//   3. Run a retention pass — run_retention(now) computes cutoff = now - window
+//      (the app may read the clock here; determinism applies to engines/libs,
+//      not the app's own loop) and rolls off old rows.
+//   4. Expose a read/status surface grouped BY DROPBOX and BY ESTATE, plus the
+//      HTTP read-API payload builders that project the store into the GUI wire
+//      shapes (metadata only — content-safety invariant enforced at the boundary).
+//
+// ── Necessary differences from the Swift host (documented, not faked) ─────────
+// The Swift MootManager proxies an ARIA_MCP resident daemon over URLSession for
+// two surfaces: the admin/hosted-estate list merged into /api/estates, and the
+// /api/lattice address snapshot. The zero-dependency Rust port carries no HTTP
+// client (the Rust app tree's no-new-external-dep preference), so those proxy
+// reads degrade to the HONEST pending/absent state — exactly the Swift fallback
+// when the daemon is unreachable: `admin: null` for /api/estates (the host's own
+// EstateAdmin section is merged in by HttpReadApi instead) and `pending: true`
+// for /api/lattice. The observable contract is identical; only the live-proxy
+// enrichment is unavailable. See `lattice_payload`.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use observer_sink::{EventRow, MetricRow, StatsStore};
+
+use crate::api_payloads::{
+    ConfigPayload, DropboxSummaryPayload, EstatePayload, EstatesPayload, EventPayload,
+    EventsPayload, GraphAnalyticPayload, GraphCommunityPayload, GraphPayload, ServerPayload,
+    StoredGraphPayload,
+};
+use crate::status_report::{GroupCount, StatusReport};
+
+/// Errors raised by `MootManager` operations. Mirrors Swift `ManagerError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagerError {
+    /// A manager operation was called before `start()` opened the store.
+    NotStarted,
+    /// A retention window of zero or less was supplied to `set_retention`.
+    InvalidRetention,
+    /// An I/O failure from the underlying stats store.
+    Storage { reason: String },
+}
+
+impl From<persistence_kit::StorageError> for ManagerError {
+    fn from(e: persistence_kit::StorageError) -> Self {
+        ManagerError::Storage {
+            reason: format!("{e:?}"),
+        }
+    }
+}
+
+/// The MOOTx01 observer/manager. Owns the central stats store, the global
+/// monitoring switch, and the retention window. Mirrors Swift `MootManager`.
+///
+/// The Rust store (`observer_sink::StatsStore`) is synchronous, so this type is
+/// synchronous too — there is no actor; the resident host serializes access
+/// through its own owner. The clock boundary is the caller's: every method that
+/// needs "now" takes it as an epoch-seconds parameter (determinism rule).
+pub struct MootManager {
+    config: crate::manager_config::ManagerConfig,
+    /// The owned stats store. `Some` after `start()` succeeds.
+    store: Option<StatsStore>,
+    /// Runtime override of the retention window (set via the gated control
+    /// channel `set retention`). `None` means "use config.retention_window_secs".
+    /// Held in-process (not persisted): the Phase-1 StatsStore exposes no generic
+    /// control upsert, so a custom window cannot be durably written without
+    /// editing ObserverSink (out of this crate's scope — same constraint the
+    /// Swift host documents). A restart falls back to the configured default.
+    retention_override_secs: Option<i64>,
+    /// The cutoff (epoch seconds) the most-recent retention pass used, surfaced
+    /// by /api/config. Held in-process (the store has no public reader for its
+    /// retention-cutoff control row). Seeded to epoch zero (matches the store's
+    /// own seed) until the first pass runs.
+    last_retention_cutoff_epoch: f64,
+}
+
+impl MootManager {
+    /// Create a manager with the given configuration. Call `start()` before any
+    /// other method. Mirrors Swift `MootManager.init(config:)`.
+    pub fn new(config: crate::manager_config::ManagerConfig) -> Self {
+        MootManager {
+            config,
+            store: None,
+            retention_override_secs: None,
+            last_retention_cutoff_epoch: 0.0,
+        }
+    }
+
+    /// The resolved configuration (store path + retention window/cadence).
+    pub fn config(&self) -> &crate::manager_config::ManagerConfig {
+        &self.config
+    }
+
+    /// Provision and open the stats store, applying the schema/migrations.
+    /// Creates the store's parent directory if needed. Idempotent at the store
+    /// level (`StatsStore::open` is forward-only). Mirrors Swift `MootManager.start()`.
+    pub fn start(&mut self) -> Result<(), ManagerError> {
+        if let Some(parent) = std::path::Path::new(&self.config.store_path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ManagerError::Storage {
+                reason: format!("create store parent dir failed: {e}"),
+            })?;
+        }
+        let store = StatsStore::new(&self.config.store_path)?;
+        store.open()?;
+        self.store = Some(store);
+        Ok(())
+    }
+
+    /// Close the store cleanly. Idempotent. Mirrors Swift `MootManager.stop()`.
+    pub fn stop(&mut self) {
+        if let Some(store) = &self.store {
+            let _ = store.close();
+        }
+        self.store = None;
+    }
+
+    /// The opened stats store, for an in-process consumer (e.g. an integration
+    /// test installing a sink against the manager's store). Mirrors Swift
+    /// `MootManager.statsStore()`.
+    pub fn stats_store(&self) -> Result<&StatsStore, ManagerError> {
+        self.require_store()
+    }
+
+    // MARK: - Monitoring switch
+
+    /// Set the global monitoring on/off switch. Writes the control flag row —
+    /// this IS the broadcast (every consumer's sink reads the row). Mirrors Swift
+    /// `MootManager.setMonitoring(_:)`.
+    pub fn set_monitoring(&self, enabled: bool) -> Result<(), ManagerError> {
+        Ok(self.require_store()?.set_monitoring_enabled(enabled)?)
+    }
+
+    /// Read the current global monitoring state. Mirrors Swift `MootManager.isMonitoring()`.
+    pub fn is_monitoring(&self) -> Result<bool, ManagerError> {
+        Ok(self.require_store()?.is_monitoring_enabled()?)
+    }
+
+    // MARK: - Retention
+
+    /// The retention window currently in effect: the runtime override if the
+    /// control channel set one, else the configured default. Mirrors Swift
+    /// `MootManager.effectiveRetentionWindow`.
+    pub fn effective_retention_window_secs(&self) -> i64 {
+        self.retention_override_secs
+            .unwrap_or(self.config.retention_window_secs)
+    }
+
+    /// Set the retention window at runtime (the gated `set retention` verb). A
+    /// non-positive window is rejected. Mirrors Swift `MootManager.setRetention(window:)`.
+    pub fn set_retention(&mut self, window_secs: i64) -> Result<(), ManagerError> {
+        if window_secs <= 0 {
+            return Err(ManagerError::InvalidRetention);
+        }
+        self.retention_override_secs = Some(window_secs);
+        Ok(())
+    }
+
+    /// Run one retention pass: roll off samples older than the retention window.
+    /// `cutoff = now - effective_window`; the cutoff is computed here (the app's
+    /// own loop may read the clock) and passed into the store's retention engine.
+    /// Returns the total rows deleted. Mirrors Swift `MootManager.runRetention(now:)`.
+    pub fn run_retention(&mut self, now_epoch: f64) -> Result<usize, ManagerError> {
+        let window = self.effective_retention_window_secs() as f64;
+        let cutoff = now_epoch - window;
+        let store = self.require_store()?;
+        let metrics_deleted = store.delete_metrics_before(cutoff, now_epoch)?;
+        let events_deleted = store.delete_events_before(cutoff, now_epoch)?;
+        self.last_retention_cutoff_epoch = cutoff;
+        Ok(metrics_deleted + events_deleted)
+    }
+
+    // MARK: - Read / status surface (CLI)
+
+    /// Build a `StatusReport` summarising the store's current contents, grouped
+    /// BY DROPBOX and BY ESTATE. Mirrors Swift `MootManager.status(now:recentEventLimit:)`.
+    pub fn status(
+        &self,
+        now_epoch: f64,
+        recent_event_limit: usize,
+    ) -> Result<StatusReport, ManagerError> {
+        let store = self.require_store()?;
+        let monitoring_enabled = store.is_monitoring_enabled()?;
+        let metrics = store.query_metrics(None)?;
+        let events = store.query_events(None)?;
+
+        // By-dropbox: count metrics and events per dropbox id.
+        let mut dropbox_metrics: BTreeMap<String, i64> = BTreeMap::new();
+        let mut dropbox_events: BTreeMap<String, i64> = BTreeMap::new();
+        for m in &metrics {
+            *dropbox_metrics.entry(m.dropbox_id.clone()).or_insert(0) += 1;
+        }
+        for e in &events {
+            *dropbox_events.entry(e.dropbox_id.clone()).or_insert(0) += 1;
+        }
+        let mut dropbox_keys: BTreeSet<String> = BTreeSet::new();
+        dropbox_keys.extend(dropbox_metrics.keys().cloned());
+        dropbox_keys.extend(dropbox_events.keys().cloned());
+        let by_dropbox: Vec<GroupCount> = dropbox_keys
+            .iter()
+            .map(|key| GroupCount {
+                key: key.clone(),
+                metric_count: *dropbox_metrics.get(key).unwrap_or(&0),
+                event_count: *dropbox_events.get(key).unwrap_or(&0),
+            })
+            .collect();
+
+        // By-estate: event-level field only (metric samples carry no estate id).
+        let mut estate_events: BTreeMap<String, i64> = BTreeMap::new();
+        for e in &events {
+            *estate_events.entry(e.estate.clone()).or_insert(0) += 1;
+        }
+        let by_estate: Vec<GroupCount> = estate_events
+            .iter()
+            .map(|(key, count)| GroupCount {
+                key: key.clone(),
+                metric_count: 0,
+                event_count: *count,
+            })
+            .collect();
+
+        // Recent events: query_events returns oldest-first; take the newest tail
+        // and reverse so the report is newest-first.
+        let recent_events = tail_reversed(events, recent_event_limit);
+        let store_health = store.storage_stats(now_epoch as i64)?;
+
+        Ok(StatusReport {
+            monitoring_enabled,
+            total_metrics: metrics.len() as i64,
+            total_events: recent_total_events(&recent_events, &by_estate),
+            by_dropbox,
+            by_estate,
+            recent_events,
+            store_health,
+        })
+    }
+
+    // MARK: - HTTP read-API payload builders
+    //
+    // These project the store's current contents into the GUI wire shapes. All
+    // are metadata-only — the content-safety invariant is enforced here at the
+    // boundary: nothing that could carry rung/memory content is read or projected.
+
+    /// Build the GET /api/server payload. Server.* metric fields are read from
+    /// the latest matching samples; all default to `None` when no samples exist
+    /// (the dashboard renders n/a chips rather than fabricating values). Mirrors
+    /// Swift `MootManager.serverPayload(now:uptimeSeconds:)`.
+    pub fn server_payload(
+        &self,
+        now_epoch: f64,
+        uptime_seconds: i64,
+    ) -> Result<ServerPayload, ManagerError> {
+        let store = self.require_store()?;
+        let monitoring_enabled = store.is_monitoring_enabled()?;
+        let all_metrics = store.query_metrics(None)?;
+        let events = store.query_events(None)?;
+        let estate_count = events
+            .iter()
+            .map(|e| e.estate.clone())
+            .collect::<BTreeSet<_>>()
+            .len() as i64;
+        let health = store.storage_stats(now_epoch as i64)?;
+
+        // --- Server-metric extraction (latest + second-latest per named metric) ---
+        let server_metric_names: BTreeSet<&str> = [
+            "server.rss_mb",
+            "server.cpu_user_ms",
+            "server.rpc_count",
+            "server.connections",
+            "server.proto_version",
+            "substrate.kernel.backend_selected",
+        ]
+        .into_iter()
+        .collect();
+        // latest_by_name[name] = (newer, older). older is None until the second sample.
+        let mut latest_by_name: BTreeMap<String, (MetricRow, Option<MetricRow>)> = BTreeMap::new();
+        for m in all_metrics.iter().filter(|m| server_metric_names.contains(m.name.as_str())) {
+            match latest_by_name.get(&m.name) {
+                Some((prev, _)) if m.ts_epoch > prev.ts_epoch => {
+                    let prev_clone = clone_metric(prev);
+                    latest_by_name.insert(m.name.clone(), (clone_metric(m), Some(prev_clone)));
+                }
+                Some((prev, second)) => {
+                    let newer_than_second =
+                        second.as_ref().map(|s| m.ts_epoch > s.ts_epoch).unwrap_or(true);
+                    if newer_than_second {
+                        let prev_clone = clone_metric(prev);
+                        latest_by_name.insert(m.name.clone(), (prev_clone, Some(clone_metric(m))));
+                    }
+                }
+                None => {
+                    latest_by_name.insert(m.name.clone(), (clone_metric(m), None));
+                }
+            }
+        }
+
+        let latest_value = |name: &str| latest_by_name.get(name).map(|(n, _)| n.value);
+        let rss_mb = latest_value("server.rss_mb");
+        let cpu_user_ms = latest_value("server.cpu_user_ms");
+        let rpc_count = latest_value("server.rpc_count").map(|v| v as i64);
+        let connections = latest_value("server.connections").map(|v| v as i64);
+        let proto_version = latest_by_name
+            .get("server.proto_version")
+            .and_then(|(n, _)| n.tags.get("version").cloned());
+        let kernel_backend = latest_by_name
+            .get("substrate.kernel.backend_selected")
+            .and_then(|(n, _)| n.tags.get("backend").cloned());
+
+        // Delta-derived rates. None when fewer than two samples exist.
+        let rpc_rate = latest_by_name.get("server.rpc_count").and_then(|(newer, older)| {
+            older.as_ref().and_then(|o| {
+                let wall = newer.ts_epoch - o.ts_epoch;
+                if wall > 0.0 {
+                    Some((newer.value - o.value).max(0.0) / wall)
+                } else {
+                    None
+                }
+            })
+        });
+        let cpu_pct = latest_by_name.get("server.cpu_user_ms").and_then(|(newer, older)| {
+            older.as_ref().and_then(|o| {
+                let wall_ms = (newer.ts_epoch - o.ts_epoch) * 1000.0;
+                if wall_ms > 0.0 {
+                    Some((100.0_f64).min(((newer.value - o.value).max(0.0) / wall_ms * 100.0).max(0.0)))
+                } else {
+                    None
+                }
+            })
+        });
+
+        // Per-dropbox summaries (Connects tab / Overview observers panel).
+        let by_dropbox = build_dropbox_summaries(&all_metrics, &events);
+
+        // NeuronKit capabilities: the Swift host reads CognitionKit's compile-time
+        // shippedNeuronKitCapabilities constant. The Rust CognitionKit crate is not
+        // a dependency of this host (the manager is a pure observer of the stats
+        // store and does not link the cognition layer), so the capability list is
+        // sourced from the stats stream instead: any `neuronkit.capability.*`
+        // metric the consumers self-report. Empty when none reported — the
+        // dashboard renders the absent state. Documented difference from Swift.
+        let capabilities = collect_capabilities(&all_metrics);
+
+        Ok(ServerPayload {
+            monitoring_enabled,
+            uptime_seconds,
+            estate_count,
+            total_metrics: all_metrics.len() as i64,
+            total_events: events.len() as i64,
+            store_size_bytes: health.as_ref().map(|h| h.logical_size_bytes).unwrap_or(0),
+            store_page_count: health.as_ref().and_then(|h| h.page_count),
+            store_freelist_page_count: health.as_ref().and_then(|h| h.freelist_page_count),
+            store_wal_frame_count: health.as_ref().and_then(|h| h.wal_frame_count),
+            store_cache_hit_ratio: health.as_ref().and_then(|h| h.cache_hit_ratio),
+            store_transaction_commit_count: health.as_ref().and_then(|h| h.transaction_commit_count),
+            store_row_count: health.as_ref().and_then(|h| h.row_count.map(|r| r as i64)),
+            rss_mb,
+            cpu_user_ms,
+            rpc_count,
+            connections,
+            proto_version,
+            kernel_backend,
+            rpc_rate,
+            cpu_pct,
+            by_dropbox,
+            capabilities,
+        })
+    }
+
+    /// Build the GET /api/estates payload: per-estate event rollups with queue
+    /// stats. The `admin` section is `None` here (the host's own EstateAdmin
+    /// section is merged in by HttpReadApi; the Swift ARIA proxy is unavailable
+    /// — see the module header). Mirrors Swift `MootManager.estatesPayload()`.
+    pub fn estates_payload(&self) -> Result<EstatesPayload, ManagerError> {
+        let store = self.require_store()?;
+        let events = store.query_events(None)?;
+        let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+        let mut last_ts: BTreeMap<String, f64> = BTreeMap::new();
+        for e in &events {
+            *counts.entry(e.estate.clone()).or_insert(0) += 1;
+            let entry = last_ts.entry(e.estate.clone()).or_insert(f64::MIN);
+            if e.ts_epoch > *entry {
+                *entry = e.ts_epoch;
+            }
+        }
+
+        // Read the queue.* / locuskit.gate.* metric rows and keep the latest
+        // sample per (estate, metric).
+        let queue_metric_names: BTreeSet<&str> = [
+            "queue.depth",
+            "queue.drain_count",
+            "queue.idle_nonempty",
+            "queue.latency_p50_ms",
+            "queue.latency_p95_ms",
+            "queue.head_of_line_age_s",
+            "locuskit.gate.admit_count",
+            "locuskit.gate.reject_count",
+        ]
+        .into_iter()
+        .collect();
+        let all_metrics = store.query_metrics(None)?;
+        // latest[(estate, metric)] = value of the newest sample.
+        let mut latest: BTreeMap<(String, String), (f64, f64)> = BTreeMap::new(); // -> (value, ts)
+        for m in all_metrics
+            .iter()
+            .filter(|m| queue_metric_names.contains(m.name.as_str()))
+        {
+            let est = m.tags.get("estate").cloned().unwrap_or_else(|| "unknown".to_string());
+            let key = (est, m.name.clone());
+            let entry = latest.entry(key).or_insert((m.value, m.ts_epoch));
+            if m.ts_epoch > entry.1 {
+                *entry = (m.value, m.ts_epoch);
+            }
+        }
+        let latest_value = |estate: &str, metric: &str| {
+            latest.get(&(estate.to_string(), metric.to_string())).map(|(v, _)| *v)
+        };
+
+        let rollups = counts
+            .keys()
+            .map(|id| {
+                let has_queue = queue_metric_names
+                    .iter()
+                    .any(|n| latest_value(id, n).is_some());
+                let queue = if has_queue {
+                    Some(crate::api_payloads::QueueStats {
+                        depth: latest_value(id, "queue.depth"),
+                        drain_count: latest_value(id, "queue.drain_count"),
+                        idle_nonempty: latest_value(id, "queue.idle_nonempty").map(|v| v > 0.0),
+                        latency_p50_ms: latest_value(id, "queue.latency_p50_ms"),
+                        latency_p95_ms: latest_value(id, "queue.latency_p95_ms"),
+                        head_of_line_age_s: latest_value(id, "queue.head_of_line_age_s"),
+                        gate_admit_count: latest_value(id, "locuskit.gate.admit_count"),
+                        gate_reject_count: latest_value(id, "locuskit.gate.reject_count"),
+                    })
+                } else {
+                    None
+                };
+                EstatePayload {
+                    id: id.clone(),
+                    event_count: *counts.get(id).unwrap_or(&0),
+                    last_event_ts: last_ts
+                        .get(id)
+                        .filter(|t| **t > f64::MIN)
+                        .map(|t| epoch_to_iso8601(*t)),
+                    queue,
+                }
+            })
+            .collect();
+
+        Ok(EstatesPayload {
+            estates: rollups,
+            // The Swift ARIA_MCP admin proxy is unavailable in the zero-dep Rust
+            // host; the host's own EstateAdmin section is merged in by HttpReadApi.
+            admin: None,
+        })
+    }
+
+    /// Build the GET /api/events payload: the most-recent events, newest first.
+    /// Mirrors Swift `MootManager.eventsPayload(limit:)`.
+    pub fn events_payload(&self, limit: usize) -> Result<EventsPayload, ManagerError> {
+        let store = self.require_store()?;
+        let events = store.query_events(None)?;
+        let recent = tail_reversed(events, limit);
+        Ok(EventsPayload {
+            events: recent.iter().map(project_event).collect(),
+        })
+    }
+
+    /// Build the GET /api/config payload. Mirrors Swift `MootManager.configPayload()`.
+    pub fn config_payload(&self) -> Result<ConfigPayload, ManagerError> {
+        let store = self.require_store()?;
+        let monitoring_enabled = store.is_monitoring_enabled()?;
+        Ok(ConfigPayload {
+            monitoring_enabled,
+            retention_seconds: self.effective_retention_window_secs(),
+            retention_cutoff: epoch_to_iso8601(self.last_retention_cutoff_epoch),
+        })
+    }
+
+    /// Build the GET /api/graph payload: the Topology node-link snapshot.
+    ///
+    /// Structure (nodes/edges) is read from the shared stats store's
+    /// `topology_snapshots` table (the autonomic governor writes a row per estate
+    /// on its cadence). When no snapshot is available yet, `structure_pending` is
+    /// true with an honest enumeration. The analytic overlay (analytics/
+    /// communities) is always sourced locally from the VizGraph signal samples.
+    /// Mirrors Swift `MootManager.graphPayload(now:estate:)`.
+    pub fn graph_payload(
+        &self,
+        now_epoch: f64,
+        estate: Option<&str>,
+    ) -> Result<GraphPayload, ManagerError> {
+        let store = self.require_store()?;
+
+        // The five canonical VizGraph signal names — the wire contract between
+        // the SubstrateML emitter and this reader (kept inline so the host takes
+        // no dependency on the analytics layer just to recognise its names).
+        let viz_signals: BTreeSet<&str> = [
+            "community.assignment",
+            "centrality.score",
+            "nmf.factor",
+            "anomaly.flag",
+            "edge.decayed_weight",
+        ]
+        .into_iter()
+        .collect();
+        let viz_metrics = store.query_metrics(None)?;
+
+        // Group by (estate, signal): keep the latest sample + the sample count.
+        let mut latest: BTreeMap<(String, String), MetricRow> = BTreeMap::new();
+        let mut sample_counts: BTreeMap<(String, String), i64> = BTreeMap::new();
+        for m in viz_metrics
+            .iter()
+            .filter(|m| viz_signals.contains(m.name.as_str()))
+        {
+            let est = m.tags.get("estate").cloned().unwrap_or_else(|| "unknown".to_string());
+            // Honour the optional estate filter against the sample's estate tag.
+            if let Some(filter) = estate {
+                if !filter.is_empty() && filter != "all" && est != filter {
+                    continue;
+                }
+            }
+            let key = (est, m.name.clone());
+            *sample_counts.entry(key.clone()).or_insert(0) += 1;
+            match latest.get(&key) {
+                Some(prev) if m.ts_epoch <= prev.ts_epoch => {}
+                _ => {
+                    latest.insert(key, clone_metric(m));
+                }
+            }
+        }
+
+        // Analytic overlay rows, sorted (estate, signal) for byte-stable output.
+        let mut analytic_keys: Vec<&(String, String)> = latest.keys().collect();
+        analytic_keys.sort();
+        let analytics: Vec<GraphAnalyticPayload> = analytic_keys
+            .iter()
+            .map(|key| {
+                let row = &latest[*key];
+                GraphAnalyticPayload {
+                    estate: key.0.clone(),
+                    signal: key.1.clone(),
+                    value: row.value,
+                    ts: epoch_to_iso8601(row.ts_epoch),
+                    sample_count: *sample_counts.get(*key).unwrap_or(&0),
+                }
+            })
+            .collect();
+
+        // Fallback community rollup from `community.assignment` (count-only).
+        let mut communities: Vec<GraphCommunityPayload> = Vec::new();
+        let mut comm_keys: Vec<&(String, String)> =
+            latest.keys().filter(|k| k.1 == "community.assignment").collect();
+        comm_keys.sort();
+        for key in comm_keys {
+            let count = latest[key].value.round().max(0.0) as i64;
+            for _ in 0..count {
+                communities.push(GraphCommunityPayload {
+                    id: communities.len() as i64,
+                    label: None,
+                    size: 0,
+                });
+            }
+        }
+
+        // Read the topology snapshot from the shared stats store.
+        let mut live_nodes = Vec::new();
+        let mut live_edges = Vec::new();
+        let mut structure_pending = true;
+        let mut generated_ts: Option<String> = None;
+        let mut pending = vec![
+            "topology snapshot not yet available — the autonomic governor has not completed its first duty cycle"
+                .to_string(),
+        ];
+
+        // "all"/empty/None → newest snapshot across all estates; an explicit
+        // estate filter reads that estate's row.
+        let estate_key: Option<&str> = match estate {
+            Some(e) if !e.is_empty() && e != "all" => Some(e),
+            _ => None,
+        };
+        if let Some(snapshot) = store.latest_topology_snapshot(estate_key)? {
+            if let Ok(stored) = serde_json::from_str::<StoredGraphPayload>(&snapshot) {
+                if !stored.structure_pending {
+                    live_nodes = stored.nodes;
+                    live_edges = stored.edges;
+                    structure_pending = false;
+                    generated_ts = stored.generated_ts;
+                    pending = Vec::new();
+                }
+            }
+        }
+
+        Ok(GraphPayload {
+            nodes: live_nodes,
+            edges: live_edges,
+            communities,
+            analytics,
+            structure_pending,
+            pending,
+            generated_ts,
+            estate: estate
+                .filter(|e| !e.is_empty())
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "all".to_string()),
+            snapshot_ts: epoch_to_iso8601(now_epoch),
+        })
+    }
+
+    // MARK: - Internals
+
+    fn require_store(&self) -> Result<&StatsStore, ManagerError> {
+        self.store.as_ref().ok_or(ManagerError::NotStarted)
+    }
+}
+
+/// Take the newest `limit` events (input is oldest-first) and reverse them so
+/// the result is newest-first. Mirrors the Swift `events.suffix(limit).reversed()`.
+fn tail_reversed(mut events: Vec<EventRow>, limit: usize) -> Vec<EventRow> {
+    if events.len() > limit {
+        events.drain(0..events.len() - limit);
+    }
+    events.reverse();
+    events
+}
+
+/// The status report's `total_events` is the full event count. `tail_reversed`
+/// already truncated to the recent window, so recompute the full total from the
+/// by-estate breakdown (which counts ALL events, pre-truncation). Mirrors the
+/// Swift `status` which reads `events.count` before truncating.
+fn recent_total_events(_recent: &[EventRow], by_estate: &[GroupCount]) -> i64 {
+    by_estate.iter().map(|g| g.event_count).sum()
+}
+
+/// Clone a `MetricRow` (ObserverSink's MetricRow is not `Clone`, so reconstruct).
+fn clone_metric(m: &MetricRow) -> MetricRow {
+    MetricRow {
+        row_id: m.row_id,
+        name: m.name.clone(),
+        value: m.value,
+        tags: m.tags.clone(),
+        ts_epoch: m.ts_epoch,
+        dropbox_id: m.dropbox_id.clone(),
+    }
+}
+
+/// Build per-dropbox sample summaries from the metric + event scans, sorted by
+/// dropbox name. Mirrors the by-dropbox block of Swift `serverPayload`.
+fn build_dropbox_summaries(
+    metrics: &[MetricRow],
+    events: &[EventRow],
+) -> Vec<DropboxSummaryPayload> {
+    let mut metric_counts: BTreeMap<String, i64> = BTreeMap::new();
+    let mut last_metric_ts: BTreeMap<String, f64> = BTreeMap::new();
+    for m in metrics {
+        *metric_counts.entry(m.dropbox_id.clone()).or_insert(0) += 1;
+        let e = last_metric_ts.entry(m.dropbox_id.clone()).or_insert(f64::MIN);
+        if m.ts_epoch > *e {
+            *e = m.ts_epoch;
+        }
+    }
+    let mut event_counts: BTreeMap<String, i64> = BTreeMap::new();
+    let mut last_event_ts: BTreeMap<String, f64> = BTreeMap::new();
+    for ev in events {
+        *event_counts.entry(ev.dropbox_id.clone()).or_insert(0) += 1;
+        let e = last_event_ts.entry(ev.dropbox_id.clone()).or_insert(f64::MIN);
+        if ev.ts_epoch > *e {
+            *e = ev.ts_epoch;
+        }
+    }
+    let mut ids: BTreeSet<String> = BTreeSet::new();
+    ids.extend(metric_counts.keys().cloned());
+    ids.extend(event_counts.keys().cloned());
+    ids.into_iter()
+        .map(|id| {
+            let lm = last_metric_ts.get(&id).copied().filter(|t| *t > f64::MIN);
+            let le = last_event_ts.get(&id).copied().filter(|t| *t > f64::MIN);
+            let last_seen = match (lm, le) {
+                (Some(m), Some(e)) => Some(m.max(e)),
+                (Some(m), None) => Some(m),
+                (None, Some(e)) => Some(e),
+                (None, None) => None,
+            };
+            DropboxSummaryPayload {
+                name: id.clone(),
+                metric_count: *metric_counts.get(&id).unwrap_or(&0),
+                event_count: *event_counts.get(&id).unwrap_or(&0),
+                last_seen_iso: last_seen.map(epoch_to_iso8601),
+            }
+        })
+        .collect()
+}
+
+/// Collect shipped-capability names from any `neuronkit.capability.<name>`
+/// metric samples the consumers self-report (the Rust-host source for the
+/// capability list — see the documented difference in `server_payload`). Sorted,
+/// deduplicated; empty when none reported.
+fn collect_capabilities(metrics: &[MetricRow]) -> Vec<String> {
+    const PREFIX: &str = "neuronkit.capability.";
+    let mut caps: BTreeSet<String> = BTreeSet::new();
+    for m in metrics {
+        if let Some(name) = m.name.strip_prefix(PREFIX) {
+            if !name.is_empty() {
+                caps.insert(name.to_string());
+            }
+        }
+    }
+    caps.into_iter().collect()
+}
+
+/// Project an `EventRow` to its metadata-only wire payload. An empty estate row
+/// id projects to `None` so the wire carries null, never "". Mirrors Swift
+/// `MootManager.projectEvent`.
+pub fn project_event(e: &EventRow) -> EventPayload {
+    EventPayload {
+        ts: epoch_to_iso8601(e.ts_epoch),
+        kind: e.kind.clone(),
+        noun_type: e.noun_type,
+        estate: e.estate.clone(),
+        dropbox: e.dropbox_id.clone(),
+        drawer_id: if e.estate_row_id.is_empty() {
+            None
+        } else {
+            Some(e.estate_row_id.clone())
+        },
+    }
+}
+
+/// Format an epoch-seconds instant as ISO-8601 UTC TEXT
+/// ("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"), matching the store's on-disk format so wire
+/// timestamps equal stored ones. Mirrors Swift `MootManager.iso8601String(from:)`.
+///
+/// Hand-rolled (no chrono dependency — the host carries zero new external deps)
+/// using the civil-from-days algorithm. UTC only.
+pub fn epoch_to_iso8601(epoch_secs: f64) -> String {
+    let total_millis = (epoch_secs * 1000.0).round() as i64;
+    let secs = total_millis.div_euclid(1000);
+    let frac_millis = total_millis.rem_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day % 3600) / 60;
+    let ss = secs_of_day % 60;
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{frac_millis:03}Z")
+}
+
+/// Civil (y, m, d) date from days-since-1970 — Howard Hinnant's `civil_from_days`.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}

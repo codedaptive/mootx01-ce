@@ -1,7 +1,7 @@
 // GraphAPITests.swift
 //
 // P5 verify line: the resident host serves the Topology read endpoint
-// (GET /api/graph) and the vendored Sigma-style renderer asset (/sigma.js).
+// (GET /api/graph); the renderer is the Canvas2D brain renderer in app.js.
 //
 // /api/graph projects the VizGraph analytic overlay the resident host CAN read
 // from the ObserverSink stats store (per-estate community count, centrality /
@@ -106,7 +106,7 @@ struct GraphAPITests {
 
         let obj = try await jsonObject(port: port, path: "/api/graph")
         for key in ["nodes", "edges", "communities", "analytics",
-                    "structurePending", "pending", "estate", "snapshotTs"] {
+                    "structurePending", "pending", "generatedTs", "estate", "snapshotTs"] {
             #expect(obj[key] != nil, "missing /api/graph field: \(key)")
         }
     }
@@ -121,6 +121,9 @@ struct GraphAPITests {
         #expect((obj["edges"] as? [Any])?.isEmpty == true)
         // The gap is enumerated honestly, not silently empty.
         #expect((obj["pending"] as? [Any])?.isEmpty == false)
+        // generatedTs is null when no snapshot has been written.
+        #expect(obj.keys.contains("generatedTs"), "generatedTs key must be present on wire")
+        #expect(obj["generatedTs"] is NSNull, "generatedTs is null when no snapshot")
     }
 
     @Test("Analytic overlay surfaces the five VizGraph signals from the store")
@@ -139,19 +142,24 @@ struct GraphAPITests {
         }
     }
 
-    @Test("community.assignment value drives the community swatch count")
+    @Test("community.assignment value drives the fallback community count")
     func communityRollup() async throws {
         let (host, port) = try await makeStartedHost { try await seedVizGraph($0, estate: "home") }
         defer { Task { await host.stop() } }
         let obj = try await jsonObject(port: port, path: "/api/graph")
         let communities = obj["communities"] as? [[String: Any]] ?? []
-        // Seeded community.assignment value = 3 → three swatches for "home".
+        // Seeded community.assignment value = 3 → three legend entries for "home".
         #expect(communities.count == 3)
+        // Wire shape is {id, label, size} (VIZ_V2 L3). The local fallback knows
+        // only the count: label is an explicit null (no udcCode locally) and
+        // size is 0 (member counts unknown without ARIA structure).
         let row = try #require(communities.first)
-        for key in ["id", "estate", "color"] {
-            #expect(row.keys.contains(key), "missing community row field: \(key)")
-        }
-        #expect((row["estate"] as? String) == "home")
+        #expect(Set(row.keys) == ["id", "label", "size"])
+        #expect(row["label"] is NSNull)
+        #expect((row["size"] as? Int) == 0)
+        // Ids are a stable running index across the fallback rollup.
+        let ids = communities.compactMap { $0["id"] as? Int }
+        #expect(ids == [0, 1, 2])
     }
 
     @Test("?estate= filters the analytic overlay to one estate")
@@ -200,36 +208,34 @@ struct GraphAPITests {
     }
 }
 
-// MARK: - /sigma.js vendored asset
+// MARK: - Topology renderer asset wiring
 
-struct SigmaAssetServingTests {
+// The Topology renderer is the Canvas2D brain renderer inside app.js — no
+// separate renderer asset is shipped. These tests pin the wiring: the
+// dashboard HTML loads app.js, app.js binds /api/graph and contains the
+// Canvas2D renderer entry points, and the retired /sigma.js path stays off
+// the allow-list.
+struct TopologyRendererAssetTests {
 
-    @Test("GET /sigma.js serves the vendored renderer with the JS content-type")
-    func sigmaServed() async throws {
+    @Test("Retired /sigma.js path is off the allow-list and serves 404")
+    func sigmaRetired() async throws {
+        #expect(StaticAssets.asset(for: "/sigma.js") == nil)
         let (host, port) = try await makeStartedHost()
         defer { Task { await host.stop() } }
-        let (status, ctype, body) = try await httpGET(port: port, path: "/sigma.js")
-        #expect(status == 200)
-        #expect(ctype?.hasPrefix("text/javascript") == true)
-        // The vendored renderer exposes the Sigma-style graph API the topology
-        // driver consumes; assert the public entry point is present.
-        #expect(body.contains("Sigma"))
+        let (status, _, _) = try await httpGET(port: port, path: "/sigma.js")
+        #expect(status == 404)
     }
 
-    @Test("Asset allow-list includes /sigma.js and still rejects off-list paths")
-    func allowListIncludesSigma() {
-        #expect(StaticAssets.asset(for: "/sigma.js") != nil)
-        #expect(StaticAssets.asset(for: "/sigma.js.bak") == nil)
-        #expect(StaticAssets.asset(for: "/../sigma.js") == nil)
-    }
-
-    @Test("The dashboard loads /sigma.js and the Topology view binds /api/graph")
+    @Test("The dashboard loads /app.js and the Topology view binds /api/graph")
     func dashboardWiresTopology() async throws {
         let (host, port) = try await makeStartedHost()
         defer { Task { await host.stop() } }
         let (_, _, html) = try await httpGET(port: port, path: "/")
-        #expect(html.contains("/sigma.js"))
+        #expect(html.contains("/app.js"))
         let (_, _, js) = try await httpGET(port: port, path: "/app.js")
         #expect(js.contains("/api/graph"))
+        // Canvas2D brain renderer entry points live in app.js itself.
+        #expect(js.contains("drawBrainFrame"))
+        #expect(js.contains("selectBrainNode"))
     }
 }
