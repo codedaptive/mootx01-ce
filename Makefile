@@ -27,7 +27,7 @@ HARNESS := docs/validation/substrate_math_performance/test-harness
 DIST    ?= dist
 
 .PHONY: help build build-swift build-rust test test-swift test-rust \
-        conformance release list clean clean-dry clean-index check-static-assets
+        conformance release list clean clean-dry clean-index check-static-assets check-edition-boundary
 
 help:
 	@echo "mootx01 build targets:"
@@ -38,6 +38,7 @@ help:
 	@echo "  test-swift   — swift test each Swift package (skips ones with no Tests/)"
 	@echo "  test-rust    — cargo test each Rust crate"
 	@echo "  check-static-assets — verify StaticAssets.swift matches DashboardAssets/ source"
+	@echo "  check-edition-boundary — verify no SHARED file references an EE-only path"
 	@echo "  conformance  — cross-language shared-vector conformance gate"
 	@echo "  release      — build host-arch release archive (mootx01 + moot-mgr) into $(DIST)/"
 	@echo "  list         — print discovered packages and crates"
@@ -61,7 +62,7 @@ build-rust:
 	@echo "✓ all Rust crates built"
 
 # ── Test ────────────────────────────────────────────────────────────────
-test: test-swift test-rust check-static-assets
+test: test-swift test-rust check-static-assets check-edition-boundary
 
 test-swift:
 	@for d in $(SWIFT_PKGS); do \
@@ -98,7 +99,6 @@ check-static-assets:
 	cp apps/moot-mgr/Sources/MootManager/DashboardAssets/index.html \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/app.css \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/app.js \
-	   apps/moot-mgr/Sources/MootManager/DashboardAssets/sigma.js \
 	   apps/moot-mgr/Sources/MootManager/DashboardAssets/gen_static_assets.sh \
 	   "$$TMPDIR/" && \
 	bash "$$TMPDIR/gen_static_assets.sh" "$$TMPDIR/StaticAssets.swift.new" && \
@@ -109,6 +109,26 @@ check-static-assets:
 	     echo "       Then commit the regenerated StaticAssets.swift." && \
 	     exit 1; }
 	@echo "✓ StaticAssets.swift is in sync with DashboardAssets/"
+
+# ── Edition-boundary lint gate ──────────────────────────────────────────────
+# Enforces the core invariant of EDITION_BOUNDARY.md / ADR-009: SHARED code (the
+# tree this edition ships) must not reference an EE-only path, or it cannot
+# build/test/run standalone. Greps SHARED paths for the high-signal EE-internal
+# markers (docs_internal/, .claude/rules/). Excludes ADR-009 (which DEFINES the
+# boundary by naming these paths) and apps/moot-agent-skills (which documents the
+# Claude Code .claude/ convention for a user's own project, not this repo).
+check-edition-boundary:
+	@hits=$$(git grep --untracked -nE "docs_internal|\.claude/rules" -- \
+	  'packages/**' 'apps/**' 'examples/**' 'docs/**' \
+	  ':!apps/moot-bridge/**' ':!docs/AGENTS.md' ':!docs/CLAUDE.md' \
+	  ':!docs/decisions/ADR-009-edition-boundary.md' ':!apps/moot-agent-skills/**' || true); \
+	if [ -n "$$hits" ]; then \
+	  echo "ERROR: SHARED code references an EE-only path (see EDITION_BOUNDARY.md / ADR-009):"; \
+	  echo "$$hits"; \
+	  echo "Fix: vendor the material into the package, or move it to a public docs/ location."; \
+	  exit 1; \
+	fi
+	@echo "✓ edition boundary clean — no SHARED→EE-only references"
 
 # ── Conformance ───────────────────────────────────────────────────────────
 # The cross-language gate: Swift and Rust must stay in lockstep.

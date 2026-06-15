@@ -1,13 +1,16 @@
 //! GRID SYNC ENFORCEMENT (Rust leg) — asserts that
 //! `neuron_kit::composition_grid::all()` produces exactly the composition name
-//! set recorded in the SHARED fixture file:
+//! set recorded in the package-local fixture file:
 //!
-//!   tools/mcp-benchmarker/conformance/composition-grid.json
+//!   packages/kits/NeuronKit/conformance/composition-grid.json
 //!
 //! This is the Rust mirror of the Swift `CompositionGridSyncTests`. That same
 //! fixture is what the benchmarker's column list derives from, so any
 //! divergence between the Rust grid, the Swift grid, and the benchmarker's
 //! columns surfaces as a test failure in BOTH languages — not as silent drift.
+//!
+//! The fixture lives inside NeuronKit's own package tree so CE builds (which
+//! do not ship tools/) can resolve it without reaching outside the package.
 //!
 //! NOTE ON "vector": the Rust grid contains "vector" (used inside weighted-all);
 //! the benchmarker omits the standalone "vector" column. The fixture carries the
@@ -28,22 +31,15 @@ struct GridFixture {
     composition_names: Vec<String>,
 }
 
-/// Resolve tools/mcp-benchmarker/conformance/composition-grid.json from this
-/// test file's location:
+/// Resolve packages/kits/NeuronKit/conformance/composition-grid.json from
+/// CARGO_MANIFEST_DIR — package-local so CE builds (which do not ship
+/// tools/) can resolve it without referencing the repo root:
 ///   CARGO_MANIFEST_DIR = packages/kits/NeuronKit/rust
-///     → NeuronKit/ (pop ×1)
-///     → kits/      (×2)
-///     → packages/  (×3)
-///     → repo root  (×4)
-///     → tools/mcp-benchmarker/conformance/composition-grid.json
+///     → NeuronKit/ (pop ×1 — package root)
+///     → NeuronKit/conformance/composition-grid.json
 fn fixture_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // .../NeuronKit/rust
-    p.pop(); // NeuronKit/
-    p.pop(); // kits/
-    p.pop(); // packages/
-    p.pop(); // repo root
-    p.push("tools");
-    p.push("mcp-benchmarker");
+    p.pop(); // NeuronKit/ (package root)
     p.push("conformance");
     p.push("composition-grid.json");
     p

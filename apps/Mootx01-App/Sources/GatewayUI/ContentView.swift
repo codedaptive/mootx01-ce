@@ -9,7 +9,7 @@ import MootGateway
 // Apple Surfaces (the adapter shells, run live), and Edges (the seam readout).
 //
 // All user-visible chrome goes through String(localized:) per
-// .claude/rules/localization.md (English-as-key, no catalog ships).
+// docs/engineering/LOCALIZATION_GUIDE.md (English-as-key, no catalog ships).
 // Model-driven Text (results, wire JSON, mapping data) is content, not display
 // literals, and stays verbatim.
 

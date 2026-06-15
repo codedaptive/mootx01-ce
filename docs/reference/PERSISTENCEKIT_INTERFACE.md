@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-06-15
+version: 1.0.1
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -697,6 +697,88 @@ ports (Rust uses rusqlite, the `postgres` crate, and the `aes-gcm`
 crate — the recorded C-1 exception). There are therefore no
 Exempt rows for this package.
 
+Two types appear as `rust-only` in the concordance audit because the Swift
+declarations use `public indirect enum` and the audit regex only matches
+`public enum`: `StoragePredicate` and `GeneratedExpression` are both public
+in Swift and Rust; the `indirect` keyword is a recursive-enum qualifier, not
+a visibility modifier. The rows below document these as the swift+rust types
+they are.
+
+One type — `StorageReplicator` — is Swift-only: the Rust port exposes the
+same replication operations as free functions (`replicate`, `flush`, `hydrate`)
+in `replication.rs`, not as a named namespace type. The `DirtyKey` type is
+Rust-only: the Swift implementation uses an internal (non-`public`) `DirtyKey`
+struct inside `IncrementalReplicationSession.swift`.
+
+### Core protocol and value types
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `Storage` (protocol) | `Storage` (trait) | Top-level backend protocol/trait. Swift: `async throws` methods. Rust: synchronous `StorageResult<T>` — sanctioned async/sync seam (§ 1). |
+| `StorageTransaction` (protocol) | `StorageTransaction` (trait) | Transaction handle carrying `rowStore`, `blobStore`, `auditLog`. Rust `transaction` is non-generic (object-safety; block returns `StorageResult<()>`). |
+| `IsolationLevel` | `IsolationLevel` | Three cases: `readCommitted`/`ReadCommitted`, `repeatableRead`/`RepeatableRead`, `serializable`/`Serializable`. |
+| `RowStore` (protocol) | `RowStore` (trait) | Typed row I/O. `insert`, `upsert`, `update`, `delete`, `query`, `count`. Swift `async throws` / Rust `StorageResult`. |
+| `RowKey` (typealias `UUID`) | `RowKey` (type alias `uuid::Uuid`) | Primary key type. |
+| `StorageRow` | `StorageRow` | `values: [String: TypedValue]` / `HashMap<String, TypedValue>`. |
+| `RowHandle` | `RowHandle` | `table: String`, `key: RowKey`. |
+| `BlobStore` (protocol) | `BlobStore` (trait) | Opaque byte I/O. `put`, `get`, `delete`, `exists`, `size`. |
+| `BlobKey` (typealias `String`) | `BlobKey` (type alias `String`) | Blob key type. |
+| `AuditLog` (protocol) | `AuditLog` (trait) | Append-only HLC-ordered audit. `append`, `appendBatch`/`append_batch`, `iterate`, `eventsForRow`/`events_for_row`, `count`. |
+| `StorageObserver` (protocol) | `StorageObserver` (trait) | Change notification. `observe(table:events:)` / `observe(table, events)`. Swift returns `AsyncStream<TableChange>`; Rust returns `mpsc::Receiver<TableChange>` — sanctioned seam. |
+| `StorageEvent` | `StorageEvent` | Three cases: `insert`/`Insert`, `update`/`Update`, `delete`/`Delete`. |
+| `TableChange` | `TableChange` | Row change notification: `table`, `event`, `rowKey`/`row_key`, `values`, `hlc`. |
+| `BlobEvent` | `BlobEvent` | Two cases: `put`/`Put`, `delete`/`Delete`. |
+| `BlobChange` | `BlobChange` | Blob change notification: `key`, `event`, `bytes`. `bytes` is `Data?`/`Option<Vec<u8>>`; carries payload on `put`, nil/None on `delete`. |
+| `NoOpObserver` | `NoOpObserver` | Empty-stream default `StorageObserver` conformer. |
+| `TypedValue` | `TypedValue` | Closed value enum: `null`/`Null`, `bool`/`Bool`, `int`/`Int`, `bitmap`/`Bitmap`, `float`/`Float`, `text`/`Text`, `blob`/`Blob`, `uuid`/`Uuid`, `timestamp`/`Timestamp`, `json`/`Json`, `hlc`/`Hlc`, `fingerprint`/`Fingerprint`, `array`/`Array`. Case-for-case identical. |
+| `Column` | `Column` | `table: String`, `name: String`. |
+| `ColumnType` | `ColumnType` | Eleven cases: `uuid`, `bitmap`, `text`, `timestamp`, `float`, `int`, `bool`, `blob`, `json`, `hlc`, `fingerprint`. |
+| `StoragePredicate` | `StoragePredicate` | Closed predicate algebra. Swift: `public indirect enum` (recursive). Rust: `pub enum`. Same cases: `and`/`And`, `or`/`Or`, `not`/`Not`, `isTrue`/`IsTrue`, `isFalse`/`IsFalse`, comparisons, bitmap predicates. The audit regex misses Swift `indirect` — this is a known regex limitation, not a parity gap. |
+| `OrderDirection` | `OrderDirection` | Two cases: `ascending`/`Ascending`, `descending`/`Descending`. |
+| `OrderClause` | `OrderClause` | `column: Column`, `direction: OrderDirection`. |
+| `SchemaDeclaration` | `SchemaDeclaration` | Schema manifest: `kitID`/`kit_id`, `version`, `tables`, `indices`, `migrations`. |
+| `TableDeclaration` | `TableDeclaration` | Table manifest: `name`, `columns`, `primaryKey`/`primary_key`, `uniqueConstraints`/`unique_constraints`, `generatedColumns`/`generated_columns`, `appendOnly`/`append_only`. |
+| `ColumnDeclaration` | `ColumnDeclaration` | Column manifest: `name`, `type`/`col_type`, `nullable`, `defaultValue`/`default_value`. |
+| `IndexDeclaration` | `IndexDeclaration` | Index manifest: `name`, `table`, `columns`, `unique`. |
+| `Migration` | `Migration` | Schema migration step: `fromVersion`/`from_version` (Int/i32), `toVersion`/`to_version` (Int/i32), `operations` ([SchemaOperation]/Vec<SchemaOperation>). |
+| `SchemaOperation` | `SchemaOperation` | Closed migration-operation enum: `createTable`/`CreateTable`, `dropTable`/`DropTable`, `addColumn`/`AddColumn`, `dropColumn`/`DropColumn`, `renameColumn`/`RenameColumn`, `addIndex`/`AddIndex`, `dropIndex`/`DropIndex`, `custom(sqlite:postgresql:)`/`Custom{sqlite,postgresql}` (per-backend SQL escape hatch). |
+| `GeneratedColumn` | `GeneratedColumn` | Computed column: `name`, `type`/`col_type`, `expression`. |
+| `GeneratedExpression` | `GeneratedExpression` | Integer expression algebra. Swift: `public indirect enum` (recursive). Rust: `pub enum`. Same cases: `column`/`Column`, `literal`/`Literal`, `bitAnd`/`BitAnd`, `bitOr`/`BitOr`, `bitXor`/`BitXor`, `shiftRight`/`ShiftRight`, `shiftLeft`/`ShiftLeft`, `equal`/`Equal`, `notEqual`/`NotEqual`. Audit regex limitation as for `StoragePredicate`. |
+| `EstateConfiguration` | `EstateConfiguration` | See EstateConfiguration field parity table below. |
+| `BackendConfiguration` | `BackendConfiguration` | Three cases: `sqlite(url:busyTimeout:)`/`Sqlite{…}`, `postgresql(…)`/`Postgresql{…}`, `inMemory`/`InMemory`. |
+| `NovelTokenTaggerChoice` | `NovelTokenTaggerChoice` | See NovelTokenTaggerChoice parity table below. |
+| `StorageError` | `StorageError` | Closed error enum. Swift: `throws`; Rust: `StorageResult<T>`. Twelve cases, case-for-case identical. |
+| `InMemoryStorage` | `InMemoryStorage` | In-memory `Storage` conformer/implementor. |
+| `SQLiteStorage` | `SqliteStorage` | SQLite backend (name idiom: `SQLite`/`Sqlite`). |
+| `PostgreSQLStorage` | `PostgresStorage` | PostgreSQL backend (name idiom: `PostgreSQL`/`Postgres`). |
+| `StorageStats` | `StorageStats` | Introspection snapshot. See § 9. |
+| `StorageIntrospection` (protocol) | `StorageIntrospection` (trait) | Optional introspection capability. See § 9. |
+
+### Replication module (swift+rust, incremental)
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `ReplicationCursor` | `ReplicationCursor` | Watermark after flush/hydrate: `hlcWatermark`/`hlc_watermark` (HLC?/Option<HLC>), `rowsWritten`/`rows_written` (Int/usize), `auditEventsWritten`/`audit_events_written` (Int/usize), `blobsWritten`/`blobs_written` (Int/usize). |
+| `ReplicationError` | `ReplicationError` | Closed error enum: `schemaMismatch`/`SchemaMismatch`, `storageFailure`/`StorageFailure`. |
+| `DirtySet` | `DirtySet` | Observer-fed dirty-row accumulator. Swift: `public actor DirtySet` (actor serializes access). Rust: `pub struct DirtySet` with `Mutex<BTreeSet<DirtyKey>>` (owned-state struct, no async runtime). Observable behaviour is identical: accumulate on change notification, drain before each sync run. |
+| `IncrementalReplicationSession` | `IncrementalReplicationSession` | Session-oriented incremental replication: wires `StorageObserver` subscriptions to dirty-set accumulators and runs sync passes. Swift: `public final class IncrementalReplicationSession: Sendable`. Rust: `pub struct IncrementalReplicationSession`. |
+| `BlobDirtySet` (Swift) | `BlobDirtyAccumulator` (Rust) | Blob-change dirty accumulator. The name differs by port convention; the contract is identical: accumulate `BlobChange` notifications, drain to get the (key, bytes) set to sync. |
+| `EstateCacheConfig` | `EstateCacheConfig` | Cache layer config: `enabled`, byte ceiling, sensitivity threshold (clamped ≤ 2). |
+| `CachingRowStore` | `CachingRowStore` | Decorating `RowStore` with InMemory hot tier and LRU eviction (SPEC I-11/I-12). |
+| `CacheInvalidator` | `CacheInvalidator` | Subscribes to `StorageObserver` and invalidates cache entries on `TableChange` (SPEC B-14). |
+
+### Rust-only types (no Swift public counterpart)
+
+| Rust type | Source file | Reason for Rust-only |
+|---|---|---|
+| `DirtyKey` | `rust/src/incremental_replication.rs` | The Swift port has an internal (non-`public`) `struct DirtyKey` inside `IncrementalReplicationSession.swift`. The Rust port exposes it as `pub struct DirtyKey` because Rust's ownership model requires callers to construct and pass dirty keys explicitly. This is an implementation-visibility difference, not a parity gap in observable behaviour. |
+
+### Swift-only types (no Rust public counterpart)
+
+| Swift type | Source file | Reason for Swift-only |
+|---|---|---|
+| `StorageReplicator` | `Sources/PersistenceKitReplication/StorageReplicator.swift` | Caseless-enum namespace for the full-snapshot replication entry points (`replicate(from:to:schema:)`, `flush(from:into:schema:)`, `hydrate(into:from:schema:)`). Rust exposes identical operations as free functions (`replicate`, `flush`, `hydrate`) in `replication.rs`; there is no named namespace type. The audit regex does not match free functions by default; this is a shape-idiom difference, not a parity gap. |
+
 ### Encryption types
 
 | Swift | Rust | Notes |
@@ -1055,6 +1137,9 @@ dependency). IntellectusLib has zero in-repo dependencies, so the
 *End of PersistenceKit Interface.*
 
 ## Changelog
+
+### 1.0.1 -- 2026-06-15
+Completed Swift/Rust concordance table in § 7: added core protocol and value type rows (Storage, StorageTransaction, IsolationLevel, RowStore, RowKey, StorageRow, RowHandle, BlobStore, BlobKey, AuditLog, StorageObserver, StorageEvent, TableChange, BlobEvent, BlobChange, NoOpObserver, TypedValue, Column, ColumnType, StoragePredicate, OrderDirection, OrderClause, SchemaDeclaration, TableDeclaration, ColumnDeclaration, IndexDeclaration, Migration, SchemaOperation, GeneratedColumn, GeneratedExpression, EstateConfiguration, BackendConfiguration, NovelTokenTaggerChoice, StorageError, InMemoryStorage, SQLiteStorage, PostgreSQLStorage, StorageStats, StorageIntrospection); added replication module rows (ReplicationCursor, ReplicationError, DirtySet, IncrementalReplicationSession, BlobDirtySet/BlobDirtyAccumulator, EstateCacheConfig, CachingRowStore, CacheInvalidator); documented DirtyKey as Rust-only and StorageReplicator as Swift-only with justification.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

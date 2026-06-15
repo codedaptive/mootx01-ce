@@ -11,7 +11,7 @@ import SwiftUI
 // captures here will see zero results — but that reflects the UI gap, not
 // a system gap.
 //
-// Display chrome via String(localized:) per .claude/rules/localization.md.
+// Display chrome via String(localized:) per docs/engineering/LOCALIZATION_GUIDE.md.
 
 struct RecallView: View {
     @Bindable var model: AppModel

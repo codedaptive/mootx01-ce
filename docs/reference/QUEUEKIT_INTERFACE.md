@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-06-15
+version: 1.0.1
 description: Public API surface for QueueKit in both the Swift and Rust ports.
 spec_type: kit
 package: QueueKit
@@ -652,6 +652,31 @@ future agents do not re-open the question.
 | `StreamID` | `StreamId` | Sanctioned idiom difference — no rename |
 | `SessionID` | `SessionId` | Sanctioned idiom difference — no rename |
 
+### `Job` and `SignalFile`
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `public struct Job: Sendable, Codable, Identifiable, Hashable` | `pub struct Job` | Wire model for a queued unit of work. Fields: `id`/`id` (JobID/JobId), `streamID`/`stream_id` (StreamID/StreamId), `submittedAt`/`submitted_at` (HLC), `priority`/`priority` (Int/i32), `payload`/`payload` (Data/Vec<u8>), `extensions`/`extensions` ([String:CodableValue]/Map<String,CodableValue>). Serializes to canonical JSON (sorted keys, no whitespace). |
+| `public struct SignalFile: Sendable, Codable` | `pub struct SignalFile` | Completion signal written to `done/`. Fields: `jobID`/`job_id`, `status`/`status` (ObservationStatus), `artifacts`/`artifacts` ([ArtifactRef]/Vec<ArtifactRef>), `completedAt`/`completed_at` (HLC). |
+
+### `ArtifactRef`
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `public enum ArtifactRef: Sendable, Hashable, Codable` | `pub enum ArtifactRef` | Four cases: `filePath`/`FilePath`, `commitHash`/`CommitHash`, `signalFile`/`SignalFile`, `trajectoryStepID`/`TrajectoryStepId` (Swift `ID` / Rust `Id` — sanctioned idiom difference). Each wraps a single `String`. Wire encoding: `{"type": "...", "value": "..."}`. |
+
+### `CodableValue`
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `public indirect enum CodableValue: Sendable, Codable, Hashable` | `pub type CodableValue = serde_json::Value` | Recursive JSON-compatible value type. Swift: closed enum cases `null`, `bool(Bool)`, `int(Int)`, `double(Double)`, `string(String)`, `array([CodableValue])`, `object([String:CodableValue])`. Rust: type alias for `serde_json::Value` (same structural shape; isomorphic). Both survive `send()`/`drain()` round-trip verbatim (SPEC § 6). The Swift declaration uses `indirect` because the enum is recursive; the audit regex does not match `public indirect enum` — this is an audit regex limitation, not a parity gap. |
+
+### `FilesystemBackend`
+
+| Swift | Rust | Notes |
+|---|---|---|
+| `public final class FilesystemBackend: QueueBackend, @unchecked Sendable` | `pub struct FilesystemBackend` implementing `QueueBackend` trait | POSIX maildir backend. Swift: `init(root: URL, hlcGenerator: HLCGenerator) throws`. Rust: `new(root: impl Into<PathBuf>, node_id: i32) -> Result<Self, QueueError>`. Both implement the full `QueueBackend` surface (write/drain/watch/complete/pendingCount/cleanStaleTmp). Maildir structure (`tmp/`, `new/`, `cur/`, `done/`) is identical. |
+
 ### Python port `ToolName` coverage
 
 The Python port (`packages/kits/QueueKit/python/`) has no `ToolName`
@@ -659,11 +684,24 @@ type and no allowlist validation. The Python port covers the Filesystem
 backend only (SPEC § 7), and `ToolName` is a caller-validation concern
 that falls outside the Filesystem byte-identity contract.
 
+### Swift-only types (no Rust counterpart)
+
+These types are present in the Swift port only. They are legitimately one-language: they depend on Apple-platform or orchestration-layer concepts that have no Rust equivalent in the current scope.
+
+| Swift type | Source file | Reason for Swift-only |
+|---|---|---|
+| `MissionContext` | `Sources/QueueKit/Job.swift` | Carries Apple/CI worktree orchestration metadata (missionPath, worktree, branch, autonomyProfile, riskClass, baseCommit, priorTrajectoryID, inheritedSkills). This is a CI/dispatch layer concern embedded in the job extension field; the Rust port has no dispatch-layer concept and does not need to parse it. |
+| `WireFormat` | `Sources/QueueKit/Job.swift` | Caseless-enum namespace for filename construction (`filename(for:)`, `sortableHLC(_:)`) and canonical JSON encoder/decoder. Rust provides equivalent free functions (`filename_for_job`, `sortable_hlc`, `encode_job`, `decode_job`) not as a namespace type; the audit regex does not match free functions by default. |
+| `QueueLatencyWindow` | `Sources/QueueKit/QueueKitTelemetry.swift` | Rolling latency-sample window for percentile telemetry. Swift-only telemetry helper; the Rust port has no IntellectusLib telemetry surface for QueueKit at this time. |
+
 ---
 
 *End of QueueKit Interface.*
 
 ## Changelog
+
+### 1.0.1 -- 2026-06-15
+Completed Swift/Rust concordance table: added rows for `Job`, `SignalFile`, `ArtifactRef`, `CodableValue`, `FilesystemBackend`; documented `MissionContext`, `WireFormat`, and `QueueLatencyWindow` as Swift-only with justification.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

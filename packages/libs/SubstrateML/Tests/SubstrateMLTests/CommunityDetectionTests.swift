@@ -132,8 +132,8 @@ struct CommunityDetectionTests {
     // module tests (rust/src/community_detection.rs). Expected labels were
     // hand-derived from the gain formula
     //     ΔQ(γ) = (k_{i,B} − k_{i,A})/m − γ·k_i·(σ_B − σ_A^excl + k_i)/(2m²)
-    // and are recorded with their derivations in
-    // docs_internal/analysis/MISSION_LOUVAIN_PHASE2_V1_AMENDMENT.md.
+    // at γ=0.05; the canonical assignments are the unique partition that
+    // maximises generalized modularity for each fixture at that resolution.
 
     /// V1 fixture — the live-estate pathology this mission exists for:
     /// 4 tunnel-bonded pairs (w = 1.0), node 0 lattice-star-bonded to one
