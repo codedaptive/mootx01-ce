@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-06-15
+version: 1.0.1
 description: Public API surface for AriaLexiconLib in both the Swift and Rust ports.
 spec_type: kit
 package: AriaLexiconLib
@@ -295,7 +295,7 @@ Conformance gate note: the Rust `acceptance_matrix` test pins the full
 verb set for every noun-row including `Propose` and `Associate`. Any
 regression in these rows will cause the test to fail immediately.
 
-## § 8 — Swift/Rust symbol map
+## § 8 — Swift/Rust Concordance
 
 One row per public concept. AriaLexiconLib is pure vocabulary with zero
 platform binding, so the content is identical across ports: same case sets,
@@ -333,6 +333,9 @@ test; there are no platform-specific bindings in this lib.
 *End of AriaLexiconLib Interface.*
 
 ## Changelog
+
+### 1.0.1 -- 2026-06-15
+Renamed `§ 8 — Swift/Rust symbol map` to `§ 8 — Swift/Rust Concordance` so the concordance audit detects the section. No content changed.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

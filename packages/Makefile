@@ -38,4 +38,4 @@ audit-clear:
 # Same check CI runs (.github/workflows/concordance.yml). Run before committing
 # a new public type. Drop --strict for an advisory report.
 concordance:
-	@cd .. && python3 tools/concordance_audit/concordance_audit.py --strict
+	@cd .. && python3 packages/scripts/concordance_audit/concordance_audit.py --strict

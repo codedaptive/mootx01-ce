@@ -19,11 +19,13 @@
 //! ## What this port resolves
 //!
 //! The estate-construction path here (cache-on default + provision-with-corpus)
-//! resolves two parity-debt items that had no Rust home until moot-mgr got a
-//! Rust twin (see `docs_internal/analysis/PARITY_DEBT_DUAL_PATH_INTAKE.md`):
+//! closes two parity gaps that existed in Swift but had no Rust home:
 //!   - DEBT-1: the cache-on default (`EstateAdmin::resolve_cache_config`).
+//!     The Swift host always wraps a LocusKit store in a CachingRowStore;
+//!     Rust now does the same via `resolve_cache_config`.
 //!   - DEBT-2: provision-with-corpus (the Rust host constructs estates via
-//!     `EstateCoordinator::provision`, not `open`, so semantic recall is lit).
+//!     `EstateCoordinator::provision`, not `open`, so semantic BM25 recall
+//!     is lit from the moment an estate is constructed).
 //!
 //! ## Not ported (headless Linux scope)
 //!

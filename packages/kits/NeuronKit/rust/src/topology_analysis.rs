@@ -43,9 +43,11 @@ pub const TOPOLOGY_MAX_LEVELS: usize = 10;
 /// bonds (bound stays above 0.05 up to ~8 bonds). Large continents joined by
 /// weak bridges have merge thresholds ~= w_bridge/m — orders of magnitude
 /// smaller — so this gamma collapses tunnel-pair fragments into their
-/// lattice stars WITHOUT gluing real continents together. Mirrors Swift
-/// `NeuronKit.topologyResolution`; derivation in
-/// docs_internal/analysis/MISSION_LOUVAIN_PHASE2_V1_AMENDMENT.md.
+/// lattice stars WITHOUT gluing real continents together. Value hand-derived
+/// from the Reichardt-Bornholdt gain formula: ΔQ(γ) = (k_{i,B}−k_{i,A})/m
+/// − γ·k_i·(σ_B−σ_A^excl+k_i)/(2m²), with γ=0.05 chosen so the penalty is
+/// small enough to absorb pair fragments while leaving the inter-continent
+/// bridge gain negative. Mirrors Swift `NeuronKit.topologyResolution`.
 pub const TOPOLOGY_RESOLUTION: f64 = 0.05;
 
 // MARK: input descriptors

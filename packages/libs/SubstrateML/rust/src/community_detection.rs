@@ -404,8 +404,9 @@ mod tests {
     // Identical fixtures and expected canonical labels live in the Swift
     // suite (Tests/SubstrateMLTests/CommunityDetectionTests.swift). Both
     // legs must agree exactly. Expected labels were hand-derived from the
-    // resolution-scaled gain formula; derivations are recorded in
-    // docs_internal/analysis/MISSION_LOUVAIN_PHASE2_V1_AMENDMENT.md.
+    // resolution-scaled gain formula ΔQ(γ) = (k_{i,B}−k_{i,A})/m
+    // − γ·k_i·(σ_B−σ_A^excl+k_i)/(2m²); the canonical assignments are
+    // the unique partition that maximises generalized modularity at γ=0.05.
 
     /// V1 fixture — the live-estate pathology: 4 tunnel-bonded pairs
     /// (w = 1.0), node 0 lattice-star-bonded to one member of each other

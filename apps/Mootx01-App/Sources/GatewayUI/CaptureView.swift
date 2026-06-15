@@ -11,7 +11,7 @@ import SwiftUI
 // never surfaced that way. The moot_update_memory correctExportability(public)
 // mutation can promote an existing private drawer to public post-capture.
 //
-// Display chrome via String(localized:) per .claude/rules/localization.md;
+// Display chrome via String(localized:) per docs/engineering/LOCALIZATION_GUIDE.md;
 // model state and tool results stay verbatim.
 
 struct CaptureView: View {

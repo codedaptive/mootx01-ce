@@ -18,8 +18,8 @@ context:
 The resident-HTTP build makes mootx01 a headless resident HTTP MCP daemon
 alongside the existing moot-mgr monitor daemon. Both are separate resident
 processes, and **each needs a loopback-pinned, zero-dependency HTTP/1.1 server**:
-moot-mgr for its dashboard read-API + control channel (port 7077), mootx01 for
-its MCP JSON-RPC + SSE transport (port 4242). A separate process cannot share
+moot-mgr for its dashboard read-API + control channel (default port 4200), mootx01 for
+its MCP JSON-RPC + SSE transport (default port 4242). A separate process cannot share
 another process's socket, so two running listeners are unavoidable — but two
 *implementations* are not.
 

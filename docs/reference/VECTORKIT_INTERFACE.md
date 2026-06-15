@@ -1,8 +1,8 @@
 ---
 title: VectorKit Interface
 status: active
-version: 1.0.0
-date: 2026-06-14
+version: 1.0.1
+date: 2026-06-15
 description: Public API surface for VectorKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -819,6 +819,7 @@ covered in the per-surface tables above.
 | Resident store | `ResidentArrayStore` | `ResidentArrayStore` | public actor / pub struct | Swift async actor / Rust struct with Arc<Mutex<...>> (no async runtime — sanctioned) |
 | Vector kind discriminant | `VectorKind` | `VectorKind` | public enum UInt8 / pub enum u8 | identical 2-case enum (binary=0/Binary, float=1/Float) |
 | Vector storage key | `VectorRecordKey` | `VectorRecordKey` | public struct / pub struct | identical 3-field struct (itemID/item_id UUID/String, vectorIndex/vector_index UInt32/u32, kind/kind VectorKind) |
+| Typed vector envelope | `VectorPayload` | `VectorPayload` | public struct / pub struct | 4-field struct: kind/kind VectorKind, dim/dim UInt32/u32, bytes/bytes [UInt8]/Vec<u8>, scale/scale Float?/Option<f32>. Carries raw bytes + decode metadata. Int8 writes are rejected fail-closed in VectorStore; `scale` is preserved as a placeholder pending int8 policy ratification (SPEC § I-4a). |
 
 ## § 8 — Telemetry
 
@@ -841,6 +842,9 @@ Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
 *End of VectorKit Interface.*
 
 ## Changelog
+
+### 1.0.1 -- 2026-06-15
+Added `VectorPayload` row to the Swift/Rust Concordance — engine types table. Type exists in both ports; the audit regex missed it because the Swift declaration does not use a keyword the regex tracks (VectorPayload is a plain `public struct`; the gap was solely a missing concordance row).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
