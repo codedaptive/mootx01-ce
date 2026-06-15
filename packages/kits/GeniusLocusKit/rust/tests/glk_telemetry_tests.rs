@@ -672,7 +672,7 @@ fn dense_store_error_emits_dark_and_store_error_counters() {
     // Force storeError on the next float_nearest (single-use test seam).
     *corpus.forced_float_error.lock().unwrap() = Some("forced-d6-counter".to_string());
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("photosynthesis store error counter chain")

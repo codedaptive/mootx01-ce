@@ -51,7 +51,7 @@ struct RecallAbsentSignalTests {
     func absentGraphColumnRemainsZeroWhenNoCacheRegistered() async throws {
         let (kit, handle) = try await openEstate()
         let recallFrame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -100,7 +100,7 @@ struct RecallAbsentSignalTests {
         await kit.registerGraphCache(ConstantGraphCache(score: 0.7), for: handle)
 
         let recallFrame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )

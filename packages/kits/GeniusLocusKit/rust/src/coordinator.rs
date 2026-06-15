@@ -4193,10 +4193,11 @@ mod tests {
         )
     }
 
-    fn unconfirmed() -> RecallFrame {
+    fn user_confirmed() -> RecallFrame {
         // .full hydration so these tests can assert on content — a .structured
         // recall returns content == "" (spec § 7.3 / Swift parity).
-        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+        // UserConfirmed: all rows written via Estate::capture are stamped at write time.
+        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
         f.hydration_level = HydrationLevel::Full;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f
@@ -4220,7 +4221,7 @@ mod tests {
         let (coord, h) = open_one();
         let stored = coord.capture(&h, cap_frame("alpha"), NOW).expect("capture");
         assert_eq!(stored.content, "alpha");
-        let rows = coord.recall(&h, unconfirmed(), NOW).expect("recall");
+        let rows = coord.recall(&h, user_confirmed(), NOW).expect("recall");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, stored.id);
         assert_eq!(rows[0].content, "alpha");
@@ -4236,7 +4237,7 @@ mod tests {
             .withdraw(&h, &stored.id, Some("obsolete"), NOW)
             .expect("withdraw");
         // The row is no longer in the unconfirmed set after withdrawal.
-        let rows = coord.recall(&h, unconfirmed(), NOW).expect("recall");
+        let rows = coord.recall(&h, user_confirmed(), NOW).expect("recall");
         assert!(
             rows.iter().all(|r| r.id != stored.id),
             "withdrawn row left the set"

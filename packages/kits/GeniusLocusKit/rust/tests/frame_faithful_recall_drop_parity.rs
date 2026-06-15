@@ -59,7 +59,8 @@ fn make_corpus() -> Arc<Corpus> {
 
 /// corpusOnly request with an optional state-axis override appended to the chain.
 fn corpus_only_request(query: &str, extra: Option<Filter>) -> GLKRecallRequest {
-    let mut chain = vec![Filter::Unconfirmed];
+    // UserConfirmed: all rows written via Estate::capture are stamped at write time.
+    let mut chain = vec![Filter::UserConfirmed];
     if let Some(f) = extra {
         chain.push(f);
     }

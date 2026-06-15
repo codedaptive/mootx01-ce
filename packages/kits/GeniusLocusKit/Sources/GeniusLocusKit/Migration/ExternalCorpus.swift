@@ -79,7 +79,7 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     ///
     /// Each frame is a content-driven query whose expected rank-1 result
     /// is the entry's `id` in a lossless migration. The filter chain is
-    /// `[.unconfirmed, .contentMatches(entry.content)]`:
+    /// `[.userConfirmed, .contentMatches(entry.content)]`:
     ///
     /// - `.contentMatches` is content-driven (not ID-driven) on purpose:
     ///   the benchmark measures whether the migrated branch can *recall*
@@ -90,16 +90,13 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     ///   hybrid BM25+vector recall through the CorpusKit tier (with
     ///   both `vectorScore` and `keywordScore` on each result), call
     ///   `hybridRecall(via:limit:now:)` instead.
-    /// - `.unconfirmed` is required, not incidental. The recall evaluator
-    ///   inserts four implicit filters for any axis the chain leaves
-    ///   unconstrained (spec § 7.9.5), and one of them is `.userConfirmed`.
-    ///   Imported drawers enter the branch through the `capture` verb and
-    ///   are unconfirmed by default, so without an explicit confirmation
-    ///   constraint every freshly imported row would be hidden behind the
-    ///   default `.userConfirmed` filter and the benchmark would report a
-    ///   total loss. Constraining the axis to `.unconfirmed` matches the
-    ///   imported-content state and mirrors the substrate's own branch
-    ///   enumeration in `glkPromoteBranch` / `glkMergeDrawers`.
+    /// - `.userConfirmed` is required, not incidental. The recall evaluator
+    ///   inserts implicit filters for any axis the chain leaves unconstrained
+    ///   (spec § 7.9.5), including a default `.userConfirmed` ceiling.
+    ///   Imported drawers enter the branch through the `capture` verb and are
+    ///   stamped `Confirmation.userConfirmed` at write time, so `.userConfirmed`
+    ///   is the correct filter for surfacing them. This mirrors the substrate's
+    ///   own branch enumeration in `glkPromoteBranch` / `glkMergeDrawers`.
     /// - `hydrationLevel: .structured` because the benchmark only reads
     ///   `Drawer.id`; full blob hydration would be wasted work.
     /// - `ordering: .byCaptureTimeDesc` is the deterministic default that
@@ -108,7 +105,7 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     public func asRecallFrames() -> [LocusKit.RecallFrame] {
         entries.map { entry in
             LocusKit.RecallFrame(
-                filterChain: [.unconfirmed, .contentMatches(entry.content)],
+                filterChain: [.userConfirmed, .contentMatches(entry.content)],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc
             )

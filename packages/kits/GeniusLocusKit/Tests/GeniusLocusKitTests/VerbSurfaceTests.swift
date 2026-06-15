@@ -56,7 +56,7 @@ struct VerbSurfaceTests {
     }
 
     /// A recall frame that matches every newly captured row in the
-    /// test estate. Uses `.unconfirmed` because the evaluator's default
+    /// test estate. Uses `.userConfirmed` because the evaluator's default
     /// insertion (§7.9.5) sets a know-now state cluster when no
     /// explicit state filter is provided, so a confirmation-axis
     /// filter alone is the simplest one-row-class match. Ordering is
@@ -64,7 +64,7 @@ struct VerbSurfaceTests {
     /// first. Matches the pattern used by the GLK fan-out tests.
     private func recallAllActive() -> RecallFrame {
         RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )

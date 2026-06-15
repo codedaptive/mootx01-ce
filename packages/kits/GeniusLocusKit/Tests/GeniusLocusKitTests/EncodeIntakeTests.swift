@@ -57,7 +57,7 @@ struct EncodeIntakeTests {
     /// A recall frame matching every newly captured active row.
     private func recallAllActive() -> RecallFrame {
         RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )

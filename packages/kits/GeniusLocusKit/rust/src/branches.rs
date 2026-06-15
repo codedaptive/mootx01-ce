@@ -122,25 +122,29 @@ pub struct EstateBranch {
 }
 
 impl EstateBranch {
-    /// Recall every unconfirmed row from an estate at `.structured` hydration,
+    /// Recall every captured row from an estate at `.structured` hydration,
     /// draining all pages. Used by the ID-only scans (`recall`,
     /// `compare_to_parent`) where the content body is not needed — `.structured`
     /// returns `content = ""` per spec § 7.3, which is correct for ID diffing.
+    /// `UserConfirmed` is the correct filter: all rows written via `Estate::capture`
+    /// are stamped `Confirmation::UserConfirmed` at write time.
     fn recall_all(estate: &Estate, now: i64) -> Vec<Drawer> {
-        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+        let mut frame = RecallFrame::new(vec![Filter::UserConfirmed]);
         frame.hydration_level = HydrationLevel::Structured;
         frame.ordering = Ordering::ByCaptureTimeDesc;
         estate.recall(frame, now).collect_all()
     }
 
-    /// Recall every unconfirmed row from an estate at `.full` hydration. Used by
+    /// Recall every captured row from an estate at `.full` hydration. Used by
     /// `promote` / `merge_drawers`, which immediately re-capture each row's
     /// content into the parent estate via `Estate::capture` (which rejects empty
     /// content). `.structured` would return `content = ""` and fail the capture
     /// guard for every row — mirrors the Swift `glkPromoteBranch` /
     /// `glkMergeDrawers` `.full` recall frame.
+    /// `UserConfirmed` is the correct filter: all rows written via `Estate::capture`
+    /// are stamped `Confirmation::UserConfirmed` at write time.
     fn recall_all_full(estate: &Estate, now: i64) -> Vec<Drawer> {
-        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+        let mut frame = RecallFrame::new(vec![Filter::UserConfirmed]);
         frame.hydration_level = HydrationLevel::Full;
         frame.ordering = Ordering::ByCaptureTimeDesc;
         estate.recall(frame, now).collect_all()
@@ -508,7 +512,8 @@ mod tests {
         // .full hydration: these branch tests recall drawers and re-file their
         // content (promote / merge), so the content body must be loaded — a
         // .structured recall returns content == "" (spec § 7.3 / Swift parity).
-        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+        // UserConfirmed: all rows written via capture() are stamped at write time.
+        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
         f.hydration_level = HydrationLevel::Full;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f

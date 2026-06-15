@@ -254,8 +254,8 @@ fn e4_expunge_on_locusonly_estate_succeeds_without_vector_cleanup() {
         .expunge(&h, &drawer.id, "locusOnly test", true, NOW)
         .expect("expunge on locusOnly estate must succeed");
 
-    // The drawer must not appear in active recall.
-    let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+    // The drawer must not appear in active recall (UserConfirmed = standard captured-row filter).
+    let frame = RecallFrame::new(vec![Filter::UserConfirmed]);
     let rows = coord
         .recall(&h, frame, NOW)
         .expect("recall after locusOnly expunge");

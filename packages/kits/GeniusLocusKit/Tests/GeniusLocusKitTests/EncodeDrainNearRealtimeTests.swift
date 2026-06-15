@@ -82,7 +82,7 @@ struct EncodeDrainNearRealtimeTests {
     private func hybridRequest(query: String, limit: Int = 200) -> GLKRecallRequest {
         GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.unconfirmed],
+                filterChain: [.userConfirmed],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc),
             mode: .hybrid,
@@ -99,7 +99,7 @@ struct EncodeDrainNearRealtimeTests {
     private func corpusOnlyRequest(query: String, limit: Int = 200) -> GLKRecallRequest {
         GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.unconfirmed],
+                filterChain: [.userConfirmed],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc),
             mode: .corpusOnly,
