@@ -230,9 +230,13 @@ The harness adapters live in `apps/moot-agent-skills/` — one folder per client
 `generic/` (fallback). To activate:
 
 1. Choose the folder that matches the user's AI client.
-2. Copy that adapter's contents into the client's project- or user-level config location
-   (each folder targets that client's native rules/skills format). Install the adapter
-   **only after** the runtime is verified — never against a daemon that isn't answering.
+2. Copy that adapter's contents into the client's project- or user-level config location —
+   the exact destination files are named in that folder's own `README.md` (e.g. `claude/` →
+   `CLAUDE.md` + `.claude/rules/`; `codex/` → `AGENTS.md` + `.agents/skills/`). **Merge, do not
+   overwrite:** if the client already has instructions or rules, append the MOOTx01 blocks
+   rather than replacing the file, and **get the user's explicit approval before changing any
+   existing instruction file.** Install the adapter **only after** the runtime is verified —
+   never against a daemon that isn't answering.
 3. Keep the `apps/moot-agent-skills/shared/` documents nearby as reference, but do **not**
    dump all of them into the model's context — prefer the client's small rule files.
 4. Confirm the behavior took, using the three prompts from `apps/moot-agent-skills/README.md`:

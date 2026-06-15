@@ -1,7 +1,7 @@
 ---
 title: Installer Interface
 status: active
-version: 1.0.1
+version: 1.0.2
 date: 2026-06-15
 description: Public API surface of the mootx01 installer CLI (Swift on macOS/iOS, Rust on Linux/Windows) plus the Swift-only MootInstallerCore host library.
 spec_type: kit
@@ -55,7 +55,10 @@ first). The Swift `MootInstallerCore` *library* has no Rust twin — its host
 internals are reimplemented in the Rust `src/core/` module rather than shared.
 There is no conformance-vector gate here: this is OS host glue (client-config
 wiring), not deterministic substrate compute (the same carve-out as LoopbackHTTP).
-`moot-mgr` (the management console) is macOS-only.
+`moot-mgr` (the observer/manager console) ships in both ports: the **macOS** build is a SwiftUI
+app, and the **Rust** build (`apps/moot-mgr/rust`, headless Linux) is a complete vertical that
+serves the same loopback web dashboard, read-API, and control channel. Only the macOS SwiftUI
+GUI is not ported — the headless host serves the same language-neutral web dashboard assets.
 
 ## § 2 — Public types
 
@@ -287,6 +290,9 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 *End of Installer Interface.*
 
 ## Changelog
+
+### 1.0.2 -- 2026-06-15
+Corrected the moot-mgr platform claim: `moot-mgr` is not macOS-only. `apps/moot-mgr/rust` is a complete headless Linux vertical serving the same loopback web dashboard / read-API / control channel; only the macOS SwiftUI GUI is unported.
 
 ### 1.0.1 -- 2026-06-15
 Corrected: the `mootx01` installer is **not** Swift-only. The Rust vertical (Linux/Windows) reimplements the same install/uninstall CLI natively and wires the same 12 MCP clients; `languages` is now `[swift, rust]`. Documented the split — CLI surface (both ports) vs `MootInstallerCore` library (Swift-only, reimplemented in Rust `core/`) vs `moot-mgr` (macOS-only).

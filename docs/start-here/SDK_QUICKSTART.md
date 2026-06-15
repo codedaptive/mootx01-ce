@@ -110,27 +110,45 @@ That's the whole loop: `capture(CaptureFrame) -> Drawer`, then `recall(RecallFra
 
 ## The same in Rust
 
-The shape is identical; the idioms differ — it's synchronous, you pass `now` (a Unix
-timestamp) explicitly for determinism, recall returns a `Vec<Drawer>` directly, and frame
-fields are snake_case.
+The same write→read loop. The idioms differ: it's synchronous, you pass `now` (epoch seconds)
+explicitly for determinism, recall returns a `Vec<Drawer>` directly (no async stream), and the
+frame fields are snake_case. (Also lifted from the kit tests.)
 
 ```rust
-use genius_locus_kit::coordinator::EstateCoordinator;
+use std::sync::Arc;
+use genius_locus_kit::{EstateCoordinator, EstateHandle};
+use locus_kit::drawer_store::DrawerStore;
+use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+use locus_kit::drawer_operational::CaptureChannel;
+use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
-use locus_kit::filter::RecallFrame;
 
-// open(&mut self, store, owner, zoom_window_low, zoom_window_high) -> Result<EstateHandle, _>
-let handle = coordinator.open(store, owner, low, high)?;
+const NOW: i64 = 1_700_000_000; // epoch seconds (locus_kit stores dates as ISO8601 text)
 
-// capture(&self, &EstateHandle, CaptureFrame, now: i64) -> Result<Drawer, _>
-let drawer = coordinator.capture(&handle, frame, now)?;
+// 1. Open the estate. The coordinator is the Rust front door; `open` takes an
+//    in-memory drawer store and a zoom window (low, high).
+let mut coord = EstateCoordinator::new();
+let store: Arc<dyn DrawerStore> = Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+let handle = coord.open(store, OwnerCredentials::new("my-app"), 0, 100).expect("open");
 
-// recall(&self, &EstateHandle, RecallFrame, now: i64) -> Result<Vec<Drawer>, _>
-let rows = coordinator.recall(&handle, recall_frame, now)?;
+// 2. Capture a memory.
+let frame = CaptureFrame::new(
+    "We decided to use SQLite for local storage.",
+    CaptureChannel::Typed,
+    "decisions",                    // room
+    LatticeAnchor::udc("decision"), // coarse subject anchor
+    "my-app",                       // added_by
+    "default",                      // embedding_model_id
+);
+let drawer = coord.capture(&handle, frame, NOW).expect("capture");
+
+// 3. Recall it. Include Filter::Unconfirmed so the fresh capture isn't hidden by the default.
+let rows = coord
+    .recall(&handle, RecallFrame::new(vec![Filter::Unconfirmed]), NOW)
+    .expect("recall");
+println!("recalled {} row(s); captured id = {}", rows.len(), drawer.id);
 ```
-
-For the exact `CaptureFrame` / `RecallFrame` field names (snake_case mirrors of the Swift ones
-above), see a worked example under `packages/kits/GeniusLocusKit/rust/tests/`.
 
 ## Where your data lives
 
@@ -152,6 +170,8 @@ designed to stand alone. That's the "modular" promise: take only what you need.
   kit, Swift and Rust).
 - **The substrate, conceptually** — [`SUBSTRATE_FOR_DEVELOPERS.md`](SUBSTRATE_FOR_DEVELOPERS.md)
   (thirteen layers, two minutes each).
-- **Worked examples** — `examples/` (full small apps) and the kit `Tests/` (the most precise,
-  always-compiling reference).
+- **Worked examples** — the runnable apps `examples/MootNotepad`, `examples/MootTodo`, and
+  `examples/MootCalendarIngest`, plus the kit `Tests/` (the most precise, always-compiling
+  reference — every snippet above is lifted from there). *(`examples/SDK/*` are aspirational
+  stubs, not yet built — skip them for now.)*
 - **The grammar** — `docs/concepts/ARIA_LEXICON.md` (one noun, nine verbs, four adjectives).
