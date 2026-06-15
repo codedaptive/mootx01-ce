@@ -3,15 +3,23 @@
   "_about": "Machine-readable companion to docs/start-here/INSTALL_SURFACE.md — facts an AI agent can parse before touching a user's machine. INSTALL_SURFACE.md is the authoritative human source; keep this in sync with it. Always confirm against the live repository (install scripts + release notes) before running commands.",
   "repo": "codedaptive/mootx01-ce",
   "ports": {
-    "daemon": 4242,
-    "dashboard": 4200,
-    "hunt_up_if_taken": true,
+    "daemon": {
+      "default": 4242,
+      "explicit": "an explicit port (--http <port> or MOOTX01_HTTP_PORT) binds exactly and fails if busy — never hunts",
+      "auto": "--http auto hunts upward from 4242 to the first free port",
+      "bound_port_file": "<data_dir>/daemon.port"
+    },
+    "dashboard": {
+      "default": 4200,
+      "behavior": "the built-in default hunts upward from 4200; an explicitly requested port binds exactly and fails if busy",
+      "bound_port_file": "<data_dir>/mgr.port"
+    },
     "retired": [7077]
   },
   "platforms": {
     "macos": { "build": "swift", "products": ["mootx01", "moot-mgr"], "hosts_estate": true, "service_manager": "launchd" },
     "linux": { "build": "rust", "products": ["mootx01"], "hosts_estate": true, "service_manager": "systemd-user" },
-    "windows": { "build": "rust", "products": ["mootx01.exe"], "hosts_estate": true, "service_manager": "task-scheduler" }
+    "windows": { "build": "rust", "products": ["mootx01.exe"], "hosts_estate": true, "service_manager": "task-scheduler", "note": "install.ps1 downloads the binary and wires clients over stdio (no resident daemon); run 'mootx01 install' afterward to register the Task Scheduler daemon and rewire clients to the HTTP daemon" }
   },
   "install": {
     "download_unix": "curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh",
