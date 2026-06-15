@@ -23,7 +23,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -275,10 +275,18 @@ actor FederationStateActor {
         isEnabled = true
     }
 
-    func disable() {
+    func disable() async {
         isEnabled = false
-        for task in observerTasks { task.cancel() }
+        // Cancel each observer task, then await its completion so write
+        // capture is deterministically stopped before disable returns —
+        // no late write can land in the outbox across the disable boundary.
+        // This mirrors the Rust port joining its observer worker threads in
+        // `stop_observers`. Cancelling without awaiting would leave a race
+        // window where a buffered change is still processed after disable.
+        let tasks = observerTasks
         observerTasks.removeAll()
+        for task in tasks { task.cancel() }
+        for task in tasks { _ = await task.value }
         for sub in subscribers { sub.finish() }
         subscribers.removeAll()
         pendingOutbound.removeAll()
@@ -491,11 +499,17 @@ actor FederationStateActor {
     /// upsert, insert-if-absent, delete, or early-return. The length comes
     /// from the cross-product of cases, not from complex logic.
     ///
-    /// Note: the `lastWriterWinsByHLC` arm currently performs an unconditional
-    /// upsert without comparing the incoming HLC against the stored row's HLC.
-    /// That LWW comparison bug is tracked separately and is out of scope here;
-    /// the envelope shape change does not alter this behavior.
-    private func applyInbound(
+    /// `lastWriterWinsByHLC` compares the incoming record's HLC against the
+    /// stored row's `_syncHLC`. If the incoming HLC is older (strictly less),
+    /// the write is silently dropped. On every apply that wins the comparison
+    /// the row is written with `_syncHLC` so the next inbound can compare.
+    /// This mirrors the CloudKitStateActor.applyInbound semantics exactly.
+    /// The same HLC gate applies to delete events: a stale delete (incoming
+    /// HLC < local `_syncHLC`) is silently rejected; a newer delete proceeds.
+    ///
+    /// Internal (not private) so the LWW force-tests can call it directly
+    /// via @testable import without going through the full push/pull stack.
+    func applyInbound(
         _ record: SyncRecord,
         syncedTable: SyncedTable,
         storage: any Storage
@@ -511,7 +525,41 @@ actor FederationStateActor {
                     conflictColumns: [syncedTable.primaryKeyColumn]
                 )
 
-            case .lastWriterWinsByHLC, .remoteWins:
+            case .lastWriterWinsByHLC:
+                // Compare HLC; only apply if remote >= local.
+                // Mirrors CloudKitStateActor.applyInbound exactly.
+                let existing = try? await storage.rowStore.query(
+                    table: record.table,
+                    where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
+                )
+                if let first = existing?.first {
+                    // Recover the stored HLC from either `.hlc` (InMemory, where
+                    // TypedValue is preserved verbatim) or `.int` (SQLite/Postgres,
+                    // where the schema does not declare _syncHLC as .hlc so
+                    // readColumn returns the raw packed integer). Both cases carry
+                    // the canonical HLC.packed layout (node<<56 | logical<<40 | phys).
+                    let localHLC: HLC?
+                    switch first["_syncHLC"] ?? .null {
+                    case .hlc(let h): localHLC = h
+                    case .int(let i): localHLC = HLC(packed: UInt64(bitPattern: i))
+                    default: localHLC = nil
+                    }
+                    let incomingHLC = record.hlc.asHLC
+                    if let localHLC, incomingHLC < localHLC {
+                        return
+                    }
+                }
+                // Merge sync meta into the persisted row so the next inbound
+                // write can read _syncHLC back and compare.
+                var rowValues = values
+                rowValues["_syncHLC"] = .hlc(record.hlc.asHLC)
+                _ = try await storage.rowStore.upsert(
+                    table: record.table,
+                    values: rowValues,
+                    conflictColumns: [syncedTable.primaryKeyColumn]
+                )
+
+            case .remoteWins:
                 _ = try await storage.rowStore.upsert(
                     table: record.table,
                     values: values,
@@ -538,8 +586,30 @@ actor FederationStateActor {
                 // Append-only tables are write-once; silently reject remote deletes.
                 return
 
-            case .lastWriterWinsByHLC, .remoteWins:
-                // Remote delete wins; hard-delete the row by primary key.
+            case .lastWriterWinsByHLC:
+                // HLC gate on the delete path: a stale delete (incoming HLC <
+                // local _syncHLC) must not remove a newer local row. A newer
+                // delete (incoming HLC >= local _syncHLC) proceeds.
+                let existing = try? await storage.rowStore.query(
+                    table: record.table,
+                    where: .eq(Column(table: record.table, name: syncedTable.primaryKeyColumn), .uuid(record.rowKey))
+                )
+                if let first = existing?.first {
+                    let localHLC: HLC?
+                    switch first["_syncHLC"] ?? .null {
+                    case .hlc(let h): localHLC = h
+                    case .int(let i): localHLC = HLC(packed: UInt64(bitPattern: i))
+                    default: localHLC = nil
+                    }
+                    let incomingHLC = record.hlc.asHLC
+                    if let localHLC, incomingHLC < localHLC {
+                        return
+                    }
+                }
+                _ = try await storage.rowStore.delete(table: record.table, where: predicate)
+
+            case .remoteWins:
+                // Remote delete wins unconditionally; hard-delete the row by primary key.
                 _ = try await storage.rowStore.delete(table: record.table, where: predicate)
 
             case .localWins:
