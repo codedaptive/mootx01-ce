@@ -33,6 +33,12 @@ Names the technique and points at the kit. Roughly two minutes per
 section. Reading this is enough to build on top of MOOTx01 with
 confidence; it is not enough to maintain the substrate itself.
 
+**[`SDK_QUICKSTART.md`](SDK_QUICKSTART.md)** — the hands-on companion to the
+developer guide: add the substrate to a project and run the core write→read
+loop (open an estate, capture a memory, recall it), in Swift and Rust, with the
+modular module map. The example is lifted from the kit tests, so it works as
+written. Read this when you're ready to integrate, not just evaluate.
+
 **[`SUBSTRATE_FOR_MAINTAINERS.md`](SUBSTRATE_FOR_MAINTAINERS.md)** —
 for port maintainers, contributors, and engineers reading the kit
 code. Same thirteen layers as the developer guide, but each section
@@ -67,8 +73,9 @@ in shape.
 After reading the guide that matches your role, the next step
 depends on what you came for:
 
-- **Build on top of MOOTx01** → [`../reference/`](../reference/)
-  for the kit-level specs you will integrate against.
+- **Build on top of MOOTx01** → [`SDK_QUICKSTART.md`](SDK_QUICKSTART.md) for the
+  hands-on open→capture→recall loop, then [`../reference/`](../reference/) for the
+  kit-level specs you integrate against.
 - **Maintain or port the substrate** → [`../engineering/`](../engineering/)
   for the cookbook and methodology, then [`../decisions/`](../decisions/)
   for the record of every kernel and architecture selection.
