@@ -121,7 +121,7 @@ enum RecipeTools {
             description: "Synthesize memories into a grounded context document: hybrid-recall and summarise into patterns, success rate, recommendations, and key insights.",
             inputSchema: objectSchema(
                 properties: [
-                    "filter": stringSchema("Filter kind: userConfirmed (default — surfaces all normally-captured drawers), unconfirmed (confirmation=0 inbox only), exportable, contained, currentlyBelieve."),
+                    "filter": stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve."),
                     "limit": integerSchema("Max drawers to recall."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
                 ],
@@ -146,7 +146,7 @@ enum RecipeTools {
                     "limit": integerSchema("Max ranked matches to return. Default 20."),
                     "pool": integerSchema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit."),
                     "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names are rejected."),
-                    "filter": stringSchema("Filter kind: userConfirmed (default — surfaces all normally-captured drawers), unconfirmed (confirmation=0 inbox only), exportable, contained, currentlyBelieve."),
+                    "filter": stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve."),
                     "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
                 ],
                 required: ["query"]),
@@ -643,19 +643,17 @@ enum RecipeTools {
         }
     }
 
-    /// Recall filter decode for grounded_synthesis. Defaults to `.userConfirmed`
-    /// because captures are stamped `Confirmation.userConfirmed` at write time,
-    /// so the absent-filter default surfaces all normally-captured drawers without
-    /// needing a workaround.
+    /// Recall filter decode for grounded_synthesis. Defaults to
+    /// `.unconfirmed` so freshly-captured rows (provenance == 0) are
+    /// visible — the default recall prepend would otherwise prune them
+    /// behind `.userConfirmed`.
     private static func decodeFilter(_ name: String?) -> LocusKit.Filter {
         switch name {
         case "userConfirmed": return .userConfirmed
         case "exportable": return .exportable
         case "contained": return .contained
         case "currentlyBelieve": return .currentlyBelieve
-        // Absent or unknown filter → userConfirmed: captures are stamped
-        // Confirmation.userConfirmed at write time so the default finds them.
-        default: return .userConfirmed
+        default: return .unconfirmed
         }
     }
 

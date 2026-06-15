@@ -139,7 +139,7 @@ struct LensToolsTests {
 
         let result = try await dispatcher.dispatch(
             name: "moot_lens_trust_synthesis",
-            arguments: .object(["filter": .string("userConfirmed")]))
+            arguments: .object(["filter": .string("unconfirmed")]))
 
         let body = try text(result)
         #expect(body.contains("trust_grounded_synthesis: 2 drawer(s)"))

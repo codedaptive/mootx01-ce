@@ -58,10 +58,10 @@ struct PrecedenceTests {
         let entries = try await kit.glkEventLagPairs(in: handle, window: window)
 
         // Fold with the same window used by the recipe.
-        let deltas = TemporalCausalityFold.fold(
+        let (deltas, _) = TemporalCausalityFold.fold(
             entries: entries,
             windowMinutes: 128,
-            startWatermark: .zero).deltas
+            startWatermark: .zero)
 
         // Pick any target if deltas exist, otherwise use a dummy.
         let target: TemporalFieldCoord

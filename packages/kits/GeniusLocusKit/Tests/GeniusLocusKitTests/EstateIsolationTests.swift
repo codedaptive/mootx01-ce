@@ -49,13 +49,13 @@ struct EstateIsolationTests {
 
         // Recall in B with a permissive filter; expect zero matches.
         //
-        // `.userConfirmed` is included explicitly so the evaluator's
+        // `.unconfirmed` is included explicitly so the evaluator's
         // default-prepend pass (§ 7.9.5) does not insert
         // `.userConfirmed` — newly captured drawers have provenance==0
         // (no confirmation), and a `.userConfirmed` prepend would prune
         // them and mask the isolation we are trying to observe.
         let estateB = try await kit.estate(for: hB)
-        let recall = RecallFrame(filterChain: [.userConfirmed])
+        let recall = RecallFrame(filterChain: [.unconfirmed])
         let stream = await estateB.recall(recall)
         var idsInB: [String] = []
         for await page in stream { idsInB.append(contentsOf: page.rows.map(\.id)) }

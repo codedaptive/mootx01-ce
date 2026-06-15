@@ -269,7 +269,7 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 let mut frame = RecallFrame::new(vec![
                     Filter::InRoom(room.to_string()),
                     Filter::CurrentlyBelieve,
-                    Filter::UserConfirmed,
+                    Filter::Unconfirmed,
                 ]);
                 frame.hydration_level = HydrationLevel::Full;
                 let stream = estate.recall(frame, now);
@@ -316,7 +316,7 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
                 let mut frame = RecallFrame::new(vec![
                     Filter::InRoom(room.to_string()),
                     Filter::CurrentlyBelieve,
-                    Filter::UserConfirmed,
+                    Filter::Unconfirmed,
                 ]);
                 frame.limit = Some(page_size);
                 frame.hydration_level = HydrationLevel::Full;

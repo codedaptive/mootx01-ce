@@ -80,7 +80,7 @@ struct TraceRewardWiringTests {
         let before = Date()
 
         // Recall with external origin so trace rows are written.
-        let frame = RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
+        let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
         let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
         _ = try await kit.recall(handle, req)
 
@@ -114,7 +114,7 @@ struct TraceRewardWiringTests {
         let before = Date()
 
         // Recall with external origin so trace rows are written.
-        let frame = RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
+        let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
         let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
         _ = try await kit.recall(handle, req)
 
@@ -152,7 +152,7 @@ struct TraceRewardWiringTests {
         _ = try await captureOne(kit: kit, handle: handle)
 
         // Recall with default (internal) origin — must not write trace rows.
-        let frame = RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured, limit: 10)
+        let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10)
         let req = GLKRecallRequest(frame: frame, mode: .locusOnly) // origin defaults to .internal
         let results = try await kit.recall(handle, req)
         #expect(!results.hits.isEmpty, "internal recall should still return rows")
@@ -171,7 +171,7 @@ struct TraceRewardWiringTests {
 
         _ = try await captureOne(kit: kit, handle: handle)
 
-        let frame = RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
+        let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
         let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
         let results = try await kit.recall(handle, req)
         #expect(!results.hits.isEmpty, "external recall should return rows")
@@ -188,7 +188,7 @@ struct TraceRewardWiringTests {
 
         _ = try await captureOne(kit: kit, handle: handle)
 
-        let frame = RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
+        let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
         let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
 
         // Two separate external recalls — should accumulate trace rows.
@@ -213,7 +213,7 @@ struct TraceRewardWiringTests {
         let unused = try await captureOne(kit: kit, handle: handle, content: "unused drawer content")
 
         // Recall both drawers with external origin.
-        let frame = RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
+        let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
         let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
         _ = try await kit.recall(handle, req)
 

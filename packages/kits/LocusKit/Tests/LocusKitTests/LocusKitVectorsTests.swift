@@ -343,15 +343,16 @@ actor VectorRunner {
             try await estate.withdraw(rowID: rowID, reason: reason)
             consumeWithdrew(&pendingObs, caseID: caseID)
         case .recallAll(let room):
-            // `.userConfirmed` suppresses insertDefaults re-insertion while
-            // admitting all captured drawers (stamped userConfirmed at write
-            // time by EstateVerbs.capture, cookbook §2.5 bits 18-23).
+            // `.unconfirmed` is included so the evaluator's prepended
+            // default `.userConfirmed` (provenance filter) is not
+            // applied — drawers from `capture` have provenance == 0
+            // which is `.unconfirmed`, matching existing recall tests.
             // `.full` hydration is required because the vector observations
             // check `expectFirstContent` — per spec § 7.3, `.structured`
             // returns content = "" (no blob reads), so only `.full` loads
             // the blob for content-checking conformance ops.
             let frame = RecallFrame(
-                filterChain: [.inRoom(room), .currentlyBelieve, .userConfirmed],
+                filterChain: [.inRoom(room), .currentlyBelieve, .unconfirmed],
                 hydrationLevel: .full)
             let stream = await estate.recall(frame)
             var rows: [Drawer] = []
@@ -361,7 +362,7 @@ actor VectorRunner {
             // `.full` hydration: same reason as recallAll above — vector
             // observations check `expectContents` so content must be loaded.
             let frame = RecallFrame(
-                filterChain: [.inRoom(room), .currentlyBelieve, .userConfirmed],
+                filterChain: [.inRoom(room), .currentlyBelieve, .unconfirmed],
                 hydrationLevel: .full,
                 limit: pageSize)
             let stream = await estate.recall(frame)

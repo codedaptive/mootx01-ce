@@ -83,11 +83,12 @@ fn make_sqlite_estate(db: &TempDb) -> Estate {
 /// the `0xFFF000` feature region of the resulting operational bitmap — the same
 /// OR-merge capture uses (cookbook §2.4).
 ///
-/// Freshly captured drawers are stamped `UserConfirmed` by `Estate::capture`
-/// (provenance bits 18-23). The recall frames in these tests include
-/// `Filter::UserConfirmed` to suppress the `insertDefaults` re-insertion while
-/// admitting all captured drawers. The prune decision is orthogonal to the
-/// confirmation axis.
+/// Freshly captured drawers are `Unconfirmed`. The recall frames in these tests
+/// include `Filter::Unconfirmed` to suppress the default `UserConfirmed`
+/// insertion, admitting these drawers. The prune decision is orthogonal to the
+/// confirmation axis; this mirrors the Swift test's `provenance: Int64(1) << 18`
+/// (UserConfirmed) fixture pattern, which also serves to admit the row through
+/// the default filter.
 fn capture_with_flags(estate: &Estate, content: &str, room: &str, flags: i64, ts: i64) {
     let mut frame = CaptureFrame::new(
         content,
@@ -236,12 +237,12 @@ fn recall_prunes_non_matching_container_and_returns_equivalent_rows() {
     capture_with_flags(&estate, "c-d1", "r1", DrawerFeatureFlags::HAS_VOICE, NOW + 1);
     capture_with_flags(&estate, "c-d2", "r2", DrawerFeatureFlags::HAS_IMAGE, NOW + 2);
 
-    // Filter::UserConfirmed suppresses insertDefaults re-insertion while
-    // admitting all captured drawers. The prune decision is driven by
+    // Filter::Unconfirmed suppresses the default UserConfirmed insertion so
+    // freshly captured drawers surface. The prune decision is driven by
     // HasFeatureFlag, which is orthogonal to the confirmation axis.
     let frame = RecallFrame::new(vec![
         Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-        Filter::UserConfirmed,
+        Filter::Unconfirmed,
     ]);
     let rows = estate.recall(frame, NOW + 3).collect_all();
 
@@ -260,7 +261,7 @@ fn pruned_container_contributes_zero_rows() {
 
     let frame = RecallFrame::new(vec![
         Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-        Filter::UserConfirmed,
+        Filter::Unconfirmed,
     ]);
     let rows = estate.recall(frame, NOW + 3).collect_all();
 
@@ -308,7 +309,7 @@ fn result_identity_pruned_vs_unpruned_scan_on_same_fixture() {
 
     let frame = RecallFrame::new(vec![
         Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-        Filter::UserConfirmed,
+        Filter::Unconfirmed,
     ]);
     let rows = estate.recall(frame, NOW + 5).collect_all();
 
@@ -341,7 +342,7 @@ fn result_identity_many_rooms_all_hasvoice() {
 
     let frame = RecallFrame::new(vec![
         Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-        Filter::UserConfirmed,
+        Filter::Unconfirmed,
     ]);
     let rows = estate.recall(frame, NOW + 100).collect_all();
     assert_eq!(rows.len(), 8, "all 8 hasVoice drawers must be returned");
@@ -374,7 +375,7 @@ fn bounded_behavior_held_under_pruning_path() {
 
     let mut frame = RecallFrame::new(vec![
         Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-        Filter::UserConfirmed,
+        Filter::Unconfirmed,
     ]);
     frame.limit = Some(3);
     let all_rows = estate.recall(frame, NOW + 100).collect_all();
@@ -400,10 +401,8 @@ fn threshold_only_chain_still_returns_all_matching_rows() {
     capture_with_flags(&estate, "y", "ry", DrawerFeatureFlags::HAS_IMAGE, NOW + 2);
     capture_with_flags(&estate, "z", "rz", 0, NOW + 3);
 
-    // CurrentlyBelieve + UserConfirmed — no HasFeatureFlag, no container prune.
-    // Filter::UserConfirmed suppresses insertDefaults re-insertion while
-    // admitting all captured drawers (stamped UserConfirmed at write time).
-    let frame = RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::UserConfirmed]);
+    // CurrentlyBelieve + Unconfirmed — no HasFeatureFlag, no container prune.
+    let frame = RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::Unconfirmed]);
     let rows = estate.recall(frame, NOW + 4).collect_all();
     assert_eq!(rows.len(), 3, "non-pruning path returns all 3 drawers");
 }

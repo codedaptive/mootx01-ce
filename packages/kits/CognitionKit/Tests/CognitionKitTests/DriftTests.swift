@@ -41,7 +41,7 @@ struct DriftRecipeTests {
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.userConfirmed])
+        LocusKit.RecallFrame(filterChain: [.unconfirmed])
     }
 
     // CK-DR-1: filing moved rooms across the split — early drawers in

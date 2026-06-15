@@ -38,7 +38,7 @@ struct ComplexityTests {
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.userConfirmed])
+        LocusKit.RecallFrame(filterChain: [.unconfirmed])
     }
 
     // CK-CM-1: recipe result equals the lens result on the same shaped input.

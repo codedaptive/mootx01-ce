@@ -4,8 +4,7 @@
 // the three recipe tools project into tools/list with `.recipe`
 // provenance and dispatch by name end-to-end against a real in-memory
 // GeniusLocusKit estate (no mocks). Mirrors the MultiEstateRoutingTests
-// harness: captures are stamped Confirmation.userConfirmed at write time, so
-// the default userConfirmed filter surfaces them without an explicit override.
+// harness: recalls use unconfirmed so freshly-captured rows are visible.
 
 import Testing
 import Foundation
@@ -139,7 +138,7 @@ struct RecipeToolsTests {
 
         let result = try await dispatcher.dispatch(
             name: "moot_synthesize",
-            arguments: .object(["filter": .string("userConfirmed")]))
+            arguments: .object(["filter": .string("unconfirmed")]))
 
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
@@ -172,7 +171,7 @@ struct RecipeToolsTests {
             name: "moot_recall_precise",
             arguments: .object([
                 "query": .string("the indemnity was 46 million marks"),
-                "filter": .string("userConfirmed"),
+                "filter": .string("unconfirmed"),
                 "limit": .integer(10),
             ]))
 
@@ -471,7 +470,7 @@ struct RecipeToolsTests {
 
         let result = try await dispatcher.dispatch(
             name: "moot_lens_associations",
-            arguments: .object(["filter": .string("userConfirmed")]))
+            arguments: .object(["filter": .string("unconfirmed")]))
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
         let text = try #require(
@@ -517,7 +516,7 @@ struct RecipeToolsTests {
         let result = try await dispatcher.dispatch(
             name: "moot_lens_concepts",
             arguments: .object([
-                "filter": .string("userConfirmed"),
+                "filter": .string("unconfirmed"),
                 "minSupport": .integer(1),
                 "maxIntentSize": .integer(8),
                 "maxConcepts": .integer(10),

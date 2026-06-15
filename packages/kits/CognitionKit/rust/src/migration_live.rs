@@ -89,7 +89,7 @@ impl<'a> LiveRecipeSubstrate<'a> {
     }
 
     fn one_query() -> RecallFrame {
-        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
+        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
         f.hydration_level = HydrationLevel::Structured;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f
@@ -374,7 +374,7 @@ mod tests {
     /// Recall all unconfirmed rows from an estate — used to inspect the parent
     /// after a promotion.
     fn all_frame() -> RecallFrame {
-        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
+        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
         f.hydration_level = HydrationLevel::Structured;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f
@@ -892,7 +892,7 @@ mod tests {
         // Pass 2 — Full recall: content decode.
         // Full recall (`HydrationLevel::Full`) reads the content blob from disk.
         // If the content TEXT column is not decoded correctly the strings are empty.
-        let mut full_frame = RecallFrame::new(vec![Filter::UserConfirmed]);
+        let mut full_frame = RecallFrame::new(vec![Filter::Unconfirmed]);
         full_frame.hydration_level = HydrationLevel::Full;
         full_frame.ordering = Ordering::ByCaptureTimeDesc;
         let recalled_full = coord2

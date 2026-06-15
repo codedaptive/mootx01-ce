@@ -81,7 +81,7 @@ struct GRT04_TimeAgingCustodyTests {
     }
 
     private var allSensitivityFrame: RecallFrame {
-        RecallFrame(filterChain: [.userConfirmed, .sensitivityAtMost(.secret)])
+        RecallFrame(filterChain: [.unconfirmed, .sensitivityAtMost(.secret)])
     }
 
     // MARK: - 1. Issuance — explicit decay fields round-trip into the store

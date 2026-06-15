@@ -94,7 +94,7 @@ fn capture_frame(content: &str) -> CaptureFrame {
 /// A hybrid recall request with the given query text (matches every newly
 /// captured unconfirmed row, scored raw).
 fn hybrid_request(query: &str) -> GLKRecallRequest {
-    GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Raw)
         .with_limit(50)
@@ -354,7 +354,7 @@ fn unique_token(i: usize) -> String {
 /// A CorpusKit-BM25-only request isolating the semantic lane the encode worker
 /// lights. Mirrors the Swift `corpusOnlyRequest`.
 fn corpus_only_request(query: &str) -> GLKRecallRequest {
-    GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::CorpusOnly)
         .with_scoring(GLKRecallScoring::Raw)
         .with_limit(200)

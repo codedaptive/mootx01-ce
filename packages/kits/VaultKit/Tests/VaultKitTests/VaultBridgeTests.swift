@@ -81,7 +81,7 @@ struct VaultBridgeTests {
 
     /// Count currently-believed drawers in an estate.
     private func currentDrawers(_ kit: GeniusLocusKit, _ handle: EstateHandle) async throws -> [Drawer] {
-        try await kit.recall(handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .full))
+        try await kit.recall(handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full))
     }
 
     // MARK: - currentlyBelieve recall helper (for scope tests)

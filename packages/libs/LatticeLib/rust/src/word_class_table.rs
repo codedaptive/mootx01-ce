@@ -2,52 +2,33 @@
 //
 // Port of WordClassTable.swift and WordClassTagger.swift's fast-path.
 //
-// NOVEL-TOKEN FALLBACK AND THE MIN-OS-VERSION GATE
+// NOVEL-TOKEN FALLBACK
 // The Swift `LatticeLib.wordClass` has two paths for novel (non-table) tokens:
-//   1. Apple: NLTagger with .lexicalClass (cookbook §2.2, platform-bound), BUT ONLY
-//      when `taggerEnabled(osVersion:minOSVersion:)` returns true — i.e. the running
-//      OS major version meets the table's `min_os_version` requirement. When the gate
-//      is disabled (OS too old), Swift returns `.other` for all novel tokens and
-//      records nothing into the pool cache.
+//   1. Apple: NLTagger with .lexicalClass (cookbook §2.2, platform-bound)
 //   2. Non-Apple: the deterministic HMM/Viterbi tagger `HMMTagger.tag`
 //
-// Rust runs exclusively on non-Apple (Linux/Windows). The HMM is the
-// non-Apple novel-token path, byte-identical to Swift's `HMMTagger.tag`.
+// Rust runs exclusively on non-Apple (Linux/Windows). For novel tokens (not in
+// the table), the Rust path calls `word_class::hmm_tag` — the byte-identical
+// port of Swift's `HMMTagger.tag` (integer Viterbi, no floating point, tables
+// mirrored verbatim from HMMTagger.swift). The cross-port conformance guarantee
+// is: Swift non-Apple HMM == Rust HMM (byte-identical).
+// NLTagger is the Apple-only optional path in Swift; it is NOT required to agree
+// with the HMM and has no Rust counterpart (platform binding).
 //
-// MIN-OS-VERSION GATE IN RUST (cookbook §2.2)
-// The `min_os_version` field in the bundled table records the NLTagger OS version
-// used to build the table. On Apple, Swift's `taggerEnabled` gate fires when the
-// running OS is below `min_os_version`, returning `.other` for all novel tokens
-// (rather than invoke an older, differently-behaving NLTagger). Since Rust is
-// non-Apple and has no NLTagger, it applies the equivalent gate by comparing the
-// table's `min_os_version` against a fixed Rust "runtime version" of 0.0: if the
-// table specifies any real Apple OS version (major ≥ 1), the gate fires, and novel
-// tokens return `.other`. This mirrors the gate-disabled Apple behavior and keeps
-// Rust bit-identical to Apple-gate-disabled Swift for the cross-port lookup
-// conformance vectors (lookup_vectors.json).
-//
-// CONSEQUENCE FOR FDC CONFORMANCE (fdc_conformance.json)
-// The three platform-divergent vectors in fdc_conformance.json contain inputs
-// where the non-Q-ID bag terms (e.g. wn: fallbacks) depend on HMM classification.
-// With the gate applied in Rust, those terms are excluded from the bag (novel
-// tokens → .other). The expected codes in fdc_conformance.json for those three
-// vectors are updated to reflect the gate-disabled Rust behavior. They remain
-// platform-divergent (Swift Apple, when gate-enabled on OS ≥ 17, uses NLTagger
-// and produces yet another code — that divergence is expected per cookbook §2.2).
-//
-// HMM BYTE-IDENTITY GATE
-// The HMM byte-identity gate (Swift non-Apple HMM == Rust HMM) is still exercised
-// in `lattice_conformance_test.rs` / `tag_conformance.json`, which explicitly
-// tests the HMM path for the cross-port byte-identity contract. The gate does NOT
-// affect that test since it bypasses the full `word_class` call stack and calls
-// `hmm_tag` directly.
+// The FDC conformance fixture (`fdc_conformance.json`) exercises only
+// table-resident tokens, so it is unaffected by the novel-token path.
+// The HMM byte-identity gate is `tag_conformance.json` /
+// `lattice_conformance_test.rs`.
 //
 // NOVEL-TOKEN RECORDING
-// After classifying a novel token via `hmm_tag` (when the gate allows it), the
-// result is recorded into SHARED_NOVEL_CACHE — mirroring `tagNovelToken` in
-// WordClassTagger.swift which calls `sharedNovelCache.record(token: lowered,
-// wordClass: tagged)`. When the gate is disabled, no recording occurs (mirrors
-// Swift behavior: gate fires → no tagging → no pool record).
+// After classifying a novel token via `hmm_tag`, the result is recorded into
+// SHARED_NOVEL_CACHE — mirroring `tagNovelToken` in WordClassTagger.swift which
+// calls `sharedNovelCache.record(token: lowered, wordClass: tagged)` for both
+// the Apple and non-Apple paths. The cache is initialized by `fdc_runtime.rs`
+// when the bundled artifacts are loaded (stamped with the table version). If the
+// cache has not been initialized yet (SHARED_NOVEL_CACHE not set), the record
+// call is silently skipped — this matches the Swift behavior when
+// `WordClassTableCache.table` is nil (tableVersion defaults to "").
 //
 // WRITABLE-ARTIFACT LOAD PRECEDENCE (cookbook §1.3/§2.2)
 // The PoolReducer merges novel-token observations into a writable copy of the
@@ -127,10 +108,7 @@ pub fn load_with_precedence(artifact_path: &Path) -> Option<WordClassTableCache>
     if let Some(merged) = load_writable_table(artifact_path) {
         let noun_set: HashSet<String> = merged.nouns.into_iter().collect();
         let verb_set: HashSet<String> = merged.verbs.into_iter().collect();
-        // Preserve the min_os_version gate from the merged artifact — the reducer
-        // writes back the same min_os_version it read, so this remains stable.
-        let tagger_enabled = min_os_version_enables_tagger(&merged.min_os_version);
-        return Some(WordClassTableCache { noun_set, verb_set, tagger_enabled });
+        return Some(WordClassTableCache { noun_set, verb_set });
     }
     // Priority 2: compile-time bundled bytes (pristine table).
     WordClassTableCache::from_json(BUNDLED_TABLE_JSON)
@@ -145,41 +123,6 @@ pub fn load_with_precedence(artifact_path: &Path) -> Option<WordClassTableCache>
 pub struct WordClassTableCache {
     pub noun_set: HashSet<String>,
     pub verb_set: HashSet<String>,
-    /// When `false`, novel tokens (table misses) return `.other` without invoking
-    /// the HMM tagger and without recording into SHARED_NOVEL_CACHE. This mirrors
-    /// Apple's `taggerEnabled` gate-disabled path in `WordClassTagger.swift`:
-    /// when the running OS is below `min_os_version`, `tagNovelToken` returns
-    /// `.other` and records nothing.
-    ///
-    /// On Rust, there is no OS version to compare against. Rust treats itself as
-    /// always "below" any real Apple OS version: if `min_os_version` parses to a
-    /// major version ≥ 1 (any real Apple OS), `tagger_enabled` is set to `false`.
-    /// This keeps the Rust encoder gate-disabled behavior bit-identical to the
-    /// Apple gate-disabled path for the cross-port lookup conformance vectors.
-    pub tagger_enabled: bool,
-}
-
-/// Parse the `min_os_version` string (e.g. "17.0") and determine whether the
-/// tagger is enabled on Rust. Since Rust is non-Apple and has no OS version to
-/// compare against, the gate fires whenever the table specifies a real Apple OS
-/// version (major ≥ 1). Returns `false` (gate disabled) for any `major ≥ 1`,
-/// `true` only when the string is absent, empty, or parses to major 0.
-///
-/// This mirrors `taggerEnabled(osVersion:minOSVersion:)` in WordClassTagger.swift
-/// with a fixed Rust "runtime version" of 0.0:
-///   if osVersion.majorVersion != major { return osVersion.majorVersion > major }
-///   → 0 > major → false for any major ≥ 1
-fn min_os_version_enables_tagger(min_os_version: &str) -> bool {
-    if min_os_version.is_empty() {
-        return true;
-    }
-    let parts: Vec<Option<u32>> = min_os_version
-        .split('.')
-        .map(|s| s.parse::<u32>().ok())
-        .collect();
-    let major = parts.first().and_then(|v| *v).unwrap_or(0);
-    // Rust runtime version is 0. A table requiring major ≥ 1 gates the tagger off.
-    major == 0
 }
 
 impl WordClassTableCache {
@@ -188,8 +131,7 @@ impl WordClassTableCache {
         let table: WordClassTable = serde_json::from_slice(data).ok()?;
         let noun_set: HashSet<String> = table.nouns.into_iter().collect();
         let verb_set: HashSet<String> = table.verbs.into_iter().collect();
-        let tagger_enabled = min_os_version_enables_tagger(&table.min_os_version);
-        Some(WordClassTableCache { noun_set, verb_set, tagger_enabled })
+        Some(WordClassTableCache { noun_set, verb_set })
     }
 
     /// Classify a token for the FDC encoder (Step 1 — word-class tagging).
@@ -198,21 +140,17 @@ impl WordClassTableCache {
     /// `LatticeLib.wordClass`: "The verb set is checked before the noun set,
     /// so a token listed under both resolves to `.verb`").
     ///
-    /// Novel tokens (not in either set) are classified through the `tagger_enabled`
-    /// gate before any further work:
-    ///   - Gate disabled (`tagger_enabled == false`): returns `.other` immediately,
-    ///     no HMM call, no cache record. Mirrors Apple's gate-disabled path in
-    ///     `WordClassTagger.tagNovelToken` (OS < min_os_version → `.other`, nothing
-    ///     recorded into the pool cache).
-    ///   - Gate enabled (`tagger_enabled == true`): classify via the deterministic
-    ///     HMM/Viterbi tagger (`word_class::hmm_tag`) and record into
-    ///     `SHARED_NOVEL_CACHE`. This path is unreachable from the bundled
-    ///     WordClassTable.json (min_os_version "17.0" → gate disabled). It would
-    ///     only fire if a future table with min_os_version "0.x" is loaded.
+    /// Novel tokens (not in either set) are classified via the deterministic
+    /// HMM/Viterbi tagger (`word_class::hmm_tag`) — the byte-identical port of
+    /// Swift's `HMMTagger.tag`. This is the non-Apple novel-token path: Rust runs
+    /// only on non-Apple platforms (Linux/Windows), so the HMM is always the
+    /// correct fallback. The HMM result (noun/verb/other) is recorded into
+    /// `SHARED_NOVEL_CACHE` (mirroring `tagNovelToken` in WordClassTagger.swift
+    /// which records for both Apple-NLTagger and non-Apple-HMM paths).
     ///
-    /// The HMM byte-identity gate (`tag_conformance.json` /
-    /// `lattice_conformance_test.rs`) calls `hmm_tag` directly and is unaffected
-    /// by this wrapper.
+    /// The FDC conformance fixture (`fdc_conformance.json`) contains only
+    /// table-resident tokens and is unaffected by this path. The HMM
+    /// byte-identity gate is `tag_conformance.json` / `lattice_conformance_test.rs`.
     pub fn word_class(&self, token: &str) -> WordClass {
         let lowered = token.to_lowercase();
         if lowered.is_empty() {
@@ -225,14 +163,11 @@ impl WordClassTableCache {
         if self.noun_set.contains(&lowered) {
             return WordClass::Noun;
         }
-        // Novel token: apply the min_os_version gate (mirrors Swift's taggerEnabled check).
-        // When the gate is disabled, return .other without invoking the HMM and without
-        // recording into the pool cache — exactly as the Apple gate-disabled path does in
-        // WordClassTagger.swift (taggerEnabled → false → return .other, no sharedNovelCache.record).
-        if !self.tagger_enabled {
-            return WordClass::Other;
-        }
-        // Gate enabled: classify via the deterministic HMM/Viterbi tagger and record.
+        // Novel token: classify via the deterministic HMM/Viterbi tagger, mirroring
+        // Swift's non-Apple `hmmViterbiTag` path in WordClassTagger.swift. Record
+        // the result into the process-wide novel-token cache — fire-and-forget,
+        // outside the lock (mirrors `tagNovelToken` in Swift which calls
+        // `sharedNovelCache.record(token:wordClass:)` for both Apple and non-Apple paths).
         let tagged = hmm_tag(&lowered);
         if let Some(cache) = SHARED_NOVEL_CACHE.get() {
             cache.record(&lowered, tagged);
@@ -266,22 +201,7 @@ impl WordClassTableCache {
         if self.noun_set.contains(&lowered) {
             return WordClass::Noun;
         }
-        // Novel token: no gate applies here regardless of choice.
-        //
-        // The min_os_version gate is an NLTagger OS-availability guard and lives
-        // in the unchoiced `word_class()` path (the encoder's default). When an
-        // explicit choice is passed:
-        //   - Hmm: HMM is platform-independent; no gate applies (Swift contract:
-        //     `.hmm → always HMM, regardless of platform or os_version`).
-        //   - NlTagger: on non-Apple (Rust), NaturalLanguage is unavailable.
-        //     Swift's non-Apple path for NlTagger falls back to HMM (not .other);
-        //     `hmm_tag_with_choice` implements this same fallback on Rust.
-        //     The gate-disabled (.other) path only fires on Apple when OS < min_os_version;
-        //     on Rust there is no Apple OS check, so the non-Apple fallback applies.
-        //
-        // The result (Hmm or NlTagger-as-HMM) is recorded into the pool cache,
-        // mirroring Swift's `tagNovelToken(_:tagger:)` which records for both
-        // the .hmm case and the non-Apple .nlTagger fallback-to-HMM case.
+        // Novel token: dispatch on choice. On Rust both Hmm and NlTagger reach HMM.
         let tagged = crate::word_class::hmm_tag_with_choice(&lowered, choice);
         if let Some(cache) = SHARED_NOVEL_CACHE.get() {
             cache.record(&lowered, tagged);
@@ -308,12 +228,10 @@ fn global_cell() -> &'static RwLock<Arc<WordClassTableCache>> {
     GLOBAL_TABLE.get_or_init(|| {
         // Seed from the bundled bytes. An empty cache (parse failure) is a
         // build error in production but must not panic the holder init.
-        // The fallback uses tagger_enabled=false (most conservative: gate disabled).
         let seed = WordClassTableCache::from_json(BUNDLED_TABLE_JSON)
             .unwrap_or_else(|| WordClassTableCache {
                 noun_set: HashSet::new(),
                 verb_set: HashSet::new(),
-                tagger_enabled: false,
             });
         RwLock::new(Arc::new(seed))
     })

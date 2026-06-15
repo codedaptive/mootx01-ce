@@ -762,19 +762,15 @@ fn decode_sensitivity(name: Option<&str>) -> i64 {
 }
 
 /// Decode the recall filter for recipe tools. Mirrors Swift
-/// `RecipeTools.decodeFilter(_:)` — defaults to `UserConfirmed` because
-/// captures are stamped `Confirmation::UserConfirmed` at write time, so the
-/// absent-filter default surfaces all normally-captured drawers without a
-/// workaround. Mirrors Swift `RecipeTools.decodeFilter`.
+/// `RecipeTools.decodeFilter(_:)` — defaults to Unconfirmed so freshly-
+/// captured rows are visible.
 fn decode_recipe_filter(args: &BTreeMap<String, JsonValue>) -> Filter {
     match args.get("filter").and_then(|v| v.as_str()) {
         Some("userConfirmed") => Filter::UserConfirmed,
         Some("exportable") => Filter::Exportable,
         Some("contained") => Filter::Contained,
         Some("currentlyBelieve") => Filter::CurrentlyBelieve,
-        // Absent or unknown filter → UserConfirmed: captures are stamped
-        // Confirmation::UserConfirmed at write time so the default finds them.
-        _ => Filter::UserConfirmed,
+        _ => Filter::Unconfirmed,
     }
 }
 

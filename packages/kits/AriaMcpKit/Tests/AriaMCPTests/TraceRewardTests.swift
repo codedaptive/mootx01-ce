@@ -219,7 +219,7 @@ struct TraceRewardTests {
         // Internal recall using the default origin (.internal). Must NOT write
         // trace rows (B-10a: only origin==.external triggers trace writes).
         let recallFrame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             limit: nil,
             ordering: .byCaptureTimeDesc

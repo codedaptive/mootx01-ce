@@ -167,7 +167,7 @@ struct PrivacyTierAndReceiptTests {
         // Recall with an explicit sensitivity ceiling so the restricted
         // drawer is visible (the evaluator default would hide it).
         let drawers = try await kit.recall(handle, RecallFrame(
-            filterChain: [.userConfirmed, .sensitivityAtMost(.secret)],
+            filterChain: [.unconfirmed, .sensitivityAtMost(.secret)],
             hydrationLevel: .full))
         #expect(drawers.count == 1)
         #expect(drawers.first?.adjectiveSensitivity == .restricted)
@@ -197,7 +197,7 @@ struct PrivacyTierAndReceiptTests {
         let bridgeB = VaultBridge(kit: kitB, mapping: DrawerMapping(classifyOnImport: false))
         _ = try await bridgeB.importVault(at: vault, into: handleB, now: Self.fixedNow)
         let drawers = try await kitB.recall(handleB, RecallFrame(
-            filterChain: [.userConfirmed, .sensitivityAtMost(.secret)],
+            filterChain: [.unconfirmed, .sensitivityAtMost(.secret)],
             hydrationLevel: .full))
         #expect(drawers.first?.adjectiveSensitivity == .elevated)
     }

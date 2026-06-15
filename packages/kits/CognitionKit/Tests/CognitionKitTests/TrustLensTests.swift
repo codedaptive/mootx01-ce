@@ -44,7 +44,7 @@ struct TrustLensTests {
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.userConfirmed])
+        LocusKit.RecallFrame(filterChain: [.unconfirmed])
     }
 
     // CK-TR-1: the lens ranks by provenance trust — canonical memories

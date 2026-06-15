@@ -127,15 +127,14 @@ mod tests {
             .id
     }
 
-    /// A per-query recall frame over the branch's captured rows. All rows
-    /// written via `Estate::capture` are stamped `Confirmation::UserConfirmed`
-    /// at write time, so `Filter::UserConfirmed` is the correct filter to
-    /// surface them. One frame per corpus concept; the set metrics use the
-    /// union of all queries' results, so this is sufficient to exercise the
-    /// branch-recall plumbing while the scoring math itself is gated by
-    /// benchmark_scoring.
+    /// A per-query recall frame over the branch's unconfirmed rows (freshly
+    /// captured rows are unconfirmed, so the filter must admit them — the
+    /// same `Filter::Unconfirmed` the branch's own snapshot recall uses).
+    /// One frame per corpus concept; the set metrics use the union of all
+    /// queries' results, so this is sufficient to exercise the branch-recall
+    /// plumbing while the scoring math itself is gated by benchmark_scoring.
     fn query() -> RecallFrame {
-        let mut frame = RecallFrame::new(vec![Filter::UserConfirmed]);
+        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
         frame.hydration_level = HydrationLevel::Structured;
         frame.ordering = Ordering::ByCaptureTimeDesc;
         frame

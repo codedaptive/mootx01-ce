@@ -134,7 +134,7 @@ struct RecallDirectorTests {
     /// A recall frame that matches every newly captured row in the test estate.
     private func recallAllActive() -> RecallFrame {
         RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -661,7 +661,7 @@ struct RecallDirectorDenseSignalTests {
 
     private func recallAllActive() -> RecallFrame {
         RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -924,7 +924,7 @@ struct RecallDirector004Tests {
             _ = try await kit.capture(handle, f)
         }
         let request = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
                                limit: 3, ordering: .byCaptureTimeDesc),
             mode: .unionBest,
             scoring: .matrixAware,
@@ -957,7 +957,7 @@ struct RecallDirector004Tests {
 
         // corpusOnly with allowDegraded and no corpus registered must not throw.
         let request = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
                                ordering: .byCaptureTimeDesc),
             mode: .corpusOnly,
             scoring: .raw,
@@ -1048,7 +1048,7 @@ struct RecallDirector004Tests {
 
         for limit in [1, 3, 5, 10] {
             let request = GLKRecallRequest(
-                frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
+                frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
                                    limit: limit, ordering: .byCaptureTimeDesc),
                 mode: .unionBest,
                 scoring: .matrixAware,
@@ -1111,7 +1111,7 @@ struct RecallDirector004Tests {
         await kit.registerMatrixTier(matrix, for: handle)
 
         let request = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
                                limit: 2, ordering: .byCaptureTimeDesc),
             mode: .unionBest,
             scoring: .matrixAware,
@@ -1174,8 +1174,8 @@ struct RecallDirector004Tests {
                             sources: [.locusBitmap, .corpusBM25],
                             score: sv, explanation: [])
         let sketch = RecallQuerySketch(
-            frame: RecallFrame(filterChain: [.userConfirmed]),
-            bitmapPredicates: [.userConfirmed],
+            frame: RecallFrame(filterChain: [.unconfirmed]),
+            bitmapPredicates: [.unconfirmed],
             queryText: "test query content",
             queryTokens: ["test", "query", "content"],
             queryEngram: nil,
@@ -1290,7 +1290,7 @@ struct RecallDirectorSafetyTests {
         // a hit with the tombstoned drawer BEFORE the fix, nil drawer AFTER the fix.
         let request = GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.userConfirmed],
+                filterChain: [.unconfirmed],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc
             ),
@@ -1351,7 +1351,7 @@ struct RecallDirectorSafetyTests {
 
         let request = GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.userConfirmed],
+                filterChain: [.unconfirmed],
                 hydrationLevel: .bitmapOnly,
                 ordering: .byCaptureTimeDesc
             ),
@@ -1408,7 +1408,7 @@ struct RecallDirectorSafetyTests {
 
         let request = GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.userConfirmed],
+                filterChain: [.unconfirmed],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc
             ),
@@ -1462,7 +1462,7 @@ struct RecallDirectorSafetyTests {
         func recall(_ level: LocusKit.HydrationLevel) async throws -> [RecallHit] {
             let request = GLKRecallRequest(
                 frame: RecallFrame(
-                    filterChain: [.userConfirmed], hydrationLevel: level,
+                    filterChain: [.unconfirmed], hydrationLevel: level,
                     limit: 5, ordering: .byCaptureTimeDesc),
                 mode: .unionBest, scoring: .raw, limit: 5,
                 fallback: .allowDegraded)
@@ -1524,7 +1524,7 @@ struct RecallAPI001Tests {
         _ = try await kit.capture(handle, frame)
 
         let recallFrame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -1575,7 +1575,7 @@ struct RecallAPI001Tests {
         _ = try await kit.capture(handle, frame)
 
         let recallFrame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -1647,7 +1647,7 @@ struct RecallDirectorGraphShingleTests {
         await kit.registerGraphCache(ConstantGraphCache(score: 0.8), for: handle)
 
         let recallFrame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -1684,7 +1684,7 @@ struct RecallDirectorGraphShingleTests {
         await kit.registerPreferenceStore(ConstantPreferenceStore(score: 0.9), for: handle)
 
         let recallFrame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -1734,7 +1734,7 @@ struct RecallDirectorGraphShingleTests {
         }
 
         let recallFrame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -1780,7 +1780,7 @@ struct RecallDirectorGraphShingleTests {
         _ = try await kit.capture(handle, frame2)
 
         let recallFrame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .bitmapOnly,  // strips content to ""
             ordering: .byCaptureTimeDesc
         )
@@ -1953,7 +1953,7 @@ struct RecallDirectorAdaptiveLambdaTests {
 
         // Run .rrf — must not throw, must return hits.
         let rrfRequest = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
                                ordering: .byCaptureTimeDesc),
             mode: .unionBest,
             scoring: .rrf,
@@ -1965,7 +1965,7 @@ struct RecallDirectorAdaptiveLambdaTests {
 
         // Run .matrixAware on the same estate — must also return hits.
         let matrixRequest = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
                                ordering: .byCaptureTimeDesc),
             mode: .unionBest,
             scoring: .matrixAware,
@@ -2032,7 +2032,7 @@ struct RecallDirectorAdaptiveLambdaTests {
         await kit.registerMatrixTier(matrix, for: handle)
 
         let request = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
                                limit: 2, ordering: .byCaptureTimeDesc),
             mode: .unionBest,
             scoring: .matrixAware,
@@ -2132,7 +2132,7 @@ struct RecallDirectorAdaptiveLambdaTests {
 
         let request = GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.userConfirmed],
+                filterChain: [.unconfirmed],
                 hydrationLevel: .structured,
                 limit: 2,
                 ordering: .byCaptureTimeDesc),
@@ -2179,7 +2179,7 @@ struct RecallByIDHydrationEquivalenceTests {
     /// A recall frame matching every newly captured active row.
     private func recallAllActive() -> RecallFrame {
         RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -2268,7 +2268,7 @@ struct RecallByIDHydrationEquivalenceTests {
         // drawers. The locus lane places rows directly into the hit set; for content to be
         // present in the hit, the request must ask for `.full` hydration.
         let fullFrame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )

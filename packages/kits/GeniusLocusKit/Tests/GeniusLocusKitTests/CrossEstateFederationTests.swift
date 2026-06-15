@@ -114,11 +114,11 @@ struct CrossEstateFederationTests {
         ))
     }
 
-    /// Recall with `.userConfirmed` so the default `.userConfirmed` prepend
+    /// Recall with `.unconfirmed` so the default `.userConfirmed` prepend
     /// does not prune freshly-captured drawers (provenance == 0). This is
     /// the same frame the GLK-01 fan-out tests use for the same reason.
     private var unconfirmedFrame: RecallFrame {
-        RecallFrame(filterChain: [.userConfirmed])
+        RecallFrame(filterChain: [.unconfirmed])
     }
 
     /// Recall frame that admits ALL sensitivity tiers (normal through secret)
@@ -127,7 +127,7 @@ struct CrossEstateFederationTests {
     /// that default so the contentLevel enforcement tests can verify GLK is
     /// the sole gating mechanism, independent of the recall-frame ceiling.
     private var allSensitivityFrame: RecallFrame {
-        RecallFrame(filterChain: [.userConfirmed, .sensitivityAtMost(.secret)])
+        RecallFrame(filterChain: [.unconfirmed, .sensitivityAtMost(.secret)])
     }
 
     // MARK: - 1. Positive — valid grant yields the source's drawer
@@ -318,10 +318,10 @@ struct CrossEstateFederationTests {
     /// Inject a drawer with arbitrary wing, room, and udcCode into the estate
     /// addressed by `handle`, bypassing `Estate.capture` (which always writes to
     /// `defaultWing()`). Requires `@testable import LocusKit` for `Estate.store`
-    /// access. The drawer is stamped with `Confirmation.userConfirmed` (bits 18-23
-    /// of provenance) so that recall with `[.userConfirmed]` can surface it — a
-    /// direct `store.addDrawer` call bypasses the `Estate.capture` path that stamps
-    /// this automatically.
+    /// access. The recall path uses `store.allDrawers()` for the filter chains used
+    /// in scope tests (`.unconfirmed` is not a prunable filter per BitmapEvaluator
+    /// `chainHasPrunableFilter`), so drawers inserted this way are visible to recall
+    /// without needing the ContainerFingerprintStore to be updated.
     private func captureWithAttributes(
         into handle: EstateHandle,
         wing: String,
@@ -333,11 +333,6 @@ struct CrossEstateFederationTests {
         let locusEstate = try await kit.estate(for: handle)
         let store = await locusEstate.store
         let now = Date()
-        // Stamp Confirmation.userConfirmed (raw 1) at bits 18-23 of provenance.
-        // Drawers inserted via store.addDrawer bypass Estate.capture (which stamps
-        // this automatically), so we set it explicitly so that recall with
-        // [.userConfirmed] can surface these rows.
-        let confirmedProvenance: Int64 = 1 << 18  // Confirmation.userConfirmed shifted to bits 18-23
         let drawer = Drawer(
             content: "content-\(tag)",
             wing: wing,
@@ -345,7 +340,6 @@ struct CrossEstateFederationTests {
             addedBy: "test",
             filedAt: now,
             embeddingModelID: "model-v1",
-            provenance: confirmedProvenance,
             udcCode: udcCode
         )
         try await store.addDrawer(drawer, now: now)

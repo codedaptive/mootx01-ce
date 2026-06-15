@@ -132,7 +132,7 @@ mod tests {
     }
 
     fn all() -> RecallFrame {
-        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
+        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
         f.hydration_level = HydrationLevel::Structured;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f
