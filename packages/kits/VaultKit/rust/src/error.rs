@@ -20,6 +20,18 @@ pub enum VaultKitError {
 
     /// The GLK verb surface returned an error while capturing or recalling.
     VerbError(String),
+
+    /// A `CorpusDocument` payload declared a `formatVersion` this build
+    /// does not understand. Decoding is strict by design: an unknown
+    /// version fails loudly with the offending value rather than
+    /// best-effort parsing a shape this code has never seen.
+    /// Mirrors Swift `VaultKitError.unsupportedFormatVersion(Int)`.
+    UnsupportedFormatVersion(i64),
+
+    /// Canonical corpus JSON could not be encoded or decoded (malformed
+    /// JSON, shape mismatch). The Swift port surfaces the analogous
+    /// failures as Foundation `EncodingError`/`DecodingError`.
+    Serialization(String),
 }
 
 impl fmt::Display for VaultKitError {
@@ -29,6 +41,12 @@ impl fmt::Display for VaultKitError {
             VaultKitError::AdapterError(msg) => write!(f, "VaultKit adapter error: {msg}"),
             VaultKitError::I5Violation(msg) => write!(f, "VaultKit I-5 violation: {msg}"),
             VaultKitError::VerbError(msg) => write!(f, "VaultKit verb error: {msg}"),
+            VaultKitError::UnsupportedFormatVersion(v) => {
+                write!(f, "VaultKit corpus document: unsupported formatVersion {v}")
+            }
+            VaultKitError::Serialization(msg) => {
+                write!(f, "VaultKit corpus serialization error: {msg}")
+            }
         }
     }
 }
