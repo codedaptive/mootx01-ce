@@ -68,9 +68,9 @@
     "input": "statistics probability data analysis"
   },
   {
-    "code": "336",
+    "code": "326",
     "input": "economics markets trade finance",
-    "platform_note": "Rust-HMM baseline (336). Apple NLTagger produces 326 — expected divergence, NLTagger is a different engine. Swift FDC conformance test skips this vector on Apple."
+    "platform_note": "Rust gate-disabled baseline (326). The min_os_version gate (17.0 > Rust runtime 0.0) fires, novel tokens return .other, matching Apple gate-disabled behavior. Apple NLTagger (gate-enabled on OS ≥ 17) produces a different code — expected divergence. Swift FDC conformance test skips this vector on Apple."
   },
   {
     "code": "027",
@@ -93,9 +93,9 @@
     "input": "language linguistics grammar syntax"
   },
   {
-    "code": "823",
+    "code": "183",
     "input": "literature poetry novels writing",
-    "platform_note": "Rust-HMM baseline (823). Apple NLTagger produces 183 — expected divergence, NLTagger is a different engine. Swift FDC conformance test skips this vector on Apple."
+    "platform_note": "Rust gate-disabled baseline (183). The min_os_version gate (17.0 > Rust runtime 0.0) fires, novel tokens return .other, matching Apple gate-disabled behavior. Apple NLTagger (gate-enabled on OS ≥ 17) produces a different code — expected divergence. Swift FDC conformance test skips this vector on Apple."
   },
   {
     "code": "701",
@@ -126,9 +126,9 @@
     "input": "law legal rights court justice"
   },
   {
-    "code": "297",
+    "code": "189",
     "input": "religion theology Christianity Islam",
-    "platform_note": "Rust-HMM baseline (297). Apple NLTagger produces 189 — expected divergence, NLTagger is a different engine. Swift FDC conformance test skips this vector on Apple."
+    "platform_note": "Rust gate-disabled baseline (189). The min_os_version gate (17.0 > Rust runtime 0.0) fires, novel tokens return .other, matching Apple gate-disabled behavior. Apple NLTagger (gate-enabled on OS ≥ 17) produces a different code — expected divergence. Swift FDC conformance test skips this vector on Apple."
   },
   {
     "code": "025",
