@@ -40,7 +40,6 @@ use std::collections::HashMap;
 use crate::concept_bag::{ConceptBag, build_encoder_bag};
 use crate::fdc_frame::FdcFrame;
 use crate::lexicon::CanonicalizationLexicon;
-use crate::word_class_table::WordClassTableCache;
 use crate::fdc_signatures::FdcSignatures;
 
 /// Scoring mode applied to both the Step-4 argmax and the Step-5 descent
@@ -71,7 +70,6 @@ pub struct FdcMatcher {
     pub score_mode: ScoreMode,
     lexicon: CanonicalizationLexicon,
     frame: FdcFrame,
-    table: WordClassTableCache,
     /// code -> signature term set
     sig_terms: HashMap<String, std::collections::HashSet<String>>,
     /// term -> sorted list of codes (inverted index)
@@ -92,17 +90,15 @@ impl FdcMatcher {
     pub fn new(
         lexicon: CanonicalizationLexicon,
         frame: FdcFrame,
-        table: WordClassTableCache,
         signatures: &FdcSignatures,
         stop_threshold: usize,
     ) -> Self {
-        Self::new_with_mode(lexicon, frame, table, signatures, stop_threshold, ScoreMode::Raw)
+        Self::new_with_mode(lexicon, frame, signatures, stop_threshold, ScoreMode::Raw)
     }
 
     pub fn new_with_mode(
         lexicon: CanonicalizationLexicon,
         frame: FdcFrame,
-        table: WordClassTableCache,
         signatures: &FdcSignatures,
         stop_threshold: usize,
         score_mode: ScoreMode,
@@ -167,7 +163,6 @@ impl FdcMatcher {
             score_mode,
             lexicon,
             frame,
-            table,
             sig_terms,
             index,
             idf,
@@ -258,7 +253,13 @@ impl FdcMatcher {
     /// `code` is None for UNRESOLVED.
     /// `conceptQID` is the highest-weighted Wikidata Q-ID in the bag, or None.
     pub fn encode_anchor(&self, text: &str) -> (Option<String>, Option<String>) {
-        let bag = build_encoder_bag(text, &self.lexicon, &self.table);
+        // Read the LIVE process-global word-class table (cookbook §1.3/§2.2):
+        // a post-reduce live swap is observed here in-session, exactly as the
+        // Swift `BagBuilder.bag` path reads the live `LatticeLib.wordClass`
+        // holder. The `Arc` is cloned once (brief read-lock) and the bag build
+        // runs against the immutable snapshot — no torn read.
+        let table = crate::word_class_table::global_table();
+        let bag = build_encoder_bag(text, &self.lexicon, &table);
         let qid = dominant_qid(&bag);
 
         if bag.is_empty() {

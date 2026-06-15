@@ -40,6 +40,33 @@ public enum FDC {
     /// produced an encode answer. Callers record it as provenance.
     public static var dataVersion: String { bundle?.version ?? "0.0.0-unavailable" }
 
+    /// Return the human-readable heading label for a classification code, or
+    /// `nil` if the code is not in the frame (UNRESOLVED, empty, or the
+    /// artifacts are unavailable). Used by dashboard surfaces to display
+    /// readable names next to raw lattice address codes.
+    ///
+    /// For 3-digit integer codes (no decimal subdivision), the leaf label is
+    /// often a compound of multiple subject terms joined with " + " (e.g.
+    /// "683" → "Firearms + Locksmithing"). The parent code carries a broader,
+    /// single-topic heading — walk up one level for these, so the dashboard
+    /// shows "Handicraft" (680) rather than the raw multi-term cluster.
+    /// Decimal codes retain their own specific label (e.g. "615.84" →
+    /// "Radiology, Medical").
+    ///
+    /// Mirrors Rust `Fdc::label()` in fdc_runtime.rs.
+    public static func label(for code: String) -> String? {
+        guard !code.isEmpty, let frame = bundle?.frame else { return nil }
+        // Decimal codes are already specific enough — use their own label.
+        // 3-digit integer codes walk up one parent level for a cleaner heading.
+        let lookup: String
+        if !code.contains("."), let parent = FDCFrame.decimalParent(of: code) {
+            lookup = parent
+        } else {
+            lookup = code
+        }
+        return frame.codes.first(where: { $0.code == lookup })?.label
+    }
+
     // MARK: - artifact loading (once per process)
 
     private struct SignaturesFile: Decodable {
@@ -48,9 +75,9 @@ public enum FDC {
         let codes: [Entry]
     }
 
-    /// The matcher and the signatures version, loaded together once per
-    /// process so `dataVersion` and the matcher share a single parse.
-    private static let bundle: (matcher: FDCMatcher, version: String)? = {
+    /// The matcher, the FDC frame (for label lookup), and the signatures
+    /// version, all loaded together once per process.
+    private static let bundle: (matcher: FDCMatcher, frame: FDCFrame, version: String)? = {
         guard let lexicon: CanonicalizationLexicon = load("Lexicon"),
               let frame: FDCFrame = load("FDCFrame"),
               let sigs: SignaturesFile = load("FDCSignatures") else { return nil }
@@ -63,7 +90,7 @@ public enum FDC {
         // frame). The matcher default stays `.raw`; the runtime opts in here.
         let m = FDCMatcher(lexicon: lexicon, frame: frame, signatures: terms,
                            stopThreshold: stopThreshold, scoreMode: .idf)
-        return (m, sigs.version)
+        return (m, frame, sigs.version)
     }()
 
     private static func load<T: Decodable>(_ name: String) -> T? {

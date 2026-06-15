@@ -3,8 +3,9 @@
 // Port of ConceptBag.swift and BagBuilder.
 //
 // Steps:
-//   1  tag — keep Noun/Verb tokens via WordClassTableCache, plus any token that
-//            resolves to a Wikidata Q-ID concept (§3.2 relaxation)
+//   1  tag — keep Noun/Verb tokens via WordClassTableCache (table fast path;
+//            novel tokens classified via HMM), plus any token that resolves to
+//            a Wikidata Q-ID concept (§3.2 relaxation)
 //   2  canonicalize — normalize + stem each kept token, then lexicon lookup:
 //            hit -> conceptID, miss -> stemmed surface form
 //   3  accumulate — count occurrences (Steps 2 and 3 are one pass)
@@ -12,6 +13,13 @@
 // The §3.2 relaxation: `isQID = concept.starts_with("Q")`. When a token
 // resolves to a Q-ID via the lexicon, it is kept regardless of word class.
 // This recovers named entities the POS tagger may drop or mislabel.
+//
+// WordClassTableCache::word_class is the Step-1 entry point. For table-resident
+// tokens it returns the table classification in constant time. For novel tokens
+// it falls back to the deterministic HMM/Viterbi tagger (`word_class::hmm_tag`),
+// which is byte-identical to Swift's `HMMTagger.tag` (integer Viterbi, no
+// floating point). Novel nouns and verbs identified by the HMM are thus kept in
+// the bag, matching the non-Apple Swift behavior.
 //
 // Deterministic and pure given a fixed lexicon and word-class table.
 
@@ -74,4 +82,53 @@ pub fn build_encoder_bag(
     table: &WordClassTableCache,
 ) -> ConceptBag {
     build_bag(text, lexicon, table, &[WordClass::Noun, WordClass::Verb])
+}
+
+/// Build the concept bag with an explicit novel-token tagger choice (Layer-2a).
+///
+/// Identical to `build_bag` except novel tokens (table misses) are classified
+/// via the specified `choice` rather than the implicit HMM default. Thread
+/// this from the estate's `novel_token_tagger` field (bridged from
+/// `persistence_kit::NovelTokenTaggerChoice` to `word_class::NovelTokenTaggerChoice`)
+/// to ensure the bag is built consistently with the estate's indexed content.
+///
+/// On Rust, `NlTagger` falls back to HMM (NaturalLanguage is not available);
+/// see `WordClassTableCache::word_class_with_tagger`.
+///
+/// Mirrors Swift's `BagBuilder.bag(_:lexicon:keep:taggerChoice:)`.
+pub fn build_bag_with_tagger(
+    text: &str,
+    lexicon: &CanonicalizationLexicon,
+    table: &WordClassTableCache,
+    keep_classes: &[WordClass],
+    choice: crate::word_class::NovelTokenTaggerChoice,
+) -> ConceptBag {
+    let mut bag: ConceptBag = HashMap::new();
+    for token in tokenize(text) {
+        let key = stem(&normalize(&token));
+        if key.is_empty() {
+            continue;
+        }
+        let concept: Option<&str> = lexicon.lookup(&key);
+        let is_qid = concept.map(|c| c.starts_with('Q')).unwrap_or(false);
+        // Dispatch novel-token classification via the specified tagger choice.
+        let wc = table.word_class_with_tagger(&token, choice);
+        if !keep_classes.contains(&wc) && !is_qid {
+            continue;
+        }
+        let bag_key = concept.unwrap_or(&key).to_owned();
+        *bag.entry(bag_key).or_insert(0) += 1;
+    }
+    bag
+}
+
+/// Convenience: build a bag with the default encoder keep classes (noun + verb)
+/// and an explicit tagger choice.
+pub fn build_encoder_bag_with_tagger(
+    text: &str,
+    lexicon: &CanonicalizationLexicon,
+    table: &WordClassTableCache,
+    choice: crate::word_class::NovelTokenTaggerChoice,
+) -> ConceptBag {
+    build_bag_with_tagger(text, lexicon, table, &[WordClass::Noun, WordClass::Verb], choice)
 }

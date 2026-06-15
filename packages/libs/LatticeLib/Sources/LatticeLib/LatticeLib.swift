@@ -13,5 +13,5 @@ public enum LatticeLib {
 
     /// The module version. Bumped in lockstep with the bundled FDC
     /// artifacts when new signatures ship.
-    public static let version: String = "0.1.0"
+    public static let version: String = "0.8.0"
 }
