@@ -190,9 +190,15 @@ background-service mechanism differ.
   `~/.local/bin/mootx01` — the same layout as macOS.
 - *Windows:* run the PowerShell installer:
   `iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.ps1) }"`.
+  Note: on Windows `install.ps1` both downloads the binary **and** wires clients over **stdio**
+  (each spawns its own instance — no shared daemon). To get the resident HTTP daemon shared across
+  clients, run `mootx01 install` afterward — it registers the Task Scheduler service and rewires
+  clients to the daemon.
 
 **Wire your AI clients.** `mootx01 install` detects and wires the same supported clients as on
 macOS — the Rust CLI writes the identical MCP entries (Claude Desktop still uses the stdio path).
+On Linux/macOS the download script tells you to run this next; on Windows it's the step that turns
+the stdio install into the resident-daemon install.
 
 **Background service** — registered automatically by `mootx01 install`, with no admin elevation:
 
@@ -277,9 +283,18 @@ Without it, `mootx01 serve` runs over stdio (the per-client ephemeral mode).
 mootx01 uninstall
 ```
 
-This stops and removes both launchd services, removes the binaries from
-`~/.mootx01/bin/` and the convenience symlinks from `~/.local/bin/`, and
-removes the MCP entries from all client configs.
-Your estate data (`~/Library/Application Support/com.mootx01.ce/`) is not
-deleted — your memory is preserved. Delete that directory manually if you
-want a complete removal.
+This removes the MCP entries from all client configs, removes the binaries from
+`~/.mootx01/bin/` and the symlinks from `~/.local/bin/`, and removes the background service for
+your platform:
+
+- **macOS** — the launchd services (`com.mootx01.daemon`, `com.mootx01.mgr`)
+- **Linux** — the systemd-user units (`mootx01.service`, `mootx01-mgr.service`)
+- **Windows** — the Task Scheduler logon tasks (`mootx01`, `mootx01-mgr`)
+
+Your estate data is **not** deleted — your memory is preserved. It lives at:
+
+- **macOS** — `~/Library/Application Support/com.mootx01.ce/`
+- **Linux** — `~/.local/share/mootx01/` (or `$XDG_DATA_HOME/mootx01/`)
+- **Windows** — `%LOCALAPPDATA%\MOOTx01\`
+
+Delete that directory manually if you want a complete removal.
