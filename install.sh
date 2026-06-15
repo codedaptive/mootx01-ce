@@ -54,12 +54,10 @@ case "$arch" in
 esac
 target="${os}-${arch}"
 
-# The MCP server (`mootx01 serve`) is macOS-only; Linux builds carry the
-# install/uninstall/db/status/query subcommands but not the server.
-if [ "$os" = "linux" ]; then
-  echo "Note: the mootx01 MCP server (\`serve\`) is macOS-only; the Linux build" >&2
-  echo "      provides the management subcommands but cannot host an estate." >&2
-fi
+# Linux/Windows archives carry `mootx01` only — the Rust vertical, which hosts the
+# estate via `mootx01 serve` exactly like macOS (CI smoke-tests `serve` on Linux).
+# The `moot-mgr` console binary ships in the macOS archive; on Linux the headless
+# manager is built from source.
 
 # 2. Resolve the version. Use the releases/latest *web* redirect (no API rate
 #    limit) and fall back to the API. Matches codegraph's approach.

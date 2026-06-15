@@ -63,6 +63,10 @@ AI assistant a user asks to "explain and install this." Mission, safety
 rules, a platform-aware install flow, verification, and troubleshooting, so
 an assistant gives a good first experience without improvising.
 
+**[`AI_INSTALL_MANIFEST.json`](AI_INSTALL_MANIFEST.json)** — the machine-readable companion to the
+install fact sheet: install commands, ports, verification, adapter locations, and the files an
+install may touch, as structured JSON for an AI agent to parse before acting.
+
 ## Reading order
 
 Pick one. They are not a series; each is complete on its own.

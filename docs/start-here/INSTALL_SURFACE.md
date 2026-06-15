@@ -4,6 +4,10 @@ This document is the install fact sheet for humans and AI assistants.
 
 Use it as the source of truth for what a product install is expected to do.
 
+> **Machine-readable companion:** `docs/start-here/AI_INSTALL_MANIFEST.json` carries these same
+> facts as structured JSON for an AI agent to parse. Keep the two in sync — this document is
+> authoritative for humans.
+
 ## Default Local Addresses
 
 | Component | Purpose | Default |
@@ -162,6 +166,7 @@ Common install or runtime environment knobs may include:
 | `MOOTX01_DATA_DIR` | Data directory override. |
 | `MOOTX01_HTTP_MAX_BODY_BYTES` | Maximum HTTP MCP request body. |
 | `MOOTX01_BRAIN_TICK_MS` | Background maintenance cadence. |
+| `MOOTX01_MONITORING_POLL_MS` | How often the daemon checks whether monitoring is enabled (default `5000`). |
 | `MOOT_MGR_HTTP_PORT` | Dashboard/read API port, default `4200`. |
 
 Use the current code and docs for exact platform support.
