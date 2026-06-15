@@ -1,5 +1,6 @@
 import Foundation
 import GeniusLocusKit
+import LocusKit
 
 /// Production adapter that binds `MaintenanceSubstrateReader` to a live
 /// GeniusLocusKit estate (NEURONKIT_SPEC § 3.2).
@@ -17,20 +18,54 @@ import GeniusLocusKit
 /// for this adapter — the same constraint that placed `EstateDreamingReader`
 /// here.
 ///
-/// ── v1 stubs ─────────────────────────────────────────────────────────
-/// Two of the five reads return empty arrays in v1:
+/// ── Bounded scan strategy ────────────────────────────────────────────
+/// Active and tombstoned drawer reads delegate to `GeniusLocusKit.allDrawers(in:)`,
+/// which is a full-corpus snapshot. A bounded variant (`allDrawersBounded(in:limit:)`)
+/// is a follow-on optimisation once GLK exposes a limit parameter; for now
+/// the full snapshot is filtered in process. B-10a: all reads are internal
+/// (no trace_limit set, no recall-trace rows written).
 ///
-/// - `learnedReferences()`: requires `DrawerStore.allLearnedReferences()`,
-///   which does not exist in the current LocusKit DrawerStore API
-///   (`learnedReferences(forSourceCatalogID:)` is source-scoped). A
-///   follow-on mission adds the full-corpus scan. v1 returns `[]`, so the
-///   byReference-validity scan proposes nothing, which is safe.
+/// ── Reference drift (real reads) ─────────────────────────────────────
+/// `learnedReferences()` now reads all non-tombstoned `LearnedReference`
+/// rows from the estate via `GeniusLocusKit.recallLearnedReferences(_:)`.
+/// Each reference's `driftSeverity` operational-bitmap axis (bits 6–11,
+/// cookbook § 2.4) is mapped to a drift fraction:
 ///
-/// - `fingerprintBaselines()`: requires persisted fingerprint baselines for
-///   rooms and wings (computed from `ContainerFingerprintStore`). Baseline
-///   persistence is a follow-on. v1 returns `[]`, so the fingerprint-drift
-///   scan proposes nothing, which is safe.
+///   DriftSeverity.none     → 0.0
+///   DriftSeverity.minor    → 0.25
+///   DriftSeverity.major    → 0.50
+///   DriftSeverity.critical → 1.0
+///
+/// The fraction is compared against `MaintenancePolicy.byReferenceDriftThreshold`
+/// (spec default 0.25) by the daemon's pure decision core. A `.none`-severity
+/// reference produces drift 0.0, which is below the default threshold — correctly
+/// silent for freshly-learned references that have not yet drifted.
+///
+/// ── Fingerprint drift (real reads) ────────────────────────────────────
+/// `fingerprintBaselines()` reads the room-level container OR aggregates the
+/// recall pruner maintains (spec § 11.5) through
+/// `GeniusLocusKit.roomLevelFingerprints(in:)` and maps each to a v1 drift
+/// fraction: the set-bit density of the aggregate over the three bitmap lanes
+/// (192 bits). A focused container reads low drift; a container whose content
+/// has spread across many disparate adjective/operational/provenance bits reads
+/// high. Deterministic and identical to the Rust port's definition. The
+/// persisted-baseline refinement (Hamming distance against a recorded per-scope
+/// baseline) requires a baseline-persistence surface that does not exist yet;
+/// bit density is the honest v1 signal that uses the data available today.
 public struct EstateMaintenanceReader: MaintenanceSubstrateReader {
+
+    /// Bit width of a `ContainerFingerprint`'s three i64 lanes (3 × 64). The v1
+    /// fingerprint-drift fraction is the set-bit density of the aggregate over
+    /// this width.
+    private static let fingerprintDriftBitWidth: Float = 192.0
+
+    /// Maximum number of drawers the maintenance reader fetches per scan.
+    /// Bounded to keep each cycle O(cap) rather than O(estate). 512 covers
+    /// typical small-to-medium estates fully; large estates get a representative
+    /// health sample. The storage layer applies the LIMIT before any in-process
+    /// filtering, so the I/O cost is O(cap). Matches the Rust reader's
+    /// `MAINTENANCE_SCAN_CAP`.
+    private static let maintenanceScanCap = 512
 
     private let handle: EstateHandle
     private let kit: GeniusLocusKit
@@ -52,43 +87,87 @@ public struct EstateMaintenanceReader: MaintenanceSubstrateReader {
     /// "Active" per the decay and forbidden-combination scans means not
     /// tombstoned (`tombstonedAt == nil`) and in Cluster A
     /// (`state.isClusterA`: active, pending, contested, or accepted).
-    /// Uses `GeniusLocusKit.allDrawers(in:)`, which returns a full-corpus
-    /// snapshot (including tombstoned rows); the filter is applied here.
+    /// Uses the bounded `GeniusLocusKit.allDrawers(in:limit:)`, which applies
+    /// the cap at the storage tier (O(cap) I/O) — the Swift parity of the Rust
+    /// reader's bounded scan. The cluster/tombstone filter is applied here.
+    /// B-10a: internal read, no trace_limit set.
     public func activeDrawers() async throws -> [Drawer] {
-        let all = try await kit.allDrawers(in: handle)
+        let all = try await kit.allDrawers(in: handle, limit: Self.maintenanceScanCap)
         return all.filter { $0.tombstonedAt == nil && $0.state.isClusterA }
     }
 
     /// Tombstoned drawers (`tombstonedAt != nil`) across the estate.
     ///
     /// Used by the tombstone/expunge-candidate scan to find rows past the
-    /// grace window. Uses the same `allDrawers(in:)` full-corpus snapshot
-    /// as `activeDrawers()`; a single GLK round-trip for both reads would
-    /// be a follow-on optimisation.
+    /// grace window. Uses the same bounded `allDrawers(in:limit:)` scan as
+    /// `activeDrawers()`.
+    /// B-10a: internal read, no trace_limit set.
     public func tombstonedDrawers() async throws -> [Drawer] {
-        let all = try await kit.allDrawers(in: handle)
+        let all = try await kit.allDrawers(in: handle, limit: Self.maintenanceScanCap)
         return all.filter { $0.tombstonedAt != nil }
     }
 
     /// Learned-reference observations for the byReference-validity scan.
     ///
-    /// v1: returns `[]`. Full implementation requires `DrawerStore.allLearnedReferences()`
-    /// (full-corpus scan with no source filter), which does not exist in
-    /// the current DrawerStore API. Follow-on mission adds the scan and
-    /// the sourceDriftFraction computation.
+    /// Reads all non-tombstoned `LearnedReference` rows from the estate via
+    /// `GeniusLocusKit.recallLearnedReferences(_:)` and maps each reference's
+    /// `driftSeverity` (bits 6–11 of `operationalBitmap`, cookbook § 2.4) to a
+    /// drift fraction in `[0, 1]`:
+    ///
+    ///   - `.none`     → 0.0  (below default threshold — no proposal)
+    ///   - `.minor`    → 0.25 (at default threshold → proposal emitted)
+    ///   - `.major`    → 0.50
+    ///   - `.critical` → 1.0
+    ///
+    /// The `referenceRowID` is the reference's stable row id, used as the
+    /// proposal target so the human can locate the drifted reference.
+    /// Tombstoned references are excluded — they are no longer active.
     public func learnedReferences() async throws -> [LearnedReferenceObservation] {
-        []
+        let refs = try await kit.recallLearnedReferences(handle)
+        return refs
+            .filter { $0.tombstonedAt == nil }
+            .map { lr in
+                LearnedReferenceObservation(
+                    referenceRowID: lr.id,
+                    sourceDriftFraction: driftFractionForSeverity(lr.driftSeverity)
+                )
+            }
     }
 
     /// Fingerprint-drift observations for the fingerprint-drift scan.
     ///
-    /// v1: returns `[]`. Full implementation reads room/wing baseline
-    /// fingerprints from `ContainerFingerprintStore`, computes Hamming
-    /// distance against live fingerprints, and returns one
-    /// `FingerprintDriftObservation` per scope that has drifted past
-    /// threshold. Baseline persistence is a follow-on mission.
+    /// Reads the room-level container OR aggregates the recall pruner maintains
+    /// (spec § 11.5) via `GeniusLocusKit.roomLevelFingerprints(in:)` and maps
+    /// each to a v1 drift fraction — the set-bit density of the aggregate over
+    /// its three bitmap lanes (192 bits). The `scopeKey` is the `wing/room`
+    /// string the daemon uses as the proposal target. One observation per
+    /// room-level container; the daemon thresholds each against
+    /// `MaintenancePolicy.fingerprintDriftThreshold`.
+    ///
+    /// The persisted-baseline refinement (Hamming distance of the live
+    /// aggregate against a recorded per-scope baseline) requires a
+    /// baseline-persistence surface that does not exist yet; bit density is the
+    /// honest v1 signal that uses the data available today. Identical definition
+    /// to the Rust port.
     public func fingerprintBaselines() async throws -> [FingerprintDriftObservation] {
-        []
+        let entries = try await kit.roomLevelFingerprints(in: handle)
+        return entries.map { entry in
+            FingerprintDriftObservation(
+                scopeKey: "\(entry.wing)/\(entry.room)",
+                driftFraction: Self.fingerprintDriftFraction(entry.fingerprint)
+            )
+        }
+    }
+
+    /// Active drawers with enrichment-status `qid_pending`, bounded to
+    /// `limit` rows for O(cap) scan cost (B-10a: internal read, no trace).
+    ///
+    /// Delegates to `GeniusLocusKit.qidPendingDrawers(in:limit:)`, which
+    /// filters the full drawer corpus to non-tombstoned Cluster-A rows with
+    /// enrichment-status == `.qidPending` (provenance bits 36-41 == 1,
+    /// cookbook §2.5) and truncates to `limit`.
+    public func qidPendingDrawers(limit: Int) async throws -> [Drawer] {
+        try await kit.qidPendingDrawers(in: handle, limit: limit)
     }
 
     /// The current unified audit log, fed from the estate's LocusKit audit
@@ -100,5 +179,34 @@ public struct EstateMaintenanceReader: MaintenanceSubstrateReader {
     /// consumes the snapshot in the daemon's audit-integrity monitor (§ 3.5).
     public func currentAuditLog() async throws -> UnifiedAuditLog {
         try await kit.currentAuditLog(in: handle)
+    }
+
+    // MARK: - Pure helpers
+
+    /// Map a `DriftSeverity` to a drift fraction in `[0, 1]`.
+    ///
+    /// The mapping is anchored at the default policy threshold (0.25) so that
+    /// `.minor` severity exactly triggers a proposal with the default policy —
+    /// matching the spec's intent that Minor is actionable.
+    private func driftFractionForSeverity(_ severity: DriftSeverity) -> Float {
+        switch severity {
+        case .none:     return 0.0
+        case .minor:    return 0.25
+        case .major:    return 0.50
+        case .critical: return 1.0
+        }
+    }
+
+    /// The v1 fingerprint-drift fraction for one room-level container: the
+    /// set-bit density of its OR aggregate over the three bitmap lanes.
+    ///
+    /// `nonzeroBitCount` of each Int64 lane summed, divided by
+    /// `fingerprintDriftBitWidth` (192). Deterministic and identical to the
+    /// Rust port's `fingerprint_drift_fraction`. Result is in `[0, 1]`.
+    static func fingerprintDriftFraction(_ fingerprint: ContainerFingerprint) -> Float {
+        let set = fingerprint.adjective.nonzeroBitCount
+            + fingerprint.operational.nonzeroBitCount
+            + fingerprint.provenance.nonzeroBitCount
+        return Float(set) / fingerprintDriftBitWidth
     }
 }

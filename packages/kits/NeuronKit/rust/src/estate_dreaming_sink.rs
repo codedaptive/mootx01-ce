@@ -7,9 +7,10 @@
 //
 //   6. `propose` — emits a Proposal row via `store.add_proposal`.
 //      Constructs the full `locus_kit::Proposal` from `ProposeFrameOut`
-//      with a "dreaming" UDC lattice anchor (required non-empty by the
-//      substrate; proposals carry the target's anchor in production; this
-//      placeholder is the correct shape for automated dreaming proposals).
+//      with genuine provenance: a real UDC 005 system-state anchor and the
+//      dreaming-daemon operational axes (kind, target object type
+//      SystemState, generated-by DreamingDaemon, Medium confidence) per
+//      cookbook §2.4. See `dreaming_proposal_operational`.
 //
 //   7. `record_cycle_diary` — writes a DiaryEntry row via
 //      `store.add_diary_entry`, translating the cycle-local
@@ -38,8 +39,37 @@ use locus_kit::diary_entry::DiaryEntry as LkDiaryEntry;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::estate_types::LatticeAnchor;
 use locus_kit::proposal::Proposal;
+use locus_kit::proposal_operational::{
+    compose_operational, ProposalConfidenceBucket, ProposalGeneratedByClass, ProposalKind,
+    ProposalTargetObjectType,
+};
 
 use crate::dreaming_cycle::{DreamingDiaryEntry, DreamingProposalSink, ProposeFrameOut};
+
+/// Map a dreaming-cycle proposal `kind` label to the substrate
+/// `ProposalKind` axis (cookbook §2.4 bits 0–5), then compose the full
+/// operational bitmap with the genuine dreaming-daemon provenance: the
+/// generated-by class is `DreamingDaemon`, the target object type is
+/// `SystemState` (a dreaming proposal targets the estate's own state, not a
+/// single row), and the confidence bucket is `Medium` (an autonomous
+/// proposal is a hypothesis, not a verified fact). Unrecognised labels map
+/// to `MutateDrawer`, the dreaming cycle's dominant proposal shape.
+fn dreaming_proposal_operational(kind: &str) -> i64 {
+    let proposal_kind = match kind {
+        "newTunnel" => ProposalKind::NewTunnel,
+        "mutateCandidate" | "mutateDrawer" => ProposalKind::MutateDrawer,
+        "associationPromotion" => ProposalKind::AssociationPromotion,
+        "miningPattern" | "miningPatternAdjustment" => ProposalKind::MiningPatternAdjustment,
+        "recordObservation" => ProposalKind::RecordObservation,
+        _ => ProposalKind::MutateDrawer,
+    };
+    compose_operational(
+        proposal_kind,
+        ProposalTargetObjectType::SystemState,
+        ProposalGeneratedByClass::DreamingDaemon,
+        ProposalConfidenceBucket::Medium,
+    )
+}
 
 /// Production adapter that binds `DreamingProposalSink` to a live
 /// `DrawerStore`.
@@ -96,21 +126,27 @@ impl<S: DrawerStore + ?Sized> EstateDreamingSink<S> {
 
 impl<S: DrawerStore + ?Sized> DreamingProposalSink for EstateDreamingSink<S> {
     /// Emit a proposal row (step 6). Translates `ProposeFrameOut` to a
-    /// `locus_kit::Proposal` and calls `store.add_proposal`. A "dreaming"
-    /// UDC lattice anchor satisfies the substrate's non-empty requirement.
-    /// Write failures are appended to `self.write_errors`.
+    /// `locus_kit::Proposal` and calls `store.add_proposal`. The proposal
+    /// carries real provenance: its operational bitmap records the genuine
+    /// generated-by class (`DreamingDaemon`), proposal kind (mapped from the
+    /// frame's `kind` label), target object type (`SystemState` — a dreaming
+    /// proposal targets the estate's own state, not one row), and a
+    /// `Medium` confidence bucket. The lattice anchor is the autonomic
+    /// system-state anchor (UDC 005 — "computing, information"; the estate's
+    /// own machinery), satisfying the non-empty invariant with a genuine
+    /// code rather than a label sentinel. Write failures are appended to
+    /// `self.write_errors`.
     fn propose(&mut self, frame: ProposeFrameOut) {
         let mut proposal = Proposal::new(
             self.next_id(),
             frame.target,
-            // Dreaming proposals carry a placeholder "dreaming" UDC anchor.
-            // In production, the target row's anchor is looked up; for
-            // autonomous dreaming proposals there is no single target anchor,
-            // so this placeholder satisfies the non-empty invariant.
-            LatticeAnchor::udc("dreaming"),
+            // UDC 005 ("computing, information") — the estate's own autonomic
+            // machinery is the genuine subject of a system-state proposal.
+            LatticeAnchor::udc("005"),
             self.now,
         );
         proposal.justification = Some(frame.justification);
+        proposal.operational_bitmap = dreaming_proposal_operational(&frame.kind);
         if let Err(e) = self.store.add_proposal(&proposal) {
             self.write_errors.push(format!("propose: {e:?}"));
         }
@@ -129,15 +165,33 @@ impl<S: DrawerStore + ?Sized> DreamingProposalSink for EstateDreamingSink<S> {
             wing: entry.wing,
             room: entry.room,
             filed_at: self.now,
-            // "dreaming-v1" is the placeholder model ID for autonomic diary
-            // entries (no embedding is generated; the field must be non-empty).
-            embedding_model_id: "dreaming-v1".into(),
+            // Dreaming-cycle diary entries carry no embedding, so the model ID
+            // is the genuine "no-embedding" marker — the same value the Swift
+            // path substitutes for an empty embeddingModelID in addDiaryEntry.
+            // Not a fabricated version string.
+            embedding_model_id: "no-embedding".into(),
             tombstoned_at: None,
             removed_by_batch: None,
             operational_bitmap: 0,
+            // Dreaming-cycle entries are system-generated; no explicit quality
+            // signal is available at write time. Reward is derived from the
+            // recall trace (implicit source) during the next dreaming tick.
+            reward: None,
+            reward_provenance: None,
         };
         if let Err(e) = self.store.add_diary_entry(&diary) {
             self.write_errors.push(format!("record_cycle_diary: {e:?}"));
+        }
+    }
+
+    /// Delete recall-trace rows older than `cutoff_iso` (the post-reward-sweep
+    /// prune). Delegates to `DrawerStore::prune_recall_traces`. Write failures
+    /// are appended to `self.write_errors` — the trait method is infallible, so
+    /// a storage fault must not abort the cycle. Mirrors the Swift
+    /// `EstateDreamingSink.pruneRecallTraces(olderThan:)`.
+    fn prune_recall_traces(&mut self, cutoff_iso: &str) {
+        if let Err(e) = self.store.prune_recall_traces(cutoff_iso) {
+            self.write_errors.push(format!("prune_recall_traces: {e:?}"));
         }
     }
 }
@@ -172,6 +226,26 @@ mod tests {
             Some("dreaming: latent alignment row-abc<->row-xyz")
         );
         assert_eq!(proposals[0].filed_at, 1_000_000);
+        // Genuine provenance, not placeholders: a real UDC anchor and the
+        // dreaming-daemon operational axes (cookbook §2.4).
+        use locus_kit::proposal_operational::{
+            ProposalConfidenceBucket, ProposalGeneratedByClass, ProposalKind,
+            ProposalTargetObjectType,
+        };
+        assert_eq!(proposals[0].lattice_anchor.udc_code, "005");
+        assert_eq!(proposals[0].proposal_kind(), ProposalKind::MiningPatternAdjustment);
+        assert_eq!(
+            proposals[0].target_object_type(),
+            ProposalTargetObjectType::SystemState
+        );
+        assert_eq!(
+            proposals[0].generated_by_class(),
+            ProposalGeneratedByClass::DreamingDaemon
+        );
+        assert_eq!(
+            proposals[0].confidence_bucket(),
+            ProposalConfidenceBucket::Medium
+        );
     }
 
     #[test]
@@ -232,7 +306,7 @@ mod tests {
         let mut sink = EstateDreamingSink::new(Arc::clone(&store), 3_000_000);
         let reader = StubReader;
         let reward = RecallTraceRewardSource;
-        let policy = DreamingPolicy { min_success_rate: 0.0, min_confidence: 0.7, min_attempts: 1, tick_interval_ms: 30_000 };
+        let policy = DreamingPolicy { min_success_rate: 0.0, min_confidence: 0.7, min_attempts: 1, tick_interval_ms: 30_000, event_observation_threshold: 1 };
         let mut daemon = DreamingDaemon::new(policy);
 
         let report = daemon.run_cycle(3_000_000.0, &reader, &reward, &mut sink);

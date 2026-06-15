@@ -2,10 +2,12 @@
 //!
 //! Hosts autonomic functions (the enrichment daemon, dreaming,
 //! maintenance, standing-signals scheduler, SolverBandit,
-//! audit-chain monitor) and reasoning functions (hybrid recall,
+//! audit-chain monitor), reasoning functions (hybrid recall,
 //! MMR diversification, ContextSynthesizer, branch derivation,
-//! tournament scoring)
-//! per NEURONKIT_SPEC_v0.85.md.
+//! tournament scoring), and five reasoning lenses — MomentSignature,
+//! Rhythm, Precedence, Complexity, Calibration — that surface gated
+//! SubstrateML and GeniusLocusKit primitives per SPEC § 7.5, § 8.
+//! Per NEURONKIT_SPEC.md.
 //!
 //! First reasoning surface: the lattice-anchor inference path.
 //! NeuronKit composes EideticLib's deterministic `lookup` and
@@ -29,9 +31,12 @@
 
 pub mod anomaly_scan;
 pub mod anticipation;
+pub mod composition_grid;
 pub mod benchmark_live;
 pub mod benchmark_scoring;
 pub mod bias;
+pub mod calibration_lens;
+pub mod complexity;
 pub mod constellation;
 pub mod context_synthesizer;
 pub mod dreaming_cycle;
@@ -49,16 +54,26 @@ pub mod maintenance_cycle;
 pub mod maintenance_decision;
 pub mod mind_overlap;
 pub mod mmr_rank;
+pub mod moment_signature;
 pub mod partial_recall;
+pub mod precedence;
+pub mod query_precision;
+pub mod reduction_composition;
+pub mod reduction_signals;
+pub mod rhythm;
 pub mod scenario_profile;
+pub mod solver_bandit;
 pub mod spreading_activation;
 pub mod structure_graph;
 pub mod theme_weather;
+pub mod topology_analysis;
 pub mod tournament;
 pub mod tournament_live;
 
 pub use anomaly_scan::{anomalies, Anomaly};
 pub use anticipation::{anticipate, ActionObservation, ActionPrediction};
+pub use calibration_lens::{calibrate, CalibratedValue};
+pub use complexity::{complexity, ComplexityResult};
 pub use benchmark_live::{benchmark as benchmark_branch, BenchmarkReport};
 pub use benchmark_scoring::{score as benchmark_score, BenchmarkScore};
 pub use bias::{learned_preference, representation_bias, CategoryBias, PreferenceStrength};
@@ -66,9 +81,9 @@ pub use constellation::{constellations, Constellation};
 pub use context_synthesizer::{synthesize, ContextDocument, DrawerRowMeta};
 pub use dreaming_cycle::{
     tunnel_key, CoOccurrenceObservation, DreamingCycleReport, DreamingDaemon, DreamingPolicy,
-    DreamingPolicyStore, DreamingProposalSink, DreamingSubstrateReader, InMemoryDreamingPolicyStore,
-    ProposeFrameOut, RecallTraceItem, RecallTraceRewardSource, RewardSource, RewardSourceKind,
-    TunnelLink,
+    DreamingPolicyStore, DreamingProposalSink, DreamingSubstrateReader, ExplicitDiaryRewardSource,
+    InMemoryDreamingPolicyStore, ProposeFrameOut, RecallTraceItem, RecallTraceRewardSource,
+    RewardSource, RewardSourceKind, TunnelLink,
 };
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
@@ -108,12 +123,29 @@ pub use maintenance_decision::{
 };
 pub use mind_overlap::{dp_summary, summary_overlap};
 pub use mmr_rank::{mmr_rank, mmr_select};
+// The precise-reduction composition surface (the Rust port of the Swift
+// NeuronKit/Reduction/ + CompositionGrid). CognitionKit's PreciseRecall recipe
+// and the ARIA moot_recall_precise dispatch consume these.
+pub use composition_grid as composition_grid_mod;
+pub use composition_grid::{named as named_composition, DEFAULT_NAME as DEFAULT_COMPOSITION};
+pub use query_precision::{distinctive_tokens, query_precision, word_tokens};
+pub use reduction_composition::{
+    assembly_expand, mmr_diversity_rerank, reduce, reduce_late, ReductionComposition,
+    WeightedSignal, DEFAULT_SURVIVOR_MULTIPLE,
+};
+pub use reduction_signals::{
+    reduction_score, reference_codes, ReductionCandidate, ReductionQuery, ReductionSignal,
+};
 pub use partial_recall::{
     partial_recall, FingerprintBlock, BLOCK_CHANNEL, BLOCK_CONCEPT, BLOCK_STRUCTURE, BLOCK_TEMPORAL,
 };
 pub use scenario_profile::ScenarioProfile;
+pub use solver_bandit::{DreamingTriggerMode, SolverBandit};
 pub use spreading_activation::{spreading_activation, Activation};
 pub use theme_weather::{recency_weight, theme_weather, CategoryMomentum};
+pub use moment_signature::{moment_signature, MomentSignatureResult, WindowRank};
+pub use precedence::{precedence, AntecedentRank};
+pub use rhythm::{rhythm, DominantPeriod};
 pub use tournament::{bradley_terry, BradleyTerryScore, PairwiseOutcome, TournamentError};
 pub use tournament_live::{
     rank_tournament, run_tournament, BranchScore, DisqualificationReason, DisqualifiedBranch,

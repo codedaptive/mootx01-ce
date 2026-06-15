@@ -3,41 +3,71 @@
 // The dreaming daemon's trigger-mode seam (NEURONKIT_SPEC § 3.1 +
 // § 3.4). The spec routes the dreaming trigger mode through SolverBandit
 // (§ 3.4 decision 2: "Dreaming trigger mode — timer vs event vs
-// hybrid"). SolverBandit is not built yet (mission NK-BANDIT), so this
-// enum is the fixed seam the later mission attaches to: the daemon reads
-// its trigger mode from here, defaulting to `.timer`, and carries NO
-// dependency on a SolverBandit type that does not exist.
+// hybrid"). SolverBandit is built — see SolverBandit.swift.
 //
-// When NK-BANDIT lands, the bandit becomes the source that selects the
-// mode per estate from observed reward; the daemon keeps consuming this
-// same enum, so the attachment is additive and nothing here changes.
+// The bandit selects the mode per estate from observed dreaming-cycle
+// reward; the daemon exposes the bandit-selected mode via
+// `currentTriggerMode()`.
+//
+// ── ARIA boundary ────────────────────────────────────────────────────────
+// `.timer`, `.event`, and `.hybrid` are RESIDENT-SCHEDULER modes, not
+// caller-selectable ARIA tool arguments. The `moot_dream` ARIA tool is
+// on-demand only — calling it triggers one dream cycle immediately; the
+// scheduling cadence (timer / event-threshold / hybrid) is the autonomic
+// governor's responsibility, selected by SolverBandit per estate. A
+// caller invoking `moot_dream` has no lever over which internal mode the
+// resident scheduler is currently in; those are internal substrate decisions.
+//
+// ── Mode wiring ─────────────────────────────────────────────────────────
+// `.timer`  — `pump(now:)` fires on the configured `tickIntervalMs`
+//             cadence. `pumpOnEvent` returns nil.
+// `.event`  — `pumpOnEvent(observationCount:now:)` fires when the
+//             co-occurrence observation count from the substrate reader
+//             meets `DreamingPolicy.eventObservationThreshold`. `pump`
+//             returns nil so the timer path cannot accidentally fire.
+// `.hybrid` — both paths are active. `pump` fires on the timer cadence;
+//             `pumpOnEvent` also fires on the event threshold. The host
+//             loop calls both; either may produce a cycle independently.
+//
+// Event source: `DreamingSubstrateReader.coOccurrenceObservations()` is
+// the activity signal. The caller counts the returned observations and
+// passes the count to `pumpOnEvent`; the daemon gates against the
+// `eventObservationThreshold` in the current policy.
 
 import Foundation
 
 /// How the dreaming daemon decides when to run a cycle.
 ///
-/// v1 default is `.timer`: the daemon ticks on the policy's
-/// `tickIntervalMs` cadence (and on demand via `triggerDreamingCycle`).
-/// `.event` and `.hybrid` are declared so the trigger taxonomy is
-/// complete and the future SolverBandit (NK-BANDIT) has concrete arms to
-/// select between; the daemon treats any non-`.timer` mode as
-/// timer-equivalent until that mission wires the event source, because
-/// no substrate event stream is reachable through the estate surface
-/// today.
+/// Three distinct behaviours — no mode is an alias for another:
+///
+/// - `.timer`: fires on the configured `tickIntervalMs` cadence via
+///   `pump(now:)`. The event path (`pumpOnEvent`) is inactive.
+/// - `.event`: fires when the co-occurrence observation count meets
+///   `DreamingPolicy.eventObservationThreshold` via `pumpOnEvent`. The
+///   timer path (`pump`) is inactive.
+/// - `.hybrid`: both paths active — `pump` fires on cadence and
+///   `pumpOnEvent` fires on the activity threshold. The host loop calls
+///   both; either may produce a cycle independently.
+///
+/// The `SolverBandit` selects the mode each cycle via Thompson Sampling
+/// based on observed dreaming-cycle reward.
 public enum DreamingTriggerMode: String, Sendable, Codable, CaseIterable, Equatable {
 
     /// Tick purely on the configured interval. The v1 default.
     case timer
 
-    /// Tick in response to substrate events (e.g. new RecallTrace
-    /// ingest). Seam for NK-BANDIT; not event-driven in v1.
+    /// Tick in response to estate activity: a co-occurrence observation
+    /// count at or above `DreamingPolicy.eventObservationThreshold` fires
+    /// a cycle via `pumpOnEvent(observationCount:now:)`. The timer path
+    /// is inactive in this mode.
     case event
 
-    /// Combine timer cadence with event triggers. Seam for NK-BANDIT;
-    /// behaves as `.timer` in v1.
+    /// Combine timer cadence with event triggers. Both `pump(now:)` and
+    /// `pumpOnEvent(observationCount:now:)` are active; the host loop
+    /// calls both so neither signal is missed.
     case hybrid
 
-    /// The v1 default trigger mode. Fixed to `.timer` until NK-BANDIT
-    /// supplies a learned selection.
+    /// The initial trigger mode. The bandit re-selects each cycle via
+    /// Thompson Sampling once sufficient reward is observed.
     public static let `default`: DreamingTriggerMode = .timer
 }

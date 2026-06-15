@@ -23,11 +23,21 @@ use neuron_kit::{
     summary_overlap, synthesize, theme_weather, ActionObservation, DrawerRow, DrawerRowMeta,
     RecallFrameTuning, RecallPage, ScenarioProfile,
 };
+use neuron_kit::{
+    calibration_lens::calibrate as lens_calibrate,
+    complexity::complexity,
+    moment_signature::moment_signature,
+    precedence::precedence,
+    rhythm::rhythm,
+};
+use genius_locus_kit::{MatrixCalibrationCurve, MatrixCalibrationOutcome};
+use substrate_ml::moment_summary::RowLite;
+use substrate_ml::temporal_causality_fold::{TemporalCausalityKey, TemporalFieldCoord};
 // FCA and ARM engines live in SubstrateML, not this crate.
 use substrate_ml::association_rule_mining::{mine_association_rules, MiningThresholds};
 use substrate_ml::formal_concept_analysis::{BoundedConceptMiner, FormalAttribute, FormalContext};
 use substrate_types::fingerprint256::Fingerprint256;
-use substrate_types::{MatrixO, RowId};
+use substrate_types::{MatrixO, RowId, HLC};
 
 // Engram is a type alias for Fingerprint256 (engram_lib::Engram = Fingerprint256).
 // Use Fingerprint256 directly — same type, already imported.
@@ -36,6 +46,32 @@ type Engram = Fingerprint256;
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../Tests/NeuronKitTests/Fixtures/lens_vectors.json")
+}
+
+/// Sort all JSON object keys recursively, producing a new Value where every
+/// object's keys appear in ascending lexicographic order.
+///
+/// Required because Cargo feature unification may activate serde_json's
+/// `preserve_order` feature (GeniusLocusKit requests it), which switches
+/// `Value`'s internal map from `BTreeMap` to `IndexMap`. With `IndexMap`,
+/// `serde_json::to_value` preserves struct declaration order instead of
+/// sorting keys — breaking the implicit sort the two-step `to_value →
+/// to_string` pattern relied on. Sorting explicitly here makes canonical
+/// encoding independent of which map type is active, matching Swift's
+/// `.sortedKeys` unconditionally.
+fn sort_keys(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut pairs: Vec<(String, serde_json::Value)> =
+                map.into_iter().map(|(k, v)| (k, sort_keys(v))).collect();
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            serde_json::Value::Object(pairs.into_iter().collect())
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sort_keys).collect())
+        }
+        other => other,
+    }
 }
 
 fn f32_of(s: &str) -> f32 {
@@ -98,6 +134,12 @@ struct LensVectors {
     scenario_profile: Vec<ScenarioProfileCase>,
     context_synthesizer: Vec<ContextSynthesizerCase>,
     bradley_terry: Vec<BradleyTerryCase>,
+    // Five-Lenses families (TASK-MXE-N4):
+    moment_signature: Vec<MomentSignatureCase>,
+    rhythm: Vec<RhythmCase>,
+    precedence: Vec<PrecedenceCase>,
+    complexity: Vec<ComplexityCase>,
+    calibration: Vec<CalibrationCase>,
 }
 
 #[derive(Deserialize)]
@@ -522,6 +564,98 @@ struct BradleyTerryCase {
     outcomes: Vec<BtOutcome>,
     tolerance: String,
     scores: Vec<BtScore>,
+}
+
+// Five-Lenses case structs (TASK-MXE-N4)
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MsRanked {
+    candidate: Vec<String>,    // 4-element block-hex array
+    hamming_distance: u32,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MomentSignatureCase {
+    rows: Vec<Vec<String>>,       // each row is a 4-element block-hex array
+    candidates: Vec<Vec<String>>,
+    signature_blocks: Vec<String>,
+    ranking: Vec<MsRanked>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RhythmPeriod {
+    period_seconds: String,         // f64 hex
+    relative_magnitude: String,     // f64 hex
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RhythmCase {
+    buckets: Vec<bool>,
+    bucket_duration_seconds: String, // f64 hex
+    top_k: usize,
+    periods: Vec<RhythmPeriod>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrecPair {
+    source_field: String,
+    source_value: String,
+    target_field: String,
+    target_value: String,
+    lag_bucket: i32,
+    count: i64,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrecRanked {
+    source_field: String,
+    source_value: String,
+    lag_bucket: i32,
+    count: i64,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrecedenceCase {
+    pairs: Vec<PrecPair>,
+    target_field: String,
+    target_value: String,
+    k: usize,
+    ranked: Vec<PrecRanked>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComplexityCase {
+    counts_a: Vec<String>,              // f32 hex
+    counts_b: Option<Vec<String>>,      // f32 hex; absent = not provided
+    joint: Option<Vec<Vec<String>>>,    // f32 hex; absent = not provided
+    entropy_a: String,                  // f32 hex
+    entropy_b: Option<String>,          // f32 hex; absent when counts_b absent
+    mutual_information: Option<String>, // f32 hex; absent when joint absent
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibRecord {
+    value: String,   // f32 hex
+    outcome: String, // "success" | "failure"
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibOutput {
+    claimed_hex: String,
+    calibrated_hex: String,
+    is_calibrated: bool,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationCase {
+    records: Vec<CalibRecord>,
+    claimed: Vec<String>,
+    calibrated: Vec<CalibOutput>,
 }
 
 #[test]
@@ -964,10 +1098,16 @@ fn lenses_reproduce_shared_vectors() {
             c.created_at.clone(),
             c.training_eligible,
         );
-        // Sorted-keys encoding via serde_json::Value (BTreeMap-backed object
-        // keys) — the Rust analog of Swift's .sortedKeys.
+        // Explicit sort_keys pass then to_string — the Rust analog of Swift's
+        // .sortedKeys. sort_keys is required because Cargo feature unification
+        // may activate serde_json's `preserve_order` feature (GeniusLocusKit
+        // requests it), which makes to_value emit declaration order instead of
+        // sorted order. sort_keys reconstructs every object from a sorted Vec,
+        // so keys are ascending-lexicographic regardless of which map type
+        // backs Value.
         let value = serde_json::to_value(&profile).expect("scenario profile to_value");
-        let canonical = serde_json::to_string(&value).expect("scenario profile serialize");
+        let canonical =
+            serde_json::to_string(&sort_keys(value)).expect("scenario profile serialize");
         assert_eq!(
             canonical, c.canonical_json,
             "sp cross-leg wire bytes (camelCase sorted keys)"
@@ -983,7 +1123,8 @@ fn lenses_reproduce_shared_vectors() {
             decoded.training_eligible, profile.training_eligible,
             "sp training_eligible"
         );
-        // Verify no tournamentReport field leaks into JSON.
+        // `tournament_report` is `#[serde(skip)]` — runtime-only advisory
+        // value that is not part of the wire shape. Verify it is absent.
         assert!(
             !json.contains("tournament_report"),
             "sp no tournament_report"
@@ -1083,6 +1224,116 @@ fn lenses_reproduce_shared_vectors() {
                 got_hi,
                 tol
             );
+        }
+    }
+
+    // ── Five-Lenses verification blocks (TASK-MXE-N4) ──────────────────────
+
+    // moment_signature: decode block-hex rows + candidates → call moment_signature.
+    for (i, c) in v.moment_signature.iter().enumerate() {
+        let rows: Vec<RowLite> = c.rows.iter().map(|b| RowLite {
+            fingerprint: fp_of(b),
+            capture_hlc: HLC::ZERO,
+        }).collect();
+        let candidates: Vec<Engram> = c.candidates.iter().map(|b| fp_of(b)).collect();
+        let result = moment_signature(&rows, &candidates);
+        assert_eq!(
+            blocks_of(result.signature), c.signature_blocks,
+            "moment_signature[{i}] signature_blocks"
+        );
+        assert_eq!(result.ranking.len(), c.ranking.len(),
+            "moment_signature[{i}] ranking length");
+        for (j, (got, want)) in result.ranking.iter().zip(&c.ranking).enumerate() {
+            assert_eq!(blocks_of(got.candidate), want.candidate,
+                "moment_signature[{i}] ranking[{j}].candidate");
+            assert_eq!(got.hamming_distance, want.hamming_distance,
+                "moment_signature[{i}] ranking[{j}].hamming_distance");
+        }
+    }
+
+    // rhythm: decode f64 hex duration → call rhythm.
+    for (i, c) in v.rhythm.iter().enumerate() {
+        let duration = f64_of(&c.bucket_duration_seconds);
+        let result = rhythm(&c.buckets, duration, c.top_k);
+        assert_eq!(result.len(), c.periods.len(),
+            "rhythm[{i}] period count");
+        for (j, (got, want)) in result.iter().zip(&c.periods).enumerate() {
+            assert_eq!(hex64(got.period_seconds), want.period_seconds,
+                "rhythm[{i}] periods[{j}].period_seconds");
+            assert_eq!(hex64(got.relative_magnitude), want.relative_magnitude,
+                "rhythm[{i}] periods[{j}].relative_magnitude");
+        }
+    }
+
+    // precedence: rebuild (TemporalCausalityKey, i64) pairs → call precedence.
+    for (i, c) in v.precedence.iter().enumerate() {
+        let target = TemporalFieldCoord::new(&c.target_field, &c.target_value);
+        let pairs: Vec<(TemporalCausalityKey, i64)> = c.pairs.iter().map(|p| {
+            let src = TemporalFieldCoord::new(&p.source_field, &p.source_value);
+            let tgt = TemporalFieldCoord::new(&p.target_field, &p.target_value);
+            (TemporalCausalityKey::new(src, tgt, p.lag_bucket), p.count)
+        }).collect();
+        let result = precedence(&pairs, &target, c.k);
+        assert_eq!(result.len(), c.ranked.len(),
+            "precedence[{i}] ranked length");
+        for (j, (got, want)) in result.iter().zip(&c.ranked).enumerate() {
+            assert_eq!(got.source.field_path, want.source_field,
+                "precedence[{i}] ranked[{j}].source_field");
+            assert_eq!(got.source.value_repr, want.source_value,
+                "precedence[{i}] ranked[{j}].source_value");
+            assert_eq!(got.lag_bucket, want.lag_bucket,
+                "precedence[{i}] ranked[{j}].lag_bucket");
+            assert_eq!(got.count, want.count,
+                "precedence[{i}] ranked[{j}].count");
+        }
+    }
+
+    // complexity: decode f32 hex count arrays → call complexity.
+    for (i, c) in v.complexity.iter().enumerate() {
+        let counts_a: Vec<f32> = c.counts_a.iter().map(|s| f32_of(s)).collect();
+        let counts_b: Option<Vec<f32>> = c.counts_b.as_ref()
+            .map(|v| v.iter().map(|s| f32_of(s)).collect());
+        let joint: Option<Vec<Vec<f32>>> = c.joint.as_ref()
+            .map(|rows| rows.iter().map(|row| row.iter().map(|s| f32_of(s)).collect()).collect());
+        let result = complexity(&counts_a, counts_b.as_deref(), joint.as_deref());
+        assert_eq!(hex32(result.entropy_a), c.entropy_a,
+            "complexity[{i}] entropy_a");
+        match (&result.entropy_b, &c.entropy_b) {
+            (Some(got), Some(want)) => assert_eq!(hex32(*got), *want,
+                "complexity[{i}] entropy_b"),
+            (None, None) => {}
+            _ => panic!("complexity[{i}] entropy_b present/absent mismatch"),
+        }
+        match (&result.mutual_information, &c.mutual_information) {
+            (Some(got), Some(want)) => assert_eq!(hex32(*got), *want,
+                "complexity[{i}] mutual_information"),
+            (None, None) => {}
+            _ => panic!("complexity[{i}] mutual_information present/absent mismatch"),
+        }
+    }
+
+    // calibration: replay records to build the curve → call lens_calibrate.
+    for (i, c) in v.calibration.iter().enumerate() {
+        let mut curve = MatrixCalibrationCurve::new();
+        for r in &c.records {
+            let outcome = if r.outcome == "success" {
+                MatrixCalibrationOutcome::Success
+            } else {
+                MatrixCalibrationOutcome::Failure
+            };
+            curve.record(f32_of(&r.value), outcome);
+        }
+        let claimed: Vec<f32> = c.claimed.iter().map(|s| f32_of(s)).collect();
+        let result = lens_calibrate(&curve, &claimed);
+        assert_eq!(result.len(), c.calibrated.len(),
+            "calibration[{i}] output length");
+        for (j, (got, want)) in result.iter().zip(&c.calibrated).enumerate() {
+            assert_eq!(hex32(got.claimed), want.claimed_hex,
+                "calibration[{i}] [{j}].claimed");
+            assert_eq!(hex32(got.calibrated), want.calibrated_hex,
+                "calibration[{i}] [{j}].calibrated");
+            assert_eq!(got.is_calibrated, want.is_calibrated,
+                "calibration[{i}] [{j}].is_calibrated");
         }
     }
 }

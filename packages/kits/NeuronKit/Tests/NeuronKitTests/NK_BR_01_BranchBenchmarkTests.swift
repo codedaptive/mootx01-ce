@@ -14,8 +14,10 @@ import GeniusLocusKit
 ///
 /// Covers the four NeuronKit entry points (`deriveBranch`,
 /// `promoteBranch`, `mergeDrawers`, `benchmark`) plus the
-/// `ExternalCorpus` decode/`asRecallFrames()` surface and the C-13
+/// `ExternalCorpus.asRecallFrames()` surface and the C-13
 /// migration-loss invariant (and its read-only corollary).
+/// ExternalCorpus JSON-decode coverage lives in VaultKit's
+/// ExchangeAdapterTests (VK-ADAPT-01 Part 3, ADR-007 Decision 1).
 ///
 /// Estate setup mirrors `GLK_COW_01_BranchTests` — an in-memory estate
 /// opened through `GeniusLocusKit`, captured into through the branch
@@ -100,31 +102,7 @@ struct NK_BR_01_BranchBenchmarkTests {
         #expect(report.merged.count == 2)
     }
 
-    // MARK: - Test 4: ExternalCorpus.load(from:) decodes a MemPalace export
-
-    @Test("ExternalCorpus.load(from:) decodes a MemPalace export")
-    func externalCorpusLoadDecodesExport() async throws {
-        let json = """
-        {
-          "name": "test-corpus",
-          "entries": [
-            { "id": "c1", "content": "alpha concept", "tags": ["x"] },
-            { "id": "c2", "content": "bravo concept", "tags": [] },
-            { "id": "c3", "content": "charlie concept", "tags": ["y", "z"] }
-          ]
-        }
-        """
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nk-br-01-\(UUID().uuidString).json")
-        try json.data(using: .utf8)!.write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let corpus = try ExternalCorpus.load(from: url)
-        #expect(corpus.name == "test-corpus")
-        #expect(corpus.entries.count == 3)
-    }
-
-    // MARK: - Test 5: asRecallFrames yields one frame per entry
+    // MARK: - Test 4: asRecallFrames yields one frame per entry
 
     @Test("asRecallFrames yields one frame per entry")
     func asRecallFramesYieldsOneFramePerEntry() {
@@ -135,7 +113,7 @@ struct NK_BR_01_BranchBenchmarkTests {
         #expect(corpus.asRecallFrames().count == corpus.entries.count)
     }
 
-    // MARK: - Test 6: benchmark on a lossless branch — overlap 1.0, no loss
+    // MARK: - Test 5: benchmark on a lossless branch — overlap 1.0, no loss
 
     @Test("benchmark on a lossless branch — overlap 1.0, no loss")
     func benchmarkLosslessBranchHasFullOverlapAndNoLoss() async throws {
@@ -160,7 +138,7 @@ struct NK_BR_01_BranchBenchmarkTests {
         #expect(report.notFoundInBranch.isEmpty)
     }
 
-    // MARK: - Test 7: C-13 — a missing concept surfaces in notFoundInBranch
+    // MARK: - Test 6: C-13 — a missing concept surfaces in notFoundInBranch
 
     @Test("C-13 — a missing concept surfaces in notFoundInBranch")
     func benchmarkMissingConceptIsZeroToleranceLoss() async throws {
@@ -186,7 +164,7 @@ struct NK_BR_01_BranchBenchmarkTests {
         #expect(report.recallOverlap < 1.0)
     }
 
-    // MARK: - Test 8: newInBranch — a branch drawer absent from the origin
+    // MARK: - Test 7: newInBranch — a branch drawer absent from the origin
 
     @Test("newInBranch — a branch drawer absent from the origin")
     func benchmarkReportsNewInBranch() async throws {
@@ -208,7 +186,7 @@ struct NK_BR_01_BranchBenchmarkTests {
         #expect(report.newInBranch.contains(extra.id))
     }
 
-    // MARK: - Test 9: every metric field is finite and in [0, 1]
+    // MARK: - Test 8: every metric field is finite and in [0, 1]
 
     @Test("every metric field is finite and in [0, 1]")
     func benchmarkMetricsAreFiniteAndBounded() async throws {
@@ -233,7 +211,7 @@ struct NK_BR_01_BranchBenchmarkTests {
         }
     }
 
-    // MARK: - Test 10: C-13 corollary — benchmark is read-only
+    // MARK: - Test 9: C-13 corollary — benchmark is read-only
 
     @Test("C-13 corollary — benchmark is read-only")
     func benchmarkIsReadOnly() async throws {
