@@ -1,4 +1,15 @@
+---
+title: Kit Interface Inventory
+status: canon
+authors: MOOTx01 maintainers
+date: 2026-06-14
+version: 1.0.0
+description: A per-kit inventory of every kit's public interface — types, functions, and protocol conformances — across the MOOTx01 substrate.
+---
+
 # Kit Interface Inventory: MOOTx01
+
+> **Companion:** [`KIT_INTERFACE_DESIGN.md`](KIT_INTERFACE_DESIGN.md) — the design rollup that explains how these interfaces fit together.
 
 **Purpose:** Rapid interface audit across all Kits to detect misplaced functions and interface shape correctness. One short section per Kit; no deep dive.
 
@@ -300,7 +311,6 @@
 - `estate(for: EstateHandle) -> LocusKit.Estate`
 
 **Per-Handle Registry:**
-- `registry: [EstateHandle: LocusKit.Estate]` (internal)
 - `storages: [EstateHandle: any Storage]`
 
 **Unified Audit Log:**
@@ -315,16 +325,10 @@
 - `glkDeriveBranch(from: EstateHandle) -> BranchHandle`
 - `glkPromoteBranch(_ branch: BranchHandle) -> PromotionResult`
 - `glkMergeDrawers(from: BranchHandle, to: EstateHandle)`
-- `branches: [BranchID: EstateBranch]` (internal)
 
 **Standing Signals:**
-- `schedulers: [EstateHandle: StandingSignalScheduler]` (internal)
 - `registerStandingSignal(...)`
 - `triggerSignal(for: EstateHandle)`
-
-**Scope & Grants:**
-- `grantStores: [EstateHandle: GrantStore]` (internal)
-- `scopeVaults: [EstateHandle: ScopeKeyVault]` (internal)
 
 ---
 
@@ -375,7 +379,7 @@
 **Role:** Behaviour recipes (named, composable workflows).  
 **Language:** Swift
 
-**Status:** Planned, Mission 10.
+**Status:** Planned.
 
 **Expected Interface:**
 - `Workflow` protocol
@@ -388,11 +392,20 @@
 
 ## Access Layer
 
-### ARIA_MCP
-**Role:** MCP server exposing any MOOTx01 estate to Claude, Claude Code, OB1, etc.  
+> **Content-refresh flag (for a human/content-owner pass):** The
+> access-surface entries below were authored against an older app
+> layout. The clean token renames are applied (aria-mcp / Mootx01-App),
+> but the entry list itself is likely stale against the current
+> surface — aria-mcp-server, AriaMcpKit, the mootx01 CLI, moot-mgr,
+> Mootx01-App, moot-math-benchmark, and moot-agent-skills. These
+> entries need a content refresh, not just a rename; left as stubs
+> pending that pass.
+
+### aria-mcp
+**Role:** MCP server exposing any MOOTx01 estate to Claude, Claude Code, etc.  
 **Language:** Swift + Python
 
-**Status:** In progress, LAUNCH-04.
+**Status:** In progress.
 
 **Expected Interface:**
 - MCP server conformance
@@ -402,45 +415,27 @@
 
 ---
 
-### ARIA_MacOS
+### Mootx01-App (macOS)
 **Role:** macOS demonstration of the sidecar pattern.  
 **Language:** Swift
 
-**Status:** Planned, after ARIA_MCP.
+**Status:** Planned, after aria-mcp.
 
 ---
 
-### ARIA_iOS
+### Mootx01-App (iOS)
 **Role:** iOS demonstration.  
 **Language:** Swift
 
-**Status:** Planned Rev 3.0, after ARIA_MacOS.
+**Status:** Planned, after the macOS app.
 
 ---
 
-### ARIA_Rust
+### aria-mcp (Rust port)
 **Role:** Rust demonstration (required for conformance parity).  
 **Language:** Rust
 
-**Status:** Planned, after ARIA_MacOS.
-
----
-
-## Special Kits
-
-### Installer
-**Role:** First-run and system integration.  
-**Status:** Planned, LAUNCH-01.
-
----
-
-### Sidecar_Demo_macOS
-**Role:** Prototype demonstrating the sidecar pattern.
-
----
-
-### tools/
-**Role:** Build and test utilities, not shipped.
+**Status:** Planned, after the macOS app.
 
 ---
 
@@ -453,7 +448,7 @@
 | **Substrate** | LocusKit, VectorKit, CorpusKit, GeniusLocusKit |
 | **Reasoning** | NeuronKit |
 | **Behaviour** | CognitionKit |
-| **Access** | ARIA_MCP, ARIA_MacOS, ARIA_iOS, ARIA_Rust |
+| **Access** | aria-mcp (Swift + Rust ports), Mootx01-App (macOS, iOS) |
 
 ---
 
@@ -474,10 +469,9 @@ CorpusKit                (VectorKit, PersistenceKit, ConvergenceKit, EngramLib)
 GeniusLocusKit        (LocusKit, CorpusKit, VectorKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
 NeuronKit             (EideticLib, GeniusLocusKit, EngramLib)
 CognitionKit          (NeuronKit, GeniusLocusKit)
-ARIA_MCP              (All substrate kits + NeuronKit)
+aria-mcp              (All substrate kits + NeuronKit)
 ```
 
 ---
 
-**Last Updated:** 2026-05-26  
-**Status:** Foundation + Substrate + Grounding complete. Reasoning (NeuronKit) in progress. Access (ARIA_MCP) in progress.
+**Status:** Foundation + Substrate + Grounding complete. Reasoning (NeuronKit) in progress. Access (aria-mcp) in progress.

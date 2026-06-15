@@ -1,23 +1,23 @@
 ---
 status: accepted
 created: 2026-05-22
-last_updated: 2026-05-22
+last_updated: 2026-06-14
 ---
 
 # Substrate Design Constraints
 
 The constitutional constraints that hold across every design
-decision in the substrate kit graph. Every session that touches
-substrate design reads this document at the opening, alongside
-the validation plan, the diary, and the claims ledger. Constraint
+decision in the substrate kit graph. These constraints sit
+alongside the validation plan and the claims ledger as the
+reviewable record of substrate design boundaries. Constraint
 violations surface immediately on proposal rather than after
 artifact landing.
 
 ## C-1: No external runtime dependencies for substrate features
 
 The substrate (LocusKit, VectorKit, CorpusKit, GeniusLocusKit,
-NexusKit, ConvergenceKit, PersistenceKit, QueueKit, SubstrateLib,
-AriaLexicon) depends only on:
+ConvergenceKit, PersistenceKit, QueueKit, SubstrateLib,
+AriaLexiconLib) depends only on:
 
 - Pure Swift and pure Rust source compiled from the controlled
   toolchain.
@@ -84,26 +84,19 @@ go through the same review path as source updates. The substrate
 records the reference data version in the manifest so behavior is
 reproducible.
 
-## Session protocol additions
-
-Every session that touches substrate design adds this document to
-its opening reading list. The validation plan's session protocol
-section (step 4) is amended to read: "Read VALIDATION_PLAN.md,
-DESIGN_CONSTRAINTS.md, and CLAIMS_LEDGER.md."
-
 ## History
 
 This document opened during the anchor-extractor design
 conversation on 2026-05-22, after two consecutive proposals
 (an LLM API call, then ONNX Runtime as a substrate dependency)
 that violated the unstated but constitutional
-no-external-dependencies rule. Bob articulated C-1 explicitly;
-C-2 follows from the kernel-ladder pattern already in the
+no-external-dependencies rule. C-1 was articulated explicitly in
+response; C-2 follows from the kernel-ladder pattern already in the
 substrate; C-3 formalizes Invariant I-14; C-4 follows from the
 audit and reproducibility requirements.
 
-The earlier KG fact recording EmbeddingGemma_300M as the
-production default embedding model is superseded by this
-document. Vector tier rung 3 in the substrate uses TF-IDF over
+An earlier record naming EmbeddingGemma_300M as the production
+default embedding model is superseded by this document. The
+substrate's vector representation tier uses TF-IDF over
 framework-profile vocabulary; neural embedding models are a
 NeuronKit-layer concern, not a substrate concern.

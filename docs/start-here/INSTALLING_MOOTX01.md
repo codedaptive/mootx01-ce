@@ -40,7 +40,7 @@ Running `mootx01 install` performs four things, in order:
 
 4. **Starts the management console.** `moot-mgr` is registered as a separate
    background service under `com.mootx01.mgr`. It runs a local dashboard at
-   `http://127.0.0.1:7077` where you can observe what the daemon is doing.
+   `http://127.0.0.1:4200` where you can observe what the daemon is doing.
    This requires the `moot-mgr` binary to be present alongside `mootx01` in
    the release archive — if you built only `mootx01`, the console step is
    skipped with a note.
@@ -89,7 +89,7 @@ connecting directly to a local HTTP MCP server without a bridge tool. The
 installer uses the stdio path for it instead, which is reliable but means
 Claude Desktop spawns its own short-lived MCP instance per conversation.
 That instance has access to your estate but does not run the background
-brain work. If you want continuous maintenance, run Claude Code, Cursor,
+maintenance work. If you want continuous maintenance, run Claude Code, Cursor,
 Cline, or Continue alongside — the daemon runs as long as those clients
 are active.
 
@@ -146,7 +146,7 @@ moot-mgr monitoring status
 
 The on/off switch takes effect on the running daemon immediately — no restart
 required. When monitoring is on, the daemon's activity (including its
-background work) appears in the dashboard at `http://127.0.0.1:7077`.
+background work) appears in the dashboard at `http://127.0.0.1:4200`.
 
 Monitoring state is stored in the management console's own database, not in
 your estate. Turning it off does not affect your memory data.
@@ -170,7 +170,7 @@ To see the management console's view of the daemon:
 moot-mgr status
 ```
 
-Or open `http://127.0.0.1:7077` in a browser (when monitoring is on, this
+Or open `http://127.0.0.1:4200` in a browser (when monitoring is on, this
 shows live activity).
 
 ---
@@ -220,7 +220,7 @@ normal installed case.
 |---|---|---|
 | `MOOTX01_HTTP_PORT` | `4242` | Loopback port the daemon listens on |
 | `MOOTX01_HTTP_MAX_BODY_BYTES` | `4194304` (4 MiB) | Maximum MCP request body the daemon accepts |
-| `MOOTX01_BRAIN_TICK_MS` | `5000` | Background brain-pump sampling resolution in milliseconds |
+| `MOOTX01_BRAIN_TICK_MS` | `5000` | How often the background maintenance loop (the autonomic governor) samples, in milliseconds |
 | `MOOTX01_MONITORING_POLL_MS` | `5000` | How often the daemon checks whether monitoring is enabled |
 
 Setting `MOOTX01_HTTP_PORT` switches `mootx01 serve` into resident HTTP mode.

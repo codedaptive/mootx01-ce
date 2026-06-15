@@ -1,7 +1,18 @@
+---
+title: Standard Code Authoring Practice
+version: 1.0.0
+status: implementation-grade specification
+author: "MOOTx01 maintainers"
+date: 2026-06-14
+description: The authoring rhythm for MOOTx01 substrate code — Swift-first, test-driven, both Swift and Rust versions co-authored per file/interface, conformance-gated bit-for-bit on shared vectors.
+relates_to:
+  - VERSIONING.md
+---
+
 # STANDARD_CODE_AUTHORING_PRACTICE
 
-**Status:** CANON. Authoritative. Injected into every coding run. Overrides any
-contrary habit, convenience, or prior agent behavior.
+This is the authoritative authoring practice for MOOTx01 substrate code. It
+takes precedence over any contrary habit or convenience.
 
 ---
 
@@ -65,7 +76,7 @@ Never write "Swift port" or "Rust port." Write "Swift version" / "Rust version."
 
 Swift tests use **swift-testing** (`import Testing`, `@Test`, `#expect`,
 `#require`) — https://developer.apple.com/xcode/swift-testing/. Not XCTest.
-This has been the design premise since launch.
+This is the design premise for the Swift test suite.
 
 Rust tests use inline `#[cfg(test)]` / `#[test]` modules in the source file.
 
@@ -89,7 +100,7 @@ coverage.
 - **No deferral.** "Defer the Rust," "TODO: Rust version," "Swift-only for now"
   are prohibited. If a real platform constraint prevents a Rust version (e.g.
   Apple-specific accelerator), that is a *behavioral fact* about the version —
-  state it plainly, never as a process excuse.
+  state it plainly, never as a justification for skipping a leg.
 - **No circular tests.** Never write a test whose only purpose is to confirm
   the code that already exists. The test defines the behavior; the code
   satisfies the test — in that order.

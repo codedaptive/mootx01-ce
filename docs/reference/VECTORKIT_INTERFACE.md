@@ -1,0 +1,846 @@
+---
+title: VectorKit Interface
+status: active
+version: 1.0.0
+date: 2026-06-14
+description: Public API surface for VectorKit in both the Swift and Rust ports.
+spec_type: kit
+authors: MOOTx01 maintainers
+package: VectorKit
+languages: [swift, rust]
+relates_to:
+  - docs/reference/VECTORKIT_SPEC.md
+purpose: |
+  Public API surface of VectorKit in both ports: the EmbeddingProvider
+  abstraction, the built-in FloatSimHashEmbeddingProvider, the
+  StoredVector record, the VectorPayloadInput batch-input type, the
+  VectorStore CRUD surface (schema v2, Lane F — item_id/vector_index/
+  kind/payload; single-row write-behind path addPayload/add_payload;
+  batch amortised path addPayloads/add_payloads; flush quiesce),
+  the VectorMatch result type, and the VectorKitError enum. The companion
+  SPEC carries the behavioral contracts (invariants I-1…I-7, conformance
+  C-1…C-12).
+---
+
+# VectorKit Interface
+
+## § 1 — Package layout
+
+**Swift:** `packages/kits/VectorKit/`
+
+- `Sources/VectorKit/VectorKit.swift` — module documentation only (no
+  symbols; the kit's surface is the types below)
+- `Sources/VectorKit/EmbeddingProvider.swift` — the `EmbeddingProvider`
+  protocol
+- `Sources/VectorKit/FloatSimHashEmbeddingProvider.swift` — the built-in
+  provider
+- `Sources/VectorKit/StoredVector.swift` — the storage record
+- `Sources/VectorKit/VectorMatch.swift` — the nearest-neighbour result
+- `Sources/VectorKit/VectorStore.swift` — the PersistenceKit-backed actor
+- `Sources/VectorKit/VectorKitError.swift` — the error enum
+- `Tests/VectorKitTests/`, `Package.swift`
+
+**Rust:** `packages/kits/VectorKit/rust/` — crate `vectorkit`
+
+- `src/lib.rs` — re-exports
+- `src/embedding_provider.rs` — the `EmbeddingProvider` trait
+- `src/simhash_embedding_provider.rs` — `FloatSimHashEmbeddingProvider`
+- `src/vector_store.rs` — `StoredVector`, `VectorMatch`, `VectorStore`
+- `src/error.rs` — `VectorKitError`
+- depends on `engram-lib`, `substrate-lib`, `persistence-kit`, `uuid`
+
+## § 2 — Public types
+
+### `EmbeddingProvider`
+
+The abstraction over on-device embedding generation: text →
+model-tagged `Engram` (SPEC § 4, I-1; § 5, B-1/B-2; I-5 empty-input
+contract).
+
+**Swift:**
+
+```swift
+public protocol EmbeddingProvider: Sendable {
+    var modelID: String { get }
+    var modelVersion: String { get }
+    func embed(_ text: String) async throws -> Engram
+
+    // Float lane source (Lane D): the pooled dense float vector the provider
+    // computes on the way to the SimHash projection — retained, not recomputed.
+    // Default impl throws (float lane is opt-in); providers that run a real
+    // inference pass override to return the pooled vector. Empty input → [].
+    func embedFloat(_ text: String) async throws -> [Float]
+
+    // Batched embedding; default sequential impl in a public extension.
+    // Providers with batched CoreML graphs override for throughput.
+    // Order of outputs matches the order of inputs; empty entries in
+    // the input array yield Engram.zero per the embed contract.
+    func embedBatch(_ texts: [String]) async throws -> [Engram]
+}
+```
+
+**Rust:**
+
+```rust
+pub trait EmbeddingProvider: Send + Sync {
+    fn model_id(&self) -> &str;
+    fn model_version(&self) -> &str;
+    fn embed(&self, text: &str) -> Result<Engram, VectorKitError>;
+
+    // Float lane source (Lane D): the pooled dense float vector. Default
+    // impl errors (float lane is opt-in); providers that run a real
+    // inference pass override to return the pooled vector. Empty input → [].
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError>;
+
+    // Batched embedding; default sequential impl in the trait body.
+    // Providers with batched inference (e.g. ONNX with a batch dim)
+    // can override. Order of outputs matches the order of inputs;
+    // empty entries yield `Engram::ZERO` per the `embed` contract.
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Engram>, VectorKitError> {
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts { out.push(self.embed(t)?); }
+        Ok(out)
+    }
+}
+```
+
+### `FloatSimHashEmbeddingProvider`
+
+The built-in deterministic provider: a host-supplied inference closure
+produces a dense `[Float]` / `Vec<f32>`, which is projected to a 256-bit
+`Engram` through SubstrateLib's canonical FloatSimHash using a stable
+per-provider seed (SPEC § 4, I-4; § 5, B-1).
+
+**Swift:**
+
+```swift
+public struct FloatSimHashEmbeddingProvider: EmbeddingProvider {
+    public let modelID: String
+    public let modelVersion: String
+    public let projectionSeed: UInt64
+    public let inference: @Sendable (String) async throws -> [Float]
+
+    public init(
+        modelID: String,
+        modelVersion: String,
+        projectionSeed: UInt64,
+        inference: @escaping @Sendable (String) async throws -> [Float]
+    )
+
+    public func embed(_ text: String) async throws -> Engram
+}
+```
+
+**Rust:**
+
+```rust
+pub struct FloatSimHashEmbeddingProvider { /* model_id, model_version, projection_seed, inference */ }
+
+impl FloatSimHashEmbeddingProvider {
+    pub fn new(
+        model_id: impl Into<String>,
+        model_version: impl Into<String>,
+        projection_seed: u64,
+        inference: impl Fn(&str) -> Result<Vec<f32>, String> + Send + Sync + 'static,
+    ) -> Self;
+}
+
+impl EmbeddingProvider for FloatSimHashEmbeddingProvider { /* model_id, model_version, embed */ }
+```
+
+### `StoredVector`
+
+One row of the `vectors` table — the record returned by
+`vectors(forItemID:)` (SPEC § 4, I-1/I-3; § 5, B-5/B-9). Lane F rename:
+`drawerID` → `itemID` (mirrors the `drawer_id` → `item_id` column rename).
+`vectorIndex` (0 for single-vector items; 0..N-1 for ColBERT token vectors)
+was added in schema v2.
+
+**Swift:**
+
+```swift
+public struct StoredVector: Sendable, Equatable {
+    public let id: String            // UUID string, stable across upserts
+    public let itemID: String        // drawer or chunk UUID (was drawerID)
+    public let vectorIndex: UInt32   // 0 for single-vector; token slot for ColBERT
+    public let modelID: String
+    public let modelVersion: String
+    public let engram: Engram        // binary payloads only; float/int8 via getPayload
+    public let filedAt: Date         // round-tripped through TEXT ISO8601
+
+    public init(id: String,
+                itemID: String,
+                vectorIndex: UInt32 = 0,
+                modelID: String,
+                modelVersion: String,
+                engram: Engram,
+                filedAt: Date)
+}
+```
+
+**Rust:**
+
+```rust
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredVector {
+    pub id: String,
+    pub item_id: String,        // was drawer_id (Lane F rename)
+    pub vector_index: u32,      // 0 for single-vector
+    pub model_id: String,
+    pub model_version: String,
+    pub engram: Engram,         // binary payloads only
+    pub filed_at: i64,          // Unix epoch seconds (TypedValue::Timestamp)
+}
+```
+
+**Parity delta:** `filed_at` — Swift `Date` (TEXT ISO8601 round-trip, sub-ms
+precision lost) / Rust `i64` (Unix epoch seconds). Value-equivalent across
+ports; sanctioned date-storage seam.
+
+### `VectorMatch`
+
+A nearest-neighbour result: one matched item, the distance, and the
+producing model's id (SPEC § 4, I-2; § 5, B-6/B-10). Ordered by distance
+ascending, ties by `itemID`/`item_id` ascending. Lane F rename:
+`drawerID` → `itemID`.
+
+**Swift:**
+
+```swift
+public struct VectorMatch: Sendable, Comparable, Equatable {
+    public let itemID: String    // drawer or chunk UUID (was drawerID)
+    public let distance: Int     // Hamming 0…256 (binary lane) or cosine×10_000 (float lane)
+    public let modelID: String
+
+    public init(itemID: String, distance: Int, modelID: String)
+    public static func < (lhs: VectorMatch, rhs: VectorMatch) -> Bool  // by distance asc, itemID asc tiebreak
+}
+```
+
+**Rust:**
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorMatch {
+    pub item_id: String,    // was drawer_id (Lane F rename)
+    pub distance: i32,      // Hamming 0..=256 or cosine×10_000
+    pub model_id: String,
+}
+
+impl Ord for VectorMatch { /* distance asc, then item_id asc */ }
+impl PartialOrd for VectorMatch { /* delegates to Ord */ }
+```
+
+### `VectorPayloadInput`
+
+One row of input for the bulk `addPayloads(_:)` / `add_payloads` path.
+Bundles a `VectorPayload` with the index metadata that a single
+`addPayload` call would otherwise take as separate arguments (SPEC §5,
+B-3b). The import and migration path builds an array/slice of
+these and submits them in one batch so the resident array, sidecar, and
+both indexes are updated once for the whole batch rather than once per row.
+
+**Swift:**
+
+```swift
+public struct VectorPayloadInput: Sendable, Equatable {
+    public let itemID: String          // owning drawer/chunk UUID; joins vectors.item_id
+    public let vectorIndex: UInt32     // 0 for single-vector; token position for ColBERT
+    public let payload: VectorPayload  // binary, float32, or int8 typed payload
+    public let modelID: String
+    public let modelVersion: String
+    public let filedAt: Date           // passed in — never read from Date() inside the engine
+
+    public init(
+        itemID: String,
+        vectorIndex: UInt32,
+        payload: VectorPayload,
+        modelID: String,
+        modelVersion: String,
+        filedAt: Date
+    )
+}
+```
+
+**Rust:**
+
+```rust
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorPayloadInput {
+    pub item_id: String,
+    pub vector_index: u32,
+    pub payload: VectorPayload,
+    pub model_id: String,
+    pub model_version: String,
+    pub filed_at_unix_secs: i64,   // Unix epoch seconds — never read from system clock
+}
+```
+
+**Parity delta:** `filedAt` — Swift `Date` / Rust `i64` Unix epoch
+seconds. Sanctioned date-storage seam (same as `StoredVector`).
+
+### `VectorStore`
+
+The PersistenceKit-backed store. A Swift `actor` (async surface mirrors
+PersistenceKit's `RowStore`); a Rust `struct` holding `Arc<dyn Storage>`
+behind a `Mutex`. Constructed against an already-opened `Storage`; the
+caller opens the schema (SPEC § 4, I-6). Methods are in § 3.
+
+**Swift:**
+
+```swift
+public actor VectorStore {
+    public static let schemaDeclaration: SchemaDeclaration
+    public let mihThreshold: UInt32   // default 50_000; promotion boundary BruteForce→MIH
+
+    public init(
+        storage: any Storage,
+        sidecarURL: URL? = nil,        // optional .vec packed binary sidecar
+        mihThreshold: UInt32 = 50_000,
+        mihBandCount: MIHBandCount = .m16
+    )
+    // CRUD + query methods: see § 3
+}
+```
+
+**Rust:**
+
+```rust
+pub struct VectorStore { /* Arc<Mutex<HotState>>, storage: Arc<dyn Storage>, … */ }
+
+impl VectorStore {
+    pub fn schema_declaration() -> SchemaDeclaration;
+    pub fn new(storage: Arc<dyn Storage>) -> Self;
+    pub fn open(storage: Arc<dyn Storage>) -> Result<Self, VectorKitError>; // opens schema, returns store
+    // CRUD + query methods: see § 3
+}
+```
+
+**`vectors` table schema — schema version 2 (Lane F, multi-vector):**
+declared by `VectorStore.schemaDeclaration` / `VectorStore::schema_declaration()`.
+
+| Column | Type | Nullable | Notes |
+|---|---|---|---|
+| `id` | UUID / TEXT | NOT NULL | Primary key. Stable across upserts. |
+| `item_id` | TEXT | NOT NULL | Owning drawer or chunk UUID. (Renamed from `drawer_id`.) |
+| `vector_index` | INTEGER | NOT NULL DEFAULT 0 | 0 for single-vector; 0..N-1 for ColBERT token vectors. |
+| `model_id` | TEXT | NOT NULL | Embedding model identifier. |
+| `model_version` | TEXT | NOT NULL | Model weights version. |
+| `kind` | INTEGER | NOT NULL DEFAULT 0 | `VectorKind` raw value: 0=binary, 1=float32, 2=int8. |
+| `dim` | INTEGER | NOT NULL DEFAULT 256 | Number of logical dimensions. |
+| `payload` | BLOB | NOT NULL | Vector bytes: 32 bytes (binary); dim×4 (float32); dim (int8). (Renamed from `engram`.) |
+| `scale` | REAL | NULL | Int8 dequantization scale. NULL for binary and float32. |
+| `filed_at` | TIMESTAMP TEXT | NOT NULL | ISO8601 text (TEXT, not REAL). |
+
+UNIQUE constraint: `(item_id, vector_index, model_id)`.
+Indices: `idx_vectors_item` on `(item_id)`; `idx_vectors_model_item` on `(model_id, item_id)`.
+
+(SPEC § 4, I-3/I-4; declared by `schemaDeclaration` / `schema_declaration()`.)
+
+## § 3 — Public functions
+
+### `embed`
+
+Generate a model-tagged engram for text (SPEC § 5, B-1/B-2; I-5). See
+`EmbeddingProvider` / `FloatSimHashEmbeddingProvider` in § 2 for the
+signatures.
+
+### `VectorStore.addVector` / `add_vector` (binary convenience)
+
+Upsert a binary (Engram) vector at `vectorIndex=0`; updates in place on
+`(itemID, 0, modelID)` (SPEC § 5, B-3). For multi-vector items use
+`addPayload` / `add_payload` directly.
+
+**Swift:**
+
+```swift
+public func addVector(
+    itemID: String,       // was drawerID (Lane F rename)
+    engram: Engram,
+    modelID: String,
+    modelVersion: String,
+    filedAt: Date
+) async throws
+```
+
+**Rust:**
+
+```rust
+pub fn add_vector(
+    &self,
+    item_id: &str,        // was drawer_id (Lane F rename)
+    engram: &Engram,
+    model_id: &str,
+    model_version: &str,
+    filed_at_unix_secs: i64,
+) -> Result<(), VectorKitError>;
+```
+
+### `VectorStore.addPayload` / `add_payload` (general write path)
+
+Upsert a binary or float32 typed payload at `(itemID, vectorIndex, modelID)`
+(SPEC § 5, B-3/B-3a/I-3/I-4). This is the general write path; `addVector`
+is a convenience wrapper for the binary/Engram case.
+
+**Int8 payloads are rejected fail-closed** (SPEC §I-4a): `addPayload` / `add_payload` throws/returns
+`VectorKitError.int8QuantizationPolicyUndefined` /
+`VectorKitError::Int8QuantizationPolicyUndefined` when `payload.kind ==
+.int8` / `VectorKind::Int8`. The `.int8` / `Int8` case is retained in
+`VectorPayload` (no-removal doctrine) but is not yet persistable. Use
+`.float` / `Float32` or the binary Engram lane instead. See VECTORKIT_SPEC
+§I-4a and arch spec §10.3.
+
+Write-behind policy (SPEC B-3a): the in-memory resident array
+is updated immediately; the `.vec` sidecar is marked dirty but NOT
+rewritten. Call `flush()` at a quiesce point to persist. Crash safety is
+preserved by the table-rebuild path (the `vectors` table is the durable
+source of truth; a stale sidecar is rebuilt from it on the next open).
+For importing many vectors at once, prefer `addPayloads(_:)` /
+`add_payloads` which bounds sidecar writes and index builds to O(batches).
+
+**Swift:**
+
+```swift
+public func addPayload(
+    itemID: String,
+    vectorIndex: UInt32,
+    payload: VectorPayload,
+    modelID: String,
+    modelVersion: String,
+    filedAt: Date
+) async throws
+```
+
+**Rust:**
+
+```rust
+pub fn add_payload(
+    &self,
+    item_id: &str,
+    vector_index: u32,
+    payload: &VectorPayload,
+    model_id: &str,
+    model_version: &str,
+    filed_at_unix_secs: i64,
+) -> Result<(), VectorKitError>;
+```
+
+### `VectorStore.addPayloads(_:)` / `add_payloads` (batch write)
+
+Bulk-upsert N binary or float32 typed payloads in one call — the import and
+migration path (SPEC § 5, B-3b).
+
+**Int8 payloads in the batch are rejected fail-closed** (SPEC §I-4a): the
+entire batch is rejected (no partial writes) if any element has `kind ==
+.int8` / `Int8`. The first offending `itemID` is reported in the error.
+
+For a batch of N items it performs:
+- O(N) row upserts to the `vectors` table (durable source of truth —
+  unavoidable and not the disease).
+- Binary lane: ONE tombstone pass, ONE array append pass, ONE sidecar
+  write (`ResidentArrayStore.appendBatch` / `append_batch`), and ONE
+  rebuild of both `BruteForceIndex` and `MIHIndex` from the final array.
+  Cost is O(batches) sidecar writes and O(batches) index builds regardless
+  of batch size.
+- Float32 lane: the Lane D float index is invalidated once for a lazy
+  rebuild on the next `findNearestFloat` call (cheaper than N incremental
+  float adds).
+- Empty batch is a no-op.
+Search output is identical to N sequential `addPayload` calls for the same
+inputs (the total order (distance ASC, itemID ASC) is applied at query
+time, not insert time). Verified by C-10 (SPEC § 7).
+
+**Swift:**
+
+```swift
+public func addPayloads(_ batch: [VectorPayloadInput]) async throws
+```
+
+**Rust:**
+
+```rust
+pub fn add_payloads(&self, batch: &[VectorPayloadInput]) -> Result<(), VectorKitError>;
+```
+
+### `VectorStore.flush()` / `flush` (sidecar quiesce)
+
+Flush any pending write-behind sidecar mutation to disk (SPEC § 5,
+B-3c). The single `addPayload` binary path is write-behind:
+it mutates the in-memory resident array and marks the sidecar dirty
+without writing. Callers persist the sidecar by calling `flush()` at a
+quiesce point (e.g. end of an import loop, before process exit, on a
+periodic checkpoint). No-op when:
+- there is no sidecar (memory-only store), OR
+- `isDirty` is false (the in-memory array already matches the file), OR
+- the last write was via `addPayloads` (which writes the sidecar eagerly).
+Crash safety does not depend on `flush()`: the `vectors` table is the
+durable source; the sidecar is rebuilt on the next open if it is stale.
+
+**Swift:**
+
+```swift
+public func flush() async throws
+```
+
+**Rust:**
+
+```rust
+pub fn flush(&self) -> Result<(), VectorKitError>;
+```
+
+### `VectorStore.getVector` / `get_vector` (binary convenience)
+
+Point read of the Engram stored under `(itemID, vectorIndex=0, modelID)`,
+or `nil` / `None` when no row exists. Does not fall back to another model
+(SPEC § 5, B-4).
+
+**Swift:**
+
+```swift
+public func getVector(itemID: String, modelID: String) async throws -> Engram?
+```
+
+**Rust:**
+
+```rust
+pub fn get_vector(&self, item_id: &str, model_id: &str)
+    -> Result<Option<Engram>, VectorKitError>;
+```
+
+### `VectorStore.getPayload` / `get_payload` (general read path)
+
+Point read of the `VectorPayload` stored under `(itemID, vectorIndex,
+modelID)`, or `nil` / `None` when no row exists (SPEC § 5, B-4).
+
+**Swift:**
+
+```swift
+public func getPayload(
+    itemID: String,
+    vectorIndex: UInt32,
+    modelID: String
+) async throws -> VectorPayload?
+```
+
+**Rust:**
+
+```rust
+pub fn get_payload(
+    &self,
+    item_id: &str,
+    vector_index: u32,
+    model_id: &str,
+) -> Result<Option<VectorPayload>, VectorKitError>;
+```
+
+### `VectorStore.vectors(forItemID:)` / `vectors_for_item`
+
+Every row for an item (one per distinct `(vectorIndex, modelID)` pair),
+ordered by `filed_at` ascending (SPEC § 5, B-5). Lane F rename: was
+`vectors(forDrawerID:)` / `vectors_for_drawer`.
+
+**Swift:**
+
+```swift
+public func vectors(forItemID itemID: String) async throws -> [StoredVector]
+```
+
+**Rust:**
+
+```rust
+pub fn vectors_for_item(&self, item_id: &str)
+    -> Result<Vec<StoredVector>, VectorKitError>;
+```
+
+### `VectorStore.findNearest` / `find_nearest`
+
+k-nearest by Hamming distance over binary rows tagged with the given
+model, via the resident DenseIndex (BruteForceIndex below
+`mihThreshold`, MIHIndex at/above it — both exact). Sorted distance
+ascending, ties by item id ascending (SPEC § 5, B-6/B-10; I-2).
+
+**Swift:**
+
+```swift
+public func findNearest(probe: Engram, modelID: String, limit: Int) async throws -> [VectorMatch]
+```
+
+**Rust:**
+
+```rust
+pub fn find_nearest(&self, probe: &Engram, model_id: &str, k: usize)
+    -> Result<Vec<VectorMatch>, VectorKitError>;
+```
+
+### `VectorStore.findNearestFloat` / `find_nearest_float`
+
+k-nearest over the float32 (Lane D) vectors by COSINE distance, using the
+in-house `FloatBruteForceIndex` (no external engine; SPEC § 4). The float
+index is built lazily on first call from the
+float32 rows in the `vectors` table and updated incrementally on float
+writes. The scan is restricted to `modelID`'s partition (I-4). Cosine is
+scale-invariant, so it ranks an answer above a near-duplicate of the
+question — the case the SimHash-Hamming lane cannot serve. Results are
+sorted (cosine distance ASC, item id ASC). `VectorMatch.distance` is the
+cosine distance ×10_000 (the same integer scale both ports use, so the
+cross-language rank-identity fixtures compare like-for-like). The float
+lane is reproducible-within-config, NOT four-way bit-identical (arch spec
+§6). Empty when `limit ≤ 0`, the probe is empty, or no float rows exist.
+
+**Swift:**
+
+```swift
+public func findNearestFloat(probe: [Float], modelID: String, limit: Int) async throws -> [VectorMatch]
+```
+
+**Rust:**
+
+```rust
+pub fn find_nearest_float(&self, probe: &[f32], model_id: &str, k: usize)
+    -> Result<Vec<VectorMatch>, VectorKitError>;
+```
+
+### `VectorStore.findByKeyword` / `find_by_keyword`
+
+Coarse substring pre-filter over `item_id`; returns distinct item ids up
+to `limit`, ascending (SPEC § 5, B-7).
+
+**Swift:**
+
+```swift
+public func findByKeyword(_ query: String, limit: Int) async throws -> [String]
+```
+
+**Rust:**
+
+```rust
+pub fn find_by_keyword(&self, query: &str, limit: usize)
+    -> Result<Vec<String>, VectorKitError>;
+```
+
+### `VectorStore.deleteVector` / `delete_vector`
+
+Idempotent delete of the binary row at `(itemID, vectorIndex=0, modelID)`
+(SPEC § 5, B-8).
+
+**Swift:**
+
+```swift
+public func deleteVector(itemID: String, modelID: String) async throws
+```
+
+**Rust:**
+
+```rust
+pub fn delete_vector(&self, item_id: &str, model_id: &str)
+    -> Result<(), VectorKitError>;
+```
+
+### `VectorStore.deleteAllVectors` / `delete_all_vectors`
+
+Delete all rows for `(itemID, modelID)` regardless of `vector_index`.
+Used for multi-vector items where every token vector must be removed
+(SPEC § 5, B-8).
+
+**Swift:**
+
+```swift
+public func deleteAllVectors(itemID: String, modelID: String) async throws
+```
+
+**Rust:**
+
+```rust
+pub fn delete_all_vectors(&self, item_id: &str, model_id: &str)
+    -> Result<(), VectorKitError>;
+```
+
+### `VectorStore.destroyAllVectors` / `destroy_all_vectors`
+
+Deletes all rows from the `vectors` table. Called by
+`GeniusLocusKit.destroy(storage:corpusStorage:handle:)` as part of
+coordinated estate teardown. After this call the backing storage is intact
+(schema preserved) but contains no vector data. The caller is responsible for
+closing the estate before calling this method.
+
+**Swift:**
+
+```swift
+public func destroyAllVectors() async throws
+```
+
+**Rust:**
+
+```rust
+pub fn destroy_all_vectors(&self) -> Result<(), VectorKitError>;
+```
+
+## § 4 — Errors
+
+Cases match one-for-one across ports so cross-language conformance tests
+share fixtures. Behavioral meaning: SPEC § 6.
+
+**Swift:**
+
+```swift
+public enum VectorKitError: Error, Sendable, Equatable {
+    case embeddingFailed(String)   // inference closure threw
+    case modelUnavailable(String)  // model not loaded / unavailable
+    case storeUnavailable(String)  // store open / row-decode failure
+    case notFound                  // reserved; reads model absence as nil/empty
+    case invalidPayload(String)    // malformed payload (wrong kind/dim/bytes)
+    case decodingFailure(String)   // row decode failure
+
+    // Thrown by addPayload / addPayloads when payload.kind == .int8.
+    // Int8 writes are rejected fail-closed because the quantization policy
+    // (symmetric vs asymmetric, per-vector vs per-dim scale) has not been
+    // ratified. Use .float (float32 lane) or the binary Engram lane.
+    // See VECTORKIT_SPEC §I-4a.
+    case int8QuantizationPolicyUndefined(String)
+}
+```
+
+**Rust:**
+
+```rust
+#[derive(Debug, PartialEq, Eq)]
+pub enum VectorKitError {
+    EmbeddingFailed(String),
+    ModelUnavailable(String),
+    StoreUnavailable(String),
+    NotFound,
+    InvalidPayload(String),
+    DecodingFailure(String),
+    /// Returned by `add_payload` / `add_payloads` when `payload.kind == Int8`.
+    /// Int8 writes are rejected fail-closed: the quantization policy has not
+    /// been ratified. Use `Float32` or `Binary` instead.
+    /// See VECTORKIT_SPEC §I-4a.
+    Int8QuantizationPolicyUndefined(String),
+}
+```
+
+## § 5 — Conformance test entry points
+
+**Swift:**
+
+```
+swift test --package-path packages/kits/VectorKit
+```
+
+(Targets: `EmbeddingProviderTests`, `FloatSimHashEmbeddingProviderTests`,
+`VectorStoreTests`, `BulkIngestTests`, `CapturePathBenchmarkTests`,
+`VectorKitTelemetryTests`.)
+
+**Rust:**
+
+```
+cargo test -p vectorkit
+```
+
+(Suites: `simhash_provider_tests.rs`, `vector_store_tests.rs`,
+`bulk_ingest_tests.rs`, `float_lane_tests.rs`,
+`vectorkit_telemetry_tests.rs`.)
+
+## § 6 — Examples
+
+```swift
+import EngramLib
+import PersistenceKit
+import VectorKit
+
+// 1. Open a store against an application-selected backend.
+try await storage.open(schema: VectorStore.schemaDeclaration)
+let store = VectorStore(storage: storage)
+
+// 2. Build a deterministic provider (host supplies inference).
+let provider = FloatSimHashEmbeddingProvider(
+    modelID: "minilm-v6",
+    modelVersion: "1.0.0",
+    projectionSeed: 0x4D49_4E4C_4D5F_7631,
+    inference: { text in try await embedMiniLM(text) }   // → [Float]
+)
+
+// 3. File a model-tagged vector for an item (drawer UUID).
+let engram = try await provider.embed("the legal pad on my desk")
+try await store.addVector(
+    itemID: "drawer-42",          // itemID (was drawerID, Lane F rename)
+    engram: engram,
+    modelID: provider.modelID,
+    modelVersion: provider.modelVersion,
+    filedAt: now
+)
+
+// 4. Query nearest neighbours within the same model.
+let probe = try await provider.embed("yellow notepad")
+let hits = try await store.findNearest(probe: probe, modelID: "minilm-v6", limit: 10)
+// hits: [VectorMatch] sorted near → far, each tagged "minilm-v6"
+// hit.itemID is the matched drawer UUID (was hit.drawerID)
+```
+
+## § 7 — Swift/Rust Concordance
+
+Every top-level public concept in VectorKit, mapped Swift↔Rust with the
+shape rule that governs how the two ports may differ. The surface is a
+clean 1:1 — six public types, identical names, no Apple-platform-bound
+types, no Swift-only or Rust-only contract types.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule |
+|---|---|---|---|---|
+| Embedding abstraction | `EmbeddingProvider` | `EmbeddingProvider` | public protocol / pub trait | identical surface (`modelID`/`model_id`, `modelVersion`/`model_version`, `embed`, `embedBatch`/`embed_batch`); Swift `async throws` / Rust sync `Result` — sanctioned (no async runtime in the Rust port). `embedBatch` default impl: Swift public extension / Rust trait body |
+| Built-in deterministic provider | `FloatSimHashEmbeddingProvider` | `FloatSimHashEmbeddingProvider` | public struct / pub struct | identical; host inference closure (Swift `@Sendable (String) async throws -> [Float]` / Rust `Fn(&str) -> Result<Vec<f32>, String> + Send + Sync`) projected via canonical SubstrateLib FloatSimHash with per-provider `projectionSeed`/`projection_seed` |
+| Storage record | `StoredVector` | `StoredVector` | public struct / pub struct | Lane F rename: `drawerID`→`itemID` / `drawer_id`→`item_id`; `vectorIndex`/`vector_index` UInt32/u32 added for multi-vector (ColBERT); timestamp seam: Swift `Date` (TEXT ISO8601) / Rust `i64` (Unix epoch) — sanctioned; `engram` field is binary-only convenience; typed payloads accessed via `getPayload` / `get_payload` |
+| Nearest-neighbour result | `VectorMatch` | `VectorMatch` | public struct / pub struct | Lane F rename: `drawerID`→`itemID` / `drawer_id`→`item_id`; ordering by distance asc then item id asc (Swift `Comparable` `<` / Rust `Ord`+`PartialOrd`); `distance` Swift `Int` / Rust `i32` (Hamming 0…256 for binary lane; cosine×10_000 for float lane) |
+| Batch input record | `VectorPayloadInput` | `VectorPayloadInput` | public struct / pub struct | identical fields: `itemID`/`item_id`, `vectorIndex`/`vector_index`, `payload`, `modelID`/`model_id`, `modelVersion`/`model_version`, `filedAt`/`filed_at_unix_secs`; timestamp seam: Swift `Date` / Rust `i64` — same as `StoredVector` (sanctioned). Value type, fully `Sendable`. No methods; data carrier only. |
+| PersistenceKit-backed store | `VectorStore` | `VectorStore` | public actor / pub struct | Swift `actor` (async CRUD mirrors PersistenceKit `RowStore`) / Rust `struct` over `Arc<Mutex<HotState>>` + `Arc<dyn Storage>`, sync CRUD — sanctioned (no async runtime). Construction: Swift `init(storage:sidecarURL:mihThreshold:mihBandCount:)` / Rust `new` + `open`. Schema v2 (multi-vector, `item_id`, `kind`, `payload`): `schemaDeclaration` / `schema_declaration()`. Hot-path: BruteForceIndex → MIHIndex at `mihThreshold` (default 50_000); float lane via `FloatBruteForceIndex`. Write paths: `addPayload` (write-behind) + `addPayloads` (O(1) sidecar/index per batch) + `flush` (quiesce). |
+| Error enum | `VectorKitError` | `VectorKitError` | public enum / pub enum | identical case-for-case: `embeddingFailed`/`EmbeddingFailed`, `modelUnavailable`/`ModelUnavailable`, `storeUnavailable`/`StoreUnavailable`, `notFound`/`NotFound` (Swift lowerCamel / Rust UpperCamel — idiom) |
+
+## Swift/Rust Concordance — engine types
+
+Public engine types in `Sources/VectorKit/Engine/` and `rust/src/engine/` not
+covered in the per-surface tables above.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule |
+|---|---|---|---|---|
+| Binary distance metric | `BinaryMetric` | `BinaryMetric` | public enum / pub enum | identical 2-case enum (hamming/Hamming, jaccard/Jaccard) |
+| Float distance metric | `FloatMetric` | `FloatMetric` | public enum / pub enum | identical 2-case enum (cosine/Cosine, dotProduct/DotProduct) |
+| Dense metric wrapper | `DenseMetric` | `DenseMetric` | public enum / pub enum | identical 2-case enum (binary(BinaryMetric)/Binary(BinaryMetric), float(FloatMetric)/Float(FloatMetric)) |
+| Brute-force index | `BruteForceIndex` | `BruteForceIndex` | public struct / pub struct | identical: conforms to / implements DenseIndex protocol/trait |
+| Dense NN result | `DenseHit` | `DenseHit` | public struct / pub struct | identical 3-field struct (itemID/item_id UUID/String, distance Int/i32, laneTag/lane_tag LaneTag) |
+| Dense index protocol | `DenseIndex` | `DenseIndex` | public protocol / pub trait | Swift `protocol : Sendable` / Rust `trait : Send + Sync`; both require `findNearest`/`find_nearest` + `insert`/`insert` + `remove`/`remove` |
+| Index backend selector | `IndexKind` | `IndexKind` | public enum / pub enum | identical 2-case enum (bruteForce/BruteForce, mih/Mih) |
+| Lane classification tag | `LaneTag` | `LaneTag` | public enum / pub enum | identical 3-case enum (binary/Binary, float/Float, unknown/Unknown) |
+| MIH band count | `MIHBandCount` | `MIHBandCount` | public enum UInt32 / pub enum u32 | identical 3-case enum (eight=8/Eight, sixteen=16/Sixteen, thirtyTwo=32/ThirtyTwo) |
+| Multi-index hash index | `MIHIndex` | `MIHIndex` | public struct / pub struct | identical: conforms to / implements DenseIndex; BandCount parameter |
+| MaxSim result | `MaxSimHit` | `MaxSimHit` | public struct / pub struct | identical 3-field struct (itemID/item_id, score Float/f32, matchCount/match_count UInt32/u32) |
+| MaxSim scorer | `MaxSimScorer` | `MaxSimScorer` | public struct / pub struct | identical: scores a query against a `ResidentVectorArray` using max-similarity (ColBERT-style) |
+| Metadata predicate | `MetadataFilter` | `MetadataFilter` | public struct / pub struct | identical: required `itemID`/`item_id` set membership check |
+| Model-partition index entry | `ModelPartitionEntry` | `ModelPartitionEntry` | public struct / pub struct | identical 3-field struct (modelID/model_id, modelVersion/model_version, startOffset/start_offset UInt32/u32) |
+| Resident vector array | `ResidentVectorArray` | `ResidentVectorArray` | public struct / pub struct | in-memory contiguous float32 array for MaxSim scoring; identical layout |
+| Resident store | `ResidentArrayStore` | `ResidentArrayStore` | public actor / pub struct | Swift async actor / Rust struct with Arc<Mutex<...>> (no async runtime — sanctioned) |
+| Vector kind discriminant | `VectorKind` | `VectorKind` | public enum UInt8 / pub enum u8 | identical 2-case enum (binary=0/Binary, float=1/Float) |
+| Vector storage key | `VectorRecordKey` | `VectorRecordKey` | public struct / pub struct | identical 3-field struct (itemID/item_id UUID/String, vectorIndex/vector_index UInt32/u32, kind/kind VectorKind) |
+
+## § 8 — Telemetry
+
+`VectorStore` emits `vectorkit.*` metrics via IntellectusLib when the
+global monitoring gate is enabled. Off by default; results are
+byte-identical with monitoring on or off. The Rust emit sites mirror the
+Swift ones exactly (`add_vector`, `add_payloads`, `find_nearest`,
+`find_by_keyword`).
+
+| Swift call site | Metric emitted | Tags |
+|---|---|---|
+| `addVector(itemID:engram:modelID:modelVersion:filedAt:)` / `addPayload(itemID:vectorIndex:payload:modelID:modelVersion:filedAt:)` | `vectorkit.index.insert_latency_ms` | `kit="VectorKit"`, `model_id=<modelID>` |
+| `addPayloads(_ batch:)` | `vectorkit.index.batch_insert_latency_ms` | `kit="VectorKit"`, `batch_size=<N>` |
+| `findNearest(probe:modelID:limit:)` | `vectorkit.search.latency_ms` | `kit="VectorKit"`, `model_id=<modelID>` |
+| `findNearest(probe:modelID:limit:)` | `vectorkit.search.result_count` | `kit="VectorKit"`, `model_id=<modelID>` |
+| `findByKeyword(_:limit:)` | `vectorkit.search.keyword_result_count` | `kit="VectorKit"` |
+
+---
+
+*End of VectorKit Interface.*
+
+## Changelog
+
+### 1.0.0 -- 2026-06-14
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

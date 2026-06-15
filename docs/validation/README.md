@@ -1,3 +1,9 @@
+---
+status: in_progress
+created: 2026-06-08
+last_updated: 2026-06-14
+---
+
 # Validation
 
 The evidence layer. Claims made elsewhere in `docs/` are not

@@ -1,10 +1,25 @@
+---
+status: decided
+question: Which major version of swift-crypto is the single workspace dependency baseline?
+authors: MOOTx01 maintainers
+date: 2026-06-03
+relates_to:
+  - docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md
+supersedes: none
+context:
+  - swift-crypto was pinned at divergent major versions across the Swift workspace.
+  - The federation identity signing surface (Ed25519) must be pinnable and consistent.
+  - Scope is every Swift package in the mootx01 workspace that pulls swift-crypto directly or via vapor/postgres-nio, plus the shared transitive-dependency pin policy.
+---
+
 # ADR-003 — swift-crypto 4.x is the Workspace Dependency Baseline
 
-- Status: Accepted — unified 2026-06-03 (mission DEPENDENCY_AND_WARNING_HYGIENE_001)
-- Date: 2026-06-03
-- Deciders: Bob (Commander)
-- Scope: All Swift packages in mootx01-ee that pull swift-crypto (directly or via vapor/postgres-nio); the shared transitive-dependency pin policy
-- Evidence: DEPENDENCY_AND_WARNING_HYGIENE_001 change-impact report + completion report (dependency version map; security review of the federation identity signing surface). Companion to the C-1 zero-external-dependency doctrine and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+This decision unifies swift-crypto across the workspace. Because it crosses a
+major version boundary (3.x → 4.x) on a security-critical surface, it is
+recorded as an ADR rather than applied silently. Supporting analysis: a
+dependency version map and a security review of the federation identity signing
+surface. Companion to the C-1 zero-external-dependency doctrine and
+[DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md](DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md).
 
 ## Context
 
@@ -21,8 +36,9 @@ identity signing path (Ed25519 via `Curve25519.Signing`) must be pinnable and
 consistent.
 
 Unifying swift-crypto means crossing a **major** version boundary (3.x → 4.x) on
-the federation identity signing surface. That is not a decision an automated
-hygiene mission should make silently. It was escalated to Bob.
+the federation identity signing surface. Because this crosses a major version
+boundary on a security-critical surface, it is recorded as a deliberate decision
+rather than applied silently.
 
 ## Decision
 
@@ -50,7 +66,7 @@ never a 3.x floor, to keep the workspace on one version.
 ## Consequences
 
 - Single, auditable crypto/nio version across the workspace.
-- One root remains un-unified: `examples/Sidecar_Demo_macOS` cannot re-resolve
+- One root remains un-unified: `examples/SidecarDemo` cannot re-resolve
   because its `Package.swift` references a non-existent `../ARIA_MCP` path
   (pre-existing breakage). A follow-on mission must fix that path to complete
   workspace-wide unification.
@@ -60,6 +76,5 @@ never a 3.x floor, to keep the workspace on one version.
 
 ## Status note
 
-This convention was previously recorded only in the (gitignored) mission BRR and
-completion report. This ADR is its canonical, discoverable home so the baseline
+This ADR is the canonical, discoverable home for the workspace baseline so it
 does not drift silently.

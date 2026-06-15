@@ -1,16 +1,16 @@
 ---
 title: ObserverSink Specification
-version: 1.0
+version: 1.0.0
 status: active
+date: 2026-06-14
+description: The PersistenceKit-backed telemetry sink that persists IntellectusLib stat samples into an SQLite stats store, with schema, retention, and a monitoring on/off signal.
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-06
 relates_to:
-  - docs/decisions/DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
 ---
 
-# ObserverSink Specification v1.0
+# ObserverSink Specification
 
 ## 1. Purpose
 
@@ -21,9 +21,9 @@ MOOTx01 manager pipeline. It provides:
 2. **`PersistenceStatsSink`** — a `StatsSink` conformance that serialises each
    `StatSample` from `IntellectusLib` into the `StatsStore`.
 
-`ObserverSink` is the `Phase 0.5` building block that de-risks the
-`emit → IntellectusLib → PersistenceKit store → readback` pipeline before
-the full Manager spine (Phase 1) is wired. See `MANAGER_1.0_PLAN.md §3`.
+`ObserverSink` provides the `emit → IntellectusLib → PersistenceKit store →
+readback` pipeline: stat samples emitted through IntellectusLib are durably
+persisted and can be read back from the SQLite stats store.
 
 Both Swift and Rust ports ship together and are conformance-gated via matching
 integration tests.
@@ -59,15 +59,16 @@ packages/libs/ObserverSink/
 | `IntellectusLib` | ObserverSink depends on | Provides `StatsSink` protocol and `StatSample` datum |
 | `PersistenceKit` + `PersistenceKitSQLite` | ObserverSink depends on | Provides `Storage` protocol and `SQLiteStorage` backend |
 
-Layering is correct and non-inverting. Per `DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28`,
-the in-repo dependency additions are recorded in the change-impact analysis for ObserverSink.
+Layering is correct and non-inverting: ObserverSink depends on the kits below
+it (IntellectusLib, PersistenceKit) and nothing depends back on it.
 
 ---
 
 ## 4. Schema
 
-Three SQLite tables. All timestamps stored as **TEXT (ISO-8601 UTC)**; no REAL
-timestamp columns exist (schema invariant, `CLAUDE.md`).
+Three SQLite tables. All timestamps are stored as **TEXT (ISO-8601 UTC)**; no
+REAL timestamp columns exist. This is a hard schema invariant across the
+substrate: date storage is always TEXT, never a Unix-epoch REAL.
 
 ### 4.1 `metric_samples`
 
@@ -79,8 +80,13 @@ Stores metric observations from `StatSample.metric(name:value:tags:ts:)`.
 | `name` | TEXT NOT NULL | Dot-separated metric name |
 | `value` | REAL NOT NULL | Measured quantity |
 | `tags` | TEXT NOT NULL | JSON-encoded `[String: String]` tag map |
-| `ts` | TEXT NOT NULL | ISO-8601 UTC; epoch-seconds Double encoded at boundary |
-| `dropbox_id` | TEXT NOT NULL | Consumer dropbox identifier |
+| `ts` | TEXT NOT NULL | ISO-8601 UTC (see encoding note below) |
+| `dropbox_id` | TEXT NOT NULL | Identifier of the consumer that emitted the sample |
+
+Storage is always TEXT (ISO-8601 UTC). The Swift port takes a `Date` and the
+Rust port takes `f64` epoch seconds; each port converts its native time value
+to the ISO-8601 string at the store boundary before insertion. There is never
+a REAL timestamp column (invariant I-1).
 
 Index: `idx_metric_samples_ts` on `ts` (retention delete performance).
 
@@ -142,8 +148,9 @@ The global monitoring flag is a row in the `control` table (`key = "monitoring"`
 - **`PersistenceStatsSink`** reads this row on every `receive(_:)` call. If the
   value is `"0"`, the sample is discarded without I/O.
 
-This is the **flag-row signal mechanism** confirmed by Bob (2026-06-06,
-`MANAGER_1.0_PLAN.md §5` item 3).
+This **flag-row signal mechanism** lets monitoring be toggled centrally: the
+flag lives in durable storage, so any consumer that reads it on each
+`receive(_:)` call observes the current state without coordination.
 
 Note: `Intellectus.isEnabled` (IntellectusLib level) provides a first short-circuit
 gate that prevents `receive(_:)` from being called at all when monitoring is
@@ -176,7 +183,7 @@ Rust equivalents:
 | Property | Value |
 |---|---|
 | Protocol | `StatsSink` (IntellectusLib) |
-| State | Holds a `StatsStore` reference and a `dropboxID` string |
+| State | Holds a `StatsStore` reference and a `dropboxID` string. The `dropboxID` is the stable identifier of the consumer feeding this sink; every row it writes is stamped with it so samples from multiple consumers sharing one store can be distinguished. |
 | `receive(_:)` | Synchronous entry, checks store flag, dispatches I/O |
 
 ### Swift port
@@ -233,9 +240,15 @@ Tests cover:
 
 ## 11. Future evolution
 
-- **v1.1 (anticipated)**: Ring buffer + batch-flush in `PersistenceStatsSink`.
-  If benchmarks show per-sample Task overhead is measurable, a 100-sample
-  batch on a 1-second timer would reduce SQLite write amplification.
-- **Postgres backend**: `StatsStore` will gain a Postgres variant when the
-  fleet manager needs multi-host aggregation. The `SchemaDeclaration` already
-  describes the tables portably; only the `EstateConfiguration.backend` changes.
+- **Recent window (shipped)**: The bounded in-process recent window is provided
+  by IntellectusLib's `RecentWindowSink`, which the resident observer program
+  installs as the global sink and configures to *forward* each sample to
+  `PersistenceStatsSink`. So one installed sink both retains a bounded recent
+  window (liveness proof) and persists durably. The window bound is 256 samples
+  by default.
+- **Batch-flush (anticipated)**: Batch-flush in `PersistenceStatsSink`. If
+  benchmarks show per-sample Task overhead is measurable, a 100-sample batch on
+  a 1-second timer would reduce SQLite write amplification.
+- **Postgres backend**: `StatsStore` will gain a Postgres variant when
+  multi-host aggregation is required. The `SchemaDeclaration` already describes
+  the tables portably; only the `EstateConfiguration.backend` changes.

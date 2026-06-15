@@ -1,9 +1,10 @@
 ---
 title: MOOTx01 Topology
 status: canon
-authors: Bob Pankratz (via/ claude)
-date: 2026-05-23
-version: 1.0
+authors: MOOTx01 maintainers
+date: 2026-06-14
+version: 1.0.0
+description: A readable front door to the repository — the two products, the kit stack, FDC, the license shape, and how a developer reaches the substrate.
 ---
 
 # MOOTx01 Topology
@@ -77,7 +78,7 @@ Foundation
 
 ### How the layers compose
 
-Foundation has eight kits: the four-package substrate (SubstrateTypes → SubstrateKernel → SubstrateML → SubstrateLib; the transitional umbrella re-export shim was removed 2026-05-29, so each consumer depends on the precise sub-package it uses), PersistenceKit, QueueKit and ConvergenceKit (peers that share SubstrateLib and chain QueueKit and ConvergenceKit on top of PersistenceKit), and the zero-dependency AriaLexiconLib. The pre-Phase-6 description ("five peer kits with no inter-dependencies") no longer holds: PersistenceKit takes SubstrateLib and SubstrateTypes; ConvergenceKit and QueueKit take SubstrateLib and PersistenceKit; the substrate split itself defines an internal ordering. The Foundation still bottoms out at SubstrateTypes and AriaLexiconLib, neither of which has any dependency. EngramLib lifts SubstrateLib's bytes into a typed 256-bit Engram. EideticLib sits beside the substrate as a standalone grounding utility: it produces anchors (FDC code + Wikidata Q-ID + confidence) via LatticeLib's FDC encoder and is consumed by the layers above without being part of them — it imports no substrate kit and is licensed independently.
+Foundation has eight kits: the four-package substrate (SubstrateTypes → SubstrateKernel → SubstrateML → SubstrateLib; each consumer depends on the precise sub-package it uses, with no umbrella re-export), PersistenceKit, QueueKit and ConvergenceKit (peers that share SubstrateLib and chain QueueKit and ConvergenceKit on top of PersistenceKit), and the zero-dependency AriaLexiconLib. These are not five independent peers: PersistenceKit takes SubstrateLib and SubstrateTypes; ConvergenceKit and QueueKit take SubstrateLib and PersistenceKit; the substrate split itself defines an internal ordering. The Foundation still bottoms out at SubstrateTypes and AriaLexiconLib, neither of which has any dependency. EngramLib lifts SubstrateLib's bytes into a typed 256-bit Engram. EideticLib sits beside the substrate as a standalone grounding utility: it produces anchors (FDC code + Wikidata Q-ID + confidence) via LatticeLib's FDC encoder and is consumed by the layers above without being part of them — it imports no substrate kit and is licensed independently.
 
 Standalone substrate is three usable estates in their own right: LocusKit for spatial memory and the knowledge graph, VectorKit for on-device semantic search, CorpusKit for content-plus-vector bundles. Each is shippable on its own.
 
@@ -99,7 +100,7 @@ At the API layer an operator may configure many separate instances of different 
 
 **FDC**, Free Decimal Correspondence, is the public-domain decimal classification frame MOOTx01 adopted as its v1.0 classifier. The notation is Dewey-like — a code's structure encodes where a concept sits in the tree — and it carries no license, so it can be opened, adopted, and federated freely. (An earlier MOOT-original taxonomy, MDCC, was removed in the MDCC→FDC migration; FDC is the shipped scheme.)
 
-The engine lives in **LatticeLib**: the FDC encoder (`FDCMatcher` / `FDCRuntime`), the FDC frame (the code tree), and the FDC signatures (the weighted concept-to-code mapping the matcher scores against). The full encoder pipeline is documented in `docs/reference/FDC_ENCODER_CANONICAL_v1.0.md`.
+The engine lives in **LatticeLib**: the FDC encoder (`FDCMatcher` / `FDCRuntime`), the FDC frame (the code tree), and the FDC signatures (the weighted concept-to-code mapping the matcher scores against). The full encoder pipeline is documented in `docs/reference/FDC_ENCODER_CANONICAL.md`.
 
 EideticLib consumes FDC. `EideticLib.lookup` delegates to `FDC.encodeAnchor`: a term is canonicalized to a concept bag, the bag is matched against the pinned FDC signatures, and the result is an anchor — an FDC code plus the bag's dominant Wikidata Q-ID. Resolution is offline and deterministic against the pinned FDC artifacts; the network is never consulted. EideticLib also carries the valid-but-unknown-code state: a well-formed FDC code the instance does not yet recognize is stored and round-tripped intact, queryable as pending, and resolved once it is learned.
 
@@ -118,7 +119,7 @@ The tiers:
 | Service provider | $5,000 / year | Hosting MOOTs as a service for third parties |
 | FedRAMP | Negotiated | Commercial, hardening kept out of the open core |
 
-A lifetime tier covers every point release within the major; the next major is a new purchase. The mechanism is a dual license on a source-available core: the public license states the free-to-build, no-selling grant, and the paid tiers are separate agreements alongside it. The Monday launch ships a source-available, free-to-build, pay-to-profit grant; PolyForm-family and the Functional Source License are the proven precedents.
+A lifetime tier covers every point release within the major; the next major is a new purchase. The mechanism is a dual license on a source-available core: the public license states the free-to-build, no-selling grant, and the paid tiers are separate agreements alongside it. The launch ships a source-available, free-to-build, pay-to-profit grant; PolyForm-family and the Functional Source License are the proven precedents.
 
 EideticLib is licensed independently: Apache for code plus CC for data, as a separate repository. The substrate kits sit under the core license.
 
@@ -137,16 +138,16 @@ ARIA is reached three ways. These are three ways to reach one contract, not thre
         ┌─────────────────────────┼─────────────────────────┐
         ▼                         ▼                         ▼
 ┌───────────────┐         ┌───────────────┐         ┌───────────────┐
-│   ARIA_MCP    │         │  Native API   │         │   Embedded    │
+│   aria-mcp    │         │  Native API   │         │   Embedded    │
 │  (MCP server) │         │ (linked lib)  │         │  (in-process) │
 └───────────────┘         └───────────────┘         └───────────────┘
    MCP clients              compiled apps            apps that compile
    reach via wire           link a library           MOOTx01 in-process
 ```
 
-**ARIA_MCP** is the first consumption surface built. It wraps a MOOTx01 estate and projects the ARIA surface onto MCP primitives. It does not add or change semantics; it carries ARIA over the wire. It is thin over the SDK by definition, so what it can expose is bounded by what the SDK exposes.
+**aria-mcp** is the first consumption surface built. It wraps a MOOTx01 estate and projects the ARIA surface onto MCP primitives. It does not add or change semantics; it carries ARIA over the wire. It is thin over the SDK by definition, so what it can expose is bounded by what the SDK exposes.
 
-**The Native API** is the SDK surface. Today it is the emergent union of the kit public APIs — GeniusLocusKit and the two BrainKits — which compiled applications link. Whether it becomes a single named SDK module or remains the union of kit modules is an open product decision; the working lean is to keep it emergent through the pre-v1.0 spike and formalize a named module once several surfaces depend on it.
+**The Native API** is the SDK surface. Today it is the emergent union of the kit public APIs — GeniusLocusKit and the two BrainKits — which compiled applications link. Whether it becomes a single named SDK module or remains the union of kit modules is an open product decision; the working lean is to keep it emergent through pre-1.0 development and formalize a named module once several surfaces depend on it.
 
 **The Embedded library** is the in-process path: an application compiles MOOTx01 directly into its own binary.
 
@@ -154,21 +155,21 @@ All three are named ARIA because they speak the ARIA language, not because any o
 
 ### v1.0 and v1.1
 
-v1.0 wraps a full MOOTx01 instance: GLK and both BrainKits. v1.1 lets the MCP provision a narrow instance (just LocusKit, just CorpusKit) and route across a fleet in API mode. Because the BrainKits are NeuronKit (Mission 9) and CognitionKit (Mission 10), and both are unbuilt as of this writing, v1.0 of the ARIA MCP server sequences after those two missions.
+v1.0 wraps a full MOOTx01 instance: GLK and both BrainKits. v1.1 lets the MCP provision a narrow instance (just LocusKit, just CorpusKit) and route across a fleet in API mode. Because the BrainKits are NeuronKit and CognitionKit, v1.0 of the aria-mcp server depends on both being in place.
 
 ## The sidecar pattern
 
-The primary way an organization adopts MOOTx01 is by sidecar. An existing app — one already on the market — attaches a MOOT alongside itself and opens that knowledge to the organization through the ARIA_MCP server, so any MCP client can reach it. The app is not rebuilt on the SDK. It gains a MOOT beside it and exposes that memory over MCP.
+The primary way an organization adopts MOOTx01 is by sidecar. An existing app — one already on the market — attaches a MOOT alongside itself and opens that knowledge to the organization through the aria-mcp server, so any MCP client can reach it. The app is not rebuilt on the SDK. It gains a MOOT beside it and exposes that memory over MCP.
 
 ```
    Existing application                 MCP clients
         (unchanged)                  (Claude, Claude Code,
-              │                       OB1, other tooling)
+              │                       other tooling)
               │                              │
               │  writes/reads                │ ARIA over MCP
               ▼                              ▼
    ┌─────────────────┐              ┌─────────────────┐
-   │  MOOT (sidecar) │◀────────────▶│   ARIA_MCP      │
+   │  MOOT (sidecar) │◀────────────▶│   aria-mcp      │
    │  GLK estate     │              │   server        │
    └─────────────────┘              └─────────────────┘
 ```
@@ -188,9 +189,7 @@ Each demonstration module also carries detailed instructions written for agentic
 | If you want to… | Read |
 |-----------------|------|
 | Understand the durable definitions | `docs/concepts/MOOTX01_AND_ARIA_CANON.md` |
-| See what is built and what ships Monday | `docs/concepts/LAUNCH_PLAN.md` |
 | Read the ARIA interface and grammar | `ARIA.md`, `ARIA_LEXICON.md` |
-| Read the substrate spec | `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` |
+| Read the substrate spec | `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` |
 | See the visual topology | `docs/concepts/topology-assets/` (SVG diagrams) |
-| Understand the GeniusLocus mathematics | `docs/concepts/GENIUSLOCUS_PAPER_v0.8_2026-05-17.md` |
 | Build against the kits | `docs/validation/substrate_math_performance/` (reference + conformance harness) |

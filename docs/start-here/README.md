@@ -1,3 +1,10 @@
+---
+title: "Start Here"
+subtitle: "Orientation guides for getting into MOOTx01"
+author: "MOOTx01 maintainers"
+date: "2026-06-14"
+---
+
 # Start Here
 
 Three orientation guides at three depths. Pick the one that matches

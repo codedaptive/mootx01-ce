@@ -1,7 +1,7 @@
 ---
 title: "The MOOTx01 Substrate: A Guide for Developers"
 subtitle: "What MOOTx01 is built on, in the time it takes to drink a coffee"
-author: "Bob Pankratz"
+author: "MOOTx01 maintainers"
 date: "2026-05-21"
 ---
 

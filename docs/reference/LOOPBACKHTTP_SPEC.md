@@ -1,17 +1,18 @@
 ---
 title: LoopbackHTTP Specification
-version: 1.0
+version: 1.0.0
 status: active
+description: Specifies the shared loopback-pinned HTTP/1.1 server primitive (POSIXSocket, HTTPRequest, HTTPResponse, SSEStream) used by the MOOTx01 resident daemons.
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-07
+date: 2026-06-14
 relates_to:
   - docs/decisions/ADR-LOOPBACKHTTP-001.md
   - docs/reference/MOOT_MGR_SPEC.md
-  - docs/reference/ARIA_MCP_SPEC_v0.2.md
+  - docs/reference/ARIA_MCP_SPEC.md
 ---
 
-# LoopbackHTTP Specification v1.0
+# LoopbackHTTP Specification
 
 ## 1. Purpose
 
@@ -103,9 +104,9 @@ truncated, or rejects an over-large `Content-Length` before reading.
 `LoopbackHTTP` ships **Swift only**. The Swift+Rust parity discipline governs
 deterministic substrate compute conformance-gated at shared test vectors; it does
 not extend to OS-transport glue (there is nothing to conformance-gate in a socket
-bind). The only Rust-needing consumer, ARIA_MCP-rust, is a complete Rust vertical
+bind). The only Rust-needing consumer, the aria-mcp Rust port, is a complete Rust vertical
 that under the no-FFI law hand-rolls its own `std::net` HTTP transport, with
-parity between the ARIA_MCP verticals enforced at the JSON-RPC wire. moot-mgr has
+parity between the aria-mcp verticals enforced at the JSON-RPC wire. moot-mgr has
 no Rust port. **Re-review trigger:** a roadmapped Rust moot-mgr build would
 introduce a Rust consumer without a wire-conformance gate and reopen this
 carve-out (ADR-LOOPBACKHTTP-001).
