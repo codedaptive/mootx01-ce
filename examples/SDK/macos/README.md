@@ -1,6 +1,6 @@
 # ARIA_MacOS
 
-**Status:** 🔲 Not yet built — macOS app target
+**Status:** Planned — not yet built. The shipping Apple app already lives at `apps/Mootx01-App/`; this is a future SDK-demonstration shell. For working SDK usage today, see `docs/start-here/SDK_QUICKSTART.md` and `examples/MootNotepad` / `examples/MootTodo`.
 
 The macOS application target for MOOTx01. A native macOS app built in SwiftUI,
 Mac-primary, that exposes the GeniusLocus estate to the user through the
