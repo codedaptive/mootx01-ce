@@ -31,7 +31,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $REPO        = if ($env:MOOTX01_REPO)        { $env:MOOTX01_REPO }        else { "codedaptive/mootx01-ce" }
-$INSTALL_DIR = if ($env:MOOTX01_INSTALL_DIR) { $env:MOOTX01_INSTALL_DIR } else { Join-Path $HOME ".mootx01\bin" }
+$MOOTX01_ROOT        = Join-Path $HOME ".mootx01"
+$DEFAULT_INSTALL_DIR = Join-Path $MOOTX01_ROOT "bin"
+$INSTALL_DIR = if ($env:MOOTX01_INSTALL_DIR) { $env:MOOTX01_INSTALL_DIR } else { $DEFAULT_INSTALL_DIR }
 $BIN_DIR     = if ($env:MOOTX01_BIN_DIR)     { $env:MOOTX01_BIN_DIR }     else { Join-Path $HOME ".local\bin" }
 $BINARY      = Join-Path $INSTALL_DIR "mootx01.exe"
 $MGR_BINARY  = Join-Path $INSTALL_DIR "moot-mgr.exe"
@@ -263,10 +265,28 @@ if ($Uninstall) {
         }
     }
 
-    # Remove binary
-    if (Test-Path $INSTALL_DIR) {
-        Remove-Item -Recurse -Force (Split-Path $INSTALL_DIR)   # removes ~/.mootx01
+    # Remove the binaries we installed. NEVER blindly delete the install dir's
+    # parent — with a custom MOOTX01_INSTALL_DIR (e.g. C:\Tools or C:\Users\bob\bin)
+    # that would take an unrelated user directory with it.
+    foreach ($exe in @($BINARY, $MGR_BINARY)) {
+        if (Test-Path $exe) {
+            Remove-Item -Force $exe
+            Write-Host "  Removed $exe"
+        }
+    }
+    # Default layout ($HOME\.mootx01\bin): remove the whole ~/.mootx01 root, which
+    # we own. Custom layout: remove the install dir only if our binaries left it
+    # empty, and never touch its parent.
+    if ($INSTALL_DIR -eq $DEFAULT_INSTALL_DIR) {
+        if (Test-Path $MOOTX01_ROOT) {
+            Remove-Item -Recurse -Force $MOOTX01_ROOT
+            Write-Host "  Removed $MOOTX01_ROOT"
+        }
+    } elseif ((Test-Path $INSTALL_DIR) -and -not (Get-ChildItem -Force $INSTALL_DIR)) {
+        Remove-Item -Force $INSTALL_DIR
         Write-Host "  Removed $INSTALL_DIR"
+    } elseif (Test-Path $INSTALL_DIR) {
+        Write-Host "  Left $INSTALL_DIR in place (not empty; removed only MOOTx01 binaries)"
     }
     Remove-FromUserPath $INSTALL_DIR
 
