@@ -1,7 +1,7 @@
 ---
 title: Installer Interface
 status: active
-version: 1.0.2
+version: 1.0.3
 date: 2026-06-15
 description: Public API surface of the mootx01 installer CLI (Swift on macOS/iOS, Rust on Linux/Windows) plus the Swift-only MootInstallerCore host library.
 spec_type: kit
@@ -56,9 +56,11 @@ internals are reimplemented in the Rust `src/core/` module rather than shared.
 There is no conformance-vector gate here: this is OS host glue (client-config
 wiring), not deterministic substrate compute (the same carve-out as LoopbackHTTP).
 `moot-mgr` (the observer/manager console) ships in both ports: the **macOS** build is a SwiftUI
-app, and the **Rust** build (`apps/moot-mgr/rust`, headless Linux) is a complete vertical that
-serves the same loopback web dashboard, read-API, and control channel. Only the macOS SwiftUI
-GUI is not ported — the headless host serves the same language-neutral web dashboard assets.
+app, and the **Rust** build (`apps/moot-mgr/rust`, headless, shipping on Linux and Windows) is a
+complete vertical that serves the same loopback web dashboard, read-API, and control channel. The
+control channel is a Unix-domain socket (chmod 0600) on Linux/macOS and a named pipe (owner-only
+ACL) on Windows. Only the macOS SwiftUI GUI is not ported — the headless host serves the same
+language-neutral web dashboard assets on every platform.
 
 ## § 2 — Public types
 
@@ -290,6 +292,9 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 *End of Installer Interface.*
 
 ## Changelog
+
+### 1.0.3 -- 2026-06-15
+Corrected the moot-mgr platform claim again: the Rust `moot-mgr` now ships on **Windows as well as Linux**, not "headless Linux" only. Its admin control channel was reworked from a Unix-domain-socket-only transport to a cross-platform local socket (UDS chmod 0600 on Linux/macOS, named pipe with owner-only ACL on Windows) via the `interprocess` crate, satisfying the platform law (Rust targets Windows AND Linux). The Windows release archive now bundles `moot-mgr.exe`.
 
 ### 1.0.2 -- 2026-06-15
 Corrected the moot-mgr platform claim: `moot-mgr` is not macOS-only. `apps/moot-mgr/rust` is a complete headless Linux vertical serving the same loopback web dashboard / read-API / control channel; only the macOS SwiftUI GUI is unported.

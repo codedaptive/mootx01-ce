@@ -20,9 +20,9 @@ jobs:
         run: |
           # mootx01 = MCP server + management CLI; moot-mgr = the management
           # console (resident host + loopback dashboard). The macOS moot-mgr is a
-          # SwiftUI app (built here and on x86_64); Linux ships the headless Rust
-          # moot-mgr (built in the Linux jobs). Windows ships mootx01 only — the Rust
-          # moot-mgr's UDS control channel is Unix-only and not yet ported to Windows.
+          # SwiftUI app (built here and on x86_64); Linux and Windows ship the
+          # headless Rust moot-mgr (built in their respective jobs) — its control
+          # channel is a Unix-domain socket on Unix and a named pipe on Windows.
           swift build -c release --package-path apps/mootx01 --product mootx01
           swift build -c release --package-path apps/moot-mgr --product moot-mgr
 
@@ -50,7 +50,7 @@ jobs:
       - name: Build release binaries (cross-compile to x86_64)
         run: |
           # Both binaries cross-compiled to x86_64; see the arm64 job for the
-          # mootx01/moot-mgr split rationale (moot-mgr is macOS-only).
+          # mootx01/moot-mgr split rationale (macOS moot-mgr = SwiftUI app).
           swift build -c release --package-path apps/mootx01 --product mootx01 --arch x86_64
           swift build -c release --package-path apps/moot-mgr --product moot-mgr --arch x86_64
 
@@ -154,8 +154,10 @@ jobs:
 
   # ── Windows build (x86_64) ────────────────────────────────────────────────
   # Windows ships the Rust CLI from apps/mootx01/rust — the complete install/db/
-  # status/query/proxy/serve/uninstall/upgrade surface. NOT the ARIA MCP server
-  # (packages/kits/AriaMcpKit/rust) which is an internal library, not the user-facing CLI.
+  # status/query/proxy/serve/uninstall/upgrade surface — AND the Rust moot-mgr
+  # console (apps/moot-mgr/rust), whose control channel is a named pipe on Windows.
+  # NOT the ARIA MCP server (packages/kits/AriaMcpKit/rust) which is an internal
+  # library, not the user-facing CLI.
   build-windows-x86_64:
     name: Build Windows x86_64
     runs-on: windows-latest
@@ -174,20 +176,23 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             apps/mootx01/rust/target
-          key: release-rust-windows-x86_64-${{ hashFiles('apps/mootx01/rust/Cargo.toml') }}
+            apps/moot-mgr/rust/target
+          key: release-rust-windows-x86_64-${{ hashFiles('apps/mootx01/rust/Cargo.toml', 'apps/moot-mgr/rust/Cargo.toml') }}
           restore-keys: release-rust-windows-x86_64-
 
-      - name: Build release binary
-        working-directory: apps/mootx01/rust
-        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Build release binaries
+        run: |
+          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml --target x86_64-pc-windows-msvc
+          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml --target x86_64-pc-windows-msvc
 
-      - name: Package binary
+      - name: Package binaries
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}"
           $asset = "mootx01-${version}-windows-x86_64.zip"
           Copy-Item "apps/mootx01/rust/target/x86_64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
-          Compress-Archive -Path "mootx01.exe" -DestinationPath $asset
+          Copy-Item "apps/moot-mgr/rust/target/x86_64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
+          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset

@@ -209,14 +209,14 @@ the stdio install into the resident-daemon install.
   On hosts without systemd, the installer prints the unit text and manual start instructions
   instead (sysvinit/openrc are not auto-registered in v1).
 - *Windows:* a per-user **Task Scheduler** logon task named `mootx01`, created with
-  `schtasks /SC ONLOGON` and started immediately. (A `mootx01-mgr` task is added only if a
-  `moot-mgr.exe` sits beside `mootx01` — the Windows archive carries `mootx01` only today, since
-  moot-mgr is Unix-only, so no mgr task is created.)
+  `schtasks /SC ONLOGON` and started immediately. A `mootx01-mgr` task is registered alongside it,
+  since the Windows archive ships `moot-mgr.exe` beside `mootx01`.
 
-**The dashboard.** The macOS `moot-mgr` is a SwiftUI app; on **Linux** `moot-mgr` is a **headless**
-server that serves the same web dashboard at `http://127.0.0.1:4200`, and it ships in the Linux
-x86_64/arm64 release archives — so `mootx01 install` registers its service automatically. On
-**Windows**, `moot-mgr` is not yet available: its control channel is Unix-only and not yet ported.
+**The dashboard.** The macOS `moot-mgr` is a SwiftUI app; on **Linux and Windows** `moot-mgr` is a
+**headless** server (the Rust build) that serves the same web dashboard at `http://127.0.0.1:4200`.
+It ships in the Linux x86_64/arm64 and Windows release archives, so `mootx01 install` registers its
+service automatically on every platform. Its admin control channel is a Unix-domain socket on
+Linux/macOS and a named pipe on Windows — both owner-only, never on the network.
 
 **Verify** the same way everywhere:
 

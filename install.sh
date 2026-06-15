@@ -56,9 +56,9 @@ target="${os}-${arch}"
 
 # Linux/Windows ship the Rust `mootx01` vertical, which hosts the estate via
 # `mootx01 serve` exactly like macOS (CI smoke-tests `serve` on Linux). The
-# `moot-mgr` console ships in the macOS (Swift) and Linux x86_64/arm64 (headless
-# Rust) archives; Windows carries `mootx01` only — moot-mgr's UDS control channel
-# is Unix-only.
+# `moot-mgr` console ships on every platform: the Swift build on macOS and the
+# headless Rust build on Linux (x86_64/arm64) and Windows. Its admin control
+# channel is a Unix-domain socket on Unix and a named pipe on Windows.
 
 # 2. Resolve the version. Use the releases/latest *web* redirect (no API rate
 #    limit) and fall back to the API. Matches codegraph's approach.
@@ -74,9 +74,10 @@ fi
 [ -n "$version" ] || { echo "mootx01: could not resolve latest version; set MOOTX01_VERSION (e.g. MOOTX01_VERSION=v1.0.0)." >&2; exit 1; }
 case "$version" in v*) ;; *) version="v$version" ;; esac
 
-# 3. Download + extract. macOS and Linux x86_64/arm64 tarballs carry two bare
-#    binaries at the root — `mootx01` and `moot-mgr` (the management console);
-#    the Windows archive carries `mootx01` only (release.yml).
+# 3. Download + extract. Every archive carries two bare binaries at the root —
+#    `mootx01` and `moot-mgr` (the management console). This script handles the
+#    macOS/Linux tarballs; the Windows .zip is the PowerShell installer's domain
+#    (release.yml).
 asset="mootx01-${version}-${target}.tar.gz"
 url="https://github.com/$REPO/releases/download/$version/$asset"
 echo "Installing mootx01 $version ($target)..."

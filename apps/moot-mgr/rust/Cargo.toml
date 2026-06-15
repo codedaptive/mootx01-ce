@@ -3,7 +3,7 @@ name = "moot-mgr"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "moot-mgr Rust twin — the Rust vertical's counterpart to the Swift moot-mgr observer/manager + resident multi-plane host. A headless Linux server that owns the central ObserverSink stats store (the global monitoring switch + retention window), serves the loopback HTTP read-API dashboard, exposes a gated UDS control channel, and provisions/tears down estates through GeniusLocusKit (admin plane). Wire-contract peer of the Swift host; internal architecture is idiomatic Rust. Per the no-FFI law this binary is a COMPLETE Rust vertical — it never calls Swift, Swift never calls it. The macOS SwiftUI GUI is NOT ported (Rust targets headless Linux); the host serves the same language-neutral web dashboard assets."
+description = "moot-mgr Rust twin — the Rust vertical's counterpart to the Swift moot-mgr observer/manager + resident multi-plane host. A cross-platform (Windows AND Linux, desktop AND server) host that owns the central ObserverSink stats store (the global monitoring switch + retention window), serves the loopback HTTP read-API dashboard, exposes a gated local-IPC control channel (Unix-domain socket on Unix, named pipe on Windows), and provisions/tears down estates through GeniusLocusKit (admin plane). Wire-contract peer of the Swift host; internal architecture is idiomatic Rust. Per the no-FFI law this binary is a COMPLETE Rust vertical — it never calls Swift, Swift never calls it. The macOS SwiftUI GUI is NOT ported; the host serves the same language-neutral web dashboard assets on every platform."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -29,6 +29,13 @@ serde_json = { version = "1" }
 # UUID generation for estate ids in the admin plane. Already accepted across
 # the kit + app tree (ARIA_MCP, GeniusLocusKit).
 uuid       = { version = "1", features = ["v4"] }
+# interprocess: cross-platform local IPC for the gated admin control channel —
+# a Unix-domain socket (chmod 0600) on Linux/macOS, a named pipe (owner-only
+# ACL) on Windows. Approved per Bob (2026-06-15) so the Rust moot-mgr satisfies
+# the platform law (Rust targets Windows AND Linux); the std::os::unix UDS it
+# replaced compiled on Unix only. App-binary dependency, not a kit dep — the
+# C-1 zero-external-deps law governs kits, and this is the host layer.
+interprocess = { version = "2" }
 
 # In-repo kit path deps. From apps/moot-mgr/rust/, the repo root is ../../../
 # Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 — the host composes

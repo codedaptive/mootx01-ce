@@ -2,13 +2,17 @@
 //
 // ============================ SECURITY BOUNDARY =============================
 // Privileged state changes (monitoring on/off, set retention, estate provision/
-// lifecycle) travel this Unix domain socket, NOT the loopback HTTP surface. The
-// socket file is created at mode 0600 (owner-only read/write). A browser cannot
-// speak a Unix domain socket — that is the feature: privileged ops stay off the
-// loopback HTTP path by construction, and the filesystem permission bits (0600)
-// are the access gate. No token is needed on the UDS because the OS already
-// authenticates by the connecting process's effective uid via the socket-file
-// permission bits.
+// lifecycle) travel a local IPC channel, NOT the loopback HTTP surface. A
+// browser cannot speak that channel — that is the feature: privileged ops stay
+// off the loopback HTTP path by construction, and the OS authenticates the
+// connecting peer for us:
+//
+//   * Unix (Linux/macOS): a filesystem Unix-domain socket created at mode 0600
+//     (owner-only read/write). The permission bits ARE the access gate — the OS
+//     authenticates by the connecting process's effective uid. No token needed.
+//   * Windows: a named pipe carrying the creating user's default ACL (owner-only).
+//     The ACL is the equivalent gate; the pipe is not on the filesystem, so its
+//     name is derived from the control-socket path (see `windows_pipe_name`).
 //
 // The protocol is line-oriented and tiny: a client connects, writes ONE control
 // path optionally followed by a tab and a JSON body, terminated by a newline;
@@ -22,34 +26,42 @@
 //   response: "{\"detail\":\"...\",\"ok\":true}\n"
 // ===========================================================================
 //
-// Implementation: a std::os::unix UnixListener, chmod'd 0600 directly. NO
-// external packages. The accept loop runs on a dedicated thread; each connection
-// is served inline.
+// Implementation: a cross-platform local socket via the `interprocess` crate —
+// a Unix-domain socket on Unix (chmod'd 0600 directly) and a named pipe on
+// Windows. The accept loop runs on a dedicated thread; each connection is served
+// inline. Per the platform law the Rust vertical targets Windows AND Linux, so
+// the transport must compile and run on both.
 
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use interprocess::local_socket::prelude::*;
+use interprocess::local_socket::{Listener, ListenerOptions, Stream};
+
 use crate::http_read_api::HttpReadApi;
 
-/// The mode the socket file is created/verified at: owner-only (0600). Mirrors
-/// Swift `ControlChannel.socketMode`.
+/// The mode the Unix socket file is created/verified at: owner-only (0600).
+/// Mirrors Swift `ControlChannel.socketMode`. (Windows uses the named-pipe ACL
+/// instead — see the security-boundary header.)
+#[cfg(unix)]
 const SOCKET_MODE: u32 = 0o600;
 
 /// Read cap to guard against an unbounded request line (matches the Swift 64 KiB).
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
-/// The UDS-backed gated control channel. One instance per resident host. Mirrors
-/// Swift `ControlChannel`.
+/// The gated control channel. One instance per resident host. Mirrors Swift
+/// `ControlChannel`.
 pub struct ControlChannel {
     /// The API whose `apply_control` implements the verbs (shared with the HTTP
     /// control surface so both behave identically).
     api: Arc<HttpReadApi>,
-    /// Filesystem path of the Unix domain socket. Any existing file here is
-    /// removed on `start()` so a stale socket cannot be reused.
+    /// On Unix, the filesystem path of the Unix-domain socket (any existing file
+    /// here is removed on `start()` so a stale socket cannot be reused). On
+    /// Windows, the seed from which the named-pipe identifier is derived.
     socket_path: String,
     running: Arc<AtomicBool>,
     accept_thread: Mutex<Option<JoinHandle<()>>>,
@@ -66,15 +78,11 @@ impl ControlChannel {
         }
     }
 
-    /// Create the socket (bound + chmod 0600) and begin accepting connections on
-    /// a dedicated thread. Mirrors Swift `ControlChannel.start()`.
+    /// Create the listener (UDS chmod 0600 on Unix / owner-ACL named pipe on
+    /// Windows) and begin accepting connections on a dedicated thread. Mirrors
+    /// Swift `ControlChannel.start()`.
     pub fn start(&self) -> std::io::Result<()> {
-        // Remove a stale socket file so the bind does not fail on EADDRINUSE.
-        let _ = std::fs::remove_file(&self.socket_path);
-        let listener = UnixListener::bind(&self.socket_path)?;
-        // chmod 0600 — owner-only. This IS the access gate (the OS authenticates
-        // by the connecting process's uid via these permission bits).
-        std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
+        let listener = bind_listener(&self.socket_path)?;
         self.running.store(true, Ordering::SeqCst);
 
         let api = Arc::clone(&self.api);
@@ -96,7 +104,9 @@ impl ControlChannel {
                         }
                     }
                 }
-                // Clean up the socket file on loop exit so a restart binds cleanly.
+                // Best-effort cleanup of the Unix socket file on loop exit so a
+                // restart binds cleanly (no-op on Windows, where the named pipe
+                // is released when the listener drops).
                 let _ = std::fs::remove_file(&socket_path);
             })?;
         *self.accept_thread.lock().unwrap() = Some(handle);
@@ -106,12 +116,12 @@ impl ControlChannel {
     /// Stop accepting and remove the socket file. Idempotent. Mirrors Swift
     /// `ControlChannel.stop()`.
     ///
-    /// The accept loop is woken by flipping `running` and poking the socket with a
-    /// throwaway connection so `incoming()` observes the flag.
+    /// The accept loop is woken by flipping `running` and poking the listener with
+    /// a throwaway connection so `incoming()` observes the flag.
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
         // Poke the listener so the blocking accept wakes and observes !running.
-        let _ = UnixStream::connect(&self.socket_path);
+        poke(&self.socket_path);
         if let Some(handle) = self.accept_thread.lock().unwrap().take() {
             let _ = handle.join();
         }
@@ -119,9 +129,74 @@ impl ControlChannel {
     }
 }
 
+/// Bind the gated control-channel listener for this platform.
+///
+/// Unix: a filesystem Unix-domain socket at `socket_path`, chmod'd 0600 — the
+/// owner-only permission bits ARE the access gate. Windows: a named pipe whose
+/// name is derived from `socket_path`, carrying the creating user's default ACL
+/// (owner-only). A browser can speak neither, by construction.
+fn bind_listener(socket_path: &str) -> std::io::Result<Listener> {
+    #[cfg(unix)]
+    {
+        use interprocess::local_socket::GenericFilePath;
+        // Remove a stale socket file so the bind does not fail on EADDRINUSE.
+        let _ = std::fs::remove_file(socket_path);
+        let name = socket_path.to_fs_name::<GenericFilePath>()?;
+        let listener = ListenerOptions::new().name(name).create_sync()?;
+        // chmod 0600 — owner-only. THIS is the Unix access gate (the OS
+        // authenticates by the connecting process's uid via these bits).
+        std::fs::set_permissions(
+            socket_path,
+            std::fs::Permissions::from_mode(SOCKET_MODE),
+        )?;
+        Ok(listener)
+    }
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::GenericNamespaced;
+        let pipe = windows_pipe_name(socket_path);
+        let name = pipe.to_ns_name::<GenericNamespaced>()?;
+        ListenerOptions::new().name(name).create_sync()
+    }
+}
+
+/// Connect once to the listener to wake its blocking accept (used by `stop()`).
+/// Errors are ignored — the only goal is to unblock the accept loop.
+fn poke(socket_path: &str) {
+    #[cfg(unix)]
+    {
+        use interprocess::local_socket::GenericFilePath;
+        if let Ok(name) = socket_path.to_fs_name::<GenericFilePath>() {
+            let _ = Stream::connect(name);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::GenericNamespaced;
+        let pipe = windows_pipe_name(socket_path);
+        if let Ok(name) = pipe.to_ns_name::<GenericNamespaced>() {
+            let _ = Stream::connect(name);
+        }
+    }
+}
+
+/// Derive a stable Windows named-pipe identifier from the control-socket path.
+/// Named pipes are not filesystem objects, so the per-data-dir control-socket
+/// PATH is folded (FNV-1a) into a flat-namespace name: distinct data dirs get
+/// distinct pipes; the same data dir always maps to the same pipe.
+#[cfg(windows)]
+fn windows_pipe_name(socket_path: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in socket_path.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("mootx01-mgr-{h:016x}.sock")
+}
+
 /// Read one request line, dispatch the verb through the shared `apply_control`,
 /// write the JSON result + newline. Mirrors Swift `ControlChannel.serve(_:)`.
-fn serve(api: &HttpReadApi, mut stream: UnixStream) {
+fn serve(api: &HttpReadApi, mut stream: Stream) {
     let line = match read_line(&mut stream) {
         Some(l) => l,
         None => return,
@@ -146,7 +221,7 @@ fn serve(api: &HttpReadApi, mut stream: UnixStream) {
 /// Read until the first newline (the request terminator), returning the line
 /// without the newline. Caps the read against an unbounded request. Mirrors
 /// Swift `ControlChannel.readLine(_:)`.
-fn read_line(stream: &mut UnixStream) -> Option<String> {
+fn read_line(stream: &mut Stream) -> Option<String> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 16 * 1024];
     loop {
