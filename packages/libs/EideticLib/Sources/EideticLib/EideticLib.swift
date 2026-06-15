@@ -56,9 +56,21 @@ public enum EideticLib {
     /// Delegates to `FDC.encodeAnchor`: the term is canonicalized to a
     /// concept bag and matched to an FDC code, and the bag's dominant
     /// Wikidata Q-ID is carried as the anchor concept. No network.
+    ///
+    /// Terminates the process with a `fatalError` if the bundled FDC
+    /// artifacts failed to load — that is a build/configuration error,
+    /// not a runtime condition. A failed load means the binary shipped
+    /// without its required data bundle and no caller can produce a
+    /// legitimate anchor. Silent sentinel returns are rejected per the
+    /// P1 mandate: "a sentinel identity that persists IS a fabricated
+    /// identity" (Bob's board item 7). Crash loud; fix the build.
     public static func lookup(_ term: String) -> Anchor {
         guard FDC.isAvailable else {
-            return Anchor.notImplemented
+            fatalError(
+                "EideticLib: FDC artifacts failed to load — " +
+                "build/configuration error. The bundled canon is missing " +
+                "from this binary. No anchor can be produced. Fix the build."
+            )
         }
 
         let (code, qid) = FDC.encodeAnchor(term)
@@ -118,13 +130,4 @@ public struct Anchor: Equatable, Sendable, Codable {
         self.dataVersion = dataVersion
     }
 
-    /// The sentinel anchor returned only when the bundled canon
-    /// fails to load — a build/configuration error, not a runtime
-    /// condition.
-    public static let notImplemented = Anchor(
-        code: "",
-        wikidataQID: nil,
-        confidence: 0,
-        dataVersion: "0.1.0-stub"
-    )
 }
