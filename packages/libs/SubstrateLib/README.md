@@ -74,5 +74,5 @@ conformance is enforced by the external test harness.
 ## Cookbook cross-reference
 
 Cookbook v1.0 §20 + the 2026-05-29 addendum describe the four-package
-split. `docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md` is the
+split. `docs/engineering/HARNESS_REFERENCE.md` is the
 canonical primitive index across all four packages.

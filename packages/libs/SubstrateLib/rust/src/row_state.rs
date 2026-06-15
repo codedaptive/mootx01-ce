@@ -77,21 +77,37 @@ fn transitions() -> &'static HashMap<TransitionKey, RowState> {
         m.insert(TransitionKey::new(Contested, Tombstone), Tombstoned);
 
         // ---- from Decayed ----
-        m.insert(TransitionKey::new(Decayed, Observe), Active);  // revives
+        // revive: re-observation restores a decayed row to active
+        // (cookbook §9.3 "revived"). The four Cluster-B → active
+        // transitions below are the complete `revive` verb surface.
+        m.insert(TransitionKey::new(Decayed, Observe), Active);
         m.insert(TransitionKey::new(Decayed, Expire), Expired);
         m.insert(TransitionKey::new(Decayed, Tombstone), Tombstoned);
 
         // ---- from Superseded ----
+        // revive: Superseded → Active is admitted at the automaton
+        // level. The automaton is stateless on (from, verb) and cannot
+        // see lineage; the lineage-conflict domain rule (a superseded
+        // row may not revive while a living successor holds its lineage
+        // head) is enforced one layer up, at LocusKit's Estate::mutate
+        // revive guard, which has store access (cookbook §6.2 / §9.3).
+        m.insert(TransitionKey::new(Superseded, Observe), Active);
         m.insert(TransitionKey::new(Superseded, Tombstone), Tombstoned);
-        // otherwise terminal (kept for lineage)
+        // Superseded → Decayed is the lineage_advance path (cookbook
+        // §9.3); modeled in the §10 verb table, not the lifecycle table.
 
         // ---- from Withdrawn ----
+        // revive: a withdrawn (explicitly retracted) row may be restored
+        // to active — "unwithdraw" per cookbook §9.3.
+        m.insert(TransitionKey::new(Withdrawn, Observe), Active);
         m.insert(TransitionKey::new(Withdrawn, Tombstone), Tombstoned);
-        // otherwise terminal
 
         // ---- from Expired ----
+        // revive: a TTL-expired row may be restored to active. The new
+        // active row carries no fresh TTL until a subsequent mutation
+        // sets one; until then it behaves as any active row.
+        m.insert(TransitionKey::new(Expired, Observe), Active);
         m.insert(TransitionKey::new(Expired, Tombstone), Tombstoned);
-        // otherwise terminal
 
         // ---- from Rejected ----
         m.insert(TransitionKey::new(Rejected, Tombstone), Tombstoned);
@@ -258,9 +274,13 @@ pub fn check_forbidden_combinations(
 // Liveness proof (cookbook § 9.4)
 //
 // No state is a dead-end before Tombstoned. Every non-terminal
-// state has at least one outgoing transition. Terminal states
-// (Superseded, Withdrawn, Expired, Rejected, Accepted, Tombstoned)
-// are intentional dead-ends except for the final tombstone path.
+// state has at least one outgoing transition. The Cluster-B
+// historical states (Superseded, Withdrawn, Expired, Decayed) each
+// carry a `revive` (Observe → Active) edge in addition to tombstone,
+// so they are recoverable, not dead-ends. The Cluster-C terminal
+// states (Rejected, Accepted) reach only tombstone (and Accepted is
+// audit-grade: S-3 forbids even that). Tombstoned is the sole
+// absolute terminal.
 //
 // C1 resolution (cookbook § 16.3)
 //
@@ -340,6 +360,35 @@ mod tests {
     fn decayed_can_revive_on_observe() {
         let next = transition(RowState::Decayed, RowVerb::Observe);
         assert_eq!(next, Some(RowState::Active));
+    }
+
+    #[test]
+    fn all_cluster_b_states_revive_on_observe() {
+        // revive surface (cookbook §9.3): every Cluster-B historical state
+        // restores to Active via Observe. Superseded is admitted here; the
+        // lineage-conflict rule is enforced at LocusKit's revive guard.
+        for from in [
+            RowState::Decayed,
+            RowState::Withdrawn,
+            RowState::Expired,
+            RowState::Superseded,
+        ] {
+            assert_eq!(
+                transition(from, RowVerb::Observe),
+                Some(RowState::Active),
+                "{from:?} should revive to Active via Observe"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_cluster_c_states_do_not_revive() {
+        // Rejected/Tombstoned have no Observe→Active edge; revive is refused
+        // at the automaton (LocusKit's guard names the domain rule on top).
+        assert_eq!(transition(RowState::Rejected, RowVerb::Observe), None);
+        assert_eq!(transition(RowState::Tombstoned, RowVerb::Observe), None);
+        // Accepted is live audit-grade, not historical — no revive edge.
+        assert_eq!(transition(RowState::Accepted, RowVerb::Observe), None);
     }
 
     #[test]

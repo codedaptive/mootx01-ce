@@ -106,6 +106,10 @@ public enum RowStateAutomaton {
         VerbKey(.superseded, "withdraw"):       .withdrawn,
         VerbKey(.superseded, "expunge"):        .tombstoned,
         VerbKey(.superseded, "lineage_advance"):.decayed,
+        // revive surface (§9.3): every Cluster-B state confirms back to
+        // active. The superseded lineage-conflict rule is enforced in
+        // LocusKit's revive guard, not here (this table is stateless).
+        VerbKey(.superseded, "confirm"):        .active,
         VerbKey(.decayed, "withdraw"):          .withdrawn,
         VerbKey(.decayed, "expunge"):           .tombstoned,
         VerbKey(.decayed, "confirm"):           .active,
@@ -113,6 +117,7 @@ public enum RowStateAutomaton {
         VerbKey(.withdrawn, "expunge"):         .tombstoned,
         VerbKey(.expired, "withdraw"):          .withdrawn,
         VerbKey(.expired, "expunge"):           .tombstoned,
+        VerbKey(.expired, "confirm"):           .active,
         VerbKey(.rejected, "confirm"):          .accepted,
         VerbKey(.rejected, "expunge"):          .tombstoned,
     ]
@@ -144,21 +149,37 @@ public enum RowStateAutomaton {
         TransitionKey(.contested, .tombstone):      .tombstoned,
 
         // ---- from decayed ----
-        TransitionKey(.decayed, .observe):       .active,    // re-observation revives
+        // revive: re-observation restores a decayed row to active
+        // (cookbook §9.3 "revived"). The four Cluster-B → active
+        // transitions below are the complete `revive` verb surface.
+        TransitionKey(.decayed, .observe):       .active,
         TransitionKey(.decayed, .expire):        .expired,
         TransitionKey(.decayed, .tombstone):     .tombstoned,
 
         // ---- from superseded ----
+        // revive: superseded → active is admitted at the automaton
+        // level. The automaton is stateless on (from, verb) and cannot
+        // see lineage; the lineage-conflict domain rule (a superseded
+        // row may not revive while a living successor holds its lineage
+        // head) is enforced one layer up, at LocusKit's Estate.mutate
+        // revive guard, which has store access (cookbook §6.2 / §9.3).
+        TransitionKey(.superseded, .observe):    .active,
         TransitionKey(.superseded, .tombstone):  .tombstoned,
-        // superseded is otherwise terminal (kept for lineage)
+        // superseded → decayed is the lineage_advance path (cookbook
+        // §9.3); modeled in the §10 verbTable, not the lifecycle table.
 
         // ---- from withdrawn ----
+        // revive: a withdrawn (explicitly retracted) row may be restored
+        // to active — "unwithdraw" per cookbook §9.3.
+        TransitionKey(.withdrawn, .observe):     .active,
         TransitionKey(.withdrawn, .tombstone):   .tombstoned,
-        // withdrawn is otherwise terminal
 
         // ---- from expired ----
+        // revive: a TTL-expired row may be restored to active. The new
+        // active row carries no fresh TTL until a subsequent mutation
+        // sets one; until then it behaves as any active row.
+        TransitionKey(.expired, .observe):       .active,
         TransitionKey(.expired, .tombstone):     .tombstoned,
-        // expired is otherwise terminal
 
         // ---- from rejected ----
         TransitionKey(.rejected, .tombstone):    .tombstoned,
@@ -371,9 +392,13 @@ public enum ForbiddenCombinations {
 // MARK: - Liveness proof (cookbook § 9.4)
 //
 // No state is a dead-end before tombstoned. Every non-terminal
-// state has at least one outgoing transition. Terminal states
-// (superseded, withdrawn, expired, rejected, accepted, tombstoned)
-// are intentional dead-ends except for the final tombstone path.
+// state has at least one outgoing transition. The Cluster-B
+// historical states (superseded, withdrawn, expired, decayed) each
+// carry a `revive` (observe → active) edge in addition to tombstone,
+// so they are recoverable, not dead-ends. The Cluster-C terminal
+// states (rejected, accepted) reach only tombstone (and accepted is
+// audit-grade: S-3 forbids even that). tombstoned is the sole
+// absolute terminal.
 //
 // MARK: - C1 resolution (cookbook § 16.3)
 //
