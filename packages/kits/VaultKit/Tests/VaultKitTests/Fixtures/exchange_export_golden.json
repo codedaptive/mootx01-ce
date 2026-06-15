@@ -1,0 +1,33 @@
+{
+  "name": "golden-palace",
+  "entries": [
+    {
+      "id": "drawer-002",
+      "content": "Bravo concept: the quick brown fox jumps over the lazy dog.",
+      "tags": []
+    },
+    {
+      "id": "drawer-001",
+      "content": "Alice works at Acme.",
+      "tags": ["org", "people"],
+      "facts": [
+        {
+          "subject": "alice",
+          "predicate": "works_at",
+          "object": "acme",
+          "validFrom": "2024-03-04T05:06:07.000Z",
+          "confidence": 0.9
+        }
+      ],
+      "pathComponents": ["work", "people"],
+      "scope": { "agentId": "ag-7" },
+      "kind": "fact"
+    },
+    {
+      "id": "drawer-003",
+      "content": "Charlie journal entry: shipped the adapter today.",
+      "tags": ["journal"],
+      "kind": "journal"
+    }
+  ]
+}

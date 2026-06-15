@@ -164,6 +164,59 @@ public struct OccurredAt: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: - FactIR
+
+/// One subject / predicate / object assertion riding a note.
+///
+/// `FactIR` is the IR-level representation of a knowledge-graph fact —
+/// a KG fact in our substrate, a graph relation (entity → relationship →
+/// entity) in programmatic external memory tools. Per ADR-007 Decision 1,
+/// the full-fidelity IR carries facts as first-class data so a
+/// programmatic exporter's graph layer survives the interchange boundary.
+/// Mapping facts to substrate nouns is adapter/bridge territory
+/// (VK-ADAPT-01+); the IR only guarantees no fact is lost in transit.
+public struct FactIR: Codable, Sendable, Equatable {
+
+    /// The assertion's subject — an entity name or identifier, verbatim
+    /// from the producing tool.
+    public var subject: String
+
+    /// The relationship between subject and object.
+    public var predicate: String
+
+    /// The assertion's object — an entity name, identifier, or literal.
+    public var object: String
+
+    /// Start of the assertion's validity window, when known, as an
+    /// ISO8601 string in LocusKit's canonical format (consistent with
+    /// `OccurredAt.iso8601`). nil means "valid since unknown/always".
+    public var validFrom: String?
+
+    /// End of the assertion's validity window, when known, as an ISO8601
+    /// string. nil means "still valid / no recorded end".
+    public var validTo: String?
+
+    /// Producer-reported confidence in [0, 1], when the source tool
+    /// scores its assertions. nil means unscored.
+    public var confidence: Double?
+
+    public init(
+        subject: String,
+        predicate: String,
+        object: String,
+        validFrom: String? = nil,
+        validTo: String? = nil,
+        confidence: Double? = nil
+    ) {
+        self.subject = subject
+        self.predicate = predicate
+        self.object = object
+        self.validFrom = validFrom
+        self.validTo = validTo
+        self.confidence = confidence
+    }
+}
+
 // MARK: - NoteIR
 
 /// The canonical intermediate representation of one note.
@@ -225,6 +278,32 @@ public struct NoteIR: Codable, Sendable, Equatable {
     /// lineage fallback — same as the original behaviour.
     public var mootID: UUID?
 
+    /// Subject / predicate / object assertions carried by this note.
+    /// Empty for plain Markdown vaults (Obsidian emits none); populated
+    /// by programmatic-tool adapters whose source has a graph layer.
+    /// Full-fidelity field per ADR-007 Decision 1.
+    public var facts: [FactIR]
+
+    /// The full source hierarchy as ordered components (ancestor →
+    /// leaf), e.g. `["projects", "alpha", "notes"]`. `originalPath`
+    /// remains the joined back-compat view, but components are the
+    /// authoritative representation — the substrate mapping may still
+    /// flatten to the leaf, but the IR is not the lossy layer.
+    public var pathComponents: [String]
+
+    /// Generic namespace map for source-tool scoping dimensions
+    /// (e.g. per-user / per-agent / per-session ids). Key names are
+    /// tool-defined — the IR deliberately does not hardcode any
+    /// vocabulary, so it accommodates the scoping-id shape class
+    /// without overfitting to one tool. Empty for Obsidian.
+    public var scope: [String: String]
+
+    /// Discriminator distinguishing what this entry IS. Open string
+    /// vocabulary (same rationale as `Block.kind`); well-known values
+    /// are `"note"` (default), `"fact"` (a fact record standing alone),
+    /// and `"journal"` (a journal/diary entry).
+    public var kind: String
+
     public init(
         stableSourceKey: String,
         body: [Block],
@@ -234,7 +313,11 @@ public struct NoteIR: Codable, Sendable, Equatable {
         originalPath: String = "",
         originDate: OccurredAt? = nil,
         source: SourceRef? = nil,
-        mootID: UUID? = nil
+        mootID: UUID? = nil,
+        facts: [FactIR] = [],
+        pathComponents: [String] = [],
+        scope: [String: String] = [:],
+        kind: String = "note"
     ) {
         self.stableSourceKey = stableSourceKey
         self.body = body
@@ -245,6 +328,39 @@ public struct NoteIR: Codable, Sendable, Equatable {
         self.originDate = originDate
         self.source = source
         self.mootID = mootID
+        self.facts = facts
+        self.pathComponents = pathComponents
+        self.scope = scope
+        self.kind = kind
+    }
+
+    // Decoding is hand-written (encoding stays synthesized) so that JSON
+    // produced BEFORE the full-fidelity extension — with no `facts`,
+    // `pathComponents`, `scope`, or `kind` keys — still decodes, landing
+    // the documented defaults. The four new fields are non-optional, so
+    // synthesized decoding would reject legacy payloads outright.
+    private enum CodingKeys: String, CodingKey {
+        case stableSourceKey, body, frontmatter, links, tags
+        case originalPath, originDate, source, mootID
+        case facts, pathComponents, scope, kind
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.stableSourceKey = try c.decode(String.self, forKey: .stableSourceKey)
+        self.body = try c.decode([Block].self, forKey: .body)
+        self.frontmatter = try c.decode([String: String].self, forKey: .frontmatter)
+        self.links = try c.decode([WikiLink].self, forKey: .links)
+        self.tags = try c.decode([String].self, forKey: .tags)
+        self.originalPath = try c.decode(String.self, forKey: .originalPath)
+        self.originDate = try c.decodeIfPresent(OccurredAt.self, forKey: .originDate)
+        self.source = try c.decodeIfPresent(SourceRef.self, forKey: .source)
+        self.mootID = try c.decodeIfPresent(UUID.self, forKey: .mootID)
+        // Full-fidelity fields: absent in pre-extension JSON → defaults.
+        self.facts = try c.decodeIfPresent([FactIR].self, forKey: .facts) ?? []
+        self.pathComponents = try c.decodeIfPresent([String].self, forKey: .pathComponents) ?? []
+        self.scope = try c.decodeIfPresent([String: String].self, forKey: .scope) ?? [:]
+        self.kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? "note"
     }
 
     /// The note body flattened to a single string — blocks joined in

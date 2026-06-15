@@ -1,0 +1,15 @@
+[
+  {
+    "id": "aaaa000011112222",
+    "source": { "wing": "mootx01", "room": "decisions" },
+    "target": { "wing": "fulcrum", "room": "diary" },
+    "label": "Decision informs diary handoff",
+    "created_at": "2026-05-29T08:38:47.205501+00:00"
+  },
+  {
+    "id": "bbbb000011112222",
+    "source": { "wing": "fulcrum", "room": "diary" },
+    "target": { "wing": "mootx01", "room": "storage" },
+    "label": ""
+  }
+]
