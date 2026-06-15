@@ -1,0 +1,10 @@
+{
+  "_comment": "Minimal Claude Code MCP config snippet. Merges into ~/.claude.json under the `mcpServers` key alongside any other servers the user has configured. install.sh does this automatically.",
+  "mcpServers": {
+    "mootx01": {
+      "command": "/ABSOLUTE/PATH/TO/.local/share/MOOTx01/bin/mootx01-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

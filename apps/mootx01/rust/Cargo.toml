@@ -1,0 +1,42 @@
+# Cargo.toml — mootx01 (Rust CLI, Linux + Windows)
+#
+# The Rust vertical's counterpart to the Swift `mootx01` binary
+# (apps/mootx01/Sources/mootx01). Governing document:
+# docs_internal/specs/CLI_SURFACE_SPEC_v1.0.md — the user-facing surface is
+# 100% identical to the Swift binary; this crate conforms to that spec.
+#
+# Per the platform law: Swift ships on macOS/iOS/iPadOS only; this binary is
+# what ships on Linux and Windows. Per the no-FFI law it is a COMPLETE Rust
+# vertical — it links the Rust aria-mcp library for `serve` and never touches
+# Swift.
+#
+# CLI parsing is hand-rolled in the library (no clap), matching the
+# moot-mgr manager_cli.rs pattern: exact control over help text (§7
+# conformance demands byte-identical help across implementations) and exit
+# codes (§5 demands 64 for usage errors; clap defaults to 2).
+
+[package]
+name = "mootx01-cli"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "mootx01 — ARIA MCP server and estate management CLI (Rust vertical for Linux/Windows). Conforms to CLI_SURFACE_SPEC_v1.0."
+
+[[bin]]
+name = "mootx01"
+path = "src/main.rs"
+
+[lib]
+name = "mootx01_cli"
+path = "src/lib.rs"
+
+[dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+# SHA-256 verification of release downloads (upgrade); same version as aria-mcp.
+sha2       = { version = "0.10" }
+
+# The complete Rust ARIA server (stdio + HTTP loops, backend selection,
+# Autonomic Governor). `serve` is a thin translation of spec flags onto
+# this library's ServerConfig.
+aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
