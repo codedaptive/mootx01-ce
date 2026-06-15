@@ -46,7 +46,7 @@ struct MindOverlapLensTests {
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.unconfirmed])
+        LocusKit.RecallFrame(filterChain: [.userConfirmed])
     }
 
     private func fixedUUID(_ fill: UInt8) -> UUID {

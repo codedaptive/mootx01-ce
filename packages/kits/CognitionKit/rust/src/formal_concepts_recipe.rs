@@ -292,7 +292,7 @@ mod tests {
     }
 
     fn unconfirmed() -> RecallFrame {
-        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
         f.hydration_level = HydrationLevel::Structured;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f
@@ -459,7 +459,7 @@ mod tests {
 
     fn unconfirmed_at_most(ceiling: AdjectiveSensitivity) -> RecallFrame {
         let mut f = RecallFrame::new(vec![
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
             Filter::SensitivityAtMost(ceiling),
         ]);
         f.hydration_level = HydrationLevel::Structured;

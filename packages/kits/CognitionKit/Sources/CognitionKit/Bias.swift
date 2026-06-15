@@ -62,15 +62,16 @@ public struct BiasReport: Sendable {
 /// Swift version of `run_bias`.
 public enum Bias {
 
-    /// Unconfirmed admits freshly-captured rows (suppresses the default
-    /// user-confirmed ceiling); the state filter selects active vs
-    /// withdrawn.
+    /// UserConfirmed: all rows written via Estate.capture are stamped
+    /// Confirmation.userConfirmed at write time. The state filter selects
+    /// active vs withdrawn from among the confirmed set.
     private static func frame(for state: State) -> LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.unconfirmed, .state(state)])
+        LocusKit.RecallFrame(filterChain: [.userConfirmed, .state(state)])
     }
 
     /// The endorsement signal: rows the user confirmed (still active) —
-    /// the complement of the unconfirmed frame above.
+    /// All normally-captured rows are userConfirmed; kept separate for
+    /// clarity in the recipe's intent vs the state-scoped frame(for:).
     private static var confirmedFrame: LocusKit.RecallFrame {
         LocusKit.RecallFrame(filterChain: [.userConfirmed, .state(.active)])
     }

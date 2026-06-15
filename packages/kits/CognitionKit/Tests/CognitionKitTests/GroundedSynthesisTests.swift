@@ -66,11 +66,11 @@ struct GroundedSynthesisTests {
                 "introduction to quantum mechanics",
             ])
 
-            // Recall the freshly-captured (unconfirmed) drawers. The recall
-            // evaluator defaults the confirmation axis to userConfirmed when
-            // unconstrained, so .unconfirmed is required to see them.
+            // Recall the freshly-captured drawers. All rows written via
+            // Estate.capture are stamped Confirmation.userConfirmed at write time,
+            // so .userConfirmed is the correct filter to surface them.
             let input = GroundedSynthesis.Input(
-                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]))
+                frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]))
             let out = try await GroundedSynthesis().run(
                 input: input, estate: handle, kit: kit)
 
@@ -94,7 +94,7 @@ struct GroundedSynthesisTests {
             let (kit, handle) = try await makeEstate(capturing: [])
 
             let input = GroundedSynthesis.Input(
-                frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]))
+                frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]))
             let out = try await GroundedSynthesis().run(
                 input: input, estate: handle, kit: kit)
 

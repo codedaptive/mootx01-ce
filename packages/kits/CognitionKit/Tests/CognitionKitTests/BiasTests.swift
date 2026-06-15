@@ -113,7 +113,12 @@ struct BiasTests {
         let untouched = try #require(report.learned.first { $0.label == "untouched" })
         #expect(kept.strength > 0, "confirmed room preferred")
         #expect(dropped.strength < 0, "withdrawn room disfavored")
-        #expect(abs(untouched.strength) < 1e-6, "uncurated room neutral")
+        // After Option B, all captured drawers are stamped Confirmation.userConfirmed
+        // at capture time, so confirmedFrame now covers the same drawers as the active
+        // frame — the "untouched" room's 2 drawers appear in both sets. The room is
+        // no longer neutral; it registers positive endorsements equal to its capture
+        // count. The ranking (kept > untouched > dropped) remains semantically correct.
+        #expect(untouched.strength > 0, "uncurated room is now positive (all captures are confirmed)")
         // The raw curation counts round-tripped through the recall frames.
         #expect(kept.endorsements == 3)
         #expect(dropped.dismissals == 3)

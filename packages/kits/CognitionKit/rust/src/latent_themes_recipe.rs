@@ -178,7 +178,7 @@ mod tests {
         // Admit elevated rows too — recall defaults to a Normal sensitivity
         // ceiling, which would otherwise drop the Elevated work regime.
         let mut f = RecallFrame::new(vec![
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
             Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
         ]);
         f.hydration_level = HydrationLevel::Structured;

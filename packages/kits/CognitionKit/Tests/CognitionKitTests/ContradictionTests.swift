@@ -41,7 +41,7 @@ struct ContradictionTests {
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.unconfirmed])
+        LocusKit.RecallFrame(filterChain: [.userConfirmed])
     }
 
     // CK-CN-1: three mutually-similar memories plus one totally

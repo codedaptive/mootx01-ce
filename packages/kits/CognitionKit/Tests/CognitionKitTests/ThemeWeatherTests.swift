@@ -47,7 +47,7 @@ struct ThemeWeatherTests {
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.unconfirmed])
+        LocusKit.RecallFrame(filterChain: [.userConfirmed])
     }
 
     // CK-TW-A: every populated room reports a momentum; drawers captured

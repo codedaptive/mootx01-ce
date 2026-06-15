@@ -42,7 +42,7 @@ struct PartialCueRecallTests {
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.unconfirmed])
+        LocusKit.RecallFrame(filterChain: [.userConfirmed])
     }
 
     // CK-FL-1: the lens runs end-to-end — computes per-drawer
