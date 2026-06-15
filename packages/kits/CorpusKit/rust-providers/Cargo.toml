@@ -3,7 +3,7 @@ name = "corpus-kit-providers"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Rust port of Swift's CorpusKitProviders target: concrete TextEmbeddingProvider and Tokenizer implementations that depend on model bundles or carry test-stub identities. DeterministicTokenizer ships today; ONNX/Candle model providers land in a follow-on R-mission."
+description = "Rust port of Swift's CorpusKitProviders target: concrete vectorkit::EmbeddingProvider and Tokenizer implementations. Ships the named text providers (MiniLM, mpnet, EmbeddingGemma) over a host-supplied inference seam plus the DeterministicTokenizer fallback. No model weights or ML-runtime crates are bundled; the host injects the inference pass on every platform (CoreML on Apple, host-chosen runtime on Windows/Linux)."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -17,3 +17,21 @@ corpus-kit = { path = "../rust" }
 # (I-25). DeterministicTokenizer consumes substrate_types::fnv::hash32
 # by name instead of reimplementing the hash inline.
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+# B2-5: the named text providers conform to vectorkit::EmbeddingProvider
+# and project pooled vectors through substrate_ml::float_simhash::project
+# (the conformance-gated, bit-identical Swift/Rust SimHash). engram-lib
+# supplies the Engram type the providers return. These mirror the deps
+# Swift's CorpusKitProviders target carries (VectorKit, SubstrateML,
+# EngramLib); the seam shape is identical across ports.
+vectorkit = { path = "../../VectorKit/rust" }
+substrate-ml = { path = "../../../libs/SubstrateML/rust" }
+engram-lib = { path = "../../../libs/EngramLib/rust" }
+
+[dev-dependencies]
+# B2-5: the embedding conformance test deserialises the shared canonical
+# vectors (Tests/SharedVectors/embedding_provider_vectors.json) that the
+# Swift leg emits. serde / serde_json are already in use across the
+# workspace (corpus-kit's own conformance tests); no new external
+# dependency is introduced to the project.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

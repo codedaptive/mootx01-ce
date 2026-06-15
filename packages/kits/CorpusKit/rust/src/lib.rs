@@ -21,17 +21,20 @@
 //! - error: CorpusKitError
 //! - chunker: sentence-aware chunker (delimiter fallback, since
 //!   no NaturalLanguage on Linux)
-//! - bm25_index: in-memory BM25 inverted index
+//! - bm25_index: in-memory BM25 inverted index (now delegates to engine layer)
 //! - bundle_store: persistence-kit-backed chunks table
 //! - corpus: Corpus struct + EmbeddingModelConfig (public RAG entry point)
-//! - hybrid_recall: vector kNN + BM25 fused via RRF
+//! - hybrid_recall: vector kNN + BM25 fused via RRF (routes through engine::fusion)
 //! - sync_manifest: CorpusKitSync::manifest helper
+//! - engine: Lane F, Lane D, and Lane E engine types
+//!   (inverted index, WAND/BMW, BM25 weighting, generalized RRF fusion)
 
 pub mod bm25_index;
 pub mod bundle_store;
 pub mod chunk;
 pub mod chunker;
 pub mod corpus;
+pub mod engine;
 pub mod error;
 pub mod hybrid_recall;
 pub mod sync_manifest;
@@ -43,6 +46,17 @@ pub use chunk::*;
 pub use chunker::*;
 pub use corpus::Corpus;
 pub use corpus::EmbeddingModelConfig;
+pub use corpus::FloatLaneOutcome;
+pub use corpus::NamedInferenceFn;
+// Lane F types (sparse + fusion).
+pub use engine::{FusedHit, ImpactPosting, LaneTag, SparseHit};
+// Lane D types (inverted index + BM25 weighting + persistence store).
+pub use engine::{
+    Algorithm, BM25Parameters, BM25Weighting, InvertedIndex, InvertedIndexStore,
+    BLOCK_SIZE, QUANT_SCALE, TermFreqTable, quantize_impact,
+};
+// Lane E types (generalized RRF fusion entry points).
+pub use engine::{fuse, fuse_scored};
 pub use error::*;
 pub use hybrid_recall::*;
 pub use sync_manifest::*;

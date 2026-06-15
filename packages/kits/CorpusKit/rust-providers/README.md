@@ -4,7 +4,7 @@ Rust port of Swift's `CorpusKitProviders` target. Hosts the concrete `Tokenizer`
 
 Sibling of `rag-kit` (the core crate). Core `rag-kit` ships traits, primitives, and engines (BM25Index, BundleStore, chunker, hybrid recall); this providers crate ships the implementations that satisfy those traits.
 
-**Status:** v1.0. `DeterministicTokenizer` is the only implementation today. Real WordPiece and SentencePiece tokenizers plus ONNX-backed embedding providers land in a follow-on R-mission once model bundles are wired in.
+**Status:** v1.0. `DeterministicTokenizer` is the only implementation today. Real WordPiece and SentencePiece tokenizers plus ONNX-backed embedding providers land in the v1.1 model-bundle mission (per DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
 
 ## What ships at v1.0
 
@@ -12,7 +12,7 @@ Sibling of `rag-kit` (the core crate). Core `rag-kit` ships traits, primitives, 
 
 The stub's purpose is twofold: exercising the `Tokenizer::keyword_tokens` path (which uses the trait's default Unicode-word-boundary split, not the stub's hash IDs) for BM25 indexing and hybrid recall fixtures, and giving cross-language conformance harnesses a tokenizer whose output is stable across language boundaries.
 
-It is NOT a model vocabulary. Feeding `tokenize()` output into a real embedding model produces garbage embeddings. Tests that need a real vocab wait for the model-bundle R-mission.
+It is NOT a model vocabulary. Feeding `tokenize()` output into a real embedding model produces garbage embeddings. Tests that need a real vocab wait for the v1.1 model-bundle mission.
 
 ## What does NOT ship at v1.0
 

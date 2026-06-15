@@ -22,29 +22,105 @@
 
 import EngramLib
 import Foundation
+import IntellectusLib
+import OSLog
 import PersistenceKit
 import SubstrateML
 import SubstrateTypes
 import VectorKit
+
+// MARK: - FloatLaneOutcome
+
+/// The observable outcome of a `Corpus.floatNearest` call.
+///
+/// Dark outcomes (`.unavailableProviderOptOut`, `.unavailableNoFloatRows`,
+/// `.emptyQuery`) are EXPECTED degradations — the calling lane degrades
+/// gracefully and emits an explainer marker. `.storeError` is NOT expected:
+/// it is logged via OSLog and emitted as a telemetry counter so that store
+/// failures are never swallowed silently. `.hits` is the happy path.
+///
+/// Callers must never treat a dark outcome as an error — per the softPrior
+/// grammar a dark dense lane means the query runs on the other lanes only,
+/// not that the query failed.
+public enum FloatLaneOutcome: Sendable {
+    /// The lane ran and returned at least one ranked hit.
+    ///
+    /// - Parameter hits: `(itemID, cosineSimilarity)` pairs, nearest first.
+    ///   `itemID` is the `sourceID` the caller ingested under (drawer ID in
+    ///   the GLK context). Similarity ∈ [−1, 1], 1.0 = identical direction.
+    case hits([(itemID: String, similarity: Float)])
+
+    /// Provider opted out of the float lane — expected, not an error.
+    ///
+    /// The configured `EmbeddingProvider` threw `VectorKitError.embeddingFailed`
+    /// on the embed call, indicating it has no float lane. This is the normal
+    /// outcome for the default `.deterministic` provider and for any provider
+    /// that does not override `embedFloat`. The dense lane is dark for this
+    /// corpus; all other lanes are unaffected.
+    case unavailableProviderOptOut
+
+    /// No float rows are stored — expected when ingest has not run yet or the
+    /// provider opted out during ingest. Dense lane is dark; other lanes are
+    /// unaffected.
+    case unavailableNoFloatRows
+
+    /// Query was empty or `limit` was zero — the call was a no-op.
+    ///
+    /// Not a store error; the caller supplied a query that cannot produce
+    /// results. No telemetry emitted for this case beyond the outcome itself.
+    case emptyQuery
+
+    /// The vector store threw an error during `findNearestFloat`.
+    ///
+    /// This is NOT an expected degradation. CorpusKit logs the error via OSLog
+    /// (category "CorpusKit") and emits a `corpus.float_lane.store_error`
+    /// telemetry counter so the failure is observable. The query still succeeds
+    /// on the other lanes — this outcome degrades, not fails.
+    ///
+    /// - Parameter error: The underlying store error. Included for logging at
+    ///   the call site; not propagated to the caller as a thrown error.
+    case storeError(Error)
+}
+
+/// CorpusKit OSLog logger (category "CorpusKit").
+///
+/// Used by `floatNearest` to log store errors so they are never swallowed.
+/// Declared at file scope to avoid repeated Logger construction on the hot path
+/// (Logger init is not free on older OS versions).
+private let corpusLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
 
 // MARK: - EmbeddingModel
 
 /// Selects the embedding model the Corpus actor uses internally.
 ///
 /// The caller names a CorpusKit case; no VectorKit type is required
-/// at the call site. For tests and offline contexts use `.deterministic`
-/// (the default) — it requires no CoreML model bundle and produces
-/// consistent projections via FNV-1a hashing + FloatSimHash. For
-/// semantic retrieval supply a CoreML inference closure via a named
-/// model case.
+/// at the call site.
+///
+/// `.deterministic` is the permanent, federation-grade vector provider
+/// present in every version (v1.0+). It uses FNV-1a tokenization +
+/// FloatSimHash projection, requires no CoreML model bundle, and produces
+/// byte-identical vectors cross-device and cross-port — the reproducibility
+/// federation requires. It captures surface/lexical signal, not learned
+/// semantic meaning.
+///
+/// The named model cases (`.miniLM`, `.mpNet`, `.embeddingGemma`) are the
+/// ADDITIVE v1.1 on-device learned semantic lane. They produce richer,
+/// model-dependent vectors for enhanced on-device search but cannot serve
+/// as the federation vector (model weights differ across devices). They do
+/// not replace the deterministic lane; both lanes coexist.
 public enum EmbeddingModel: Sendable {
 
-    /// Deterministic hash embedding. No CoreML required.
+    /// Permanent, federation-grade deterministic vector provider.
     ///
-    /// Uses FNV-1a hashing through the canonical FloatSimHash projection
-    /// with a fixed seed. Consistent across calls and across Swift/Rust
-    /// ports, but not semantically meaningful — suitable for tests,
-    /// prototyping, and offline use.
+    /// Uses FNV-1a tokenization + FloatSimHash projection with a fixed
+    /// seed (`0xC05BD15CA15D1B00`). Produces byte-identical 32-element
+    /// float vectors across calls, across Swift/Rust ports, and across
+    /// devices — the reproducibility federation requires. Captures
+    /// surface/lexical signal; not a learned semantic embedding.
+    ///
+    /// This is NOT a test stand-in or placeholder. It is the vector
+    /// representation that every version of the system (v1.0 through
+    /// any future version) uses for the federation-synchronized lane.
     case deterministic
 
     /// MiniLM v6 text embedding (384-dim pooled output).
@@ -111,6 +187,12 @@ public actor Corpus {
     /// BM25 index, so the two stay in sync.
     private var chunkSourceMap: [UUID: String] = [:]
 
+    /// Test-only: when non-nil, `floatNearest` returns `.storeError(this)` immediately,
+    /// bypassing the real vector store. Set via `_testForceFloatStoreError(_:)`.
+    /// Never set in production code; documented here so future agents do not mistake
+    /// this property for production logic.
+    var _forcedFloatError: Error? = nil
+
     /// Construct a Corpus against a PersistenceKit Storage.
     ///
     /// Opens the BundleStore and VectorStore schema declarations on the
@@ -161,6 +243,52 @@ public actor Corpus {
         }
     }
 
+    // MARK: - Test seams (internal — not part of the public surface)
+
+    /// Test-only init that accepts an `EmbeddingProvider` directly.
+    ///
+    /// This seam exists so test suites can inject a custom provider (e.g. one that
+    /// throws on `embedFloat`) without affecting production code paths. The public
+    /// `init(storage:model:)` is the production entry point; this init is `internal`
+    /// so `@testable import CorpusKit` tests can reach it while callers outside the
+    /// module cannot.
+    ///
+    /// - Parameters:
+    ///   - storage: A PersistenceKit Storage instance.
+    ///   - provider: A directly-supplied `EmbeddingProvider`. The caller is
+    ///     responsible for providing a provider whose `modelID` and `modelVersion`
+    ///     are consistent with any pre-existing vectors in `storage`.
+    init(storage: any Storage, provider: any EmbeddingProvider) async throws {
+        try await storage.migrate(to: BundleStore.schemaDeclaration)
+        try await storage.migrate(to: VectorStore.schemaDeclaration)
+
+        self.bundleStore = BundleStore(storage: storage)
+        self.bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
+        self.vectorStore = VectorStore(storage: storage)
+        self.provider = provider
+        self.hlcGenerator = HLCGenerator(nodeID: 1)
+
+        let existing = try await bundleStore.allChunks()
+        if !existing.isEmpty {
+            await bm25.index(existing)
+            for chunk in existing {
+                chunkSourceMap[chunk.id] = chunk.sourceID
+            }
+        }
+    }
+
+    /// Test-only: force `floatNearest` to return `.storeError(error)` on the next call.
+    ///
+    /// Intended for tests that need to verify the store-error code path (observable
+    /// degradation contract §4). The error is consumed on the first `floatNearest`
+    /// call after this is set; subsequent calls behave normally.
+    ///
+    /// Never call this in production code. Marked `internal` so it is visible to
+    /// `@testable import CorpusKit` test suites and invisible to callers outside the module.
+    func _testForceFloatStoreError(_ error: Error) {
+        _forcedFloatError = error
+    }
+
     // MARK: - Public API
 
     /// Ingest text from a source document.
@@ -188,17 +316,41 @@ public actor Corpus {
         for chunk in chunks { chunkSourceMap[chunk.id] = chunk.sourceID }
 
         // Fan-out: embed each chunk and store the vector. The
-        // chunk.id.uuidString == vector.drawerID join is maintained here;
-        // the caller never sees it (sealed-vector principle).
+        // chunk.id.uuidString == vector.item_id join is maintained here;
+        // the caller never sees it (sealed-vector principle). The column
+        // was renamed drawer_id → item_id in Lane F (arch spec §4.1).
         for chunk in chunks {
             let engram = try await provider.embed(chunk.text)
             try await vectorStore.addVector(
-                drawerID: chunk.id.uuidString,
+                itemID: chunk.id.uuidString,
                 engram: engram,
                 modelID: provider.modelID,
                 modelVersion: provider.modelVersion,
                 filedAt: now
             )
+
+            // Float lane (Lane D): RETAIN, don't recompute. The provider's
+            // float vector is the SAME pooled embedding `embed` already ran
+            // through `FloatSimHash.project` for the binary engram — one
+            // inference pass, two stored rows. The float row is a SECOND row
+            // per chunk under the same item_id, distinguished by `kind=float32`
+            // and `vector_index=1` (the binary engram is vector_index=0). It is
+            // written only when the provider supports `embedFloat`; the default
+            // provider opts out by throwing, so a non-float provider stores the
+            // binary lane only and the dense float lane stays dark for it.
+            // Cosine over this true embedding ranks an answer above a near-
+            // duplicate of the question, which the 256-bit SimHash projection
+            // cannot (it loses the magnitude signal).
+            if let floats = try? await provider.embedFloat(chunk.text), !floats.isEmpty {
+                try await vectorStore.addPayload(
+                    itemID: chunk.id.uuidString,
+                    vectorIndex: 1,
+                    payload: VectorPayload(floats: floats),
+                    modelID: provider.modelID,
+                    modelVersion: provider.modelVersion,
+                    filedAt: now
+                )
+            }
         }
     }
 
@@ -241,8 +393,13 @@ public actor Corpus {
         for chunk in chunks {
             await bm25.remove(chunk.id)
             chunkSourceMap.removeValue(forKey: chunk.id)
-            try await vectorStore.deleteVector(
-                drawerID: chunk.id.uuidString,
+            // Delete ALL vector_index rows for this chunk, not just the binary
+            // engram at vector_index=0: the float lane (Lane D) stores a second
+            // row at vector_index=1 under the same item_id. deleteAllVectors
+            // removes both and invalidates the float index so a removed source
+            // cannot resurface through the dense float lane.
+            try await vectorStore.deleteAllVectors(
+                itemID: chunk.id.uuidString,
                 modelID: provider.modelID
             )
         }
@@ -350,6 +507,195 @@ public actor Corpus {
     /// `modelID` used during `ingest` — vectors stored under a different model
     /// ID are not comparable per spec I-4.
     public var modelID: String { provider.modelID }
+
+    /// Embed the query text into the pooled dense float vector (Lane D) — the
+    /// probe for the dense float recall lane.
+    ///
+    /// Delegates to the configured provider's `embedFloat`. The default
+    /// `.deterministic` provider DOES implement `embedFloat` (FNV-1a + FloatSimHash),
+    /// so Lane D is live from the first capture under the default. Providers that
+    /// choose not to produce a dense float vector throw
+    /// `VectorKitError.embeddingFailed`; the caller treats a throw as "this
+    /// corpus has no float lane" and skips the dense lane rather than failing
+    /// the whole recall. Empty input returns `[]` (no dense direction for the
+    /// empty string), matching the storage-side contract in `ingest`.
+    ///
+    /// - Parameter text: the query text to embed.
+    /// - Returns: the pooled float vector, or `[]` for empty input.
+    /// - Throws: `VectorKitError.embeddingFailed` when the provider opts out.
+    public func embedFloat(_ text: String) async throws -> [Float] {
+        try await provider.embedFloat(text)
+    }
+
+    /// Dense float nearest-neighbour recall (Lane D): embed `query` to its
+    /// pooled float vector and rank stored chunks by cosine over the in-house
+    /// `FloatBruteForceIndex`. Returns a `FloatLaneOutcome` that is always
+    /// observable — dark lanes carry a typed reason, store errors are logged
+    /// and counted, never swallowed.
+    ///
+    /// This is the cosine path the 256-bit SimHash-Hamming lane could not
+    /// serve: cosine is scale-invariant, so an answer statement ranks above a
+    /// near-duplicate of the question.
+    ///
+    /// **Degradation contract:** this method never throws. A dark lane is
+    /// represented as `.unavailableProviderOptOut`, `.unavailableNoFloatRows`,
+    /// or `.emptyQuery` — all expected outcomes. `.storeError` is NOT expected:
+    /// the error is logged (OSLog "CorpusKit") and emitted as
+    /// `corpus.float_lane.store_error` telemetry before returning so the
+    /// failure is always observable. The query continues on other lanes.
+    ///
+    /// **Telemetry** (off by default — single `Atomic<Bool>` load when disabled):
+    /// - `corpus.float_lane.hit`           — lane ran and returned ≥1 result.
+    /// - `corpus.float_lane.dark_provider` — provider opted out.
+    /// - `corpus.float_lane.dark_no_rows`  — no float rows stored.
+    /// - `corpus.float_lane.store_error`   — unexpected store failure.
+    ///
+    /// - Parameters:
+    ///   - query: the query text.
+    ///   - limit: maximum number of matches.
+    /// - Returns: a `FloatLaneOutcome` describing the result.
+    public func floatNearest(query: String, limit: Int) async -> FloatLaneOutcome {
+        guard limit > 0, !query.isEmpty else {
+            // Empty query or zero limit — no telemetry: this is a no-op call.
+            return .emptyQuery
+        }
+
+        // Test-only hook: if a forced error is installed, consume it and return
+        // .storeError immediately. This exercises the observable store-error code
+        // path without requiring production modifications to the vector store.
+        if let forced = _forcedFloatError {
+            _forcedFloatError = nil
+            corpusLog.error("floatNearest: findNearestFloat failed — \(forced, privacy: .public)")
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.store_error",
+                value: 1.0,
+                tags: ["kit": "CorpusKit"],
+                ts: Date().timeIntervalSince1970
+            ))
+            return .storeError(forced)
+        }
+
+        // Attempt to embed the query text via the float lane. A throw here
+        // means the provider has no float lane (expected opt-out). This is NOT
+        // a store error — no log, no store_error counter. Emit the dark_provider
+        // counter so the caller can observe the lane was dark.
+        let probe: [Float]
+        do {
+            let result = try await provider.embedFloat(query)
+            guard !result.isEmpty else {
+                // Provider returned an empty vector — treat as opt-out.
+                Intellectus.report(.metric(
+                    name: "corpus.float_lane.dark_provider",
+                    value: 1.0,
+                    tags: ["kit": "CorpusKit"],
+                    ts: Date().timeIntervalSince1970
+                ))
+                return .unavailableProviderOptOut
+            }
+            probe = result
+        } catch {
+            // Provider threw — this is the expected opt-out path (e.g.
+            // the deterministic provider, or any provider without a float lane).
+            // Log nothing; emit the dark_provider counter only.
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.dark_provider",
+                value: 1.0,
+                tags: ["kit": "CorpusKit"],
+                ts: Date().timeIntervalSince1970
+            ))
+            return .unavailableProviderOptOut
+        }
+
+        // Over-fetch 4× at the CHUNK granularity so that after source-level
+        // aggregation we still have at least `limit` sources, mirroring
+        // bm25TopKBySource's over-fetch discipline. The float index keys rows by
+        // chunk.id (the vector item_id); we aggregate to sourceID below.
+        let matches: [VectorMatch]
+        do {
+            matches = try await vectorStore.findNearestFloat(
+                probe: probe, modelID: provider.modelID, limit: limit * 4)
+        } catch {
+            // Store threw — this is NOT expected. Log it via OSLog so it is
+            // never silent, then emit the store_error counter for telemetry
+            // dashboards and alerts.
+            corpusLog.error("floatNearest: findNearestFloat failed — \(error, privacy: .public)")
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.store_error",
+                value: 1.0,
+                tags: ["kit": "CorpusKit"],
+                ts: Date().timeIntervalSince1970
+            ))
+            return .storeError(error)
+        }
+
+        // Empty matches means no float rows are stored — expected dark outcome.
+        guard !matches.isEmpty else {
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.dark_no_rows",
+                value: 1.0,
+                tags: ["kit": "CorpusKit"],
+                ts: Date().timeIntervalSince1970
+            ))
+            return .unavailableNoFloatRows
+        }
+
+        // Aggregate chunk-level cosine to SOURCE (drawer) level. The vector
+        // item_id is the chunk uuid string; chunkSourceMap resolves it to the
+        // sourceID the caller ingested under (the drawer id in the GLK context),
+        // exactly as bm25TopKBySource does, so float hits hydrate back to the
+        // real Drawer row. A source's similarity is its best (max) chunk cosine.
+        // VectorMatch.distance is the cosine DISTANCE (1 − sim) quantised
+        // ×10_000 (FloatBruteForceIndex convention); recover sim = 1 − dist/1e4.
+        var bySource: [String: Float] = [:]
+        for m in matches {
+            guard let chunkUUID = UUID(uuidString: m.itemID),
+                  let sourceID = chunkSourceMap[chunkUUID] else { continue }
+            let similarity = 1.0 - Float(m.distance) / 10_000.0
+            bySource[sourceID] = max(bySource[sourceID] ?? -Float.greatestFiniteMagnitude, similarity)
+        }
+
+        // After source aggregation, no results means no chunks are in the
+        // chunk→source map (all chunks were removed). Treat as no-rows dark.
+        guard !bySource.isEmpty else {
+            Intellectus.report(.metric(
+                name: "corpus.float_lane.dark_no_rows",
+                value: 1.0,
+                tags: ["kit": "CorpusKit"],
+                ts: Date().timeIntervalSince1970
+            ))
+            return .unavailableNoFloatRows
+        }
+
+        // Sort by similarity descending, sourceID ascending on tie (the
+        // universal deterministic tie-break), and return the top `limit`.
+        var ranked = bySource.map { (itemID: $0.key, similarity: $0.value) }
+        ranked.sort { a, b in
+            if a.similarity != b.similarity { return a.similarity > b.similarity }
+            return a.itemID < b.itemID
+        }
+        let result = Array(ranked.prefix(limit))
+
+        // Happy path — lane ran. Emit hit counter (count = result size so
+        // dashboards can see both that the lane ran and how many hits emerged).
+        Intellectus.report(.metric(
+            name: "corpus.float_lane.hit",
+            value: Double(result.count),
+            tags: ["kit": "CorpusKit"],
+            ts: Date().timeIntervalSince1970
+        ))
+        return .hits(result)
+    }
+
+    /// Whether this corpus's embedding provider supports the dense float lane
+    /// (Lane D). True when `embedFloat` returns a vector rather than throwing
+    /// the opt-out error. Probes with a single non-empty token so the answer
+    /// reflects provider capability, not input. The GLK dense lane checks this
+    /// (via a non-empty `floatNearest`) before fusing the dense column.
+    public var supportsFloat: Bool {
+        get async {
+            ((try? await provider.embedFloat("x")) ?? []).isEmpty == false
+        }
+    }
 
     /// Count the total chunks in the bundle store across all sources.
     ///
@@ -508,5 +854,19 @@ private struct CorpusTextProvider: EmbeddingProvider {
         let tokens = tokenizer.tokenize(text)
         let floats = try await inference(tokens)
         return FloatSimHash.project(vector: floats, seed: projectionSeed)
+    }
+
+    /// Float lane source (Lane D): the pooled vector this provider's `embed`
+    /// already computes before projecting it to the 256-bit engram. Returning
+    /// it directly feeds the dense float lane's cosine ranking — one inference
+    /// pass, two stored rows. Empty input returns `[]` (no dense direction for
+    /// the empty string), matching the `EmbeddingProvider.embedFloat` contract.
+    /// This is the production float-lane path for the `.miniLM`/`.mpNet`/
+    /// `.embeddingGemma` models; without it those models would have NO float
+    /// lane (the protocol default opts out by throwing).
+    func embedFloat(_ text: String) async throws -> [Float] {
+        guard !text.isEmpty else { return [] }
+        let tokens = tokenizer.tokenize(text)
+        return try await inference(tokens)
     }
 }

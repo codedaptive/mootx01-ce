@@ -13,6 +13,13 @@ path = "src/lib.rs"
 
 [dependencies]
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+# B2-5: the named EmbeddingModelConfig cases (MiniLM/MPNet/EmbeddingGemma)
+# project pooled vectors through substrate_ml::float_simhash::project — the
+# conformance-gated, bit-identical Swift/Rust SimHash. The Swift CorpusKit
+# core target carries the matching SubstrateML dependency for the same
+# CorpusTextProvider projection; this is the parity addition. Layering is
+# downstream->upstream (corpus-kit -> substrate-ml); no inversion.
+substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 engram-lib = { path = "../../../libs/EngramLib/rust" }
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
@@ -27,10 +34,32 @@ intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# InvertedIndexStore uses rusqlite directly for its SQLite persistence
+# sidecar — same bundled SQLite as PersistenceKit so no second copy of
+# the library ships. The bundled feature pins the version identically.
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Integration tests need a concrete tokenizer; the test-fixture
 # `DeterministicTokenizer` lives in the sibling `corpus-kit-providers`
 # crate (mirrors the Swift `CorpusKitProviders` target). Dev-only so
 # the core kit stays provider-free in normal builds.
+[features]
+# test-seams: enables the `open_with_provider` constructor and the
+# `forced_float_error` field on `Corpus`. These surfaces are deliberately
+# absent from normal production builds. GLK declares corpus-kit with this
+# feature in its [dev-dependencies] so the parity test suite can reach
+# them; nothing in the GLK production binary enables the feature.
+test-seams = []
+
 [dev-dependencies]
 corpus-kit-providers = { path = "../rust-providers" }
+# InvertedIndexStore round-trip test opens a real file-backed connection.
+rusqlite = { version = "0.31", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+# corpus_tests.rs uses forced_float_error and open_with_provider seams — declare
+# them as required-features so `cargo test` picks up the test-seams flag for this
+# integration-test binary automatically.
+[[test]]
+name = "corpus_tests"
+required-features = ["test-seams"]
