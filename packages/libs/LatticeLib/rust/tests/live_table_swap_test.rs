@@ -44,7 +44,9 @@ fn table_plus_noun(extra_noun: &str) -> WordClassTableCache {
     let mut noun_set: HashSet<String> = current.noun_set.iter().cloned().collect();
     noun_set.insert(extra_noun.to_string());
     let verb_set: HashSet<String> = current.verb_set.iter().cloned().collect();
-    WordClassTableCache { noun_set, verb_set }
+    // Preserve the gate state from the current live table.
+    let tagger_enabled = current.tagger_enabled;
+    WordClassTableCache { noun_set, verb_set, tagger_enabled }
 }
 
 /// Restore the bundled (pristine) table as the live snapshot.
