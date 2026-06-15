@@ -245,6 +245,24 @@ function Remove-FromUserPath($dir) {
 if ($Uninstall) {
     Write-Host "Uninstalling mootx01..."
 
+    # Unregister the background services (the mootx01 / mootx01-mgr Task Scheduler
+    # logon tasks) via the Rust CLI BEFORE the binary is deleted — `mootx01
+    # uninstall` is what knows the task names (commands/uninstall.rs). Skipping
+    # this would leave logon tasks pointing at a deleted binary. Scheduled tasks
+    # are global, so this only applies to a global uninstall; -Local removals are
+    # project-scoped and register no tasks.
+    if (-not $Local) {
+        if (Test-Path $BINARY) {
+            try {
+                & $BINARY uninstall --yes | Out-Null
+            } catch {
+                Write-Warning "Could not run '$BINARY uninstall' to unregister scheduled tasks: $_"
+            }
+        } else {
+            Write-Warning "mootx01.exe not found; the mootx01 / mootx01-mgr scheduled tasks may remain. Run 'mootx01 uninstall' if it is still on PATH."
+        }
+    }
+
     # Remove binary
     if (Test-Path $INSTALL_DIR) {
         Remove-Item -Recurse -Force (Split-Path $INSTALL_DIR)   # removes ~/.mootx01
