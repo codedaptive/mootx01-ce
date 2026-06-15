@@ -7,6 +7,14 @@
 // behavior set the file documents: classic z-score, rolling z-score,
 // the MAD-based modified z-score (robust to outliers), and the
 // |z| ≥ threshold rule. Float32 comparisons use a 1e-5 tolerance.
+//
+// Isolation strategy:
+//   rollingZScore() and rollingModifiedZScore() call Intellectus.report()
+//   whenever the window is non-empty. Tests that call these functions with
+//   non-empty windows wrap their body in GlobalTestLock.shared.withLock { }
+//   to prevent concurrent VizGraphSignalTests from capturing stray samples.
+//   Pure-math functions (zScore, modifiedZScore, isAnomalous) and the
+//   empty-window early-return path are exempt.
 
 import Testing
 @testable import SubstrateML
@@ -33,17 +41,23 @@ struct AnomalyDetectionTests {
     }
 
     @Test("rolling z-score over a constant window is zero (no spread)")
-    func rollingZScoreConstantWindow() {
-        #expect(AnomalyDetection.rollingZScore(window: [4, 4, 4, 4], current: 9) == 0)
+    func rollingZScoreConstantWindow() async {
+        // rollingZScore() calls Intellectus.report() on non-empty windows — hold GlobalTestLock.
+        await GlobalTestLock.shared.withLock {
+            #expect(AnomalyDetection.rollingZScore(window: [4, 4, 4, 4], current: 9) == 0)
+        }
     }
 
     @Test("rolling z-score flags a value far from the window mean")
-    func rollingZScoreFlagsOutlier() {
-        // window mean 3, population variance 2, stddev √2 ≈ 1.4142.
-        let z = AnomalyDetection.rollingZScore(window: [1, 2, 3, 4, 5], current: 3)
-        #expect(abs(z) < tol)                       // the mean scores 0
-        let zHigh = AnomalyDetection.rollingZScore(window: [1, 2, 3, 4, 5], current: 5)
-        #expect(zHigh > 1.0)                          // (5−3)/1.414 ≈ 1.414
+    func rollingZScoreFlagsOutlier() async {
+        // rollingZScore() calls Intellectus.report() (two calls here) — hold GlobalTestLock.
+        await GlobalTestLock.shared.withLock {
+            // window mean 3, population variance 2, stddev √2 ≈ 1.4142.
+            let z = AnomalyDetection.rollingZScore(window: [1, 2, 3, 4, 5], current: 3)
+            #expect(abs(z) < tol)                       // the mean scores 0
+            let zHigh = AnomalyDetection.rollingZScore(window: [1, 2, 3, 4, 5], current: 5)
+            #expect(zHigh > 1.0)                          // (5−3)/1.414 ≈ 1.414
+        }
     }
 
     @Test("modified z-score is zero when MAD is zero")
@@ -59,8 +73,11 @@ struct AnomalyDetectionTests {
     }
 
     @Test("rolling modified z-score is zero for a flat window")
-    func rollingModifiedZScoreFlat() {
-        #expect(AnomalyDetection.rollingModifiedZScore(window: [3, 3, 3, 3, 3], current: 3) == 0)
+    func rollingModifiedZScoreFlat() async {
+        // rollingModifiedZScore() calls Intellectus.report() on non-empty windows — hold GlobalTestLock.
+        await GlobalTestLock.shared.withLock {
+            #expect(AnomalyDetection.rollingModifiedZScore(window: [3, 3, 3, 3, 3], current: 3) == 0)
+        }
     }
 
     @Test("the |z| ≥ threshold rule fires at and above the threshold")

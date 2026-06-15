@@ -14,7 +14,7 @@ compiling until consumers re-point precisely.
 
 Cold path / dreaming-driven. MatrixDecay, MomentSummary, BradleyTerry, Anomaly, InfoTheory, TemporalCompression, PartialStateRecall, FFT, NMF, EigenvalueCentrality, AuditLogFold, TierContribution, PairingHandshake. Tier-2 and Tier-3 of the conformance harness live here.
 
-See `docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md` §6 for
+See `docs/engineering/HARNESS_REFERENCE.md` §6 for
 the canonical breakdown of where each substrate primitive lives,
 and cookbook v1.0 §20 for the rationale.
 

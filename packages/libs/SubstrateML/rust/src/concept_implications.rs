@@ -336,6 +336,9 @@ fn sort_implications(mut implications: Vec<Implication>) -> Vec<Implication> {
 mod tests {
     use super::*;
     use crate::formal_concept_analysis::FormalContext;
+    // HashSet is test-only (premise/conclusion set comparisons below);
+    // importing it at module scope would warn on non-test builds.
+    use std::collections::HashSet;
 
     fn a() -> FormalAttribute { FormalAttribute::new("t", "k", "a") }
     fn b() -> FormalAttribute { FormalAttribute::new("t", "k", "b") }
