@@ -9,9 +9,14 @@
 //   - `receive(_:)` is the single required method. No batching, no
 //     buffering, no back-pressure at this layer — those are concerns
 //     for the concrete implementation a host installs.
-//   - The real reporting sink (transport to the observer program) is
-//     installed by a host in a later mission. This file only provides
-//     the protocol and the no-op default.
+//   - The production sink is `PersistenceStatsSink`, wired by
+//     `AriaResident.installManagerTelemetry` at startup. In resident
+//     HTTP mode the daemon resolves the store path via
+//     `AriaResident.statsStorePathFromEnv`: if `ARIA_MCP_STATS_STORE`
+//     is set and non-empty that path is used; otherwise the daemon
+//     defaults to the moot-mgr store at
+//     `<app-support>/com.mootx01.ce/moot-mgr/stats.sqlite`.
+//     This file only provides the protocol and the no-op default.
 
 // MARK: - StatsSink
 
