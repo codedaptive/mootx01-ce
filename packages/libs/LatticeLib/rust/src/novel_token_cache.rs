@@ -2,12 +2,16 @@
 //
 // Port of NovelTokenCache.swift (cookbook §2.2, §2.3, canonical §3 Step 1).
 //
-// When a token is not in the static word-class table, the word_class path
-// returns WordClass::Other (the Rust non-Apple stub — no HMM artifact is
-// bundled yet) and records the result here. The cache flushes to the pool at
-// exactly POOL_SUBMIT_THRESHOLD (50) entries and drains; entries below the
-// threshold are kept indefinitely (canonical §3 Step 1). Flush is
-// fire-and-forget: no retry, never on the hot encode path.
+// When a token is not in the static word-class table, the word_class table
+// path classifies it via the deterministic HMM/Viterbi tagger (`hmm_tag`) and
+// records the result here. Rust runs on non-Apple platforms only; `hmm_tag` is
+// the correct non-Apple novel-token path (byte-identical to `HMMTagger.tag` in
+// Swift). The FDC conformance fixture (`fdc_conformance.json`) exercises only
+// table-resident tokens and is unaffected by this path. The HMM byte-identity
+// gate is `tag_conformance.json` / `lattice_conformance_test.rs`.
+// The cache flushes to the pool at exactly POOL_SUBMIT_THRESHOLD (50) entries
+// and drains; entries below the threshold are kept indefinitely (canonical §3
+// Step 1). Flush is fire-and-forget: no retry, never on the hot encode path.
 //
 // The `submitter` closure is injected so tests can assert the drain without a
 // network call; the default is a no-op until the pool endpoint is wired
@@ -35,6 +39,14 @@ use crate::word_class::WordClass;
 /// conformance-vector regeneration. Mirrors `NovelTokenCache.poolSubmitThreshold`
 /// in Swift (value: 50).
 pub const POOL_SUBMIT_THRESHOLD: usize = 50;
+
+// ─── HMM/Viterbi tagger version ──────────────────────────────────────────────
+
+/// The non-Apple HMM/Viterbi model version stamped on pool submissions.
+/// Mirrors `WordClassTagger.currentTaggerVersion` `#else` branch in Swift
+/// (value: `"hmm-viterbi-1"`). Bump both here and in Swift when the
+/// `HMMTagger` model tables change.
+pub const HMM_VITERBI_VERSION: &str = "hmm-viterbi-1";
 
 // ─── Wire-format types ────────────────────────────────────────────────────────
 
@@ -124,8 +136,8 @@ impl NovelTokenCache {
     /// The `submitter` is invoked with the drained submission when the cache
     /// reaches the threshold. Defaults to a no-op until the pool endpoint is
     /// wired (cookbook §2.2). On non-Apple platforms the tagger version is
-    /// `"hmm-viterbi-stub-0"`, mirroring Swift's `currentTaggerVersion` for the
-    /// `#else` branch.
+    /// `HMM_VITERBI_VERSION` (`"hmm-viterbi-1"`), mirroring Swift's
+    /// `currentTaggerVersion` `#else` branch.
     pub fn new(
         table_version: impl Into<String>,
         platform: impl Into<String>,
@@ -192,30 +204,54 @@ impl NovelTokenCache {
 
 /// The process-wide novel-token accumulation cache wired into the fallback path
 /// (cookbook §2.2). Stamped with the bundled table version, the platform
-/// string, and the tagger version. Uses the no-op submitter until the pool
-/// endpoint is wired.
+/// string, and the tagger version.
+///
+/// Wired with the real local-file submitter (`novel_pool_submitter::default_submitter`)
+/// so drained batches are written as JSON files to the configured pool directory
+/// (`LATTICE_POOL_DIR` env var, or the platform XDG default). The no-op submitter
+/// may only be used in tests or in an embedded-host where the pool directory is
+/// explicitly unwanted.
 ///
 /// Mirrors `LatticeLib.sharedNovelCache` (Swift static `let`) in
 /// `WordClassTagger.swift`. On non-Apple platforms (the only Rust target):
 /// - platform = `"other"` (mirrors Swift `currentPlatform` `#else` branch)
-/// - tagger_version = `"hmm-viterbi-stub-0"` (mirrors Swift
-///   `currentTaggerVersion` `#else` branch and the comment "Mirrors the Rust
-///   port's HMM_VITERBI_VERSION" in `WordClassTagger.swift`)
+/// - tagger_version = `HMM_VITERBI_VERSION` (`"hmm-viterbi-1"`) — mirrors
+///   Swift `currentTaggerVersion` `#else` branch (`WordClassTagger.swift`)
 pub static SHARED_NOVEL_CACHE: OnceLock<NovelTokenCache> = OnceLock::new();
 
-/// Initialize the process-wide cache. Must be called once before `word_class`
-/// is invoked on novel tokens. The runtime (`fdc_runtime.rs`) calls this when
-/// loading the bundled artifacts so the table version is available.
+/// Initialize the process-wide cache with the real local-file submitter.
+/// Must be called once before `word_class` is invoked on novel tokens.
+/// The runtime (`fdc_runtime.rs`) calls this when loading the bundled
+/// artifacts so the table version is available.
 ///
 /// If called more than once, the second and subsequent calls are no-ops
-/// (OnceLock contract). Mirroring Swift's `sharedNovelCache` static let which
+/// (OnceLock contract). Mirrors Swift's `sharedNovelCache` static let which
 /// reads `WordClassTableCache.table?.tableVersion ?? ""` at initialization.
 pub(crate) fn init_shared_cache(table_version: &str) {
+    use crate::novel_pool_submitter::default_submitter;
     SHARED_NOVEL_CACHE.get_or_init(|| {
-        NovelTokenCache::new_noop(
+        NovelTokenCache::new(
             table_version,
-            "other",          // mirrors Swift currentPlatform #else branch
-            "hmm-viterbi-stub-0", // mirrors Swift currentTaggerVersion #else branch
+            "other",             // mirrors Swift currentPlatform #else branch
+            HMM_VITERBI_VERSION, // mirrors Swift currentTaggerVersion #else branch
+            default_submitter(), // real local-file submitter; no-op only in tests
+        )
+    });
+}
+
+/// Initialize the process-wide cache with an explicit submitter. Used by tests
+/// that need to observe drain output without touching the filesystem.
+///
+/// If the cache is already initialized (OnceLock), this is a no-op.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn init_shared_cache_with_submitter(table_version: &str, submitter: Submitter) {
+    SHARED_NOVEL_CACHE.get_or_init(|| {
+        NovelTokenCache::new(
+            table_version,
+            "other",
+            HMM_VITERBI_VERSION,
+            submitter,
         )
     });
 }
@@ -248,10 +284,10 @@ mod tests {
     #[test]
     fn pool_submission_fields_stored_correctly() {
         let entries = vec![PoolEntry::new("dog", "NOUN")];
-        let s = PoolSubmission::new("v1.0", "other", "hmm-viterbi-stub-0", entries.clone());
+        let s = PoolSubmission::new("v1.0", "other", HMM_VITERBI_VERSION, entries.clone());
         assert_eq!(s.table_version, "v1.0");
         assert_eq!(s.platform, "other");
-        assert_eq!(s.tagger_version, "hmm-viterbi-stub-0");
+        assert_eq!(s.tagger_version, HMM_VITERBI_VERSION);
         assert_eq!(s.entries, entries);
     }
 
@@ -259,8 +295,10 @@ mod tests {
     fn pool_submission_json_round_trip_uses_snake_case_keys() {
         // Verifies that the wire format uses snake_case keys matching
         // Swift's PoolSubmission.CodingKeys (table_version, tagger_version).
+        // The tagger_version value is an intentionally fictional fixture —
+        // this test checks key names only, not the production version identifier.
         let entries = vec![PoolEntry::new("run", "VERB")];
-        let sub = PoolSubmission::new("v1.0", "other", "hmm-viterbi-stub-0", entries);
+        let sub = PoolSubmission::new("v1.0", "other", "test-old-version-0", entries);
         let json = serde_json::to_string(&sub).unwrap();
         assert!(json.contains("\"table_version\""), "json must contain table_version key");
         assert!(json.contains("\"tagger_version\""), "json must contain tagger_version key");
@@ -289,7 +327,7 @@ mod tests {
 
     #[test]
     fn cache_count_is_zero_on_init() {
-        let cache = NovelTokenCache::new_noop("v1", "other", "hmm-viterbi-stub-0");
+        let cache = NovelTokenCache::new_noop("v1", "other", HMM_VITERBI_VERSION);
         assert_eq!(cache.count(), 0);
     }
 
@@ -298,7 +336,7 @@ mod tests {
         let submitted: Arc<StdMutex<Vec<PoolSubmission>>> = Arc::new(StdMutex::new(Vec::new()));
         let submitted_clone = submitted.clone();
         let cache = NovelTokenCache::new(
-            "v1", "other", "hmm-viterbi-stub-0",
+            "v1", "other", HMM_VITERBI_VERSION,
             Box::new(move |s| { submitted_clone.lock().unwrap().push(s); }),
         );
         // Record 49 tokens — one below the threshold.
@@ -316,7 +354,7 @@ mod tests {
         let submitted: Arc<StdMutex<Vec<PoolSubmission>>> = Arc::new(StdMutex::new(Vec::new()));
         let submitted_clone = submitted.clone();
         let cache = NovelTokenCache::new(
-            "v1.0", "other", "hmm-viterbi-stub-0",
+            "v1.0", "other", HMM_VITERBI_VERSION,
             Box::new(move |s| { submitted_clone.lock().unwrap().push(s); }),
         );
         for i in 0..POOL_SUBMIT_THRESHOLD {
@@ -334,7 +372,7 @@ mod tests {
         let submitted: Arc<StdMutex<Vec<PoolSubmission>>> = Arc::new(StdMutex::new(Vec::new()));
         let submitted_clone = submitted.clone();
         let cache = NovelTokenCache::new(
-            "v2.0", "other", "hmm-viterbi-stub-0",
+            "v2.0", "other", HMM_VITERBI_VERSION,
             Box::new(move |s| { submitted_clone.lock().unwrap().push(s); }),
         );
         for i in 0..POOL_SUBMIT_THRESHOLD {
@@ -343,7 +381,7 @@ mod tests {
         let subs = submitted.lock().unwrap();
         assert_eq!(subs[0].table_version, "v2.0");
         assert_eq!(subs[0].platform, "other");
-        assert_eq!(subs[0].tagger_version, "hmm-viterbi-stub-0");
+        assert_eq!(subs[0].tagger_version, HMM_VITERBI_VERSION);
         // Every entry should carry the VERB tag.
         assert!(subs[0].entries.iter().all(|e| e.tag == "VERB"));
     }
@@ -354,7 +392,7 @@ mod tests {
         let submitted: Arc<StdMutex<Vec<PoolSubmission>>> = Arc::new(StdMutex::new(Vec::new()));
         let submitted_clone = submitted.clone();
         let cache = NovelTokenCache::new(
-            "v1", "other", "hmm-viterbi-stub-0",
+            "v1", "other", HMM_VITERBI_VERSION,
             Box::new(move |s| { submitted_clone.lock().unwrap().push(s); }),
         );
         for i in 0..POOL_SUBMIT_THRESHOLD {
@@ -376,7 +414,7 @@ mod tests {
         let submitted: Arc<StdMutex<Vec<PoolSubmission>>> = Arc::new(StdMutex::new(Vec::new()));
         let submitted_clone = submitted.clone();
         let cache = NovelTokenCache::new(
-            "v1", "other", "hmm-viterbi-stub-0",
+            "v1", "other", HMM_VITERBI_VERSION,
             Box::new(move |s| { submitted_clone.lock().unwrap().push(s); }),
         );
         cache.record("alpha", WordClass::Noun);

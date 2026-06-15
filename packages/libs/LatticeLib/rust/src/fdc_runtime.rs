@@ -20,8 +20,9 @@ use crate::fdc_frame::FdcFrame;
 use crate::fdc_matcher::{FdcMatcher, ScoreMode};
 use crate::fdc_signatures::FdcSignatures;
 use crate::lexicon::CanonicalizationLexicon;
+use crate::novel_pool_submitter::default_table_artifact;
 use crate::novel_token_cache::init_shared_cache;
-use crate::word_class_table::WordClassTableCache;
+use crate::word_class_table;
 
 // Pinned descent cutoff (cookbook §6.1). 1 = any overlap continues descent.
 // Tuned empirically: a sweep over 1...200 produced identical results on the
@@ -34,6 +35,10 @@ const STOP_THRESHOLD: usize = 1;
 struct Bundle {
     matcher: FdcMatcher,
     version: String,
+    // Retained for label lookups. FdcFrame derives Clone so we clone before moving
+    // into FdcMatcher, which takes ownership. This matches Swift's bundle tuple
+    // which stores (matcher, frame, version) together.
+    frame: FdcFrame,
 }
 
 static BUNDLE: OnceLock<Option<Bundle>> = OnceLock::new();
@@ -58,12 +63,30 @@ fn get_bundle() -> Option<&'static Bundle> {
         let lexicon = CanonicalizationLexicon::from_json(LEXICON_JSON)?;
         let frame = FdcFrame::from_json(FRAME_JSON)?;
         let signatures = FdcSignatures::from_json(SIGS_JSON)?;
-        // Parse the raw table struct first to extract the version string for the
-        // novel-token cache, then build the membership-set cache from the same data.
-        let raw_table: crate::word_class_table::WordClassTable =
+
+        // Parse the bundled table first to extract the version string. The version
+        // is pinned and does not change with the writable artifact — it is the
+        // table_version of the bundled table that gates pool submissions (cookbook
+        // §2.3). The merged artifact must carry the same table_version.
+        let raw_bundled: crate::word_class_table::WordClassTable =
             serde_json::from_slice(TABLE_JSON).ok()?;
-        let table_version_str = raw_table.table_version.clone();
-        let table = WordClassTableCache::from_json(TABLE_JSON)?;
+        let table_version_str = raw_bundled.table_version.clone();
+
+        // Seed the LIVE process-global word-class table with writable-artifact
+        // precedence (cookbook §1.3/§2.2):
+        //   1. Writable merged artifact at `default_table_artifact()`, if present.
+        //   2. Compile-time bundled bytes, as fallback (the OnceLock seed).
+        // This implements cross-reload learning at startup (a previous
+        // `pool_reduce` run is picked up here) AND establishes the holder the
+        // live in-session swap publishes into post-reduce. The encode path and
+        // the public `word_class` free fn read this same holder, so a swap is
+        // observed in-session — no process restart (mirrors the Swift live
+        // `WordClassTableCache`). If the writable artifact resolves, it replaces
+        // the bundled seed; if not, the bundled seed already loaded is left in
+        // place.
+        let artifact_path = default_table_artifact();
+        word_class_table::seed_global_table(&artifact_path);
+
         // Initialize the process-wide novel-token cache, stamped with the bundled
         // table version. Mirrors Swift's `sharedNovelCache` static let which reads
         // `WordClassTableCache.table?.tableVersion ?? ""` at initialization.
@@ -77,17 +100,17 @@ fn get_bundle() -> Option<&'static Bundle> {
         // rewarding distinctive ones — improved within-region code selection
         // over raw overlap on the v1.0 frame. Mirrors Swift FDCRuntime.swift
         // which passes `.idf` to FDCMatcher at construction time. The matcher
-        // default stays Raw; the runtime opts in here.
+        // default stays Raw; the runtime opts in here. The matcher reads the
+        // live global word-class table at encode time (it no longer owns one).
         let matcher = FdcMatcher::new_with_mode(
             lexicon,
-            frame,
-            table,
+            frame.clone(),   // matcher takes ownership; clone is retained below for label lookups
             &signatures,
             STOP_THRESHOLD,
             ScoreMode::Idf,
         );
 
-        Some(Bundle { matcher, version })
+        Some(Bundle { matcher, version, frame })
     }).as_ref()
 }
 
@@ -122,5 +145,86 @@ impl Fdc {
         get_bundle()
             .map(|b| b.version.as_str())
             .unwrap_or("0.0.0-unavailable")
+    }
+
+    /// Return the human-readable heading for an FDC code, or None when
+    /// the code is absent from the frame or the artifacts are unavailable.
+    ///
+    /// 3-digit integer codes (no decimal point) walk up one parent level so
+    /// the dashboard shows a single-topic heading rather than a raw compound
+    /// cluster label (e.g. "683" → parent "680" → "Handicraft", not the
+    /// raw "Firearms + Locksmithing" leaf label).
+    /// Decimal codes return their own label unchanged.
+    ///
+    /// Mirrors Swift `FDC.label(for:)` in FDCRuntime.swift.
+    pub fn label(code: &str) -> Option<String> {
+        let bundle = get_bundle()?;
+        if code.is_empty() {
+            return None;
+        }
+        // Walk up one level for plain 3-digit codes; keep decimal codes as-is.
+        let lookup = if !code.contains('.') {
+            FdcFrame::decimal_parent(code).unwrap_or_else(|| code.to_owned())
+        } else {
+            code.to_owned()
+        };
+        bundle.frame.codes.iter()
+            .find(|e| e.code == lookup)
+            .map(|e| e.label.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tests require the bundled artifacts to be present (include_bytes! at compile time).
+    // All four tests are skipped gracefully when artifacts are unavailable; in practice
+    // they always load since the JSON files are bundled unconditionally.
+
+    #[test]
+    fn label_empty_returns_none() {
+        // Empty string must return None regardless of artifact availability.
+        assert_eq!(Fdc::label(""), None);
+    }
+
+    #[test]
+    fn label_code_not_in_frame_returns_none() {
+        if !Fdc::is_available() {
+            return;
+        }
+        // A clearly invalid code is absent from the frame.
+        assert_eq!(Fdc::label("NOTACODE"), None);
+    }
+
+    #[test]
+    fn label_integer_code_walks_to_parent() {
+        if !Fdc::is_available() {
+            return;
+        }
+        // For a 3-digit integer code, label() walks up one level via decimal_parent().
+        // "006" has parent "000"; label("006") and label("000") must both look up
+        // code "000" in the frame, so they return the same value.
+        let via_child = Fdc::label("006");
+        let direct_root = Fdc::label("000");
+        assert!(via_child.is_some(), "label(\"006\") should resolve via parent \"000\"");
+        assert_eq!(via_child, direct_root, "label(\"006\") must equal label(\"000\") — both look up the parent");
+    }
+
+    #[test]
+    fn label_decimal_code_returns_own_label() {
+        if !Fdc::is_available() {
+            return;
+        }
+        // A decimal code (contains '.') returns its own label, not the parent's.
+        // "006.6" must NOT equal label("006") (which is the "000" root label).
+        let decimal_label = Fdc::label("006.6");
+        let parent_label = Fdc::label("006");
+        if decimal_label.is_some() && parent_label.is_some() {
+            assert_ne!(
+                decimal_label, parent_label,
+                "label(\"006.6\") must return its own label, not the parent-walked \"000\" label"
+            );
+        }
     }
 }

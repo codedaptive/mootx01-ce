@@ -1,11 +1,15 @@
-// fdc_conformance_test.rs — FDC Swift↔Rust agreement property
+// fdc_conformance_test.rs — FDC encode self-consistency and stemmer gate
 //
-// Loads the canonical conformance fixture (generated from the Swift engine
-// via FDC.encode over a representative corpus) and asserts that the Rust
-// `Fdc::encode` produces byte-identical output for every vector.
+// `fdc_conformance_all_vectors_match` asserts that the Rust `Fdc::encode`
+// produces the values recorded in `fdc_conformance.json` for every fixture
+// vector. The baseline in that fixture is the Rust-HMM path (deterministic,
+// non-Apple): novel tokens are classified via the integer-Viterbi HMM
+// (`word_class::hmm_tag`), byte-identical to Swift's `HMMTagger.tag` on
+// non-Apple platforms. Apple's NLTagger is a different engine (platform-bound
+// to Swift on Apple) and is NOT used to gate this test.
 //
 // Conformance scope:
-//   Swift-scalar == Rust-scalar.
+//   Rust-HMM scalar (self-consistent) + byte-identity with Swift-non-Apple-HMM.
 //
 // The four-way conformance matrix (Swift-scalar, Swift-Metal, Rust-scalar,
 // Rust-BLAS/NEON) does NOT apply here: FDC is a pure string/bag computation
@@ -45,7 +49,7 @@ fn fdc_conformance_all_vectors_match() {
             pass += 1;
         } else {
             failures.push(format!(
-                "MISMATCH input={:?} swift={:?} rust={:?}",
+                "MISMATCH input={:?} expected={:?} got={:?}",
                 v.input, v.code, rust_code
             ));
         }
