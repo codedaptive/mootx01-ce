@@ -270,12 +270,14 @@ fn run_memory_search(
         }
     }
 
-    // Decode optional `filter` for the recall frame; default to Unconfirmed.
-    // Full hydration: the caller is a human-facing AI client; the content
-    // preview in the search result requires the content blob. Structured
-    // hydration (the RecallFrame default) strips content blobs and would
-    // render every result as an empty-content preview.
-    let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+    // Decode optional `filter` for the recall frame; default to UserConfirmed.
+    // Captures stamp Confirmation::UserConfirmed at write time, so the
+    // absent-filter default of UserConfirmed (confirmation >= 1) correctly
+    // surfaces all normally-captured drawers. Full hydration: the caller is a
+    // human-facing AI client; the content preview in the search result requires
+    // the content blob. Structured hydration (the RecallFrame default) strips
+    // content blobs and would render every result as an empty-content preview.
+    let mut frame = RecallFrame::new(vec![Filter::UserConfirmed]);
     frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
 
     // B-10a: mark as external so the coordinator writes recall-trace rows for
@@ -558,9 +560,13 @@ fn run_link_memories(
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
-    // Recall all drawers to resolve wing+room for source and target.
+    // Enumerate all drawers (including tombstoned) to resolve wing+room for
+    // source and target. Uses all_drawers rather than recall so that IDs are
+    // visible regardless of their confirmation state — recall with any filter
+    // would exclude drawers whose provenance does not match the filter, making
+    // tunnel wiring fail for drawers in non-default confirmation states.
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     let source = all.iter().find(|d| d.id == from_id).ok_or_else(|| {
@@ -618,12 +624,13 @@ fn run_connection_search(
     let estate = registry.resolve(args, "estateID")?;
     let from_id = require_string(args, "from_id")?;
 
-    let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
-    // Recall all drawers to find the source drawer's wing.
+    // Enumerate all drawers (including tombstoned) to find the source drawer's
+    // wing. Uses all_drawers so that drawers in any confirmation state are
+    // visible — the connection graph is admin-layer, not recall-filtered.
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     let source = all.iter().find(|d| d.id == from_id).ok_or_else(|| {
@@ -653,7 +660,7 @@ fn run_connection_search(
 
 /// List incoming connections to a memory. Requires `to_id`.
 ///
-/// Scans tunnels across all wings (derived from recalling all drawers) and
+/// Scans tunnels across all wings (derived from enumerating all drawers) and
 /// filters by `target_drawer_id`. Mirrors Swift `runConnectionMap`.
 fn run_connection_map(
     args: &BTreeMap<String, JsonValue>,
@@ -662,12 +669,12 @@ fn run_connection_map(
     let estate = registry.resolve(args, "estateID")?;
     let to_id = require_string(args, "to_id")?;
 
-    let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
-    // Recall all drawers to discover all wings in the estate.
+    // Enumerate all drawers (including tombstoned) to discover all wings in the
+    // estate. Uses all_drawers so wing discovery is confirmation-state-agnostic.
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     let wings: std::collections::HashSet<&str> =
@@ -971,11 +978,15 @@ fn run_estate_status(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
-    let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
+    // Enumerate all drawers (including tombstoned) for an honest total count.
+    // Uses all_drawers so the count is confirmation-state-agnostic: status is an
+    // admin view; recall-filtered counts would under-report on estates where
+    // drawers are in non-default confirmation states. Mirrors Swift runEstateStatus
+    // which calls estate.allDrawers().
     let drawers = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     let kg_facts = coord
@@ -1032,11 +1043,13 @@ fn run_estate_map(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
-    let now = wall_now();
     let coord = estate.coord.lock().unwrap();
 
+    // Enumerate all drawers (including tombstoned) for a complete wing/room map.
+    // Uses all_drawers so the taxonomy tree reflects all drawers regardless of
+    // confirmation state. Mirrors Swift runEstateMap which calls estate.allDrawers().
     let drawers = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .all_drawers(&estate.handle)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     // Group by wing then room.

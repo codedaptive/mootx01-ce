@@ -185,7 +185,7 @@ struct MultiEstateRoutingTests {
     private func federatedArgs(requester: EstateHandle) -> JSONValue {
         .object([
             "requesterEstateID": .string(requester.estateUUID.uuidString),
-            "filter": .string("unconfirmed"),
+            "filter": .string("userConfirmed"),
         ])
     }
 

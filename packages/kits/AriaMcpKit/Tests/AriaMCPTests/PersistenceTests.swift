@@ -160,7 +160,7 @@ struct PersistenceTests {
             // would be empty and the assertion would fail. This is the correct
             // hydration level for a round-trip content verification test.
             let recallFrame = RecallFrame(
-                filterChain: [.unconfirmed],
+                filterChain: [.userConfirmed],
                 hydrationLevel: .full,
                 limit: nil,
                 ordering: .byCaptureTimeDesc
