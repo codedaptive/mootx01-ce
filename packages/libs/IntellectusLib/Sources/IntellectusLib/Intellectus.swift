@@ -194,9 +194,12 @@ public enum Intellectus {
     /// `true` when the host has installed a real sink and is ready
     /// to receive samples.
     ///
-    /// The observer program (a later mission) drives this from its
-    /// broadcast signal: it calls `setEnabled(true)` when an observer
-    /// subscribes and `setEnabled(false)` when the last observer drops.
+    /// The resident observer program drives this from the stats-store
+    /// monitoring flag: `AriaResident.Observer` calls `setEnabled(true)`
+    /// when monitoring is on (env `ARIA_MCP_OBSERVER` or the store flag)
+    /// and `setEnabled(false)` when it is off, polling the flag on its
+    /// monitoring-gate interval so a moot-mgr toggle takes effect without
+    /// a daemon restart.
     ///
     /// - Parameter enabled: `true` to start receiving samples; `false`
     ///   to stop (samples are discarded from this call forward).

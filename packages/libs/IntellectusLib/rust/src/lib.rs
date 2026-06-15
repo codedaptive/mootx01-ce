@@ -11,6 +11,7 @@
 //! - [`EventKind`] — the verb class for topology events
 //! - [`StatsSink`] — trait for receiving `StatSample` values
 //! - [`NoOpSink`] — the default discard implementation
+//! - [`RecentWindowSink`] — bounded ring-buffer sink exposing a recent window
 //! - [`Intellectus`] — global holder: installed sink + atomic enabled flag
 //! - [`report!`] — macro for short-circuit emission
 //!
@@ -54,6 +55,9 @@ pub use sample::{StatSample, EventKind};
 
 mod sink;
 pub use sink::{StatsSink, NoOpSink};
+
+mod window;
+pub use window::RecentWindowSink;
 
 mod holder;
 pub use holder::IntellectusHolder;
