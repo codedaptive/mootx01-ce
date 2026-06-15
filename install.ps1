@@ -249,7 +249,7 @@ if ($Uninstall) {
         Remove-Item -Recurse -Force (Split-Path $INSTALL_DIR)   # removes ~/.mootx01
         Write-Host "  Removed $INSTALL_DIR"
     }
-    Remove-FromUserPath $BIN_DIR
+    Remove-FromUserPath $INSTALL_DIR
 
     # Remove MCP client entries
     $clients = Get-Clients

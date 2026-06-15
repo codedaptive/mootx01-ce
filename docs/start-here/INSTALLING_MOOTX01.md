@@ -208,8 +208,10 @@ the stdio install into the resident-daemon install.
   the Linux x86_64/arm64 archives include `moot-mgr`, so the mgr service registers automatically.
   On hosts without systemd, the installer prints the unit text and manual start instructions
   instead (sysvinit/openrc are not auto-registered in v1).
-- *Windows:* a per-user **Task Scheduler** logon task named `mootx01` (plus `mootx01-mgr`), created
-  with `schtasks /SC ONLOGON` and started immediately.
+- *Windows:* a per-user **Task Scheduler** logon task named `mootx01`, created with
+  `schtasks /SC ONLOGON` and started immediately. (A `mootx01-mgr` task is added only if a
+  `moot-mgr.exe` sits beside `mootx01` — the Windows archive carries `mootx01` only today, since
+  moot-mgr is Unix-only, so no mgr task is created.)
 
 **The dashboard.** The macOS `moot-mgr` is a SwiftUI app; on **Linux** `moot-mgr` is a **headless**
 server that serves the same web dashboard at `http://127.0.0.1:4200`, and it ships in the Linux
@@ -292,7 +294,7 @@ your platform:
 
 - **macOS** — the launchd services (`com.mootx01.daemon`, `com.mootx01.mgr`)
 - **Linux** — the systemd-user units (`mootx01.service`, and `mootx01-mgr.service` if it was installed)
-- **Windows** — the Task Scheduler logon tasks (`mootx01`, `mootx01-mgr`)
+- **Windows** — the Task Scheduler logon task `mootx01` (and `mootx01-mgr` only if it was installed)
 
 Your estate data is **not** deleted — your memory is preserved. It lives at:
 
