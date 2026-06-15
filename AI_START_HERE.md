@@ -1,5 +1,3 @@
-<!-- File: AI_START_HERE.md -->
-
 # AI Start Here: Explain and Install MOOTx01 CE
 
 You are an AI assistant encountering the MOOTx01 CE repository for the first time.
@@ -60,13 +58,13 @@ Good response shape:
 
 MOOTx01 CE is a local memory layer for AI. It lets supported AI clients use a local memory estate through MCP, so useful project facts, decisions, notes, and recall can survive beyond one chat. I can install it for you, but first I need to check your platform and which AI client you want wired.
 
-Ask:
+Default to the product install. Ask:
 
 1. What operating system are you on?
 2. Which AI client do you want to use with it?
-3. Do you want the normal product install, or are you evaluating the SDK/source?
+3. Do you want me to also enable MOOTx01 agent behavior for that client — so the AI instinctively uses its memory — not just wire the tools?
 
-Do not give the user a long architecture lecture before answering their actual install request.
+Only raise the SDK/source path if the user says they want to *build* with MOOTx01 rather than use it. Do not give the user a long architecture lecture before answering their actual install request.
 
 ## Product Or SDK
 
@@ -199,10 +197,17 @@ Restart the AI client after install.
 
 Then verify the client can see MOOTx01 MCP tools.
 
-Good first tool checks:
+Good first tool checks — the session-start ritual the harness adapter expects (see
+`apps/moot-agent-skills/shared/MOOTX01_SESSION_RITUAL.md`):
 
-- `moot_estate_ping`
-- `moot_estate_status`
+- `moot_estate_ping` — server reachable
+- `moot_estate_status` — estate summary
+- `moot_read_journal` — recover recent continuity
+- `moot_estate_map` — wings/rooms/memory counts
+- `moot_list_lenses` — available reasoning tools
+
+If a tool supports `teachme:true`, pass it whenever you are unsure how to call a tool —
+MOOTx01 explains the tool to you instead of you guessing. Use it freely during first-run.
 
 Good memory smoke test:
 
@@ -213,6 +218,29 @@ Good memory smoke test:
 Example memory text:
 
     MOOTx01 install verification memory. If this is found later, recall is working.
+
+### 8. Activate Your AI's MOOTx01 Behavior
+
+Installing the runtime wires the tools; it does not make the AI *instinctively* reach for
+them. This step does — it is the difference between "the tools are present" and "my AI uses
+its memory without being told." Do it only **after** the runtime and MCP wiring verify above.
+
+The harness adapters live in `apps/moot-agent-skills/` — one folder per client: `claude/`,
+`codex/`, `cursor/`, `cline/`, `roo/`, `windsurf/`, `continue/`, `openai-agents/`, and
+`generic/` (fallback). To activate:
+
+1. Choose the folder that matches the user's AI client.
+2. Copy that adapter's contents into the client's project- or user-level config location
+   (each folder targets that client's native rules/skills format). Install the adapter
+   **only after** the runtime is verified — never against a daemon that isn't answering.
+3. Keep the `apps/moot-agent-skills/shared/` documents nearby as reference, but do **not**
+   dump all of them into the model's context — prefer the client's small rule files.
+4. Confirm the behavior took, using the three prompts from `apps/moot-agent-skills/README.md`:
+   - "What did we decide last time about the importer?"
+   - "Summarize what we know about this project from memory."
+   - "We decided X; remember that and link it to the earlier Y decision."
+
+If the AI now reaches for `moot_*` tools on its own for these, activation worked.
 
 ## Explain What Changed
 

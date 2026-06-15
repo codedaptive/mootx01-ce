@@ -1,5 +1,3 @@
-<!-- File: docs/start-here/END_USER_EXPLAINER.md -->
-
 # MOOTx01 CE For End Users
 
 MOOTx01 CE is local long-term memory for AI assistants.
@@ -145,3 +143,14 @@ A good AI assistant should:
 9. Tell you how to troubleshoot or uninstall.
 
 If an AI assistant skips verification, ask it to verify.
+
+## Going Further: Make Your AI Use MOOTx01 Automatically
+
+Installing MOOTx01 wires the tools into your AI client. A *great* install does one more
+thing: it enables the matching **MOOTx01 adapter** for your client, so the AI instinctively
+uses its memory — recalling, filing, and linking on its own — instead of waiting to be asked.
+
+Those adapters live in `apps/moot-agent-skills/`, one folder per client (Claude, Codex,
+Cursor, Cline, and others). After the runtime is verified, a good assistant copies the right
+adapter into your client's config and confirms the behavior with a couple of memory prompts.
+If it is not offered, ask for it.
