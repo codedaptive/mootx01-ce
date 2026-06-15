@@ -1,18 +1,15 @@
 // CompositionGridSyncTests.swift
 //
 // GRID SYNC ENFORCEMENT — asserts that NeuronKit.CompositionGrid.all produces
-// exactly the composition name set recorded in the package-local fixture file:
+// exactly the composition name set recorded in the shared fixture file:
 //
-//   packages/kits/NeuronKit/conformance/composition-grid.json
+//   tools/mcp-benchmarker/conformance/composition-grid.json
 //
 // That fixture is ALSO what the benchmarker's AblationColumnsTests derive
 // their expected list from, so any divergence between NeuronKit's real grid
 // and the benchmarker's column list surfaces as a test failure here AND there —
 // not as a silent drift that only shows up when a stale gauntlet report is
 // mistaken for post-change truth.
-//
-// The fixture lives inside NeuronKit's own package tree so CE builds (which
-// do not ship tools/) can resolve it without reaching outside the package.
 //
 // NOTE ON "vector": NeuronKit.CompositionGrid.all contains "vector" because the
 // signal still exists (used inside weighted-all). The benchmarker omits the
@@ -28,19 +25,26 @@ import Foundation
 
 // MARK: - fixture path
 
-/// Resolves packages/kits/NeuronKit/conformance/composition-grid.json from
-/// this test file's location — package-local so CE builds (which do not
-/// ship tools/) can resolve it without referencing the repo root:
+/// Resolves tools/mcp-benchmarker/conformance/composition-grid.json from this
+/// test file's location:
 ///   packages/kits/NeuronKit/Tests/NeuronKitTests/CompositionGridSyncTests.swift
 ///     → NeuronKitTests/  (deletingLastPathComponent ×1)
 ///     → Tests/           (×2)
-///     → NeuronKit/       (×3 — package root)
-///     → NeuronKit/conformance/composition-grid.json
+///     → NeuronKit/       (×3)
+///     → kits/            (×4)
+///     → packages/        (×5)
+///     → repo root        (×6 — the repo root)
+///     → tools/mcp-benchmarker/conformance/composition-grid.json
 private func compositionGridFixturePath(file: String = #filePath) -> URL {
     URL(fileURLWithPath: file)
         .deletingLastPathComponent()   // NeuronKitTests/
         .deletingLastPathComponent()   // Tests/
-        .deletingLastPathComponent()   // NeuronKit/ (package root)
+        .deletingLastPathComponent()   // NeuronKit/
+        .deletingLastPathComponent()   // kits/
+        .deletingLastPathComponent()   // packages/
+        .deletingLastPathComponent()   // repo root
+        .appendingPathComponent("tools")
+        .appendingPathComponent("mcp-benchmarker")
         .appendingPathComponent("conformance")
         .appendingPathComponent("composition-grid.json")
 }

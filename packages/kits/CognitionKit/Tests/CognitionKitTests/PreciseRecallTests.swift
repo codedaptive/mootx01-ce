@@ -104,7 +104,7 @@ struct PreciseRecallTests {
             let matches = try await PreciseRecall.run(
                 kit: kit, handle: handle,
                 query: "the war indemnity was 46 million marks",
-                filter: .userConfirmed, limit: 10, pool: 30)
+                filter: .unconfirmed, limit: 10, pool: 30)
 
             #expect(!matches.isEmpty, "the coarse grab must surface candidates")
             // found@1: the distinctive-number target is rank 1.
@@ -130,7 +130,7 @@ struct PreciseRecallTests {
             let matches = try await PreciseRecall.run(
                 kit: kit, handle: handle,
                 query: "Helsinki division revenue 46 million",
-                filter: .userConfirmed, limit: 1, pool: 30)
+                filter: .unconfirmed, limit: 1, pool: 30)
 
             #expect(matches.count == 1)
             #expect(matches.first?.id == target)
@@ -154,7 +154,7 @@ struct PreciseRecallTests {
             let matches = try await PreciseRecall.run(
                 kit: kit, handle: handle,
                 query: "the war indemnity was 46 million marks",
-                filter: .userConfirmed, limit: 10, pool: 30,
+                filter: .unconfirmed, limit: 10, pool: 30,
                 composition: "hamming+tokenExact")
 
             #expect(!matches.isEmpty)
@@ -179,7 +179,7 @@ struct PreciseRecallTests {
                 let matches = try await PreciseRecall.run(
                     kit: kit, handle: handle,
                     query: "Helsinki division revenue 46 million",
-                    filter: .userConfirmed, limit: 10, pool: 30, composition: name)
+                    filter: .unconfirmed, limit: 10, pool: 30, composition: name)
                 #expect(matches.contains { $0.id == target },
                         "composition '\(name)' must hold the target in the bounded set")
             }
@@ -206,7 +206,7 @@ struct PreciseRecallTests {
             let matches = try await PreciseRecall.run(
                 kit: kit, handle: handle,
                 query: "the war indemnity was 46 million marks",
-                filter: .userConfirmed, limit: 10, pool: 30)
+                filter: .unconfirmed, limit: 10, pool: 30)
 
             let targetMatch = matches.first { $0.id == target }
             #expect(targetMatch != nil, "the target must be returned")
@@ -232,7 +232,7 @@ struct PreciseRecallTests {
             let matches = try await PreciseRecall.run(
                 kit: kit, handle: handle,
                 query: "the bridge was 350 metres long",
-                filter: .userConfirmed, limit: 5, pool: 1)
+                filter: .unconfirmed, limit: 5, pool: 1)
 
             #expect(matches.count >= 1, "clamped pool still returns ranked matches")
         }
@@ -323,7 +323,7 @@ struct PreciseRecallTests {
             let _ = try await PreciseRecall.run(
                 kit: kit, handle: handle,
                 query: "quarterly report revenue region",
-                filter: .userConfirmed, limit: finalLimit, pool: 50)
+                filter: .unconfirmed, limit: finalLimit, pool: 50)
 
             // Read trace rows via a fresh DrawerStore over the same storage —
             // independent of the live estate, no testable-import required.

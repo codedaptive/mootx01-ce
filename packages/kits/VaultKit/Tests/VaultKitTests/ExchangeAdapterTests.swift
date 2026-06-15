@@ -50,7 +50,7 @@ struct ExchangeAdapterTests {
     /// Currently-believed drawers, hydrated in full so provenance and
     /// channel fields are readable.
     private func currentDrawers(_ kit: GeniusLocusKit, _ handle: EstateHandle) async throws -> [Drawer] {
-        try await kit.recall(handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .full))
+        try await kit.recall(handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full))
     }
 
     // MARK: - Decode: golden fixture

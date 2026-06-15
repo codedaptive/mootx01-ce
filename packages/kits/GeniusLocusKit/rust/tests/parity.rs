@@ -183,7 +183,7 @@ fn fan_out_returns_contribution_per_overlapping_estate() {
     // `.unconfirmed` so the default-prepend (.userConfirmed) does not
     // prune freshly captured provenance==0 rows — mirrors the Swift
     // CrossEstateOverlapTests payload test.
-    let frame = RecallFrame::new(vec![Filter::UserConfirmed]);
+    let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
     let contributions = coord
         .fan_out_recall(frame, LatticeRegion::new(4, 8), FAN_OUT_NOW)
         .expect("fan-out");
@@ -207,7 +207,7 @@ fn fan_out_carries_real_drawer_ids_per_estate() {
     let id_mid = capture_one(&coord, &h_mid, "mid");
     let id_high = capture_one(&coord, &h_high, "high");
 
-    let frame = RecallFrame::new(vec![Filter::UserConfirmed]);
+    let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
     let contributions = coord
         .fan_out_recall(frame, LatticeRegion::new(4, 8), FAN_OUT_NOW)
         .expect("fan-out");

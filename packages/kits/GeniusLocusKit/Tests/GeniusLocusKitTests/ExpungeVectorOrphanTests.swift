@@ -88,7 +88,7 @@ struct ExpungeVectorOrphanTests {
     private func hybridRequest(query: String, limit: Int = 50) -> GLKRecallRequest {
         GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.userConfirmed],
+                filterChain: [.unconfirmed],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc
             ),
@@ -269,7 +269,7 @@ struct ExpungeVectorOrphanTests {
         let activeRows = try await kit.recall(
             handle,
             RecallFrame(
-                filterChain: [.userConfirmed],
+                filterChain: [.unconfirmed],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc
             )

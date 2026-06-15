@@ -43,7 +43,7 @@ struct EstateDivergenceTests {
     }
 
     private var unconfirmed: LocusKit.RecallFrame {
-        LocusKit.RecallFrame(filterChain: [.userConfirmed])
+        LocusKit.RecallFrame(filterChain: [.unconfirmed])
     }
 
     // CK-ED-1: two estates filed into disjoint rooms diverge sharply;

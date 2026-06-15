@@ -104,7 +104,7 @@ fn cap_frame(content: &str, room: &str) -> CaptureFrame {
 }
 
 fn unconfirmed_request() -> GLKRecallRequest {
-    GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +460,7 @@ fn b7_scored_rrf_produces_different_final_scores_than_raw() {
     coord.capture(&h, cap_frame("orbital mechanics and dynamics", "physics"), NOW + 1).unwrap();
     coord.capture(&h, cap_frame("thermodynamics entropy heat", "study"), NOW + 2).unwrap();
 
-    let frame = RecallFrame::new(vec![Filter::UserConfirmed]);
+    let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
 
     // Recall with .raw scoring — final scores are rank-normalised locus scores.
     let raw_req = GLKRecallRequest::new(frame.clone())
@@ -520,7 +520,7 @@ fn b8_hybrid_mode_returns_glk_recall_result() {
     let (coord, h) = open_one();
     coord.capture(&h, cap_frame("hybrid content", "room"), NOW).expect("capture");
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_limit(5);
@@ -539,7 +539,7 @@ fn b9_union_best_mode_populates_union_profile_when_rows_present() {
     let (coord, h) = open_one();
     coord.capture(&h, cap_frame("union test content", "room"), NOW).expect("capture");
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_limit(5);
@@ -568,7 +568,7 @@ fn b10_plain_recall_unchanged_after_scored_recall() {
 
     // plain recall — must return the same rows
     let plain = coord
-        .recall(&h, RecallFrame::new(vec![Filter::UserConfirmed]), NOW + 1)
+        .recall(&h, RecallFrame::new(vec![Filter::Unconfirmed]), NOW + 1)
         .expect("recall");
 
     assert_eq!(plain.len(), scored.hits.len(), "plain and scored should return the same count");
@@ -629,7 +629,7 @@ fn c1_bm25_lane_contributes_with_registered_corpus() {
     coord.register_corpus(&h, corpus);
 
     // Hybrid recall with a query matching the ingested content.
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("sunlight glucose")
@@ -662,7 +662,7 @@ fn c2_bm25_lane_hits_carry_corpus_bm25_source() {
     corpus.ingest(&drawer.content, &drawer.id, NOW).expect("ingest");
     coord.register_corpus(&h, corpus);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("gradient descent")
@@ -693,7 +693,7 @@ fn c3_corpus_only_mode_uses_bm25_not_locus() {
     corpus.ingest(&drawer.content, &drawer.id, NOW).expect("ingest");
     coord.register_corpus(&h, corpus);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::CorpusOnly)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("quantum entanglement")
@@ -724,7 +724,7 @@ fn c4_hybrid_without_registration_falls_back_to_locus_ranked() {
     coord.capture(&h, cap_frame("cryptography hash function blockchain", "security"), NOW).expect("capture");
 
     // No register_corpus, no register_vector_store — pure fallback.
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("cryptography")
@@ -754,7 +754,7 @@ fn c5_bm25_lane_skipped_when_query_text_absent() {
     coord.register_corpus(&h, corpus);
 
     // Hybrid request WITHOUT query_text — BM25 lane must be skipped.
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         // no .with_query_text(...)
@@ -795,7 +795,7 @@ fn c6_vector_lane_contributes_with_registered_corpus_and_vector_store() {
     coord.register_vector_store(&h, vector_store);
 
     // Hybrid recall with the same text as the indexed document.
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("abstract algebra group theory")
@@ -839,7 +839,7 @@ fn c7_union_best_with_corpus_and_vector_populates_union_profile() {
     coord.register_corpus(&h, corpus);
     coord.register_vector_store(&h, vector_store);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_query_text("lambda calculus")
@@ -872,7 +872,7 @@ fn c7_union_best_with_corpus_and_vector_populates_union_profile() {
 #[test]
 fn d1_locus_only_dense_lane_status_is_none() {
     let (mut coord, h) = open_one();
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::LocusOnly)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_limit(5);
@@ -889,7 +889,7 @@ fn d1_locus_only_dense_lane_status_is_none() {
 #[test]
 fn d2_union_best_no_corpus_dense_lane_status_is_none() {
     let (mut coord, h) = open_one();
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("dense float lane test")
@@ -913,7 +913,7 @@ fn d3_union_best_corpus_no_ingest_dense_lane_status_dark_no_float_rows() {
     let corpus = make_corpus_for_test();
     coord.register_corpus(&h, corpus);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("dense float lane test")
@@ -942,7 +942,7 @@ fn d4_union_best_with_ingest_dense_lane_status_is_none_on_hits() {
     corpus.ingest(&drawer.content, &drawer.id, NOW).expect("ingest");
     coord.register_corpus(&h, corpus);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("float lane integration test")
@@ -991,7 +991,7 @@ fn d5_union_best_throwing_provider_dense_lane_status_dark_provider_opt_out() {
             .expect("open_with_provider");
     coord.register_corpus(&h, std::sync::Arc::new(corpus));
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("provider opt-out test")
@@ -1041,7 +1041,7 @@ fn d6_union_best_forced_store_error_full_chain() {
     // StoreError and consume this value (single-use, mirrors Swift seam).
     *corpus.forced_float_error.lock().unwrap() = Some("forced-store-error-for-d6".to_string());
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("photosynthesis store error chain")
@@ -1098,7 +1098,7 @@ fn d7_hybrid_mode_produces_no_dense_status_no_dense_evidence() {
     corpus.ingest(&drawer.content, &drawer.id, NOW).expect("ingest");
     coord.register_corpus(&h, corpus);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("hybrid mode dense gate test")
@@ -1150,7 +1150,7 @@ fn d8_corpus_only_mode_produces_no_dense_status_no_dense_evidence() {
     corpus.ingest(&drawer.content, &drawer.id, NOW).expect("ingest");
     coord.register_corpus(&h, corpus);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::CorpusOnly)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("corpusOnly mode dense gate test")
@@ -1229,7 +1229,7 @@ fn e1_forced_vector_hamming_failure_degrades_stage_and_query_survives() {
     // Inject the seam: next recall_scored call will see a find_nearest failure.
     coord.inject_vector_hamming_error("test: simulated find_nearest failure");
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("stellar nucleosynthesis")
@@ -1291,7 +1291,7 @@ fn e2_forced_embed_failure_degrades_stage_and_query_survives() {
     // Inject the embed seam: next recall_scored call will see an embed failure.
     coord.inject_embed_error("test: simulated embed failure");
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("quantum chromodynamics")
@@ -1349,7 +1349,7 @@ fn e3_happy_path_no_degraded_stages_when_lanes_succeed() {
     coord.register_vector_store(&h, vector_store);
 
     // No seam injection — happy path.
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("metamorphic rock formation")
@@ -1384,7 +1384,7 @@ fn e4_locus_only_mode_never_has_degraded_stages() {
     coord.inject_vector_hamming_error("seam that should never fire for locusOnly");
     coord.inject_embed_error("embed seam that should never fire for locusOnly");
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::LocusOnly)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_limit(5);
@@ -1473,7 +1473,7 @@ fn f1_union_best_matrix_aware_no_tier_has_no_matrix_signal() {
     coord.capture(&h, cap_frame("neural network gradient descent", "ml"), NOW + 2).unwrap();
 
     // No register_matrix_tier call — no tier registered.
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_limit(10);
@@ -1537,7 +1537,7 @@ fn f2_union_best_matrix_aware_with_tier_order_differs_from_rrf() {
     let tier = build_seeded_tier();
     coord.register_matrix_tier(&h, tier);
 
-    let frame = RecallFrame::new(vec![Filter::UserConfirmed]);
+    let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
 
     // Recall with pure Rrf (baseline — no matrix signals).
     let rrf_req = GLKRecallRequest::new(frame.clone())
@@ -1598,7 +1598,7 @@ fn f3_union_best_matrix_aware_with_tier_populates_union_profile() {
     let tier = build_seeded_tier();
     coord.register_matrix_tier(&h, tier);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_limit(10);
@@ -1648,7 +1648,7 @@ fn f4_union_best_matrix_aware_dense_column_consumed() {
     let tier = build_seeded_tier();
     coord.register_matrix_tier(&h, tier);
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_query_text("stellar evolution")
@@ -1696,7 +1696,7 @@ fn f5_no_tier_matrix_columns_zero_on_all_hits() {
     coord.capture(&h, cap_frame("enzyme catalysis activation energy substrate", "biochem"), NOW + 2).unwrap();
 
     // No register_matrix_tier — tier is absent.
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_limit(10);
@@ -1763,7 +1763,7 @@ fn open_wired_estate() -> (EstateCoordinator, genius_locus_kit::handle::EstateHa
 fn h1_locus_only_matrix_aware_surfaces_fallback() {
     let (mut coord, h) = open_one();
     coord.capture(&h, cap_frame("sedimentary basin formation", "geology"), NOW).expect("capture");
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::LocusOnly)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_limit(5);
@@ -1778,7 +1778,7 @@ fn h1_locus_only_matrix_aware_surfaces_fallback() {
 #[test]
 fn h2_corpus_only_matrix_aware_surfaces_fallback() {
     let (mut coord, h) = open_wired_estate();
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::CorpusOnly)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_query_text("metamorphic rock formation")
@@ -1794,7 +1794,7 @@ fn h2_corpus_only_matrix_aware_surfaces_fallback() {
 #[test]
 fn h3_hybrid_matrix_aware_surfaces_fallback() {
     let (mut coord, h) = open_wired_estate();
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_query_text("metamorphic rock formation")
@@ -1810,7 +1810,7 @@ fn h3_hybrid_matrix_aware_surfaces_fallback() {
 #[test]
 fn h4_union_best_rrf_surfaces_fallback() {
     let (mut coord, h) = open_wired_estate();
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("metamorphic rock formation")
@@ -1826,7 +1826,7 @@ fn h4_union_best_rrf_surfaces_fallback() {
 #[test]
 fn h5_union_best_matrix_aware_records_no_fallback() {
     let (mut coord, h) = open_wired_estate();
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::MatrixAware)
         .with_query_text("metamorphic rock formation")
@@ -1843,7 +1843,7 @@ fn h5_union_best_matrix_aware_records_no_fallback() {
 #[test]
 fn h6_hybrid_rrf_records_no_fallback() {
     let (mut coord, h) = open_wired_estate();
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("metamorphic rock formation")
@@ -1934,7 +1934,7 @@ fn f3_hybrid_live_rows_failure_surfaces_stage() {
         .unwrap()
         .set_test_force_internal_read_error(Some(RecallInternalRead::LiveRows));
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::Hybrid)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_query_text("probe")
@@ -1958,7 +1958,7 @@ fn f4_union_best_live_rows_failure_surfaces_stage() {
         .set_test_force_internal_read_error(Some(RecallInternalRead::LiveRows));
 
     // No corpus/vector registered → no-corpus locus-ranked path; still a locus lane.
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::UnionBest)
         .with_scoring(GLKRecallScoring::Rrf)
         .with_limit(5);
@@ -1977,7 +1977,7 @@ fn f5_genuine_empty_records_no_locus_stage() {
     // stage — empty is not failure.
     let (mut coord, h) = open_one();
     seed_one(&mut coord, &h);
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::UserConfirmed]))
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
         .with_mode(GLKRecallMode::LocusOnly)
         .with_scoring(GLKRecallScoring::Raw)
         .with_limit(5);

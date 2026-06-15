@@ -467,8 +467,7 @@ public struct VaultBridge: Sendable {
         let drawers = try await kit.recall(
             handle,
             RecallFrame(
-                // UserConfirmed: all rows written via Estate.capture are stamped at write time.
-                filterChain: [.userConfirmed],
+                filterChain: [.unconfirmed],
                 hydrationLevel: .structured,
                 limit: 10_000_000
             )

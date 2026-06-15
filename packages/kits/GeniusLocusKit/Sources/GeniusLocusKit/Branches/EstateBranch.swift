@@ -177,7 +177,7 @@ final class EstateBranch: BranchHandle, @unchecked Sendable {
         // regardless of interval width; the period label allows consumers
         // to correlate which window the report describes.
         let frame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )

@@ -139,8 +139,8 @@ fn coord_with_rows(contents: &[&str]) -> (EstateCoordinator, genius_locus_kit::h
     (coord, h)
 }
 
-fn user_confirmed() -> RecallFrame {
-    let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
+fn unconfirmed() -> RecallFrame {
+    let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
     f.hydration_level = HydrationLevel::Structured;
     f.ordering = Ordering::ByCaptureTimeDesc;
     f
@@ -219,7 +219,7 @@ fn grounded_synthesis_emits_nothing_when_disabled() {
     let _ = run_grounded_synthesis(
         &coord,
         &h,
-        user_confirmed(),
+        unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
     );
@@ -272,7 +272,7 @@ fn grounded_synthesis_emits_start_and_complete() {
     let _ = run_grounded_synthesis(
         &coord,
         &h,
-        user_confirmed(),
+        unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
     );
@@ -319,8 +319,8 @@ fn two_grounded_synthesis_runs_emit_four_metrics() {
     Intellectus::install(sink.clone());
     Intellectus::set_enabled(true);
 
-    let _ = run_grounded_synthesis(&coord, &h, user_confirmed(), RecallFrameTuning::default(), NOW);
-    let _ = run_grounded_synthesis(&coord, &h, user_confirmed(), RecallFrameTuning::default(), NOW);
+    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW);
+    let _ = run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW);
 
     assert_eq!(
         sink.count_named(METRIC_RECIPE_RUN),
@@ -347,7 +347,7 @@ fn grounded_synthesis_step_count_tag_matches_drawer_count() {
     let out = run_grounded_synthesis(
         &coord,
         &h,
-        user_confirmed(),
+        unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
     )
@@ -487,7 +487,7 @@ fn grounded_synthesis_output_identical_with_and_without_telemetry() {
     let out_off = run_grounded_synthesis(
         &coord_off,
         &h_off,
-        user_confirmed(),
+        unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
     )
@@ -500,7 +500,7 @@ fn grounded_synthesis_output_identical_with_and_without_telemetry() {
     let out_on = run_grounded_synthesis(
         &coord_on,
         &h_on,
-        user_confirmed(),
+        unconfirmed(),
         RecallFrameTuning::default(),
         NOW,
     )

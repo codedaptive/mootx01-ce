@@ -104,7 +104,7 @@ impl Drop for SqliteCleanup {
 /// Build an unconfirmed RecallFrame with structured hydration and a
 /// cap of 20 rows. Mirrors the Swift test helper.
 fn unconfirmed_frame() -> RecallFrame {
-    let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
+    let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
     f.hydration_level = HydrationLevel::Structured;
     f.ordering = Ordering::ByCaptureTimeDesc;
     f.limit = Some(20);

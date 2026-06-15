@@ -56,7 +56,7 @@ struct PromotionTargetTests {
         // `.structured` returns `content = ""` (no blob reads), so only `.full`
         // loads content bodies for content-equality assertions.
         let frame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )

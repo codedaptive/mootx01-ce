@@ -111,7 +111,7 @@ struct GLK_MIG_02_MigrationTests {
 
         // Target should have one drawer; source should have none.
         let targetRecall = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -161,7 +161,7 @@ struct GLK_MIG_02_MigrationTests {
         // Populate the estate via the consolidated import-path provenance
         // (importedFile channel, imported sourceType) so all entries are
         // present. verifyMigration uses content-match recall with the
-        // .userConfirmed filter, which matches this capture state.
+        // .unconfirmed filter, which matches this capture state.
         let corpus = makeCorpus(count: 2, prefix: "verify-identical")
         let handle = try await populateEstate(kit: kit, corpus: corpus, now: now)
 

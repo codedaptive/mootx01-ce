@@ -93,11 +93,6 @@ test-seams = ["locus-kit/test-seams"]
 # Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (dev-dep, no layering inversion:
 # engram-lib is a substrate lib below GLK).
 engram-lib = { path = "../../../libs/EngramLib/rust" }
-
-# Test-only: enable LocusKit's test-seams feature so out-of-crate GLK integration
-# tests can drive LocusKit fault-injection hooks (e.g. set_test_force_orphan_seal_error
-# in expunge_vector_orphan). Dev-dep only — not enabled in production builds.
-locus-kit = { path = "../../LocusKit/rust", features = ["test-seams"] }
 # test-seams feature enables Corpus::open_with_provider and
 # Corpus::forced_float_error for gate-2 storeError force-testing (D-6 parity
 # test). The production [dependencies] entry above carries no features so the

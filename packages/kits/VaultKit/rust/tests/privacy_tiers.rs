@@ -185,10 +185,9 @@ fn import_preserves_sensitivity_from_frontmatter() {
 
     // Recall with an explicit sensitivity ceiling so the restricted drawer
     // is visible (the evaluator default would hide it).
-    // UserConfirmed: all rows written via Estate::capture are stamped at write time.
     let frame = RecallFrame {
         filter_chain: vec![
-            Filter::UserConfirmed,
+            Filter::Unconfirmed,
             Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
         ],
         hydration_level: HydrationLevel::Full,
@@ -232,10 +231,9 @@ fn sensitivity_round_trips_via_frontmatter() {
     bridge(&coord_b)
         .import_vault(&vault, &handle_b, NOW)
         .expect("import");
-    // UserConfirmed: all rows written via Estate::capture are stamped at write time.
     let recall_frame = RecallFrame {
         filter_chain: vec![
-            Filter::UserConfirmed,
+            Filter::Unconfirmed,
             Filter::SensitivityAtMost(AdjectiveSensitivity::Secret),
         ],
         hydration_level: HydrationLevel::Full,

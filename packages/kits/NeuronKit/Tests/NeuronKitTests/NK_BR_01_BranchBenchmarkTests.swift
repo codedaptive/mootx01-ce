@@ -57,10 +57,9 @@ struct NK_BR_01_BranchBenchmarkTests {
 
     /// Count rows currently recall-able from a branch via a bare
     /// content-agnostic chain — used by the read-only corollary test.
-    /// UserConfirmed: all rows written via capture() are stamped at write time.
     private func branchRowCount(_ branch: any BranchHandle) async throws -> Int {
         let frame = RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )

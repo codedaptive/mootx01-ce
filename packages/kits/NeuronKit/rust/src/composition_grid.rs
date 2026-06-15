@@ -8,10 +8,10 @@
 //!
 //! The name set, term sets, weights, and `mmr_lambda` values are byte-identical
 //! to the Swift grid. The grid-sync conformance test
-//! (`tests/composition_grid_sync.rs`) asserts every name in the package-local
-//! fixture `packages/kits/NeuronKit/conformance/composition-grid.json` exists
-//! here, in the fixture's order — so a divergence between the Swift grid, the
-//! Rust grid, and the benchmarker's column list fails tests in BOTH languages.
+//! (`tests/composition_grid_sync.rs`) asserts every name in the SHARED fixture
+//! `tools/mcp-benchmarker/conformance/composition-grid.json` exists here, in
+//! the fixture's order — so a divergence between the Swift grid, the Rust grid,
+//! and the benchmarker's column list fails tests in BOTH languages.
 
 use crate::reduction_composition::{ReductionComposition, WeightedSignal};
 use crate::reduction_signals::ReductionSignal::{

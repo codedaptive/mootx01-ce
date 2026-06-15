@@ -610,7 +610,7 @@ fn grt05a_mode1_vault_holds_key_allows_recall() {
 
     // Vault holds the key (issue_grant loaded it for mode 1).
     let result = coord.federated_recall(
-        RecallFrame::new(vec![Filter::UserConfirmed]),
+        RecallFrame::new(vec![Filter::Unconfirmed]),
         &src,
         &req,
         NOW_F64 + 1.0,
@@ -659,7 +659,7 @@ fn grt05b_mode1_vault_key_missing_refuses() {
 
     // budget is still > 0 but vault key is gone
     let result = coord.federated_recall(
-        RecallFrame::new(vec![Filter::UserConfirmed]),
+        RecallFrame::new(vec![Filter::Unconfirmed]),
         &src,
         &req,
         NOW_F64 + 1.0,
@@ -699,7 +699,7 @@ fn grt05c_mode2_handed_over_allows_recall_within_window() {
     coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 1.0).expect("set_budget");
 
     let result = coord.federated_recall(
-        RecallFrame::new(vec![Filter::UserConfirmed]),
+        RecallFrame::new(vec![Filter::Unconfirmed]),
         &src,
         &req,
         NOW_F64 + 1.0,
@@ -742,7 +742,7 @@ fn grt06a_budget_debits_per_read() {
     coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 1.0).expect("set_budget");
 
     let result = coord.federated_recall(
-        RecallFrame::new(vec![Filter::UserConfirmed]),
+        RecallFrame::new(vec![Filter::Unconfirmed]),
         &src,
         &req,
         NOW_F64 + 1.0,
@@ -789,7 +789,7 @@ fn grt06b_exhausted_budget_refuses() {
     coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 0.0).expect("set_budget");
 
     let result = coord.federated_recall(
-        RecallFrame::new(vec![Filter::UserConfirmed]),
+        RecallFrame::new(vec![Filter::Unconfirmed]),
         &src,
         &req,
         NOW_F64 + 1.0,
@@ -1176,7 +1176,7 @@ fn grt07d_decayed_to_zero_floor_zero_refuses() {
 
     // t0 + 1000 (ten half-lives): effective level is 0 → refuse.
     let result = coord.federated_recall(
-        RecallFrame::new(vec![Filter::UserConfirmed]),
+        RecallFrame::new(vec![Filter::Unconfirmed]),
         &src,
         &req,
         t0 + 1000.0,
@@ -1217,7 +1217,7 @@ fn grt07e_mid_decay_grant_proceeds_and_budget_debits() {
 
     // Mid-decay read (one half-life) succeeds (floor 1 keeps the grant usable).
     let result = coord.federated_recall(
-        RecallFrame::new(vec![Filter::UserConfirmed]),
+        RecallFrame::new(vec![Filter::Unconfirmed]),
         &src,
         &req,
         t0 + 100.0,

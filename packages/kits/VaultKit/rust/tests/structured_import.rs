@@ -190,7 +190,7 @@ fn structured_import_hierarchy_as_full_room_path() {
         .recall(
             &handle,
             locus_kit::filter::RecallFrame {
-                filter_chain: vec![locus_kit::filter::Filter::UserConfirmed],
+                filter_chain: vec![locus_kit::filter::Filter::Unconfirmed],
                 hydration_level: locus_kit::filter::HydrationLevel::Structured,
                 limit: Some(100),
                 ordering: locus_kit::filter::Ordering::ByCaptureTimeDesc,
@@ -253,7 +253,7 @@ fn frontmatter_room_wins_over_path_components() {
         .recall(
             &handle,
             locus_kit::filter::RecallFrame {
-                filter_chain: vec![locus_kit::filter::Filter::UserConfirmed],
+                filter_chain: vec![locus_kit::filter::Filter::Unconfirmed],
                 hydration_level: locus_kit::filter::HydrationLevel::Structured,
                 limit: Some(100),
                 ordering: locus_kit::filter::Ordering::ByCaptureTimeDesc,
@@ -285,7 +285,7 @@ fn single_component_path_uses_leaf_as_room() {
         .recall(
             &handle,
             locus_kit::filter::RecallFrame {
-                filter_chain: vec![locus_kit::filter::Filter::UserConfirmed],
+                filter_chain: vec![locus_kit::filter::Filter::Unconfirmed],
                 hydration_level: locus_kit::filter::HydrationLevel::Structured,
                 limit: Some(100),
                 ordering: locus_kit::filter::Ordering::ByCaptureTimeDesc,

@@ -58,7 +58,7 @@ struct AssociationRulesTests {
     func emptyEstateYieldsNoRules() async throws {
         let (kit, handle) = try await openEstate()
         let input = AssociationRules.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
             thresholds: .init(minSupport: 0.0, minConfidence: 0.0))
         let out = try await AssociationRules().run(
             input: input, estate: handle, kit: kit)
@@ -82,7 +82,7 @@ struct AssociationRulesTests {
         }
 
         let input = AssociationRules.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
             thresholds: .init(minSupport: 0.2, minConfidence: 0.5))
         let out = try await AssociationRules().run(
             input: input, estate: handle, kit: kit)
@@ -115,13 +115,13 @@ struct AssociationRulesTests {
         // rules should pass. room:rare appears in only 1/4 → rules involving
         // it are gated out.
         let high = AssociationRules.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
             thresholds: .init(minSupport: 0.9, minConfidence: 0.9))
         let highOut = try await AssociationRules().run(
             input: high, estate: handle, kit: kit)
 
         let low = AssociationRules.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
             thresholds: .init(minSupport: 0.0, minConfidence: 0.0))
         let lowOut = try await AssociationRules().run(
             input: low, estate: handle, kit: kit)
@@ -156,7 +156,7 @@ struct AssociationRulesTests {
         }
 
         let input = AssociationRules.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
             thresholds: .init(minSupport: 0.0, minConfidence: 0.0))
         let first = try await AssociationRules().run(input: input, estate: handle, kit: kit)
         let second = try await AssociationRules().run(input: input, estate: handle, kit: kit)
@@ -185,7 +185,7 @@ extension AssociationRulesTests {
         }
 
         let input = AssociationRules.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed], limit: 100),
+            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed], limit: 100),
             thresholds: .init(minSupport: 0.0, minConfidence: 0.0))
         let out = try await AssociationRules().run(
             input: input, estate: handle, kit: kit)

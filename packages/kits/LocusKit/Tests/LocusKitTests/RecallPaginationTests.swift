@@ -37,7 +37,7 @@ struct RecallPaginationTests {
         let estate = try await makeEstate()
         try await captureMany(3, into: estate)
         let stream = await estate.recall(
-            RecallFrame(filterChain: [.currentlyBelieve, .userConfirmed], limit: 10)
+            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed], limit: 10)
         )
         var pages: [RecallStream.RecallPage] = []
         for await page in stream { pages.append(page) }
@@ -52,7 +52,7 @@ struct RecallPaginationTests {
         let estate = try await makeEstate()
         try await captureMany(5, into: estate)
         let stream = await estate.recall(
-            RecallFrame(filterChain: [.currentlyBelieve, .userConfirmed], limit: 2)
+            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed], limit: 2)
         )
         var pages: [RecallStream.RecallPage] = []
         for await page in stream { pages.append(page) }
@@ -70,7 +70,7 @@ struct RecallPaginationTests {
     func emptyEstate() async throws {
         let estate = try await makeEstate()
         let stream = await estate.recall(
-            RecallFrame(filterChain: [.currentlyBelieve, .userConfirmed], limit: 10)
+            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed], limit: 10)
         )
         var pages: [RecallStream.RecallPage] = []
         for await page in stream { pages.append(page) }
@@ -92,7 +92,7 @@ struct RecallPaginationTests {
         )
         _ = try await estate.capture(frame)
         let stream = await estate.recall(
-            RecallFrame(filterChain: [.currentlyBelieve, .userConfirmed],
+            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed],
                         hydrationLevel: .bitmapOnly)
         )
         var rows: [Drawer] = []
@@ -118,7 +118,7 @@ struct RecallPaginationTests {
         )
         let captured = try await estate.capture(frame)
         let stream = await estate.recall(
-            RecallFrame(filterChain: [.currentlyBelieve, .userConfirmed],
+            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed],
                         hydrationLevel: .structured)
         )
         var rows: [Drawer] = []
@@ -144,7 +144,7 @@ struct RecallPaginationTests {
         )
         _ = try await estate.capture(frame)
         let stream = await estate.recall(
-            RecallFrame(filterChain: [.currentlyBelieve, .userConfirmed],
+            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed],
                         hydrationLevel: .full)
         )
         var rows: [Drawer] = []
@@ -159,7 +159,7 @@ struct RecallPaginationTests {
         let estate = try await makeEstate()
         try await captureMany(60, into: estate)
         let stream = await estate.recall(
-            RecallFrame(filterChain: [.currentlyBelieve, .userConfirmed], limit: nil)
+            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed], limit: nil)
         )
         var firstPageCount: Int?
         for await page in stream {

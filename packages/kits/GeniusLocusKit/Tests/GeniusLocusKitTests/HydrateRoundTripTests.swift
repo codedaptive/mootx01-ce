@@ -140,7 +140,7 @@ struct HydrateRoundTripTests {
 
         // Recall baseline from source estate.
         let sourceDrawers = try await sourceKit.recall(sourceHandle, RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             limit: 10
         ))
@@ -164,7 +164,7 @@ struct HydrateRoundTripTests {
         // ── Assert logical equivalence ───────────────────────────────────────
 
         let hydratedDrawers = try await hydratedKit.recall(hydratedHandle, RecallFrame(
-            filterChain: [.userConfirmed],
+            filterChain: [.unconfirmed],
             hydrationLevel: .structured,
             limit: 10
         ))

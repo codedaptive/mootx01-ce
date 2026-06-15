@@ -404,9 +404,8 @@ impl<'a> VaultBridge<'a> {
         // written-vs-updated misclassification for drawers #257+. Matches Swift
         // VaultBridge.existingDrawerState. trace_limit None: not a reward-cycle
         // caller.
-        // UserConfirmed: all rows written via Estate::capture are stamped at write time.
         let frame = RecallFrame {
-            filter_chain: vec![Filter::UserConfirmed],
+            filter_chain: vec![Filter::Unconfirmed],
             hydration_level: HydrationLevel::Structured,
             limit: Some(10_000_000),
             ordering: Ordering::ByCaptureTimeDesc,

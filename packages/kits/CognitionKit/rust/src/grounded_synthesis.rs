@@ -212,8 +212,8 @@ mod tests {
         (coord, h)
     }
 
-    fn user_confirmed() -> RecallFrame {
-        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
+    fn unconfirmed() -> RecallFrame {
+        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
         // Structured on purpose: the recipe must OVERRIDE this to Full
         // internally (synthesis reads bodies). Exercises the override path.
         f.hydration_level = HydrationLevel::Structured;
@@ -232,7 +232,7 @@ mod tests {
             "cats and dogs are pets",
         ]);
         let out =
-            run_grounded_synthesis(&coord, &h, user_confirmed(), RecallFrameTuning::default(), NOW)
+            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW)
                 .expect("run");
         assert_eq!(out.drawer_count, 3, "all recalled rows feed synthesis");
         assert!(
@@ -249,7 +249,7 @@ mod tests {
     fn gs2_empty_estate_yields_empty_document() {
         let (coord, h) = coord_with_rows(&[]);
         let out =
-            run_grounded_synthesis(&coord, &h, user_confirmed(), RecallFrameTuning::default(), NOW)
+            run_grounded_synthesis(&coord, &h, unconfirmed(), RecallFrameTuning::default(), NOW)
                 .expect("run");
         assert_eq!(out.drawer_count, 0);
         assert!(out.context.patterns.is_empty());
