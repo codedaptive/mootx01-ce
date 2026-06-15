@@ -7,6 +7,12 @@
 //! capabilities are available BEFORE any execution begins, and the gate
 //! reports the FIRST missing capability in declaration order so the
 //! failure is deterministic across versions.
+//!
+//! The four lenses added by TASK-MXE-ASSIGNED (moment, rhythm, precedence,
+//! complexity) are pure math free functions — no new capability cases were
+//! needed. They declare `required_capabilities: []` because their NeuronKit
+//! entry points (moment_signature, rhythm, precedence, complexity) carry no
+//! capability gate of their own.
 
 use crate::error::RecipeError;
 use serde::{Deserialize, Serialize};

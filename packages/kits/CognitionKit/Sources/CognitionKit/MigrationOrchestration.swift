@@ -7,14 +7,15 @@
 // Swift side of CognitionKit's Rust-parity Pass 2.
 //
 // Why a seam (the same deferral pattern Rust GLK's Surface and NeuronKit's
-// daemon seams already use): the recipe BODY cannot run live in Rust —
-// the Rust LocusKit estate does not exist (every Rust GLK verb is stubbed)
-// and building it is the substrate missions' lane, not CognitionKit's. But
-// the recipe's *sequencing logic* — what calls it makes, in what order,
-// and how it threads the minted ids and benchmark results into the ranked
-// report — IS portable. Abstracting the three substrate operations behind
-// `RecipeSubstrate` lets that logic exist identically in Swift and Rust
-// and be conformance-gated against a deterministic in-memory fake.
+// daemon seams already use): the recipe BODY is substrate-agnostic by design —
+// the Rust GLK has a live adapter (migration_live.rs) and the Rust LocusKit
+// estate + verbs are fully implemented, but the recipe's *sequencing logic*
+// — what calls it makes, in what order, and how it threads the minted ids
+// and benchmark results into the ranked report — is more valuable portable
+// and conformance-gated than hard-wired to any one language's async runtime.
+// Abstracting the three substrate operations behind `RecipeSubstrate` lets
+// that logic exist identically in Swift and Rust and be conformance-gated
+// against a deterministic in-memory fake.
 //
 // Relationship to the production `MigrationBenchmark.run`:
 //   - `run` is the live, async, GLK-backed, parallel-per-plan path.
