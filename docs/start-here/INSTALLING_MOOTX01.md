@@ -5,13 +5,14 @@ author: "MOOTx01 maintainers"
 date: "2026-06-07"
 ---
 
-> This guide covers `mootx01 install` on macOS. It explains what the installer
-> sets up, how your AI clients connect, and what to do when something isn't
-> right. Read this before filing a bug — most first-run questions are answered here.
+> This guide covers `mootx01 install` on **macOS, Linux, and Windows**. The detailed walkthrough
+> below is written for macOS, the most full-featured path; the **[Linux and Windows](#linux-and-windows)**
+> section near the end covers what differs on those platforms. Read this before filing a bug —
+> most first-run questions are answered here.
 
 ## Before you begin
 
-- macOS 15 or later (the MCP server and the background daemon require it)
+- One of: **macOS 15+** (Swift build), **Linux** x86_64/arm64, or **Windows** x86_64 (both Rust builds) — all host a local estate; see [Linux and Windows](#linux-and-windows) for those paths
 - At least one supported AI client installed: **Claude Desktop**, **Claude Code**,
   **Cursor**, **Cline**, or **Continue**
 - The `mootx01` binary built or downloaded from the release archive and
@@ -172,6 +173,48 @@ moot-mgr status
 
 Or open `http://127.0.0.1:4200` in a browser (when monitoring is on, this
 shows live activity).
+
+---
+
+## Linux and Windows
+
+MOOTx01 runs a full local estate on Linux and Windows too: the **Rust** build of `mootx01` hosts
+the same MCP server as the Swift build on macOS (CI smoke-tests `mootx01 serve` on Linux). The flow
+mirrors the macOS walkthrough above — only the install command, the binary set, and the
+background-service mechanism differ.
+
+**Install the binary.**
+
+- *Linux:* `curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh`
+  downloads the Linux `mootx01`, places it at `~/.mootx01/bin/mootx01`, and symlinks
+  `~/.local/bin/mootx01` — the same layout as macOS.
+- *Windows:* run the PowerShell installer:
+  `iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.ps1) }"`.
+
+**Wire your AI clients.** `mootx01 install` detects and wires the same supported clients as on
+macOS — the Rust CLI writes the identical MCP entries (Claude Desktop still uses the stdio path).
+
+**Background service** — registered automatically by `mootx01 install`, with no admin elevation:
+
+- *Linux:* a per-user **systemd** unit at `~/.config/systemd/user/mootx01.service` (plus
+  `mootx01-mgr.service`), enabled via `systemctl --user enable --now` with `loginctl enable-linger`
+  so the daemon runs without an open login session. On hosts without systemd, the installer prints
+  the unit text and manual start instructions instead (sysvinit/openrc are not auto-registered in v1).
+- *Windows:* a per-user **Task Scheduler** logon task named `mootx01` (plus `mootx01-mgr`), created
+  with `schtasks /SC ONLOGON` and started immediately.
+
+**The dashboard.** The macOS `moot-mgr` is a SwiftUI app; on **Linux** `moot-mgr` is a **headless**
+server that serves the same web dashboard at `http://127.0.0.1:4200`. It builds from source rather
+than shipping in the Linux release archive (which carries `mootx01` only).
+
+**Verify** the same way everywhere:
+
+```
+mootx01 status
+```
+
+plus `http://127.0.0.1:4200` when the manager is running. Everything stays on loopback
+(`127.0.0.1`) — nothing leaves your machine.
 
 ---
 
