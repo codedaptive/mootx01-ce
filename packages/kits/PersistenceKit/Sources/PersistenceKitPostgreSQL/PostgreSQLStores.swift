@@ -1,7 +1,6 @@
 // PostgreSQLStores.swift
 //
 // RowStore, BlobStore, AuditLog implementations for PostgreSQL.
-// VectorIndex lives in PostgreSQLVectorIndex.swift.
 
 import Foundation
 import PersistenceKit
@@ -10,7 +9,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -96,7 +95,7 @@ final class PostgreSQLRowStore: RowStore, Sendable {
         }
         // Compile predicate with bindings starting at $\(cols.count + 1)
         var predBindings: [TypedValue] = []
-        var predSQL = renderPredicate(predicate, startIndex: cols.count + 1, bindings: &predBindings)
+        let predSQL = renderPredicate(predicate, startIndex: cols.count + 1, bindings: &predBindings)
         bindings.append(contentsOf: predBindings)
         let sql = "UPDATE \"\(table)\" SET \(setClauses.joined(separator: ", ")) WHERE \(predSQL)"
         let _sql = sql
@@ -168,10 +167,8 @@ final class PostgreSQLRowStore: RowStore, Sendable {
             let pgRows = try await conn.executeParameterized(_sql, bindings: _bindings, logger: Logger(label: "pg.row.count"))
             for try await row in pgRows {
                 let access = row.makeRandomAccess()
-                if let cell = try? access["c"] {
-                    if let i: Int64 = try? cell.decode(Int64.self, context: .default) {
-                        return Int(i)
-                    }
+                if let i: Int64 = try? access["c"].decode(Int64.self, context: .default) {
+                    return Int(i)
                 }
             }
             return 0
@@ -241,10 +238,8 @@ final class PostgreSQLBlobStore: BlobStore, Sendable {
             )
             for try await row in rows {
                 let access = row.makeRandomAccess()
-                if let cell = try? access["data"] {
-                    if let b: ByteBuffer = try? cell.decode(ByteBuffer.self, context: .default) {
-                        return Data(buffer: b)
-                    }
+                if let b: ByteBuffer = try? access["data"].decode(ByteBuffer.self, context: .default) {
+                    return Data(buffer: b)
                 }
             }
             return nil
@@ -268,6 +263,25 @@ final class PostgreSQLBlobStore: BlobStore, Sendable {
 
     func size(key: BlobKey) async throws -> Int? {
         return try await get(key: key)?.count
+    }
+
+    func listKeys() async throws -> [BlobKey] {
+        try await withConnection { conn in
+            try await ensureBlobTable(conn)
+            let rows = try await conn.executeParameterized(
+                "SELECT \"key\" FROM \"_storagekit_blobs\"",
+                bindings: [],
+                logger: Logger(label: "pg.blob.listkeys")
+            )
+            var keys: [BlobKey] = []
+            for try await row in rows {
+                let access = row.makeRandomAccess()
+                if let k: String = try? access["key"].decode(String.self, context: .default) {
+                    keys.append(k)
+                }
+            }
+            return keys
+        }
     }
 }
 
@@ -386,9 +400,10 @@ final class PostgreSQLAuditLog: AuditLog, Sendable {
             let pgRows = try await conn.executeParameterized(_sql, bindings: _bindings, logger: Logger(label: "pg.audit.iter"))
             var out: [AuditEvent] = []
             for try await row in pgRows {
-                if let event = decodeAuditEvent(row) {
-                    out.append(event)
-                }
+                // decodeAuditEvent throws on any required-field decode failure;
+                // error propagates to the caller rather than silently dropping
+                // a corrupt audit record.
+                out.append(try decodeAuditEvent(row))
             }
             return out
         }
@@ -408,67 +423,73 @@ final class PostgreSQLAuditLog: AuditLog, Sendable {
             )
             for try await row in pgRows {
                 let access = row.makeRandomAccess()
-                if let cell = try? access["c"] {
-                    if let i: Int64 = try? cell.decode(Int64.self, context: .default) { return Int(i) }
-                }
+                if let i: Int64 = try? access["c"].decode(Int64.self, context: .default) { return Int(i) }
             }
             return 0
         }
     }
 }
 
-private func decodeAuditEvent(_ row: PostgresRow) -> AuditEvent? {
+/// Decode one PostgreSQL row into an AuditEvent, throwing on any parse failure.
+///
+/// Required columns (event_id, hlc_packed, estate_uuid, row_id, verb, actor,
+/// after_adj/op/prov, after_udc/qid) are decoded with `try` so a corrupt or
+/// missing field surfaces as a thrown error rather than silently dropping the
+/// event. Optional bitmap and lattice anchor columns use `try?` — NULL is the
+/// intended storage value for "no before-state", so a decode failure there is
+/// treated as absent (correct behaviour for NULL; corrupt non-NULL BIGINT would
+/// also be caught by the PostgreSQL wire decoder before reaching this function).
+private func decodeAuditEvent(_ row: PostgresRow) throws -> AuditEvent {
     let access = row.makeRandomAccess()
-    do {
-        let eventID: UUID = try access["event_id"].decode(UUID.self, context: .default)
-        let hlcPacked: Int64 = try access["hlc_packed"].decode(Int64.self, context: .default)
-        let estateUuid: UUID = try access["estate_uuid"].decode(UUID.self, context: .default)
-        let rowId: UUID = try access["row_id"].decode(UUID.self, context: .default)
-        let verb: String = try access["verb"].decode(String.self, context: .default)
-        let actor: String = try access["actor"].decode(String.self, context: .default)
-        let afterAdj: Int64 = try access["after_adj"].decode(Int64.self, context: .default)
-        let afterOp: Int64 = try access["after_op"].decode(Int64.self, context: .default)
-        let afterProv: Int64 = try access["after_prov"].decode(Int64.self, context: .default)
-        let afterUdc: Int64 = try access["after_udc"].decode(Int64.self, context: .default)
-        let afterQid: Int64 = try access["after_qid"].decode(Int64.self, context: .default)
+    let eventID: UUID = try access["event_id"].decode(UUID.self, context: .default)
+    let hlcPacked: Int64 = try access["hlc_packed"].decode(Int64.self, context: .default)
+    let estateUuid: UUID = try access["estate_uuid"].decode(UUID.self, context: .default)
+    let rowId: UUID = try access["row_id"].decode(UUID.self, context: .default)
+    let verb: String = try access["verb"].decode(String.self, context: .default)
+    let actor: String = try access["actor"].decode(String.self, context: .default)
+    let afterAdj: Int64 = try access["after_adj"].decode(Int64.self, context: .default)
+    let afterOp: Int64 = try access["after_op"].decode(Int64.self, context: .default)
+    let afterProv: Int64 = try access["after_prov"].decode(Int64.self, context: .default)
+    let afterUdc: Int64 = try access["after_udc"].decode(Int64.self, context: .default)
+    let afterQid: Int64 = try access["after_qid"].decode(Int64.self, context: .default)
 
-        let beforeAdj: Int64? = try? access["before_adj"].decode(Int64.self, context: .default)
-        let beforeOp: Int64? = try? access["before_op"].decode(Int64.self, context: .default)
-        let beforeProv: Int64? = try? access["before_prov"].decode(Int64.self, context: .default)
-        let beforeBitmaps: (adjective: Int64, operational: Int64, provenance: Int64)?
-        if let ba = beforeAdj, let bo = beforeOp, let bp = beforeProv {
-            beforeBitmaps = (ba, bo, bp)
-        } else {
-            beforeBitmaps = nil
-        }
-        let beforeUdc: Int64? = try? access["before_udc"].decode(Int64.self, context: .default)
-        let beforeQid: Int64? = try? access["before_qid"].decode(Int64.self, context: .default)
-        let beforeAnchor: LatticeAnchor?
-        if let u = beforeUdc, let q = beforeQid {
-            beforeAnchor = LatticeAnchor(udcCode: UInt64(bitPattern: u), qidPointer: UInt64(bitPattern: q))
-        } else {
-            beforeAnchor = nil
-        }
-
-        let packed = UInt64(bitPattern: hlcPacked)
-        let physical = Int64(packed >> 16)
-        let logical = Int32(truncatingIfNeeded: (packed >> 4) & 0xFFF)
-        let node = Int32(truncatingIfNeeded: packed & 0xF)
-        let hlc = HLC(physicalTime: physical, logicalCount: logical, nodeID: node)
-
-        return AuditEvent(
-            eventID: eventID,
-            estateUuid: estateUuid,
-            rowId: rowId,
-            hlc: hlc,
-            verb: verb,
-            beforeBitmaps: beforeBitmaps,
-            afterBitmaps: (afterAdj, afterOp, afterProv),
-            beforeLatticeAnchor: beforeAnchor,
-            afterLatticeAnchor: LatticeAnchor(udcCode: UInt64(bitPattern: afterUdc), qidPointer: UInt64(bitPattern: afterQid)),
-            actor: actor
-        )
-    } catch {
-        return nil
+    // Optional bitmap fields: NULL is the valid before-state sentinel; try?
+    // is correct here because PostgreSQL enforces BIGINT at the wire level —
+    // a non-NULL value will parse cleanly or the wire decode above will fail.
+    let beforeAdj: Int64? = try? access["before_adj"].decode(Int64.self, context: .default)
+    let beforeOp: Int64? = try? access["before_op"].decode(Int64.self, context: .default)
+    let beforeProv: Int64? = try? access["before_prov"].decode(Int64.self, context: .default)
+    let beforeBitmaps: (adjective: Int64, operational: Int64, provenance: Int64)?
+    if let ba = beforeAdj, let bo = beforeOp, let bp = beforeProv {
+        beforeBitmaps = (ba, bo, bp)
+    } else {
+        beforeBitmaps = nil
     }
+    let beforeUdc: Int64? = try? access["before_udc"].decode(Int64.self, context: .default)
+    let beforeQid: Int64? = try? access["before_qid"].decode(Int64.self, context: .default)
+    let beforeAnchor: LatticeAnchor?
+    if let u = beforeUdc, let q = beforeQid {
+        beforeAnchor = LatticeAnchor(udcCode: UInt64(bitPattern: u), qidPointer: UInt64(bitPattern: q))
+    } else {
+        beforeAnchor = nil
+    }
+
+    let packed = UInt64(bitPattern: hlcPacked)
+    let physical = Int64(packed >> 16)
+    let logical = Int32(truncatingIfNeeded: (packed >> 4) & 0xFFF)
+    let node = Int32(truncatingIfNeeded: packed & 0xF)
+    let hlc = HLC(physicalTime: physical, logicalCount: logical, nodeID: node)
+
+    return AuditEvent(
+        eventID: eventID,
+        estateUuid: estateUuid,
+        rowId: rowId,
+        hlc: hlc,
+        verb: verb,
+        beforeBitmaps: beforeBitmaps,
+        afterBitmaps: (afterAdj, afterOp, afterProv),
+        beforeLatticeAnchor: beforeAnchor,
+        afterLatticeAnchor: LatticeAnchor(udcCode: UInt64(bitPattern: afterUdc), qidPointer: UInt64(bitPattern: afterQid)),
+        actor: actor
+    )
 }

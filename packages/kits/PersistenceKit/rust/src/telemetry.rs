@@ -40,7 +40,6 @@
 //!    - `persistence.db.lock_contention` — lock contention flag (SQLite + PG)
 //!    - `persistence.db.row_count`       — total row count (InMemory only)
 //!    - `persistence.db.blob_count`      — blob count (InMemory only)
-//!    - `persistence.db.vector_count`    — vector count (InMemory only)
 //!
 //! 6. **Conformance guarantee.**
 //!    `report_storage_stats` does not modify the stats returned by
@@ -240,7 +239,7 @@ pub fn report_storage_stats(
         });
     }
 
-    // InMemory-specific fields: row_count, blob_count, vector_count.
+    // InMemory-specific fields: row_count, blob_count.
     // These are None for SQLite and PostgreSQL.
 
     if let Some(row_count) = stats.row_count {
@@ -261,18 +260,6 @@ pub fn report_storage_stats(
             StatSample::metric(
                 "persistence.db.blob_count".to_string(),
                 blob_count as f64,
-                make_tags(),
-                ts,
-            )
-        });
-    }
-
-    if let Some(vector_count) = stats.vector_count {
-        // Number of entries in the InMemory vector store.
-        report!({
-            StatSample::metric(
-                "persistence.db.vector_count".to_string(),
-                vector_count as f64,
                 make_tags(),
                 ts,
             )

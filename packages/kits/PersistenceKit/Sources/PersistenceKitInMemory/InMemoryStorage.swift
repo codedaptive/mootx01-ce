@@ -12,7 +12,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -27,7 +27,6 @@ public final class InMemoryStorage: Storage, Sendable {
 
     public let rowStore: any RowStore
     public let blobStore: any BlobStore
-    public let vectorIndex: any VectorIndex
     public let auditLog: any AuditLog
     public let observer: any StorageObserver
 
@@ -53,7 +52,6 @@ public final class InMemoryStorage: Storage, Sendable {
             ? CachingRowStore(backing: baseRowStore, config: configuration.cacheConfig)
             : baseRowStore
         self.blobStore = InMemoryBlobStore(stateActor: actor)
-        self.vectorIndex = InMemoryVectorIndex(stateActor: actor)
         self.auditLog = InMemoryAuditLog(stateActor: actor)
         self.observer = InMemoryObserver(registry: registry)
     }
@@ -82,20 +80,30 @@ public final class InMemoryStorage: Storage, Sendable {
         isolation: IsolationLevel,
         _ block: @Sendable (any StorageTransaction) async throws -> T
     ) async throws -> T {
-        // Take snapshot. Run block against a transactional actor. On
-        // success, replace the main state. On error, discard.
+        // The block mutates the LIVE state actor directly, with a rollback
+        // snapshot taken for the error path only. This matches the Rust port
+        // (inmemory.rs `transaction`), which runs the block against the live
+        // `Mutex<State>` and restores the snapshot only on error.
+        //
+        // WHY NOT run against a detached copy and replace-on-commit: a detached
+        // copy + blind `replace(with: finalState)` on success silently DROPS any
+        // non-transactional write (a bare `insert`) that commits to the live
+        // actor between the snapshot and the replace — the replace overwrites the
+        // whole state with the stale-snapshot-derived copy. That lost-update is
+        // exactly how a rapid burst of QueueKit `send()` inserts (bare, per spec
+        // §10) raced the encode drain's serializable claim transaction and lost
+        // queued encode jobs (~5-10% under a 120-capture burst), leaving those
+        // drawers un-ingested and BM25/vector-dark. Mutating live state preserves
+        // concurrent inserts because both paths target the one actor.
         let snapshot = await stateActor.snapshot()
-        let txnActor = InMemoryStateActor(initial: snapshot)
-        let txn = InMemoryTransaction(stateActor: txnActor)
+        let txn = InMemoryTransaction(stateActor: stateActor)
 
         do {
-            let result = try await block(txn)
-            let finalState = await txnActor.snapshot()
-            await stateActor.replace(with: finalState)
-            return result
+            return try await block(txn)
         } catch {
-            // Record the rollback so StorageIntrospection can surface it.
-            await stateActor.recordRollback()
+            // Restore the pre-transaction snapshot and record the rollback so
+            // StorageIntrospection can surface it.
+            await stateActor.rollback(to: snapshot)
             throw error
         }
     }
@@ -116,7 +124,6 @@ extension InMemoryStorage: StorageIntrospection {
             transactionRollbackCount: snap.rollbackCount,
             rowCount: snap.rowCount,
             blobCount: snap.blobCount,
-            vectorCount: snap.vectorCount,
             capturedAt: now
         )
     }
@@ -145,7 +152,6 @@ actor InMemoryStateActor {
     }
 
     func snapshot() -> InMemoryState { state }
-    func replace(with newState: InMemoryState) { state = newState }
     func schemaVersion() -> Int { state.schemaVersion }
 
     /// Per-kit schema version, keyed by kitID. Returns 0 if no migrations
@@ -328,19 +334,31 @@ actor InMemoryStateActor {
         where predicate: StoragePredicate?,
         orderBy: [OrderClause],
         limit: Int?,
-        offset: Int?
+        offset: Int?,
+        columns: [String]?
     ) throws -> [StorageRow] {
         guard let t = state.tables[table] else {
             throw StorageError.invalidQuery(detail: "query: table \(table) not found")
         }
-        var results: [StorageRow] = []
+        // Column projection (no-blob read): when `columns` is non-nil, keep
+        // only those keys in each returned row so an unnamed column (e.g.
+        // "content") is absent — mirroring the SQLite projected SELECT. nil
+        // projects nothing away (the full row). Predicate evaluation and
+        // ordering still see the full in-memory row; only the RETURNED row is
+        // narrowed, after the predicate/sort, so a projected query can still
+        // filter or order on an unprojected column.
+        let projected: Set<String>? = columns.map(Set.init)
+        // Match the full rows first so the predicate, ordering, and pagination
+        // all see every column (SQLite's ORDER BY can reference a non-selected
+        // column); projection is applied last, to the rows actually returned.
+        var matched: [[String: TypedValue]] = []
         for (_, row) in t.rows {
             if predicate == nil || PredicateEvaluator.evaluate(predicate!, against: row) {
-                results.append(StorageRow(values: row))
+                matched.append(row)
             }
         }
         if !orderBy.isEmpty {
-            results.sort { lhs, rhs in
+            matched.sort { lhs, rhs in
                 for clause in orderBy {
                     let lv = lhs[clause.column.name] ?? .null
                     let rv = rhs[clause.column.name] ?? .null
@@ -351,9 +369,12 @@ actor InMemoryStateActor {
                 return false
             }
         }
-        if let off = offset, off > 0 { results = Array(results.dropFirst(off)) }
-        if let lim = limit { results = Array(results.prefix(lim)) }
-        return results
+        if let off = offset, off > 0 { matched = Array(matched.dropFirst(off)) }
+        if let lim = limit { matched = Array(matched.prefix(lim)) }
+        return matched.map { row in
+            guard let projected else { return StorageRow(values: row) }
+            return StorageRow(values: row.filter { projected.contains($0.key) })
+        }
     }
 
     func countRows(table: String, where predicate: StoragePredicate?) throws -> Int {
@@ -401,23 +422,27 @@ actor InMemoryStateActor {
 
     // MARK: - Blob operations
 
-    func putBlob(_ key: BlobKey, bytes: Data) { state.blobs[key] = bytes }
-    func getBlob(_ key: BlobKey) -> Data? { state.blobs[key] }
-    func deleteBlob(_ key: BlobKey) { state.blobs.removeValue(forKey: key) }
-    func blobExists(_ key: BlobKey) -> Bool { state.blobs[key] != nil }
-    func blobSize(_ key: BlobKey) -> Int? { state.blobs[key]?.count }
-
-    // MARK: - Vector operations
-
-    func putVector(_ key: RowKey, vector: [Float], metadata: [String: TypedValue]) {
-        state.vectors[key] = InMemoryVectorEntry(vector: vector, metadata: metadata)
+    func putBlob(_ key: BlobKey, bytes: Data) async {
+        state.blobs[key] = bytes
+        // Notify blob subscribers so the incremental replication session can
+        // track which keys became dirty since the last sync run.
+        if let registry = observerRegistry {
+            await registry.notifyBlob(BlobChange(key: key, event: .put, bytes: bytes))
+        }
     }
 
-    func deleteVector(_ key: RowKey) { state.vectors.removeValue(forKey: key) }
+    func getBlob(_ key: BlobKey) -> Data? { state.blobs[key] }
 
-    func vectorCount() -> Int { state.vectors.count }
+    func deleteBlob(_ key: BlobKey) async {
+        state.blobs.removeValue(forKey: key)
+        if let registry = observerRegistry {
+            await registry.notifyBlob(BlobChange(key: key, event: .delete, bytes: nil))
+        }
+    }
 
-    func vectorSnapshot() -> [RowKey: InMemoryVectorEntry] { state.vectors }
+    func blobExists(_ key: BlobKey) -> Bool { state.blobs[key] != nil }
+    func blobSize(_ key: BlobKey) -> Int? { state.blobs[key]?.count }
+    func listBlobKeys() -> [BlobKey] { Array(state.blobs.keys) }
 
     // MARK: - Audit operations
 
@@ -465,25 +490,32 @@ actor InMemoryStateActor {
     ///   This is a rough signal, not a precise allocator measurement.
     /// - rowCount: sum of all row counts across all tables.
     /// - blobCount: number of blob entries.
-    /// - vectorCount: number of vector entries.
     /// - transactionRollbackCount: incremented by InMemoryStorage.transaction()
     ///   on error. The actor tracks this as a monotone counter.
-    func introspectionSnapshot() -> (rowCount: Int, blobCount: Int, vectorCount: Int, rollbackCount: Int64, approxBytes: Int64) {
+    func introspectionSnapshot() -> (rowCount: Int, blobCount: Int, rollbackCount: Int64, approxBytes: Int64) {
         let rows = state.tables.values.map { $0.rows.count }.reduce(0, +)
         let blobs = state.blobs.count
-        let vectors = state.vectors.count
         // Approximate size: row overhead (256 B avg) + actual blob bytes.
         let blobBytes = state.blobs.values.map { Int64($0.count) }.reduce(0, +)
         let approxBytes = Int64(rows) * 256 + blobBytes
-        return (rows, blobs, vectors, rollbackStats, approxBytes)
+        return (rows, blobs, rollbackStats, approxBytes)
     }
 
-    // Monotone rollback counter. Incremented by InMemoryStorage.transaction()
-    // when the user block throws. Used to surface the transactionRollbackCount
-    // field in StorageStats for callers that want to track error rates.
+    // Monotone rollback counter. Incremented by `rollback(to:)` when a
+    // transaction's user block throws. Used to surface the
+    // transactionRollbackCount field in StorageStats for callers that want to
+    // track error rates.
     var rollbackStats: Int64 = 0
 
-    func recordRollback() {
+    /// Restore the pre-transaction snapshot and record the rollback.
+    ///
+    /// Called by `InMemoryStorage.transaction(isolation:_:)` on the error path:
+    /// the block mutated the live state in place, so a throw must revert the
+    /// whole state to its pre-transaction snapshot. Restoring the whole snapshot
+    /// (rather than only the block's mutations) matches the Rust port's
+    /// single-threaded transaction semantics.
+    func rollback(to snapshot: InMemoryState) {
+        state = snapshot
         rollbackStats += 1
     }
 }
@@ -498,18 +530,12 @@ struct InMemoryState: Sendable {
     var schemaDeclaration: SchemaDeclaration? = nil
     var tables: [String: InMemoryTable] = [:]
     var blobs: [BlobKey: Data] = [:]
-    var vectors: [RowKey: InMemoryVectorEntry] = [:]
     var auditEvents: [AuditEventRecord] = []
 }
 
 struct InMemoryTable: Sendable {
     var declaration: TableDeclaration
     var rows: [RowKey: [String: TypedValue]] = [:]
-}
-
-struct InMemoryVectorEntry: Sendable {
-    let vector: [Float]
-    let metadata: [String: TypedValue]
 }
 
 struct AuditEventRecord: Sendable {
@@ -522,13 +548,11 @@ struct AuditEventRecord: Sendable {
 final class InMemoryTransaction: StorageTransaction, Sendable {
     let rowStore: any RowStore
     let blobStore: any BlobStore
-    let vectorIndex: any VectorIndex
     let auditLog: any AuditLog
 
     init(stateActor: InMemoryStateActor) {
         self.rowStore = InMemoryRowStore(stateActor: stateActor)
         self.blobStore = InMemoryBlobStore(stateActor: stateActor)
-        self.vectorIndex = InMemoryVectorIndex(stateActor: stateActor)
         self.auditLog = InMemoryAuditLog(stateActor: stateActor)
     }
 }

@@ -8,13 +8,15 @@
 // Scope note: the Swift runner has nine groups. `run_all` drives the eight
 // backend-universal groups (schema, row, predicate, blob, audit,
 // generated-column, append-only, transaction). The ninth — vector — is
-// exposed separately via `vector_fixtures`, because not every backend ships
-// a VectorIndex (InMemory and Postgres+pgvector do; SQLite rides sqlite-vec).
+// exposed separately via `vector_fixtures`. PersistenceKit owns no k-NN
+// engine (ADR-008); `vector_fixtures` asserts the storage-ACCOMMODATION
+// contract — every backend round-trips, bulk-hydrates, counts, and deletes
+// vector-payload rows through the general RowStore surface.
 
 #![allow(dead_code)] // each backend test binary uses a subset of helpers
 
 use persistence_kit::{
-    AuditEvent, Column, ColumnDeclaration, ColumnType, DistanceMetric, GeneratedColumn,
+    AuditEvent, Column, ColumnDeclaration, ColumnType, GeneratedColumn,
     GeneratedExpression, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection,
     SchemaDeclaration, Storage, StorageError, StoragePredicate, TableDeclaration, TypedValue,
 };
@@ -183,34 +185,136 @@ fn transaction_fixtures(backend: &str, factory: &Factory) {
     storage.close().unwrap();
 }
 
-/// Vector fixtures — separate from run_all (not every backend ships
-/// VectorIndex yet). Backends that do (InMemory, Postgres+pgvector) call it
-/// explicitly. Mirrors the Swift vectorFixtures group.
+/// Schema mirroring how VectorKit stores embeddings on a backend: a keyed row
+/// with an opaque binary vector payload (`payload_binary`, e.g. a 32-byte
+/// packed Engram/fingerprint) and a float32 payload (`payload_float32`, e.g. a
+/// 384-d MiniLM embedding serialized to bytes). Plain BLOB columns —
+/// PersistenceKit owns no vector engine.
+fn vector_accommodation_schema() -> SchemaDeclaration {
+    SchemaDeclaration::new(
+        "ConformanceVectorAccommodationKit",
+        1,
+        vec![TableDeclaration::new(
+            "vector_rows",
+            vec![
+                ColumnDeclaration::uuid("id"),
+                ColumnDeclaration::blob("payload_binary"),
+                ColumnDeclaration::blob("payload_float32"),
+                ColumnDeclaration::text("model_id"),
+                ColumnDeclaration::int("dim"),
+            ],
+            vec!["id".to_string()],
+        )],
+    )
+}
+
+/// Vector-storage accommodation guarantee (ADR-008). PersistenceKit owns no
+/// k-NN engine; dense-embedding search lives in VectorKit. Every backend MUST
+/// accommodate a vector workload's STORAGE needs through RowStore:
+///   1. vector-payload row round-trip — 32-byte binary + 384-d float32 survive
+///      insert→query byte-for-byte;
+///   2. bulk hydration at scale — ≥1k vector rows load back fully;
+///   3. count and delete over those rows.
+/// Mirrors the Swift vectorFixtures group.
 pub fn vector_fixtures(backend: &str, factory: &Factory) {
     let storage = factory();
-    storage.open(&test_schema()).expect("open");
-    let idx = storage.vector_index();
+    storage.open(&vector_accommodation_schema()).expect("open");
+    let rows = storage.row_store();
 
-    let k1 = Uuid::new_v4();
-    let k2 = Uuid::new_v4();
-    let k3 = Uuid::new_v4();
-    let k4 = Uuid::new_v4();
-    idx.add(k1, &[1.0, 0.0, 0.0], BTreeMap::new()).unwrap();
-    idx.add(k2, &[0.0, 1.0, 0.0], BTreeMap::new()).unwrap();
-    idx.add(k3, &[0.95, 0.05, 0.0], BTreeMap::new()).unwrap();
-    idx.add(k4, &[0.0, 0.0, 1.0], BTreeMap::new()).unwrap();
+    // (1) Vector-payload row round-trip.
+    let binary_payload: Vec<u8> = (0..32u8).collect();
+    let floats: Vec<f32> = (0..384).map(|i| i as f32 * 0.001 - 0.19).collect();
+    let mut float_bytes: Vec<u8> = Vec::with_capacity(384 * 4);
+    for f in &floats {
+        float_bytes.extend_from_slice(&f.to_le_bytes());
+    }
 
-    assert_eq!(idx.count().unwrap(), 4, "{backend}: vector count");
+    let round_trip_id = Uuid::new_v4();
+    let mut row: BTreeMap<String, TypedValue> = BTreeMap::new();
+    row.insert("id".into(), TypedValue::Uuid(round_trip_id));
+    row.insert("payload_binary".into(), TypedValue::Blob(binary_payload.clone()));
+    row.insert("payload_float32".into(), TypedValue::Blob(float_bytes.clone()));
+    row.insert("model_id".into(), TypedValue::Text("MiniLM-L6-v2".into()));
+    row.insert("dim".into(), TypedValue::Int(384));
+    rows.insert("vector_rows", row).unwrap();
 
-    let top = idx
-        .knn(&[1.0, 0.0, 0.0], 2, DistanceMetric::L2, None, None)
+    let fetched = rows
+        .query(
+            "vector_rows",
+            Some(&StoragePredicate::Eq(
+                Column::new("vector_rows", "id"),
+                TypedValue::Uuid(round_trip_id),
+            )),
+            &[],
+            None,
+            None,
+        )
         .unwrap();
-    assert_eq!(top.len(), 2, "{backend}: kNN returns k results");
-    assert_eq!(top[0].key, k1, "{backend}: exact match first");
-    assert_eq!(top[1].key, k3, "{backend}: near match second");
+    assert_eq!(fetched.len(), 1, "{backend}: vector-payload row present");
+    assert_eq!(
+        fetched[0].get("payload_binary"),
+        Some(&TypedValue::Blob(binary_payload)),
+        "{backend}: 32-byte binary vector payload round-trips byte-for-byte"
+    );
+    assert_eq!(
+        fetched[0].get("payload_float32"),
+        Some(&TypedValue::Blob(float_bytes.clone())),
+        "{backend}: 384-d float32 vector payload round-trips byte-for-byte"
+    );
+    assert_eq!(
+        fetched[0].get("dim"),
+        Some(&TypedValue::Int(384)),
+        "{backend}: vector dimensionality preserved"
+    );
 
-    idx.delete(k1).unwrap();
-    assert_eq!(idx.count().unwrap(), 3, "{backend}: count after delete");
+    // (2) Bulk hydration at scale: ≥1k vector rows load back fully.
+    let bulk_count = 1_000usize;
+    for i in 0..bulk_count {
+        let payload: Vec<u8> = (0..32u8).map(|b| ((i + b as usize) & 0xFF) as u8).collect();
+        let mut r: BTreeMap<String, TypedValue> = BTreeMap::new();
+        r.insert("id".into(), TypedValue::Uuid(Uuid::new_v4()));
+        r.insert("payload_binary".into(), TypedValue::Blob(payload));
+        r.insert("payload_float32".into(), TypedValue::Blob(float_bytes.clone()));
+        r.insert("model_id".into(), TypedValue::Text("MiniLM-L6-v2".into()));
+        r.insert("dim".into(), TypedValue::Int(384));
+        rows.insert("vector_rows", r).unwrap();
+    }
+
+    let hydrated = rows.query("vector_rows", None, &[], None, None).unwrap();
+    assert_eq!(
+        hydrated.len(),
+        bulk_count + 1,
+        "{backend}: bulk hydration returns all {} vector rows",
+        bulk_count + 1
+    );
+    let widths_ok = hydrated.iter().all(|row| {
+        matches!(row.get("payload_binary"), Some(TypedValue::Blob(b)) if b.len() == 32)
+            && matches!(row.get("payload_float32"), Some(TypedValue::Blob(f)) if f.len() == 384 * 4)
+    });
+    assert!(
+        widths_ok,
+        "{backend}: every hydrated vector row preserves payload widths"
+    );
+
+    // (3) Count and delete.
+    assert_eq!(
+        rows.count("vector_rows", None).unwrap(),
+        bulk_count + 1,
+        "{backend}: vector-row count"
+    );
+    rows.delete(
+        "vector_rows",
+        &StoragePredicate::Eq(
+            Column::new("vector_rows", "id"),
+            TypedValue::Uuid(round_trip_id),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        rows.count("vector_rows", None).unwrap(),
+        bulk_count,
+        "{backend}: vector-row count after delete"
+    );
 
     storage.close().unwrap();
 }

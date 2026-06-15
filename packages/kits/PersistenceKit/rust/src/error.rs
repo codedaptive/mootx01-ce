@@ -46,6 +46,24 @@ pub enum StorageError {
     BackendError {
         underlying: String,
     },
+    /// A stored value could not be parsed back to its declared type. The
+    /// `stored_text` field carries the raw string from SQLite for diagnosis.
+    /// Thrown instead of silently substituting a default (e.g. Uuid::nil()
+    /// or timestamp 0) so callers know their data is corrupt.
+    CorruptStoredValue {
+        table: String,
+        column: String,
+        stored_text: String,
+    },
+    /// The supplied `EstateConfiguration` contains a value that is invalid for
+    /// the current platform or runtime. For example, selecting `NlTagger` on
+    /// a non-Apple platform (where `NaturalLanguage` is unavailable) produces
+    /// this error at configuration validation time. Fail-closed: an invalid
+    /// configuration is rejected before any storage is opened. Mirrors
+    /// Swift's `StorageError.invalidConfiguration(reason:)`.
+    InvalidConfiguration {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for StorageError {
@@ -91,6 +109,14 @@ impl std::fmt::Display for StorageError {
                 write!(f, "table {} is append-only", table)
             }
             StorageError::BackendError { underlying } => write!(f, "backend error: {}", underlying),
+            StorageError::CorruptStoredValue { table, column, stored_text } => write!(
+                f,
+                "corrupt stored value in {}.{}: cannot parse {:?}",
+                table, column, stored_text
+            ),
+            StorageError::InvalidConfiguration { reason } => {
+                write!(f, "invalid estate configuration: {}", reason)
+            }
         }
     }
 }

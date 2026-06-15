@@ -1,7 +1,7 @@
 // StorageReplicator.swift
 //
 // Generic full-snapshot replication primitive (§5 of the PersistenceKit
-// Estate Replication spec). Implements replicate(from:to:schema:mode:)
+// Estate Replication spec). Implements replicate(from:to:schema:)
 // and exposes flush / hydrate conveniences.
 //
 // CONTRACT:
@@ -9,7 +9,8 @@
 //     schemaVersion. No auto-migration.
 //   - Atomicity: the entire destination write is wrapped in a serializable
 //     transaction. A crash or error mid-flush leaves the destination at its
-//     prior consistent state.
+//     prior consistent state. Blob writes happen INSIDE the same transaction
+//     so a crash mid-flush does not leave a partial blob set.
 //   - Row snapshot: all rows in schema.tables, including tombstoned rows and
 //     rows in append-only tables, are copied verbatim. Generated columns are
 //     FILTERED OUT before upsert — the destination backend recomputes them.
@@ -18,15 +19,12 @@
 //   - Audit copy: _storagekit_audit is NOT in schema.tables; it is copied
 //     via a separate auditLog.iterate → appendBatch path. This is load-bearing
 //     for downstream matrix rebuild (which consumes the audit log).
-//   - Blob copy: _storagekit_blobs is NOT in schema.tables. No GLK kit uses
-//     blobStore for content as of 2026-06-05 (confirmed by
-//     REPLICATION_GROUND_TRUTH.md §BLOB COPY PATH and by the absence of any
-//     blobStore call site in LocusKit, VectorKit, CorpusKit, or GeniusLocusKit).
-//     BlobStore also lacks a listKeys() method — the protocol has no way to
-//     enumerate all stored keys without knowing them in advance. The blob path
-//     is intentionally not implemented here. A future mission that introduces
-//     GLK blob usage must also add BlobStore.listKeys() to the protocol and add
-//     a blob copy step to this primitive.
+//   - Blob copy: _storagekit_blobs is NOT in schema.tables. The BlobStore
+//     protocol exposes listKeys() to enumerate all stored keys. The snapshot
+//     reads every key from source and writes it to destination inside the same
+//     serializable transaction as the row and audit copies. A corrupt or
+//     unreadable blob (get returns nil) aborts the entire flush with
+//     ReplicationError.storageFailure — fail-loud discipline; no silent skipping.
 //   - TypedValue is copied verbatim (no coercion). ISO-8601 TEXT timestamps
 //     round-trip through the backend without alteration (schema invariant I-3).
 //   - HLC watermark: the max HLC seen across all copied rows' hlc-typed columns
@@ -43,84 +41,84 @@ private let log = Logger(subsystem: "com.mootx01.kit", category: "PersistenceKit
 
 /// Intermediate value holding the source snapshot captured before the
 /// destination transaction opens. Sendable because all constituent types
-/// are Sendable (TypedValue, AuditEvent, String are all Sendable).
+/// are Sendable (TypedValue, AuditEvent, String, Data are all Sendable).
 private struct ReplicationPayload: Sendable {
     /// Per-table row snapshots. Generated columns have been filtered
     /// out from each row's values dict; the destination recomputes them.
     let tableSnapshots: [(tableName: String, primaryKey: [String], rows: [[String: TypedValue]])]
     /// All audit events from the source's _storagekit_audit table.
     let auditEvents: [AuditEvent]
+    /// All blob (key, bytes) pairs from the source's _storagekit_blobs store.
+    ///
+    /// Captured before the destination transaction opens so the transaction
+    /// duration is not inflated by blob I/O from the source. Keys are sorted
+    /// for deterministic write order across repeated flush calls.
+    let blobs: [(key: BlobKey, bytes: Data)]
 }
 
 // MARK: - StorageReplicator
 
 /// Namespace for the generic storage replication primitive.
 ///
-/// `StorageReplicator.replicate(from:to:schema:mode:)` is the core engine.
-/// `flush(from:into:schema:mode:)` and `hydrate(into:from:schema:)` are
-/// thin convenience wrappers that name the direction explicitly.
+/// `StorageReplicator.replicate(from:to:schema:)` is the core engine — it always
+/// performs a full snapshot: all rows, all audit events, all blobs, atomically.
+/// `flush(from:into:schema:)` and `hydrate(into:from:schema:)` are thin
+/// convenience wrappers that name the direction explicitly.
+///
+/// For session-oriented incremental replication (observer-driven dirty-set),
+/// use `IncrementalReplicationSession` directly.
 public enum StorageReplicator {
 
     // MARK: - Core primitive
 
     /// Copy the full projected state of `source` into `destination`.
     ///
+    /// Always performs a full snapshot: every row in every schema-declared table,
+    /// all audit events, and all blobs are copied atomically in a serializable
+    /// transaction. The operation is idempotent — a second call with no source
+    /// changes writes zero new rows (upsert on primary key is a no-op for
+    /// identical values).
+    ///
     /// - Parameters:
     ///   - source: The storage to read from (must be open).
     ///   - destination: The storage to write to (must be open).
     ///   - schema: The schema declaration governing which tables to copy.
-    ///     This must be the same schema applied to both backends.
-    ///   - mode: `.full` copies all rows and audit events atomically.
-    ///     `.incremental` throws `ReplicationError.notImplemented`.
+    ///     Must be the same schema applied to both backends.
     /// - Returns: A `ReplicationCursor` carrying the HLC watermark and counts.
-    /// - Throws: `ReplicationError` if the schema gate fails, the mode is
-    ///   not implemented, or a storage operation fails.
+    /// - Throws: `ReplicationError` if the schema gate fails or a storage
+    ///   operation fails.
     public static func replicate(
         from source: any Storage,
         to destination: any Storage,
-        schema: SchemaDeclaration,
-        mode: ReplicationMode
+        schema: SchemaDeclaration
     ) async throws -> ReplicationCursor {
-        switch mode {
-        case .full:
-            return try await replicateFull(from: source, to: destination, schema: schema)
-        case .incremental:
-            // §6 incremental is a separate mission. The dirty-set MUST be driven
-            // by StorageObserver.observe, not auditLog.iterate — see mission notes
-            // and REPLICATION_TRACK_PLAN.md §HARD CONSTRAINT for the rationale.
-            throw ReplicationError.notImplemented(
-                reason: "§6 incremental replication is not yet implemented. " +
-                    "The dirty-set must be driven by StorageObserver.observe, " +
-                    "not auditLog — several noun inserts bypass the AuditGate."
-            )
-        }
+        return try await replicateFull(from: source, to: destination, schema: schema)
     }
 
     // MARK: - Conveniences
 
     /// Flush an in-memory storage into a durable storage.
     ///
-    /// Equivalent to `replicate(from: inMemory, to: durable, schema: schema, mode: .full)`.
+    /// Equivalent to `replicate(from: inMemory, to: durable, schema: schema)`.
     /// The entire write to `durable` is atomic; a failure leaves `durable` unchanged.
     public static func flush(
         from inMemory: any Storage,
         into durable: any Storage,
-        schema: SchemaDeclaration,
-        mode: ReplicationMode = .full
+        schema: SchemaDeclaration
     ) async throws -> ReplicationCursor {
-        try await replicate(from: inMemory, to: durable, schema: schema, mode: mode)
+        try await replicate(from: inMemory, to: durable, schema: schema)
     }
 
     /// Hydrate a fresh in-memory storage from a durable storage.
     ///
-    /// Equivalent to `replicate(from: durable, to: inMemory, schema: schema, mode: .full)`.
+    /// Equivalent to `replicate(from: durable, to: inMemory, schema: schema)`.
     /// Call this on a freshly-opened InMemoryStorage instance.
     public static func hydrate(
         into inMemory: any Storage,
         from durable: any Storage,
         schema: SchemaDeclaration
     ) async throws -> ReplicationCursor {
-        try await replicate(from: durable, to: inMemory, schema: schema, mode: .full)
+        try await replicate(from: durable, to: inMemory, schema: schema)
     }
 
     // MARK: - Full-snapshot implementation
@@ -209,19 +207,28 @@ public enum StorageReplicator {
                 }
             }
 
+            // 3c. Blob copy: write every blob from the snapshot into the destination.
+            // put() is idempotent on key — a repeated full flush with the same blobs
+            // overwrites in place, producing no duplicate keys.
+            for blob in payload.blobs {
+                try await txn.blobStore.put(key: blob.key, bytes: blob.bytes)
+            }
+
             return ReplicationResult(
                 rowsWritten: rowsWritten,
                 auditEventsWritten: payload.auditEvents.count,
+                blobsWritten: payload.blobs.count,
                 hlcWatermark: maxHLC
             )
         }
 
-        log.info("replicate: complete — \(result.rowsWritten) rows, \(result.auditEventsWritten) audit events")
+        log.info("replicate: complete — \(result.rowsWritten) rows, \(result.auditEventsWritten) audit events, \(result.blobsWritten) blobs")
 
         return ReplicationCursor(
             hlcWatermark: result.hlcWatermark,
             rowsWritten: result.rowsWritten,
-            auditEventsWritten: result.auditEventsWritten
+            auditEventsWritten: result.auditEventsWritten,
+            blobsWritten: result.blobsWritten
         )
     }
 
@@ -271,9 +278,33 @@ public enum StorageReplicator {
         )
         log.debug("replicate snapshot: \(auditEvents.count) audit events")
 
+        // Blob snapshot — _storagekit_blobs is NOT in schema.tables.
+        // Enumerate all keys via listKeys(), then read each blob.
+        // Keys are sorted for deterministic write order.
+        // A nil return from get(key:) means the key was deleted between
+        // listKeys() and get() — this is a TOCTOU race that cannot be
+        // prevented with the current protocol (no snapshot isolation on the
+        // blob store). We treat it as a transient failure and abort: fail-loud
+        // discipline — a missing blob key is surfaced as an error rather than
+        // silently dropped, because a destination with a partial blob set
+        // cannot detect the gap itself.
+        let blobKeys = try await source.blobStore.listKeys()
+        var blobs: [(key: BlobKey, bytes: Data)] = []
+        for key in blobKeys.sorted() {
+            guard let bytes = try await source.blobStore.get(key: key) else {
+                throw ReplicationError.storageFailure(
+                    detail: "blob key '\(key)' was present in listKeys() but absent in get() — " +
+                        "concurrent delete during snapshot; retry the flush"
+                )
+            }
+            blobs.append((key: key, bytes: bytes))
+        }
+        log.debug("replicate snapshot: \(blobs.count) blobs")
+
         return ReplicationPayload(
             tableSnapshots: tableSnapshots,
-            auditEvents: auditEvents
+            auditEvents: auditEvents,
+            blobs: blobs
         )
     }
 }
@@ -285,5 +316,6 @@ public enum StorageReplicator {
 private struct ReplicationResult: Sendable {
     let rowsWritten: Int
     let auditEventsWritten: Int
+    let blobsWritten: Int
     let hlcWatermark: HLC?
 }

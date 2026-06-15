@@ -42,10 +42,10 @@ struct SQLiteIntrospectionTests {
 
     @Test("SQLiteStorage conforms to StorageIntrospection")
     func conformsToStorageIntrospection() throws {
-        let storage = try makeStorage()
-        // The conformance is unconditional; just casting must succeed.
-        let introspectable = storage as? StorageIntrospection
-        #expect(introspectable != nil, "SQLiteStorage must conform to StorageIntrospection")
+        // Bind as `Any` so the conformance check is a genuine runtime test;
+        // casting the concrete type directly is statically always-true.
+        let storage: Any = try makeStorage()
+        #expect(storage is any StorageIntrospection, "SQLiteStorage must conform to StorageIntrospection")
     }
 
     @Test("stats returns non-negative logicalSizeBytes after open")
@@ -157,7 +157,6 @@ struct SQLiteIntrospectionTests {
         let stats = try await storage.stats(now: Date())
         #expect(stats.rowCount == nil, "rowCount must be nil for SQLite")
         #expect(stats.blobCount == nil, "blobCount must be nil for SQLite")
-        #expect(stats.vectorCount == nil, "vectorCount must be nil for SQLite")
     }
 
     @Test("logicalSizeBytes grows after inserting rows")

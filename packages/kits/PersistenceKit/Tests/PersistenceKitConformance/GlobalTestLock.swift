@@ -82,9 +82,9 @@ public actor GlobalTestLock {
         do {
             try await body()
         } catch {
-            await release()
+            release()
             throw error
         }
-        await release()
+        release()
     }
 }

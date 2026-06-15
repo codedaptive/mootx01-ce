@@ -35,7 +35,6 @@ import Foundation
 /// | lockContention         |   ✓    |     ✓      |   nil    |
 /// | rowCount               |   nil  |    nil     |    ✓     |
 /// | blobCount              |   nil  |    nil     |    ✓     |
-/// | vectorCount            |   nil  |    nil     |    ✓     |
 /// | capturedAt             |   ✓    |     ✓      |    ✓     |
 public struct StorageStats: Sendable, Equatable {
 
@@ -152,12 +151,6 @@ public struct StorageStats: Sendable, Equatable {
     /// SQLite / PostgreSQL: nil.
     public let blobCount: Int?
 
-    /// Total vector entry count.
-    ///
-    /// InMemory: count of entries in the vector store.
-    /// SQLite / PostgreSQL: nil.
-    public let vectorCount: Int?
-
     // MARK: - Metadata
 
     /// Timestamp at which the snapshot was captured.
@@ -181,7 +174,6 @@ public struct StorageStats: Sendable, Equatable {
         lockContention: Bool? = nil,
         rowCount: Int? = nil,
         blobCount: Int? = nil,
-        vectorCount: Int? = nil,
         capturedAt: Date
     ) {
         self.logicalSizeBytes = logicalSizeBytes
@@ -196,7 +188,6 @@ public struct StorageStats: Sendable, Equatable {
         self.lockContention = lockContention
         self.rowCount = rowCount
         self.blobCount = blobCount
-        self.vectorCount = vectorCount
         self.capturedAt = capturedAt
     }
 }

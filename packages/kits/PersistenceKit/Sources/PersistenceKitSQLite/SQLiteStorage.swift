@@ -10,7 +10,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -25,7 +25,6 @@ public final class SQLiteStorage: Storage, Sendable {
 
     public let rowStore: any RowStore
     public let blobStore: any BlobStore
-    public let vectorIndex: any VectorIndex
     public let auditLog: any AuditLog
     public let observer: any StorageObserver
 
@@ -54,7 +53,6 @@ public final class SQLiteStorage: Storage, Sendable {
             ? CachingRowStore(backing: baseRowStore, config: configuration.cacheConfig)
             : baseRowStore
         self.blobStore = SQLiteBlobStore(backend: backend)
-        self.vectorIndex = SQLiteVectorIndex(backend: backend)
         self.auditLog = SQLiteAuditLog(backend: backend)
         self.observer = SQLiteObserver(registry: registry)
     }
@@ -132,6 +130,18 @@ actor SQLiteBackend {
         }
     }
 
+    /// Emit a blob change to all blob subscribers registered via observeBlobs().
+    ///
+    /// Called after every successful putBlob/deleteBlob so the incremental
+    /// replication session can accumulate dirty blob keys without polling.
+    /// Spawns a non-blocking Task to avoid holding the actor while the async
+    /// registry notify runs — identical pattern to notifyObservers.
+    private func notifyBlobChange(_ change: BlobChange) {
+        if let r = observerRegistry {
+            Task { await r.notifyBlob(change) }
+        }
+    }
+
     func close() {
         connection.close()
     }
@@ -146,7 +156,6 @@ actor SQLiteBackend {
         try connection.exec(SQLiteSchema.auditIndexSQL)
         try connection.exec(SQLiteSchema.auditHLCIndexSQL)
         try connection.exec(SQLiteSchema.blobTableSQL)
-        try connection.exec(SQLiteSchema.vectorMetadataTableSQL)
 
         // User-declared tables.
         for table in schema.tables {
@@ -439,14 +448,26 @@ actor SQLiteBackend {
         orderBy: [OrderClause],
         limit: Int?,
         offset: Int?,
-        tableSchema: TableDeclaration?
+        tableSchema: TableDeclaration?,
+        columns: [String]?
     ) throws -> [StorageRow] {
         // Resolve declared types from the retained schema so typed
         // columns decode to their proper TypedValue case. An explicit
         // tableSchema argument overrides the retained lookup.
         let resolvedSchema = tableSchema
             ?? schemaDeclaration?.tables.first(where: { $0.name == table })
-        var sql = "SELECT * FROM \"\(table)\""
+        // Column projection (no-blob read): a non-nil `columns` list emits an
+        // explicit SELECT of exactly those columns, so an unnamed column (e.g.
+        // "content") is never read out of SQLite. A nil projection is the
+        // historical full `SELECT *`. Identifiers are quoted; an empty list
+        // degrades to `*` rather than producing invalid SQL.
+        let projection: String
+        if let columns, !columns.isEmpty {
+            projection = columns.map { "\"\($0)\"" }.joined(separator: ", ")
+        } else {
+            projection = "*"
+        }
+        var sql = "SELECT \(projection) FROM \"\(table)\""
         var bindings: [TypedValue] = []
         if let predicate {
             let compiled = SQLitePredicateCompiler.compile(predicate)
@@ -475,7 +496,11 @@ actor SQLiteBackend {
             var values: [String: TypedValue] = [:]
             for i in 0..<colCount {
                 let name = stmt.columnName(i)
-                values[name] = readColumn(stmt: stmt, index: i, schema: resolvedSchema, columnName: name)
+                // readColumn throws StorageError.corruptStoredValue when a
+                // TEXT value for a .uuid or .timestamp column cannot be parsed.
+                // The error propagates out of queryRows so the caller knows the
+                // row is unreadable rather than receiving a silently wrong value.
+                values[name] = try readColumn(stmt: stmt, index: i, schema: resolvedSchema, columnName: name, table: table)
             }
             // At-rest decryption seam (mode 2/3): decrypt the content
             // column when the row carries a key identifier. No-op for mode 1.
@@ -709,12 +734,24 @@ actor SQLiteBackend {
         return keys
     }
 
+    /// Read one column from the current statement row into a TypedValue.
+    ///
+    /// **Type-tolerant vs. parse-failure distinction:**
+    /// - Type-tolerant decode (valid value in the wrong column affinity) stays:
+    ///   e.g. an INTEGER stored for a .uuid column is passed through as
+    ///   `.text` so the caller sees the raw value rather than an opaque error.
+    ///   This handles legitimate SQLite affinity coercions for VALID data.
+    /// - Parse-failure on a VALID TEXT column becomes a thrown
+    ///   `.corruptStoredValue` error: if the stored string cannot be parsed as
+    ///   the declared type (UUID or ISO-8601 timestamp), the data is corrupt
+    ///   and we must not silently substitute a random UUID or epoch-0 date.
     private func readColumn(
         stmt: SQLiteStatement,
         index: Int32,
         schema: TableDeclaration?,
-        columnName: String
-    ) -> TypedValue {
+        columnName: String,
+        table: String
+    ) throws -> TypedValue {
         let sqliteType = stmt.columnType(index)
         if sqliteType == SQLITE_NULL { return .null }
 
@@ -739,8 +776,30 @@ actor SQLiteBackend {
         case SQLITE_TEXT:
             let s = stmt.columnText(index) ?? ""
             switch kitType {
-            case .uuid: return .uuid(UUID(uuidString: s) ?? UUID())
-            case .timestamp: return .timestamp(ISO8601.date(from: s) ?? Date(timeIntervalSince1970: 0))
+            case .uuid:
+                // A stored UUID string that cannot be parsed is corrupt data —
+                // substituting UUID() would create a silent data identity lie.
+                // Throw so the caller knows the row is unreadable.
+                guard let uuid = UUID(uuidString: s) else {
+                    throw StorageError.corruptStoredValue(
+                        table: table,
+                        column: columnName,
+                        storedText: s
+                    )
+                }
+                return .uuid(uuid)
+            case .timestamp:
+                // A stored timestamp string that cannot be parsed is corrupt data —
+                // substituting epoch-0 would silently mis-date every downstream
+                // consumer. Throw so the caller knows the row is unreadable.
+                guard let date = ISO8601.date(from: s) else {
+                    throw StorageError.corruptStoredValue(
+                        table: table,
+                        column: columnName,
+                        storedText: s
+                    )
+                }
+                return .timestamp(date)
             default: return .text(s)
             }
         case SQLITE_BLOB:
@@ -756,9 +815,9 @@ actor SQLiteBackend {
     }
 
     private func unpackHLC(_ packed: UInt64) -> HLC {
-        // Use the canonical inverse: HLC(packed:) matches HLC.packed's
-        // layout (node<<56 | logical<<40 | physical). The old inline
-        // decode used a different layout and silently corrupted reads.
+        // Canonical inverse of HLC.packed. Layout: node<<56 | logical<<40 | physical.
+        // HLC.packed stores the three fields in that order; HLC(packed:) recovers
+        // them exactly, giving bit-identical round-trips through SQLite INTEGER.
         return HLC(packed: packed)
     }
 
@@ -787,6 +846,10 @@ actor SQLiteBackend {
         try stmt.bind(.text(key), at: 1)
         try stmt.bind(.blob(bytes), at: 2)
         _ = try stmt.step()
+        // Notify blob subscribers after a successful write. The bytes are
+        // carried in the notification so the incremental replication session
+        // can propagate the value without a second round-trip to the source.
+        notifyBlobChange(BlobChange(key: key, event: .put, bytes: bytes))
     }
 
     func getBlob(_ key: BlobKey) throws -> Data? {
@@ -802,6 +865,10 @@ actor SQLiteBackend {
         defer { stmt.finalize() }
         try stmt.bind(.text(key), at: 1)
         _ = try stmt.step()
+        // Notify blob subscribers after a successful delete. bytes is nil for
+        // delete events — the incremental session only needs the key to issue
+        // a delete on the destination.
+        notifyBlobChange(BlobChange(key: key, event: .delete, bytes: nil))
     }
 
     func blobExists(_ key: BlobKey) throws -> Bool {
@@ -817,6 +884,18 @@ actor SQLiteBackend {
         try stmt.bind(.text(key), at: 1)
         guard try stmt.step() else { return nil }
         return Int(stmt.columnInt64(0))
+    }
+
+    func listBlobKeys() throws -> [BlobKey] {
+        let stmt = try connection.prepare("SELECT \"key\" FROM \"_storagekit_blobs\"")
+        defer { stmt.finalize() }
+        var keys: [BlobKey] = []
+        while try stmt.step() {
+            if let key = stmt.columnText(0) {
+                keys.append(key)
+            }
+        }
+        return keys
     }
 
     // MARK: - Audit operations
@@ -898,7 +977,11 @@ actor SQLiteBackend {
 
         var events: [AuditEvent] = []
         while try stmt.step() {
-            events.append(decodeAuditRow(stmt))
+            // decodeAuditRow throws StorageError.corruptStoredValue when a UUID
+            // column cannot be parsed. The error propagates so callers know a
+            // specific audit row is unreadable rather than receiving a fabricated
+            // event with a randomly-generated ID.
+            events.append(try decodeAuditRow(stmt))
         }
         return events
     }
@@ -911,7 +994,7 @@ actor SQLiteBackend {
         try stmt.bind(.text(rowID.uuidString), at: 1)
         var events: [AuditEvent] = []
         while try stmt.step() {
-            events.append(decodeAuditRow(stmt))
+            events.append(try decodeAuditRow(stmt))
         }
         return events
     }
@@ -923,13 +1006,33 @@ actor SQLiteBackend {
         return Int(stmt.columnInt64(0))
     }
 
-    private func decodeAuditRow(_ stmt: SQLiteStatement) -> AuditEvent {
-        let eventID = UUID(uuidString: stmt.columnText(0) ?? "") ?? UUID()
-        // Use the canonical inverse: HLC(packed:) matches HLC.packed's
-        // layout (node<<56 | logical<<40 | physical).
+    /// Decode one audit row from the statement into an AuditEvent.
+    ///
+    /// UUID columns (event_id, estate_uuid, row_id) are stored as uppercase
+    /// TEXT. An unparseable string means the row is corrupt; throw
+    /// `.corruptStoredValue` rather than substituting a random UUID which
+    /// would produce a valid-looking but fabricated audit record.
+    private func decodeAuditRow(_ stmt: SQLiteStatement) throws -> AuditEvent {
+        let table = "_storagekit_audit"
+
+        let eventIDStr = stmt.columnText(0) ?? ""
+        guard let eventID = UUID(uuidString: eventIDStr) else {
+            throw StorageError.corruptStoredValue(table: table, column: "event_id", storedText: eventIDStr)
+        }
+        // HLC is stored as Int64(bitPattern: hlc.packed); recover via HLC(packed:)
+        // for a bit-identical round-trip.
         let hlc = HLC(packed: UInt64(bitPattern: stmt.columnInt64(1)))
-        let estateUUID = UUID(uuidString: stmt.columnText(2) ?? "") ?? UUID()
-        let rowId = UUID(uuidString: stmt.columnText(3) ?? "") ?? UUID()
+
+        let estateUUIDStr = stmt.columnText(2) ?? ""
+        guard let estateUUID = UUID(uuidString: estateUUIDStr) else {
+            throw StorageError.corruptStoredValue(table: table, column: "estate_uuid", storedText: estateUUIDStr)
+        }
+
+        let rowIdStr = stmt.columnText(3) ?? ""
+        guard let rowId = UUID(uuidString: rowIdStr) else {
+            throw StorageError.corruptStoredValue(table: table, column: "row_id", storedText: rowIdStr)
+        }
+
         let verb = stmt.columnText(4) ?? ""
 
         let beforeBitmaps: (adjective: Int64, operational: Int64, provenance: Int64)?

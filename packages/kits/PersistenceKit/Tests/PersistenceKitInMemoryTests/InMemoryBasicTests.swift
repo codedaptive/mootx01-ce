@@ -10,7 +10,7 @@ import PersistenceKitInMemory
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -199,27 +199,6 @@ struct InMemoryBasicTests {
 
         let count = try await storage.rowStore.count(table: "drawers", where: nil)
         #expect(count == 1)
-    }
-
-    @Test func vectorKNN() async throws {
-        let storage = makeStorage()
-        try await storage.open(schema: makeSchema())
-
-        let k1 = UUID(), k2 = UUID(), k3 = UUID()
-        try await storage.vectorIndex.add(key: k1, vector: [1, 0, 0], metadata: [:])
-        try await storage.vectorIndex.add(key: k2, vector: [0, 1, 0], metadata: [:])
-        try await storage.vectorIndex.add(key: k3, vector: [0.9, 0.1, 0], metadata: [:])
-
-        let results = try await storage.vectorIndex.knn(
-            query: [1, 0, 0],
-            k: 2,
-            metric: .cosine,
-            filter: nil,
-            searchParameters: nil
-        )
-        #expect(results.count == 2)
-        #expect(results[0].key == k1, "exact match wins")
-        #expect(results[1].key == k3, "near match comes second")
     }
 
     @Test func blobRoundtrip() async throws {

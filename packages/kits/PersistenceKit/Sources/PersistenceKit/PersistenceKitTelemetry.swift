@@ -45,7 +45,6 @@
 //      persistence.db.lock_contention    — lock contention flag (SQLite + PG)
 //      persistence.db.row_count          — total row count (InMemory only)
 //      persistence.db.blob_count         — blob count (InMemory only)
-//      persistence.db.vector_count       — vector count (InMemory only)
 //
 // 6. Conformance guarantee.
 //    `reportStorageStats` does not modify the stats returned by `stats(now:)`,
@@ -226,7 +225,7 @@ public func reportStorageStats(
         ))
     }
 
-    // InMemory-specific fields: row_count, blob_count, vector_count.
+    // InMemory-specific fields: row_count, blob_count.
     // These are nil for SQLite and PostgreSQL.
 
     if let rowCount = stats.rowCount {
@@ -249,13 +248,4 @@ public func reportStorageStats(
         ))
     }
 
-    if let vectorCount = stats.vectorCount {
-        // Number of entries in the InMemory vector store.
-        Intellectus.report(.metric(
-            name: "persistence.db.vector_count",
-            value: Double(vectorCount),
-            tags: baseTags,
-            ts: ts
-        ))
-    }
 }

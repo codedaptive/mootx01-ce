@@ -2,7 +2,7 @@
 
 Rust port of the Swift `PersistenceKit` package. Mirrors the closed-enum predicate algebra, typed value carriers, schema declaration, and the five abstraction protocols: `Storage`, `RowStore`, `BlobStore`, `VectorIndex`, `AuditLog`, `StorageObserver`.
 
-**Status:** v1.0 InMemory backend shipped (Rust mission 2). SQLite and PostgreSQL backends deferred to a follow-on R-mission. The trait surface is stable; backends slot in additively.
+**Status:** All three backends shipped: `InMemoryStorage`, `SqliteStorage`, and `PostgresStorage`. The SQLite backend runs the full conformance suite (10 integration tests covering schema, rows, predicates, blobs, vectors, audit, generated columns, transactions, append-only, and introspection). The PostgreSQL backend compiles and runs the same conformance suite when `PERSISTENCEKIT_PG_URL` points to a scratch database; it is skipped by default without a live server.
 
 ## Trait surface
 
@@ -16,16 +16,18 @@ Synchronous (`Result<T, StorageError>`). The Swift side uses `async` because Swi
 - `EstateConfiguration`, `BackendConfiguration` (InMemory, Sqlite, Postgresql variants reserved)
 - `Storage`, `RowStore`, `BlobStore`, `VectorIndex`, `AuditLog`, `StorageObserver` traits
 - `StorageError` (11 variants)
-- `InMemoryStorage` backend (this crate's only conforming backend at v1.0)
+- `InMemoryStorage` backend — full conforming backend for tests and ephemeral estates
+- `SqliteStorage` backend — file-backed, full predicate compiler, BlobStore, VectorIndex (sqlite-vec), AuditLog, StorageObserver, StorageTransaction, StorageIntrospection
+- `PostgresStorage` backend — full predicate compiler, BlobStore, VectorIndex (pgvector-compatible), AuditLog, StorageObserver, StorageTransaction, StorageIntrospection; lazy-connect (no network I/O on `new()`)
 - `NoOpObserver` for backends without change notification
-- 17 integration tests covering insert / query / order / paginate / upsert / update / delete / bitmask predicates / blobs / vector kNN / audit log idempotence / audit ordering / observer fire / observer filter / schema version / LIKE patterns / predicate short-circuit
+- `CachingRowStore` — LRU row cache wrapper over any `RowStore`
+- 17 InMemory integration tests covering insert / query / order / paginate / upsert / update / delete / bitmask predicates / blobs / vector kNN / audit log idempotence / audit ordering / observer fire / observer filter / schema version / LIKE patterns / predicate short-circuit
+- SQLite conformance suite (10 tests): full `run_all` fixture battery + 9 `StorageIntrospection` tests
+- PostgreSQL conformance suite: same fixture battery, gated on `PERSISTENCEKIT_PG_URL` environment variable
 
 ## What does NOT ship at v1.0
 
-- SQLite backend with predicate compiler (follow-on R-mission)
-- PostgreSQL backend with pgvector (follow-on R-mission)
-- `StorageTransaction` trait (Swift has it via async closure; Rust v1.0 omits it because the closure-with-trait-objects pattern adds noise. The SQLite backend lands with explicit begin/commit/rollback.)
-- `AuditEvent` lattice anchor decode (stored as raw `u64` codes; the lattice algebra lives in LocusKit which has not been ported yet)
+- `AuditEvent` lattice anchor decode to a meaningful lattice coordinate (the raw `u64` codes are stored and read back correctly; semantic interpretation requires LatticeLib, which was not ported at the time these backends landed)
 
 ## Building
 

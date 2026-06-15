@@ -10,7 +10,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -105,10 +105,10 @@ func decodeRow(_ row: PostgresRow, columns: [ColumnDeclaration]) -> [String: Typ
     var out: [String: TypedValue] = [:]
     let randomAccessRow = row.makeRandomAccess()
     for col in columns {
-        guard let cell = try? randomAccessRow[col.name] else {
-            out[col.name] = .null
-            continue
-        }
+        // PostgresRandomAccessRow's by-name subscript is non-throwing and
+        // returns the cell directly. `columns` always describes the query's own
+        // projection, so every name is present in the row.
+        let cell = randomAccessRow[col.name]
         out[col.name] = decodeCell(cell, type: col.type)
     }
     return out
