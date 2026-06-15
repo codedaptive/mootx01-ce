@@ -17,7 +17,7 @@ Two targets:
 Per `docs/decisions/DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md` section 4.7:
 
 1. Tokenization migrated from VectorKit to CorpusKit. Tokenizer protocol defines vocab id, max tokens, pad and unknown ids, model tokenization, and BM25 keyword tokenization with a default implementation.
-2. Three text embedding providers ship (MiniLM, mpnet, EmbeddingGemma). Each carries its own DeterministicTokenizer stand-in for v1.0; real WordPiece and SentencePiece tokenizers ship when the upstream CoreML model bundles include the vocab metadata.
+2. Three text embedding providers ship (MiniLM, mpnet, EmbeddingGemma). Each carries its own DeterministicTokenizer stand-in for v1.0; real WordPiece and SentencePiece tokenizers ship in the v1.1 model-bundle mission (per DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
 3. Chunker uses NaturalLanguage sentence segmentation with a configurable target (default 800 chars) and overlap (default 100 chars).
 4. BundleStore consumes PersistenceKit; one schema declaration (`BundleStore.schemaDeclaration`), one table (`chunks`), idempotent on primary key.
 5. BM25Index is an actor; rebuilt on demand from the bundle store. Configurable k1 and b.

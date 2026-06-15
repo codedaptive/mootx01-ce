@@ -10,11 +10,16 @@
 //! and `BundleStore` handle their own interior mutability through
 //! `Arc<dyn Storage>`. The struct is `Send + Sync`.
 //!
-//! Platform note: CoreML is Apple-only. The Swift port ships `miniLM`,
-//! `mpNet`, and `embeddingGemma` `EmbeddingModel` cases that accept
-//! CoreML inference closures. The Rust `EmbeddingModelConfig` ships only
-//! `Deterministic`; ONNX/Candle-backed named models land in a follow-on
-//! mission once model bundles are wired in (SPEC § 9).
+//! Platform note: model inference is host-supplied on BOTH ports. The
+//! Swift `EmbeddingModel` cases `miniLM`/`mpNet`/`embeddingGemma` accept
+//! an inference closure (CoreML on Apple); `EmbeddingModelConfig` here
+//! carries the SAME named cases over an inference closure the host wraps
+//! around whatever runtime it chooses on Windows/Linux (the kit bundles
+//! no model weights and links no ML-runtime crate — external deps are
+//! prohibited). The seam payload is identical to Swift: token IDs in,
+//! pooled float vector out. The kit owns the FNV-1a tokenization and the
+//! FloatSimHash projection on both ports; for any shared (text -> pooled
+//! vector) the engram is bit-identical Swift/Rust (SPEC § 8.2).
 
 use crate::bm25_index::BM25Index;
 use crate::bundle_store::BundleStore;
@@ -23,16 +28,21 @@ use crate::chunker::{chunk_with_default_hlc, ChunkerConfiguration};
 use crate::error::{CorpusKitError, CorpusKitResult};
 use crate::hybrid_recall::{recall as hybrid_recall, HybridRecallConfiguration};
 use crate::tokenizer::{default_keyword_tokens, Tokenizer};
+use engram_lib::Engram;
+use intellectus_lib::{report, StatSample};
 use std::sync::{Arc, Mutex};
+use substrate_ml::float_simhash;
 use vectorkit::simhash_embedding_provider::FloatSimHashEmbeddingProvider;
 use vectorkit::vector_store::VectorStore;
 use vectorkit::EmbeddingProvider;
+use vectorkit::VectorKitError;
+use vectorkit::VectorPayload;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -42,14 +52,70 @@ use vectorkit::EmbeddingProvider;
 // ─────────────────────────────────────────────────────────────────
 use persistence_kit::Storage;
 
+// MARK: - FloatLaneOutcome
+
+/// Observable outcome of a `Corpus::float_nearest` call.
+///
+/// Mirrors Swift `FloatLaneOutcome`. Dark outcomes are EXPECTED degradations;
+/// the caller degrades gracefully. `StoreError` is NOT expected: the error
+/// description is emitted via `eprintln!` (Rust has no OSLog equivalent) and
+/// counted via `corpus.float_lane.store_error` so failures are never swallowed.
+///
+/// Callers must never treat a dark outcome as a failure. A dark dense lane
+/// means the query continues on other lanes only.
+#[derive(Debug)]
+pub enum FloatLaneOutcome {
+    /// Lane ran and returned at least one ranked hit.
+    ///
+    /// Contains `(item_id, cosine_similarity)` pairs nearest-first.
+    /// `item_id` == `source_id` at ingest time (drawer ID in the GLK context).
+    /// Similarity ∈ \[−1, 1\], 1.0 = identical direction.
+    Hits(Vec<(String, f32)>),
+
+    /// Provider opted out — expected, not an error.
+    ///
+    /// The provider's `embed_float` errored (it has no float lane). This is
+    /// the normal outcome for `EmbeddingModelConfig::Deterministic` on
+    /// providers that do not override `embed_float`. The dense lane is dark;
+    /// all other lanes are unaffected.
+    UnavailableProviderOptOut,
+
+    /// No float rows stored — expected when ingest has not run with a
+    /// float-capable provider. Dense lane is dark; other lanes unaffected.
+    UnavailableNoFloatRows,
+
+    /// Query was empty or `limit` was zero — the call was a no-op.
+    ///
+    /// No telemetry emitted: the guard fired before any store access.
+    EmptyQuery,
+
+    /// Vector store threw during `find_nearest_float`.
+    ///
+    /// NOT an expected degradation. The error is printed via `eprintln!`
+    /// (Rust has no OSLog; this mirrors Swift's `corpusLog.error`) and
+    /// counted via `corpus.float_lane.store_error` so dashboards surface it.
+    /// The query continues on other lanes — this degrades, never fails.
+    StoreError(String),
+}
+
 // MARK: - EmbeddingModelConfig
+
+/// Host-supplied inference seam for the named model cases: FNV-1a
+/// token IDs in, pooled float vector out. Mirrors the Swift
+/// `EmbeddingModel` cases' `([Int32]) async throws -> [Float]`
+/// closure; synchronous to match the Rust `EmbeddingProvider` trait
+/// (the host adapts any async model pass behind this boundary).
+pub type NamedInferenceFn = Box<dyn Fn(&[i32]) -> Result<Vec<f32>, String> + Send + Sync + 'static>;
 
 /// Selects the embedding model the `Corpus` struct uses internally.
 ///
-/// Rust counterpart to Swift's `EmbeddingModel`. Because CoreML is
-/// Apple-only, the named model cases (MiniLM, MPNet, EmbeddingGemma)
-/// are not available in this port; they land in a follow-on mission
-/// once ONNX/Candle-backed providers are wired in.
+/// Rust counterpart to Swift's `EmbeddingModel`. Model inference is
+/// host-supplied on every platform, so the named cases each carry an
+/// inference closure the host injects — exactly as the Swift cases do.
+/// The kit owns FNV-1a tokenization and the FloatSimHash projection;
+/// the host owns the model pass (CoreML on Apple, a host-chosen runtime
+/// on Windows/Linux). No model weights are bundled and no ML-runtime
+/// crate is linked.
 ///
 /// Use `Deterministic` (the default) for tests and offline contexts.
 #[derive(Default)]
@@ -61,7 +127,29 @@ pub enum EmbeddingModelConfig {
     /// not semantically meaningful. Suitable for tests and offline use.
     #[default]
     Deterministic,
+
+    /// MiniLM v6 text embedding (384-dim pooled output). The kit
+    /// tokenizes (FNV-1a, vocab 30522, max 128 tokens) and projects
+    /// through FloatSimHash with the canonical MiniLM seed; the host
+    /// closure runs the model pass on the token IDs.
+    MiniLM { inference: NamedInferenceFn },
+
+    /// MPNet base v2 text embedding (768-dim pooled output). FNV-1a
+    /// tokenization (vocab 30522, max 128 tokens), MPNet projection seed.
+    MPNet { inference: NamedInferenceFn },
+
+    /// Embedding-Gemma 300M (768-dim pooled output). FNV-1a tokenization
+    /// (vocab 256000, max 2048 tokens), EmbeddingGemma projection seed.
+    EmbeddingGemma { inference: NamedInferenceFn },
 }
+
+// Model-specific projection seeds. Byte-identical to the Swift
+// `EmbeddingModel` seeds and to CorpusKitProviders' provider seeds, so a
+// vector stored under either surface keys identically. Changing a seed
+// re-keys all stored vectors for that model.
+const MINILM_SEED: u64 = 0x4D49_4E4C_4D5F_7631; // "MINLM_v1"
+const MPNET_SEED: u64 = 0x4D50_4E45_545F_7631; // "MPNET_v1"
+const EMBEDDING_GEMMA_SEED: u64 = 0x454D_4247_4D5F_7631; // "EMBGM_v1"
 
 // Seed is distinct from all model-specific seeds and matches the Swift
 // EmbeddingModel.deterministicSeed for cross-port consistency.
@@ -127,6 +215,15 @@ pub struct Corpus {
     chunk_source_map: Mutex<std::collections::HashMap<uuid::Uuid, String>>,
     vector_store: VectorStore,
     provider: Box<dyn EmbeddingProvider>,
+    /// Test-only seam: when `Some`, `float_nearest` returns `StoreError(this)` on the
+    /// next call, consuming the value. Never set in production code.
+    ///
+    /// Available only when the `test-seams` feature is enabled (declared in
+    /// [dev-dependencies] by any crate that needs force-testing). Mirrors the
+    /// Swift `_forcedFloatError: Error?` seam on the `Corpus` actor (gate-2).
+    /// Production builds have no knowledge of this field.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub forced_float_error: Mutex<Option<String>>,
 }
 
 impl Corpus {
@@ -154,11 +251,38 @@ impl Corpus {
             .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
 
         let bundle_store = BundleStore::new(Arc::clone(&storage));
-        let vector_store = VectorStore::new(Arc::clone(&storage));
+        // No sidecar path for the CorpusKit Rust path — memory-only resident array.
+        // The SQLite table remains the durable source of truth; the resident array
+        // is rebuilt from the table on first find_nearest call.
+        let vector_store = VectorStore::new(Arc::clone(&storage), None);
 
         let bm25 = BM25Index::new(Arc::new(CorpusBm25Tokenizer));
         let provider: Box<dyn EmbeddingProvider> = match model {
             EmbeddingModelConfig::Deterministic => Box::new(make_deterministic_provider()),
+            EmbeddingModelConfig::MiniLM { inference } => Box::new(CorpusTextProvider::new(
+                "minilm-v6",
+                "1.0.0",
+                MINILM_SEED,
+                30522,
+                128,
+                inference,
+            )),
+            EmbeddingModelConfig::MPNet { inference } => Box::new(CorpusTextProvider::new(
+                "mpnet-base-v2",
+                "1.0.0",
+                MPNET_SEED,
+                30522,
+                128,
+                inference,
+            )),
+            EmbeddingModelConfig::EmbeddingGemma { inference } => Box::new(CorpusTextProvider::new(
+                "embedding-gemma-300m",
+                "1.0.0",
+                EMBEDDING_GEMMA_SEED,
+                256_000,
+                2048,
+                inference,
+            )),
         };
 
         Ok(Corpus {
@@ -167,6 +291,43 @@ impl Corpus {
             chunk_source_map: Mutex::new(std::collections::HashMap::new()),
             vector_store,
             provider,
+            #[cfg(any(test, feature = "test-seams"))]
+            forced_float_error: Mutex::new(None),
+        })
+    }
+
+    // MARK: - Test seams (not part of the production surface)
+
+    /// Test-only constructor that accepts an `EmbeddingProvider` directly.
+    ///
+    /// Mirrors Swift's internal `init(storage:provider:)` seam. Allows test suites
+    /// to inject a custom provider (e.g. one whose `embed_float` always errors) so
+    /// the `UnavailableProviderOptOut` path can be force-tested without modifying
+    /// production code. Available only when the `test-seams` feature is enabled.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn open_with_provider(
+        storage: Arc<dyn Storage>,
+        provider: Box<dyn EmbeddingProvider>,
+    ) -> CorpusKitResult<Self> {
+        storage
+            .migrate(&BundleStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        storage
+            .migrate(&VectorStore::schema_declaration())
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+
+        let bundle_store = BundleStore::new(Arc::clone(&storage));
+        let vector_store = VectorStore::new(Arc::clone(&storage), None);
+        let bm25 = BM25Index::new(Arc::new(CorpusBm25Tokenizer));
+
+        Ok(Corpus {
+            bundle_store,
+            bm25: Mutex::new(bm25),
+            chunk_source_map: Mutex::new(std::collections::HashMap::new()),
+            vector_store,
+            provider,
+            #[cfg(any(test, feature = "test-seams"))]
+            forced_float_error: Mutex::new(None),
         })
     }
 
@@ -228,6 +389,32 @@ impl Corpus {
                     filed_at_secs,
                 )
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+
+            // Float lane (Lane D): RETAIN, don't recompute. The provider's
+            // float vector is the SAME pooled embedding `embed` already ran
+            // through the SimHash projection for the binary engram — one
+            // inference pass, two stored rows. The float row is a SECOND row
+            // per chunk under the same item_id at vector_index=1 (the binary
+            // engram is vector_index=0), tagged kind=float32. Written only when
+            // the provider supports embed_float; the default provider opts out
+            // by erroring, so a non-float provider stores the binary lane only
+            // and the dense float lane stays dark for it. Cosine over this true
+            // embedding ranks an answer above a near-duplicate of the question,
+            // which the 256-bit SimHash projection cannot.
+            if let Ok(floats) = self.provider.embed_float(&chunk.text) {
+                if !floats.is_empty() {
+                    self.vector_store
+                        .add_payload(
+                            &chunk.id.to_string(),
+                            1,
+                            &VectorPayload::from_f32(&floats),
+                            self.provider.model_id(),
+                            self.provider.model_version(),
+                            filed_at_secs,
+                        )
+                        .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
+                }
+            }
         }
         Ok(())
     }
@@ -289,6 +476,232 @@ impl Corpus {
     /// Mirrors Swift `Corpus.modelID`.
     pub fn model_id(&self) -> &str {
         self.provider.model_id()
+    }
+
+    /// Embed the query text into the pooled dense float vector (Lane D) — the
+    /// probe for the dense float recall lane. Delegates to the provider's
+    /// `embed_float`. Providers without a float lane error; the caller treats
+    /// that as "this corpus has no float lane" and skips the dense lane rather
+    /// than failing the whole recall. Empty input returns `[]`. Mirrors Swift
+    /// `Corpus.embedFloat(_:)`.
+    pub fn embed_float(&self, text: &str) -> CorpusKitResult<Vec<f32>> {
+        self.provider
+            .embed_float(text)
+            .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{:?}", e)))
+    }
+
+    /// Dense float nearest-neighbour recall (Lane D): embed `query` to its
+    /// pooled float vector and rank stored chunks by cosine over the in-house
+    /// `FloatBruteForceIndex`. Returns a `FloatLaneOutcome` that is always
+    /// observable — dark lanes carry a typed reason, store errors are printed
+    /// and counted via telemetry, never swallowed.
+    ///
+    /// Mirrors Swift `Corpus.floatNearest(query:limit:)`.
+    ///
+    /// **Degradation contract:** this method never panics. A dark lane is
+    /// represented as `UnavailableProviderOptOut`, `UnavailableNoFloatRows`,
+    /// or `EmptyQuery` — all expected. `StoreError` is NOT expected: the
+    /// error is printed via `eprintln!` and emitted as
+    /// `corpus.float_lane.store_error` telemetry so the failure is always
+    /// observable. The query continues on other lanes.
+    ///
+    /// **Telemetry** (off by default — single `AtomicBool::load(Acquire)` when disabled):
+    /// - `corpus.float_lane.hit`           — lane ran and returned ≥1 result.
+    /// - `corpus.float_lane.dark_provider` — provider opted out.
+    /// - `corpus.float_lane.dark_no_rows`  — no float rows stored.
+    /// - `corpus.float_lane.store_error`   — unexpected store failure.
+    pub fn float_nearest(&self, query: &str, limit: usize) -> FloatLaneOutcome {
+        if limit == 0 || query.is_empty() {
+            // Empty query or zero limit — no telemetry: this is a no-op call.
+            return FloatLaneOutcome::EmptyQuery;
+        }
+
+        // Test-only hook: if a forced error is installed, consume it and return
+        // StoreError immediately — mirrors the Swift `_forcedFloatError` seam.
+        // Compiled in only when the `test-seams` feature is active; the block
+        // is completely absent from production builds.
+        #[cfg(any(test, feature = "test-seams"))]
+        {
+            let mut guard = self.forced_float_error.lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(err_str) = guard.take() {
+                drop(guard);
+                eprintln!("corpus.float_nearest: find_nearest_float failed (forced) — {}", err_str);
+                report!(StatSample::metric(
+                    "corpus.float_lane.store_error".to_string(),
+                    1.0,
+                    [("kit".to_string(), "CorpusKit".to_string())]
+                        .into_iter().collect(),
+                    {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now().duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                    },
+                ));
+                return FloatLaneOutcome::StoreError(err_str);
+            }
+        }
+
+        // Attempt to embed the query via the float lane. A provider without a
+        // float lane will error here — this is the expected opt-out path (not a
+        // store error). Emit the dark_provider counter so callers can observe it.
+        let probe = match self.provider.embed_float(query) {
+            Ok(p) if !p.is_empty() => p,
+            Ok(_) => {
+                // Provider returned an empty vector — treat as opt-out.
+                report!(StatSample::metric(
+                    "corpus.float_lane.dark_provider".to_string(),
+                    1.0,
+                    [("kit".to_string(), "CorpusKit".to_string())]
+                        .into_iter().collect(),
+                    {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now().duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                    },
+                ));
+                return FloatLaneOutcome::UnavailableProviderOptOut;
+            }
+            Err(_) => {
+                // Provider threw — expected opt-out (no float lane).
+                // Log nothing; emit the dark_provider counter only.
+                report!(StatSample::metric(
+                    "corpus.float_lane.dark_provider".to_string(),
+                    1.0,
+                    [("kit".to_string(), "CorpusKit".to_string())]
+                        .into_iter().collect(),
+                    {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now().duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                    },
+                ));
+                return FloatLaneOutcome::UnavailableProviderOptOut;
+            }
+        };
+
+        // Over-fetch 4× at CHUNK granularity so after source-level aggregation
+        // we still have at least `limit` sources — mirrors bm25_top_k_by_source.
+        let matches = match self.vector_store.find_nearest_float(
+            &probe,
+            self.provider.model_id(),
+            limit.saturating_mul(4),
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                // Store threw — NOT expected. Print so the error is never
+                // silent (mirrors Swift's corpusLog.error via OSLog). Emit
+                // the store_error counter so dashboards surface the failure.
+                let err_str = format!("{:?}", e);
+                eprintln!("corpus.float_nearest: find_nearest_float failed — {}", err_str);
+                report!(StatSample::metric(
+                    "corpus.float_lane.store_error".to_string(),
+                    1.0,
+                    [("kit".to_string(), "CorpusKit".to_string())]
+                        .into_iter().collect(),
+                    {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        SystemTime::now().duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                    },
+                ));
+                return FloatLaneOutcome::StoreError(err_str);
+            }
+        };
+
+        // Empty matches — no float rows stored. Expected dark outcome.
+        if matches.is_empty() {
+            report!(StatSample::metric(
+                "corpus.float_lane.dark_no_rows".to_string(),
+                1.0,
+                [("kit".to_string(), "CorpusKit".to_string())]
+                    .into_iter().collect(),
+                {
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    SystemTime::now().duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                },
+            ));
+            return FloatLaneOutcome::UnavailableNoFloatRows;
+        }
+
+        // Aggregate chunk-level cosine to SOURCE (drawer) level via the in-memory
+        // reverse map: the vector item_id is the chunk uuid string;
+        // chunk_source_map resolves it to the sourceID ingested under (the drawer
+        // id in the GLK context), exactly as bm25_top_k_by_source does, so float
+        // hits hydrate back to the real Drawer row. A source's similarity is its
+        // best (max) chunk cosine. VectorMatch.distance is the cosine DISTANCE
+        // (1 − sim) ×10_000; recover sim = 1 − dist/10_000.
+        let csm = match self.chunk_source_map.lock() {
+            Ok(guard) => guard,
+            Err(_) => return FloatLaneOutcome::UnavailableNoFloatRows,
+        };
+        let mut by_source: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+        for m in &matches {
+            let chunk_uuid = match uuid::Uuid::parse_str(&m.item_id) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            if let Some(source_id) = csm.get(&chunk_uuid) {
+                let similarity = 1.0 - m.distance as f32 / 10_000.0;
+                let entry = by_source
+                    .entry(source_id.clone())
+                    .or_insert(f32::NEG_INFINITY);
+                *entry = entry.max(similarity);
+            }
+        }
+        drop(csm);
+
+        // After aggregation: empty by_source means no chunks in the reverse
+        // map (all chunks removed). Treat as no-rows dark.
+        if by_source.is_empty() {
+            report!(StatSample::metric(
+                "corpus.float_lane.dark_no_rows".to_string(),
+                1.0,
+                [("kit".to_string(), "CorpusKit".to_string())]
+                    .into_iter().collect(),
+                {
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    SystemTime::now().duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                },
+            ));
+            return FloatLaneOutcome::UnavailableNoFloatRows;
+        }
+
+        // Sort by similarity descending, source_id ascending on tie — the
+        // universal deterministic tie-break — and return the top `limit`.
+        let mut ranked: Vec<(String, f32)> = by_source.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        ranked.truncate(limit);
+
+        // Happy path — lane ran. Emit hit counter.
+        let hit_count = ranked.len();
+        report!(StatSample::metric(
+            "corpus.float_lane.hit".to_string(),
+            hit_count as f64,
+            [("kit".to_string(), "CorpusKit".to_string())]
+                .into_iter().collect(),
+            {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                SystemTime::now().duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64()).unwrap_or(0.0)
+            },
+        ));
+        FloatLaneOutcome::Hits(ranked)
+    }
+
+    /// Whether this corpus's embedding provider supports the dense float lane
+    /// (Lane D). True when `embed_float` returns a vector rather than erroring.
+    /// Probes with a single non-empty token so the answer reflects provider
+    /// capability, not input. Mirrors Swift `Corpus.supportsFloat`.
+    pub fn supports_float(&self) -> bool {
+        matches!(self.provider.embed_float("x"), Ok(v) if !v.is_empty())
     }
 
     /// BM25 keyword top-k by source (drawer) ID.
@@ -409,8 +822,13 @@ impl Corpus {
             .map_err(|_| CorpusKitError::StoreUnavailable("BM25 lock poisoned".into()))?;
         for chunk in &chunks {
             bm25.remove(chunk.id);
+            // Delete ALL vector_index rows for this chunk, not just the binary
+            // engram at vector_index=0: the float lane (Lane D) stores a second
+            // row at vector_index=1 under the same item_id. delete_all_vectors
+            // removes both and invalidates the float index so a removed source
+            // cannot resurface through the dense float lane.
             self.vector_store
-                .delete_vector(&chunk.id.to_string(), self.provider.model_id())
+                .delete_all_vectors(&chunk.id.to_string(), self.provider.model_id())
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{:?}", e)))?;
         }
         // Remove chunk entries from the reverse map so bm25_top_k_by_source
@@ -470,5 +888,94 @@ impl Tokenizer for CorpusBm25Tokenizer {
     }
     fn keyword_tokens(&self, text: &str) -> Vec<String> {
         default_keyword_tokens(text)
+    }
+}
+
+// MARK: - CorpusTextProvider (named model cases)
+
+/// `EmbeddingProvider` adapter for the named `EmbeddingModelConfig`
+/// cases (MiniLM, MPNet, EmbeddingGemma). Rust mirror of Swift's
+/// private `CorpusTextProvider`. Tokenizes text with the model's FNV-1a
+/// vocabulary, runs the host-supplied inference closure on the token
+/// IDs, and projects the resulting float vector through FloatSimHash
+/// with the model's canonical seed.
+///
+/// Private to corpus-kit; it never appears on a public method
+/// signature. Callers select a model through `EmbeddingModelConfig`.
+/// The FNV-1a token fold matches Swift's `CorpusDefaultTokenizer`
+/// (offset basis `2_166_136_261`, prime `1_677_619`, ids in
+/// `[2, vocab_size)`), so for a shared (text -> pooled vector) the
+/// engram is bit-identical to the Swift named-case path.
+struct CorpusTextProvider {
+    model_id: String,
+    model_version: String,
+    projection_seed: u64,
+    /// vocab_size - 2; token ids live in [2, vocab_size).
+    vocab_range: u32,
+    max_tokens: usize,
+    inference: NamedInferenceFn,
+}
+
+impl CorpusTextProvider {
+    fn new(
+        model_id: impl Into<String>,
+        model_version: impl Into<String>,
+        projection_seed: u64,
+        vocab_size: u32,
+        max_tokens: usize,
+        inference: NamedInferenceFn,
+    ) -> Self {
+        CorpusTextProvider {
+            model_id: model_id.into(),
+            model_version: model_version.into(),
+            projection_seed,
+            vocab_range: vocab_size - 2,
+            max_tokens,
+            inference,
+        }
+    }
+
+    /// FNV-1a token fold matching Swift `CorpusDefaultTokenizer.tokenize`.
+    fn tokenize(&self, text: &str) -> Vec<i32> {
+        default_keyword_tokens(text)
+            .iter()
+            .take(self.max_tokens)
+            .map(|word| {
+                let h = word
+                    .bytes()
+                    .fold(2_166_136_261u32, |acc, b| (acc ^ u32::from(b)).wrapping_mul(1_677_619));
+                2 + (h % self.vocab_range) as i32
+            })
+            .collect()
+    }
+}
+
+impl EmbeddingProvider for CorpusTextProvider {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+    fn model_version(&self) -> &str {
+        &self.model_version
+    }
+    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+        // Empty-input contract: Engram::ZERO without touching the seam.
+        if text.is_empty() {
+            return Ok(Engram::ZERO);
+        }
+        let tokens = self.tokenize(text);
+        let pooled = (self.inference)(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+        Ok(float_simhash::project(&pooled, self.projection_seed))
+    }
+
+    /// Float lane source (Lane D): the pooled vector `embed` projects,
+    /// returned unprojected. This is the production float-lane path for
+    /// the named models; without it they would have NO float lane (the
+    /// trait default opts out by erroring). Empty input returns `vec![]`.
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tokens = self.tokenize(text);
+        (self.inference)(&tokens).map_err(VectorKitError::EmbeddingFailed)
     }
 }

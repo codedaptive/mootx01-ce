@@ -74,16 +74,29 @@ let package = Package(
             dependencies: [
                 "CorpusKit",
                 "CorpusKitProviders",
+                // VectorKit supplies the EmbeddingProvider protocol the
+                // embedding-provider conformance gate references directly
+                // (EmbeddingProviderConformanceTests, B2-5 parity gate).
+                "VectorKit",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 // PersistenceKitSQLite is required by the SQLite-backed chunk HLC
                 // round-trip test (ChunkHLCRoundTripTests), which exercises the
                 // unpackHLC fix through BundleStore's actual SQLite storage path.
+                // Also required by InvertedIndexStore tests (Lane D): the store's
+                // persistence contract requires a real SQLite backend, not InMemory.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 // IntellectusLib is required by CorpusKitTelemetryTests, which
                 // install capturing sinks and toggle the enabled flag.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
             ],
-            path: "Tests/CorpusKitTests"
+            path: "Tests/CorpusKitTests",
+            resources: [
+                // Shared cross-language canonical vectors (BM25 bit-identity gate,
+                // finding W1). The Rust leg reads the SAME file at
+                // rust/tests/bm25_conformance_test.rs via include_bytes! up the tree.
+                .copy("../SharedVectors"),
+            ]
         ),
     ]
 )

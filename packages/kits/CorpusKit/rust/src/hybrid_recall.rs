@@ -1,6 +1,12 @@
 //! Hybrid retrieval: vector kNN + BM25 keyword scoring fused via
 //! Reciprocal Rank Fusion (RRF). Mirror of Swift's `HybridRecall`.
 //!
+//! LANE-E2: the two-lane RRF logic is now delegated to
+//! `engine::fusion::fuse` instead of being reimplemented inline.
+//! `recall` builds per-lane ranked lists and raw-score maps, then
+//! calls `fuse`. The ranking output is bit-identical to the previous
+//! implementation for the same inputs (verified by hybrid_recall_tests).
+//!
 //! CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
 //! self-report telemetry to `recall`. The `report!` macro calls are
 //! placed at the operation boundary, after the result is assembled,
@@ -11,6 +17,8 @@
 use crate::bm25_index::BM25Index;
 use crate::bundle_store::BundleStore;
 use crate::chunk::ScoredChunk;
+use crate::engine::fusion::fuse;
+use crate::engine::sparse_types::LaneTag;
 use crate::error::{CorpusKitError, CorpusKitResult};
 use engram_lib::Engram;
 use intellectus_lib::{report, StatSample};
@@ -42,11 +50,11 @@ impl Default for HybridRecallConfiguration {
 
 /// Retrieve top-k chunks by hybrid (vector + keyword) scoring.
 ///
-/// The vector pass filters to `model_id` so cross-model
-/// comparisons cannot occur. The keyword pass uses the
-/// pre-indexed `BM25Index`. Both candidate sets are fused via
-/// RRF; the resulting top-`limit` ids are hydrated through the
-/// `bundle_store`.
+/// Both the vector pass (Hamming kNN) and keyword pass (BM25) produce
+/// ranked candidate lists. These are fused using generalized RRF via
+/// `engine::fusion::fuse` — the `LaneTag::BinaryDense` lane carries
+/// vector hits and `LaneTag::Sparse` carries BM25 hits. The ranking
+/// behaviour is identical to the previous inline implementation.
 ///
 /// Telemetry: emits `corpuskit.recall.latency_ms`,
 /// `corpuskit.recall.vector_result_count`,
@@ -100,58 +108,103 @@ pub fn recall(
     let vector_result_count = vector_results.len();
     let keyword_result_count = keyword_results.len();
 
-    // (vectorScore, keywordScore, fusedScore) per uuid
-    let mut fused: HashMap<Uuid, (f64, f64, f64)> = HashMap::new();
+    // Build per-lane ranked inputs for the generalized Fusion engine.
+    //
+    // Vector lane (BinaryDense): find_nearest returns hits sorted by
+    // Hamming distance ascending — index 0 = rank 1.
+    // Raw score = Hamming distance (u32 cast to f32); lower = closer.
+    //
+    // Keyword lane (Sparse): top_k returns (id: Uuid, score: f32)
+    // sorted by BM25 score descending — index 0 = rank 1.
+    // Raw score = BM25 score f32.
+    //
+    // Both ranked lists are built as Vec<(String, usize)> using the
+    // chunk UUID string as item_id — the same join key used by
+    // bundle_store.get_many.
 
-    for (rank, hit) in vector_results.iter().enumerate() {
-        let Ok(uuid) = Uuid::parse_str(&hit.drawer_id) else {
+    let mut vector_ranked: Vec<(String, usize)> = Vec::new();
+    let mut vector_score_map: HashMap<String, f32> = HashMap::new();
+    for (idx, hit) in vector_results.iter().enumerate() {
+        // Skip items whose item_id is not a valid UUID — they cannot be
+        // hydrated by bundle_store and are not in the corpus.
+        if Uuid::parse_str(&hit.item_id).is_err() {
             continue;
-        };
-        let rrf = 1.0 / (config.rrf_k + (rank as f64 + 1.0));
-        let contribution = rrf * config.vector_weight;
-        let entry = fused.entry(uuid).or_insert((0.0, 0.0, 0.0));
-        entry.0 = hit.distance as f64;
-        entry.2 += contribution;
-    }
-    for (rank, (id, score)) in keyword_results.iter().enumerate() {
-        let rrf = 1.0 / (config.rrf_k + (rank as f64 + 1.0));
-        let contribution = rrf * config.keyword_weight;
-        let entry = fused.entry(*id).or_insert((0.0, 0.0, 0.0));
-        entry.1 = *score as f64;
-        entry.2 += contribution;
+        }
+        vector_ranked.push((hit.item_id.clone(), idx + 1));
+        // Hamming distance as f32; lower = closer to probe.
+        vector_score_map.insert(hit.item_id.clone(), hit.distance as f32);
     }
 
-    let mut ranked: Vec<(Uuid, f64, f64, f64)> = fused
-        .into_iter()
-        .map(|(id, (v, k, f))| (id, v, k, f))
+    let mut keyword_ranked: Vec<(String, usize)> = Vec::new();
+    let mut keyword_score_map: HashMap<String, f32> = HashMap::new();
+    for (idx, (id, score)) in keyword_results.iter().enumerate() {
+        let item_id = id.to_string();
+        keyword_ranked.push((item_id.clone(), idx + 1));
+        keyword_score_map.insert(item_id, *score);
+    }
+
+    // Delegate fusion to engine::fusion::fuse. BinaryDense and Sparse
+    // are the canonical lane names for these two retrieval paths
+    // (arch spec §2.4, LaneTag definition).
+    let mut ranked_lists: HashMap<LaneTag, Vec<(String, usize)>> = HashMap::new();
+    ranked_lists.insert(LaneTag::BinaryDense, vector_ranked);
+    ranked_lists.insert(LaneTag::Sparse, keyword_ranked);
+
+    let mut lane_scores_map: HashMap<LaneTag, HashMap<String, f32>> = HashMap::new();
+    lane_scores_map.insert(LaneTag::BinaryDense, vector_score_map);
+    lane_scores_map.insert(LaneTag::Sparse, keyword_score_map);
+
+    let mut weights: HashMap<LaneTag, f32> = HashMap::new();
+    weights.insert(LaneTag::BinaryDense, config.vector_weight as f32);
+    weights.insert(LaneTag::Sparse, config.keyword_weight as f32);
+
+    let mut fused_hits = fuse(
+        &ranked_lists,
+        Some(&lane_scores_map),
+        &weights,
+        config.rrf_k as f32,
+    );
+
+    // Apply the limit. fuse returns a fully sorted list; truncate to top-k.
+    fused_hits.truncate(limit);
+
+    // Hydrate chunks from bundle_store using UUID primary keys.
+    // Items whose item_id is not a valid UUID are dropped here (they
+    // were included in fusion but cannot be hydrated).
+    let uuids: Vec<Uuid> = fused_hits
+        .iter()
+        .filter_map(|h| Uuid::parse_str(&h.item_id).ok())
         .collect();
-    ranked.sort_by(|a, b| {
-        b.3.partial_cmp(&a.3)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
-    });
-    ranked.truncate(limit);
-
-    let ids: Vec<Uuid> = ranked.iter().map(|e| e.0).collect();
-    let chunks = bundle_store.get_many(&ids)?;
+    let chunks = bundle_store.get_many(&uuids)?;
     let by_id: HashMap<Uuid, _> = chunks.into_iter().map(|c| (c.id, c)).collect();
 
-    let mut out = Vec::with_capacity(ranked.len());
-    for (id, vector_score, keyword_score, fused_score) in ranked {
-        let Some(chunk) = by_id.get(&id) else {
+    // Build the output list in fused-score order.
+    // Per-lane raw scores from FusedHit.per_lane feed ScoredChunk
+    // subscores: BinaryDense → vector_score, Sparse → keyword_score.
+    let mut out = Vec::with_capacity(fused_hits.len());
+    for hit in &fused_hits {
+        let Ok(uuid) = Uuid::parse_str(&hit.item_id) else {
             continue;
         };
+        let Some(chunk) = by_id.get(&uuid) else {
+            continue;
+        };
+        let vector_score = hit.per_lane.get(&LaneTag::BinaryDense).copied();
+        let keyword_score = hit.per_lane.get(&LaneTag::Sparse).copied();
+        // vector_score: presence in per_lane[BinaryDense] determines Some/None.
+        // A raw value of 0.0 (Hamming distance 0) is the BEST possible match —
+        // the probe is identical to the stored engram. Mapping distance 0 to
+        // None would silently discard the highest-quality vector hit, misleading
+        // None-checking callers. Pass vector_score through unchanged.
+        //
+        // keyword_score: BM25 scores are strictly positive for any match, so
+        // a zero value reliably indicates the keyword lane did not contribute.
         out.push(
-            ScoredChunk::new(chunk.clone(), fused_score as f32).with_subscores(
-                if vector_score == 0.0 {
-                    None
-                } else {
-                    Some(vector_score as f32)
-                },
-                if keyword_score == 0.0 {
-                    None
-                } else {
-                    Some(keyword_score as f32)
+            ScoredChunk::new(chunk.clone(), hit.fused_score).with_subscores(
+                vector_score,
+                match keyword_score {
+                    Some(k) if k != 0.0 => Some(k),
+                    _ => None,
                 },
             ),
         );

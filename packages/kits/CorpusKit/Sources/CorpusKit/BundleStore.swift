@@ -3,7 +3,8 @@
 // Storage for RAG chunks (the "content half" of a content-plus-
 // vector bundle). The vector half lives in VectorKit's vectors
 // table; the bundle store maintains the chunks table and the
-// join via (chunk.id == vector.drawerID) by convention.
+// join via (chunk.id.uuidString == vector.item_id) by convention
+// (Lane F rename: drawer_id → item_id, arch spec §4.1).
 //
 // Schema (single table, one row per chunk):
 //   chunks (
@@ -49,7 +50,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -243,17 +244,34 @@ public actor BundleStore {
     // MARK: - Decode
 
     static func decodeChunk(_ row: StorageRow) -> Chunk? {
-        guard case let .uuid(id) = row["id"] ?? .null,
+        // Decode against the PRIMITIVE TypedValue forms the SQLite backend hands
+        // back on read, not the semantic insert-side forms. SQLite has no native
+        // UUID/HLC types, so a UUID column round-trips as `.text` and an HLC
+        // column (a packed UInt64) round-trips as `.int` — while the InMemory
+        // backend preserves the inserted `.uuid`/`.hlc`. Decoding only the
+        // semantic forms silently dropped EVERY persisted chunk on reopen:
+        // `allChunks()` returned empty, `Corpus.init`'s BM25 rebuild indexed
+        // nothing, and semantic recall went dark on any restored estate (a fresh
+        // process serving a persisted estate fell back to query-blind locus
+        // recall). Mirrors LocusKit.DrawerStore's primitive-tolerant readers.
+        // This is why InMemory-backed tests never caught it.
+        guard let id = decodeRowUUID(row["id"]),
               case let .text(sourceID) = row["source_id"] ?? .null,
               case let .int(startOffset) = row["start_offset"] ?? .null,
               case let .int(length) = row["length"] ?? .null,
               case let .text(text) = row["text"] ?? .null,
-              case let .hlc(hlc) = row["hlc"] ?? .null else {
+              let hlc = decodeRowHLC(row["hlc"]) else {
             return nil
         }
+        // metadata is a JSON column: `.json` on the InMemory backend, `.blob`
+        // (the raw JSON bytes) on the SQLite backend. Accept both; absent or
+        // unparseable metadata is an empty map, never a decode failure.
         var metadata: [String: String] = [:]
-        if case let .json(data) = row["metadata"] ?? .null {
+        switch row["metadata"] ?? .null {
+        case let .json(data), let .blob(data):
             metadata = (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+        default:
+            break
         }
         return Chunk(
             id: id,
@@ -264,5 +282,30 @@ public actor BundleStore {
             hlc: hlc,
             metadata: metadata
         )
+    }
+
+    /// Decodes a UUID from a row column that may arrive as either `.uuid` (the
+    /// InMemory backend preserves the inserted TypedValue) or `.text` (the
+    /// SQLite backend, where a UUID column is physically TEXT and round-trips as
+    /// a string). Returns nil for any other case or an unparseable string.
+    static func decodeRowUUID(_ value: TypedValue?) -> UUID? {
+        switch value ?? .null {
+        case let .uuid(u): return u
+        case let .text(s): return UUID(uuidString: s)
+        default: return nil
+        }
+    }
+
+    /// Decodes an HLC from a row column that may arrive as either `.hlc` (the
+    /// InMemory backend preserves the inserted TypedValue) or `.int` (the SQLite
+    /// backend, where an HLC column stores the packed UInt64 as INTEGER and
+    /// round-trips as a signed `.int`). The packed form is reconstructed via the
+    /// bit pattern so it survives the signed/unsigned round trip losslessly.
+    static func decodeRowHLC(_ value: TypedValue?) -> HLC? {
+        switch value ?? .null {
+        case let .hlc(h): return h
+        case let .int(i): return HLC(packed: UInt64(bitPattern: i))
+        default: return nil
+        }
     }
 }

@@ -10,6 +10,13 @@
 // concerns. NeuronKit's reasoning layer composes higher-level
 // recall pipelines on top.
 //
+// LANE-E2: the two-lane RRF logic is now delegated to Fusion
+// (Engine/Fusion.swift) instead of being reimplemented inline.
+// HybridRecall builds the per-lane ranked lists and raw-score maps,
+// then calls Fusion.fuse(rankedLists:laneScores:weights:rrfK:).
+// The ranking output is bit-identical to the previous implementation
+// for the same inputs (verified by HybridRecallConformanceTests).
+//
 // CORPUSKIT_REPORT_001 (cp-corpuskit-report): added IntellectusLib
 // self-report telemetry to recall. The emit calls are placed at the
 // operation boundary, after the result is assembled, so the
@@ -46,6 +53,12 @@ public enum HybridRecall {
 
     /// Retrieve top-k chunks by hybrid (vector + keyword) scoring.
     ///
+    /// Both the vector pass (Hamming kNN) and keyword pass (BM25) produce
+    /// ranked candidate lists. These are fused using generalized RRF via
+    /// `Fusion.fuse` — the .binaryDense lane carries vector hits and
+    /// the .sparse lane carries BM25 hits. The ranking behaviour is
+    /// identical to the previous inline implementation.
+    ///
     /// - Parameters:
     ///   - probe: probe Engram (from the query's embedding).
     ///   - query: query text (for the keyword pass).
@@ -56,7 +69,6 @@ public enum HybridRecall {
     ///   - bm25: keyword index.
     ///   - bundleStore: chunk content store.
     ///   - configuration: weights, RRF constant, optional MMR.
-    /// Retrieve top-k chunks by hybrid (vector + keyword) scoring.
     ///
     /// Telemetry: emits `corpuskit.recall.latency_ms` (wall time for the
     /// full hybrid pipeline including embedding, vector kNN, BM25, RRF,
@@ -99,53 +111,94 @@ public enum HybridRecall {
         let vectorResults = try await vectorHits
         let keywordResults = await keywordHits
 
-        // Vector scores are Hamming distance ascending; convert to
-        // 1 / (k + rank) RRF contribution. Keyword scores are
-        // BM25 descending; convert with the same RRF transform.
-        var fused: [UUID: (Double, Double, Double)] = [:]
-        // (vectorScore, keywordScore, fusedScore)
+        // Build per-lane ranked inputs for the generalized Fusion engine.
+        //
+        // Vector lane (.binaryDense): findNearest returns hits sorted by
+        // Hamming distance ascending — index 0 = rank 1.
+        // Raw score = Hamming distance (Int cast to Float); lower = closer.
+        //
+        // Keyword lane (.sparse): topK returns (id: UUID, score: Float)
+        // sorted by BM25 score descending — index 0 = rank 1.
+        // Raw score = BM25 score Float.
+        //
+        // Both ranked lists are built as [(itemID: String, rank: Int)] using
+        // the chunk UUID.uuidString as itemID — the same join key used by
+        // bundleStore.getMany.
 
-        for (rank, hit) in vectorResults.enumerated() {
-            // hit.drawerID is the chunk's UUID-as-string by convention.
-            guard let uuid = UUID(uuidString: hit.drawerID) else { continue }
-            let rrf = 1.0 / (configuration.rrfK + Double(rank + 1))
-            let contribution = rrf * configuration.vectorWeight
-            var entry = fused[uuid] ?? (0, 0, 0)
-            entry.0 = Double(hit.distance)
-            entry.2 += contribution
-            fused[uuid] = entry
-        }
-        for (rank, hit) in keywordResults.enumerated() {
-            let rrf = 1.0 / (configuration.rrfK + Double(rank + 1))
-            let contribution = rrf * configuration.keywordWeight
-            var entry = fused[hit.id] ?? (0, 0, 0)
-            entry.1 = Double(hit.score)
-            entry.2 += contribution
-            fused[hit.id] = entry
+        var vectorRanked: [(itemID: String, rank: Int)] = []
+        var vectorScoreMap: [String: Float] = [:]
+        for (idx, hit) in vectorResults.enumerated() {
+            // Skip items whose itemID is not a valid UUID string — they
+            // cannot be hydrated by bundleStore and are not in the corpus.
+            guard UUID(uuidString: hit.itemID) != nil else { continue }
+            vectorRanked.append((itemID: hit.itemID, rank: idx + 1))
+            // Hamming distance as Float; lower = closer to probe.
+            vectorScoreMap[hit.itemID] = Float(hit.distance)
         }
 
-        var ranked = fused.map { (id, score) in
-            (id: id, vectorScore: score.0, keywordScore: score.1, fused: score.2)
+        var keywordRanked: [(itemID: String, rank: Int)] = []
+        var keywordScoreMap: [String: Float] = [:]
+        for (idx, hit) in keywordResults.enumerated() {
+            let itemID = hit.id.uuidString
+            keywordRanked.append((itemID: itemID, rank: idx + 1))
+            keywordScoreMap[itemID] = hit.score
         }
-        ranked.sort {
-            if $0.fused != $1.fused { return $0.fused > $1.fused }
-            return $0.id.uuidString < $1.id.uuidString
-        }
-        if ranked.count > limit { ranked.removeLast(ranked.count - limit) }
 
-        // Hydrate chunks from bundleStore.
-        let ids = ranked.map { $0.id }
-        let chunks = try await bundleStore.getMany(ids: ids)
+        // Delegate fusion to Fusion.fuse. The .binaryDense and .sparse
+        // LaneTags are used because they match the canonical lane names
+        // for these two retrieval paths (arch spec §2.4, LaneTag definition).
+        let fusedHits = Fusion.fuse(
+            rankedLists: [
+                .binaryDense: vectorRanked,
+                .sparse:      keywordRanked
+            ],
+            laneScores: [
+                .binaryDense: vectorScoreMap,
+                .sparse:      keywordScoreMap
+            ],
+            weights: [
+                .binaryDense: Float(configuration.vectorWeight),
+                .sparse:      Float(configuration.keywordWeight)
+            ],
+            rrfK: Float(configuration.rrfK)
+        )
+
+        // Apply the limit. Fusion.fuse returns the full merged list sorted
+        // by fusedScore DESC, itemID ASC; truncate to the requested top-k.
+        let topHits = fusedHits.count > limit
+            ? Array(fusedHits.prefix(limit))
+            : fusedHits
+
+        // Hydrate chunks from bundleStore using the UUID primary keys.
+        // Items whose itemID is not a valid UUID are dropped at this point
+        // (they were included in fusion but cannot be hydrated).
+        let uuids = topHits.compactMap { UUID(uuidString: $0.itemID) }
+        let chunks = try await bundleStore.getMany(ids: uuids)
         let byID = Dictionary(uniqueKeysWithValues: chunks.map { ($0.id, $0) })
 
+        // Build the output list in fused-score order.
+        // Per-lane raw scores from FusedHit.perLane feed ScoredChunk
+        // subscores: .binaryDense → vectorScore, .sparse → keywordScore.
+        // A nil subscore means that lane did not produce a hit for that item.
         var out: [ScoredChunk] = []
-        for entry in ranked {
-            guard let chunk = byID[entry.id] else { continue }
+        for hit in topHits {
+            guard let uuid = UUID(uuidString: hit.itemID),
+                  let chunk = byID[uuid] else { continue }
+            let vectorScore = hit.perLane[.binaryDense]
+            let keywordScore = hit.perLane[.sparse]
+            // vectorScore: presence in perLane[.binaryDense] determines non-nil.
+            // A raw score of 0 (Hamming distance 0) is the BEST possible match —
+            // the probe is identical to the stored engram. Treating distance 0 as nil
+            // would silently discard the highest-quality vector hit, misleading nil-
+            // checking callers into thinking no vector lane contributed.
+            //
+            // keywordScore: BM25 scores are strictly positive for any match, so
+            // a zero value reliably indicates the keyword lane did not contribute.
             out.append(ScoredChunk(
                 chunk: chunk,
-                score: Float(entry.fused),
-                vectorScore: entry.vectorScore == 0 ? nil : Float(entry.vectorScore),
-                keywordScore: entry.keywordScore == 0 ? nil : Float(entry.keywordScore)
+                score: hit.fusedScore,
+                vectorScore:  vectorScore,
+                keywordScore: (keywordScore == 0 || keywordScore == nil) ? nil : keywordScore
             ))
         }
 
