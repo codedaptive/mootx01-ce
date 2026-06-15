@@ -32,12 +32,20 @@ pub const VERSION: &str = "0.1.0";
 /// and matched to an FDC code, and the bag's dominant Wikidata Q-ID
 /// is carried as the anchor concept. No network is consulted.
 ///
-/// Returns `Anchor::not_implemented()` only if the bundled artifacts
-/// fail to load — a build/configuration error, not a runtime
-/// condition. Mirrors Swift `EideticLib.lookup(_:)`.
+/// Panics if the bundled artifacts fail to load — that is a
+/// build/configuration error, not a runtime condition. A failed
+/// load means the binary shipped without its required data bundle
+/// and no caller can produce a legitimate anchor. Silent sentinel
+/// returns are rejected per the P1 mandate: "a sentinel identity
+/// that persists IS a fabricated identity" (Bob's board item 7).
+/// Panics loud; fix the build. Mirrors Swift `EideticLib.lookup(_:)`.
 pub fn lookup(term: &str) -> Anchor {
     if !Fdc::is_available() {
-        return Anchor::not_implemented();
+        panic!(
+            "eidetic_lib: FDC artifacts failed to load — \
+             build/configuration error. The bundled canon is missing \
+             from this binary. No anchor can be produced. Fix the build."
+        );
     }
 
     let (code, qid) = Fdc::encode_anchor(term);
@@ -146,10 +154,10 @@ mod tests {
     fn lookup_carries_data_version() {
         // The data_version records the pinned FDC signatures version.
         // Mirrors Swift `lookupCarriesDataVersion`.
+        // FDC unavailable is a panic (build/config error); this test
+        // also implicitly validates that the artifacts loaded.
         let anchor = lookup("organic chemistry reactions molecules");
         assert!(!anchor.data_version.is_empty());
-        // When artifacts are available, data_version must NOT be the stub sentinel.
-        assert_ne!(anchor.data_version, "0.1.0-stub");
     }
 
     #[test]
@@ -164,18 +172,9 @@ mod tests {
     #[test]
     fn lookup_fdc_available() {
         // The bundled artifacts must load — configuration check.
-        // If this fails, all lookup tests produce not_implemented.
+        // If this fails, lookup panics (build/configuration error).
+        // This test ensures that build/config is correct in CI.
         assert!(Fdc::is_available(), "lattice_lib FDC runtime must be available");
-    }
-
-    #[test]
-    fn lookup_not_implemented_sentinel_has_stub_data_version() {
-        // The sentinel is returned only on artifact load failure, not
-        // on lookup misses. Mirrors Swift `Anchor.notImplemented` semantics.
-        let stub = Anchor::not_implemented();
-        assert_eq!(stub.code, "");
-        assert_eq!(stub.confidence, 0);
-        assert_eq!(stub.data_version, "0.1.0-stub");
     }
 
     #[test]

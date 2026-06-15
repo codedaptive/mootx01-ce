@@ -26,20 +26,6 @@ pub struct Anchor {
     pub data_version: String,
 }
 
-impl Anchor {
-    /// The sentinel anchor returned by the v0.1 stub. Callers
-    /// can integrate against the API surface; real anchors
-    /// replace these sentinels once the pipeline lands.
-    pub fn not_implemented() -> Self {
-        Anchor {
-            code: String::new(),
-            wikidata_qid: None,
-            confidence: 0,
-            data_version: "0.1.0-stub".to_string(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,14 +41,5 @@ mod tests {
         let json = serde_json::to_string(&anchor).expect("serialize");
         let decoded: Anchor = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, anchor);
-    }
-
-    #[test]
-    fn not_implemented_carries_stub_data_version() {
-        let stub = Anchor::not_implemented();
-        assert_eq!(stub.code, "");
-        assert!(stub.wikidata_qid.is_none());
-        assert_eq!(stub.confidence, 0);
-        assert_eq!(stub.data_version, "0.1.0-stub");
     }
 }
