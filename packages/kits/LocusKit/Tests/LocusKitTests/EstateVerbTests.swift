@@ -98,13 +98,11 @@ struct EstateVerbTests {
     @Test("recall yields a single page from an empty estate without throwing")
     func recall_emptyEstateSinglePage() async throws {
         let (estate, _) = try await makeEstate()
-        // `.unconfirmed` suppresses the evaluator's default `.userConfirmed`
-        // insertion (§ 7.9.5); this test predates the provenance-aware
-        // evaluator and operates on the empty corpus that the default
-        // would still admit zero rows from, so the override keeps the
-        // page-shape contract observable rather than masking it.
+        // `.userConfirmed` suppresses insertDefaults re-insertion while
+        // admitting captured drawers. The empty estate has zero rows regardless
+        // of provenance filter, so this observes the page-shape contract.
         let stream = await estate.recall(
-            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed])
+            RecallFrame(filterChain: [.currentlyBelieve, .userConfirmed])
         )
         var pageCount = 0
         for await page in stream {
@@ -127,13 +125,14 @@ struct EstateVerbTests {
             embeddingModelID: "minilm-v6"
         )
         let drawer = try await estate.capture(frame)
-        // Freshly captured rows are unconfirmed.
-        #expect(drawer.confirmation == .unconfirmed)
+        // Freshly captured rows are stamped userConfirmed at write time
+        // (EstateVerbs.capture stamps Confirmation.userConfirmed into bits 18-23).
+        #expect(drawer.confirmation == .userConfirmed)
 
+        // mutate(.confirm) on an already-userConfirmed drawer is idempotent —
+        // it writes userConfirmed again. Verify the axis is preserved.
         try await estate.mutate(rowID: drawer.id, kind: .confirm)
 
-        // Re-read: confirmation is now userConfirmed; every other axis is
-        // preserved (room/state unchanged).
         let after = try #require(try await estate.store.getDrawer(id: drawer.id))
         #expect(after.confirmation == .userConfirmed)
         #expect(after.room == "study")

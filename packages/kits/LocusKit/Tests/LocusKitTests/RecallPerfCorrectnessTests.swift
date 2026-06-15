@@ -81,11 +81,12 @@ struct RecallPerfCorrectnessTests {
 
         _ = try await captureN(estateSize, into: estate)
 
-        // Single recall — default filter (currentlyBelieve + trustworthy etc
-        // are inserted by default; unconfirmed so we skip the confirmation gate).
+        // Single recall — explicit userConfirmed suppresses insertDefaults
+        // re-insertion while admitting all captured drawers (stamped userConfirmed
+        // at write time by EstateVerbs.capture).
         // traceLimit = cap: opt in to trace writes and verify the cap is honoured.
         let frame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .bitmapOnly,   // no re-hydration needed for this test
             traceLimit: cap
         )
@@ -140,7 +141,7 @@ struct RecallPerfCorrectnessTests {
         // Recall at .structured — no content predicate, so no-blob scan runs.
         // The no-blob rows are returned directly; no re-fetch fires.
         let recallFrame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .structured
         )
         let stream = await estate.recall(recallFrame)
@@ -179,7 +180,7 @@ struct RecallPerfCorrectnessTests {
 
         // Recall at .full — filter pass runs no-blob, then re-fetches matched IDs.
         let recallFrame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .full
         )
         let stream = await estate.recall(recallFrame)
@@ -211,7 +212,7 @@ struct RecallPerfCorrectnessTests {
         ))
 
         let recallFrame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .bitmapOnly   // caller explicitly wants no content
         )
         let stream = await estate.recall(recallFrame)
@@ -247,7 +248,7 @@ struct RecallPerfCorrectnessTests {
         // caller's requested result count (the reward sweep cares about what
         // was returned, not the full candidate set).
         let frame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .bitmapOnly,
             limit: requestedLimit,
             ordering: .byCaptureTimeAsc,
@@ -293,10 +294,10 @@ struct RecallPerfCorrectnessTests {
         // The first `cap` IDs in insertion order are what recall should return.
         let expectedIds = Array(allIds.prefix(cap))
 
-        // Recall with no filter that would exclude rows (just remove the default
-        // confirmation filter so all freshly-captured unconfirmed rows pass).
+        // Recall with explicit userConfirmed to suppress insertDefaults re-insertion
+        // while admitting all captured drawers (stamped userConfirmed at write time).
         let frame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .bitmapOnly,
             // No limit set — the cap is the estate-level bound, not the page size.
             limit: nil,
@@ -325,7 +326,7 @@ struct RecallPerfCorrectnessTests {
         _ = try await captureN(count, into: estate)
 
         let frame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .bitmapOnly
         )
         let stream = await estate.recall(frame)
@@ -351,7 +352,7 @@ struct RecallPerfCorrectnessTests {
 
         // traceLimit is nil by default — no trace rows written.
         let frame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .bitmapOnly
         )
         let now = Date()
@@ -378,7 +379,7 @@ struct RecallPerfCorrectnessTests {
 
         let traceLimit = 5
         let frame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .bitmapOnly,
             traceLimit: traceLimit
         )
@@ -453,7 +454,7 @@ struct RecallPerfCorrectnessTests {
 
         // Full-estate scan intent — same limit as VaultBridge uses.
         let frame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .structured,
             limit: 10_000_000
         )
@@ -477,7 +478,7 @@ struct RecallPerfCorrectnessTests {
 
         let limit = 20
         let frame = RecallFrame(
-            filterChain: [.currentlyBelieve, .unconfirmed],
+            filterChain: [.currentlyBelieve, .userConfirmed],
             hydrationLevel: .structured,
             limit: limit
         )
