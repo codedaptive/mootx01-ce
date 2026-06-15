@@ -1,29 +1,33 @@
 //! FederationSyncEngine: Ed25519-authenticated peer-to-peer
 //! backend.
 //!
-//! Wire transport is out of scope for v1.0; the engine ships
-//! with an in-process FederationRelay that two engines can
-//! plug into for unit tests. A future R-mission adds a real
-//! wire transport (HTTP/gRPC/QUIC) that conforms to the same
-//! relay trait.
+//! Cross-machine wire transport (HTTP/gRPC/QUIC) is a v1.x decision
+//! — the governing ruling records this as deliberately out of v1.0
+//! scope. The engine ships with an in-process FederationRelay that
+//! two engines can plug into for unit tests; a hosted relay conforming
+//! to the `Relay` trait is the v1.x extension point.
 //!
 //! All envelopes are signed at push and verified at pull. Schema
 //! and kit mismatch reject the record. Conflict resolution
 //! follows the per-table ConflictPolicy on the local manifest.
 
 use crate::engine::SyncEngine;
-use crate::record::{PackedHLC, SyncEventKind, SyncRecord};
+use crate::record::{PackedHLC, SyncEventKind, SyncRecord, SyncValueMap};
 use crate::types::{ConflictPolicy, SyncDirection, SyncedTable, SyncError, SyncEvent, SyncManifest, SyncReceipt, SyncResult, SyncState};
+use substrate_types::hlc::{HLC, HLCGenerator};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH,
     SIGNATURE_LENGTH,
 };
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::thread::JoinHandle;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use persistence_kit::{Column, RowStore, Storage, StorageEvent, StoragePredicate, TableChange, TypedValue};
 
 // ----- identity -----
 
@@ -244,10 +248,31 @@ struct EngineState {
     last_push_secs: Option<i64>,
     last_pull_secs: Option<i64>,
     inbox: Option<Receiver<SignedEnvelope>>,
-    outbox: Vec<SyncRecord>,
+    /// Pending records awaiting the next push. Shared (`Arc<Mutex<…>>`) because
+    /// the observer worker threads append to it on every observed write while
+    /// the engine drains it on `push`. Mirrors the Swift `pendingOutbound`
+    /// array on `FederationStateActor`, which the actor's observer tasks fill.
+    outbox: Arc<Mutex<Vec<SyncRecord>>>,
+    /// HLC generator used to mint a monotonic timestamp for an observed change
+    /// that arrives without one (the InMemory observer emits `hlc: None`).
+    /// Shared with the worker threads so all auto-populated records draw from
+    /// one monotonic clock. Mirrors the Swift `hlcGenerator` on the actor,
+    /// which fills `change.hlc ?? hlcGenerator.send(now:)` in `push`.
+    hlc_generator: Arc<Mutex<HLCGenerator>>,
     /// Monotonically increasing logical counter for the batch-level HLC.
     /// Advanced once per push batch (not per record) to order envelopes.
     hlc_counter: i32,
+    /// Live observer worker threads — one per push-eligible table subscribed
+    /// at `enable`. Joined on `disable` so no thread outlives the engine.
+    /// Mirrors the Swift `observerTasks: [Task]` array, cancelled in `disable`.
+    observer_workers: Vec<JoinHandle<()>>,
+    /// Cancellation flag shared with every observer worker. Set on `disable`
+    /// to wake the workers out of their bounded `recv_timeout` wait and end
+    /// their loops — the explicit-cancel analogue of Swift's `Task.cancel()`.
+    /// A flag (not relying on sender-drop) is required because a consumer that
+    /// still holds an `Arc<dyn Storage>` clone keeps the observer hub — and its
+    /// senders — alive, so the receiver would never disconnect on its own.
+    observer_stop: Arc<AtomicBool>,
 }
 
 pub struct FederationSyncEngine {
@@ -276,8 +301,15 @@ impl FederationSyncEngine {
                 last_push_secs: None,
                 last_pull_secs: None,
                 inbox: None,
-                outbox: Vec::new(),
+                outbox: Arc::new(Mutex::new(Vec::new())),
+                // Random low node id in [1, 15], matching the Swift actor's
+                // `HLCGenerator(nodeID: Int32.random(in: 1...0x0F))`.
+                hlc_generator: Arc::new(Mutex::new(HLCGenerator::new(
+                    (rand_node_id() & 0x0F).max(1),
+                ))),
                 hlc_counter: 0,
+                observer_workers: Vec::new(),
+                observer_stop: Arc::new(AtomicBool::new(false)),
             },
             subscribers: Vec::new(),
         }
@@ -287,16 +319,101 @@ impl FederationSyncEngine {
         &self.peer_identity
     }
 
-    /// Queue a record for the next push. Mirrors the
-    /// StorageObserver-driven outbox the Swift side maintains;
-    /// in Rust v1.0 callers enqueue explicitly while the
-    /// observer-driven path is built.
+    /// Queue a record for the next push explicitly.
+    ///
+    /// Production wiring auto-populates the outbox by subscribing to the
+    /// storage observer at `enable` (parity with the Swift port — see the
+    /// observer-worker setup in `enable`). This explicit entry point remains
+    /// available for callers that mint `SyncRecord`s directly (tests, and
+    /// out-of-band replays that do not flow through a storage write).
     pub fn enqueue(&mut self, record: SyncRecord) -> SyncResult<()> {
         if !self.state.enabled {
             return Err(SyncError::NotEnabled);
         }
-        self.state.outbox.push(record);
+        self.state.outbox.lock().unwrap().push(record);
         Ok(())
+    }
+
+    /// Subscribe to the storage observer and spawn one worker thread per
+    /// push-eligible table that maps each observed `TableChange` to a
+    /// `SyncRecord` and appends it to the shared outbox.
+    ///
+    /// This is the production write-capture path, parity with the Swift
+    /// `FederationStateActor.enable`, which runs
+    /// `storage.observer.observe(table:events:[.insert,.update,.delete])`
+    /// for every `table.direction != .pullOnly` and feeds `recordOutbound`.
+    /// Pull-only tables never originate local writes for replication, so they
+    /// are skipped on both ports.
+    ///
+    /// Each worker waits on its `Receiver<TableChange>` with a bounded
+    /// `recv_timeout` and re-checks the shared stop flag each tick, so
+    /// `disable` can wake it promptly even when a consumer still holds a
+    /// storage handle keeping the observer's senders alive. This is the
+    /// explicit-cancel analogue of the Swift observer `Task` ending on
+    /// `Task.cancel()`.
+    fn start_observers(
+        &mut self,
+        manifest: &SyncManifest,
+        storage: &Arc<dyn Storage>,
+    ) -> SyncResult<()> {
+        let observer = storage.observer();
+        let events: BTreeSet<StorageEvent> =
+            [StorageEvent::Insert, StorageEvent::Update, StorageEvent::Delete]
+                .into_iter()
+                .collect();
+
+        for table in &manifest.tables {
+            // Pull-only tables do not push local writes; skip them (Swift parity).
+            if table.direction == SyncDirection::PullOnly {
+                continue;
+            }
+            let rx = observer
+                .observe(&table.name, events.clone())
+                .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+
+            let outbox = Arc::clone(&self.state.outbox);
+            let hlc_generator = Arc::clone(&self.state.hlc_generator);
+            let stop = Arc::clone(&self.state.observer_stop);
+            let schema_version = manifest.schema_version;
+            let kit_id = manifest.kit_id.clone();
+
+            let handle = std::thread::spawn(move || {
+                // 100ms tick bounds shutdown latency without busy-spinning.
+                let tick = Duration::from_millis(100);
+                loop {
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    match rx.recv_timeout(tick) {
+                        Ok(change) => {
+                            if let Some(record) =
+                                change_to_record(change, schema_version, &kit_id, &hlc_generator)
+                            {
+                                outbox.lock().unwrap().push(record);
+                            }
+                        }
+                        // Timed out: loop back and re-check the stop flag.
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        // The observer hub was dropped (storage closed): exit.
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            });
+            self.state.observer_workers.push(handle);
+        }
+        Ok(())
+    }
+
+    /// Signal every observer worker to stop and join them. Idempotent.
+    /// Mirrors the Swift `disable` loop that cancels each observer `Task`.
+    fn stop_observers(&mut self) {
+        self.state.observer_stop.store(true, Ordering::Release);
+        for handle in self.state.observer_workers.drain(..) {
+            // A worker can only be blocked for at most one tick, so join is bounded.
+            let _ = handle.join();
+        }
+        // Reset for a future enable on the same engine instance.
+        self.state.observer_stop.store(false, Ordering::Release);
     }
 
     fn emit(&mut self, event: SyncEvent) {
@@ -310,12 +427,8 @@ impl FederationSyncEngine {
     /// so successive batches are strictly ordered.
     fn next_batch_hlc(&mut self) -> PackedHLC {
         self.state.hlc_counter += 1;
-        let physical_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
         PackedHLC {
-            physical_time,
+            physical_time: now_millis(),
             logical_count: self.state.hlc_counter,
             node_id: 0,
         }
@@ -329,6 +442,9 @@ impl SyncEngine for FederationSyncEngine {
         }
         let inbox = self.relay.register(self.peer_identity.clone());
         self.state.inbox = Some(inbox);
+        // Subscribe the observer workers BEFORE marking enabled so the
+        // write-capture path is live the moment the engine reports enabled.
+        self.start_observers(&manifest, &storage)?;
         self.state.manifest = Some(manifest);
         self.state.storage = Some(storage);
         self.state.enabled = true;
@@ -337,10 +453,14 @@ impl SyncEngine for FederationSyncEngine {
 
     fn disable(&mut self) -> SyncResult<()> {
         self.state.enabled = false;
+        // Stop the observer workers BEFORE dropping storage so no worker races
+        // a late write into the outbox after disable returns (Swift parity:
+        // the actor cancels its observer tasks in `disable`).
+        self.stop_observers();
         self.state.manifest = None;
         self.state.storage = None;
         self.state.inbox = None;
-        self.state.outbox.clear();
+        self.state.outbox.lock().unwrap().clear();
         Ok(())
     }
 
@@ -348,7 +468,7 @@ impl SyncEngine for FederationSyncEngine {
         if !self.state.enabled {
             return Err(SyncError::NotEnabled);
         }
-        let to_send: Vec<SyncRecord> = std::mem::take(&mut self.state.outbox);
+        let to_send: Vec<SyncRecord> = std::mem::take(&mut *self.state.outbox.lock().unwrap());
         let record_count = to_send.len();
         if record_count == 0 {
             let receipt = SyncReceipt::now(0, 0, 0);
@@ -515,10 +635,13 @@ impl SyncEngine for FederationSyncEngine {
 /// insert, hard-delete, or a silent return. Length comes from the cross-product
 /// of cases, not from complex logic.
 ///
-/// Note: the `LastWriterWinsByHLC` arm currently performs an unconditional
-/// upsert without comparing the incoming HLC against the stored row's HLC.
-/// That LWW comparison bug is tracked separately and is out of scope here;
-/// the envelope shape change does not alter this behavior.
+/// `LastWriterWinsByHLC` compares the incoming record's HLC against the stored
+/// row's `_syncHLC`. If the incoming HLC is older (strictly less), the write is
+/// silently dropped. On every apply that wins the comparison the row is written
+/// with `_syncHLC` so the next inbound can compare. This mirrors the Swift
+/// CloudKitStateActor.applyInbound semantics exactly.
+/// The same HLC gate applies to delete events: a stale delete (incoming HLC <
+/// local `_syncHLC`) is silently rejected; a newer delete proceeds.
 fn apply_record(
     record: &SyncRecord,
     synced_table: &SyncedTable,
@@ -543,9 +666,29 @@ fn apply_record(
                 .entry(synced_table.primary_key_column.clone())
                 .or_insert_with(|| TypedValue::Uuid(record.row_key));
             match synced_table.conflict_policy {
-                ConflictPolicy::AppendOnly
-                | ConflictPolicy::LastWriterWinsByHLC
-                | ConflictPolicy::RemoteWins => {
+                ConflictPolicy::AppendOnly => {
+                    row_store
+                        .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                }
+                ConflictPolicy::LastWriterWinsByHLC => {
+                    // Compare HLC; only apply if remote >= local.
+                    // Mirrors Swift CloudKitStateActor.applyInbound exactly.
+                    if let Some(local_hlc) = read_sync_hlc(&row_store, &record.table, &predicate) {
+                        let incoming: HLC = record.hlc.into();
+                        if incoming < local_hlc {
+                            // Stale inbound: silently drop.
+                            return Ok(());
+                        }
+                    }
+                    // Merge sync meta into the persisted row so the next inbound
+                    // write can read _syncHLC back and compare.
+                    values.insert("_syncHLC".to_string(), TypedValue::Hlc(record.hlc.into()));
+                    row_store
+                        .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                }
+                ConflictPolicy::RemoteWins => {
                     row_store
                         .upsert(&record.table, values, &[synced_table.primary_key_column.clone()])
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
@@ -567,8 +710,23 @@ fn apply_record(
                 ConflictPolicy::AppendOnly => {
                     // Append-only tables are write-once; silently reject remote deletes.
                 }
-                ConflictPolicy::LastWriterWinsByHLC | ConflictPolicy::RemoteWins => {
-                    // Remote delete wins; hard-delete the row by primary key.
+                ConflictPolicy::LastWriterWinsByHLC => {
+                    // HLC gate on the delete path: a stale delete (incoming HLC <
+                    // local _syncHLC) must not remove a newer local row. A newer
+                    // delete (incoming HLC >= local _syncHLC) proceeds.
+                    if let Some(local_hlc) = read_sync_hlc(&row_store, &record.table, &predicate) {
+                        let incoming: HLC = record.hlc.into();
+                        if incoming < local_hlc {
+                            // Stale delete: silently drop.
+                            return Ok(());
+                        }
+                    }
+                    row_store
+                        .delete(&record.table, &predicate)
+                        .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
+                }
+                ConflictPolicy::RemoteWins => {
+                    // Remote delete wins unconditionally; hard-delete the row by primary key.
                     row_store
                         .delete(&record.table, &predicate)
                         .map_err(|e| SyncError::TransportFailure { detail: e.to_string() })?;
@@ -580,4 +738,79 @@ fn apply_record(
         }
     }
     Ok(())
+}
+
+/// Map an observed `TableChange` to a `SyncRecord` for the outbox.
+///
+/// Returns `None` for a change with no `row_key`: a sync record is keyed by
+/// its primary-key UUID, so a keyless change cannot be replicated and is
+/// dropped (the Swift `push` loop applies the same `guard let rowKey` skip).
+///
+/// HLC selection mirrors Swift's `change.hlc ?? hlcGenerator.send(now:)`: if
+/// the observation already carries the HLC that ordered the write, reuse it;
+/// otherwise mint a monotonic one through the shared generator. `send(now:)`
+/// advances the logical counter so two HLC-less changes in the same instant do
+/// not collide on an identical timestamp.
+fn change_to_record(
+    change: TableChange,
+    schema_version: i32,
+    kit_id: &str,
+    hlc_generator: &Arc<Mutex<HLCGenerator>>,
+) -> Option<SyncRecord> {
+    let row_key = change.row_key?;
+    let hlc = match change.hlc {
+        Some(h) => h,
+        None => hlc_generator.lock().unwrap().send(now_millis()),
+    };
+    let values = change.values.map(SyncValueMap::from_typed);
+    Some(SyncRecord::new(
+        change.table,
+        SyncEventKind::from(change.event),
+        row_key,
+        values,
+        hlc,
+        schema_version,
+        kit_id,
+    ))
+}
+
+/// Current wall-clock in milliseconds, passed explicitly into the HLC
+/// generator. The single clock read is isolated here so the rest of the
+/// engine stays deterministic and the read is easy to audit. Mirrors the
+/// Swift actor's `nowMillis()`.
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Draw a low, non-zero node id for the HLC generator. Mirrors the Swift
+/// actor's `Int32.random(in: 1...0x0F)`; the caller masks to `[1, 15]`.
+fn rand_node_id() -> i32 {
+    let mut key = [0u8; 4];
+    rand_core::RngCore::fill_bytes(&mut OsRng, &mut key);
+    i32::from_le_bytes(key).unsigned_abs() as i32
+}
+
+/// Read the stored `_syncHLC` for a row, if present.
+///
+/// Returns the HLC stored in the `_syncHLC` column of the first matching row,
+/// or `None` when the row does not exist yet or has no `_syncHLC`. The
+/// InMemory backend stores `TypedValue::Hlc` verbatim; SQLite/Postgres return
+/// `TypedValue::Int` (the packed i64). Both encodings are handled.
+fn read_sync_hlc(
+    row_store: &Arc<dyn RowStore>,
+    table: &str,
+    predicate: &StoragePredicate,
+) -> Option<HLC> {
+    let rows = row_store
+        .query(table, Some(predicate), &[], None, None)
+        .ok()?;
+    let first = rows.into_iter().next()?;
+    match first.get("_syncHLC") {
+        Some(TypedValue::Hlc(h)) => Some(*h),
+        Some(TypedValue::Int(i)) => Some(HLC::from_packed((*i) as u64)),
+        _ => None,
+    }
 }
