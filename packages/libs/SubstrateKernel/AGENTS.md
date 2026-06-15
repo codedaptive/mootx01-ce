@@ -214,7 +214,7 @@ must produce the same bits as yours.
 
 ## Related docs
 
-- `../../../docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md`
+- `../../../docs/engineering/HARNESS_REFERENCE.md`
   §2.1 — Tier-1 primitives indexed with Swift API, Rust API, file
   paths, and CRCs.
 - Cookbook v1.0 §3 (fingerprint), §5 (audit log + clock + seal),
