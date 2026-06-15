@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
 use intellectus_lib::{report, StatSample};
-use locus_kit::filter::RecallFrame;
+use locus_kit::filter::{HydrationLevel, RecallFrame};
 use neuron_kit::{
     rerank, synthesize, ContextDocument, DrawerRow, DrawerRowMeta, RecallFrameTuning, RecallPage,
 };
@@ -111,8 +111,16 @@ pub fn run_grounded_synthesis(
 
     // 1. Recall over the single GLK recall-verb boundary (now real). A recall
     //    failure (e.g. a stale handle) propagates as RecipeRunError::Substrate.
+    //
+    //    Hydration is forced to Full: synthesis extracts patterns/themes from
+    //    drawer BODIES, and per spec § 7.3 a Structured recall returns content
+    //    as "" (blob loading is skipped). Synthesizing over structured rows
+    //    would silently produce an empty-pattern context — same failure class
+    //    as the Contradiction recipe. Mirrors the Swift GroundedSynthesis.
+    let mut full_frame = frame;
+    full_frame.hydration_level = HydrationLevel::Full;
     let drawers = coord
-        .recall(handle, frame, now)
+        .recall(handle, full_frame, now)
         .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;
 
     // 2. Project to DrawerRow for rerank, and to per-id metadata for
@@ -206,6 +214,8 @@ mod tests {
 
     fn unconfirmed() -> RecallFrame {
         let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+        // Structured on purpose: the recipe must OVERRIDE this to Full
+        // internally (synthesis reads bodies). Exercises the override path.
         f.hydration_level = HydrationLevel::Structured;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f

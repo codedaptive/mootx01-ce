@@ -126,7 +126,7 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
         // Grounding / trust lens.
         RecipeDescriptor {
             name: "trust_grounded_synthesis".into(),
-            version: "1.0.0".into(),
+            version: "1.1.0".into(),
             description:
                 "Reasoning lens: recall, rank by provenance trust (canonical and user above derived), and synthesize the trust-ordered set."
                     .into(),
@@ -200,6 +200,40 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![NeuronKitCapability::AssociationRuleMining],
         },
+        // Temporal lenses (Lenses 1-3, Time+Prediction).
+        RecipeDescriptor {
+            name: "moment".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: OR-reduce the primary window's fingerprints into a temporal signature and rank comparison windows by Hamming proximity."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "rhythm".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: FFT over a time-bucketed fingerprint bit series to surface the dominant periodic activity patterns."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        RecipeDescriptor {
+            name: "precedence".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: fold the estate's audit trail into T-matrix deltas and rank the antecedents most predictive of a target field-value coordinate."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        // Information-theoretic lens (Lens 4, Topics).
+        RecipeDescriptor {
+            name: "complexity".into(),
+            version: "1.0.0".into(),
+            description:
+                "Reasoning lens: Shannon entropy (and optional mutual information) over the distribution of a label field across the recalled set."
+                    .into(),
+            required_capabilities: vec![],
+        },
     ]
 }
 
@@ -223,8 +257,10 @@ mod tests {
     #[test]
     fn catalog_lists_all_shipped_recipes() {
         // Both versions of every recipe ship, so every recipe registers
-        // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational
-        // recipes plus the 14 reasoning lenses plus the 3 analytics lenses.
+        // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
+        // plus the 14 reasoning lenses plus the 3 analytics lenses plus
+        // the 4 new temporal/entropy lenses (moment, rhythm, precedence,
+        // complexity) = 23 total.
         let mut names = recipe_names();
         names.sort();
         assert_eq!(
@@ -234,6 +270,7 @@ mod tests {
                 "apriori_rules",
                 "association_rules",
                 "bias",
+                "complexity",
                 "constellation",
                 "contradiction",
                 "drift",
@@ -245,7 +282,10 @@ mod tests {
                 "latent_themes",
                 "migration_benchmark",
                 "mind_overlap",
+                "moment",
                 "partial_cue_recall",
+                "precedence",
+                "rhythm",
                 "theme_weather",
                 "trust_grounded_synthesis",
                 "tunnel_successor",

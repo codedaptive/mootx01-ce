@@ -24,6 +24,14 @@
 // saveScenarioProfile) are deliberately absent — a recipe cannot
 // declare a dependency on a function that does not exist, so the
 // capability check is a real gate and not a rubber stamp.
+//
+// The four lenses added by TASK-MXE-ASSIGNED (moment, rhythm, precedence,
+// complexity) are pure math free functions (no SubstrateML gate, no branch
+// or recall capability). They declare requiredCapabilities: [] intentionally.
+// No new cases were added: each calls an already-gated NeuronKit free function
+// (momentSignature, rhythm, precedence, complexity) whose inputs are pre-shaped
+// by the recipe — the capability gate exists at the function level, not the
+// recipe level, and these functions carry no capability declaration of their own.
 
 import Foundation
 

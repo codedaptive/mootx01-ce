@@ -57,11 +57,14 @@ let package = Package(
         // SubstrateML provides the ARM engine (mineAssociationRules,
         // MiningThresholds, AssociationRule, Item) consumed by AssociationRules.swift.
         .package(path: "../../libs/SubstrateML"),
-        // PersistenceKit's in-memory backend is a test-only dependency:
-        // the recipe tests open a real GeniusLocusKit estate over
-        // InMemoryStorage, exercising the full substrate boundary rather
-        // than a mock. Declared at the package level; wired only into the
-        // test target below.
+        // PersistenceKit's in-memory and SQLite backends are test-only
+        // dependencies: the recipe tests open real GeniusLocusKit estates
+        // exercising the full substrate boundary rather than mocks.
+        // SQLite is required for the Contradiction SQLite-backed test
+        // (CK-CN-4) that proves content hydration is not silently
+        // masked by InMemory (InMemory returns content regardless of
+        // hydrationLevel; SQLite enforces spec § 7.3 strictly).
+        // Declared at the package level; wired only into the test target.
         .package(path: "../PersistenceKit"),
     ],
     targets: [
@@ -91,6 +94,11 @@ let package = Package(
                 .product(name: "SubstrateML", package: "SubstrateML"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                // SQLite backend: used by CK-CN-4 to prove that the
+                // .full hydration override in Contradiction is exercised
+                // against the real blob-gated storage path. InMemory
+                // masks the bug; SQLite enforces it.
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
             ],
             path: "Tests/CognitionKitTests",
             // Shared conformance vectors — one artifact read by the Swift
