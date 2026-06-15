@@ -1,13 +1,13 @@
 ---
 title: Installer Interface
 status: active
-version: 1.0.0
-date: 2026-06-14
-description: Public API surface for the Swift-only Installer (CLI/host app).
+version: 1.0.1
+date: 2026-06-15
+description: Public API surface of the mootx01 installer CLI (Swift on macOS/iOS, Rust on Linux/Windows) plus the Swift-only MootInstallerCore host library.
 spec_type: kit
 authors: MOOTx01 maintainers
 package: Installer
-languages: [swift]  # Swift-only; no Rust port (CLI/installer app, not a kit)
+languages: [swift, rust]  # mootx01 CLI surface ships in both ports; the MootInstallerCore library is Swift-only
 relates_to:
 purpose: |
   Public API surface of the Installer. Type signatures, method
@@ -46,8 +46,16 @@ swift-argument-parser (CLI app exception — not a kit) plus the
 in-repo products AriaMCP, AriaLexiconLib, GeniusLocusKit, LocusKit,
 PersistenceKit, PersistenceKitSQLite.
 
-**Rust:** none. The installer is a Swift-only CLI/host app; it is not
-a substrate kit and has no Rust parity port.
+**Rust:** `apps/mootx01/rust/` — the Rust vertical that ships on Linux and
+Windows. It reimplements the same `mootx01` CLI natively (no FFI), including
+`install`/`uninstall` (`src/commands/install.rs`, `src/core/clients.rs`), and
+wires the **same 12 MCP clients** with the same behavior as the Swift port
+(detect each client, write its MCP config, grant tool permissions, back up
+first). The Swift `MootInstallerCore` *library* has no Rust twin — its host
+internals are reimplemented in the Rust `src/core/` module rather than shared.
+There is no conformance-vector gate here: this is OS host glue (client-config
+wiring), not deterministic substrate compute (the same carve-out as LoopbackHTTP).
+`moot-mgr` (the management console) is macOS-only.
 
 ## § 2 — Public types
 
@@ -279,6 +287,9 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 *End of Installer Interface.*
 
 ## Changelog
+
+### 1.0.1 -- 2026-06-15
+Corrected: the `mootx01` installer is **not** Swift-only. The Rust vertical (Linux/Windows) reimplements the same install/uninstall CLI natively and wires the same 12 MCP clients; `languages` is now `[swift, rust]`. Documented the split — CLI surface (both ports) vs `MootInstallerCore` library (Swift-only, reimplemented in Rust `core/`) vs `moot-mgr` (macOS-only).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
