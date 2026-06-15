@@ -31,7 +31,7 @@ import PersistenceKitReplication
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -149,15 +149,6 @@ private func tombstonedItemRow(
 }
 
 /// Build an event row dict with a composite PK.
-///
-/// NOTE: HLC column round-trip through SQLite is subject to a pre-existing
-/// bug in the SQLite backend where the pack/unpack formats differ between
-/// SQLiteConnection.bind (.hlc → SubstrateTypes HLC.packed format: node|logical|phys)
-/// and SQLiteBackend.unpackHLC (reads as phys|logical|node with different bit widths).
-/// Tests that assert exact HLC column values through SQLite use InMemory↔InMemory
-/// pairs only. Cross-backend (InMemory↔SQLite) tests use the events table for
-/// composite-PK and append-only verification but do not assert HLC column values.
-/// See the completion report finding F-HLC-01 for the pre-existing bug analysis.
 private func eventRow(
     topicID: UUID,
     seq: Int64,
@@ -371,12 +362,11 @@ struct ReplicationConformanceTests {
         let sourceEvents = try await sortedRows(from: source, table: "events")
         let hydratedEvents = try await sortedRows(from: hydrated, table: "events")
         #expect(sourceEvents.count == hydratedEvents.count)
-        // Compare all columns except hlc_stamp due to pre-existing SQLite backend bug
-        // (F-HLC-01): SQLiteConnection binds HLC using SubstrateTypes packed format but
-        // SQLiteBackend.unpackHLC reads it with a different bit layout, so HLC column
-        // values do not round-trip correctly through SQLite. See completion report.
+        // All columns including hlc_stamp must match. The SQLite backend stores
+        // HLC as Int64(bitPattern: hlc.packed) and reads back via HLC(packed:),
+        // so the round-trip is bit-identical.
         for (src, dst) in zip(sourceEvents, hydratedEvents) {
-            for (key, value) in src where key != "hlc_stamp" {
+            for (key, value) in src {
                 #expect(dst[key] == value, "events.\(key) mismatch after SQLite round-trip")
             }
         }
@@ -385,13 +375,18 @@ struct ReplicationConformanceTests {
         let sourceAudit = try await source.auditLog.iterate(after: nil, rowID: nil, limit: Int.max)
         let hydratedAudit = try await hydrated.auditLog.iterate(after: nil, rowID: nil, limit: Int.max)
         #expect(sourceAudit.count == hydratedAudit.count)
-        // Compare by eventID only (stable across round-trips). HLC values are subject to
-        // the pre-existing SQLite backend pack/unpack mismatch (F-HLC-01); the eventID
-        // is stored as TEXT and round-trips correctly. This confirms events are present
-        // and deduplicated correctly (idempotent append on eventID key).
-        let sourceAuditIDs = Set(sourceAudit.map { $0.eventID.uuidString })
-        let hydratedAuditIDs = Set(hydratedAudit.map { $0.eventID.uuidString })
-        #expect(sourceAuditIDs == hydratedAuditIDs)
+        // Full equality: eventID, HLC, verb, bitmaps, lattice anchors, actor all
+        // round-trip correctly through SQLite. HLC is stored as packed Int64 and
+        // recovered via HLC(packed:) — bit-identical.
+        for (src, dst) in zip(
+            sourceAudit.sorted(by: { $0.eventID.uuidString < $1.eventID.uuidString }),
+            hydratedAudit.sorted(by: { $0.eventID.uuidString < $1.eventID.uuidString })
+        ) {
+            #expect(src.eventID == dst.eventID, "audit eventID mismatch")
+            #expect(src.hlc == dst.hlc, "audit HLC mismatch after SQLite round-trip")
+            #expect(src.verb == dst.verb, "audit verb mismatch")
+            #expect(src.actor == dst.actor, "audit actor mismatch")
+        }
 
         // ── Tombstone preservation ────────────────────────────────
         // The tombstoned row must survive the round-trip with tombstoned_at set.
@@ -681,12 +676,9 @@ struct ReplicationConformanceTests {
         #expect(restoredEvents[0]["topic_id"] == .uuid(topicID))
         #expect(restoredEvents[0]["seq"] == .int(1))
         #expect(restoredEvents[0]["content"] == .text("cross-backend test"))
-        // HLC column not asserted here due to pre-existing SQLite backend bug (F-HLC-01):
-        // SQLiteConnection binds HLC using SubstrateTypes packed format but
-        // SQLiteBackend.unpackHLC decodes it with a different bit layout.
-        // The InMemory↔InMemory test (roundTripIdentityInMemoryToInMemory) verifies
-        // HLC column correctness on the InMemory↔InMemory path, which does not go
-        // through SQLite serialization.
+        // HLC round-trip through SQLite must be bit-identical: stored as
+        // Int64(bitPattern: hlc.packed) and recovered via HLC(packed:).
+        #expect(restoredEvents[0]["hlc_stamp"] == .hlc(hlc), "HLC column must be bit-identical after SQLite round-trip")
 
         let restoredAudit = try await restored.auditLog.count()
         #expect(restoredAudit == 1)
@@ -709,37 +701,13 @@ struct ReplicationConformanceTests {
             _ = try await StorageReplicator.replicate(
                 from: source,
                 to: destination,
-                schema: sourceSchema,
-                mode: .full
+                schema: sourceSchema
             )
             Issue.record("Should have thrown ReplicationError.schemaMismatch")
         } catch let error as ReplicationError {
             if case .schemaMismatch(let sv, let dv, _, _) = error {
                 #expect(sv == 1)
                 #expect(dv == 2)
-            } else {
-                Issue.record("Wrong error type: \(error)")
-            }
-        }
-    }
-
-    /// Schema gate: incremental mode throws notImplemented.
-    @Test func incrementalModeThrowsNotImplemented() async throws {
-        let source = try await makeInMemory()
-        let destination = try await makeInMemory()
-        let cursor = ReplicationCursor(hlcWatermark: nil, rowsWritten: 0, auditEventsWritten: 0)
-
-        do {
-            _ = try await StorageReplicator.replicate(
-                from: source,
-                to: destination,
-                schema: SyntheticSchema.declaration,
-                mode: .incremental(cursor: cursor)
-            )
-            Issue.record("Should have thrown ReplicationError.notImplemented")
-        } catch let error as ReplicationError {
-            if case .notImplemented = error {
-                // Expected.
             } else {
                 Issue.record("Wrong error type: \(error)")
             }
@@ -844,5 +812,104 @@ struct ReplicationConformanceTests {
         #expect(cursor.rowsWritten == 0)
         #expect(cursor.auditEventsWritten == 0)
         #expect(cursor.hlcWatermark == nil)
+    }
+
+    // MARK: - §9.B Blob copy — full snapshot
+
+    /// §9.B1 — Full snapshot with N blobs: all N arrive at destination byte-identical.
+    ///
+    /// Inserts 5 blobs with distinct keys and payloads, flushes, hydrates into a fresh
+    /// InMemory instance, and asserts every blob is present with the exact bytes.
+    @Test func fullSnapshotCopiesAllBlobsByteIdentical() async throws {
+        let source = try await makeInMemory()
+
+        // Write 5 blobs with distinct keys and payloads.
+        let blobPayloads: [(key: String, bytes: Data)] = [
+            ("blob:alpha",   Data([0xDE, 0xAD, 0xBE, 0xEF])),
+            ("blob:beta",    Data([0x01, 0x02, 0x03])),
+            ("blob:gamma",   Data(repeating: 0xFF, count: 64)),
+            ("blob:delta",   Data()),                          // zero-length blob
+            ("blob:epsilon", Data("hello blob".utf8)),
+        ]
+        for pair in blobPayloads {
+            try await source.blobStore.put(key: pair.key, bytes: pair.bytes)
+        }
+
+        // Flush to SQLite (cross-backend validates BlobStore.listKeys + get on SQLite).
+        let (sqlite, sqliteURL) = try await makeSQLite()
+        defer { removeSQLite(at: sqliteURL) }
+
+        let flushCursor = try await StorageReplicator.flush(
+            from: source,
+            into: sqlite,
+            schema: SyntheticSchema.declaration
+        )
+        #expect(flushCursor.blobsWritten == blobPayloads.count,
+                "Flush cursor must report all \(blobPayloads.count) blobs written")
+
+        // Hydrate fresh InMemory from SQLite.
+        let hydrated = try await makeInMemory()
+        let hydrateCursor = try await StorageReplicator.hydrate(
+            into: hydrated,
+            from: sqlite,
+            schema: SyntheticSchema.declaration
+        )
+        #expect(hydrateCursor.blobsWritten == blobPayloads.count,
+                "Hydrate cursor must report all \(blobPayloads.count) blobs written")
+
+        // Assert all blobs present and byte-identical.
+        for pair in blobPayloads {
+            let result = try await hydrated.blobStore.get(key: pair.key)
+            #expect(result == pair.bytes,
+                    "Blob '\(pair.key)' must be byte-identical after full-snapshot replication")
+        }
+
+        // Assert no extra keys were added.
+        let keys = try await hydrated.blobStore.listKeys()
+        #expect(keys.sorted() == blobPayloads.map(\.key).sorted(),
+                "Destination blob key set must exactly match source")
+    }
+
+    /// §9.B2 — Idempotent second flush: no duplicate blobs created.
+    @Test func fullSnapshotBlobCopyIsIdempotent() async throws {
+        let source = try await makeInMemory()
+        try await source.blobStore.put(key: "idempotent-key", bytes: Data([0xAB, 0xCD]))
+
+        let (sqlite, sqliteURL) = try await makeSQLite()
+        defer { removeSQLite(at: sqliteURL) }
+
+        // First flush.
+        let c1 = try await StorageReplicator.flush(from: source, into: sqlite, schema: SyntheticSchema.declaration)
+        #expect(c1.blobsWritten == 1)
+
+        // Second flush — same source data, same destination.
+        let c2 = try await StorageReplicator.flush(from: source, into: sqlite, schema: SyntheticSchema.declaration)
+        #expect(c2.blobsWritten == 1)
+
+        // Destination must have exactly 1 blob key (no duplicate).
+        let keys = try await sqlite.blobStore.listKeys()
+        #expect(keys.count == 1, "Second flush must not create duplicate blob keys")
+
+        // Value must still be correct.
+        let result = try await sqlite.blobStore.get(key: "idempotent-key")
+        #expect(result == Data([0xAB, 0xCD]))
+    }
+
+    /// §9.B3 — Full snapshot with zero blobs: blobsWritten is 0, no error.
+    @Test func fullSnapshotZeroBlobsProducesZeroCount() async throws {
+        let source = try await makeInMemory()
+        let destination = try await makeInMemory()
+        // Source has rows but no blobs.
+        _ = try await source.rowStore.upsert(
+            table: "items",
+            values: liveItemRow(),
+            conflictColumns: ["id"]
+        )
+        let cursor = try await StorageReplicator.flush(
+            from: source,
+            into: destination,
+            schema: SyntheticSchema.declaration
+        )
+        #expect(cursor.blobsWritten == 0, "No blobs in source must produce blobsWritten == 0")
     }
 }

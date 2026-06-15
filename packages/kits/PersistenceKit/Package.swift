@@ -3,9 +3,15 @@
 // Package.swift — PersistenceKit
 //
 // PersistenceKit is the storage abstraction layer for the GeniusLocus
-// substrate. It provides typed row, blob, vector, and audit log
-// I/O over swappable backends (SQLite + sqlite-vec, PostgreSQL +
-// pgvector, InMemory for tests).
+// substrate. It provides typed row, blob, and audit log I/O over
+// swappable backends (SQLite, PostgreSQL, InMemory for tests).
+//
+// PersistenceKit owns no vector-search engine. Dense-embedding k-NN
+// lives solely in VectorKit (ADR-008 persistencekit-vector-contract-
+// correction). Every backend instead guarantees the ACCOMMODATION
+// contract: it accommodates vector workloads' storage needs (vector-
+// payload round-trip, bulk hydration, count, delete) through the
+// general RowStore / BlobStore surfaces.
 //
 // Design per DECISION_STORAGEKIT_DESIGN_2026-05-19.md.
 // Eleven-kit graph per DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md.
@@ -48,17 +54,6 @@ let package = Package(
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
     ],
     targets: [
-        // Vendored sqlite-vec C amalgamation (asg017/sqlite-vec).
-        .target(
-            name: "CSQLiteVec",
-            path: "Sources/CSQLiteVec",
-            publicHeadersPath: "include",
-            cSettings: [
-                .define("SQLITE_CORE", to: "1"),
-                .define("SQLITE_VEC_STATIC", to: "1"),
-            ]
-        ),
-
         // Core protocols and types.
         .target(
             name: "PersistenceKit",
@@ -80,7 +75,7 @@ let package = Package(
         ),
         .target(
             name: "PersistenceKitSQLite",
-            dependencies: ["PersistenceKit", "SubstrateTypes", "CSQLiteVec"],
+            dependencies: ["PersistenceKit", "SubstrateTypes"],
             path: "Sources/PersistenceKitSQLite"
         ),
         .target(

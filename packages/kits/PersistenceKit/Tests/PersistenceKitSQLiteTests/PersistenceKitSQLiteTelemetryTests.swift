@@ -194,8 +194,7 @@ struct PKSQLiteTelemetryEnabledTests {
             await reportStorageStats(storage, estateID: "sqlite-estate", now: now)
 
             let pkSamples = sink.samples(prefix: "persistence.db.")
-            let inMemoryMetrics = ["persistence.db.row_count", "persistence.db.blob_count",
-                                   "persistence.db.vector_count"]
+            let inMemoryMetrics = ["persistence.db.row_count", "persistence.db.blob_count"]
             for metricName in inMemoryMetrics {
                 let found = pkSamples.contains {
                     if case let .metric(name, _, _, _) = $0 { return name == metricName }

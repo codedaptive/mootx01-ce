@@ -20,15 +20,18 @@ final class ObserverRegistry: @unchecked Sendable {
         let continuation: AsyncStream<TableChange>.Continuation
     }
 
-    // `subs` is accessed exclusively under `lock`; that discipline is what
-    // makes the `@unchecked Sendable` conformance sound — the same pattern
-    // used by `FederationRelay` and the QueueKit watchers.
+    struct BlobSubscription {
+        let id: UUID
+        let continuation: AsyncStream<BlobChange>.Continuation
+    }
+
+    // `subs` and `blobSubs` are accessed exclusively under `lock`; that
+    // discipline is what makes the `@unchecked Sendable` conformance sound.
     private let lock = NSLock()
     private var subs: [UUID: Subscription] = [:]
+    private var blobSubs: [UUID: BlobSubscription] = [:]
 
-    /// Record a subscription and return its stream. Synchronous: the
-    /// subscription is present in `subs` before this returns, so a change
-    /// notified immediately afterwards is delivered rather than dropped.
+    /// Record a row subscription and return its stream. Synchronous.
     func register(table: String, events: Set<StorageEvent>) -> AsyncStream<TableChange> {
         let id = UUID()
         let (stream, continuation) = AsyncStream<TableChange>.makeStream(bufferingPolicy: .bufferingOldest(1024))
@@ -41,9 +44,28 @@ final class ObserverRegistry: @unchecked Sendable {
         return stream
     }
 
+    /// Record a blob subscription and return its stream. Synchronous.
+    func registerBlobs() -> AsyncStream<BlobChange> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<BlobChange>.makeStream(bufferingPolicy: .bufferingOldest(1024))
+        lock.lock()
+        blobSubs[id] = BlobSubscription(id: id, continuation: continuation)
+        lock.unlock()
+        continuation.onTermination = { [weak self] _ in
+            self?.removeBlobSub(id: id)
+        }
+        return stream
+    }
+
     private func remove(id: UUID) {
         lock.lock()
         subs.removeValue(forKey: id)
+        lock.unlock()
+    }
+
+    private func removeBlobSub(id: UUID) {
+        lock.lock()
+        blobSubs.removeValue(forKey: id)
         lock.unlock()
     }
 
@@ -58,7 +80,13 @@ final class ObserverRegistry: @unchecked Sendable {
         return subs.values.filter { $0.table == change.table && $0.events.contains(change.event) }
     }
 
-    /// Deliver `change` to every matching subscription.
+    private func allBlobSubscriptions() -> [BlobSubscription] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(blobSubs.values)
+    }
+
+    /// Deliver `change` to every matching row subscription.
     ///
     /// Declared `async` to preserve the awaited call site in
     /// `InMemoryStateActor.notify`, which keeps delivery ordered with
@@ -68,6 +96,13 @@ final class ObserverRegistry: @unchecked Sendable {
     /// cannot contend with an in-flight notify.
     func notify(_ change: TableChange) async {
         for sub in subscriptions(matching: change) {
+            sub.continuation.yield(change)
+        }
+    }
+
+    /// Deliver `change` to every blob subscription.
+    func notifyBlob(_ change: BlobChange) async {
+        for sub in allBlobSubscriptions() {
             sub.continuation.yield(change)
         }
     }
@@ -87,5 +122,9 @@ final class InMemoryObserver: StorageObserver, Sendable {
         // race ahead of registration. Mirrors the Rust observer, which
         // returns `hub.subscribe(...)` directly.
         registry.register(table: table, events: events)
+    }
+
+    func observeBlobs() -> AsyncStream<BlobChange> {
+        registry.registerBlobs()
     }
 }

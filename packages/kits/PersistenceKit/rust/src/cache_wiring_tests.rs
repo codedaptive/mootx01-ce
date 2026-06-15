@@ -70,6 +70,8 @@ fn make_inmemory(cache_enabled: bool) -> InMemoryStorage {
         } else {
             EstateCacheConfig::disabled()
         },
+        // HMM is the default and the only valid choice on Rust.
+        novel_token_tagger: crate::storage::NovelTokenTaggerChoice::Hmm,
     };
     let storage = InMemoryStorage::new(config);
     storage.open(&wiring_schema()).expect("inmemory schema open");
@@ -194,6 +196,8 @@ fn make_sqlite(cache_enabled: bool) -> SqliteStorage {
         } else {
             EstateCacheConfig::disabled()
         },
+        // HMM is the default and the only valid choice on Rust.
+        novel_token_tagger: crate::storage::NovelTokenTaggerChoice::Hmm,
     };
     let storage = SqliteStorage::new(config).expect("sqlite open");
     storage.open(&wiring_schema()).expect("sqlite schema open");

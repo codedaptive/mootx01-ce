@@ -10,7 +10,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -27,7 +27,6 @@ public final class PostgreSQLStorage: Storage, Sendable {
     let backend: PostgreSQLBackend
     public let rowStore: any RowStore
     public let blobStore: any BlobStore
-    public let vectorIndex: any VectorIndex
     public let auditLog: any AuditLog
     public let observer: any StorageObserver = NoOpObserver()
 
@@ -45,7 +44,7 @@ public final class PostgreSQLStorage: Storage, Sendable {
         // analogue of SQLite's one-file-per-estate). Every pooled connection
         // pins its search_path to it, so a shared database holds many estates
         // without table collisions. `public` stays on the path so shared
-        // extensions (e.g. pgvector) resolve.
+        // extensions resolve.
         let searchPath = "pk_" + configuration.estateID.uuidString
             .replacingOccurrences(of: "-", with: "").lowercased()
         let pool = PostgreSQLPool(
@@ -66,7 +65,6 @@ public final class PostgreSQLStorage: Storage, Sendable {
             ? CachingRowStore(backing: baseRowStore, config: configuration.cacheConfig)
             : baseRowStore
         self.blobStore = PostgreSQLBlobStore(backend: backend)
-        self.vectorIndex = PostgreSQLVectorIndex(backend: backend)
         self.auditLog = PostgreSQLAuditLog(backend: backend)
     }
 
@@ -251,7 +249,7 @@ actor PostgreSQLBackend {
         )
         for try await row in sizeRows {
             let acc = row.makeRandomAccess()
-            if let cell = try? acc[0], let v = try? cell.decode(Int64.self, context: .default) {
+            if let v = try? acc[0].decode(Int64.self, context: .default) {
                 logicalSize = v
             }
         }
@@ -301,8 +299,7 @@ actor PostgreSQLBackend {
         )
         for try await row in lockRows {
             let acc = row.makeRandomAccess()
-            if let cell = try? acc["waiting"],
-               let v = try? cell.decode(Int64.self, context: .default) {
+            if let v = try? acc["waiting"].decode(Int64.self, context: .default) {
                 lockContention = v > 0
             }
         }
@@ -338,10 +335,8 @@ actor PostgreSQLBackend {
         )
         for try await row in rows {
             let access = row.makeRandomAccess()
-            if let cell = try? access["value"] {
-                if let s: String = try? cell.decode(String.self, context: .default), let v = Int(s) {
-                    return v
-                }
+            if let s: String = try? access["value"].decode(String.self, context: .default), let v = Int(s) {
+                return v
             }
         }
         return 0
@@ -428,14 +423,12 @@ actor PostgreSQLBackend {
 final class PostgreSQLTransaction: StorageTransaction, Sendable {
     let rowStore: any RowStore
     let blobStore: any BlobStore
-    let vectorIndex: any VectorIndex
     let auditLog: any AuditLog
 
     init(connection: PostgresConnection, backend: PostgreSQLBackend) {
         let ctx = PostgreSQLTransactionContext(connection: connection, backend: backend)
         self.rowStore = PostgreSQLRowStore(backend: backend, txn: ctx)
         self.blobStore = PostgreSQLBlobStore(backend: backend, txn: ctx)
-        self.vectorIndex = PostgreSQLVectorIndex(backend: backend, txn: ctx)
         self.auditLog = PostgreSQLAuditLog(backend: backend, txn: ctx)
     }
 }

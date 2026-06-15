@@ -89,8 +89,15 @@ pub struct EstateEncryptionConfig {
     /// Stable identifier recorded in the row's keyID column and the key
     /// registry. `None` for `.Plaintext`.
     pub key_identifier: Option<String>,
-    /// The AES-GCM-256 data key (32 raw bytes). `pub(crate)` so the SQLite
-    /// backend can use it without exporting it. `None` for `.Plaintext`.
+    /// The AES-GCM-256 data key (32 raw bytes). `pub(crate)` and never part
+    /// of the public API surface. `None` for `.Plaintext`.
+    ///
+    /// The Rust `sqlite.rs` backend reads this key in `encrypted_for_write`
+    /// and `decrypted_for_read` to encrypt the `content` column at rest,
+    /// mirroring Swift's `encryptedForWrite`/`decryptedForRead` seam on
+    /// `SQLiteBackend`. The envelope layout `[nonce][tag][ciphertext]` is
+    /// byte-identical between Swift and Rust so a cell encrypted by one
+    /// side decrypts correctly on the other.
     ///
     /// Never log or expose this field outside the crate.
     pub(crate) key: Option<Vec<u8>>,
@@ -261,6 +268,41 @@ impl AeadProvider for AesGcmAeadProvider {
         cipher
             .decrypt(nonce, ct_with_tag.as_slice())
             .map_err(|e| format!("AesGcmAeadProvider::decrypt: authentication failure: {e}"))
+    }
+}
+
+// Inherent impl block for test-only helpers on AesGcmAeadProvider.
+#[cfg(test)]
+impl AesGcmAeadProvider {
+    /// Encrypt `plaintext` under `key` with a caller-supplied `nonce` (12 bytes).
+    /// Exposed only for tests that need a deterministic ciphertext to verify
+    /// cross-port envelope format parity. Production callers always use the
+    /// `AeadProvider::encrypt` method, which generates a fresh random nonce
+    /// via OsRng — never call this in non-test code.
+    ///
+    /// # Security note
+    /// Reusing a nonce under the same key breaks AES-GCM confidentiality and
+    /// authenticity. This seam exists only so tests can produce a known-nonce
+    /// envelope matching the Swift fixture; it is compiled out of release builds.
+    pub fn encrypt_with_nonce(
+        &self,
+        plaintext: &[u8],
+        key: &[u8],
+        nonce_bytes: &[u8; 12],
+    ) -> Result<Vec<u8>, String> {
+        let k = Key::<Aes256Gcm>::from_slice(key);
+        let cipher = Aes256Gcm::new(k);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let ct_with_tag = cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| format!("AesGcmAeadProvider::encrypt_with_nonce: {e}"))?;
+        let ct_len = ct_with_tag.len().saturating_sub(TAG_LEN);
+        let (ct_bytes, tag_bytes) = ct_with_tag.split_at(ct_len);
+        let mut out = Vec::with_capacity(NONCE_LEN + TAG_LEN + ct_bytes.len());
+        out.extend_from_slice(nonce_bytes);
+        out.extend_from_slice(tag_bytes);
+        out.extend_from_slice(ct_bytes);
+        Ok(out)
     }
 }
 

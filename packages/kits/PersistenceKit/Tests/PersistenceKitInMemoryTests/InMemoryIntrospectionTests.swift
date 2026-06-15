@@ -2,7 +2,7 @@
 //
 // Verifies the StorageIntrospection conformance of InMemoryStorage.
 // Tests focus on the fields the InMemory backend supplies: rowCount,
-// blobCount, vectorCount, transactionRollbackCount, and approximate
+// blobCount, transactionRollbackCount, and approximate
 // logicalSizeBytes. SQLite- and PostgreSQL-specific fields must be nil.
 
 import Testing
@@ -34,9 +34,10 @@ struct InMemoryIntrospectionTests {
 
     @Test("InMemoryStorage conforms to StorageIntrospection")
     func conformsToStorageIntrospection() {
-        let storage = makeStorage()
-        let introspectable = storage as? StorageIntrospection
-        #expect(introspectable != nil, "InMemoryStorage must conform to StorageIntrospection")
+        // Bind as `Any` so the conformance check is a genuine runtime test;
+        // casting the concrete type directly is statically always-true.
+        let storage: Any = makeStorage()
+        #expect(storage is any StorageIntrospection, "InMemoryStorage must conform to StorageIntrospection")
     }
 
     @Test("rowCount is zero before any inserts")
@@ -75,18 +76,6 @@ struct InMemoryIntrospectionTests {
 
         let stats = await storage.stats(now: Date())
         #expect(stats.blobCount == 2, "blobCount must equal the number of stored blobs")
-    }
-
-    @Test("vectorCount reflects stored vectors")
-    func vectorCountReflectsStoredVectors() async throws {
-        let storage = makeStorage()
-        try await storage.open(schema: Self.schema)
-
-        let k = UUID()
-        try await storage.vectorIndex.add(key: k, vector: [1.0, 0.0, 0.0], metadata: [:])
-
-        let stats = await storage.stats(now: Date())
-        #expect(stats.vectorCount == 1, "vectorCount must equal the number of stored vectors")
     }
 
     @Test("transactionRollbackCount increments on user-block error")

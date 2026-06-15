@@ -8,7 +8,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -47,7 +47,24 @@ final class InMemoryRowStore: RowStore, Sendable {
         limit: Int?,
         offset: Int?
     ) async throws -> [StorageRow] {
-        try await stateActor.queryRows(table: table, where: predicate, orderBy: orderBy, limit: limit, offset: offset)
+        try await stateActor.queryRows(table: table, where: predicate, orderBy: orderBy, limit: limit, offset: offset, columns: nil)
+    }
+
+    // No-blob projection: drop every column not named in `columns` from each
+    // returned row. The InMemory backend holds full rows in memory, so this
+    // does not save a transfer the way SQLite does, but it makes the returned
+    // StorageRow byte-identical to the SQLite projection — a consumer decoding
+    // an absent column reads the same empty/default value on both backends, so
+    // dense-first tests behave identically across InMemory and SQLite.
+    func query(
+        table: String,
+        where predicate: StoragePredicate?,
+        orderBy: [OrderClause],
+        limit: Int?,
+        offset: Int?,
+        columns: [String]?
+    ) async throws -> [StorageRow] {
+        try await stateActor.queryRows(table: table, where: predicate, orderBy: orderBy, limit: limit, offset: offset, columns: columns)
     }
 
     func count(table: String, where predicate: StoragePredicate?) async throws -> Int {
