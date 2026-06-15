@@ -25,7 +25,14 @@ pub mod info_theory;
 pub mod lattice_distance;
 pub mod moment_summary;
 pub mod nmf;
+// NMFDoubleFrobeniusSquared — the parked f64/Frobenius² NMF variant.
+// PRODUCTION GATE: NOT for production use. Must pass substrate_math_performance
+// benchmarking before any consumer wires to this. See the module header for the
+// full gate contract and the motivation (Bob's ruling 2026-06-13).
+pub mod nmf_double_frobenius_squared;
 pub mod random_walks;
+pub mod sampling;
+pub mod shingle_similarity;
 pub mod temporal_compression;
 
 // Relocated 2026-05-29 (four-package split addendum): cold-path /

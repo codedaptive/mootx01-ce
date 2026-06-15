@@ -355,7 +355,7 @@ All four cells must PASS at the CRC listed in the tables above.
 
 ## Related docs
 
-- `../../../docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md`
+- `../../../docs/engineering/HARNESS_REFERENCE.md`
   §2.2 (Tier 2) and §2.3 (Tier 3) — primitives indexed with Swift
   API, Rust API, file paths, and CRCs.
 - Cookbook v1.0 §6 (matrix tier), §7 (estate as graph), §8 (algorithms),
