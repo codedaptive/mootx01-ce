@@ -21,6 +21,15 @@ use crate::job::{
 
 const STALE_TMP: Duration = Duration::from_secs(5 * 60);
 
+/// Poll cadence for the default (no `watch` feature) filesystem watcher.
+/// 200 ms — matches Swift's `Watcher.watchPoll` interval (200_000_000 ns)
+/// so both ports deliver the same near-realtime guarantee out of the box.
+/// Short enough for near-realtime throughput; long enough that the thread
+/// does not spin a core. Only compiled when the `watch` feature is absent
+/// (the event-driven path has no need of a poll interval).
+#[cfg(not(feature = "watch"))]
+const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
 pub struct FilesystemBackend {
     root: PathBuf,
     hlc: Mutex<HlcGenState>,
@@ -257,17 +266,44 @@ impl QueueBackend for FilesystemBackend {
         list_jobs(&self.cur_dir(), None)
     }
 
+    // pendingCount (telemetry depth probe) — Swift parity.
+    //
+    // Count files in `new/` — each file is one pending job not yet claimed. A
+    // non-existent directory means zero pending (matches Swift's guard).
+    fn pending_count(&self) -> Result<usize, QueueError> {
+        match fs::read_dir(self.new_dir()) {
+            Ok(rd) => Ok(rd.filter_map(Result::ok).count()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(QueueError::BackendUnavailable(
+                format!("pending_count list new/: {e}"))),
+        }
+    }
+
     fn completed(&self, stream_id: Option<&StreamId>) -> Result<Vec<Job>, QueueError> {
         list_jobs(&self.done_dir(), stream_id)
     }
 
     // spec §3, §4: watch()
     //
-    // The notify crate raises an event when a file lands in new/.
-    // Each event is treated as a wake signal only; the authoritative
-    // claim path is drain_available(), which performs the atomic
-    // rename from new/ to cur/. This honours the spec rule that
-    // watch() must never short-circuit the claim atomicity.
+    // Two implementations behind a feature gate — same external contract,
+    // different wake mechanism:
+    //
+    //   Default build (no feature flag):
+    //     Polling fallback. Scans new/ on a fixed 200 ms cadence (matching
+    //     Swift's Watcher.watchPoll interval), treating each tick as a wake
+    //     signal. No external dependency; works out of the box. Delivers
+    //     near-realtime throughput at the polling granularity.
+    //
+    //   --features watch:
+    //     Event-driven via the `notify` crate (OS file-system events). Lower
+    //     latency than polling; same drain-first contract. An upgrade, not a
+    //     requirement.
+    //
+    // Both paths share the same wake contract: every wake calls drain_available()
+    // as the authority on what is claimable — the wake is a hint, never
+    // authoritative. Spurious wakes drain to empty harmlessly. A drain error
+    // propagates (fail-closed per SPEC §5 B-3).
+
     #[cfg(feature = "watch")]
     fn watch<F>(&self, handler: F) -> Result<(), QueueError>
     where
@@ -293,6 +329,8 @@ impl QueueBackend for FilesystemBackend {
         loop {
             match rx.recv() {
                 Ok(_event) => {
+                    // Wake is a signal only; drain_available() is the authority
+                    // on what is actually claimable (drain-first semantics).
                     let pairs = self.drain_available()?;
                     for (job, session_id) in pairs {
                         handler(job, session_id)?;
@@ -306,13 +344,31 @@ impl QueueBackend for FilesystemBackend {
     }
 
     #[cfg(not(feature = "watch"))]
-    fn watch<F>(&self, _handler: F) -> Result<(), QueueError>
+    fn watch<F>(&self, handler: F) -> Result<(), QueueError>
     where
         F: Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync,
     {
-        Err(QueueError::BackendUnavailable(
-            "watch() requires the 'watch' feature. \
-             Enable with --features watch.".to_string()))
+        // Polling fallback — no external dependency required.
+        //
+        // Drain anything already present before entering the poll loop,
+        // so jobs that arrived before watch() was called are not lost
+        // (mirrors the drain-before-block in the --features watch path).
+        for (job, session_id) in self.drain_available()? {
+            handler(job, session_id)?;
+        }
+
+        loop {
+            std::thread::sleep(WATCH_POLL_INTERVAL);
+            // Each tick is treated as a wake hint; drain_available() is the
+            // authority on what is actually claimable. Spurious ticks that find
+            // new/ empty drain to nothing and loop back. A drain error propagates
+            // fail-closed (SPEC §5 B-3): a storage fault is not silently treated
+            // as an empty queue.
+            let pairs = self.drain_available()?;
+            for (job, session_id) in pairs {
+                handler(job, session_id)?;
+            }
+        }
     }
 }
 

@@ -25,6 +25,12 @@ pub enum QueueError {
     StaleTmpFile { path: String, age_secs: f64 },
     BackendUnavailable(String),
     InvalidTerminalStatus(String),
+    /// `await_drain(...)` exceeded its timeout with work still on either
+    /// frontier. Carries the last-observed depths so a caller can log how far
+    /// the queue was from empty when it gave up (a non-zero `in_flight` points
+    /// at a stalled drain worker; a non-zero `pending` at a worker that never
+    /// claimed). Swift parity: `QueueError.drainTimeout(pending:inFlight:)`.
+    DrainTimeout { pending: usize, in_flight: usize },
 }
 
 impl fmt::Display for QueueError {

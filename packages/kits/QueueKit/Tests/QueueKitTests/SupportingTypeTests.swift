@@ -1,6 +1,7 @@
 // SupportingTypeTests.swift
 //
-// Covers QUEUEKIT_SPEC §6 wire format and §7 supporting types.
+// Covers QUEUEKIT_SPEC §6 wire format and §7 supporting types;
+// QueueLatencyWindow percentile tests (TELEMETRY_QT).
 
 import Testing
 import Foundation
@@ -10,7 +11,7 @@ import SubstrateTypes
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -141,5 +142,45 @@ struct SupportingTypeTests {
         let decoded = try WireFormat.decoder.decode(
             [ArtifactRef].self, from: data)
         #expect(decoded == arts)
+    }
+
+    // MARK: - QueueLatencyWindow (TELEMETRY_QT)
+
+    @Test func latencyWindowEmptyReturnsZero() {
+        let w = QueueLatencyWindow()
+        #expect(w.percentile(50) == 0.0)
+        #expect(w.percentile(95) == 0.0)
+    }
+
+    @Test func latencyWindowSingleSampleAllPercentiles() {
+        var w = QueueLatencyWindow()
+        w.append(42.0)
+        #expect(w.percentile(0) == 42.0)
+        #expect(w.percentile(50) == 42.0)
+        #expect(w.percentile(100) == 42.0)
+    }
+
+    @Test func latencyWindowP50P95KnownSet() {
+        // 10 samples [1..10]; sorted: [1,2,3,4,5,6,7,8,9,10]
+        // p50: idx = Int(0.5 * 9) = 4 → sorted[4] = 5.0
+        // p95: idx = Int(0.95 * 9) = Int(8.55) = 8 → sorted[8] = 9.0
+        var w = QueueLatencyWindow()
+        for i in 1...10 { w.append(Double(i)) }
+        #expect(w.percentile(50) == 5.0,
+                "p50 of [1..10] must be 5.0; got \(w.percentile(50))")
+        #expect(w.percentile(95) == 9.0,
+                "p95 of [1..10] must be 9.0; got \(w.percentile(95))")
+    }
+
+    @Test func latencyWindowRollsOffOldestSamples() {
+        // capacity=3: after 4 appends window = [2, 3, 100] (1.0 evicted)
+        // sorted = [2, 3, 100]; p50: idx = Int(0.5 * 2) = 1 → sorted[1] = 3.0
+        var w = QueueLatencyWindow(capacity: 3)
+        w.append(1.0)
+        w.append(2.0)
+        w.append(3.0)
+        w.append(100.0)   // evicts 1.0
+        #expect(w.percentile(50) == 3.0,
+                "p50 of capacity-evicted window [2,3,100] must be 3.0; got \(w.percentile(50))")
     }
 }

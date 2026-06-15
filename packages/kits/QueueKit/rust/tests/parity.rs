@@ -2,11 +2,16 @@
 //   - ToolName + allowlist validation
 //   - QueueKitSchema shape (kitID, version, table name, column set)
 //   - PersistenceKitBackend round-trip (send/drain/complete/in_flight/completed)
+//   - pending_count() across enqueue/drain/complete states (Swift parity:
+//     PersistenceKitBackend.pendingCount())
+//   - watch() fires on enqueue and delivers via drain_available() (Swift
+//     parity: PersistenceKitBackend.watch(handler:))
 //   - QueueError::UnknownTool and QueueError::StaleTmpFile variants
 //
 // Requires --features persistencekit.
 
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 use queuekit::{
@@ -357,4 +362,204 @@ fn extensions_round_trip() {
         drained_job.extensions.get("priority_label").and_then(|v| v.as_str()),
         Some("high")
     );
+}
+
+// ---------------------------------------------------------------------------
+// pending_count() — PersistenceKitBackend parity
+//
+// Swift reference: PersistenceKitBackend.pendingCount() — COUNT(*) WHERE
+// status = 'new', no claim. Used by QueueKitTelemetry to snapshot queue depth
+// without advancing the cursor. These tests mirror the FilesystemBackend
+// coverage in await_drain.rs::pending_count_tracks_new_frontier.
+// ---------------------------------------------------------------------------
+
+// Zero on an empty backend.
+#[test]
+fn pk_pending_count_empty() {
+    let backend = make_backend();
+    // No jobs written; pending_count must return 0 (not an error).
+    assert_eq!(
+        backend.pending_count().expect("pending_count on empty backend"),
+        0,
+        "empty backend must report zero pending"
+    );
+}
+
+// Reflects the number of jobs written (status = 'new') before any claim.
+#[test]
+fn pk_pending_count_after_enqueue() {
+    let backend = make_backend();
+    backend.write(&test_job(1)).expect("write 1");
+    assert_eq!(backend.pending_count().expect("after first write"), 1);
+    backend.write(&test_job(2)).expect("write 2");
+    assert_eq!(backend.pending_count().expect("after second write"), 2);
+    backend.write(&test_job(3)).expect("write 3");
+    assert_eq!(backend.pending_count().expect("after third write"), 3);
+}
+
+// Drops to zero after drain_available() claims all pending jobs.
+// Mirrors Swift: pendingCount drops to 0 once drainAvailable() moves rows to "cur".
+#[test]
+fn pk_pending_count_drops_after_drain() {
+    let backend = make_backend();
+    backend.write(&test_job(1)).expect("write 1");
+    backend.write(&test_job(2)).expect("write 2");
+
+    // Before drain: two jobs pending, none in-flight.
+    assert_eq!(backend.pending_count().expect("before drain"), 2);
+    assert!(backend.in_flight().expect("in_flight before drain").is_empty());
+
+    let batch = backend.drain_available().expect("drain");
+    assert_eq!(batch.len(), 2);
+
+    // After drain: pending drops to zero; both jobs are in-flight (status = 'cur').
+    assert_eq!(
+        backend.pending_count().expect("after drain"),
+        0,
+        "pending_count must be 0 after drain claims all jobs"
+    );
+    assert_eq!(backend.in_flight().expect("in_flight after drain").len(), 2);
+}
+
+// Stays at zero after all jobs are completed (status = 'done').
+#[test]
+fn pk_pending_count_zero_after_complete() {
+    let backend = make_backend();
+    backend.write(&test_job(1)).expect("write");
+    let batch = backend.drain_available().expect("drain");
+    for (job, _) in &batch {
+        backend.complete(&job.id, ObservationStatus::Done, vec![]).expect("complete");
+    }
+    // All jobs are now in 'done'; pending_count must still be 0.
+    assert_eq!(backend.pending_count().expect("after complete"), 0);
+    assert!(backend.in_flight().expect("in_flight after complete").is_empty());
+}
+
+// Mixed state: some jobs pending, some in-flight, some completed.
+// pending_count counts only the 'new' rows — not 'cur' or 'done'.
+#[test]
+fn pk_pending_count_mixed_states() {
+    let backend = make_backend();
+    // Write three jobs.
+    backend.write(&test_job(1)).expect("write 1");
+    backend.write(&test_job(2)).expect("write 2");
+    backend.write(&test_job(3)).expect("write 3");
+    assert_eq!(backend.pending_count().expect("all pending"), 3);
+
+    // Drain (claims all three → 'cur').
+    let batch = backend.drain_available().expect("drain");
+    assert_eq!(backend.pending_count().expect("all in-flight"), 0);
+
+    // Complete the first job. pending_count still 0; others remain 'cur'.
+    backend.complete(&batch[0].0.id, ObservationStatus::Done, vec![])
+        .expect("complete job 0");
+    assert_eq!(backend.pending_count().expect("two in-flight one done"), 0);
+
+    // Write a fourth job. pending_count is now 1 (only the new one).
+    backend.write(&test_job(4)).expect("write 4");
+    assert_eq!(
+        backend.pending_count().expect("one new two cur one done"),
+        1,
+        "pending_count must count only 'new' rows"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// watch() — PersistenceKitBackend parity
+//
+// Swift reference: PersistenceKitBackend.watch(handler:) subscribes to INSERT
+// events on the jobs table; each wake re-reads through drain_available() so
+// only durably committed rows are delivered. The handler receives (Job, SessionID)
+// pairs as they become available.
+//
+// Test strategy: spawn watch() on a background thread with a handler that
+// collects jobs into a shared vec and returns an error after seeing the
+// expected count (breaking the watch loop). The main thread writes jobs and
+// waits for the collector to signal completion. Bounded wait, no sleep loops.
+// ---------------------------------------------------------------------------
+
+// watch() delivers a single job written before the watch call (pre-existing
+// job draining on attach). Mirrors Swift spec §10 invariant 2: watch re-reads
+// through drain_available(), so jobs already present at subscription time are
+// not lost.
+#[test]
+fn pk_watch_delivers_jobs_on_enqueue() {
+    use std::sync::mpsc;
+
+    let storage = make_storage();
+    // Coerce Arc<InMemoryStorage> to Arc<dyn Storage> so PersistenceKitBackend::new
+    // receives the expected trait-object pointer.
+    let storage_dyn: Arc<dyn persistence_kit::storage::Storage> = storage;
+    let backend = Arc::new(PersistenceKitBackend::new(Arc::clone(&storage_dyn)));
+
+    // Write one job before starting the watcher, to exercise the
+    // "drain anything already present before blocking" path.
+    backend.write(&test_job(1)).expect("write before watch");
+
+    let (tx, rx) = mpsc::sync_channel::<queuekit::Job>(4);
+    let b = Arc::clone(&backend);
+
+    let watcher_thread = std::thread::spawn(move || {
+        b.watch(move |job, _session| {
+            let _ = tx.send(job.clone());
+            // Signal handler break: return error after first delivery so
+            // the watch loop exits cleanly. The watch() contract (per spec
+            // §3) says the loop exits when handler returns an error.
+            Err(queuekit::QueueError::WatcherFailed("test stop".to_string()))
+        })
+    });
+
+    // Wait up to 5 seconds for the job to arrive via watch.
+    let delivered = rx.recv_timeout(Duration::from_secs(5))
+        .expect("watch did not deliver the pre-existing job within 5 s");
+
+    assert_eq!(delivered.id.0, "job-0001");
+
+    // The watcher thread should have exited because the handler returned Err.
+    watcher_thread.join()
+        .expect("watcher thread panicked")
+        .ok(); // WatcherFailed returned by our handler; that's expected
+
+    // After watch exits, the job was claimed by drain_available(). in_flight
+    // must have it, and pending must be zero.
+    assert_eq!(backend.pending_count().expect("pending after watch"), 0);
+}
+
+// watch() delivers a job written AFTER the watcher attaches, exercising the
+// observer wake path (INSERT event → wake → drain_available()).
+#[test]
+fn pk_watch_fires_on_post_attach_enqueue() {
+    use std::sync::mpsc;
+
+    let storage = make_storage();
+    let storage_dyn: Arc<dyn persistence_kit::storage::Storage> = storage;
+    let backend = Arc::new(PersistenceKitBackend::new(Arc::clone(&storage_dyn)));
+
+    let (tx, rx) = mpsc::sync_channel::<queuekit::Job>(4);
+    let b_watch = Arc::clone(&backend);
+
+    let watcher_thread = std::thread::spawn(move || {
+        b_watch.watch(move |job, _session| {
+            let _ = tx.send(job.clone());
+            Err(queuekit::QueueError::WatcherFailed("test stop".to_string()))
+        })
+    });
+
+    // Give the watcher a moment to subscribe before we write.
+    // 20 ms is plenty — InMemoryStorage observer subscription is synchronous.
+    std::thread::sleep(Duration::from_millis(20));
+
+    // Write a job AFTER the watcher is running.
+    backend.write(&test_job(42)).expect("write after attach");
+
+    let delivered = rx.recv_timeout(Duration::from_secs(5))
+        .expect("watch did not fire within 5 s after enqueue");
+
+    assert_eq!(delivered.id.0, "job-0042");
+
+    watcher_thread.join()
+        .expect("watcher thread panicked")
+        .ok();
+
+    assert_eq!(backend.pending_count().expect("pending after watch"), 0);
 }
