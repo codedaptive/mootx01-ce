@@ -202,10 +202,12 @@ the stdio install into the resident-daemon install.
 
 **Background service** — registered automatically by `mootx01 install`, with no admin elevation:
 
-- *Linux:* a per-user **systemd** unit at `~/.config/systemd/user/mootx01.service` (plus
-  `mootx01-mgr.service`), enabled via `systemctl --user enable --now` with `loginctl enable-linger`
-  so the daemon runs without an open login session. On hosts without systemd, the installer prints
-  the unit text and manual start instructions instead (sysvinit/openrc are not auto-registered in v1).
+- *Linux:* a per-user **systemd** unit at `~/.config/systemd/user/mootx01.service`, enabled via
+  `systemctl --user enable --now` with `loginctl enable-linger` so the daemon runs without an open
+  login session. A `mootx01-mgr.service` is added **only if** a `moot-mgr` binary sits beside
+  `mootx01` — the Linux release archive carries `mootx01` only, so build `moot-mgr` from source if
+  you want the dashboard service. On hosts without systemd, the installer prints the unit text and
+  manual start instructions instead (sysvinit/openrc are not auto-registered in v1).
 - *Windows:* a per-user **Task Scheduler** logon task named `mootx01` (plus `mootx01-mgr`), created
   with `schtasks /SC ONLOGON` and started immediately.
 
@@ -288,7 +290,7 @@ This removes the MCP entries from all client configs, removes the binaries from
 your platform:
 
 - **macOS** — the launchd services (`com.mootx01.daemon`, `com.mootx01.mgr`)
-- **Linux** — the systemd-user units (`mootx01.service`, `mootx01-mgr.service`)
+- **Linux** — the systemd-user units (`mootx01.service`, and `mootx01-mgr.service` if it was installed)
 - **Windows** — the Task Scheduler logon tasks (`mootx01`, `mootx01-mgr`)
 
 Your estate data is **not** deleted — your memory is preserved. It lives at:
