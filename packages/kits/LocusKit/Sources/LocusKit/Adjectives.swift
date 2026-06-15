@@ -6,7 +6,7 @@ import SubstrateKernel
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -176,6 +176,71 @@ public enum AdjectiveSensitivity: Int, Sendable, Codable {
     case elevated = 16
     case restricted = 32
     case secret = 48
+}
+
+// MARK: - Privacy-tier predicates (ADR-007 Decision 2)
+
+public extension AdjectiveSensitivity {
+
+    /// `true` for sensitivity values that belong to the **Normal tier**
+    /// per ADR-007 Decision 2: `.normal` (raw 0) and `.elevated` (raw 16).
+    ///
+    /// Normal-tier drawers are eligible for free bulk export. This predicate
+    /// is the enforcement hook that VaultKit's export path consults to
+    /// determine whether a drawer may ride a bulk channel without additional
+    /// friction.
+    ///
+    /// ADR-007 Decision 2 tier mapping (four sensitivity values → three tiers):
+    ///   `.normal`     → Normal tier  → `isBulkExportable = true`
+    ///   `.elevated`   → Normal tier  → `isBulkExportable = true`
+    ///   `.restricted` → Private tier → `isBulkExportable = false`
+    ///   `.secret`     → Secret tier  → `isBulkExportable = false`
+    var isBulkExportable: Bool {
+        switch self {
+        case .normal, .elevated: return true
+        case .restricted, .secret: return false
+        }
+    }
+
+    /// `true` for sensitivity values that belong to the **Private tier**
+    /// per ADR-007 Decision 2: `.restricted` (raw 32).
+    ///
+    /// Private-tier drawers require an owner-held key at execution time before
+    /// participating in bulk operations (v1.0 gold deliverable). By default
+    /// they are excluded from bulk export; an explicit scope option in VaultKit
+    /// may include them when the key ceremony is satisfied.
+    ///
+    /// ADR-007 Decision 2 tier mapping:
+    ///   `.normal`     → Normal tier  → `requiresOwnerKeyForBulk = false`
+    ///   `.elevated`   → Normal tier  → `requiresOwnerKeyForBulk = false`
+    ///   `.restricted` → Private tier → `requiresOwnerKeyForBulk = true`
+    ///   `.secret`     → Secret tier  → `requiresOwnerKeyForBulk = false`
+    var requiresOwnerKeyForBulk: Bool {
+        switch self {
+        case .restricted: return true
+        case .normal, .elevated, .secret: return false
+        }
+    }
+
+    /// `true` for sensitivity values that belong to the **Secret tier**
+    /// per ADR-007 Decision 2: `.secret` (raw 48).
+    ///
+    /// Secret-tier drawers never ride bulk channels under any scope option.
+    /// This predicate is the hard exclusion gate: VaultKit's export path
+    /// must reject secret-tier drawers regardless of any other scope
+    /// configuration.
+    ///
+    /// ADR-007 Decision 2 tier mapping:
+    ///   `.normal`     → Normal tier  → `isExcludedFromBulk = false`
+    ///   `.elevated`   → Normal tier  → `isExcludedFromBulk = false`
+    ///   `.restricted` → Private tier → `isExcludedFromBulk = false`
+    ///   `.secret`     → Secret tier  → `isExcludedFromBulk = true`
+    var isExcludedFromBulk: Bool {
+        switch self {
+        case .secret: return true
+        case .normal, .elevated, .restricted: return false
+        }
+    }
 }
 
 // @guardian-pair: exportability-basis AdjectiveExportability.allCases <-> AuditGate.basis[exportability].legalValues (raw set equality)

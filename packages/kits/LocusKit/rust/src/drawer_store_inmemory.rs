@@ -60,13 +60,16 @@
 use crate::adjectives::State;
 use crate::diary_entry::DiaryEntry;
 use crate::drawer::Drawer;
+use crate::drawer_fingerprint::EstateFingerprintFamilies;
 use persistence_kit::inmemory::InMemoryStorage;
+use substrate_types::fingerprint256::Fingerprint256;
+use substrate_types::RowState;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -75,6 +78,7 @@ use persistence_kit::inmemory::InMemoryStorage;
 // See packages/libs/Substrate{Types,Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 use crate::association::Association;
+use crate::container_fingerprint_store::{ContainerFingerprintStore, RoomLevelEntry};
 use crate::drawer_store::DrawerStore;
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
@@ -84,6 +88,7 @@ use crate::manifest::{ManifestKey, ManifestValues};
 use crate::proposal::Proposal;
 use crate::recall_trace_item::RecallTraceItem;
 use crate::schema;
+use crate::source_catalog_entry::{SourceCatalogEntry, SourceKind};
 use crate::summaries::{RoomSummary, WingSummary};
 use crate::tunnel::Tunnel;
 use crate::tunnel_operational::TunnelKind;
@@ -111,9 +116,39 @@ const T_KG_FACTS: &str = "kg_facts";
 const T_PROPOSALS: &str = "proposals";
 const T_ASSOCIATIONS: &str = "associations";
 const T_LEARNED_REFERENCES: &str = "learned_references";
+const T_SOURCE_CATALOG: &str = "source_catalog";
 const T_DIARY: &str = "diary";
 const T_MANIFEST: &str = "manifest";
 const T_RECALL_TRACE: &str = "recall_trace";
+
+/// The structured (no-blob) column projection for the `drawers` table: every
+/// drawer column EXCEPT `content`. Used by `all_drawers_bounded_projected` so a
+/// `.structured` recall scan never reads the content blob and the decoded
+/// drawer carries `content == ""` (LocusKit spec § 7.3). Must stay in sync with
+/// `schema::drawers_table` minus `content`; `drawer_from_row` decodes the absent
+/// `content` column to `""` via `string_value_of(None)`.
+const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
+    "id",
+    "wing",
+    "room",
+    "sourceFile",
+    "chunkIndex",
+    "addedBy",
+    "filedAt",
+    "eventTime",
+    "embeddingModelID",
+    "tombstonedAt",
+    "removedByBatch",
+    "provenance",
+    "adjectiveBitmap",
+    "operationalBitmap",
+    "lineageID",
+    "udcCode",
+    "udcFacets",
+    "wikidataQID",
+    "wikidataQidsSecondary",
+    "ext",
+];
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -155,6 +190,19 @@ pub struct DrawerStoreCore {
     estate_uuid: Uuid,
 }
 
+/// The classification of the manifest's `estate_uuid` value at open.
+/// `Present` carries the parsed UUID (for stamping) plus the raw stored
+/// text (hashed for the maker node id, byte-identical to Swift). `Absent`
+/// means the key was never written (fresh estate). A present-but-malformed
+/// value is NOT a variant here — it surfaces as `Err(CorruptStoredValue)`
+/// from `classify_estate_uuid`, because conflating corruption with a fresh
+/// estate would mask data loss (P1-7). Parity: Swift `EstateUuidState`.
+#[derive(Debug)]
+enum EstateUuidState {
+    Present { uuid: Uuid, raw_text: String },
+    Absent,
+}
+
 impl DrawerStoreCore {
     /// Open the core over a `Storage` handle. Opens the LocusKit schema
     /// (idempotent — re-opening an existing estate is a no-op for tables,
@@ -189,24 +237,49 @@ impl DrawerStoreCore {
             estate_uuid: Uuid::nil(),
         };
         store.populate_v1_manifest_defaults(now)?;
+        // Classify the persisted estate identity ONCE, distinguishing two
+        // cases that must NOT be conflated (P1-7):
+        //   • Absent manifest value (fresh estate, key never written) →
+        //     the legitimate fresh-estate path.
+        //   • Present-but-malformed UUID (non-parseable text) → data
+        //     corruption: fail loud with `CorruptStoredValue` rather than
+        //     fabricating a random UUID / node 0, which would mask it.
+        // The same classified value feeds BOTH the estate uuid and the HLC
+        // maker node id so they can never disagree (mirrors Swift
+        // `DrawerStore.classifyEstateUuid`).
+        let identity = store.classify_estate_uuid()?;
         // Establish the clock: injected (holder) or made here (top).
         let generator = match hlc {
             Some(g) => g,
-            None => HLCGenerator::new(store.maker_node_id()),
+            None => HLCGenerator::new(Self::maker_node_id(&identity)),
         };
         *store.hlc.lock().unwrap() = generator;
         // Freeze the write-gate vocabulary once (freeze-at-instantiation).
         store.vocabulary = crate::vocabulary::frozen().map_err(|e| {
             LocusKitError::InvalidContent(format!("LocusKit vocabulary failed to freeze: {:?}", e))
         })?;
-        // Resolve estate uuid once; absent/malformed ⇒ fresh random.
-        store.estate_uuid = store.resolve_estate_uuid().unwrap_or_else(Uuid::new_v4);
+        // Resolve estate uuid from the SAME classified value: present ⇒ the
+        // persisted identity; absent ⇒ a fresh mint for this store. A
+        // corrupt value already returned `Err` above, so it never reaches
+        // here.
+        store.estate_uuid = match identity {
+            EstateUuidState::Present { uuid, .. } => uuid,
+            EstateUuidState::Absent => Uuid::new_v4(),
+        };
         Ok(store)
     }
 
-    /// Read + parse the estate uuid manifest value, or None. Mirrors
-    /// Swift `resolveEstateUuid`.
-    fn resolve_estate_uuid(&self) -> Option<Uuid> {
+    /// Read the manifest `estate_uuid` value and classify it as a fresh
+    /// estate (`Absent`), a valid persisted identity (`Present`), or data
+    /// corruption (`Err(CorruptStoredValue)`). The three outcomes are
+    /// mutually exclusive and exhaustive:
+    ///   • row missing / value missing / non-text → `Absent` (fresh).
+    ///   • value present and parses as a UUID → `Present`.
+    ///   • value present but does NOT parse → `Err(CorruptStoredValue {
+    ///     table: "manifest", column: "estate_uuid", stored_text })`,
+    ///     fail-loud, never a fabricated default.
+    /// Parity: Swift `DrawerStore.classifyEstateUuid`.
+    fn classify_estate_uuid(&self) -> Result<EstateUuidState, LocusKitError> {
         let rows = self
             .storage
             .row_store()
@@ -220,37 +293,40 @@ impl DrawerStoreCore {
                 Some(1),
                 None,
             )
-            .ok()?;
-        match rows.first().and_then(|r| r.get("value")) {
-            Some(TypedValue::Text(s)) => Uuid::parse_str(s).ok(),
-            _ => None,
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        // Absent: no row, no value, or a non-text value. A fresh,
+        // never-written estate — legitimate, assign a new identity.
+        let raw = match rows.first().and_then(|r| r.get("value")) {
+            Some(TypedValue::Text(s)) => s.clone(),
+            _ => return Ok(EstateUuidState::Absent),
+        };
+        // Present: the value exists, so it MUST parse. A non-parseable
+        // value is corruption — fail loud rather than mint a random UUID.
+        match Uuid::parse_str(&raw) {
+            Ok(uuid) => Ok(EstateUuidState::Present { uuid, raw_text: raw }),
+            Err(_) => Err(LocusKitError::CorruptStoredValue {
+                table: T_MANIFEST.to_string(),
+                column: "estate_uuid".to_string(),
+                stored_text: raw,
+            }),
         }
     }
 
-    /// Derive a stable maker node id from the estate uuid manifest value
-    /// (FNV-1a 32-bit, masked non-negative). 0 when absent. Mirrors
-    /// Swift `makerNodeID`.
-    fn maker_node_id(&self) -> i32 {
-        let rows = match self.storage.row_store().query(
-            T_MANIFEST,
-            Some(&StoragePredicate::Eq(
-                Column::new(T_MANIFEST, "key"),
-                TypedValue::Text("estate_uuid".to_string()),
-            )),
-            &[],
-            Some(1),
-            None,
-        ) {
-            Ok(r) => r,
-            Err(_) => return 0,
-        };
-        let uuid = match rows.first().and_then(|r| r.get("value")) {
-            Some(TypedValue::Text(s)) => s.clone(),
-            _ => return 0,
-        };
-        // FNV-1a 32-bit (SubstrateLib), masked to non-negative i32.
-        let h = substrate_types::fnv::hash32(&uuid);
-        (h & 0x7FFF_FFFF) as i32
+    /// Derive a stable maker node id from an already-classified estate
+    /// uuid (FNV-1a 32-bit, masked non-negative). A present value hashes
+    /// its RAW stored text — byte-identical to what Swift hashes — so both
+    /// ports derive the same node id. An absent value (fresh estate)
+    /// yields 0. Corrupt values never reach here (`classify_estate_uuid`
+    /// returns `Err` first). Mirrors Swift `makerNodeID(for:)`.
+    fn maker_node_id(state: &EstateUuidState) -> i32 {
+        match state {
+            EstateUuidState::Absent => 0,
+            EstateUuidState::Present { raw_text, .. } => {
+                // FNV-1a 32-bit (SubstrateLib), masked to non-negative i32.
+                let h = substrate_types::fnv::hash32(raw_text);
+                (h & 0x7FFF_FFFF) as i32
+            }
+        }
     }
 
     /// Populate the v1 well-known manifest keys. Uses a presence check
@@ -823,7 +899,45 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        Ok(rows.first().map(drawer_from_row))
+        rows.first().map(drawer_from_row).transpose()
+    }
+
+    fn living_successor_in_lineage(
+        &self,
+        lineage_id: &str,
+        excluding_id: &str,
+    ) -> Result<Option<String>, LocusKitError> {
+        // Cluster-A membership is
+        // `g_state_cluster < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW`
+        // (the Cluster-B floor, 16, per cookbook §2.3). `g_state_cluster`
+        // stores the raw 6-bit state value, so active/pending/contested/
+        // accepted = 0..=3 all qualify as living. Boundary sourced from
+        // the RowState automaton. Mirror of Swift `livingSuccessorInLineage`.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_DRAWERS,
+                Some(&StoragePredicate::all(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_DRAWERS, "lineageID"),
+                        TypedValue::Text(lineage_id.to_string()),
+                    ),
+                    StoragePredicate::Neq(
+                        Column::new(T_DRAWERS, "id"),
+                        TypedValue::Text(excluding_id.to_string()),
+                    ),
+                    StoragePredicate::Lt(
+                        Column::new(T_DRAWERS, "g_state_cluster"),
+                        TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64),
+                    ),
+                ])),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.first().map(|r| string_value_of(r.get("id"))))
     }
 
     fn drawers_in_wing(&self, wing: &str) -> Result<Vec<Drawer>, LocusKitError> {
@@ -850,7 +964,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect();
+        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()?;
 
         // Emit query telemetry at the post-query operation boundary.
         // now_secs=0.0 because drawers_in_wing has no caller-supplied timestamp.
@@ -884,7 +998,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        Ok(rows.iter().map(drawer_from_row).collect())
+        rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()
     }
 
     fn drawers_by_source(&self, source_file: &str) -> Result<Vec<Drawer>, LocusKitError> {
@@ -911,7 +1025,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        Ok(rows.iter().map(drawer_from_row).collect())
+        rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()
     }
 
     fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
@@ -932,10 +1046,88 @@ impl DrawerStore for DrawerStoreCore {
                 None,
             )
             .map_err(map_storage_err)?;
-        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect();
+        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()?;
 
         // Emit query telemetry at the post-query operation boundary.
         crate::telemetry::emit_drawer_query(&_tel_start, 0.0, drawers.len(), &self.estate_uuid, "all");
+        Ok(drawers)
+    }
+
+    fn all_drawers_bounded(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
+        // Bounded corpus scan for the recall locus lane. Passes `limit` to
+        // the storage query so only the first `limit` rows (in filedAt order)
+        // are materialised. When `limit` is `None` this is equivalent to
+        // `all_drawers()`.
+        //
+        // This path loads full rows including the content blob — it is the
+        // `.full` recall scan. The no-blob `.structured` scan goes through
+        // `all_drawers_bounded_projected`, which uses `RowStore::query_projected`
+        // to omit the content column. The behavioral contract (bounded scan,
+        // filedAt order, correct result set) matches the Swift port.
+        let _tel_start = std::time::Instant::now();
+
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_DRAWERS,
+                None,
+                &[OrderClause::new(
+                    Column::new(T_DRAWERS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                limit,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()?;
+
+        crate::telemetry::emit_drawer_query(
+            &_tel_start,
+            0.0,
+            drawers.len(),
+            &self.estate_uuid,
+            "all_bounded",
+        );
+        Ok(drawers)
+    }
+
+    fn all_drawers_bounded_projected(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        // No-blob bounded corpus scan for the `.structured` recall lane.
+        // Projects to the structured column set (every drawer column except
+        // `content`) via `query_projected`, so the content blob is never read
+        // off disk and `drawer_from_row` decodes the absent column to `""`.
+        // This is the Rust parity of Swift's `.structured` recall projection
+        // (spec § 7.3). `limit` is pushed to the storage layer, filedAt order.
+        let _tel_start = std::time::Instant::now();
+
+        let rows = self
+            .storage
+            .row_store()
+            .query_projected(
+                T_DRAWERS,
+                DRAWER_STRUCTURED_COLUMNS,
+                None,
+                &[OrderClause::new(
+                    Column::new(T_DRAWERS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                limit,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let drawers: Vec<Drawer> = rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()?;
+
+        crate::telemetry::emit_drawer_query(
+            &_tel_start,
+            0.0,
+            drawers.len(),
+            &self.estate_uuid,
+            "all_bounded_structured",
+        );
         Ok(drawers)
     }
 
@@ -1126,7 +1318,8 @@ impl DrawerStore for DrawerStoreCore {
         changed_by: &str,
         reason: Option<&str>,
         now: i64,
-    ) -> Result<(), LocusKitError> {
+        seal_audit: bool,
+    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
 
@@ -1192,9 +1385,9 @@ impl DrawerStore for DrawerStoreCore {
 
         // Materialized projection: write the merged adjective snapshot,
         // zero the content blob, stamp tombstonedAt — all in the same
-        // transaction as the gated event append. Per cookbook §10.5:
-        // "Content blob zeroized in the same transaction as the state
-        // transition (atomic; verbatim sacred only up to expunge)."
+        // logical operation. Per cookbook §10.5: "Content blob zeroized
+        // in the same transaction as the state transition (atomic;
+        // verbatim sacred only up to expunge)."
         let row_store = self.storage.row_store();
         let mut update_vals = BTreeMap::new();
         update_vals.insert(
@@ -1216,16 +1409,132 @@ impl DrawerStore for DrawerStoreCore {
                 ),
             )
             .map_err(map_storage_err)?;
-        self.storage
-            .audit_log()
-            .append(pk_audit_event_from(&event))
-            .map_err(map_storage_err)?;
+
+        // When seal_audit is true (direct LocusKit callers), append the
+        // gate-produced event immediately — preserving the historical
+        // single-call atomic contract. When false (GLK orchestration path),
+        // the event is returned unsealed; the caller seals via
+        // seal_expunge_audit or seal_expunge_orphan_audit after step 2
+        // (cross-kit vector delete), satisfying §B-2a audit ordering.
+        if seal_audit {
+            self.storage
+                .audit_log()
+                .append(pk_audit_event_from(&event))
+                .map_err(map_storage_err)?;
+        }
+
         let _ = reason; // reason is captured in audit verb context;
                         // no separate audit-row column today, but the
                         // parameter is retained for future ProvFrame
                         // composition (cookbook §10.5 names a `reason`
                         // arg on the verb signature).
-        Ok(())
+        Ok(event)
+    }
+
+    fn seal_expunge_audit(
+        &self,
+        event: &substrate_lib::verbs::AuditEvent,
+    ) -> Result<(), LocusKitError> {
+        // Append the gate-produced success event produced earlier by
+        // expunge_gated(seal_audit: false). This is the §B-2a success seal:
+        // storage (step 1) + cross-kit delete (step 2) both succeeded.
+        self.storage
+            .audit_log()
+            .append(pk_audit_event_from(event))
+            .map_err(map_storage_err)
+    }
+
+    fn seal_expunge_orphan_audit(
+        &self,
+        drawer_id: &str,
+        success_event: &substrate_lib::verbs::AuditEvent,
+        changed_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        // Construct an "expungeOrphan" audit event to record the partial
+        // expunge honestly: storage tombstoned+scrubbed (step 1 succeeded),
+        // but the cross-kit vector delete (step 2) failed. The verb string
+        // "expungeOrphan" is preserved in the substrate audit trail for
+        // forensic inspection; verb_from_str maps it to
+        // UnifiedAuditVerb::Expunge in the unified log so downstream
+        // consumers see the storage-level expunge without requiring a
+        // distinct ARIA verb.
+        let _ = drawer_id; // rowId is carried by success_event.row_id
+        let stamp = self.hlc.lock().unwrap().send(now);
+        let event_id = substrate_lib::audit_gate::content_id(
+            success_event.estate_uuid,
+            success_event.row_id,
+            &stamp,
+            "expungeOrphan",
+            success_event.after_bitmaps,
+            success_event.after_lattice_anchor.clone(),
+        );
+        let orphan = substrate_lib::verbs::AuditEvent {
+            event_id,
+            estate_uuid: success_event.estate_uuid,
+            row_id: success_event.row_id,
+            hlc: stamp,
+            verb: "expungeOrphan".to_string(),
+            before_bitmaps: success_event.before_bitmaps,
+            after_bitmaps: success_event.after_bitmaps,
+            before_lattice_anchor: success_event.before_lattice_anchor.clone(),
+            after_lattice_anchor: success_event.after_lattice_anchor.clone(),
+            actor: changed_by.to_string(),
+        };
+        self.storage
+            .audit_log()
+            .append(pk_audit_event_from(&orphan))
+            .map_err(map_storage_err)
+    }
+
+    fn seal_expunge_orphan_for_sweep(
+        &self,
+        drawer_id: &str,
+        changed_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        // Build a synthetic "expungeOrphan" audit event from the drawer's
+        // current on-disk state. The original step-1 gate event was lost
+        // (crash window or double-failure); we reconstruct using the
+        // tombstoned drawer's current bitmaps.
+        //
+        // "before_bitmaps" is set to None (unknown) because the pre-tombstone
+        // snapshot is unavailable. The audit event accurately records the
+        // expunge happened and the vector orphan state; the missing before
+        // bitmaps are acceptable for crash-recovery forensics.
+        let row_uuid = require_uuid(drawer_id, "drawerId")?;
+        let adj_bitmap = self.read_drawer_bitmap(drawer_id, "adjectiveBitmap")?;
+        let op_bitmap = self.read_drawer_bitmap(drawer_id, "operationalBitmap")?;
+        let prov_bitmap = self.read_drawer_bitmap(drawer_id, "provenance")?;
+        let udc = self.read_drawer_udc(drawer_id)?;
+        let anchor = substrate_lib::verbs::LatticeAnchor::udc(&udc);
+        let after_bitmaps: (i64, i64, i64) = (adj_bitmap, op_bitmap, prov_bitmap);
+
+        let stamp = self.hlc.lock().unwrap().send(now);
+        let event_id = substrate_lib::audit_gate::content_id(
+            self.estate_uuid.as_u128(),
+            substrate_lib::verbs::RowId(row_uuid.as_u128()),
+            &stamp,
+            "expungeOrphan",
+            after_bitmaps,
+            anchor.clone(),
+        );
+        let orphan = substrate_lib::verbs::AuditEvent {
+            event_id,
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(row_uuid.as_u128()),
+            hlc: stamp,
+            verb: "expungeOrphan".to_string(),
+            before_bitmaps: None,       // pre-tombstone snapshot unavailable (sweep path)
+            after_bitmaps,
+            before_lattice_anchor: None, // pre-tombstone anchor unavailable (sweep path)
+            after_lattice_anchor: anchor,
+            actor: changed_by.to_string(),
+        };
+        self.storage
+            .audit_log()
+            .append(pk_audit_event_from(&orphan))
+            .map_err(map_storage_err)
     }
 
     fn reanchor_gated(
@@ -1544,6 +1853,11 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn kg_facts_for_drawer(&self, source_drawer_id: &str) -> Result<Vec<KGFact>, LocusKitError> {
+        // Active-cluster (A) facts from one source drawer. `g_state_cluster`
+        // holds the raw 6-bit RowState, so the active set is
+        // `raw < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW` (the cluster-B
+        // floor, 16) — equivalent to RowState Cluster-A for every defined
+        // raw. Boundary sourced from the automaton, never a bare literal.
         let rows = self
             .storage
             .row_store()
@@ -1556,7 +1870,7 @@ impl DrawerStore for DrawerStoreCore {
                     ),
                     StoragePredicate::Lt(
                         Column::new(T_KG_FACTS, "g_state_cluster"),
-                        TypedValue::Int(7),
+                        TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64),
                     ),
                 ])),
                 &[OrderClause::new(
@@ -1792,6 +2106,70 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     // -----------------------------------------------------------------
+    // Source catalog CRUD
+    // -----------------------------------------------------------------
+
+    fn add_source_catalog_entry(&self, entry: &SourceCatalogEntry) -> Result<(), LocusKitError> {
+        // handle + added_by required; lattice anchor required per cookbook
+        // §2.7 (I-16). The genuine anchor recorded here is what the learn
+        // verb copies onto each LearnedReference, so an empty anchor would
+        // propagate a fabricated identity — hence the hard rejection.
+        validate_non_empty(&entry.handle, "handle")?;
+        validate_non_empty(&entry.added_by, "addedBy")?;
+        validate_non_empty(&entry.lattice_anchor.udc_code, "latticeAnchor.udcCode")?;
+        self.storage
+            .row_store()
+            .insert(T_SOURCE_CATALOG, source_catalog_values(entry))
+            .map_err(map_storage_err)?;
+        Ok(())
+    }
+
+    fn get_source_catalog_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<SourceCatalogEntry>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_SOURCE_CATALOG,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_SOURCE_CATALOG, "id"),
+                    TypedValue::Text(id.to_string()),
+                )),
+                &[],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.first().map(source_catalog_from_row))
+    }
+
+    fn source_catalog_entry_for_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<SourceCatalogEntry>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_SOURCE_CATALOG,
+                Some(&StoragePredicate::Eq(
+                    Column::new(T_SOURCE_CATALOG, "handle"),
+                    TypedValue::Text(handle.to_string()),
+                )),
+                &[OrderClause::new(
+                    Column::new(T_SOURCE_CATALOG, "firstSeen"),
+                    OrderDirection::Ascending,
+                )],
+                Some(1),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        Ok(rows.first().map(source_catalog_from_row))
+    }
+
+    // -----------------------------------------------------------------
     // Diary CRUD
     // -----------------------------------------------------------------
 
@@ -1900,6 +2278,23 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
+    fn insert_recall_traces(&self, items: &[RecallTraceItem]) -> Result<(), LocusKitError> {
+        // Batch-insert all trace rows. An empty slice is a no-op.
+        // Each item is inserted individually through the row_store interface
+        // (PersistenceKit's Rust RowStore has no multi-row insert primitive);
+        // the I/O advantage over the single-item loop is that errors from any
+        // row abort the rest immediately rather than continuing silently.
+        // For SQLite the real amortisation comes from the WAL — individual
+        // INSERTs inside the same write burst are batched by the WAL writer.
+        for item in items {
+            self.storage
+                .row_store()
+                .insert(T_RECALL_TRACE, recall_trace_values(item))
+                .map_err(map_storage_err)?;
+        }
+        Ok(())
+    }
+
     fn get_recall_trace(&self, id: &str) -> Result<Option<RecallTraceItem>, LocusKitError> {
         let rows = self
             .storage
@@ -1996,6 +2391,95 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
+    fn prune_recall_traces(&self, cutoff: &str) -> Result<usize, LocusKitError> {
+        // Delete trace rows with recalledAt < cutoff. `cutoff` is an ISO8601
+        // TEXT string; lexicographic `<` on canonical UTC ISO8601 strings
+        // equals numeric less-than on the timestamps (fleet date rule). Mirrors
+        // Swift `DrawerStore.pruneRecallTraces(olderThan:)`. `delete` returns
+        // the number of rows removed.
+        self.storage
+            .row_store()
+            .delete(
+                T_RECALL_TRACE,
+                &StoragePredicate::Lt(
+                    Column::new(T_RECALL_TRACE, "recalledAt"),
+                    TypedValue::Text(cutoff.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)
+    }
+
+    fn mark_recall_traces_used(
+        &self,
+        target: &str,
+        since: &str,
+        now: &str,
+    ) -> Result<usize, LocusKitError> {
+        // Fetch all trace rows for `target` in the window [since, now].
+        // ISO8601 string comparison is equivalent to numeric timestamp
+        // comparison for canonical UTC ISO8601 strings (fleet date rule).
+        // Mirrors Swift `DrawerStore.markRecallTracesUsed(target:since:now:)`.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_RECALL_TRACE,
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_RECALL_TRACE, "target"),
+                        TypedValue::Text(target.to_string()),
+                    ),
+                    StoragePredicate::Gte(
+                        Column::new(T_RECALL_TRACE, "recalledAt"),
+                        TypedValue::Text(since.to_string()),
+                    ),
+                    StoragePredicate::Lte(
+                        Column::new(T_RECALL_TRACE, "recalledAt"),
+                        TypedValue::Text(now.to_string()),
+                    ),
+                ])),
+                &[],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+
+        let mut touched = 0usize;
+        for row in &rows {
+            let item = recall_trace_from_row(row);
+            if item.used() {
+                // Idempotent — already-marked rows are skipped.
+                continue;
+            }
+            let updated = item.with_used();
+            self.storage
+                .row_store()
+                .update(
+                    T_RECALL_TRACE,
+                    recall_trace_values(&updated),
+                    &StoragePredicate::Eq(
+                        Column::new(T_RECALL_TRACE, "id"),
+                        TypedValue::Text(updated.id.clone()),
+                    ),
+                )
+                .map_err(map_storage_err)?;
+            touched += 1;
+        }
+        Ok(touched)
+    }
+
+    fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
+        // Query all rows in the recall_trace table (no predicate = full scan).
+        // The table is bounded by retention pruning so this is not unbounded.
+        // Mirrors Swift `DrawerStore.countRecallTraces()`.
+        let rows = self
+            .storage
+            .row_store()
+            .query(T_RECALL_TRACE, None, &[], None, None)
+            .map_err(map_storage_err)?;
+        Ok(rows.len())
+    }
+
     // -----------------------------------------------------------------
     // Audit reads
     // -----------------------------------------------------------------
@@ -2011,6 +2495,46 @@ impl DrawerStore for DrawerStoreCore {
             .events_for_row(uuid)
             .map_err(map_storage_err)?;
         Ok(pk_events.iter().map(substrate_audit_event_from).collect())
+    }
+
+    fn tombstoned_rows_without_expunge_audit(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        // Step 1: fetch all tombstoned drawers.
+        // The InMemory backend does not support a JOIN so we scan tombstoned
+        // rows and check each one's audit log individually. Tombstoned rows
+        // are rare in practice (each expunge removes one); this is bounded.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_DRAWERS,
+                Some(&StoragePredicate::IsNotNull(Column::new(
+                    T_DRAWERS,
+                    "tombstonedAt",
+                ))),
+                &[],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let tombstoned: Vec<crate::drawer::Drawer> = rows
+            .iter()
+            .map(drawer_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Step 2: for each tombstoned row, check the audit log for a
+        // "tombstone" or "expungeOrphan" event. Rows that have neither
+        // event are in the crash-window or double-failure set.
+        let mut orphans = Vec::new();
+        for drawer in tombstoned {
+            let events = self.audit_events_for_row(&drawer.id)?;
+            let has_expunge_audit = events
+                .iter()
+                .any(|e| e.verb == "tombstone" || e.verb == "expungeOrphan");
+            if !has_expunge_audit {
+                orphans.push(drawer);
+            }
+        }
+        Ok(orphans)
     }
 
     // -----------------------------------------------------------------
@@ -2155,9 +2679,14 @@ impl DrawerStore for DrawerStoreCore {
     }
 
     fn all_kg_facts(&self) -> Result<Vec<KGFact>, LocusKitError> {
-        // KG-facts where state cluster < 7 (excludes rejected/accepted/
-        // tombstoned post-resolution states). Mirrors kg_facts_for_drawer
-        // but without the source-drawer predicate.
+        // KG-facts in the active cluster (A). `g_state_cluster` stores the
+        // raw 6-bit RowState (0..=63), so the active set is exactly
+        // `raw < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW` (the cluster-B
+        // floor, 16) — equivalent to RowState Cluster-A for every defined
+        // raw (active/pending/contested/accepted included; the retired
+        // B/C states from 16/32 excluded). The boundary is sourced from
+        // the RowState automaton, never a bare literal. Mirrors
+        // kg_facts_for_drawer but without the source-drawer predicate.
         let rows = self
             .storage
             .row_store()
@@ -2165,7 +2694,7 @@ impl DrawerStore for DrawerStoreCore {
                 T_KG_FACTS,
                 Some(&StoragePredicate::Lt(
                     Column::new(T_KG_FACTS, "g_state_cluster"),
-                    TypedValue::Int(7),
+                    TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64),
                 )),
                 &[OrderClause::new(
                     Column::new(T_KG_FACTS, "filedAt"),
@@ -2180,6 +2709,33 @@ impl DrawerStore for DrawerStoreCore {
         // Emit KGFact-query telemetry at the post-query boundary.
         // query="all" identifies the estate-wide query path.
         crate::telemetry::emit_kgfact_query(0.0, facts.len(), &self.estate_uuid, "all");
+        Ok(facts)
+    }
+
+    fn all_kg_facts_including_retired(&self) -> Result<Vec<KGFact>, LocusKitError> {
+        // No state-cluster predicate — return every row, all lifecycle states,
+        // so callers can trace the full evolution of structured knowledge.
+        // This is the backing query for `moot_fact_timeline`.
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_KG_FACTS,
+                None,
+                &[OrderClause::new(
+                    Column::new(T_KG_FACTS, "filedAt"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let facts: Vec<KGFact> = rows.iter().map(kg_fact_from_row).collect();
+
+        // Emit KGFact-query telemetry at the post-query boundary.
+        // query="timeline" distinguishes the all-history path from the
+        // active-only "all" path in emitted telemetry.
+        crate::telemetry::emit_kgfact_query(0.0, facts.len(), &self.estate_uuid, "timeline");
         Ok(facts)
     }
 
@@ -2204,6 +2760,212 @@ impl DrawerStore for DrawerStoreCore {
             )
             .map_err(map_storage_err)?;
         Ok(rows.iter().map(diary_from_row).collect())
+    }
+
+    // ── Temporal reads ───────────────────────────────────────────────────────
+
+    fn fingerprints_captured_in(
+        &self,
+        start_epoch: i64,
+        end_epoch: i64,
+    ) -> Result<Vec<Fingerprint256>, LocusKitError> {
+        // The OR branch covers rows with a NULL eventTime column (backfill to
+        // filedAt per ING-01). In practice all Rust-authored rows have a
+        // concrete eventTime (resolved eagerly in estate_verbs), but rows
+        // originally written by the Swift leg may carry NULL for captures
+        // predating the ING-01 two-clock column.
+        let pred = StoragePredicate::all(vec![
+            StoragePredicate::any(vec![
+                StoragePredicate::And(vec![
+                    StoragePredicate::IsNotNull(Column::new(T_DRAWERS, "eventTime")),
+                    StoragePredicate::Gte(
+                        Column::new(T_DRAWERS, "eventTime"),
+                        TypedValue::Timestamp(start_epoch),
+                    ),
+                    StoragePredicate::Lte(
+                        Column::new(T_DRAWERS, "eventTime"),
+                        TypedValue::Timestamp(end_epoch),
+                    ),
+                ]),
+                StoragePredicate::And(vec![
+                    StoragePredicate::IsNull(Column::new(T_DRAWERS, "eventTime")),
+                    StoragePredicate::Gte(
+                        Column::new(T_DRAWERS, "filedAt"),
+                        TypedValue::Timestamp(start_epoch),
+                    ),
+                    StoragePredicate::Lte(
+                        Column::new(T_DRAWERS, "filedAt"),
+                        TypedValue::Timestamp(end_epoch),
+                    ),
+                ]),
+            ]),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        ]);
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_DRAWERS,
+                Some(&pred),
+                &[OrderClause::new(
+                    Column::new(T_DRAWERS, "id"),
+                    OrderDirection::Ascending,
+                )],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        // Construct on-demand — one FNV hash per call.
+        let families = EstateFingerprintFamilies::new(&self.estate_uuid.to_string());
+        rows.iter()
+            .map(|row| drawer_from_row(row).map(|d| families.fingerprint(&d)))
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn fingerprint_bit_series(
+        &self,
+        bit: usize,
+        bucket_seconds: i64,
+        bucket_count: usize,
+        ending_at: i64,
+    ) -> Result<Vec<bool>, LocusKitError> {
+        if bit > 255 {
+            return Err(LocusKitError::InvalidContent(format!(
+                "fingerprint_bit_series: bit {} out of range [0, 255]",
+                bit
+            )));
+        }
+        if bucket_seconds < 1 {
+            return Err(LocusKitError::InvalidContent(format!(
+                "fingerprint_bit_series: bucket_seconds {} must be ≥ 1",
+                bucket_seconds
+            )));
+        }
+        if bucket_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let window_start = ending_at - (bucket_count as i64) * bucket_seconds;
+        let pred = StoragePredicate::all(vec![
+            StoragePredicate::any(vec![
+                StoragePredicate::And(vec![
+                    StoragePredicate::IsNotNull(Column::new(T_DRAWERS, "eventTime")),
+                    StoragePredicate::Gte(
+                        Column::new(T_DRAWERS, "eventTime"),
+                        TypedValue::Timestamp(window_start),
+                    ),
+                    StoragePredicate::Lte(
+                        Column::new(T_DRAWERS, "eventTime"),
+                        TypedValue::Timestamp(ending_at),
+                    ),
+                ]),
+                StoragePredicate::And(vec![
+                    StoragePredicate::IsNull(Column::new(T_DRAWERS, "eventTime")),
+                    StoragePredicate::Gte(
+                        Column::new(T_DRAWERS, "filedAt"),
+                        TypedValue::Timestamp(window_start),
+                    ),
+                    StoragePredicate::Lte(
+                        Column::new(T_DRAWERS, "filedAt"),
+                        TypedValue::Timestamp(ending_at),
+                    ),
+                ]),
+            ]),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        ]);
+        let rows = self
+            .storage
+            .row_store()
+            .query(T_DRAWERS, Some(&pred), &[], None, None)
+            .map_err(map_storage_err)?;
+        let families = EstateFingerprintFamilies::new(&self.estate_uuid.to_string());
+        // Pre-compute (event_time, fingerprint) for all drawers in the window.
+        // drawer.event_time carries the ING-01 filedAt backfill from drawer_from_row.
+        let captures: Vec<(i64, Fingerprint256)> = rows
+            .iter()
+            .map(|row| {
+                let d = drawer_from_row(row)?;
+                Ok((d.event_time, families.fingerprint(&d)))
+            })
+            .collect::<Result<Vec<_>, LocusKitError>>()?;
+
+        Ok((0..bucket_count)
+            .map(|i| {
+                let bucket_lower = ending_at - (bucket_count - i) as i64 * bucket_seconds;
+                let is_last = i == bucket_count - 1;
+                captures.iter().any(|(t, fp)| {
+                    let in_bucket = if is_last {
+                        // Final bucket: [lower, ending_at] inclusive upper.
+                        *t >= bucket_lower && *t <= ending_at
+                    } else {
+                        // [lower, upper): exclusive upper so edge belongs to later bucket.
+                        let bucket_upper =
+                            ending_at - (bucket_count - i - 1) as i64 * bucket_seconds;
+                        *t >= bucket_lower && *t < bucket_upper
+                    };
+                    in_bucket && temporal_bit_set(fp, bit)
+                })
+            })
+            .collect())
+    }
+
+    fn room_level_fingerprints(&self) -> Result<Vec<RoomLevelEntry>, LocusKitError> {
+        // The container-fingerprint aggregate lives in the same backing
+        // `Storage` this core wraps; build a read-only view over it and
+        // enumerate the room-level rows. `ContainerFingerprintStore::new`
+        // re-opens the LocusKit schema, a no-op once the estate is open
+        // (the version gate short-circuits). No drawer scan happens here —
+        // the OR aggregates are read straight from `container_fingerprints`.
+        let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
+        fp_store.room_level_entries()
+    }
+
+    fn or_in_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+        adjective: i64,
+        operational: i64,
+        provenance: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        // The container-fingerprint aggregate lives in the same backing
+        // `Storage` this core wraps; build a view over it and OR the
+        // drawer's bitmaps into the room-level and wing-rollup rows.
+        // `ContainerFingerprintStore::new` re-opens the LocusKit schema, a
+        // no-op once the estate is open (the version gate short-circuits).
+        // Mirrors Swift `Estate.capture`'s `containerFP.orIn(...)`.
+        let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
+        fp_store.or_in(wing, room, adjective, operational, provenance, now)
+    }
+
+    fn rebuild_container_fingerprints(&self, now: i64) -> Result<(), LocusKitError> {
+        // Backfill so the aggregate covers every active row and is therefore
+        // sound to prune against (spec § 11.5). One full scan at open,
+        // mirroring Swift `Estate.open`/`create`'s
+        // `containerFP.rebuildAll(activeDrawers:)`. Tombstoned drawers are
+        // excluded — they are not part of the active set the OR must cover.
+        let active: Vec<Drawer> = self
+            .all_drawers()?
+            .into_iter()
+            .filter(|d| d.tombstoned_at.is_none())
+            .collect();
+        let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
+        fp_store.rebuild_all(&active, now)
+    }
+
+    fn get_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Option<crate::container_fingerprint_store::ContainerFingerprint>, LocusKitError>
+    {
+        // Point lookup for one (wing, room) pair — used by the recall
+        // pruning path to check the wing-level rollup (room == "") before
+        // scanning individual rooms. `ContainerFingerprintStore::new`
+        // re-opens the LocusKit schema, a no-op once the estate is open.
+        let fp_store = ContainerFingerprintStore::new(Arc::clone(&self.storage))?;
+        fp_store.get(wing, room)
     }
 }
 
@@ -2284,6 +3046,13 @@ impl DrawerStore for InMemoryDrawerStore {
     fn get_drawer(&self, id: &str) -> Result<Option<crate::drawer::Drawer>, LocusKitError> {
         self.inner.get_drawer(id)
     }
+    fn living_successor_in_lineage(
+        &self,
+        lineage_id: &str,
+        excluding_id: &str,
+    ) -> Result<Option<String>, LocusKitError> {
+        self.inner.living_successor_in_lineage(lineage_id, excluding_id)
+    }
     fn drawers_in_wing(&self, wing: &str) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.drawers_in_wing(wing)
     }
@@ -2302,6 +3071,18 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn all_drawers(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.all_drawers()
+    }
+    fn all_drawers_bounded(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.all_drawers_bounded(limit)
+    }
+    fn all_drawers_bounded_projected(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.all_drawers_bounded_projected(limit)
     }
     fn drawer_ids(&self) -> Result<Vec<crate::estate_types::RowID>, LocusKitError> {
         self.inner.drawer_ids()
@@ -2357,8 +3138,24 @@ impl DrawerStore for InMemoryDrawerStore {
         changed_by: &str,
         reason: Option<&str>,
         now: i64,
+        seal_audit: bool,
+    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+        self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+    }
+    fn seal_expunge_audit(
+        &self,
+        event: &substrate_lib::verbs::AuditEvent,
     ) -> Result<(), LocusKitError> {
-        self.inner.expunge_gated(drawer_id, changed_by, reason, now)
+        self.inner.seal_expunge_audit(event)
+    }
+    fn seal_expunge_orphan_audit(
+        &self,
+        drawer_id: &str,
+        success_event: &substrate_lib::verbs::AuditEvent,
+        changed_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.seal_expunge_orphan_audit(drawer_id, success_event, changed_by, now)
     }
     fn reanchor_gated(
         &self,
@@ -2465,6 +3262,24 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<Vec<crate::learned_reference::LearnedReference>, LocusKitError> {
         self.inner.learned_references_from_source(source_catalog_id)
     }
+    fn add_source_catalog_entry(
+        &self,
+        entry: &crate::source_catalog_entry::SourceCatalogEntry,
+    ) -> Result<(), LocusKitError> {
+        self.inner.add_source_catalog_entry(entry)
+    }
+    fn get_source_catalog_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::source_catalog_entry::SourceCatalogEntry>, LocusKitError> {
+        self.inner.get_source_catalog_entry(id)
+    }
+    fn source_catalog_entry_for_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<crate::source_catalog_entry::SourceCatalogEntry>, LocusKitError> {
+        self.inner.source_catalog_entry_for_handle(handle)
+    }
     fn add_diary_entry(&self, entry: &crate::diary_entry::DiaryEntry) -> Result<(), LocusKitError> {
         self.inner.add_diary_entry(entry)
     }
@@ -2495,6 +3310,12 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<(), LocusKitError> {
         self.inner.insert_recall_trace(item)
     }
+    fn insert_recall_traces(
+        &self,
+        items: &[crate::recall_trace_item::RecallTraceItem],
+    ) -> Result<(), LocusKitError> {
+        self.inner.insert_recall_traces(items)
+    }
     fn get_recall_trace(
         &self,
         id: &str,
@@ -2517,11 +3338,36 @@ impl DrawerStore for InMemoryDrawerStore {
     fn mark_recall_trace_used(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
         self.inner.mark_recall_trace_used(id, now)
     }
+    fn prune_recall_traces(&self, cutoff: &str) -> Result<usize, LocusKitError> {
+        self.inner.prune_recall_traces(cutoff)
+    }
+    fn mark_recall_traces_used(
+        &self,
+        target: &str,
+        since: &str,
+        now: &str,
+    ) -> Result<usize, LocusKitError> {
+        self.inner.mark_recall_traces_used(target, since, now)
+    }
+    fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_recall_traces()
+    }
     fn audit_events_for_row(
         &self,
         row_id: &str,
     ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
         self.inner.audit_events_for_row(row_id)
+    }
+    fn tombstoned_rows_without_expunge_audit(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.inner.tombstoned_rows_without_expunge_audit()
+    }
+    fn seal_expunge_orphan_for_sweep(
+        &self,
+        drawer_id: &str,
+        changed_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.seal_expunge_orphan_for_sweep(drawer_id, changed_by, now)
     }
     fn list_wings(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
         self.inner.list_wings()
@@ -2549,8 +3395,54 @@ impl DrawerStore for InMemoryDrawerStore {
     fn all_kg_facts(&self) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
         self.inner.all_kg_facts()
     }
+    fn all_kg_facts_including_retired(&self) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
+        self.inner.all_kg_facts_including_retired()
+    }
     fn all_diary_entries(&self) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
         self.inner.all_diary_entries()
+    }
+    fn fingerprints_captured_in(
+        &self,
+        start_epoch: i64,
+        end_epoch: i64,
+    ) -> Result<Vec<Fingerprint256>, LocusKitError> {
+        self.inner.fingerprints_captured_in(start_epoch, end_epoch)
+    }
+    fn fingerprint_bit_series(
+        &self,
+        bit: usize,
+        bucket_seconds: i64,
+        bucket_count: usize,
+        ending_at: i64,
+    ) -> Result<Vec<bool>, LocusKitError> {
+        self.inner
+            .fingerprint_bit_series(bit, bucket_seconds, bucket_count, ending_at)
+    }
+    fn room_level_fingerprints(&self) -> Result<Vec<RoomLevelEntry>, LocusKitError> {
+        self.inner.room_level_fingerprints()
+    }
+    fn or_in_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+        adjective: i64,
+        operational: i64,
+        provenance: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner
+            .or_in_container_fingerprint(wing, room, adjective, operational, provenance, now)
+    }
+    fn rebuild_container_fingerprints(&self, now: i64) -> Result<(), LocusKitError> {
+        self.inner.rebuild_container_fingerprints(now)
+    }
+    fn get_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Option<crate::container_fingerprint_store::ContainerFingerprint>, LocusKitError>
+    {
+        self.inner.get_container_fingerprint(wing, room)
     }
 }
 
@@ -2738,6 +3630,19 @@ fn diary_values(e: &DiaryEntry) -> BTreeMap<String, TypedValue> {
     m.insert(
         "operationalBitmap".to_string(),
         TypedValue::Bitmap(e.operational_bitmap),
+    );
+    // Explicit reward channel (NEURONKIT_SPEC § 3.1 step 1a).
+    // REAL nullable: bind f64 or Null.
+    m.insert(
+        "reward".to_string(),
+        e.reward.map(TypedValue::Float).unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "rewardProvenance".to_string(),
+        e.reward_provenance
+            .as_ref()
+            .map(|s| TypedValue::Text(s.clone()))
+            .unwrap_or(TypedValue::Null),
     );
     m
 }
@@ -2953,28 +3858,62 @@ fn recall_trace_values(item: &RecallTraceItem) -> BTreeMap<String, TypedValue> {
 // Row decode helpers
 // ---------------------------------------------------------------------------
 
-fn drawer_from_row(row: &StorageRow) -> Drawer {
-    Drawer {
+/// Returns true when the given bit (0-based) is set in `fp`.
+/// Layout: block0=bits 0–63, block1=64–127, block2=128–191, block3=192–255.
+/// Callers must pre-validate that bit ∈ [0, 255].
+fn temporal_bit_set(fp: &Fingerprint256, bit: usize) -> bool {
+    match bit {
+        0..=63 => (fp.block0 >> (bit as u32)) & 1 != 0,
+        64..=127 => (fp.block1 >> ((bit - 64) as u32)) & 1 != 0,
+        128..=191 => (fp.block2 >> ((bit - 128) as u32)) & 1 != 0,
+        _ => (fp.block3 >> ((bit - 192) as u32)) & 1 != 0,
+    }
+}
+
+/// Decode a `drawers` row into a `Drawer`.
+///
+/// Returns `Err(LocusKitError::CorruptStoredValue)` when the stored
+/// `lineageID` TEXT is non-empty but cannot be parsed as a UUID.
+/// An empty-string `lineageID` is the intentional "unset" sentinel —
+/// it becomes a fresh `Uuid::new_v4()` so unset rows never collapse
+/// onto one lineage. A non-empty unparseable string is corruption:
+/// manufacturing a new random UUID would fabricate a lineage that
+/// never existed, silently misleading federation routing and
+/// Bradley-Terry reward matching. Parity with Swift `drawerFromRow`
+/// and PersistenceKit commit 0ff08d93.
+///
+/// `filed_at` and other Timestamp columns are declared
+/// `ColumnType::Timestamp` in the schema; PersistenceKit's
+/// `read_value` already throws `StorageError::CorruptStoredValue`
+/// there before the row reaches this function.
+fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
+    let raw_lineage = string_value_of(row.get("lineageID"));
+    let lineage_id = if raw_lineage.is_empty() {
+        Uuid::new_v4()
+    } else {
+        Uuid::parse_str(&raw_lineage).map_err(|_| LocusKitError::CorruptStoredValue {
+            table: "drawers".to_string(),
+            column: "lineageID".to_string(),
+            stored_text: raw_lineage.clone(),
+        })?
+    };
+    let filed_at = i64_value_of(row.get("filedAt"));
+    Ok(Drawer {
         id: string_value_of(row.get("id")),
-        // Empty-string or unparseable lineageID becomes a fresh
-        // per-row UUID so unset rows never collapse onto one
-        // lineage; matches the Swift `drawerFromRow`.
-        lineage_id: Uuid::parse_str(&string_value_of(row.get("lineageID")))
-            .unwrap_or_else(|_| Uuid::new_v4()),
+        lineage_id,
         content: string_value_of(row.get("content")),
         wing: string_value_of(row.get("wing")),
         room: string_value_of(row.get("room")),
         source_file: opt_string_value_of(row.get("sourceFile")),
         chunk_index: opt_int_value_of(row.get("chunkIndex")),
         added_by: string_value_of(row.get("addedBy")),
-        filed_at: i64_value_of(row.get("filedAt")),
+        filed_at,
         // Two-clock ingest (ING-01): coalesce NULL/absent eventTime to
         // filed_at at the decode boundary. Rows written before the column
         // existed carry NULL in SQLite; they decode to event_time == filed_at
         // (the streaming-capture identity) without requiring ALTER+UPDATE.
         // The in-struct type is non-optional, mirroring Swift Drawer.eventTime.
-        event_time: opt_int_value_of(row.get("eventTime"))
-            .unwrap_or_else(|| i64_value_of(row.get("filedAt"))),
+        event_time: opt_int_value_of(row.get("eventTime")).unwrap_or(filed_at),
         embedding_model_id: string_value_of(row.get("embeddingModelID")),
         tombstoned_at: opt_int_value_of(row.get("tombstonedAt")),
         removed_by_batch: opt_string_value_of(row.get("removedByBatch")),
@@ -2985,7 +3924,7 @@ fn drawer_from_row(row: &StorageRow) -> Drawer {
         udc_facets: opt_string_value_of(row.get("udcFacets")),
         wikidata_qid: opt_string_value_of(row.get("wikidataQID")),
         wikidata_qids_secondary: opt_string_value_of(row.get("wikidataQidsSecondary")),
-    }
+    })
 }
 
 fn tunnel_from_row(row: &StorageRow) -> Tunnel {
@@ -3136,6 +4075,69 @@ fn learned_reference_from_row(row: &StorageRow) -> LearnedReference {
     }
 }
 
+fn source_catalog_values(entry: &SourceCatalogEntry) -> BTreeMap<String, TypedValue> {
+    let mut m = BTreeMap::new();
+    m.insert("id".to_string(), TypedValue::Text(entry.id.clone()));
+    m.insert("kind".to_string(), TypedValue::Int(entry.kind.raw_value()));
+    m.insert("handle".to_string(), TypedValue::Text(entry.handle.clone()));
+    m.insert(
+        "addedBy".to_string(),
+        TypedValue::Text(entry.added_by.clone()),
+    );
+    m.insert(
+        "firstSeen".to_string(),
+        TypedValue::Timestamp(entry.first_seen),
+    );
+    m.insert(
+        "udcCode".to_string(),
+        TypedValue::Text(entry.lattice_anchor.udc_code.clone()),
+    );
+    m.insert(
+        "udcFacets".to_string(),
+        entry
+            .lattice_anchor
+            .udc_facets
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "wikidataQID".to_string(),
+        entry
+            .lattice_anchor
+            .wikidata_qid
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "wikidataQidsSecondary".to_string(),
+        entry
+            .lattice_anchor
+            .wikidata_qids_secondary
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m
+}
+
+fn source_catalog_from_row(row: &StorageRow) -> SourceCatalogEntry {
+    SourceCatalogEntry {
+        id: string_value_of(row.get("id")),
+        kind: SourceKind::from_raw(i64_value_of(row.get("kind"))),
+        handle: string_value_of(row.get("handle")),
+        lattice_anchor: LatticeAnchor::new(
+            string_value_of(row.get("udcCode")),
+            opt_string_value_of(row.get("udcFacets")),
+            opt_string_value_of(row.get("wikidataQID")),
+            opt_string_value_of(row.get("wikidataQidsSecondary")),
+        ),
+        first_seen: i64_value_of(row.get("firstSeen")),
+        added_by: string_value_of(row.get("addedBy")),
+    }
+}
+
 fn diary_from_row(row: &StorageRow) -> DiaryEntry {
     DiaryEntry {
         id: string_value_of(row.get("id")),
@@ -3149,6 +4151,10 @@ fn diary_from_row(row: &StorageRow) -> DiaryEntry {
         tombstoned_at: opt_int_value_of(row.get("tombstonedAt")),
         removed_by_batch: opt_string_value_of(row.get("removedByBatch")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
+        // Explicit reward channel (NEURONKIT_SPEC § 3.1 step 1a).
+        // SQLite returns Float or Null; opt_float_value_of handles both.
+        reward: opt_float_value_of(row.get("reward")),
+        reward_provenance: opt_string_value_of(row.get("rewardProvenance")),
     }
 }
 
@@ -3189,9 +4195,26 @@ fn recall_trace_from_row(row: &StorageRow) -> RecallTraceItem {
     RecallTraceItem {
         id: string_value_of(row.get("id")),
         target: string_value_of(row.get("target")),
-        recalled_at: string_value_of(row.get("recalledAt")),
+        recalled_at: recalled_at_string(row.get("recalledAt")),
         score: opt_float_value_of(row.get("score")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
+    }
+}
+
+/// Decode the `recalledAt` column to its ISO8601 string, tolerating both the
+/// `Text` form (the InMemory backend round-trips the raw string) and the
+/// `Timestamp` form (the SQLite / Postgres backends parse the TEXT column to
+/// epoch seconds on read because the column is declared `.timestamp`, then we
+/// re-render the canonical ISO8601). Without the Timestamp arm, a persisted
+/// reopen would surface an empty `recalled_at`, breaking the dreaming reward
+/// sweep's `recalledAt` windowing on durable backends (the InMemory-only tests
+/// hide this). Mirrors the read-back tolerance every other LocusKit decoder
+/// applies to timestamp columns.
+fn recalled_at_string(v: Option<&TypedValue>) -> String {
+    match v {
+        Some(TypedValue::Text(s)) => s.clone(),
+        Some(TypedValue::Timestamp(secs)) => format_iso8601(*secs),
+        _ => String::new(),
     }
 }
 
@@ -3503,6 +4526,159 @@ mod tests {
         let store_b = DrawerStoreCore::new(storage as Arc<dyn Storage>, NOW + 1, None).unwrap();
         let uuid_b = store_b.read_manifest().unwrap().estate_uuid;
         assert_eq!(uuid_a, uuid_b);
+    }
+
+    // -----------------------------------------------------------------
+    // P1-7: estate_uuid manifest classification — absent vs corrupt vs
+    // valid. An ABSENT value (fresh estate) is legitimate (node 0, no
+    // error); a PRESENT-but-malformed value is data corruption and MUST
+    // fail loud (CorruptStoredValue), never collapse to node 0 / a random
+    // UUID which would mask the corruption. Parity with the Swift port's
+    // `DrawerStoreClassifyEstateUuidTests`.
+    // -----------------------------------------------------------------
+
+    /// VALID persisted UUID → the correct, stable node id is derived
+    /// (FNV-1a 32-bit of the raw stored text, masked non-negative), and
+    /// the estate uuid resolves to that persisted value.
+    #[test]
+    fn estate_uuid_valid_persisted_derives_correct_node_id() {
+        let stored = "11111111-1111-1111-1111-111111111111";
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let core =
+            DrawerStoreCore::new(Arc::clone(&storage) as Arc<dyn Storage>, NOW, None).unwrap();
+        // Overwrite the manifest with a known UUID, then re-open over the
+        // same storage so classification runs against the known value.
+        core.set_meta("estate_uuid", stored).unwrap();
+        let reopened =
+            DrawerStoreCore::new(storage as Arc<dyn Storage>, NOW + 1, None).unwrap();
+
+        // estate uuid resolves to the persisted value (not a fresh mint).
+        assert_eq!(reopened.estate_uuid.to_string(), stored);
+
+        // node id is the FNV hash of the raw stored text, masked. This is
+        // the same expression Swift evaluates on the identical bytes.
+        let expected = (substrate_types::fnv::hash32(stored) & 0x7FFF_FFFF) as i32;
+        let state = reopened.classify_estate_uuid().unwrap();
+        assert!(matches!(state, EstateUuidState::Present { .. }));
+        assert_eq!(DrawerStoreCore::maker_node_id(&state), expected);
+        // Sanity: a real persisted uuid never derives node 0.
+        assert_ne!(DrawerStoreCore::maker_node_id(&state), 0);
+        // The live clock carries that node id.
+        assert_eq!(reopened.hlc.lock().unwrap().node_id, expected);
+    }
+
+    /// ABSENT manifest value (fresh estate, key never written) → the
+    /// legitimate fresh-estate path: classification is `Absent`, node id
+    /// is 0, and open does NOT error.
+    #[test]
+    fn estate_uuid_absent_opens_fresh_no_throw() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let core =
+            DrawerStoreCore::new(Arc::clone(&storage) as Arc<dyn Storage>, NOW, None).unwrap();
+        // Delete the estate_uuid row so the value is genuinely absent,
+        // simulating an unseeded manifest (the legitimate fresh case).
+        let deleted = storage
+            .row_store()
+            .delete(
+                T_MANIFEST,
+                &StoragePredicate::Eq(
+                    Column::new(T_MANIFEST, "key"),
+                    TypedValue::Text("estate_uuid".to_string()),
+                ),
+            )
+            .unwrap();
+        assert_eq!(deleted, 1, "exactly one estate_uuid row removed");
+
+        // Classification reports Absent; node id is 0; no error.
+        let state = core.classify_estate_uuid().unwrap();
+        assert!(matches!(state, EstateUuidState::Absent));
+        assert_eq!(DrawerStoreCore::maker_node_id(&state), 0);
+    }
+
+    /// PRESENT-but-malformed UUID (data corruption) → fail loud with
+    /// `CorruptStoredValue { table: "manifest", column: "estate_uuid" }`.
+    /// NOT node 0, NOT a random UUID, NOT a silent default.
+    #[test]
+    fn estate_uuid_corrupt_fails_loud() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let core =
+            DrawerStoreCore::new(Arc::clone(&storage) as Arc<dyn Storage>, NOW, None).unwrap();
+        // Corrupt the persisted value in place.
+        core.set_meta("estate_uuid", "not-a-uuid").unwrap();
+
+        // classify_estate_uuid fails loud — never a silent fallback.
+        let err = core.classify_estate_uuid().unwrap_err();
+        match err {
+            LocusKitError::CorruptStoredValue {
+                ref table,
+                ref column,
+                ref stored_text,
+            } => {
+                assert_eq!(table, T_MANIFEST);
+                assert_eq!(column, "estate_uuid");
+                assert_eq!(stored_text, "not-a-uuid");
+            }
+            other => panic!("expected CorruptStoredValue, got {:?}", other),
+        }
+
+        // And the corruption propagates through the production open path:
+        // re-opening over the same corrupt storage must Err, not collapse
+        // to node 0 / a random UUID.
+        let reopen =
+            DrawerStoreCore::new(storage as Arc<dyn Storage>, NOW + 1, None);
+        assert!(
+            matches!(
+                reopen,
+                Err(LocusKitError::CorruptStoredValue { ref column, .. }) if column == "estate_uuid"
+            ),
+            "open over corrupt estate_uuid must fail loud, got {:?}",
+            reopen.map(|_| "Ok"),
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // room_level_fingerprints + all_drawers_bounded accessors
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn room_level_fingerprints_reads_container_aggregate() {
+        // Seed the container_fingerprints aggregate through a
+        // ContainerFingerprintStore over the SAME storage the DrawerStoreCore
+        // wraps, then read it back through the DrawerStore accessor. Proves the
+        // accessor reads the maintained aggregate rather than a separate table.
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store =
+            DrawerStoreCore::new(Arc::clone(&storage) as Arc<dyn Storage>, NOW, None).unwrap();
+        let fp_store =
+            ContainerFingerprintStore::new(Arc::clone(&storage) as Arc<dyn Storage>).unwrap();
+        fp_store.or_in("study", "notes", 0b0011, 0b0100, 0, NOW).unwrap();
+        fp_store.or_in("study", "drafts", 0b1000, 0, 0, NOW).unwrap();
+
+        let mut entries = store.room_level_fingerprints().unwrap();
+        entries.sort_by(|a, b| a.room.cmp(&b.room));
+        assert_eq!(entries.len(), 2, "two room-level containers, no wing rollup");
+        assert_eq!(entries[0].room, "drafts");
+        assert_eq!(entries[0].fingerprint.adjective, 0b1000);
+        assert_eq!(entries[1].room, "notes");
+        assert_eq!(entries[1].fingerprint.adjective, 0b0011);
+        assert_eq!(entries[1].fingerprint.operational, 0b0100);
+    }
+
+    #[test]
+    fn room_level_fingerprints_empty_on_fresh_estate() {
+        let store = open_store();
+        assert!(store.room_level_fingerprints().unwrap().is_empty());
+    }
+
+    #[test]
+    fn all_drawers_bounded_caps_and_reads_full_on_none() {
+        let store = open_store();
+        for i in 0..5 {
+            let d = sample_drawer(&format!("d{i}"), "w", "r", "c");
+            store.add_drawer(&d, NOW + i).unwrap();
+        }
+        assert_eq!(store.all_drawers_bounded(Some(2)).unwrap().len(), 2);
+        assert_eq!(store.all_drawers_bounded(None).unwrap().len(), 5);
     }
 
     #[test]
@@ -4077,6 +5253,8 @@ mod tests {
             tombstoned_at: None,
             removed_by_batch: None,
             operational_bitmap: 0,
+            reward: None,
+            reward_provenance: None,
         };
         let mut e2 = e1.clone();
         e2.id = "e2".to_string();
@@ -4181,6 +5359,133 @@ mod tests {
             .recent_recall_traces("2024-01-01T00:00:00.000Z", "2024-12-31T00:00:00.000Z")
             .unwrap();
         assert!(rows.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // prune_recall_traces, mark_recall_traces_used, count_recall_traces
+    // (Item A parity — mirrors Swift DrawerStore methods)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn prune_recall_traces_removes_rows_before_cutoff() {
+        let store = open_store();
+        // Insert three rows at different timestamps.
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "p-old1", "d-1", "2024-01-01T00:00:00.000Z", None, 0,
+        )).unwrap();
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "p-old2", "d-2", "2024-06-01T00:00:00.000Z", None, 0,
+        )).unwrap();
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "p-keep", "d-3", "2024-12-01T00:00:00.000Z", None, 0,
+        )).unwrap();
+
+        // Prune rows strictly before 2024-12-01 (ISO8601 lexicographic < is
+        // numerically correct for canonical UTC strings — fleet date rule).
+        let deleted = store.prune_recall_traces("2024-12-01T00:00:00.000Z").unwrap();
+        assert_eq!(deleted, 2, "two rows before cutoff must be deleted");
+
+        // The kept row survives.
+        assert!(store.get_recall_trace("p-keep").unwrap().is_some(), "p-keep must survive");
+        // The pruned rows are gone.
+        assert!(store.get_recall_trace("p-old1").unwrap().is_none(), "p-old1 must be pruned");
+        assert!(store.get_recall_trace("p-old2").unwrap().is_none(), "p-old2 must be pruned");
+    }
+
+    #[test]
+    fn prune_recall_traces_returns_zero_when_nothing_to_prune() {
+        let store = open_store();
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "recent", "d-r", "2025-06-01T00:00:00.000Z", None, 0,
+        )).unwrap();
+        // Cutoff in the past — nothing qualifies.
+        let deleted = store.prune_recall_traces("2020-01-01T00:00:00.000Z").unwrap();
+        assert_eq!(deleted, 0);
+        // Row is still present.
+        assert!(store.get_recall_trace("recent").unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_recall_traces_empty_table_returns_zero() {
+        let store = open_store();
+        let deleted = store.prune_recall_traces("2099-01-01T00:00:00.000Z").unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn mark_recall_traces_used_bulk_marks_matching_window() {
+        let store = open_store();
+        // Three rows for target "dt-A": two inside window, one outside.
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "bt1", "dt-A", "2024-01-01T00:00:00.000Z", None, 0,
+        )).unwrap();
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "bt2", "dt-A", "2024-01-02T00:00:00.000Z", None, 0,
+        )).unwrap();
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "bt3", "dt-A", "2024-01-04T00:00:00.000Z", None, 0,
+        )).unwrap(); // outside window
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "bt4", "dt-B", "2024-01-01T12:00:00.000Z", None, 0,
+        )).unwrap(); // different target
+
+        let touched = store.mark_recall_traces_used(
+            "dt-A",
+            "2024-01-01T00:00:00.000Z",
+            "2024-01-03T00:00:00.000Z",
+        ).unwrap();
+        assert_eq!(touched, 2, "two rows inside window must be marked");
+
+        assert!(store.get_recall_trace("bt1").unwrap().unwrap().used(), "bt1 must be marked");
+        assert!(store.get_recall_trace("bt2").unwrap().unwrap().used(), "bt2 must be marked");
+        assert!(!store.get_recall_trace("bt3").unwrap().unwrap().used(), "bt3 outside window");
+        assert!(!store.get_recall_trace("bt4").unwrap().unwrap().used(), "bt4 different target");
+    }
+
+    #[test]
+    fn mark_recall_traces_used_is_idempotent() {
+        let store = open_store();
+        store.insert_recall_trace(&RecallTraceItem::new(
+            "idem-x", "dt-X", "2024-06-01T00:00:00.000Z", None, 0,
+        )).unwrap();
+        let first = store.mark_recall_traces_used(
+            "dt-X", "2024-01-01T00:00:00.000Z", "2025-01-01T00:00:00.000Z",
+        ).unwrap();
+        assert_eq!(first, 1);
+        let second = store.mark_recall_traces_used(
+            "dt-X", "2024-01-01T00:00:00.000Z", "2025-01-01T00:00:00.000Z",
+        ).unwrap();
+        assert_eq!(second, 0, "second call on already-marked row must return 0");
+    }
+
+    #[test]
+    fn mark_recall_traces_used_unknown_target_returns_zero() {
+        let store = open_store();
+        let n = store.mark_recall_traces_used(
+            "no-such-target",
+            "2000-01-01T00:00:00.000Z",
+            "2099-01-01T00:00:00.000Z",
+        ).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn count_recall_traces_reports_total_including_used() {
+        let store = open_store();
+        assert_eq!(store.count_recall_traces().unwrap(), 0, "empty table → 0");
+
+        for i in 1..=3u32 {
+            store.insert_recall_trace(&RecallTraceItem::new(
+                &format!("ct-{i}"),
+                &format!("d-{i}"),
+                "2024-06-01T00:00:00.000Z",
+                None,
+                0,
+            )).unwrap();
+        }
+        store.mark_recall_trace_used("ct-2", NOW).unwrap();
+        // count must include marked rows.
+        assert_eq!(store.count_recall_traces().unwrap(), 3, "three rows total");
     }
 
     #[test]
@@ -4302,12 +5607,14 @@ mod tests {
         assert!(before.tombstoned_at.is_none());
         assert_eq!(before.adjective_bitmap & (1 << 26), 0);
 
+        // seal_audit: true — direct-caller path, audit appended immediately.
         store
             .expunge_gated(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 "alice",
                 Some("GDPR delete request 2026-05-29"),
                 NOW + 500,
+                true,
             )
             .unwrap();
 
@@ -4335,12 +5642,14 @@ mod tests {
         d.adjective_bitmap = (1 << 24) | (1 << 25);
         store.add_drawer(&d, NOW).unwrap();
 
+        // seal_audit: true — direct-caller path, audit appended immediately.
         store
             .expunge_gated(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 "alice",
                 None,
                 NOW + 500,
+                true,
             )
             .unwrap();
         let after = store
@@ -4379,6 +5688,7 @@ mod tests {
                 "alice",
                 None,
                 NOW + 200,
+                true,
             )
             .unwrap_err();
         match err {
@@ -4412,11 +5722,108 @@ mod tests {
                 "alice",
                 None,
                 NOW + 100,
+                true,
             )
             .unwrap_err();
         match err {
             LocusKitError::DrawerNotFound { .. } => {}
             other => panic!("expected DrawerNotFound, got {:?}", other),
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Force-tests: all_kg_facts_including_retired (math-provenance gate)
+    // ----------------------------------------------------------------
+    //
+    // These guard FINDING-3: the trait default must fail loud on stores that
+    // do not override the method; concrete production stores (InMemory here,
+    // SQLite in drawer_store_sqlite.rs) must return real results.
+
+    /// Concrete store — empty estate returns empty vec (not an error).
+    /// A genuinely-empty estate is a valid state that is NOT a missing impl.
+    #[test]
+    fn all_kg_facts_including_retired_empty_estate_returns_empty_vec() {
+        let store = open_store();
+        let result = store.all_kg_facts_including_retired().unwrap();
+        assert!(result.is_empty(), "empty estate should return empty vec");
+    }
+
+    /// Concrete store — active facts are visible in the timeline.
+    /// Regression guard: the real impl must see active facts.
+    #[test]
+    fn all_kg_facts_including_retired_includes_active_facts() {
+        let store = open_store();
+        let f = KGFact::new(
+            tid("f1"),
+            "alice".to_string(),
+            "livesIn".to_string(),
+            "berlin".to_string(),
+            tid("d1"),
+            NOW,
+        );
+        store.add_kg_fact(&f).unwrap();
+        let rows = store.all_kg_facts_including_retired().unwrap();
+        assert_eq!(rows.len(), 1, "active fact must appear in timeline");
+        assert_eq!(rows[0].subject, "alice");
+    }
+
+    /// Concrete store — retired (withdrawn) facts are visible in the
+    /// timeline even though they are excluded from `all_kg_facts()`.
+    /// This is the specific contract of the timeline path.
+    #[test]
+    fn all_kg_facts_including_retired_includes_retired_facts() {
+        let store = open_store();
+        let f = KGFact::new(
+            tid("f2"),
+            "bob".to_string(),
+            "worksAt".to_string(),
+            "acme".to_string(),
+            tid("d2"),
+            NOW,
+        );
+        store.add_kg_fact(&f).unwrap();
+        // Retire the fact: transitions state to Withdrawn (≥ 7).
+        store.withdraw_kg_fact(&tid("f2"), NOW + 1).unwrap();
+
+        // all_kg_facts (active-only) must NOT see it.
+        let active = store.all_kg_facts().unwrap();
+        assert!(active.is_empty(), "withdrawn fact must not appear in active-only scan");
+
+        // all_kg_facts_including_retired (full timeline) MUST see it.
+        let timeline = store.all_kg_facts_including_retired().unwrap();
+        assert_eq!(timeline.len(), 1, "withdrawn fact must appear in timeline");
+        assert_eq!(timeline[0].subject, "bob");
+    }
+
+    /// Concrete store — mixed estate (one active + one retired) returns
+    /// both rows from the timeline, preserving filed_at ascending order.
+    #[test]
+    fn all_kg_facts_including_retired_returns_active_and_retired_ordered() {
+        let store = open_store();
+        let f_active = KGFact::new(
+            tid("fa"),
+            "carol".to_string(),
+            "knows".to_string(),
+            "dave".to_string(),
+            tid("d3"),
+            NOW,
+        );
+        let f_retired = KGFact::new(
+            tid("fr"),
+            "eve".to_string(),
+            "uses".to_string(),
+            "tool".to_string(),
+            tid("d4"),
+            NOW + 1,
+        );
+        store.add_kg_fact(&f_active).unwrap();
+        store.add_kg_fact(&f_retired).unwrap();
+        store.withdraw_kg_fact(&tid("fr"), NOW + 2).unwrap();
+
+        let timeline = store.all_kg_facts_including_retired().unwrap();
+        assert_eq!(timeline.len(), 2, "timeline must include both active and retired");
+        // filed_at ascending: f_active (NOW) before f_retired (NOW+1).
+        assert_eq!(timeline[0].subject, "carol");
+        assert_eq!(timeline[1].subject, "eve");
     }
 }

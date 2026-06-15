@@ -9,7 +9,7 @@
 //! Estate verb surface in LP-1F selects the slice):
 //!
 //! 1. **Default insertion** (§ 7.9.5) — prepend the four implicit
-//!    filters (`SensitivityAtMost(Normal)`, `Trustworthy`,
+//!    filters (`SensitivityAtMost(Elevated)`, `Trustworthy`,
 //!    `UserConfirmed`, `CurrentlyBelieve`) for any concern the caller
 //!    did not constrain. Tombstone exclusion is always enforced and
 //!    is independent of the chain (`state == 9` rejected at the
@@ -243,14 +243,18 @@ impl BitmapEvaluator {
             result.insert(0, Filter::UserConfirmed);
         }
         if !chain.iter().any(Self::is_bitmap_sensitivity_filter) {
-            // Sensitivity default — caller maximum is `Normal` until
-            // ARIA_MCP supplies real access claims (§ 9.2). Conditional
-            // on absence so an explicit `SensitivityAtMost(Elevated)`
-            // is not AND-ed against a baseline `Normal`, which would
-            // collapse the explicit ceiling to the implicit one.
+            // Sensitivity default — ceiling is `Elevated`, the Normal-tier
+            // ceiling per ADR-007 Decision 2 / VK-TIER-01 mapping (Normal
+            // tier = normal + elevated; restricted = Private tier; secret =
+            // Secret tier). `Restricted` and `Secret` are excluded from
+            // default recall. This is the no-claims posture: § 9.2
+            // access claims (future ARIA_MCP) can LOWER the ceiling when a
+            // caller's grant set does not include elevated content. Conditional
+            // on absence so an explicit sensitivity constraint from the caller
+            // suppresses this default rather than AND-ing against it.
             result.insert(
                 0,
-                Filter::SensitivityAtMost(crate::adjectives::AdjectiveSensitivity::Normal),
+                Filter::SensitivityAtMost(crate::adjectives::AdjectiveSensitivity::Elevated),
             );
         }
         result
@@ -314,6 +318,17 @@ impl BitmapEvaluator {
     /// overhead for the common threshold-only chain.
     pub fn chain_has_prunable_filter(chain: &[Filter]) -> bool {
         chain.iter().any(Self::filter_is_prunable)
+    }
+
+    /// Whether the chain carries any content-tier predicate (`ContentMatches`
+    /// or a composition containing one). When true the recall path must load
+    /// drawers at full hydration so the content body is available for the
+    /// substring match. When false the no-blob structured projection is
+    /// sufficient — the bitmap and structured tiers have no need for the blob.
+    ///
+    /// Mirrors Swift `BitmapEvaluator.chainHasContentPredicate`.
+    pub fn chain_has_content_predicate(chain: &[Filter]) -> bool {
+        chain.iter().any(Self::is_content_filter)
     }
 
     fn filter_is_prunable(filter: &Filter) -> bool {
@@ -709,20 +724,33 @@ impl BitmapEvaluator {
     // -----------------------------------------------------------------
 
     fn sort(mut drawers: Vec<Drawer>, ordering: Ordering) -> Vec<Drawer> {
+        // All orderings apply an `id` tie-break (smaller id wins, lexicographic
+        // ascending) so results are deterministic when the primary key ties.
+        // This matches Swift's `sorted { }` which is stable — stable sort in
+        // Rust preserves insertion order for equal keys, so we make the
+        // tie-break explicit here instead of relying on insertion order:
+        //   • Swift canonical is stable, preserving input order on ties.
+        //   • Rust sort_by is also stable, but we want a deterministic cross-
+        //     language guarantee: "on tie, smaller id wins" is the contract.
         match ordering {
             Ordering::ByCaptureTimeDesc => {
-                drawers.sort_by_key(|d| std::cmp::Reverse(d.filed_at));
+                drawers.sort_by(|a, b| {
+                    b.filed_at
+                        .cmp(&a.filed_at)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
             }
             Ordering::ByCaptureTimeAsc => {
-                drawers.sort_by_key(|d| d.filed_at);
+                drawers.sort_by(|a, b| {
+                    a.filed_at
+                        .cmp(&b.filed_at)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
             }
             Ordering::ByRoomAsc => {
-                drawers.sort_by(|a, b| a.room.cmp(&b.room));
-            }
-            Ordering::ByRelevanceDesc => {
-                // Relevance scoring requires the vector index from
-                // VectorKit. Returning the input order is the
-                // documented stub behaviour until that index ships.
+                drawers.sort_by(|a, b| {
+                    a.room.cmp(&b.room).then_with(|| a.id.cmp(&b.id))
+                });
             }
         }
         drawers
@@ -807,20 +835,146 @@ mod tests {
     }
 
     #[test]
-    fn sensitivity_default_is_normal() {
+    fn tier_boundary_default_ceiling_elevated_included_restricted_excluded() {
+        // Per ADR-007 Decision 2 / VK-TIER-01: the Normal-tier ceiling is
+        // `Elevated`. `Restricted` is Private tier and must be absent from
+        // default (no-claims) recall. Mirrors Swift
+        // `tierBoundary_defaultCeiling_elevatedIncluded_restrictedExcluded`.
         let store = make_store();
-        // Row at Elevated sensitivity — defaults exclude it.
-        let mut d = base_drawer("d1");
-        d.adjective_bitmap = AdjectiveSensitivity::Elevated.raw_value() << 6;
+
+        // Elevated row (raw 16 << 6 = 1024 in adjective_bitmap) — must appear.
+        let mut d_elevated = base_drawer("elevated");
+        d_elevated.adjective_bitmap |= AdjectiveSensitivity::Elevated.raw_value() << 6;
+        // Restricted row (raw 32 << 6 = 2048) — must be absent.
+        let mut d_restricted = base_drawer("restricted");
+        d_restricted.adjective_bitmap |= AdjectiveSensitivity::Restricted.raw_value() << 6;
+
         let frame = make_frame(vec![]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d.clone()], store.as_ref()).unwrap();
-        assert!(result.is_empty());
-        // Caller widens the ceiling — Elevated row surfaces.
-        let frame = make_frame(vec![Filter::SensitivityAtMost(
-            AdjectiveSensitivity::Elevated,
-        )]);
-        let result = BitmapEvaluator::evaluate(&frame, &[d], store.as_ref()).unwrap();
-        assert_eq!(result.len(), 1);
+        let result = BitmapEvaluator::evaluate(
+            &frame,
+            &[d_elevated.clone(), d_restricted.clone()],
+            store.as_ref(),
+        )
+        .unwrap();
+
+        assert!(
+            result.iter().any(|d| d.id == "elevated"),
+            "elevated drawer must appear in default (no-claims) recall after tier alignment"
+        );
+        assert!(
+            !result.iter().any(|d| d.id == "restricted"),
+            "restricted drawer must be absent from default recall (Private tier)"
+        );
+    }
+
+    #[test]
+    fn secret_exclusion_unconstrained_recall() {
+        // A `secret`-sensitivity drawer must never appear when the caller
+        // supplies no sensitivity filter. Default ceiling is Elevated (< Secret).
+        // Mirrors Swift `secretExclusion_unconstrainedRecall`.
+        let store = make_store();
+
+        let mut d_secret = base_drawer("secret");
+        d_secret.adjective_bitmap |= AdjectiveSensitivity::Secret.raw_value() << 6;
+        let d_normal = base_drawer("normal");
+
+        let frame = make_frame(vec![]);
+        let result =
+            BitmapEvaluator::evaluate(&frame, &[d_secret, d_normal], store.as_ref()).unwrap();
+
+        assert!(
+            !result.iter().any(|d| d.id == "secret"),
+            "secret drawer must be absent from unconstrained recall"
+        );
+        assert!(
+            result.iter().any(|d| d.id == "normal"),
+            "normal drawer must appear in unconstrained recall"
+        );
+    }
+
+    #[test]
+    fn secret_exclusion_other_axis_chain() {
+        // A chain that constrains the provenance axis but NOT sensitivity must
+        // still exclude secret-sensitivity drawers via the default ceiling.
+        // Mirrors Swift `secretExclusion_otherAxisChains`.
+        let store = make_store();
+
+        // Secret-sensitivity, unconfirmed provenance (zero provenance).
+        let mut d_secret_unconfirmed = base_drawer("secret-unconfirmed");
+        d_secret_unconfirmed.adjective_bitmap |= AdjectiveSensitivity::Secret.raw_value() << 6;
+        d_secret_unconfirmed.provenance = 0; // Unconfirmed
+
+        // Normal-sensitivity, normal provenance (UserConfirmed).
+        let d_normal = base_drawer("normal");
+
+        // Chain constrains provenance only (Unconfirmed). Default sensitivity
+        // ceiling (.Elevated) still applies, so secret is excluded.
+        let frame = make_frame(vec![Filter::Unconfirmed]);
+        let result = BitmapEvaluator::evaluate(
+            &frame,
+            &[d_secret_unconfirmed.clone()],
+            store.as_ref(),
+        )
+        .unwrap();
+        assert!(
+            !result.iter().any(|d| d.id == "secret-unconfirmed"),
+            "secret drawer must be excluded even under Unconfirmed chain"
+        );
+
+        // A secret row with matching content is also excluded when the chain
+        // constrains only content — sensitivity default applies regardless.
+        let mut d_secret_matching = base_drawer("secret-matching");
+        d_secret_matching.adjective_bitmap |= AdjectiveSensitivity::Secret.raw_value() << 6;
+        d_secret_matching.content = "needle".to_string();
+        let mut d_normal_matching = base_drawer("normal-matching");
+        d_normal_matching.content = "needle".to_string();
+        let frame = make_frame(vec![Filter::ContentMatches("needle".to_string())]);
+        let result = BitmapEvaluator::evaluate(
+            &frame,
+            &[d_secret_matching, d_normal_matching],
+            store.as_ref(),
+        )
+        .unwrap();
+        assert!(
+            !result.iter().any(|d| d.id == "secret-matching"),
+            "secret drawer must be absent even when content matches, sensitivity axis unconstrained"
+        );
+        assert!(
+            result.iter().any(|d| d.id == "normal-matching"),
+            "normal-matching drawer must appear under ContentMatches chain"
+        );
+        let _ = d_normal; // used above implicitly
+    }
+
+    #[test]
+    fn secret_reachable_with_explicit_sensitivity_constraint() {
+        // A secret-sensitivity drawer IS returned when the caller explicitly
+        // constrains the sensitivity axis to include secret — both
+        // `Sensitivity(Secret)` (exact match) and `SensitivityAtMost(Secret)`
+        // (ceiling at secret). Mirrors Swift
+        // `secretReachable_withExplicitSensitivityConstraint`.
+        let store = make_store();
+
+        let mut d_secret = base_drawer("secret");
+        d_secret.adjective_bitmap |= AdjectiveSensitivity::Secret.raw_value() << 6;
+
+        // Exact-match form.
+        let frame = make_frame(vec![Filter::Sensitivity(AdjectiveSensitivity::Secret)]);
+        let result =
+            BitmapEvaluator::evaluate(&frame, &[d_secret.clone()], store.as_ref()).unwrap();
+        assert!(
+            result.iter().any(|d| d.id == "secret"),
+            "secret drawer must be present under explicit Sensitivity(Secret) constraint"
+        );
+
+        // Ceiling form.
+        let frame = make_frame(vec![Filter::SensitivityAtMost(AdjectiveSensitivity::Secret)]);
+        let result =
+            BitmapEvaluator::evaluate(&frame, &[d_secret.clone()], store.as_ref()).unwrap();
+        assert!(
+            result.iter().any(|d| d.id == "secret"),
+            "secret drawer must be present under explicit SensitivityAtMost(Secret) constraint"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1205,6 +1359,7 @@ mod tests {
             limit: None,
             ordering: Ordering::ByCaptureTimeDesc,
             as_of: None,
+            trace_limit: None,
         };
         let result =
             BitmapEvaluator::evaluate(&frame, &[early.clone(), late.clone()], store.as_ref())
@@ -1226,6 +1381,7 @@ mod tests {
             limit: None,
             ordering: Ordering::ByCaptureTimeAsc,
             as_of: None,
+            trace_limit: None,
         };
         let result = BitmapEvaluator::evaluate(&frame, &[late, early], store.as_ref()).unwrap();
         assert_eq!(result[0].id, "early");
@@ -1245,11 +1401,103 @@ mod tests {
             limit: None,
             ordering: Ordering::ByRoomAsc,
             as_of: None,
+            trace_limit: None,
         };
         let result = BitmapEvaluator::evaluate(&frame, &[k, s], store.as_ref()).unwrap();
         assert_eq!(result[0].room, "den");
         assert_eq!(result[1].room, "kitchen");
     }
+
+    // -----------------------------------------------------------------
+    // Ordering tie-break (Item B parity — deterministic on equal primary key)
+    //
+    // When two drawers share the same primary sort key (filed_at or room),
+    // the id tie-break (smaller id wins, lexicographic ascending) must fire.
+    // This matches the Swift contract — "smaller id wins" is the stated
+    // cross-language guarantee so a fixed fixture produces identical order
+    // in both languages.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn order_by_capture_time_desc_tiebreak_by_id() {
+        let store = make_store();
+        // Two drawers with identical filed_at — "a-id" < "z-id" lexicographically.
+        let mut d_z = base_drawer("z-id");
+        d_z.filed_at = NOW + 50;
+        let mut d_a = base_drawer("a-id");
+        d_a.filed_at = NOW + 50;
+        let frame = RecallFrame {
+            filter_chain: vec![],
+            hydration_level: crate::filter::HydrationLevel::Structured,
+            limit: None,
+            ordering: Ordering::ByCaptureTimeDesc,
+            as_of: None,
+            trace_limit: None,
+        };
+        // Regardless of input order the tie-break must produce "a-id" before "z-id".
+        let result_fwd =
+            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref())
+                .unwrap();
+        let result_rev =
+            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref())
+                .unwrap();
+        assert_eq!(result_fwd[0].id, "a-id", "tie-break: smaller id first (fwd)");
+        assert_eq!(result_fwd[1].id, "z-id", "tie-break: larger id second (fwd)");
+        assert_eq!(result_rev[0].id, "a-id", "tie-break: smaller id first (rev)");
+        assert_eq!(result_rev[1].id, "z-id", "tie-break: larger id second (rev)");
+    }
+
+    #[test]
+    fn order_by_capture_time_asc_tiebreak_by_id() {
+        let store = make_store();
+        let mut d_z = base_drawer("z-id");
+        d_z.filed_at = NOW + 50;
+        let mut d_a = base_drawer("a-id");
+        d_a.filed_at = NOW + 50;
+        let frame = RecallFrame {
+            filter_chain: vec![],
+            hydration_level: crate::filter::HydrationLevel::Structured,
+            limit: None,
+            ordering: Ordering::ByCaptureTimeAsc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let result_fwd =
+            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref())
+                .unwrap();
+        let result_rev =
+            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref())
+                .unwrap();
+        assert_eq!(result_fwd[0].id, "a-id", "tie-break asc: smaller id first (fwd)");
+        assert_eq!(result_rev[0].id, "a-id", "tie-break asc: smaller id first (rev)");
+    }
+
+    #[test]
+    fn order_by_room_asc_tiebreak_by_id() {
+        let store = make_store();
+        // Two drawers in the same room — "a-id" < "z-id".
+        let mut d_z = base_drawer("z-id");
+        d_z.room = "kitchen".to_string();
+        let mut d_a = base_drawer("a-id");
+        d_a.room = "kitchen".to_string();
+        let frame = RecallFrame {
+            filter_chain: vec![],
+            hydration_level: crate::filter::HydrationLevel::Structured,
+            limit: None,
+            ordering: Ordering::ByRoomAsc,
+            as_of: None,
+            trace_limit: None,
+        };
+        let result_fwd =
+            BitmapEvaluator::evaluate(&frame, &[d_z.clone(), d_a.clone()], store.as_ref())
+                .unwrap();
+        let result_rev =
+            BitmapEvaluator::evaluate(&frame, &[d_a.clone(), d_z.clone()], store.as_ref())
+                .unwrap();
+        assert_eq!(result_fwd[0].id, "a-id", "tie-break room: smaller id first (fwd)");
+        assert_eq!(result_rev[0].id, "a-id", "tie-break room: smaller id first (rev)");
+    }
+
 
     // -----------------------------------------------------------------
     // Provenance channel mask carry-over — explicit guard

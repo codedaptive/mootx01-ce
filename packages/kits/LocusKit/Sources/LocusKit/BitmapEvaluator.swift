@@ -5,7 +5,7 @@ import SubstrateML
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -23,7 +23,7 @@ import SubstrateTypes
 /// `Estate.recall` hands it:
 ///
 /// 1. Default insertion (§ 7.9.5) — prepend the four implicit
-///    filters (`.sensitivityAtMost(.normal)`, `.trustworthy`,
+///    filters (`.sensitivityAtMost(.elevated)`, `.trustworthy`,
 ///    `.userConfirmed`, `.currentlyBelieve`) for any concern the
 ///    caller did not constrain. Tombstone exclusion is always
 ///    enforced and is independent of the chain (state == 9 rejected
@@ -223,12 +223,16 @@ struct BitmapEvaluator {
             result.insert(.userConfirmed, at: 0)
         }
         if !chain.contains(where: isBitmapSensitivityFilter) {
-            // Sensitivity default — caller maximum is `.normal` until
-            // ARIA_MCP supplies real access claims (§ 9.2). Conditional
-            // on absence so an explicit `.sensitivityAtMost(.elevated)`
-            // is not AND-ed against a baseline `.normal`, which would
-            // collapse the explicit ceiling to the implicit one.
-            result.insert(.sensitivityAtMost(.normal), at: 0)
+            // Sensitivity default — ceiling is `.elevated`, the Normal-tier
+            // ceiling per ADR-007 Decision 2 / VK-TIER-01 mapping (Normal
+            // tier = normal + elevated; restricted = Private tier; secret =
+            // Secret tier). `restricted` and `secret` are excluded from
+            // default recall. This is the no-claims posture: § 9.2
+            // access claims (future ARIA_MCP) can LOWER the ceiling when a
+            // caller's grant set does not include elevated content. Conditional
+            // on absence so an explicit sensitivity constraint from the caller
+            // suppresses this default rather than AND-ing against it.
+            result.insert(.sensitivityAtMost(.elevated), at: 0)
         }
         return result
     }
@@ -295,6 +299,20 @@ struct BitmapEvaluator {
     /// overhead for the common threshold-only chain.
     static func chainHasPrunableFilter(_ chain: [Filter]) -> Bool {
         chain.contains { filterIsPrunable($0) }
+    }
+
+    /// Whether the chain carries any content-tier predicate (`.contentMatches`
+    /// or a composition containing one). When true the recall path must load
+    /// drawers at `.full` hydration so the content body is available for the
+    /// substring match. When false the no-blob `.structured` projection is
+    /// sufficient — the bitmap and structured tiers have no need for the blob.
+    ///
+    /// This is the per-query hydration decision: loading content blobs for
+    /// every drawer on every unfiltered query is O(N_blob) data transferred
+    /// out of storage; skipping it when no content predicate is present
+    /// eliminates the dominant per-query I/O cost on large estates.
+    static func chainHasContentPredicate(_ chain: [Filter]) -> Bool {
+        chain.contains { isContentFilter($0) }
     }
 
     private static func filterIsPrunable(_ filter: Filter) -> Bool {
@@ -625,11 +643,6 @@ struct BitmapEvaluator {
             return drawers.sorted { $0.filedAt < $1.filedAt }
         case .byRoomAsc:
             return drawers.sorted { $0.room < $1.room }
-        case .byRelevanceDesc:
-            // Relevance scoring requires the vector index from VectorKit
-            // (ships with VectorKit). Returning the input order is the
-            // documented stub behaviour until that index composes in.
-            return drawers
         }
     }
 }

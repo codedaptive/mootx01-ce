@@ -10,6 +10,7 @@
 //!   §4 KGFact: add_kg_fact / kg_facts_for_drawer / all_kg_facts emit metrics.
 //!   §5 Tunnel: add_tunnel emits tunnel.add_count.
 //!   §6 Conformance: results are byte-identical with monitoring on and off.
+//!   §7 Event emission: Estate::capture / capture_tunnel emit StatSample::Event.
 //!
 //! ## Global state isolation
 //!
@@ -36,10 +37,14 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use intellectus_lib::{Intellectus, NoOpSink, StatSample, StatsSink};
+use intellectus_lib::{EventKind, Intellectus, NoOpSink, StatSample, StatsSink};
 use locus_kit::drawer::Drawer;
+use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+use locus_kit::estate::Estate;
+use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+use locus_kit::frames::{CaptureFrame, TunnelCaptureFrame};
 use locus_kit::kg_fact::KGFact;
 use locus_kit::tunnel::Tunnel;
 use locus_kit::tunnel_operational::TunnelKind;
@@ -100,6 +105,17 @@ impl CapturingSink {
         self.all_samples().into_iter().filter(|s| {
             if let StatSample::Metric { name: n, tags, .. } = s {
                 n == name && tags.get("estate").map(|s| s.as_str()) == Some(estate_tag)
+            } else {
+                false
+            }
+        }).collect()
+    }
+
+    /// All Event samples whose `estate` field matches `estate_tag`.
+    fn event_samples_for_estate(&self, estate_tag: &str) -> Vec<StatSample> {
+        self.all_samples().into_iter().filter(|s| {
+            if let StatSample::Event { estate, .. } = s {
+                estate == estate_tag
             } else {
                 false
             }
@@ -692,6 +708,154 @@ fn drawers_in_wing_results_identical_with_monitoring_on_and_off() {
 
     // Confirm monitoring was active.
     assert!(sink.count() > 0, "at least one metric must be emitted when monitoring is on");
+
+    reset_intellectus();
+}
+
+// ─────────────────────────────────────────────────────────────────
+// §7 Event emission — Estate::capture / capture_tunnel
+// ─────────────────────────────────────────────────────────────────
+//
+// These tests verify that the estate-level verb wrappers (estate_verbs.rs)
+// emit a StatSample::Event with kind=Capture after successfully writing
+// to the backing store. The DrawerStoreCore layer emits Metric samples;
+// the Event emission is a distinct, higher-level instrumentation point.
+//
+// NounType wire-stable values (SubstrateTypes): Drawer=0, Tunnel=1.
+
+/// Build an Estate over a fresh InMemoryDrawerStore for event-emission tests.
+fn make_fresh_estate() -> Estate {
+    let store = Arc::new(
+        InMemoryDrawerStore::new(1_000_000, None).expect("InMemoryDrawerStore::new must succeed"),
+    );
+    Estate::create(store, OwnerCredentials::new("test-owner"), None)
+        .expect("Estate::create must succeed")
+}
+
+/// A minimal valid CaptureFrame for event-emission tests.
+fn capture_frame() -> CaptureFrame {
+    CaptureFrame::new(
+        "event-emission test content",
+        CaptureChannel::Typed,
+        "room-event-test",
+        LatticeAnchor::udc("004"),
+        "test-agent",
+        "minilm-v2",
+    )
+}
+
+/// A minimal valid TunnelCaptureFrame for event-emission tests.
+fn tunnel_capture_frame() -> TunnelCaptureFrame {
+    TunnelCaptureFrame::new(
+        "wing-a",
+        "room-event-test",
+        "wing-b",
+        "room-event-test-b",
+        "test-link",
+        "test-agent",
+    )
+}
+
+/// Estate::capture emits exactly one StatSample::Event with kind=Capture,
+/// noun_type=0 (Drawer), and row_id=drawer.id when monitoring is enabled.
+///
+/// Mirrors Swift `captureDrawerEmitsCaptureEvent` (TEL-01 §7).
+#[test]
+fn capture_drawer_emits_capture_event() {
+    let _guard = global_lock();
+    let sink = Arc::new(CapturingSink::new());
+    Intellectus::install(sink.clone());
+    Intellectus::set_enabled(true);
+
+    let estate = make_fresh_estate();
+    let estate_tag = estate.estate_uuid().to_string();
+
+    let drawer = estate
+        .capture(capture_frame(), 1_700_000_000)
+        .expect("Estate::capture must succeed");
+
+    let events = sink.event_samples_for_estate(&estate_tag);
+    assert_eq!(
+        events.len(),
+        1,
+        "Estate::capture must emit exactly one Event for estate {}; got {}",
+        estate_tag,
+        events.len()
+    );
+    if let Some(StatSample::Event { kind, noun_type, row_id, estate: ev_estate, .. }) =
+        events.first()
+    {
+        assert_eq!(
+            *kind,
+            EventKind::Capture,
+            "Event kind must be Capture; got {:?}",
+            kind
+        );
+        // Drawer NounType wire-stable value = 0 (SubstrateTypes)
+        assert_eq!(*noun_type, 0i64, "Drawer noun_type must be 0; got {}", noun_type);
+        assert_eq!(
+            row_id, &drawer.id,
+            "Event row_id must equal the returned drawer id"
+        );
+        assert_eq!(
+            ev_estate, &estate_tag,
+            "Event estate must match the estate UUID"
+        );
+    } else {
+        panic!("Expected StatSample::Event; got {:?}", events.first());
+    }
+
+    reset_intellectus();
+}
+
+/// Estate::capture_tunnel emits exactly one StatSample::Event with kind=Capture,
+/// noun_type=1 (Tunnel), and row_id=tunnel.id when monitoring is enabled.
+///
+/// Mirrors Swift `captureTunnelEmitsCaptureEvent` (TEL-01 §7).
+#[test]
+fn capture_tunnel_emits_capture_event() {
+    let _guard = global_lock();
+    let sink = Arc::new(CapturingSink::new());
+    Intellectus::install(sink.clone());
+    Intellectus::set_enabled(true);
+
+    let estate = make_fresh_estate();
+    let estate_tag = estate.estate_uuid().to_string();
+
+    let tunnel = estate
+        .capture_tunnel(tunnel_capture_frame(), 1_700_000_000)
+        .expect("Estate::capture_tunnel must succeed");
+
+    let events = sink.event_samples_for_estate(&estate_tag);
+    assert_eq!(
+        events.len(),
+        1,
+        "Estate::capture_tunnel must emit exactly one Event for estate {}; got {}",
+        estate_tag,
+        events.len()
+    );
+    if let Some(StatSample::Event { kind, noun_type, row_id, estate: ev_estate, .. }) =
+        events.first()
+    {
+        assert_eq!(
+            *kind,
+            EventKind::Capture,
+            "Event kind must be Capture; got {:?}",
+            kind
+        );
+        // Tunnel NounType wire-stable value = 1 (SubstrateTypes)
+        assert_eq!(*noun_type, 1i64, "Tunnel noun_type must be 1; got {}", noun_type);
+        assert_eq!(
+            row_id, &tunnel.id,
+            "Event row_id must equal the returned tunnel id"
+        );
+        assert_eq!(
+            ev_estate, &estate_tag,
+            "Event estate must match the estate UUID"
+        );
+    } else {
+        panic!("Expected StatSample::Event; got {:?}", events.first());
+    }
 
     reset_intellectus();
 }

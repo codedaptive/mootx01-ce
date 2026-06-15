@@ -7,7 +7,7 @@
 //!
 //! Per `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` §§ 7.1 / 7.8.3.
 
-use crate::adjectives::{AdjectiveSensitivity, Trust};
+use crate::adjectives::{AdjectiveExportability, AdjectiveSensitivity, Trust};
 use crate::drawer_operational::{CaptureChannel, ContentKind};
 use crate::estate_types::LatticeAnchor;
 use crate::filter::LineageID;
@@ -95,11 +95,22 @@ pub struct CaptureFrame {
     /// authorship date as epoch seconds. Mirrors Swift
     /// `CaptureFrame.eventTime: Date?`. (ING-01)
     pub event_time: Option<i64>,
+
+    /// Exportability of the resulting drawer at capture time.
+    /// Encodes into bits 12–17 of the drawer's `adjective_bitmap`
+    /// (cookbook §2.3, 6-bit scale-gapped field; raw 0 = Private,
+    /// raw 32 = Public). Defaults to `Private` (non-exportable) so all
+    /// existing callers continue to produce private drawers — the
+    /// privacy-preserving default. Supply `Public` to birth a drawer
+    /// that is immediately visible to `Filter::Exportable` recall
+    /// (DEBT-1 write-side fix). Mirrors Swift `CaptureFrame.exportability`.
+    pub exportability: AdjectiveExportability,
 }
 
 impl CaptureFrame {
     /// Construct a `CaptureFrame` with the spec defaults: `Typed` channel,
-    /// `Normal` sensitivity, `Prose` kind, no lineage id, no feature flags.
+    /// `Normal` sensitivity, `Prose` kind, `Private` exportability,
+    /// no lineage id, no feature flags.
     /// Mirrors `CaptureFrame.init(content:channel:room:latticeAnchor:addedBy:embeddingModelID:)`.
     pub fn new(
         content: impl Into<String>,
@@ -124,6 +135,10 @@ impl CaptureFrame {
             embedding_model_id: embedding_model_id.into(),
             feature_flags: 0,
             event_time: None,
+            // Privacy-preserving default: drawers are born private.
+            // Use AdjectiveExportability::Public to produce a born-public
+            // drawer, or correctExportability post-capture.
+            exportability: AdjectiveExportability::Private,
         }
     }
 }
@@ -224,7 +239,12 @@ pub enum MutationKind {
     /// lineage id does not match but the semantic supersession relationship
     /// should still be recorded).
     Supersede,
-    /// Move a withdrawn / expired row back to `Active`.
+    /// Restore a historical (Cluster-B) row to `Active`. Legal from
+    /// `Decayed`, `Withdrawn`, and `Expired` unconditionally; legal from
+    /// `Superseded` only when no living successor holds the lineage head
+    /// (otherwise it raises `DisciplineViolation` naming the lineage
+    /// conflict). Refused from live (Cluster-A) and terminal (`Rejected`
+    /// / `Tombstoned`) states. See `Estate::mutate`.
     Revive,
     /// Move the row's state to `Accepted` (terminal cluster — the row
     /// is canonical and will not move again).
@@ -233,24 +253,65 @@ pub enum MutationKind {
     CorrectSensitivity(AdjectiveSensitivity),
     /// Set the row's trust axis to the supplied value.
     CorrectTrust(Trust),
+    /// Set the row's exportability axis to the supplied value.
+    ///
+    /// Exportability lives in `adjective_bitmap` bits 12–17 (cookbook §2.3,
+    /// 6-bit scale-gapped field; raw 0 = Private, raw 32 = Public).
+    /// Default is `Private` (non-exportable) — this mutation is the
+    /// only path to mark a drawer public after capture, completing the
+    /// exportability write side (DEBT-1). Mirrors Swift
+    /// `MutationKind.correctExportability`.
+    CorrectExportability(AdjectiveExportability),
 }
 
 // MARK: - LearnFrame
 
-/// Slots for the `learn` verb. Scaffold only — full slot set
-/// (`SourceCatalogEntry`, `LearnMode`, `RefreshPolicy`) is declared in
-/// the standing-signals mission.
+/// Slots for the `learn` verb. Per spec § 7.8.2
+/// (`LearnFrame { source, handle, mode, refresh_policy }`). Mirrors the
+/// Swift `LearnFrame`.
+///
+/// `learn` brings an authoritative external reference into the estate. The
+/// reference's genuine lattice anchor comes from `source` — a
+/// `SourceCatalogEntry` carries the source's classified lattice position,
+/// which every reference learned from it inherits. This is how `learn`
+/// derives a real anchor instead of fabricating a sentinel from a bare
+/// handle (P1 mandate).
 #[derive(Debug, Clone)]
 pub struct LearnFrame {
-    /// Caller-supplied handle naming the source to learn.
+    /// The source this reference is learned from. Carries the genuine
+    /// lattice anchor the learned reference inherits. `Estate::learn`
+    /// catalogs it (keyed by `source.handle`) if no entry exists yet.
+    pub source: crate::source_catalog_entry::SourceCatalogEntry,
+
+    /// The reference handle — the URI / locator the learned reference
+    /// points at. Distinct from `source.handle`. Must be non-empty;
+    /// `Estate::learn` rejects an empty handle with
+    /// `LocusKitError::InvalidContent`.
     pub handle: String,
+
+    /// Whether the reference is held by pointer or its content was
+    /// ingested. Encoded into the operational bitmap (cookbook § 2.4
+    /// bit 12).
+    pub mode: crate::learned_reference::LearnMode,
+
+    /// How often the reference is re-grounded against its source. Encoded
+    /// into the operational bitmap (cookbook § 2.4 bits 0–5).
+    pub refresh_policy: crate::learned_reference::RefreshPolicy,
 }
 
 impl LearnFrame {
-    /// Create a `LearnFrame` with the given source handle.
-    pub fn new(handle: impl Into<String>) -> Self {
+    /// Create a `LearnFrame` from a source and reference handle, defaulting
+    /// `mode` to `ByReference` and `refresh_policy` to `Weekly` (matching
+    /// the Swift initializer's defaults).
+    pub fn new(
+        source: crate::source_catalog_entry::SourceCatalogEntry,
+        handle: impl Into<String>,
+    ) -> Self {
         Self {
+            source,
             handle: handle.into(),
+            mode: crate::learned_reference::LearnMode::ByReference,
+            refresh_policy: crate::learned_reference::RefreshPolicy::Weekly,
         }
     }
 }
@@ -358,8 +419,23 @@ mod tests {
     }
 
     #[test]
-    fn learn_frame_stores_handle() {
-        let f = LearnFrame::new("source-abc");
-        assert_eq!(f.handle, "source-abc");
+    fn learn_frame_stores_source_and_handle() {
+        use crate::estate_types::LatticeAnchor;
+        use crate::learned_reference::{LearnMode, RefreshPolicy};
+        use crate::source_catalog_entry::{SourceCatalogEntry, SourceKind};
+        let source = SourceCatalogEntry::new(
+            "src-1",
+            SourceKind::User,
+            "https://example.com",
+            LatticeAnchor::udc("004"),
+            1_700_000_000,
+            "cataloger",
+        );
+        let f = LearnFrame::new(source, "https://example.com/page");
+        assert_eq!(f.handle, "https://example.com/page");
+        assert_eq!(f.source.id, "src-1");
+        // Defaults mirror the Swift initializer.
+        assert_eq!(f.mode, LearnMode::ByReference);
+        assert_eq!(f.refresh_policy, RefreshPolicy::Weekly);
     }
 }

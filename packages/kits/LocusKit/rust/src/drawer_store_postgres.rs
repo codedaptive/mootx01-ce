@@ -68,6 +68,7 @@ use crate::error::LocusKitError;
 use persistence_kit::storage::{BackendConfiguration, EstateConfiguration};
 use persistence_kit::PostgresStorage;
 use std::sync::Arc;
+use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::hlc::HLCGenerator;
 use uuid::Uuid;
 
@@ -163,6 +164,14 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.get_drawer(id)
     }
 
+    fn living_successor_in_lineage(
+        &self,
+        lineage_id: &str,
+        excluding_id: &str,
+    ) -> Result<Option<String>, LocusKitError> {
+        self.0.living_successor_in_lineage(lineage_id, excluding_id)
+    }
+
     fn drawers_in_wing(&self, wing: &str) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.0.drawers_in_wing(wing)
     }
@@ -184,6 +193,20 @@ impl DrawerStore for PostgresDrawerStore {
 
     fn all_drawers(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.0.all_drawers()
+    }
+
+    fn all_drawers_bounded(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.all_drawers_bounded(limit)
+    }
+
+    fn all_drawers_bounded_projected(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.all_drawers_bounded_projected(limit)
     }
 
     fn drawer_ids(&self) -> Result<Vec<crate::estate_types::RowID>, LocusKitError> {
@@ -245,8 +268,24 @@ impl DrawerStore for PostgresDrawerStore {
         changed_by: &str,
         reason: Option<&str>,
         now: i64,
+        seal_audit: bool,
+    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
+        self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+    }
+    fn seal_expunge_audit(
+        &self,
+        event: &substrate_lib::verbs::AuditEvent,
     ) -> Result<(), LocusKitError> {
-        self.0.expunge_gated(drawer_id, changed_by, reason, now)
+        self.0.seal_expunge_audit(event)
+    }
+    fn seal_expunge_orphan_audit(
+        &self,
+        drawer_id: &str,
+        success_event: &substrate_lib::verbs::AuditEvent,
+        changed_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.seal_expunge_orphan_audit(drawer_id, success_event, changed_by, now)
     }
 
     fn reanchor_gated(
@@ -284,6 +323,15 @@ impl DrawerStore for PostgresDrawerStore {
 
     fn tunnels_to_wing(&self, wing: &str) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
         self.0.tunnels_to_wing(wing)
+    }
+
+    fn all_tunnels(&self) -> Result<Vec<crate::tunnel::Tunnel>, LocusKitError> {
+        // Must forward: the trait default for all_tunnels is fail-loud
+        // (DatabaseUnavailable). Omitting this forward would make the durable
+        // Postgres backend hard-error on the dreaming-reader B-1 path
+        // (Estate::all_tunnels), so the read is delegated to DrawerStoreCore's
+        // real backend implementation.
+        self.0.all_tunnels()
     }
 
     fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
@@ -371,6 +419,27 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.learned_references_from_source(source_catalog_id)
     }
 
+    fn add_source_catalog_entry(
+        &self,
+        entry: &crate::source_catalog_entry::SourceCatalogEntry,
+    ) -> Result<(), LocusKitError> {
+        self.0.add_source_catalog_entry(entry)
+    }
+
+    fn get_source_catalog_entry(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::source_catalog_entry::SourceCatalogEntry>, LocusKitError> {
+        self.0.get_source_catalog_entry(id)
+    }
+
+    fn source_catalog_entry_for_handle(
+        &self,
+        handle: &str,
+    ) -> Result<Option<crate::source_catalog_entry::SourceCatalogEntry>, LocusKitError> {
+        self.0.source_catalog_entry_for_handle(handle)
+    }
+
     fn add_diary_entry(&self, entry: &crate::diary_entry::DiaryEntry) -> Result<(), LocusKitError> {
         self.0.add_diary_entry(entry)
     }
@@ -406,6 +475,13 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.insert_recall_trace(item)
     }
 
+    fn insert_recall_traces(
+        &self,
+        items: &[crate::recall_trace_item::RecallTraceItem],
+    ) -> Result<(), LocusKitError> {
+        self.0.insert_recall_traces(items)
+    }
+
     fn get_recall_trace(
         &self,
         id: &str,
@@ -420,8 +496,33 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.recall_trace_since(since)
     }
 
+    fn recent_recall_traces(
+        &self,
+        since: &str,
+        now: &str,
+    ) -> Result<Vec<crate::recall_trace_item::RecallTraceItem>, LocusKitError> {
+        self.0.recent_recall_traces(since, now)
+    }
+
     fn mark_recall_trace_used(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
         self.0.mark_recall_trace_used(id, now)
+    }
+
+    fn prune_recall_traces(&self, cutoff: &str) -> Result<usize, LocusKitError> {
+        self.0.prune_recall_traces(cutoff)
+    }
+
+    fn mark_recall_traces_used(
+        &self,
+        target: &str,
+        since: &str,
+        now: &str,
+    ) -> Result<usize, LocusKitError> {
+        self.0.mark_recall_traces_used(target, since, now)
+    }
+
+    fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
+        self.0.count_recall_traces()
     }
 
     fn audit_events_for_row(
@@ -429,6 +530,22 @@ impl DrawerStore for PostgresDrawerStore {
         row_id: &str,
     ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
         self.0.audit_events_for_row(row_id)
+    }
+
+    fn tombstoned_rows_without_expunge_audit(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        // Delegate to DrawerStoreCore (InMemory-compatible scan path).
+        // A future optimisation can replace this with a Postgres LEFT JOIN;
+        // for now the scan is correct and bounded (tombstoned rows are rare).
+        self.0.tombstoned_rows_without_expunge_audit()
+    }
+
+    fn seal_expunge_orphan_for_sweep(
+        &self,
+        drawer_id: &str,
+        changed_by: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.seal_expunge_orphan_for_sweep(drawer_id, changed_by, now)
     }
 
     fn list_wings(&self) -> Result<Vec<crate::summaries::WingSummary>, LocusKitError> {
@@ -464,7 +581,56 @@ impl DrawerStore for PostgresDrawerStore {
         self.0.all_kg_facts()
     }
 
+    fn all_kg_facts_including_retired(&self) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
+        self.0.all_kg_facts_including_retired()
+    }
+
     fn all_diary_entries(&self) -> Result<Vec<crate::diary_entry::DiaryEntry>, LocusKitError> {
         self.0.all_diary_entries()
+    }
+    fn fingerprints_captured_in(
+        &self,
+        start_epoch: i64,
+        end_epoch: i64,
+    ) -> Result<Vec<Fingerprint256>, LocusKitError> {
+        self.0.fingerprints_captured_in(start_epoch, end_epoch)
+    }
+    fn fingerprint_bit_series(
+        &self,
+        bit: usize,
+        bucket_seconds: i64,
+        bucket_count: usize,
+        ending_at: i64,
+    ) -> Result<Vec<bool>, LocusKitError> {
+        self.0
+            .fingerprint_bit_series(bit, bucket_seconds, bucket_count, ending_at)
+    }
+    fn room_level_fingerprints(
+        &self,
+    ) -> Result<Vec<crate::container_fingerprint_store::RoomLevelEntry>, LocusKitError> {
+        self.0.room_level_fingerprints()
+    }
+    fn or_in_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+        adjective: i64,
+        operational: i64,
+        provenance: i64,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0
+            .or_in_container_fingerprint(wing, room, adjective, operational, provenance, now)
+    }
+    fn rebuild_container_fingerprints(&self, now: i64) -> Result<(), LocusKitError> {
+        self.0.rebuild_container_fingerprints(now)
+    }
+    fn get_container_fingerprint(
+        &self,
+        wing: &str,
+        room: &str,
+    ) -> Result<Option<crate::container_fingerprint_store::ContainerFingerprint>, LocusKitError>
+    {
+        self.0.get_container_fingerprint(wing, room)
     }
 }

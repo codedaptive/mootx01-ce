@@ -27,7 +27,7 @@ use std::cmp::Ordering;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -271,6 +271,28 @@ impl Proposal {
     pub fn confidence_bucket(&self) -> ProposalConfidenceBucket {
         ProposalConfidenceBucket::from_raw(bit_field::extract_field(self.operational_bitmap, 24, 6))
     }
+}
+
+/// Compose a proposal `operational_bitmap` from its four typed axes per
+/// cookbook §2.4 (kind 0–5, target object type 6–11, generated-by class
+/// 18–23, confidence bucket 24–29; confirmation source 12–17 is left at its
+/// zero case `Human` until a confirmation step runs). Field placement goes
+/// through the conformance-gated `bit_field::write_field` primitive — never
+/// hand-rolled shift/mask math. Mirrors Swift `Proposal.composeOperational`.
+/// Used by the autonomic daemon sinks to stamp genuine provenance on the
+/// proposals they emit.
+pub fn compose_operational(
+    kind: ProposalKind,
+    target_object_type: ProposalTargetObjectType,
+    generated_by: ProposalGeneratedByClass,
+    confidence: ProposalConfidenceBucket,
+) -> i64 {
+    let mut bits: i64 = 0;
+    bits = bit_field::write_field(kind.raw_value(), bits, 0, 6);
+    bits = bit_field::write_field(target_object_type.raw_value(), bits, 6, 6);
+    bits = bit_field::write_field(generated_by.raw_value(), bits, 18, 6);
+    bits = bit_field::write_field(confidence.raw_value(), bits, 24, 6);
+    bits
 }
 
 #[cfg(test)]

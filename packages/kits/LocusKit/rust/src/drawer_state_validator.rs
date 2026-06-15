@@ -23,7 +23,7 @@ use crate::error::LocusKitError;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -240,21 +240,23 @@ mod tests {
     }
 
     #[test]
-    fn illegal_withdrawn_to_active() {
-        // F14: no revive verb from withdrawn in cookbook §9.2.
-        assert!(validate(State::Withdrawn, State::Active, Observe).is_err());
+    fn legal_withdrawn_to_active_revive() {
+        // revive (cookbook §9.3): withdrawn → active via Observe — unwithdraw.
+        assert!(validate(State::Withdrawn, State::Active, Observe).is_ok());
     }
 
     #[test]
-    fn illegal_expired_to_active() {
-        // F14: no revive verb from expired in cookbook §9.2.
-        assert!(validate(State::Expired, State::Active, Observe).is_err());
+    fn legal_expired_to_active_revive() {
+        // revive (cookbook §9.3): expired → active via Observe — TTL revive.
+        assert!(validate(State::Expired, State::Active, Observe).is_ok());
     }
 
     #[test]
-    fn illegal_superseded_to_active() {
-        // F14: superseded rows are kept for lineage; no revive verb.
-        assert!(validate(State::Superseded, State::Active, Observe).is_err());
+    fn legal_superseded_to_active_revive() {
+        // revive (cookbook §9.3): the automaton admits superseded → active; the
+        // lineage-conflict rule is enforced at Estate::mutate's revive guard,
+        // not in this stateless transition check.
+        assert!(validate(State::Superseded, State::Active, Observe).is_ok());
     }
 
     #[test]

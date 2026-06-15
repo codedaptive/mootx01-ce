@@ -347,14 +347,23 @@ actor VectorRunner {
             // default `.userConfirmed` (provenance filter) is not
             // applied — drawers from `capture` have provenance == 0
             // which is `.unconfirmed`, matching existing recall tests.
-            let frame = RecallFrame(filterChain: [.inRoom(room), .currentlyBelieve, .unconfirmed])
+            // `.full` hydration is required because the vector observations
+            // check `expectFirstContent` — per spec § 7.3, `.structured`
+            // returns content = "" (no blob reads), so only `.full` loads
+            // the blob for content-checking conformance ops.
+            let frame = RecallFrame(
+                filterChain: [.inRoom(room), .currentlyBelieve, .unconfirmed],
+                hydrationLevel: .full)
             let stream = await estate.recall(frame)
             var rows: [Drawer] = []
             for await page in stream { rows.append(contentsOf: page.rows) }
             consumeRecalled(&pendingObs, rows: rows, caseID: caseID)
         case .recallPaged(let room, let pageSize):
+            // `.full` hydration: same reason as recallAll above — vector
+            // observations check `expectContents` so content must be loaded.
             let frame = RecallFrame(
                 filterChain: [.inRoom(room), .currentlyBelieve, .unconfirmed],
+                hydrationLevel: .full,
                 limit: pageSize)
             let stream = await estate.recall(frame)
             var rows: [Drawer] = []
