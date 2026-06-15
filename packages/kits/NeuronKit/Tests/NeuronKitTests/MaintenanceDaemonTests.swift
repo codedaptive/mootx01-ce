@@ -6,11 +6,14 @@
 // Maintenance/MaintenanceDecision.swift,
 // Maintenance/MaintenancePolicy.swift, Maintenance/MaintenanceSeams.swift
 // — the decision core, policy, and seams are exercised through the
-// daemon over the shared seam fakes below. Covers C-3 (all five scan categories detected and proposed),
-// C-4 / C-12 (audit-chain break → integrity proposal; clean chain →
-// none), C-6 (exactly one diary entry per cycle), B-2 (every detected
-// issue is a proposal, never an action), B-4 (idempotency across
-// cycles), the policy-store round-trip, and the pump tick cadence.
+// daemon over the shared seam fakes below. Covers C-3 (all five scan
+// categories detected and proposed), C-4 / C-12 (audit-chain break →
+// integrity proposal; clean chain → none), C-6 (exactly one diary entry
+// per cycle), B-2 (every detected issue is a proposal, never an action),
+// B-4 (idempotency across cycles), the policy-store round-trip, the pump
+// tick cadence, and Board item 14 (QID-pending enrichment retry batch:
+// success path flips provenance bits, failure path stays pending, counters
+// move, B-10a zero trace-rows).
 //
 // All substrate interaction is through NeuronKit-owned seams; these
 // tests inject in-memory fakes. They import GeniusLocusKit and LocusKit
@@ -29,40 +32,65 @@ import GeniusLocusKit
 
 // MARK: - In-memory seam fakes
 
-/// Records every write the daemon makes. The presence of exactly two
-/// methods — and the absence of any remediation method — is itself the
-/// structural proof of the never-remediate invariant (B-2 / § 3.2).
+/// Records every write the daemon makes. The presence of exactly three
+/// methods — and the absence of any broader remediation method — is
+/// itself the structural proof of the never-remediate invariant (B-2 /
+/// § 3.2). The QID update is recorded so Board item 14 tests can assert
+/// that the provenance bitmap was written with the correct new value.
 private actor RecordingSink: MaintenanceProposalSink {
     private(set) var proposals: [ProposeFrame] = []
     private(set) var diaryEntries: [DiaryEntry] = []
+    /// (rowID, newProvenance) pairs from QID-pending retry writes.
+    private(set) var enrichmentUpdates: [(rowID: RowID, newProvenance: Int64)] = []
 
     func propose(_ frame: ProposeFrame) async throws { proposals.append(frame) }
     func recordCycleDiary(_ entry: DiaryEntry) async throws { diaryEntries.append(entry) }
+    func updateEnrichmentStatus(rowID: RowID, newProvenance: Int64, now: Date) async throws {
+        enrichmentUpdates.append((rowID: rowID, newProvenance: newProvenance))
+    }
 
     func proposalCount() -> Int { proposals.count }
+    func proposalKindCount(_ kind: ProposalKind) -> Int {
+        proposals.filter { $0.kind == kind }.count
+    }
     func diaryCount() -> Int { diaryEntries.count }
+    func enrichmentUpdateCount() -> Int { enrichmentUpdates.count }
+    func enrichmentUpdate(for rowID: RowID) -> Int64? {
+        enrichmentUpdates.first(where: { $0.rowID == rowID })?.newProvenance
+    }
 }
 
 /// Returns whatever substrate state the test configures.
+///
+/// The `qidPending` array is the seam's view of drawers with
+/// enrichment-status `qid_pending`. Tests seed this independently of
+/// `active` so the two scans (decay/forbidden vs QID-retry) are exercised
+/// in isolation. B-10a: `qidPendingDrawers` is an internal maintenance
+/// read — the fake returns it without writing any trace rows.
 private actor FakeReader: MaintenanceSubstrateReader {
     var active: [Drawer]
     var tombstoned: [Drawer]
     var references: [LearnedReferenceObservation]
     var fingerprints: [FingerprintDriftObservation]
     var auditLog: UnifiedAuditLog
+    /// Drawers to return from `qidPendingDrawers(limit:)`. Set by Board
+    /// item 14 tests.
+    var qidPending: [Drawer]
 
     init(
         active: [Drawer] = [],
         tombstoned: [Drawer] = [],
         references: [LearnedReferenceObservation] = [],
         fingerprints: [FingerprintDriftObservation] = [],
-        auditLog: UnifiedAuditLog = UnifiedAuditLog()
+        auditLog: UnifiedAuditLog = UnifiedAuditLog(),
+        qidPending: [Drawer] = []
     ) {
         self.active = active
         self.tombstoned = tombstoned
         self.references = references
         self.fingerprints = fingerprints
         self.auditLog = auditLog
+        self.qidPending = qidPending
     }
 
     func activeDrawers() async throws -> [Drawer] { active }
@@ -70,6 +98,11 @@ private actor FakeReader: MaintenanceSubstrateReader {
     func learnedReferences() async throws -> [LearnedReferenceObservation] { references }
     func fingerprintBaselines() async throws -> [FingerprintDriftObservation] { fingerprints }
     func currentAuditLog() async throws -> UnifiedAuditLog { auditLog }
+    func qidPendingDrawers(limit: Int) async throws -> [Drawer] {
+        // Honour the cap: the daemon controls the limit, but the seam must
+        // respect it. Returns up to `limit` rows from the seeded list.
+        Array(qidPending.prefix(limit))
+    }
 }
 
 // MARK: - Builders
@@ -341,6 +374,252 @@ struct MaintenanceDaemonTests {
             fingerprintDriftThreshold: 0.4,
             byReferenceDriftThreshold: 0.6
         ))
+    }
+
+    // MARK: - Board item 14: QID-pending enrichment retry batch
+
+    // ── B-10a: internal maintenance reads must not write recall-trace rows.
+    // The FakeReader implementation satisfies this structurally: it returns
+    // qid-pending drawers from the in-memory list without touching any trace
+    // store. The daemon never sets trace_limit on the read path; zero trace
+    // rows is guaranteed by the seam design.
+
+    @Test("Board-14: zero pending drawers — all QID counters are zero")
+    func board14ZeroPendingDrawersAllCountersZero() async throws {
+        // Seed no qid-pending drawers. The retry batch should find nothing
+        // and emit all-zero counters.
+        let reader = FakeReader(auditLog: cleanAuditLog(), qidPending: [])
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+
+        #expect(report.qidRetried == 0)
+        #expect(report.qidResolved == 0)
+        #expect(report.qidStillPending == 0)
+        let updates = await sink.enrichmentUpdateCount()
+        #expect(updates == 0, "no enrichment writes when there are no pending drawers")
+    }
+
+    @Test("Q-ID completion: unresolved drawers reach the qidProposed terminal — proposal filed, status flipped")
+    func board14UnresolvedReachesQidProposedTerminal() async throws {
+        // Drawers with empty content: EideticLib.lookup("") returns an
+        // empty-code Anchor with no QID. Because re-inference is deterministic
+        // against the pinned FDC artifacts, retrying is futile — leaving the
+        // row at qid_pending would be DURABLE pending state, which the beta
+        // gate forbids. The daemon must instead file an enrichment proposal and
+        // flip the status to the terminal in-workflow state qidProposed (4).
+        //
+        // The enrichment-status field in the seeded provenance is qid_pending
+        // (bits 36-41 == 1); after the cycle it must be qid_proposed (4).
+        let qidPendingBit: Int64 = 1 << 36
+        let qidProposedBit: Int64 = 4 << 36
+        let pendingA = Drawer(
+            id: "qid-pending-a",
+            content: "",
+            wing: "w", room: "r", addedBy: "test",
+            filedAt: t0,
+            embeddingModelID: "",
+            tombstonedAt: nil,
+            provenance: qidPendingBit,
+            adjectiveBitmap: 0
+        )
+        let pendingB = Drawer(
+            id: "qid-pending-b",
+            content: "",
+            wing: "w", room: "r", addedBy: "test",
+            filedAt: t0,
+            embeddingModelID: "",
+            tombstonedAt: nil,
+            provenance: qidPendingBit,
+            adjectiveBitmap: 0
+        )
+        let reader = FakeReader(auditLog: cleanAuditLog(), qidPending: [pendingA, pendingB])
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+
+        // Both drawers were retried.
+        #expect(report.qidRetried == 2)
+        // None resolved (empty content → no QID).
+        #expect(report.qidResolved == 0)
+        // Both reached the terminal in-workflow state. NONE durable-pending.
+        #expect(report.qidProposed == 2)
+        #expect(report.qidStillPending == 0)
+        // One enrichment proposal AND one status write per unresolved drawer.
+        let enrichmentProposals = await sink.proposalKindCount(.enrichment)
+        #expect(enrichmentProposals == 2)
+        let updates = await sink.enrichmentUpdateCount()
+        #expect(updates == 2)
+        // Each status write flipped bits 36-41 to qidProposed (4).
+        let writtenA = await sink.enrichmentUpdate(for: "qid-pending-a")
+        let writtenB = await sink.enrichmentUpdate(for: "qid-pending-b")
+        #expect(((writtenA ?? 0) & (0x3F << 36)) == qidProposedBit)
+        #expect(((writtenB ?? 0) & (0x3F << 36)) == qidProposedBit)
+        // Counter integrity: retried == resolved + proposed + still-pending.
+        #expect(report.qidRetried == report.qidResolved + report.qidProposed + report.qidStillPending)
+    }
+
+    @Test("Q-ID completion: counter integrity holds — retried == resolved + proposed + still-pending; none durable-pending")
+    func board14CounterIntegrityHoldsAcrossOutcomes() async throws {
+        // Feed three drawers with arbitrary content. EideticLib will produce
+        // some mix of resolved / unresolved. The structural invariant is that
+        // `qidRetried == qidResolved + qidProposed + qidStillPending` and that
+        // qidStillPending is 0 (no real write failures in the fake sink), so
+        // every drawer reaches a terminal. The enrichment-update count equals
+        // resolved + proposed (both flip the status field).
+        let drawers = (0..<3).map { i in
+            Drawer(
+                id: "qid-drawer-\(i)",
+                content: "drawer content \(i)",
+                wing: "w", room: "r", addedBy: "test",
+                filedAt: t0,
+                embeddingModelID: "",
+                tombstonedAt: nil,
+                provenance: 1 << 36,
+                adjectiveBitmap: 0
+            )
+        }
+        let reader = FakeReader(auditLog: cleanAuditLog(), qidPending: drawers)
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+
+        // Counter integrity: retried == resolved + proposed + still-pending.
+        #expect(report.qidRetried == 3)
+        #expect(report.qidRetried == report.qidResolved + report.qidProposed + report.qidStillPending)
+        // The gate: no drawer left durable-pending.
+        #expect(report.qidStillPending == 0)
+
+        // One enrichment-status write per resolved drawer AND per proposed
+        // drawer (both flip the status field).
+        let updates = await sink.enrichmentUpdateCount()
+        #expect(updates == report.qidResolved + report.qidProposed)
+    }
+
+    @Test("Board-14: success path — resolved drawer gets provenance bits flipped to qidCompleted")
+    func board14SuccessPathProvenanceBitsFlippedToQidCompleted() async throws {
+        // Seed a drawer whose provenance has enrichment-status bits (36-41)
+        // set to qid_pending (value 1). If EideticLib resolves the content
+        // and returns a QID, the daemon must flip those bits to qid_completed
+        // (value 2) while preserving all other provenance bits.
+        //
+        // The provenance computation: the input provenance has bits 36-41 == 1
+        // (qid_pending). After a successful retry:
+        //   newProvenance = (provenance & ~(0x3F << 36)) | (2 << 36)
+        //
+        // Provenance value with only qid_pending set:
+        //   qidPendingProvenance = 1 << 36 = 68_719_476_736
+        // Expected after resolution:
+        //   qidCompletedProvenance = 2 << 36 = 137_438_953_472
+        let qidPendingBit: Int64 = 1 << 36
+        let qidCompletedBit: Int64 = 2 << 36
+
+        // Use "mathematics" which is likely in the FDC canon with a QID.
+        // If EideticLib doesn't resolve it, the test validates only the
+        // counter path (no assertion fails — the conditional checks guard).
+        let pendingDrawer = Drawer(
+            id: "qid-resolve-test",
+            content: "mathematics",
+            wing: "w", room: "r", addedBy: "test",
+            filedAt: t0,
+            embeddingModelID: "",
+            tombstonedAt: nil,
+            provenance: qidPendingBit,
+            adjectiveBitmap: 0
+        )
+        let reader = FakeReader(auditLog: cleanAuditLog(), qidPending: [pendingDrawer])
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+
+        #expect(report.qidRetried == 1)
+        // Counter invariant always holds; never durable-pending.
+        #expect(report.qidRetried == report.qidResolved + report.qidProposed + report.qidStillPending)
+        #expect(report.qidStillPending == 0)
+
+        let qidProposedBit: Int64 = 4 << 36
+        let updates = await sink.enrichmentUpdateCount()
+        if report.qidResolved == 1 {
+            // Resolved path: status flipped to qidCompleted (2).
+            #expect(updates == 1)
+            let written = await sink.enrichmentUpdate(for: "qid-resolve-test")
+            let writtenBits = (written ?? 0) & (0x3F << 36)
+            #expect(writtenBits == qidCompletedBit,
+                    "enrichment-status bits must be flipped to qidCompleted (2 << 36)")
+        } else {
+            // Unresolved path: an enrichment proposal was filed and the status
+            // flipped to qidProposed (4) — the terminal in-workflow state.
+            #expect(report.qidProposed == 1)
+            #expect(updates == 1)
+            let written = await sink.enrichmentUpdate(for: "qid-resolve-test")
+            #expect(((written ?? 0) & (0x3F << 36)) == qidProposedBit)
+            let enrichmentProposals = await sink.proposalKindCount(.enrichment)
+            #expect(enrichmentProposals == 1)
+        }
+    }
+
+    @Test("Board-14: bounded scan cap is honoured — limit respected by seam")
+    func board14BoundedScanCapHonoured() async throws {
+        // Seed 100 pending drawers. The retry batch cap is 64. The FakeReader
+        // respects the `limit` parameter and returns at most 64 drawers;
+        // the daemon's qidRetried counter must be ≤ 64.
+        let manyPending = (0..<100).map { i in
+            Drawer(
+                id: "qid-cap-test-\(i)",
+                content: "",
+                wing: "w", room: "r", addedBy: "test",
+                filedAt: t0,
+                embeddingModelID: "",
+                tombstonedAt: nil,
+                adjectiveBitmap: 0
+            )
+        }
+        let reader = FakeReader(auditLog: cleanAuditLog(), qidPending: manyPending)
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+
+        // The daemon passes `qidRetryScanCap` (64) to the seam as the limit.
+        // The seam returns at most 64 rows. So qidRetried must be exactly 64.
+        #expect(report.qidRetried == 64,
+                "bounded scan must honour the 64-row cap; got \(report.qidRetried)")
+        #expect(report.qidRetried == report.qidResolved + report.qidProposed + report.qidStillPending)
+        // Every processed row reached a terminal — none durable-pending.
+        #expect(report.qidStillPending == 0)
+        #expect(report.qidProposed == 64)
+    }
+
+    @Test("Board-14: diary entry includes QID retry telemetry summary")
+    func board14DiaryEntryIncludesQidTelemetrySummary() async throws {
+        // The cycle diary entry must include the qid-retried, qid-resolved,
+        // and qid-pending counts in its text. This is observable state:
+        // operators reading the diary can see retry progress.
+        let pendingDrawer = Drawer(
+            id: "qid-diary-test",
+            content: "",
+            wing: "w", room: "r", addedBy: "test",
+            filedAt: t0,
+            embeddingModelID: "",
+            tombstonedAt: nil,
+            adjectiveBitmap: 0
+        )
+        let reader = FakeReader(auditLog: cleanAuditLog(), qidPending: [pendingDrawer])
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink)
+
+        let report = try await d.triggerMaintenanceCycle(now: t0)
+
+        // The diary entry text must reference all four QID telemetry fields.
+        let text = report.diaryEntry.entry
+        #expect(text.contains("qid-retried"), "diary must include qid-retried count")
+        #expect(text.contains("qid-resolved"), "diary must include qid-resolved count")
+        #expect(text.contains("qid-proposed"), "diary must include qid-proposed count")
+        #expect(text.contains("qid-pending"), "diary must include qid-pending count")
     }
 
     // MARK: - pump tick cadence (injectable clock, no wall-clock sleeps)

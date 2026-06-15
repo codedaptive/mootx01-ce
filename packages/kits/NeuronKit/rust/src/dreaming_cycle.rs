@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use intellectus_lib::{report, StatSample};
 
 use crate::dreaming_decision::{self, candidate_key};
+use crate::solver_bandit::DreamingTriggerMode;
 
 /// Minimal identity-free projection of a recall-trace row — the only two
 /// fields the cycle reads (the reward source maps `used` to a reward).
@@ -90,16 +91,17 @@ pub struct DreamingCycleReport {
 
 /// Which reward signal a `RewardSource` derives reward from.
 ///
-/// `recallTrace` is the only source available in v1. `explicitDiaryReward`
-/// is the documented seam for a future explicit `DiaryEntry.reward` source;
-/// the substrate field does not exist yet, so no v1 source reads it.
+/// Both cases are now live. `RecallTrace` is the default implicit source
+/// (`RecallTraceItem.used`, C-15). `ExplicitDiaryReward` is backed by
+/// `DiaryEntry.reward`, which exists on the substrate since schema v1.
 /// Mirrors `RewardSourceKind` (Swift `RewardSource.swift`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RewardSourceKind {
-    /// Implicit relevance: `RecallTraceItem.used`. The v1 live source (C-15).
+    /// Implicit relevance: `RecallTraceItem.used`. Default source (C-15).
     RecallTrace,
-    /// Explicit quality: `DiaryEntry.reward`. Future source; substrate field
-    /// absent in v1.
+    /// Explicit quality: `DiaryEntry.reward`. Populated by callers that have
+    /// a quality signal (user rating, model confidence, etc.). Live since
+    /// LocusKit schema v1.
     ExplicitDiaryReward,
 }
 
@@ -113,18 +115,27 @@ pub struct DreamingPolicy {
     pub min_confidence: f32,
     /// Minimum co-occurrence attempts (spec default 3).
     pub min_attempts: i64,
-    /// Tick cadence in milliseconds (spec default 30_000).
+    /// Tick cadence in milliseconds (spec default 30_000). Used by the
+    /// `.timer` and `.hybrid` trigger modes; ignored by `.event`.
     pub tick_interval_ms: i64,
+    /// Minimum co-occurrence observation count that triggers a cycle in
+    /// `.event` and `.hybrid` modes. The caller passes the count from
+    /// `DreamingSubstrateReader::co_occurrence_observations()` to
+    /// `pump_on_event`; a cycle fires when that count meets or exceeds
+    /// this threshold. Spec default 1 (any non-empty observation set).
+    /// Ignored by `.timer` mode.
+    pub event_observation_threshold: i64,
 }
 
 impl Default for DreamingPolicy {
-    /// Spec defaults (NEURONKIT_SPEC § 3.1): 0.6 / 0.7 / 3 / 30_000.
+    /// Spec defaults (NEURONKIT_SPEC § 3.1): 0.6 / 0.7 / 3 / 30_000 / 1.
     fn default() -> Self {
         Self {
             min_success_rate: 0.6,
             min_confidence: 0.7,
             min_attempts: 3,
             tick_interval_ms: 30_000,
+            event_observation_threshold: 1,
         }
     }
 }
@@ -195,7 +206,9 @@ pub trait RewardSource {
     fn reward(&self, item: &RecallTraceItem) -> f32;
 }
 
-/// The v1 single-source reward: `used → 1.0`, otherwise `0.0` (C-15).
+/// The implicit recall-trace reward: `used → 1.0`, otherwise `0.0` (C-15).
+/// Derivation per NEURONKIT_SPEC § 3.1 step 1b. Default wiring; callers
+/// that do not set `DiaryEntry.reward` continue to use this source.
 /// Mirrors `RecallTraceRewardSource` (Swift `RewardSource.swift`).
 pub struct RecallTraceRewardSource;
 
@@ -213,11 +226,103 @@ impl RewardSource for RecallTraceRewardSource {
     }
 }
 
-/// Write seam: emit a proposal and record the cycle diary. No remediation
-/// method — the daemon can only propose (structural never-remediate).
+/// The explicit diary reward: `DiaryEntry.reward` (NEURONKIT_SPEC § 3.1
+/// step 1a). Reads explicit quality scores keyed by `RecallTraceItem.target`
+/// and returns the explicit score when present.
+///
+/// PRECEDENCE: explicit reward from `DiaryEntry.reward` takes priority over
+/// the implicit trace-derived signal. When no explicit reward is keyed for a
+/// target the fallback source (`RecallTraceRewardSource`) is consulted, so
+/// existing recall-trace behaviour is preserved for rows without an explicit
+/// reward.
+///
+/// The caller supplies a keyed lookup so this source stays deterministic and
+/// free of substrate I/O — the daemon pre-reads diary entries via its
+/// `DreamingSubstrateReader` seam and passes the reward map here.
+/// Mirrors `ExplicitDiaryRewardSource` (Swift `RewardSource.swift`).
+pub struct ExplicitDiaryRewardSource {
+    /// Explicit rewards by drawer target ID. Populated from
+    /// `DiaryEntry.reward` for entries linked to a target drawer.
+    pub rewards_by_target: std::collections::BTreeMap<String, f32>,
+    /// Fallback source when `rewards_by_target` has no entry for a target.
+    /// Default: `RecallTraceRewardSource`.
+    pub fallback: Box<dyn RewardSource + Send + Sync>,
+}
+
+impl ExplicitDiaryRewardSource {
+    /// Construct with a reward map and the default `RecallTraceRewardSource`
+    /// fallback. Mirrors `ExplicitDiaryRewardSource.init(rewardsByTarget:)`.
+    pub fn new(rewards_by_target: std::collections::BTreeMap<String, f32>) -> Self {
+        Self {
+            rewards_by_target,
+            fallback: Box::new(RecallTraceRewardSource),
+        }
+    }
+
+    /// Construct with an explicit fallback source.
+    pub fn with_fallback(
+        rewards_by_target: std::collections::BTreeMap<String, f32>,
+        fallback: Box<dyn RewardSource + Send + Sync>,
+    ) -> Self {
+        Self {
+            rewards_by_target,
+            fallback,
+        }
+    }
+}
+
+impl RewardSource for ExplicitDiaryRewardSource {
+    fn kind(&self) -> RewardSourceKind {
+        RewardSourceKind::ExplicitDiaryReward
+    }
+
+    /// Returns the explicit diary reward when present, otherwise delegates to
+    /// `fallback`. Precedence: explicit → fallback (NEURONKIT_SPEC § 3.1
+    /// step 1a overrides step 1b when available).
+    fn reward(&self, item: &RecallTraceItem) -> f32 {
+        if let Some(&explicit) = self.rewards_by_target.get(&item.target) {
+            return explicit;
+        }
+        self.fallback.reward(item)
+    }
+}
+
+/// Write seam: emit a proposal, record the cycle diary, and prune stale
+/// recall-trace rows after the reward sweep. No remediation method — the daemon
+/// can only propose (structural never-remediate).
 pub trait DreamingProposalSink {
     fn propose(&mut self, frame: ProposeFrameOut);
     fn record_cycle_diary(&mut self, entry: DreamingDiaryEntry);
+
+    /// Delete recall-trace rows whose `recalled_at` is strictly before
+    /// `cutoff_iso`. Called after the reward sweep (step 1) so the
+    /// recall_trace table stays bounded. `cutoff_iso` is a canonical ISO8601
+    /// string (`...SS.000Z`) matching the recalledAt storage format. The trait
+    /// method is infallible (the sync-port convention); implementations that
+    /// persist trace rows route the deletion through the store and capture any
+    /// error out-of-band, while in-memory test fakes are a no-op. Mirrors the
+    /// Swift `DreamingProposalSink.pruneRecallTraces(olderThan:)`.
+    fn prune_recall_traces(&mut self, cutoff_iso: &str);
+}
+
+/// Recall-trace retention window in calendar days. Rows older than this are
+/// pruned after each reward sweep: a month of reward signal is sufficient for
+/// Bradley-Terry convergence; older rows are stale and never re-enter a reward
+/// window. Mirrors the Swift `recallTraceRetentionDays = 30`.
+pub const RECALL_TRACE_RETENTION_DAYS: f64 = 30.0;
+
+/// Format epoch seconds as the canonical recall-trace ISO8601 string
+/// (`YYYY-MM-DDTHH:MM:SS.000Z`), matching LocusKit's `recalledAt` storage
+/// format so a lexicographic `recalledAt < cutoff` comparison is exact. The
+/// fractional part is always `.000` (the trace clock is epoch-seconds).
+fn prune_cutoff_iso(epoch_secs: i64) -> String {
+    // topology_analysis::epoch_to_iso8601 emits `...SSZ` (no fraction); splice
+    // in `.000` before the trailing `Z` to match the recalledAt format.
+    let no_frac = crate::topology_analysis::epoch_to_iso8601(epoch_secs);
+    match no_frac.strip_suffix('Z') {
+        Some(prefix) => format!("{prefix}.000Z"),
+        None => no_frac, // defensive: formatter always ends in Z
+    }
 }
 
 const AGENT_NAME: &str = "dreaming-daemon";
@@ -237,39 +342,51 @@ pub fn tunnel_key(link: &TunnelLink) -> Option<String> {
 /// machinery, which is the runtime's concern, not the algorithm's).
 pub struct DreamingDaemon {
     pub policy: DreamingPolicy,
+    /// Current trigger mode. Mirrors Swift `DreamingDaemon.triggerMode`.
+    pub trigger_mode: DreamingTriggerMode,
     consolidated: BTreeMap<String, f32>,
     proposed_keys: BTreeSet<String>,
     cycle_count: i64,
-    /// Epoch-seconds timestamp of the last `pump` fire, or `None` on first
-    /// call. Used by `pump` for interval gating — the daemon never reads the
-    /// system clock; the caller injects `now`.
-    last_fire_epoch_secs: Option<f64>,
+    /// Epoch-seconds timestamp of the last TIMER-path `pump` fire, or `None`
+    /// on first call. Tracks only timer fires so event-path fires in
+    /// `.hybrid` mode do not reset the timer countdown; the two paths are
+    /// independent. The daemon never reads the system clock; the caller
+    /// injects `now`.
+    last_timer_fire_epoch_secs: Option<f64>,
 }
 
 impl DreamingDaemon {
+    /// Construct a daemon with the given policy and trigger mode.
     pub fn new(policy: DreamingPolicy) -> Self {
+        Self::with_trigger_mode(policy, DreamingTriggerMode::Timer)
+    }
+
+    /// Construct a daemon with an explicit trigger mode. Prefer `new` for
+    /// `.timer`-mode daemons; use this when the bandit has selected a
+    /// non-default mode.
+    pub fn with_trigger_mode(policy: DreamingPolicy, trigger_mode: DreamingTriggerMode) -> Self {
         Self {
             policy,
+            trigger_mode,
             consolidated: BTreeMap::new(),
             proposed_keys: BTreeSet::new(),
             cycle_count: 0,
-            last_fire_epoch_secs: None,
+            last_timer_fire_epoch_secs: None,
         }
     }
 
-    /// Interval-gated pump — the entry point for the resident loop.
+    /// Interval-gated pump — the timer-path entry point for the resident loop.
     ///
     /// Mirrors Swift `DreamingDaemon.pump(now:)`:
-    /// - First call always fires (no prior fire timestamp).
-    /// - Subsequent calls fire only when `policy.tick_interval_ms` has elapsed
-    ///   since the last fire.
-    /// - Returns `Some(report)` when the cycle ran, `None` when the interval
-    ///   has not elapsed.
+    ///
+    /// - **`.timer`** and **`.hybrid`**: fires when `tick_interval_ms` has
+    ///   elapsed since the last TIMER fire, or on the first call (no prior
+    ///   timer fire). Sets `last_timer_fire_epoch_secs` on fire.
+    /// - **`.event`**: returns `None` unconditionally — the timer path is
+    ///   inactive for event mode. Use `pump_on_event` instead.
     ///
     /// DETERMINISM: `now_epoch_secs` is injected by the caller. The daemon
-    /// never reads `SystemTime::now()`. The caller (the resident pump loop)
-    /// reads the clock once per tick and passes it to every daemon, guaranteeing
-    /// that all daemons in a single tick operate on the same `now`.
+    /// never reads `SystemTime::now()`.
     pub fn pump<R, Q, S>(
         &mut self,
         now_epoch_secs: f64,
@@ -282,16 +399,68 @@ impl DreamingDaemon {
         Q: RewardSource,
         S: DreamingProposalSink,
     {
-        // Gate: fire if this is the first call or the interval has elapsed.
+        // `.event` mode: timer path is inactive — returning None here ensures
+        // the mode is not an alias for `.timer`.
+        if self.trigger_mode == DreamingTriggerMode::Event {
+            return None;
+        }
+
+        // Gate: fire if this is the first timer call or the interval has elapsed.
         let interval_secs = self.policy.tick_interval_ms as f64 / 1000.0;
-        let should_fire = match self.last_fire_epoch_secs {
-            None => true, // first call always fires
+        let should_fire = match self.last_timer_fire_epoch_secs {
+            None => true, // first timer call always fires
             Some(last) => (now_epoch_secs - last) >= interval_secs,
         };
         if !should_fire {
             return None;
         }
-        self.last_fire_epoch_secs = Some(now_epoch_secs);
+        let report = self.run_cycle(now_epoch_secs, reader, reward_source, sink);
+        // Update the timer baseline AFTER a successful timer fire; event-path
+        // fires do NOT update this field.
+        self.last_timer_fire_epoch_secs = Some(now_epoch_secs);
+        Some(report)
+    }
+
+    /// Event-gated pump — the event-path entry point for the resident loop.
+    ///
+    /// Mirrors Swift `DreamingDaemon.pumpOnEvent(observationCount:now:)`:
+    ///
+    /// - **`.event`** and **`.hybrid`**: fires when `observation_count` meets
+    ///   `policy.event_observation_threshold`. Does NOT update
+    ///   `last_timer_fire_epoch_secs` — timer and event paths are independent
+    ///   in `.hybrid` mode.
+    /// - **`.timer`**: returns `None` unconditionally — the event path is
+    ///   inactive for timer mode.
+    ///
+    /// The caller derives `observation_count` by calling
+    /// `DreamingSubstrateReader::co_occurrence_observations()` and passing the
+    /// count; this keeps the seam contract intact (the daemon calls the reader
+    /// again inside `run_cycle`).
+    pub fn pump_on_event<R, Q, S>(
+        &mut self,
+        observation_count: i64,
+        now_epoch_secs: f64,
+        reader: &R,
+        reward_source: &Q,
+        sink: &mut S,
+    ) -> Option<DreamingCycleReport>
+    where
+        R: DreamingSubstrateReader,
+        Q: RewardSource,
+        S: DreamingProposalSink,
+    {
+        // `.timer` mode: event path is inactive.
+        if self.trigger_mode == DreamingTriggerMode::Timer {
+            return None;
+        }
+
+        // Gate: the estate must have enough activity to warrant dreaming.
+        if observation_count < self.policy.event_observation_threshold {
+            return None;
+        }
+
+        // Event fires do NOT update `last_timer_fire_epoch_secs` — the timer
+        // countdown is independent of the event path.
         Some(self.run_cycle(now_epoch_secs, reader, reward_source, sink))
     }
 
@@ -345,6 +514,15 @@ impl DreamingDaemon {
             let cur = reward_by_target.get(&trace.target).copied().unwrap_or(0.0);
             reward_by_target.insert(trace.target.clone(), cur.max(r));
         }
+
+        // Post-step-1 prune: delete trace rows older than the retention window
+        // so the table does not grow unboundedly. The cutoff is derived from
+        // the injected `now_epoch_secs` (never the system clock) and expressed
+        // in the canonical recalledAt ISO format. Mirrors the Swift daemon's
+        // post-reward-sweep prune.
+        let prune_cutoff_secs =
+            (now_epoch_secs - RECALL_TRACE_RETENTION_DAYS * 86_400.0).floor() as i64;
+        sink.prune_recall_traces(&prune_cutoff_iso(prune_cutoff_secs));
 
         // Step 2: latent co-occurrence candidates.
         let observations = reader.co_occurrence_observations();
@@ -478,6 +656,7 @@ mod tests {
     struct RecordingSink {
         proposals: Vec<ProposeFrameOut>,
         diaries: Vec<DreamingDiaryEntry>,
+        prune_cutoffs: Vec<String>,
     }
     impl DreamingProposalSink for RecordingSink {
         fn propose(&mut self, frame: ProposeFrameOut) {
@@ -485,6 +664,9 @@ mod tests {
         }
         fn record_cycle_diary(&mut self, entry: DreamingDiaryEntry) {
             self.diaries.push(entry);
+        }
+        fn prune_recall_traces(&mut self, cutoff_iso: &str) {
+            self.prune_cutoffs.push(cutoff_iso.to_string());
         }
     }
 
@@ -539,6 +721,29 @@ mod tests {
             sink.diaries[0].entry,
             "dreaming cycle 1: considered 1, proposed 1, suppressed 0, below-threshold 0"
         );
+    }
+
+    // DC-PRUNE: the cycle prunes recall traces once, with a 30-day cutoff
+    // derived from the injected `now`. Mirrors the Swift daemon's
+    // post-reward-sweep prune.
+    #[test]
+    fn dc_prune_recall_traces_fires_once_with_thirty_day_cutoff() {
+        let reader = FakeReader {
+            traces: vec![trace("r1", true)],
+            observations: vec![],
+            tunnels: vec![],
+        };
+        let mut sink = RecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        let now_secs = 1_700_000_000.0_f64;
+        let _ = d.run_cycle(now_secs, &reader, &RecallTraceRewardSource, &mut sink);
+
+        assert_eq!(sink.prune_cutoffs.len(), 1, "prune must fire exactly once per cycle");
+        let expected_secs = (now_secs - RECALL_TRACE_RETENTION_DAYS * 86_400.0) as i64;
+        let expected = prune_cutoff_iso(expected_secs);
+        assert_eq!(sink.prune_cutoffs[0], expected, "cutoff must be now - 30 days, canonical ISO");
+        // Canonical recalledAt format: fractional .000Z.
+        assert!(sink.prune_cutoffs[0].ends_with(".000Z"), "cutoff must use .000Z format");
     }
 
     // DC-2: a candidate duplicating an existing drawer-to-drawer tunnel is
@@ -611,6 +816,7 @@ mod tests {
             min_confidence: 0.9,
             min_attempts: 5,
             tick_interval_ms: 60_000,
+            event_observation_threshold: 1,
         };
         store.save_policy(custom);
         let loaded = store.load_policy();
@@ -628,6 +834,7 @@ mod tests {
             min_confidence: 0.7,
             min_attempts: 100,
             tick_interval_ms: 30_000,
+            event_observation_threshold: 1,
         };
         store.save_policy(strict);
         // Load it and verify the gate is strict.
@@ -669,6 +876,45 @@ mod tests {
         let unused = RecallTraceItem { target: "t".to_string(), used: false };
         assert_eq!(source.reward(&used), 1.0);
         assert_eq!(source.reward(&unused), 0.0);
+    }
+
+    // RS-3: ExplicitDiaryRewardSource returns explicit reward for known target.
+    #[test]
+    fn rs3_explicit_diary_reward_source_known_target() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("drawer-A".to_string(), 0.9_f32);
+        let src = ExplicitDiaryRewardSource::new(map);
+        assert_eq!(src.kind(), RewardSourceKind::ExplicitDiaryReward);
+        let item = RecallTraceItem { target: "drawer-A".to_string(), used: false };
+        assert!((src.reward(&item) - 0.9).abs() < 1e-6, "explicit reward must be returned");
+    }
+
+    // RS-4: ExplicitDiaryRewardSource falls back to RecallTraceRewardSource for
+    // unknown target.
+    #[test]
+    fn rs4_explicit_diary_reward_source_unknown_target_fallback() {
+        let map = std::collections::BTreeMap::new(); // empty — no explicit rewards
+        let src = ExplicitDiaryRewardSource::new(map);
+        // used=true → fallback (RecallTrace) returns 1.0
+        let used = RecallTraceItem { target: "drawer-B".to_string(), used: true };
+        assert_eq!(src.reward(&used), 1.0);
+        // used=false → fallback returns 0.0
+        let unused = RecallTraceItem { target: "drawer-B".to_string(), used: false };
+        assert_eq!(src.reward(&unused), 0.0);
+    }
+
+    // RS-5: explicit reward overrides trace-based used=true (precedence rule).
+    #[test]
+    fn rs5_explicit_overrides_trace_signal() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("drawer-C".to_string(), 0.2_f32);
+        let src = ExplicitDiaryRewardSource::new(map);
+        // used=true would yield 1.0 via trace, but explicit is 0.2.
+        let item = RecallTraceItem { target: "drawer-C".to_string(), used: true };
+        assert!(
+            (src.reward(&item) - 0.2).abs() < 1e-6,
+            "explicit must override trace-derived 1.0"
+        );
     }
 
     // DC-4: per-target reward keeps the strongest signal — a target used in
@@ -730,5 +976,103 @@ mod tests {
         // Call at t=30 s — exactly at the interval boundary.
         let at_boundary = d.pump(30.0, &reader, &RecallTraceRewardSource, &mut sink);
         assert!(at_boundary.is_some(), "call at interval boundary must fire");
+    }
+
+    // ─── Trigger-source tests (Board item 13) ───────────────────────────
+    // Mirrors Swift TS-1, TS-2, TS-3, TS-4 in DreamingDaemonTests.
+
+    // TS-1: .timer mode — pump fires on cadence; pump_on_event returns None
+    // even when observation count is above threshold.
+    #[test]
+    fn ts1_timer_mode_fires_on_cadence_not_on_event() {
+        let reader = FakeReader { traces: vec![], observations: vec![], tunnels: vec![] };
+        let mut sink = RecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy::default()); // trigger_mode = Timer
+
+        // First pump always fires in timer mode (no prior timer tick).
+        let first = d.pump(0.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(first.is_some(), ".timer: first pump must fire");
+
+        // pump_on_event must return None regardless of observation count —
+        // the event path is inactive in timer mode.
+        let event_result = d.pump_on_event(100, 1.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(event_result.is_none(), ".timer: pump_on_event must return None (event path inactive)");
+
+        // Timer fires after the cadence elapses.
+        let second = d.pump(30.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(second.is_some(), ".timer: pump fires after interval");
+    }
+
+    // TS-2: .event mode — pump_on_event fires when observation count meets
+    // threshold; pump returns None (timer path inactive).
+    #[test]
+    fn ts2_event_mode_fires_on_event_not_on_timer() {
+        let reader = FakeReader { traces: vec![], observations: vec![], tunnels: vec![] };
+        let mut sink = RecordingSink::default();
+        // Threshold = 2; trigger mode = Event.
+        let policy = DreamingPolicy { event_observation_threshold: 2, ..DreamingPolicy::default() };
+        let mut d = DreamingDaemon::with_trigger_mode(policy, DreamingTriggerMode::Event);
+
+        // pump must return None — timer path is inactive in event mode.
+        // The first pump would normally fire (no prior timer tick), but event
+        // mode overrides that.
+        let timer_result = d.pump(0.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(timer_result.is_none(), ".event: pump must return None (timer path inactive)");
+
+        // pump_on_event below threshold returns None.
+        let below = d.pump_on_event(1, 0.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(below.is_none(), ".event: pump_on_event below threshold must return None");
+
+        // pump_on_event at threshold fires.
+        let at = d.pump_on_event(2, 0.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(at.is_some(), ".event: pump_on_event at threshold must fire");
+
+        // pump_on_event above threshold fires.
+        let above = d.pump_on_event(5, 1.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(above.is_some(), ".event: pump_on_event above threshold must fire");
+    }
+
+    // TS-3: .hybrid mode — both pump (timer) AND pump_on_event (event) are
+    // active independently. Event fires do not reset the timer countdown.
+    #[test]
+    fn ts3_hybrid_mode_fires_on_both_timer_and_event_independently() {
+        let reader = FakeReader { traces: vec![], observations: vec![], tunnels: vec![] };
+        let mut sink = RecordingSink::default();
+        // threshold = 1, interval = 30 s; trigger mode = Hybrid.
+        let policy = DreamingPolicy {
+            tick_interval_ms: 30_000,
+            event_observation_threshold: 1,
+            ..DreamingPolicy::default()
+        };
+        let mut d = DreamingDaemon::with_trigger_mode(policy, DreamingTriggerMode::Hybrid);
+
+        // Timer path: first pump fires (no prior timer tick).
+        let timer_fire = d.pump(0.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(timer_fire.is_some(), ".hybrid: first pump (timer) must fire");
+
+        // Timer not due yet (t=1 < 30).
+        let timer_blocked = d.pump(1.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(timer_blocked.is_none(), ".hybrid: pump returns None before interval elapses");
+
+        // Event path fires independently of the timer.
+        let event_fire = d.pump_on_event(1, 1.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(event_fire.is_some(), ".hybrid: pump_on_event must fire independently of timer");
+
+        // Event fire did NOT reset the timer; timer fires at t=30 (30 s after t=0).
+        let timer_second = d.pump(30.0, &reader, &RecallTraceRewardSource, &mut sink);
+        assert!(timer_second.is_some(), ".hybrid: pump fires after interval (event fire did not reset timer)");
+    }
+
+    // TS-4: event_observation_threshold round-trips through the policy store.
+    #[test]
+    fn ts4_event_observation_threshold_round_trips() {
+        let mut store = InMemoryDreamingPolicyStore::new(None);
+        let custom = DreamingPolicy {
+            event_observation_threshold: 7,
+            ..DreamingPolicy::default()
+        };
+        store.save_policy(custom);
+        let loaded = store.load_policy().unwrap();
+        assert_eq!(loaded.event_observation_threshold, 7, "event_observation_threshold must round-trip");
     }
 }

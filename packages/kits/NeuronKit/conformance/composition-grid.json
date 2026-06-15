@@ -1,0 +1,27 @@
+{
+  "_comment": "Authoritative composition name list — the shared-vector fixture both the benchmarker and NeuronKit assert against. If NeuronKit.CompositionGrid.all changes its name set, the NeuronKit CompositionGridSyncTests will fail until this file is updated to match. The benchmarker's AblationColumnsTests derives its expectedCompositions from this file, so divergence = test failure on both sides. NOTE: 'vector' is intentionally omitted from the benchmarker column list (it is byte-identical to 'hamming' in practice — GLK RecallScoreVector.vector IS normalized Hamming similarity over the 256-bit SimHash projection). NeuronKit retains 'vector' in its grid for the weighted-all composition; the benchmarker skips the standalone 'vector' column and exposes 'dense-fused' as the TRUE float-embedding lane. The fixture below is the benchmarker's column list — it matches GauntletRunner.compositionNames exactly.",
+  "compositionNames": [
+    "text",
+    "hamming",
+    "matrix",
+    "lattice",
+    "tokenExact",
+    "bm25",
+    "hamming+tokenExact",
+    "hamming+text",
+    "text+matrix",
+    "lattice+hamming",
+    "text+tokenExact",
+    "text+mmr",
+    "temporalState",
+    "temporalText",
+    "temporal",
+    "text+temporal",
+    "text+assembly",
+    "tokenExact+assembly",
+    "matrix-weighted",
+    "matrix+hamming",
+    "dense-fused",
+    "weighted-all"
+  ]
+}

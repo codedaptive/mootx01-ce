@@ -8,13 +8,14 @@
 // of mirrored-by-copy literals. Floats are carried as bit-pattern hex
 // strings ("0x3f800000") so equality is exact and JSON-precision-safe.
 //
-// Families covered (as of BYCOPY_MIGRATION_001):
+// Families covered (as of TASK-MXE-N4):
 //   NeuronKit: drift, anomalies, keystones, constellations,
 //     spreadingActivation, themeWeather, latentThemes,
 //     representationBias, learnedPreference, anticipate,
 //     partialRecall, mindOverlap, shingleSimilarity,
 //     benchmarkScoring, mmrRank, hybridRecall, scenarioProfile,
-//     contextSynthesizer, bradleyTerry
+//     contextSynthesizer, bradleyTerry,
+//     momentSignature, rhythm, precedence, complexity, calibration
 //   SubstrateML: formalConceptAnalysis, associationRuleMining
 //
 // Regenerate (after a DELIBERATE behavioral change only):
@@ -28,6 +29,7 @@ import Foundation
 import SubstrateML
 import SubstrateTypes
 import EngramLib
+import GeniusLocusKit
 @testable import NeuronKit
 
 // MARK: - Bit-pattern hex codecs
@@ -286,6 +288,70 @@ private struct LensVectors: Codable {
         var scores: [Score]
     }
 
+    // MARK: — Five-Lenses families (TASK-MXE-N4)
+
+    // moment_signature: rows as 4-block fingerprint hex arrays; candidates same.
+    // Output: signature blocks + ranked [{candidate blocks, hammingDistance}].
+    struct MomentSignatureCase: Codable {
+        struct RankedCandidate: Codable { let candidate: [String]; var hammingDistance: Int }
+        let rows: [[String]]            // each row: 4-element block-hex array
+        let candidates: [[String]]      // same shape
+        var signatureBlocks: [String]   // 4-element block-hex array
+        var ranking: [RankedCandidate]
+    }
+
+    // rhythm: bool activity series, duration as f64 hex, topK int.
+    // Output: [{periodSeconds: f64 hex, relativeMagnitude: f64 hex}].
+    struct RhythmCase: Codable {
+        struct Period: Codable { var periodSeconds: String; var relativeMagnitude: String }
+        let buckets: [Bool]
+        let bucketDurationSeconds: String  // f64 hex
+        let topK: Int
+        var periods: [Period]
+    }
+
+    // precedence: pre-folded T-matrix pairs encoded inline; k antecedents.
+    // Output: ranked [{sourceField, sourceValue, lagBucket, count}].
+    struct PrecedenceCase: Codable {
+        struct Pair: Codable {
+            let sourceField: String; let sourceValue: String
+            let targetField: String; let targetValue: String
+            let lagBucket: Int; let count: Int
+        }
+        struct RankedAntecedent: Codable {
+            let sourceField: String; let sourceValue: String
+            let lagBucket: Int; var count: Int
+        }
+        let pairs: [Pair]
+        let targetField: String; let targetValue: String; let k: Int
+        var ranked: [RankedAntecedent]
+    }
+
+    // complexity: f32 hex count arrays; countsB and joint are omitted when nil.
+    // Output: f32 hex entropyA; entropyB and mutualInformation omitted when nil.
+    struct ComplexityCase: Codable {
+        let countsA: [String]           // f32 hex
+        let countsB: [String]?          // f32 hex; nil = not provided
+        let joint: [[String]]?          // f32 hex; nil = not provided
+        var entropyA: String            // f32 hex
+        var entropyB: String?           // f32 hex; nil when countsB is nil
+        var mutualInformation: String?  // f32 hex; nil when joint is nil
+    }
+
+    // calibration: curve built from replay records {value: f32 hex, outcome: "success"|"failure"}.
+    // Output: [{claimedHex: f32 hex, calibratedHex: f32 hex, isCalibrated: Bool}].
+    struct CalibrationCase: Codable {
+        struct Record: Codable { let value: String; let outcome: String }
+        struct Output: Codable {
+            let claimedHex: String
+            var calibratedHex: String
+            var isCalibrated: Bool
+        }
+        let records: [Record]           // replay to build the curve
+        let claimed: [String]           // f32 hex values to calibrate
+        var calibrated: [Output]
+    }
+
     var drift: [DriftCase]
     var anomalies: [AnomalyCase]
     var keystones: [KeystonesCase]
@@ -308,6 +374,11 @@ private struct LensVectors: Codable {
     var scenarioProfile: [ScenarioProfileCase]
     var contextSynthesizer: [ContextSynthesizerCase]
     var bradleyTerry: [BradleyTerryCase]
+    var momentSignature: [MomentSignatureCase]
+    var rhythm: [RhythmCase]
+    var precedence: [PrecedenceCase]
+    var complexity: [ComplexityCase]
+    var calibration: [CalibrationCase]
 }
 
 // MARK: - The gate
@@ -731,6 +802,89 @@ struct LensVectorConformanceTests {
                     strength: hex(score.strength),
                     confidenceLow: hex(score.confidenceLow),
                     confidenceHigh: hex(score.confidenceHigh))
+            }
+            return c
+        }
+
+        // MARK: — Five-Lenses computation blocks (TASK-MXE-N4)
+
+        // moment_signature: decode block-hex rows and candidates → call NeuronKit.momentSignature.
+        v.momentSignature = vectors.momentSignature.map { c in
+            var c = c
+            let rows = c.rows.map { b in
+                RowLite(fingerprint: fingerprint(b),
+                        captureHLC: HLC(physicalTime: 0, logicalCount: 0, nodeID: 0))
+            }
+            let candidates = c.candidates.map { fingerprint($0) }
+            let result = NeuronKit.momentSignature(fingerprints: rows, candidates: candidates)
+            c.signatureBlocks = blocks(result.signature)
+            c.ranking = result.ranking.map {
+                .init(candidate: blocks($0.candidate),
+                      hammingDistance: Int($0.hammingDistance))
+            }
+            return c
+        }
+
+        // rhythm: decode f64 hex duration → call NeuronKit.rhythm.
+        v.rhythm = vectors.rhythm.map { c in
+            var c = c
+            let periods = NeuronKit.rhythm(
+                buckets: c.buckets,
+                bucketDurationSeconds: double(c.bucketDurationSeconds),
+                topK: c.topK)
+            c.periods = periods.map {
+                .init(periodSeconds: hex($0.periodSeconds),
+                      relativeMagnitude: hex($0.relativeMagnitude))
+            }
+            return c
+        }
+
+        // precedence: rebuild pairs as (TemporalCausalityKey, Int64) → call NeuronKit.precedence.
+        v.precedence = vectors.precedence.map { c in
+            var c = c
+            let target = TemporalFieldCoord(fieldPath: c.targetField, valueRepr: c.targetValue)
+            let pairs: [(TemporalCausalityKey, Int64)] = c.pairs.map { p in
+                let src = TemporalFieldCoord(fieldPath: p.sourceField, valueRepr: p.sourceValue)
+                let tgt = TemporalFieldCoord(fieldPath: p.targetField, valueRepr: p.targetValue)
+                let key = TemporalCausalityKey(source: src, target: tgt, lagBucket: p.lagBucket)
+                return (key, Int64(p.count))
+            }
+            let result = NeuronKit.precedence(pairs: pairs, target: target, k: c.k)
+            c.ranked = result.map {
+                .init(sourceField: $0.source.fieldPath,
+                      sourceValue: $0.source.valueRepr,
+                      lagBucket: $0.lagBucket,
+                      count: Int($0.count))
+            }
+            return c
+        }
+
+        // complexity: decode f32 hex count arrays → call NeuronKit.complexity.
+        v.complexity = vectors.complexity.map { c in
+            var c = c
+            let countsA = c.countsA.map(float)
+            let countsB = c.countsB.map { $0.map(float) }
+            let joint = c.joint.map { $0.map { row in row.map(float) } }
+            let result = NeuronKit.complexity(countsA: countsA, countsB: countsB, joint: joint)
+            c.entropyA = hex(result.entropyA)
+            c.entropyB = result.entropyB.map(hex)
+            c.mutualInformation = result.mutualInformation.map(hex)
+            return c
+        }
+
+        // calibration: replay records to build the curve → call NeuronKit.calibrate.
+        v.calibration = vectors.calibration.map { c in
+            var c = c
+            var curve = MatrixCalibrationCurve()
+            for r in c.records {
+                let outcome: MatrixCalibrationOutcome = r.outcome == "success" ? .success : .failure
+                curve.record(claimedConfidence: float(r.value), outcome: outcome)
+            }
+            let results = NeuronKit.calibrate(curve: curve, claimed: c.claimed.map(float))
+            c.calibrated = zip(c.claimed, results).map { (claimedHex, out) in
+                .init(claimedHex: claimedHex,
+                      calibratedHex: hex(out.calibrated),
+                      isCalibrated: out.isCalibrated)
             }
             return c
         }

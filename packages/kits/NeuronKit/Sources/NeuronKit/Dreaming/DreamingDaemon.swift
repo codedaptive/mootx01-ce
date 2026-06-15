@@ -59,15 +59,17 @@ public protocol DreamingSubstrateReader: Sendable {
 
 /// Write surface the dreaming daemon emits through (NEURONKIT_SPEC § 3.1
 /// tick steps 6–7). This is the daemon's ONLY write path. It exposes
-/// exactly two operations — emit a proposal, and record the cycle diary
-/// entry — and deliberately has NO Tunnel-creation method, which is how
-/// the never-create-Tunnels invariant is enforced structurally: the
-/// daemon cannot create a Tunnel because nothing it can reach does.
+/// exactly three operations — emit a proposal, record the cycle diary
+/// entry, and prune stale recall-trace rows after the reward sweep — and
+/// deliberately has NO Tunnel-creation method, which is how the
+/// never-create-Tunnels invariant is enforced structurally: the daemon
+/// cannot create a Tunnel because nothing it can reach does.
 ///
 /// `EstateDreamingSink` is the production adapter; it implements
 /// `propose(_:)` by forwarding to the estate handle's `propose` verb
-/// (the legal B-1 write path) and `recordCycleDiary(_:)` by forwarding
-/// to `addDiaryEntry`.
+/// (the legal B-1 write path), `recordCycleDiary(_:)` by forwarding
+/// to `addDiaryEntry`, and `pruneRecallTraces(olderThan:)` by forwarding
+/// to `GeniusLocusKit.pruneRecallTraces(in:olderThan:)`.
 public protocol DreamingProposalSink: Sendable {
 
     /// Emit a proposal for a novel candidate alignment (step 6). Maps to
@@ -76,6 +78,16 @@ public protocol DreamingProposalSink: Sendable {
 
     /// Record exactly one diary entry summarising the cycle (step 7).
     func recordCycleDiary(_ entry: DiaryEntry) async throws
+
+    /// Delete recall-trace rows whose `recalledAt` is strictly before
+    /// `cutoff`. Called after the reward sweep to keep the table bounded.
+    /// Returns the number of rows deleted. Implementations that do not
+    /// persist trace rows may return 0 without error (e.g. in-memory
+    /// test fakes).
+    ///
+    /// - Parameter cutoff: rows with recalledAt < cutoff are deleted.
+    @discardableResult
+    func pruneRecallTraces(olderThan cutoff: Date) async throws -> Int
 }
 
 /// A latent co-occurrence the daemon may propose as a Tunnel.
@@ -178,11 +190,21 @@ public actor DreamingDaemon {
     /// persisted through `policyStore`.
     private var policy: DreamingPolicy
 
-    /// The trigger mode seam (default `.timer`). Carries no SolverBandit
-    /// dependency; NK-BANDIT attaches here later.
-    private let triggerMode: DreamingTriggerMode
+    /// The current trigger mode, updated by the bandit after each cycle.
+    /// Starts at the injected value (default `.timer`); the bandit
+    /// re-selects each cycle via Thompson Sampling once reward is observed.
+    private var triggerMode: DreamingTriggerMode
 
-    /// Last cycle time, for the tick-cadence decision in `pump`.
+    /// Thompson-Sampling Beta bandit that selects the trigger mode per
+    /// estate from observed dreaming-cycle reward (NEURONKIT_SPEC § 3.4).
+    /// Mutable because each cycle updates the selected arm's posterior
+    /// and re-selects. Not persisted by the daemon itself (B-4); the host
+    /// layer persists and restores it via `policyStore.loadBandit()`.
+    private var bandit: SolverBandit
+
+    /// Last timer-path cycle time, for the tick-cadence decision in `pump`.
+    /// Tracks only timer-triggered fires so event-path fires in `.hybrid`
+    /// mode do not reset the timer countdown; the two paths are independent.
     private var lastTickAt: Date?
 
     /// Candidate keys already proposed in a prior cycle. The idempotency
@@ -214,6 +236,7 @@ public actor DreamingDaemon {
         rewardSource: RewardSource = RecallTraceRewardSource(),
         policyStore: DreamingPolicyStore,
         triggerMode: DreamingTriggerMode = .default,
+        bandit: SolverBandit = SolverBandit(),
         policy: DreamingPolicy = .default
     ) {
         self.reader = reader
@@ -221,6 +244,7 @@ public actor DreamingDaemon {
         self.rewardSource = rewardSource
         self.policyStore = policyStore
         self.triggerMode = triggerMode
+        self.bandit = bandit
         self.policy = policy
     }
 
@@ -228,37 +252,56 @@ public actor DreamingDaemon {
 
     /// Register the dreaming discovery parameters and persist them to the
     /// manifest seam. Spec defaults match NEURONKIT_SPEC § 3.1.
+    ///
+    /// - Parameters:
+    ///   - minSuccessRate: reward threshold above which a row is a success. Default 0.6.
+    ///   - minConfidence: minimum contrastive confidence to propose. Default 0.7.
+    ///   - minAttempts: minimum co-occurrence count to be eligible. Default 3.
+    ///   - tickIntervalMs: timer cadence in milliseconds. Default 30_000.
+    ///   - eventObservationThreshold: observation count at which an event-mode
+    ///     cycle fires. Default 1 (any non-empty observation set triggers).
     public func registerDreamingPolicy(
         minSuccessRate: Float = 0.6,
         minConfidence: Float = 0.7,
         minAttempts: Int = 3,
-        tickIntervalMs: Int = 30_000
+        tickIntervalMs: Int = 30_000,
+        eventObservationThreshold: Int = 1
     ) async throws {
         let next = DreamingPolicy(
             minSuccessRate: minSuccessRate,
             minConfidence: minConfidence,
             minAttempts: minAttempts,
-            tickIntervalMs: tickIntervalMs
+            tickIntervalMs: tickIntervalMs,
+            eventObservationThreshold: eventObservationThreshold
         )
         policy = next
         try await policyStore.savePolicy(next)
     }
 
-    /// Load the persisted policy from the manifest seam, if any, replacing
-    /// the in-memory policy. Call once after construction to pick up a
-    /// policy a prior run registered.
+    /// Load the persisted policy and bandit state from the manifest seam,
+    /// if any. Call once after construction to pick up state a prior run
+    /// registered. The bandit reverts to a fresh uniform prior if no
+    /// persisted state is found.
     public func loadPersistedPolicy() async throws {
         if let stored = try await policyStore.loadPolicy() {
             policy = stored
+        }
+        if let stored = try await policyStore.loadBandit() {
+            bandit = stored
         }
     }
 
     /// The current policy. Exposed for the manifest round-trip test.
     public func currentPolicy() -> DreamingPolicy { policy }
 
-    /// The configured trigger mode. Exposed so callers can confirm the
-    /// v1 default with no SolverBandit dependency.
+    /// The current bandit-selected trigger mode. Updated after each cycle
+    /// via Thompson Sampling; callers (e.g. the host loop) read this to
+    /// decide scheduling strategy for the next cycle.
     public func currentTriggerMode() -> DreamingTriggerMode { triggerMode }
+
+    /// The current bandit state. Exposed so the host layer can persist
+    /// it via the policy seam after each pump/cycle.
+    public func currentBandit() -> SolverBandit { bandit }
 
     /// The wired reward source's kind. Exposed for C-15 (assert the
     /// reward seam is present and defaulted to the recall-trace source).
@@ -266,30 +309,90 @@ public actor DreamingDaemon {
 
     // MARK: - Tick driving
 
-    /// Run one cycle iff the configured tick interval has elapsed since
-    /// the last cycle (the autonomic timer path, § 3.1). Returns the
-    /// cycle report when it fires, or `nil` when the interval has not yet
-    /// elapsed. The caller advances `now` from its own clock; the daemon
-    /// performs no sleeping. The first pump (no prior tick) always fires.
+    /// Run one cycle iff the trigger-mode timer condition is satisfied.
     ///
-    /// Conformance C-1 allows ±10% jitter on the cadence; this scheduler
-    /// fires as soon as the full interval has elapsed, so the realised
-    /// spacing equals the configured interval (well within tolerance).
+    /// - **`.timer`** and **`.hybrid`**: fires when `tickIntervalMs` has
+    ///   elapsed since the last TIMER fire (C-1 ±10% jitter allowed), or on
+    ///   the first call when no prior timer tick exists. Returns `nil` when
+    ///   the interval has not elapsed. Sets `lastTickAt` on fire so the
+    ///   cadence tracks only timer fires.
+    /// - **`.event`**: the timer path is inactive for this mode. Returns
+    ///   `nil` unconditionally; use `pumpOnEvent(observationCount:now:)` to
+    ///   trigger event-mode cycles.
+    ///
+    /// The caller advances `now` from its own clock; the daemon performs
+    /// no sleeping. Conformance C-1 allows ±10% jitter on the cadence.
     public func pump(now: Date) async throws -> DreamingCycleReport? {
+        // `.event` mode: timer path is inactive. The caller must use
+        // `pumpOnEvent` to drive this mode — a timer that fires for an
+        // event-only mode would make `.event` an alias for `.timer`,
+        // violating the mode-naming contract.
+        guard triggerMode != .event else { return nil }
+
         if let last = lastTickAt {
             let elapsedMs = now.timeIntervalSince(last) * 1000.0
             guard elapsedMs >= Double(policy.tickIntervalMs) else { return nil }
         }
+        // Advance the timer baseline AT THE CADENCE GATE — before running the
+        // cycle — so a failed cycle (one that throws) does not leave lastTickAt
+        // nil and cause the next pump call to fire again immediately. A skipped
+        // or failed cadence slot is still consumed: the interval resets from
+        // `now`, preventing a rapid-retry hammering of the substrate on repeated
+        // errors. Event-path fires (pumpOnEvent) do NOT update lastTickAt —
+        // the two paths are fully independent.
+        lastTickAt = now
+        let report = try await runCycle(now: now)
+        return report
+    }
+
+    /// Run one cycle iff the trigger-mode event condition is satisfied.
+    ///
+    /// - **`.event`**: fires when `observationCount` is at or above
+    ///   `policy.eventObservationThreshold`, indicating the estate has
+    ///   accumulated sufficient new activity (co-occurrence observations)
+    ///   to warrant dreaming. Returns `nil` when below threshold.
+    /// - **`.hybrid`**: fires on the event condition in addition to the
+    ///   timer path in `pump`. Allows the same daemon to fire from either
+    ///   source so neither signal is missed.
+    /// - **`.timer`**: the event path is inactive for this mode. Returns
+    ///   `nil` unconditionally; use `pump(now:)` instead.
+    ///
+    /// The caller derives `observationCount` by calling
+    /// `DreamingSubstrateReader.coOccurrenceObservations()` and passing
+    /// the count; this keeps the seam contract intact (the daemon itself
+    /// calls the reader inside `runCycle`).
+    ///
+    /// - Parameters:
+    ///   - observationCount: the current co-occurrence observation count
+    ///     from the estate reader, used to gate the event threshold.
+    ///   - now: deterministic clock supplied by the caller.
+    /// - Returns: a `DreamingCycleReport` when the cycle fires, `nil`
+    ///   when the event threshold is not met or the mode is `.timer`.
+    public func pumpOnEvent(observationCount: Int, now: Date) async throws -> DreamingCycleReport? {
+        // `.timer` mode: event path is inactive. The caller must use
+        // `pump(now:)` to drive this mode.
+        guard triggerMode != .timer else { return nil }
+
+        // Fire when the observation count meets or exceeds the threshold —
+        // the estate has accumulated enough activity to warrant dreaming.
+        guard observationCount >= policy.eventObservationThreshold else { return nil }
+
         return try await runCycle(now: now)
     }
 
-    /// Run one cycle on demand, regardless of the timer (§ 3.1
-    /// `triggerDreamingCycle()`). `now` is explicit for determinism per
-    /// CLAUDE.md; the spec's no-argument signature cannot satisfy the
+    /// Run one cycle on demand, regardless of the timer or event threshold
+    /// (§ 3.1 `triggerDreamingCycle()`). `now` is explicit for determinism
+    /// per CLAUDE.md; the spec's no-argument signature cannot satisfy the
     /// "never call Date() in an engine" rule.
+    ///
+    /// On-demand fires update `lastTickAt` (the timer baseline) so the next
+    /// `pump` call measures cadence from this moment. This matches the
+    /// spec's intent: an explicit trigger resets the autonomic schedule.
     @discardableResult
     public func triggerDreamingCycle(now: Date) async throws -> DreamingCycleReport {
-        try await runCycle(now: now)
+        let report = try await runCycle(now: now)
+        lastTickAt = now
+        return report
     }
 
     // MARK: - The seven-step tick (§ 3.1)
@@ -309,10 +412,11 @@ public actor DreamingDaemon {
         ))
 
         // ── Step 1: reward retrieval via the RewardSource seam ──────────
-        // v1 single-source: recent RecallTraceItem rows, mapped through
-        // the reward source (used → 1.0, unused → 0.0). The explicit
-        // DiaryEntry.reward source is the seam's documented future second
-        // input; it is NOT read here (the field does not exist yet).
+        // The reward source is caller-supplied (default RecallTraceRewardSource,
+        // implicit). Callers that have explicit diary rewards can wire
+        // ExplicitDiaryRewardSource instead (NEURONKIT_SPEC § 3.1 step 1a).
+        // Both sources implement the same `RewardSource` protocol so this
+        // loop is source-agnostic.
         let windowSeconds = Double(policy.tickIntervalMs) / 1000.0
         let since = now.addingTimeInterval(-windowSeconds)
         let traces = try await reader.recentRecallTraces(since: since, now: now)
@@ -323,6 +427,19 @@ public actor DreamingDaemon {
             // once counts as used for reward purposes.
             rewardByTarget[trace.target] = max(rewardByTarget[trace.target] ?? 0, r)
         }
+
+        // ── Post-step-1 prune: delete trace rows older than the retention
+        // window so the table does not accumulate unboundedly. The retention
+        // constant is in calendar days; the cutoff is derived from `now`
+        // (never from Date()) per the deterministic-engine rule.
+        //
+        // recallTraceRetentionDays = 30: a month of reward signal is sufficient
+        // for Bradley-Terry convergence; rows older than this are stale and
+        // will never enter a future reward window. Discarded silently so a
+        // storage fault does not abort the cycle.
+        let recallTraceRetentionDays: Double = 30
+        let pruneCutoff = now.addingTimeInterval(-recallTraceRetentionDays * 86400)
+        _ = try? await sink.pruneRecallTraces(olderThan: pruneCutoff)
 
         // ── Step 2: extract latent co-occurrence candidates ────────────
         let observations = try await reader.coOccurrenceObservations()
@@ -410,7 +527,32 @@ public actor DreamingDaemon {
             ts: now.timeIntervalSince1970
         ))
 
-        lastTickAt = now
+        // ── Bandit reward observation and re-selection (NEURONKIT_SPEC § 3.4) ─
+        // Reward is the mean recall-trace reward this cycle: high when callers
+        // acted on the substrate state the trigger mode surfaced (used → 1.0),
+        // low when the substrate returned rows no one acted on (unused → 0.0).
+        // An empty reward window (no recall traces) gets a neutral 0.5 so the
+        // arm is neither credited nor penalised.
+        let cycleReward: Double
+        if rewardByTarget.isEmpty {
+            cycleReward = 0.5
+        } else {
+            let sum = rewardByTarget.values.reduce(0.0) { $0 + Double($1) }
+            cycleReward = sum / Double(rewardByTarget.count)
+        }
+        bandit.observe(arm: triggerMode, reward: cycleReward)
+        // Re-select the trigger mode for the next cycle. The seed is derived
+        // from the cycle timestamp's bit pattern — deterministic for the same
+        // `now`, the same pattern as SpreadingActivation's walk seed.
+        let banditSeed = UInt64(bitPattern: Int64(now.timeIntervalSince1970 * 1_000))
+        triggerMode = bandit.select(seed: banditSeed)
+        try await policyStore.saveBandit(bandit)
+
+        // `lastTickAt` is NOT updated here — the calling path (pump vs
+        // pumpOnEvent) is responsible: the timer path sets `lastTickAt` so
+        // the cadence tracks only timer fires; the event path leaves it
+        // unchanged so event fires in `.hybrid` mode do not reset the
+        // timer countdown. The two paths are fully independent.
         return DreamingCycleReport(
             tickedAt: now,
             candidatesConsidered: observations.count,

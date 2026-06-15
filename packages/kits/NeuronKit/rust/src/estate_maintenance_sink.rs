@@ -7,9 +7,10 @@
 //
 //   5. `propose` — emits a Proposal row via `store.add_proposal`.
 //      Constructs the full `locus_kit::Proposal` from `ProposeFrameOut`
-//      with a "maintenance" UDC lattice anchor (required non-empty by the
-//      substrate; proposals carry the target's anchor in production; this
-//      placeholder satisfies the non-empty invariant for autonomic proposals).
+//      with genuine provenance: a real UDC 005 system-state anchor and the
+//      maintenance-daemon operational axes (kind, target object type
+//      SystemState, generated-by DreamingDaemon, High confidence) per
+//      cookbook §2.4. See `maintenance_proposal_operational`.
 //
 //   6. `record_cycle_diary` — writes a DiaryEntry row via
 //      `store.add_diary_entry`, translating the cycle-local
@@ -34,8 +35,37 @@ use locus_kit::diary_entry::DiaryEntry as LkDiaryEntry;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::estate_types::LatticeAnchor;
 use locus_kit::proposal::Proposal;
+use locus_kit::proposal_operational::{
+    compose_operational, ProposalConfidenceBucket, ProposalGeneratedByClass, ProposalKind,
+    ProposalTargetObjectType,
+};
 
 use crate::maintenance_cycle::{MaintenanceDiaryEntry, MaintenanceProposalSink, ProposeFrameOut};
+
+/// Map a maintenance-cycle proposal `kind` label to the substrate
+/// `ProposalKind` axis (cookbook §2.4 bits 0–5), then compose the full
+/// operational bitmap with the genuine maintenance-daemon provenance: the
+/// generated-by class is `DreamingDaemon` (the autonomic governor is the
+/// daemon producer class), the target object type is `SystemState` (a
+/// maintenance proposal targets the estate's own state), and the confidence
+/// bucket is `High` (maintenance remediations are rule-driven, not
+/// hypotheses). Unrecognised labels map to `MutateDrawer`, the maintenance
+/// cycle's dominant remediation shape.
+fn maintenance_proposal_operational(kind: &str) -> i64 {
+    let proposal_kind = match kind {
+        "newTunnel" => ProposalKind::NewTunnel,
+        "mutateCandidate" | "mutateDrawer" => ProposalKind::MutateDrawer,
+        "withdrawDrawer" => ProposalKind::WithdrawDrawer,
+        "recordObservation" => ProposalKind::RecordObservation,
+        _ => ProposalKind::MutateDrawer,
+    };
+    compose_operational(
+        proposal_kind,
+        ProposalTargetObjectType::SystemState,
+        ProposalGeneratedByClass::DreamingDaemon,
+        ProposalConfidenceBucket::High,
+    )
+}
 
 /// Production adapter that binds `MaintenanceProposalSink` to a live
 /// `DrawerStore`.
@@ -92,21 +122,21 @@ impl<S: DrawerStore + ?Sized> EstateMaintenanceSink<S> {
 
 impl<S: DrawerStore + ?Sized> MaintenanceProposalSink for EstateMaintenanceSink<S> {
     /// Emit a remediation proposal (step 5). Translates `ProposeFrameOut` to
-    /// a `locus_kit::Proposal` and calls `store.add_proposal`. A "maintenance"
-    /// UDC lattice anchor satisfies the substrate's non-empty requirement.
+    /// a `locus_kit::Proposal` and calls `store.add_proposal`. Carries genuine
+    /// provenance: a real UDC 005 system-state anchor and the maintenance-
+    /// daemon operational axes (see `maintenance_proposal_operational`).
     /// Write failures are appended to `self.write_errors`.
     fn propose(&mut self, frame: ProposeFrameOut) {
         let mut proposal = Proposal::new(
             self.next_id(),
             frame.target,
-            // Maintenance proposals carry a placeholder "maintenance" UDC anchor.
-            // In production, the target row's anchor is looked up; for autonomic
-            // maintenance proposals there is no single target anchor, so this
-            // placeholder satisfies the non-empty invariant.
-            LatticeAnchor::udc("maintenance"),
+            // UDC 005 ("computing, information") — the estate's own autonomic
+            // machinery is the genuine subject of a system-state proposal.
+            LatticeAnchor::udc("005"),
             self.now,
         );
         proposal.justification = Some(frame.justification);
+        proposal.operational_bitmap = maintenance_proposal_operational(&frame.kind);
         if let Err(e) = self.store.add_proposal(&proposal) {
             self.write_errors.push(format!("propose: {e:?}"));
         }
@@ -125,15 +155,50 @@ impl<S: DrawerStore + ?Sized> MaintenanceProposalSink for EstateMaintenanceSink<
             wing: entry.wing,
             room: entry.room,
             filed_at: self.now,
-            // "maintenance-v1" is the placeholder model ID for autonomic diary
-            // entries (no embedding is generated; the field must be non-empty).
-            embedding_model_id: "maintenance-v1".into(),
+            // Maintenance-cycle diary entries carry no embedding, so the model
+            // ID is the genuine "no-embedding" marker — the same value the
+            // Swift path substitutes for an empty embeddingModelID in
+            // addDiaryEntry. Not a fabricated version string.
+            embedding_model_id: "no-embedding".into(),
             tombstoned_at: None,
             removed_by_batch: None,
             operational_bitmap: 0,
+            // Maintenance-cycle entries are system-generated; no explicit
+            // quality signal is available at write time. Reward derives from
+            // the recall trace during the next dreaming tick.
+            reward: None,
+            reward_provenance: None,
         };
         if let Err(e) = self.store.add_diary_entry(&diary) {
             self.write_errors.push(format!("record_cycle_diary: {e:?}"));
+        }
+    }
+
+    /// Update a drawer's provenance bitmap after a QID-pending retry
+    /// (Board item 14). Writes the new provenance value by calling
+    /// `store.mutate_provenance(row_id, new_provenance)` — the production
+    /// write path for provenance changes (B-1 compliant; routes through the
+    /// DrawerStore trait, not raw SQL).
+    ///
+    /// Write failures are appended to `self.write_errors` and logged — the
+    /// daemon never panics on a sink write failure; the pending row will be
+    /// retried on the next maintenance cycle.
+    fn update_enrichment_status(
+        &mut self,
+        row_id: &str,
+        new_provenance: i64,
+        _now_epoch_secs: f64,
+    ) {
+        if let Err(e) = self.store.mutate_provenance(
+            row_id,
+            new_provenance,
+            // The maintenance daemon is the stable audit actor for QID retry
+            // writes — the same name the cycle diary entries are filed under.
+            "maintenance-daemon",
+            Some("maintenance: enrichment-status retry"),
+            self.now,
+        ) {
+            self.write_errors.push(format!("update_enrichment_status({row_id}): {e:?}"));
         }
     }
 }
@@ -169,6 +234,26 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("decay candidate"));
+        // Genuine provenance, not placeholders: a real UDC anchor and the
+        // maintenance-daemon operational axes (cookbook §2.4).
+        use locus_kit::proposal_operational::{
+            ProposalConfidenceBucket, ProposalGeneratedByClass, ProposalKind,
+            ProposalTargetObjectType,
+        };
+        assert_eq!(proposals[0].lattice_anchor.udc_code, "005");
+        assert_eq!(proposals[0].proposal_kind(), ProposalKind::MutateDrawer);
+        assert_eq!(
+            proposals[0].target_object_type(),
+            ProposalTargetObjectType::SystemState
+        );
+        assert_eq!(
+            proposals[0].generated_by_class(),
+            ProposalGeneratedByClass::DreamingDaemon
+        );
+        assert_eq!(
+            proposals[0].confidence_bucket(),
+            ProposalConfidenceBucket::High
+        );
     }
 
     #[test]
@@ -206,15 +291,11 @@ mod tests {
         impl MaintenanceSubstrateReader for StubReader {
             fn scan(&self) -> MaintenanceScan {
                 MaintenanceScan {
-                    audit: None,
-                    forbidden_drawer_ids: vec![],
                     aged_active: vec![AgedRow {
                         id: "row-a".into(),
                         age_seconds: 3_000_000.0, // well past 30-day decay window
                     }],
-                    aged_tombstoned: vec![],
-                    fingerprint_drift: vec![],
-                    reference_drift: vec![],
+                    ..MaintenanceScan::default()
                 }
             }
         }

@@ -96,6 +96,7 @@ private actor FakeDreamingReader: DreamingSubstrateReader {
 private actor FakeDreamingSink: DreamingProposalSink {
     func propose(_ frame: ProposeFrame) async throws {}
     func recordCycleDiary(_ entry: DiaryEntry) async throws {}
+    func pruneRecallTraces(olderThan cutoff: Date) async throws -> Int { 0 }
 }
 
 private actor FakeDreamingPolicyStore: DreamingPolicyStore {

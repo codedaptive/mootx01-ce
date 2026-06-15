@@ -39,6 +39,7 @@
 
 import Foundation
 import GeniusLocusKit
+import IntellectusLib
 
 /// The maintenance daemon — a background actor so it never blocks the
 /// caller (§ 3 autonomic contract). Idempotent across cycles (B-4):
@@ -252,6 +253,148 @@ public actor MaintenanceDaemon {
         let fingerprintDrifts = outcome.fingerprintDrifts
         let byReferenceDrifts = outcome.byReferenceDrifts
 
+        // ── Step 5.5: QID-pending enrichment retry + completion (Board item
+        // 14 + Q-ID-completion terminal workflow) ─────────────────────────
+        // Pick up drawers with enrichment-status `qid_pending` (provenance
+        // bits 36-41 == 1, cookbook §2.5) and re-run lattice-anchor inference
+        // (`NeuronKit.inferLatticeAnchor`) on each. Two terminal outcomes —
+        // no drawer is left in passive `qid_pending` after a cycle:
+        //
+        //   • RESOLVED: the resolver returned a Q-ID on this retry (a newer
+        //     canon/table is now in effect). Flip enrichment-status bits to
+        //     `qid_completed` (== 2) via `updateEnrichmentStatus`.
+        //
+        //   • UNRESOLVED: deterministic re-inference returned no Q-ID. Because
+        //     inference is deterministic against the pinned FDC artifacts, the
+        //     SAME input re-inferred next cycle yields the SAME nil — so
+        //     leaving the row at `qid_pending` would be DURABLE pending state,
+        //     which the beta gate forbids. Instead the daemon files a real
+        //     enrichment PROPOSAL (kind `.enrichment`, carrying the drawer
+        //     target + the resolved MDCC code) via `sink.propose` — the
+        //     established workflow for obtaining human/agent input — and flips
+        //     the status to `qid_proposed` (== 4). `qid_proposed` is NOT
+        //     re-picked by `qidPendingDrawers` (that scan filters
+        //     `== qidPending`), so the row leaves the retry backlog and sits
+        //     in-workflow until proposal acceptance completes it
+        //     (`GeniusLocusKit.resolveEnrichmentProposal`).
+        //
+        // Both writes route through the B-1-legal sink (GLK→Estate). The batch
+        // is bounded at `QID_RETRY_SCAN_CAP` rows (64) so large estates do not
+        // stall the tick; successive cycles drain the backlog in order.
+        //
+        // B-10a: the `qidPendingDrawers` read is internal — no trace_limit,
+        // no recall-trace rows written.
+        //
+        // Determinism: `now` is the daemon's injected clock. Inference is
+        // deterministic per `NeuronKit.inferLatticeAnchor` contract (EideticLib
+        // calls no clock; the FDC canon is pinned).
+        let qidPendingDrawers = try await reader.qidPendingDrawers(limit: Self.qidRetryScanCap)
+        let qidRetried = qidPendingDrawers.count
+        var qidResolved = 0
+        var qidProposed = 0
+        var qidStillPending = 0
+        let cycleTs = now.timeIntervalSince1970
+
+        // Emit `qid_retry` counter once per cycle, before processing, so
+        // the caller can observe how many drawers the daemon is working on.
+        Intellectus.report(.metric(
+            name: "neuronkit.enrichment.qid_retry",
+            value: Double(qidRetried),
+            tags: ["cycle": "\(cycleCount + 1)"],
+            ts: cycleTs
+        ))
+
+        // The 6-bit enrichment-status mask at shift 36 (cookbook §2.5).
+        let statusMask: Int64 = 0x3F << 36
+        for drawer in qidPendingDrawers {
+            let inference = NeuronKit.inferLatticeAnchor(drawer.content)
+            if inference.wikidataQID != nil {
+                // RESOLVED: Q-ID resolved on this retry — flip enrichment-status
+                // to qid_completed (value 2). Preserve all other provenance bits
+                // by masking out bits 36-41 and OR-ing in 2.
+                let newProvenance = (drawer.provenance & ~statusMask)
+                    | (Int64(EnrichmentStatus.qidCompleted.rawValue) << 36)
+                do {
+                    try await sink.updateEnrichmentStatus(
+                        rowID: drawer.id,
+                        newProvenance: newProvenance,
+                        now: now
+                    )
+                    qidResolved += 1
+                } catch {
+                    // Real runtime write failure (not a missing-data condition):
+                    // the row legitimately stays qid_pending and is retried next
+                    // cycle. This is the only path that ends at pending, and only
+                    // because the substrate write itself failed — permitted by
+                    // doctrine (failure states are for real runtime failures).
+                    qidStillPending += 1
+                }
+            } else {
+                // UNRESOLVED: deterministic re-inference produced no Q-ID, so
+                // retrying again is futile. File a real enrichment proposal (the
+                // established human/agent-input workflow) and move the drawer to
+                // the terminal in-workflow state qid_proposed (value 4). The
+                // proposal carries the resolved MDCC code as candidate context;
+                // `inference.code` is empty only when the concept is wholly
+                // unresolved (Mode C), in which case the justification records
+                // "unresolved" so reviewers know no code was found either.
+                let codeContext = inference.code.isEmpty ? "unresolved" : inference.code
+                let proposalFrame = ProposeFrame(
+                    target: drawer.id,
+                    kind: .enrichment,
+                    justification:
+                        "maintenance: Q-ID unresolved by deterministic inference "
+                        + "for drawer \(drawer.id) (mdcc: \(codeContext)); "
+                        + "enrichment proposal filed for human/agent Q-ID assignment"
+                )
+                let newProvenance = (drawer.provenance & ~statusMask)
+                    | (Int64(EnrichmentStatus.qidProposed.rawValue) << 36)
+                do {
+                    try await sink.propose(proposalFrame)
+                    try await sink.updateEnrichmentStatus(
+                        rowID: drawer.id,
+                        newProvenance: newProvenance,
+                        now: now
+                    )
+                    qidProposed += 1
+                } catch {
+                    // Real runtime failure writing the proposal or the status
+                    // flip: the row legitimately stays qid_pending and is retried
+                    // next cycle. Doctrine-permitted failure state (the proposal
+                    // workflow implementation exists; this is a write failure,
+                    // not unimplemented pending).
+                    qidStillPending += 1
+                }
+            }
+        }
+
+        // Emit per-cycle QID outcome counters through the Intellectus facade.
+        // The off-path cost is a single atomic load + branch per call when
+        // monitoring is disabled — no allocation, no lock.
+        Intellectus.report(.metric(
+            name: "neuronkit.enrichment.qid_resolved",
+            value: Double(qidResolved),
+            tags: ["cycle": "\(cycleCount + 1)"],
+            ts: cycleTs
+        ))
+        // qid_proposed: drawers moved to the terminal in-workflow state this
+        // cycle (enrichment proposal filed). These leave the retry backlog.
+        Intellectus.report(.metric(
+            name: "neuronkit.enrichment.qid_proposed",
+            value: Double(qidProposed),
+            tags: ["cycle": "\(cycleCount + 1)"],
+            ts: cycleTs
+        ))
+        // qid_still_pending now counts ONLY drawers whose substrate write
+        // failed this cycle (a real runtime failure) — never a deterministic
+        // re-inference miss, which now terminates as qid_proposed.
+        Intellectus.report(.metric(
+            name: "neuronkit.enrichment.qid_still_pending",
+            value: Double(qidStillPending),
+            tags: ["cycle": "\(cycleCount + 1)"],
+            ts: cycleTs
+        ))
+
         // ── Step 6: write exactly one diary entry recording the cycle ──
         cycleCount += 1
         let entry = DiaryEntry(
@@ -261,7 +404,9 @@ public actor MaintenanceDaemon {
                 + "forbidden \(forbiddenCombinations), decay \(decayCandidates), "
                 + "tombstone \(tombstoneCandidates), fingerprint-drift \(fingerprintDrifts), "
                 + "byReference-drift \(byReferenceDrifts), "
-                + "proposed \(emitted.count), suppressed \(suppressed)",
+                + "proposed \(emitted.count), suppressed \(suppressed), "
+                + "qid-retried \(qidRetried), qid-resolved \(qidResolved), "
+                + "qid-proposed \(qidProposed), qid-pending \(qidStillPending)",
             topic: "maintenance-cycle",
             wing: Self.diaryWing,
             room: "diary",
@@ -282,9 +427,21 @@ public actor MaintenanceDaemon {
             fingerprintDrifts: fingerprintDrifts,
             byReferenceDrifts: byReferenceDrifts,
             suppressedDuplicates: suppressed,
-            diaryEntry: entry
+            diaryEntry: entry,
+            qidRetried: qidRetried,
+            qidResolved: qidResolved,
+            qidProposed: qidProposed,
+            qidStillPending: qidStillPending
         )
     }
+
+    // MARK: - QID retry scan cap
+
+    /// Maximum number of qid-pending drawers the daemon picks up per retry
+    /// batch. Mirrors `QID_RETRY_SCAN_CAP` in GLK's `EnrichmentRetryReads.swift`
+    /// (64 rows). Declared as a private constant on the daemon so the daemon's
+    /// own scan-cap is explicit at the call site in `runCycle`.
+    private static let qidRetryScanCap = 64
 
     // MARK: - Proposal frame construction
 
