@@ -1,0 +1,201 @@
+{
+  "schema_version": "2",
+  "language": "python",
+  "op": "hamming_distance_batch",
+  "date": "2026-05-29",
+  "generated_at": "2026-05-29T09:27:52Z",
+  "hardware_tag": "apple-m5-max",
+  "commit_sha": "88788de",
+  "seed": "0xcafebabedeadbeef",
+  "timing": {
+    "warmup_ms": 50,
+    "measure_ms": 200,
+    "quick_mode": false
+  },
+  "platform": {
+    "arch": "aarch64",
+    "os": "macos"
+  },
+  "measurements": [
+    {
+      "kernel": "scalar",
+      "batch_size": 1,
+      "mode": "batched",
+      "iterations": 767415,
+      "ns_per_call_min": 83,
+      "ns_per_call_mean": 202,
+      "ns_per_call_stddev": 94,
+      "ns_per_element_min": 83.0
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 1,
+      "mode": "sequential",
+      "iterations": 751657,
+      "ns_per_call_min": 125,
+      "ns_per_call_mean": 206,
+      "ns_per_call_stddev": 173,
+      "ns_per_element_min": 125.0
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 2,
+      "mode": "batched",
+      "iterations": 504813,
+      "ns_per_call_min": 208,
+      "ns_per_call_mean": 327,
+      "ns_per_call_stddev": 177,
+      "ns_per_element_min": 104.0
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 2,
+      "mode": "sequential",
+      "iterations": 503289,
+      "ns_per_call_min": 208,
+      "ns_per_call_mean": 328,
+      "ns_per_call_stddev": 172,
+      "ns_per_element_min": 104.0
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 4,
+      "mode": "batched",
+      "iterations": 316134,
+      "ns_per_call_min": 417,
+      "ns_per_call_mean": 559,
+      "ns_per_call_stddev": 216,
+      "ns_per_element_min": 104.25
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 4,
+      "mode": "sequential",
+      "iterations": 314677,
+      "ns_per_call_min": 417,
+      "ns_per_call_mean": 562,
+      "ns_per_call_stddev": 264,
+      "ns_per_element_min": 104.25
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 8,
+      "mode": "batched",
+      "iterations": 174838,
+      "ns_per_call_min": 875,
+      "ns_per_call_mean": 1071,
+      "ns_per_call_stddev": 311,
+      "ns_per_element_min": 109.375
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 8,
+      "mode": "sequential",
+      "iterations": 177954,
+      "ns_per_call_min": 875,
+      "ns_per_call_mean": 1053,
+      "ns_per_call_stddev": 348,
+      "ns_per_element_min": 109.375
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 16,
+      "mode": "batched",
+      "iterations": 98790,
+      "ns_per_call_min": 1625,
+      "ns_per_call_mean": 1951,
+      "ns_per_call_stddev": 408,
+      "ns_per_element_min": 101.562
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 16,
+      "mode": "sequential",
+      "iterations": 98710,
+      "ns_per_call_min": 1625,
+      "ns_per_call_mean": 1953,
+      "ns_per_call_stddev": 471,
+      "ns_per_element_min": 101.562
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 32,
+      "mode": "batched",
+      "iterations": 46460,
+      "ns_per_call_min": 3583,
+      "ns_per_call_mean": 4225,
+      "ns_per_call_stddev": 803,
+      "ns_per_element_min": 111.969
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 32,
+      "mode": "sequential",
+      "iterations": 46385,
+      "ns_per_call_min": 3583,
+      "ns_per_call_mean": 4231,
+      "ns_per_call_stddev": 939,
+      "ns_per_element_min": 111.969
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 64,
+      "mode": "batched",
+      "iterations": 25046,
+      "ns_per_call_min": 6792,
+      "ns_per_call_mean": 7899,
+      "ns_per_call_stddev": 1140,
+      "ns_per_element_min": 106.125
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 64,
+      "mode": "sequential",
+      "iterations": 22824,
+      "ns_per_call_min": 6792,
+      "ns_per_call_mean": 8665,
+      "ns_per_call_stddev": 18429,
+      "ns_per_element_min": 106.125
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 128,
+      "mode": "batched",
+      "iterations": 12631,
+      "ns_per_call_min": 13625,
+      "ns_per_call_mean": 15739,
+      "ns_per_call_stddev": 1622,
+      "ns_per_element_min": 106.445
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 128,
+      "mode": "sequential",
+      "iterations": 12774,
+      "ns_per_call_min": 13666,
+      "ns_per_call_mean": 15562,
+      "ns_per_call_stddev": 1422,
+      "ns_per_element_min": 106.766
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 256,
+      "mode": "batched",
+      "iterations": 6627,
+      "ns_per_call_min": 26792,
+      "ns_per_call_mean": 30077,
+      "ns_per_call_stddev": 3184,
+      "ns_per_element_min": 104.656
+    },
+    {
+      "kernel": "scalar",
+      "batch_size": 256,
+      "mode": "sequential",
+      "iterations": 6599,
+      "ns_per_call_min": 26833,
+      "ns_per_call_mean": 30208,
+      "ns_per_call_stddev": 3269,
+      "ns_per_element_min": 104.816
+    }
+  ]
+}
