@@ -44,7 +44,7 @@ struct FrameAwareByIdLoadTests {
         try await estate.withdraw(rowID: gone.id, reason: "test")
 
         let res = try await estate.getDrawers(
-            ids: [active.id, gone.id], matchingFrame: frame([.unconfirmed]),
+            ids: [active.id, gone.id], matchingFrame: frame([.userConfirmed]),
             hydrationLevel: .structured)
 
         // Both rows physically loaded.
@@ -65,7 +65,7 @@ struct FrameAwareByIdLoadTests {
 
         let res = try await estate.getDrawers(
             ids: [active.id, gone.id],
-            matchingFrame: frame([.unconfirmed, .usedToBelieve]),
+            matchingFrame: frame([.usedToBelieve, .userConfirmed]),
             hydrationLevel: .structured)
 
         // The override surfaces the withdrawn (Cluster B) drawer and excludes the
@@ -83,7 +83,7 @@ struct FrameAwareByIdLoadTests {
         let ghost = UUID().uuidString
 
         let res = try await estate.getDrawers(
-            ids: [active.id, ghost], matchingFrame: frame([.unconfirmed]),
+            ids: [active.id, ghost], matchingFrame: frame([.userConfirmed]),
             hydrationLevel: .structured)
 
         // The ghost id did not load — it is absent from BOTH sets, so a caller

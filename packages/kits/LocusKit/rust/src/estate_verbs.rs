@@ -217,16 +217,30 @@ impl Estate {
         // Provenance bitmap assembly (cookbook §2.5 layout):
         //   bits 0–5   source_type           (SourceType raw)
         //   bits 6–11  channel               (provenance Channel raw)
+        //   bits 18–23 confirmation          (Confirmation raw)
         //   bits 30–35 sensitivity           (provenance Sensitivity raw)
-        // Other provenance slots (capture_channel mirror, confirmation,
-        // confidence, enrichment_status) are populated by downstream
-        // daemons or held at zero by default. Mirrors EstateVerbs.swift.
+        //
+        // Confirmation is stamped as `UserConfirmed` (raw 1) at capture
+        // time because an explicit file via a human or agent IS an implicit
+        // confirmation. Leaving confirmation at zero (`Unconfirmed`) would
+        // cause BitmapEvaluator::insert_defaults to prepend a `UserConfirmed`
+        // filter (confirmation >= 1) and silently drop every captured drawer
+        // from default recall and search. Mirrors EstateVerbs.swift.
+        //
+        // Other provenance slots (capture_channel mirror, confidence,
+        // enrichment_status) are populated by downstream daemons or held
+        // at zero by default.
         let provenance_bitmap = bit_field::write_field(
             frame.provenance_sensitivity.raw_value(),
             bit_field::write_field(
-                frame.provenance_channel.raw_value(),
-                bit_field::write_field(frame.source_type.raw_value(), 0, 0, 6),
-                6,
+                Confirmation::UserConfirmed.raw_value(),
+                bit_field::write_field(
+                    frame.provenance_channel.raw_value(),
+                    bit_field::write_field(frame.source_type.raw_value(), 0, 0, 6),
+                    6,
+                    6,
+                ),
+                18,
                 6,
             ),
             30,
@@ -2165,7 +2179,7 @@ mod tests {
         let frame = RecallFrame::new(vec![
             Filter::InRoom("den".to_string()),
             Filter::CurrentlyBelieve,
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
         ]);
         let stream = estate.recall(frame, 1_700_000_002);
         let rows = stream.collect_all();
@@ -2185,7 +2199,7 @@ mod tests {
         let mut frame = RecallFrame::new(vec![
             Filter::InRoom("hall".to_string()),
             Filter::CurrentlyBelieve,
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
         ]);
         frame.hydration_level = HydrationLevel::Full;
         let stream = estate.recall(frame, 1_700_000_004);
@@ -2223,15 +2237,17 @@ mod tests {
     fn mutate_confirm_transitions_confirmation_to_user_confirmed() {
         let estate = make_estate();
         let drawer = basic_capture(&estate, "to confirm", "study");
-        // Freshly captured rows are Unconfirmed.
-        assert_eq!(drawer.confirmation(), Confirmation::Unconfirmed);
+        // Freshly captured rows are stamped UserConfirmed at capture time
+        // (estate_verbs capture stamps Confirmation::UserConfirmed into bits 18-23).
+        assert_eq!(drawer.confirmation(), Confirmation::UserConfirmed);
 
+        // Calling mutate(Confirm) on an already-UserConfirmed drawer is idempotent —
+        // it writes UserConfirmed again. Verify the axis is preserved at UserConfirmed
+        // and no other axis is disturbed.
         estate
             .mutate(&drawer.id, MutationKind::Confirm, None)
             .unwrap();
 
-        // Re-read: the confirmation axis is now UserConfirmed and every
-        // other axis is preserved (room/state unchanged).
         let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
         assert_eq!(after.confirmation(), Confirmation::UserConfirmed);
         assert_eq!(after.room, "study");
@@ -3247,8 +3263,8 @@ mod tests {
         }
     }
 
-    fn unconfirmed_frame() -> RecallFrame {
-        RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::Unconfirmed])
+    fn user_confirmed_frame() -> RecallFrame {
+        RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::UserConfirmed])
     }
 
     #[test]
@@ -3258,7 +3274,7 @@ mod tests {
         capture_n(&estate, 10);
 
         // trace_limit is None by default — no trace rows written.
-        let frame = unconfirmed_frame();
+        let frame = user_confirmed_frame();
         let stream = estate.recall(frame, 1_700_001_000);
         let _ = stream.collect_all();
 
@@ -3279,7 +3295,7 @@ mod tests {
         let estate = make_sqlite_estate(&db);
         capture_n(&estate, 20);
 
-        let mut frame = unconfirmed_frame();
+        let mut frame = user_confirmed_frame();
         frame.trace_limit = Some(5);
         let stream = estate.recall(frame, 1_700_001_000);
         let _ = stream.collect_all();
@@ -3304,10 +3320,10 @@ mod tests {
         // Two recalls at distinct epochs, each writing trace rows.
         let old_epoch = 1_700_001_000;
         let new_epoch = 1_700_005_000;
-        let mut f1 = unconfirmed_frame();
+        let mut f1 = user_confirmed_frame();
         f1.trace_limit = Some(3);
         let _ = estate.recall(f1, old_epoch).collect_all();
-        let mut f2 = unconfirmed_frame();
+        let mut f2 = user_confirmed_frame();
         f2.trace_limit = Some(3);
         let _ = estate.recall(f2, new_epoch).collect_all();
 
@@ -3340,7 +3356,7 @@ mod tests {
         // 300 > RECALL_CANDIDATE_CAP (256): the old 256 cap silently truncated.
         capture_n(&estate, 300);
 
-        let mut frame = unconfirmed_frame();
+        let mut frame = user_confirmed_frame();
         frame.hydration_level = HydrationLevel::Structured;
         frame.limit = Some(10_000_000); // VaultBridge full-scan intent
         let rows = estate.recall(frame, 1_700_001_000).collect_all();
@@ -3353,7 +3369,7 @@ mod tests {
         let estate = make_sqlite_estate(&db);
         capture_n(&estate, 300);
 
-        let mut frame = unconfirmed_frame();
+        let mut frame = user_confirmed_frame();
         frame.hydration_level = HydrationLevel::Structured;
         frame.limit = Some(20);
         let rows = estate.recall(frame, 1_700_001_000).collect_all();
@@ -3376,7 +3392,7 @@ mod tests {
 
         // .structured with no content predicate → no-blob projected scan →
         // content == "" (Swift parity, spec § 7.3).
-        let mut frame = unconfirmed_frame();
+        let mut frame = user_confirmed_frame();
         frame.hydration_level = HydrationLevel::Structured;
         let rows = estate.recall(frame, 1_700_001_000).collect_all();
         assert_eq!(rows.len(), 5);
@@ -3392,7 +3408,7 @@ mod tests {
         capture_n(&estate, 5);
 
         // .full → blob-loading scan → real content bodies.
-        let mut frame = unconfirmed_frame();
+        let mut frame = user_confirmed_frame();
         frame.hydration_level = HydrationLevel::Full;
         let rows = estate.recall(frame, 1_700_001_000).collect_all();
         assert_eq!(rows.len(), 5);
@@ -3432,7 +3448,7 @@ mod tests {
         let def = estate
             .get_drawers_matching_frame(
                 &ids,
-                &RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::Unconfirmed]),
+                &RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::UserConfirmed]),
             )
             .unwrap();
         let mut loaded: Vec<&String> = def.loaded_ids.iter().collect();
@@ -3451,7 +3467,7 @@ mod tests {
         let over = estate
             .get_drawers_matching_frame(
                 &ids,
-                &RecallFrame::new(vec![Filter::UsedToBelieve, Filter::Unconfirmed]),
+                &RecallFrame::new(vec![Filter::UsedToBelieve, Filter::UserConfirmed]),
             )
             .unwrap();
         assert_eq!(
@@ -3466,7 +3482,7 @@ mod tests {
         let res = estate
             .get_drawers_matching_frame(
                 &[active.id.clone(), ghost.clone()],
-                &RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::Unconfirmed]),
+                &RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::UserConfirmed]),
             )
             .unwrap();
         assert!(!res.loaded_ids.contains(&ghost), "non-existent id must be absent from loaded_ids");
@@ -3487,7 +3503,7 @@ mod tests {
         // substring match runs — even at .structured hydration the match works.
         let frame = RecallFrame::new(vec![
             Filter::CurrentlyBelieve,
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
             Filter::ContentMatches("doc-3".to_string()),
         ]);
         let rows = estate.recall(frame, 1_700_001_000).collect_all();
@@ -3500,14 +3516,11 @@ mod tests {
     /// Helper: capture a drawer with an explicit `feature_flags` bitmask so
     /// the test controls which operational bits are present.
     ///
-    /// Note on confirmation: freshly captured drawers are `Unconfirmed` because
-    /// `CaptureFrame` has no confirmation slot (confirmation is set by downstream
-    /// mutation). The pruning test chains below include `Filter::Unconfirmed` to
-    /// suppress the default `UserConfirmed` insertion so these drawers surface —
-    /// matching the Swift test's approach of stamping `provenance: Int64(1) << 18`
-    /// (UserConfirmed) directly on the fixture `Drawer`. Both approaches admit the
-    /// row; the key result under test is the fingerprint-prune decision, which is
-    /// orthogonal to the confirmation axis.
+    /// Note on confirmation: freshly captured drawers are stamped `UserConfirmed`
+    /// by `Estate::capture` (provenance bits 18-23). The pruning test chains below
+    /// include `Filter::UserConfirmed` to suppress the `insertDefaults` provenance
+    /// re-insertion while admitting all captured rows. The key result under test is
+    /// the fingerprint-prune decision, which is orthogonal to the confirmation axis.
     fn capture_with_flags(
         estate: &Estate,
         content: &str,
@@ -3674,12 +3687,13 @@ mod tests {
         // d2: hasImage in room r2 — pruned (lacks HAS_VOICE)
         let _d2 = capture_with_flags(&estate, "c-d2", "r2", DrawerFeatureFlags::HAS_IMAGE, 1_700_000_002);
 
-        // Filter::Unconfirmed suppresses the default UserConfirmed insertion so
-        // freshly captured (Unconfirmed) drawers surface. The prune decision is
-        // orthogonal to the confirmation axis: the HasFeatureFlag filter drives it.
+        // Filter::UserConfirmed is an explicit provenance filter that suppresses
+        // insertDefaults re-insertion while admitting captured drawers (which are
+        // stamped UserConfirmed at write time). The prune decision is orthogonal to
+        // the confirmation axis: the HasFeatureFlag filter drives it.
         let frame = RecallFrame::new(vec![
             Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
         ]);
         let rows = estate.recall(frame, 1_700_000_003).collect_all();
 
@@ -3703,7 +3717,7 @@ mod tests {
 
         let frame = RecallFrame::new(vec![
             Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
         ]);
         let rows = estate.recall(frame, 1_700_000_003).collect_all();
 
@@ -3740,11 +3754,11 @@ mod tests {
         let _d4 = capture_with_flags(&estate, "d-plain", "room-d", 0, 1_700_000_004);
 
         // Pruning path: chain_has_prunable_filter is true for HasFeatureFlag.
-        // Filter::Unconfirmed suppresses default UserConfirmed insertion so
-        // freshly captured drawers surface.
+        // Filter::UserConfirmed is an explicit provenance filter that suppresses
+        // insertDefaults re-insertion while admitting all captured drawers.
         let pruned_frame = RecallFrame::new(vec![
             Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
         ]);
         let mut pruned_ids: Vec<String> =
             estate.recall(pruned_frame, 1_700_000_005).collect_all().into_iter().map(|d| d.id).collect();
@@ -3784,10 +3798,11 @@ mod tests {
         // RecallStream returns at most 3 per page; collect_all drains pages.
         // The point: the scan_bound does NOT silently truncate 10 to 3 — the
         // limit is for pagination, not for corpus truncation when estate < cap.
-        // Filter::Unconfirmed suppresses default UserConfirmed insertion.
+        // Filter::UserConfirmed is an explicit provenance filter that suppresses
+        // insertDefaults re-insertion while admitting all captured drawers.
         let mut frame = RecallFrame::new(vec![
             Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
         ]);
         frame.limit = Some(3);
         let all_rows = estate.recall(frame, 1_700_000_020).collect_all();
@@ -3832,7 +3847,7 @@ mod tests {
     #[test]
     fn recall_success_has_no_degraded_stage() {
         let estate = seeded_voice_estate();
-        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::UserConfirmed];
         let stream = estate.recall(RecallFrame::new(chain), 1_700_000_010);
         let (rows, stages) = stream.collect_all_with_degraded();
         assert_eq!(rows.len(), 1);
@@ -3858,7 +3873,7 @@ mod tests {
         estate.set_test_force_internal_read_error(Some(
             crate::estate::RecallInternalRead::RoomFingerprints));
         // Prunable filter → fingerprint-pruning path (room_level_fingerprints).
-        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::UserConfirmed];
         let stream = estate.recall(RecallFrame::new(chain), 1_700_000_010);
         let (rows, stages) = stream.collect_all_with_degraded();
         assert!(rows.is_empty());
@@ -3870,7 +3885,7 @@ mod tests {
         let estate = seeded_voice_estate();
         estate.set_test_force_internal_read_error(Some(
             crate::estate::RecallInternalRead::RoomDrawerRead));
-        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::UserConfirmed];
         let stream = estate.recall(RecallFrame::new(chain), 1_700_000_010);
         let (rows, stages) = stream.collect_all_with_degraded();
         assert!(rows.is_empty(), "a failed surviving-room read yields no rows for that room");
@@ -3899,7 +3914,7 @@ mod tests {
         assert_eq!(s1, vec!["locus.liveRows.readFailed".to_string()]);
 
         // Seam consumed — next recall is a normal, successful read.
-        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::UserConfirmed];
         let second = estate.recall(RecallFrame::new(chain), 1_700_000_011);
         let (r2, s2) = second.collect_all_with_degraded();
         assert_eq!(r2.len(), 1);
@@ -3920,7 +3935,7 @@ mod tests {
         estate.set_test_force_internal_read_error(Some(
             crate::estate::RecallInternalRead::TraceWrite));
         // trace_limit opts the caller into the reward cycle so the write runs.
-        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::UserConfirmed];
         let mut frame = RecallFrame::new(chain);
         frame.trace_limit = Some(5);
         let stream = estate.recall(frame, 1_700_000_010);
@@ -3937,7 +3952,7 @@ mod tests {
     fn recall_trace_write_success_records_no_stage() {
         // Healthy control: trace_limit set, write succeeds → rows, NO stage.
         let estate = seeded_voice_estate();
-        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::UserConfirmed];
         let mut frame = RecallFrame::new(chain);
         frame.trace_limit = Some(5);
         let stream = estate.recall(frame, 1_700_000_010);

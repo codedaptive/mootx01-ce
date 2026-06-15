@@ -24,10 +24,11 @@ import SubstrateLib
 /// default insertion → bitmap → structured → content → ordering, with
 /// optional historical reconstruction at `frame.asOf`.
 ///
-/// Tests use `captureAndConfirm` to file drawers that satisfy the
-/// default-insertion gates (`.userConfirmed`, `.trustworthy`,
-/// `.sensitivityAtMost(.elevated)`, `.currentlyBelieve`) unless a test
-/// is specifically probing one of those defaults.
+/// Tests use `captureAndConfirm` to file drawers. Since `Estate.capture` now
+/// stamps `Confirmation.userConfirmed` at write time (provenance bits 18-23),
+/// `captureAndConfirm` is idempotent — it writes the same value. It is retained
+/// for symmetry with tests that probe the other default-insertion gates
+/// (`.trustworthy`, `.sensitivityAtMost(.elevated)`, `.currentlyBelieve`).
 @Suite("BitmapEvaluator — filter compilation, evaluation, ordering (spec § 7.9)")
 struct EvaluatorTests {
 
@@ -87,15 +88,36 @@ struct EvaluatorTests {
 
     // MARK: - Default filter insertion (§ 7.9.5)
 
-    @Test("Default insertion: unconfirmed drawer excluded by default .userConfirmed")
-    func defaults_excludeUnconfirmed() async throws {
+    @Test("Default insertion: captured drawer included by default .userConfirmed (capture stamps UserConfirmed)")
+    func defaults_includeCapturedDrawer() async throws {
+        // EstateVerbs.capture stamps Confirmation.userConfirmed (bits 18-23) into
+        // the provenance bitmap at write time. The default insertDefaults prepend
+        // adds .userConfirmed (confirmation >= 1) when no provenance filter is
+        // present — captured drawers satisfy this and are INCLUDED.
         let estate = try await makeEstate()
-        _ = try await estate.capture(frame(room: "r1"))  // provenance stays at 0
+        _ = try await estate.capture(frame(room: "r1"))
         let stream = await estate.recall(
             RecallFrame(filterChain: [.inRoom("r1")])
         )
         let rows = await drain(stream)
-        #expect(rows.isEmpty)
+        #expect(rows.count == 1, "captured drawer (stamped userConfirmed) must appear in default recall")
+    }
+
+    @Test("Default insertion: drawer with provenance=0 excluded by default .userConfirmed")
+    func defaults_excludeZeroProvenanceDrawer() async throws {
+        // A drawer directly inserted with provenance=0 (confirmation=unconfirmed, raw 0)
+        // is excluded by the default .userConfirmed gate (confirmation >= 1 required).
+        // This tests the gate itself — capture no longer produces provenance=0 drawers.
+        let estate = try await makeEstate()
+        let d = try await estate.capture(frame(room: "r2"))
+        // Force provenance to 0 after capture to simulate a raw-store-inserted drawer
+        // (bypassing EstateVerbs.capture's UserConfirmed stamp).
+        try await estate._setProvenance(rowID: d.id, newProvenance: 0)
+        let stream = await estate.recall(
+            RecallFrame(filterChain: [.inRoom("r2")])
+        )
+        let rows = await drain(stream)
+        #expect(rows.isEmpty, "drawer with provenance=0 must be excluded by default .userConfirmed gate")
     }
 
     @Test("Default insertion: confirmed drawer included")
@@ -222,22 +244,27 @@ struct EvaluatorTests {
     func secretExclusion_otherAxisChains() async throws {
         // A shipped-surface chain that constrains other axes but NOT sensitivity
         // must still exclude secret-sensitivity drawers via the default ceiling.
-        // Representative chains: [.unconfirmed], [.contentMatches(...)].
+        // Representative chains: [.userConfirmed], [.contentMatches(...)].
         let estate = try await makeEstate()
-        // unconfirmed drawer with secret sensitivity (provenance not yet confirmed)
-        let secretCapture = frame(content: "secret-unconfirmed", sensitivity: .secret)
+        // Captured drawer with secret sensitivity — stamped userConfirmed at
+        // write time (EstateVerbs.capture, bits 18-23), but excluded by the
+        // default sensitivity ceiling (Elevated) because sensitivity=secret
+        // exceeds the ceiling. Not a confirmation issue; a sensitivity issue.
+        let secretCapture = frame(content: "secret-content", sensitivity: .secret)
         let dSecret = try await estate.capture(secretCapture)
         // confirmed drawer with normal sensitivity for comparison
         let dNormal = try await captureAndConfirm(
             frame(content: "normal-content", sensitivity: .normal), into: estate
         )
         // Chain that constrains provenance axis (not sensitivity) — default ceiling applies.
+        // Filter::UserConfirmed admits dSecret through the provenance gate;
+        // the sensitivity ceiling (Elevated) then excludes it.
         let stream1 = await estate.recall(
-            RecallFrame(filterChain: [.unconfirmed])
+            RecallFrame(filterChain: [.userConfirmed])
         )
         let rows1 = await drain(stream1)
         #expect(!rows1.contains(where: { $0.id == dSecret.id }),
-            "secret drawer must be excluded even under .unconfirmed chain")
+            "secret drawer must be excluded even under .userConfirmed chain (sensitivity ceiling)")
 
         // Chain that constrains content axis — default sensitivity ceiling applies.
         let stream2 = await estate.recall(

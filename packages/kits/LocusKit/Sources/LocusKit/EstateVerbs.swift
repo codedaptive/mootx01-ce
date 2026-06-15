@@ -126,18 +126,32 @@ public extension Estate {
         // Provenance bitmap assembly (cookbook §2.5 layout):
         //   bits 0–5   sourceType            (SourceType raw)
         //   bits 6–11  channel               (provenance Channel raw)
+        //   bits 18–23 confirmation          (Confirmation raw)
         //   bits 30–35 sensitivity           (provenance Sensitivity raw)
-        // Other provenance slots (captureChannel mirror, confirmation,
-        // confidence, enrichmentStatus) are populated by downstream
-        // daemons or held at zero by default.
+        //
+        // Confirmation is stamped as `.userConfirmed` (raw 1) at capture
+        // time because an explicit file via a human or agent IS an implicit
+        // confirmation. Leaving confirmation at zero (`.unconfirmed`) would
+        // cause BitmapEvaluator.insertDefaults to prepend a `.userConfirmed`
+        // filter (confirmation >= 1) and silently drop every captured drawer
+        // from default recall and search. This stamp prevents that
+        // default-filter conflict so filed drawers are immediately
+        // retrievable without manual confirmation.
+        //
+        // Other provenance slots (captureChannel mirror, confidence,
+        // enrichmentStatus) are populated by downstream daemons or held at
+        // zero by default.
         let provenanceBitmap = BitField.writeField(
             Int64(frame.provenanceSensitivity.rawValue),
             into: BitField.writeField(
-                Int64(frame.provenanceChannel.rawValue),
+                Int64(Confirmation.userConfirmed.rawValue),
                 into: BitField.writeField(
-                    Int64(frame.sourceType.rawValue),
-                    into: 0, shift: 0, width: 6),
-                shift: 6, width: 6),
+                    Int64(frame.provenanceChannel.rawValue),
+                    into: BitField.writeField(
+                        Int64(frame.sourceType.rawValue),
+                        into: 0, shift: 0, width: 6),
+                    shift: 6, width: 6),
+                shift: 18, width: 6),
             shift: 30, width: 6
         )
 

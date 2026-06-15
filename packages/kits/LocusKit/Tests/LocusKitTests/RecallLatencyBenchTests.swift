@@ -54,7 +54,7 @@ struct RecallLatencyBenchTests {
     func structuredRecallLatency() async throws {
         let estate = try await makeLargeEstate()
         let frame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -84,7 +84,7 @@ struct RecallLatencyBenchTests {
     func fullRecallLatency() async throws {
         let estate = try await makeLargeEstate()
         let frame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
@@ -111,7 +111,7 @@ struct RecallLatencyBenchTests {
     func structuredRecallLimitedLatency() async throws {
         let estate = try await makeLargeEstate()
         let frame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             limit: 20,
             ordering: .byCaptureTimeDesc
