@@ -12,7 +12,7 @@
 */
 :root{
   --bg:#06070e; --bg2:#090b14; --bg3:#0d1020; --surface2:#12162a; --surface3:#181d34;
-  --text:#f0eeea; --hi:#c8c4bc; --muted:#8a8aaa; --faint:#56566e;
+  --text:#f0eeea; --hi:#c8c4bc; --muted:#9f9fc0; --faint:#72728e;
   --accent:#ff8c00; --accent2:#3ab4ff;
   --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.13);
   --ba:rgba(255,140,0,.25); --ba2:rgba(58,180,255,.25);
@@ -22,7 +22,30 @@
   --font-u:"Outfit",system-ui,-apple-system,sans-serif;
   --font-m:"JetBrains Mono",ui-monospace,Menlo,monospace;
   --r:10px; --rsm:7px;
+  --topbar:linear-gradient(180deg,rgba(22,24,31,.9),rgba(16,18,24,.78));
 }
+
+/* LIGHT THEME — token override only. The topology stage is deliberately
+   exempt (pinned dark below): the brain canvas is a dark-field instrument,
+   and its overlays (picker, legend, feed, playback chips) are tuned as
+   dark glass over it. Everything else — nav, tables, panels, cards —
+   flips with these tokens. Toggled by #themeToggle; persisted in
+   localStorage("mootmgr-theme"); applied pre-paint by the inline head
+   script in index.html so there is no dark flash. */
+html[data-theme="light"]{
+  --bg:#ffffff; --bg2:#f6f7f9; --bg3:#eef0f3; --surface2:#e7e9ed; --surface3:#dfe2e7;
+  --text:#1d1e26; --hi:#34353e; --muted:#5d5d76; --faint:#8b8ba0;
+  --accent:#e07800; --accent2:#0b78c2;
+  --border:rgba(20,20,40,.12); --border2:rgba(20,20,40,.22);
+  --ba:rgba(224,120,0,.35); --ba2:rgba(11,120,194,.30);
+  --adim:rgba(224,120,0,.12); --adim2:rgba(11,120,194,.10);
+  --ok:#0b78c2; --warn:#a96a00; --err:#c2273a;
+  --topbar:linear-gradient(180deg,rgba(255,255,255,.92),rgba(246,247,249,.80));
+}
+/* Soften the orange/blue atmosphere glows on paper. */
+html[data-theme="light"] body::before{opacity:.35}
+/* Dark-field instrument: the canvas stage keeps the night palette. */
+html[data-theme="light"] .topo-stage{background:#06070e}
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
@@ -45,7 +68,7 @@ body::before{
 .topbar{
   grid-column:1 / -1; display:flex; align-items:center; gap:18px; padding:0 20px; height:60px;
   border-bottom:1px solid var(--border);
-  background:linear-gradient(180deg,rgba(22,24,31,.9),rgba(16,18,24,.78));
+  background:var(--topbar);
 }
 .brand{display:flex; align-items:center; gap:11px}
 .chip{width:28px;height:28px;flex:none;filter:drop-shadow(0 0 6px rgba(255,140,0,.45))}
@@ -102,7 +125,7 @@ body::before{
   border-radius:var(--r); padding:16px 18px;
 }
 .card .clabel{font-size:10.5px; text-transform:uppercase; letter-spacing:1.4px; color:var(--muted)}
-.card .cval{font-family:var(--font-d); font-size:34px; line-height:1.05; margin-top:6px; color:var(--text)}
+.card .cval{font-family:var(--font-d); font-size:34px; line-height:1.05; margin-top:6px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 .card .cval.blue{color:var(--accent2)}
 .card .cval.orange{color:var(--accent)}
 .card .cunit{font-family:var(--font-m); font-size:12px; color:var(--muted); margin-left:6px}
@@ -174,7 +197,7 @@ body::before{
 .kind-capture{color:var(--accent)}
 .kind-think{color:var(--accent2)}
 
-/* topology (P5) — Sigma-style canvas + controls + overlays */
+/* topology (P5) — Canvas2D neural-brain renderer + controls + overlays */
 .topo-bar{display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:14px}
 .topo-controls{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
 .topo-label{font-size:10px; text-transform:uppercase; letter-spacing:1.1px; color:var(--muted)}
@@ -184,18 +207,21 @@ body::before{
 }
 .topo-select:focus-visible{outline:2px solid var(--ba2); outline-offset:0}
 .topo-stage{
-  position:relative; width:100%; height:calc(100vh - 200px); min-height:380px;
+  /* -252px (was -200px) leaves room for the L5 playback bar below the canvas */
+  position:relative; width:100%; height:calc(100vh - 252px); min-height:380px;
   border:1px solid var(--border); border-radius:var(--r); overflow:hidden;
   background:radial-gradient(900px 600px at 50% 40%, rgba(58,180,255,.04), transparent 70%), var(--bg2);
 }
 .topo-canvas{position:absolute; inset:0}
 .topo-canvas canvas{cursor:grab}
 .topo-canvas canvas:active{cursor:grabbing}
-/* honest pending overlay (centered) */
+/* honest pending overlay (centered) — only shown on analytics-grid path */
 .topo-pending{
   position:absolute; inset:0; display:flex; flex-direction:column; align-items:center;
   justify-content:center; text-align:center; color:var(--muted); pointer-events:none; padding:24px;
 }
+/* explicit hide rule so display:flex doesn't fight the [hidden] attribute */
+.topo-pending[hidden]{ display:none !important }
 .stubmark{font-size:60px; color:var(--faint); margin-bottom:14px}
 .topo-pending h2{font-family:var(--font-d); font-size:24px; color:var(--hi); letter-spacing:1px}
 .topo-pending p{max-width:560px; font-size:12.5px; margin-top:8px; line-height:1.6}
@@ -226,5 +252,447 @@ body::before{
 .topo-legend .lswatches{display:flex; gap:4px; flex-wrap:wrap; margin-top:2px}
 .topo-legend .lsw{width:11px; height:11px; border-radius:3px}
 
+/* Node count — top-left corner chip (synthetic and live paths) */
+.topo-nodecnt{
+  position:absolute; top:14px; left:14px; font-family:var(--font-m); font-size:10px;
+  color:var(--muted); letter-spacing:.06em; pointer-events:none;
+}
+.topo-nodecnt strong{color:var(--hi); font-weight:500}
+/* Watermark — top-right corner label (synthetic path only) */
+.topo-watermark{
+  position:absolute; top:14px; right:14px; font-family:var(--font-m); font-size:10px;
+  color:var(--muted); letter-spacing:.08em; opacity:.5; pointer-events:none;
+}
+/* Static legend sections (PoC-spec style: Node types / Activity / Edges) */
+.topo-lsect{
+  font-size:9px; font-family:var(--font-m); color:var(--muted); text-transform:uppercase;
+  letter-spacing:.1em; margin-bottom:3px; margin-top:6px;
+}
+.topo-lsect:first-child{margin-top:0}
+.topo-lrow{display:flex; align-items:center; gap:7px; font-size:11px; color:var(--sub); margin-bottom:3px}
+.topo-ldot{width:8px; height:8px; border-radius:50%; flex:none}
+.topo-lline{width:16px; height:1px; flex:none}
+/* topology pending overlay — analytics-present variant (topo-pending--has-analytics):
+   scrollable top-aligned panel. Overlay is hidden on the no-analytics synthetic path so
+   the brain canvas is the hero. When analytics are present the dark tint makes text readable. */
+.topo-pending--has-analytics {
+  justify-content: flex-start;
+  align-items: flex-start;
+  overflow-y: auto;
+  padding: 20px 24px;
+  pointer-events: auto; /* enable scroll when analytics are present */
+  background: rgba(6,7,14,0.86); /* readable over animated brain canvas */
+}
+/* Centered (no-analytics) path: radial vignette keeps brain visible at edges */
+.topo-pending:not(.topo-pending--has-analytics) {
+  background: radial-gradient(ellipse 65% 55% at 50% 50%,
+    rgba(6,7,14,0.78) 0%, rgba(6,7,14,0.38) 55%, transparent 80%);
+}
+.topo-pending-header {
+  display: flex; align-items: flex-start; gap: 14px; margin-bottom: 18px;
+}
+/* compact diamond + heading used when analytics are showing */
+.stubmark-sm { font-size: 28px; color: var(--faint); flex: none; margin-top: 2px; }
+.topo-pending-header h2 { font-family: var(--font-d); font-size: 20px; color: var(--hi); letter-spacing: .5px; }
+.topo-pending-header p { font-size: 12px; color: var(--muted); margin-top: 3px; max-width: 480px; line-height: 1.6; }
+/* full-overlay treatment (no analytics): revert to the pre-analytics centered look */
+.topo-pending:not(.topo-pending--has-analytics) .topo-pending-header {
+  flex-direction: column; align-items: center; text-align: center;
+}
+.topo-pending:not(.topo-pending--has-analytics) .stubmark-sm { font-size: 60px; margin-top: 0; margin-bottom: 12px; }
+.topo-pending:not(.topo-pending--has-analytics) .topo-pending-header h2 { font-size: 24px; letter-spacing: 1px; }
+.topo-pending:not(.topo-pending--has-analytics) .topo-pending-header p { max-width: 560px; font-size: 12.5px; text-align: center; }
+/* analytics grid: estate sections with per-signal rows */
+.topo-analytics { width: 100%; }
+.topo-estate-section { margin-bottom: 20px; }
+.topo-estate-label { font-family: var(--font-m); font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+.topo-signal-row { display: flex; align-items: center; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.topo-signal-name { font-family: var(--font-m); color: var(--muted); flex: 1; }
+.topo-signal-val { font-family: var(--font-d); font-size: 22px; color: var(--hi); min-width: 60px; text-align: right; }
+.topo-signal-meta { display: flex; align-items: center; gap: 6px; }
+/* --muted (#8a8aaa) on --bg2 (#090b14) = 5.89:1, passes WCAG 1.4.3 AA.
+   Sample count is the accessible state carrier for freshness; --faint fails at 2.76:1. */
+.topo-signal-samples { font-family: var(--font-m); font-size: 10px; color: var(--muted); }
+/* freshness dot — aria-hidden; sample count text is the accessible state carrier (color never sole signal) */
+.topo-fresh-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.topo-fresh-dot.fresh { background: var(--ok); }
+.topo-fresh-dot.aging { background: var(--warn); }
+.topo-fresh-dot.stale { background: var(--err); }
+.topo-fresh-dot.unknown { background: var(--faint); }
+/* community swatches row */
+.topo-communities { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.topo-comm-label { font-size: 11px; color: var(--muted); font-family: var(--font-m); }
+.topo-swatches { display: flex; gap: 4px; flex-wrap: wrap; }
+/* no-analytics subordinate section (monitoring off / no data) */
+.topo-no-analytics { text-align: center; padding: 24px 0; color: var(--faint); }
+.topo-no-analytics .no-icon { font-size: 28px; display: block; margin-bottom: 6px; }
+.topo-no-analytics p { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* L4 3D toggle + L5 play button — aria-pressed carries the toggle state;
+   accent border/text mirrors the active chip treatment elsewhere. */
+.topo-bar .btn[aria-pressed="true"],
+.topo-playbar .btn[aria-pressed="true"]{ border-color:var(--accent); color:var(--accent) }
+/* L5 radar-loop playback bar — sits directly under the topology stage */
+.topo-playbar{
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:10px;
+}
+/* mono timestamp chip — fixed-ish width prevents jitter as the playhead advances */
+#topoPlayClock{ font-family:var(--font-m); min-width:150px; text-align:center }
+#topoPlaySpan{ font-family:var(--font-m) }
+
 /* loading / empty */
 .empty{color:var(--muted); font-size:13px; font-style:italic; padding:18px 0}
+
+/* overview 2-column panel grid; stacks to 1 column below 700px */
+.panels-2col{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:18px}
+@media (max-width:700px){.panels-2col{grid-template-columns:1fr}}
+
+/* panel heading row with optional right-side hint */
+.phead-row{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:10px}
+.phead-row .phead{margin-bottom:0}
+.phint{font-family:var(--font-m); font-size:10px; color:var(--faint)}
+
+/* LED indicator: 9px dot + label + ON/OFF text (color is never the sole signal — §8) */
+.led-row{display:flex; align-items:center; gap:9px; padding:5px 0; border-bottom:1px solid var(--border)}
+.led-row:last-child{border-bottom:none}
+.led-dot{width:9px; height:9px; border-radius:50%; flex:none}
+.led-on{background:var(--accent2)}
+.led-off{background:var(--faint)}
+.led-label,.cap-label{flex:1; font-size:13px; color:var(--hi)}
+.led-state{font-family:var(--font-m); font-size:11px; font-weight:700}
+.led-on-text{color:var(--accent2)}
+.led-off-text{color:var(--faint)}
+.cap-list{display:flex; flex-direction:column}
+
+/* health check rows */
+.health-list{display:flex; flex-direction:column}
+.check-row{
+  display:flex; align-items:baseline; gap:10px; padding:5px 0;
+  border-bottom:1px solid var(--border); font-size:12.5px;
+}
+.check-row:last-child{border-bottom:none}
+.check-ind{font-size:14px; width:16px; flex:none}
+.check-ind.ok{color:var(--ok)}
+.check-ind.warn{color:var(--warn)}
+.check-ind.pend{color:var(--faint)}
+.check-label{flex:1; color:var(--hi)}
+.check-detail{font-family:var(--font-m); font-size:11px; color:var(--muted)}
+
+/* live activity feed panel */
+.feed-list{display:flex; flex-direction:column; gap:4px}
+.feed-row{display:flex; align-items:center; gap:8px; padding:3px 0}
+.fdot-sm{width:7px; height:7px; border-radius:50%; flex:none}
+.fdot-sm.capture{background:var(--accent)}
+.fdot-sm.think{background:var(--accent2)}
+.feed-info{flex:1; font-family:var(--font-m); font-size:11px; color:var(--hi); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.feed-ts{font-family:var(--font-m); font-size:10px; color:var(--faint); white-space:nowrap; margin-left:auto}
+
+/* busiest estates bar list */
+.bar-list{display:flex; flex-direction:column; gap:6px}
+.bar-row{display:flex; align-items:center; gap:10px}
+.bar-name{font-family:var(--font-m); font-size:12px; color:var(--hi); width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bar-track{flex:1; height:6px; background:var(--surface2); border-radius:999px; overflow:hidden}
+.bar-fill{height:100%; background:var(--accent2); border-radius:999px; transition:width .3s}
+.bar-count{font-family:var(--font-m); font-size:11px; color:var(--muted); min-width:30px; text-align:right}
+
+/* activity event-type dot column (first column, 24px wide) */
+.evdot{width:24px; text-align:center}
+.ev-dot{display:inline-block; width:7px; height:7px; border-radius:50%}
+.ev-capture{background:var(--accent)}
+.ev-think{background:var(--accent2)}
+
+/* activity row expand (detail row inserted after clicked row) */
+.row-expand td{background:var(--surface2); padding:10px 14px}
+.expand-grid{display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; font-family:var(--font-m); font-size:11px}
+.exp-key{color:var(--muted)}
+.exp-val{color:var(--hi)}
+.dtable tbody tr{cursor:pointer}
+.dtable tbody tr.row-expand{cursor:default}
+
+/* activity kind filter chips */
+.chiprow{display:flex; align-items:center; gap:6px}
+.chiprow button{
+  background:var(--surface2); border:1px solid var(--border2); color:var(--muted);
+  font-family:var(--font-u); font-size:11px; padding:5px 12px; border-radius:999px; cursor:pointer;
+  transition:background .14s, color .14s, border-color .14s;
+}
+.chiprow button:hover{color:var(--text)}
+.chiprow button.chip-on{background:var(--adim); border-color:var(--ba); color:var(--text)}
+.chiprow button:focus-visible{outline:2px solid var(--ba2); outline-offset:1px}
+
+/* configuration key/value grid (two-column, used in transport and estate panels) */
+.cfg-kvgrid{display:grid; grid-template-columns:max-content 1fr; gap:8px 20px; font-size:13px; align-items:center}
+.cfg-key{color:var(--muted)}
+.cfg-val{display:flex; align-items:center; gap:6px; font-family:var(--font-m); color:var(--hi)}
+
+/* estate admin badges (kind / backend / mountState) */
+.badge{display:inline-flex; align-items:center; gap:5px; font-family:var(--font-m); font-size:10px; font-weight:600; letter-spacing:.4px; padding:3px 8px; border-radius:999px; border:1px solid; text-transform:uppercase}
+.badge-kind.glk{color:var(--accent); border-color:var(--ba); background:var(--adim)}
+.badge-kind.corpusonly{color:var(--accent2); border-color:var(--ba2); background:var(--adim2)}
+.badge-kind.locusonly{color:var(--hi); border-color:var(--border2); background:var(--surface2)}
+/* InMemory backend is visually distinguished as volatile — amber with warning prefix, never suppressed */
+.badge-backend.inmemory{color:var(--warn); border-color:rgba(255,183,77,.3); background:rgba(255,183,77,.07)}
+.badge-mount.mounted{color:var(--ok)}
+.badge-mount.quiesced{color:var(--warn)}
+.badge-mount.draining{color:var(--accent)}
+/* Dot inside mount badge inherits text color (color is never the sole signal — text label follows) */
+.mount-dot{width:7px; height:7px; border-radius:50%; background:currentColor; flex:none}
+.badge-row{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px}
+.estate-divider{border:none; border-top:1px solid var(--border); margin:10px 0}
+
+/* estate lifecycle action buttons — read-only indicators; writes travel the native channel */
+.estate-actions{display:flex; gap:8px; margin-top:10px}
+.estate-actions .btn-ghost{opacity:.45; cursor:default; pointer-events:none}
+/* Keyboard focus outline suppressed on ghost buttons — they are inert indicators, not controls.
+   Without this, the base .btn:focus-visible rule would paint a --ba2 outline on a visually
+   disabled button, creating a false interactive affordance. */
+.estate-actions .btn-ghost:focus-visible{outline:none}
+
+/* section label for admin vs external-reporter groups */
+.estates-section-label{font-size:10px; text-transform:uppercase; letter-spacing:1.4px; color:var(--muted); margin:18px 0 10px}
+
+/* first-run empty state */
+.first-run{text-align:center; padding:50px 20px; color:var(--muted)}
+.first-run .fr-icon{font-size:56px; color:var(--faint); display:block; margin-bottom:12px}
+.first-run h2{font-family:var(--font-d); font-size:22px; color:var(--hi)}
+.first-run p{font-size:13px; margin-top:6px}
+
+/* pipeline estate selector header */
+.pipe-header{display:flex; align-items:center; gap:10px; margin-bottom:14px}
+
+/* flow-rate chip: neutral when quiet, orange-background when active (> 10 events/min) */
+.flow-rate{display:inline-block; margin-top:10px; font-family:var(--font-m); font-size:11px; color:var(--muted); background:var(--surface2); border:1px solid var(--border); border-radius:999px; padding:3px 10px}
+.flow-rate.flow-rate-active{color:var(--accent); background:var(--adim); border-color:var(--ba)}
+
+/* nav active: orange left-border stripe + glow background (concept style) */
+.navitem.on{
+  background:var(--adim); border-color:var(--ba); color:var(--text);
+  border-left:3px solid var(--accent);
+}
+
+/* overview 3-column panel grid */
+.panels-3col{display:grid; grid-template-columns:2fr 1fr; gap:14px; margin-bottom:18px}
+@media (max-width:840px){.panels-3col{grid-template-columns:1fr}}
+/* panel that spans 2 columns in a 3-col grid — the "2fr" column in .panels-3col */
+.panel-2col{grid-column:1}
+
+/* concept-style capabilities list (LED dot + label rows) */
+.caplist{list-style:none; display:flex; flex-direction:column; gap:0}
+.caplist li{display:flex; align-items:center; gap:9px; padding:6px 0; border-bottom:1px solid var(--border); font-size:12.5px; color:var(--hi)}
+.caplist li:last-child{border-bottom:none}
+.caplist .cled{width:8px; height:8px; border-radius:50%; flex:none; background:var(--accent2)}
+
+/* health check list (concept style with checkmark icons) */
+.healthlist{list-style:none; display:flex; flex-direction:column; gap:0}
+.healthlist li{display:flex; align-items:baseline; gap:9px; padding:6px 0; border-bottom:1px solid var(--border); font-size:12.5px}
+.healthlist li:last-child{border-bottom:none}
+.healthlist .hicon{font-size:12px; width:16px; flex:none}
+.healthlist .hicon.ok{color:var(--ok)}
+.healthlist .hicon.warn{color:var(--warn)}
+.healthlist .hlabel{flex:1; color:var(--hi)}
+.healthlist .hdetail{font-family:var(--font-m); font-size:11px; color:var(--muted)}
+
+/* mini live-activity feed in Overview panel */
+.minifeed{display:flex; flex-direction:column; gap:5px; max-height:240px; overflow-y:auto}
+.minifeed .mfrow{display:flex; align-items:center; gap:8px; font-family:var(--font-m); font-size:11px; color:var(--hi)}
+.minifeed .mfkind{width:7px; height:7px; border-radius:50%; flex:none}
+.minifeed .mfkind.capture{background:var(--accent)}
+.minifeed .mfkind.think{background:var(--accent2)}
+.minifeed .mfinfo{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.minifeed .mfts{font-size:10px; color:var(--faint); white-space:nowrap}
+
+/* Top Observers bar rows in Overview */
+.obs-list{display:flex; flex-direction:column; gap:8px}
+.obs-row{display:flex; align-items:center; gap:10px}
+.obs-name{font-family:var(--font-m); font-size:11px; color:var(--hi); min-width:140px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.obs-track{flex:1; height:5px; background:var(--surface2); border-radius:999px; overflow:hidden}
+.obs-fill{height:100%; background:var(--accent); border-radius:999px; transition:width .3s}
+.obs-count{font-family:var(--font-m); font-size:11px; color:var(--muted); min-width:32px; text-align:right}
+
+/* backpressure pill cards (replaces the old text-string rendering) */
+.bprow{display:flex; flex-wrap:wrap; gap:10px}
+.bpcard{
+  display:flex; flex-direction:column; align-items:center; min-width:108px; flex:1;
+  background:var(--surface2); border:1px solid var(--border); border-radius:var(--rsm);
+  padding:10px 12px; gap:4px;
+}
+.bpcard .bpl{font-size:10px; text-transform:uppercase; letter-spacing:1.1px; color:var(--muted)}
+.bpcard .bpv{font-family:var(--font-d); font-size:22px; color:var(--hi); line-height:1.1}
+.bpcard .bpv.na{color:var(--faint); font-size:16px; font-family:var(--font-m)}
+
+/* configuration two-column layout (concept side-by-side Transport + Estate) */
+.cfg-2col{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:18px}
+@media (max-width:680px){.cfg-2col{grid-template-columns:1fr}}
+
+/* cfg-val styled as orange chip (matching concept's orange value badges) */
+.cfg-val-chip{
+  display:inline-flex; align-items:center; font-family:var(--font-m); font-size:11px;
+  color:var(--accent); background:var(--adim); border:1px solid var(--ba);
+  border-radius:999px; padding:3px 10px; font-weight:600;
+}
+.cfg-val-na{
+  font-family:var(--font-m); font-size:11px; color:var(--faint);
+}
+
+/* ARIA grammar collapsible panel summary style */
+details.panel summary{cursor:pointer; list-style:none}
+details.panel summary::-webkit-details-marker{display:none}
+details.panel summary::before{content:"▶ "; font-size:9px; color:var(--faint); margin-right:4px; transition:transform .15s}
+details.panel[open] summary::before{content:"▼ "}
+
+/* capabilities grid: 2-3 column LED + label grid for Configuration */
+.caps-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:8px}
+.cap-item{display:flex; align-items:center; gap:9px; padding:8px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:var(--rsm); font-size:12px; color:var(--hi)}
+.cap-led{width:8px; height:8px; border-radius:50%; flex:none}
+.cap-led.on{background:var(--accent2)}
+.cap-led.off{background:var(--faint)}
+
+/* Connects / Resources dtable: make na text visually soft */
+.td-na{color:var(--faint); font-family:var(--font-m); font-size:11px}
+
+/* lex chip for verb/noun coloring in activity kind cells */
+.lex-capture{color:var(--accent); font-weight:600}
+.lex-think{color:var(--accent2); font-weight:600}
+.lex-recall{color:var(--ok); font-weight:600}
+
+/* ===== CONCEPT-FAITHFUL ADDITIONS ===== */
+
+/* Overview Row 3: 3 equal columns (Capabilities / Health / Live feed) */
+.panels-3equal{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:18px}
+@media (max-width:900px){.panels-3equal{grid-template-columns:1fr 1fr}}
+@media (max-width:580px){.panels-3equal{grid-template-columns:1fr}}
+
+/* Volume bars (Overview Row 2 left, 2fr — orange animated bar chart) */
+.vol{display:flex; align-items:flex-end; gap:4px; height:100px; padding-top:8px}
+.vol .bar{flex:1; background:linear-gradient(180deg,var(--accent),var(--adim)); border-radius:3px 3px 0 0; min-height:3px; transition:height .6s cubic-bezier(.2,.8,.2,1); opacity:.88}
+.vol .bar:hover{opacity:1; box-shadow:0 0 10px rgba(255,140,0,.28)}
+.vol-axis{display:flex; justify-content:space-between; margin-top:6px; font-family:var(--font-m); font-size:10px; color:var(--faint)}
+
+/* Ranked list (Overview Row 2 right, 1fr — Top Observers = concept Top Tools) */
+.rank{display:flex; flex-direction:column; gap:9px}
+.rank .item{display:grid; grid-template-columns:1fr auto auto; align-items:center; gap:10px}
+.rank .name{font-family:var(--font-m); font-size:12px; color:var(--hi); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.rank .meter{height:6px; border-radius:4px; background:var(--surface3); overflow:hidden; min-width:50px}
+.rank .meter i{display:block; height:100%; background:linear-gradient(90deg,var(--adim),var(--accent)); border-radius:4px; transition:width .45s}
+.rank .n{font-family:var(--font-m); font-size:11px; color:var(--muted); text-align:right; white-space:nowrap}
+
+/* Capabilities panel: concept .cap with .nm (name) + .ds (descriptor right-aligned) */
+.caps{display:flex; flex-direction:column; gap:7px}
+.cap{display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--border); border-radius:var(--rsm); background:var(--bg3)}
+.cap .nm{font-size:12.5px; font-weight:600; color:var(--hi)}
+.cap .ds{font-size:11px; color:var(--muted); margin-left:auto; font-family:var(--font-m)}
+
+/* Concept LED dot (used inside .cap) */
+.led{width:8px;height:8px;border-radius:50%;flex:none}
+.led.on{background:var(--accent2); box-shadow:0 0 6px rgba(58,180,255,.4)}
+.led.off{background:var(--faint)}
+
+/* Health check list: concept .health li with circular .check icon */
+.health{list-style:none}
+.health li{display:flex; align-items:flex-start; gap:10px; padding:9px 0; border-bottom:1px dashed var(--border)}
+.health li:last-child{border-bottom:none}
+.health .check{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;flex:none;font-size:11px;font-weight:700;line-height:1}
+.health .check.ok{background:rgba(58,180,255,.14);color:var(--ok)}
+.health .check.warn{background:rgba(255,183,77,.14);color:var(--warn)}
+.health .txt{font-size:13px;color:var(--hi)}
+.health .sub{font-size:11px;color:var(--muted);font-family:var(--font-m);margin-top:2px}
+
+/* Live feed: concept .feed .ev rows (time · method orange · session · latency) */
+.feed{display:flex; flex-direction:column; gap:2px; max-height:220px; overflow-y:auto}
+.feed .ev{display:flex; align-items:center; gap:9px; padding:7px 3px; border-bottom:1px solid var(--border); font-size:12px; animation:slidein .32s ease both}
+@keyframes slidein{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.feed .ev{animation:none}}
+.feed .ev .t{font-family:var(--font-m);font-size:10px;color:var(--faint);width:60px;flex:none}
+.feed .ev .m{font-family:var(--font-m);color:var(--accent);font-size:11px;white-space:nowrap}
+.feed .ev .d{color:var(--hi);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px}
+.feed .ev .lat{font-family:var(--font-m);font-size:10px;color:var(--muted);white-space:nowrap}
+
+/* Lex method chip: concept .lex pill — bordered chip for Activity Inspector */
+.lex{display:inline-block;font-size:9.5px;letter-spacing:.8px;text-transform:uppercase;font-weight:700;padding:2px 7px;border-radius:5px;border:1px solid var(--border2);color:var(--hi);background:var(--bg3)}
+.lex.capture{color:var(--accent);border-color:rgba(255,140,0,.3)}
+.lex.think{color:var(--accent2);border-color:rgba(58,180,255,.22)}
+
+/* Status chip: concept .stat.ok / .stat.err */
+.stat{display:inline-flex;align-items:center;gap:5px;font-family:var(--font-m);font-size:11px;font-weight:600}
+.stat.ok{color:var(--ok)}
+.stat.err{color:var(--err)}
+
+/* Inspector expand: concept .insp-inner 2-column (event left / context right) */
+.row-expand td{background:var(--bg3); padding:0}
+.insp-inner{padding:14px 20px;display:grid;grid-template-columns:1fr 1fr;gap:16px;animation:fade .2s ease both}
+@media (max-width:600px){.insp-inner{grid-template-columns:1fr}}
+
+/* Section label inside Inspector expand */
+.sec-lab{font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:8px;display:block}
+
+/* Lexicon view: right column (verbs + adjectives panels stacked vertically) */
+.lex-right-col{display:flex; flex-direction:column; gap:14px}
+
+/* ==========================================================================
+   LARGE-DISPLAY SCALING
+   Fonts are px-hardcoded for the base layout (14px body). On monitors ≥1600px
+   these become physically tiny. Two breakpoints scale up the body default and
+   the densest small-text elements so every view stays readable at distance.
+   Nav width also widens slightly to prevent text clipping at the larger sizes.
+   ========================================================================== */
+@media(min-width:1600px){
+  body{font-size:15px}
+  .sidenav{width:160px}
+  .card .clabel,.phint,.tag,.note,.sub,
+  .topo-nodecnt,.topo-watermark,.dtable th,
+  .cap .nm,.cap .ds,.feed-info,.feed-ts,
+  .bar-name,.bar-count,.check-detail,
+  .minifeed .mfts,.topo-signal-name{font-size:12px}
+  .dtable td,.navitem,.filter,.empty{font-size:14px}
+  .card .cval{font-size:36px}
+  .title{font-size:29px}
+  .phead{font-size:15px}
+}
+@media(min-width:2200px){
+  body{font-size:16px}
+  .sidenav{width:170px}
+  .card .clabel,.phint,.tag,.note,.sub,
+  .topo-nodecnt,.topo-watermark,.dtable th,
+  .cap .nm,.cap .ds,.feed-info,.feed-ts,
+  .bar-name,.bar-count,.check-detail,
+  .minifeed .mfts,.topo-signal-name{font-size:13px}
+  .dtable td,.navitem,.filter,.empty{font-size:15px}
+  .card .cval{font-size:38px}
+  .title{font-size:31px}
+  .phead{font-size:16px}
+}
+
+/* Content picker (top-right under controls): check/uncheck knowledge domains.
+   Same chrome family as .topo-legend; scrolls when the estate has many. */
+.topo-commpicker{
+  position:absolute; right:14px; top:14px; display:flex; flex-direction:column;
+  background:rgba(6,7,14,.72); border:1px solid var(--border); border-radius:var(--rsm);
+  padding:8px 10px; font-family:var(--font-m); font-size:10.5px; color:var(--muted);
+  max-width:280px; max-height:46%; overflow:hidden;
+}
+.topo-commpicker .cp-head{display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:6px}
+.topo-commpicker .cp-title{font-weight:700; color:var(--hi); letter-spacing:.6px; text-transform:uppercase; font-size:9.5px}
+.topo-commpicker .cp-all{
+  background:none; border:1px solid var(--border); border-radius:4px; color:var(--muted);
+  font:inherit; font-size:9.5px; padding:2px 8px; cursor:pointer;
+}
+.topo-commpicker .cp-all[aria-pressed="true"]{color:var(--accent); border-color:var(--accent)}
+.topo-commpicker .cp-list{overflow-y:auto; display:flex; flex-direction:column; gap:2px; min-height:0}
+.topo-commpicker .cp-row{
+  display:flex; align-items:center; gap:7px; padding:2px 4px; border-radius:4px; cursor:pointer;
+  min-height:22px; /* compact rows; the panel is dense by design */
+}
+.topo-commpicker .cp-row:hover{background:rgba(232,234,240,.06)}
+.topo-commpicker .cp-row.off{opacity:.42}
+.topo-commpicker .cp-box{
+  width:11px; height:11px; border:1px solid var(--border); border-radius:3px; flex:none; cursor:pointer;
+}
+.topo-commpicker .cp-box.on{background:var(--accent); border-color:var(--accent)}
+.topo-commpicker .cp-dot{width:9px; height:9px; border-radius:50%; flex:none}
+.topo-commpicker .cp-label{
+  flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--hi);
+}
+.topo-commpicker .cp-size{color:var(--muted); flex:none}
+
+/* Theme toggle — compact icon button in the topbar right cluster. */
+.btn-theme{font-size:15px; line-height:1; padding:4px 10px; margin-right:10px}

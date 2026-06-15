@@ -87,8 +87,28 @@ let package = Package(
         // Permitted per CLAUDE.md "Package.swift / Cargo.toml edits — controlled,
         // not forbidden"; ADR-LOOPBACKHTTP-001.
         .package(name: "LoopbackHTTP", path: "../../packages/libs/LoopbackHTTP"),
+        // LatticeLib: FDC (Frame-Directed Classification) runtime — surfaces
+        // FDC.isAvailable, FDC.dataVersion, LatticeLib.version in the dashboard
+        // Capabilities panel. ADR-006-dashboard-kit-deps.md.
+        .package(name: "LatticeLib", path: "../../packages/libs/LatticeLib"),
+        // AriaLexiconLib: the reified ARIA grammar (Noun, Verb, Adjective,
+        // Acceptance matrix) — used to serve the /api/lexicon endpoint as static
+        // JSON. Zero runtime cost; compile-time enum iteration. ADR-006.
+        .package(name: "AriaLexiconLib", path: "../../packages/libs/AriaLexiconLib"),
+        // CognitionKit: shippedNeuronKitCapabilities — surfaces the set of
+        // shipped NeuronKit capabilities in ServerPayload.capabilities, replacing
+        // the hardcoded "pending Phase-2" dashboard row. ADR-006.
+        .package(name: "CognitionKit", path: "../../packages/kits/CognitionKit"),
     ],
     targets: [
+        // GenStaticAssets build-tool plugin: auto-regenerates StaticAssets.swift
+        // from DashboardAssets/ before every build so the binary always serves
+        // the latest assets. Applied to the MootManager target below.
+        .plugin(
+            name: "GenStaticAssets",
+            capability: .buildTool(),
+            path: "Plugins/GenStaticAssets"
+        ),
         .target(
             name: "MootManager",
             dependencies: [
@@ -99,14 +119,26 @@ let package = Package(
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
+                .product(name: "LatticeLib", package: "LatticeLib"),
+                .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
+                .product(name: "CognitionKit", package: "CognitionKit"),
             ],
             path: "Sources/MootManager",
             // DashboardAssets/ holds the EDITABLE source of the read-plane web UI
-            // (index.html, app.css, app.js) plus the generator that embeds them
-            // into StaticAssets.swift. The served copy is the generated Swift
-            // constant, so the asset files themselves are excluded from the build
-            // (they are not Swift sources and must not be bundled as resources).
-            exclude: ["DashboardAssets"]
+            // (index.html, app.css, app.js) plus the generator that embeds
+            // them into StaticAssets.swift.
+            // DashboardAssets/ is excluded — those files are not Swift sources.
+            // StaticAssets.swift is excluded from the source tree here because the
+            // GenStaticAssets plugin (prebuildCommand) generates a fresh copy into
+            // the plugin work directory on every build, which SPM auto-compiles as
+            // part of this target. The source-tree copy is kept in git as a reference
+            // for the CI lint gate (make check-static-assets) but not compiled
+            // directly — the plugin-generated copy is what goes into the binary.
+            // SPM's sandbox prevents prebuildCommand from writing back to the source
+            // tree, so the work-directory pattern is the correct sandbox-safe
+            // approach for Swift 6.2.
+            exclude: ["DashboardAssets", "StaticAssets.swift"],
+            plugins: [.plugin(name: "GenStaticAssets")]
         ),
         .executableTarget(
             name: "moot-mgr",
