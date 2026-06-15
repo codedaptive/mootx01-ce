@@ -1,0 +1,42 @@
+[package]
+name = "moot-math-benchmark"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "moot-math-benchmark — cross-platform performance benchmarks for the GeniusLocus substrate primitives. Conformance is separate; see docs/validation/."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "stress-test"
+path = "src/bin/stress_test.rs"
+
+[[bin]]
+name = "topk-bench"
+path = "src/bin/topk_bench.rs"
+
+[[bin]]
+name = "ml-bench"
+path = "src/bin/ml_bench.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+# Bench bins share infrastructure (kernel_registry, Stats, JSON
+# output schema) with the conformance harness library.
+harness = { package = "geniuslocus-test-harness", path = "../../../docs/validation/substrate_math_performance/test-harness/rust" }
+
+# Substrate sub-crates (four-package split, 2026-05-29). moot-math-benchmark
+# benchmarks types + kernel + ML primitives; it does not drive verbs,
+# so it does not depend on substrate-lib. The `simd-nightly` feature is
+# passed through to substrate-kernel so `KernelKind::Simd` resolves to
+# `kernel_simd::SimdKernel` instead of falling back to `ScalarKernel`.
+substrate-types = { path = "../../../packages/libs/SubstrateTypes/rust" }
+substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust", features = ["simd-nightly"] }
+substrate-ml = { path = "../../../packages/libs/SubstrateML/rust" }
+
+[features]
+default = ["simd-nightly"]
+simd-nightly = ["harness/simd-nightly", "substrate-kernel/simd-nightly"]
