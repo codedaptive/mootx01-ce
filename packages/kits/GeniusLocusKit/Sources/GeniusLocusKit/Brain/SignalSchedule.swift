@@ -282,10 +282,10 @@ public enum SignalRouteOutcome: Sendable, Equatable, Codable {
     /// live in the estate and returned without error.
     case routed(verb: String)
     /// Verb call returned `notSupportedByEstate`. The route was
-    /// attempted at the GLK boundary; the estate declined. The
-    /// `propose`, `associate`, and `learn` verbs are fully live;
-    /// this case arises for verbs that remain partially stubbed
-    /// (e.g., `mutate` state-axis kinds not yet wired in LocusKit).
+    /// attempted at the GLK boundary; the estate declined. All nine
+    /// verbs — including `mutate` with all five state-axis kinds
+    /// (`confirm`, `reject`, `contest`, `resolve`, `revive`) — are
+    /// fully wired in LocusKit both ports (B2-1).
     case routedButVerbStubbed(verb: String)
     /// Diagnostic emission; surfaced through `signalStatus` instead
     /// of a verb call.

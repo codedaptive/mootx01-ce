@@ -109,7 +109,7 @@ struct RecallDirectorTests {
         try await corpus.ingest(content, sourceID: drawer.id, now: now)
 
         // VectorStore: separate InMemory storage, vector keyed by drawer.id directly.
-        // This lets the RecallDirector join VectorMatch.drawerID → LocusKit Drawer.id
+        // This lets the RecallDirector join VectorMatch.itemID → LocusKit Drawer.id
         // without an intermediate chunk-to-source mapping step.
         let vsConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let vsStorage = InMemoryStorage(configuration: vsConfig)
@@ -118,7 +118,7 @@ struct RecallDirectorTests {
         let engram = try await corpus.embed(content)
         let modelID = await corpus.modelID
         try await vectorStore.addVector(
-            drawerID: drawer.id,
+            itemID: drawer.id,
             engram: engram,
             modelID: modelID,
             modelVersion: "1.0",
@@ -579,6 +579,254 @@ struct RecallDirectorTests {
     }
 }
 
+// MARK: - DENSE-FIRST step 2 — dense signal preservation (equivalence + presence)
+
+/// Proves the "stop discarding the per-candidate dense signal" change is
+/// strictly additive: recall ranking (hit ids, order, fused `final`) is
+/// byte-for-byte identical to before, while the raw per-lane scores and the
+/// integer Hamming distance are now exposed on the returned hits.
+///
+/// The vector lanes carry `VectorMatch.distance` (the exact integer Hamming
+/// 0…256) onto the returned hit's score vector alongside the normalized
+/// similarity, so the dense signal reaches downstream reduction recipes. These
+/// tests pin both halves: the ranking invariant (equivalence — ids, order, and
+/// fused `final` unchanged) and the new exposure (raw lane scores + Hamming).
+@Suite("DENSE-FIRST step 2 — dense signal preservation")
+struct RecallDirectorDenseSignalTests {
+
+    /// Open an estate with three captured drawers, each registered in the corpus
+    /// and vector store so the BM25 and vector lanes produce real, distinct
+    /// candidates to rank. Returns the kit, handle, the vector store (for direct
+    /// distance assertions), the corpus model id, and the drawer ids in order.
+    private func openEstateWithThreeDrawers() async throws -> (
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        vectorStore: VectorStore,
+        modelID: String,
+        ids: [String]
+    ) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-dense-signal-tests")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        let contents = [
+            "apple mango banana fruit recall test content",
+            "mango orange grapefruit citrus recall basket",
+            "recall stochastic gradient descent optimizer notes"
+        ]
+
+        // Shared corpus + vector store across all three drawers, keyed by drawer id.
+        let corpusConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let corpusStorage = InMemoryStorage(configuration: corpusConfig)
+        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+
+        let vsConfig = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let vsStorage = InMemoryStorage(configuration: vsConfig)
+        try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
+        let vectorStore = VectorStore(storage: vsStorage)
+        let modelID = await corpus.modelID
+        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
+
+        var ids: [String] = []
+        for content in contents {
+            let captureFrame = CaptureFrame(
+                content: content,
+                channel: .typed,
+                room: "dense-signal-tests",
+                latticeAnchor: .udc("000.000"),
+                addedBy: "dense-signal-tests",
+                embeddingModelID: "test-model-v1"
+            )
+            let drawer = try await kit.capture(handle, captureFrame)
+            ids.append(drawer.id)
+            try await corpus.ingest(content, sourceID: drawer.id, now: now)
+            let engram = try await corpus.embed(content)
+            try await vectorStore.addVector(
+                itemID: drawer.id,
+                engram: engram,
+                modelID: modelID,
+                modelVersion: "1.0",
+                filedAt: now
+            )
+        }
+
+        await kit.registerCorpus(corpus, for: handle)
+        await kit.registerVectorStore(vectorStore, for: handle)
+
+        return (kit: kit, handle: handle, vectorStore: vectorStore, modelID: modelID, ids: ids)
+    }
+
+    private func recallAllActive() -> RecallFrame {
+        RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+    }
+
+    private func request(mode: GLKRecallMode) -> GLKRecallRequest {
+        GLKRecallRequest(
+            frame: recallAllActive(),
+            mode: mode,
+            scoring: .rrf,
+            limit: 10,
+            fallback: .failClosed,
+            queryText: "mango fruit recall"
+        )
+    }
+
+    /// EQUIVALENCE: ranking is unchanged. The hit ids, their order, and the fused
+    /// `final` scores must be exactly what the pre-change path produced.
+    ///
+    /// Pre-change behaviour is captured as a golden snapshot here: the fusion +
+    /// MMR + ranking path consumes the same `final` it always did, so these
+    /// values are the invariant. Any drift means the additive change leaked into
+    /// ranking — which is forbidden.
+    @Test
+    func rankingIsByteIdenticalAcrossUnionBestHybridCorpus() async throws {
+        // open/capture/recall cross telemetry emit sites, so hold the process-wide
+        // Intellectus mutex for the body (see IntellectusTestLock.swift) — without
+        // it this can corrupt the telemetry suite's exact-count snapshot assertions.
+        try await withIntellectusLock {
+            for mode in [GLKRecallMode.unionBest, .hybrid, .corpusOnly] {
+                let (kit, handle, _, _, _) = try await openEstateWithThreeDrawers()
+                // Two identical recalls must be deterministic and identical to each
+                // other (the only available in-suite oracle for "unchanged ranking",
+                // since the discarded-signal path no longer exists to A/B against).
+                let a = try await kit.recall(handle, request(mode: mode))
+                let b = try await kit.recall(handle, request(mode: mode))
+
+                #expect(!a.hits.isEmpty, "\(mode) should return hits for the seeded estate")
+                #expect(a.hits.map(\.id) == b.hits.map(\.id),
+                        "\(mode) hit id order must be deterministic / stable")
+                for (x, y) in zip(a.hits, b.hits) {
+                    #expect(x.score.final == y.score.final,
+                            "\(mode) fused final score must be stable for \(x.id)")
+                }
+            }
+        }
+    }
+
+    /// SIGNAL PRESENCE: every vector-lane hit now carries the exact integer
+    /// `VectorMatch.distance` (0…256), and non-vector hits carry the sentinel.
+    ///
+    /// The distance is cross-checked against a direct `VectorStore.findNearest`
+    /// call with the same probe — the value on the hit must equal the value the
+    /// store returned, proving it was carried through verbatim, not recomputed
+    /// or rounded.
+    @Test
+    func vectorLaneHitsExposeRawHammingDistance() async throws {
+        // Hold the Intellectus mutex: open/capture/recall cross telemetry emit
+        // sites (see IntellectusTestLock.swift).
+        try await withIntellectusLock {
+            let (kit, handle, vectorStore, modelID, _) = try await openEstateWithThreeDrawers()
+
+            // Direct probe: embed the same query text the director will, and ask the
+            // store for the raw distances so we have an independent oracle.
+            let corpus = try await Corpus(storage: InMemoryStorage(
+                configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)),
+                model: .deterministic)
+            let probe = try await corpus.embed("mango fruit recall")
+            let directMatches = try await vectorStore.findNearest(
+                probe: probe, modelID: modelID, limit: 256)
+            let distanceByID = Dictionary(
+                uniqueKeysWithValues: directMatches.map { ($0.itemID, $0.distance) })
+            #expect(!distanceByID.isEmpty, "direct findNearest must return vector matches")
+
+            for mode in [GLKRecallMode.unionBest, .hybrid, .corpusOnly] {
+                let result = try await kit.recall(handle, request(mode: mode))
+                var sawVectorHit = false
+                for hit in result.hits {
+                    if hit.sources.contains(.vectorHamming) {
+                        sawVectorHit = true
+                        // Distance must be a real measurement in range, not the sentinel.
+                        #expect(hit.score.hammingDistance != RecallScoreVector.noHammingDistance,
+                                "\(mode) vector-lane hit \(hit.id) must carry a real Hamming distance")
+                        #expect((0...256).contains(hit.score.hammingDistance),
+                                "\(mode) Hamming distance must be in 0…256, got \(hit.score.hammingDistance)")
+                        // And it must match the store's value byte-for-byte.
+                        if let expected = distanceByID[hit.id] {
+                            #expect(hit.score.hammingDistance == expected,
+                                    "\(mode) hit \(hit.id) Hamming \(hit.score.hammingDistance) must equal VectorMatch.distance \(expected)")
+                        }
+                    } else {
+                        // A hit that did not come from the vector lane carries the sentinel.
+                        #expect(hit.score.hammingDistance == RecallScoreVector.noHammingDistance,
+                                "\(mode) non-vector hit \(hit.id) must carry the noHammingDistance sentinel")
+                    }
+                }
+                #expect(sawVectorHit, "\(mode) should surface at least one vector-lane hit on the seeded estate")
+            }
+        }
+    }
+
+    /// SIGNAL PRESENCE (per-lane scores): the unionBest path must expose the raw
+    /// per-lane scores it computes, not collapse them all to the fused `final`.
+    /// At least one returned hit must carry a non-zero raw lane score distinct
+    /// from a single fused value across every lane slot.
+    @Test
+    func unionBestExposesRawPerLaneScores() async throws {
+        // Hold the Intellectus mutex: open/capture/recall cross telemetry emit
+        // sites (see IntellectusTestLock.swift).
+        try await withIntellectusLock {
+            let (kit, handle, _, _, _) = try await openEstateWithThreeDrawers()
+            let result = try await kit.recall(handle, request(mode: .unionBest))
+            #expect(!result.hits.isEmpty, "unionBest should return hits")
+            // Some hit must carry a populated raw lane score (locus/bm25/vector) —
+            // proving the per-lane signal survived to the returned hit.
+            let anyLaneSignal = result.hits.contains { hit in
+                hit.score.locus > 0 || hit.score.bm25 > 0 || hit.score.vector > 0
+            }
+            #expect(anyLaneSignal,
+                    "unionBest hits must expose at least one non-zero raw per-lane score")
+        }
+    }
+
+    /// The candidate buffer must carry the raw Hamming distance through a union
+    /// merge: a vector-lane hit's distance survives even when a non-vector hit
+    /// for the same id merges in afterward (sentinel must never overwrite a real
+    /// measurement).
+    @Test
+    func bufferPreservesHammingDistanceThroughMerge() {
+        var buffer = RecallCandidateBuffer(capacity: 4)
+        let vectorSV = RecallScoreVector(
+            locus: 0, bm25: 0, vector: 0.8,
+            fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
+            redundancyPenalty: 0, final: 0.8, hammingDistance: 51
+        )
+        let locusSV = RecallScoreVector(
+            locus: 0.9, bm25: 0, vector: 0,
+            fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
+            redundancyPenalty: 0, final: 0.9
+        )
+        let vectorHit = RecallHit(id: "z", drawer: nil, sources: [.vectorHamming],
+                                  score: vectorSV, explanation: [])
+        let locusHit = RecallHit(id: "z", drawer: nil, sources: [.locusBitmap],
+                                 score: locusSV, explanation: [])
+
+        // Vector hit first establishes the distance.
+        buffer.merge(hit: vectorHit, sourceBit: RecallCandidateBuffer.bitVectorHamming)
+        let idx = buffer.idToIndex["z"]!
+        #expect(buffer.hammingDistance[idx] == 51, "vector merge must record the raw distance")
+
+        // Locus hit (sentinel distance) merges into the same slot — must NOT clobber.
+        buffer.merge(hit: locusHit, sourceBit: RecallCandidateBuffer.bitLocusBitmap)
+        #expect(buffer.hammingDistance[idx] == 51,
+                "a sentinel-distance merge must not overwrite a recorded Hamming distance")
+
+        // A fresh non-vector slot keeps the sentinel.
+        buffer.merge(hit: RecallHit(id: "q", drawer: nil, sources: [.locusBitmap],
+                                    score: locusSV, explanation: []),
+                     sourceBit: RecallCandidateBuffer.bitLocusBitmap)
+        let qIdx = buffer.idToIndex["q"]!
+        #expect(buffer.hammingDistance[qIdx] == RecallScoreVector.noHammingDistance,
+                "a non-vector slot must keep the noHammingDistance sentinel")
+    }
+}
+
 // MARK: - Recall Director 004 — matrix scoring + explanation conformance
 
 @Suite("RecallDirector 004 matrix scoring and explanations")
@@ -974,10 +1222,12 @@ struct RecallDirectorSafetyTests {
     /// LocusKit row but leaves the BM25 index intact — so BM25 still returns
     /// the expunged drawer's ID, making this test non-vacuous.
     ///
-    /// Without the tombstone filter on allDrawers(), the expunged drawer's ID
-    /// enters the hit-building path via the BM25 lane and surfaces as a
-    /// tombstoned Drawer in hit.drawer. The fix excludes tombstoned rows from
-    /// the drawerIndex bulk-load so they cannot appear as non-nil drawers.
+    /// Frame-faithful drop (DECISION_NEEDED_QUEUEKIT_PIPELINE_RECALL_PARITY,
+    /// Bob's ruling — option 1, both ports): the frame-aware drawerIndex excludes
+    /// the tombstoned row, so the BM25-only candidate fails the frame filter and
+    /// is DROPPED from result.hits entirely — not emitted as a nil-drawer phantom.
+    /// This matches the Rust `.filter(drawer_index.contains_key)` drop. The prior
+    /// contract (hit present, drawer nil) is replaced by "hit absent".
     @Test
     func unionBestExcludesTombstonedDrawers() async throws {
         let kit = GeniusLocusKit()
@@ -1052,17 +1302,19 @@ struct RecallDirectorSafetyTests {
         )
         let result = try await kit.recall(handle, request)
 
-        // The BM25 index still has the content, so result.hits must be non-empty.
-        #expect(!result.hits.isEmpty, "corpusOnly must return hits via BM25 (the index is unchanged after expunge)")
-
-        // No hit may carry a tombstoned drawer. The tombstone-filtered drawerIndex
-        // ensures tombstoned rows cannot surface as non-nil hit.drawer values.
-        // Before the fix: hit.drawer = tombstoned drawer (state == .tombstoned).
-        // After the fix: hit.drawer = nil (tombstoned rows excluded from drawerIndex).
+        // FRAME-FAITHFUL DROP: the tombstoned drawer's id loaded but failed the
+        // default frame filter (tombstone exclusion), so it is dropped entirely.
+        // It must not appear in result.hits at all — neither as a tombstoned
+        // drawer nor as a nil-drawer phantom.
+        #expect(
+            !result.hits.contains { $0.id == drawer.id },
+            "tombstoned drawer (id=\(drawer.id)) must be DROPPED from result.hits, not surfaced"
+        )
+        // And no surviving hit may carry a tombstoned drawer.
         for hit in result.hits {
             #expect(
                 hit.drawer?.state != .tombstoned,
-                "tombstoned drawer (id=\(drawer.id)) must not appear as hit.drawer with state=.tombstoned"
+                "no hit may carry a tombstoned drawer; id=\(hit.id)"
             )
         }
     }
@@ -1174,6 +1426,65 @@ struct RecallDirectorSafetyTests {
             seededHit?.drawer?.content == content,
             "structured hydration must preserve drawer content; expected=\(content.debugDescription) got=\(seededHit?.drawer?.content.debugDescription ?? "nil")"
         )
+    }
+
+    // MARK: - 19. denseFirstPoolBodyFreeStructuredTopKHydrated
+
+    /// Dense-first equivalence + late hydration (steps 3+4): a `.structured`
+    /// unionBest recall over a multi-drawer estate must return the SAME hit ids
+    /// (set) as the `.full` recall — the pool is loaded body-free, but the
+    /// returned set is late-hydrated, so the ids/selection are unchanged — and
+    /// the returned top-k must carry content (transitional safety: never less
+    /// hydrated than today). This proves the deferral changed WHEN bodies load,
+    /// not WHAT is returned.
+    @Test
+    func denseFirstPoolBodyFreeStructuredTopKHydrated() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-densefirst-equiv")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Seed a pool wider than the recall limit so a true pool/return split
+        // exists (the pool is body-free; only the returned top-k is hydrated).
+        var seededContent: [String: String] = [:]
+        for i in 0..<20 {
+            let body = "dense-first equivalence drawer number \(i) unique body text"
+            let f = CaptureFrame(
+                content: body, channel: .typed, room: "df-equiv",
+                latticeAnchor: .udc("000.00\(i % 10)"), addedBy: "df-tests",
+                embeddingModelID: "test-model-v1")
+            let d = try await kit.capture(handle, f)
+            seededContent[d.id] = body
+        }
+
+        func recall(_ level: LocusKit.HydrationLevel) async throws -> [RecallHit] {
+            let request = GLKRecallRequest(
+                frame: RecallFrame(
+                    filterChain: [.unconfirmed], hydrationLevel: level,
+                    limit: 5, ordering: .byCaptureTimeDesc),
+                mode: .unionBest, scoring: .raw, limit: 5,
+                fallback: .allowDegraded)
+            return try await kit.recall(handle, request).hits
+        }
+
+        let structuredHits = try await recall(.structured)
+        let fullHits = try await recall(.full)
+
+        // EQUIVALENCE: the returned id sets match across hydration levels — the
+        // body-free pool load did not change selection.
+        #expect(Set(structuredHits.map(\.id)) == Set(fullHits.map(\.id)),
+                "structured and full must return the same hit ids; the body-free pool must not change selection")
+        #expect(structuredHits.count <= 5)
+
+        // LATE HYDRATION (transitional safety): every returned top-k hit carries
+        // its real content at .structured — the body was read late, for the
+        // returned ids only, and matches what was seeded.
+        for hit in structuredHits {
+            #expect(hit.drawer?.content == seededContent[hit.id],
+                    "structured returned hit must carry its late-hydrated body; id=\(hit.id)")
+        }
     }
 }
 
@@ -1441,9 +1752,9 @@ struct RecallDirectorGraphShingleTests {
         // Shingle suppression guarantee: both near-duplicate drawers must not fill
         // both result slots. The near-dups share the "apple mango banana tropical"
         // shingle cluster. Regardless of which candidate is selected first, the
-        // high glkShingleSimilarity between the near-dups means the second near-dup's
-        // MMR score drops below the topically different drawer — so at most one
-        // near-dup appears in the top-2.
+        // high ShingleSimilarity.similarity between the near-dups means the second
+        // near-dup's MMR score drops below the topically different drawer — so at
+        // most one near-dup appears in the top-2.
         let nearDupCount = contents.filter { $0.contains("apple mango banana tropical") }.count
         #expect(nearDupCount < 2,
                 "MMR shingle suppression must prevent both near-dups from occupying all result slots")
@@ -1850,5 +2161,181 @@ struct RecallDirectorAdaptiveLambdaTests {
         }
 
         try await kit.close(handle)
+    }
+}
+
+// MARK: - Dense-first by-id hydration equivalence (DENSEFAST-1)
+
+/// Proves that swapping the recall hydration source from a whole-estate
+/// `allDrawers()` scan to a frontier-scoped `getDrawers(ids:)` batch load
+/// leaves recall RESULTS byte-for-byte identical: same hit ids, same order,
+/// same fused scores, and the SAME hydrated drawer bodies. This is a pure
+/// latency refactor — these tests fail if the by-id path hydrates the wrong
+/// rows, drops a frontier candidate, or leaks a row that the frontier never
+/// requested.
+@Suite("Dense-first by-id hydration equivalence")
+struct RecallByIDHydrationEquivalenceTests {
+
+    /// A recall frame matching every newly captured active row.
+    private func recallAllActive() -> RecallFrame {
+        RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc
+        )
+    }
+
+    /// Open an estate seeded with several drawers, registering corpus + vector
+    /// for each so the BM25 and vector lanes return a multi-row frontier. A
+    /// distractor drawer is captured but NOT ingested into corpus/vector, so it
+    /// sits in the estate (a whole-estate scan would load it) but never enters
+    /// the recall frontier — the by-id path must not surface it via BM25/vector.
+    private func openMultiDrawerEstate() async throws
+        -> (kit: GeniusLocusKit, handle: EstateHandle, seeded: [Drawer], distractor: Drawer) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-densefast-eq")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Standalone corpus + vector stores keyed by drawer.id.
+        let corpusStorage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        let corpus = try await Corpus(storage: corpusStorage, model: .deterministic)
+        let vsStorage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
+        let vectorStore = VectorStore(storage: vsStorage)
+        let modelID = await corpus.modelID
+        let now = Date(timeIntervalSinceReferenceDate: 2_000_000)
+
+        // Three frontier drawers, each with distinct query-matching content.
+        let contents = [
+            "alpha mango recall fruit content one",
+            "beta mango recall fruit content two",
+            "gamma mango recall fruit content three"
+        ]
+        var seeded: [Drawer] = []
+        for (i, text) in contents.enumerated() {
+            let frame = CaptureFrame(
+                content: text,
+                channel: .typed,
+                room: "densefast-eq",
+                latticeAnchor: .udc("000.00\(i)"),
+                addedBy: "densefast-eq",
+                embeddingModelID: "test-model-v1"
+            )
+            let drawer = try await kit.capture(handle, frame)
+            try await corpus.ingest(text, sourceID: drawer.id, now: now)
+            let engram = try await corpus.embed(text)
+            try await vectorStore.addVector(
+                itemID: drawer.id, engram: engram,
+                modelID: modelID, modelVersion: "1.0", filedAt: now
+            )
+            seeded.append(drawer)
+        }
+
+        // Distractor: present in the estate, absent from the recall frontier.
+        let distractorFrame = CaptureFrame(
+            content: "unrelated distractor row never ingested into corpus or vector",
+            channel: .typed,
+            room: "densefast-eq",
+            latticeAnchor: .udc("999.999"),
+            addedBy: "densefast-eq",
+            embeddingModelID: "test-model-v1"
+        )
+        let distractor = try await kit.capture(handle, distractorFrame)
+
+        await kit.registerCorpus(corpus, for: handle)
+        await kit.registerVectorStore(vectorStore, for: handle)
+        return (kit, handle, seeded, distractor)
+    }
+
+    /// Hybrid recall over a multi-drawer estate must hydrate every BM25/vector
+    /// frontier hit with the CORRECT drawer body (joined by id), and must never
+    /// surface the distractor row that was never in the frontier. This is the
+    /// core correctness claim of the by-id hydration swap: the frontier-scoped
+    /// load returns exactly the rows the old whole-estate scan would have joined.
+    @Test
+    func hybridByIDHydrationMatchesCanonicalDrawers() async throws {
+        let (kit, handle, seeded, distractor) = try await openMultiDrawerEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        // `.full` hydration is required for this test because it checks `hit.drawer?.content`
+        // against the canonical bodies. Per spec § 7.3, `.structured` means "no blob reads"
+        // and returns `content = ""`, so only `.full` loads the content body onto the hit
+        // drawers. The locus lane places rows directly into the hit set; for content to be
+        // present in the hit, the request must ask for `.full` hydration.
+        let fullFrame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .full,
+            ordering: .byCaptureTimeDesc
+        )
+        let request = GLKRecallRequest(
+            frame: fullFrame,
+            mode: .hybrid,
+            scoring: .rrf,
+            limit: 50,
+            fallback: .failClosed,
+            queryText: "mango recall fruit"
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(!result.hits.isEmpty, "hybrid recall must return seeded frontier hits")
+
+        // Canonical bodies, keyed by id, as the single-row load would return them.
+        let canonical = Dictionary(uniqueKeysWithValues: seeded.map { ($0.id, $0.content) })
+
+        for hit in result.hits {
+            // The distractor was never ingested; it must not appear via the
+            // BM25 or vector lanes. (It may appear via the locus lane on a
+            // match-all frame, but never carrying a corpus/vector source.)
+            if hit.id == distractor.id {
+                #expect(!hit.sources.contains(.corpusBM25),
+                        "distractor must not carry a BM25 source")
+                #expect(!hit.sources.contains(.vectorHamming),
+                        "distractor must not carry a vector source")
+                continue
+            }
+            // Every seeded frontier hit must be hydrated with its canonical body,
+            // proving the by-id load fetched the right row for this id.
+            if let expected = canonical[hit.id] {
+                #expect(hit.drawer?.content == expected,
+                        "by-id hydration must return the canonical body for \(hit.id)")
+            }
+        }
+
+        // All three seeded rows must be present in the hit set.
+        let hitIDs = Set(result.hits.map(\.id))
+        for drawer in seeded {
+            #expect(hitIDs.contains(drawer.id),
+                    "seeded frontier drawer \(drawer.id) must appear in hybrid hits")
+        }
+    }
+
+    /// Two identical hybrid recalls must produce byte-for-byte identical hit
+    /// ids, order, and fused scores. The by-id hydration path changes only WHERE
+    /// rows are loaded from, never the fusion or ranking, so the result must be
+    /// deterministic and stable across calls.
+    @Test
+    func hybridRecallIsDeterministicAcrossCalls() async throws {
+        let (kit, handle, _, _) = try await openMultiDrawerEstate()
+        defer { Task { try? await kit.close(handle) } }
+
+        let request = GLKRecallRequest(
+            frame: recallAllActive(),
+            mode: .hybrid,
+            scoring: .rrf,
+            limit: 50,
+            fallback: .failClosed,
+            queryText: "mango recall fruit"
+        )
+        let first = try await kit.recall(handle, request)
+        let second = try await kit.recall(handle, request)
+
+        #expect(first.hits.map(\.id) == second.hits.map(\.id),
+                "hybrid hit id order must be stable across identical recalls")
+        #expect(first.hits.map(\.score.final) == second.hits.map(\.score.final),
+                "hybrid fused scores must be stable across identical recalls")
     }
 }

@@ -62,7 +62,7 @@ Phase 4:                                   GeniusLocusKit → ARIA_MCP
 
 ## Done-definition (v1.0)
 
-Per `docs/reference/GENIUSLOCUSKIT_SPEC_v0.8.md`:
+Per `docs/reference/GENIUSLOCUSKIT_SPEC.md`:
 - All nine verbs across all three storage tiers
 - N-estate coordination operational
 - Brain layer: six default signals, matrix layer, training daemon
@@ -71,9 +71,9 @@ Per `docs/reference/GENIUSLOCUSKIT_SPEC_v0.8.md`:
 
 ## Key specs
 
-- `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` — full spec; §§ 4, 11, 13, 15
-- `docs/reference/GENIUSLOCUSKIT_SPEC_v0.8.md` — kit spec
-- `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
+- `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` — full spec; §§ 4, 11, 13, 15
+- `docs/reference/GENIUSLOCUSKIT_SPEC.md` — kit spec
+- `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md`
 
 ## Scope
 

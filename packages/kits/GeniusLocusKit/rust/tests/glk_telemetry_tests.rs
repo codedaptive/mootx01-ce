@@ -46,7 +46,7 @@ use uuid::Uuid;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -611,6 +611,79 @@ fn provision_then_quiesce_is_quiesced_regardless_of_monitoring() {
     // ON path emitted metrics.
     assert!(sink.count() > 0,
         "monitoring-on path must emit at least one metric");
+
+    Intellectus::set_enabled(false);
+    Intellectus::install(Arc::new(NoOpSink));
+}
+
+// MARK: - §D6-counters: storeError dark counters (gate-2 chain sentence)
+
+/// The dense-lane storeError chain COUNTER half (status + COUNTER + no fake
+/// evidence). Lives in THIS binary — not recall_scored_parity — because the
+/// global Intellectus enable would crosstalk with that binary's parallel
+/// tests and weaken the force-proof; here the global_lock serializes and the
+/// sink captures only this test's emissions.
+#[test]
+fn dense_store_error_emits_dark_and_store_error_counters() {
+    let _guard = global_lock();
+    let sink = Arc::new(CapturingSink::new());
+    Intellectus::install(Arc::clone(&sink) as Arc<dyn StatsSink>);
+    Intellectus::set_enabled(true);
+
+    use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring};
+    use locus_kit::filter::{Filter, RecallFrame};
+    use locus_kit::frames::CaptureFrame;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use corpus_kit::Corpus;
+
+    let (store, storage) = make_stores();
+    let mut coord = EstateCoordinator::new();
+    let h = coord.provision(
+        store, storage, None,
+        test_owner(),
+        locus_only_params("d6-counters"),
+        EmbeddingModelConfig::Deterministic,
+    ).unwrap();
+
+    let drawer = coord.capture(
+        &h,
+        CaptureFrame::new(
+            "store error counter chain photosynthesis",
+            CaptureChannel::Typed,
+            "d6-counter-room",
+            LatticeAnchor::udc("0"),
+            "test-agent",
+            "test-embed-v1",
+        ),
+        1_700_000_000,
+    ).expect("capture");
+
+    let corpus = {
+        use persistence_kit::inmemory::InMemoryStorage;
+        use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
+        let cfg = EstateConfiguration::new(uuid::Uuid::new_v4(), BackendConfiguration::InMemory);
+        let st: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(cfg));
+        Arc::new(Corpus::open(st, EmbeddingModelConfig::Deterministic).expect("Corpus::open"))
+    };
+    corpus.ingest(&drawer.content, &drawer.id, 1_700_000_000).expect("ingest");
+    coord.register_corpus(&h, Arc::clone(&corpus));
+
+    // Force storeError on the next float_nearest (single-use test seam).
+    *corpus.forced_float_error.lock().unwrap() = Some("forced-d6-counter".to_string());
+
+    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
+        .with_mode(GLKRecallMode::UnionBest)
+        .with_scoring(GLKRecallScoring::Rrf)
+        .with_query_text("photosynthesis store error counter chain")
+        .with_limit(5);
+    let result = coord.recall_scored(&h, req, 1_700_000_001).expect("recall survives");
+
+    assert_eq!(result.dense_lane_status.as_deref(), Some("dark:storeError"));
+    assert!(sink.count_named("glk.recall.dense_lane_dark") >= 1,
+        "glk.recall.dense_lane_dark must emit on storeError");
+    assert!(sink.count_named("corpus.float_lane.store_error") >= 1,
+        "corpus.float_lane.store_error must emit on forced store error");
 
     Intellectus::set_enabled(false);
     Intellectus::install(Arc::new(NoOpSink));

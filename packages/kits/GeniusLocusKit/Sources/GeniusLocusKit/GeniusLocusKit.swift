@@ -1,8 +1,11 @@
+import ConvergenceKit
 import CorpusKit
 import Foundation
 import OSLog
 import LocusKit
 import PersistenceKit
+import QueueKit
+import SubstrateTypes
 import VectorKit
 
 /// The composition layer for the GeniusLocus substrate.
@@ -43,6 +46,13 @@ public actor GeniusLocusKit {
         subsystem: "com.mootx01.kit",
         category: "GeniusLocusKit"
     )
+
+    /// Trace retention window in seconds: 30 days.
+    ///
+    /// Matches the dreaming daemon's prune window so any still-live trace
+    /// row for a drawer is within the mark window used by `markRecallUsed`.
+    /// Internal — only the verb surface and tests reference this constant.
+    internal static let traceRetentionSeconds: TimeInterval = 30 * 24 * 60 * 60
 
     /// Registry of currently-open estates keyed by handle.
     ///
@@ -178,6 +188,184 @@ public actor GeniusLocusKit {
     /// Estates view lifecycle badges in the moot-mgr GUI (ARIA_MCP_MANAGEMENT_GUI_SPEC §5.3).
     internal var mountStates: [EstateHandle: EstateMountState] = [:]
 
+    /// Per-estate DrawerStore facade for temporal reads (dormant-surfaces mission).
+    ///
+    /// Built lazily by `ensureFingerprintStore(for:)` in `TemporalReads.swift` on the
+    /// first `glkFingerprintsCaptured` or `glkFingerprintBitSeries` call. Follows the
+    /// same pattern as `diaryStores` — backed by the same `Storage` as the estate,
+    /// separate facade to avoid cross-concern entanglement. Dropped in `close`.
+    internal var fingerprintStores: [EstateHandle: DrawerStore] = [:]
+
+    /// Per-estate LLM calibration curve registries.
+    ///
+    /// Populated on first `glkRecordCalibrationOutcome` and readable via
+    /// `glkCalibrationCurve`. Holds the in-memory state; callers that need
+    /// persistence register a `MatrixPersistenceBackend` via
+    /// `registerMatrixPersistence(_:for:)`. Dropped in `close`.
+    internal var calibrationRegistries: [EstateHandle: MatrixCalibrationRegistry] = [:]
+
+    /// Optional per-estate matrix persistence backends for calibration snapshots.
+    ///
+    /// When present, `glkRecordCalibrationOutcome` saves a `MatrixSnapshot`
+    /// (tier + calibration registry) after each update so calibration survives
+    /// a process restart. Registered via `registerMatrixPersistence(_:for:)`.
+    /// Dropped in `close`.
+    internal var matrixPersistenceBackends: [EstateHandle: MatrixPersistenceBackend] = [:]
+
+    /// Per-estate dedicated encode queue (Dual-Path Intake P3 / D-B).
+    ///
+    /// ONE QueueKit per estate, distinct from the Brain scheduler's queue, that
+    /// carries `EncodeJob` payloads from the regular capture path to the encode
+    /// drain worker. Mounted at provision (`mountEncodeQueue(for:)`), backed by a
+    /// transient in-memory PersistenceKitBackend (mirroring the scheduler's queue
+    /// substrate). Dropped in `close`. Absent for estates provisioned before the
+    /// intake wiring or for `.locusOnly` estates with no Corpus to feed.
+    internal var encodeQueues: [EstateHandle: QueueKit] = [:]
+
+    /// Per-estate HLC generator for stamping `EncodeJob` queue submissions.
+    ///
+    /// One generator per estate so encode jobs order on a per-estate clock,
+    /// matching the scheduler's per-estate HLC discipline. Built alongside the
+    /// encode queue in `mountEncodeQueue(for:)`. `var` because `HLCGenerator.send`
+    /// is mutating. Dropped in `close`.
+    internal var encodeHLCs: [EstateHandle: HLCGenerator] = [:]
+
+    /// Per-estate background encode-drain worker task (P4).
+    ///
+    /// Spawned in `mountEncodeQueue(for:)`: a detached loop that drains the
+    /// encode queue, ingests each job into the estate's Corpus, and replies
+    /// terminal so `awaitDrain()` can observe completion. Cancelled and dropped
+    /// in `close` so a torn-down estate leaves no orphan worker.
+    internal var encodeDrainWorkers: [EstateHandle: Task<Void, Never>] = [:]
+
+    /// Test-only ingest-failure injector for the encode-drain at-least-once path.
+    ///
+    /// When set, `ingestAndReply` invokes this with the job's drawer id BEFORE
+    /// the real ingest on each attempt; a thrown error simulates a transient
+    /// ingest failure so the bounded-retry / at-least-once behaviour can be
+    /// force-tested deterministically. Nil in production (zero overhead); the
+    /// documented seam for `EncodeDrainAtLeastOnceTests`. Mirrors the Rust
+    /// `encode_ingest_failure_hook`.
+    internal var encodeIngestFailureHook: (@Sendable (String) throws -> Void)?
+
+    /// Per-estate active sync engine entry (ConvergenceKit backend + label).
+    ///
+    /// Registered via `registerSyncEngine(_:backendName:for:)` after `open(_:owner:)`.
+    /// When present, `syncStateToken(for:)` queries `entry.engine.state` and formats
+    /// the canonical token using `entry.backendName`. When absent the estate is
+    /// local-only: `syncStateToken(for:)` returns `"local-only"`.
+    ///
+    /// `backendName` ("none", "cloudkit", "federation") is stored alongside the
+    /// engine because `SyncEngine` is a protocol and GLK imports only the base
+    /// `ConvergenceKit` module — it cannot recover the concrete type name without
+    /// importing backend-specific targets. The caller supplies the label at
+    /// registration time, keeping GLK's import surface minimal.
+    ///
+    /// Dropped in `close` so no engine reference outlives the estate.
+    internal var syncEngines: [EstateHandle: SyncEngineEntry] = [:]
+
+    // MARK: — Recall degradation test seams (P1 fail-loud contract)
+
+    /// Test-only: when non-nil, the Hamming vector lane returns this error instead
+    /// of calling `VectorStore.findNearest`. Consumed on the first call that checks
+    /// it; subsequent calls behave normally. Never set in production code.
+    ///
+    /// Named with a `_test` prefix so future agents cannot mistake this for a
+    /// production toggle. Visible to `@testable import GeniusLocusKit` only.
+    var _testForceVectorHammingError: Error? = nil
+
+    /// Test-only: when non-nil, `compileSketch` returns this error instead of
+    /// calling `corpus.embed`. Consumed on the first call; subsequent calls behave
+    /// normally. Never set in production code.
+    var _testForceEmbedError: Error? = nil
+
+    /// Test-only: when non-nil, the structured pool load (`estate.getDrawers` in
+    /// step 5.5 of `recallUnionBest`) returns this error. Consumed on the first
+    /// call; subsequent calls behave normally. Never set in production code.
+    var _testForcePoolGetDrawersError: Error? = nil
+
+    /// Test-only: when non-nil, the MMR body-hydration step (step 9.5 of
+    /// `recallUnionBest`) returns this error. Consumed on the first call;
+    /// subsequent calls behave normally. Never set in production code.
+    var _testForceMMRHydrationError: Error? = nil
+
+    /// Test-only: when non-nil, the returned-hits body-hydration step (step 10.5
+    /// of `recallUnionBest`) returns this error. Consumed on the first call;
+    /// subsequent calls behave normally. Never set in production code.
+    var _testForceReturnHydrationError: Error? = nil
+
+    /// Test-only: when non-nil, the hybrid lane's `estate.getDrawers` call for
+    /// frontier candidates returns this error. Consumed on the first call;
+    /// subsequent calls behave normally. Never set in production code.
+    var _testForceHybridGetDrawersError: Error? = nil
+
+    /// Test-only: when non-nil, the corpusOnly lane's `estate.getDrawers` call
+    /// for fused candidates returns this error. Consumed on the first call;
+    /// subsequent calls behave normally. Never set in production code.
+    var _testForceCorpusOnlyGetDrawersError: Error? = nil
+
+    // MARK: — Test seam injection helpers
+
+    /// Inject a Hamming vector lane error for the next recall call.
+    ///
+    /// Intended for tests only (`@testable import`). Sets the single-use
+    /// `_testForceVectorHammingError` seam. Never call in production code.
+    func _inject(vectorHammingError error: Error) {
+        _testForceVectorHammingError = error
+    }
+
+    /// Inject an embed error for the next `compileSketch` call.
+    ///
+    /// Intended for tests only. Never call in production code.
+    func _inject(embedError error: Error) {
+        _testForceEmbedError = error
+    }
+
+    /// Install the encode-drain ingest-failure hook (test seam).
+    ///
+    /// The hook runs on the actor before each encode-drain ingest attempt; a
+    /// thrown error simulates a transient ingest fault, exercising the
+    /// at-least-once bounded-retry path. Intended for tests only
+    /// (`@testable import`). Never call in production code.
+    func _setEncodeIngestFailureHook(_ hook: @escaping @Sendable (String) throws -> Void) {
+        encodeIngestFailureHook = hook
+    }
+
+    /// Inject a pool `getDrawers` error for the next `recallUnionBest` step 5.5 call.
+    ///
+    /// Intended for tests only. Never call in production code.
+    func _inject(poolGetDrawersError error: Error) {
+        _testForcePoolGetDrawersError = error
+    }
+
+    /// Inject an MMR body-hydration error for the next `recallUnionBest` step 9.5 call.
+    ///
+    /// Intended for tests only. Never call in production code.
+    func _inject(mmrHydrationError error: Error) {
+        _testForceMMRHydrationError = error
+    }
+
+    /// Inject a return-hits body-hydration error for the next `recallUnionBest` step 10.5 call.
+    ///
+    /// Intended for tests only. Never call in production code.
+    func _inject(returnHydrationError error: Error) {
+        _testForceReturnHydrationError = error
+    }
+
+    /// Inject a hybrid `getDrawers` error for the next `recallHybrid` frontier load call.
+    ///
+    /// Intended for tests only. Never call in production code.
+    func _inject(hybridGetDrawersError error: Error) {
+        _testForceHybridGetDrawersError = error
+    }
+
+    /// Inject a corpusOnly `getDrawers` error for the next `hydrateHits` call.
+    ///
+    /// Intended for tests only. Never call in production code.
+    func _inject(corpusOnlyGetDrawersError error: Error) {
+        _testForceCorpusOnlyGetDrawersError = error
+    }
+
     /// Construct an empty kit. The estate registry starts empty;
     /// callers admit estates via `open(storage:owner:)`.
     public init() {
@@ -233,6 +421,17 @@ public extension GeniusLocusKit {
     ///   - handle: The estate this store is associated with. Must be open.
     func registerVectorStore(_ store: VectorStore, for handle: EstateHandle) {
         vectorStores[handle] = store
+    }
+
+    /// The `VectorStore` registered for `handle`, or `nil` when none has been
+    /// registered (e.g. semantic recall was not wired for this estate).
+    ///
+    /// Public read accessor so a consumer that registered the store elsewhere
+    /// (the resident daemon wires it in `AriaMCPMain`) can retrieve it to wire
+    /// the standing-signal scheduler's `VectorSimilaritySignal` against the same
+    /// store. The actor isolates the registry; this is a plain read.
+    func registeredVectorStore(for handle: EstateHandle) -> VectorStore? {
+        vectorStores[handle]
     }
 
     /// Register a `MatrixTier` snapshot for the given estate handle.

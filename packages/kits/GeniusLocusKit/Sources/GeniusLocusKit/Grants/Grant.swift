@@ -176,11 +176,25 @@ public enum GrantLifetime: Sendable, Codable, Equatable {
     }
 }
 
-/// The four custody modes from Appendix B. Modes 1 and 2 are
-/// production at v1.0; modes 3 and 4 are v1.5 gate / experimental and
-/// raise `experimentalModeNotActivated` at issue time unless IP
-/// clearance is confirmed. With clearance, mode 3 issues (ENC-02) while
-/// mode 4 still raises `hardwareNotSupported`.
+/// The four custody modes (Appendix B). Modes 1 and 2 are production;
+/// mode 3 is experimental gated behind `experimentalIPClearanceConfirmed`;
+/// mode 4 is the time-aging decay policy.
+///
+/// Mode 4 — time-aging decay (`timeAging`). The original Appendix B mode 4
+/// modelled physical SRAM decay: an estate handed a grant whose effective
+/// capability *attenuates over time* the way data retention in an unpowered
+/// SRAM cell decays (the TARDIS technique, USENIX 2012). SRAM hardware is
+/// not available on any beta surface, so the shipped policy is a
+/// deterministic SOFTWARE time-aging model with the same semantics:
+/// the grant's effective content level decays as a half-life function of the
+/// elapsed time since `decayStartedAt`, floored at `decayFloor`. The
+/// attenuation is computed against an injected `now` (no wall-clock read), so
+/// it is reproducible and bit-comparable across ports. See
+/// `Grant.effectiveContentLevel(now:)` for the policy.
+///
+/// The legacy `"physicalDecay"` discriminant token decodes INTO this mode:
+/// the mode-4 slot was never removed from the schema, and a legacy row with
+/// no decay fields receives documented defaults (see `GrantStore`).
 public enum CustodyMode: Sendable, Codable, Equatable {
     /// Mode 1: the scope key never leaves custody; every read is a live
     /// request; clawback is cryptographic.
@@ -194,17 +208,111 @@ public enum CustodyMode: Sendable, Codable, Equatable {
     case decayDerived(threshold: Int, totalShares: Int,
                       driftRatePerDay: DriftRate,
                       experimentalIPClearanceConfirmed: Bool)
-    /// Mode 4: physical SRAM decay. Not implemented in v1.0.
-    case physicalDecay(experimentalIPClearanceConfirmed: Bool)
+    /// Mode 4: time-aging decay. The grant's effective content level
+    /// attenuates as a half-life function of elapsed time, floored at
+    /// `floor`. Software analogue of the original SRAM physical-decay
+    /// model (TARDIS); decay is deterministic in injected `now`. See
+    /// `DecayPolicy` for the field semantics.
+    case timeAging(DecayPolicy)
 
-    /// The `custody_mode` column discriminant and signing token.
+    /// The signing token: identity, grantee, scope, and all custody
+    /// parameters the signature must cover. For `timeAging` the decay policy
+    /// fields ride in the token so a tampered half-life, start instant, or
+    /// floor breaks signature verification.
     var signingToken: String {
         switch self {
-        case .mediated:        return "mediated"
-        case .handedOver:      return "handedOver"
-        case .decayDerived:    return "decayDerived"
-        case .physicalDecay:   return "physicalDecay"
+        case .mediated:     return "mediated"
+        case .handedOver:   return "handedOver"
+        case .decayDerived: return "decayDerived"
+        case .timeAging(let policy): return "timeAging|\(policy.signingToken)"
         }
+    }
+
+    /// The bare `custody_mode` column discriminant — the persisted token
+    /// without associated values. Mode 3's and mode 4's parameters live in
+    /// dedicated columns (mode 3: GRT-01 known non-persistence; mode 4: the
+    /// `decay_*` columns), so the column stores only the discriminant.
+    var columnToken: String {
+        switch self {
+        case .mediated:     return "mediated"
+        case .handedOver:   return "handedOver"
+        case .decayDerived: return "decayDerived"
+        case .timeAging:    return "timeAging"
+        }
+    }
+}
+
+/// Parameters of the mode-4 time-aging custody policy.
+///
+/// A grant under `CustodyMode.timeAging` exposes a content level that
+/// attenuates over time. The effective level at instant `now` is
+///
+///     effective = max(floor, round(baseLevel * 0.5^(elapsed / halfLifeSeconds)))
+///
+/// where `elapsed = max(0, now - startedAt)` and `baseLevel` is the grant's
+/// persisted `contentLevel`. The half-life form mirrors the matrix-calibration
+/// decay (math treatise §8): the multiplicative factor `0.5^(elapsed/halfLife)`
+/// halves the surviving capability every `halfLifeSeconds`. The fraction is
+/// computed in `Double` but the result is rounded to an integer content level
+/// so both ports produce identical discrete values from identical fixtures.
+///
+/// `floor` is the minimum content level the grant decays toward — the residual
+/// capability that never ages away. A grant whose effective level reaches `0`
+/// (only possible when `floor == 0`) is treated as fully decayed and refused on
+/// the recall path. A positive `floor` keeps the grant usable indefinitely at
+/// the floor level.
+public struct DecayPolicy: Sendable, Codable, Equatable {
+    /// Default half-life for a legacy mode-4 row with no persisted decay
+    /// fields: 30 days in seconds. Chosen to match the matrix-calibration
+    /// decay default (math treatise §8, `halfLifeDays = 30.0`) so the one
+    /// decay constant the substrate documents is reused rather than invented.
+    public static let defaultHalfLifeSeconds = 30 * 24 * 60 * 60
+
+    /// Half-life of the capability in whole seconds. Every `halfLifeSeconds`
+    /// of elapsed time halves the surviving (above-floor) content level.
+    /// Must be positive; a non-positive value is clamped to 1 second by the
+    /// effective-level math so the formula never divides by zero.
+    public let halfLifeSeconds: Int
+
+    /// The instant decay is measured from. Persisted explicitly so the decay
+    /// clock is independent of the grant's `issuedAt`; a legacy row with no
+    /// decay fields documents `startedAt = issuedAt` (see `GrantStore`).
+    public let startedAt: Date
+
+    /// The minimum content level the grant decays toward. `0` means the grant
+    /// can decay to no access (and is refused once it reaches the floor); a
+    /// positive value is a permanent residual capability.
+    public let floor: Int
+
+    public init(halfLifeSeconds: Int, startedAt: Date, floor: Int) {
+        self.halfLifeSeconds = halfLifeSeconds
+        self.startedAt = startedAt
+        self.floor = floor
+    }
+
+    /// Deterministic token fragment for the signing payload. The instant is
+    /// rendered as fractional seconds since the reference date — the same
+    /// locale/calendar/timezone-independent numeric form the grant uses for
+    /// `issuedAt`, so the bytes are identical on every platform.
+    var signingToken: String {
+        "halfLife:\(halfLifeSeconds)|start:\(startedAt.timeIntervalSinceReferenceDate)|floor:\(floor)"
+    }
+
+    /// The effective content level of a `baseLevel` capability at `now`.
+    ///
+    /// Deterministic in `now`: `elapsed` is clamped to a non-negative value so a
+    /// `now` before `startedAt` yields the undecayed `baseLevel`, and a
+    /// non-positive `halfLifeSeconds` is clamped to 1 so the exponent is always
+    /// finite. The surviving level is `baseLevel * 0.5^(elapsed/halfLife)`,
+    /// rounded to the nearest integer (`.toNearestOrAwayFromZero`, matching the
+    /// Rust `round()` so both ports agree on the discrete value), then floored
+    /// at `floor`.
+    func effectiveLevel(baseLevel: Int, now: Date) -> Int {
+        let elapsed = max(0.0, now.timeIntervalSince(startedAt))
+        let halfLife = Double(max(1, halfLifeSeconds))
+        let surviving = Double(baseLevel) * pow(0.5, elapsed / halfLife)
+        let rounded = Int(surviving.rounded(.toNearestOrAwayFromZero))
+        return max(floor, rounded)
     }
 }
 
@@ -267,14 +375,9 @@ public enum GrantError: Error, Sendable, Equatable {
     case grantRevoked(id: UUID)
     /// The grant's lifetime has elapsed.
     case grantExpired(id: UUID)
-    /// A custody mode 3 or 4 grant was issued without
+    /// A mode-3 (decay-derived) grant was issued without
     /// `experimentalIPClearanceConfirmed: true`.
     case experimentalModeNotActivated
-    /// Custody mode 4's key mechanic (SRAM physical decay) is not
-    /// implemented; a clearance-confirmed mode-4 grant raises this. Mode
-    /// 3's Lagrange derivation is implemented (ENC-02) and no longer
-    /// raises this error.
-    case hardwareNotSupported
     /// No grant with the given id is on record.
     case grantNotFound(id: UUID)
     /// Mode 1: the originating estate is offline so the live key

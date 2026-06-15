@@ -10,7 +10,7 @@
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -267,12 +267,14 @@ fn calibration_deflates_overconfidence() {
 
 #[test]
 fn nmf_approximates_input_matrix() {
+    // MatrixNMF delegates to the canonical substrate NMFAlternatingLeastSquares
+    // (f32, RMS error). For a perfect rank-1 input the RMS error converges to 0.0.
+    // tolerance is f32 (the substrate canonical tolerance type).
     let o: [f64; 9] = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0];
-    #[allow(clippy::unusual_byte_groupings)]
-    let f = MatrixNMF::factorize(&o, 3, 3, 1, 0xC0FFEE_BABE_BEEF, 200, 1e-9);
+    let f = MatrixNMF::factorize(&o, 3, 3, 1, 0xDEADBEEFCAFEBABE, 200, 1e-9_f32);
     assert!(
         f.reconstruction_error < 1e-3,
-        "err {}",
+        "RMS err {} (canonical f32 substrate NMF)",
         f.reconstruction_error
     );
     assert_eq!(f.loadings_for_row(0).len(), 1);
@@ -280,9 +282,11 @@ fn nmf_approximates_input_matrix() {
 
 #[test]
 fn nmf_deterministic_across_runs() {
+    // Two calls with the same seed produce bit-identical f32 W and H
+    // via the canonical substrate NMFAlternatingLeastSquares.
     let o: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
-    let a = MatrixNMF::factorize(&o, 2, 2, 2, 42, 20, 1e-9);
-    let b = MatrixNMF::factorize(&o, 2, 2, 2, 42, 20, 1e-9);
+    let a = MatrixNMF::factorize(&o, 2, 2, 2, 42, 20, 1e-4_f32);
+    let b = MatrixNMF::factorize(&o, 2, 2, 2, 42, 20, 1e-4_f32);
     assert_eq!(a.w, b.w);
     assert_eq!(a.h, b.h);
 }

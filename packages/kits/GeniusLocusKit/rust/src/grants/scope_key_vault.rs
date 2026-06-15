@@ -121,10 +121,16 @@ impl ScopeKeyVault {
                 Ok(Some(key.to_vec()))
             }
 
-            CustodyMode::PhysicalDecay { .. } => {
-                // Mode 4 (physical SRAM decay) is not implemented in v1.0.
-                // The Swift port raises `hardwareNotSupported` here.
-                Err(GrantError::HardwareNotSupported)
+            CustodyMode::TimeAging(_) => {
+                // Mode 4: the scope key is derived once and handed to the
+                // recipient exactly as mode 2 — the time-aging policy
+                // attenuates the *content level* on the recall path, not the
+                // key. Binding to the grantee (mode-2 derivation) keeps a
+                // mode-4 key from being usable by any other estate. The vault
+                // retains nothing. Mirror of Swift ScopeKeyVault.issue `.timeAging`.
+                let info_bytes = Self::info_bytes(grant.id, Some(grant.grantee_estate_id));
+                let key_bytes = hkdf::derive_key(identity_key_raw, GRANT_SALT, &info_bytes, 32);
+                Ok(Some(key_bytes))
             }
         }
     }
@@ -170,6 +176,16 @@ impl ScopeKeyVault {
     /// Mirror of Swift `ScopeKeyVault.holdsScopeKey(for:)`.
     pub fn holds_scope_key(&self, id: Uuid) -> bool {
         self.mediated_keys.contains_key(&id)
+    }
+
+    /// Remove a scope key from the vault without recording a revocation.
+    ///
+    /// Test helper for simulating vault-key loss (e.g. estate restart without
+    /// key reload) so that mode-1 custody gate tests can verify CustodyRefused.
+    /// Unlike `revoke`, this does NOT add the grant id to the revoked set —
+    /// the grant remains active in the GrantStore; only the in-memory key is gone.
+    pub fn remove_scope_key(&mut self, id: Uuid) {
+        self.mediated_keys.remove(&id);
     }
 
     // MARK: - Private helpers

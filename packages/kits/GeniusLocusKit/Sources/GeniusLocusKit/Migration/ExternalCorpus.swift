@@ -1,9 +1,19 @@
 // ExternalCorpus.swift
 //
-// The external reference corpus the migration API ingests and the
-// benchmark scores a branch against (NEURONKIT_SPEC § 4.7). A corpus
-// is a MemPalace export — or any enumerable reference set — flattened
-// to a list of id/content/tags entries.
+// The external reference corpus the migration benchmark scores a branch
+// against (NEURONKIT_SPEC § 4.7). A corpus is any enumerable reference
+// set flattened to a list of id/content/tags entries.
+//
+// Corpus construction paths (VK-ADAPT-01, ADR-007):
+//   - VaultKit's CorpusProjection converts [NoteIR] → ExternalCorpus for
+//     the adapter → bridge import pipeline.
+//   - ARIA_MCP can construct a corpus inline from wire args.
+//   - NeuronKit's benchmark algorithm constructs corpora programmatically
+//     from captured drawer content.
+//
+// Decode knowledge for the external memory-tool JSON export format lives
+// in VaultKit's ExchangeAdapter per ADR-007 Decision 1; it is not
+// reproduced here.
 //
 // Ownership rationale: "external" means external to a GeniusLocus
 // estate — the reference frame belongs to the consumer, not the
@@ -24,7 +34,7 @@ import CorpusKit
 
 /// A single entry in an external reference corpus used for migration
 /// benchmarking. `id` is the stable identifier from the source system
-/// (a MemPalace node ID, a reference key); it is compared against
+/// (an external tool node ID, a reference key); it is compared against
 /// `Drawer.id` values recalled from a branch. In a lossless migration
 /// each entry's `id` equals the `id` of the drawer the migration
 /// produced from it, so the benchmark's expected-vs-found set
@@ -36,9 +46,9 @@ public struct ExternalEntry: Sendable, Codable, Equatable {
     /// Verbatim text — the basis for the derived `RecallFrame` query.
     public let content: String
     /// Classification tags carried from the source system. Advisory;
-    /// the benchmark does not weight on them in v1 (kept so the decode
-    /// shape is faithful to MemPalace exports and the migration API can
-    /// read them without a schema change).
+    /// the benchmark does not weight on them in v1. Tags are populated
+    /// by VaultKit's CorpusProjection from NoteIR.tags when the corpus
+    /// originates from the adapter → bridge import pipeline.
     public let tags: [String]
 
     public init(id: String, content: String, tags: [String]) {
@@ -48,7 +58,7 @@ public struct ExternalEntry: Sendable, Codable, Equatable {
     }
 }
 
-/// An external corpus for benchmark comparison — a MemPalace export or
+/// An external corpus for benchmark comparison — an exchange-format export or
 /// any enumerable reference set. Owned by GeniusLocusKit; consumed by
 /// the migration API and by NeuronKit's benchmark algorithm. Value
 /// type, fully `Sendable`.
@@ -63,27 +73,6 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     public init(name: String, entries: [ExternalEntry]) {
         self.name = name
         self.entries = entries
-    }
-
-    /// Decode a MemPalace JSON export at `url`.
-    ///
-    /// Minimal documented shape (the schema is not pinned in
-    /// NEURONKIT_SPEC § 4.7, and a repo-wide search of docs/canon and
-    /// docs/engineering found no canonical MemPalace export schema to
-    /// defer to, so this is the authoritative shape per the mission's
-    /// Known Ambiguities resolution):
-    ///
-    /// ```json
-    /// { "name": String, "entries": [ { "id": String, "content": String, "tags": [String] } ] }
-    /// ```
-    ///
-    /// `ExternalCorpus` is itself `Codable` against exactly this shape,
-    /// so the decode is a direct `JSONDecoder` pass — no bespoke
-    /// container parsing. Throws on malformed JSON or any missing
-    /// required field (`name`, `id`, `content`, `tags`).
-    public static func load(from url: URL) throws -> ExternalCorpus {
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(ExternalCorpus.self, from: data)
     }
 
     /// One `RecallFrame` per entry, in entry order.
@@ -104,12 +93,12 @@ public struct ExternalCorpus: Sendable, Codable, Equatable {
     /// - `.unconfirmed` is required, not incidental. The recall evaluator
     ///   inserts four implicit filters for any axis the chain leaves
     ///   unconstrained (spec § 7.9.5), and one of them is `.userConfirmed`.
-    ///   Migrated drawers enter the branch through the `capture` verb and
+    ///   Imported drawers enter the branch through the `capture` verb and
     ///   are unconfirmed by default, so without an explicit confirmation
-    ///   constraint every freshly migrated row would be hidden behind the
+    ///   constraint every freshly imported row would be hidden behind the
     ///   default `.userConfirmed` filter and the benchmark would report a
     ///   total loss. Constraining the axis to `.unconfirmed` matches the
-    ///   migrated-content state and mirrors the substrate's own branch
+    ///   imported-content state and mirrors the substrate's own branch
     ///   enumeration in `glkPromoteBranch` / `glkMergeDrawers`.
     /// - `hydrationLevel: .structured` because the benchmark only reads
     ///   `Drawer.id`; full blob hydration would be wasted work.

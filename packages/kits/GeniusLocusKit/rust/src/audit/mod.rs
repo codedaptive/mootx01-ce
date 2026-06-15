@@ -14,11 +14,13 @@
 pub mod log;
 pub mod projection;
 pub mod recovery;
+pub mod verifier;
 
 pub use log::{
     sha256, AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue,
     UnifiedAuditVerb,
 };
+pub use verifier::{AuditChainReport, AuditChainVerifier};
 pub use projection::{
     AuditProjectionFold, UnifiedProjection, UnifiedProjectionKey, UnifiedRowProjection,
 };

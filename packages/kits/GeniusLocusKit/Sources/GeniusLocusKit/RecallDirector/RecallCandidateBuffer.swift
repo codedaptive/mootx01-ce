@@ -10,6 +10,7 @@ import LocusKit
 ///   - bit 1: locusGraph
 ///   - bit 2: corpusBM25
 ///   - bit 3: vectorHamming
+///   - bit 4: vectorDense
 ///
 /// `merge` provides O(1) deduplication via `idToIndex`: if the ID is
 /// already in the buffer, the source bit is unioned and per-column scores
@@ -41,8 +42,17 @@ struct RecallCandidateBuffer {
     var graph: [Float]
     /// Learned-preference score for each slot (populated in a future mission).
     var preference: [Float]
+    /// Dense-float cosine-similarity score for each slot (Lane D), in [0, 1].
+    /// Populated by the dense float lane; 0 for slots it did not contribute.
+    var dense: [Float]
     /// Combined final score, used as the MMR relevance signal after normalizeFinals.
     var final: [Float]
+    /// Raw integer Hamming distance (0…256) for each slot that came from the
+    /// vector lane, or `RecallScoreVector.noHammingDistance` (-1) for slots
+    /// that did not. Carried verbatim from `VectorMatch.distance` so the dense
+    /// signal survives the union merge; never normalised (it is not a score
+    /// column — `normalizeFinals` deliberately leaves it untouched).
+    var hammingDistance: [Int]
     /// O(1) lookup from drawer ID to slot index.
     var idToIndex: [String: Int]
     /// Number of slots populated so far. Always ≤ capacity.
@@ -56,6 +66,7 @@ struct RecallCandidateBuffer {
     static let bitLocusGraph: UInt16    = 1 << 1
     static let bitCorpusBM25: UInt16    = 1 << 2
     static let bitVectorHamming: UInt16 = 1 << 3
+    static let bitVectorDense: UInt16   = 1 << 4
 
     /// Initialise a buffer with fixed `capacity`. No reallocation occurs after this call.
     ///
@@ -73,7 +84,11 @@ struct RecallCandidateBuffer {
         self.temporal     = Array(repeating: 0, count: capacity)
         self.graph        = Array(repeating: 0, count: capacity)
         self.preference   = Array(repeating: 0, count: capacity)
+        self.dense        = Array(repeating: 0, count: capacity)
         self.final        = Array(repeating: 0, count: capacity)
+        // Initialise to the sentinel: a slot only acquires a real distance when a
+        // vector-lane hit merges into it. Non-vector slots keep the sentinel.
+        self.hammingDistance = Array(repeating: RecallScoreVector.noHammingDistance, count: capacity)
         self.idToIndex    = [:]
         idToIndex.reserveCapacity(capacity)
     }
@@ -100,7 +115,16 @@ struct RecallCandidateBuffer {
             temporal[idx]      = max(temporal[idx],      hit.score.temporal)
             graph[idx]         = max(graph[idx],         hit.score.graph)
             preference[idx]    = max(preference[idx],    hit.score.preference)
+            dense[idx]         = max(dense[idx],         hit.score.dense)
             final[idx]         = max(final[idx],         hit.score.final)
+            // Hamming distance is not a score column, so it is not max'd: the
+            // vector lane is the only producer of a real distance for a given id,
+            // and a drawer has one stored engram, so the distance is the same
+            // whichever lane re-merges it. Keep the first real (non-sentinel)
+            // value; never let a sentinel from a non-vector lane overwrite it.
+            if hit.score.hammingDistance != RecallScoreVector.noHammingDistance {
+                hammingDistance[idx] = hit.score.hammingDistance
+            }
         } else {
             // New candidate: append if capacity allows.
             guard count < capacity else { return }
@@ -116,7 +140,9 @@ struct RecallCandidateBuffer {
             temporal[idx]     = hit.score.temporal
             graph[idx]        = hit.score.graph
             preference[idx]   = hit.score.preference
+            dense[idx]        = hit.score.dense
             final[idx]        = hit.score.final
+            hammingDistance[idx] = hit.score.hammingDistance
             count += 1
         }
     }
@@ -147,6 +173,7 @@ struct RecallCandidateBuffer {
         temporal     = normalizedCopy(of: temporal)
         graph        = normalizedCopy(of: graph)
         preference   = normalizedCopy(of: preference)
+        dense        = normalizedCopy(of: dense)
         final        = normalizedCopy(of: final)
     }
 

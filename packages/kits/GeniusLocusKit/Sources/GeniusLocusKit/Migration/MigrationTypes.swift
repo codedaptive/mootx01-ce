@@ -1,18 +1,21 @@
 // MigrationTypes.swift
 //
-// Value types and error enum for the GeniusLocusKit migration API
-// (GLK-MIG-02). These are the data-transfer objects the three
-// migration verbs produce and consume — no estate logic here.
+// Value types and error enum for the GeniusLocusKit migration API.
+// These are the data-transfer objects the migration verbs (runParallel,
+// verifyMigration) and their consumers produce and consume — no estate
+// logic here.
 
 import Foundation
 
 // MARK: - MigrationReport
 
-/// A summary of a completed MemPalace import operation.
+/// A migration-summary DTO retained on the GLK surface (VK-ADAPT-01:
+/// the type remains here while mass ingestion lives in VaultKit, whose
+/// `importVault` returns its own `ImportReport`).
 ///
-/// Produced by `GeniusLocusKit.importFromMemPalace(_:targetStorage:owner:now:)`.
-/// Every corpus entry is accounted for: entries that landed in the estate
-/// appear in `rowsByNoun`; entries that could not be mapped appear in
+/// Summarises a corpus import operation against an estate. Every corpus
+/// entry is accounted for: entries that landed in the estate appear in
+/// `rowsByNoun`; entries that could not be mapped appear in
 /// `unmappedConcepts`. The two counts must sum to `corpus.entries.count`
 /// (spec conformance C-13 zero-loss invariant).
 public struct MigrationReport: Sendable, Codable {

@@ -40,7 +40,16 @@ persistence-kit = { path = "../../PersistenceKit/rust" }
 # Corpus.recall for hybrid BM25+vector retrieval.
 vectorkit = { path = "../../VectorKit/rust" }
 corpus-kit = { path = "../../CorpusKit/rust" }
+# Dual-Path Intake (G7): the per-estate encode queue is a real QueueKit
+# mounted on the in-memory PersistenceKit backend (D-B), so GLK depends on
+# queuekit with the persistencekit feature. Mirrors the Swift
+# `import QueueKit` in EncodeIntake.swift. Layering: genius-locus-kit
+# (composition) → queuekit (substrate) does NOT invert.
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+queuekit = { path = "../../QueueKit/rust", features = ["persistencekit"] }
 uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 # Crypto hygiene: zeroize scope keys on drop and on revoke. This is the
 # companion crate to aes-gcm (already a transitive dep via PersistenceKit);
 # adding it as a direct dep makes the dependency explicit and enables the
@@ -55,3 +64,57 @@ zeroize = "1"
 # Layering: genius-locus-kit (composition) → intellectus-lib (floor). No inversion.
 # Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust equivalent: no inversion rule).
 intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
+# ConvergenceKit: sync-backend abstraction. GeniusLocusKit stores the active
+# SyncEngine per estate and exposes sync_state_token so ARIA surfaces can
+# report honest sync status. Layering: genius-locus-kit (composition) →
+# convergence-kit (sync tier) does NOT invert. convergence-kit has no
+# dependency on genius-locus-kit.
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+convergence-kit = { path = "../../ConvergenceKit/rust" }
+
+[features]
+# test-seams: exposes EstateCoordinator::inject_vector_hamming_error and
+# inject_embed_error for P1 degradation force-tests in the integration test suite
+# (tests/recall_scored_parity.rs GROUP E). Compiled out of the production binary.
+# Pattern mirrors corpus-kit's test-seams feature (same crate, same technique).
+# Also enables locus-kit/test-seams so the LocusKit recall internal-read fault
+# seam (Estate::set_test_force_internal_read_error) is reachable from GLK
+# integration tests that drive recall through the RecallDirector (P0-5 sites
+# 1-5). Without this, the dependency crate's `test` cfg does NOT apply to GLK's
+# integration tests and the seam method would be absent.
+test-seams = ["locus-kit/test-seams"]
+
+[dev-dependencies]
+# Test-only: engram-lib is needed to implement the EmbeddingProvider trait in
+# integration tests (D5: ThrowingFloatProvider for dense_lane_status parity tests).
+# engram-lib is already a transitive dependency via vectorkit → engram-lib;
+# this dev-dep makes it directly nameable in tests/ without altering the
+# production dependency graph.
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (dev-dep, no layering inversion:
+# engram-lib is a substrate lib below GLK).
+engram-lib = { path = "../../../libs/EngramLib/rust" }
+
+# Test-only: enable LocusKit's test-seams feature so out-of-crate GLK integration
+# tests can drive LocusKit fault-injection hooks (e.g. set_test_force_orphan_seal_error
+# in expunge_vector_orphan). Dev-dep only — not enabled in production builds.
+locus-kit = { path = "../../LocusKit/rust", features = ["test-seams"] }
+# test-seams feature enables Corpus::open_with_provider and
+# Corpus::forced_float_error for gate-2 storeError force-testing (D-6 parity
+# test). The production [dependencies] entry above carries no features so the
+# seams are absent from the shipped binary. Dev-dep only; no inversion.
+corpus-kit = { path = "../../CorpusKit/rust", features = ["test-seams"] }
+
+# These integration-test binaries call EstateCoordinator seams gated behind
+# `#[cfg(any(test, feature = "test-seams"))]`: recall_scored_parity uses
+# inject_vector_hamming_error / inject_embed_error (GROUP E degradation), and
+# encode_intake_parity uses arm_transient_encode_ingest_failures (bounded-retry
+# path). For an integration test the dependency crate's `test` cfg does NOT
+# apply, so declare required-features so a default `cargo test` picks up the
+# flag for these binaries automatically — mirroring corpus-kit's corpus_tests.
+[[test]]
+name = "recall_scored_parity"
+required-features = ["test-seams"]
+
+[[test]]
+name = "encode_intake_parity"
+required-features = ["test-seams"]

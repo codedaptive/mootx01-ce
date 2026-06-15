@@ -16,7 +16,7 @@ use crate::matrix::{MatrixCalibrationRegistry, MatrixTier, MatrixValueCoord};
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,

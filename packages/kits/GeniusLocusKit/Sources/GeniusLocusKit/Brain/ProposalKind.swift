@@ -66,6 +66,15 @@ public enum ProposalKind: Sendable, Hashable, Codable {
     /// through `propose` for confirmation."
     case mutateCandidate
 
+    /// Enrichment / Q-ID-assignment proposal. Filed by the maintenance
+    /// daemon when deterministic re-inference cannot resolve a drawer's
+    /// Wikidata Q-ID (cookbook §2.5; Q-ID-completion terminal workflow).
+    /// Carries the drawer target and the resolved MDCC code as candidate
+    /// context in the justification. Acceptance writes the human/agent-
+    /// supplied Q-ID into the drawer's anchor and flips the enrichment
+    /// status to `qidCompleted`.
+    case enrichment
+
     // MARK: Test / lifecycle labels (public taxonomy)
 
     /// Amend proposal — used in verb-surface tests as a lifecycle label
@@ -97,6 +106,7 @@ public enum ProposalKind: Sendable, Hashable, Codable {
         case .miningPattern:      return "mining_pattern"
         case .disciplineViolation: return "discipline_violation"
         case .mutateCandidate:    return "mutate_candidate"
+        case .enrichment:         return "enrichment"
         case .amend:              return "amend"
         case .testPropose:        return "test_propose"
         case .other(let s):       return s
@@ -112,6 +122,7 @@ public enum ProposalKind: Sendable, Hashable, Codable {
         case "mining_pattern":       self = .miningPattern
         case "discipline_violation": self = .disciplineViolation
         case "mutate_candidate":     self = .mutateCandidate
+        case "enrichment":           self = .enrichment
         case "amend":                self = .amend
         case "test_propose":         self = .testPropose
         default:                     self = .other(rawValue)

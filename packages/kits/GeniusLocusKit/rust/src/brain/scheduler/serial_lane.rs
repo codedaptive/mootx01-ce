@@ -15,39 +15,65 @@
 //   the Rust mirror uses a synchronous closure so the parity test
 //   has no async runtime. The four-class emission contract is
 //   unchanged.
+//
+// - Dispatcher carries `now_nanos`. The Rust substrate uses explicit
+//   `now` parameters throughout (determinism convention). The Swift
+//   `SignalDispatcher` calls `dispatchPropose`/`dispatchAssociate`
+//   without a timestamp because the Swift coordinator reads its own
+//   clock; the Rust port threads `now_nanos` from the drain loop
+//   through `apply_emission` into both dispatch methods so verb calls
+//   reach a deterministic coordinator path.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::brain::scheduler::api::*;
 use crate::brain::scheduler::schedule::SchedulerError;
+use crate::coordinator::{EstateCoordinator, VerbDispatchError};
+use crate::handle::EstateHandle;
+use crate::verbs::frames::{
+    AssociateFrame as VerbAssociateFrame, ProposeFrame as VerbProposeFrame,
+};
+use crate::verbs::lexicon::VerbError;
 
-/// Closure shape the scheduler calls back into to route `propose`
-/// and `associate` emissions. Mirrors Swift's `SignalDispatcher`
-/// protocol.
+/// Routing surface the scheduler calls back into to execute `propose`
+/// and `associate` emissions against the live coordinator. Mirrors
+/// Swift's `SignalDispatcher` protocol.
 ///
-/// `Ok(true)` records `Routed`; `Ok(false)` records
-/// `RoutedButVerbStubbed` (the GLK-02 substrate-stub case);
-/// `Err(reason)` records `RouteFailed`.
+/// `now_nanos` is threaded from the drain loop so verb calls satisfy
+/// the Rust determinism convention (explicit `now` everywhere, never
+/// `SystemTime::now()` inside the coordinator).
+///
+/// Return contract (parity with Swift `dispatchPropose`/`dispatchAssociate`):
+///   `Ok(true)`  — verb succeeded → records `Routed`
+///   `Ok(false)` — verb raised `VerbError::NotSupportedByEstate` →
+///                 records `RoutedButVerbStubbed`
+///   `Err(msg)`  — any other verb or dispatch failure → records `RouteFailed`
 pub trait Dispatcher: Send + Sync {
     fn dispatch_propose(
         &self,
         handle: &EstateHandleID,
         frame: &ProposalFrame,
+        now_nanos: i64,
     ) -> Result<bool, String>;
 
     fn dispatch_associate(
         &self,
         handle: &EstateHandleID,
         frame: &AssociationFrame,
+        now_nanos: i64,
     ) -> Result<bool, String>;
 }
 
-/// Default dispatcher that mimics GLK-02's substrate-stub behaviour:
-/// every propose/associate call is acknowledged but reported as
-/// `routed_but_verb_stubbed`. The parity test uses this so the Rust
-/// surface matches the Swift surface where the GLK verb-body wiring
-/// to locus_kit::Estate has not yet been completed.
+/// Test-only stub dispatcher. Every propose/associate call is
+/// acknowledged but reported as `routed_but_verb_stubbed`, so tests that
+/// verify scheduling mechanics (ordering, emission counting, concurrency
+/// policy) can run without a live estate. It is NOT wired in any shipped
+/// product path: the production dispatcher is `CoordinatorDispatcher`
+/// (routes emissions to real coordinator verbs), and the Rust resident
+/// runs no standing-signal scheduler at all — its autonomic governor loop
+/// is the only scheduler (see packages/kits/AriaMcpKit/rust/src/autonomic_governor.rs).
 pub struct NoopDispatcher;
 
 impl Dispatcher for NoopDispatcher {
@@ -55,6 +81,7 @@ impl Dispatcher for NoopDispatcher {
         &self,
         _handle: &EstateHandleID,
         _frame: &ProposalFrame,
+        _now_nanos: i64,
     ) -> Result<bool, String> {
         Ok(false)
     }
@@ -63,8 +90,140 @@ impl Dispatcher for NoopDispatcher {
         &self,
         _handle: &EstateHandleID,
         _frame: &AssociationFrame,
+        _now_nanos: i64,
     ) -> Result<bool, String> {
         Ok(false)
+    }
+}
+
+/// Production dispatcher that routes scheduler emissions through the
+/// live `EstateCoordinator` verb surface. This is the Rust equivalent
+/// of Swift's `SchedulerDispatcher` in `SignalAPI.swift`:
+///
+/// ```swift
+/// internal struct SchedulerDispatcher: SignalDispatcher {
+///     let kit: GeniusLocusKit
+///     func dispatchPropose(handle:frame:) async throws { try await kit.propose(handle, frame) }
+///     func dispatchAssociate(handle:frame:) async throws { try await kit.associate(handle, frame) }
+/// }
+/// ```
+///
+/// The coordinator is shared behind a `Mutex` so the same `EstateCoordinator`
+/// that the application uses for direct verb calls can also service
+/// scheduler-driven emissions — single ownership, no duplication of
+/// estate state.
+///
+/// The stored `handle` is the live `EstateHandle` for this estate. The
+/// scheduler's `EstateHandleID` string is checked against the handle's
+/// UUID for belt-and-suspenders safety; a mismatch records `RouteFailed`
+/// because it indicates the scheduler was wired to the wrong coordinator
+/// instance.
+///
+/// `VerbError::NotSupportedByEstate` is mapped to `Ok(false)` (recorded
+/// as `RoutedButVerbStubbed`) matching Swift's `dispatchPropose` catch
+/// block that checks `if case .notSupportedByEstate = verbError`. All
+/// other failures propagate as `Err(reason)` (recorded as `RouteFailed`).
+pub struct CoordinatorDispatcher {
+    /// Shared coordinator that owns the live estate. `Mutex` because
+    /// the estate coordinator's verb methods take `&self` (interior
+    /// mutation via the underlying SQLite connection), which is already
+    /// thread-safe; the `Mutex` exists to satisfy `Send + Sync` for
+    /// the `Dispatcher` trait bound.
+    pub coordinator: Arc<Mutex<EstateCoordinator>>,
+    /// The specific estate this scheduler services. Stored as a value
+    /// type so the dispatcher can validate the incoming `EstateHandleID`
+    /// without a map lookup on every emission.
+    pub handle: EstateHandle,
+}
+
+impl CoordinatorDispatcher {
+    /// Construct a dispatcher backed by `coordinator` for `handle`.
+    pub fn new(coordinator: Arc<Mutex<EstateCoordinator>>, handle: EstateHandle) -> Self {
+        Self { coordinator, handle }
+    }
+}
+
+impl Dispatcher for CoordinatorDispatcher {
+    /// Route a `propose` emission from the scheduler to the
+    /// coordinator's `propose` verb.
+    ///
+    /// `now_nanos` is the drain-loop nanosecond timestamp. The
+    /// coordinator stores `filed_at` in epoch-seconds (ISO8601 TEXT
+    /// column), so `now_nanos` is converted to seconds by dividing by
+    /// `1_000_000_000` before the verb call. This matches the Swift
+    /// path where `dispatchPropose` calls `kit.propose(handle, frame)`
+    /// without a timestamp and the Swift actor reads `Date()` (which is
+    /// also seconds-precision for storage purposes).
+    fn dispatch_propose(
+        &self,
+        handle_id: &EstateHandleID,
+        frame: &ProposalFrame,
+        now_nanos: i64,
+    ) -> Result<bool, String> {
+        // Belt-and-suspenders: verify the incoming handle ID matches
+        // the stored handle. A mismatch means the scheduler was
+        // constructed with a different handle than the coordinator owns,
+        // which is a wiring error in the caller.
+        let expected_id = uuid::Uuid::from_bytes(self.handle.estate_uuid).to_string();
+        if handle_id != &expected_id {
+            return Err(format!(
+                "CoordinatorDispatcher handle mismatch: scheduler handle={handle_id}, \
+                 coordinator handle={expected_id}"
+            ));
+        }
+        // Convert nanoseconds → epoch-seconds for the coordinator's
+        // ISO8601-backed `filed_at` column.
+        let now_sec = now_nanos / 1_000_000_000;
+        let verb_frame = VerbProposeFrame {
+            target: frame.target.clone(),
+            kind: frame.kind.clone(),
+            justification: frame.justification.clone(),
+        };
+        let coordinator = self
+            .coordinator
+            .lock()
+            .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+        match coordinator.propose(&self.handle, verb_frame, now_sec) {
+            Ok(_) => Ok(true),
+            Err(VerbDispatchError::Verb(VerbError::NotSupportedByEstate { .. })) => Ok(false),
+            Err(e) => Err(format!("{e:?}")),
+        }
+    }
+
+    /// Route an `associate` emission from the scheduler to the
+    /// coordinator's `associate` verb.
+    ///
+    /// `now_nanos` is converted to epoch-seconds before the call for
+    /// the same reason as `dispatch_propose` — the coordinator's
+    /// `filed_at` column is ISO8601 TEXT (seconds precision).
+    fn dispatch_associate(
+        &self,
+        handle_id: &EstateHandleID,
+        frame: &AssociationFrame,
+        now_nanos: i64,
+    ) -> Result<bool, String> {
+        let expected_id = uuid::Uuid::from_bytes(self.handle.estate_uuid).to_string();
+        if handle_id != &expected_id {
+            return Err(format!(
+                "CoordinatorDispatcher handle mismatch: scheduler handle={handle_id}, \
+                 coordinator handle={expected_id}"
+            ));
+        }
+        let now_sec = now_nanos / 1_000_000_000;
+        let verb_frame = VerbAssociateFrame {
+            a: frame.a.clone(),
+            b: frame.b.clone(),
+            weight: frame.weight,
+        };
+        let coordinator = self
+            .coordinator
+            .lock()
+            .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+        match coordinator.associate(&self.handle, verb_frame, now_sec) {
+            Ok(_) => Ok(true),
+            Err(VerbDispatchError::Verb(VerbError::NotSupportedByEstate { .. })) => Ok(false),
+            Err(e) => Err(format!("{e:?}")),
+        }
     }
 }
 
@@ -300,7 +459,10 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
             let signal_id = entry.signal_id.clone();
             let emission = entry.emission;
             self.set_state(&signal_id, SignalState::Running);
-            let outcome = self.apply_emission(&signal_id, &emission);
+            // Thread now_nanos into apply_emission so the dispatcher can
+            // forward the drain-loop timestamp to the coordinator's verb
+            // calls (determinism convention: explicit `now` everywhere).
+            let outcome = self.apply_emission(&signal_id, &emission, now_nanos);
             if let Some(record) = self.signals.get_mut(&signal_id) {
                 record.recent_outcomes.push(outcome);
                 trim_retention(&mut record.recent_outcomes);
@@ -333,10 +495,15 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
         }
     }
 
-    fn apply_emission(&self, _id: &SignalID, emission: &SignalEmission) -> SignalRouteOutcome {
+    fn apply_emission(
+        &self,
+        _id: &SignalID,
+        emission: &SignalEmission,
+        now_nanos: i64,
+    ) -> SignalRouteOutcome {
         match emission {
             SignalEmission::Propose(frame) => {
-                match self.dispatcher.dispatch_propose(&self.handle, frame) {
+                match self.dispatcher.dispatch_propose(&self.handle, frame, now_nanos) {
                     Ok(true) => SignalRouteOutcome::Routed {
                         verb: "propose".into(),
                     },
@@ -350,7 +517,7 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
                 }
             }
             SignalEmission::Associate(frame) => {
-                match self.dispatcher.dispatch_associate(&self.handle, frame) {
+                match self.dispatcher.dispatch_associate(&self.handle, frame, now_nanos) {
                     Ok(true) => SignalRouteOutcome::Routed {
                         verb: "associate".into(),
                     },
@@ -365,7 +532,7 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
             }
             SignalEmission::MutateCandidate { row_id, kind } => {
                 // §11.1: routed through `propose` for confirmation.
-                // Build a ProposalFrame with kind=mutate_candidate
+                // Build a ProposalFrame with kind=MutateCandidate
                 // and the source mutation's case tag in the
                 // justification so downstream consumers can identify
                 // it.
@@ -374,7 +541,7 @@ impl<D: Dispatcher> SerialLaneScheduler<D> {
                     kind: ProposalKind::MutateCandidate,
                     justification: Some(format!("kind={}", kind.tag())),
                 };
-                match self.dispatcher.dispatch_propose(&self.handle, &frame) {
+                match self.dispatcher.dispatch_propose(&self.handle, &frame, now_nanos) {
                     Ok(true) => SignalRouteOutcome::Routed {
                         verb: "propose".into(),
                     },

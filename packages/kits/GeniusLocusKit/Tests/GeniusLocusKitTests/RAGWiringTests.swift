@@ -202,14 +202,14 @@ struct VectorSimilaritySignalProximityTests {
         let closeEngram = Engram.zero
 
         try await vectorStore.addVector(
-            drawerID: "drawer-A",
+            itemID: "drawer-A",
             engram: closeEngram,
             modelID: "test-v1",
             modelVersion: "1.0",
             filedAt: t0)
 
         try await vectorStore.addVector(
-            drawerID: "drawer-B",
+            itemID: "drawer-B",
             engram: closeEngram,
             modelID: "test-v1",
             modelVersion: "1.0",
@@ -277,10 +277,10 @@ struct VectorSimilaritySignalProximityTests {
             block2: UInt64.max, block3: UInt64.max)
 
         try await vectorStore.addVector(
-            drawerID: "far-A", engram: zeroEngram,
+            itemID: "far-A", engram: zeroEngram,
             modelID: "test-v1", modelVersion: "1.0", filedAt: t0)
         try await vectorStore.addVector(
-            drawerID: "far-B", engram: maxEngram,
+            itemID: "far-B", engram: maxEngram,
             modelID: "test-v1", modelVersion: "1.0", filedAt: t0)
 
         let kit = GeniusLocusKit()
