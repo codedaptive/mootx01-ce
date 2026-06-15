@@ -27,7 +27,7 @@ HARNESS := docs/validation/substrate_math_performance/test-harness
 DIST    ?= dist
 
 .PHONY: help build build-swift build-rust test test-swift test-rust \
-        conformance release list clean clean-dry clean-index
+        conformance release list clean clean-dry clean-index check-static-assets
 
 help:
 	@echo "mootx01 build targets:"
@@ -37,6 +37,7 @@ help:
 	@echo "  test         — test all Swift packages + Rust crates"
 	@echo "  test-swift   — swift test each Swift package (skips ones with no Tests/)"
 	@echo "  test-rust    — cargo test each Rust crate"
+	@echo "  check-static-assets — verify StaticAssets.swift matches DashboardAssets/ source"
 	@echo "  conformance  — cross-language shared-vector conformance gate"
 	@echo "  release      — build host-arch release archive (mootx01 + moot-mgr) into $(DIST)/"
 	@echo "  list         — print discovered packages and crates"
@@ -60,7 +61,7 @@ build-rust:
 	@echo "✓ all Rust crates built"
 
 # ── Test ────────────────────────────────────────────────────────────────
-test: test-swift test-rust
+test: test-swift test-rust check-static-assets
 
 test-swift:
 	@for d in $(SWIFT_PKGS); do \
@@ -79,6 +80,35 @@ test-rust:
 		( cd "$$d" && cargo test ) || { echo "FAILED (cargo test): $$d"; exit 1; }; \
 	done
 	@echo "✓ all Rust tests passed"
+
+# ── Static-asset lint gate ─────────────────────────────────────────────────────
+# Verifies that apps/moot-mgr/Sources/MootManager/StaticAssets.swift is in sync
+# with the DashboardAssets/ source files. Fails if the script would produce a
+# different file — meaning a developer edited DashboardAssets/ without committing
+# the regenerated StaticAssets.swift. Chained into `make test` so CI catches
+# out-of-sync commits.
+#
+# The gen_static_assets.sh script accepts an optional first argument to redirect
+# output to an arbitrary path; the check uses a temp directory to avoid touching
+# the live StaticAssets.swift. The script is copied with the asset sources so it
+# can locate them via its own dirname resolution.
+check-static-assets:
+	@TMPDIR=$$(mktemp -d) && \
+	trap "rm -rf $$TMPDIR" EXIT && \
+	cp apps/moot-mgr/Sources/MootManager/DashboardAssets/index.html \
+	   apps/moot-mgr/Sources/MootManager/DashboardAssets/app.css \
+	   apps/moot-mgr/Sources/MootManager/DashboardAssets/app.js \
+	   apps/moot-mgr/Sources/MootManager/DashboardAssets/sigma.js \
+	   apps/moot-mgr/Sources/MootManager/DashboardAssets/gen_static_assets.sh \
+	   "$$TMPDIR/" && \
+	bash "$$TMPDIR/gen_static_assets.sh" "$$TMPDIR/StaticAssets.swift.new" && \
+	diff apps/moot-mgr/Sources/MootManager/StaticAssets.swift \
+	     "$$TMPDIR/StaticAssets.swift.new" > /dev/null \
+	|| { echo "ERROR: StaticAssets.swift is out of sync with DashboardAssets/." && \
+	     echo "       Run: apps/moot-mgr/Sources/MootManager/DashboardAssets/gen_static_assets.sh" && \
+	     echo "       Then commit the regenerated StaticAssets.swift." && \
+	     exit 1; }
+	@echo "✓ StaticAssets.swift is in sync with DashboardAssets/"
 
 # ── Conformance ───────────────────────────────────────────────────────────
 # The cross-language gate: Swift and Rust must stay in lockstep.
@@ -103,9 +133,9 @@ conformance:
 # is built in CI on a v* tag; this is the local host-arch counterpart.
 release:
 	@mkdir -p "$(DIST)"
-	swift build -c release --package-path installer --product mootx01
+	swift build -c release --package-path apps/mootx01 --product mootx01
 	swift build -c release --package-path apps/moot-mgr --product moot-mgr
-	@cp installer/.build/release/mootx01 "$(DIST)/mootx01"
+	@cp apps/mootx01/.build/release/mootx01 "$(DIST)/mootx01"
 	@cp apps/moot-mgr/.build/release/moot-mgr "$(DIST)/moot-mgr"
 	@arch=$$(uname -m); asset="mootx01-local-macos-$$arch.tar.gz"; \
 	 ( cd "$(DIST)" && tar -czf "$$asset" mootx01 moot-mgr && shasum -a 256 "$$asset" ); \
