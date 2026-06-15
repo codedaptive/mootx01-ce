@@ -1,0 +1,14 @@
+interface:
+  display_name: "MOOTx01 Memory"
+  short_description: "Use MOOTx01 as active long-term memory and low-token reasoning substrate."
+  default_prompt: "Use $mootx01-memory to recall, analyze, and write back durable knowledge through MOOTx01."
+
+policy:
+  allow_implicit_invocation: true
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "mootx01"
+      description: "MOOTx01 ARIA MCP server exposing memory, fact, lens, vault, and dream tools."
+
