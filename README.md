@@ -6,7 +6,7 @@
 
 > The frontier intelligence is rented. The memory is yours.
 
-![status](https://img.shields.io/badge/status-0.8--alpha-orange)
+![status](https://img.shields.io/badge/status-1.0.0--beta-orange)
 ![platforms](https://img.shields.io/badge/platforms-Apple%20Silicon%20·%20PC%2FLinux-blue)
 ![ports](https://img.shields.io/badge/ports-Swift%20%2B%20Rust%20(byte--identical)-success)
 ![interface](https://img.shields.io/badge/interface-ARIA%20over%20MCP-purple)
@@ -53,9 +53,9 @@ A **moot** was the old assembly where a community brought its memory together �
 
 ---
 
-## Quickstart (0.8-alpha)
+## Quickstart (1.0.0-beta)
 
-> **Status:** 0.8-alpha early access — installable now, **not yet security-hardened**. The full security sweep (Roadmap §4) precedes the general-availability binary; this alpha is for early adopters and builders.
+> **Status:** 1.0.0-beta early access — installable now, **not yet security-hardened**. The full security sweep (Roadmap §4) precedes the general-availability binary; this beta is for early adopters and builders.
 
 **Install** — prebuilt binary, no toolchain, no clone:
 
@@ -73,7 +73,7 @@ mootx01 install        # also starts the console in the background
 # dashboard → http://127.0.0.1:7077      manual control → moot-mgr serve
 ```
 
-A read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface for estate provisioning and lifecycle. macOS only at 0.8-alpha. Opt out with `mootx01 install --no-manager`.
+A read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface for estate provisioning and lifecycle. macOS only at 1.0.0-beta. Opt out with `mootx01 install --no-manager`.
 
 *Prefer source?* `swift build -c release --package-path apps/aria-mcp-server` (macOS 26+), or `cargo build --release` in `apps/aria-mcp-server/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
 
@@ -184,7 +184,7 @@ Intended sequence, not committed dates:
 2. **Ship the ARIA MCP reference server** — so anyone can compile it and use their MOOT from an agentic chat or coding harness.
 3. **Ship the management & monitoring console (`moot-mgr`)** — the resident host that creates and manages multiple estates (stepped provisioning, per-estate backend, full lifecycle) with a flow-down self-report layer surfaced as a read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface. One cross-platform codebase: a loopback web dashboard plus a macOS menu-bar agent.
 4. **Full security sweep** — a complete security, quality-control, and hardening pass across the substrate, the MCP server, and the console. No kit has cleared this gate yet.
-5. **Hardened GA binary** — the curl-installable binary ships at 0.8-alpha for early adopters (see Quickstart); the *general-availability, security-hardened* binary of the MCP server and the console follows the full security sweep (§4) — the first artifact aimed at the wider, non-developer audience is the first one hardened.
+5. **Hardened GA binary** — the curl-installable binary ships at 1.0.0-beta for early adopters (see Quickstart); the *general-availability, security-hardened* binary of the MCP server and the console follows the full security sweep (§4) — the first artifact aimed at the wider, non-developer audience is the first one hardened.
 6. **Sidecar & embedded examples** — a reference set of apps showing the sidecar and embedding patterns.
 
 ## Repository structure
@@ -211,7 +211,7 @@ mootx01/
 | [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) | Readable front door: products, stack, surfaces, sidecar |
 | [`docs/concepts/MOOTX01_AND_ARIA_CANON.md`](docs/concepts/MOOTX01_AND_ARIA_CANON.md) | Durable definitions of MOOTx01 and ARIA |
 | [`docs/concepts/ARIA_LEXICON.md`](docs/concepts/ARIA_LEXICON.md) | The ARIA grammar: one noun, nine verbs, four adjectives |
-| [`docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md`](docs/reference/) | Authoritative substrate specification |
+| [`docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md`](docs/reference/) | Authoritative substrate specification |
 | [`EDITIONS.md`](EDITIONS.md) · [`LICENSING.md`](LICENSING.md) | Open core + commercial editions, in plain language |
 
 ## Standards
