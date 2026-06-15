@@ -313,7 +313,8 @@ if ($Uninstall) {
     Remove-Permissions $settingsPath
 
     Write-Host ""
-    Write-Host "mootx01 removed. Your estate data at $env:APPDATA\com.mootx01.ce was not touched."
+    $dataDir = if ($env:MOOTX01_DATA_DIR) { $env:MOOTX01_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "MOOTx01" }
+    Write-Host "mootx01 removed. Your estate data at $dataDir was not touched."
     Write-Host "Delete that directory manually if you want to remove your data."
     exit 0
 }
