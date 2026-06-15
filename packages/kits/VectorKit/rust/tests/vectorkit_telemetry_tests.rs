@@ -426,8 +426,8 @@ fn find_nearest_results_unchanged_by_telemetry() {
     assert_eq!(results_off.len(), results_on.len(),
         "find_nearest must return same count with monitoring off and on");
     for i in 0..results_off.len() {
-        assert_eq!(results_off[i].drawer_id, results_on[i].drawer_id,
-            "result[{}].drawer_id must match", i);
+        assert_eq!(results_off[i].item_id, results_on[i].item_id,
+            "result[{}].item_id must match", i);
         assert_eq!(results_off[i].distance, results_on[i].distance,
             "result[{}].distance must match", i);
     }

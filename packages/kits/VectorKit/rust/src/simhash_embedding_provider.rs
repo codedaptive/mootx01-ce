@@ -12,10 +12,10 @@
 //! VectorKit owns neither tokenization, model bundles, nor model
 //! identity. Concrete text providers that carry a tokenizer and a
 //! model-specific projection seed (MiniLM, mpnet, EmbeddingGemma)
-//! live in corpus-kit-providers and conform to this same
-//! `EmbeddingProvider` trait (the consolidation landed 2026-05-27;
-//! the parallel `CorpusKit::TextEmbeddingProvider` Swift protocol
-//! and its Rust mirror have been deleted). This provider is the low-level "host
+//! live in corpus-kit-providers and conform to vectorkit's own
+//! `EmbeddingProvider` trait (the `CorpusKit::TextEmbeddingProvider`
+//! protocol and its Rust mirror were deleted; all providers now
+//! conform to `VectorKit::EmbeddingProvider`). This provider is the low-level "host
 //! supplies inference, kit supplies the canonical projection"
 //! building block; the caller passes the projection seed.
 
@@ -25,7 +25,7 @@ use engram_lib::Engram;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -91,5 +91,21 @@ impl EmbeddingProvider for FloatSimHashEmbeddingProvider {
         // EngramLib crate. The substrate's canonical projection
         // IS the engram -- no reconstruction needed.
         Ok(float_simhash::project(&floats, self.projection_seed))
+    }
+
+    /// Return the pooled dense float vector — the float lane source.
+    ///
+    /// This is exactly the vector `embed` feeds into
+    /// `float_simhash::project`; the inference closure is the model pass
+    /// MiniLM/mpnet/EmbeddingGemma run. Returning it directly is the
+    /// "retain, don't recompute" path: the float lane and the binary
+    /// SimHash lane are two reads of one inference output. Empty input
+    /// returns `vec![]` per the trait contract (no dense direction for the
+    /// empty string).
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        (self.inference)(text).map_err(VectorKitError::EmbeddingFailed)
     }
 }

@@ -50,6 +50,12 @@ let package = Package(
             dependencies: [
                 "VectorKit",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                // PersistenceKitSQLite backs the reopen regression test that guards
+                // against the dark-recall-on-restart decode bug: only a real
+                // on-disk estate exercises the SQLite primitive read-back forms
+                // (.text id, .text/ISO8601 filed_at) the in-memory backend does
+                // not. Mirrors CorpusKitTests' SQLite dependency.
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 "IntellectusLib",
             ]
         ),

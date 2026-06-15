@@ -20,4 +20,24 @@ public enum VectorKitError: Error, Sendable, Equatable {
     /// reads; included here so the error surface is complete from the
     /// scaffold.
     case notFound
+
+    /// A VectorPayload is structurally invalid — wrong kind, wrong byte
+    /// count, or inconsistent dim/bytes. Associated value describes the
+    /// inconsistency. Thrown by VectorPayload.asEngram() and
+    /// VectorPayload.asFloats().
+    case invalidPayload(String)
+
+    /// A VectorRecordKey, row, or schema element is malformed in a way
+    /// that prevents decode. Associated value describes the malformation.
+    case decodingFailure(String)
+
+    /// An `.int8` VectorPayload was submitted for persistence, but the
+    /// int8 quantization policy (symmetric vs asymmetric, per-vector vs
+    /// per-dim scale) has not been ratified. Writing an int8 payload now
+    /// would lock in undefined dequantization semantics. Use `.float`
+    /// (float32 lane) or `.binaryDense` (.binary lane / Engram) instead.
+    /// See VECTORKIT_SPEC §I-4a and arch spec §10.3. When a quantization
+    /// policy is ratified, remove this error case and the guards that
+    /// throw it.
+    case int8QuantizationPolicyUndefined(String)
 }
