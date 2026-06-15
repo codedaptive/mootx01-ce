@@ -325,9 +325,11 @@ Remove-Item -Recurse -Force $tmpDir
 
 Write-Host "  Installed $BINARY"
 
-# 4. Add to PATH
-New-Item -ItemType Directory -Force $BIN_DIR | Out-Null
-Add-ToUserPath $BIN_DIR
+# 4. Add the install dir (which holds mootx01.exe) to the user PATH so `mootx01`
+#    is callable by name, including the `mootx01 install` follow-up below. Windows
+#    has no convenient unprivileged symlink, so we PATH the real dir rather than
+#    shim into $BIN_DIR.
+Add-ToUserPath $INSTALL_DIR
 
 # 5. Wire MCP clients
 Write-Host ""
