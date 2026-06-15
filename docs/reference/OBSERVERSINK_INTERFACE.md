@@ -1,6 +1,6 @@
 ---
 title: ObserverSink Interface
-version: 1.0
+version: 1.0.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -10,9 +10,9 @@ relates_to:
   - docs/reference/PERSISTENCEKIT_SPEC.md
 ---
 
-# ObserverSink Interface v1.0
+# ObserverSink Interface
 
-The public API surface of `ObserverSink` as shipped in v1.0.
+The public API surface of `ObserverSink`.
 
 ---
 
@@ -80,6 +80,18 @@ public final class StatsStore: Sendable {
 
     /// Query metric samples, optionally filtered by dropbox. Ordered by ts ascending.
     public func queryMetrics(dropboxID: String?) async throws -> [MetricRow]
+
+    /// Query metric samples whose name is in `names` via SQL `WHERE name IN (...)`.
+    /// Returns [] immediately if `names` is empty. Ordered by ts ascending.
+    /// Use in hot read-API paths instead of queryMetrics + Swift-side filter.
+    public func queryMetricsByNames(
+        _ names: Set<String>,
+        dropboxID: String?
+    ) async throws -> [MetricRow]
+
+    /// Count total metric rows without decoding row content.
+    /// Delegates to RowStore.count(table:where:) — SQL COUNT(*).
+    public func countMetrics() async throws -> Int
 
     /// Query event samples, optionally filtered by dropbox. Ordered by ts ascending.
     public func queryEvents(dropboxID: String?) async throws -> [EventRow]
@@ -155,7 +167,7 @@ public enum StatsStoreSchema {
 
     // Well-known control keys
     public static let monitoringKey: String        // "monitoring"
-    pub static let retentionCutoffKey: String      // "retention_cutoff"
+    public static let retentionCutoffKey: String      // "retention_cutoff"
 }
 ```
 
@@ -331,6 +343,8 @@ ports agree under the conformance suite cited.
 | Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
 |---|---|---|---|---|---|---|
 | Stats store | `StatsStore` (final class) | `StatsStore` (struct) | public / pub | Swift `async` actor-safe `final class` / Rust sync `struct`; same SQLite schema + control rows | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
+| Filtered metric query | `queryMetricsByNames(_:dropboxID:)` | _(pending Rust parity)_ | public / — | Swift-only; Rust parity pending. SQL IN predicate; returns named rows only. | `ObserverSinkConformanceTests.swift` | Swift-only |
+| Metric count | `countMetrics()` | _(pending Rust parity)_ | public / — | Swift-only; Rust parity pending. SQL COUNT(*); no row decoding. | `ObserverSinkConformanceTests.swift` | Swift-only |
 | Metric row | `MetricRow` | `MetricRow` | public / pub | Swift `ts: Date` (decoded from ISO-8601) / Rust `ts_epoch: f64`; `rowID: UUID` / `row_id: Uuid`; same fields otherwise | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
 | Event row | `EventRow` | `EventRow` | public / pub | Swift `nounType: Int`/`ts: Date` / Rust `noun_type: i64`/`ts_epoch: f64`; Swift `rowIDStr` / Rust `estate_row_id`; same fields otherwise | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |
 | Schema-name namespace | `StatsStoreSchema` (enum-of-statics) | `StatsStoreSchema` (unit struct + consts) | public / pub | Swift caseless enum of `static let` / Rust `pub struct` with `pub const`s; same string values (see schema-constants table below) | `conformance.rs` / `ObserverSinkConformanceTests.swift` | Confirmed |

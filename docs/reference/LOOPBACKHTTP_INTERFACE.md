@@ -1,18 +1,19 @@
 ---
 title: LoopbackHTTP Interface
-version: 1.0
+version: 1.0.0
 status: active
+description: Public API surface of the LoopbackHTTP kit — the loopback-pinned POSIX socket and HTTP/SSE transport primitives.
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-07
+date: 2026-06-14
 relates_to:
   - docs/reference/LOOPBACKHTTP_SPEC.md
   - docs/decisions/ADR-LOOPBACKHTTP-001.md
 ---
 
-# LoopbackHTTP Interface v1.0
+# LoopbackHTTP Interface
 
-The public API surface of `LoopbackHTTP` as shipped in v1.0. Swift only — see
+The public API surface of `LoopbackHTTP`. Swift only — see
 §Rust below for the Swift-only rationale.
 
 ---
@@ -142,10 +143,23 @@ public struct SSEStream: Sendable {
 
 The Swift+Rust parity discipline governs deterministic substrate compute
 conformance-gated at shared test vectors; it does not extend to OS-transport
-glue. The only Rust-needing consumer (ARIA_MCP-rust) hand-rolls its own
-`std::net` HTTP transport under the no-FFI law, with parity between the ARIA_MCP
+glue. The only Rust-needing consumer (the aria-mcp Rust port) hand-rolls its own
+`std::net` HTTP transport under the no-FFI law, with parity between the aria-mcp
 verticals enforced at the JSON-RPC wire, not the transport implementation.
 moot-mgr has no Rust port. A Rust port of `LoopbackHTTP` would have no consumer.
 
-**Re-review trigger:** a roadmapped Rust moot-mgr build would introduce a Rust
-consumer with no wire-conformance gate above it and reopen this decision.
+---
+
+## Swift/Rust Concordance
+
+`LoopbackHTTP` is Swift-only (see §Rust above). All public types are
+Swift-only and Exempt from Swift+Rust parity requirements per
+ADR-LOOPBACKHTTP-001.
+
+| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
+|---|---|---|---|---|---|---|
+| POSIX socket namespace | `POSIXSocket` | — | public enum (caseless namespace) / — | Swift caseless-enum namespace for POSIX socket operations; no Rust parity (OS-transport glue, per ADR-LOOPBACKHTTP-001) | — | Exempt (platform binding) |
+| Socket error | `SocketError` | — | public enum / — | Swift-only error enum for socket-level failures; Rust aria-mcp uses `std::net` errors natively | — | Exempt (platform binding) |
+| HTTP request wire type | `HTTPRequest` | — | public struct / — | Swift-only wire DTO for incoming HTTP requests; Rust side uses its own parse layer | — | Exempt (platform binding) |
+| HTTP response wire type | `HTTPResponse` | — | public struct / — | Swift-only wire DTO for HTTP responses; Rust side builds responses directly | — | Exempt (platform binding) |
+| Server-sent events stream | `SSEStream` | — | public struct / — | Swift-only SSE write helper; no Rust port (Apple-only MCP transport surface) | — | Exempt (platform binding) |

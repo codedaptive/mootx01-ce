@@ -1,7 +1,7 @@
 ---
 status: in_progress
 created: 2026-05-22
-last_updated: 2026-05-29
+last_updated: 2026-06-14
 phase: A
 ---
 
@@ -19,14 +19,11 @@ Status vocabulary per row:
 
 - `evidenced`: a runnable test or demonstration exists and
   passes; the commit SHA, test path, or runnable
-  demonstration path is recorded under "Evidence" and as a KG
-  fact `claim_evidenced_by`.
+  demonstration path is recorded under "Evidence".
 - `pending`: the claim has no current evidence on file; the
-  reason and what is needed are recorded under "Evidence". A
-  matching KG fact `claim_evidence_pending` exists.
+  reason and what is needed are recorded under "Evidence".
 - `waived`: the claim is intentionally deferred or scoped out
-  of v1; the rationale is recorded under "Evidence" and as a
-  KG fact `claim_waived_with_rationale`.
+  of v1; the rationale is recorded under "Evidence".
 - `superseded`: an earlier invariant or theorem that a later
   one replaces. Listed for historical reference; the active
   successor carries the evidence.
@@ -35,7 +32,7 @@ Status vocabulary per row:
 
 | Category                              | Total | Populated | Phase   |
 |---------------------------------------|-------|-----------|---------|
-| Invariants (I-1 through I-30)         | 30    | 24        | A first batch done; I-25..I-30 (2026-05-28 decisions) added 2026-05-29, evidence pending |
+| Invariants (I-1 through I-30)         | 30    | 24        | A first batch done; I-25..I-30 (2026-05-28 decisions) added, evidence pending |
 | Theorems (named results, section 14)  | 7     | 7         | A second batch done (paper numbering reconciliation deferred) |
 | Hot-path budgets (cookbook section 17.1) | 3+    | 3         | A second batch done |
 | Verb-surface protocol contracts       | 9     | 9         | A second batch done |
@@ -44,58 +41,58 @@ Status vocabulary per row:
 | Standing-signals scheduler contracts  | TBD   | 0         | A pending |
 | Decision-record claims                | TBD   | 0         | A pending |
 
-Phase A continues next session.
+Phase A population continues.
 
 ## Invariants
 
 The constitutional core. I-1 through I-14 are inherited from
-the v0.35 spec section 3. I-15 through I-24 are new in v0.36.
+the architecture spec section 3. I-15 through I-24 extend it.
 Two original invariants (I-5 and I-9) are explicitly superseded
 by I-16 and I-15 respectively; they are listed below as
 `superseded` rows for historical traceability.
 
 ### I-1: Verbatim rung is immutable
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 70
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 70
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Expected location: a Swift test under
   `Tests/GeniusLocusKitTests/` that attempts mutation of a
-  rung-1 column post-capture and asserts failure. Mission 8's
-  GLK-01 scaffolding committed the row-immutability contract;
-  exact test path to confirm.
+  rung-1 column post-capture and asserts failure. The
+  row-immutability contract is committed; exact test path to
+  confirm.
 
 ### I-2: All bitmap mutations write audit rows
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 72
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 72
 - Type: invariant (formalized by I-20 as G-Set CRDT)
-- Status: active in v0.36; co-active with I-20
-- Evidence: pending. Mission 8's GLK-03 implemented the unified
-  audit log with per-estate G-Set folding; the negative test
+- Status: active in v1.0; co-active with I-20
+- Evidence: pending. The unified audit log with per-estate
+  G-Set folding is implemented; the negative test
   surface is in those test files. Confirm path.
 
 ### I-3: The substrate accepts no `secret + public` combination
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 74
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 74
 - Type: invariant (subsumed by I-22's forbidden combinations enumeration)
-- Status: active in v0.36; co-active with I-22
+- Status: active in v1.0; co-active with I-22
 - Evidence: pending. The maintenance-daemon scan and the verb
-  layer rejection are both required surfaces. Mission 8's
-  GLK-05 covers the maintenance scan via the standing signal;
-  verb-layer rejection should be in GLK-02 tests.
+  layer rejection are both required surfaces. The maintenance
+  scan runs via the standing signal; verb-layer rejection
+  should be in the verb-surface tests.
 
 ### I-4: Every model-generated rung carries `model_id` and `model_version`
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 76
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 76
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Per-rung model identification is a row
   schema property; the negative test would attempt to write a
   rung 2/3/4 without model_id and assert failure.
 
 ### I-5: Every drawer carries a lattice anchor (superseded)
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 78
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 78
 - Type: invariant
 - Status: superseded by I-16 (universal lattice anchor extends
   this from drawer-only to all noun types)
@@ -104,9 +101,9 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-6: Audit rows can be tombstoned but not modified
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 80
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 80
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Only the `expunge` verb mutates audit
   rows. Negative test attempts an audit-row update via any
   other path and asserts failure. The expunge-tombstoning
@@ -114,45 +111,45 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-7: The verb count is fixed at nine
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 82
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 82
 - Type: invariant
-- Status: active in v0.36
-- Evidence: pending. Mission 8's GLK-02 implemented the
-  nine-verb surface and AriaLexicon conformance. The verb
+- Status: active in v1.0
+- Evidence: pending. The nine-verb surface and AriaLexiconLib
+  conformance are implemented. The verb
   count is a static contract; the conformance test should
   assert exactly nine verbs by name.
 
 ### I-8: The adjective category count is fixed at four
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 84
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 84
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. State, trust, sensitivity, exportability.
   Static contract; the conformance test asserts exactly four
   named categories.
 
 ### I-9: Field width is 4 bits in the bitmap tier (superseded)
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 86
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 86
 - Type: invariant
-- Status: superseded by I-15 (6-bit field-width floor in v0.36)
+- Status: superseded by I-15 (6-bit field-width floor)
 - Evidence: historical; the active version's evidence is
   under I-15.
 
 ### I-10: Every bitmap field reserves at least 30% growth space
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 88
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 88
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. The check is a static analysis over the
   manifest's bitmap layout; a unit test asserts each field's
   used-values count is at most 70% of its capacity.
 
 ### I-11: Bitmap layouts within a published version are stable
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 90
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 90
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. The negative test attempts a layout
   mutation under a published manifest and asserts failure;
   the positive test confirms `bitmap_layout_version` bump
@@ -160,20 +157,20 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-12: The substrate provides storage; applications do not bring their own
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 92
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 92
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: evidenced by composition. GLK depends on LocusKit,
   VectorKit, and CorpusKit per the kit-composition test
   surfaces; no external storage adapter exists.
-- Evidence pointer: Mission 8's composition tests under
-  GLK-01. To confirm specific test path.
+- Evidence pointer: the kit-composition tests. To confirm
+  specific test path.
 
 ### I-13: Federation is not a substrate concern
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 94
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 94
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: evidenced by absence. The substrate kit graph
   contains no network or RPC surface. Confirmed by
   inspection; a structural test enumerating GLK's exported
@@ -182,9 +179,9 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-14: Provenance is set at write and mutated only via the audit-recorded path
 
-- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` line 96
+- Spec: `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` line 96
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. The verb-layer test surface should show
   that `capture`, `propose`, `learn`, and `associate` set
   provenance; that `mutate_bitmap` writes an audit row for
@@ -193,64 +190,64 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-15: 6-bit field-width floor
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 163
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 163
 - Type: invariant (supersedes I-9)
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Bitmap field widths now floor at 6 bits;
   the unit test asserts manifest layout conformance.
 
 ### I-16: Every row has a lattice anchor
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 424
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 424
 - Type: invariant (supersedes I-5, extends drawer-only to universal)
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Drawers, tunnels, associations, all noun
   types carry a lattice anchor. Test asserts schema-level
   presence of `lattice_anchor` across all noun row types.
 
 ### I-17: Cross-noun fingerprint compatibility
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 713
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 713
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. All noun fingerprints share a compatible
   256-bit format; cross-noun Hamming distance is meaningful.
   Test asserts fingerprint shape conformance across nouns.
 
 ### I-18: Runtime view is bit-sliced 3D tensor
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 803
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 803
 - Type: invariant (constitutional working-set layout)
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Working set is held as memory-mapped
   bit-slice arrays. Test asserts the runtime view's shape and
   the round-trip from row-format to bit-slice and back.
 
 ### I-19: Kernel layer is portable across SIMD families
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 872
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 872
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: evidenced by the four-cell conformance gate and
   the cross-language byte-equality test for all 24 primitives.
-- Evidence pointer: `test-harness/` four-way conformance
+- Evidence pointer: the four-way conformance
   matrix; current as of develop tip `7da4413`.
 
 ### I-20: Audit log is a Grow-Only Set CRDT
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 952
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 952
 - Type: invariant (formalizes I-2 with CRDT properties)
-- Status: active in v0.36; co-active with I-2
-- Evidence: evidenced by Mission 8's GLK-03 unified audit log
+- Status: active in v1.0; co-active with I-2
+- Evidence: evidenced by the unified audit log
   implementation with per-estate G-Set folding.
-- Evidence pointer: GLK-03 commit `8a191ff`; specific test
+- Evidence pointer: commit `8a191ff`; specific test
   path to confirm.
 
 ### I-21: Sync convergence
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 1007
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 1007
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Given two replicas R_A and R_B of the
   same estate, convergence under bidirectional sync. The
   negative test injects divergent histories and asserts
@@ -258,29 +255,28 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-22: Forbidden state-combination invariants
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 1780
-- Type: invariant (enumeration of forbidden combinations including v0.35 I-3)
-- Status: active in v0.36
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 1780
+- Type: invariant (enumeration of forbidden combinations including the original I-3)
+- Status: active in v1.0
 - Evidence: partial. The `secret + public` case (subsuming
-  v0.35 I-3) is covered alongside any additional combinations
+  the original I-3) is covered alongside any additional combinations
   the cookbook enumerates. Phase A to extract the full list
   in a subsequent pass.
 
 ### I-23: Pairing algebra (binary arity in v1)
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 2234
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 2234
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Associations are binary in v1; n-ary
-  deferred to future AssociationCluster noun per KG fact
-  `association_arity_decision`. Test asserts the row schema
-  rejects n-ary associations.
+  deferred to a future AssociationCluster noun. Test asserts
+  the row schema rejects n-ary associations.
 
 ### I-24: Tier aggregation provides (ε, δ)-DP
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` line 2352
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` line 2352
 - Type: invariant
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. Tier aggregation provides differential
   privacy with declared (ε, δ) bounds. The test asserts the
   DP budget tracking and the aggregation output's noise
@@ -288,7 +284,7 @@ by I-16 and I-15 respectively; they are listed below as
 
 ### I-25: One implementation per atomic
 
-- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md` §1.4;
+- Spec: `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md` §1.4;
   `docs/concepts/MOOTX01_AND_ARIA_CANON.md` ("the substrate owns the atomics")
 - Type: invariant (2026-05-28)
 - Status: active in v1.0
@@ -355,32 +351,32 @@ by I-16 and I-15 respectively; they are listed below as
 
 ## Theorems
 
-The canonical statements live in `docs/canon/private/SUBSTRATE_MATHEMATICS.md`
-section 14, which restates the named results the substrate claims
+The canonical statements live in the substrate mathematics
+reference, which restates the named results the substrate claims
 and ties each to the demonstrating kit and conformance suite. The
 full formal statements live in the published paper section 13 and
-Appendix C. Mission 8's GLK-08 demonstrated Theorems 4, 6, 7, and
-8 by their paper-numbering, and met Theorem 5; the section 14
+Appendix C. The theorem demonstrations covered Theorems 4, 6, 7, and
+8 by their paper-numbering, and met Theorem 5; the named-result
 restatement uses descriptive names rather than the paper numbers.
-Reconciling the paper-numbered and section-14-named lists requires
+Reconciling the paper-numbered and named-result lists requires
 a direct read of paper section 13 and Appendix C, which Phase A
 defers to a focused later pass.
 
 ### T1: Sync convergence (I-21)
 
-- Spec: `docs/canon/private/SUBSTRATE_MATHEMATICS.md` section 14;
-  paper Theorem 1 (`docs/canon/GENIUSLOCUS_PAPER_v0.8_2026-05-17.md` line 1572)
+- Spec: substrate mathematics reference, named results;
+  paper Theorem 1
 - Type: theorem
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: evidenced. Replicas holding equal audit sets project
   equal state. Demonstrated by the ConvergenceKit convergence tests.
 - Evidence pointer: ConvergenceKit tests; specific path to confirm.
 
 ### T2: Cross-noun Hamming well-definedness (I-17)
 
-- Spec: `docs/canon/private/SUBSTRATE_MATHEMATICS.md` section 14
+- Spec: substrate mathematics reference, named results
 - Type: theorem
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: evidenced by SubstrateLib and LocusKit fingerprint
   tests. Uniform four-block widths and deterministic null
   sub-hashes make d_H a well-defined distance across all noun
@@ -390,10 +386,10 @@ defers to a focused later pass.
 
 ### T3: Pruning equivalence
 
-- Spec: `docs/canon/private/SUBSTRATE_MATHEMATICS.md` section 14;
+- Spec: substrate mathematics reference, named results;
   cookbook section 5
 - Type: theorem
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: evidenced by LocusKit recall tests. Container-pruned
   recall returns the same result as a full scan; OR-pruning skips
   a container only when no row could match.
@@ -402,50 +398,50 @@ defers to a focused later pass.
 
 ### T4: Automaton safety, liveness, and reachability
 
-- Spec: `docs/canon/private/SUBSTRATE_MATHEMATICS.md` section 14;
+- Spec: substrate mathematics reference, named results;
   cookbook section 13
-- Type: theorem (likely paper Thm 4 demonstrated by GLK-08)
-- Status: active in v0.36
+- Type: theorem (paper Thm 4)
+- Status: active in v1.0
 - Evidence: evidenced. Demonstrated by the LocusKit
-  `DrawerStateValidator` suite and GLK-08 theorem demonstrations.
+  `DrawerStateValidator` suite and the theorem demonstrations.
 - Evidence pointer: LocusKit DrawerStateValidator;
   `GeniusLocusKit/Tests/GeniusLocusKitTests/TheoremsTests.swift`
-  per GLK-08 mission spec (commit `fa27ca2`).
+  at commit `fa27ca2`.
 
 ### T5: Performance budget (paper Theorem 5)
 
-- Spec: `docs/canon/private/SUBSTRATE_MATHEMATICS.md` section 14;
+- Spec: substrate mathematics reference, named results;
   paper Theorem 5
 - Type: theorem (performance gate)
-- Status: active in v0.36; **the load-bearing performance budget**
-- Evidence: evidenced and met by GLK-08. P99 capture under 100 ms
+- Status: active in v1.0; **the load-bearing performance budget**
+- Evidence: evidenced and met. P99 capture under 100 ms
   on the iPhone profile and enrichment at least 60 drawers per
   hour on the Mac profile.
 - Evidence pointer:
   `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`
-  at commit `fa27ca2`; perf-gate diary entry reports P99 capture
+  at commit `fa27ca2`; the perf gate reports P99 capture
   0.262 ms (well under the 100 ms budget) and enrichment far above
   the 60 drawers per hour floor.
 
 ### T6: Pairing non-transitivity (I-23)
 
-- Spec: `docs/canon/private/SUBSTRATE_MATHEMATICS.md` section 14;
+- Spec: substrate mathematics reference, named results;
   cookbook section 11
 - Type: theorem
-- Status: active in v0.36
+- Status: active in v1.0
 - Evidence: pending. No implicit cross-perimeter comparability;
   enforced by refusing unshared-seed comparisons. The negative
   test attempts a comparison across estates without a shared
   pairing seed and asserts refusal.
 
-### T7 and T8: Paper-numbered demonstrations under GLK-08
+### T7 and T8: Paper-numbered demonstrations
 
-- Spec: paper section 13 and Appendix C; GLK-08 mission spec
-- Type: theorem (paper numbering 7 and 8; section 14 mapping pending)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-08 theorem demonstrations.
+- Spec: paper section 13 and Appendix C
+- Type: theorem (paper numbering 7 and 8; named-result mapping pending)
+- Status: active in v1.0
+- Evidence: evidenced by the theorem demonstrations.
   Statements require paper section 13 read to align with the
-  section 14 named-result list. Phase A defers full statement
+  named-result list. Phase A defers full statement
   capture to a focused later pass.
 - Evidence pointer:
   `GeniusLocusKit/Tests/GeniusLocusKitTests/TheoremsTests.swift`
@@ -454,15 +450,14 @@ defers to a focused later pass.
 ## Hot-path budgets
 
 The cookbook section 17.1 enumerates the hot-path budgets the
-substrate must meet. Three are pinned as load-bearing in
-Mission 8's done-definition and the Phase 2 final selection doc.
+substrate must meet. Three are pinned as load-bearing.
 
 ### HP1: Capture P99 latency under 100 milliseconds on iPhone
 
-- Spec: paper Theorem 5; cookbook section 17.1; GLK-08 mission
+- Spec: paper Theorem 5; cookbook section 17.1
 - Type: hot-path budget
-- Status: active in v0.36; **met**
-- Evidence: evidenced. GLK-08 measured 0.262 ms P99 capture,
+- Status: active in v1.0; **met**
+- Evidence: evidenced. The perf gate measured 0.262 ms P99 capture,
   three orders of magnitude under the 100 ms budget on iPhone
   profile.
 - Evidence pointer:
@@ -471,10 +466,10 @@ Mission 8's done-definition and the Phase 2 final selection doc.
 
 ### HP2: Enrichment rate at least 60 drawers per hour on Mac
 
-- Spec: paper Theorem 5; cookbook section 17.1; GLK-08 mission
+- Spec: paper Theorem 5; cookbook section 17.1
 - Type: hot-path budget
-- Status: active in v0.36; **met**
-- Evidence: evidenced. GLK-08 measured enrichment rate far above
+- Status: active in v1.0; **met**
+- Evidence: evidenced. The perf gate measured enrichment rate far above
   the 60 drawers per hour floor on Mac profile.
 - Evidence pointer:
   `GeniusLocusKit/Tests/GeniusLocusKitTests/PerformanceGateTests.swift`
@@ -485,35 +480,34 @@ Mission 8's done-definition and the Phase 2 final selection doc.
 - Spec: cookbook section 17.1; cookbook section 17.5 bandwidth
   floor analysis
 - Type: hot-path budget
-- Status: active in v0.36; **unmet, aspirational**
+- Status: active in v1.0; **unmet, aspirational**
 - Evidence: partial. The section 17.5 bandwidth floor on
-  apple-m5-max is 533 microseconds. Best measured kernel today
+  the Apple M-series profile is 533 microseconds. Best measured kernel today
   is Swift SimdKernel at 594 microseconds (11% above floor) and
   Rust SimdKernel at 631 microseconds (18% above floor); see
-  the post-ladder baseline in
-  `docs/validation/substrate_math_performance/test-harness/README.md`
+  the baseline in
+  `docs/validation/substrate_math_performance/README.md`
   at commit `7da4413`. The 100 microsecond budget is unmet by
   any kernel measured; section 17.5 analysis suggests the
   memory bandwidth floor is the binding constraint, not the
   algorithm. Future work would require either reducing bytes
-  read (bit-slice layout per I-18, deferred per Phase 2.delta-3
-  disposition) or hardware beyond the M-series memory subsystem.
-- Evidence pointer: harness baseline table; Phase 2 final
-  selection doc row 5.
+  read (bit-slice layout per I-18, deferred) or hardware beyond
+  the M-series memory subsystem.
+- Evidence pointer: the substrate-math performance baseline table.
 
 ## Protocol contracts: the nine-verb surface
 
 Invariant I-7 fixes the verb count at nine. The verbs are
-defined in the cookbook section 10 and implemented in Mission 8's
-GLK-02 (commit `3c34a9a`). Each verb has signature, preconditions,
+defined in the cookbook section 10 and implemented at commit
+`3c34a9a`. Each verb has signature, preconditions,
 and postconditions that conformance tests must verify.
 
 ### V1: capture
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests.
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests.
 - Evidence pointer:
   `GeniusLocusKit/Sources/GeniusLocusKit/Verbs/VerbSurface.swift`
   and verb tests at commit `3c34a9a`; specific test path to
@@ -523,8 +517,8 @@ and postconditions that conformance tests must verify.
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests; recall is the
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests; recall is the
   canonical single-estate recall over the composed substrate.
 - Evidence pointer: same as V1.
 
@@ -532,8 +526,8 @@ and postconditions that conformance tests must verify.
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests; mutate writes
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests; mutate writes
   an audit row per I-2 and I-20.
 - Evidence pointer: same as V1.
 
@@ -541,8 +535,8 @@ and postconditions that conformance tests must verify.
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests; withdraw
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests; withdraw
   retracts a proposed-but-not-confirmed item.
 - Evidence pointer: same as V1.
 
@@ -550,8 +544,8 @@ and postconditions that conformance tests must verify.
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests; expunge
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests; expunge
   tombstones per I-6 while preserving the fact-of-expunge.
 - Evidence pointer: same as V1.
 
@@ -559,8 +553,8 @@ and postconditions that conformance tests must verify.
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests; reanchor
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests; reanchor
   updates a lattice anchor with audit row recording the change.
 - Evidence pointer: same as V1.
 
@@ -568,27 +562,27 @@ and postconditions that conformance tests must verify.
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests; learn drives
-  matrix-tier update via the Brain layer.
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests; learn drives
+  matrix-tier update via the autonomic governor.
 - Evidence pointer: same as V1.
 
 ### V8: propose
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests; propose is
-  the emission path for the six standing signals per GLK-05.
-- Evidence pointer: same as V1; GLK-05 standing-signals tests at
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests; propose is
+  the emission path for the six standing signals.
+- Evidence pointer: same as V1; the standing-signals tests at
   commit `1809eda`.
 
 ### V9: associate
 
 - Spec: cookbook section 10
 - Type: protocol contract (verb)
-- Status: active in v0.36
-- Evidence: evidenced by GLK-02 verb-surface tests; associate
+- Status: active in v1.0
+- Evidence: evidenced by the verb-surface tests; associate
   creates a binary association per I-23.
 - Evidence pointer: same as V1.
 
@@ -600,8 +594,7 @@ source document.
 
 ### Manifest required keys (18 required + 5 optional)
 
-KG fact `self_description_mechanism` records the v0.36 manifest
-as having 18 required keys and 5 optional keys, with
+The manifest has 18 required keys and 5 optional keys, with
 `bitmap_layout_version` and `provenance_bitmap_version` making
 the manifest self-describing. The cookbook should enumerate the
 full list; Phase A captures each as one ledger row with a
@@ -609,7 +602,7 @@ schema-validation evidence pointer.
 
 ### Framework profile contracts
 
-KG facts indicate the framework profile declares lattice citation
+The framework profile declares lattice citation
 standard, zoom window, vocabulary loaded at estate creation,
 proposition vocabulary predicates for rung 1.5 KG, jsonpath to
 predicate mappings over blob tier content, canonical reference
@@ -621,20 +614,19 @@ declared contract becomes one ledger row.
 ### Standing-signals scheduler contracts
 
 The scheduler runs all six standing signals under a single
-serial dispatch per GLK-04 (commit `aae7d5d`). The contracts:
+serial dispatch (commit `aae7d5d`). The contracts:
 exactly-once dispatch, ordering preservation under the configured
 policy, register / status / subscribe API surface, and the six
 signals (dreaming, maintenance, vector-similarity, decay-sweep,
 byReference-validity, end-of-day-tournament) each emitting via
-`propose` without mutating state per GLK-05.
+`propose` without mutating state.
 
 ### Decision-record claims
 
 The 27 decision records under `docs/decisions/` each carry one
 or more claims about substrate behavior, design constraints, or
 empirical findings. Phase A's final pass walks each record and
-extracts claims into the ledger. Mission 8's eight mission specs
-also carry done-definition claims that should be cross-referenced.
+extracts claims into the ledger.
 
 ## Pending evidence (gap list)
 
@@ -645,9 +637,9 @@ Phase B (invariants) and Phase C (theorems).
 Current count after second batch:
 
 - 18 pending invariant rows; 2 evidenced (I-12, I-19); 2 partial (I-3 by I-22 subsumption, I-22 enumeration to complete); 2 superseded historical (I-5, I-9).
-- 1 pending theorem row (T6 pairing non-transitivity); 6 evidenced (T1, T2, T3, T4, T5, T7-T8 by GLK-08).
+- 1 pending theorem row (T6 pairing non-transitivity); 6 evidenced (T1, T2, T3, T4, T5, T7-T8).
 - 0 pending hot-path budgets; 2 met (HP1 capture, HP2 enrichment); 1 unmet aspirational (HP3 hamming top-K, against the memory bandwidth floor).
-- 0 pending verb-surface rows; 9 evidenced by GLK-02 (V1 through V9).
+- 0 pending verb-surface rows; 9 evidenced (V1 through V9).
 
 Total evidenced after batch 2: 22 (was 2). Pending: 19 (was 18; T6 added). Met-with-budget-known: 3 (HP1 met, HP2 met, HP3 unmet but bounded).
 

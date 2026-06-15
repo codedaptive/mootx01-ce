@@ -1,16 +1,14 @@
 ---
-status: stub
-authors: Bob Pankratz (via/ claude)
+title: <PackageName> Interface
+version: MAJOR.MINOR.PATCH
+status: draft | review | active | deprecated | superseded
 date: <YYYY-MM-DD>
-version: v0.1
-package: <PackageName>
-languages: [swift]  # add "rust" once the Rust version lands
+description: Public API surface of <PackageName> — the signatures that satisfy <PACKAGE>_SPEC.md.
+spec_type: kit | protocol | encoder
+authors: MOOTx01 maintainers
+languages: [swift]   # add "rust" once the Rust port lands
 relates_to:
-  - <PACKAGE>_SPEC_v0.1.md  (the contract this interface implements)
-purpose: |
-  Public API surface of <PackageName>. Type signatures, method
-  shapes, error enums. The companion SPEC document carries the
-  behavioral contracts that these signatures must satisfy.
+  - docs/reference/<PACKAGE>_SPEC.md   # the contract this interface implements
 ---
 
 # <PackageName> Interface
@@ -44,16 +42,16 @@ Filling this stub:
    in frontmatter so the gap is visible.
 
 Source of truth at fill time:
-  Swift:  Packages/<kits|libs>/<PackageName>/Sources/<PackageName>/
+  Swift:  packages/<kits|libs>/<PackageName>/Sources/<PackageName>/
   Rust:   <crate-path>/src/
-  Tests:  Packages/<kits|libs>/<PackageName>/Tests/<PackageName>Tests/
+  Tests:  packages/<kits|libs>/<PackageName>/Tests/<PackageName>Tests/
 -->
 
 ## § 1 — Package layout
 
 <!-- Where this package lives in the source tree, per language. -->
 
-**Swift:** `Packages/<kits|libs>/<PackageName>/`
+**Swift:** `packages/<kits|libs>/<PackageName>/`
 
 - `Sources/<PackageName>/` — public API + implementation
 - `Tests/<PackageName>Tests/` — conformance tests
@@ -141,7 +139,7 @@ language. -->
 **Swift:**
 
 ```
-swift test --package-path Packages/<kits|libs>/<PackageName>
+swift test --package-path packages/<kits|libs>/<PackageName>
 ```
 
 **Rust:**
@@ -162,4 +160,4 @@ common path. Delete this section if examples live elsewhere
 
 ---
 
-*End of <PackageName> Interface v0.1.*
+*End of <PackageName> Interface.*

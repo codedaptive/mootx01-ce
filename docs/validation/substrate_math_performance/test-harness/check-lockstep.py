@@ -61,6 +61,17 @@ EXCEPTIONS = {
     # predicate; no parallel optimization needed because Swift's
     # closure capture handles the field-subsetting on the call site.
     "RowLite",
+    # RowId (FCA-local, SubstrateML formal_concept_analysis.rs): a
+    # context-local 0-based row index (`pub type RowId = u32`) used
+    # only inside the FCA matrix arithmetic — semantically distinct
+    # from the canonical 128-bit `RowId(u128)` substrate row
+    # identifier in SubstrateTypes. In Swift, FormalContext nests its
+    # `RowID = UInt32` typealias internally (`FormalContext.RowID`) to
+    # avoid collision with LocusKit's module-level `RowID = String`.
+    # Rust module scoping already isolates it without nesting; no
+    # top-level Swift mirror is correct or desirable — the nested
+    # Swift form is the intentional choice on the Apple/Swift side.
+    "RowId",
 }
 
 USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")

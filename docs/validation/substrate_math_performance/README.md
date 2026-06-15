@@ -1,3 +1,10 @@
+---
+status: in_progress
+created: 2026-05-18
+last_updated: 2026-06-14
+phase: B
+---
+
 # Substrate reference
 
 This directory holds the substrate's kernel reference
@@ -5,15 +12,9 @@ implementation, language ports, GPU shader source, and benchmark
 harness. It is the empirical foundation for the cookbook's §4.4
 portable kernel layer and §17 performance budgets.
 
-A new engineer (human or agent) joining substrate work reads
-this README and the Phase 2 final selection decision record,
-then is ready to extend the kernel layer with new backends or
-new ops.
-
-The kernel-maintenance operating guides (agent orientation and Claude
-skill descriptor) are internal documents maintained at
-`docs/_internal/substrate_math/AGENT_HOWTO.md` and
-`docs/_internal/substrate_math/SKILL.md`.
+A new engineer joining substrate work reads this README and the
+Phase 2 final selection decision record, then is ready to extend
+the kernel layer with new backends or new ops.
 
 ## Directory layout
 
@@ -34,7 +35,7 @@ substrate_math_performance/
 │                                           retained; see Phase 2.δ-2)
 └── test-harness/                          conformance harness (benchmark
     │                                       sweep not yet ported — see below)
-    ├── vectors/                            24 JSON test-vector files
+    ├── vectors/                            28 JSON test-vector files
     │                                       (+ locuskit/ subdir, 4 files)
     ├── swift/                              Swift harness (SwiftPM)
     │   ├── Package.swift
@@ -50,8 +51,10 @@ substrate_math_performance/
     │   └── src/bin/
     │       ├── gen_vectors.rs
     │       └── validate_vectors.rs
-    └── benchmarks/results/                 gitignored per-run JSON output
-        └── {date}-{hw-slug}/               e.g. 2026-05-18-apple-m5-max/
+    └── (benchmarks/results/)               NOT PRESENT — the benchmark
+                                            sweep is not yet ported here;
+                                            this gitignored output tree
+                                            appears only once it lands
 ```
 
 The Rust reference port is no longer a single `rust/` tree here. After
@@ -60,7 +63,7 @@ the 2026-05-29 four-package refactor it is split across
 HLC, Hamming), `packages/libs/SubstrateKernel/rust/` (kernel dispatch +
 SIMD), `packages/libs/SubstrateML/rust/` (ML primitives), and
 `packages/libs/SubstrateLib/rust/` (the orchestration layer). The current
-constitutional spec is `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`
+constitutional spec is `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md`
 (the v0.36 cookbook is archived).
 
 The benchmark sweep (`stress-test`, `topk-bench`, Rust `stress_test`) is
@@ -68,19 +71,21 @@ NOT present in this repo: the `StressTest/` and `TopKBench/` Swift sources
 and the Rust `stress_test` bin were not carried over from the prior
 `mootx01-rc` tree. Until they are ported, only the conformance binaries
 (`gen-vectors`, `validate-vectors`) build and run here. Porting the sweep
-is tracked as a backlog item (MISSION_PERF_SWEEP_HARNESS).
+is tracked as future work.
 
 ## What lives where
 
 - **The constitutional spec** is
-  `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`.
+  `docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md`.
   Math first, annotations where needed. The cookbook defines the
   contract; the reference implementations satisfy it. New
   cookbook sections come from upstream design sessions, not from
   kernel work.
 - **The trait surface** is `GeniusLocusReference/glref-swift-PortableKernel.swift`
-  (Swift) and `rust/glref-rust-kernel.rs` (Rust). Every concrete
-  kernel implements this trait. The trait is the API contract;
+  (Swift); the Rust counterpart is the `SubstrateKernel` trait in
+  `packages/libs/SubstrateKernel/rust/src/kernel.rs` (there is no
+  `glref-rust-*` file in this directory). Every concrete kernel
+  implements this trait. The trait is the API contract;
   the trait extension provides scalar defaults that any kernel
   can override.
 - **The dispatcher** is `PortableKernel.kernelForCurrentPlatform()`
@@ -120,10 +125,6 @@ is tracked as a backlog item (MISSION_PERF_SWEEP_HARNESS).
 
 ### Swift reference + harness
 
-If a `.build/` directory was copied from another worktree (a stale module
-cache referencing a different absolute path), the first build fails with
-`missing required module 'SwiftShims'`. Run `rm -rf .build` first.
-
 ```sh
 # Reference Swift port (the GeniusLocusReference package — a library, no
 # test target, so do not run `swift test` here)
@@ -144,9 +145,8 @@ swift test                         # DispatcherTests + HarnessTests, all pass
 ```
 
 The benchmark sweep (`stress-test`, `topk-bench`) is not yet ported to
-this repo (see the directory-layout note above and
-`MISSION_PERF_SWEEP_HARNESS.md`). The commands below are the intended
-interface once those executables land:
+this repo (see the directory-layout note above). The commands below are
+the intended interface once those executables land:
 
 ```sh
 # Benchmark sweep (produces JSON in benchmarks/results/{date}-{hw}/)
@@ -191,7 +191,7 @@ algorithm changes), regenerate every vector:
 
 ```sh
 cd docs/validation/substrate_math_performance/test-harness/swift
-.build/release/gen-vectors ../vectors/         # overwrites all 24 vectors
+.build/release/gen-vectors ../vectors/         # overwrites all 28 vectors
 ```
 
 Every kernel's `validate-vectors` then re-runs and must PASS.
@@ -238,8 +238,8 @@ primitive added to §1.2 P1-P12 or §8 algorithms). To add one:
    primitive's pseudocode and conformance fixture.
 2. Implement in the Swift scalar reference under
    `GeniusLocusReference/glref-swift-{...}.swift`.
-3. Mirror in the Rust scalar reference under
-   `rust/glref-rust-{...}.rs`.
+3. Mirror in the Rust scalar reference under the appropriate
+   substrate crate (`packages/libs/Substrate{Types,Kernel,ML}/rust/src/`).
 4. Add to the `SubstrateKernel` trait with a scalar default in
    the trait extension.
 5. Generate test vectors via the Swift scalar reference; commit
@@ -255,16 +255,18 @@ primitive added to §1.2 P1-P12 or §8 algorithms). To add one:
 
 Every benchmark JSON file includes the hardware tag and the
 commit hash that produced it. Hardware tags are produced by
-`Harness.swift`'s `Hardware.tag()` and follow the pattern
+`Sources/Harness/Core/Hardware.swift`'s `Hardware.tag()` and follow the pattern
 `{vendor}-{model}` (e.g., `apple-m5-max`, `apple-m3-pro`).
 Decision records cite the hardware tag in measurement tables so
 that a future reader on different hardware knows whether the
 result transfers.
 
-Benchmark JSONs are gitignored. The schema is committed (the
-`writeJSON` function in `StressTest/main.swift` and
-`TopKBench/main.swift`). To compare a current measurement
-against a historical one, check out the historical commit, run
+Benchmark JSONs are gitignored. The schema and its `writeJSON`
+emitter live in the `StressTest` / `TopKBench` sweep sources, which
+are not yet ported into this repo (see the directory-layout note
+above); they land together with the sweep. To compare a current
+measurement against a historical one, check out the historical
+commit, run
 the same stress-test invocation on the same hardware, and
 compare.
 

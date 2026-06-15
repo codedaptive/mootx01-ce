@@ -1,10 +1,23 @@
+---
+status: decided
+question: Is `eventTime` the single authored-in-world origin-time primitive on `Drawer`, or should a parallel `occurredAt` primitive be introduced?
+authors: MOOTx01 maintainers
+date: 2026-06-03
+relates_to:
+  - docs/reference/LOCUSKIT_SPEC.md
+  - docs/reference/LOCUSKIT_INTERFACE.md
+supersedes: none
+context:
+  - A drawer carries two distinct time semantics — an ingest clock (`filedAt`) and an authored-in-world clock (`eventTime`).
+  - The two-clock model shipped first in Swift; the Rust port had no `event_time`, a conformance gap against the published interface.
+  - Scope is the `Drawer` origin-time field across both ports (Swift + Rust), its `CaptureFrame` capture slot, its SQLite column, and the fingerprint capture-week bucket that keys off it. LocusKit only.
+---
+
 # ADR-004 — `eventTime` is the Authored-in-World Origin-Time Primitive (Two-Clock Ingest)
 
-- Status: Accepted — 2026-06-03 (decision D-1; Rust parity landed via stream `bp1`, mission BP_1_RUST_EVENT_TIME_PARITY_001)
-- Date: 2026-06-03
-- Deciders: Bob (Commander)
-- Scope: The `Drawer` origin-time field across both ports (Swift + Rust), its `CaptureFrame` capture slot, its SQLite column, and the fingerprint capture-week bucket that keys off it. LocusKit only.
-- Evidence: ING-01 ("two-clock ingest") shipped Swift implementation; `LOCUSKIT_INTERFACE_v0.8.md:123` (`Drawer.eventTime`), `:278` (`CaptureFrame.eventTime`), invariant **I-7** (ISO8601 date columns include `eventTime`); BP-1 change-impact analysis + completion report; prior rescope analysis (MemPalace `mootx01/locuskit`, 2026-06-03).
+**Status:** Accepted — 2026-06-03
+
+**Evidence:** The two-clock ingest model shipped its Swift implementation; `Drawer.eventTime` and `CaptureFrame.eventTime` are canonical in `LOCUSKIT_INTERFACE.md`, and invariant **I-7** (ISO8601 date columns) includes `eventTime`.
 
 ## Context
 
@@ -13,11 +26,11 @@ A drawer carries two distinct time semantics:
 - **`filedAt`** — the *ingest clock*: when the row entered the local store. Monotonically increasing, immutable, the anchor for CRDT convergence and audit ordering. "When did we learn this."
 - **`eventTime`** — the *authored-in-world clock*: when the thing happened or was authored in the world. For streaming capture it coincides with `filedAt`; for bulk historical ingestion the caller supplies the original authorship date. "When did it actually happen." The fingerprint's capture-week bucket and all temporal-cognition primitives key off this field, not `filedAt`.
 
-This two-clock model shipped in Swift under mission ING-01 as `Drawer.eventTime`: full field, nullable SQLite column with NULL→`filedAt` backfill on read, `CaptureFrame.eventTime`, capture stamping (`frame.eventTime ?? now`), fingerprint integration, and an 8-test acceptance suite (`TwoClockIngestTests.swift`). It is canonical in the published interface (`Drawer.eventTime` at `:123`, `CaptureFrame.eventTime` at `:278`) and named in invariant I-7.
+This two-clock model shipped first in Swift as `Drawer.eventTime`: full field, nullable SQLite column with NULL→`filedAt` backfill on read, `CaptureFrame.eventTime`, capture stamping (`frame.eventTime ?? now`), fingerprint integration, and an acceptance suite. It is canonical in the published interface (`Drawer.eventTime`, `CaptureFrame.eventTime`) and named in invariant I-7.
 
 Two questions were open and are now closed:
 
-1. A later mission (the parked "BP" mission) proposed a **new `occurredAt` primitive** for authored-in-world time — not realizing `eventTime` already provides exactly that semantic.
+1. A later proposal suggested a **new `occurredAt` primitive** for authored-in-world time — not realizing `eventTime` already provides exactly that semantic.
 2. The Rust port had **zero** `event_time` despite the interface stating "Rust mirror these fields" — a pre-existing conformance gap, not a design question.
 
 ## Decision
@@ -25,15 +38,15 @@ Two questions were open and are now closed:
 **`eventTime` is the single authored-in-world origin-time primitive on `Drawer`. It is not renamed, and no parallel primitive is introduced.**
 
 1. **No `occurredAt`.** A new `occurredAt` field would duplicate `eventTime`'s semantics. Rejected.
-2. **No rename `eventTime → occurredAt`.** Renaming would diverge from the published `LOCUSKIT_INTERFACE`, edit I-7's column list, and ripple through every consumer for no semantic gain. Rejected. (This is decision D-1.)
-3. **The Rust port mirrors Swift `eventTime` field-for-field.** Implemented in stream `bp1`:
+2. **No rename `eventTime → occurredAt`.** Renaming would diverge from the published `LOCUSKIT_INTERFACE`, edit I-7's column list, and ripple through every consumer for no semantic gain. Rejected.
+3. **The Rust port mirrors Swift `eventTime` field-for-field:**
    - `Drawer.event_time: i64` — **non-optional**, mirroring Swift's non-optional `eventTime: Date`. `Drawer::new` defaults it to `filed_at` (the Rust expression of Swift's `eventTime ?? filedAt`).
    - `CaptureFrame.event_time: Option<i64>` — **nullable**, mirroring Swift's `eventTime: Date?` (default `None`).
-   - Nullable `eventTime` SQLite column; `drawer_from_row` backfills NULL/absent → `filed_at` on read (mirrors `DrawerStore.swift:1640`).
-   - `capture` stamps `frame.event_time.unwrap_or(now)` (mirrors `EstateVerbs.swift:151`).
-   - The fingerprint capture-week bucket keys off `event_time`, not `filed_at` (mirrors `DrawerFingerprint.swift:112`).
+   - Nullable `eventTime` SQLite column; the drawer row decoder backfills NULL/absent → `filed_at` on read (mirroring the Swift `DrawerStore` read path).
+   - `capture` stamps `frame.event_time.unwrap_or(now)` (mirroring the Swift capture path in `EstateVerbs`).
+   - The fingerprint capture-week bucket keys off `event_time`, not `filed_at` (mirroring the Swift `DrawerFingerprint` bucket logic).
 
-**Storage discipline:** `eventTime` is TEXT ISO8601 at the SQLite boundary in both ports (fleet date rule, I-7); the Rust port holds it as epoch-seconds `i64` internally, as it does for `filed_at`. The column lands additively in the v1 schema declaration with **no migration ladder** — no estate data has shipped (pre-1.0), so additive nullable columns are the sanctioned pattern.
+**Storage discipline:** `eventTime` is TEXT ISO8601 at the SQLite boundary in both ports (the project-wide TEXT/ISO8601 date rule, I-7); the Rust port holds it as epoch-seconds `i64` internally, as it does for `filed_at`. The column lands additively in the v1 schema declaration with **no migration ladder** — no estate data has shipped (pre-1.0), so additive nullable columns are the sanctioned pattern.
 
 ## Alternatives considered
 
@@ -49,8 +62,8 @@ Two questions were open and are now closed:
 
 ## Out of scope (recorded so it is not lost)
 
-**`SourceRef` (contentHash / mime / byteSize)** — the second half of the original parked BP mission — is genuinely net-new on *both* ports (additive over the existing `source_file`/`chunkIndex`) and remains deferred as **BP-2**. It is a separate decision and a separate mission; it is *not* governed by this ADR.
+**`SourceRef` (contentHash / mime / byteSize)** is genuinely net-new on *both* ports (additive over the existing `source_file`/`chunkIndex`) and remains deferred. It is a separate decision; it is *not* governed by this ADR.
 
 ## Status note
 
-This decision was previously recorded only in the (gitignored) BP-1 mission BRR and completion report, and in MemPalace. This ADR is its canonical, discoverable home so the keep-`eventTime` decision (D-1) and the two-clock model do not drift silently, and so any future "add an origin-time field" proposal is routed to `eventTime` rather than re-deriving it.
+This ADR is the canonical, discoverable home for the keep-`eventTime` decision and the two-clock model, so they do not drift silently, and so any future "add an origin-time field" proposal is routed to `eventTime` rather than re-deriving it.

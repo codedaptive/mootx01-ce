@@ -1,3 +1,9 @@
+---
+status: in_progress
+created: 2026-06-14
+last_updated: 2026-06-14
+---
+
 # SubstrateValidator — field validators of the substrate libs
 
 Two standalone compiled applications — one **Swift** (primary), one **Rust** —
@@ -31,8 +37,8 @@ harness's `test-harness/swift`.)
 
 **Swift is the primary validator and does the (B)+2 dual check:** every primitive
 is validated against *both* the shipping `packages/libs` Swift impl *and* the
-glref reference, and their agreement is reported. That dual check found a real
-shipping bug (see below) that the glref-only harness could not.
+glref reference, and their agreement is reported. That dual check surfaced a
+harness encoding-path mismatch (see below) that the glref-only harness could not.
 
 ## Build & run
 
@@ -85,11 +91,20 @@ the output, and compares the CRC to the committed `output_crc32`.
   time, so there is no clean `build.rs` equivalent. `--stamp` is the
   release/build-time stamp point; drift = "since last stamp".
 
-## Bug found by the (B)+2 dual check
+## Encoding-path mismatch surfaced by the (B)+2 dual check
 
-`SubstrateTypes.RowBitmaps` / `BitVector216` (Swift) **silently drops row fields
-10, 11, 22, 23, 34, 35** — it packs 12 fields × 6 bits = 72 bits into a 64-bit
-`Int64` and overshifts. glref and the Rust lib are correct (closure-based). The
-`field_presence_matrix_f` Swift validator routes around `BitVector216` (drives
-`MatrixF`'s subscript directly) to compute the canonical value. Fix mission:
-`docs/_internal/missions/MISSION_FIX_ROWBITMAPS_BITVECTOR216_2026-05-31.md`.
+The dual check surfaced a mismatch in how an *arbitrary 216-bit presence grid* is
+encoded — not a data-loss bug in shipping rows. `BitVector216`'s row-derived
+initializer, `init(rowBitmaps:)`, builds the dense view from the live `RowBitmaps`
+`Int64` columns; row fields 10, 11, 22, 23, 34, 35 map to bit positions 60–71 of
+their column, which the cookbook reserves (§2.3 bits 28–63, §2.4 bits 26–63, §2.5
+bits 42–63). For any conforming row those bits are always zero, so `init(rowBitmaps:)`
+returns the correct value — but a harness feeding an *arbitrary* uniform 36×6
+presence grid through that path could not round-trip those six positions.
+
+Resolved: `SubstrateTypes` provides a second initializer,
+`BitVector216(presenceBytes:)`, for arbitrary 27-byte presence patterns — it
+round-trips all 36 fields, including 10/11/22/23/34/35 (covered by
+`RowBitmapsTests.presenceBytesRoundTrip`). A validator encoding an arbitrary
+presence grid uses `init(presenceBytes:)` rather than the row-derived path. No real
+product data is affected: conforming rows never populate the reserved bits.

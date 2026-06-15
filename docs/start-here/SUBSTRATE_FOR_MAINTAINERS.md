@@ -1,7 +1,7 @@
 ---
 title: "The MOOTx01 Substrate: A Guide for Maintainers"
 subtitle: "What the math does, why we chose it, and where it lives in the code"
-author: "Bob Pankratz"
+author: "MOOTx01 maintainers"
 date: "2026-05-21"
 ---
 
@@ -177,4 +177,4 @@ The mathematics behind this guide is held internally. If you find yourself needi
 
 ---
 
-*Maintainers' guide. Derived from the v0.36 cookbook and the substrate mathematics treatment. The full mathematical derivations are not included by design.*
+*Maintainers' guide. Derived from the substrate engineering cookbook and the substrate mathematics treatment. The full mathematical derivations are not included by design.*

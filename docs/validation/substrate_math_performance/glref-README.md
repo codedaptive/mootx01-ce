@@ -1,7 +1,13 @@
+---
+status: in_progress
+created: 2026-05-16
+last_updated: 2026-06-14
+---
+
 # GeniusLocus Reference Implementation
 
 Reference implementations of every technique specified in
-[`docs/specs/GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36_2026-05-16.md`](../../specs/GENIUSLOCUS_ENGINEERING_COOKBOOK_v0.36_2026-05-16.md).
+[`docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md`](../../engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md).
 
 These files are **canonical sources** for shipping code. They are
 not the shipping code itself. A coder wrapping these for production
@@ -11,43 +17,55 @@ target runtime, and gains:
 - A bit-for-bit oracle against the cookbook's pseudocode
 - A test-vector basis for cross-language conformance
 - Inline cookbook section references for every algorithm
-- Two reference languages (Swift, Rust) plus Metal where the
-  bandwidth profile makes a GPU kernel meaningful
+- A Swift reference here plus Metal where the bandwidth profile
+  makes a GPU kernel meaningful; the Rust port (the four
+  `packages/libs/Substrate*/rust/` crates) is conformance-gated
+  against the same vectors via `test-harness/rust`
 
 ## Layout
 
 ```
-substrate_reference/
-├── README.md              This file
-├── INDEX.md               Cookbook § → file mapping
-├── swift/                 Swift reference implementations
-│   └── glref-swift-<TechniqueName>.swift
-├── rust/                  Rust reference implementations
-│   └── glref-rust-<technique_name>.rs
-└── metal/                 Metal compute shaders
-    └── glref-metal-<shader_name>.metal
+substrate_math_performance/
+├── glref-README.md           This file
+├── glref-INDEX.md            Cookbook § → file mapping
+├── GeniusLocusReference/     Swift reference implementations (library)
+│   ├── Package.swift
+│   └── glref-swift-<TechniqueName>.swift   (50 files)
+├── metal/                    Metal compute shaders
+│   └── glref-metal-hamming_nn.metal
+├── test-harness/             conformance + drift harness (see test-harness/README.md)
+│   ├── swift/                Swift harness (gen-vectors, validate-vectors)
+│   ├── rust/                 Rust harness (pinned nightly)
+│   └── vectors/             canonical test-vector JSON files
+└── validation-app/           cross-language comparison app
+    ├── rust/
+    ├── swift-app/
+    └── cross_lang_compare.py
 ```
 
-A Swift and Rust file with the same root name implement the same
-algorithm. Compare them side by side to verify equivalence; run
-the cross-language test vectors to verify bit-identical output.
+The reference implementations in `GeniusLocusReference/` are **Swift
+only** — there is no parallel `glref-rust-*` reference tree in this
+directory. The Rust port of the substrate lives in the four substrate
+crates under `packages/libs/Substrate*/rust/`, and is exercised here
+through `test-harness/rust` (conformance against the same vectors) and
+`validation-app/rust` (cross-language output comparison). Equivalence
+between the Swift reference and the Rust port is verified by running
+both against the shared test vectors and confirming bit-identical
+output, not by reading two side-by-side files in this directory.
 
 ## Authoring workflow
 
-Reference implementations are authored in **parallel sub-agents
-working from the cookbook as the single source of truth**. Swift
-and Rust ports land together for the same primitive, not
-sequentially. The cookbook prose is authoritative; both language
-ports are equal-status implementations of that prose.
+Reference implementations are authored from the cookbook as the
+single source of truth. Swift and Rust ports land together for the
+same primitive, not sequentially. The cookbook prose is
+authoritative; both language ports are equal-status implementations
+of that prose.
 
 The conformance gate is bit-identity between the two ports on
 every test vector. When they disagree, the cookbook is ambiguous
 on that primitive — investigate, fix the cookbook, both re-run.
 This catches spec bugs that single-language authoring would
 silently paper over.
-
-See [`docs/decisions/DECISION_RUST_PORT_ROUTING_2026-05-16.md`](../../decisions/DECISION_RUST_PORT_ROUTING_2026-05-16.md)
-for the rationale.
 
 ## Accelerator routing (which silicon runs which math)
 
@@ -69,8 +87,10 @@ backend must match bit-for-bit.
 | Bradley-Terry online update | CPU scalar | CPU scalar | CPU scalar |
 | LLM inference (cognition tier above) | **ANE** via Core ML | CUDA / DirectML / CPU | CUDA / ROCm / CPU |
 
-Apple-side rationale: [`docs/decisions/DECISION_ACCELERATOR_ROUTING_2026-05-16.md`](../../decisions/DECISION_ACCELERATOR_ROUTING_2026-05-16.md).
-Non-Apple rationale: [`docs/decisions/DECISION_RUST_PORT_ROUTING_2026-05-16.md`](../../decisions/DECISION_RUST_PORT_ROUTING_2026-05-16.md).
+Routing follows the kernel-dispatch contract: the scalar reference
+is the oracle every accelerator backend must match bit-for-bit,
+and each platform selects the fastest backend that preserves that
+identity.
 
 ## Implementation status
 
@@ -128,18 +148,18 @@ Non-Apple rationale: [`docs/decisions/DECISION_RUST_PORT_ROUTING_2026-05-16.md`]
 
 | Pass | Scope |
 |---|---|
-| Test vectors | Per-component canonical input/output pairs in `test-harness/vectors/` exercising every new Block 2a + 2b component. Gates future re-implementations and SIMD specializations at bit-identity. |
+| Test vectors | Per-component canonical input/output pairs in `test-harness/vectors/` exercising every component. Gates future re-implementations and SIMD specializations at bit-identity. |
 | NEON / AVX-512 / AVX2 kernels | Specializations of PortableKernel for ARM and x86-64. Each must produce bit-identical output to ScalarKernel under the four-way conformance gate. |
-| Louvain phase 2 | Deferred from §7.3 to v0.37. Phase 1 already shipped; CognitionKit's recall_community and recall_exploratory are documented v0.37 stubs. |
-| Paper v0.2 | Quantitative results from M6 evaluation suite once test vectors and a runnable benchmark land. |
+| Louvain phase 2 | Deferred from §7.3. Phase 1 already shipped; CognitionKit's recall_community and recall_exploratory are documented stubs pending phase 2. |
+| Quantitative paper | Quantitative results from the evaluation suite once test vectors and a runnable benchmark land. |
 
 ## Conformance
 
 Each reference implementation is paired with test vectors that any
 shipping implementation must reproduce bit-for-bit. The vectors
 are the contract between this reference tree and production code
-in LocusKit / LociKit / NeuronKit / CognitionKit / NexusKit /
-CorpusKit.
+in LocusKit / GeniusLocusKit / NeuronKit / CognitionKit /
+ConvergenceKit / CorpusKit.
 
 Test vectors are produced by running the reference on a fixed
 seed and recording outputs. They land in
@@ -149,23 +169,38 @@ bit-identical output across language and backend.
 
 ## Building
 
-### Swift
+### Swift reference
+
+The reference implementations are a single SwiftPM library package
+with no test target:
 
 ```sh
-cd docs/validation/substrate_math_performance/swift && swift build && swift test
+cd docs/validation/substrate_math_performance/GeniusLocusReference && swift build
 ```
 
-### Rust
+### Conformance harness (Swift)
+
+The harness builds and tests the conformance binaries (`gen-vectors`,
+`validate-vectors`) against the shared vectors:
 
 ```sh
-cd docs/validation/substrate_math_performance/rust && cargo build && cargo test
+cd docs/validation/substrate_math_performance/test-harness/swift && swift build && swift test
+```
+
+### Conformance harness (Rust)
+
+The Rust harness requires the pinned nightly toolchain selected by
+`test-harness/rust/rust-toolchain.toml` (see `test-harness/README.md`):
+
+```sh
+cd docs/validation/substrate_math_performance/test-harness/rust && cargo build && cargo test
 ```
 
 ### Metal
 
-Shaders are validated via the Swift package's `MetalKernels`
-target once the portable kernel layer (federation/runtime pass)
-lands.
+The single shader lives at `metal/glref-metal-hamming_nn.metal`. It is
+validated through the harness's Metal kernel path against the same
+Hamming-NN vectors.
 
 ## Relationship to shipping kits
 
@@ -179,10 +214,10 @@ lands.
 | glref-*-FFT | NeuronKit (rhythm analysis path, consumed by §11.14) |
 | glref-*-ActionOutcomeMatrix, LLMCalibrationCurve | NeuronKit (cognition tier) |
 | glref-*-NMF, InformationTheory, AnomalyDetection, TemporalCompression | NeuronKit (matrix tier maintenance) |
-| glref-*-FeatureExtractors | NexusIOS, NexusMacOS (ambient stream capture) |
+| glref-*-FeatureExtractors | Mootx01-App (ambient stream capture) |
 | glref-*-CognitionKit | CognitionKit (the shipping kit of the same name) |
 | glref-*-ThreeDBitTensor, WorkingSetMmap, SQLiteDurabilityTail, PortableKernel | LocusKit (substrate runtime) |
-| glref-*-PairingHandshake, TierContribution*, TierAscendingQuery, DPORReduction | NexusKit (federation) |
+| glref-*-PairingHandshake, TierContribution*, TierAscendingQuery, DPORReduction | ConvergenceKit (federation) |
 | glref-*-PortableCognitionBundle | CognitionKit (export/import) |
 | glref-*-ActuatorKit | NeuronKit (actuator dispatch) |
 | glref-*-DreamingDaemon | LocusKit (background maintenance) |
