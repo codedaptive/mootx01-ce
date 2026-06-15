@@ -44,7 +44,7 @@ struct GLK_COW_01_BranchTests {
     /// which would break tests 7 and 8 that match by content after promotion/merge.
     private func recallAll(kit: GeniusLocusKit, handle: EstateHandle) async throws -> [Drawer] {
         let frame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
@@ -109,7 +109,7 @@ struct GLK_COW_01_BranchTests {
         let stored = try await branch.capture(branchFrame)
 
         let recallFrame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )
@@ -176,7 +176,7 @@ struct GLK_COW_01_BranchTests {
         #expect(branch.status == .discarded)
 
         let recallFrame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         )

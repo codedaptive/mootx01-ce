@@ -103,7 +103,7 @@ private func openEstateWithFloatCorpusAndIngest() async throws
 /// Recall frame that matches every active row in the test estate.
 private func recallAllActive() -> RecallFrame {
     RecallFrame(
-        filterChain: [.unconfirmed],
+        filterChain: [.userConfirmed],
         hydrationLevel: .structured,
         ordering: .byCaptureTimeDesc
     )
@@ -394,7 +394,7 @@ struct DenseLaneStoreErrorTests {
 
             let request = GLKRecallRequest(
                 frame: RecallFrame(
-                    filterChain: [.unconfirmed],
+                    filterChain: [.userConfirmed],
                     hydrationLevel: .structured,
                     ordering: .byCaptureTimeDesc
                 ),

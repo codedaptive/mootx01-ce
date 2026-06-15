@@ -103,7 +103,7 @@ struct CompositionConformanceTests {
         // Fan-out routing. Region [4, 8] overlaps the two low estates,
         // skips the high estate. Each contribution carries its own
         // captured drawer; the disjoint estate is not consulted.
-        let recall = RecallFrame(filterChain: [.unconfirmed])
+        let recall = RecallFrame(filterChain: [.userConfirmed])
         let contributions = try await kit.fanOutRecall(
             recall, region: LatticeRegion(low: 4, high: 8))
         let byHandle = Dictionary(uniqueKeysWithValues: contributions.map { ($0.handle, $0) })
@@ -273,11 +273,11 @@ struct CompositionConformanceTests {
         let captured = try await kit.capture(handle,
             captureFrame(tag: "verb", room: "verb-room"))
 
-        // Recall with `.unconfirmed` because freshly captured drawers
+        // Recall with `.userConfirmed` because freshly captured drawers
         // have provenance==0; default-prepend `.userConfirmed` would
         // prune them before the verb surface returned.
         let recalled = try await kit.recall(handle,
-            RecallFrame(filterChain: [.unconfirmed]))
+            RecallFrame(filterChain: [.userConfirmed]))
         #expect(recalled.map(\.id).contains(captured.id),
                 "captured drawer must appear in the recall result")
 
@@ -288,11 +288,11 @@ struct CompositionConformanceTests {
         try await kit.withdraw(handle,
             WithdrawFrame(rowID: captured.id, reason: "composition-test"))
         let stillActive = try await kit.recall(handle,
-            RecallFrame(filterChain: [.unconfirmed, .state(.active)]))
+            RecallFrame(filterChain: [.userConfirmed, .state(.active)]))
         #expect(!stillActive.contains(where: { $0.id == captured.id }),
                 "withdrawn drawer must not surface under .state(.active)")
         let nowWithdrawn = try await kit.recall(handle,
-            RecallFrame(filterChain: [.unconfirmed, .state(.withdrawn)]))
+            RecallFrame(filterChain: [.userConfirmed, .state(.withdrawn)]))
         #expect(nowWithdrawn.contains(where: { $0.id == captured.id }),
                 "withdrawn drawer must surface under .state(.withdrawn)")
     }

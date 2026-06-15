@@ -71,10 +71,11 @@ struct FrameFaithfulRecallDropTests {
     }
 
     /// corpusOnly request carrying a caller-supplied state filter. The default
-    /// (`.unconfirmed` only) implies `.currentlyBelieve`; passing `.usedToBelieve`
+    /// (`.userConfirmed` only) implies `.currentlyBelieve`; passing `.usedToBelieve`
     /// overrides the state axis so Cluster-B (withdrawn) drawers surface.
+    /// UserConfirmed: all rows written via Estate.capture are stamped at write time.
     private func request(query: String, stateFilter: Filter? = nil) -> GLKRecallRequest {
-        var chain: [Filter] = [.unconfirmed]
+        var chain: [Filter] = [.userConfirmed]
         if let stateFilter { chain.append(stateFilter) }
         return GLKRecallRequest(
             frame: RecallFrame(

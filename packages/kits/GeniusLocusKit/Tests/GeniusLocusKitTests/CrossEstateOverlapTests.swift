@@ -114,10 +114,10 @@ struct CrossEstateOverlapTests {
         let dMid  = try await capture(into: hMid,  tag: "mid")
         let dHigh = try await capture(into: hHigh, tag: "high")
 
-        // Recall with `.unconfirmed` so default-prepend does not insert
+        // Recall with `.userConfirmed` so default-prepend does not insert
         // `.userConfirmed` (newly captured drawers have provenance==0;
         // the prepend would prune all three rows and mask routing).
-        let frame = RecallFrame(filterChain: [.unconfirmed])
+        let frame = RecallFrame(filterChain: [.userConfirmed])
         let region = LatticeRegion(low: 4, high: 8) // overlaps low and mid only
 
         let contributions = try await kit.fanOutRecall(frame, region: region)
@@ -153,7 +153,7 @@ struct CrossEstateOverlapTests {
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         _ = try await kit.open(storage: storage, owner: owner)
 
-        let frame = RecallFrame(filterChain: [.unconfirmed])
+        let frame = RecallFrame(filterChain: [.userConfirmed])
         let contributions = try await kit.fanOutRecall(
             frame, region: LatticeRegion(low: 50, high: 60)
         )
@@ -170,7 +170,7 @@ struct CrossEstateOverlapTests {
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
         _ = try await kit.open(storage: storage, owner: owner)
 
-        let frame = RecallFrame(filterChain: [.unconfirmed])
+        let frame = RecallFrame(filterChain: [.userConfirmed])
         let thrown = await #expect(throws: GeniusLocusKitError.self) {
             try await kit.fanOutRecall(frame, region: LatticeRegion(low: 10, high: 4))
         }

@@ -138,7 +138,7 @@ private func unionBestRequest(
 ) -> GLKRecallRequest {
     GLKRecallRequest(
         frame: RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         ),
@@ -156,7 +156,7 @@ private func hybridRequest(
 ) -> GLKRecallRequest {
     GLKRecallRequest(
         frame: RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         ),
@@ -174,7 +174,7 @@ private func corpusOnlyRequest(
 ) -> GLKRecallRequest {
     GLKRecallRequest(
         frame: RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .structured,
             ordering: .byCaptureTimeDesc
         ),
@@ -384,7 +384,7 @@ struct PoolGetDrawersDegradationTests {
             // Use matrixAware so the scoring path reads drawerIndex.
             let request = GLKRecallRequest(
                 frame: RecallFrame(
-                    filterChain: [.unconfirmed],
+                    filterChain: [.userConfirmed],
                     hydrationLevel: .structured,
                     ordering: .byCaptureTimeDesc
                 ),
@@ -434,7 +434,7 @@ struct PoolGetDrawersDegradationTests {
 
         let request = GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.unconfirmed],
+                filterChain: [.userConfirmed],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc
             ),
@@ -472,7 +472,7 @@ struct MMRHydrationDegradationTests {
             // Use .full hydration so step 9.5 actually fires (it is guarded by .full level).
             let request = GLKRecallRequest(
                 frame: RecallFrame(
-                    filterChain: [.unconfirmed],
+                    filterChain: [.userConfirmed],
                     hydrationLevel: .full,
                     ordering: .byCaptureTimeDesc
                 ),
@@ -522,7 +522,7 @@ struct ReturnHydrationDegradationTests {
             // because .full uses mmrContentByID which was read at step 9.5).
             let request = GLKRecallRequest(
                 frame: RecallFrame(
-                    filterChain: [.unconfirmed],
+                    filterChain: [.userConfirmed],
                     hydrationLevel: .structured,
                     ordering: .byCaptureTimeDesc
                 ),
@@ -659,7 +659,7 @@ struct DegradedStagesHappyPathTests {
         let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "hp-lo")
         let request = GLKRecallRequest(
             frame: RecallFrame(
-                filterChain: [.unconfirmed],
+                filterChain: [.userConfirmed],
                 hydrationLevel: .structured,
                 ordering: .byCaptureTimeDesc
             ),
@@ -727,7 +727,7 @@ struct ScoringFallbackDispositionTests {
     func locusOnlyMatrixAwareSurfaces() async throws {
         let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "sf-lo-ma")
         let request = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
                                ordering: .byCaptureTimeDesc),
             mode: .locusOnly,
             scoring: .matrixAware,
@@ -745,7 +745,7 @@ struct ScoringFallbackDispositionTests {
     func corpusOnlyMatrixAwareSurfaces() async throws {
         let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "sf-co-ma")
         let request = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
                                ordering: .byCaptureTimeDesc),
             mode: .corpusOnly,
             scoring: .matrixAware,
@@ -764,7 +764,7 @@ struct ScoringFallbackDispositionTests {
     func hybridMatrixAwareSurfaces() async throws {
         let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "sf-hy-ma")
         let request = GLKRecallRequest(
-            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+            frame: RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured,
                                ordering: .byCaptureTimeDesc),
             mode: .hybrid,
             scoring: .matrixAware,

@@ -973,7 +973,7 @@ public extension GeniusLocusKit {
         // `.structured` returns `content = ""` (no blob reads), so using
         // `.structured` here would fail the capture guard for every promoted row.
         let frame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
@@ -1048,7 +1048,7 @@ public extension GeniusLocusKit {
         // so using `.structured` here would fail the capture guard for every
         // cherry-picked row.
         let frame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
@@ -1183,9 +1183,10 @@ public extension GeniusLocusKit {
         return store
     }
 
-    /// Drain all unconfirmed rows from a LocusKit estate into an array.
+    /// Drain all captured rows from a LocusKit estate into an array.
     /// Used by `glkDeriveBranch` to snapshot the parent or parent-branch
-    /// estate at derivation time.
+    /// estate at derivation time. All rows written via `Estate.capture` are
+    /// stamped `Confirmation.userConfirmed` at write time.
     ///
     /// `.full` hydration is required because the snapshot rows are immediately
     /// re-captured into the branch estate via `Estate.capture`, which requires
@@ -1195,7 +1196,7 @@ public extension GeniusLocusKit {
     /// callers, so loading blobs here is O(estate) and intentional.
     private func recallRows(from estate: LocusKit.Estate) async throws -> [Drawer] {
         let frame = RecallFrame(
-            filterChain: [.unconfirmed],
+            filterChain: [.userConfirmed],
             hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
