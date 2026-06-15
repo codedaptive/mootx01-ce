@@ -67,7 +67,7 @@ struct FormalConceptsTests {
     func emptyEstateYieldsNoConcepts() async throws {
         let (kit, handle) = try await openEstate()
         let input = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: .init(minSupport: 1, maxIntentSize: 8, maxConcepts: 8))
         let out = try await FormalConcepts().run(
             input: input, estate: handle, kit: kit)
@@ -95,7 +95,7 @@ struct FormalConceptsTests {
         }
 
         let input = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: .init(minSupport: 2, maxIntentSize: 8, maxConcepts: 10))
         let out = try await FormalConcepts().run(
             input: input, estate: handle, kit: kit)
@@ -119,7 +119,7 @@ struct FormalConceptsTests {
         }
 
         let input = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: .init(minSupport: 1, maxIntentSize: 8, maxConcepts: 8))
         let out = try await FormalConcepts().run(
             input: input, estate: handle, kit: kit)
@@ -159,7 +159,7 @@ struct FormalConceptsTests {
         }
 
         let input = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: .init(minSupport: 1, maxIntentSize: 8, maxConcepts: 10))
         let first = try await FormalConcepts().run(input: input, estate: handle, kit: kit)
         let second = try await FormalConcepts().run(input: input, estate: handle, kit: kit)
@@ -192,7 +192,7 @@ struct FormalConceptsTests {
             udc: "530", qid: "Q11397")
 
         let input = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: .init(minSupport: 2, maxIntentSize: 8, maxConcepts: 16))
         let out = try await FormalConcepts().run(input: input, estate: handle, kit: kit)
 
@@ -257,7 +257,7 @@ struct FormalConceptsTests {
             try await FormalConcepts().run(
                 input: .init(
                     frame: LocusKit.RecallFrame(
-                        filterChain: [.unconfirmed, .sensitivityAtMost(ceiling)]),
+                        filterChain: [.userConfirmed, .sensitivityAtMost(ceiling)]),
                     miner: .init(minSupport: 1, maxIntentSize: 8, maxConcepts: 16)),
                 estate: handle, kit: kit)
         }
@@ -280,7 +280,7 @@ struct FormalConceptsTests {
         try await capture(kit, handle, room: "study", kind: .code, channel: .voiced, udc: "600")
 
         let input = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: .init(minSupport: 1, maxIntentSize: 8, maxConcepts: 16))
         let out = try await FormalConcepts().run(input: input, estate: handle, kit: kit)
 
@@ -296,7 +296,7 @@ struct FormalConceptsTests {
     func coverDeltasEmptyForEmptyEstate() async throws {
         let (kit, handle) = try await openEstate()
         let input = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: .init(minSupport: 1, maxIntentSize: 8, maxConcepts: 8))
         let out = try await FormalConcepts().run(input: input, estate: handle, kit: kit)
         // No drawers → no concepts → no cover deltas.
@@ -323,7 +323,7 @@ struct FormalConceptsTests {
         }
 
         let input = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: .init(minSupport: 2, maxIntentSize: 8, maxConcepts: 16))
         let out = try await FormalConcepts().run(input: input, estate: handle, kit: kit)
 
@@ -363,11 +363,11 @@ struct FormalConceptsTests {
         }
 
         let singleInput = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: BoundedConceptMiner(
                 minSupport: 2, maxIntentSize: 8, maxConcepts: 16))
         let multiInput = FormalConcepts.Input(
-            frame: LocusKit.RecallFrame(filterChain: [.unconfirmed]),
+            frame: LocusKit.RecallFrame(filterChain: [.userConfirmed]),
             miner: BoundedConceptMiner(
                 minSupport: 2, maxIntentSize: 8, maxConcepts: 16,
                 seedMode: .multi))

@@ -205,7 +205,7 @@ struct DenseFusedSemanticPairTests {
                 // first. (We assert the dense win below; this documents the gap.)
                 let textMatches = try await PreciseRecall.run(
                     kit: kit, handle: handle, query: Self.query,
-                    filter: .unconfirmed, limit: 3, pool: 30, composition: "text")
+                    filter: .userConfirmed, limit: 3, pool: 30, composition: "text")
                 #expect(
                     textMatches.first?.id != target,
                     "pure-lexical text must NOT rank the low-overlap answer first")
@@ -214,7 +214,7 @@ struct DenseFusedSemanticPairTests {
                 // the answer to the top even with near-zero word overlap.
                 let denseMatches = try await PreciseRecall.run(
                     kit: kit, handle: handle, query: Self.query,
-                    filter: .unconfirmed, limit: 3, pool: 30, composition: "dense-fused")
+                    filter: .userConfirmed, limit: 3, pool: 30, composition: "dense-fused")
                 #expect(!denseMatches.isEmpty, "the coarse grab must surface candidates")
                 #expect(
                     denseMatches.first?.id == target,
@@ -236,7 +236,7 @@ struct DenseFusedSemanticPairTests {
                 let target = ids[0]
                 let matches = try await PreciseRecall.run(
                     kit: kit, handle: handle, query: Self.query,
-                    filter: .unconfirmed, limit: 3, pool: 30, composition: "dense-fused")
+                    filter: .userConfirmed, limit: 3, pool: 30, composition: "dense-fused")
                 #expect(matches.contains { $0.id == target },
                         "dense-fused must hold the answer in the bounded set")
             }

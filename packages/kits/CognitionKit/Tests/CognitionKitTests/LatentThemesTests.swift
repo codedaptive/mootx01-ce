@@ -47,9 +47,10 @@ struct LatentThemesTests {
 
     /// Admit elevated rows too — recall defaults to a normal sensitivity
     /// ceiling, which would otherwise drop the elevated work regime.
+    // UserConfirmed: all rows written via Estate.capture are stamped at write time.
     private var allRows: LocusKit.RecallFrame {
         LocusKit.RecallFrame(filterChain: [
-            .unconfirmed, .sensitivityAtMost(.secret),
+            .userConfirmed, .sensitivityAtMost(.secret),
         ])
     }
 

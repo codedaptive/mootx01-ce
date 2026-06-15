@@ -146,7 +146,7 @@ mod tests {
     }
 
     fn unconfirmed() -> RecallFrame {
-        let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+        let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
         f.hydration_level = HydrationLevel::Structured;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f

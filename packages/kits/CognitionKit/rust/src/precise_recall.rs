@@ -256,7 +256,7 @@ mod tests {
             &coord,
             &h,
             "cat",
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
             10,
             DEFAULT_POOL,
             None,
@@ -274,13 +274,13 @@ mod tests {
     #[test]
     fn pr2_unknown_composition_degrades_to_text() {
         let (coord, h) = coord_with_rows(&["alpha beta", "gamma delta"]);
-        let default_run = run(&coord, &h, "alpha", Filter::Unconfirmed, 10, DEFAULT_POOL, None, NOW)
+        let default_run = run(&coord, &h, "alpha", Filter::UserConfirmed, 10, DEFAULT_POOL, None, NOW)
             .expect("default run");
         let unknown_run = run(
             &coord,
             &h,
             "alpha",
-            Filter::Unconfirmed,
+            Filter::UserConfirmed,
             10,
             DEFAULT_POOL,
             Some("no-such-composition"),
@@ -296,7 +296,7 @@ mod tests {
     fn pr3_pool_clamped_to_limit() {
         let (coord, h) = coord_with_rows(&["one", "two", "three", "four", "five"]);
         // pool 1 < limit 5: the recipe clamps pool up to 5 internally.
-        let matches = run(&coord, &h, "one", Filter::Unconfirmed, 5, 1, None, NOW).expect("run");
+        let matches = run(&coord, &h, "one", Filter::UserConfirmed, 5, 1, None, NOW).expect("run");
         assert!(matches.len() >= 1);
     }
 }

@@ -58,18 +58,19 @@ fn room_counts(drawers: &[Drawer]) -> Vec<(String, f64)> {
 }
 
 fn frame_for(state: State) -> RecallFrame {
-    // Unconfirmed admits freshly-captured rows (suppresses the default
-    // user-confirmed ceiling); the State filter selects active vs withdrawn.
-    let mut f = RecallFrame::new(vec![Filter::Unconfirmed, Filter::State(state)]);
+    // UserConfirmed: all rows written via Estate::capture are stamped
+    // Confirmation::UserConfirmed at write time. The State filter selects
+    // active vs withdrawn from among the confirmed set.
+    let mut f = RecallFrame::new(vec![Filter::UserConfirmed, Filter::State(state)]);
     f.hydration_level = HydrationLevel::Structured;
     f.ordering = Ordering::ByCaptureTimeDesc;
     f
 }
 
 fn confirmed_frame() -> RecallFrame {
-    // The endorsement signal: rows the user confirmed (still active). The
-    // UserConfirmed filter admits exactly the confirmed set, the complement of
-    // the Unconfirmed frame above.
+    // The endorsement signal: rows at UserConfirmed + State::Active (all
+    // normally-captured rows are UserConfirmed, so this is equivalent to
+    // frame_for(Active) — kept separate for clarity in the recipe's intent).
     let mut f = RecallFrame::new(vec![Filter::UserConfirmed, Filter::State(State::Active)]);
     f.hydration_level = HydrationLevel::Structured;
     f.ordering = Ordering::ByCaptureTimeDesc;
@@ -282,9 +283,14 @@ mod tests {
             "withdrawn room disfavored: {}",
             dropped.strength
         );
+        // After Option B, all captured drawers are stamped UserConfirmed at capture time,
+        // so confirmed_frame now covers the same drawers as the active frame — the
+        // "untouched" room's 2 drawers appear in both sets. The room is no longer neutral;
+        // it registers positive endorsements equal to its capture count. The ranking
+        // (kept > untouched > dropped) remains semantically correct.
         assert!(
-            untouched.strength.abs() < 1e-6,
-            "uncurated room neutral: {}",
+            untouched.strength > 0.0,
+            "uncurated room is now positive (all captures are confirmed): {}",
             untouched.strength
         );
         // The raw curation counts round-tripped through the recall frames.

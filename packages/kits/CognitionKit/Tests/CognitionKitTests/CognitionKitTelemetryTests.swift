@@ -142,7 +142,7 @@ struct CognitionKitTelemetrySuite {
                 let (kit, handle) = try await makeEstate(capturing: ["hello world"])
                 let recipe = GroundedSynthesis()
                 _ = try await recipe.run(
-                    input: .init(frame: LocusKit.RecallFrame(filterChain: [.unconfirmed])),
+                    input: .init(frame: LocusKit.RecallFrame(filterChain: [.userConfirmed])),
                     estate: handle,
                     kit: kit
                 )
@@ -171,7 +171,7 @@ struct CognitionKitTelemetrySuite {
                 let (kit, handle) = try await makeEstate(capturing: ["hello world"])
                 let recipe = GroundedSynthesis()
                 _ = try await recipe.run(
-                    input: .init(frame: LocusKit.RecallFrame(filterChain: [.unconfirmed])),
+                    input: .init(frame: LocusKit.RecallFrame(filterChain: [.userConfirmed])),
                     estate: handle,
                     kit: kit
                 )
@@ -212,7 +212,7 @@ struct CognitionKitTelemetrySuite {
                 defer { resetIntellectus() }
 
                 let recipe = GroundedSynthesis()
-                let frame = LocusKit.RecallFrame(filterChain: [.unconfirmed])
+                let frame = LocusKit.RecallFrame(filterChain: [.userConfirmed])
                 _ = try await recipe.run(input: .init(frame: frame), estate: handle, kit: kit)
                 _ = try await recipe.run(input: .init(frame: frame), estate: handle, kit: kit)
 
@@ -238,7 +238,7 @@ struct CognitionKitTelemetrySuite {
                     capturing: ["hello", "world", "test"])
                 let recipe = GroundedSynthesis()
                 let output = try await recipe.run(
-                    input: .init(frame: LocusKit.RecallFrame(filterChain: [.unconfirmed])),
+                    input: .init(frame: LocusKit.RecallFrame(filterChain: [.userConfirmed])),
                     estate: handle,
                     kit: kit
                 )
@@ -388,7 +388,7 @@ struct CognitionKitTelemetrySuite {
         func groundedSynthesisOutputIdenticalWithAndWithoutTelemetry() async throws {
             try await withCognitionLock {
                 let recipe = GroundedSynthesis()
-                let frame = LocusKit.RecallFrame(filterChain: [.unconfirmed])
+                let frame = LocusKit.RecallFrame(filterChain: [.userConfirmed])
 
                 // OFF path.
                 let (kitOff, handleOff) = try await makeEstate(capturing: ["hello", "world"])
