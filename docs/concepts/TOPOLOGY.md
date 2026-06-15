@@ -2,8 +2,8 @@
 title: MOOTx01 Topology
 status: canon
 authors: MOOTx01 maintainers
-date: 2026-06-14
-version: 1.0.0
+date: 2026-06-15
+version: 1.0.1
 description: A readable front door to the repository — the two products, the kit stack, FDC, the license shape, and how a developer reaches the substrate.
 ---
 
@@ -104,22 +104,13 @@ The engine lives in **LatticeLib**: the FDC encoder (`FDCMatcher` / `FDCRuntime`
 
 EideticLib consumes FDC. `EideticLib.lookup` delegates to `FDC.encodeAnchor`: a term is canonicalized to a concept bag, the bag is matched against the pinned FDC signatures, and the result is an anchor — an FDC code plus the bag's dominant Wikidata Q-ID. Resolution is offline and deterministic against the pinned FDC artifacts; the network is never consulted. EideticLib also carries the valid-but-unknown-code state: a well-formed FDC code the instance does not yet recognize is stored and round-tripped intact, queryable as pending, and resolved once it is learned.
 
-## The license shape
+## Licensing
 
-Free to build and share, pay to profit. Make something new and free with it, go forward, no permission. Profit from what you built with it, get a license. The blocked act is offering for money what you built with the code, not who you are.
-
-The tiers:
-
-| Tier | Price | Covers |
-|------|-------|--------|
-| Personal use | Free, forever | Any individual using MOOTx01 for their own life |
-| Build and share free | Free | Building and sharing non-paid work |
-| Mobile app | $100 lifetime | Compiling into a for-sale mobile app, all of vX.y |
-| Corporate internal | $500 lifetime | Internal-facing applications, all of vX.y |
-| Service provider | $5,000 / year | Hosting MOOTs as a service for third parties |
-| FedRAMP | Negotiated | Commercial, hardening kept out of the open core |
-
-A lifetime tier covers every point release within the major; the next major is a new purchase. The mechanism is a dual license on a source-available core: the public license states the free-to-build, no-selling grant, and the paid tiers are separate agreements alongside it. The launch ships a source-available, free-to-build, pay-to-profit grant; PolyForm-family and the Functional Source License are the proven precedents.
+Free to build and share, licensed to sell — source-available under the Functional Source
+License (FSL-1.1-ALv2, with Apache 2.0 as the future license). The full model and the
+current tier ladder live in [`LICENSING.md`](../../LICENSING.md), the single source of truth
+(kept in step with mootx01.ai); this architecture map deliberately does not duplicate the
+price table.
 
 EideticLib is licensed independently: Apache for code plus CC for data, as a separate repository. The substrate kits sit under the core license.
 
