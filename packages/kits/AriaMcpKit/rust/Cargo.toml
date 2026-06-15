@@ -1,0 +1,73 @@
+[package]
+name = "aria-mcp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "ARIA_MCP Rust server — the Rust vertical's counterpart to the Swift ARIA_MCP server. Links the Rust kits (cognition-kit, neuron-kit, genius-locus-kit, locus-kit, persistence-kit) and hosts them behind a JSON-RPC 2.0 / stdio MCP transport. Wire-contract peer of the Swift server; internal architecture is idiomatic Rust. Per the no-FFI law, this binary is a COMPLETE Rust vertical — it never calls Swift, Swift never calls it."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# The server-logic library (testable). The reference-server binary that wires
+# stdin/stdout lives in apps/aria-mcp-server/rust and depends on this lib.
+[lib]
+name = "aria_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+serde       = { version = "1", features = ["derive"] }
+serde_json  = { version = "1" }
+uuid        = { version = "1", features = ["v4"] }
+# SHA-256 for the ARIA-layer drift-detection sidecar manifest
+# (ADR-VAULTKIT-002 decision b). Already in the lock file as a transitive
+# dep; adding as direct dep so the version is explicit and stable.
+sha2        = { version = "0.10", features = [] }
+digest      = { version = "0.10" }
+
+# Kit path deps. From packages/kits/AriaMcpKit/rust/, kits are ../../<Kit>/rust.
+cognition-kit    = { path = "../../CognitionKit/rust" }
+genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
+locus-kit        = { path = "../../LocusKit/rust" }
+neuron-kit       = { path = "../../NeuronKit/rust" }
+substrate-ml     = { path = "../../../libs/SubstrateML/rust" }
+# substrate-types: direct dep for Fingerprint256 (used in moot_lens_moment
+# and moot_lens_rhythm dispatch arms that call DrawerStore::fingerprints_captured_in
+# and DrawerStore::fingerprint_bit_series). Permitted per
+# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; dependency recorded in
+# the aria-tools mission blast-radius report.
+substrate-types  = { path = "../../../libs/SubstrateTypes/rust" }
+# vault-kit: VaultBridge + ObsidianAdapter + DrawerMapping — backing the
+# moot_vault_* tool family. In-repo path dep permitted per
+# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; dep recorded in
+# ADR-VAULTKIT-002 decision (e) Rust analog.
+vault-kit        = { path = "../../VaultKit/rust" }
+# The estate registry opens in-memory estates using InMemoryStorage and
+# InMemoryDrawerStore — both production-path for v1. persistence-kit is
+# a regular dep, not dev-only, because it is used in the lib (estate_registry).
+persistence-kit  = { path = "../../PersistenceKit/rust" }
+# corpus-kit and vectorkit: wired by the SQLite estate constructor to light up
+# the BM25 + vector semantic-recall lanes. Mirrors AriaMCPMain.swift's
+# wireSemanticRecall branch (SQLite only). Permitted per
+# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; dependency recorded in the
+# mcp-semantic-lanes mission blast-radius report.
+corpus-kit       = { path = "../../CorpusKit/rust" }
+vectorkit        = { path = "../../VectorKit/rust" }
+# intellectus-lib: required for Intellectus::install / set_enabled / report!()
+# in autonomic_governor.rs (Part 4) and autonomic_governor_tests.rs (Part 1).
+intellectus-lib  = { path = "../../../libs/IntellectusLib/rust" }
+# observer-sink: PersistenceStatsSink backed by StatsStore (SQLite). Wired at
+# startup via ARIA_MCP_STATS_STORE env var; see main.rs telemetry block.
+observer-sink    = { path = "../../../libs/ObserverSink/rust" }
+# lattice-lib: the resident Autonomic Governor drives `lattice::pool_reduce`
+# (novel-token merge-back — the second dormant learning loop) on a low cadence
+# from autonomic_governor.rs. App→lib path dep (downstream→upstream), no
+# inversion. Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+lattice-lib      = { path = "../../../libs/LatticeLib/rust" }
+
+[dev-dependencies]
+# convergence-kit: EstateStatusSyncTests (Rust) directly names NoSyncEngine and
+# SyncManifest to force-test the OP-1 honest sync vocabulary on the Rust port.
+# genius-locus-kit carries convergence-kit as a transitive dep; naming it here
+# makes it an explicit dev-only entry so test code can import it without
+# depending on internal transitive crate names. App→kit layering, no inversion.
+# Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (Rust no-inversion rule).
+convergence-kit  = { path = "../../ConvergenceKit/rust" }
