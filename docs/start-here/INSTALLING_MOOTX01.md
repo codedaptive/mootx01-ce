@@ -204,16 +204,17 @@ the stdio install into the resident-daemon install.
 
 - *Linux:* a per-user **systemd** unit at `~/.config/systemd/user/mootx01.service`, enabled via
   `systemctl --user enable --now` with `loginctl enable-linger` so the daemon runs without an open
-  login session. A `mootx01-mgr.service` is added **only if** a `moot-mgr` binary sits beside
-  `mootx01` — the Linux release archive carries `mootx01` only, so build `moot-mgr` from source if
-  you want the dashboard service. On hosts without systemd, the installer prints the unit text and
-  manual start instructions instead (sysvinit/openrc are not auto-registered in v1).
+  login session. A `mootx01-mgr.service` is added when a `moot-mgr` binary sits beside `mootx01`;
+  the Linux x86_64/arm64 archives include `moot-mgr`, so the mgr service registers automatically.
+  On hosts without systemd, the installer prints the unit text and manual start instructions
+  instead (sysvinit/openrc are not auto-registered in v1).
 - *Windows:* a per-user **Task Scheduler** logon task named `mootx01` (plus `mootx01-mgr`), created
   with `schtasks /SC ONLOGON` and started immediately.
 
 **The dashboard.** The macOS `moot-mgr` is a SwiftUI app; on **Linux** `moot-mgr` is a **headless**
-server that serves the same web dashboard at `http://127.0.0.1:4200`. It builds from source rather
-than shipping in the Linux release archive (which carries `mootx01` only).
+server that serves the same web dashboard at `http://127.0.0.1:4200`, and it ships in the Linux
+x86_64/arm64 release archives — so `mootx01 install` registers its service automatically. On
+**Windows**, `moot-mgr` is not yet available: its control channel is Unix-only and not yet ported.
 
 **Verify** the same way everywhere:
 

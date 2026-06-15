@@ -19,9 +19,10 @@ jobs:
       - name: Build release binaries
         run: |
           # mootx01 = MCP server + management CLI; moot-mgr = the management
-          # console (resident host + loopback dashboard). Both ship in the macOS
-          # archive. moot-mgr is macOS-only (.macOS(.v26), GeniusLocusKit-backed),
-          # so it is built here and on x86_64 but not on the Linux jobs.
+          # console (resident host + loopback dashboard). The macOS moot-mgr is a
+          # SwiftUI app (built here and on x86_64); Linux ships the headless Rust
+          # moot-mgr (built in the Linux jobs). Windows ships mootx01 only — the Rust
+          # moot-mgr's UDS control channel is Unix-only and not yet ported to Windows.
           swift build -c release --package-path apps/mootx01 --product mootx01
           swift build -c release --package-path apps/moot-mgr --product moot-mgr
 
@@ -92,16 +93,18 @@ jobs:
           key: release-rust-linux-x86_64-${{ hashFiles('apps/mootx01/rust/Cargo.toml') }}
           restore-keys: release-rust-linux-x86_64-
 
-      - name: Build release binary
-        working-directory: apps/mootx01/rust
-        run: cargo build --release
+      - name: Build release binaries
+        run: |
+          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml
+          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml
 
-      - name: Package binary
+      - name: Package binaries
         run: |
           VERSION="${{ github.ref_name }}"
           ASSET="mootx01-${VERSION}-linux-x86_64.tar.gz"
           cp apps/mootx01/rust/target/release/mootx01 mootx01
-          tar -czf "${ASSET}" mootx01
+          cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
+          tar -czf "${ASSET}" mootx01 moot-mgr
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
       - name: Upload asset
@@ -129,16 +132,18 @@ jobs:
           key: release-rust-linux-arm64-${{ hashFiles('apps/mootx01/rust/Cargo.toml') }}
           restore-keys: release-rust-linux-arm64-
 
-      - name: Build release binary
-        working-directory: apps/mootx01/rust
-        run: cargo build --release
+      - name: Build release binaries
+        run: |
+          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml
+          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml
 
-      - name: Package binary
+      - name: Package binaries
         run: |
           VERSION="${{ github.ref_name }}"
           ASSET="mootx01-${VERSION}-linux-arm64.tar.gz"
           cp apps/mootx01/rust/target/release/mootx01 mootx01
-          tar -czf "${ASSET}" mootx01
+          cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
+          tar -czf "${ASSET}" mootx01 moot-mgr
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
       - name: Upload asset

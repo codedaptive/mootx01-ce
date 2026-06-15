@@ -54,10 +54,11 @@ case "$arch" in
 esac
 target="${os}-${arch}"
 
-# Linux/Windows archives carry `mootx01` only — the Rust vertical, which hosts the
-# estate via `mootx01 serve` exactly like macOS (CI smoke-tests `serve` on Linux).
-# The `moot-mgr` console binary ships in the macOS archive; on Linux the headless
-# manager is built from source.
+# Linux/Windows ship the Rust `mootx01` vertical, which hosts the estate via
+# `mootx01 serve` exactly like macOS (CI smoke-tests `serve` on Linux). The
+# `moot-mgr` console ships in the macOS (Swift) and Linux x86_64/arm64 (headless
+# Rust) archives; Windows carries `mootx01` only — moot-mgr's UDS control channel
+# is Unix-only.
 
 # 2. Resolve the version. Use the releases/latest *web* redirect (no API rate
 #    limit) and fall back to the API. Matches codegraph's approach.
@@ -73,9 +74,9 @@ fi
 [ -n "$version" ] || { echo "mootx01: could not resolve latest version; set MOOTX01_VERSION (e.g. MOOTX01_VERSION=v1.0.0)." >&2; exit 1; }
 case "$version" in v*) ;; *) version="v$version" ;; esac
 
-# 3. Download + extract. The macOS release tarball contains two bare binaries
-#    at its root — `mootx01` and `moot-mgr` (the management console); Linux
-#    archives carry `mootx01` only (release.yml: `tar -czf ASSET mootx01 [moot-mgr]`).
+# 3. Download + extract. macOS and Linux x86_64/arm64 tarballs carry two bare
+#    binaries at the root — `mootx01` and `moot-mgr` (the management console);
+#    the Windows archive carries `mootx01` only (release.yml).
 asset="mootx01-${version}-${target}.tar.gz"
 url="https://github.com/$REPO/releases/download/$version/$asset"
 echo "Installing mootx01 $version ($target)..."
@@ -94,8 +95,8 @@ ln -sf "$INSTALL_DIR/mootx01" "$BIN_DIR/mootx01"
 echo "Installed  $INSTALL_DIR/mootx01"
 echo "Linked     $BIN_DIR/mootx01"
 
-# moot-mgr (the management & monitoring console) ships only in the macOS
-# archive; place it the same way when the extracted tree carries it.
+# moot-mgr (the management & monitoring console) ships in the macOS and Linux
+# archives; place it the same way whenever the extracted tree carries it.
 mgr_installed=0
 if [ -f "$tmp/moot-mgr" ]; then
   install -m 0755 "$tmp/moot-mgr" "$INSTALL_DIR/moot-mgr"
