@@ -69,25 +69,38 @@ jobs:
           path: ${{ env.ASSET }}
 
   # ── Linux builds (x86_64 + arm64) ─────────────────────────────────────────
-  # Linux binaries include install/uninstall/db/status/query subcommands.
-  # The serve subcommand requires macOS (AriaMCP + GeniusLocusKit declare
-  # .macOS(.v15)) and is excluded via #if os(macOS) in ServeCommand.swift.
+  # Linux ships the Rust CLI from apps/mootx01/rust (NOT the Swift installer —
+  # Swift has no Linux GUI, and the Swift package's non-macOS branch omits
+  # `serve`). The Rust binary is the complete CLI: install, db, status, query,
+  # proxy, serve, uninstall, upgrade. Verified green by rust-cli.yml.
   build-linux-x86_64:
     name: Build Linux x86_64
     runs-on: ubuntu-22.04
-    container:
-      image: swift:6.0-jammy
     steps:
       - uses: actions/checkout@v4
 
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/mootx01/rust/target
+          key: release-rust-linux-x86_64-${{ hashFiles('apps/mootx01/rust/Cargo.toml') }}
+          restore-keys: release-rust-linux-x86_64-
+
       - name: Build release binary
-        run: swift build -c release --package-path apps/mootx01 --product mootx01
+        working-directory: apps/mootx01/rust
+        run: cargo build --release
 
       - name: Package binary
         run: |
           VERSION="${{ github.ref_name }}"
           ASSET="mootx01-${VERSION}-linux-x86_64.tar.gz"
-          cp apps/mootx01/.build/release/mootx01 mootx01
+          cp apps/mootx01/rust/target/release/mootx01 mootx01
           tar -czf "${ASSET}" mootx01
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
@@ -100,19 +113,31 @@ jobs:
   build-linux-arm64:
     name: Build Linux arm64
     runs-on: ubuntu-22.04-arm64
-    container:
-      image: swift:6.0-jammy
     steps:
       - uses: actions/checkout@v4
 
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/mootx01/rust/target
+          key: release-rust-linux-arm64-${{ hashFiles('apps/mootx01/rust/Cargo.toml') }}
+          restore-keys: release-rust-linux-arm64-
+
       - name: Build release binary
-        run: swift build -c release --package-path apps/mootx01 --product mootx01
+        working-directory: apps/mootx01/rust
+        run: cargo build --release
 
       - name: Package binary
         run: |
           VERSION="${{ github.ref_name }}"
           ASSET="mootx01-${VERSION}-linux-arm64.tar.gz"
-          cp apps/mootx01/.build/release/mootx01 mootx01
+          cp apps/mootx01/rust/target/release/mootx01 mootx01
           tar -czf "${ASSET}" mootx01
           echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
 
@@ -123,29 +148,40 @@ jobs:
           path: ${{ env.ASSET }}
 
   # ── Windows build (x86_64) ────────────────────────────────────────────────
-  # The installer package is Swift-only; Swift has no Windows toolchain. The
-  # Windows binary is built from the Rust vertical (apps/aria-mcp-server/rust) and
-  # renamed to mootx01.exe so install.ps1 and the asset-naming convention align.
+  # Windows ships the Rust CLI from apps/mootx01/rust — the complete install/db/
+  # status/query/proxy/serve/uninstall/upgrade surface. NOT the ARIA MCP server
+  # (packages/kits/AriaMcpKit/rust) which is an internal library, not the user-facing CLI.
   build-windows-x86_64:
     name: Build Windows x86_64
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/mootx01/rust/target
+          key: release-rust-windows-x86_64-${{ hashFiles('apps/mootx01/rust/Cargo.toml') }}
+          restore-keys: release-rust-windows-x86_64-
+
       - name: Build release binary
-        run: cargo build --release --manifest-path apps/aria-mcp-server/rust/Cargo.toml --target x86_64-pc-windows-msvc
+        working-directory: apps/mootx01/rust
+        run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Package binary
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}"
           $asset = "mootx01-${version}-windows-x86_64.zip"
-          Copy-Item "apps/aria-mcp-server/rust/target/x86_64-pc-windows-msvc/release/aria-mcp.exe" "mootx01.exe"
+          Copy-Item "apps/mootx01/rust/target/x86_64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
           Compress-Archive -Path "mootx01.exe" -DestinationPath $asset
           "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
 
