@@ -254,7 +254,8 @@ mod tests {
 
         let make_queries = || {
             let mk = || {
-                let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
+                // UserConfirmed: all rows written via capture() are stamped at write time.
+                let mut f = RecallFrame::new(vec![Filter::UserConfirmed]);
                 f.hydration_level = HydrationLevel::Structured;
                 f.ordering = Ordering::ByCaptureTimeDesc;
                 f
