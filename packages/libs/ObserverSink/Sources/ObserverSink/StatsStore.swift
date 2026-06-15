@@ -111,6 +111,17 @@ public enum StatsStoreSchema {
     /// Set to "1970-01-01T00:00:00.000Z" (epoch zero) on first open to
     /// indicate no retention has run yet.
     public static let retentionCutoffKey = "retention_cutoff"
+
+    // MARK: topology_snapshots table (v2)
+
+    /// The topology_snapshots table name. One row per estate; latest-wins upsert.
+    public static let topologySnapshotsTable = "topology_snapshots"
+
+    /// TEXT NOT NULL — ISO-8601 UTC timestamp of when the governor produced the snapshot.
+    public static let generatedAtColumn = "generated_at"
+
+    /// TEXT NOT NULL — JSON-encoded ARIAGraphPayload bytes. Served verbatim by /api/graph.
+    public static let payloadColumn = "payload"
 }
 
 // MARK: - StatsStore
@@ -149,21 +160,25 @@ public final class StatsStore: Sendable {
 
     /// The current schema version for ObserverSink.
     /// Bumping this value requires a Migration entry to be added to `schema`.
-    public static let schemaVersion = 1
+    /// v1: initial schema (metric_samples, event_samples, control).
+    /// v2: added topology_snapshots table (one row per estate, latest-wins upsert).
+    public static let schemaVersion = 2
 
     // MARK: - Schema declaration
 
     /// The PersistenceKit schema declaration for the stats store.
     ///
-    /// Three tables:
+    /// Four tables (v2):
     /// - `metric_samples`: metric observations (name, value, tags JSON, ts, dropbox_id)
     /// - `event_samples`: topology events (kind, noun_type, row_id, estate, ts, dropbox_id)
     /// - `control`: global monitoring flag + retention metadata (key-value pairs)
+    /// - `topology_snapshots`: one row per estate holding the latest governor-computed
+    ///   topology payload (estate TEXT PRIMARY KEY, generated_at TEXT, payload TEXT).
+    ///   The autonomic governor writes here on its topology duty cycle; ARIA /api/graph
+    ///   and moot-mgr serve bytes from this table directly (no compute on read).
     ///
-    /// Indices on `ts` columns enable efficient retention deletes. The `control`
-    /// table is tiny (two rows) so no index is needed there.
-    ///
-    /// Version 1: initial schema — all three tables.
+    /// Version 1: initial schema — metric_samples, event_samples, control.
+    /// Version 2: additive migration — topology_snapshots table added.
     public static let schema = SchemaDeclaration(
         kitID: "ObserverSink",
         version: schemaVersion,
@@ -243,6 +258,32 @@ public final class StatsStore: Sendable {
                 ],
                 primaryKey: [StatsStoreSchema.keyColumn]
             ),
+
+            // MARK: topology_snapshots (v2)
+            //
+            // One row per estate. The autonomic governor upserts here after each
+            // topology-recompute duty cycle. `estate` is the PRIMARY KEY so the
+            // latest-wins upsert overwrites the previous row without accumulating
+            // history (history is not needed — only the current snapshot is served).
+            //
+            // `generated_at` is TEXT (ISO-8601 UTC) per the schema timestamp invariant.
+            // `payload` is TEXT storing the JSON-encoded ARIAGraphPayload bytes produced
+            // by the governor. The HTTP server and moot-mgr serve these bytes verbatim —
+            // no re-encoding on read.
+            //
+            // Added by v1→v2 migration (schema version bump from 1 to 2).
+            TableDeclaration(
+                name: StatsStoreSchema.topologySnapshotsTable,
+                columns: [
+                    // Estate identifier — one row per estate, primary key.
+                    .text(StatsStoreSchema.estateColumn),
+                    // ISO-8601 TEXT timestamp of when the governor produced this snapshot.
+                    .timestamp(StatsStoreSchema.generatedAtColumn),
+                    // JSON payload bytes (TEXT). Served verbatim; no decode on read path.
+                    .text(StatsStoreSchema.payloadColumn),
+                ],
+                primaryKey: [StatsStoreSchema.estateColumn]
+            ),
         ],
         indices: [
             // Index on metric_samples.ts for fast retention deletes.
@@ -258,6 +299,26 @@ public final class StatsStore: Sendable {
                 name: "idx_event_samples_ts",
                 table: StatsStoreSchema.eventSamplesTable,
                 columns: [StatsStoreSchema.tsColumn]
+            ),
+        ],
+        migrations: [
+            // v1 → v2: add topology_snapshots table.
+            // Additive migration — no existing rows are touched. The new table
+            // starts empty; the governor populates it on its next duty cycle.
+            Migration(
+                fromVersion: 1,
+                toVersion: 2,
+                operations: [
+                    .createTable(TableDeclaration(
+                        name: StatsStoreSchema.topologySnapshotsTable,
+                        columns: [
+                            .text(StatsStoreSchema.estateColumn),
+                            .timestamp(StatsStoreSchema.generatedAtColumn),
+                            .text(StatsStoreSchema.payloadColumn),
+                        ],
+                        primaryKey: [StatsStoreSchema.estateColumn]
+                    )),
+                ]
             ),
         ]
     )
@@ -463,6 +524,87 @@ public final class StatsStore: Sendable {
         )
     }
 
+    // MARK: - Topology snapshot (v2)
+
+    /// Write or replace the topology snapshot for `estate`.
+    ///
+    /// The autonomic governor calls this after each topology-recompute duty cycle.
+    /// The table uses `estate` as its PRIMARY KEY, so each call overwrites the
+    /// previous row — only the current snapshot is kept (latest-wins, no history).
+    ///
+    /// `generatedAt` is stored as TEXT (ISO-8601 UTC) per the schema timestamp
+    /// invariant. `payload` is the JSON-encoded ARIAGraphPayload bytes produced by
+    /// the governor; the HTTP server serves them verbatim without re-encoding.
+    ///
+    /// - Parameters:
+    ///   - estate:      Estate identifier string (PRIMARY KEY).
+    ///   - generatedAt: Caller-supplied timestamp of when the governor produced this
+    ///                  snapshot. No `Date()` call inside the store (determinism rule).
+    ///   - payload:     JSON payload bytes. Stored as UTF-8 TEXT.
+    /// - Throws: `StorageError` on I/O failure.
+    public func writeTopologySnapshot(estate: String, generatedAt: Date, payload: Data) async throws {
+        guard let payloadStr = String(data: payload, encoding: .utf8) else {
+            // Payload must be valid UTF-8 JSON; the governor always produces valid UTF-8.
+            throw StorageError.invalidQuery(detail: "topology snapshot payload is not valid UTF-8")
+        }
+        try await storage.rowStore.upsert(
+            table: StatsStoreSchema.topologySnapshotsTable,
+            values: [
+                StatsStoreSchema.estateColumn: .text(estate),
+                // ISO-8601 TEXT per schema invariant.
+                StatsStoreSchema.generatedAtColumn: .timestamp(generatedAt),
+                StatsStoreSchema.payloadColumn: .text(payloadStr),
+            ],
+            conflictColumns: [StatsStoreSchema.estateColumn]
+        )
+    }
+
+    /// Read the latest topology snapshot bytes for `estate`.
+    ///
+    /// Returns `nil` when no snapshot has been written yet for this estate
+    /// (governor has not completed its first duty cycle, or monitoring is
+    /// disabled). The caller should return a `structurePending: true` response
+    /// in this case.
+    ///
+    /// - Parameter estate: Estate identifier string (PRIMARY KEY lookup), or
+    ///   `nil` for the newest snapshot across ALL estates. The moot-mgr
+    ///   dashboard's default ("all estates") view reads with nil — it does
+    ///   not know estate UUIDs; the governor writes one row per estate and
+    ///   the newest `generated_at` wins.
+    /// - Returns: The raw JSON payload `Data`, or `nil` if absent.
+    /// - Throws: `StorageError` on I/O failure.
+    public func latestTopologySnapshot(estate: String?) async throws -> Data? {
+        let predicate: StoragePredicate? = estate.map { est in
+            .eq(
+                Column(table: StatsStoreSchema.topologySnapshotsTable,
+                       name: StatsStoreSchema.estateColumn),
+                .text(est)
+            )
+        }
+        let rows = try await storage.rowStore.query(
+            table: StatsStoreSchema.topologySnapshotsTable,
+            where: predicate
+        )
+        // PRIMARY KEY lookup yields ≤1 row; the nil-estate path picks the
+        // newest generated_at across estates.
+        let newest = rows.max { a, b in
+            timestampValue(a[StatsStoreSchema.generatedAtColumn])
+                < timestampValue(b[StatsStoreSchema.generatedAtColumn])
+        }
+        guard let row = newest,
+              let payloadTyped = row[StatsStoreSchema.payloadColumn],
+              case let .text(payloadStr) = payloadTyped
+        else { return nil }
+        return payloadStr.data(using: .utf8)
+    }
+
+    /// Decode a `generated_at` cell to a comparable instant. The write path
+    /// stores `.timestamp`; tolerate absent values by sorting them oldest.
+    private func timestampValue(_ value: TypedValue?) -> Date {
+        if case let .timestamp(d)? = value { return d }
+        return .distantPast
+    }
+
     // MARK: - Read: metric samples
 
     /// Query metric samples, optionally filtering by dropbox.
@@ -488,6 +630,69 @@ public final class StatsStore: Sendable {
             offset: nil
         )
         return rows.compactMap(MetricRow.init(storageRow:))
+    }
+
+    /// Query metric samples whose `name` is in `names`.
+    ///
+    /// Issues a `WHERE name IN (...)` predicate — reads only the named rows
+    /// rather than the full table. Use this in all hot read-API paths instead of
+    /// `queryMetrics(dropboxID:)` + Swift-side filter.
+    ///
+    /// - Parameters:
+    ///   - names: The set of metric names to retrieve. If empty, returns [] immediately.
+    ///   - dropboxID: Optional additional filter by dropbox. nil = all dropboxes.
+    /// - Returns: Matching rows ordered by ts ascending (oldest first).
+    /// - Throws: `StorageError` on I/O failure.
+    public func queryMetricsByNames(
+        _ names: Set<String>,
+        dropboxID: String? = nil
+    ) async throws -> [MetricRow] {
+        guard !names.isEmpty else { return [] }
+
+        // StoragePredicate.in emits `WHERE name IN ('n1', 'n2', ...)` — the SQLite
+        // query planner reads only rows matching the named set; no full-table scan.
+        let nameCol = Column(
+            table: StatsStoreSchema.metricSamplesTable,
+            name: StatsStoreSchema.nameColumn)
+        let namePredicate = StoragePredicate.in(nameCol, names.map { .text($0) })
+
+        let predicate: StoragePredicate
+        if let id = dropboxID {
+            let dbCol = Column(
+                table: StatsStoreSchema.metricSamplesTable,
+                name: StatsStoreSchema.dropboxIDColumn)
+            predicate = .and([namePredicate, .eq(dbCol, .text(id))])
+        } else {
+            predicate = namePredicate
+        }
+
+        let rows = try await storage.rowStore.query(
+            table: StatsStoreSchema.metricSamplesTable,
+            where: predicate,
+            orderBy: [OrderClause(column: Column(
+                table: StatsStoreSchema.metricSamplesTable,
+                name: StatsStoreSchema.tsColumn
+            ), direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return rows.compactMap(MetricRow.init(storageRow:))
+    }
+
+    /// Count total metric rows without reading their content.
+    ///
+    /// Used by `serverPayload()` to report `totalMetrics` without a full-row decode.
+    /// Delegates to `RowStore.count(table:where:)` — maps to a SQL `COUNT(*)` with
+    /// no row decoding.
+    ///
+    /// - Returns: Total number of rows in `metric_samples`.
+    /// - Throws: `StorageError` on I/O failure.
+    public func countMetrics() async throws -> Int {
+        // COUNT(*) with no predicate — cheapest possible aggregate; no row decoding.
+        try await storage.rowStore.count(
+            table: StatsStoreSchema.metricSamplesTable,
+            where: nil
+        )
     }
 
     /// Query event samples, optionally filtering by dropbox.

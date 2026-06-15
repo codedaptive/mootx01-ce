@@ -64,7 +64,8 @@ fn make_store() -> Arc<StatsStore> {
 
 #[test]
 fn schema_version() {
-    assert_eq!(StatsStore::SCHEMA_VERSION, 1);
+    // Schema version 2: topology_snapshots table added (v1→v2 migration).
+    assert_eq!(StatsStore::SCHEMA_VERSION, 2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -463,8 +464,117 @@ fn storage_stats_reports_backend_health() {
         stats.blob_count.is_none(),
         "blob_count must be None for SQLite backend"
     );
-    assert!(
-        stats.vector_count.is_none(),
-        "vector_count must be None for SQLite backend"
-    );
+    // vector_count was removed from StorageStats in ADR-008 (blast-radius miss fix).
+    // The field no longer exists on the struct; the InMemory-only assertion is gone.
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13–16. Topology snapshot — mirrors Swift tests 12–16
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 13. write_topology_snapshot stores payload and latest_topology_snapshot returns it.
+#[test]
+fn topology_snapshot_round_trip() {
+    let store = make_store();
+    let estate = "estate-topology-001";
+    let generated_at_secs = 1_700_000_000.0f64;
+    let payload = r#"{"nodes":[],"edges":[],"communities":[],"structurePending":false,"generatedTs":"2023-11-14T22:13:20.000Z"}"#;
+
+    store
+        .write_topology_snapshot(estate, generated_at_secs, payload)
+        .expect("write_topology_snapshot must succeed");
+
+    let result = store
+        .latest_topology_snapshot(Some(estate))
+        .expect("latest_topology_snapshot must not error");
+    let got = result.expect("Expected Some(payload) after write");
+    assert_eq!(got, payload, "Stored payload must round-trip verbatim");
+}
+
+/// 14. write_topology_snapshot overwrites the previous snapshot for the same estate.
+#[test]
+fn topology_snapshot_latest_wins() {
+    let store = make_store();
+    let estate = "estate-topology-002";
+
+    store
+        .write_topology_snapshot(estate, 1_000_000.0, "first-payload")
+        .expect("first write must succeed");
+    store
+        .write_topology_snapshot(estate, 2_000_000.0, "second-payload")
+        .expect("second write must succeed");
+
+    let result = store
+        .latest_topology_snapshot(Some(estate))
+        .expect("latest_topology_snapshot must not error");
+    let got = result.expect("Expected Some after two writes");
+    // Latest-wins: only second-payload survives.
+    assert_eq!(got, "second-payload", "Second write must supersede the first");
+}
+
+/// 15. Topology snapshots for different estates are independent.
+#[test]
+fn topology_snapshot_per_estate_isolation() {
+    let store = make_store();
+    let estate_a = "estate-topology-A";
+    let estate_b = "estate-topology-B";
+
+    store
+        .write_topology_snapshot(estate_a, 1_000_000.0, "payload-A")
+        .expect("write estate A must succeed");
+    store
+        .write_topology_snapshot(estate_b, 1_000_000.0, "payload-B")
+        .expect("write estate B must succeed");
+
+    let got_a = store
+        .latest_topology_snapshot(Some(estate_a))
+        .expect("read estate A must not error")
+        .expect("estate A must be Some");
+    let got_b = store
+        .latest_topology_snapshot(Some(estate_b))
+        .expect("read estate B must not error")
+        .expect("estate B must be Some");
+
+    assert_eq!(got_a, "payload-A", "Estate A payload must be isolated");
+    assert_eq!(got_b, "payload-B", "Estate B payload must be isolated");
+}
+
+/// 16. latest_topology_snapshot returns None for unknown estate.
+#[test]
+fn topology_snapshot_missing_returns_none() {
+    let store = make_store();
+    let result = store
+        .latest_topology_snapshot(Some("no-such-estate"))
+        .expect("query must not error");
+    assert!(result.is_none(), "Unknown estate must return None");
+}
+
+/// 17. None estate returns the newest snapshot across all estates — the
+/// moot-mgr dashboard's default ("all") view reads without an estate key.
+#[test]
+fn topology_snapshot_none_estate_returns_newest() {
+    let store = make_store();
+    store
+        .write_topology_snapshot("estate-older", 1_000_000.0, "payload-older")
+        .expect("write older must succeed");
+    store
+        .write_topology_snapshot("estate-newer", 2_000_000.0, "payload-newer")
+        .expect("write newer must succeed");
+
+    let got = store
+        .latest_topology_snapshot(None)
+        .expect("query must not error")
+        .expect("must be Some");
+    assert_eq!(got, "payload-newer",
+               "None estate must return the newest generated_at across estates");
+}
+
+/// 18. None estate returns None on an empty store.
+#[test]
+fn topology_snapshot_none_estate_empty_store() {
+    let store = make_store();
+    let result = store
+        .latest_topology_snapshot(None)
+        .expect("query must not error");
+    assert!(result.is_none());
 }

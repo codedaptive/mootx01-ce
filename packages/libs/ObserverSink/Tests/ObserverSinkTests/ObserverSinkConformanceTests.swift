@@ -14,6 +14,11 @@
 //   5. Monitoring off: disable store flag, emit more samples, assert no new rows inserted.
 //   6. Retention roll-off: insert old + new rows, apply cutoff, assert old rows gone and
 //      new rows kept. Tests both deleteMetricsBefore and deleteEventsBefore.
+//   7. Tags JSON round-trip: insert metric with multi-key tags dict, read back, assert all tags.
+//   8. Empty tags: insert metric with empty tags map, read back, assert empty dict.
+//   9. DB-layer health: storageStats() returns non-nil result with logicalSizeBytes > 0.
+//   10. queryMetricsByNames: name-IN filter returns only matching rows; empty set is no-op.
+//   11. countMetrics: COUNT(*) returns the correct row count without row decoding.
 //
 // Both-ports parity: the Rust tests in observer_sink/tests/conformance.rs exercise
 // the same six scenarios with the same table names and flag semantics.
@@ -52,8 +57,8 @@ struct ObserverSinkConformanceTests {
     func schemaVersion() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
-        // The schema version is a constant — verify the store returns it.
-        #expect(StatsStore.schemaVersion == 1)
+        // Schema version 2: topology_snapshots table added (v1→v2 migration).
+        #expect(StatsStore.schemaVersion == 2)
     }
 
     @Test("StatsStore seeds control rows on open")
@@ -288,6 +293,22 @@ struct ObserverSinkConformanceTests {
         #expect(row.tags.count == 3)
     }
 
+    // MARK: 8. Empty tags
+
+    @Test("Empty tag map is stored and decoded as empty dictionary")
+    func emptyTagsRoundTrip() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let dropboxID = "test-dropbox-emptytags"
+        try await store.insertMetric(name: "no.tags", value: 5.0, tags: [:],
+                                      ts: 1_000_000.0, dropboxID: dropboxID)
+
+        let rows = try await store.queryMetrics(dropboxID: dropboxID)
+        let row = try #require(rows.first)
+        #expect(row.tags.isEmpty)
+    }
+
     // MARK: 2b. Monitoring flag survives re-open (persistent switch)
 
     @Test("Monitoring flag set to ON survives closing and re-opening the store")
@@ -332,19 +353,177 @@ struct ObserverSinkConformanceTests {
         #expect(stats.capturedAt == nowForTest)
     }
 
-    // MARK: 8. Empty tags
+    // MARK: 10. queryMetricsByNames — name-IN filter
 
-    @Test("Empty tag map is stored and decoded as empty dictionary")
-    func emptyTagsRoundTrip() async throws {
+    @Test("queryMetricsByNames returns only rows matching the named set")
+    func queryMetricsByNamesFiltersCorrectly() async throws {
         let store = try await makeStore()
         defer { Task { await store.close() } }
 
-        let dropboxID = "test-dropbox-emptytags"
-        try await store.insertMetric(name: "no.tags", value: 5.0, tags: [:],
-                                      ts: 1_000_000.0, dropboxID: dropboxID)
+        let dropboxID = "test-dropbox-bynames"
+        try await store.insertMetric(name: "a", value: 1.0, tags: [:], ts: 100.0, dropboxID: dropboxID)
+        try await store.insertMetric(name: "b", value: 2.0, tags: [:], ts: 101.0, dropboxID: dropboxID)
+        try await store.insertMetric(name: "c", value: 3.0, tags: [:], ts: 102.0, dropboxID: dropboxID)
 
-        let rows = try await store.queryMetrics(dropboxID: dropboxID)
-        let row = try #require(rows.first)
-        #expect(row.tags.isEmpty)
+        let rows = try await store.queryMetricsByNames(["a", "b"])
+        #expect(rows.count == 2, "Expected exactly 2 rows (a and b)")
+        let names = Set(rows.map(\.name))
+        #expect(names == ["a", "b"], "Expected only names 'a' and 'b'")
+        #expect(!names.contains("c"), "Row 'c' must not appear in the result")
+    }
+
+    @Test("queryMetricsByNames with empty set returns [] without querying")
+    func queryMetricsByNamesEmptySetReturnsEmpty() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let dropboxID = "test-dropbox-bynames-empty"
+        try await store.insertMetric(name: "x", value: 1.0, tags: [:], ts: 100.0, dropboxID: dropboxID)
+
+        let rows = try await store.queryMetricsByNames([])
+        #expect(rows.isEmpty, "Empty name set must return [] immediately")
+    }
+
+    @Test("queryMetricsByNames with dropboxID further filters by dropbox")
+    func queryMetricsByNamesWithDropboxFilter() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        try await store.insertMetric(name: "m", value: 1.0, tags: [:], ts: 100.0, dropboxID: "box-1")
+        try await store.insertMetric(name: "m", value: 2.0, tags: [:], ts: 101.0, dropboxID: "box-2")
+
+        let rows = try await store.queryMetricsByNames(["m"], dropboxID: "box-1")
+        #expect(rows.count == 1, "Expected 1 row for box-1 only")
+        #expect(rows.first?.dropboxID == "box-1")
+    }
+
+    // MARK: 11. countMetrics — COUNT(*) aggregate
+
+    @Test("countMetrics returns correct row count")
+    func countMetricsReturnsCorrectCount() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        // Empty store: count is zero.
+        #expect(try await store.countMetrics() == 0, "Empty store must report 0")
+
+        let dropboxID = "test-dropbox-count"
+        try await store.insertMetric(name: "m1", value: 1.0, tags: [:], ts: 100.0, dropboxID: dropboxID)
+        try await store.insertMetric(name: "m2", value: 2.0, tags: [:], ts: 101.0, dropboxID: dropboxID)
+        try await store.insertMetric(name: "m3", value: 3.0, tags: [:], ts: 102.0, dropboxID: dropboxID)
+
+        #expect(try await store.countMetrics() == 3, "Expected count 3 after three inserts")
+    }
+
+    // MARK: 12. Topology snapshot — schema version bump
+
+    @Test("StatsStore schema is version 2 after topology_snapshots table added")
+    func schemaVersionIsTwo() async throws {
+        // Schema version bumped from 1 → 2 when topology_snapshots table was added.
+        #expect(StatsStore.schemaVersion == 2)
+    }
+
+    // MARK: 13. Topology snapshot write and read
+
+    @Test("writeTopologySnapshot stores payload and latestTopologySnapshot returns it")
+    func topologySnapshotRoundTrip() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let estate = "estate-topology-001"
+        let generatedAt = Date(timeIntervalSince1970: 1_700_000_000.0)
+        let payload = Data("""
+            {"nodes":[],"edges":[],"communities":[],"structurePending":false,"generatedTs":"2023-11-14T22:13:20.000Z"}
+            """.utf8)
+
+        try await store.writeTopologySnapshot(estate: estate, generatedAt: generatedAt, payload: payload)
+
+        let result = try await store.latestTopologySnapshot(estate: estate)
+        let roundtripped = try #require(result, "Expected non-nil snapshot after write")
+        #expect(roundtripped == payload, "Stored payload must round-trip verbatim")
+    }
+
+    // MARK: 14. Topology snapshot latest-wins upsert
+
+    @Test("writeTopologySnapshot overwrites the previous snapshot for the same estate")
+    func topologySnapshotLatestWins() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let estate = "estate-topology-002"
+        let firstPayload = Data("first-payload".utf8)
+        let secondPayload = Data("second-payload".utf8)
+
+        let t1 = Date(timeIntervalSince1970: 1_000_000.0)
+        let t2 = Date(timeIntervalSince1970: 2_000_000.0)
+
+        try await store.writeTopologySnapshot(estate: estate, generatedAt: t1, payload: firstPayload)
+        try await store.writeTopologySnapshot(estate: estate, generatedAt: t2, payload: secondPayload)
+
+        // Latest-wins: only secondPayload survives.
+        let result = try await store.latestTopologySnapshot(estate: estate)
+        let got = try #require(result)
+        #expect(got == secondPayload, "Second write must supersede the first")
+    }
+
+    // MARK: 15. Topology snapshot per-estate isolation
+
+    @Test("topology snapshots for different estates are independent")
+    func topologySnapshotPerEstateIsolation() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let estateA = "estate-topology-A"
+        let estateB = "estate-topology-B"
+        let payloadA = Data("payload-A".utf8)
+        let payloadB = Data("payload-B".utf8)
+        let generatedAt = Date(timeIntervalSince1970: 1_000_000.0)
+
+        try await store.writeTopologySnapshot(estate: estateA, generatedAt: generatedAt, payload: payloadA)
+        try await store.writeTopologySnapshot(estate: estateB, generatedAt: generatedAt, payload: payloadB)
+
+        let gotA = try await store.latestTopologySnapshot(estate: estateA)
+        let gotB = try await store.latestTopologySnapshot(estate: estateB)
+
+        #expect(try #require(gotA) == payloadA, "Estate A payload must be isolated")
+        #expect(try #require(gotB) == payloadB, "Estate B payload must be isolated")
+    }
+
+    @Test("nil estate returns the newest snapshot across all estates")
+    func topologySnapshotNilEstateReturnsNewest() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        // Two estates, B generated later — the dashboard's default ("all")
+        // view reads with nil and must get B's payload.
+        try await store.writeTopologySnapshot(
+            estate: "estate-older", generatedAt: Date(timeIntervalSince1970: 1_000_000.0),
+            payload: Data("payload-older".utf8))
+        try await store.writeTopologySnapshot(
+            estate: "estate-newer", generatedAt: Date(timeIntervalSince1970: 2_000_000.0),
+            payload: Data("payload-newer".utf8))
+
+        let got = try await store.latestTopologySnapshot(estate: nil)
+        #expect(try #require(got) == Data("payload-newer".utf8),
+                "nil estate must return the newest generated_at across estates")
+    }
+
+    @Test("nil estate returns nil when no snapshots exist")
+    func topologySnapshotNilEstateEmptyStore() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+        let got = try await store.latestTopologySnapshot(estate: nil)
+        #expect(got == nil)
+    }
+
+    // MARK: 16. Topology snapshot missing estate returns nil
+
+    @Test("latestTopologySnapshot returns nil for unknown estate")
+    func topologySnapshotMissingReturnsNil() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        let result = try await store.latestTopologySnapshot(estate: "no-such-estate")
+        #expect(result == nil, "Unknown estate must return nil")
     }
 }
