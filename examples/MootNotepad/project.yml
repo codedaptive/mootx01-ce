@@ -18,7 +18,7 @@ options:
 packages:
   # The local MootGateway package — the MOOT seam every example builds on.
   Mootx01:
-    path: ../../apps/Mootx01
+    path: ../../apps/Mootx01-App
 
 targets:
   MootNotepad:

@@ -4,7 +4,7 @@ options:
   deploymentTarget: { iOS: "26.0", macOS: "26.0" }
   createIntermediateGroups: true
 packages:
-  Mootx01: { path: ../../apps/Mootx01 }
+  Mootx01: { path: ../../apps/Mootx01-App }
 targets:
   MootTodo:
     type: application
