@@ -46,7 +46,7 @@
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -387,6 +387,13 @@ impl EstateCoordinator {
             .open_estate_directly(hydrated.estate, zoom_window_low, zoom_window_high)
             .map_err(|e| HydrateError::Coordinator(format!("{e:?}")))?;
 
+        // Install the rebuilt audit log and matrix tier on the coordinator so a
+        // hydrated estate's `current_audit_log` reads the replayed history and
+        // the matrixAware recall lane is live from the first recall — parity
+        // with the Swift hydration path's `rebuildDerivedAccelerators` install.
+        self.set_audit_log(&handle, hydrated.unified_log.clone());
+        self.register_matrix_tier(&handle, hydrated.matrix_tier.clone());
+
         Ok((handle, hydrated.unified_log, hydrated.matrix_tier))
     }
 }
@@ -487,18 +494,38 @@ pub fn bridge_audit_event(event: &substrate_types::audit_event::AuditEvent) -> V
 /// `UnifiedAuditVerb` enum. Unknown verbs collapse to `.mutate`.
 ///
 /// Mirrors `AuditBridge.verb(for:)` in Swift.
+/// Map the substrate's free-form verb string to the unified log's verb enum.
+/// Unknown verbs collapse to `.Mutate` (safe default for "a bitmap changed").
+///
+/// "tombstone" is the RowVerb the AuditGate seals for an expunge
+/// (RowVerb::Tombstone.rawValue == "tombstone"). It maps to `.Expunge`
+/// because that is the ARIA-level verb the operation represents. The
+/// substrate uses the lower-level automaton term; the unified log uses
+/// the ARIA noun–verb vocabulary.
+///
+/// "expungeOrphan" is written by `seal_expunge_orphan_audit` when the
+/// storage half of an expunge succeeded but the cross-kit vector delete
+/// (step 2) failed. It also maps to `.Expunge` so audit projection
+/// consumers see the storage-level expunge in both the success and
+/// orphan cases. Consumers that need to distinguish a clean expunge from
+/// a partial one must read the substrate audit trail directly (the verb
+/// string is preserved there as-is).
+///
+/// Mirrors `AuditBridge.verb(for:)` in Swift.
 fn verb_from_str(s: &str) -> UnifiedAuditVerb {
     match s {
-        "capture"      => UnifiedAuditVerb::Capture,
-        "withdraw"     => UnifiedAuditVerb::Withdraw,
-        "expunge"      => UnifiedAuditVerb::Expunge,
-        "reanchor"     => UnifiedAuditVerb::Reanchor,
-        "learn"        => UnifiedAuditVerb::Learn,
-        "propose"      => UnifiedAuditVerb::Propose,
-        "associate"    => UnifiedAuditVerb::Associate,
-        "migrate"      => UnifiedAuditVerb::Migrate,
-        "dreamCompact" => UnifiedAuditVerb::DreamCompact,
-        _              => UnifiedAuditVerb::Mutate,
+        "capture"        => UnifiedAuditVerb::Capture,
+        "withdraw"       => UnifiedAuditVerb::Withdraw,
+        "tombstone"      => UnifiedAuditVerb::Expunge,   // AuditGate seals expunge as RowVerb::Tombstone
+        "expungeOrphan"  => UnifiedAuditVerb::Expunge,   // cross-kit delete failed; storage half succeeded
+        "expunge"        => UnifiedAuditVerb::Expunge,   // legacy / direct verb string (unused by current gate)
+        "reanchor"       => UnifiedAuditVerb::Reanchor,
+        "learn"          => UnifiedAuditVerb::Learn,
+        "propose"        => UnifiedAuditVerb::Propose,
+        "associate"      => UnifiedAuditVerb::Associate,
+        "migrate"        => UnifiedAuditVerb::Migrate,
+        "dreamCompact"   => UnifiedAuditVerb::DreamCompact,
+        _                => UnifiedAuditVerb::Mutate,
     }
 }
 
@@ -511,7 +538,9 @@ fn verb_from_str(s: &str) -> UnifiedAuditVerb {
 /// Mirrors `GeniusLocusKit.feedAuditLog(for:)` in Swift. The unified log is
 /// keyed on SHA-256 content addresses so this is idempotent — feeding the
 /// same events twice is a G-Set no-op.
-fn feed_audit_log_from_estate(estate: &Estate) -> Result<UnifiedAuditLog, LocusKitError> {
+pub(crate) fn feed_audit_log_from_estate(
+    estate: &Estate,
+) -> Result<UnifiedAuditLog, LocusKitError> {
     let mut log = UnifiedAuditLog::new();
     let drawers = estate.all_drawers()?;
     for drawer in &drawers {

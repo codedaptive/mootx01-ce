@@ -50,7 +50,11 @@ public extension GeniusLocusKit {
                 embeddingModelID: "no-embedding",
                 tombstonedAt: entry.tombstonedAt,
                 removedByBatch: entry.removedByBatch,
-                operationalBitmap: entry.operationalBitmap
+                operationalBitmap: entry.operationalBitmap,
+                // Pass through explicit reward fields so dreaming-daemon diary
+                // entries carry any reward signal the caller attached.
+                reward: entry.reward,
+                rewardProvenance: entry.rewardProvenance
             )
         } else {
             stored = entry

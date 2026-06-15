@@ -122,16 +122,17 @@ impl VectorSimilaritySignal {
             };
 
             for m in matches {
-                if m.drawer_id == *drawer_id {
+                if m.item_id == *drawer_id {
                     continue; // skip self-match
                 }
                 if m.distance > proximity_threshold {
                     continue;
                 }
-                let (a, b) = if drawer_id.as_str() < m.drawer_id.as_str() {
-                    (drawer_id.clone(), m.drawer_id.clone())
+                // Lane F rename: VectorMatch.drawer_id → item_id (arch spec §4.1).
+                let (a, b) = if drawer_id.as_str() < m.item_id.as_str() {
+                    (drawer_id.clone(), m.item_id.clone())
                 } else {
-                    (m.drawer_id.clone(), drawer_id.clone())
+                    (m.item_id.clone(), drawer_id.clone())
                 };
                 let pair_key = format!("{}||{}", a, b);
                 if seen_pairs.insert(pair_key) {

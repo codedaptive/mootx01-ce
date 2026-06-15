@@ -25,12 +25,14 @@
 //
 // Conformance gate: the lattice-overlap routing, the verb / frame /
 // acceptance enumeration, the unified audit log's content-hash shape,
-// the scheduler, the six standing signals, the matrix tier, and the
-// training daemon are all parity-tested against the Swift reference
-// via shared inputs and expected outputs encoded in `tests/parity.rs`,
+// the scheduler, the six standing signals, the matrix tier, the
+// training daemon, and the dormant-surfaces estate reads are all
+// parity-tested against the Swift reference via shared inputs and
+// expected outputs encoded in `tests/parity.rs`,
 // `tests/verb_parity.rs`, `tests/audit_parity.rs`,
 // `tests/scheduler_parity.rs`, `tests/standing_signals_parity.rs`,
-// `tests/matrix_parity.rs`, and `tests/training_parity.rs`.
+// `tests/matrix_parity.rs`, `tests/training_parity.rs`, and
+// `tests/dormant_surfaces.rs`.
 // Whenever the Swift side changes a primitive, the Rust port must
 // match bit-for-bit to keep the conformance contract honored. Per
 // `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` §15 and the
@@ -55,6 +57,10 @@ pub mod handle;
 // `composite_schema` declaration. Also adds `open_hydrating` to
 // `EstateCoordinator` via an impl block.
 pub mod hydration;
+// intake.rs — Dual-Path Intake (G7): WriteMode, EncodeJob, the per-estate
+// encode queue (D-B), mode-aware capture (D-A), and the pump-driven drain.
+// Rust twin of EncodeJob.swift + EncodeIntake.swift.
+pub mod intake;
 pub mod matrix;
 pub mod migration;
 pub mod node_topology;
@@ -63,14 +69,19 @@ pub mod training;
 pub mod verbs;
 
 pub use audit::{
-    AuditProjectionFold, AuditRecovery, AuditRecoveryDivergence, AuditRecoveryResult, AuditTier,
-    RowMismatch, UnifiedAuditEntry, UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb,
-    UnifiedProjection, UnifiedProjectionKey, UnifiedRowProjection,
+    AuditChainReport, AuditChainVerifier, AuditProjectionFold, AuditRecovery,
+    AuditRecoveryDivergence, AuditRecoveryResult, AuditTier, RowMismatch, UnifiedAuditEntry,
+    UnifiedAuditLog, UnifiedAuditValue, UnifiedAuditVerb, UnifiedProjection, UnifiedProjectionKey,
+    UnifiedRowProjection,
 };
+// Re-export for NeuronKit B-1 constraint: event_lag_pairs is the estate-
+// surface entry point for converting UnifiedAuditEntry → TemporalAuditEntry.
+pub use brain::event_lag_pairs::event_lag_pairs;
 pub use brain::scheduler::{
     trigger_tag as scheduler_trigger_tag, AssociationFrame as SchedulerAssociationFrame,
     ConcurrencyPolicy as SchedulerConcurrencyPolicy,
     ConditionPredicate as SchedulerConditionPredicate,
+    CoordinatorDispatcher as SchedulerCoordinatorDispatcher,
     DiagnosticReport as SchedulerDiagnosticReport, Dispatcher as SchedulerDispatcher,
     MutationKind as SchedulerMutationKind, NoopDispatcher as SchedulerNoopDispatcher,
     ProposalFrame as SchedulerProposalFrame, ProposalKind as SchedulerProposalKind,
@@ -87,6 +98,11 @@ pub use brain::signals::{
     VectorSimilaritySignal,
 };
 pub use migration::{ExternalCorpus, ExternalEntry};
+// Dual-Path Intake (G7) public surface: the write mode and the encode-job
+// payload. The coordinator methods (`capture_with_mode`, `mount_encode_queue`,
+// `await_encode_drain`, `drain_encode_queue_once`) are inherent methods on
+// `EstateCoordinator` and reachable through it directly.
+pub use intake::{EncodeJob, WriteMode};
 pub use hydration::{
     bridge_audit_event, composite_schema, open_hydrating, flush as glk_flush,
     HydratedEstate, HydrateError,
@@ -95,12 +111,16 @@ pub use hydration::{
 pub use coordinator::{
     EstateCoordinator, GeniusLocusKitError, VerbDispatchError,
     EstateKind, EstateMountState, EstateProvisionParams, SyncMode,
+    FederatedRecallResult, FederatedReadRefusalReason,
+    SyncEngineEntry, format_sync_state_token,
+    ExpungeIntegritySweepResult,
 };
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;
 // Re-exports for B-1-compliant reader types: NeuronKit readers import these
 // from genius_locus_kit so they carry no direct locus_kit:: imports.
 pub use locus_kit::adjectives::{AdjectiveExportability, AdjectiveSensitivity, State as DrawerState};
+pub use locus_kit::container_fingerprint_store::{ContainerFingerprint, RoomLevelEntry};
 pub use locus_kit::drawer::Drawer;
 pub use locus_kit::recall_trace_item::RecallTraceItem;
 pub use locus_kit::tunnel::Tunnel;
@@ -118,7 +138,7 @@ pub use node_topology::{MemoryTopologyProvider, NodeTopologyProvider};
 pub use recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
     RecallEvidencePath, RecallFallbackPolicy, RecallHit, RecallLane,
-    RecallPlan, RecallScoreVector, RecallUnionProfile, RecallWeights,
+    RecallOrigin, RecallPlan, RecallScoreVector, RecallUnionProfile, RecallWeights,
 };
 pub use verbs::{
     Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame,
@@ -126,7 +146,7 @@ pub use verbs::{
     SurfaceTarget, Verb, VerbError, VerbFlow, WithdrawFrame, VERB_NAMES,
 };
 pub use grants::{
-    CustodyMode, DecayFieldElement, DecayShareProvider, DriftRate, Grant, GrantError,
-    GrantLifetime, GrantOptions, GrantScope, GrantStore, IssueGrantResult, LagrangeDecayKey,
-    ReSharePermission, ReferenceDecayShareProvider, ScopeKeyVault, StoredGrant,
+    CustodyMode, DecayFieldElement, DecayPolicy, DecayShareProvider, DriftRate, Grant, GrantError,
+    GrantLifetime, GrantOptions, GrantScope, GrantStore, GrantStoreError, IssueGrantResult,
+    LagrangeDecayKey, ReSharePermission, ReferenceDecayShareProvider, ScopeKeyVault, StoredGrant,
 };

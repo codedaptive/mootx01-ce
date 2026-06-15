@@ -145,6 +145,9 @@ pub enum RecallEvidencePath {
     CorpusBm25,
     /// Hamming-distance vector match.
     VectorHamming,
+    /// Dense float-embedding cosine match (Lane D) — the TRUE float vector
+    /// lane, distinct from the 256-bit SimHash-Hamming `VectorHamming` lane.
+    VectorDense,
     /// Matrix field-presence signal.
     MatrixFieldPresence,
     /// Matrix co-occurrence signal.
@@ -166,6 +169,7 @@ impl RecallEvidencePath {
             Self::LocusGraph          => "locusGraph",
             Self::CorpusBm25          => "corpusBM25",
             Self::VectorHamming       => "vectorHamming",
+            Self::VectorDense         => "vectorDense",
             Self::MatrixFieldPresence => "matrixFieldPresence",
             Self::MatrixCorrelation   => "matrixCorrelation",
             Self::MatrixCoOccurrence  => "matrixCoOccurrence",
@@ -239,6 +243,12 @@ pub struct RecallScoreVector {
     pub redundancy_penalty: f32,
     /// Final combined score after all lane contributions and deduplication.
     pub final_score: f32,
+    /// Normalized cosine similarity from the DENSE FLOAT lane (Lane D), in
+    /// `[0, 1]`. The TRUE float-embedding signal: cosine over the pooled
+    /// vector, stored as `(cosine + 1) / 2` so 1.0 = identical direction and
+    /// the convention matches every other `[0, 1]` column. 0 for hits not from
+    /// the dense lane. RRF fusion is rank-based and never reads this magnitude.
+    pub dense: f32,
 }
 
 impl RecallScoreVector {
@@ -258,6 +268,7 @@ impl RecallScoreVector {
             preference: 0.0,
             redundancy_penalty: 0.0,
             final_score: value,
+            dense: 0.0,
         }
     }
 
@@ -273,6 +284,7 @@ impl RecallScoreVector {
         preference: 0.0,
         redundancy_penalty: 0.0,
         final_score: 0.0,
+        dense: 0.0,
     };
 }
 
@@ -315,6 +327,67 @@ impl RecallWeights {
         diversity: 0.0,
         graph: 0.0,
     };
+
+    /// Compute adaptive weights from a query sketch and union profile.
+    ///
+    /// Mirrors Swift `RecallWeights.adaptive(for:profile:)` (RecallWeights+Adaptive.swift).
+    ///
+    /// Base weights: locus=0.2, bm25=0.2, vector=0.2, matrix=0.1, fieldFit=0.1,
+    /// diversity=0.1, graph=0.1. Additive bonuses applied then normalised to sum 1.0:
+    ///   - bitmap predicates non-empty: +0.1 to locus and field_fit.
+    ///   - query text present: +0.1 to bm25 and vector.
+    ///   - redundancy > 0.5: +0.15 to diversity.
+    ///   - signal_agreement > 0.6: +0.1 to graph.
+    ///
+    /// Parameters:
+    ///   - has_bitmap_predicates: true when the recall frame has non-empty filter chain.
+    ///   - has_query_text: true when the request carries a non-empty query_text.
+    ///   - profile: The union profile computed over the merged candidate buffer.
+    pub fn adaptive(
+        has_bitmap_predicates: bool,
+        has_query_text: bool,
+        profile: &RecallUnionProfile,
+    ) -> Self {
+        let mut locus_w: f32   = 0.2;
+        let mut bm25_w: f32    = 0.2;
+        let mut vector_w: f32  = 0.2;
+        let matrix_w: f32      = 0.1;
+        let mut field_fit_w: f32 = 0.1;
+        let mut diversity_w: f32 = 0.1;
+        let mut graph_w: f32   = 0.1;
+
+        // Structural filter bonus.
+        if has_bitmap_predicates {
+            locus_w    += 0.1;
+            field_fit_w += 0.1;
+        }
+        // Free-text bonus.
+        if has_query_text {
+            bm25_w   += 0.1;
+            vector_w += 0.1;
+        }
+        // Redundancy bonus.
+        if profile.redundancy > 0.5 {
+            diversity_w += 0.15;
+        }
+        // Signal agreement bonus.
+        if profile.signal_agreement > 0.6 {
+            graph_w += 0.1;
+        }
+
+        // Normalise to sum ≈ 1.0.
+        let total = locus_w + bm25_w + vector_w + matrix_w + field_fit_w + diversity_w + graph_w;
+        let norm = if total > 0.0 { total } else { 1.0 };
+        Self {
+            locus:     locus_w     / norm,
+            bm25:      bm25_w      / norm,
+            vector:    vector_w    / norm,
+            matrix:    matrix_w    / norm,
+            field_fit: field_fit_w / norm,
+            diversity: diversity_w / norm,
+            graph:     graph_w     / norm,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +440,36 @@ pub struct RecallHit {
 // GLKRecallRequest
 // ---------------------------------------------------------------------------
 
+/// Whether a recall request originates from an external consumer or an
+/// internal system process.
+///
+/// Per B-10a (LOCUSKIT_SPEC.md § B-10a): only external-origin requests
+/// may write recall-trace rows. Internal reads — maintenance, dreaming,
+/// standing signals, recipes/lenses, migration, and benchmarks — MUST use
+/// `Internal` so the reward pipeline learns from experience with users,
+/// not from the system's own reflective reads.
+///
+/// The default on `GLKRecallRequest` is `Internal` so that every existing
+/// call site is safe unless explicitly overridden to `External`. The
+/// ARIA_MCP boundary is the ONLY place where `External` is set.
+///
+/// Mirrors Swift `RecallOrigin` (GLKRecallRequest.swift).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecallOrigin {
+    /// Request originates from an external consumer (human or outside AI)
+    /// arriving through the ARIA access surface. May write recall-trace rows.
+    External,
+    /// Request originates from an internal system process. Must NOT write
+    /// recall-trace rows. Default for all non-ARIA callers.
+    Internal,
+}
+
+impl Default for RecallOrigin {
+    fn default() -> Self {
+        Self::Internal
+    }
+}
+
 /// A fully-specified recall request at the GLK surface.
 ///
 /// Callers that do not need explicit mode/scoring control use the legacy
@@ -393,13 +496,26 @@ pub struct GLKRecallRequest {
     /// the locus lane (for hybrid) or empty (for corpusOnly). Defaults to
     /// None for backward compatibility with locusOnly callers.
     pub query_text: Option<String>,
+    /// How many rows to record as recall-trace rows in the reward cycle.
+    ///
+    /// When set, the coordinator uses this value for `trace_limit` on the
+    /// primary locus frame instead of `limit`. Ignored unless
+    /// `origin == External` (B-10a).
+    pub trace_limit: Option<usize>,
+    /// Whether this recall originates from an external consumer or an
+    /// internal system process.
+    ///
+    /// B-10a enforcement: the coordinator sets `trace_limit` on the
+    /// LocusKit `RecallFrame` ONLY when `origin == External`. Internal reads
+    /// must not write recall-trace rows. Defaults to `Internal`.
+    pub origin: RecallOrigin,
 }
 
 impl GLKRecallRequest {
     /// Create a request with explicit lane, scoring, and policy.
     ///
     /// Defaults match Swift: mode=hybrid, scoring=matrixAware, limit=12,
-    /// fallback=failClosed, query_text=None.
+    /// fallback=failClosed, query_text=None, origin=Internal.
     pub fn new(frame: RecallFrame) -> Self {
         Self {
             frame,
@@ -408,6 +524,8 @@ impl GLKRecallRequest {
             limit: 12,
             fallback: RecallFallbackPolicy::FailClosed,
             query_text: None,
+            trace_limit: None,
+            origin: RecallOrigin::Internal,
         }
     }
 
@@ -440,6 +558,24 @@ impl GLKRecallRequest {
         self.query_text = Some(text.into());
         self
     }
+
+    /// Builder: set an explicit trace-write budget for the reward cycle.
+    ///
+    /// When set, the coordinator uses this value for `trace_limit` on the
+    /// primary locus frame instead of `limit`. Only applied when
+    /// `origin == External` (B-10a).
+    pub fn with_trace_limit(mut self, limit: usize) -> Self {
+        self.trace_limit = Some(limit);
+        self
+    }
+
+    /// Builder: mark this request as originating from an external consumer.
+    ///
+    /// Only the ARIA_MCP boundary should call this method (B-10a enforcement).
+    pub fn external(mut self) -> Self {
+        self.origin = RecallOrigin::External;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +597,72 @@ pub struct GLKRecallResult {
     pub union_profile: Option<RecallUnionProfile>,
     /// Hits in the order the active lane and scoring returned them.
     pub hits: Vec<RecallHit>,
+    /// Dense float lane (Lane D) status for this query.
+    ///
+    /// Non-None when the lane was dark (did not contribute hits), carrying the
+    /// observable reason as a short string. None when the lane ran and returned hits,
+    /// or when no corpus was registered for the estate (lane was never attempted).
+    ///
+    /// Values follow the `dark:<reason>` convention, identical to Swift:
+    /// - `"dark:providerOptOut"` — the corpus's embedding provider has no float lane.
+    /// - `"dark:noFloatRows"` — no float vectors are stored.
+    /// - `"dark:storeError"` — the vector store threw; error already logged by CorpusKit.
+    /// - `"dark:emptyQuery"` — query was empty (guard fired before lane was attempted).
+    ///
+    /// Only populated for `UnionBest` mode (the mode that attempts the dense lane).
+    /// `LocusOnly`, `CorpusOnly`, `Hybrid`, and `NodeTreeNative` carry `None`.
+    ///
+    /// Mirrors Swift `GLKRecallResult.denseLaneStatus` (GLKRecallResult.swift).
+    pub dense_lane_status: Option<String>,
+
+    /// Per-stage degradation indicators for this query.
+    ///
+    /// Each element names a pipeline stage that encountered a recoverable error
+    /// and was skipped. The query survived by operating on whatever signals
+    /// remained. An empty vec means every attempted stage succeeded.
+    ///
+    /// Stage identifiers follow the `<lane>.<operation>` convention, matching
+    /// the Swift `GLKRecallResult.degradedStages` string vocabulary exactly:
+    /// - `"vectorHamming.findNearest"` — `VectorStore.find_nearest` threw; the
+    ///   Hamming vector lane contributed no candidates. The query survives on
+    ///   locus and BM25 signals; the vector column is absent from hit scores.
+    /// - `"corpus.embed"` — the embedding call inside the query-sketch compilation
+    ///   threw; the vector lane is dark for this query (same effect as above, but
+    ///   the failure occurred one step earlier — before `find_nearest` was called).
+    ///
+    /// The following Swift stages are absent in the Rust port because the Rust
+    /// `recall_scored_multi_lane` path uses `estate.recall()` (non-throwing) for
+    /// drawer retrieval — there is no separate by-id `getDrawers` batch load, no
+    /// body-free pool step, and no MMR hydration step:
+    ///   `pool.getDrawers`, `pool.hydrateBodies.mmr`, `pool.hydrateBodies.return`,
+    ///   `hybrid.getDrawers`, `corpusOnly.getDrawers`.
+    ///
+    /// A second class of identifiers names a SCORING FALLBACK — the caller
+    /// requested a scoring strategy that is not a distinct implementation in
+    /// that lane, so a simpler combiner was applied. The query succeeded; the
+    /// entry names the fallback so the caller knows the requested scoring was
+    /// not the one applied. Parity with Swift exactly; genuinely-implemented
+    /// combos (`UnionBest` + `MatrixAware`; `Hybrid` / `CorpusOnly` + `Rrf`)
+    /// record nothing.
+    /// - `"locusOnly.matrixAware"` — `MatrixAware` on `LocusOnly`, no matrix
+    ///   pass; raw bitmap-evaluator ordering returned.
+    /// - `"corpusOnly.matrixAware"` — `MatrixAware` on `CorpusOnly`, no matrix
+    ///   pass; fell back to RRF fusion.
+    /// - `"hybrid.matrixAware"` — `MatrixAware` on `Hybrid`, no matrix pass;
+    ///   fell back to RRF fusion.
+    /// - `"unionBest.rrf"` — `Rrf` on `UnionBest`, no distinct equal-weight RRF
+    ///   fusion; fell back to the raw lane-normalised score.
+    ///
+    /// Scoring-stage failures always DEGRADE (query survives). Estate-unavailable
+    /// failures surface as `VerbDispatchError::EstateNotOpen` before any stage runs.
+    ///
+    /// Counterpart telemetry: each degraded stage emits a counter named by the
+    /// corresponding `metric_names::*_DEGRADED` constant, tagged with `estate_id`
+    /// and `lane`. Consumers can correlate this field with the Intellectus counter
+    /// stream for per-estate health dashboards.
+    ///
+    /// Mirrors Swift `GLKRecallResult.degradedStages` (GLKRecallResult.swift).
+    pub degraded_stages: Vec<String>,
 }
 
 impl GLKRecallResult {
@@ -516,4 +718,112 @@ impl RecallUnionProfile {
         redundancy: 0.0,
         matrix_coherence: 0.0,
     };
+
+    /// Compute a union profile from the populated (and already normalised) parallel
+    /// score columns that make up the candidate buffer.
+    ///
+    /// Mirrors Swift `RecallUnionProfile.compute(from:primarySourceCount:)`
+    /// (RecallUnionProfile.swift).
+    ///
+    /// Parameters:
+    ///   - locus_col / bm25_col / vector_col: the normalised per-candidate score columns.
+    ///   - co_occurrence_col: the matrix co-occurrence column (after normalization).
+    ///   - source_masks: the u16 lane-membership bitset per candidate.
+    ///   - final_col: the normalised final score column (for redundancy top-16 selection).
+    ///   - count: number of populated slots in every column.
+    ///   - primary_source_count: number of lanes that contributed ≥ 1 hit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compute(
+        locus_col: &[f32],
+        bm25_col: &[f32],
+        vector_col: &[f32],
+        co_occurrence_col: &[f32],
+        source_masks: &[u16],
+        final_col: &[f32],
+        count: usize,
+        primary_source_count: usize,
+    ) -> Self {
+        if count == 0 {
+            return Self::ZERO;
+        }
+
+        let n = count;
+        let divisor = primary_source_count.max(1) as f32;
+
+        // Sharpness: population standard deviation of each score column.
+        let locus_sharpness  = Self::std_dev(&locus_col[..n]);
+        let bm25_sharpness   = Self::std_dev(&bm25_col[..n]);
+        let vector_sharpness = Self::std_dev(&vector_col[..n]);
+
+        // Signal agreement: mean of popcount(source_mask[i]) / primary_source_count.
+        let mut agreement_sum: f32 = 0.0;
+        for i in 0..n {
+            agreement_sum += source_masks[i].count_ones() as f32 / divisor;
+        }
+        let signal_agreement = agreement_sum / n as f32;
+
+        // Redundancy: mean pairwise sourceMask Jaccard over top-16 by final score.
+        let top16_count = n.min(16);
+        let mut indexed: Vec<(usize, f32)> = (0..n).map(|i| (i, final_col[i])).collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_indices: Vec<usize> = indexed[..top16_count].iter().map(|(i, _)| *i).collect();
+
+        let mut pair_sum: f32 = 0.0;
+        let mut pair_count: usize = 0;
+        for a in 0..top_indices.len() {
+            for b in (a + 1)..top_indices.len() {
+                let ia = top_indices[a];
+                let ib = top_indices[b];
+                let and_bits = source_masks[ia] & source_masks[ib];
+                let or_bits  = source_masks[ia] | source_masks[ib];
+                let jaccard: f32 = if or_bits == 0 {
+                    0.0
+                } else {
+                    and_bits.count_ones() as f32 / or_bits.count_ones() as f32
+                };
+                pair_sum += jaccard;
+                pair_count += 1;
+            }
+        }
+        let redundancy: f32 = if pair_count > 0 {
+            pair_sum / pair_count as f32
+        } else {
+            0.0
+        };
+
+        // matrixCoherence: mean co-occurrence score over top-16.
+        let mut co_sum: f32 = 0.0;
+        for &idx in &top_indices {
+            co_sum += co_occurrence_col[idx];
+        }
+        let matrix_coherence: f32 = if top16_count > 0 {
+            co_sum / top16_count as f32
+        } else {
+            0.0
+        };
+
+        Self {
+            locus_sharpness,
+            bm25_sharpness,
+            vector_sharpness,
+            signal_agreement,
+            redundancy,
+            matrix_coherence,
+        }
+    }
+
+    /// Population standard deviation of a slice.
+    fn std_dev(col: &[f32]) -> f32 {
+        let n = col.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let sum: f32 = col.iter().sum();
+        let mean = sum / n as f32;
+        let variance: f32 = col.iter().map(|&v| {
+            let d = v - mean;
+            d * d
+        }).sum::<f32>() / n as f32;
+        variance.sqrt()
+    }
 }

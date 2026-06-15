@@ -122,11 +122,26 @@ pub struct EstateBranch {
 }
 
 impl EstateBranch {
-    /// Recall every unconfirmed row from an estate, draining all pages —
-    /// the snapshot/promote/merge scans.
+    /// Recall every unconfirmed row from an estate at `.structured` hydration,
+    /// draining all pages. Used by the ID-only scans (`recall`,
+    /// `compare_to_parent`) where the content body is not needed — `.structured`
+    /// returns `content = ""` per spec § 7.3, which is correct for ID diffing.
     fn recall_all(estate: &Estate, now: i64) -> Vec<Drawer> {
         let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
         frame.hydration_level = HydrationLevel::Structured;
+        frame.ordering = Ordering::ByCaptureTimeDesc;
+        estate.recall(frame, now).collect_all()
+    }
+
+    /// Recall every unconfirmed row from an estate at `.full` hydration. Used by
+    /// `promote` / `merge_drawers`, which immediately re-capture each row's
+    /// content into the parent estate via `Estate::capture` (which rejects empty
+    /// content). `.structured` would return `content = ""` and fail the capture
+    /// guard for every row — mirrors the Swift `glkPromoteBranch` /
+    /// `glkMergeDrawers` `.full` recall frame.
+    fn recall_all_full(estate: &Estate, now: i64) -> Vec<Drawer> {
+        let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+        frame.hydration_level = HydrationLevel::Full;
         frame.ordering = Ordering::ByCaptureTimeDesc;
         estate.recall(frame, now).collect_all()
     }
@@ -256,8 +271,10 @@ impl EstateBranch {
     /// transition to `Won`. Returns the count promoted. `pub(crate)` — driven
     /// by the coordinator's `glk_promote_branch`.
     pub(crate) fn promote(&mut self, now: i64) -> Result<usize, BranchError> {
-        let new_rows: Vec<Drawer> = self
-            .recall(now)
+        // `.full` recall: each promoted row is re-captured into the parent
+        // estate (which requires non-empty content), so the content body must
+        // be loaded. Mirrors the Swift glkPromoteBranch `.full` frame.
+        let new_rows: Vec<Drawer> = Self::recall_all_full(&self.branch_estate, now)
             .into_iter()
             .filter(|row| !self.snapshot_ids.contains(&row.id))
             .collect();
@@ -276,7 +293,10 @@ impl EstateBranch {
         drawer_ids: &[String],
         now: i64,
     ) -> Result<MergeReport, BranchError> {
-        let rows = self.recall(now);
+        // `.full` recall: each cherry-picked row is re-captured into the parent
+        // estate (which requires non-empty content). Mirrors the Swift
+        // glkMergeDrawers `.full` frame.
+        let rows = Self::recall_all_full(&self.branch_estate, now);
         let mut merged = Vec::new();
         let mut skipped = Vec::new();
         for id in drawer_ids {
@@ -314,7 +334,10 @@ impl EstateCoordinator {
         let parent = self
             .estate_for(handle)
             .map_err(|_| BranchError::EstateNotOpen)?;
-        let snapshot_rows = EstateBranch::recall_all(parent, now);
+        // `.full` snapshot: the rows are re-captured into the branch estate
+        // (which requires non-empty content). Mirrors the Swift derive
+        // `recallRows` `.full` frame.
+        let snapshot_rows = EstateBranch::recall_all_full(parent, now);
         let branch = EstateBranch::build(name.into(), parent.clone(), &snapshot_rows, 1, now)?;
         let id = branch.branch_id;
         self.branches.insert(id, branch);
@@ -335,7 +358,9 @@ impl EstateCoordinator {
                 .ok_or(BranchError::NotTracked {
                     branch_id: parent_branch_id,
                 })?;
-        let snapshot_rows = EstateBranch::recall_all(parent_branch.branch_estate(), now);
+        // `.full` snapshot: re-captured into the child branch estate (requires
+        // non-empty content). Mirrors the Swift derive-from-branch `.full` frame.
+        let snapshot_rows = EstateBranch::recall_all_full(parent_branch.branch_estate(), now);
         let parent_estate = parent_branch.branch_estate().clone();
         let depth = parent_branch.lineage_depth + 1;
         let branch = EstateBranch::build(name.into(), parent_estate, &snapshot_rows, depth, now)?;
@@ -480,8 +505,11 @@ mod tests {
     }
 
     fn all_frame() -> RecallFrame {
+        // .full hydration: these branch tests recall drawers and re-file their
+        // content (promote / merge), so the content body must be loaded — a
+        // .structured recall returns content == "" (spec § 7.3 / Swift parity).
         let mut f = RecallFrame::new(vec![Filter::Unconfirmed]);
-        f.hydration_level = HydrationLevel::Structured;
+        f.hydration_level = HydrationLevel::Full;
         f.ordering = Ordering::ByCaptureTimeDesc;
         f
     }

@@ -139,19 +139,31 @@ public extension GeniusLocusKit {
     /// Close an estate and remove it from the registry.
     ///
     /// Calls `LocusKit.Estate.close()` on the live actor to allow it
-    /// to flush any pending state, then drops the registry entry. The
-    /// handle becomes stale after this call; subsequent
+    /// to flush any pending state, then calls `storage.close()` on the
+    /// backing SQLite connection to release the file lock, and drops all
+    /// registry entries for the handle.
+    ///
+    /// Storage close contract: GLK retains the caller's `Storage` in
+    /// `storages[handle]` so grant stores and sub-stores share the same
+    /// SQLite file. On close, GLK calls `storage.close()` to release
+    /// the connection. Callers must not use the `Storage` instance after
+    /// passing it to `open`/`provision` and then calling `close`.
+    ///
+    /// The handle becomes stale after this call; subsequent
     /// `estate(for:)` lookups throw `.estateNotOpen`.
     ///
-    /// Idempotent only in the sense that a stale handle is reported
-    /// explicitly: closing an already-closed handle raises
-    /// `.estateNotOpen`, which the caller can ignore.
+    /// Double-close safe: a stale handle raises `.estateNotOpen`,
+    /// which the caller can ignore.
     ///
     /// - Throws: `.estateNotOpen` if the handle is not in the registry.
     func close(_ handle: EstateHandle) async throws {
         guard let estate = registry[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
+        // Capture the storage before clearing the map entries so we can close it
+        // after all registry cleanup. Closing AFTER cleanup ensures no concurrent
+        // actor-isolated path can read through the storage once close() is in flight.
+        let storage = storages[handle]
         do {
             try await estate.close()
         } catch {
@@ -164,19 +176,33 @@ public extension GeniusLocusKit {
             auditLogs[handle] = nil
             diaryStores[handle] = nil
             kgStores[handle] = nil
+            fingerprintStores[handle] = nil
             matrixTiers[handle] = nil
+            calibrationRegistries[handle] = nil
+            matrixPersistenceBackends[handle] = nil
             nodeTopologyProviders[handle] = nil
             corpusKits[handle] = nil
             vectorStores[handle] = nil
+            // Cancel the encode drain worker and drop its queue (Dual-Path Intake).
+            dropEncodeQueue(for: handle)
             mountStates[handle] = nil
+            // Drop the sync engine so no engine reference outlives the estate.
+            syncEngines[handle] = nil
             dropGrantSurface(for: handle)
+            // Release the storage connection even on estate flush failure so
+            // the SQLite file lock is freed and the file can be reopened.
+            storages[handle] = nil
+            await storage?.close()
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")
         }
         registry[handle] = nil
         auditLogs[handle] = nil
         diaryStores[handle] = nil
         kgStores[handle] = nil
+        fingerprintStores[handle] = nil
         matrixTiers[handle] = nil
+        calibrationRegistries[handle] = nil
+        matrixPersistenceBackends[handle] = nil
         nodeTopologyProviders[handle] = nil
         // Drop corpus and vector store registrations (GLK_PROVISION_001):
         // these are set by provision() and must be released with the estate.
@@ -184,8 +210,20 @@ public extension GeniusLocusKit {
         // registerCorpus/registerVectorStore — both paths benefit from cleanup.
         corpusKits[handle] = nil
         vectorStores[handle] = nil
+        // Cancel the encode drain worker and drop its queue (Dual-Path Intake):
+        // set by mountEncodeQueue at provision (and lazily on first regular
+        // capture); must be released with the estate so no orphan worker runs.
+        dropEncodeQueue(for: handle)
         mountStates[handle] = nil
+        // Drop the sync engine so no engine reference outlives the estate.
+        syncEngines[handle] = nil
         dropGrantSurface(for: handle)
+        // Release the backing Storage connection so the SQLite file lock is freed.
+        // This is the fix for the connection leak: storages[handle] was captured
+        // before cleanup; nil it and close the connection now that all per-estate
+        // map entries are cleared and no actor-isolated path can reach the storage.
+        storages[handle] = nil
+        await storage?.close()
         Self.log.info("closed estate \(handle.estateUUID, privacy: .public)")
 
         // Telemetry: emit mount-state transition to unmounted (GLK_ROLLUPS_001).

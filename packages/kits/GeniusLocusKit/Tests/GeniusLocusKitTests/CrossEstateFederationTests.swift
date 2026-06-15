@@ -123,7 +123,7 @@ struct CrossEstateFederationTests {
 
     /// Recall frame that admits ALL sensitivity tiers (normal through secret)
     /// plus unconfirmed drawers. The default `BitmapEvaluator` sensitivity
-    /// ceiling is `.normal`; supplying `.sensitivityAtMost(.secret)` overrides
+    /// ceiling is `.elevated`; supplying `.sensitivityAtMost(.secret)` overrides
     /// that default so the contentLevel enforcement tests can verify GLK is
     /// the sole gating mechanism, independent of the recall-frame ceiling.
     private var allSensitivityFrame: RecallFrame {
@@ -369,9 +369,9 @@ struct CrossEstateFederationTests {
         let dElevated = try await captureWithSensitivity(into: hB, tag: "cl-elevated", sensitivity: .elevated, kit: kit)
 
         // allSensitivityFrame overrides BitmapEvaluator's default
-        // `.sensitivityAtMost(.normal)` ceiling so the GLK contentLevel
+        // `.sensitivityAtMost(.elevated)` ceiling so the GLK contentLevel
         // gate is the sole filter under test. Without this override, the
-        // recall itself would exclude elevated drawers before GLK can act.
+        // recall itself would exclude restricted drawers before GLK can act.
         let result = try await kit.federatedRecall(allSensitivityFrame, from: hB, requestedBy: hA)
         let ids = result.drawers.map(\.id)
 
@@ -614,5 +614,164 @@ struct CrossEstateFederationTests {
             "wholeEstate scope must return all drawers — regression guard for pass-through")
         #expect(ids.contains(dB.id),
             "wholeEstate scope must return all drawers — regression guard for pass-through")
+    }
+
+    // MARK: - CustodyMode enforcement (P0 Beta Blocker)
+
+    // MARK: - 15. Mode 1 (mediated) — vault holds key, read succeeds
+
+    /// A mode-1 (mediated) grant reads successfully when the vault holds
+    /// the scope key. The vault is populated by `issueGrant`; the key is
+    /// retained in memory for the duration of the estate's session.
+    /// This test verifies that the custody gate passes for mode-1 when
+    /// everything is in order (positive case).
+    @Test
+    func mediatedGrantVaultHoldsKeyAllowsRead() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-custody-mediated")
+        let hA = try await openEstate(in: kit, owner: owner)
+        let hB = try await openEstate(in: kit, owner: owner)
+
+        // Mode-1 (mediated) grant: the scope key is retained in the vault.
+        _ = try await kit.issueGrant(hB, GrantOptions(
+            granteeEstateID: hA.estateUUID,
+            scope: .wholeEstate,
+            custodyMode: .mediated,
+            lifetime: .permanent,
+            contentLevel: 0
+        ))
+        let dB = try await capture(into: hB, tag: "mediated-key", kit: kit)
+
+        let result = try await kit.federatedRecall(unconfirmedFrame, from: hB, requestedBy: hA)
+        #expect(result.drawers.map(\.id).contains(dB.id),
+            "mode-1 (mediated) grant with vault key must allow federated read")
+    }
+
+    // MARK: - 16. Mode 2 (handedOver) — offline read succeeds within window
+
+    /// A mode-2 (handedOver) grant allows reads within the grant window
+    /// without a vault check. The key was handed to the recipient at issue;
+    /// the source imposes no vault check. The expiry check (step 4) covers
+    /// the grant window.
+    @Test
+    func handedOverGrantAllowsReadWithinWindow() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-custody-handedover")
+        let hA = try await openEstate(in: kit, owner: owner)
+        let hB = try await openEstate(in: kit, owner: owner)
+
+        let issuedAt = Date(timeIntervalSince1970: 1_000_000)
+        let expiry = issuedAt.addingTimeInterval(3600)  // 1 hour window
+        _ = try await kit.issueGrant(hB, GrantOptions(
+            granteeEstateID: hA.estateUUID,
+            scope: .wholeEstate,
+            custodyMode: .handedOver,
+            lifetime: .until(expiry),
+            contentLevel: 0
+        ), now: issuedAt)
+        let dB = try await capture(into: hB, tag: "handedover-key", kit: kit)
+
+        // Read within the window: no vault check required for mode 2.
+        let result = try await kit.federatedRecall(
+            unconfirmedFrame, from: hB, requestedBy: hA,
+            now: issuedAt.addingTimeInterval(1800)
+        )
+        #expect(result.drawers.map(\.id).contains(dB.id),
+            "mode-2 (handedOver) grant must allow read within the grant window")
+    }
+
+    // MARK: - InferenceRemainingBudget enforcement (P0 Beta Blocker)
+
+    // MARK: - 18. Budget debits per read and persists across grant store queries
+
+    /// Each `federatedRecall` call debits the authorizing grant's
+    /// `inferenceRemainingBudget` by `GeniusLocusKit.budgetDebitPerRead` (0.01).
+    /// The debit is persisted to the grants table so subsequent reads see the
+    /// reduced budget. This test verifies both the debit amount and persistence.
+    @Test
+    func budgetDebitsPerReadAndPersists() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-budget-debit")
+        let hA = try await openEstate(in: kit, owner: owner)
+        let hB = try await openEstate(in: kit, owner: owner)
+
+        let issued = try await kit.issueGrant(hB, grantOptions(to: hA))
+        _ = try await capture(into: hB, tag: "budget-debit", kit: kit)
+
+        // Read the budget before the first federated recall.
+        let (storeBefore, _) = try await kit.ensureGrantSurface(for: hB)
+        let budgetBefore = try await storeBefore.get(id: issued.grant.id)?
+            .grant.inferenceRemainingBudget ?? 0.0
+        #expect(budgetBefore == 1.0, "fresh grant must have budget 1.0")
+
+        // Perform one federated recall.
+        _ = try await kit.federatedRecall(unconfirmedFrame, from: hB, requestedBy: hA)
+
+        // Re-read the stored budget; it must have decreased by budgetDebitPerRead.
+        let (storeAfter, _) = try await kit.ensureGrantSurface(for: hB)
+        let budgetAfter = try await storeAfter.get(id: issued.grant.id)?
+            .grant.inferenceRemainingBudget ?? 0.0
+        #expect(
+            abs(budgetAfter - (1.0 - GeniusLocusKit.budgetDebitPerRead)) < 0.0001,
+            "budget after one read must equal 1.0 - budgetDebitPerRead (\(GeniusLocusKit.budgetDebitPerRead)); got \(budgetAfter)"
+        )
+    }
+
+    // MARK: - 19. Exhausted budget refuses with no content leak
+
+    /// A grant whose `inferenceRemainingBudget` has reached zero refuses all
+    /// further reads with `.budgetExhausted`. No drawer content is returned.
+    /// This verifies the exhausted budget gate fires before the read executes.
+    @Test
+    func exhaustedBudgetRefusesWithNoContentLeak() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-budget-exhausted")
+        let hA = try await openEstate(in: kit, owner: owner)
+        let hB = try await openEstate(in: kit, owner: owner)
+
+        // Issue a grant and then manually set budget to 0.0 via the store
+        // to simulate an exhausted grant without running 100 reads.
+        let issued = try await kit.issueGrant(hB, grantOptions(to: hA))
+        _ = try await capture(into: hB, tag: "budget-exhausted", kit: kit)
+
+        let (store, _) = try await kit.ensureGrantSurface(for: hB)
+        // Debit the full budget (1.0) to exhaust it.
+        try await store.debitBudget(id: issued.grant.id, amount: 1.0)
+
+        let thrown = await #expect(throws: GeniusLocusKitError.self) {
+            try await kit.federatedRecall(unconfirmedFrame, from: hB, requestedBy: hA)
+        }
+        if case .crossEstateReadRefused(_, _, let reason)? = thrown {
+            #expect(reason == .budgetExhausted,
+                "exhausted budget must refuse with .budgetExhausted")
+        } else {
+            Issue.record("expected .crossEstateReadRefused, got \(String(describing: thrown))")
+        }
+    }
+
+    // MARK: - 20. Budget debit is bounded: cannot go below zero
+
+    /// Successive reads debit the budget by `budgetDebitPerRead` each time.
+    /// The persisted budget never goes below 0.0 (the `max(0.0, …)` clamp in
+    /// `GrantStore.debitBudget`). This test verifies the lower bound.
+    @Test
+    func budgetDebitClampsAtZero() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-budget-clamp")
+        let hA = try await openEstate(in: kit, owner: owner)
+        let hB = try await openEstate(in: kit, owner: owner)
+
+        let issued = try await kit.issueGrant(hB, grantOptions(to: hA))
+
+        // Debit more than the full budget (1.0) in one call.
+        let (store, _) = try await kit.ensureGrantSurface(for: hB)
+        try await store.debitBudget(id: issued.grant.id, amount: 5.0)
+
+        let budgetAfter = try await store.get(id: issued.grant.id)?
+            .grant.inferenceRemainingBudget ?? -999.0
+        #expect(budgetAfter >= 0.0,
+            "budget must not go below 0.0 after an over-debit; got \(budgetAfter)")
+        #expect(budgetAfter == 0.0,
+            "budget clamped at 0.0 after over-debit; got \(budgetAfter)")
     }
 }

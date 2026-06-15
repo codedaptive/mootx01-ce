@@ -3,6 +3,7 @@ import EngramLib
 import Foundation
 import OSLog
 import LocusKit
+import SubstrateML
 import VectorKit
 
 /// The Recall Director — routes a `GLKRecallRequest` through the appropriate
@@ -89,8 +90,36 @@ public extension GeniusLocusKit {
             // GLK freezes the provider's treeEdges(scope:nil) result exactly once
             // at that call (G1) and appends synthetic containment tunnels to the
             // estate's stored tunnels before returning the union.
+            //
+            // nodeTreeNative routes to locusOnly; no corpus/vector stages are
+            // attempted, so degradedStages is always empty for this mode.
             return try await recallLocusOnly(estate: estate, request: request, plan: plan)
         }
+    }
+
+    // MARK: - Late body hydration capability
+
+    /// LATE BODY HYDRATION — read the full content blob for a specific id set on
+    /// the estate behind `handle`. Returns `id → content` for every id with a
+    /// live row; ids with no row are absent from the map.
+    ///
+    /// This is the GLK-owned hydration capability the higher lanes (NeuronKit
+    /// reductions via CognitionKit recipes) call back into after a body-free
+    /// recall: they fetch a wide candidate pool body-free (`.bitmapOnly` /
+    /// `.structured`), narrow it on the dense signal, and hydrate ONLY the
+    /// survivors through this method. Keeping it here means NeuronKit and
+    /// CognitionKit never reach the LocusKit store directly — they request
+    /// hydration through GLK, the composition layer that owns the estate handle.
+    ///
+    /// - Parameters:
+    ///   - handle: the estate to hydrate from. Must be open in this kit.
+    ///   - ids: the survivor/top-k ids whose bodies to read.
+    /// - Returns: `id → content` for the ids that resolve to a live row.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func hydrate(_ handle: EstateHandle, ids: [String]) async throws -> [String: String] {
+        let estate = try estate(for: handle)
+        let bodies = try await estate.hydrateBodies(ids: ids)
+        return Dictionary(uniqueKeysWithValues: bodies.map { ($0.id, $0.content) })
     }
 
     // MARK: - locusOnly lane
@@ -116,7 +145,27 @@ public extension GeniusLocusKit {
         // Drain the recall stream produced by the LocusKit bitmap evaluator.
         // The stream's page size is controlled by the estate; we take the
         // first `request.limit` rows after materializing.
-        let stream = await estate.recall(request.frame)
+        //
+        // B-10a: trace rows are written ONLY for external-origin requests.
+        // Internal reads (dreaming, standing signals, recipes, migration, etc.)
+        // must leave traceLimit = nil so the reward pipeline learns from
+        // experience with users, not from the system's own reflective reads.
+        //
+        // For external requests: traceLimit = request.traceLimit ?? request.limit
+        // so the reward cycle records exactly the rows surfaced to the caller.
+        // When a caller (e.g. the PreciseRecall recipe) passes a coarse pool as
+        // `limit` but a smaller final-result count as `traceLimit`, the trace
+        // write is capped to the final result count — writing pool-sized trace
+        // rows for a limit-20 precise query would inflate the trace table with
+        // rows the caller never received.
+        var tracedFrame = request.frame
+        if case .external = request.origin {
+            // External-origin: set traceLimit so the estate writes reward-cycle
+            // trace rows. The frame is immutable, so we build a local copy.
+            tracedFrame.traceLimit = request.traceLimit ?? request.limit
+        }
+        // Internal-origin: tracedFrame.traceLimit stays nil — no trace writes.
+        let stream = await estate.recall(tracedFrame)
         var rows: [LocusKit.Drawer] = []
         for await page in stream {
             rows.append(contentsOf: page.rows)
@@ -133,15 +182,38 @@ public extension GeniusLocusKit {
         // Scoring semantics for the locusOnly lane:
         //   - .raw  — hits returned in RecallFrame.ordering order; this IS raw
         //             behaviour because no multi-lane combiner is active.
-        //   - .rrf  — single-lane RRF degrades to .raw ordering; nothing to
-        //             fuse. A future mission may weight intra-lane ranks with
-        //             explicit RRF math if more than one locus cursor runs in
-        //             parallel.
-        //   - .matrixAware — not yet active for locusOnly; falls back to raw
-        //             ordering. A future mission will add the matrix scoring
-        //             pass here once the per-lane matrix signal is defined.
-        // No scoring branch is needed now: all three cases produce the same
-        // ordering-based output for a single lane.
+        //   - .rrf  — single-lane RRF is rank-preserving over the one locus
+        //             cursor, so the ordering equals .raw; this is the real
+        //             single-lane behaviour, not a fallback.
+        //   - .matrixAware — the locusOnly lane has no matrix scoring pass (the
+        //             matrix signals are defined for the unionBest weighted
+        //             pipeline). matrixAware therefore FALLS BACK to raw bitmap
+        //             ordering, and that fallback is surfaced as the
+        //             `locusOnly.matrixAware` degraded stage below so the caller
+        //             knows the requested scoring was not the one applied.
+        // The hit ordering is identical for all three; only matrixAware records
+        // a degraded stage (its request could not be honoured).
+        //
+        // Seed from the LocusKit recall stream (P0-5 sites 1-5): a failed
+        // internal read (liveRows / room-fingerprints / room-drawer / bitmap-
+        // eval) names a `locus.*` stage on the stream so a FAILED locus recall
+        // is distinguishable from a GENUINE-EMPTY estate. Genuine-empty seeds none.
+        var degradedStages: [String] = stream.degradedStages
+        if request.scoring == .matrixAware {
+            // estateUUID is actor-isolated on LocusKit.Estate; recallLocusOnly
+            // has no EstateHandle parameter (it is reachable via the corpusOnly
+            // allowDegraded path with a synthesised plan), so read it here.
+            let estateID = await estate.estateUUID.uuidString
+            Self.recallLog.debug(
+                "RecallDirector locusOnly: matrixAware requested but no matrix pass in this lane — degraded to raw ordering")
+            glkEmit(
+                name: GLKMetricName.locusOnlyMatrixAwareFallback,
+                value: 1.0,
+                tags: ["estate_id": estateID],
+                now: Date()
+            )
+            degradedStages.append("locusOnly.matrixAware")
+        }
 
         // Wrap each drawer as a RecallHit. The locusOnly lane:
         //   - sources: [.locusBitmap] — the bitmap evaluator produced this hit
@@ -163,11 +235,18 @@ public extension GeniusLocusKit {
             "RecallDirector locusOnly: \(hits.count, privacy: .public) hits returned"
         )
 
+        // locusOnly does not attempt the dense float lane or any corpus/vector
+        // stage. Its degradations are: a scoring-fallback (matrixAware requested
+        // but unavailable in this lane, set above) and any LocusKit recall
+        // internal-read failure surfaced via the stream (P0-5 sites 1-5, seeded
+        // into degradedStages at the drain above).
         return GLKRecallResult(
             request: request,
             plan: plan,
             unionProfile: nil,
-            hits: hits
+            hits: hits,
+            denseLaneStatus: nil,
+            degradedStages: degradedStages
         )
     }
 
@@ -204,7 +283,12 @@ public extension GeniusLocusKit {
             throw GeniusLocusKitError.recallLaneUnavailable(.corpus)
         }
 
-        let sketch = await compileSketch(from: request, corpus: corpus)
+        // Accumulates the names of stages that encountered a recoverable error.
+        // Populated below; carried through to GLKRecallResult.degradedStages.
+        var degradedStages: [String] = []
+
+        let sketch = await compileSketch(
+            from: request, corpus: corpus, handle: handle, degradedStages: &degradedStages)
 
         // BM25 lane: top-frontierK source-level hits from the keyword index.
         let bm25List: [(id: String, score: Float)]
@@ -217,17 +301,48 @@ public extension GeniusLocusKit {
 
         // Vector lane: top-frontierK Hamming nearest-neighbour hits.
         let vectorList: [(id: String, score: Float)]
+        // Raw integer Hamming distance per drawer id (0…256), preserved alongside
+        // the normalized score so the returned hit can expose it. The normalized
+        // score still drives RRF ranking; this map is additive enrichment.
+        var hammingByID: [String: Int] = [:]
         if let engram = sketch.queryEngram, let store = vectorStores[handle] {
             let modelID = await corpus.modelID
-            let matches = (try? await store.findNearest(
-                probe: engram,
-                modelID: modelID,
-                limit: plan.frontierK
-            )) ?? []
-            // Convert Hamming distance to a score: score = 1 - distance/256.
-            // Distance 0 (identical) → score 1.0; distance 256 → score 0.0.
-            vectorList = matches.map { m in
-                (id: m.drawerID, score: Float(256 - m.distance) / 256.0)
+            // Consume the test seam (single-use: the seam error is taken once
+            // and the property is cleared so subsequent calls behave normally).
+            let forcedVectorError = _testForceVectorHammingError
+            _testForceVectorHammingError = nil
+            let matchResult: Result<[VectorMatch], Error>
+            if let forcedError = forcedVectorError {
+                matchResult = .failure(forcedError)
+            } else {
+                do {
+                    matchResult = .success(try await store.findNearest(
+                        probe: engram, modelID: modelID, limit: plan.frontierK))
+                } catch {
+                    matchResult = .failure(error)
+                }
+            }
+            switch matchResult {
+            case .success(let matches):
+                // Convert Hamming distance to a score: score = 1 - distance/256.
+                // Distance 0 (identical) → score 1.0; distance 256 → score 0.0.
+                for m in matches { hammingByID[m.itemID] = m.distance }
+                vectorList = matches.map { m in
+                    (id: m.itemID, score: Float(256 - m.distance) / 256.0)
+                }
+            case .failure(let error):
+                // Hamming vector lane DEGRADED — the query survives on BM25 only.
+                // Log + telemetry so estate dashboards surface the failure.
+                Self.recallLog.error(
+                    "RecallDirector corpusOnly: vectorHamming.findNearest degraded: \(error, privacy: .public)")
+                glkEmit(
+                    name: GLKMetricName.vectorHammingDegraded,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString, "lane": "corpusOnly"],
+                    now: Date()
+                )
+                degradedStages.append("vectorHamming.findNearest")
+                vectorList = []
             }
         } else {
             vectorList = []
@@ -242,10 +357,12 @@ public extension GeniusLocusKit {
         //         matching is the primary signal when RRF is not requested;
         //         vector-only results are appended for IDs not in the BM25 list.
         //         This honours the caller's request to skip inter-lane rank math.
-        // .matrixAware — not yet active for the corpusOnly lane; the matrix
-        //         scoring pass (fieldFit, coOccurrence, temporal) is defined for
-        //         the unionBest lane only. Falls back to .rrf behaviour here.
-        //         A future mission will add the matrix pass to the corpusOnly lane.
+        // .matrixAware — the corpusOnly lane has no matrix scoring pass (the
+        //         matrix signals fieldFit/coOccurrence/temporal are defined for
+        //         the unionBest weighted pipeline). matrixAware FALLS BACK to
+        //         .rrf fusion here, and that fallback is surfaced as the
+        //         `corpusOnly.matrixAware` degraded stage so the caller knows
+        //         the requested scoring was not the one applied.
         let fused: [(id: String, score: Float)]
         switch request.scoring {
         case .raw:
@@ -265,28 +382,46 @@ public extension GeniusLocusKit {
             }
             fused = Array(merged.prefix(request.limit))
         case .rrf, .matrixAware:
-            // .rrf — existing RRF fusion; two-lane reciprocal rank combination.
-            // .matrixAware scoring is not yet active for the corpusOnly lane;
-            // falls back to .rrf behaviour. A future mission will add the matrix
-            // pass here.
+            // .rrf — real two-lane reciprocal-rank fusion of BM25 + vector.
+            // .matrixAware reuses this fusion (no matrix pass in this lane) and
+            // records the scoring fallback below.
+            if request.scoring == .matrixAware {
+                Self.recallLog.debug(
+                    "RecallDirector corpusOnly: matrixAware requested but no matrix pass in this lane — degraded to rrf")
+                glkEmit(
+                    name: GLKMetricName.corpusOnlyMatrixAwareFallback,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString],
+                    now: Date()
+                )
+                degradedStages.append("corpusOnly.matrixAware")
+            }
             fused = rrfFuse(bm25List, vectorList, k: 60, limit: request.limit)
         }
 
-        // Hydrate fused hits from the estate, excluding tombstoned drawers and
-        // applying the requested hydration level to the loaded drawers.
+        // Hydrate fused hits from the estate, applying the recall frame's filter
+        // chain so corpus-lane candidates the frame excludes (e.g. withdrawn under
+        // the default `.currentlyBelieve`) are dropped, and the requested hydration
+        // level to the loaded drawers.
         let hits = await hydrateHits(
             fused,
             estate: estate,
+            frame: request.frame,
             bm25IDs: Set(bm25List.map(\.id)),
             vectorIDs: Set(vectorList.map(\.id)),
-            level: request.frame.hydrationLevel
+            hammingByID: hammingByID,
+            level: request.frame.hydrationLevel,
+            handle: handle,
+            degradedStages: &degradedStages
         )
 
         Self.recallLog.debug(
-            "RecallDirector corpusOnly: bm25=\(bm25List.count, privacy: .public) vector=\(vectorList.count, privacy: .public) fused=\(hits.count, privacy: .public)"
+            "RecallDirector corpusOnly: bm25=\(bm25List.count, privacy: .public) vector=\(vectorList.count, privacy: .public) fused=\(hits.count, privacy: .public) degraded=\(degradedStages, privacy: .public)"
         )
 
-        return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: hits)
+        // corpusOnly does not include the dense float lane (BM25 + Hamming only).
+        return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: hits,
+                               denseLaneStatus: nil, degradedStages: degradedStages)
     }
 
     // MARK: - hybrid lane
@@ -306,13 +441,29 @@ public extension GeniusLocusKit {
         plan: RecallPlan,
         handle: EstateHandle
     ) async throws -> GLKRecallResult {
+        // Accumulates recoverable stage failures for GLKRecallResult.degradedStages.
+        var degradedStages: [String] = []
+
         // Locus lane — same drain as locusOnly.
-        let stream = await estate.recall(request.frame)
+        // B-10a: trace rows only for external-origin requests. For external,
+        // traceLimit = request.traceLimit ?? request.limit so the reward cycle
+        // records the rows the caller finally receives, not the internal scan
+        // candidate count. PreciseRecall passes traceLimit = finalLimit so a
+        // pool-500 precise query does not write 500 trace rows for a 20-row result.
+        var tracedFrame = request.frame
+        if case .external = request.origin {
+            tracedFrame.traceLimit = request.traceLimit ?? request.limit
+        }
+        let stream = await estate.recall(tracedFrame)
         var locusRows: [LocusKit.Drawer] = []
         for await page in stream {
             locusRows.append(contentsOf: page.rows)
             if locusRows.count >= plan.frontierK { break }
         }
+        // Surface LocusKit recall internal-read failures (P0-5 sites 1-5): a
+        // failed locus read names a `locus.*` stage so the hybrid result can
+        // tell a FAILED locus lane from a GENUINE-EMPTY one. Genuine-empty: none.
+        degradedStages.append(contentsOf: stream.degradedStages)
         let locusList: [(id: String, score: Float)] = Array(locusRows.prefix(plan.frontierK))
             .enumerated()
             .map { (idx, d) in (id: d.id, score: Float(plan.frontierK - idx) / Float(plan.frontierK)) }
@@ -320,20 +471,49 @@ public extension GeniusLocusKit {
         // Corpus and vector lanes — only if corpus is registered.
         var bm25List: [(id: String, score: Float)] = []
         var vectorList: [(id: String, score: Float)] = []
+        // Raw integer Hamming distance per drawer id (0…256) from the vector lane,
+        // preserved for the returned hit. Ranking still uses the normalized score.
+        var hammingByID: [String: Int] = [:]
         if let corpus = corpusKits[handle], let text = request.queryText, !text.isEmpty {
-            let sketch = await compileSketch(from: request, corpus: corpus)
+            let sketch = await compileSketch(
+                from: request, corpus: corpus, handle: handle, degradedStages: &degradedStages)
             let bm25Hits = await corpus.bm25TopKBySource(query: text, limit: plan.frontierK)
             bm25List = bm25Hits.map { (id: $0.sourceID, score: $0.score) }
 
             if let engram = sketch.queryEngram, let store = vectorStores[handle] {
                 let modelID = await corpus.modelID
-                let matches = (try? await store.findNearest(
-                    probe: engram,
-                    modelID: modelID,
-                    limit: plan.frontierK
-                )) ?? []
-                vectorList = matches.map { m in
-                    (id: m.drawerID, score: Float(256 - m.distance) / 256.0)
+                // Consume the test seam (single-use).
+                let forcedVectorError = _testForceVectorHammingError
+                _testForceVectorHammingError = nil
+                let matchResult: Result<[VectorMatch], Error>
+                if let forcedError = forcedVectorError {
+                    matchResult = .failure(forcedError)
+                } else {
+                    do {
+                        matchResult = .success(try await store.findNearest(
+                            probe: engram, modelID: modelID, limit: plan.frontierK))
+                    } catch {
+                        matchResult = .failure(error)
+                    }
+                }
+                switch matchResult {
+                case .success(let matches):
+                    for m in matches { hammingByID[m.itemID] = m.distance }
+                    vectorList = matches.map { m in
+                        (id: m.itemID, score: Float(256 - m.distance) / 256.0)
+                    }
+                case .failure(let error):
+                    // Hamming vector lane DEGRADED — query survives on locus + BM25.
+                    Self.recallLog.error(
+                        "RecallDirector hybrid: vectorHamming.findNearest degraded: \(error, privacy: .public)")
+                    glkEmit(
+                        name: GLKMetricName.vectorHammingDegraded,
+                        value: 1.0,
+                        tags: ["estate_id": handle.estateUUID.uuidString, "lane": "hybrid"],
+                        now: Date()
+                    )
+                    degradedStages.append("vectorHamming.findNearest")
+                    vectorList = []
                 }
             }
         }
@@ -346,8 +526,12 @@ public extension GeniusLocusKit {
         //         (locus → BM25 → vector), dedup by ID, apply limit.
         //         No rank math; the ordering reflects lane priority, not
         //         inter-lane rank fusion.
-        // .matrixAware — not yet active for the hybrid lane; falls back to
-        //         .rrf behaviour. A future mission will add the matrix pass.
+        // .matrixAware — the hybrid lane has no matrix scoring pass (the matrix
+        //         signals are defined for the unionBest weighted pipeline).
+        //         matrixAware FALLS BACK to three-way RRF fusion, and that
+        //         fallback is surfaced as the `hybrid.matrixAware` degraded
+        //         stage so the caller knows the requested scoring was not the
+        //         one applied.
         let fused: [(id: String, score: Float)]
         switch request.scoring {
         case .raw:
@@ -365,32 +549,96 @@ public extension GeniusLocusKit {
             }
             fused = Array(merged.prefix(request.limit))
         case .rrf, .matrixAware:
-            // .rrf — existing three-way RRF fusion.
-            // .matrixAware not yet active for the hybrid lane; falls back to
-            // .rrf behaviour. A future mission will add the matrix pass here.
+            // .rrf — real three-way RRF fusion of locus + BM25 + vector.
+            // .matrixAware reuses this fusion (no matrix pass in this lane) and
+            // records the scoring fallback below.
+            if request.scoring == .matrixAware {
+                Self.recallLog.debug(
+                    "RecallDirector hybrid: matrixAware requested but no matrix pass in this lane — degraded to rrf")
+                glkEmit(
+                    name: GLKMetricName.hybridMatrixAwareFallback,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString],
+                    now: Date()
+                )
+                degradedStages.append("hybrid.matrixAware")
+            }
             fused = rrfFuseThree(locusList, bm25List, vectorList, k: 60, limit: request.limit)
         }
 
-        // Hydrate fused hits from the estate. Locus rows are already in memory;
-        // supplement with a live-drawers fetch for any IDs that came only from
-        // BM25 or vector. Tombstoned rows are excluded from the extra index so
-        // that expunged content cannot surface via the BM25 or vector lanes.
+        // Hydrate fused hits from the estate. Locus rows are already in memory
+        // (they came from the frame-filtered `estate.recall`, so they are
+        // frame-admissible by construction); supplement with a FRAME-AWARE
+        // by-id load for any IDs that came only from BM25 or vector, so a
+        // candidate the frame excludes (withdrawn under `.currentlyBelieve`,
+        // tombstoned always) is absent from extraIndex and DROPPED — not surfaced
+        // as a nil-drawer phantom — while the same candidate surfaces under a
+        // `.usedToBelieve` frame.
         let locusIndex = Dictionary(uniqueKeysWithValues: locusRows.map { ($0.id, $0) })
         let bm25IDs = Set(bm25List.map(\.id))
         let vectorIDs = Set(vectorList.map(\.id))
-        // Load non-tombstoned drawers only if there are non-locus hits to hydrate.
-        // The .state != .tombstoned guard uses the adjectiveBitmap state field
-        // (bits 0-5), which is reliable across both InMemory and SQLite backends.
         let extraIDs = (bm25IDs.union(vectorIDs)).subtracting(Set(locusIndex.keys))
         let extraIndex: [String: LocusKit.Drawer]
-        if !extraIDs.isEmpty {
-            let liveDrawers = (try? await estate.allDrawers())?.filter { $0.state != .tombstoned } ?? []
-            extraIndex = Dictionary(uniqueKeysWithValues: liveDrawers.map { ($0.id, $0) })
+        // `extraLoadedIDs` records which extra ids physically loaded, so the drop
+        // is gated on load success: an extra id that loaded but failed the frame
+        // filter is dropped; one that did not load (transient/partial) is degraded.
+        var extraLoadedIDs: Set<String> = []
+        // Consume the test seam (single-use) unconditionally so the seam is
+        // available even when extraIDs happens to be empty on a given query.
+        // This allows tests to verify the failure path regardless of whether
+        // all BM25/vector candidates were already in the locus index.
+        let forcedHybridError = _testForceHybridGetDrawersError
+        _testForceHybridGetDrawersError = nil
+        if let forcedError = forcedHybridError {
+            // Test seam active — DEGRADE regardless of extraIDs content.
+            // The seam fires even when extraIDs is empty because the test is
+            // verifying the degradation path, not a real query outcome.
+            Self.recallLog.error(
+                "RecallDirector hybrid: hybrid.getDrawers degraded (forced): \(forcedError, privacy: .public)")
+            glkEmit(
+                name: GLKMetricName.hybridGetDrawersDegraded,
+                value: 1.0,
+                tags: ["estate_id": handle.estateUUID.uuidString],
+                now: Date()
+            )
+            degradedStages.append("hybrid.getDrawers")
+            extraIndex = [:]
+        } else if !extraIDs.isEmpty {
+            // Production path: frame-aware hydrate of frontier IDs from BM25/vector
+            // not already in the locus index. O(candidates) by-id batch load.
+            //
+            // Failure DEGRADES (query survives on locus-indexed results only):
+            // BM25/vector hits not in the locus index will be absent from the result.
+            do {
+                let filtered = try await estate.getDrawers(
+                    ids: Array(extraIDs), matchingFrame: request.frame,
+                    hydrationLevel: request.frame.hydrationLevel)
+                extraIndex = Dictionary(uniqueKeysWithValues: filtered.admissible.map { ($0.id, $0) })
+                extraLoadedIDs = filtered.loadedIDs
+            } catch {
+                // Frontier load DEGRADED — BM25/vector-only candidates absent from result.
+                Self.recallLog.error(
+                    "RecallDirector hybrid: hybrid.getDrawers degraded: \(error, privacy: .public)")
+                glkEmit(
+                    name: GLKMetricName.hybridGetDrawersDegraded,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString],
+                    now: Date()
+                )
+                degradedStages.append("hybrid.getDrawers")
+                extraIndex = [:]
+            }
         } else {
             extraIndex = [:]
         }
         var hits: [RecallHit] = []
         for (drawerID, rrfScore) in fused {
+            // FRAME-FAITHFUL DROP, gated on load success: a non-locus candidate
+            // that loaded but is absent from the frame-filtered extraIndex failed
+            // the frame filter — drop it. Locus candidates are frame-admissible by
+            // construction; a candidate that did not load (degraded) is kept.
+            if locusIndex[drawerID] == nil
+                && extraLoadedIDs.contains(drawerID) && extraIndex[drawerID] == nil { continue }
             let rawDrawer: LocusKit.Drawer? = locusIndex[drawerID] ?? extraIndex[drawerID]
             // Apply the caller-requested hydration level so BM25/vector-path drawers
             // honour the same bitmapOnly stripping that RecallStream applies on the
@@ -405,20 +653,26 @@ public extension GeniusLocusKit {
             let bm25Score: Float = bm25IDs.contains(drawerID) ? rrfScore : 0
             let vectorScore: Float = vectorIDs.contains(drawerID) ? rrfScore : 0
             let locusScore: Float = locusIndex[drawerID] != nil ? rrfScore : 0
+            // Raw Hamming distance for vector-lane hits (sentinel otherwise),
+            // preserved from the vector lane. The fused `rrfScore` remains the
+            // ranking signal unchanged; the dense distance is additive enrichment.
+            let hamming = hammingByID[drawerID] ?? RecallScoreVector.noHammingDistance
             let scoreVec = RecallScoreVector(
                 locus: locusScore, bm25: bm25Score, vector: vectorScore,
                 fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
-                redundancyPenalty: 0, final: rrfScore
+                redundancyPenalty: 0, final: rrfScore, hammingDistance: hamming
             )
             hits.append(RecallHit(id: drawerID, drawer: drawer, sources: sources,
                                   score: scoreVec, explanation: sources.map(\.rawValue).sorted()))
         }
 
         Self.recallLog.debug(
-            "RecallDirector hybrid: locus=\(locusList.count, privacy: .public) bm25=\(bm25List.count, privacy: .public) vector=\(vectorList.count, privacy: .public) fused=\(hits.count, privacy: .public)"
+            "RecallDirector hybrid: locus=\(locusList.count, privacy: .public) bm25=\(bm25List.count, privacy: .public) vector=\(vectorList.count, privacy: .public) fused=\(hits.count, privacy: .public) degraded=\(degradedStages, privacy: .public)"
         )
 
-        return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: hits)
+        // hybrid does not include the dense float lane (locus + BM25 + Hamming only).
+        return GLKRecallResult(request: request, plan: plan, unionProfile: nil, hits: hits,
+                               denseLaneStatus: nil, degradedStages: degradedStages)
     }
 
     // MARK: - Query sketch compiler
@@ -426,16 +680,52 @@ public extension GeniusLocusKit {
     /// Compile a `RecallQuerySketch` from the request and a registered corpus.
     ///
     /// Embeds `request.queryText` into `queryEngram` via the corpus's provider.
-    /// If embedding fails, `queryEngram` is nil and the vector lane returns
-    /// an empty candidate set.
+    /// If embedding fails, `queryEngram` is nil and the vector lane returns an
+    /// empty candidate set; the failure is recorded in `degradedStages` so the
+    /// caller can surface the degradation in `GLKRecallResult.degradedStages`.
+    ///
+    /// The `_testForceEmbedError` seam (single-use) allows tests to inject an
+    /// embed failure without a real corpus error.
     private func compileSketch(
         from request: GLKRecallRequest,
-        corpus: Corpus
+        corpus: Corpus,
+        handle: EstateHandle,
+        degradedStages: inout [String]
     ) async -> RecallQuerySketch {
         let text = request.queryText
         var engram: Engram? = nil
         if let t = text, !t.isEmpty {
-            engram = try? await corpus.embed(t)
+            // Consume the test seam (single-use).
+            let forcedEmbedError = _testForceEmbedError
+            _testForceEmbedError = nil
+            if let forcedError = forcedEmbedError {
+                // Embedding DEGRADED via test seam — vector lane will be dark.
+                Self.recallLog.error(
+                    "RecallDirector compileSketch: corpus.embed degraded (forced): \(forcedError, privacy: .public)")
+                glkEmit(
+                    name: GLKMetricName.corpusEmbedDegraded,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString, "lane": "embed"],
+                    now: Date()
+                )
+                degradedStages.append("corpus.embed")
+            } else {
+                do {
+                    engram = try await corpus.embed(t)
+                } catch {
+                    // Embedding DEGRADED — vector lane will be dark for this query.
+                    // The query continues on BM25/locus signals.
+                    Self.recallLog.error(
+                        "RecallDirector compileSketch: corpus.embed degraded: \(error, privacy: .public)")
+                    glkEmit(
+                        name: GLKMetricName.corpusEmbedDegraded,
+                        value: 1.0,
+                        tags: ["estate_id": handle.estateUUID.uuidString, "lane": "embed"],
+                        now: Date()
+                    )
+                    degradedStages.append("corpus.embed")
+                }
+            }
         }
         // Inline keyword tokenisation mirrors CorpusDefaultTokenizer.keywordTokens:
         // ASCII-lowercase, split on non-alpha-numeric, minimum word length 2.
@@ -547,10 +837,14 @@ public extension GeniusLocusKit {
         plan: RecallPlan,
         handle: EstateHandle
     ) async throws -> GLKRecallResult {
+        // Accumulates recoverable stage failures for GLKRecallResult.degradedStages.
+        var degradedStages: [String] = []
+
         // Step 1 — compile sketch (may be empty if no corpus is registered).
         let sketch: RecallQuerySketch
         if let corpus = corpusKits[handle] {
-            sketch = await compileSketch(from: request, corpus: corpus)
+            sketch = await compileSketch(
+                from: request, corpus: corpus, handle: handle, degradedStages: &degradedStages)
         } else {
             // No corpus — sketch has no tokens or engram; locus lane still runs.
             sketch = RecallQuerySketch(
@@ -564,12 +858,25 @@ public extension GeniusLocusKit {
         }
 
         // Step 2 — locus lane.
-        let stream = await estate.recall(request.frame)
+        // B-10a: trace rows only for external-origin requests. For external,
+        // traceLimit = request.traceLimit ?? request.limit so the reward cycle
+        // records the rows the caller finally receives, not the coarse pool
+        // width. PreciseRecall passes traceLimit = finalLimit so a pool-500
+        // precise query does not write 500 trace rows for a 20-row result.
+        var tracedFrame = request.frame
+        if case .external = request.origin {
+            tracedFrame.traceLimit = request.traceLimit ?? request.limit
+        }
+        let stream = await estate.recall(tracedFrame)
         var locusRows: [LocusKit.Drawer] = []
         for await page in stream {
             locusRows.append(contentsOf: page.rows)
             if locusRows.count >= plan.frontierK { break }
         }
+        // Surface LocusKit recall internal-read failures (P0-5 sites 1-5): a
+        // failed locus read names a `locus.*` stage so the unionBest result can
+        // tell a FAILED locus lane from a GENUINE-EMPTY one. Genuine-empty: none.
+        degradedStages.append(contentsOf: stream.degradedStages)
         let locusSlice = Array(locusRows.prefix(plan.frontierK))
 
         // Step 3 — BM25 lane (only when corpus is registered and query text present).
@@ -592,19 +899,129 @@ public extension GeniusLocusKit {
         if let engram = sketch.queryEngram, let store = vectorStores[handle],
            let corpus = corpusKits[handle] {
             let modelID = await corpus.modelID
-            let matches = (try? await store.findNearest(
-                probe: engram, modelID: modelID, limit: plan.frontierK)) ?? []
-            vectorHits = matches.map { m in
-                // Convert Hamming distance to similarity: 1 − distance/256.
-                // Distance 0 (identical bits) → 1.0; distance 256 → 0.0.
-                let sim = Float(256 - m.distance) / 256.0
-                let sv = RecallScoreVector(
-                    locus: 0, bm25: 0, vector: sim,
-                    fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
-                    redundancyPenalty: 0, final: sim
+            // Consume the test seam (single-use).
+            let forcedVectorError = _testForceVectorHammingError
+            _testForceVectorHammingError = nil
+            let matchResult: Result<[VectorMatch], Error>
+            if let forcedError = forcedVectorError {
+                matchResult = .failure(forcedError)
+            } else {
+                do {
+                    matchResult = .success(
+                        try await store.findNearest(
+                            probe: engram, modelID: modelID, limit: plan.frontierK))
+                } catch {
+                    matchResult = .failure(error)
+                }
+            }
+            switch matchResult {
+            case .success(let matches):
+                vectorHits = matches.map { m in
+                    // Convert Hamming distance to similarity: 1 − distance/256.
+                    // Distance 0 (identical bits) → 1.0; distance 256 → 0.0.
+                    // The normalized `sim` still drives ranking; the raw integer
+                    // `m.distance` (0…256) is preserved verbatim on the score vector
+                    // so dense-reduction recipes can rank on it without the rounding
+                    // loss of `sim`. This is purely additive — `sim` is unchanged.
+                    let sim = Float(256 - m.distance) / 256.0
+                    let sv = RecallScoreVector(
+                        locus: 0, bm25: 0, vector: sim,
+                        fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
+                        redundancyPenalty: 0, final: sim, hammingDistance: m.distance
+                    )
+                    return RecallHit(id: m.itemID, drawer: nil, sources: [.vectorHamming],
+                                     score: sv, explanation: ["vectorHamming"])
+                }
+            case .failure(let error):
+                // Hamming vector lane DEGRADED — query survives on locus + BM25 + dense.
+                Self.recallLog.error(
+                    "RecallDirector unionBest: vectorHamming.findNearest degraded: \(error, privacy: .public)")
+                glkEmit(
+                    name: GLKMetricName.vectorHammingDegraded,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString, "lane": "unionBest"],
+                    now: Date()
                 )
-                return RecallHit(id: m.drawerID, drawer: nil, sources: [.vectorHamming],
-                                 score: sv, explanation: ["vectorHamming"])
+                degradedStages.append("vectorHamming.findNearest")
+                vectorHits = []
+            }
+        }
+
+        // Step 4.5 — DENSE FLOAT lane (Lane D). The TRUE float-embedding lane:
+        // cosine over the retained pooled vector, NOT the lossy 256-bit
+        // SimHash-Hamming projection. Fires independently of the Hamming lane —
+        // both can contribute. Runs only when a corpus with a float-capable
+        // provider is registered and the query text is non-empty. The corpus
+        // owns the embed + float-index search; GLK never reaches the store
+        // directly. B-10a: this lane writes NO trace rows — it adds candidates
+        // to the in-memory buffer only, exactly like the Hamming lane.
+        //
+        // FloatLaneOutcome makes every dark-lane state observable. GLK reads the
+        // outcome and adds an explainer marker when the lane is dark so per-query
+        // results say why the dense lane did not run. A storeError is already
+        // logged + counted inside CorpusKit (OSLog + corpus.float_lane.store_error
+        // counter); GLK adds a glk.recall.dense_lane_dark counter for estate-level
+        // observability.
+        var denseHits: [RecallHit] = []
+        var denseLaneExplainerTag: String? = nil
+        if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
+            let outcome = await corpus.floatNearest(query: text, limit: plan.frontierK)
+            switch outcome {
+            case .hits(let matches):
+                // Happy path — lane contributed results.
+                denseHits = matches.map { m in
+                    // Normalize cosine similarity (∈ [−1, 1]) to [0, 1] as
+                    // (sim + 1) / 2 so the dense column matches every other
+                    // [0, 1] column's convention (1.0 = identical direction).
+                    // RRF fusion (below) is rank-based and ignores this magnitude;
+                    // the column feeds the explainer/optimizer and the weighted path.
+                    let dense = max(0, min(1, (m.similarity + 1) / 2))
+                    let sv = RecallScoreVector(
+                        locus: 0, bm25: 0, vector: 0,
+                        fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
+                        redundancyPenalty: 0, final: dense, dense: dense)
+                    return RecallHit(id: m.itemID, drawer: nil, sources: [.vectorDense],
+                                     score: sv, explanation: ["vectorDense"])
+                }
+
+            case .unavailableProviderOptOut:
+                // Expected — provider has no float lane. Record for explainer;
+                // emit the GLK-level dark-lane counter.
+                denseLaneExplainerTag = "dark:providerOptOut"
+                glkEmit(
+                    name: GLKMetricName.denseLaneDark,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString, "reason": "providerOptOut"],
+                    now: Date()
+                )
+
+            case .unavailableNoFloatRows:
+                // Expected — corpus was ingested with a non-float provider or no
+                // documents have been ingested yet. Record for explainer; count.
+                denseLaneExplainerTag = "dark:noFloatRows"
+                glkEmit(
+                    name: GLKMetricName.denseLaneDark,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString, "reason": "noFloatRows"],
+                    now: Date()
+                )
+
+            case .emptyQuery:
+                // Guard above (text.isEmpty) prevents this in practice; handle
+                // defensively so the enum switch is exhaustive without a `default`.
+                denseLaneExplainerTag = "dark:emptyQuery"
+
+            case .storeError:
+                // Unexpected store failure. CorpusKit already logged via OSLog and
+                // emitted corpus.float_lane.store_error. GLK adds the estate-level
+                // dark counter so estate dashboards surface the failure.
+                denseLaneExplainerTag = "dark:storeError"
+                glkEmit(
+                    name: GLKMetricName.denseLaneDark,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString, "reason": "storeError"],
+                    now: Date()
+                )
             }
         }
 
@@ -612,9 +1029,12 @@ public extension GeniusLocusKit {
         var primarySourceCount = 1 // locus always contributes
         if !bm25Hits.isEmpty   { primarySourceCount += 1 }
         if !vectorHits.isEmpty { primarySourceCount += 1 }
+        if !denseHits.isEmpty  { primarySourceCount += 1 }
 
         // Step 5 — merge all hits into the candidate buffer.
-        let bufferCapacity = plan.frontierK * 3 + 10
+        // Capacity covers all FOUR lanes (locus, BM25, Hamming, dense) at
+        // frontierK each, plus slack, so no lane's candidates are dropped.
+        let bufferCapacity = plan.frontierK * 4 + 10
         var buffer = RecallCandidateBuffer(capacity: bufferCapacity)
 
         for (idx, drawer) in locusSlice.enumerated() {
@@ -635,16 +1055,72 @@ public extension GeniusLocusKit {
         for hit in vectorHits {
             buffer.merge(hit: hit, sourceBit: RecallCandidateBuffer.bitVectorHamming)
         }
+        for hit in denseHits {
+            buffer.merge(hit: hit, sourceBit: RecallCandidateBuffer.bitVectorDense)
+        }
 
-        // Step 5.5 — bulk-load all live (non-tombstoned) drawers early so matrix
-        // scoring and final hydration share one estate round-trip. Moving this
-        // before normalize (step 6) lets the matrix scorer derive per-candidate
-        // field coordinates from Drawer objects rather than a second fetch.
-        // Tombstoned rows are excluded via the adjectiveBitmap state field (bits
-        // 0-5); this is reliable across both InMemory and SQLite backends and
-        // prevents expunged drawers from surfacing via the BM25 or vector lanes.
-        let liveDrawers = (try? await estate.allDrawers())?.filter { $0.state != .tombstoned } ?? []
-        let drawerIndex = Dictionary(uniqueKeysWithValues: liveDrawers.map { ($0.id, $0) })
+        // Step 5.5 — DENSE-FIRST POOL LOAD (body-free), FRAME-FILTERED. Bulk-load
+        // the merged candidate pool by id at `.structured` (content blob projected
+        // away — the wide pool is structured/bitmap/lattice columns only) AND apply
+        // the recall frame's filter chain, via the LocusKit public frame-aware load.
+        // `drawerIndex` is therefore exactly the frame-admissible subset of the pool
+        // — identical semantics to the Rust path, whose `drawer_index` is derived
+        // from `estate.recall(frame)` for the DEFAULT frame and any override. A
+        // BM25/vector candidate whose drawer the frame excludes (e.g. `.withdrawn`
+        // under the default `.currentlyBelieve`) is therefore ABSENT from
+        // drawerIndex and is DROPPED at step 11 — but the SAME drawer surfaces when
+        // the frame overrides to `.usedToBelieve`, because the filter is the frame's,
+        // not a hardcode. Every dense scoring stage below reads structured columns,
+        // so none needs a body; bodies are read LATE (steps 10–11) via hydrateBodies.
+        //
+        // `poolLoadedIDs` records every id whose row physically loaded, regardless
+        // of the frame filter. The step-11 drop is GATED on it: an id that loaded
+        // but is absent from drawerIndex failed the frame filter (drop it); an id
+        // that did NOT load (transient/partial read) is DEGRADED gracefully — kept,
+        // never dropped. This is the ~10% burst-loss guard: a valid ACTIVE drawer
+        // merely not-yet-joined due to a partial load must not be dropped.
+        //
+        // Failure DEGRADES (query survives on locus/BM25/vector signals only):
+        // when the load throws, drawerIndex AND poolLoadedIDs are empty, so the
+        // drop is disabled (nothing loaded → nothing to drop) and all matrix/graph/
+        // preference scoring columns are zero. Recorded in degradedStages.
+        let forcedPoolError = _testForcePoolGetDrawersError
+        _testForcePoolGetDrawersError = nil
+        let drawerIndex: [String: LocusKit.Drawer]
+        let poolLoadedIDs: Set<String>
+        let poolGetDrawersResult: Result<LocusKit.FrameFilteredDrawers, Error>
+        if let forcedError = forcedPoolError {
+            poolGetDrawersResult = .failure(forcedError)
+        } else {
+            do {
+                poolGetDrawersResult = .success(
+                    try await estate.getDrawers(
+                        ids: buffer.ids,
+                        matchingFrame: request.frame,
+                        hydrationLevel: .structured))
+            } catch {
+                poolGetDrawersResult = .failure(error)
+            }
+        }
+        switch poolGetDrawersResult {
+        case .success(let filtered):
+            drawerIndex = Dictionary(uniqueKeysWithValues: filtered.admissible.map { ($0.id, $0) })
+            poolLoadedIDs = filtered.loadedIDs
+        case .failure(let error):
+            // Pool load DEGRADED — matrix/graph/preference scoring will be zero.
+            // The query continues on lane-rank signals only (locus + BM25 + vector).
+            Self.recallLog.error(
+                "RecallDirector unionBest: pool.getDrawers degraded: \(error, privacy: .public)")
+            glkEmit(
+                name: GLKMetricName.poolGetDrawersDegraded,
+                value: 1.0,
+                tags: ["estate_id": handle.estateUUID.uuidString],
+                now: Date()
+            )
+            degradedStages.append("pool.getDrawers")
+            drawerIndex = [:]
+            poolLoadedIDs = []
+        }
 
         // Step 5.6 — matrix scoring (before normalize).
         // Runs only when scoring is .matrixAware (the full pipeline) and a
@@ -716,9 +1192,11 @@ public extension GeniusLocusKit {
         // Step 9 — compute final score per candidate.
         //
         // .matrixAware — the full existing weighted pipeline IS the matrixAware
-        //   path. Active weights: locus, bm25, vector, fieldFit, graph, preference,
-        //   matrix (coOccurrence + temporal combined). agreementBonus = 0.05 ×
-        //   popcount(sourceMask) / 3 (normalised to max 0.05 over 3 source bits).
+        //   path. Active weights: locus, bm25, vector (Hamming AND dense, sharing
+        //   the vector budget), fieldFit, graph, preference, matrix (coOccurrence
+        //   + temporal combined). agreementBonus = 0.05 × popcount(sourceMask) / 4
+        //   (normalised to max 0.05 over 4 lane source bits: locus, bm25,
+        //   vectorHamming, vectorDense).
         //   RecallWeights has no dedicated preference field; preference is scored
         //   at equal weight to graph (weights.graph) so both cold-path signals
         //   share the same budget slice.
@@ -727,10 +1205,25 @@ public extension GeniusLocusKit {
         //   the buffer (the lane-normalised rank score set in step 6) for MMR.
         //   No matrix signals, no adaptive weights, no agreement bonus.
         //
-        // .rrf — .rrf in unionBest uses equal-weight lane scoring without matrix
-        //   signals. A future mission will add explicit equal-weight RRF fusion
-        //   across lane scores here; for now this falls back to the .raw path
-        //   (buffer.final scores) to avoid silent matrix-signal bleed.
+        // .rrf — unionBest implements the weighted matrix-aware pipeline and a
+        //   raw pass, but NOT a distinct equal-weight RRF fusion across lane
+        //   scores. .rrf therefore FALLS BACK to the .raw path (buffer.final
+        //   lane-normalised scores) to avoid silent matrix-signal bleed, and
+        //   that fallback is surfaced as the `unionBest.rrf` degraded stage
+        //   (recorded below) so the caller knows the requested scoring was not
+        //   the one applied. matrixAware (the full weighted pipeline) and raw
+        //   are both genuinely implemented and record no degraded stage.
+        if request.scoring == .rrf {
+            Self.recallLog.debug(
+                "RecallDirector unionBest: rrf requested but no distinct RRF fusion in this lane — degraded to raw (buffer.final)")
+            glkEmit(
+                name: GLKMetricName.unionBestRRFFallback,
+                value: 1.0,
+                tags: ["estate_id": handle.estateUUID.uuidString],
+                now: Date()
+            )
+            degradedStages.append("unionBest.rrf")
+        }
         let agreementBonus: Float = 0.05
         var scores = [Float](repeating: 0, count: buffer.count)
         switch request.scoring {
@@ -740,23 +1233,76 @@ public extension GeniusLocusKit {
                 // under the matrix weight budget, so the two matrix signals share
                 // the same budget slice without over-weighting matrix overall.
                 let matrixSignal = (buffer.coOccurrence[i] + buffer.temporal[i]) * 0.5
+                // The dense float lane shares the `vector` weight budget with
+                // the Hamming lane (both are vector-similarity signals), so
+                // adding dense does not inflate the vector lane's overall share.
                 scores[i] =
                     weights.locus    * buffer.locus[i] +
                     weights.bm25     * buffer.bm25[i] +
                     weights.vector   * buffer.vector[i] +
+                    weights.vector   * buffer.dense[i] +
                     weights.fieldFit * buffer.fieldFit[i] +
                     weights.matrix   * matrixSignal +
                     weights.graph    * buffer.graph[i] +
                     weights.graph    * buffer.preference[i] +
-                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 3.0
+                    agreementBonus * Float(buffer.sourceMask[i].nonzeroBitCount) / 4.0
             }
         case .raw, .rrf:
             // .raw: use the normalised lane-rank score directly — no matrix signals,
             // no adaptive weights, no agreement bonus.
-            // .rrf: falls back to .raw (buffer.final) until a future mission adds
-            // explicit equal-weight RRF fusion across lane scores in unionBest.
+            // .rrf: shares the .raw path (buffer.final) because unionBest has no
+            // distinct equal-weight RRF fusion across lane scores; the fallback
+            // is surfaced as the `unionBest.rrf` degraded stage recorded above.
             for i in 0..<buffer.count {
                 scores[i] = buffer.final[i]
+            }
+        }
+
+        // Step 9.5 — DENSE-FIRST MMR-content decision. The MMR pass (step 10)
+        // uses content-shingle similarity when bodies are present and the dense
+        // sourceMask Jaccard otherwise. The pool was loaded body-free, so a body
+        // is materialized for MMR ONLY when the caller asked for full content —
+        // the one level whose MMR was content-shingle before this change (a
+        // `.full` recall is content-equivalent to today). A `.structured` /
+        // `.bitmapOnly` caller did not ask for bodies, so its MMR runs on the
+        // dense Jaccard proxy and no pool body is read; the precise content
+        // reduction for those callers happens later in the higher (NeuronKit)
+        // lanes over the hydrated survivors. `mmrContentByID` is empty for those
+        // levels, which the MMR loop reads as "content unavailable → Jaccard."
+        //
+        // Failure DEGRADES (MMR runs on sourceMask Jaccard proxy): when
+        // hydrateBodies fails, mmrContentByID is empty and the MMR selection
+        // order may differ from the fully-hydrated path. The stage is recorded.
+        var mmrContentByID: [String: String] = [:]
+        if case .full = request.frame.hydrationLevel {
+            let forcedMMRError = _testForceMMRHydrationError
+            _testForceMMRHydrationError = nil
+            let mmrResult: Result<[(id: String, content: String)], Error>
+            if let forcedError = forcedMMRError {
+                mmrResult = .failure(forcedError)
+            } else {
+                do {
+                    let bodies = try await estate.hydrateBodies(ids: buffer.ids)
+                    mmrResult = .success(bodies.map { ($0.id, $0.content) })
+                } catch {
+                    mmrResult = .failure(error)
+                }
+            }
+            switch mmrResult {
+            case .success(let pairs):
+                mmrContentByID = Dictionary(uniqueKeysWithValues: pairs)
+            case .failure(let error):
+                // MMR content hydration DEGRADED — MMR uses sourceMask Jaccard proxy.
+                Self.recallLog.error(
+                    "RecallDirector unionBest: pool.hydrateBodies.mmr degraded: \(error, privacy: .public)")
+                glkEmit(
+                    name: GLKMetricName.poolHydrateBodiesMMRDegraded,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString],
+                    now: Date()
+                )
+                degradedStages.append("pool.hydrateBodies.mmr")
+                mmrContentByID = [:]
             }
         }
 
@@ -776,11 +1322,24 @@ public extension GeniusLocusKit {
 
         while selected.count < limit, !unselected.isEmpty {
             // Pick argmax of λ·relevance − (1−λ)·maxSimilarityToSelected.
-            var bestIdx = unselected.first!
-            var bestMMR = Float.leastNormalMagnitude
+            //
+            // DETERMINISM: `unselected` is a Set<Int>, whose iteration order is
+            // randomized per process by Swift's hash seed. A plain `>` argmax
+            // therefore broke ties (equal MMR score) by whichever index the Set
+            // happened to yield first — so the same query returned different
+            // orderings across processes (the recall-jitter that made every
+            // leaderboard comparison ±noise). The argmax must be a TOTAL order:
+            // higher MMR score wins, and on an exact tie the lower drawer id
+            // wins. That makes the selection independent of Set iteration order —
+            // the same stable (score, then id) tie-break VectorStore.findNearest
+            // already uses. `bestIdx == -1` seeds the first comparison.
+            var bestIdx = -1
+            var bestMMR = -Float.greatestFiniteMagnitude
             for i in unselected {
                 let mmrScore = lambda * scores[i] - (1 - lambda) * maxSim[i]
-                if mmrScore > bestMMR {
+                if bestIdx == -1
+                    || mmrScore > bestMMR
+                    || (mmrScore == bestMMR && buffer.ids[i] < buffer.ids[bestIdx]) {
                     bestMMR = mmrScore
                     bestIdx = i
                 }
@@ -788,14 +1347,15 @@ public extension GeniusLocusKit {
             selected.append(bestIdx)
             unselected.remove(bestIdx)
 
-            // Update maxSim for remaining candidates using post-hydration
-            // shingle similarity when drawer content is available. Falls
-            // back to sourceMask Jaccard for bitmapOnly hydration (content
-            // stripped to "") or candidates absent from drawerIndex.
-            let contentBest = drawerIndex[buffer.ids[bestIdx]]?.content ?? ""
+            // Update maxSim for remaining candidates using late-hydrated
+            // shingle similarity when a body is available (a `.full` caller —
+            // `mmrContentByID` populated in step 9.5). Falls back to sourceMask
+            // Jaccard for the body-free tiers (`.structured`/`.bitmapOnly`,
+            // empty content map) or candidates absent from the pool.
+            let contentBest = mmrContentByID[buffer.ids[bestIdx]] ?? ""
             for i in unselected {
                 let sim: Float
-                let contentI = drawerIndex[buffer.ids[i]]?.content ?? ""
+                let contentI = mmrContentByID[buffer.ids[i]] ?? ""
                 if !contentBest.isEmpty, !contentI.isEmpty {
                     sim = glkShingleSimilarity(contentBest, contentI)
                 } else {
@@ -806,6 +1366,57 @@ public extension GeniusLocusKit {
             }
         }
 
+        // Step 10.5 — LATE BODY HYDRATION for the returned top-k. The pool was
+        // loaded body-free; the returned set's bodies are read now, for exactly
+        // the selected ids. TRANSITIONAL SAFETY (Kong K3): the returned top-k is
+        // never less hydrated than today — a `.full` or `.structured` caller
+        // gets bodies on the returned set (preserving the structured content
+        // contract), a `.bitmapOnly` caller gets none (applyHydration strips it
+        // anyway, so no body is read for that level). `.full` already hydrated
+        // the buffer in step 9.5; reuse it rather than re-read.
+        //
+        // Failure DEGRADES for `.structured` recall: returned hits carry empty
+        // `content` fields. The query is not discarded — the scored IDs are still
+        // correct. The stage is recorded in degradedStages.
+        let selectedIDs = selected.map { buffer.ids[$0] }
+        var returnedContentByID: [String: String]
+        switch request.frame.hydrationLevel {
+        case .full:
+            returnedContentByID = mmrContentByID
+        case .structured:
+            let forcedReturnError = _testForceReturnHydrationError
+            _testForceReturnHydrationError = nil
+            let returnResult: Result<[(id: String, content: String)], Error>
+            if let forcedError = forcedReturnError {
+                returnResult = .failure(forcedError)
+            } else {
+                do {
+                    let bodies = try await estate.hydrateBodies(ids: selectedIDs)
+                    returnResult = .success(bodies.map { ($0.id, $0.content) })
+                } catch {
+                    returnResult = .failure(error)
+                }
+            }
+            switch returnResult {
+            case .success(let pairs):
+                returnedContentByID = Dictionary(uniqueKeysWithValues: pairs)
+            case .failure(let error):
+                // Return hydration DEGRADED — structured hits carry empty content.
+                Self.recallLog.error(
+                    "RecallDirector unionBest: pool.hydrateBodies.return degraded: \(error, privacy: .public)")
+                glkEmit(
+                    name: GLKMetricName.poolHydrateBodiesReturnDegraded,
+                    value: 1.0,
+                    tags: ["estate_id": handle.estateUUID.uuidString],
+                    now: Date()
+                )
+                degradedStages.append("pool.hydrateBodies.return")
+                returnedContentByID = [:]
+            }
+        case .bitmapOnly:
+            returnedContentByID = [:]   // content is stripped by applyHydration
+        }
+
         // Step 11 — build RecallHit array in MMR-selected order.
         // The explainer runs here — only for selected hits, never for frontier
         // candidates — then wires the explanation array onto each RecallHit.
@@ -814,12 +1425,24 @@ public extension GeniusLocusKit {
         hits.reserveCapacity(selected.count)
         for idx in selected {
             let id = buffer.ids[idx]
-            // Apply the caller-requested hydration level to the drawer from
-            // drawerIndex (which holds unstripped drawers loaded from the estate).
-            // This mirrors the stripping RecallStream applies on the locus
-            // page-emission path so the director path is consistent.
-            let drawer = drawerIndex[id].map {
-                applyHydration($0, level: request.frame.hydrationLevel)
+            // FRAME-FAITHFUL DROP (parity with Rust `.filter(drawer_index.contains_key)`):
+            // drop an id that physically loaded but is ABSENT from the frame-filtered
+            // drawerIndex — it failed the frame's state/structured/content filter
+            // (e.g. a withdrawn drawer under the default `.currentlyBelieve`), so it
+            // must NOT surface as a nil-drawer phantom. GATED on load success: an id
+            // that did not load (transient/partial read; absent from poolLoadedIDs)
+            // is DEGRADED gracefully — kept with a nil drawer — never dropped, so a
+            // valid ACTIVE drawer not-yet-joined is preserved (the ~10% burst guard).
+            if poolLoadedIDs.contains(id) && drawerIndex[id] == nil { continue }
+            // Re-materialize the late-hydrated body onto the structured pool
+            // drawer, then apply the caller-requested hydration level. The pool
+            // drawer carries `content == ""` (body-free load); the returned set
+            // had its body read in step 10.5 for the content-bearing tiers.
+            // `.bitmapOnly` strips content regardless. This mirrors the stripping
+            // RecallStream applies on the locus page-emission path.
+            let drawer = drawerIndex[id].map { pool -> LocusKit.Drawer in
+                let hydrated = withContent(pool, returnedContentByID[id] ?? "")
+                return applyHydration(hydrated, level: request.frame.hydrationLevel)
             }
             var sources: Set<RecallEvidencePath> = []
             let mask = buffer.sourceMask[idx]
@@ -827,14 +1450,22 @@ public extension GeniusLocusKit {
             if mask & RecallCandidateBuffer.bitLocusGraph   != 0 { sources.insert(.locusGraph) }
             if mask & RecallCandidateBuffer.bitCorpusBM25   != 0 { sources.insert(.corpusBM25) }
             if mask & RecallCandidateBuffer.bitVectorHamming != 0 { sources.insert(.vectorHamming) }
+            if mask & RecallCandidateBuffer.bitVectorDense  != 0 { sources.insert(.vectorDense) }
             if sources.isEmpty { sources.insert(.locusBitmap) }
 
+            // Carry the per-lane buffer columns onto the returned score vector,
+            // including the raw Hamming distance preserved through the union
+            // merge (sentinel for non-vector-lane hits) and the normalized dense
+            // cosine column. `final` is the fused ranking score exactly as
+            // before; the extra columns are additive.
             let sv = RecallScoreVector(
                 locus: buffer.locus[idx], bm25: buffer.bm25[idx],
                 vector: buffer.vector[idx], fieldFit: buffer.fieldFit[idx],
                 coOccurrence: buffer.coOccurrence[idx], temporal: buffer.temporal[idx],
                 graph: buffer.graph[idx], preference: buffer.preference[idx],
-                redundancyPenalty: 0, final: scores[idx]
+                redundancyPenalty: 0, final: scores[idx],
+                hammingDistance: buffer.hammingDistance[idx],
+                dense: buffer.dense[idx]
             )
             // Derive a temporary hit to pass to the explainer (explanation
             // initialised empty; the real explanation is set below).
@@ -847,10 +1478,11 @@ public extension GeniusLocusKit {
         }
 
         Self.recallLog.debug(
-            "RecallDirector unionBest: locus=\(locusSlice.count, privacy: .public) bm25=\(bm25Hits.count, privacy: .public) vector=\(vectorHits.count, privacy: .public) selected=\(hits.count, privacy: .public)"
+            "RecallDirector unionBest: locus=\(locusSlice.count, privacy: .public) bm25=\(bm25Hits.count, privacy: .public) vector=\(vectorHits.count, privacy: .public) selected=\(hits.count, privacy: .public) denseLane=\(denseLaneExplainerTag ?? "active", privacy: .public) degraded=\(degradedStages, privacy: .public)"
         )
 
-        return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits)
+        return GLKRecallResult(request: request, plan: plan, unionProfile: profile, hits: hits,
+                               denseLaneStatus: denseLaneExplainerTag, degradedStages: degradedStages)
     }
 
     // MARK: - Matrix coord helper
@@ -906,64 +1538,99 @@ public extension GeniusLocusKit {
 
     /// Shingle-overlap (Jaccard) similarity between two content strings.
     ///
-    /// Builds 3-character lowercase shingle sets from each string and
-    /// returns |A ∩ B| / |A ∪ B|. Returns 0.0 when either set is empty
-    /// (no shingle overlap — treat as fully dissimilar). The 3-gram window
-    /// matches NeuronKit.HybridRecallEngine.shingleSimilarity exactly;
-    /// GeniusLocusKit reimplements locally because it does not depend on
-    /// NeuronKit (layering constraint).
-    private func glkShingleSimilarity(_ a: String, _ b: String) -> Float {
-        let sa = glkShingles(a)
-        let sb = glkShingles(b)
-        guard !sa.isEmpty, !sb.isEmpty else { return 0 }
-        let intersection = sa.intersection(sb).count
-        let union = sa.union(sb).count
-        guard union > 0 else { return 0 }
-        return Float(intersection) / Float(union)
-    }
-
-    /// 3-character lowercase shingle set for shingle similarity computation.
+    /// Delegates to `SubstrateML.ShingleSimilarity.similarity` — the
+    /// substrate-owned character-shingle Jaccard kernel (I-25). SubstrateML sits
+    /// below both GLK and NeuronKit in the kit graph, and both kits already
+    /// declare a SubstrateML dependency, so the kernel has a single owner with no
+    /// manifest change and no GLK→NeuronKit cross-kit layering dependency — GLK
+    /// reaches the shared kernel downward through the substrate, not sideways.
     ///
-    /// Folds the string to lowercase UTF-8 scalars and windows over
-    /// every consecutive triple. Short strings (fewer than 3 scalars)
-    /// produce an empty set, causing `glkShingleSimilarity` to return 0.
-    private func glkShingles(_ s: String) -> Set<String> {
-        let chars = Array(s.lowercased())
-        guard chars.count >= 3 else { return [] }
-        var result = Set<String>(minimumCapacity: chars.count - 2)
-        for i in 0...(chars.count - 3) {
-            result.insert(String(chars[i..<i+3]))
-        }
-        return result
+    /// The substrate kernel preserves the canonical NeuronKit edge-case contract:
+    /// 3-gram windows; 1–2 char strings collapse to a single whole-string shingle;
+    /// both-empty → 0.0; |∩|/|∪| otherwise.
+    private func glkShingleSimilarity(_ a: String, _ b: String) -> Float {
+        ShingleSimilarity.similarity(a, b)
     }
 
     // MARK: - Hydration helper (corpusOnly lane)
 
     /// Hydrate fused hits for the `corpusOnly` lane.
     ///
-    /// Loads all live (non-tombstoned) drawers from the estate once, then joins
-    /// by row ID. Tombstoned rows are excluded via the adjectiveBitmap state
-    /// field so that expunged content cannot surface in BM25 or vector results.
-    /// The `level` parameter applies the same hydration stripping that RecallStream
-    /// enforces on the locus page-emission path. For small estates
-    /// (test and early-production scale) a full scan is efficient enough.
+    /// Loads only the fused candidate drawers by id in one batch via the LocusKit
+    /// frame-aware load, which applies the recall `frame`'s filter chain so
+    /// `drawerIndex` is exactly the frame-admissible subset — a candidate the
+    /// frame excludes (withdrawn under the default `.currentlyBelieve`, tombstoned
+    /// always) is ABSENT and is DROPPED rather than surfaced as a nil-drawer
+    /// phantom; the same candidate surfaces under a `.usedToBelieve` frame because
+    /// the filter is the frame's, not a hardcode. The `level` parameter applies
+    /// the same hydration stripping RecallStream enforces on the locus page path.
+    /// The by-id load is O(candidates), not O(estate).
+    ///
+    /// The drop is GATED on load success via `loadedIDs`: an id that loaded but is
+    /// absent from drawerIndex failed the frame filter (drop it); an id that did
+    /// NOT load (transient/partial read) is DEGRADED gracefully — kept with a nil
+    /// drawer — never dropped. On total load failure both sets are empty so the
+    /// drop is disabled and every fused id is emitted (nil drawer), recorded in
+    /// `degradedStages` via the inout accumulator.
     private func hydrateHits(
         _ fused: [(id: String, score: Float)],
         estate: LocusKit.Estate,
+        frame: RecallFrame,
         bm25IDs: Set<String>,
         vectorIDs: Set<String>,
-        level: LocusKit.HydrationLevel
+        hammingByID: [String: Int],
+        level: LocusKit.HydrationLevel,
+        handle: EstateHandle,
+        degradedStages: inout [String]
     ) async -> [RecallHit] {
-        // Bulk-load non-tombstoned drawers once; build an ID index for O(1) joins.
-        // The .state != .tombstoned guard uses adjectiveBitmap bits 0-5, which is
-        // reliable across both InMemory and SQLite backends.
-        let liveDrawers = (try? await estate.allDrawers())?.filter { $0.state != .tombstoned } ?? []
-        let drawerIndex = Dictionary(uniqueKeysWithValues: liveDrawers.map { ($0.id, $0) })
+        // Bulk-load the fused candidate drawers by id once, frame-filtered, and
+        // build an ID index for O(1) joins. An O(candidates) by-id batch load over
+        // the fused frontier replaces an O(estate) full scan.
+        let forcedCorpusOnlyError = _testForceCorpusOnlyGetDrawersError
+        _testForceCorpusOnlyGetDrawersError = nil
+        let getDrawersResult: Result<LocusKit.FrameFilteredDrawers, Error>
+        if let forcedError = forcedCorpusOnlyError {
+            getDrawersResult = .failure(forcedError)
+        } else {
+            do {
+                getDrawersResult = .success(
+                    try await estate.getDrawers(
+                        ids: fused.map(\.id), matchingFrame: frame, hydrationLevel: level))
+            } catch {
+                getDrawersResult = .failure(error)
+            }
+        }
+        let drawerIndex: [String: LocusKit.Drawer]
+        let loadedIDs: Set<String>
+        switch getDrawersResult {
+        case .success(let filtered):
+            drawerIndex = Dictionary(uniqueKeysWithValues: filtered.admissible.map { ($0.id, $0) })
+            loadedIDs = filtered.loadedIDs
+        case .failure(let error):
+            // corpusOnly frontier load DEGRADED — BM25/vector results unavailable.
+            Self.recallLog.error(
+                "RecallDirector corpusOnly: corpusOnly.getDrawers degraded: \(error, privacy: .public)")
+            glkEmit(
+                name: GLKMetricName.corpusOnlyGetDrawersDegraded,
+                value: 1.0,
+                tags: ["estate_id": handle.estateUUID.uuidString],
+                now: Date()
+            )
+            degradedStages.append("corpusOnly.getDrawers")
+            drawerIndex = [:]
+            loadedIDs = []
+        }
 
         var hits: [RecallHit] = []
         for (drawerID, rrfScore) in fused {
-            // Apply hydration stripping so the BM25/vector path honours the same
-            // bitmapOnly contract that RecallStream enforces on the locus path.
+            // FRAME-FAITHFUL DROP, gated on load success: a candidate that loaded
+            // but is absent from the frame-filtered drawerIndex failed the frame
+            // filter — drop it. A candidate that did not load (degraded) is kept
+            // with a nil drawer so the query degrades gracefully.
+            if loadedIDs.contains(drawerID) && drawerIndex[drawerID] == nil { continue }
+            // drawerIndex already carries the caller-requested hydration level (the
+            // load honoured `level`), except `.bitmapOnly` stripping which the
+            // frame-aware load does not apply — re-apply it here for that contract.
             let drawer = drawerIndex[drawerID].map { applyHydration($0, level: level) }
             var sources: Set<RecallEvidencePath> = []
             if bm25IDs.contains(drawerID) { sources.insert(.corpusBM25) }
@@ -972,15 +1639,53 @@ public extension GeniusLocusKit {
 
             let bm25Score: Float = bm25IDs.contains(drawerID) ? rrfScore : 0
             let vectorScore: Float = vectorIDs.contains(drawerID) ? rrfScore : 0
+            // Raw Hamming distance for vector-lane hits (sentinel otherwise),
+            // preserved from the vector lane. `final`/`bm25`/`vector` keep the
+            // fused RRF score exactly as before — only the dense signal is added.
+            let hamming = hammingByID[drawerID] ?? RecallScoreVector.noHammingDistance
             let scoreVec = RecallScoreVector(
                 locus: 0, bm25: bm25Score, vector: vectorScore,
                 fieldFit: 0, coOccurrence: 0, temporal: 0, graph: 0, preference: 0,
-                redundancyPenalty: 0, final: rrfScore
+                redundancyPenalty: 0, final: rrfScore, hammingDistance: hamming
             )
             hits.append(RecallHit(id: drawerID, drawer: drawer, sources: sources,
                                   score: scoreVec, explanation: sources.map(\.rawValue).sorted()))
         }
         return hits
+    }
+
+    // MARK: - Late-hydration helper
+
+    /// Return a copy of `d` with its `content` replaced by `body` — the
+    /// dense-first late-hydration step. The pool is loaded body-free
+    /// (`content == ""`); this re-materializes the body onto the returned
+    /// drawer for exactly the survivor/top-k ids. Every other field is
+    /// preserved verbatim. When `body` is empty this is an identity rebuild
+    /// (the drawer was already body-free), so callers may invoke it
+    /// unconditionally.
+    private func withContent(_ d: LocusKit.Drawer, _ body: String) -> LocusKit.Drawer {
+        LocusKit.Drawer(
+            id: d.id,
+            content: body,
+            wing: d.wing,
+            room: d.room,
+            sourceFile: d.sourceFile,
+            chunkIndex: d.chunkIndex,
+            addedBy: d.addedBy,
+            filedAt: d.filedAt,
+            eventTime: d.eventTime,
+            embeddingModelID: d.embeddingModelID,
+            tombstonedAt: d.tombstonedAt,
+            removedByBatch: d.removedByBatch,
+            provenance: d.provenance,
+            adjectiveBitmap: d.adjectiveBitmap,
+            operationalBitmap: d.operationalBitmap,
+            lineageID: d.lineageID,
+            udcCode: d.udcCode,
+            udcFacets: d.udcFacets,
+            wikidataQID: d.wikidataQID,
+            wikidataQidsSecondary: d.wikidataQidsSecondary
+        )
     }
 
     // MARK: - Hydration helper
