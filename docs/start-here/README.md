@@ -40,6 +40,23 @@ answers three questions: what it is, why we chose it, where it
 lives in the code. Adds failure modes, performance numbers, and
 conformance notes the developer guide omits.
 
+## Quick onboarding & AI-assisted install
+
+**[`END_USER_EXPLAINER.md`](END_USER_EXPLAINER.md)** — the shortest
+plain-language explanation for a non-technical end user: what MOOTx01 is
+(local memory for AI), what gets installed, and what the ports and
+dashboard are. Read this first if you just want to understand it.
+
+**[`INSTALL_SURFACE.md`](INSTALL_SURFACE.md)** — the install fact sheet for
+humans and AI assistants: default addresses, the product-install flow, the
+platform matrix, expected commands, environment variables, verification,
+and uninstall. The source of truth for what a product install does.
+
+**[`AI_START_HERE.md`](../../AI_START_HERE.md)** — at the repo root, for an
+AI assistant a user asks to "explain and install this." Mission, safety
+rules, a platform-aware install flow, verification, and troubleshooting, so
+an assistant gives a good first experience without improvising.
+
 ## Reading order
 
 Pick one. They are not a series; each is complete on its own.
