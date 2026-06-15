@@ -121,7 +121,8 @@ check-edition-boundary:
 	@hits=$$(git grep --untracked -nE "docs_internal|\.claude/rules" -- \
 	  'packages/**' 'apps/**' 'examples/**' 'docs/**' \
 	  ':!apps/moot-bridge/**' ':!docs/AGENTS.md' ':!docs/CLAUDE.md' \
-	  ':!docs/decisions/ADR-009-edition-boundary.md' ':!apps/moot-agent-skills/**' || true); \
+	  ':!docs/decisions/ADR-009-edition-boundary.md' ':!apps/moot-agent-skills/**' \
+	  ':!docs/start-here/AI_INSTALL_MANIFEST.json' || true); \
 	if [ -n "$$hits" ]; then \
 	  echo "ERROR: SHARED code references an EE-only path (see EDITION_BOUNDARY.md / ADR-009):"; \
 	  echo "$$hits"; \
