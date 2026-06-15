@@ -959,7 +959,7 @@ fn boolean_schema(description: &str) -> serde_json::Value {
 }
 
 fn filter_schema() -> serde_json::Value {
-    string_schema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve.")
+    string_schema("Filter kind: userConfirmed (default — surfaces all normally-captured drawers), unconfirmed (capture inbox with confirmation=0 only), exportable, contained, currentlyBelieve.")
 }
 
 fn estate_id_schema() -> serde_json::Value {

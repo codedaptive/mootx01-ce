@@ -354,8 +354,11 @@ pub fn opt_float(args: &BTreeMap<String, JsonValue>, key: &str, fallback: f64) -
 }
 
 /// Decode the recall filter from an optional `filter` argument.
-/// Default: `Unconfirmed`. Mirrors Swift `RecipeTools.decodeFilter` and
-/// `LensTools.frame(_:)`.
+///
+/// Default: `UserConfirmed`. Captures stamp `Confirmation::UserConfirmed` into the
+/// provenance bitmap at write time, so the absent-filter default of `UserConfirmed`
+/// (confirmation >= 1) correctly surfaces all normally-captured drawers. Mirrors
+/// Swift `ToolDispatch.decodeFilter`.
 pub fn decode_filter(args: &BTreeMap<String, JsonValue>) -> locus_kit::filter::Filter {
     use locus_kit::filter::Filter;
     match args.get("filter").and_then(|v| v.as_str()) {
@@ -363,7 +366,9 @@ pub fn decode_filter(args: &BTreeMap<String, JsonValue>) -> locus_kit::filter::F
         Some("exportable") => Filter::Exportable,
         Some("contained") => Filter::Contained,
         Some("currentlyBelieve") => Filter::CurrentlyBelieve,
-        _ => Filter::Unconfirmed,
+        // Absent filter → userConfirmed: captured drawers are stamped userConfirmed
+        // at write time, so this default finds them without additional filter args.
+        _ => Filter::UserConfirmed,
     }
 }
 

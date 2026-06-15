@@ -655,7 +655,7 @@ enum TeachmeGuides {
 
         Example:
           { "query": "the indemnity was 46 million marks",
-            "limit": 10, "pool": 30, "filter": "unconfirmed" }
+            "limit": 10, "pool": 30, "filter": "userConfirmed" }
 
         Response (same shape as moot_memory_search):
           found N memory(s)

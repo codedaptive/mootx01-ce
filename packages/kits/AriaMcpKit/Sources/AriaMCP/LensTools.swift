@@ -777,7 +777,9 @@ enum LensTools {
         case "exportable": filter = .exportable
         case "contained": filter = .contained
         case "currentlyBelieve": filter = .currentlyBelieve
-        default: filter = .unconfirmed
+        // Absent or unknown filter → userConfirmed: captures are stamped
+        // Confirmation.userConfirmed at write time so the default surfaces them.
+        default: filter = .userConfirmed
         }
         return LocusKit.RecallFrame(filterChain: [filter])
     }
@@ -790,7 +792,9 @@ enum LensTools {
         case "exportable": return .exportable
         case "contained": return .contained
         case "currentlyBelieve": return .currentlyBelieve
-        default: return .unconfirmed
+        // Absent or unknown filter → userConfirmed: captures are stamped
+        // Confirmation.userConfirmed at write time so the default surfaces them.
+        default: return .userConfirmed
         }
     }
 
@@ -820,7 +824,7 @@ enum LensTools {
     }
 
     private static var filterSchema: JSONValue {
-        stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve.")
+        stringSchema("Filter kind: userConfirmed (default — surfaces all normally-captured drawers), unconfirmed (confirmation=0 inbox only), exportable, contained, currentlyBelieve.")
     }
 
     private static func objectSchema(

@@ -447,7 +447,12 @@ public struct ToolDispatcher: Sendable {
     }
 
     func decodeFilter(_ value: JSONValue?) throws -> Filter {
-        guard let name = value?.stringValue else { return .unconfirmed }
+        // Absent filter defaults to .userConfirmed, matching BitmapEvaluator's
+        // insertDefaults which prepends .userConfirmed when no provenance filter
+        // is present. Captured drawers are stamped confirmation=userConfirmed at
+        // write time (EstateVerbs.swift capture), so the default recall sees them.
+        // Callers that genuinely need unconfirmed content pass filter:"unconfirmed".
+        guard let name = value?.stringValue else { return .userConfirmed }
         switch name {
         case "unconfirmed": return .unconfirmed
         case "userConfirmed": return .userConfirmed

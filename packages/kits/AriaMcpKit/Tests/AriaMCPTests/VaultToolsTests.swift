@@ -301,7 +301,7 @@ struct VaultToolsTests {
         #expect(reconciled.contains("- \(exportedNote)"))
         // The deleted drawer is still believed — reconcile actioned nothing.
         let drawers = try await kit.recall(
-            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+            handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured))
         #expect(drawers.count == 1)
     }
 
@@ -330,7 +330,7 @@ struct VaultToolsTests {
 
         // Snapshot the drawer count in the estate before the edit.
         let preRecall = try await kit.recall(
-            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+            handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured))
         let preCount = preRecall.count
 
         // Edit the exported note on disk — this creates a modified candidate.
@@ -349,7 +349,7 @@ struct VaultToolsTests {
         #expect(dryRun.contains("dry-run"))
         // Estate unchanged after dry-run.
         let midRecall = try await kit.recall(
-            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+            handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured))
         #expect(midRecall.count == preCount)
 
         // Apply mode: the modified note must be imported into the estate.
@@ -393,7 +393,7 @@ struct VaultToolsTests {
 
         // Estate now contains the new drawer.
         let postRecall = try await kit.recall(
-            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+            handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured))
         #expect(postRecall.count == 1)
     }
 
@@ -419,7 +419,7 @@ struct VaultToolsTests {
 
         // Snapshot drawer count: 10 from the captures above.
         let preRecall = try await kit.recall(
-            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+            handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured))
         #expect(preRecall.count == 10)
 
         // Edit exactly one vault note on disk to create a single modified candidate.
@@ -450,7 +450,7 @@ struct VaultToolsTests {
 
         // The estate still has 10 drawers — no new ones were created.
         let postRecall = try await kit.recall(
-            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+            handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured))
         #expect(postRecall.count == 10)
     }
 
@@ -480,7 +480,7 @@ struct VaultToolsTests {
 
         // Estate must be unchanged — no drawers written.
         let recall = try await kit.recall(
-            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+            handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured))
         #expect(recall.count == 0)
     }
 
@@ -510,7 +510,7 @@ struct VaultToolsTests {
 
         // The drawer is still believed in the estate.
         let recall = try await kit.recall(
-            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+            handle, RecallFrame(filterChain: [.userConfirmed], hydrationLevel: .structured))
         #expect(recall.count == 1)
     }
 
