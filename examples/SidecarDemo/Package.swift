@@ -4,7 +4,7 @@
 //
 // This package is one demo, two targets. The point is to show, in the
 // smallest possible amount of code, the sidecar pattern named in
-// docs/canon/MOOTX01_AND_ARIA_CANON.md §"The sidecar pattern":
+// docs/concepts/MOOTX01_AND_ARIA_CANON.md §"The sidecar pattern":
 //
 //   An existing app attaches a MOOT alongside itself and opens that
 //   knowledge to the organization through the ARIA_MCP server, so any

@@ -26,8 +26,8 @@ ARIA_iOS is the iOS application shell. It:
 
 ## Key specs to read before contributing
 
-1. `docs/canon/MOOTX01_SPEC.md` — the MOOTx01 product specification
-2. `docs/specs/ARIA_MCP_SPEC.md` — the kit this target calls into
+1. `docs/concepts/MOOTX01_AND_ARIA_CANON.md` — the MOOTx01 product specification
+2. `docs/reference/ARIA_MCP_SPEC.md` — the kit this target calls into
 
 ## Scope
 
