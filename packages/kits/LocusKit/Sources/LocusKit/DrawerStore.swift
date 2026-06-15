@@ -40,7 +40,7 @@ import SubstrateKernel
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -106,40 +106,102 @@ public actor DrawerStore {
         // uuid, and the HLC maker node id all consistent on first open
         // (mirrors the Rust port's construction order).
         try await Self.populateV1ManifestDefaults(storage: storage, now: Date())
-        // Resolve the estate uuid once. Populate guarantees the key is
-        // present; the `?? UUID()` is now a defensive fallback only.
-        self.estateUuid = await Self.resolveEstateUuid(storage: storage) ?? UUID()
+        // Resolve the estate identity once, distinguishing two cases that
+        // must NOT be conflated (P1-7):
+        //   • ABSENT manifest value (fresh estate, key never written) →
+        //     the legitimate fresh-estate path. populate guarantees the
+        //     key is present on a normal open, so `.absent` here means a
+        //     genuinely empty/unseeded manifest, not corruption.
+        //   • PRESENT-but-malformed UUID (non-parseable text — wrong
+        //     length, bad characters, truncation) → data corruption. We
+        //     throw `corruptStoredValue` rather than fabricating a random
+        //     UUID / node 0, which would silently mask the corruption.
+        // A single read+classify keeps the estate uuid and the HLC maker
+        // node id derived from the SAME manifest value, so they can never
+        // disagree (mirrors the Rust port's `classify_estate_uuid`).
+        let identity = try await Self.classifyEstateUuid(storage: storage)
+        switch identity {
+        case .present(let uuid, _):
+            self.estateUuid = uuid
+        case .absent:
+            // Fresh estate: no persisted identity to honour. Mint one for
+            // this store's stamping. A corrupt value never reaches here.
+            self.estateUuid = UUID()
+        }
         if let injected = hlc {
             self.hlc = injected
         } else {
-            // Top mode: make our own. Node id derived from the estate
-            // uuid now present in the manifest (stable per estate).
-            self.hlc = HLCGenerator(nodeID: await Self.makerNodeID(storage: storage))
+            // Top mode: make our own. Node id is derived from the SAME
+            // classified value: a valid persisted uuid yields a stable
+            // per-estate maker; an absent value yields node 0 (fresh).
+            // A corrupt value already threw above, so it never reaches here.
+            self.hlc = HLCGenerator(nodeID: Self.makerNodeID(for: identity))
         }
     }
 
-    /// Read + parse the estate uuid manifest value, or nil if absent/bad.
-    private static func resolveEstateUuid(storage: any Storage) async -> UUID? {
-        guard let rows = try? await storage.rowStore.query(
-                table: "manifest",
-                where: .eq(Column(table: "manifest", name: "key"), .text("estate_uuid"))),
-              let v = rows.first?["value"], case let .text(s) = v else { return nil }
-        return UUID(uuidString: s)
+    /// The classification of the manifest's `estate_uuid` value at open.
+    /// `.present` carries a successfully-parsed UUID; `.absent` means the
+    /// key was never written (fresh estate). A present-but-malformed value
+    /// is NOT a case here — it surfaces as a thrown `corruptStoredValue`
+    /// from `classifyEstateUuid`, because conflating corruption with a
+    /// fresh estate would mask data loss (P1-7).
+    /// `.present` carries both the parsed UUID (for stamping) and the
+    /// raw stored text (for hashing the maker node id). The maker id is
+    /// hashed from the raw stored text — identical bytes to what Rust
+    /// hashes — so the two ports derive byte-identical node ids.
+    private enum EstateUuidState {
+        case present(uuid: UUID, rawText: String)
+        case absent
     }
 
-    /// Derive a stable maker node id from the estate uuid manifest value.
-    /// Falls back to 0 when absent (fresh estate). Low 31 bits of a
-    /// stable hash so the id fits Int32 and is estate-specific.
-    private static func makerNodeID(storage: any Storage) async -> Int32 {
-        guard let rows = try? await storage.rowStore.query(
-                table: "manifest",
-                where: .eq(Column(table: "manifest", name: "key"), .text("estate_uuid"))),
-              let v = rows.first?["value"], case let .text(uuid) = v else {
+    /// Read the manifest `estate_uuid` value and classify it as a fresh
+    /// estate (`.absent`), a valid persisted identity (`.present`), or
+    /// data corruption (throws). The three outcomes are mutually
+    /// exclusive and exhaustive:
+    ///   • row missing / value missing / non-text → `.absent` (fresh).
+    ///   • value present and parses as a UUID → `.present(uuid)`.
+    ///   • value present but does NOT parse → throws
+    ///     `corruptStoredValue(table: "manifest", column: "estate_uuid",
+    ///     storedText:)`, fail-loud, never a fabricated default.
+    /// Parity: Rust `DrawerStoreCore::classify_estate_uuid`.
+    private static func classifyEstateUuid(
+        storage: any Storage
+    ) async throws -> EstateUuidState {
+        let rows = try await storage.rowStore.query(
+            table: "manifest",
+            where: .eq(Column(table: "manifest", name: "key"), .text("estate_uuid")))
+        // Absent: no row, no value, or a non-text value. A fresh, never-
+        // written estate. Legitimate — derive/assign as a new estate.
+        guard let v = rows.first?["value"], case let .text(s) = v else {
+            return .absent
+        }
+        // Present: the value exists, so it MUST parse. A non-parseable
+        // value is corruption — fail loud rather than mint a random UUID.
+        guard let uuid = UUID(uuidString: s) else {
+            throw LocusKitError.corruptStoredValue(
+                table: "manifest", column: "estate_uuid", storedText: s)
+        }
+        return .present(uuid: uuid, rawText: s)
+    }
+
+    /// Derive a stable maker node id from an already-classified estate
+    /// uuid. A present value hashes to a non-negative Int32 (low 31 bits
+    /// of FNV-1a 32-bit) so the id is estate-specific; an absent value
+    /// (fresh estate) yields node 0. Corrupt values never reach here —
+    /// `classifyEstateUuid` throws before this is called.
+    private static func makerNodeID(for state: EstateUuidState) -> Int32 {
+        switch state {
+        case .absent:
+            // Fresh estate: no persisted identity to key the node id on.
             return 0
+        case .present(_, let rawText):
+            // FNV-1a 32-bit (SubstrateLib), masked to non-negative Int32.
+            // Hash the RAW stored text (not the re-serialised UUID) so the
+            // node id is byte-identical to the Rust port, which hashes the
+            // same stored string.
+            let h = FNV.hash32(rawText)
+            return Int32(bitPattern: h & 0x7FFF_FFFF)
         }
-        // FNV-1a 32-bit (SubstrateLib), masked to non-negative Int32.
-        let h = FNV.hash32(uuid)
-        return Int32(bitPattern: h & 0x7FFF_FFFF)
     }
 
     // MARK: - Manifest v1 defaults
@@ -319,6 +381,42 @@ public actor DrawerStore {
         return rows.first.map { Self.string($0["id"]) }
     }
 
+    /// Find a living successor sharing `lineageID`, excluding `excludingID`.
+    ///
+    /// A "living successor" is any row in the same content lineage that
+    /// currently occupies a Cluster-A state — active, pending, contested,
+    /// or accepted (raw state < 16, the Cluster-B boundary per cookbook
+    /// §2.3). This is the lineage head: the row that superseded the
+    /// excluded predecessor (or a later link in the chain).
+    ///
+    /// The revive guard (`Estate.mutate` with `.revive`) consults this to
+    /// decide whether reviving a superseded row would create two active
+    /// rows claiming the same lineage position — a domain contradiction
+    /// (cookbook §6.2). Note the predicate is `< 16`, wider than
+    /// `findActivePredecessor`'s `< 3`: a living successor includes the
+    /// audit-grade `accepted` state, which the supersession-cascade
+    /// predecessor lookup intentionally excludes.
+    ///
+    /// - Returns: the id of one living successor if any exists, else nil.
+    public func livingSuccessorInLineage(
+        lineageID: UUID, excludingID: String
+    ) async throws -> String? {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                .eq(Column(table: "drawers", name: "lineageID"), .text(lineageID.uuidString)),
+                .neq(Column(table: "drawers", name: "id"), .text(excludingID)),
+                // Living = RowState Cluster A; boundary from the automaton.
+                .lt(Column(table: "drawers", name: "g_state_cluster"),
+                    .int(Int64(RowState.activeClusterUpperBoundRaw)))
+            ]),
+            orderBy: [],
+            limit: 1,
+            offset: nil
+        )
+        return rows.first.map { Self.string($0["id"]) }
+    }
+
     /// Look up a drawer by id. Returns nil on miss.
     public func getDrawer(id: String) async throws -> Drawer? {
         let rows = try await storage.rowStore.query(
@@ -326,6 +424,86 @@ public actor DrawerStore {
             where: .eq(Column(table: "drawers", name: "id"), .text(id))
         )
         return try rows.first.map(Self.drawerFromRow)
+    }
+
+    /// Batch by-id load. Returns the drawers whose ids appear in `ids`,
+    /// in unspecified order, omitting any id with no matching row. This is
+    /// the O(candidates) hydration path for recall: it loads only the
+    /// requested frontier rows via a single `WHERE id IN (...)` query rather
+    /// than scanning the whole estate. Row decoding mirrors `getDrawer(id:)`
+    /// exactly, so a drawer fetched here is byte-for-byte the one fetched
+    /// singly. Like `getDrawer`, it does NOT filter tombstoned rows; callers
+    /// that need a liveness guard apply it on the returned drawers.
+    ///
+    /// SQLite caps a single statement at SQLITE_MAX_VARIABLE_NUMBER bound
+    /// parameters (999 on the conservative pre-3.32 default). The id set is
+    /// chunked below that ceiling so an arbitrarily large frontier still
+    /// resolves in a bounded number of queries. An empty `ids` returns `[]`
+    /// without touching storage.
+    public func getDrawers(ids: [String]) async throws -> [Drawer] {
+        // The bare signature is the full-hydration path (today's behavior:
+        // reads every column, content blob included). All existing callers
+        // resolve here unchanged.
+        try await getDrawers(ids: ids, hydrationLevel: .full)
+    }
+
+    /// Every `drawers` column EXCEPT `content` — the no-blob structured
+    /// projection. A `.structured`/`.bitmapOnly` load selects exactly these
+    /// columns, so the content blob is never read out of storage. The set is
+    /// the column list `drawerValues(_:)` writes minus `"content"`; a column
+    /// added to the schema must be added here too or it reads as absent at
+    /// `.structured`. `drawerFromRow` decodes an absent `content` to "" via
+    /// `string(_:)`, so a structured drawer carries an empty body by design.
+    private static let structuredDrawerColumns: [String] = [
+        "id", "wing", "room", "sourceFile", "chunkIndex", "addedBy",
+        "filedAt", "eventTime", "embeddingModelID", "tombstonedAt",
+        "removedByBatch", "provenance", "adjectiveBitmap", "operationalBitmap",
+        "lineageID", "udcCode", "udcFacets", "wikidataQID",
+        "wikidataQidsSecondary"
+    ]
+
+    /// Batch by-id load at a chosen hydration level — the dense-first candidate
+    /// pool path. At `.structured`/`.bitmapOnly` the query PROJECTS away the
+    /// `content` column, so the blob is never read from storage; the returned
+    /// drawers carry `content == ""` and every structured/bitmap/lattice column
+    /// intact (the dense signal the higher lanes select on). At `.full` it reads
+    /// every column, identical to `getDrawers(ids:)`. Chunking, de-duplication,
+    /// and the no-tombstone-filter contract match `getDrawers(ids:)` exactly.
+    public func getDrawers(ids: [String], hydrationLevel: HydrationLevel) async throws -> [Drawer] {
+        if ids.isEmpty { return [] }
+        // No-blob projection for the structured/bitmap tiers; full read for
+        // `.full`. The projection omits `content`, which is the entire point of
+        // the dense-first pool load.
+        let columns: [String]?
+        switch hydrationLevel {
+        case .structured, .bitmapOnly:
+            columns = Self.structuredDrawerColumns
+        case .full:
+            columns = nil
+        }
+        // De-duplicate to avoid emitting the same row twice when an id
+        // repeats in the input. Order within a chunk is not meaningful to
+        // callers (recall re-indexes by id), so a Set is sufficient.
+        let unique = Array(Set(ids))
+        // Stay strictly below the 999-variable SQLite ceiling. 900 leaves
+        // headroom for any wrapping predicate a future caller might add.
+        let chunkSize = 900
+        var result: [Drawer] = []
+        result.reserveCapacity(unique.count)
+        var index = 0
+        while index < unique.count {
+            let end = min(index + chunkSize, unique.count)
+            let chunk = unique[index..<end]
+            let values = chunk.map { TypedValue.text($0) }
+            let rows = try await storage.rowStore.query(
+                table: "drawers",
+                where: .in(Column(table: "drawers", name: "id"), values),
+                orderBy: [], limit: nil, offset: nil, columns: columns
+            )
+            result.append(contentsOf: try rows.map(Self.drawerFromRow))
+            index = end
+        }
+        return result
     }
 
     /// All non-tombstoned drawers in a wing, ordered by filedAt.
@@ -409,12 +587,45 @@ public actor DrawerStore {
     /// `locuskit.drawer.query_result_count` (tag: query="all") when
     /// monitoring is enabled.
     public func allDrawers() async throws -> [Drawer] {
+        try await allDrawers(hydrationLevel: .full, limit: nil)
+    }
+
+    /// Bounded, optionally no-blob corpus scan ordered by filedAt ascending.
+    ///
+    /// This is the performance-critical path for the recall locus lane:
+    ///
+    ///   - `hydrationLevel` controls whether the `content` blob is fetched.
+    ///     At `.structured` or `.bitmapOnly` the query projects away the
+    ///     `content` column (identical to the `getDrawers(ids:hydrationLevel:)`
+    ///     structured projection) — the blob is never read from storage.
+    ///     At `.full` all columns are selected, identical to `allDrawers()`.
+    ///
+    ///   - `limit` caps how many rows SQLite materialises. When non-nil the
+    ///     query applies `LIMIT limit` at the storage tier, so the database
+    ///     stops scanning after it has produced that many rows. This is the
+    ///     candidate-cap mechanism: recall only needs the first N rows in
+    ///     filedAt order; fetching the whole estate and discarding the tail
+    ///     is O(N_estate), this is O(min(N_estate, limit)).
+    ///
+    /// Telemetry: emits `locuskit.drawer.query_latency_ms` and
+    /// `locuskit.drawer.query_result_count` (tag: query="all") when
+    /// monitoring is enabled.
+    public func allDrawers(hydrationLevel: HydrationLevel, limit: Int?) async throws -> [Drawer] {
         let startTs = Date().timeIntervalSince1970
+        // No-blob projection for the structured/bitmap tiers; full read for `.full`.
+        // Mirrors the same column set used by `getDrawers(ids:hydrationLevel:)`.
+        let columns: [String]?
+        switch hydrationLevel {
+        case .structured, .bitmapOnly:
+            columns = Self.structuredDrawerColumns
+        case .full:
+            columns = nil
+        }
         let rows = try await storage.rowStore.query(
             table: "drawers",
             where: nil,
             orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
-            limit: nil, offset: nil
+            limit: limit.map { $0 }, offset: nil, columns: columns
         )
         let result = try rows.map(Self.drawerFromRow)
         // query="all" labels this as the full-corpus path.
@@ -530,6 +741,8 @@ public actor DrawerStore {
             writes(for: .provenance, from: d.provenance)
         let anchor = SubstrateTypes.LatticeAnchor.udc(d.udcCode)
 
+        let nowTs = now.timeIntervalSince1970
+        let estateTag = estate.uuidString
         try await storage.transaction(isolation: .serializable) { txn in
             _ = try await txn.rowStore.insert(
                 table: "drawers", values: Self.drawerValues(d))
@@ -539,8 +752,11 @@ public actor DrawerStore {
                 prior: nil, priorLatticeAnchor: nil, writes: allWrites,
                 afterLatticeAnchor: anchor, vocabulary: vocab, hlc: stamp, actor: d.addedBy)
             switch result {
-            case .success(let e): try await txn.auditLog.append(e)
+            case .success(let e):
+                try await txn.auditLog.append(e)
+                emitGateAdmit(now: nowTs, estateTag: estateTag)
             case .failure(let v):
+                emitGateReject(now: nowTs, estateTag: estateTag, reason: "\(v)")
                 throw LocusKitError.invalidContent("capture rejected by gate: \(v)")
             }
         }
@@ -644,9 +860,9 @@ public actor DrawerStore {
     /// all in one transaction. Implements the cookbook §10.5 expunge
     /// verb's storage-layer postconditions (atomic content erasure +
     /// state transition + flag set); the cross-kit RAG vector delete
-    /// is GLK's responsibility and lands in F17 second pass item 4,
-    /// not here. Aggregates are deliberately untouched, per §9.5.1
-    /// and §10.5 (they are already de-identified statistical roll-ups).
+    /// is GLK's orchestration responsibility — see §B-2a.
+    /// Aggregates are deliberately untouched, per §9.5.1 and §10.5
+    /// (they are already de-identified statistical roll-ups).
     ///
     /// Routes through `AuditGate.admit` with two FieldWrites in a
     /// single call: the state slot (adjective bits 0-5, target = 33
@@ -659,12 +875,25 @@ public actor DrawerStore {
     /// `RowStateAutomaton.transitions` (cookbook §9.5 S-3: audit-grade
     /// rows survive intact), so expunging an accepted row throws
     /// `LocusKitError.invalidContent`.
+    ///
+    /// When `sealAudit` is `true` (default), the audit event is
+    /// appended atomically inside the same transaction as the row
+    /// mutation — this is the behaviour for direct callers that own
+    /// the full expunge. When `sealAudit` is `false`, the audit event
+    /// is NOT appended (the caller must call `sealExpungeAudit(_:now:)`
+    /// after completing its own orchestration steps). The gate-produced
+    /// event is returned in both cases so the caller has it ready for
+    /// the deferred seal. Returns nil only when `sealAudit` is true
+    /// (the event was sealed inside the transaction and no further
+    /// action is required from the caller).
+    @discardableResult
     public func expungeGated(
         drawerId: String,
         changedBy: String,
         reason: String? = nil,
-        now: Date = Date()
-    ) async throws {
+        now: Date = Date(),
+        sealAudit: Bool = true
+    ) async throws -> AuditEvent? {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(changedBy, label: "changedBy")
 
@@ -694,7 +923,12 @@ public actor DrawerStore {
         let flagsSlot = FieldSlot(column: .adjective, shift: 24, width: 3,
                                   label: "flags")
 
-        try await storage.transaction(isolation: .serializable) { txn in
+        // When sealAudit is false the gate-produced event is returned to
+        // the caller (GLK VerbSurface) so it can be sealed after its own
+        // orchestration steps. The transaction returns the event in both
+        // cases; we thread it back via the generic-return overload so the
+        // mutable-capture concurrency constraint is satisfied.
+        let capturedEvent: AuditEvent = try await storage.transaction(isolation: .serializable) { txn in
             let rows = try await txn.rowStore.query(
                 table: "drawers",
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
@@ -756,13 +990,218 @@ public actor DrawerStore {
                 ],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
-            try await txn.auditLog.append(event)
+            if sealAudit {
+                // Default path: seal atomically in the same transaction
+                // as the row mutation. Direct callers (not via GLK) use
+                // this path and get the same atomic guarantee as before.
+                try await txn.auditLog.append(event)
+            }
             _ = reason   // reason is captured in audit verb context; no
                          // separate audit-row column today, but the
                          // parameter is retained for future ProvFrame
                          // composition (cookbook §10.5 names a `reason`
                          // arg on the verb signature).
+            return event
         }
+
+        // When sealAudit is true the event was appended inside the
+        // transaction; return nil so callers know no deferred action is
+        // needed. When sealAudit is false, return the captured event so
+        // the caller can pass it to sealExpungeAudit(_:).
+        return sealAudit ? nil : capturedEvent
+    }
+
+    /// Seal a previously prepared expunge audit event.
+    ///
+    /// Called by GLK's `VerbSurface.expunge` after the cross-kit vector
+    /// delete step succeeds, when `expungeGated(sealAudit:false)` was
+    /// used to split the storage mutation from the audit seal.
+    ///
+    /// Appends `event` directly to the audit log outside any transaction
+    /// — the storage half of the expunge already committed. The event
+    /// carries verb `"tombstone"` and the gate-computed afterBitmaps from
+    /// the original mutation, so rebuild via `feedAuditLog` produces the
+    /// same unified log entry as the fully-atomic (sealAudit:true) path.
+    ///
+    /// Deterministic: the caller threads the same `now` the verb received;
+    /// never calls Date() here.
+    public func sealExpungeAudit(_ event: AuditEvent) async throws {
+        try await storage.auditLog.append(event)
+    }
+
+    /// Seal a cross-kit-orphan audit event for a partially-completed expunge.
+    ///
+    /// Called by GLK's `VerbSurface.expunge` when the storage half (step 1)
+    /// succeeded but the cross-kit vector delete (step 2) failed. The row is
+    /// already tombstoned and its content is zeroed; this method writes an
+    /// honest audit record that the fact-of-expunge at the storage layer is
+    /// preserved (spec I-6) while making the partial outcome detectable.
+    ///
+    /// The audit event uses verb `"expungeOrphan"` — distinct from the success
+    /// verb `"tombstone"`, but both bridge to `UnifiedAuditVerb.expunge` in the
+    /// GLK unified log (AuditBridge). A consumer that needs to distinguish
+    /// a clean expunge from an orphan case must read the substrate audit trail
+    /// directly (verb string is `"expungeOrphan"`) rather than the unified log.
+    ///
+    /// Unlike `sealExpungeAudit(_:)`, the bitmaps in the orphan event match
+    /// the post-tombstone state (same as the success event) — the storage
+    /// mutation DID occur. The only difference is the verb string, which
+    /// signals to audit consumers that the cross-kit delete did not complete.
+    ///
+    /// Deterministic: the caller threads the same `now` the verb received;
+    /// never calls Date() here.
+    ///
+    /// Parity note (eventID): the Rust port computes `eventID` via
+    /// `audit_gate::content_id` (deterministic SHA-256 over the event fields).
+    /// This Swift initializer uses `AuditEvent(eventID: UUID())` (random UUID,
+    /// the default for the `AuditEvent` initializer). The IDs will diverge if
+    /// orphan audit events are ever federated cross-port. Until cross-port audit
+    /// federation lands, this divergence is acceptable — both ports write the
+    /// event to their own substrate, and the unified log does not expose `eventID`.
+    /// When federation is implemented, reconcile this to use the same SHA-256
+    /// deterministic content-ID derivation as the Rust port.
+    public func sealExpungeOrphanAudit(
+        drawerId: String,
+        successEvent: AuditEvent,
+        changedBy: String,
+        now: Date
+    ) async throws {
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        // Construct the orphan event from the success event's fields,
+        // replacing only the verb and the HLC (new stamp so the orphan
+        // event sorts after the success-event's HLC would have).
+        let orphanEvent = AuditEvent(
+            estateUuid: successEvent.estateUuid,
+            rowId: successEvent.rowId,
+            hlc: stamp,
+            verb: "expungeOrphan",
+            beforeBitmaps: successEvent.beforeBitmaps,
+            afterBitmaps: successEvent.afterBitmaps,
+            beforeLatticeAnchor: successEvent.beforeLatticeAnchor,
+            afterLatticeAnchor: successEvent.afterLatticeAnchor,
+            actor: changedBy
+        )
+        try await storage.auditLog.append(orphanEvent)
+    }
+
+    // MARK: - Expunge integrity sweep helpers
+
+    /// Query for tombstoned drawers that have no sealed "tombstone" or
+    /// "expungeOrphan" audit event.
+    ///
+    /// Returns the set of rows that fell into the crash-window: step 1 of the
+    /// §B-2a expunge (LocusKit storage tombstone+scrub) ran, but the process
+    /// crashed before step 3 (audit seal) and the orphan-seal recovery path
+    /// also did not complete. These rows are tombstoned and content-zeroed, but
+    /// the audit trail is silent about the expunge.
+    ///
+    /// The GLK `runExpungeIntegritySweep` maintenance function calls this to
+    /// enumerate the orphan set, then re-attempts the cross-kit delete and seals
+    /// a synthetic "expungeOrphan" audit for each row via
+    /// `sealExpungeOrphanForSweep`.
+    ///
+    /// Deterministic: does not call Date(); all timestamps come from existing
+    /// stored data.
+    ///
+    /// - Throws: `LocusKitError` when the underlying storage query fails.
+    ///   The caller treats this as fatal (the orphan set is unknown; sweep
+    ///   cannot proceed).
+    public func tombstonedRowsWithoutExpungeAudit() async throws -> [Drawer] {
+        // Query every tombstoned row (tombstonedAt IS NOT NULL), regardless of
+        // hydration level — the sweep needs the drawer's bitmaps and lattice
+        // anchor to construct the synthetic audit event.
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .isNotNull(Column(table: "drawers", name: "tombstonedAt")),
+            orderBy: [OrderClause(column: Column(table: "drawers", name: "tombstonedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        let tombstoned = try rows.map(Self.drawerFromRow)
+
+        // Filter to only those with no tombstone or expungeOrphan audit event.
+        var orphans: [Drawer] = []
+        for drawer in tombstoned {
+            guard let uuid = UUID(uuidString: drawer.id) else { continue }
+            let events = try await storage.auditLog.eventsForRow(uuid)
+            let hasExpungeAudit = events.contains(where: {
+                $0.verb == "tombstone" || $0.verb == "expungeOrphan"
+            })
+            if !hasExpungeAudit {
+                orphans.append(drawer)
+            }
+        }
+        return orphans
+    }
+
+    /// Seal a synthetic "expungeOrphan" audit event for a crash-window row.
+    ///
+    /// Called by the GLK integrity sweep after re-attempting the cross-kit
+    /// delete. Unlike `sealExpungeOrphanAudit`, this path constructs the audit
+    /// event from the current drawer state rather than from the original gate
+    /// event (which was lost in the crash). The result is honest: the bitmaps
+    /// reflect the post-tombstone state, and the "expungeOrphan" verb signals
+    /// that the row was cleaned up by the sweep, not the live expunge path.
+    ///
+    /// The sweep cannot reconstruct the exact HLC that the original expunge
+    /// used, so the event gets a fresh HLC stamp (sorted after all prior events
+    /// for this row, per the monotonic HLC guarantee).
+    ///
+    /// Deterministic: the caller threads `now`; never calls Date() here.
+    ///
+    /// - Parameters:
+    ///   - drawerId: the stable row id.
+    ///   - changedBy: identity string for the actor (estate owner or "estate").
+    ///   - now: the sweep's wall-clock snapshot in millis since UNIX epoch.
+    ///
+    /// - Throws: `LocusKitError.drawerNotFound` when the row is absent.
+    ///   `LocusKitError` variants for storage or audit-log write failures.
+    public func sealExpungeOrphanForSweep(
+        drawerId: String,
+        changedBy: String,
+        now: Int64
+    ) async throws {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(changedBy, label: "changedBy")
+
+        // Read the current row to obtain bitmaps and lattice anchor.
+        // The row is tombstoned (content zeroed), so these reflect the
+        // post-tombstone state — correct for the "after" snapshot.
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+        )
+        guard let row = rows.first else {
+            throw LocusKitError.drawerNotFound(id: drawerId)
+        }
+        let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
+        let estate = estateUuid
+
+        let adjBitmap = Self.int64(row["adjectiveBitmap"])
+        let opBitmap  = Self.int64(row["operationalBitmap"])
+        let provBitmap = Self.int64(row["provenance"])
+        let latticeAnchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
+
+        let stamp = hlc.send(now: now)
+
+        // Construct the synthetic orphan event from current drawer state.
+        // `beforeBitmaps: nil` — the pre-tombstone snapshot is unavailable
+        // (crash window; no original gate event). This is distinct from the
+        // live expunge path where `beforeBitmaps` comes from the gate event.
+        // Consumers that need to distinguish sweep-sealed from live-sealed
+        // events can check for `beforeBitmaps == nil`.
+        let orphanEvent = AuditEvent(
+            estateUuid: estate,
+            rowId: rowUuid,
+            hlc: stamp,
+            verb: "expungeOrphan",
+            beforeBitmaps: nil,
+            afterBitmaps: (adjective: adjBitmap, operational: opBitmap, provenance: provBitmap),
+            beforeLatticeAnchor: nil,
+            afterLatticeAnchor: latticeAnchor,
+            actor: changedBy
+        )
+        try await storage.auditLog.append(orphanEvent)
     }
 
     /// Reanchor a drawer: update the row's placement columns (`room` and/or
@@ -1131,9 +1570,10 @@ public actor DrawerStore {
     /// Transition a KGFact's state to withdrawn.
     ///
     /// Sets bits 0–5 of `adjectiveBitmap` to `State.withdrawn.rawValue` (18).
-    /// Facts with `g_state_cluster` >= 7 are excluded from `allKGFacts` active
-    /// recall. The row is not deleted — retirement is a state transition that
-    /// preserves the audit trail.
+    /// That raw lands in RowState Cluster B (at/above the active upper bound
+    /// `RowState.activeClusterUpperBoundRaw`, 16), so the fact is excluded
+    /// from `allKGFacts` active recall. The row is not deleted — retirement
+    /// is a state transition that preserves the audit trail.
     ///
     /// - Throws: `LocusKitError.invalidContent` if no fact with `id` exists.
     public func withdrawKGFact(id: String) async throws {
@@ -1156,10 +1596,14 @@ public actor DrawerStore {
         return try rows.first.map(Self.kgFactFromRow)
     }
 
-    /// All facts from a source drawer whose state cluster is below 7
-    /// (excludes the rejected/accepted/tombstoned post-resolution
-    /// states), ordered by filedAt ascending. The state-cluster gate
-    /// uses the generated column so it is an indexed range scan.
+    /// All facts from a source drawer in the RowState Cluster-A (active)
+    /// set — `g_state_cluster < RowState.activeClusterUpperBoundRaw` (the
+    /// cluster-B floor, 16) — ordered by filedAt ascending. The
+    /// generated column stores the raw 6-bit RowState, so the predicate
+    /// keeps active/pending/contested/accepted and drops the retired
+    /// B/C states; it uses the generated column so it is an indexed range
+    /// scan. The boundary is sourced from the RowState automaton, not a
+    /// bare literal.
     ///
     /// Telemetry: emits `locuskit.kgfact.query_result_count`
     /// (tag: query="drawer") when monitoring is enabled.
@@ -1168,7 +1612,8 @@ public actor DrawerStore {
             table: "kg_facts",
             where: .and([
                 .eq(Column(table: "kg_facts", name: "sourceDrawerID"), .text(sourceDrawerID)),
-                .lt(Column(table: "kg_facts", name: "g_state_cluster"), .int(7))
+                .lt(Column(table: "kg_facts", name: "g_state_cluster"),
+                    .int(Int64(RowState.activeClusterUpperBoundRaw)))
             ]),
             orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil
@@ -1328,6 +1773,48 @@ public actor DrawerStore {
         return try rows.map(Self.learnedReferenceFromRow)
     }
 
+    // MARK: - Source catalog CRUD
+
+    /// Insert a source catalog entry. `handle` and `addedBy` are required,
+    /// and the lattice anchor is required per cookbook §2.7 (I-16): an empty
+    /// `udcCode` is rejected with `LocusKitError.invalidContent` before the
+    /// insert, mirroring `addLearnedReference`. The genuine anchor recorded
+    /// here is what the `learn` verb copies onto each `LearnedReference`, so
+    /// an empty anchor here would propagate a fabricated identity — hence the
+    /// hard rejection. Conflicting ids surface as duplicateKey.
+    public func addSourceCatalogEntry(_ e: SourceCatalogEntry) async throws {
+        try Self.validateNonEmpty(e.handle, label: "handle")
+        try Self.validateNonEmpty(e.addedBy, label: "addedBy")
+        try Self.validateNonEmpty(e.latticeAnchor.udcCode, label: "latticeAnchor.udcCode")
+        _ = try await storage.rowStore.insert(
+            table: "source_catalog", values: Self.sourceCatalogValues(e))
+    }
+
+    /// Fetch a source catalog entry by id. Returns nil for an absent id — a
+    /// routine query miss, not an error, mirroring `getLearnedReference`.
+    public func getSourceCatalogEntry(id: String) async throws -> SourceCatalogEntry? {
+        let rows = try await storage.rowStore.query(
+            table: "source_catalog",
+            where: .eq(Column(table: "source_catalog", name: "id"), .text(id))
+        )
+        return try rows.first.map(Self.sourceCatalogFromRow)
+    }
+
+    /// Fetch the source catalog entry whose `handle` matches, if any.
+    /// Resolves through `idx_source_catalog_handle`. The learn verb's
+    /// source-resolution probe: "do we already catalog this source?".
+    /// Returns the first match (handles are not unique-constrained; the
+    /// learn verb catalogs at most one entry per handle), or nil.
+    public func sourceCatalogEntry(forHandle handle: String) async throws -> SourceCatalogEntry? {
+        let rows = try await storage.rowStore.query(
+            table: "source_catalog",
+            where: .eq(Column(table: "source_catalog", name: "handle"), .text(handle)),
+            orderBy: [OrderClause(column: Column(table: "source_catalog", name: "firstSeen"), direction: .ascending)],
+            limit: 1, offset: nil
+        )
+        return try rows.first.map(Self.sourceCatalogFromRow)
+    }
+
     // MARK: - Diary CRUD
 
     /// Insert a diary entry. Conflicting ids surface as duplicateKey.
@@ -1425,9 +1912,10 @@ public actor DrawerStore {
         return try rows.map(Self.learnedReferenceFromRow)
     }
 
-    /// All kg-facts estate-wide where the state cluster is below 7
-    /// (excludes rejected/accepted/tombstoned post-resolution states),
-    /// ordered by `filedAt` ascending.
+    /// All kg-facts estate-wide in the RowState Cluster-A (active) set —
+    /// `g_state_cluster < RowState.activeClusterUpperBoundRaw` (the
+    /// cluster-B floor, 16) — ordered by `filedAt` ascending. Keeps
+    /// active/pending/contested/accepted; drops the retired B/C states.
     ///
     /// Mirrors `kgFacts(forDrawerID:)` but without the source-drawer
     /// predicate. Peer of the Rust `DrawerStore::all_kg_facts`.
@@ -1437,7 +1925,8 @@ public actor DrawerStore {
     public func allKGFacts() async throws -> [KGFact] {
         let rows = try await storage.rowStore.query(
             table: "kg_facts",
-            where: .lt(Column(table: "kg_facts", name: "g_state_cluster"), .int(7)),
+            where: .lt(Column(table: "kg_facts", name: "g_state_cluster"),
+                       .int(Int64(RowState.activeClusterUpperBoundRaw))),
             orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
             limit: nil, offset: nil
         )
@@ -1448,6 +1937,46 @@ public actor DrawerStore {
             resultCount: result.count,
             estateTag: estateUuid.uuidString,
             queryLabel: "all"
+        )
+        return result
+    }
+
+    /// All kg-facts estate-wide regardless of state — active AND retired
+    /// (withdrawn, expired, decayed, superseded, rejected, tombstoned).
+    ///
+    /// This is the timeline read path: it returns the full lifecycle history
+    /// of every fact ever filed, ordered by `filedAt` ascending so callers
+    /// can trace how structured knowledge evolved over time.  Each returned
+    /// `KGFact` carries its `adjectiveBitmap` intact; callers derive the
+    /// lifecycle state via `(adjectiveBitmap & 0x3F)`, the raw RowState —
+    /// values below `RowState.activeClusterUpperBoundRaw` (16) are
+    /// Cluster-A active, values at or above it are retired (see
+    /// `Adjectives.State`).
+    ///
+    /// Use `allKGFacts()` when you only need the currently-active set.
+    /// Use this method only when you need the full history, e.g. to power
+    /// `moot_fact_timeline`.
+    ///
+    /// Peer of the Rust `DrawerStore::all_kg_facts_including_retired`.
+    ///
+    /// Telemetry: emits `locuskit.kgfact.query_result_count`
+    /// (tag: query="timeline") when monitoring is enabled.
+    public func allKGFactsIncludingRetired() async throws -> [KGFact] {
+        // No state-cluster predicate — return every row, all lifecycle states.
+        let rows = try await storage.rowStore.query(
+            table: "kg_facts",
+            where: nil,
+            orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        let result = try rows.map(Self.kgFactFromRow)
+        // query="timeline" distinguishes this estate-wide all-history path
+        // from the active-only "all" path in emitted telemetry.
+        emitKGFactQuery(
+            now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "timeline"
         )
         return result
     }
@@ -1477,6 +2006,33 @@ public actor DrawerStore {
         _ = try await storage.rowStore.insert(
             table: "recall_trace",
             values: Self.recallTraceValues(item))
+    }
+
+    /// Batch-insert a set of recall trace rows in a single transaction.
+    ///
+    /// This is the performance-correct path for recall tracing: tracing every
+    /// drawer in the filtered set with one INSERT per drawer is O(N) in the
+    /// estate size and the dominant cost at scale (~135ms for 1,040 inserts on
+    /// a 1,040-drawer estate). A batched insert amortises the transaction
+    /// overhead across all rows, reducing the commit count from N to 1.
+    ///
+    /// Callers must supply only the bounded candidate set that was actually
+    /// returned to the caller (the drained frontierK rows), not the full
+    /// filtered set. The reward sweep only needs rows the caller received.
+    ///
+    /// Empty `items` is a no-op (no transaction opened, no storage touched).
+    /// Conflicting ids in the batch surface as duplicateKey from the primary-key
+    /// constraint; the transaction rolls back the entire batch on the first
+    /// conflict, consistent with the single-insert contract.
+    public func insertRecallTraces(_ items: [RecallTraceItem]) async throws {
+        guard !items.isEmpty else { return }
+        try await storage.transaction(isolation: .serializable) { txn in
+            for item in items {
+                _ = try await txn.rowStore.insert(
+                    table: "recall_trace",
+                    values: Self.recallTraceValues(item))
+            }
+        }
     }
 
     /// Fetch a single trace row by id. Returns nil when not found.
@@ -1533,6 +2089,29 @@ public actor DrawerStore {
         return try rows.map(Self.recallTraceFromRow)
     }
 
+    /// Delete recall-trace rows whose `recalledAt` is strictly before
+    /// `cutoff`. Returns the number of rows deleted.
+    ///
+    /// Called by the dreaming daemon's reward sweep after it has processed
+    /// the window so stale rows do not accumulate indefinitely. The cutoff
+    /// is expressed as a `Date`; the comparison uses the TEXT ISO8601
+    /// convention used by neighbouring trace queries (`.lt` on a lexicographic
+    /// ISO8601 string is equivalent to a numeric less-than on the timestamps,
+    /// provided all values are in UTC — which the fleet date-storage rule
+    /// guarantees).
+    ///
+    /// - Parameter cutoff: rows with `recalledAt < cutoff` are deleted.
+    /// - Returns: the number of rows deleted.
+    public func pruneRecallTraces(olderThan cutoff: Date) async throws -> Int {
+        try await storage.rowStore.delete(
+            table: "recall_trace",
+            where: .lt(
+                Column(table: "recall_trace", name: "recalledAt"),
+                .timestamp(cutoff)
+            )
+        )
+    }
+
     /// Mark a trace row's `used` flag (bit 0 of operationalBitmap).
     /// The reward path calls this when it has processed the row.
     /// Uses `storage.transaction` for atomic read-modify-write: reads
@@ -1565,6 +2144,87 @@ public actor DrawerStore {
             table: "recall_trace",
             values: Self.recallTraceValues(updated),
             where: .eq(Column(table: "recall_trace", name: "id"), .text(id)))
+    }
+
+    /// Bulk-mark trace rows for a drawer target within a time window.
+    ///
+    /// Sets bit 0 (`flagUsed`) on every `recall_trace` row where
+    /// `target == target` AND `recalledAt ∈ [since, now]` AND bit 0 is
+    /// currently unset. This is the production reward-wiring path: ARIA
+    /// decides "drawer D was used" and calls this once; the substrate
+    /// flips whatever live trace rows exist for that drawer. Idempotent —
+    /// rows already marked are skipped by the `bit0 = 0` predicate.
+    ///
+    /// The reward sweep keys by `target` (not trace-row id), so a single
+    /// bulk UPDATE per target drawer is the correct granularity. The
+    /// existing `markRecallTraceUsed(id:now:)` remains as the tested
+    /// per-row primitive; this method is the ARIA path.
+    ///
+    /// - Parameters:
+    ///   - target: the drawer id whose live trace rows to mark.
+    ///   - since: lower bound (inclusive) of the time window.
+    ///   - now:   upper bound (inclusive) of the time window; the
+    ///            deterministic clock value the caller supplies.
+    /// - Returns: number of rows whose bit was flipped (0 when all already
+    ///            marked or no matching rows exist).
+    public func markRecallTracesUsed(target: String, since: Date, now: Date) async throws -> Int {
+        // Fetch matching trace rows in-memory and mark each one that is
+        // not yet marked. PersistenceKit's row-store exposes a predicate
+        // query + update surface, not arbitrary SQL; the fetch-then-update
+        // pattern is consistent with markRecallTraceUsed(id:now:) and keeps
+        // the query layer the single abstraction consumers of PersistenceKit
+        // use. The window is bounded [since, now] so this is O(trace window)
+        // not O(estate), and the trace table is bounded by retention pruning.
+        let rows = try await storage.rowStore.query(
+            table: "recall_trace",
+            where: .and([
+                .eq(Column(table: "recall_trace", name: "target"), .text(target)),
+                .gte(
+                    Column(table: "recall_trace", name: "recalledAt"),
+                    .timestamp(since)
+                ),
+                .lte(
+                    Column(table: "recall_trace", name: "recalledAt"),
+                    .timestamp(now)
+                ),
+            ])
+        )
+        let items = try rows.map(Self.recallTraceFromRow)
+        var touched = 0
+        for item in items where !item.used {
+            let updated = RecallTraceItem(
+                id: item.id,
+                target: item.target,
+                recalledAt: item.recalledAt,
+                score: item.score,
+                operationalBitmap: item.operationalBitmap | RecallTraceItem.flagUsed
+            )
+            try await storage.rowStore.update(
+                table: "recall_trace",
+                values: Self.recallTraceValues(updated),
+                where: .eq(Column(table: "recall_trace", name: "id"), .text(item.id))
+            )
+            touched += 1
+        }
+        return touched
+    }
+
+    /// Count all rows in the recall_trace table.
+    ///
+    /// Used by estate-status reporting so trace-table growth is observable
+    /// without requiring the caller to load every row. Returns the total
+    /// row count across all targets and windows; includes both used and
+    /// unused rows (the distinction is visible in the dreaming reward report,
+    /// not here). An empty table returns 0.
+    public func countRecallTraces() async throws -> Int {
+        // Pass `where: nil` to query all rows — the RowStore protocol
+        // defaults `where` to nil when no predicate is supplied, which
+        // matches a SELECT * with no WHERE clause.
+        let rows = try await storage.rowStore.query(
+            table: "recall_trace",
+            where: nil
+        )
+        return rows.count
     }
 
     // MARK: - Summary surface
@@ -1663,7 +2323,21 @@ public actor DrawerStore {
             Int64(try await getMeta(key: key.rawValue) ?? "") ?? fallback
         }
         func reqDate(_ key: ManifestKey) async throws -> Date {
-            LKISO8601.date(from: try await getMeta(key: key.rawValue) ?? "") ?? Date(timeIntervalSince1970: 0)
+            let raw = try await getMeta(key: key.rawValue) ?? ""
+            // Empty string means the manifest key is absent — return epoch-0
+            // (the legitimate absent-value sentinel for manifest dates).
+            // A non-empty string that fails to parse is unambiguous corruption:
+            // throw instead of fabricating an epoch-0 date that would
+            // misrepresent createdAt / lastModified timestamps.
+            if raw.isEmpty { return Date(timeIntervalSince1970: 0) }
+            guard let parsed = LKISO8601.date(from: raw) else {
+                throw LocusKitError.corruptStoredValue(
+                    table: "manifest",
+                    column: key.rawValue,
+                    storedText: raw
+                )
+            }
+            return parsed
         }
         func opt(_ key: ManifestKey) async throws -> String? {
             try await getMeta(key: key.rawValue)
@@ -1797,7 +2471,11 @@ public actor DrawerStore {
             "embeddingModelID": .text(e.embeddingModelID),
             "tombstonedAt": e.tombstonedAt.map { TypedValue.timestamp($0) } ?? .null,
             "removedByBatch": e.removedByBatch.map { TypedValue.text($0) } ?? .null,
-            "operationalBitmap": .bitmap(e.operationalBitmap)
+            "operationalBitmap": .bitmap(e.operationalBitmap),
+            // Explicit reward channel (NEURONKIT_SPEC § 3.1 step 1a).
+            // REAL nullable: bind the f64 value or NULL.
+            "reward": e.reward.map { TypedValue.float($0) } ?? .null,
+            "rewardProvenance": e.rewardProvenance.map { TypedValue.text($0) } ?? .null
         ]
     }
 
@@ -1817,7 +2495,7 @@ public actor DrawerStore {
         RecallTraceItem(
             id: string(row["id"]),
             target: string(row["target"]),
-            recalledAt: date(row["recalledAt"]),
+            recalledAt: try date(table: "recall_traces", column: "recalledAt", row["recalledAt"]),
             score: optDouble(row["score"]),
             operationalBitmap: int64(row["operationalBitmap"])
         )
@@ -1873,10 +2551,45 @@ public actor DrawerStore {
         ]
     }
 
+    private static func sourceCatalogValues(_ e: SourceCatalogEntry) -> [String: TypedValue] {
+        [
+            "id": .text(e.id),
+            "kind": .int(Int64(e.kind.rawValue)),
+            "handle": .text(e.handle),
+            "addedBy": .text(e.addedBy),
+            "firstSeen": .timestamp(e.firstSeen),
+            "udcCode": .text(e.latticeAnchor.udcCode),
+            "udcFacets": e.latticeAnchor.udcFacets.map { TypedValue.text($0) } ?? .null,
+            "wikidataQID": e.latticeAnchor.wikidataQID.map { TypedValue.text($0) } ?? .null,
+            "wikidataQidsSecondary": e.latticeAnchor.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null
+        ]
+    }
+
     // MARK: - Row decode helpers
 
     private static func drawerFromRow(_ row: StorageRow) throws -> Drawer {
-        Drawer(
+        // lineageID — empty-string is the intentional "unset" sentinel and
+        // becomes a fresh per-row UUID so unset rows never collapse onto one
+        // lineage. A non-empty string that is not a valid UUID is unambiguous
+        // corruption: throwing surfaces it rather than manufacturing a
+        // lineage that never existed (which would mislead federation routing
+        // and Bradley-Terry reward matching). Parity with PersistenceKit
+        // commit 0ff08d93 (corruptStoredValue for UUID/timestamp parse failure).
+        let rawLineage = string(row["lineageID"])
+        let lineageID: UUID
+        if rawLineage.isEmpty {
+            lineageID = UUID()
+        } else if let parsed = UUID(uuidString: rawLineage) {
+            lineageID = parsed
+        } else {
+            throw LocusKitError.corruptStoredValue(
+                table: "drawers",
+                column: "lineageID",
+                storedText: rawLineage
+            )
+        }
+        let filedAt = try date(table: "drawers", column: "filedAt", row["filedAt"])
+        return Drawer(
             id: string(row["id"]),
             content: string(row["content"]),
             wing: string(row["wing"]),
@@ -1884,24 +2597,21 @@ public actor DrawerStore {
             sourceFile: optString(row["sourceFile"]),
             chunkIndex: optInt(row["chunkIndex"]),
             addedBy: string(row["addedBy"]),
-            filedAt: date(row["filedAt"]),
+            filedAt: filedAt,
             // Two-clock ingest (ING-01): backfill a NULL/absent eventTime
             // to this row's filedAt. Rows written before the column
             // existed read NULL here; the fallback gives them
             // eventTime == filedAt (the streaming-capture identity),
-            // realizing the mission's "event_time = filed_at" backfill
-            // intent in the read path rather than via an ALTER+UPDATE.
-            eventTime: optDate(row["eventTime"]) ?? date(row["filedAt"]),
+            // realising the "event_time = filed_at" backfill intent in
+            // the read path rather than via an ALTER+UPDATE.
+            eventTime: optDate(row["eventTime"]) ?? filedAt,
             embeddingModelID: string(row["embeddingModelID"]),
             tombstonedAt: optDate(row["tombstonedAt"]),
             removedByBatch: optString(row["removedByBatch"]),
             provenance: int64(row["provenance"]),
             adjectiveBitmap: int64(row["adjectiveBitmap"]),
             operationalBitmap: int64(row["operationalBitmap"]),
-            // Empty-string or unparseable lineageID becomes a fresh
-            // per-row UUID so unset rows never collapse onto one
-            // lineage; matches the prior store's drawerFromRow.
-            lineageID: UUID(uuidString: string(row["lineageID"])) ?? UUID(),
+            lineageID: lineageID,
             udcCode: string(row["udcCode"]),
             udcFacets: optString(row["udcFacets"]),
             wikidataQID: optString(row["wikidataQID"]),
@@ -1924,7 +2634,7 @@ public actor DrawerStore {
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
             addedBy: string(row["addedBy"]),
-            filedAt: date(row["filedAt"]),
+            filedAt: try date(table: "tunnels", column: "filedAt", row["filedAt"]),
             tombstonedAt: optDate(row["tombstonedAt"]),
             removedByBatch: optString(row["removedByBatch"])
         )
@@ -1950,7 +2660,7 @@ public actor DrawerStore {
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
             addedBy: string(row["addedBy"]),
-            filedAt: date(row["filedAt"]),
+            filedAt: try date(table: "associations", column: "filedAt", row["filedAt"]),
             tombstonedAt: optDate(row["tombstonedAt"]),
             removedByBatch: optString(row["removedByBatch"])
         )
@@ -1971,9 +2681,25 @@ public actor DrawerStore {
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
             addedBy: string(row["addedBy"]),
-            filedAt: date(row["filedAt"]),
+            filedAt: try date(table: "learned_references", column: "filedAt", row["filedAt"]),
             tombstonedAt: optDate(row["tombstonedAt"]),
             removedByBatch: optString(row["removedByBatch"])
+        )
+    }
+
+    private static func sourceCatalogFromRow(_ row: StorageRow) throws -> SourceCatalogEntry {
+        SourceCatalogEntry(
+            id: string(row["id"]),
+            kind: SourceKind.fromRaw(Int(int64(row["kind"]))),
+            handle: string(row["handle"]),
+            latticeAnchor: LatticeAnchor(
+                udcCode: string(row["udcCode"]),
+                udcFacets: optString(row["udcFacets"]),
+                wikidataQID: optString(row["wikidataQID"]),
+                wikidataQidsSecondary: optString(row["wikidataQidsSecondary"])
+            ),
+            firstSeen: try date(table: "source_catalog", column: "firstSeen", row["firstSeen"]),
+            addedBy: string(row["addedBy"])
         )
     }
 
@@ -1985,11 +2711,15 @@ public actor DrawerStore {
             topic: string(row["topic"]),
             wing: string(row["wing"]),
             room: string(row["room"]),
-            filedAt: date(row["filedAt"]),
+            filedAt: try date(table: "diary", column: "filedAt", row["filedAt"]),
             embeddingModelID: string(row["embeddingModelID"]),
             tombstonedAt: optDate(row["tombstonedAt"]),
             removedByBatch: optString(row["removedByBatch"]),
-            operationalBitmap: int64(row["operationalBitmap"])
+            operationalBitmap: int64(row["operationalBitmap"]),
+            // Explicit reward channel (NEURONKIT_SPEC § 3.1 step 1a).
+            // SQLite returns .float (Double) or .null; optDouble handles both.
+            reward: optDouble(row["reward"]),
+            rewardProvenance: optString(row["rewardProvenance"])
         )
     }
 
@@ -2003,7 +2733,7 @@ public actor DrawerStore {
             adjectiveBitmap: int64(row["adjectiveBitmap"]),
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
-            filedAt: date(row["filedAt"])
+            filedAt: try date(table: "kg_facts", column: "filedAt", row["filedAt"])
         )
     }
 
@@ -2022,7 +2752,7 @@ public actor DrawerStore {
             adjectiveBitmap: int64(row["adjectiveBitmap"]),
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
-            filedAt: date(row["filedAt"])
+            filedAt: try date(table: "proposals", column: "filedAt", row["filedAt"])
         )
     }
 
@@ -2033,6 +2763,13 @@ public actor DrawerStore {
     /// (the SQLite backend decodes bitmap/timestamp/uuid columns to
     /// their declared cases), so these are total projections with
     /// safe fallbacks rather than parsers.
+    ///
+    /// INTENTIONAL CONTRACT: the empty-string sentinel for udcCode and
+    /// the .text/.int type-tolerant decode of VALID values remain as
+    /// non-throwing total projections. Only `date(table:column:value:)`
+    /// and the lineageID path in `drawerFromRow` throw — and only when
+    /// a non-empty stored TEXT string cannot be parsed to its declared
+    /// type, which is unambiguous corruption rather than an absent value.
 
     private static func string(_ v: TypedValue?) -> String {
         switch v {
@@ -2065,10 +2802,30 @@ public actor DrawerStore {
         }
     }
 
-    private static func date(_ v: TypedValue?) -> Date {
+    /// Decode a required (non-nullable) date column from a `StorageRow` cell.
+    ///
+    /// - `.timestamp`: already decoded by PersistenceKit — returned directly.
+    /// - `.text("")` or absent: column is NULL or an empty-string sentinel —
+    ///   returns `Date(timeIntervalSince1970: 0)`. This is the legitimate
+    ///   absent-value path, not corruption.
+    /// - `.text(s)` where `s` is a non-empty, non-parseable ISO 8601 string:
+    ///   the stored value is corrupt. Throws
+    ///   `LocusKitError.corruptStoredValue` so the caller surfaces the
+    ///   problem rather than silently fabricating an epoch-0 date that
+    ///   could misrepresent tombstone state or ordering.
+    private static func date(table: String, column: String, _ v: TypedValue?) throws -> Date {
         switch v {
         case .timestamp(let d): return d
-        case .text(let s): return LKISO8601.date(from: s) ?? Date(timeIntervalSince1970: 0)
+        case .text(let s):
+            if s.isEmpty { return Date(timeIntervalSince1970: 0) }
+            guard let parsed = LKISO8601.date(from: s) else {
+                throw LocusKitError.corruptStoredValue(
+                    table: table,
+                    column: column,
+                    storedText: s
+                )
+            }
+            return parsed
         default: return Date(timeIntervalSince1970: 0)
         }
     }
@@ -2088,6 +2845,163 @@ public actor DrawerStore {
         case .null, nil: return nil
         default: return nil
         }
+    }
+
+    // MARK: - Temporal reads
+
+    /// Returns the `Fingerprint256` of every non-tombstoned drawer whose
+    /// effective capture time falls in `window`, in ascending row-id order.
+    ///
+    /// Effective capture time: `eventTime` when present; `filedAt` otherwise
+    /// (ING-01 two-clock backfill — rows written before the eventTime column
+    /// existed get `eventTime = filedAt` on the read path). Feeds the
+    /// MomentSummary OR-fold (substrate math §15.1 predicate π₁).
+    ///
+    /// - Parameter window: closed `[lower, upper]` Date range; both bounds
+    ///   are inclusive.
+    /// - Returns: fingerprints in ascending SQLite row-id order.
+    public func fingerprintsCaptured(in window: ClosedRange<Date>) async throws -> [Fingerprint256] {
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                Self.captureTimeInRangePredicate(lower: window.lowerBound, upper: window.upperBound),
+                .isNull(Column(table: "drawers", name: "tombstonedAt"))
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "drawers", name: "id"),
+                direction: .ascending
+            )],
+            limit: nil,
+            offset: nil
+        )
+        // Construct on-demand — one FNV hash, cheap and correct.
+        let families = EstateFingerprintFamilies(estateUUID: estateUuid.uuidString)
+        return try rows.map { row in
+            let drawer = try Self.drawerFromRow(row)
+            return families.fingerprint(of: drawer)
+        }
+    }
+
+    /// Returns one Bool per time bucket (oldest first): whether any
+    /// non-tombstoned drawer captured in that bucket has the given
+    /// fingerprint bit set.
+    ///
+    /// Feeds the FFT rhythm spectrum (substrate math §15.5).
+    ///
+    /// **Bucket layout** (oldest first, `i` ∈ `[0, bucketCount)`):
+    /// ```
+    /// lowerᵢ = endingAt − (bucketCount − i) × bucketSeconds
+    /// upperᵢ = endingAt − (bucketCount − i − 1) × bucketSeconds
+    /// ```
+    /// Interval: `[lowerᵢ, upperᵢ)` — lower inclusive, upper exclusive — so
+    /// a capture exactly on a shared boundary belongs to the later
+    /// (higher-timestamp) bucket. The final bucket is `[lower, endingAt]`
+    /// (inclusive upper).
+    ///
+    /// Bit layout: block0 covers bits 0–63, block1 covers 64–127,
+    /// block2 covers 128–191, block3 covers 192–255.
+    ///
+    /// - Parameters:
+    ///   - bit: fingerprint bit index in `[0, 255]`.
+    ///   - bucketSeconds: width of each bucket in seconds; must be ≥ 1.
+    ///   - bucketCount: number of buckets; returns `[]` when 0.
+    ///   - endingAt: upper bound of the newest bucket (caller-supplied
+    ///     deterministic clock — never call `Date()` inside the kit).
+    /// - Throws: `LocusKitError.invalidContent` when `bit ∉ [0, 255]` or
+    ///   `bucketSeconds < 1`.
+    public func fingerprintBitSeries(
+        bit: Int,
+        bucketSeconds: Int,
+        bucketCount: Int,
+        endingAt: Date
+    ) async throws -> [Bool] {
+        guard bit >= 0 && bit <= 255 else {
+            throw LocusKitError.invalidContent(
+                "fingerprintBitSeries: bit \(bit) out of range [0, 255]"
+            )
+        }
+        guard bucketSeconds >= 1 else {
+            throw LocusKitError.invalidContent(
+                "fingerprintBitSeries: bucketSeconds \(bucketSeconds) must be ≥ 1"
+            )
+        }
+        guard bucketCount > 0 else { return [] }
+
+        let windowStart = endingAt.addingTimeInterval(
+            Double(-bucketCount) * Double(bucketSeconds)
+        )
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and([
+                Self.captureTimeInRangePredicate(lower: windowStart, upper: endingAt),
+                .isNull(Column(table: "drawers", name: "tombstonedAt"))
+            ]),
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        let families = EstateFingerprintFamilies(estateUUID: estateUuid.uuidString)
+        // Pre-compute (effectiveCaptureTime, fingerprint) for all drawers in the window.
+        // drawer.eventTime already carries the ING-01 filedAt backfill from drawerFromRow.
+        let captures: [(time: Date, fp: Fingerprint256)] = try rows.map { row in
+            let drawer = try Self.drawerFromRow(row)
+            return (time: drawer.eventTime, fp: families.fingerprint(of: drawer))
+        }
+
+        return (0..<bucketCount).map { i in
+            let bucketLower = endingAt.addingTimeInterval(
+                Double(-(bucketCount - i)) * Double(bucketSeconds)
+            )
+            let isLastBucket = (i == bucketCount - 1)
+            // Check whether any capture falls in this bucket AND has the target bit set.
+            return captures.contains { entry in
+                let inBucket: Bool
+                if isLastBucket {
+                    // Final bucket: [lower, endingAt] inclusive upper.
+                    inBucket = entry.time >= bucketLower && entry.time <= endingAt
+                } else {
+                    // [lower, upper): exclusive upper so edge belongs to the later bucket.
+                    let bucketUpper = endingAt.addingTimeInterval(
+                        Double(-(bucketCount - i - 1)) * Double(bucketSeconds)
+                    )
+                    inBucket = entry.time >= bucketLower && entry.time < bucketUpper
+                }
+                return inBucket && Self.isBitSet(entry.fp, bit: bit)
+            }
+        }
+    }
+
+    /// Returns true when the given bit (0-based) is set in `fp`.
+    /// Callers must pre-validate that bit ∈ [0, 255].
+    /// Layout: block0 = bits 0–63, block1 = 64–127, block2 = 128–191, block3 = 192–255.
+    private static func isBitSet(_ fp: Fingerprint256, bit: Int) -> Bool {
+        switch bit {
+        case 0..<64:    return (fp.block0 >> UInt64(bit)) & 1 != 0
+        case 64..<128:  return (fp.block1 >> UInt64(bit - 64)) & 1 != 0
+        case 128..<192: return (fp.block2 >> UInt64(bit - 128)) & 1 != 0
+        default:        return (fp.block3 >> UInt64(bit - 192)) & 1 != 0
+        }
+    }
+
+    /// Builds a predicate matching drawers whose effective capture time falls
+    /// in [lower, upper] (both inclusive). The OR branch handles rows with a
+    /// NULL eventTime column by falling back to filedAt (ING-01 two-clock
+    /// backfill: rows written before eventTime existed have eventTime = filedAt).
+    private static func captureTimeInRangePredicate(lower: Date, upper: Date) -> StoragePredicate {
+        let etCol = Column(table: "drawers", name: "eventTime")
+        let faCol = Column(table: "drawers", name: "filedAt")
+        return .or([
+            .and([
+                .isNotNull(etCol),
+                .gte(etCol, .timestamp(lower)),
+                .lte(etCol, .timestamp(upper))
+            ]),
+            .and([
+                .isNull(etCol),
+                .gte(faCol, .timestamp(lower)),
+                .lte(faCol, .timestamp(upper))
+            ])
+        ])
     }
 
     // MARK: - Validation

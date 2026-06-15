@@ -386,12 +386,14 @@ fn expunge_gated_tombstones_zeros_content_sets_bit_26() {
         "content-aaaa",
     );
     store.add_drawer(&d, NOW).unwrap();
+    // seal_audit: true — direct-caller path, audit appended immediately.
     store
         .expunge_gated(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "alice",
             Some("GDPR"),
             NOW + 500,
+            true,
         )
         .unwrap();
     let after = store
@@ -449,6 +451,123 @@ fn add_kg_fact_and_kg_facts_for_drawer() {
     assert_eq!(rows[0].subject, "alice");
 }
 
+// ---------------------------------------------------------------------------
+// KG-active filter == RowState Cluster-A (single-source-of-truth gate)
+//
+// The KG-fact "active" filter (all_kg_facts / kg_facts_for_drawer) must derive
+// "active" from the canonical RowState Cluster-A boundary
+// (RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW == 16), NOT a hand-rolled `< 7`.
+// These run against the SQLite-backed store, so they exercise the real SQL
+// storage predicate — proving the persisted filter and the automaton agree.
+// ---------------------------------------------------------------------------
+
+/// File one fact in every defined RowState; the active set returned by
+/// `all_kg_facts()` must be EXACTLY the RowState Cluster-A states
+/// {active, pending, contested, accepted}. Behavior-preserving over the
+/// prior `< 7` gate (every defined active raw is < 7 AND < 16), and every
+/// retired B/C state is excluded.
+#[test]
+fn all_kg_facts_active_set_equals_cluster_a() {
+    use substrate_types::RowState;
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    let defined = [
+        RowState::Active,
+        RowState::Pending,
+        RowState::Contested,
+        RowState::Accepted,
+        RowState::Superseded,
+        RowState::Decayed,
+        RowState::Withdrawn,
+        RowState::Expired,
+        RowState::Rejected,
+        RowState::Tombstoned,
+    ];
+    for (i, state) in defined.iter().enumerate() {
+        let raw = *state as u8;
+        let mut f = KGFact::new(
+            tid(&format!("f-{raw}")),
+            format!("s-{raw}"),
+            "rel".to_string(),
+            "obj".to_string(),
+            tid("d1"),
+            NOW + i as i64,
+        );
+        // bits 0–5 of adjective_bitmap carry the raw RowState.
+        f.adjective_bitmap = raw as i64;
+        store.add_kg_fact(&f).unwrap();
+    }
+
+    let active: std::collections::HashSet<String> =
+        store.all_kg_facts().unwrap().into_iter().map(|f| f.subject).collect();
+
+    // Active set is exactly Cluster-A {active=0, pending=1, contested=2, accepted=3}.
+    let expected: std::collections::HashSet<String> =
+        ["s-0", "s-1", "s-2", "s-3"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(active, expected, "active set must equal RowState Cluster-A");
+
+    // Per-state membership must match the automaton for every defined raw.
+    for state in defined {
+        let raw = state as u8;
+        let present = active.contains(&format!("s-{raw}"));
+        assert_eq!(
+            present,
+            state.is_active_cluster(),
+            "state {state:?} (raw {raw}) active-membership must match Cluster-A"
+        );
+    }
+}
+
+/// The per-drawer active filter and the estate-wide active filter agree on
+/// the same data — both derive from RowState Cluster-A.
+#[test]
+fn kg_facts_for_drawer_and_all_kg_facts_agree() {
+    use substrate_types::RowState;
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    let defined = [
+        RowState::Active,
+        RowState::Pending,
+        RowState::Contested,
+        RowState::Accepted,
+        RowState::Superseded,
+        RowState::Decayed,
+        RowState::Withdrawn,
+        RowState::Expired,
+        RowState::Rejected,
+        RowState::Tombstoned,
+    ];
+    for (i, state) in defined.iter().enumerate() {
+        let raw = *state as u8;
+        let mut f = KGFact::new(
+            tid(&format!("f-{raw}")),
+            format!("s-{raw}"),
+            "rel".to_string(),
+            "obj".to_string(),
+            tid("d1"),
+            NOW + i as i64,
+        );
+        f.adjective_bitmap = raw as i64;
+        store.add_kg_fact(&f).unwrap();
+    }
+
+    let per_drawer: std::collections::HashSet<String> = store
+        .kg_facts_for_drawer(&tid("d1"))
+        .unwrap()
+        .into_iter()
+        .map(|f| f.subject)
+        .collect();
+    let estate: std::collections::HashSet<String> =
+        store.all_kg_facts().unwrap().into_iter().map(|f| f.subject).collect();
+
+    assert_eq!(per_drawer, estate, "per-drawer and estate active filters must agree");
+    let expected: std::collections::HashSet<String> =
+        ["s-0", "s-1", "s-2", "s-3"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(per_drawer, expected);
+}
+
 #[test]
 fn diary_round_trip_and_lastn_ordering() {
     let db = TempDb::new();
@@ -465,6 +584,8 @@ fn diary_round_trip_and_lastn_ordering() {
         tombstoned_at: None,
         removed_by_batch: None,
         operational_bitmap: 0,
+        reward: None,
+        reward_provenance: None,
     };
     let mut e2 = e1.clone();
     e2.id = "e2".to_string();
@@ -530,6 +651,149 @@ fn recall_trace_since_filters_and_orders_ascending() {
         .unwrap();
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(ids, vec!["mid", "late"]);
+}
+
+// ---------------------------------------------------------------------------
+// § 6b — mark_recall_traces_used + count_recall_traces (parity)
+// ---------------------------------------------------------------------------
+
+/// Bulk-mark flips the used bit on matching rows only, leaving out-of-window
+/// and different-target rows untouched. Mirrors Swift
+/// `MarkRecallTracesUsedTests.bulkMarkFlipsBit`.
+#[test]
+fn mark_recall_traces_used_marks_only_matching_rows() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    // Five rows: two for target "drawer-A" in window, one outside, two for "drawer-B".
+    let since = "2024-01-01T00:00:00.000Z";
+    let now_ts = "2024-01-03T00:00:00.000Z";
+
+    store.insert_recall_trace(&RecallTraceItem::new("t1", "drawer-A", "2024-01-01T00:00:00.000Z", None, 0)).unwrap();
+    store.insert_recall_trace(&RecallTraceItem::new("t2", "drawer-A", "2024-01-02T00:00:00.000Z", None, 0)).unwrap();
+    store.insert_recall_trace(&RecallTraceItem::new("t3", "drawer-A", "2024-01-04T00:00:00.000Z", None, 0)).unwrap(); // outside window
+    store.insert_recall_trace(&RecallTraceItem::new("t4", "drawer-B", "2024-01-01T12:00:00.000Z", None, 0)).unwrap();
+    store.insert_recall_trace(&RecallTraceItem::new("t5", "drawer-B", "2024-01-02T12:00:00.000Z", None, 0)).unwrap();
+
+    let touched = store.mark_recall_traces_used("drawer-A", since, now_ts).unwrap();
+    assert_eq!(touched, 2, "only two drawer-A rows are in the window");
+
+    assert!(store.get_recall_trace("t1").unwrap().unwrap().used(), "t1 must be marked");
+    assert!(store.get_recall_trace("t2").unwrap().unwrap().used(), "t2 must be marked");
+    assert!(!store.get_recall_trace("t3").unwrap().unwrap().used(), "t3 (outside window) must NOT be marked");
+    assert!(!store.get_recall_trace("t4").unwrap().unwrap().used(), "t4 (different target) must NOT be marked");
+    assert!(!store.get_recall_trace("t5").unwrap().unwrap().used(), "t5 (different target) must NOT be marked");
+}
+
+/// Second call on already-marked rows returns 0 (idempotent).
+#[test]
+fn mark_recall_traces_used_is_idempotent() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    store.insert_recall_trace(&RecallTraceItem::new(
+        "idem-1", "drawer-Y", "2024-01-02T00:00:00.000Z", None, 0,
+    )).unwrap();
+
+    let first = store.mark_recall_traces_used(
+        "drawer-Y", "2024-01-01T00:00:00.000Z", "2024-01-03T00:00:00.000Z",
+    ).unwrap();
+    assert_eq!(first, 1);
+
+    // Second call — already marked, must return 0.
+    let second = store.mark_recall_traces_used(
+        "drawer-Y", "2024-01-01T00:00:00.000Z", "2024-01-03T00:00:00.000Z",
+    ).unwrap();
+    assert_eq!(second, 0);
+}
+
+/// Unknown target returns Ok(0) without error.
+#[test]
+fn mark_recall_traces_used_unknown_target_returns_zero() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let n = store.mark_recall_traces_used(
+        "nonexistent", "2000-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z",
+    ).unwrap();
+    assert_eq!(n, 0);
+}
+
+/// count_recall_traces returns total row count across all targets and used states.
+#[test]
+fn count_recall_traces_reports_total() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    assert_eq!(store.count_recall_traces().unwrap(), 0, "empty table → 0");
+
+    for i in 1..=3u32 {
+        store.insert_recall_trace(&RecallTraceItem::new(
+            &format!("ct-{i}"), &format!("drawer-{i}"),
+            "2024-06-01T00:00:00.000Z", None, 0,
+        )).unwrap();
+    }
+
+    // Mark one as used; count must still include it.
+    store.mark_recall_trace_used("ct-2", NOW).unwrap();
+
+    assert_eq!(store.count_recall_traces().unwrap(), 3, "three rows total");
+}
+
+// ---------------------------------------------------------------------------
+// § 6c — prune_recall_traces (parity)
+//
+// Mirrors Swift DrawerStore.pruneRecallTraces(olderThan:) and the
+// InMemory counterpart tests added in Item A.
+// ---------------------------------------------------------------------------
+
+/// prune_recall_traces deletes rows with recalledAt strictly before cutoff.
+#[test]
+fn prune_recall_traces_removes_rows_before_cutoff() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    store.insert_recall_trace(&RecallTraceItem::new(
+        "p-old1", "d-1", "2024-01-01T00:00:00.000Z", None, 0,
+    )).unwrap();
+    store.insert_recall_trace(&RecallTraceItem::new(
+        "p-old2", "d-2", "2024-06-01T00:00:00.000Z", None, 0,
+    )).unwrap();
+    store.insert_recall_trace(&RecallTraceItem::new(
+        "p-keep", "d-3", "2024-12-01T00:00:00.000Z", None, 0,
+    )).unwrap();
+
+    // ISO8601 lexicographic < equals numeric < for canonical UTC strings
+    // (fleet date rule). Cutoff is the exact timestamp of the kept row —
+    // only rows strictly before the cutoff are deleted.
+    let deleted = store.prune_recall_traces("2024-12-01T00:00:00.000Z").unwrap();
+    assert_eq!(deleted, 2, "two rows before cutoff must be deleted");
+
+    assert!(store.get_recall_trace("p-keep").unwrap().is_some(), "kept row must survive");
+    assert!(store.get_recall_trace("p-old1").unwrap().is_none(), "p-old1 pruned");
+    assert!(store.get_recall_trace("p-old2").unwrap().is_none(), "p-old2 pruned");
+}
+
+/// prune_recall_traces returns 0 when no rows are before the cutoff.
+#[test]
+fn prune_recall_traces_nothing_to_prune_returns_zero() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    store.insert_recall_trace(&RecallTraceItem::new(
+        "recent", "d-r", "2025-06-01T00:00:00.000Z", None, 0,
+    )).unwrap();
+    let deleted = store.prune_recall_traces("2020-01-01T00:00:00.000Z").unwrap();
+    assert_eq!(deleted, 0);
+    assert!(store.get_recall_trace("recent").unwrap().is_some());
+}
+
+/// prune_recall_traces on an empty table returns 0.
+#[test]
+fn prune_recall_traces_empty_table_returns_zero() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let deleted = store.prune_recall_traces("2099-01-01T00:00:00.000Z").unwrap();
+    assert_eq!(deleted, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -733,4 +997,245 @@ fn audit_events_survive_reopen() {
         .unwrap();
     // Capture event + operational mutation event = 2.
     assert_eq!(events.len(), 2, "audit events must survive disk round-trip");
+}
+
+// ---------------------------------------------------------------------------
+// C3 regression gate — bounded recall delegation must never silently empty
+// ---------------------------------------------------------------------------
+
+/// C3 (2026-06-12 inspection): `PostgresDrawerStore` once lacked an
+/// `all_drawers_bounded` override and the trait default returned `Ok(vec![])`
+/// — every recall on that backend silently returned ZERO rows, caught by no
+/// test. The default now DERIVES from `all_drawers` (truncate to limit). This
+/// gate pins the delegation contract on a real durable backend: with drawers
+/// present, a bounded scan must return them (bounded), never empty.
+#[test]
+fn c3_all_drawers_bounded_never_silently_empty() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    for i in 0..5 {
+        let d = sample_drawer(&format!("c3-{i}"), "Archive", "delegation", "body");
+        store.add_drawer(&d, NOW + i).unwrap();
+    }
+
+    // Bounded: exactly the limit, never empty.
+    let two = store.all_drawers_bounded(Some(2)).unwrap();
+    assert_eq!(two.len(), 2, "bounded scan must honor the limit, not return empty");
+
+    // Unbounded (None): every live drawer.
+    let all = store.all_drawers_bounded(None).unwrap();
+    assert_eq!(all.len(), 5, "None limit must return every live drawer");
+
+    // Projected variant (the .structured no-blob path) — same cardinality,
+    // content stripped.
+    let projected = store.all_drawers_bounded_projected(Some(5)).unwrap();
+    assert_eq!(projected.len(), 5, "projected bounded scan must not be empty");
+    assert!(projected.iter().all(|d| d.content.is_empty()),
+            "projected scan must strip content (spec § 7.3 parity)");
+}
+
+// ---------------------------------------------------------------------------
+// FINDING-3 regression gate — all_kg_facts_including_retired (math-provenance)
+// ---------------------------------------------------------------------------
+//
+// Guards the math-provenance gate finding that `all_kg_facts_including_retired`
+// had a silent-empty trait default. The SQLite concrete backend overrides with a
+// real implementation. These tests verify the concrete backend produces correct
+// results so the silent-empty default change does not regress production reads.
+
+/// SQLite concrete store — empty estate returns empty vec, not an error.
+/// A genuinely-empty estate is a valid state distinct from a missing impl.
+#[test]
+fn finding3_sqlite_all_kg_facts_including_retired_empty_estate() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let result = store.all_kg_facts_including_retired().unwrap();
+    assert!(result.is_empty(), "empty estate should return empty vec on SQLite");
+}
+
+/// SQLite concrete store — active facts appear in the timeline.
+#[test]
+fn finding3_sqlite_all_kg_facts_including_retired_sees_active_facts() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let f = KGFact::new(
+        tid("f1"),
+        "alice".to_string(),
+        "livesIn".to_string(),
+        "berlin".to_string(),
+        tid("d1"),
+        NOW,
+    );
+    store.add_kg_fact(&f).unwrap();
+    let rows = store.all_kg_facts_including_retired().unwrap();
+    assert_eq!(rows.len(), 1, "active fact must appear in timeline (SQLite)");
+    assert_eq!(rows[0].subject, "alice");
+}
+
+/// SQLite concrete store — retired (withdrawn) facts appear in the timeline
+/// but NOT in the active-only `all_kg_facts()` scan.
+#[test]
+fn finding3_sqlite_all_kg_facts_including_retired_sees_retired_facts() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let f = KGFact::new(
+        tid("f2"),
+        "bob".to_string(),
+        "worksAt".to_string(),
+        "acme".to_string(),
+        tid("d2"),
+        NOW,
+    );
+    store.add_kg_fact(&f).unwrap();
+    store.withdraw_kg_fact(&tid("f2"), NOW + 1).unwrap();
+
+    // Active-only scan must not include the retired fact.
+    let active = store.all_kg_facts().unwrap();
+    assert!(active.is_empty(), "withdrawn fact must not appear in active-only scan (SQLite)");
+
+    // Full timeline must include it.
+    let timeline = store.all_kg_facts_including_retired().unwrap();
+    assert_eq!(timeline.len(), 1, "withdrawn fact must appear in timeline (SQLite)");
+    assert_eq!(timeline[0].subject, "bob");
+}
+
+/// SQLite concrete store — results survive disk round-trip (reopen).
+/// Pins that the SQLite backend actually persists kg_facts, so timeline
+/// results are not ephemeral in-process artifacts.
+#[test]
+fn finding3_sqlite_all_kg_facts_including_retired_survives_reopen() {
+    let db = TempDb::new();
+    {
+        let store = open_sqlite(db.path());
+        let f_active = KGFact::new(
+            tid("fa"),
+            "carol".to_string(),
+            "knows".to_string(),
+            "dave".to_string(),
+            tid("d3"),
+            NOW,
+        );
+        let f_retired = KGFact::new(
+            tid("fr"),
+            "eve".to_string(),
+            "uses".to_string(),
+            "tool".to_string(),
+            tid("d4"),
+            NOW + 1,
+        );
+        store.add_kg_fact(&f_active).unwrap();
+        store.add_kg_fact(&f_retired).unwrap();
+        store.withdraw_kg_fact(&tid("fr"), NOW + 2).unwrap();
+        // Drop store — flushes WAL-mode SQLite.
+    }
+    // Reopen from same path.
+    let store2 = open_sqlite(db.path());
+    let timeline = store2.all_kg_facts_including_retired().unwrap();
+    assert_eq!(
+        timeline.len(),
+        2,
+        "both active and retired facts must survive disk round-trip"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// § N — Durable-newtype trait-default regression guard
+//
+// Background: commit 2b549c37 made all empty-success DrawerStore read
+// defaults fail-loud (return DatabaseUnavailable). `SqliteDrawerStore` is a
+// newtype over `DrawerStoreCore` that hand-forwards every method to `.0`
+// with no `Deref`. If a method is NOT forwarded, the newtype inherits the
+// fail-loud trait default and HARD-ERRORS on a real estate. `all_tunnels`
+// was the one omitted forward; these tests assert it (and the B-1 reader
+// path that depends on it) return the REAL DrawerStoreCore result on the
+// durable SQLite backend, never DatabaseUnavailable.
+// ---------------------------------------------------------------------------
+
+/// `all_tunnels` on the durable SQLite newtype returns the real rows — it
+/// must NOT inherit the fail-loud trait default. Populated case.
+#[test]
+fn all_tunnels_durable_sqlite_returns_real_rows() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+
+    // Two distinct tunnels in different wings so we exercise the
+    // cross-wing aggregation `all_tunnels` performs.
+    let mut t1 = Tunnel::new(
+        "t1".to_string(),
+        "w1".to_string(),
+        "k1".to_string(),
+        "w1".to_string(),
+        "p1".to_string(),
+        "supplies".to_string(),
+        "alice".to_string(),
+        NOW,
+    );
+    t1.source_drawer_id = Some(tid("d1"));
+    let mut t2 = Tunnel::new(
+        "t2".to_string(),
+        "w2".to_string(),
+        "k2".to_string(),
+        "w2".to_string(),
+        "p2".to_string(),
+        "supplies".to_string(),
+        "alice".to_string(),
+        NOW,
+    );
+    t2.source_drawer_id = Some(tid("d2"));
+    store.add_tunnel(&t1).unwrap();
+    store.add_tunnel(&t2).unwrap();
+
+    // The load-bearing assertion: this is `.unwrap()`, so a
+    // DatabaseUnavailable from an inherited fail-loud default would panic.
+    let all = store
+        .all_tunnels()
+        .expect("durable SQLite all_tunnels must return real rows, not DatabaseUnavailable");
+    assert_eq!(all.len(), 2, "both tunnels across both wings must be returned");
+}
+
+/// `all_tunnels` on a genuinely empty durable SQLite estate returns an empty
+/// Vec — NOT DatabaseUnavailable. Distinguishes "real empty result" from
+/// "fail-loud trait default".
+#[test]
+fn all_tunnels_durable_sqlite_empty_estate_is_ok_empty() {
+    let db = TempDb::new();
+    let store = open_sqlite(db.path());
+    let all = store
+        .all_tunnels()
+        .expect("empty durable estate must return Ok(empty), not DatabaseUnavailable");
+    assert!(all.is_empty(), "fresh estate has no tunnels");
+}
+
+/// Regression guard for the dreaming-reader B-1 path: `Estate::all_tunnels`
+/// (estate_verbs.rs) delegates to `DrawerStore::all_tunnels`. Over a
+/// SQLite-backed Estate this must return real rows — the path the re-gate
+/// flagged as hard-erroring on durable backends.
+#[test]
+fn estate_all_tunnels_b1_path_works_on_sqlite_backend() {
+    use locus_kit::estate::Estate;
+    use locus_kit::estate_types::OwnerCredentials;
+    use std::sync::Arc;
+
+    let db = TempDb::new();
+    let store = Arc::new(SqliteDrawerStore::from_path(db.path(), NOW, None, 5.0).unwrap());
+    let estate = Estate::create(store.clone(), OwnerCredentials::new("owner"), None).unwrap();
+
+    let mut t = Tunnel::new(
+        "t1".to_string(),
+        "w1".to_string(),
+        "k1".to_string(),
+        "w1".to_string(),
+        "p1".to_string(),
+        "supplies".to_string(),
+        "alice".to_string(),
+        NOW,
+    );
+    t.source_drawer_id = Some(tid("d1"));
+    store.add_tunnel(&t).unwrap();
+
+    let all = estate
+        .all_tunnels()
+        .expect("B-1 reader path must work on a SQLite-backed estate, not DatabaseUnavailable");
+    assert_eq!(all.len(), 1, "the single estate tunnel must surface via the B-1 path");
 }

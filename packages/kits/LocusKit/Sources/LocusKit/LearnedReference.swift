@@ -11,16 +11,17 @@ import Foundation
 /// that verb writes to. It is a *product* noun in the language taxonomy
 /// (`AriaLexiconLib/Noun.swift` — `learnedReference.role == .product`).
 ///
-/// This mission ships only the value type, its operational accessors, the
-/// `learned_references` table, and store persistence. No verb behaviour
-/// (learn / mutate / withdraw / expunge / recall) is implemented here — the
-/// verb missions target this substrate later.
+/// This module ships the value type, its operational accessors, the
+/// `learned_references` table, and store persistence — the noun/persistence
+/// layer. The verbs that act on it live in `EstateVerbs`; notably `learn`,
+/// which derives a `LearnedReference` from a `SourceCatalogEntry` and writes it
+/// through this layer (implemented at `EstateVerbs.learn`).
 ///
 /// ## Field shape — source-grounded
 ///
 /// The mission brief sketched a KGFact-shaped triple with a `grounding_ref`
 /// column. Source is ground truth (mission "Read First"): the architecture
-/// spec (`docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8.md` § 7.8.2)
+/// spec (`docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` § 7.8.2)
 /// defines `LearnedReference` as a *reference* noun, not a triple:
 ///
 /// ```
@@ -34,10 +35,10 @@ import Foundation
 /// completion report:
 ///
 /// - `source: SourceCatalogEntry` → `sourceCatalogID: String`. The
-///   `SourceCatalogEntry` type is not implemented anywhere in the codebase
-///   (spec-only). The substrate stores a reference to the catalog entry as
-///   an identifier string, the same way `KGFact` stores `sourceDrawerID`
-///   rather than embedding a `Drawer`.
+///   `SourceCatalogEntry` type is implemented in `SourceCatalogEntry.swift`
+///   (both Swift and Rust). The substrate stores a reference to the catalog
+///   entry as an identifier string, the same way `KGFact` stores
+///   `sourceDrawerID` rather than embedding a `Drawer`.
 /// - `mode: LearnMode` lives in the operational bitmap (bit 12), not as a
 ///   stored struct field. Cookbook v1.0 § 2.4 (which supersedes the v0.8
 ///   spec on bitmap layout) places `mode` in the LearnedReference
@@ -91,9 +92,9 @@ public struct LearnedReference: Equatable, Codable, Sendable {
 
     /// Reference to the `SourceCatalogEntry` this reference was learned from
     /// (spec § 7.8.2 `source`). Stored as the catalog entry's identifier
-    /// string — the `SourceCatalogEntry` value type is not implemented in
-    /// the substrate, so the reference is carried the way `KGFact` carries
-    /// `sourceDrawerID`. Indexed (`idx_learned_references_source`) so a
+    /// string — a foreign-key reference, the way `KGFact` carries
+    /// `sourceDrawerID`, rather than embedding the full `SourceCatalogEntry`
+    /// value. Indexed (`idx_learned_references_source`) so a
     /// refresh sweep can resolve every reference from one source.
     public let sourceCatalogID: String
 

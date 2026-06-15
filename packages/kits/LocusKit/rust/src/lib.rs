@@ -86,7 +86,9 @@
 //! - `recall_stream` — synchronous paged cursor (`RecallStream`,
 //!   `RecallPage`) over the evaluator's output
 //! - `estate_verbs` — Estate verb surface: `capture`, `recall`,
-//!   `withdraw`, and stubs for `mutate`, `expunge`, `reanchor`, `learn`
+//!   `withdraw`, `mutate`, `expunge`, `reanchor`, and `learn`
+//!   (all implemented; `learn` derives a `LearnedReference` from a
+//!   `SourceCatalogEntry` and persists it — see estate_verbs.rs § 7.8.2)
 //! - `estate_audit` — audit / history methods (`audit_trail`,
 //!   `bitmap_state`)
 //!
@@ -150,6 +152,7 @@ mod reanchor_tests;
 pub mod recall_stream;
 pub mod recall_trace_item;
 pub mod schema;
+pub mod source_catalog_entry;
 pub mod summaries;
 pub mod telemetry;
 pub mod tunnel;

@@ -1,11 +1,10 @@
 //! Estate verb surface. Ports `EstateVerbs.swift`.
 //!
-//! Implements `capture`, `recall`, `withdraw`, and `expunge` as
-//! working verbs and `mutate`, `reanchor`, `learn` as stubs that
-//! return `LocusKitError::InvalidContent` until their owning missions
-//! ship.
-//! Mirrors the Swift split: `Estate.swift` carries the lifecycle
-//! surface; this file carries the verbs.
+//! Implements all seven verbs as working verbs: `capture`, `recall`,
+//! `withdraw`, `expunge`, `mutate`, `reanchor`, and `learn`. `learn`
+//! derives a `LearnedReference` from a `SourceCatalogEntry`
+//! (spec § 7.8.2). Mirrors the Swift split: `Estate.swift` carries the
+//! lifecycle surface; this file carries the verbs.
 //!
 //! Per `GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md` § 7.8.1.
 //!
@@ -24,15 +23,21 @@
 //!   `Mutex`) provides the same serialisation guarantee.
 //! - `async throws -> T` → `Result<T, LocusKitError>` or plain return.
 //! - Swift `recall` is non-throwing and returns a `RecallStream`; the Rust
-//!   port mirrors that: evaluate errors collapse to an empty row set, and
-//!   a `RecallStream` is returned directly (not wrapped in `Result`).
+//!   port mirrors that: a `RecallStream` is returned directly (not wrapped in
+//!   `Result`). An internal-read failure does NOT collapse silently — it names
+//!   a stage on `RecallStream::degraded_stages` (callers read
+//!   `degraded_stages()` to distinguish a FAILED read from a GENUINE-EMPTY
+//!   result). See `recall` and spec § 7.8.1 / LOCUSKIT SPEC § 5 B-3.
 //! - Swift maintains a `containerFP` OR aggregate for fingerprint pruning
-//!   (spec § 11.5). The Rust port omits this because `Estate.store` does
-//!   not carry a `containerFP` field and adding one would modify the landed
-//!   estate.rs body (out of scope per BRR). The unpruned path —
-//!   `store.all_drawers()` filtered to non-tombstoned — is used instead,
-//!   which is sound (correct, just slower for large corpora at which point
-//!   the SQLite backend and fingerprint pruning land together).
+//!   (spec § 11.5). The Rust port wires the same pruning path: when the
+//!   filter chain carries a prunable filter, `recall` calls
+//!   `DrawerStore::room_level_fingerprints` to enumerate container entries,
+//!   prunes with `BitmapEvaluator::container_survives` at both wing and room
+//!   level, then fetches rows only from surviving containers via
+//!   `DrawerStore::drawers_in_wing_room`. Non-prunable chains take the
+//!   bounded corpus scan path (`all_drawers_bounded` /
+//!   `all_drawers_bounded_projected`) unchanged. Both paths apply the same
+//!   `prefix(scan_bound)` cap so results are identically bounded.
 
 use crate::adjectives::{State, Trust};
 use crate::bitmap_evaluator::BitmapEvaluator;
@@ -46,15 +51,16 @@ use crate::provenance::Confirmation;
 use crate::recall_stream::RecallStream;
 use crate::tunnel::Tunnel;
 
-use crate::filter::RecallFrame;
+use crate::filter::{HydrationLevel, RecallFrame};
 use crate::recall_trace_item::RecallTraceItem;
+use intellectus_lib::{report, EventKind, StatSample};
 use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -64,6 +70,50 @@ use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────
 use substrate_kernel::bit_field;
 use substrate_lib::row_state::RowVerb;
+
+use crate::estate_types::RowID;
+use std::collections::HashSet;
+
+/// Result of `Estate::get_drawers_matching_frame`: the frame-admissible drawers
+/// plus the set of ids whose rows physically loaded.
+///
+/// `loaded_ids` is reported independently of the frame filter so a caller can
+/// gate a drop on load success — see `get_drawers_matching_frame`. Parity peer
+/// of Swift `FrameFilteredDrawers` (EstateTypes.swift).
+#[derive(Debug, Clone)]
+pub struct FrameFilteredDrawers {
+    /// Drawers from the requested ids that passed the frame's filter chain
+    /// (tombstone exclusion always enforced). Ordered per the frame's ordering.
+    pub admissible: Vec<Drawer>,
+    /// Every id whose row was returned by storage, regardless of frame filter.
+    pub loaded_ids: HashSet<String>,
+}
+
+/// Maximum candidate count for the recall locus-lane scan.
+///
+/// The GLK `RecallDirector` drains at most `min(max(limit * 4, 64), 256)`
+/// rows from the recall stream. Capping the estate scan at this value produces
+/// the identical drained set as an uncapped scan while doing O(cap) I/O instead
+/// of O(estate). Mirrors Swift `Estate.recallCandidateCap`.
+pub const RECALL_CANDIDATE_CAP: usize = 256;
+
+/// Stable stage identifiers for recall internal-read failures. Centralised so
+/// the strings cannot drift from the Swift port or from
+/// `RecallStream::degraded_stages`' documented vocabulary.
+pub(crate) mod recall_stage {
+    pub const LIVE_ROWS_READ_FAILED: &str = "locus.liveRows.readFailed";
+    pub const ROOM_FINGERPRINTS_READ_FAILED: &str = "locus.roomFingerprints.readFailed";
+    pub const ROOM_DRAWER_READ_FAILED: &str = "locus.roomDrawerRead.readFailed";
+    pub const BITMAP_EVAL_FAILED: &str = "locus.bitmapEval.failed";
+    /// The opt-in recall-trace WRITE (`store.insert_recall_traces`) failed.
+    /// recall stays non-throwing and STILL returns its rows — the lost trace
+    /// is surfaced here so the reward sweep's missing input is observable
+    /// rather than silent. Distinct namespace (`recall.`, not `locus.`)
+    /// because this is a write-side reward-path fault, not an internal-read
+    /// failure that emptied the result. Byte-identical to the Swift
+    /// `RecallStage.traceWriteFailed` constant.
+    pub const TRACE_WRITE_FAILED: &str = "recall.trace_write_failed";
+}
 
 impl Estate {
     // -----------------------------------------------------------------------
@@ -149,13 +199,20 @@ impl Estate {
         ) | (frame.feature_flags & DrawerFeatureFlags::FIELD_MASK);
 
         // Adjective bitmap assembly (cookbook §2.3 v0.6 layout):
-        //   bits 0–5  state                 (default 0 = Active)
-        //   bits 6–11 adjective_sensitivity (scale-gapped raw 0/16/32/48)
-        //
-        // The sensitivity raw values are scale-gapped and packed via
-        // write_field into the 6-bit window at bits 6–11.
-        // Per Adjectives.swift / spec § 5.5.
-        let adj_bitmap = bit_field::write_field(frame.sensitivity.raw_value(), 0, 6, 6);
+        //   bits 0–5   state                 (default 0 = Active)
+        //   bits 6–11  adjective_sensitivity (scale-gapped raw 0/16/32/48)
+        //   bits 12–17 exportability         (scale-gapped raw 0 = Private, 32 = Public)
+        //   bits 18–23 trust                 (default 0 = Verbatim)
+        // Sensitivity and exportability both use scale-gapped raw values;
+        // each is written into its 6-bit window via write_field, which
+        // masks the value to the window width before placing it.
+        // Per adjectives.rs / cookbook §2.3.
+        let adj_bitmap = bit_field::write_field(
+            frame.exportability.raw_value(),
+            bit_field::write_field(frame.sensitivity.raw_value(), 0, 6, 6),
+            12,
+            6,
+        );
 
         // Provenance bitmap assembly (cookbook §2.5 layout):
         //   bits 0–5   source_type           (SourceType raw)
@@ -219,6 +276,32 @@ impl Estate {
         drawer.event_time = frame.event_time.unwrap_or(now);
 
         self.store.add_drawer(&drawer, now)?;
+        // Maintain the per-container OR aggregate (spec § 11.5) so recall
+        // pruning and the maintenance fingerprint-drift signal stay current.
+        // The stored bitmaps equal the drawer's fields — add_drawer does not
+        // rewrite them — so OR-ing the drawer's own bitmaps is exact. Mirrors
+        // Swift `Estate.capture`'s `containerFP.orIn(...)` call after
+        // `store.addDrawer`. Bit-identical OR-fold: the store delegates to
+        // `ContainerFingerprintStore`, whose `merging` routes through the
+        // conformance-gated `substrate_types::or_reduce` kernel.
+        self.store.or_in_container_fingerprint(
+            &drawer.wing,
+            &drawer.room,
+            drawer.adjective_bitmap,
+            drawer.operational_bitmap,
+            drawer.provenance,
+            now,
+        )?;
+        // Emit a Capture event for the new drawer. NounType::Drawer = 0 (wire-stable,
+        // matches SubstrateTypes/NounType.swift). The report!() macro is a no-op when
+        // no sink is installed, so this is zero-cost in stdio/test mode.
+        report!(StatSample::event(
+            EventKind::Capture,
+            0i64,
+            drawer.id.clone(),
+            self.estate_uuid().to_string(),
+            now as f64,
+        ));
         Ok(drawer)
     }
     // -----------------------------------------------------------------------
@@ -311,6 +394,15 @@ impl Estate {
         tunnel.target_drawer_id = frame.target_drawer_id;
         tunnel.operational_bitmap = op_bitmap;
         self.store.add_tunnel(&tunnel)?;
+        // Emit a Capture event for the new tunnel. NounType::Tunnel = 1 (wire-stable,
+        // matches SubstrateTypes/NounType.swift).
+        report!(StatSample::event(
+            EventKind::Capture,
+            1i64,
+            tunnel.id.clone(),
+            self.estate_uuid().to_string(),
+            now as f64,
+        ));
         Ok(tunnel)
     }
 
@@ -327,56 +419,401 @@ impl Estate {
     /// (§ 7.9.4 step 3), content-tier filters (§ 7.9.4 step 4),
     /// ordering, and historical reconstruction (§ 7.9.6).
     ///
-    /// This method is **non-throwing** (matching Swift semantics): evaluate
-    /// errors collapse to an empty row set. The empty stream is the
-    /// documented signal that no rows matched; callers that need to
-    /// distinguish the two go through the substrate directly.
+    /// This method is **non-throwing** (matching Swift semantics): an
+    /// internal-read failure (the bounded scan, room-fingerprint enumeration,
+    /// a surviving room's drawer read, or the bitmap evaluator) is SURFACED as
+    /// a named stage on `RecallStream::degraded_stages` rather than collapsing
+    /// to a genuine-looking empty result. A GENUINE-EMPTY estate (every read
+    /// succeeded, no rows matched) returns an empty stream with EMPTY
+    /// `degraded_stages`; a FAILED read returns an empty (or short) stream with
+    /// the failing stage named — so the two are distinguishable. Callers that
+    /// need the rows behind a fault go through the substrate directly; callers
+    /// that need only to tell failed-from-empty read `degraded_stages()`.
+    /// Spec § 7.8.1 / LOCUSKIT SPEC § 5 B-3.
     ///
-    /// One `RecallTraceItem` is inserted per returned row (used = false).
-    /// This is the "later two-source reward" hook from the NEURONKIT_SPEC
-    /// § 3.1: the reward path later sets `used = true` for rows the caller
-    /// acted on, enabling Bradley-Terry to distinguish acted-on rows from
-    /// ignored ones. Trace insertion failures are silenced so a storage
-    /// fault does not break the caller's result.
+    /// Trace rows are written only when the caller opts in via
+    /// `frame.trace_limit`. `None` (the default) writes ZERO trace rows —
+    /// internal scans, VaultBridge scans, and any other non-reward caller do
+    /// not participate in the reward cycle. `Some(n)` writes at most the first
+    /// `min(n, filtered.len())` surfaced rows: the "later two-source reward"
+    /// hook from NEURONKIT_SPEC § 3.1, where the reward path later sets
+    /// `used = true` for rows the caller acted on. Trace insertion failures are
+    /// silenced so a storage fault does not break the caller's result.
     ///
     /// `now` is stamped once at the verb boundary per the
     /// deterministic-clock rule (CLAUDE.md). The trace rows record
     /// `recalled_at` so the reward sweep can group rows by recall session.
     pub fn recall(&self, frame: RecallFrame, now: i64) -> RecallStream {
-        // Fetch all drawers and filter to non-tombstoned (live corpus).
-        // The unpruned path is used because Estate.store carries no
-        // containerFP field (adding one would modify the landed estate.rs
-        // body, which is out of scope per the BRR for LP-1F).
-        let live: Vec<Drawer> = self
-            .store
-            .all_drawers()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|d| d.tombstoned_at.is_none())
-            .collect();
+        // ----------------------------------------------------------------
+        // Bounded scan, no-blob projection, opt-in trace. Mirrors Swift
+        // EstateVerbs.recall / liveRows.
+        //
+        // Scan bound: max(frame.limit.unwrap_or(0), RECALL_CANDIDATE_CAP).
+        // Director-style callers (limit ~20) keep the 256-row floor; explicit
+        // large-limit callers (e.g. VaultBridge limit 10_000_000) get a true
+        // full scan so no drawer is silently truncated. The 256 cap alone was
+        // a data-integrity bug: limit > 256 truncated to 256, so a full-estate
+        // scan missed drawers #257+.
+        //
+        // No-blob projection: when the filter chain has no content-tier
+        // predicate AND the caller does not need the blob (hydration != Full),
+        // the scan projects away the content column via
+        // all_drawers_bounded_projected, so a `.structured` caller receives
+        // content == "" (spec § 7.3) without paying the blob I/O — exactly the
+        // Swift `.structured` projection. A content predicate or a `.full`
+        // caller uses the blob-loading scan so the substring match can run and
+        // `.full` callers receive real content.
+        //
+        // Opt-in trace: written only when frame.trace_limit is Some(n), bounded
+        // to min(n, filtered.len()) surfaced rows. One batch insert.
+        // ----------------------------------------------------------------
 
-        // Run the four-tier bitmap evaluator pipeline. Errors collapse to
-        // an empty result — recall is non-throwing per spec § 7.8.1.
-        let filtered: Vec<Drawer> =
-            BitmapEvaluator::evaluate(&frame, &live, self.store.as_ref()).unwrap_or_default();
+        let scan_bound = frame.limit.unwrap_or(0).max(RECALL_CANDIDATE_CAP);
 
-        // Stamp one RecallTraceItem per returned row.
+        // Internal-read failures are SURFACED on the stream's degraded_stages,
+        // not silently swallowed to an empty result. A failed read produces an
+        // empty candidate set for a reason OTHER than "no matches"; recording
+        // the named stage lets the GLK consumer tell a FAILED recall from a
+        // GENUINE-EMPTY estate (spec § 7.8.1). `recall` stays non-throwing.
+        let mut degraded_stages: Vec<String> = Vec::new();
+
+        // Consume the single-use fault seam once at the top (test/test-seams
+        // builds only). `forced` is always `None` in a production build.
+        #[cfg(any(test, feature = "test-seams"))]
+        let forced = self.take_test_force_internal_read_error();
+        #[cfg(not(any(test, feature = "test-seams")))]
+        let forced: Option<()> = None;
+        // Per-read forced-fault predicates. In production `forced` is `()`-typed
+        // and these are always false, so the optimizer drops the branches.
+        #[cfg(any(test, feature = "test-seams"))]
+        let force_live_rows = forced == Some(crate::estate::RecallInternalRead::LiveRows);
+        #[cfg(any(test, feature = "test-seams"))]
+        let force_room_fingerprints =
+            forced == Some(crate::estate::RecallInternalRead::RoomFingerprints);
+        #[cfg(any(test, feature = "test-seams"))]
+        let force_room_drawer = forced == Some(crate::estate::RecallInternalRead::RoomDrawerRead);
+        #[cfg(any(test, feature = "test-seams"))]
+        let force_bitmap_eval = forced == Some(crate::estate::RecallInternalRead::BitmapEval);
+        // Trace-WRITE fault: fires AFTER reads + eval succeed, so a forced
+        // `.traceWrite` yields a populated result WITH the
+        // `recall.trace_write_failed` stage (recall stays non-throwing).
+        #[cfg(any(test, feature = "test-seams"))]
+        let force_trace_write = forced == Some(crate::estate::RecallInternalRead::TraceWrite);
+        #[cfg(not(any(test, feature = "test-seams")))]
+        let (
+            force_live_rows,
+            force_room_fingerprints,
+            force_room_drawer,
+            force_bitmap_eval,
+            force_trace_write,
+        ) = {
+            let _ = forced;
+            (false, false, false, false, false)
+        };
+
+        // The blob is needed when a content predicate must run the substring
+        // match (needs the body for the filter pass) or when the caller asked
+        // for Full hydration (wants the body in the result). Otherwise the
+        // no-blob projected scan is sufficient and correct.
+        let needs_content_for_filter =
+            BitmapEvaluator::chain_has_content_predicate(&frame.filter_chain);
+        let caller_needs_blob = frame.hydration_level == HydrationLevel::Full;
+
+        let candidates: Vec<Drawer> =
+            if BitmapEvaluator::chain_has_prunable_filter(&frame.filter_chain) {
+                // Fingerprint-pruning path: walk surviving rooms and fetch their
+                // rows, mirroring Swift EstateVerbs.liveRows (spec § 7.9.4 step 1).
+                //
+                // 1. Enumerate room-level container fingerprints.
+                // 2. For each room, check the wing-level rollup first (cached in a
+                //    local map). If the wing rollup fails `container_survives` the
+                //    entire wing is skipped without fetching individual rooms.
+                // 3. If the wing survives, check the room fingerprint. Only rooms
+                //    that survive fetch their drawers via `drawers_in_wing_room`.
+                // 4. Apply `prefix(scan_bound)` after collection so both paths emit
+                //    at most `scan_bound` rows — identical bound semantics to the
+                //    non-pruning path.
+                //
+                // `drawers_in_wing_room` already excludes tombstoned rows (same as
+                // Swift `store.drawersIn(wing:room:)`), so no post-filter is needed.
+                //
+                // Note on hydration: `drawers_in_wing_room` always loads full rows
+                // (content included). For .structured and .bitmapOnly callers the
+                // blob is loaded unnecessarily, but the pruning path visits only
+                // surviving rooms — typically a small fraction of the estate — so
+                // the dominant cost is the SQL scan, not the blob transfer.
+                // Room-fingerprint enumeration. A failure here means the pruning
+                // path cannot decide which rooms survive — surface it as a named
+                // stage rather than silently scanning nothing.
+                let entries = if force_room_fingerprints {
+                    degraded_stages.push(recall_stage::ROOM_FINGERPRINTS_READ_FAILED.to_string());
+                    Vec::new()
+                } else {
+                    match self.store.room_level_fingerprints() {
+                        Ok(e) => e,
+                        Err(_) => {
+                            degraded_stages
+                                .push(recall_stage::ROOM_FINGERPRINTS_READ_FAILED.to_string());
+                            Vec::new()
+                        }
+                    }
+                };
+
+                // Cache wing-level survive decisions so each wing is checked once.
+                // Keyed by wing name; value is true if the wing rollup survives.
+                let mut wing_survives: std::collections::HashMap<String, bool> =
+                    std::collections::HashMap::new();
+
+                let mut rows: Vec<Drawer> = Vec::new();
+                for entry in &entries {
+                    // Wing-level pre-check: fetch the wing rollup (room == "")
+                    // and test it. Cache the decision to avoid re-querying for
+                    // subsequent rooms in the same wing.
+                    let wing_ok = wing_survives
+                        .entry(entry.wing.clone())
+                        .or_insert_with(|| {
+                            // get() returns None when no wing rollup row exists
+                            // yet (possible on an estate that never called
+                            // or_in/rebuild). None → treat as surviving (sound:
+                            // absent aggregate must not prune, per spec § 11.5).
+                            match self.store.get_container_fingerprint(
+                                &entry.wing,
+                                crate::container_fingerprint_store::ContainerFingerprintStore::WING_ROLLUP_ROOM,
+                            ) {
+                                Ok(Some(fp)) => BitmapEvaluator::container_survives(
+                                    &frame.filter_chain,
+                                    fp,
+                                ),
+                                _ => true,
+                            }
+                        });
+                    if !*wing_ok {
+                        continue;
+                    }
+                    // Room-level check.
+                    if !BitmapEvaluator::container_survives(&frame.filter_chain, entry.fingerprint)
+                    {
+                        continue;
+                    }
+                    // Surviving room: fetch its non-tombstoned drawers. A failure
+                    // here means a room that SHOULD contribute rows silently
+                    // contributed none — surface it as a named stage instead of
+                    // returning a short result that looks like a genuine match set.
+                    let room_drawers = if force_room_drawer {
+                        if !degraded_stages
+                            .iter()
+                            .any(|s| s == recall_stage::ROOM_DRAWER_READ_FAILED)
+                        {
+                            degraded_stages
+                                .push(recall_stage::ROOM_DRAWER_READ_FAILED.to_string());
+                        }
+                        Vec::new()
+                    } else {
+                        match self.store.drawers_in_wing_room(&entry.wing, &entry.room) {
+                            Ok(d) => d,
+                            Err(_) => {
+                                if !degraded_stages
+                                    .iter()
+                                    .any(|s| s == recall_stage::ROOM_DRAWER_READ_FAILED)
+                                {
+                                    degraded_stages.push(
+                                        recall_stage::ROOM_DRAWER_READ_FAILED.to_string(),
+                                    );
+                                }
+                                Vec::new()
+                            }
+                        }
+                    };
+                    rows.extend(room_drawers);
+                }
+                // Apply bound after collection: both paths emit at most scan_bound rows.
+                rows.into_iter().take(scan_bound).collect()
+            } else {
+                // No pruning possible: bounded corpus scan in filed_at order.
+                // Uses no-blob projection when safe (no content predicate AND
+                // caller does not need the blob), matching Swift's no-blob path.
+                // A scan failure is surfaced as the live-rows stage rather than
+                // masquerading as a genuine-empty corpus.
+                if force_live_rows {
+                    degraded_stages.push(recall_stage::LIVE_ROWS_READ_FAILED.to_string());
+                    Vec::new()
+                } else {
+                    let scanned = if needs_content_for_filter || caller_needs_blob {
+                        self.store.all_drawers_bounded(Some(scan_bound))
+                    } else {
+                        self.store.all_drawers_bounded_projected(Some(scan_bound))
+                    };
+                    match scanned {
+                        Ok(rows) => rows
+                            .into_iter()
+                            .filter(|d| d.tombstoned_at.is_none())
+                            .collect(),
+                        Err(_) => {
+                            degraded_stages.push(recall_stage::LIVE_ROWS_READ_FAILED.to_string());
+                            Vec::new()
+                        }
+                    }
+                }
+            };
+
+        // Run the four-tier bitmap evaluator pipeline. A failure is SURFACED as
+        // a named degraded stage rather than masquerading as a genuine-empty
+        // result — recall is non-throwing per spec § 7.8.1, so the stream's
+        // degraded_stages is the channel. Skipped when an upstream read already
+        // failed (candidates is empty for a named reason; re-evaluating would
+        // only re-confirm empty).
+        let filtered: Vec<Drawer> = if !degraded_stages.is_empty() {
+            Vec::new()
+        } else if force_bitmap_eval {
+            degraded_stages.push(recall_stage::BITMAP_EVAL_FAILED.to_string());
+            Vec::new()
+        } else {
+            match BitmapEvaluator::evaluate(&frame, &candidates, self.store.as_ref()) {
+                Ok(f) => f,
+                Err(_) => {
+                    degraded_stages.push(recall_stage::BITMAP_EVAL_FAILED.to_string());
+                    Vec::new()
+                }
+            }
+        };
+
+        // Opt-in trace writes (Swift parity): nil/None → write nothing; Some(n)
+        // → write at most the first min(n, filtered.len()) surfaced rows. The
+        // reward sweep cares only about what was returned to the caller.
         // `recalled_at` is stored as TEXT ISO8601 per the fleet date rule.
-        let recalled_at = epoch_to_iso8601(now);
-        for drawer in &filtered {
-            let trace = RecallTraceItem::new(
-                Uuid::new_v4().to_string(),
-                drawer.id.clone(),
-                recalled_at.clone(),
-                None, // ordered-by-capture-time recalls carry no score
-                0,    // operational_bitmap = 0 (used = false)
-            );
-            // Silence errors — a storage fault must not break the recall result.
-            let _ = self.store.insert_recall_trace(&trace);
+        //
+        // FAIL-CLOSED (Swift parity): a trace-write fault does NOT empty the
+        // result — recall stays non-throwing and the caller still receives its
+        // rows. But a DROPPED trace is the reward sweep's missing input, so it
+        // is SURFACED as `recall.trace_write_failed` on the same degraded_stages
+        // channel the internal-read failures use, rather than silently swallowed.
+        // Genuine success records nothing.
+        if let Some(trace_limit) = frame.trace_limit {
+            let count = trace_limit.min(filtered.len());
+            if count > 0 {
+                let recalled_at = epoch_to_iso8601(now);
+                let traces: Vec<RecallTraceItem> = filtered[..count]
+                    .iter()
+                    .map(|drawer| {
+                        RecallTraceItem::new(
+                            Uuid::new_v4().to_string(),
+                            drawer.id.clone(),
+                            recalled_at.clone(),
+                            None, // ordered-by-capture-time recalls carry no score
+                            0,    // operational_bitmap = 0 (used = false)
+                        )
+                    })
+                    .collect();
+                // TEST-ONLY seam: a forced `.traceWrite` drives this write to
+                // fail without a genuinely-broken store. No production caller
+                // arms it; in a production build `force_trace_write` is `false`
+                // and the branch is optimised away.
+                let write_result = if force_trace_write {
+                    Err(LocusKitError::SqliteError(
+                        "forced trace-write fault (test seam)".to_string(),
+                    ))
+                } else {
+                    self.store.insert_recall_traces(&traces)
+                };
+                if write_result.is_err() {
+                    degraded_stages.push(recall_stage::TRACE_WRITE_FAILED.to_string());
+                }
+            }
         }
 
         let page_size = frame.limit.unwrap_or(RecallStream::DEFAULT_PAGE_SIZE);
         RecallStream::new(filtered, page_size, frame.hydration_level)
+            .with_degraded_stages(degraded_stages)
+    }
+
+    /// FRAME-AWARE by-id load. Loads `ids` by row, then applies the frame's
+    /// bitmap/structured/content filter chain (via `BitmapEvaluator`, the exact
+    /// pipeline `recall` runs) so `admissible` is precisely the frame-filtered
+    /// subset of `ids` — identical semantics to a `recall(frame)` scan
+    /// intersected with `ids`, but as an O(candidates) by-id load.
+    ///
+    /// Parity peer of Swift `Estate.getDrawers(ids:matchingFrame:hydrationLevel:)`.
+    /// The Rust GLK recall path derives its `drawer_index` from a full
+    /// `estate.recall(frame)` scan and so does not call this on its hot path;
+    /// the capability is mirrored here for cross-port surface parity and for the
+    /// frame-faithful drop conformance tests.
+    ///
+    /// `loaded_ids` reports every id whose row was returned by storage,
+    /// regardless of the frame filter, so callers can gate a drop on load
+    /// success: an id that loaded but is absent from `admissible` failed the
+    /// frame filter (drop it); an id absent from `loaded_ids` did not load (a
+    /// transient/partial read) and must be DEGRADED gracefully, never dropped.
+    /// Tombstone exclusion is always enforced by `BitmapEvaluator` independent
+    /// of the chain.
+    ///
+    /// `BitmapOnly` hydration strips the content body (parity with the recall
+    /// page-emission `hydrate`); `Structured`/`Full` return the loaded row as-is
+    /// (`get_drawer` reads full rows — the no-blob projection is a scan-level
+    /// optimization not available on the single-row by-id path, and a content
+    /// predicate in the frame needs the body anyway).
+    pub fn get_drawers_matching_frame(
+        &self,
+        ids: &[RowID],
+        frame: &RecallFrame,
+    ) -> Result<FrameFilteredDrawers, LocusKitError> {
+        let mut loaded: Vec<Drawer> = Vec::with_capacity(ids.len());
+        let mut loaded_ids: HashSet<String> = HashSet::with_capacity(ids.len());
+        for id in ids {
+            if let Some(drawer) = self.store.get_drawer(id)? {
+                loaded_ids.insert(drawer.id.clone());
+                // Honor BitmapOnly stripping so the by-id load matches the recall
+                // page-emission hydration contract for the requested level.
+                let row = if frame.hydration_level == HydrationLevel::BitmapOnly {
+                    let mut d = drawer;
+                    d.content = String::new();
+                    d
+                } else {
+                    drawer
+                };
+                loaded.push(row);
+            }
+        }
+        let admissible = BitmapEvaluator::evaluate(frame, &loaded, self.store.as_ref())?;
+        Ok(FrameFilteredDrawers {
+            admissible,
+            loaded_ids,
+        })
+    }
+
+    /// Delete recall-trace rows whose `recalled_at` is strictly before
+    /// `cutoff`. Estate-level pass-through over
+    /// `DrawerStore::prune_recall_traces`. Returns the number of rows deleted.
+    ///
+    /// Called by the dreaming daemon's reward sweep to keep the recall_trace
+    /// table bounded. `cutoff` is an ISO8601 TEXT string derived from the
+    /// caller's deterministic `now`. Mirrors Swift
+    /// `Estate.pruneRecallTraces(olderThan:)`.
+    pub fn prune_recall_traces(&self, cutoff: &str) -> Result<usize, LocusKitError> {
+        self.store.prune_recall_traces(cutoff)
+    }
+
+    /// Bulk-mark recall-trace rows for `target` in the window `[since, now]`.
+    ///
+    /// Estate-level pass-through over `DrawerStore::mark_recall_traces_used`.
+    /// Both `since` and `now` are ISO8601 TEXT strings (fleet date rule).
+    /// Returns the number of rows whose `used` bit was flipped. Mirrors Swift
+    /// `Estate.markRecallTracesUsed(target:since:now:)`.
+    pub fn mark_recall_traces_used(
+        &self,
+        target: &str,
+        since: &str,
+        now: &str,
+    ) -> Result<usize, LocusKitError> {
+        self.store.mark_recall_traces_used(target, since, now)
+    }
+
+    /// Count all rows in the recall_trace table.
+    ///
+    /// Estate-level pass-through over `DrawerStore::count_recall_traces`.
+    /// Used by estate-status reporting. Mirrors Swift
+    /// `Estate.countRecallTraces()`.
+    pub fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
+        self.store.count_recall_traces()
     }
 
     // -----------------------------------------------------------------------
@@ -423,11 +860,20 @@ impl Estate {
         self.store.all_learned_references()
     }
 
-    /// All kg-facts in the estate where state cluster < 7, ordered by
-    /// `filed_at` ascending. Estate-level pass-through over
-    /// `DrawerStore::all_kg_facts`.
+    /// All kg-facts in the estate that are in the RowState Cluster-A
+    /// (active) set — `g_state_cluster < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW`
+    /// (16) — ordered by `filed_at` ascending. Estate-level pass-through
+    /// over `DrawerStore::all_kg_facts`.
     pub fn all_kg_facts(&self) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
         self.store.all_kg_facts()
+    }
+
+    /// All kg-facts in the estate regardless of lifecycle state — active AND
+    /// retired — ordered by `filed_at` ascending. Estate-level pass-through
+    /// over `DrawerStore::all_kg_facts_including_retired`.
+    /// Peer of the Swift `Estate.allKGFactsIncludingRetired()`.
+    pub fn all_kg_facts_including_retired(&self) -> Result<Vec<crate::kg_fact::KGFact>, LocusKitError> {
+        self.store.all_kg_facts_including_retired()
     }
 
     /// Insert a kg-fact into the estate. Estate-level pass-through over
@@ -476,6 +922,32 @@ impl Estate {
     /// without NeuronKit calling the store directly (B-1 compliance).
     pub fn all_drawers(&self) -> Result<Vec<Drawer>, LocusKitError> {
         self.store.all_drawers()
+    }
+
+    /// Up to `limit` drawers in the estate (including tombstoned rows),
+    /// in the store's natural `filedAt`-ascending order. Estate-level
+    /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is
+    /// applied at the storage layer (LIMIT), so the I/O is O(limit), not
+    /// O(estate)-then-truncate. `None` reads the full corpus, matching
+    /// `all_drawers`. Used by GLK to give the maintenance reader a bounded
+    /// scan without NeuronKit reaching the store directly (B-1 compliance).
+    pub fn all_drawers_bounded(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.all_drawers_bounded(limit)
+    }
+
+    /// Every room-level container fingerprint (room non-empty) with its
+    /// bitwise-OR aggregate. Estate-level pass-through over
+    /// `DrawerStore::room_level_fingerprints`. The maintenance daemon's
+    /// fingerprint-drift signal reads these through GLK as the live
+    /// per-scope fingerprint (B-1 compliance — NeuronKit never touches the
+    /// store).
+    pub fn room_level_fingerprints(
+        &self,
+    ) -> Result<Vec<crate::container_fingerprint_store::RoomLevelEntry>, LocusKitError> {
+        self.store.room_level_fingerprints()
     }
 
     /// All tunnels in the estate across all wings. Estate-level pass-through
@@ -567,30 +1039,30 @@ impl Estate {
     // expunge
     // -----------------------------------------------------------------------
 
-    /// Expunge a row (hard remove). Per cookbook §10.5: tombstones
-    /// the row, zeroes its content blob, sets the
-    /// `dreaming_recalc_required` worklist marker (adjective bit 26)
-    /// synchronously, leaves aggregates untouched (§9.5.1: already
-    /// de-identified statistical roll-ups), and emits a sealed audit
-    /// event so the fact-of-expunge is preserved (v0.35 I-6).
+    /// Expunge a drawer, with optional deferred audit seal.
     ///
-    /// Cookbook preconditions: "None beyond row existing." The
-    /// `confirmation: bool` parameter is a caller-supplied safety
-    /// check; expunge is destructive (the verbatim content is gone
-    /// after this call returns) so the API requires an explicit
-    /// `true` to proceed. Estate-level toggles (F17 second pass
-    /// item 2) are not in cookbook today and not enforced here.
+    /// When `seal_audit` is `true` (the default for direct LocusKit callers),
+    /// the audit event is sealed inside this call — preserving the historical
+    /// atomic single-call contract.
     ///
-    /// The cross-kit RAG vector delete (§10.5 second postcondition)
-    /// is GLK's orchestration responsibility (F17 second pass item 4)
-    /// and not invoked here; LocusKit's expunge is the storage-layer
-    /// half.
+    /// When `seal_audit` is `false` (the GLK orchestration path), the gate-
+    /// produced event is returned unsealed. The caller seals via
+    /// `seal_expunge_audit` after the cross-kit vector delete succeeds, or via
+    /// `seal_expunge_orphan_audit` if it fails. This satisfies the §B-2a audit
+    /// ordering invariant: success audit seals only after the full expunge
+    /// (storage + cross-kit delete) completes.
+    ///
+    /// The `now` parameter is millis since UNIX epoch. Passing it explicitly
+    /// makes the operation deterministic — callers use their own clock snapshot;
+    /// this function never calls `SystemTime::now`.
     pub fn expunge(
         &self,
         row_id: &str,
         reason: &str,
         confirmation: bool,
-    ) -> Result<(), LocusKitError> {
+        now: i64,
+        seal_audit: bool,
+    ) -> Result<substrate_lib::verbs::AuditEvent, LocusKitError> {
         if !confirmation {
             return Err(LocusKitError::InvalidContent(
                 "expunge requires confirmation: true (destructive op)".to_string(),
@@ -616,12 +1088,119 @@ impl Estate {
         } else {
             Some(reason)
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
         self.store
-            .expunge_gated(row_id, &changed_by, reason_opt, now)
+            .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit)
+    }
+
+    /// Seal the success audit event produced by `expunge(seal_audit: false)`.
+    ///
+    /// Called by the GLK orchestration path after the cross-kit vector delete
+    /// (step 2) succeeds. The event was produced in step 1 but held unsealed
+    /// until the full expunge completed, per the §B-2a audit ordering invariant.
+    pub fn seal_expunge_audit(
+        &self,
+        event: &substrate_lib::verbs::AuditEvent,
+    ) -> Result<(), LocusKitError> {
+        self.store.seal_expunge_audit(event)
+    }
+
+    /// Seal an "expungeOrphan" audit event when step 2 (cross-kit vector
+    /// delete) failed after step 1 (storage expunge) already committed.
+    ///
+    /// Records the partial expunge honestly: the row is tombstoned and content
+    /// is zeroed, but the vector embedding was NOT removed. The substrate verb
+    /// string `"expungeOrphan"` maps to `UnifiedAuditVerb::Expunge` in the
+    /// unified log, so downstream consumers see the storage-level expunge.
+    ///
+    /// Returns `Err` when the underlying store cannot write the orphan audit
+    /// event (double-failure: step-2 vector delete already failed). The GLK
+    /// coordinator folds this error into the returned `CrossKitVectorDeleteFailed`
+    /// reason string so callers learn both failures from a single typed error.
+    pub fn seal_expunge_orphan_audit(
+        &self,
+        row_id: &str,
+        success_event: &substrate_lib::verbs::AuditEvent,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        // Test seam: force a one-shot orphan-seal failure to exercise the
+        // double-failure path in the GLK coordinator without needing a
+        // genuinely-broken store. Compiled out in production builds.
+        #[cfg(any(test, feature = "test-seams"))]
+        if self.take_test_force_orphan_seal_error() {
+            return Err(LocusKitError::InvalidContent(
+                "forced orphan-seal failure".to_string(),
+            ));
+        }
+
+        let changed_by = self
+            .store
+            .read_manifest()
+            .map(|m| m.owner_identifier)
+            .unwrap_or_default();
+        let changed_by = if changed_by.is_empty() {
+            "estate".to_string()
+        } else {
+            changed_by
+        };
+        self.store
+            .seal_expunge_orphan_audit(row_id, success_event, &changed_by, now)
+    }
+
+    /// Seal a synthetic `"expungeOrphan"` audit event for use by the
+    /// expunge integrity sweep.
+    ///
+    /// Unlike `seal_expunge_orphan_audit` — which requires the original
+    /// step-1 gate event (held in memory, lost on crash) — this path
+    /// reads the drawer's current bitmaps and lattice anchor directly from
+    /// the store to construct the event. The "before" bitmaps are
+    /// approximated as the current (post-tombstone) state; this is
+    /// acceptable for crash-recovery forensics where the pre-tombstone
+    /// snapshot is unavailable.
+    ///
+    /// Called by `GLK::run_expunge_integrity_sweep` for each row in the
+    /// orphan set (tombstoned without any expunge audit event).
+    pub fn seal_expunge_orphan_audit_synthetic(
+        &self,
+        row_id: &str,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        let changed_by = self
+            .store
+            .read_manifest()
+            .map(|m| m.owner_identifier)
+            .unwrap_or_default();
+        let changed_by = if changed_by.is_empty() {
+            "estate".to_string()
+        } else {
+            changed_by
+        };
+        self.store
+            .seal_expunge_orphan_for_sweep(row_id, &changed_by, now)
+    }
+
+    // -----------------------------------------------------------------------
+    // Integrity sweep query surface
+    // -----------------------------------------------------------------------
+
+    /// Tombstoned drawers that have no sealed "tombstone" or "expungeOrphan"
+    /// audit event — the input set for `GLK::run_expunge_integrity_sweep`.
+    ///
+    /// A row is in this set when storage-expunge step 1 completed (tombstone
+    /// written) but neither the success-audit (step 3) nor the orphan-audit
+    /// (step-2-failure path) was sealed. This covers two root causes:
+    ///
+    ///   1. **Crash window**: the process crashed between step 1 and step 3.
+    ///   2. **Double-failure**: both the step-2 vector delete and the
+    ///      orphan-seal write failed; the row is tombstoned with no audit record.
+    ///
+    /// The GLK coordinator re-attempts the cross-kit delete for each returned
+    /// row and seals the appropriate audit. The query is bounded because
+    /// tombstoned rows are rare — each successful expunge removes one from this
+    /// set permanently.
+    pub fn tombstoned_rows_without_expunge_audit(
+        &self,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.store.tombstoned_rows_without_expunge_audit()
     }
 
     // -----------------------------------------------------------------------
@@ -668,9 +1247,9 @@ impl Estate {
     /// Resolve, Accept, Supersede, Revive) route through
     /// `DrawerStore::mutate_state`, which validates against the canonical
     /// automaton (cookbook §9.2). Adjective-axis kinds (CorrectSensitivity,
-    /// CorrectTrust) recompose `adjective_bitmap` and persist via
-    /// `DrawerStore::mutate_adjective`. Guard conditions: Resolve requires
-    /// current state == Contested; Accept requires trust >= Canonical (S-1);
+    /// CorrectTrust, CorrectExportability) recompose `adjective_bitmap` and
+    /// persist via `DrawerStore::mutate_adjective`. Guard conditions: Resolve
+    /// requires current state == Contested; Accept requires trust >= Canonical (S-1);
     /// Revive requires current state in Cluster B. Mirror of Swift `Estate.mutate`.
     pub fn mutate(
         &self,
@@ -820,24 +1399,90 @@ impl Estate {
                         id: row_id.to_string(),
                     }
                 })?;
-                // Guard: revive is only valid from Cluster B (historical) states
-                // per ARCH SPEC §6.2. Cluster A and Cluster C are not eligible.
                 let state = State::from_raw(bit_field::extract_field(drawer.adjective_bitmap, 0, 6));
-                let is_knew_past = matches!(
-                    state,
-                    State::Superseded | State::Decayed | State::Withdrawn | State::Expired
-                );
-                if !is_knew_past {
-                    return Err(LocusKitError::InvalidContent(format!(
-                        "revive: only valid from Cluster B states (Decayed, Withdrawn, Expired, Superseded); current: {state:?}"
-                    )));
+                // revive restores a terminal-but-recoverable row to active.
+                // Legality is decided per source state (cookbook §9.3, §6.2):
+                //
+                //   Decayed   → Active   LEGAL (re-observation revives)
+                //   Withdrawn → Active   LEGAL (unwithdraw an explicit retraction)
+                //   Expired   → Active   LEGAL (TTL revive; no fresh TTL until a
+                //                                later mutation sets one)
+                //   Superseded→ Active   CONDITIONAL on the lineage rule below
+                //   Active/Pending/Contested/Accepted   REFUSED (not historical —
+                //                                a live row has nothing to revive)
+                //   Rejected  → Active   REFUSED (a review verdict; the recovery
+                //                                path is re-propose, not revive)
+                //   Tombstoned→ Active   REFUSED (hard delete; content erased)
+                //
+                // Each refusal is a real domain rule surfaced as
+                // `DisciplineViolation` naming the rule — never `NotSupported`.
+                match state {
+                    // Unconditionally recoverable Cluster-B states.
+                    State::Decayed | State::Withdrawn | State::Expired => {}
+                    State::Superseded => {
+                        // Lineage rule (cookbook §6.2): a superseded row was
+                        // replaced by a successor sharing its lineage_id. If
+                        // that successor (or a later link) still lives — i.e.
+                        // some row in this lineage is in Cluster A — reviving
+                        // the predecessor would put TWO active rows at the same
+                        // lineage head. That is a domain contradiction, so
+                        // revive refuses and names the conflicting successor.
+                        // When NO living successor remains (it was itself
+                        // withdrawn/expired/decayed or tombstoned/expunged), the
+                        // head is vacant and the predecessor may reclaim it.
+                        if let Some(successor_id) = self.store.living_successor_in_lineage(
+                            &drawer.lineage_id.to_string(),
+                            row_id,
+                        )? {
+                            return Err(LocusKitError::DisciplineViolation {
+                                from: state.raw_value(),
+                                to: State::Active.raw_value(),
+                                reason: format!(
+                                    "revive: superseded row has a living successor \
+                                     ({successor_id}) holding the lineage head; revive the \
+                                     lineage head or withdraw/expunge the successor first"
+                                ),
+                            });
+                        }
+                    }
+                    State::Active | State::Pending | State::Contested | State::Accepted => {
+                        // Cluster A — already live; nothing to revive.
+                        return Err(LocusKitError::DisciplineViolation {
+                            from: state.raw_value(),
+                            to: State::Active.raw_value(),
+                            reason: format!(
+                                "revive: row is already live ({state:?}); revive applies \
+                                 only to historical Cluster-B states"
+                            ),
+                        });
+                    }
+                    State::Rejected => {
+                        // Cluster C — a review verdict, not a recoverable
+                        // historical state. Re-entry is via re-proposal.
+                        return Err(LocusKitError::DisciplineViolation {
+                            from: state.raw_value(),
+                            to: State::Active.raw_value(),
+                            reason: "revive: rejected rows are not revivable; a rejection \
+                                     is a review verdict — re-propose the content instead"
+                                .to_string(),
+                        });
+                    }
+                    State::Tombstoned => {
+                        // Cluster C terminal — content erased; row gone in every
+                        // sense but the audit trail.
+                        return Err(LocusKitError::DisciplineViolation {
+                            from: state.raw_value(),
+                            to: State::Active.raw_value(),
+                            reason: "revive: tombstoned rows are unrecoverable; the \
+                                     content blob has been expunged"
+                                .to_string(),
+                        });
+                    }
                 }
-                // The canonical automaton (cookbook §9.2) supports only
-                // Decayed → Observe → Active. Withdrawn, Expired, and Superseded
-                // → Active are not in the automaton table; those attempts surface
-                // as a gate discipline violation. See LOCUSKIT_SPEC_v0.8.md §revive;
-                // a follow-up mission must extend the automaton to support
-                // withdrawn/expired/superseded → active.
+                // decayed/withdrawn/expired/superseded(head vacant) → active.
+                // The automaton legalizes all four via Observe (re-observation
+                // revives); the lineage contradiction for superseded was caught
+                // above, so by here the transition is unconditionally legal.
                 let changed_by = self.changed_by_or_estate();
                 let now = Self::now_millis();
                 self.store.mutate_state(
@@ -896,6 +1541,37 @@ impl Estate {
                     new_adjective,
                     &changed_by,
                     Some(_payload.unwrap_or("trust corrected via Estate.mutate")),
+                    now,
+                )
+            }
+
+            MutationKind::CorrectExportability(exportability) => {
+                let drawer = self.store.get_drawer(row_id)?.ok_or_else(|| {
+                    LocusKitError::DrawerNotFound {
+                        id: row_id.to_string(),
+                    }
+                })?;
+                // Exportability lives in adjective_bitmap bits 12–17 (cookbook §2.3,
+                // 6-bit scale-gapped field; raw 0 = Private, raw 32 = Public).
+                // write_field clears that 6-bit window and ORs in the new value,
+                // preserving all other adjective axes (state, sensitivity, trust,
+                // obligation flags). This is the write-side counterpart to the
+                // existing `exportability()` accessor in adjectives.rs
+                // (DEBT-1: this is the mutation path that sets the exportability bit).
+                // Mirrors Swift MutationKind::CorrectExportability in EstateVerbs.swift.
+                let new_adjective = bit_field::write_field(
+                    exportability.raw_value(),
+                    drawer.adjective_bitmap,
+                    12,
+                    6,
+                );
+                let changed_by = self.changed_by_or_estate();
+                let now = Self::now_millis();
+                self.store.mutate_adjective(
+                    row_id,
+                    new_adjective,
+                    &changed_by,
+                    Some(_payload.unwrap_or("exportability corrected via Estate.mutate")),
                     now,
                 )
             }
@@ -1103,58 +1779,82 @@ impl Estate {
 
     // MARK: - learn
 
-    /// Bring an external reference into the estate by handle. Mirrors `Estate.learn` in Swift.
+    /// Bring an external reference into the estate, grounded against its
+    /// source. Per spec § 7.8.2 / cookbook §10.9. Mirrors Swift
+    /// `Estate.learn`.
     ///
-    /// Constructs a `LearnedReference` with `source_catalog_id` set to the frame's
-    /// handle (v1 placeholder — `SourceCatalogEntry` is spec-only, not yet implemented),
-    /// sentinel `lattice_anchor` ("0" UDC code per Known Ambiguity), and
-    /// `added_by = "learn"`. Per cookbook §10.9 / spec § 7.8.2.
+    /// The reference's genuine lattice anchor is derived from
+    /// `frame.source` — a `SourceCatalogEntry` carries the source's
+    /// classified lattice position, which the learned reference inherits.
+    /// No sentinel anchor is ever fabricated (P1 mandate, Bob's board
+    /// item 7). The verb:
     ///
-    /// - `frame.handle` must be non-empty; returns `LocusKitError::InvalidContent` if empty.
-    /// - `now` is epoch seconds.
+    /// 1. Validates `frame.handle` is non-empty — the only fail-loud path
+    ///    on a normal beta call (`LocusKitError::InvalidContent`).
+    /// 2. Catalogs `frame.source` durably if no entry already holds its
+    ///    handle (idempotent by source handle), then resolves the catalog
+    ///    entry whose anchor the reference inherits.
+    /// 3. Writes a `LearnedReference` anchored to the catalog entry's
+    ///    genuine anchor, with `source_catalog_id` pointing at it and the
+    ///    operational bitmap encoding `mode` (bit 12) and `refresh_policy`
+    ///    (bits 0–5) per cookbook § 2.4.
+    ///
+    /// - `now` is epoch seconds (deterministic write timestamp).
     pub fn learn(
         &self,
         frame: LearnFrame,
         now: i64,
     ) -> Result<crate::learned_reference::LearnedReference, LocusKitError> {
+        // Fail loud only on genuinely invalid input. An empty reference
+        // handle has nothing to point at — there is no reference to learn.
         if frame.handle.is_empty() {
             return Err(LocusKitError::InvalidContent(
-                "learn handle must not be empty".to_string(),
+                "learn: handle must not be empty".to_string(),
             ));
         }
 
-        // Trust::Canonical encodes as raw value 3 (adjectives.rs Trust::Canonical = 3).
-        // Cookbook §2.3: trust axis at bits 18–23 of adjective_bitmap.
-        // bit_field::write_field(value, into_bitmap, shift, width).
-        let adj_bitmap = bit_field::write_field(
-            crate::adjectives::Trust::Canonical as i64,
-            0i64,
-            18,
-            6,
-        );
-
-        // Sentinel lattice anchor ("0" UDC code) — SourceCatalogEntry is spec-only;
-        // the enrichment daemon will resolve the real anchor when it runs.
-        let ref_row = crate::learned_reference::LearnedReference {
-            id: Uuid::new_v4().to_string(),
-            source_catalog_id: frame.handle.clone(), // v1 placeholder — no SourceCatalogEntry yet
-            handle: frame.handle,
-            lattice_anchor: crate::estate_types::LatticeAnchor {
-                udc_code: "0".to_string(),
-                udc_facets: None,
-                wikidata_qid: None,
-                wikidata_qids_secondary: None,
-            },
-            adjective_bitmap: adj_bitmap,
-            operational_bitmap: 0,
-            provenance_bitmap: 0,
-            added_by: "learn".to_string(),
-            filed_at: now,
-            tombstoned_at: None,
-            removed_by_batch: None,
+        // Resolve (or catalog) the source. The source carries the genuine
+        // anchor; cataloging is idempotent by source handle so repeated
+        // learns from one source share a single catalog entry.
+        let catalog_entry = match self
+            .store
+            .source_catalog_entry_for_handle(&frame.source.handle)?
+        {
+            Some(existing) => existing,
+            None => {
+                self.store.add_source_catalog_entry(&frame.source)?;
+                frame.source.clone()
+            }
         };
-        self.store.add_learned_reference(&ref_row)?;
-        Ok(ref_row)
+
+        // Encode mode (bit 12) and refresh policy (bits 0–5) into the
+        // operational bitmap per cookbook § 2.4. The source acquisition
+        // axis (bits 13–18) maps from the catalog entry's kind so the
+        // reference records the channel it arrived through.
+        let mut operational: i64 = 0;
+        operational =
+            bit_field::write_field(frame.refresh_policy.raw_value(), operational, 0, 6);
+        operational = bit_field::write_flag(
+            frame.mode == crate::learned_reference::LearnMode::ByIngestion,
+            operational,
+            12,
+        );
+        operational =
+            bit_field::write_field(catalog_entry.kind.raw_value(), operational, 13, 6);
+
+        let mut reference = crate::learned_reference::LearnedReference::new(
+            Uuid::new_v4().to_string(),
+            catalog_entry.id.clone(),
+            frame.handle.clone(),
+            // Genuine anchor, inherited from the source's catalog entry —
+            // never a sentinel.
+            catalog_entry.lattice_anchor.clone(),
+            "learn".to_string(),
+            now,
+        );
+        reference.operational_bitmap = operational;
+        self.store.add_learned_reference(&reference)?;
+        Ok(reference)
     }
 }
 
@@ -1166,9 +1866,15 @@ impl Estate {
 /// TEXT columns (fleet date-storage rule: TEXT ISO8601, never REAL).
 /// Used by `recall` to stamp `recalled_at` on `RecallTraceItem` rows.
 ///
-/// Produces the format `YYYY-MM-DDTHH:MM:SSZ`. This matches the
-/// `format_iso8601` helper in `drawer_store_inmemory.rs` so timestamps
-/// written by either site sort and compare correctly.
+/// Produces the canonical fractional-seconds form `YYYY-MM-DDTHH:MM:SS.000Z`,
+/// matching Swift's `LKISO8601` formatter (`.withInternetDateTime +
+/// .withFractionalSeconds`) and the `format_iso8601` helper in
+/// `drawer_store_inmemory.rs`. This MUST agree with `format_iso8601` because a
+/// `recalledAt` value written here is parsed back to epoch and re-rendered via
+/// `format_iso8601` on durable-backend reads (the `.timestamp` column decodes
+/// to `TypedValue::Timestamp`); a format drift would make the read-back string
+/// differ from the written string. Fractional seconds are always `.000`
+/// because the trace clock is epoch-seconds granularity.
 fn epoch_to_iso8601(epoch_seconds: i64) -> String {
     // Simple Gregorian calendar conversion without external crates.
     // Accurate for dates in the range 2001–2100 (the LocusKit operational
@@ -1176,7 +1882,7 @@ fn epoch_to_iso8601(epoch_seconds: i64) -> String {
     // implementation — both ignore leap seconds.
     let (year, month, day, hour, minute, second) = epoch_to_components(epoch_seconds);
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
         year, month, day, hour, minute, second
     )
 }
@@ -1323,6 +2029,132 @@ mod tests {
         assert_eq!(drawer.wing, "wing_owner");
     }
 
+    // --- capture container-fingerprint maintenance (P0-PARITY #33) ---
+
+    #[test]
+    fn capture_ors_into_room_level_container_fingerprint() {
+        // After a capture the room-level container aggregate is non-empty —
+        // the capture-time OR-in maintained it. Before this fix the Rust
+        // capture path never OR'd, so the aggregate stayed empty and the
+        // maintenance fingerprint-drift signal read nothing.
+        let estate = make_estate();
+        let d = basic_capture(&estate, "alpha", "study");
+
+        let entries = estate.store.room_level_fingerprints().unwrap();
+        assert_eq!(entries.len(), 1, "the captured drawer's room is enumerated");
+        let entry = &entries[0];
+        assert_eq!(entry.wing, d.wing);
+        assert_eq!(entry.room, "study");
+        // The room aggregate equals the OR of the (single) captured drawer's
+        // own bitmaps — the canonical container-fingerprint definition.
+        assert_eq!(entry.fingerprint.adjective, d.adjective_bitmap);
+        assert_eq!(entry.fingerprint.operational, d.operational_bitmap);
+        assert_eq!(entry.fingerprint.provenance, d.provenance);
+    }
+
+    #[test]
+    fn capture_n_drawers_room_aggregate_is_or_fold_of_all() {
+        // Capture N drawers into one room; the room aggregate is the bitwise
+        // OR of every drawer's three bitmap fields. This is the bit-identical
+        // shape Swift produces: same drawer contents → same room aggregate on
+        // both ports, because both OR the identical per-drawer bitmaps through
+        // the conformance-gated or_reduce kernel.
+        let estate = make_estate();
+        let mut expected_adj = 0i64;
+        let mut expected_op = 0i64;
+        let mut expected_prov = 0i64;
+        for i in 0..5 {
+            let d = basic_capture(&estate, &format!("c{i}"), "den");
+            expected_adj |= d.adjective_bitmap;
+            expected_op |= d.operational_bitmap;
+            expected_prov |= d.provenance;
+        }
+        let entry = estate
+            .store
+            .room_level_fingerprints()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.room == "den")
+            .expect("den room aggregate present");
+        assert_eq!(entry.fingerprint.adjective, expected_adj);
+        assert_eq!(entry.fingerprint.operational, expected_op);
+        assert_eq!(entry.fingerprint.provenance, expected_prov);
+    }
+
+    #[test]
+    fn capture_distinct_rooms_yield_distinct_room_aggregates() {
+        // Two rooms each get their own room-level aggregate; the wing-rollup
+        // row (room == "") is excluded by room_level_fingerprints, so exactly
+        // two entries appear.
+        let estate = make_estate();
+        basic_capture(&estate, "a", "study");
+        basic_capture(&estate, "b", "kitchen");
+        let entries = estate.store.room_level_fingerprints().unwrap();
+        assert_eq!(entries.len(), 2);
+        let mut rooms: Vec<String> = entries.iter().map(|e| e.room.clone()).collect();
+        rooms.sort();
+        assert_eq!(rooms, vec!["kitchen".to_string(), "study".to_string()]);
+    }
+
+    #[test]
+    fn populated_aggregate_drives_container_pruning_decision() {
+        // Component-level prune decision over the populated aggregate. Capture
+        // a hasVoice drawer into room r1 and a hasImage drawer into room r2;
+        // the capture-time OR-in records each room's feature bits. A chain
+        // requiring hasVoice prunes r2 (its OR lacks the bit) and keeps r1.
+        // Tests BitmapEvaluator::container_survives directly; the end-to-end
+        // recall path wiring is covered by recall_prunes_non_matching_container
+        // and result_identity_pruned_vs_unpruned below.
+        let estate = make_estate();
+
+        let mut voice = CaptureFrame::new(
+            "v", CaptureChannel::Typed, "r1",
+            LatticeAnchor::udc("5"), "alice", "test-v1",
+        );
+        voice.feature_flags = DrawerFeatureFlags::HAS_VOICE;
+        estate.capture(voice, 1_700_000_001).unwrap();
+
+        let mut image = CaptureFrame::new(
+            "i", CaptureChannel::Typed, "r2",
+            LatticeAnchor::udc("5"), "alice", "test-v1",
+        );
+        image.feature_flags = DrawerFeatureFlags::HAS_IMAGE;
+        estate.capture(image, 1_700_000_001).unwrap();
+
+        let entries = estate.store.room_level_fingerprints().unwrap();
+        let r1 = entries.iter().find(|e| e.room == "r1").expect("r1 aggregate");
+        let r2 = entries.iter().find(|e| e.room == "r2").expect("r2 aggregate");
+
+        let chain = [Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE)];
+        // r1 carries the hasVoice bit → survives the prune; r2 does not → pruned.
+        assert!(BitmapEvaluator::container_survives(&chain, r1.fingerprint));
+        assert!(!BitmapEvaluator::container_survives(&chain, r2.fingerprint));
+    }
+
+    #[test]
+    fn reopen_backfills_container_aggregate_from_active_drawers() {
+        // Soundness contract (spec § 11.5): the aggregate must cover every
+        // active row. Capture builds the aggregate incrementally; reopening the
+        // estate over the same storage rebuilds it from the active drawer set.
+        // Either way the room aggregate covers the captured drawer's bits.
+        let store = Arc::new(InMemoryDrawerStore::new(1_700_000_000, None).unwrap());
+        let estate = Estate::create(store.clone(), OwnerCredentials::new("owner"), None).unwrap();
+        let d = basic_capture(&estate, "alpha", "study");
+
+        // Reopen over the SAME backing store; from_manifest backfills.
+        let reopened = Estate::open(store, OwnerCredentials::new("owner")).unwrap();
+        let entry = reopened
+            .store
+            .room_level_fingerprints()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.room == "study")
+            .expect("study aggregate present after reopen");
+        assert_eq!(entry.fingerprint.adjective, d.adjective_bitmap);
+        assert_eq!(entry.fingerprint.operational, d.operational_bitmap);
+        assert_eq!(entry.fingerprint.provenance, d.provenance);
+    }
+
     // --- recall ---
 
     #[test]
@@ -1347,11 +2179,15 @@ mod tests {
         let d2 = basic_capture(&estate, "gone", "hall");
         estate.withdraw(&d2.id, None, 1_700_000_003).unwrap();
 
-        let frame = RecallFrame::new(vec![
+        // .full hydration so the content body is returned — a .structured
+        // recall correctly returns content == "" (spec § 7.3 / Swift parity),
+        // which would defeat the content assertion below.
+        let mut frame = RecallFrame::new(vec![
             Filter::InRoom("hall".to_string()),
             Filter::CurrentlyBelieve,
             Filter::Unconfirmed,
         ]);
+        frame.hydration_level = HydrationLevel::Full;
         let stream = estate.recall(frame, 1_700_000_004);
         let rows = stream.collect_all();
         assert_eq!(rows.len(), 1);
@@ -1545,20 +2381,147 @@ mod tests {
         }
     }
 
+    // --- revive: complete state semantics (cookbook §9.3 / §6.2) ---
+
+    /// Capture with a shared lineage so the supersession cascade fires.
+    fn capture_in_lineage(estate: &Estate, content: &str, lineage: Uuid, now: i64) -> Drawer {
+        let mut frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            "r",
+            LatticeAnchor::udc("5"),
+            "alice",
+            "test-v1",
+        );
+        frame.lineage_id = Some(lineage);
+        estate.capture(frame, now).unwrap()
+    }
+
+    fn state_of(estate: &Estate, id: &str) -> State {
+        let d = estate.store.get_drawer(id).unwrap().unwrap();
+        State::from_raw(d.adjective_bitmap & 0x3F)
+    }
+
     #[test]
-    fn mutate_revive_from_active_throws_cluster_b_guard() {
+    fn mutate_revive_from_active_refused_already_live() {
+        // Cluster A — already live; revive refuses with a named domain rule.
         let estate = make_estate();
         let drawer = basic_capture(&estate, "cluster-a target", "r");
         let err = estate
             .mutate(&drawer.id, MutationKind::Revive, None)
             .unwrap_err();
-        if let LocusKitError::InvalidContent(msg) = &err {
-            assert!(
-                msg.contains("revive") || msg.contains("Cluster B") || msg.contains("cluster"),
-                "error should identify the revive Cluster B guard: {msg}"
-            );
-        } else {
-            panic!("expected InvalidContent, got {err:?}");
+        match err {
+            LocusKitError::DisciplineViolation { from, reason, .. } => {
+                assert_eq!(from, State::Active.raw_value());
+                assert!(reason.contains("already live"), "names the rule: {reason}");
+            }
+            other => panic!("expected DisciplineViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mutate_revive_from_withdrawn_becomes_active() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "withdraw target", "r");
+        estate.withdraw(&drawer.id, Some("test"), 1_700_000_002).unwrap();
+        assert_eq!(state_of(&estate, &drawer.id), State::Withdrawn);
+        let before = estate.store.audit_events_for_row(&drawer.id).unwrap().len();
+
+        estate.mutate(&drawer.id, MutationKind::Revive, None).unwrap();
+        assert_eq!(state_of(&estate, &drawer.id), State::Active);
+        let after = estate.store.audit_events_for_row(&drawer.id).unwrap().len();
+        assert_eq!(after, before + 1, "revive appends exactly one audit row");
+    }
+
+    #[test]
+    fn mutate_revive_from_expired_becomes_active() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "expire target", "r");
+        // expire is a dreaming transition, staged via the validated store call.
+        estate
+            .store
+            .mutate_state(&drawer.id, State::Expired, RowVerb::Expire, "t", Some("fixture"), 1_700_000_002)
+            .unwrap();
+        assert_eq!(state_of(&estate, &drawer.id), State::Expired);
+
+        estate.mutate(&drawer.id, MutationKind::Revive, None).unwrap();
+        assert_eq!(state_of(&estate, &drawer.id), State::Active);
+    }
+
+    #[test]
+    fn mutate_revive_from_decayed_becomes_active() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "decay target", "r");
+        estate
+            .store
+            .mutate_state(&drawer.id, State::Decayed, RowVerb::Decay, "t", Some("fixture"), 1_700_000_002)
+            .unwrap();
+        assert_eq!(state_of(&estate, &drawer.id), State::Decayed);
+
+        estate.mutate(&drawer.id, MutationKind::Revive, None).unwrap();
+        assert_eq!(state_of(&estate, &drawer.id), State::Active);
+    }
+
+    #[test]
+    fn mutate_revive_from_superseded_legal_when_successor_dead() {
+        // Successor was itself withdrawn → lineage head vacant → revive LEGAL.
+        let estate = make_estate();
+        let lineage = Uuid::new_v4();
+        let v1 = capture_in_lineage(&estate, "v1", lineage, 1_700_000_001);
+        let v2 = capture_in_lineage(&estate, "v2", lineage, 1_700_000_002);
+        assert_eq!(state_of(&estate, &v1.id), State::Superseded);
+        estate.withdraw(&v2.id, Some("test"), 1_700_000_003).unwrap();
+
+        estate.mutate(&v1.id, MutationKind::Revive, None).unwrap();
+        assert_eq!(
+            state_of(&estate, &v1.id),
+            State::Active,
+            "vacant head: superseded predecessor reclaims active"
+        );
+    }
+
+    #[test]
+    fn mutate_revive_from_superseded_refused_with_living_successor() {
+        // Successor still live → reviving would create two lineage heads →
+        // refuse with the named lineage-conflict domain error.
+        let estate = make_estate();
+        let lineage = Uuid::new_v4();
+        let v1 = capture_in_lineage(&estate, "v1", lineage, 1_700_000_001);
+        let v2 = capture_in_lineage(&estate, "v2", lineage, 1_700_000_002);
+        assert_eq!(state_of(&estate, &v1.id), State::Superseded);
+        assert_eq!(state_of(&estate, &v2.id), State::Active);
+
+        let err = estate.mutate(&v1.id, MutationKind::Revive, None).unwrap_err();
+        match err {
+            LocusKitError::DisciplineViolation { from, to, reason } => {
+                assert_eq!(from, State::Superseded.raw_value());
+                assert_eq!(to, State::Active.raw_value());
+                assert!(reason.contains("living successor"), "names the conflict: {reason}");
+                assert!(reason.contains(&v2.id), "names the successor id: {reason}");
+            }
+            other => panic!("expected DisciplineViolation, got {other:?}"),
+        }
+        // v1 stays superseded; the refused revive changed nothing.
+        assert_eq!(state_of(&estate, &v1.id), State::Superseded);
+    }
+
+    #[test]
+    fn mutate_revive_from_tombstoned_refused_unrecoverable() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "tombstone target", "r");
+        estate.expunge(&drawer.id, "test", true, 0, true).unwrap();
+        assert_eq!(state_of(&estate, &drawer.id), State::Tombstoned);
+
+        let err = estate.mutate(&drawer.id, MutationKind::Revive, None).unwrap_err();
+        match err {
+            LocusKitError::DisciplineViolation { from, reason, .. } => {
+                assert_eq!(from, State::Tombstoned.raw_value());
+                assert!(
+                    reason.contains("tombstoned") || reason.contains("unrecoverable"),
+                    "names the rule: {reason}"
+                );
+            }
+            other => panic!("expected DisciplineViolation, got {other:?}"),
         }
     }
 
@@ -1646,6 +2609,283 @@ mod tests {
     }
 
     #[test]
+    fn mutate_correct_exportability_public_updates_bits_12_to_17() {
+        use substrate_kernel::bit_field;
+        use crate::adjectives::AdjectiveExportability;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "exportability target", "study");
+        // Default exportability: Private (raw 0) — privacy-preserving default.
+        let initial_exp = AdjectiveExportability::from_raw(
+            bit_field::extract_field(drawer.adjective_bitmap, 12, 6)
+        );
+        assert_eq!(initial_exp, AdjectiveExportability::Private);
+
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectExportability(AdjectiveExportability::Public),
+                None,
+            )
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        let exp = AdjectiveExportability::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 12, 6)
+        );
+        assert_eq!(exp, AdjectiveExportability::Public, "exportability should be Public");
+        // State must be unchanged.
+        assert_eq!(State::from_raw(after.adjective_bitmap & 0x3F), State::Active);
+    }
+
+    #[test]
+    fn mutate_correct_exportability_private_lowers_from_public() {
+        use substrate_kernel::bit_field;
+        use crate::adjectives::AdjectiveExportability;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "re-lower test", "study");
+
+        // Raise to Public first.
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectExportability(AdjectiveExportability::Public),
+                None,
+            )
+            .unwrap();
+        let raised = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        assert_eq!(
+            AdjectiveExportability::from_raw(bit_field::extract_field(raised.adjective_bitmap, 12, 6)),
+            AdjectiveExportability::Public
+        );
+
+        // Lower back to Private.
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectExportability(AdjectiveExportability::Private),
+                None,
+            )
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        let exp = AdjectiveExportability::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 12, 6)
+        );
+        assert_eq!(exp, AdjectiveExportability::Private, "exportability should be lowered to Private");
+    }
+
+    #[test]
+    fn mutate_correct_exportability_does_not_disturb_sensitivity_or_trust() {
+        use substrate_kernel::bit_field;
+        use crate::adjectives::{AdjectiveExportability, AdjectiveSensitivity};
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "independence target", "r");
+
+        // Stage non-default values on the other two adjective axes.
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectSensitivity(AdjectiveSensitivity::Restricted),
+                None,
+            )
+            .unwrap();
+        estate
+            .mutate(&drawer.id, MutationKind::CorrectTrust(Trust::Canonical), None)
+            .unwrap();
+
+        // Mutate exportability — the other axes must survive unchanged.
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectExportability(AdjectiveExportability::Public),
+                None,
+            )
+            .unwrap();
+
+        let after = estate.store.get_drawer(&drawer.id).unwrap().unwrap();
+        let exp = AdjectiveExportability::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 12, 6)
+        );
+        let sens = AdjectiveSensitivity::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 6, 6)
+        );
+        let trust = Trust::from_raw(
+            bit_field::extract_field(after.adjective_bitmap, 18, 6)
+        );
+        assert_eq!(exp, AdjectiveExportability::Public, "exportability must be Public");
+        assert_eq!(sens, AdjectiveSensitivity::Restricted, "sensitivity must be unchanged");
+        assert_eq!(trust, Trust::Canonical, "trust must be unchanged");
+        assert_eq!(State::from_raw(after.adjective_bitmap & 0x3F), State::Active);
+    }
+
+    #[test]
+    fn mutate_correct_exportability_writes_audit_row() {
+        use crate::adjectives::AdjectiveExportability;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "audit row test", "r");
+        // Count audit rows via the DrawerStore trait method used elsewhere in this file.
+        let before = estate.store.audit_events_for_row(&drawer.id).unwrap().len();
+
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectExportability(AdjectiveExportability::Public),
+                None,
+            )
+            .unwrap();
+
+        let after = estate.store.audit_events_for_row(&drawer.id).unwrap().len();
+        assert_eq!(after, before + 1, "correctExportability must append exactly one audit row");
+    }
+
+    #[test]
+    fn capture_born_public_exportability_public() {
+        use substrate_kernel::bit_field;
+        use crate::adjectives::AdjectiveExportability;
+        use crate::drawer_operational::CaptureChannel;
+        use crate::estate_types::LatticeAnchor;
+        let estate = make_estate();
+        let mut frame = CaptureFrame::new(
+            "born public",
+            CaptureChannel::Typed,
+            "r",
+            LatticeAnchor::udc("5"),
+            "alice",
+            "test-v1",
+        );
+        frame.exportability = AdjectiveExportability::Public;
+        // Use a distinct timestamp so InMemory store doesn't collide with basic_capture.
+        let drawer = estate.capture(frame, 1_700_000_099).unwrap();
+        // Read back via bits 12–17 (exportability window, cookbook §2.3).
+        let exp = AdjectiveExportability::from_raw(
+            bit_field::extract_field(drawer.adjective_bitmap, 12, 6)
+        );
+        assert_eq!(exp, AdjectiveExportability::Public,
+            "a drawer captured with exportability=Public should be born public");
+    }
+
+    #[test]
+    fn filter_exportable_returns_public_drawers_not_private() {
+        use substrate_kernel::bit_field;
+        use crate::adjectives::AdjectiveExportability;
+        use crate::drawer_operational::CaptureChannel;
+        use crate::estate_types::LatticeAnchor;
+        let estate = make_estate();
+
+        // Capture a private drawer (default); verify bits 12–17 are Private.
+        let private_drawer = basic_capture(&estate, "private content", "r");
+        assert_eq!(
+            AdjectiveExportability::from_raw(bit_field::extract_field(private_drawer.adjective_bitmap, 12, 6)),
+            AdjectiveExportability::Private
+        );
+
+        // Capture a born-public drawer.
+        let mut pub_frame = CaptureFrame::new(
+            "public content",
+            CaptureChannel::Typed,
+            "r",
+            LatticeAnchor::udc("5"),
+            "alice",
+            "test-v1",
+        );
+        pub_frame.exportability = AdjectiveExportability::Public;
+        let public_drawer = estate.capture(pub_frame, 1_700_000_050).unwrap();
+        assert_eq!(
+            AdjectiveExportability::from_raw(bit_field::extract_field(public_drawer.adjective_bitmap, 12, 6)),
+            AdjectiveExportability::Public
+        );
+
+        // Explicit filter chain: bypasses default provenance/trust insertion
+        // so captured test drawers (unconfirmed by default) are not excluded
+        // for the wrong reason — the chain itself governs who passes.
+        let chain = vec![
+            Filter::CurrentlyBelieve,
+            Filter::UserConfirmed,
+            Filter::Trustworthy,
+            Filter::SensitivityAtMost(crate::adjectives::AdjectiveSensitivity::Secret),
+            Filter::Exportable,
+        ];
+        // Confirm the public drawer so it satisfies UserConfirmed; the private
+        // drawer remains unconfirmed and will be excluded both by UserConfirmed
+        // and by Exportable.
+        estate.mutate(&public_drawer.id, MutationKind::Confirm, None).unwrap();
+
+        let stream = estate.recall(RecallFrame::new(chain), 1_700_000_060);
+        let rows = stream.collect_all();
+        let ids: Vec<&str> = rows.iter().map(|d| d.id.as_str()).collect();
+
+        assert!(
+            ids.contains(&public_drawer.id.as_str()),
+            "filter:Exportable must include the confirmed public drawer"
+        );
+        assert!(
+            !ids.contains(&private_drawer.id.as_str()),
+            "filter:Exportable must exclude the private drawer"
+        );
+    }
+
+    #[test]
+    fn mutate_to_public_then_filter_exportable_roundtrip() {
+        use substrate_kernel::bit_field;
+        use crate::adjectives::AdjectiveExportability;
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "roundtrip target", "r");
+        // Confirm the drawer so it satisfies UserConfirmed in the filter chain.
+        estate.mutate(&drawer.id, MutationKind::Confirm, None).unwrap();
+        // Verify born Private.
+        assert_eq!(
+            AdjectiveExportability::from_raw(bit_field::extract_field(drawer.adjective_bitmap, 12, 6)),
+            AdjectiveExportability::Private
+        );
+
+        // Explicit filter chain: avoids default insertion; Exportable is the gate
+        // under test.
+        let exportable_chain = || vec![
+            Filter::CurrentlyBelieve,
+            Filter::UserConfirmed,
+            Filter::Trustworthy,
+            Filter::SensitivityAtMost(crate::adjectives::AdjectiveSensitivity::Secret),
+            Filter::Exportable,
+        ];
+
+        // Before mutation: filter:Exportable must return empty.
+        let empty = estate.recall(RecallFrame::new(exportable_chain()), 1_700_000_010).collect_all();
+        assert!(empty.is_empty(), "before mutation, filter:Exportable must return empty");
+
+        // Mutate to Public.
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectExportability(AdjectiveExportability::Public),
+                None,
+            )
+            .unwrap();
+
+        // After mutation: filter:Exportable must return the drawer.
+        let public_rows = estate.recall(RecallFrame::new(exportable_chain()), 1_700_000_020).collect_all();
+        assert!(
+            public_rows.iter().any(|d| d.id == drawer.id),
+            "after CorrectExportability(Public), filter:Exportable must return the drawer"
+        );
+
+        // Mutate back to Private.
+        estate
+            .mutate(
+                &drawer.id,
+                MutationKind::CorrectExportability(AdjectiveExportability::Private),
+                None,
+            )
+            .unwrap();
+
+        // After lowering: filter:Exportable must return empty again.
+        let private_rows = estate.recall(RecallFrame::new(exportable_chain()), 1_700_000_030).collect_all();
+        assert!(
+            private_rows.is_empty(),
+            "after re-lowering to Private, filter:Exportable must return empty"
+        );
+    }
+
+    #[test]
     fn reanchor_empty_args_returns_invalid_content() {
         // Belt-and-suspenders guard: both to_room and to_lattice nil.
         let estate = make_estate();
@@ -1694,27 +2934,108 @@ mod tests {
         assert_eq!(updated.provenance, d.provenance);
     }
 
-    #[test]
-    fn learn_with_empty_handle_returns_invalid_content() {
-        let estate = make_estate();
-        // learn is now live; an empty handle is invalid.
-        let err = estate
-            .learn(LearnFrame::new(""), 1_700_000_000)
-            .unwrap_err();
-        assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    fn sample_source() -> crate::source_catalog_entry::SourceCatalogEntry {
+        crate::source_catalog_entry::SourceCatalogEntry::new(
+            "src-1",
+            crate::source_catalog_entry::SourceKind::User,
+            "https://example.com",
+            // A genuine, non-empty anchor — what the learned reference inherits.
+            LatticeAnchor::udc("004"),
+            1_700_000_000,
+            "cataloger",
+        )
     }
 
     #[test]
-    fn learn_with_valid_handle_returns_learned_reference() {
+    fn learn_writes_genuine_anchor_from_source() {
+        // learn succeeds on a normal beta path: it derives the reference's
+        // genuine anchor from the source catalog entry and persists it. No
+        // sentinel identity (P1 mandate, Bob's board item 7).
         let estate = make_estate();
-        let result = estate.learn(LearnFrame::new("test-handle"), 1_700_000_000);
-        let ref_row = result.expect("learn should succeed with a valid handle");
-        assert_eq!(ref_row.handle, "test-handle");
-        assert_eq!(ref_row.source_catalog_id, "test-handle");
-        assert_eq!(ref_row.lattice_anchor.udc_code, "0"); // sentinel anchor
-        assert_eq!(ref_row.added_by, "learn");
-        // Trust::Canonical (raw 3) at bits 18–23 of adjective_bitmap.
-        assert_ne!(ref_row.adjective_bitmap, 0);
+        let frame = LearnFrame::new(sample_source(), "https://example.com/page");
+        let reference = estate.learn(frame, 1_700_000_100).expect("learn should succeed");
+
+        // Anchor is the source's genuine anchor, never a sentinel.
+        assert_eq!(reference.lattice_anchor.udc_code, "004");
+        assert!(!reference.lattice_anchor.udc_code.is_empty());
+        assert_eq!(reference.source_catalog_id, "src-1");
+        assert_eq!(reference.handle, "https://example.com/page");
+        assert_eq!(reference.added_by, "learn");
+
+        // Operational axes decode back: mode=byReference (default),
+        // refresh=weekly (default), source=user (from catalog kind).
+        assert_eq!(reference.mode(), crate::learned_reference::LearnMode::ByReference);
+        assert_eq!(
+            reference.refresh_policy(),
+            crate::learned_reference::RefreshPolicy::Weekly
+        );
+        assert_eq!(
+            reference.acquisition_source(),
+            crate::learned_reference::LearnedReferenceSource::User
+        );
+
+        // The reference is durable and queryable.
+        let fetched = estate
+            .store
+            .get_learned_reference(&reference.id)
+            .unwrap()
+            .expect("learned reference must be persisted");
+        assert_eq!(fetched.lattice_anchor.udc_code, "004");
+
+        // The source was cataloged durably and is queryable by handle.
+        let cataloged = estate
+            .store
+            .source_catalog_entry_for_handle("https://example.com")
+            .unwrap()
+            .expect("source must be cataloged");
+        assert_eq!(cataloged.id, "src-1");
+    }
+
+    #[test]
+    fn learn_encodes_mode_and_refresh_policy() {
+        let estate = make_estate();
+        let mut frame = LearnFrame::new(sample_source(), "https://example.com/doc");
+        frame.mode = crate::learned_reference::LearnMode::ByIngestion;
+        frame.refresh_policy = crate::learned_reference::RefreshPolicy::Daily;
+        let reference = estate.learn(frame, 1_700_000_200).expect("learn should succeed");
+        assert_eq!(reference.mode(), crate::learned_reference::LearnMode::ByIngestion);
+        assert_eq!(
+            reference.refresh_policy(),
+            crate::learned_reference::RefreshPolicy::Daily
+        );
+    }
+
+    #[test]
+    fn learn_reuses_existing_catalog_entry() {
+        // Two learns from the same source handle share one catalog entry.
+        let estate = make_estate();
+        let r1 = estate
+            .learn(LearnFrame::new(sample_source(), "https://example.com/a"), 1_700_000_300)
+            .expect("first learn");
+        // A second source value with the same handle but a different id must
+        // NOT create a second catalog entry; the existing one is reused.
+        let mut other = sample_source();
+        other.id = "src-2".to_string();
+        let r2 = estate
+            .learn(LearnFrame::new(other, "https://example.com/b"), 1_700_000_400)
+            .expect("second learn");
+        assert_eq!(r1.source_catalog_id, "src-1");
+        assert_eq!(r2.source_catalog_id, "src-1", "existing catalog entry must be reused");
+    }
+
+    #[test]
+    fn learn_fails_loud_only_on_empty_handle() {
+        // Fail loud ONLY on genuinely invalid input — an empty reference
+        // handle. A valid handle succeeds (see learn_writes_genuine_anchor).
+        let estate = make_estate();
+        let err = estate
+            .learn(LearnFrame::new(sample_source(), ""), 1_700_000_500)
+            .unwrap_err();
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(_)),
+            "empty handle must return InvalidContent, got: {:?}",
+            err
+        );
     }
 
     #[test]
@@ -1786,7 +3107,7 @@ mod tests {
     fn estate_expunge_requires_confirmation() {
         let estate = make_estate();
         let d = basic_capture(&estate, "to be expunged", "office");
-        let err = estate.expunge(&d.id, "", false).unwrap_err();
+        let err = estate.expunge(&d.id, "", false, 0, true).unwrap_err();
         assert!(
             matches!(err, LocusKitError::InvalidContent(_)),
             "expected InvalidContent for confirmation=false, got {:?}",
@@ -1802,7 +3123,7 @@ mod tests {
     fn estate_expunge_forwards_through_to_store_with_confirmation() {
         let estate = make_estate();
         let d = basic_capture(&estate, "to be expunged", "office");
-        estate.expunge(&d.id, "operator request", true).unwrap();
+        estate.expunge(&d.id, "operator request", true, 0, true).unwrap();
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
         assert_ne!(
@@ -1818,7 +3139,7 @@ mod tests {
     fn estate_expunge_rejects_absent_row() {
         let estate = make_estate();
         let err = estate
-            .expunge("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "", true)
+            .expunge("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "", true, 0, true)
             .unwrap_err();
         match err {
             LocusKitError::DrawerNotFound { .. } => {}
@@ -1877,5 +3198,751 @@ mod tests {
         let from_study = estate.tunnels_from_wing("study").unwrap();
         assert_eq!(from_study.len(), 1);
         assert_eq!(from_study[0].source_wing, "study");
+    }
+
+    // --- recall integrity: traceLimit / scan cap / no-blob projection ---
+    // Rust twins of Swift RecallPerfCorrectnessTests (fdd2e763 / 9596ef4f).
+
+    use crate::drawer_store_sqlite::SqliteDrawerStore;
+
+    /// RAII temp SQLite DB path; deletes the file + WAL/SHM on drop.
+    struct TempDb {
+        path: String,
+    }
+    impl TempDb {
+        fn new() -> Self {
+            let name = format!("locus_recall_test_{}.db", uuid::Uuid::new_v4().simple());
+            let path = std::env::temp_dir().join(name).to_string_lossy().into_owned();
+            TempDb { path }
+        }
+    }
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in &["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{}", self.path, suffix));
+            }
+        }
+    }
+
+    /// A SQLite-backed estate at a fresh temp path. Returns the estate and the
+    /// `TempDb` guard (which the caller must keep alive for the test's duration).
+    fn make_sqlite_estate(db: &TempDb) -> Estate {
+        let store = Arc::new(SqliteDrawerStore::from_path(&db.path, 1_700_000_000, None, 5.0).unwrap());
+        Estate::create(store, OwnerCredentials::new("owner"), None).unwrap()
+    }
+
+    /// Capture `n` drawers into `estate`, content "doc-i" in room "den".
+    fn capture_n(estate: &Estate, n: usize) {
+        for i in 0..n {
+            let frame = CaptureFrame::new(
+                format!("doc-{i}"),
+                CaptureChannel::Typed,
+                "den",
+                LatticeAnchor::udc("5"),
+                "alice",
+                "test-v1",
+            );
+            // Stagger filedAt so the bounded scan has a deterministic order.
+            estate.capture(frame, 1_700_000_001 + i as i64).unwrap();
+        }
+    }
+
+    fn unconfirmed_frame() -> RecallFrame {
+        RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::Unconfirmed])
+    }
+
+    #[test]
+    fn trace_limit_none_writes_zero_trace_rows() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        capture_n(&estate, 10);
+
+        // trace_limit is None by default — no trace rows written.
+        let frame = unconfirmed_frame();
+        let stream = estate.recall(frame, 1_700_001_000);
+        let _ = stream.collect_all();
+
+        // recent_recall_traces over a wide window must be empty.
+        let since = epoch_to_iso8601(1_700_000_000);
+        let now = epoch_to_iso8601(1_700_002_000);
+        let traces = estate.recent_recall_traces(&since, &now).unwrap();
+        assert!(
+            traces.is_empty(),
+            "trace_limit None must write ZERO trace rows; got {}",
+            traces.len()
+        );
+    }
+
+    #[test]
+    fn trace_limit_five_writes_at_most_five_rows() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        capture_n(&estate, 20);
+
+        let mut frame = unconfirmed_frame();
+        frame.trace_limit = Some(5);
+        let stream = estate.recall(frame, 1_700_001_000);
+        let _ = stream.collect_all();
+
+        let since = epoch_to_iso8601(1_700_000_000);
+        let now = epoch_to_iso8601(1_700_002_000);
+        let traces = estate.recent_recall_traces(&since, &now).unwrap();
+        assert!(
+            traces.len() <= 5,
+            "trace_limit 5: expected <= 5 trace rows, got {}",
+            traces.len()
+        );
+        assert!(!traces.is_empty(), "expected at least one trace row with trace_limit 5");
+    }
+
+    #[test]
+    fn prune_deletes_old_keeps_new() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        capture_n(&estate, 10);
+
+        // Two recalls at distinct epochs, each writing trace rows.
+        let old_epoch = 1_700_001_000;
+        let new_epoch = 1_700_005_000;
+        let mut f1 = unconfirmed_frame();
+        f1.trace_limit = Some(3);
+        let _ = estate.recall(f1, old_epoch).collect_all();
+        let mut f2 = unconfirmed_frame();
+        f2.trace_limit = Some(3);
+        let _ = estate.recall(f2, new_epoch).collect_all();
+
+        // Cutoff between the two recall sessions: prune the old, keep the new.
+        let cutoff = epoch_to_iso8601((old_epoch + new_epoch) / 2);
+        let deleted = estate.prune_recall_traces(&cutoff).unwrap();
+        assert!(deleted >= 1, "expected the old rows pruned; deleted {deleted}");
+
+        // Surviving rows are all at or after the cutoff (the new session).
+        let since = epoch_to_iso8601(1_700_000_000);
+        let now = epoch_to_iso8601(1_700_006_000);
+        let remaining = estate.recent_recall_traces(&since, &now).unwrap();
+        assert!(!remaining.is_empty(), "the new session's rows must survive");
+        let new_iso = epoch_to_iso8601(new_epoch);
+        for t in &remaining {
+            assert!(
+                t.recalled_at >= cutoff,
+                "surviving row {} predates cutoff {}",
+                t.recalled_at,
+                cutoff
+            );
+            assert_eq!(t.recalled_at, new_iso, "survivors are the new session");
+        }
+    }
+
+    #[test]
+    fn large_limit_returns_all_drawers_above_cap() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        // 300 > RECALL_CANDIDATE_CAP (256): the old 256 cap silently truncated.
+        capture_n(&estate, 300);
+
+        let mut frame = unconfirmed_frame();
+        frame.hydration_level = HydrationLevel::Structured;
+        frame.limit = Some(10_000_000); // VaultBridge full-scan intent
+        let rows = estate.recall(frame, 1_700_001_000).collect_all();
+        assert_eq!(rows.len(), 300, "limit 10_000_000 must return all 300; got {}", rows.len());
+    }
+
+    #[test]
+    fn small_limit_stays_bounded_at_cap() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        capture_n(&estate, 300);
+
+        let mut frame = unconfirmed_frame();
+        frame.hydration_level = HydrationLevel::Structured;
+        frame.limit = Some(20);
+        let rows = estate.recall(frame, 1_700_001_000).collect_all();
+        // Director-style callers keep the 256 candidate floor; they never get
+        // all 300. The page size is the limit, but collect_all drains every
+        // page up to scan_bound = max(20, 256) = 256.
+        assert!(
+            rows.len() <= RECALL_CANDIDATE_CAP,
+            "limit 20 on 300-drawer estate must not exceed cap {}; got {}",
+            RECALL_CANDIDATE_CAP,
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn structured_recall_returns_empty_content() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        capture_n(&estate, 5);
+
+        // .structured with no content predicate → no-blob projected scan →
+        // content == "" (Swift parity, spec § 7.3).
+        let mut frame = unconfirmed_frame();
+        frame.hydration_level = HydrationLevel::Structured;
+        let rows = estate.recall(frame, 1_700_001_000).collect_all();
+        assert_eq!(rows.len(), 5);
+        for r in &rows {
+            assert_eq!(r.content, "", "structured recall must return content == \"\"");
+        }
+    }
+
+    #[test]
+    fn full_recall_returns_real_content() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        capture_n(&estate, 5);
+
+        // .full → blob-loading scan → real content bodies.
+        let mut frame = unconfirmed_frame();
+        frame.hydration_level = HydrationLevel::Full;
+        let rows = estate.recall(frame, 1_700_001_000).collect_all();
+        assert_eq!(rows.len(), 5);
+        for r in &rows {
+            assert!(
+                r.content.starts_with("doc-"),
+                "full recall must return real content; got {:?}",
+                r.content
+            );
+        }
+    }
+
+    #[test]
+    fn get_drawers_matching_frame_drops_withdrawn_under_default_admits_under_override() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        let active = estate
+            .capture(
+                CaptureFrame::new("active one", CaptureChannel::Typed, "r",
+                    LatticeAnchor::udc("5"), "alice", "v1"),
+                1_700_000_001,
+            )
+            .unwrap();
+        let gone = estate
+            .capture(
+                CaptureFrame::new("withdrawn one", CaptureChannel::Typed, "r",
+                    LatticeAnchor::udc("5"), "alice", "v1"),
+                1_700_000_002,
+            )
+            .unwrap();
+        estate.withdraw(&gone.id, Some("test"), 1_700_000_003).unwrap();
+
+        let ids = vec![active.id.clone(), gone.id.clone()];
+
+        // Default frame (CurrentlyBelieve) → only the active drawer is admissible;
+        // both rows physically load.
+        let def = estate
+            .get_drawers_matching_frame(
+                &ids,
+                &RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::Unconfirmed]),
+            )
+            .unwrap();
+        let mut loaded: Vec<&String> = def.loaded_ids.iter().collect();
+        loaded.sort();
+        let mut expect_loaded = vec![&active.id, &gone.id];
+        expect_loaded.sort();
+        assert_eq!(loaded, expect_loaded, "both rows must load regardless of frame filter");
+        assert_eq!(
+            def.admissible.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+            vec![active.id.clone()],
+            "default frame must admit only the active drawer"
+        );
+
+        // UsedToBelieve override → the withdrawn (Cluster B) drawer is admitted and
+        // the active (Cluster A) one excluded — proving the filter is the frame's.
+        let over = estate
+            .get_drawers_matching_frame(
+                &ids,
+                &RecallFrame::new(vec![Filter::UsedToBelieve, Filter::Unconfirmed]),
+            )
+            .unwrap();
+        assert_eq!(
+            over.admissible.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+            vec![gone.id.clone()],
+            "a UsedToBelieve frame must admit the withdrawn drawer and exclude the active one"
+        );
+        assert_eq!(over.admissible[0].state(), State::Withdrawn);
+
+        // A non-existent id is absent from loaded_ids → caller degrades (keeps), not drops.
+        let ghost = uuid::Uuid::new_v4().to_string();
+        let res = estate
+            .get_drawers_matching_frame(
+                &[active.id.clone(), ghost.clone()],
+                &RecallFrame::new(vec![Filter::CurrentlyBelieve, Filter::Unconfirmed]),
+            )
+            .unwrap();
+        assert!(!res.loaded_ids.contains(&ghost), "non-existent id must be absent from loaded_ids");
+        assert_eq!(res.loaded_ids.len(), 1);
+        assert_eq!(
+            res.admissible.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+            vec![active.id.clone()]
+        );
+    }
+
+    #[test]
+    fn content_predicate_chain_still_filters() {
+        let db = TempDb::new();
+        let estate = make_sqlite_estate(&db);
+        capture_n(&estate, 5); // doc-0 .. doc-4
+
+        // A content-predicate chain forces the blob-loading scan so the
+        // substring match runs — even at .structured hydration the match works.
+        let frame = RecallFrame::new(vec![
+            Filter::CurrentlyBelieve,
+            Filter::Unconfirmed,
+            Filter::ContentMatches("doc-3".to_string()),
+        ]);
+        let rows = estate.recall(frame, 1_700_001_000).collect_all();
+        assert_eq!(rows.len(), 1, "exactly one drawer matches 'doc-3'");
+        assert_eq!(rows[0].content, "doc-3");
+    }
+
+    // --- fingerprint pruning in recall (mirrors Swift RecallPruningTests) ---
+
+    /// Helper: capture a drawer with an explicit `feature_flags` bitmask so
+    /// the test controls which operational bits are present.
+    ///
+    /// Note on confirmation: freshly captured drawers are `Unconfirmed` because
+    /// `CaptureFrame` has no confirmation slot (confirmation is set by downstream
+    /// mutation). The pruning test chains below include `Filter::Unconfirmed` to
+    /// suppress the default `UserConfirmed` insertion so these drawers surface —
+    /// matching the Swift test's approach of stamping `provenance: Int64(1) << 18`
+    /// (UserConfirmed) directly on the fixture `Drawer`. Both approaches admit the
+    /// row; the key result under test is the fingerprint-prune decision, which is
+    /// orthogonal to the confirmation axis.
+    fn capture_with_flags(
+        estate: &Estate,
+        content: &str,
+        room: &str,
+        flags: i64,
+        now: i64,
+    ) -> Drawer {
+        let mut frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            room,
+            LatticeAnchor::udc("5"),
+            "alice",
+            "test-v1",
+        );
+        // `DrawerFeatureFlags` constants are pre-shifted (e.g. HAS_VOICE = 1<<13),
+        // so OR-ing them directly into `feature_flags` lands the correct bits in
+        // the 0xFFF000 feature region of the operational bitmap after capture's
+        // assembly (cookbook §2.4, mirrors Swift test `op: Int64` construction).
+        frame.feature_flags = flags;
+        estate.capture(frame, now).unwrap()
+    }
+
+    #[test]
+    fn chain_has_prunable_filter_true_for_has_feature_flag() {
+        // Mirrors Swift: chainHasPrunableFilter([.hasFeatureFlag(.hasVoice)]) == true
+        assert!(BitmapEvaluator::chain_has_prunable_filter(&[
+            Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE)
+        ]));
+    }
+
+    #[test]
+    fn chain_has_prunable_filter_true_for_nested_all() {
+        // Mirrors Swift: chainHasPrunableFilter([.all([.hasFeatureFlag(.hasImage)])]) == true
+        assert!(BitmapEvaluator::chain_has_prunable_filter(&[Filter::All(vec![
+            Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_IMAGE)
+        ])]));
+    }
+
+    #[test]
+    fn chain_has_prunable_filter_false_for_threshold_only() {
+        // Mirrors Swift: chainHasPrunableFilter([.currentlyBelieve, .trustworthy]) == false
+        assert!(!BitmapEvaluator::chain_has_prunable_filter(&[
+            Filter::CurrentlyBelieve,
+            Filter::Trustworthy
+        ]));
+    }
+
+    #[test]
+    fn container_survives_set_bit_present_passes() {
+        // Fingerprint whose operational field has the HAS_VOICE bit set →
+        // a chain requiring HAS_VOICE admits it. Mirrors Swift containerSurvival.
+        let with_voice = crate::container_fingerprint_store::ContainerFingerprint::new(
+            0,
+            DrawerFeatureFlags::HAS_VOICE,
+            0,
+        );
+        assert!(BitmapEvaluator::container_survives(
+            &[Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE)],
+            with_voice
+        ));
+    }
+
+    #[test]
+    fn container_survives_set_bit_absent_prunes() {
+        // Fingerprint with HAS_IMAGE but not HAS_VOICE → a chain requiring
+        // HAS_VOICE prunes it. Mirrors Swift containerSurvival.
+        let with_image = crate::container_fingerprint_store::ContainerFingerprint::new(
+            0,
+            DrawerFeatureFlags::HAS_IMAGE,
+            0,
+        );
+        assert!(!BitmapEvaluator::container_survives(
+            &[Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE)],
+            with_image
+        ));
+    }
+
+    #[test]
+    fn container_survives_threshold_filter_never_prunes() {
+        // A threshold filter (CurrentlyBelieve) cannot prune via an OR, so the
+        // container always survives regardless of the fingerprint bits.
+        // Mirrors Swift: containerSurvives(chain: [.currentlyBelieve], ...) == true
+        let with_image = crate::container_fingerprint_store::ContainerFingerprint::new(
+            0,
+            DrawerFeatureFlags::HAS_IMAGE,
+            0,
+        );
+        assert!(BitmapEvaluator::container_survives(
+            &[Filter::CurrentlyBelieve],
+            with_image
+        ));
+    }
+
+    #[test]
+    fn container_survives_conjunction_missing_conjunct_prunes() {
+        // Conjunction: a missing conjunct makes the whole conjunction
+        // unsatisfiable; the container is pruned.
+        // Mirrors Swift: !containerSurvives(chain: [.all([.hasVoice, .hasImage])],
+        //                                   fingerprint: withVoice)
+        let with_voice = crate::container_fingerprint_store::ContainerFingerprint::new(
+            0,
+            DrawerFeatureFlags::HAS_VOICE,
+            0,
+        );
+        assert!(!BitmapEvaluator::container_survives(
+            &[Filter::All(vec![
+                Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
+                Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_IMAGE),
+            ])],
+            with_voice
+        ));
+    }
+
+    #[test]
+    fn container_survives_disjunction_one_satisfiable_disjunct_passes() {
+        // Disjunction: one satisfiable disjunct is enough; the container survives.
+        // Mirrors Swift: containerSurvives(chain: [.any([.hasVoice, .hasImage])],
+        //                                  fingerprint: withVoice) == true
+        let with_voice = crate::container_fingerprint_store::ContainerFingerprint::new(
+            0,
+            DrawerFeatureFlags::HAS_VOICE,
+            0,
+        );
+        assert!(BitmapEvaluator::container_survives(
+            &[Filter::Any(vec![
+                Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
+                Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_IMAGE),
+            ])],
+            with_voice
+        ));
+    }
+
+    #[test]
+    fn container_survives_negation_gives_no_exclusion() {
+        // `Not` gives no sound exclusion from an OR fingerprint, so the
+        // container always survives under a negation filter.
+        // Mirrors Swift: containerSurvives(chain: [.not(.hasVoice)], ...) == true
+        let with_image = crate::container_fingerprint_store::ContainerFingerprint::new(
+            0,
+            DrawerFeatureFlags::HAS_IMAGE,
+            0,
+        );
+        assert!(BitmapEvaluator::container_survives(
+            &[Filter::Not(Box::new(Filter::HasFeatureFlag(
+                DrawerFeatureFlags::HAS_VOICE
+            )))],
+            with_image
+        ));
+    }
+
+    #[test]
+    fn recall_prunes_non_matching_container_and_returns_equivalent_rows() {
+        // End-to-end pruning path: capture a hasVoice drawer into room r1
+        // and a hasImage drawer into room r2. A recall filtering on hasVoice
+        // prunes r2 (its OR lacks the bit) and returns only d1.
+        //
+        // Mirrors Swift RecallPruningTests:
+        //   "Recall prunes a non-matching container and returns the equivalent rows"
+        let estate = make_estate();
+
+        // d1: hasVoice in room r1 — survives the prune
+        let d1 = capture_with_flags(&estate, "c-d1", "r1", DrawerFeatureFlags::HAS_VOICE, 1_700_000_001);
+        // d2: hasImage in room r2 — pruned (lacks HAS_VOICE)
+        let _d2 = capture_with_flags(&estate, "c-d2", "r2", DrawerFeatureFlags::HAS_IMAGE, 1_700_000_002);
+
+        // Filter::Unconfirmed suppresses the default UserConfirmed insertion so
+        // freshly captured (Unconfirmed) drawers surface. The prune decision is
+        // orthogonal to the confirmation axis: the HasFeatureFlag filter drives it.
+        let frame = RecallFrame::new(vec![
+            Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
+            Filter::Unconfirmed,
+        ]);
+        let rows = estate.recall(frame, 1_700_000_003).collect_all();
+
+        assert_eq!(rows.len(), 1, "only the hasVoice drawer survives the prune");
+        assert_eq!(rows[0].id, d1.id, "surviving drawer is d1 (hasVoice)");
+    }
+
+    #[test]
+    fn recall_pruned_skipped_container_returns_no_rows_from_it() {
+        // A pruned container contributes zero rows to the result.
+        // Verify both that the pruned room's drawer is absent and that the
+        // surviving room's drawer is present.
+        let estate = make_estate();
+
+        let d_voice = capture_with_flags(
+            &estate, "voice", "voice-room", DrawerFeatureFlags::HAS_VOICE, 1_700_000_001,
+        );
+        let _d_image = capture_with_flags(
+            &estate, "image", "image-room", DrawerFeatureFlags::HAS_IMAGE, 1_700_000_002,
+        );
+
+        let frame = RecallFrame::new(vec![
+            Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
+            Filter::Unconfirmed,
+        ]);
+        let rows = estate.recall(frame, 1_700_000_003).collect_all();
+
+        let ids: Vec<&str> = rows.iter().map(|d| d.id.as_str()).collect();
+        assert!(ids.contains(&d_voice.id.as_str()), "voice drawer must be present");
+        assert!(
+            !ids.iter().any(|id| *id == _d_image.id.as_str()),
+            "image-only drawer must be absent (pruned)"
+        );
+    }
+
+    #[test]
+    fn result_identity_pruned_vs_unpruned_scan_on_same_fixture() {
+        // Pruning is an optimization, never a result change.
+        //
+        // The pruning path (hasVoice chain, which engages container pruning)
+        // and the non-pruning path (same hasVoice chain, same data) must
+        // return identical row sets. This assertion holds because:
+        //   - Both paths apply the same BitmapEvaluator filter.
+        //   - The pruning path only skips containers whose OR proves they
+        //     hold no matching row; it never skips a container that could
+        //     match.
+        //   - Therefore the result is identical to what the per-row filter
+        //     would produce over the full corpus.
+        //
+        // We verify identity by first running the pruned recall, then
+        // manually computing what an exhaustive scan returns, and asserting
+        // the two ID sets are equal.
+        let estate = make_estate();
+
+        let d1 = capture_with_flags(&estate, "a-voice", "room-a", DrawerFeatureFlags::HAS_VOICE, 1_700_000_001);
+        let d2 = capture_with_flags(&estate, "b-voice", "room-b", DrawerFeatureFlags::HAS_VOICE, 1_700_000_002);
+        let _d3 = capture_with_flags(&estate, "c-image", "room-c", DrawerFeatureFlags::HAS_IMAGE, 1_700_000_003);
+        let _d4 = capture_with_flags(&estate, "d-plain", "room-d", 0, 1_700_000_004);
+
+        // Pruning path: chain_has_prunable_filter is true for HasFeatureFlag.
+        // Filter::Unconfirmed suppresses default UserConfirmed insertion so
+        // freshly captured drawers surface.
+        let pruned_frame = RecallFrame::new(vec![
+            Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
+            Filter::Unconfirmed,
+        ]);
+        let mut pruned_ids: Vec<String> =
+            estate.recall(pruned_frame, 1_700_000_005).collect_all().into_iter().map(|d| d.id).collect();
+        pruned_ids.sort();
+
+        // Expected result: the two hasVoice drawers only.
+        let mut expected: Vec<String> = vec![d1.id.clone(), d2.id.clone()];
+        expected.sort();
+
+        assert_eq!(
+            pruned_ids, expected,
+            "pruned recall must return the same rows as a full per-row filter"
+        );
+    }
+
+    #[test]
+    fn bounded_behavior_held_with_pruning_path() {
+        // The pruning path applies prefix(scan_bound) after collection so it
+        // obeys the same scan_bound as the non-pruning path (mirrors Swift's
+        // `candidates = Array(rows.prefix(scanBound))`). Use a small explicit
+        // limit to verify the cap is respected.
+        let estate = make_estate();
+
+        // Capture 10 drawers with HAS_VOICE into 10 distinct rooms.
+        for i in 0..10 {
+            capture_with_flags(
+                &estate,
+                &format!("v{i}"),
+                &format!("room-{i}"),
+                DrawerFeatureFlags::HAS_VOICE,
+                1_700_000_000 + i,
+            );
+        }
+
+        // limit = 3 → scan_bound = max(3, RECALL_CANDIDATE_CAP) = 256.
+        // All 10 are within 256, so all 10 survive. But with limit=3 the
+        // RecallStream returns at most 3 per page; collect_all drains pages.
+        // The point: the scan_bound does NOT silently truncate 10 to 3 — the
+        // limit is for pagination, not for corpus truncation when estate < cap.
+        // Filter::Unconfirmed suppresses default UserConfirmed insertion.
+        let mut frame = RecallFrame::new(vec![
+            Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE),
+            Filter::Unconfirmed,
+        ]);
+        frame.limit = Some(3);
+        let all_rows = estate.recall(frame, 1_700_000_020).collect_all();
+        assert_eq!(
+            all_rows.len(),
+            10,
+            "all 10 hasVoice drawers must be reachable across pages"
+        );
+    }
+
+    // --- recall internal-read failure surfacing (P0-5 sites 1-5) ---
+    //
+    // A failed internal read (live_rows / room-fingerprints / room-drawer /
+    // bitmap-eval) must be DISTINGUISHABLE from a genuine-empty estate: it
+    // names a `locus.*` stage on the stream's degraded_stages, while a genuine
+    // recall (empty or not) names none. The fault is injected via the Estate
+    // single-use seam (available under cfg(test)).
+
+    /// Seed an estate with one hasVoice drawer in room r1 so the
+    /// fingerprint-pruning path visits a surviving room.
+    fn seeded_voice_estate() -> Estate {
+        let estate = make_estate();
+        let mut voice = CaptureFrame::new(
+            "v", CaptureChannel::Typed, "r1",
+            LatticeAnchor::udc("5"), "alice", "test-v1",
+        );
+        voice.feature_flags = DrawerFeatureFlags::HAS_VOICE;
+        estate.capture(voice, 1_700_000_001).unwrap();
+        estate
+    }
+
+    #[test]
+    fn recall_genuine_empty_has_no_degraded_stage() {
+        // Empty estate, no fault armed → empty result, NO degraded stage.
+        let estate = make_estate();
+        let stream = estate.recall(RecallFrame::new(vec![]), 1_700_000_010);
+        let (rows, stages) = stream.collect_all_with_degraded();
+        assert!(rows.is_empty());
+        assert!(stages.is_empty(), "genuine-empty estate must record no degraded stage");
+    }
+
+    #[test]
+    fn recall_success_has_no_degraded_stage() {
+        let estate = seeded_voice_estate();
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let stream = estate.recall(RecallFrame::new(chain), 1_700_000_010);
+        let (rows, stages) = stream.collect_all_with_degraded();
+        assert_eq!(rows.len(), 1);
+        assert!(stages.is_empty());
+    }
+
+    #[test]
+    fn recall_live_rows_failure_surfaced() {
+        // Empty filter chain → non-pruning bounded scan (live_rows path).
+        let estate = seeded_voice_estate();
+        estate.set_test_force_internal_read_error(Some(
+            crate::estate::RecallInternalRead::LiveRows));
+        let stream = estate.recall(RecallFrame::new(vec![]), 1_700_000_010);
+        let (rows, stages) = stream.collect_all_with_degraded();
+        assert!(rows.is_empty(), "failed scan yields no rows");
+        assert_eq!(stages, vec!["locus.liveRows.readFailed".to_string()],
+            "a FAILED scan is distinguishable from a genuine-empty estate");
+    }
+
+    #[test]
+    fn recall_room_fingerprints_failure_surfaced() {
+        let estate = seeded_voice_estate();
+        estate.set_test_force_internal_read_error(Some(
+            crate::estate::RecallInternalRead::RoomFingerprints));
+        // Prunable filter → fingerprint-pruning path (room_level_fingerprints).
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let stream = estate.recall(RecallFrame::new(chain), 1_700_000_010);
+        let (rows, stages) = stream.collect_all_with_degraded();
+        assert!(rows.is_empty());
+        assert_eq!(stages, vec!["locus.roomFingerprints.readFailed".to_string()]);
+    }
+
+    #[test]
+    fn recall_room_drawer_read_failure_surfaced() {
+        let estate = seeded_voice_estate();
+        estate.set_test_force_internal_read_error(Some(
+            crate::estate::RecallInternalRead::RoomDrawerRead));
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let stream = estate.recall(RecallFrame::new(chain), 1_700_000_010);
+        let (rows, stages) = stream.collect_all_with_degraded();
+        assert!(rows.is_empty(), "a failed surviving-room read yields no rows for that room");
+        assert_eq!(stages, vec!["locus.roomDrawerRead.readFailed".to_string()]);
+    }
+
+    #[test]
+    fn recall_bitmap_eval_failure_surfaced() {
+        let estate = seeded_voice_estate();
+        estate.set_test_force_internal_read_error(Some(
+            crate::estate::RecallInternalRead::BitmapEval));
+        let stream = estate.recall(RecallFrame::new(vec![]), 1_700_000_010);
+        let (rows, stages) = stream.collect_all_with_degraded();
+        assert!(rows.is_empty());
+        assert_eq!(stages, vec!["locus.bitmapEval.failed".to_string()]);
+    }
+
+    #[test]
+    fn recall_fault_seam_is_single_use() {
+        let estate = seeded_voice_estate();
+        estate.set_test_force_internal_read_error(Some(
+            crate::estate::RecallInternalRead::LiveRows));
+
+        let first = estate.recall(RecallFrame::new(vec![]), 1_700_000_010);
+        let (_r1, s1) = first.collect_all_with_degraded();
+        assert_eq!(s1, vec!["locus.liveRows.readFailed".to_string()]);
+
+        // Seam consumed — next recall is a normal, successful read.
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let second = estate.recall(RecallFrame::new(chain), 1_700_000_011);
+        let (r2, s2) = second.collect_all_with_degraded();
+        assert_eq!(r2.len(), 1);
+        assert!(s2.is_empty());
+    }
+
+    // --- trace-WRITE failure is fail-closed (rows still returned) ---
+    //
+    // The trace write fires AFTER reads + eval succeed and ONLY when the caller
+    // opts in via trace_limit on a non-empty result. A forced `TraceWrite` fault
+    // must therefore yield a POPULATED result WITH the `recall.trace_write_failed`
+    // stage — proving recall stays non-throwing (spec § 7.8.1) while a dropped
+    // trace (the reward sweep's missing input) is observable, not silent.
+
+    #[test]
+    fn recall_trace_write_failure_surfaced_rows_still_returned() {
+        let estate = seeded_voice_estate();
+        estate.set_test_force_internal_read_error(Some(
+            crate::estate::RecallInternalRead::TraceWrite));
+        // trace_limit opts the caller into the reward cycle so the write runs.
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let mut frame = RecallFrame::new(chain);
+        frame.trace_limit = Some(5);
+        let stream = estate.recall(frame, 1_700_000_010);
+        let (rows, stages) = stream.collect_all_with_degraded();
+        // Non-throwing: the caller STILL receives its rows despite the lost trace.
+        assert_eq!(rows.len(), 1,
+            "recall stays non-throwing — a trace-write fault must not empty the result");
+        // The dropped trace is observable on the same degraded_stages channel.
+        assert_eq!(stages, vec!["recall.trace_write_failed".to_string()],
+            "a lost recall trace must be observable, not silently swallowed");
+    }
+
+    #[test]
+    fn recall_trace_write_success_records_no_stage() {
+        // Healthy control: trace_limit set, write succeeds → rows, NO stage.
+        let estate = seeded_voice_estate();
+        let chain = vec![Filter::HasFeatureFlag(DrawerFeatureFlags::HAS_VOICE), Filter::Unconfirmed];
+        let mut frame = RecallFrame::new(chain);
+        frame.trace_limit = Some(5);
+        let stream = estate.recall(frame, 1_700_000_010);
+        let (rows, stages) = stream.collect_all_with_degraded();
+        assert_eq!(rows.len(), 1);
+        assert!(stages.is_empty(), "a clean trace write records no degraded stage");
     }
 }

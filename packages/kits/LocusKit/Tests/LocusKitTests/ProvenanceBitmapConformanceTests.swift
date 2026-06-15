@@ -207,6 +207,7 @@ struct ProvenanceBitmapConformanceTests {
         (EnrichmentStatus.qidPending, 1),
         (EnrichmentStatus.qidCompleted, 2),
         (EnrichmentStatus.closureCached, 3),
+        (EnrichmentStatus.qidProposed, 4),
     ]
 
     @Test("EnrichmentStatus raw values match cookbook §2.5 (NEW in v0.6)")

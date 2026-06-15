@@ -3,9 +3,11 @@
 //! Only the four backing axis enums are ported here — they are genuine
 //! leaves. The `Drawer` accessors that decode them belong to the Drawer
 //! type and live in `drawer_operational.rs` alongside the operational
-//! accessors: `adjective_sensitivity()` (bits 6–11) and `trust()` (bits
-//! 18–23) are implemented; the remaining Drawer adjective accessors
-//! (state, exportability, and the cluster predicates) are pending.
+//! accessors. All adjective-axis accessors are implemented: `state()` (bits
+//! 0–5), `adjective_sensitivity()` (bits 6–11), `exportability()` (bits
+//! 12–17), `trust()` (bits 18–23), plus the cluster predicates
+//! `is_currently_believed()`, `is_knew_past()`, `is_terminal()`, the
+//! obligation flags `dreaming_recalc_required()` (bit 26), and `sealed()` (bit 27).
 //!
 //! ## Adjective bitmap layout (per cookbook §2.3 / §2.8)
 //!
@@ -210,6 +212,59 @@ impl AdjectiveSensitivity {
             // intermediates and beyond-spec values) falls back to Normal.
             _ => AdjectiveSensitivity::Normal,
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Privacy-tier predicates — ADR-007 Decision 2
+    //
+    // Three predicates record the normative mapping of the four sensitivity
+    // values onto the three ADR-007 privacy tiers. The predicates are mutually
+    // exclusive and collectively exhaustive: exactly one is `true` for every
+    // variant. They are pure computed functions — no new fields, no new bitmap
+    // bits, no schema changes.
+    //
+    // Tier mapping (four sensitivity values → three tiers):
+    //   Normal  (raw  0) → Normal tier  — free bulk export
+    //   Elevated(raw 16) → Normal tier  — free bulk export
+    //   Restricted(raw 32) → Private tier — bulk requires owner-held key (v1.0)
+    //   Secret  (raw 48) → Secret tier  — never rides bulk channels
+    // -------------------------------------------------------------------------
+
+    /// `true` for sensitivity values that belong to the **Normal tier**
+    /// per ADR-007 Decision 2: `Normal` (raw 0) and `Elevated` (raw 16).
+    ///
+    /// Normal-tier drawers are eligible for free bulk export. VaultKit's
+    /// export path consults this predicate to determine whether a drawer
+    /// may ride a bulk channel without additional friction.
+    ///
+    /// Mirrors Swift `AdjectiveSensitivity.isBulkExportable`.
+    pub fn is_bulk_exportable(self) -> bool {
+        matches!(self, AdjectiveSensitivity::Normal | AdjectiveSensitivity::Elevated)
+    }
+
+    /// `true` for sensitivity values that belong to the **Private tier**
+    /// per ADR-007 Decision 2: `Restricted` (raw 32).
+    ///
+    /// Private-tier drawers require an owner-held key at execution time before
+    /// participating in bulk operations (v1.0 gold deliverable). By default
+    /// they are excluded from bulk export; an explicit scope option in VaultKit
+    /// may include them when the key ceremony is satisfied.
+    ///
+    /// Mirrors Swift `AdjectiveSensitivity.requiresOwnerKeyForBulk`.
+    pub fn requires_owner_key_for_bulk(self) -> bool {
+        matches!(self, AdjectiveSensitivity::Restricted)
+    }
+
+    /// `true` for sensitivity values that belong to the **Secret tier**
+    /// per ADR-007 Decision 2: `Secret` (raw 48).
+    ///
+    /// Secret-tier drawers never ride bulk channels under any scope option.
+    /// VaultKit's export path must reject secret-tier drawers regardless of
+    /// any other scope configuration.
+    ///
+    /// Mirrors Swift `AdjectiveSensitivity.isExcludedFromBulk`.
+    pub fn is_excluded_from_bulk(self) -> bool {
+        matches!(self, AdjectiveSensitivity::Secret)
     }
 }
 
@@ -468,6 +523,142 @@ mod tests {
                 AdjectiveExportability::from_raw(v),
                 AdjectiveExportability::Private,
                 "expected Private fallback for raw {v}"
+            );
+        }
+    }
+
+    // --- Privacy-tier predicates — ADR-007 Decision 2 ---
+    //
+    // Truth table: four sensitivity values × three tier predicates.
+    // Mirrors the Swift AdjectivePrivacyTierTests suite — cross-port
+    // conformance: the truth tables MUST agree in both languages.
+
+    // is_bulk_exportable (Normal tier)
+
+    #[test]
+    fn is_bulk_exportable_true_for_normal() {
+        assert!(
+            AdjectiveSensitivity::Normal.is_bulk_exportable(),
+            "Normal is in the Normal tier — free bulk export (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn is_bulk_exportable_true_for_elevated() {
+        assert!(
+            AdjectiveSensitivity::Elevated.is_bulk_exportable(),
+            "Elevated is in the Normal tier — free bulk export (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn is_bulk_exportable_false_for_restricted() {
+        assert!(
+            !AdjectiveSensitivity::Restricted.is_bulk_exportable(),
+            "Restricted is in the Private tier — not bulk-exportable (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn is_bulk_exportable_false_for_secret() {
+        assert!(
+            !AdjectiveSensitivity::Secret.is_bulk_exportable(),
+            "Secret is in the Secret tier — not bulk-exportable (ADR-007 Decision 2)"
+        );
+    }
+
+    // requires_owner_key_for_bulk (Private tier)
+
+    #[test]
+    fn requires_owner_key_false_for_normal() {
+        assert!(
+            !AdjectiveSensitivity::Normal.requires_owner_key_for_bulk(),
+            "Normal is in the Normal tier — no key required (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn requires_owner_key_false_for_elevated() {
+        assert!(
+            !AdjectiveSensitivity::Elevated.requires_owner_key_for_bulk(),
+            "Elevated is in the Normal tier — no key required (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn requires_owner_key_true_for_restricted() {
+        assert!(
+            AdjectiveSensitivity::Restricted.requires_owner_key_for_bulk(),
+            "Restricted is in the Private tier — owner key required (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn requires_owner_key_false_for_secret() {
+        assert!(
+            !AdjectiveSensitivity::Secret.requires_owner_key_for_bulk(),
+            "Secret is in the Secret tier — excluded entirely, not key-gated (ADR-007 Decision 2)"
+        );
+    }
+
+    // is_excluded_from_bulk (Secret tier)
+
+    #[test]
+    fn is_excluded_from_bulk_false_for_normal() {
+        assert!(
+            !AdjectiveSensitivity::Normal.is_excluded_from_bulk(),
+            "Normal is in the Normal tier — not excluded (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn is_excluded_from_bulk_false_for_elevated() {
+        assert!(
+            !AdjectiveSensitivity::Elevated.is_excluded_from_bulk(),
+            "Elevated is in the Normal tier — not excluded (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn is_excluded_from_bulk_false_for_restricted() {
+        assert!(
+            !AdjectiveSensitivity::Restricted.is_excluded_from_bulk(),
+            "Restricted is in the Private tier — key-gated, not hard-excluded (ADR-007 Decision 2)"
+        );
+    }
+
+    #[test]
+    fn is_excluded_from_bulk_true_for_secret() {
+        assert!(
+            AdjectiveSensitivity::Secret.is_excluded_from_bulk(),
+            "Secret is in the Secret tier — always excluded from bulk (ADR-007 Decision 2)"
+        );
+    }
+
+    /// ADR-007 Decision 2 exhaustiveness: the three predicates are mutually
+    /// exclusive and collectively exhaustive — exactly one is `true` for
+    /// every variant. Cross-port conformance: matches the Swift exhaustiveness
+    /// test in `AdjectivePrivacyTierTests`.
+    #[test]
+    fn privacy_tier_predicates_mutually_exclusive_exhaustive() {
+        let all_variants = [
+            AdjectiveSensitivity::Normal,
+            AdjectiveSensitivity::Elevated,
+            AdjectiveSensitivity::Restricted,
+            AdjectiveSensitivity::Secret,
+        ];
+        for variant in all_variants {
+            let true_count = [
+                variant.is_bulk_exportable(),
+                variant.requires_owner_key_for_bulk(),
+                variant.is_excluded_from_bulk(),
+            ]
+            .iter()
+            .filter(|&&b| b)
+            .count();
+            assert_eq!(
+                true_count, 1,
+                "{variant:?}: expected exactly 1 true predicate but got {true_count} (ADR-007 Decision 2)"
             );
         }
     }

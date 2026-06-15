@@ -31,14 +31,43 @@ public struct RecallStream: AsyncSequence, Sendable {
     private let pageSize: Int
     private let hydrationLevel: HydrationLevel
 
+    /// Named internal-read failures that occurred while `Estate.recall`
+    /// produced this stream. EMPTY for a genuine result (every internal
+    /// read succeeded — including the genuine-empty estate, where the
+    /// reads succeeded and simply matched no rows). NON-EMPTY only when
+    /// an internal read (`liveRows`, room-fingerprints, room-drawer-read,
+    /// or the bitmap evaluator) FAILED and its rows were dropped: in that
+    /// case `rows` may be empty for a reason OTHER than "no matches," and
+    /// this array names which stage failed so a consumer can tell a FAILED
+    /// recall from a GENUINE-EMPTY estate. Spec § 7.8.1.
+    ///
+    /// Stage identifiers (stable, cross-port):
+    /// - `locus.liveRows.readFailed` — the bounded corpus scan failed.
+    /// - `locus.roomFingerprints.readFailed` — the room-fingerprint
+    ///   enumeration failed (fingerprint-pruning path).
+    /// - `locus.roomDrawerRead.readFailed` — a surviving room's drawer
+    ///   read failed (fingerprint-pruning path).
+    /// - `locus.bitmapEval.failed` — `BitmapEvaluator.evaluate` threw.
+    ///
+    /// `recall` is non-throwing per spec § 7.8.1, so this field — not a
+    /// thrown error — is the channel by which an internal-read failure
+    /// reaches the caller. The GLK `RecallDirector` merges these into
+    /// `GLKRecallResult.degradedStages`.
+    public let degradedStages: [String]
+
     /// Constructed by `Estate.recall`. `pageSize` is clamped to at
     /// least 1 — a non-positive page size would loop forever or
     /// produce zero-row pages with `isLast == false`, both of which
     /// violate the spec § 7.8.4 contract.
+    ///
+    /// `degradedStages` defaults to `[]` so non-recall constructors
+    /// (e.g. an in-memory reranked stream) carry no spurious degradation
+    /// without restating the default.
     internal init(
         rows: [Drawer],
         pageSize: Int = RecallStream.defaultPageSize,
-        hydrationLevel: HydrationLevel = .structured
+        hydrationLevel: HydrationLevel = .structured,
+        degradedStages: [String] = []
     ) {
         self.rows = rows
         // `Swift.max` qualifier — `Sequence.max()` is an instance
@@ -46,6 +75,7 @@ public struct RecallStream: AsyncSequence, Sendable {
         // the global function here.
         self.pageSize = Swift.max(1, pageSize)
         self.hydrationLevel = hydrationLevel
+        self.degradedStages = degradedStages
     }
 
     public func makeAsyncIterator() -> AsyncIterator {

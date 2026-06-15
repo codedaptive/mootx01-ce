@@ -1,4 +1,6 @@
-//! Operational bitmap value types. Ports `DrawerOperational.swift`.
+//! Operational bitmap value types and adjective bitmap accessors for the
+//! `Drawer` entity. Ports `DrawerOperational.swift` (operational axis) and
+//! the `Adjectives.swift` `Drawer` extension (adjective axis).
 //!
 //! Per cookbook §2.4 (Drawer operational layout, v0.6 6-bit floor) and
 //! §2.8 (verification table).
@@ -35,7 +37,7 @@ use crate::drawer::Drawer;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -248,6 +250,89 @@ impl Drawer {
         // Cookbook §2.4 bit 25: lineage_clustering flag.
         bit_field::extract_flag(self.operational_bitmap, 25)
     }
+
+    // -------------------------------------------------------------------------
+    // Adjective-bitmap axis accessors — mirrors the `Drawer` extension in
+    // `Adjectives.swift`. `adjective_sensitivity()` and `trust()` are above
+    // in this file; the remaining axes follow.
+    // -------------------------------------------------------------------------
+
+    /// Decode bits 0–5 of `adjective_bitmap` as a `State`. Returns `Active`
+    /// for unrecognised raw values so retrieval filters that look for current
+    /// beliefs fail closed (an unknown row surfaces for review rather than
+    /// silently disappearing). Cookbook §2.3 6-bit field.
+    ///
+    /// Mirrors Swift `Drawer.state`.
+    pub fn state(&self) -> crate::adjectives::State {
+        // Cookbook §2.3: state at bits 0–5 of adjective_bitmap.
+        crate::adjectives::State::from_raw(bit_field::extract_field(self.adjective_bitmap, 0, 6))
+    }
+
+    /// Decode bits 12–17 of `adjective_bitmap` as an `AdjectiveExportability`.
+    /// Returns `Private` for unrecognised raw values — non-exportable is the
+    /// safe fallback for an unknown encoding. Cookbook §2.3 6-bit field.
+    ///
+    /// Mirrors Swift `Drawer.exportability`.
+    pub fn exportability(&self) -> crate::adjectives::AdjectiveExportability {
+        // Cookbook §2.3: exportability at bits 12–17 of adjective_bitmap.
+        crate::adjectives::AdjectiveExportability::from_raw(bit_field::extract_field(
+            self.adjective_bitmap,
+            12,
+            6,
+        ))
+    }
+
+    /// True when the row sits in Cluster A (active / becoming) per cookbook
+    /// §2.3 — `Active`, `Pending`, `Contested`, or `Accepted`. F11 cascade
+    /// (2026-05-27): `Accepted` moved here from the v0.35 terminal cluster.
+    /// Cookbook semantics: accepted is the audit-grade endpoint of
+    /// becoming-true belief.
+    ///
+    /// Mathematically equivalent to `(state.raw_value() >> 4) & 0x3 == 0`.
+    ///
+    /// Mirrors Swift `Drawer.isCurrentlyBelieved`.
+    pub fn is_currently_believed(&self) -> bool {
+        self.state().is_cluster_a()
+    }
+
+    /// True when the row sits in Cluster B (superseded / historical) per
+    /// cookbook §2.3 — `Superseded`, `Decayed`, `Withdrawn`, or `Expired`.
+    ///
+    /// Mathematically equivalent to `(state.raw_value() >> 4) & 0x3 == 1`.
+    ///
+    /// Mirrors Swift `Drawer.isKnewPast`.
+    pub fn is_knew_past(&self) -> bool {
+        matches!(
+            self.state(),
+            crate::adjectives::State::Superseded
+                | crate::adjectives::State::Decayed
+                | crate::adjectives::State::Withdrawn
+                | crate::adjectives::State::Expired
+        )
+    }
+
+    /// True when the row sits in Cluster C (terminal) per cookbook §2.3 —
+    /// `Rejected` or `Tombstoned`. F11 cascade (2026-05-27): `Accepted`
+    /// moved OUT of this cluster (now in `is_currently_believed`). Cluster C
+    /// is "externally rejected / removed," not merely "no further transitions."
+    ///
+    /// Mathematically equivalent to `(state.raw_value() >> 4) & 0x3 == 2`.
+    ///
+    /// Mirrors Swift `Drawer.isTerminal`.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.state(),
+            crate::adjectives::State::Rejected | crate::adjectives::State::Tombstoned
+        )
+    }
+
+    // dreaming_recalc_required() and sealed() are defined in `drawer.rs`
+    // alongside the adjective-bitmap layout comment where they were first
+    // introduced (F17 cascade / custody cascade). They are part of the
+    // adjective axis but pre-date this file's existence as a home for
+    // operational-bitmap code. They live in drawer.rs to avoid a duplicate
+    // definition across two `impl Drawer` blocks in the same crate.
+    // See `Drawer::dreaming_recalc_required()` and `Drawer::sealed()`.
 }
 
 // ---------------------------------------------------------------------------
@@ -417,5 +502,260 @@ mod tests {
         // Ambient (raw 6) — the highest used case.
         d.adjective_bitmap = Trust::Ambient.raw_value() << 18;
         assert_eq!(d.trust(), Trust::Ambient);
+    }
+
+    // -------------------------------------------------------------------------
+    // Adjective-bitmap axis accessor tests (Item C parity)
+    // Mirrors Swift's Adjectives.swift Drawer extension tests.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn state_accessor_reads_bits_0_5() {
+        use crate::adjectives::State;
+        let mut d = sample();
+        // Default bitmap → Active (raw 0).
+        assert_eq!(d.state(), State::Active);
+        // Tombstoned (raw 33) at bits 0–5.
+        d.adjective_bitmap = State::Tombstoned.raw_value();
+        assert_eq!(d.state(), State::Tombstoned);
+        // Pending (raw 1).
+        d.adjective_bitmap = State::Pending.raw_value();
+        assert_eq!(d.state(), State::Pending);
+        // Upper fields (sensitivity at 6–11) must not bleed into state read.
+        d.adjective_bitmap = State::Accepted.raw_value()
+            | (crate::adjectives::AdjectiveSensitivity::Secret.raw_value() << 6);
+        assert_eq!(d.state(), State::Accepted);
+    }
+
+    #[test]
+    fn state_accessor_unknown_raw_falls_back_to_active() {
+        // A reserved raw value (e.g., 4) in bits 0–5 must fall back to Active.
+        let mut d = sample();
+        d.adjective_bitmap = 4i64; // raw 4 is reserved per cookbook §2.3
+        assert_eq!(d.state(), crate::adjectives::State::Active);
+    }
+
+    #[test]
+    fn exportability_accessor_reads_bits_12_17() {
+        use crate::adjectives::AdjectiveExportability;
+        let mut d = sample();
+        // Default → Private (raw 0).
+        assert_eq!(d.exportability(), AdjectiveExportability::Private);
+        // Public (raw 32) at bits 12–17.
+        d.adjective_bitmap = AdjectiveExportability::Public.raw_value() << 12;
+        assert_eq!(d.exportability(), AdjectiveExportability::Public);
+        // Sensitivity at bits 6–11 must not bleed into exportability read.
+        d.adjective_bitmap = (AdjectiveExportability::Public.raw_value() << 12)
+            | (crate::adjectives::AdjectiveSensitivity::Restricted.raw_value() << 6);
+        assert_eq!(d.exportability(), AdjectiveExportability::Public);
+    }
+
+    #[test]
+    fn exportability_accessor_unknown_raw_falls_back_to_private() {
+        // A raw value of 1 at bits 12–17 is reserved; must fall back to Private.
+        let mut d = sample();
+        d.adjective_bitmap = 1i64 << 12; // raw 1 is not a legal exportability value
+        assert_eq!(
+            d.exportability(),
+            crate::adjectives::AdjectiveExportability::Private
+        );
+    }
+
+    #[test]
+    fn is_currently_believed_cluster_a_states() {
+        use crate::adjectives::State;
+        // All four Cluster A states must return true.
+        for s in [State::Active, State::Pending, State::Contested, State::Accepted] {
+            let mut d = sample();
+            d.adjective_bitmap = s.raw_value();
+            assert!(
+                d.is_currently_believed(),
+                "{s:?} must be in Cluster A (isCurrentlyBelieved)"
+            );
+        }
+    }
+
+    #[test]
+    fn is_currently_believed_false_for_cluster_b_and_c() {
+        use crate::adjectives::State;
+        // Cluster B and C states must return false.
+        for s in [
+            State::Superseded,
+            State::Decayed,
+            State::Withdrawn,
+            State::Expired,
+            State::Rejected,
+            State::Tombstoned,
+        ] {
+            let mut d = sample();
+            d.adjective_bitmap = s.raw_value();
+            assert!(
+                !d.is_currently_believed(),
+                "{s:?} must NOT be in Cluster A"
+            );
+        }
+    }
+
+    #[test]
+    fn is_knew_past_cluster_b_states() {
+        use crate::adjectives::State;
+        // All four Cluster B states must return true.
+        for s in [
+            State::Superseded,
+            State::Decayed,
+            State::Withdrawn,
+            State::Expired,
+        ] {
+            let mut d = sample();
+            d.adjective_bitmap = s.raw_value();
+            assert!(d.is_knew_past(), "{s:?} must be in Cluster B (isKnewPast)");
+        }
+    }
+
+    #[test]
+    fn is_knew_past_false_for_cluster_a_and_c() {
+        use crate::adjectives::State;
+        for s in [
+            State::Active,
+            State::Pending,
+            State::Contested,
+            State::Accepted,
+            State::Rejected,
+            State::Tombstoned,
+        ] {
+            let mut d = sample();
+            d.adjective_bitmap = s.raw_value();
+            assert!(!d.is_knew_past(), "{s:?} must NOT be in Cluster B");
+        }
+    }
+
+    #[test]
+    fn is_terminal_cluster_c_states() {
+        use crate::adjectives::State;
+        // Both Cluster C states must return true.
+        for s in [State::Rejected, State::Tombstoned] {
+            let mut d = sample();
+            d.adjective_bitmap = s.raw_value();
+            assert!(d.is_terminal(), "{s:?} must be in Cluster C (isTerminal)");
+        }
+    }
+
+    #[test]
+    fn is_terminal_false_for_cluster_a_and_b() {
+        use crate::adjectives::State;
+        for s in [
+            State::Active,
+            State::Pending,
+            State::Contested,
+            State::Accepted,
+            State::Superseded,
+            State::Decayed,
+            State::Withdrawn,
+            State::Expired,
+        ] {
+            let mut d = sample();
+            d.adjective_bitmap = s.raw_value();
+            assert!(!d.is_terminal(), "{s:?} must NOT be in Cluster C");
+        }
+    }
+
+    /// The three cluster predicates are mutually exclusive and collectively
+    /// exhaustive for every defined State value. Mirrors the Swift exhaustiveness
+    /// check pattern used across the adjective test suite.
+    #[test]
+    fn cluster_predicates_mutually_exclusive_exhaustive() {
+        use crate::adjectives::State;
+        let all_states = [
+            State::Active,
+            State::Pending,
+            State::Contested,
+            State::Accepted,
+            State::Superseded,
+            State::Decayed,
+            State::Withdrawn,
+            State::Expired,
+            State::Rejected,
+            State::Tombstoned,
+        ];
+        for s in all_states {
+            let mut d = sample();
+            d.adjective_bitmap = s.raw_value();
+            let true_count = [
+                d.is_currently_believed(),
+                d.is_knew_past(),
+                d.is_terminal(),
+            ]
+            .iter()
+            .filter(|&&b| b)
+            .count();
+            assert_eq!(
+                true_count, 1,
+                "{s:?}: expected exactly 1 cluster predicate true, got {true_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn dreaming_recalc_required_is_adjective_bit_26() {
+        let mut d = sample();
+        // Default — no recalc owed.
+        assert!(!d.dreaming_recalc_required());
+        // Set bit 26 in adjective_bitmap.
+        d.adjective_bitmap = 1i64 << 26;
+        assert!(d.dreaming_recalc_required());
+        // Adjacent bit must not trigger.
+        d.adjective_bitmap = 1i64 << 25;
+        assert!(!d.dreaming_recalc_required());
+        d.adjective_bitmap = 1i64 << 27;
+        assert!(!d.dreaming_recalc_required());
+    }
+
+    #[test]
+    fn sealed_is_adjective_bit_27() {
+        let mut d = sample();
+        // Default — unsealed.
+        assert!(!d.sealed());
+        // Set bit 27 in adjective_bitmap.
+        d.adjective_bitmap = 1i64 << 27;
+        assert!(d.sealed());
+        // Adjacent bit must not trigger.
+        d.adjective_bitmap = 1i64 << 26;
+        assert!(!d.sealed());
+        d.adjective_bitmap = 1i64 << 28;
+        assert!(!d.sealed());
+    }
+
+    #[test]
+    fn adjective_bits_independent_across_fields() {
+        // Verify that state, sensitivity, exportability, trust, dreaming_recalc,
+        // and sealed all decode from independent bit ranges with no cross-field
+        // leakage. Compose a bitmap with all axes at non-zero values and check
+        // each accessor independently.
+        use crate::adjectives::{
+            AdjectiveExportability, AdjectiveSensitivity, State, Trust,
+        };
+        let mut d = sample();
+        // State = Tombstoned (raw 33 at bits 0–5)
+        // Sensitivity = Secret (raw 48 at bits 6–11)
+        // Exportability = Public (raw 32 at bits 12–17)
+        // Trust = Canonical (raw 3 at bits 18–23)
+        // dreaming_recalc_required = true (bit 26)
+        // sealed = true (bit 27)
+        d.adjective_bitmap = State::Tombstoned.raw_value()
+            | (AdjectiveSensitivity::Secret.raw_value() << 6)
+            | (AdjectiveExportability::Public.raw_value() << 12)
+            | (Trust::Canonical.raw_value() << 18)
+            | (1i64 << 26)
+            | (1i64 << 27);
+        assert_eq!(d.state(), State::Tombstoned);
+        assert_eq!(d.adjective_sensitivity(), AdjectiveSensitivity::Secret);
+        assert_eq!(d.exportability(), AdjectiveExportability::Public);
+        assert_eq!(d.trust(), Trust::Canonical);
+        assert!(d.dreaming_recalc_required());
+        assert!(d.sealed());
+        // Cluster predicates must reflect the composed state (Tombstoned → terminal).
+        assert!(d.is_terminal());
+        assert!(!d.is_currently_believed());
+        assert!(!d.is_knew_past());
     }
 }

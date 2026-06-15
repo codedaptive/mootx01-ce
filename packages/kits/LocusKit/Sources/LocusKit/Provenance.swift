@@ -6,7 +6,7 @@ import SubstrateKernel
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -35,7 +35,7 @@ import SubstrateLib
 /// bits 18–23  confirmation           (contiguous, 5 cases at raw 0…4)
 /// bits 24–29  confidence             (scale-gapped, 0/16/32/48/56)
 /// bits 30–35  sensitivity_at_capture (scale-gapped, mirrors adjective sensitivity)
-/// bits 36–41  enrichment_status      (contiguous, 4 cases at raw 0…3)
+/// bits 36–41  enrichment_status      (contiguous, 5 cases at raw 0…4)
 /// bits 42–63  reserved
 /// ```
 ///
@@ -191,7 +191,14 @@ public enum EnrichmentStatus: Int, Sendable, Codable {
     case qidPending = 1
     case qidCompleted = 2
     case closureCached = 3
-    // raws 4–63 reserved
+    /// Q-ID could not be resolved by deterministic re-inference and an
+    /// enrichment proposal has been filed for human/agent review. A
+    /// terminal "in workflow" state, NOT passive pending: the maintenance
+    /// daemon's `qidPending` scan does not re-pick these rows, so they
+    /// leave the retry backlog. Proposal acceptance moves the row to
+    /// `qidCompleted` (cookbook §2.5; Q-ID-completion terminal workflow).
+    case qidProposed = 4
+    // raws 5–63 reserved
 }
 
 // MARK: - Drawer accessors

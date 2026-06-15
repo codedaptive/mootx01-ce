@@ -11,6 +11,16 @@ publish = false
 name = "locus_kit"
 path = "src/lib.rs"
 
+[features]
+# test-seams exposes TEST-ONLY fault-injection hooks (e.g. the Estate
+# `recall` internal-read fault seam) so out-of-crate integration tests —
+# notably GeniusLocusKit/rust, which drives LocusKit recall through the
+# RecallDirector — can trigger a real internal-read failure rather than
+# only compile-verifying the degraded path. The seams are also active under
+# `cfg(test)` for in-crate tests. Compiled out entirely in a normal build:
+# zero production footprint.
+test-seams = []
+
 # Standalone crate. There is no top-level Cargo workspace in this
 # repository; sibling kits (EngramLib/rust, VectorKit/rust, etc.) are
 # each standalone crates. LP-1B added persistence-kit (schema declaration
@@ -33,3 +43,8 @@ intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
 [dev-dependencies]
 # JSON parsing for LP-0 conformance vectors. Only used in tests/lp0_vectors.rs.
 serde_json = "1"
+# rusqlite is used in corrupt_readback_tests.rs to corrupt stored values via
+# raw SQL (bypassing the kit's codec). Identical test strategy to
+# PersistenceKit/rust/tests/corrupt_readback_tests.rs. bundled = statically
+# links the SQLite amalgamation, matching PersistenceKit's approach.
+rusqlite = { version = "0.31", features = ["bundled"] }

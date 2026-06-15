@@ -71,6 +71,108 @@ struct DrawerStoreTests {
         #expect(try await store.getDrawer(id: "99999999-9999-4999-8999-999999999999") == nil)
     }
 
+    @Test("getDrawers(ids:) returns the requested drawers, equivalent to getDrawer")
+    func getDrawersBatchEquivalence() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        let a = sampleDrawer(id: "a")
+        let b = sampleDrawer(id: "b")
+        let c = sampleDrawer(id: "c")
+        try await store.addDrawer(a)
+        try await store.addDrawer(b)
+        try await store.addDrawer(c)
+        // Batch-load a subset; each row must be byte-for-byte the single-load row.
+        let batch = try await store.getDrawers(ids: [a.id, c.id])
+        let byID = Dictionary(uniqueKeysWithValues: batch.map { ($0.id, $0) })
+        #expect(byID.count == 2)
+        #expect(byID[a.id] == (try await store.getDrawer(id: a.id)))
+        #expect(byID[c.id] == (try await store.getDrawer(id: c.id)))
+        #expect(byID[b.id] == nil)
+    }
+
+    @Test("getDrawers(ids:) returns [] for empty input without touching storage")
+    func getDrawersEmpty() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        #expect(try await store.getDrawers(ids: []) == [])
+    }
+
+    @Test("getDrawers(ids:) omits unknown ids and de-duplicates repeats")
+    func getDrawersMissesAndDupes() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        let a = sampleDrawer(id: "a")
+        try await store.addDrawer(a)
+        let unknown = TestStorage.tid("zz")
+        // Repeat a.id and include an unknown id: result is exactly one row.
+        let batch = try await store.getDrawers(ids: [a.id, a.id, unknown])
+        #expect(batch.count == 1)
+        #expect(batch.first == a)
+    }
+
+    @Test("getDrawers(ids:) chunks past the SQLite bind-parameter ceiling")
+    func getDrawersChunkingBeyond900() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        // Insert more rows than a single IN-clause can bind (chunkSize = 900),
+        // then request all of them. The chunked path must return every row.
+        var ids: [String] = []
+        for i in 0..<950 {
+            // Distinct ids per row; sampleDrawer derives content from the id.
+            let d = sampleDrawer(id: "row-\(i)")
+            try await store.addDrawer(d)
+            ids.append(d.id)
+        }
+        let batch = try await store.getDrawers(ids: ids)
+        #expect(batch.count == 950)
+        #expect(Set(batch.map(\.id)) == Set(ids))
+    }
+
+    // MARK: - Dense-first: no-blob structured projection (steps 3+4)
+
+    @Test("getDrawers(ids:hydrationLevel:.structured) does NOT read the content blob")
+    func getDrawersStructuredOmitsContent() async throws {
+        // The .structured projection must leave content absent — a genuine
+        // no-blob read — while every structured/bitmap/lattice column survives.
+        // Run against the real SQLite backend so this proves the projected
+        // SELECT, not a post-load strip.
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        let a = sampleDrawer(id: "a", room: "room-x")
+        try await store.addDrawer(a)
+
+        let structured = try await store.getDrawers(
+            ids: [a.id], hydrationLevel: .structured)
+        #expect(structured.count == 1)
+        let s = structured.first
+        // content is absent (decodes to "") — the blob was never read.
+        #expect(s?.content == "")
+        // The dense/structured signal is intact at .structured.
+        #expect(s?.id == a.id)
+        #expect(s?.wing == a.wing)
+        #expect(s?.room == a.room)
+        #expect(s?.adjectiveBitmap == a.adjectiveBitmap)
+        #expect(s?.operationalBitmap == a.operationalBitmap)
+        #expect(s?.udcCode == a.udcCode)
+    }
+
+    @Test("getDrawers(ids:hydrationLevel:.full) reads the content blob")
+    func getDrawersFullReadsContent() async throws {
+        // The .full path is byte-for-byte the bare getDrawers(ids:) — content
+        // present, every column intact.
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+        let a = sampleDrawer(id: "a")
+        try await store.addDrawer(a)
+
+        let full = try await store.getDrawers(ids: [a.id], hydrationLevel: .full)
+        #expect(full.first?.content == a.content)
+        #expect(full.first == a)
+        // The bare overload still reads content (full hydration).
+        let bare = try await store.getDrawers(ids: [a.id])
+        #expect(bare.first?.content == a.content)
+    }
+
     @Test("first open: audit event estate uuid matches manifest estate uuid")
     func firstOpenAuditEstateUuidMatchesManifest() async throws {
         // Regression: the estate uuid stamped into audit events on a

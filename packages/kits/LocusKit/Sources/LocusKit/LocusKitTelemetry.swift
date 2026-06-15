@@ -181,3 +181,55 @@ func emitTunnelAdd(now: Double, estateTag: String) {
         ts: now
     ))
 }
+
+// MARK: - Write-gate telemetry
+
+/// Emit a write-gate ADMIT event (the write passed validation).
+///
+/// Called from DrawerStore.gatedCapture after AuditGate.admit succeeds.
+///
+/// `locuskit.gate.admit_count`: value 1.0 per admitted write.
+///
+/// Tags: `estate`.
+///
+/// - Parameters:
+///   - now: Epoch seconds at the gate decision point.
+///   - estateTag: The estate UUID string.
+@inline(__always)
+func emitGateAdmit(now: Double, estateTag: String) {
+    // Count: one unit per write that passed AuditGate.admit validation.
+    // Correlates with successful capture volume for the estate.
+    Intellectus.report(.metric(
+        name: "locuskit.gate.admit_count",
+        value: 1.0,
+        tags: ["estate": estateTag],
+        ts: now
+    ))
+}
+
+/// Emit a write-gate REJECT event (the write failed validation).
+///
+/// Called from DrawerStore.gatedCapture when AuditGate.admit returns failure.
+///
+/// `locuskit.gate.reject_count`: value 1.0 per rejected write.
+///
+/// Tags: `estate`, `reason` — reason is the gate's violation description,
+/// truncated to 64 characters to bound tag cardinality.
+///
+/// - Parameters:
+///   - now: Epoch seconds at the gate decision point.
+///   - estateTag: The estate UUID string.
+///   - reason: The gate violation description.
+@inline(__always)
+func emitGateReject(now: Double, estateTag: String, reason: String) {
+    // Count: one unit per write that failed AuditGate.admit validation.
+    // Non-zero values indicate schema / vocabulary violations at the write boundary.
+    // Reason tag truncated to 64 chars to bound metric-tag cardinality.
+    let truncatedReason = reason.count > 64 ? String(reason.prefix(64)) : reason
+    Intellectus.report(.metric(
+        name: "locuskit.gate.reject_count",
+        value: 1.0,
+        tags: ["estate": estateTag, "reason": truncatedReason],
+        ts: now
+    ))
+}

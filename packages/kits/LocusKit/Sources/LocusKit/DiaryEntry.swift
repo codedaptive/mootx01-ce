@@ -70,6 +70,27 @@ public struct DiaryEntry: Equatable, Hashable, Codable, Sendable {
     /// `DiaryOperational.swift`.
     public let operationalBitmap: Int64
 
+    /// Explicit quality signal assigned at write time — the
+    /// `DiaryEntry.reward` field that `RewardSource.swift` (§ 3.1 step 1a)
+    /// documents as the two-source reward's explicit branch.
+    ///
+    /// When non-nil, callers have attached a quality score in `[0, 1]`.
+    /// When nil the entry carries no explicit reward; the dreaming daemon
+    /// falls back to the implicit `RecallTraceItem.used` source (§ 3.1
+    /// step 1b, implemented by `RecallTraceRewardSource`).
+    ///
+    /// Stored as REAL nullable in SQLite. The column is present in the v1
+    /// schema (fresh CREATE); no migration machinery is needed because no
+    /// estate data has shipped pre-v1.0.
+    public let reward: Double?
+
+    /// Human-readable provenance tag describing how `reward` was derived.
+    /// Examples: `"user-rating"`, `"model-confidence"`, `"implicit-recall"`.
+    /// Optional; stored as TEXT nullable alongside `reward`. When nil the
+    /// provenance is unspecified (callers that omit `reward` typically omit
+    /// this too).
+    public let rewardProvenance: String?
+
     /// Designated initializer.
     public init(
         id: String = UUID().uuidString,
@@ -82,7 +103,9 @@ public struct DiaryEntry: Equatable, Hashable, Codable, Sendable {
         embeddingModelID: String,
         tombstonedAt: Date? = nil,
         removedByBatch: String? = nil,
-        operationalBitmap: Int64 = 0
+        operationalBitmap: Int64 = 0,
+        reward: Double? = nil,
+        rewardProvenance: String? = nil
     ) {
         self.id = id
         self.agentName = agentName
@@ -95,5 +118,7 @@ public struct DiaryEntry: Equatable, Hashable, Codable, Sendable {
         self.tombstonedAt = tombstonedAt
         self.removedByBatch = removedByBatch
         self.operationalBitmap = operationalBitmap
+        self.reward = reward
+        self.rewardProvenance = rewardProvenance
     }
 }

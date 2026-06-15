@@ -11,12 +11,11 @@
 //! `bitmap_ops.rs` internally; callers never write `state < 3` or
 //! `trust < 4`.
 //!
-//! ## Scope of the LP-1E port
+//! ## Scope of this module
 //!
-//! This module ports the types the bitmap evaluator consumes. The
-//! `CaptureFrame`, `MutationKind`, and `LearnFrame` types from
-//! `Frames.swift` belong to the Estate verb surface and land in
-//! LP-1F (see `lib.rs` deferred-list).
+//! This module ports the filter types the bitmap evaluator consumes.
+//! The `CaptureFrame`, `MutationKind`, and `LearnFrame` verb input
+//! frames from `Frames.swift` live in `frames.rs` (landed LP-1F).
 
 use crate::adjectives::{AdjectiveSensitivity, State, Trust};
 use crate::drawer_operational::{CaptureChannel, ContentKind};
@@ -65,16 +64,21 @@ pub enum HydrationLevel {
 // MARK: - Ordering ------------------------------------------------------------
 
 /// Result ordering for recall. Per spec § 7.8.3.
+///
+/// Relevance ordering (`ByRelevanceDesc`) is not present on this enum.
+/// Relevance requires the vector index from VectorKit; LocusKit is a
+/// bitmap-filter engine with no scoring signal. Callers that need
+/// relevance-ranked results must go through GLK RecallDirector's scored
+/// lane (NeuronKit/HybridRecall), which composes VectorKit on top of
+/// LocusKit. Exposing a relevance case here produced input-order results
+/// advertised as relevance-ordered — an honest API must either implement
+/// the behaviour or remove the case. It was removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ordering {
     /// Newest captured first.
     ByCaptureTimeDesc,
     /// Oldest captured first.
     ByCaptureTimeAsc,
-    /// Evaluator-determined relevance score, descending. Requires the
-    /// vector tier; unavailable until VectorKit ships, so the evaluator
-    /// returns the input order as the documented stub behaviour.
-    ByRelevanceDesc,
     /// Lexicographic ascending by `room`.
     ByRoomAsc,
 }
@@ -208,11 +212,20 @@ pub struct RecallFrame {
     /// timestamp (epoch seconds). `None` = current state. Per spec
     /// § 6.8.
     pub as_of: Option<substrate_types::hlc::HLC>,
+    /// How many of the surfaced rows to write as recall-trace rows.
+    /// `None` = write NO trace rows (the default). `Some(n)` = write at most
+    /// the first `n` rows that were returned to the caller. Only the GLK
+    /// RecallDirector primary locus call sets this; all other recall calls
+    /// leave it `None` to avoid silent write amplification. Zero trace rows is
+    /// correct for internal or VaultBridge-style scans that do not participate
+    /// in the reward cycle. Mirrors Swift `RecallFrame.traceLimit`.
+    pub trace_limit: Option<usize>,
 }
 
 impl RecallFrame {
     /// Construct a `RecallFrame` with the spec defaults: `Structured`
-    /// hydration, no limit, `ByCaptureTimeDesc` ordering, no `as_of`.
+    /// hydration, no limit, `ByCaptureTimeDesc` ordering, no `as_of`,
+    /// no trace writes (`trace_limit = None`).
     /// Mirrors the Swift `RecallFrame.init(filterChain:)` shape.
     pub fn new(filter_chain: Vec<Filter>) -> Self {
         Self {
@@ -221,6 +234,7 @@ impl RecallFrame {
             limit: None,
             ordering: Ordering::ByCaptureTimeDesc,
             as_of: None,
+            trace_limit: None,
         }
     }
 }
@@ -267,7 +281,6 @@ mod tests {
         let all = [
             Ordering::ByCaptureTimeDesc,
             Ordering::ByCaptureTimeAsc,
-            Ordering::ByRelevanceDesc,
             Ordering::ByRoomAsc,
         ];
         for (i, a) in all.iter().enumerate() {
