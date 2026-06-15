@@ -44,6 +44,34 @@ spending expensive context-window tokens.
    - "Summarize what we know about this project from memory."
    - "We decided X; remember that and link it to the earlier Y decision."
 
+## Where each adapter installs
+
+Each folder targets its client's native files. Copy into the **project root** for one project,
+or the client's **user-level** config directory for all projects (see the client's own docs for
+its user-level path).
+
+| Client | Destination files (relative to project root) |
+|---|---|
+| `claude/` | `CLAUDE.md`, `.claude/rules/*.md`, `.claude/skills/mootx01-memory/SKILL.md`, `.claude/commands/mootx01-start.md` |
+| `codex/` | `AGENTS.md`, `.agents/skills/mootx01-memory/{SKILL.md, agents/openai.yaml}`, `.codex/hooks.json` |
+| `cursor/` | `.cursor/rules/*.mdc` (or legacy `.cursorrules`) |
+| `cline/` | `.clinerules/*.md` |
+| `roo/` | `.roo/rules/*.md` (or legacy `.roorules`) |
+| `windsurf/` | `.windsurf/rules/*.md` / `.devin/rules/*.md` (or legacy `.windsurfrules`) |
+| `continue/` | `.continue/rules/*.md` |
+| `openai-agents/` | paste `system-prompt.md` / `developer-message.md` / `tool-contract.md` into your app's prompt slots |
+| `generic/` | paste `custom-instructions.md` into the harness's custom-instructions field |
+
+## Installation rules (read before copying)
+
+- **Merge, do not overwrite.** If a destination already exists (the user has their own
+  `CLAUDE.md`, `AGENTS.md`, rules, …), **append** the MOOTx01 block — never replace the file.
+- **Back up first.** Copy any existing instruction file aside before editing it.
+- **Get approval.** Do not change a user's existing instruction files without their explicit
+  approval. Brand-new files the user doesn't have yet may be added freely.
+- **Don't over-load context.** Prefer the client's small rule files; keep `shared/` as
+  reference, not as bulk context.
+
 ## Tool Name Assumptions
 
 These adapters assume the MOOTx01 MCP surface exposes these tool names:

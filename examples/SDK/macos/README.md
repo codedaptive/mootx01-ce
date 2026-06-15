@@ -27,9 +27,9 @@ and retrieval goes through the kit stack below it.
 
 ## Key specs to read before contributing
 
-1. `docs/canon/MOOTX01_SPEC.md` — the MOOTx01 product specification; defines the
+1. `docs/concepts/MOOTX01_AND_ARIA_CANON.md` — the MOOTx01 product specification; defines the
    user-facing product this target delivers
-2. `docs/specs/ARIA_MCP_SPEC.md` — the kit this target calls into
+2. `docs/reference/ARIA_MCP_SPEC.md` — the kit this target calls into
 
 ## Scope
 

@@ -3,7 +3,7 @@
 A small demonstration: a macOS application attaches a MOOT beside
 itself and opens that knowledge to an organization through the
 ARIA_MCP server. This is the headline pattern named in
-`docs/canon/MOOTX01_AND_ARIA_CANON.md` §"The sidecar pattern".
+`docs/concepts/MOOTX01_AND_ARIA_CANON.md` §"The sidecar pattern".
 
 The demo is intentionally small. The point is the pattern, not a
 polished product. Two files carry all of the wiring; an agent reading

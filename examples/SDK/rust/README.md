@@ -1,6 +1,6 @@
 # ARIA_Rust
 
-**Status:** Planned, stub. Canonical role defined in `docs/canon/MOOTX01_AND_ARIA_CANON.md`, Demonstration apps.
+**Status:** Planned, stub. Canonical role defined in `docs/concepts/MOOTX01_AND_ARIA_CANON.md`, Demonstration apps.
 
 ARIA_Rust is the Rust-side demonstration app, the counterpart to ARIA_MacOS and ARIA_iOS on the Swift side. It is not an end-user product. Its purpose is to show a developer how to use the Rust kits.
 

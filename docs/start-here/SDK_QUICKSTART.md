@@ -37,12 +37,13 @@ narrow capability, you can depend on a single kit directly (see *Going lighter* 
 ```swift
 dependencies: [
     .package(path: "../packages/kits/GeniusLocusKit"),
+    .package(path: "../packages/kits/LocusKit"),         // estate verbs (capture/recall) + frames
     .package(path: "../packages/kits/PersistenceKit"),   // storage backends
 ],
 targets: [
     .target(name: "YourApp", dependencies: [
         "GeniusLocusKit",
-        "LocusKit",                                            // estate verbs (capture/recall)
+        .product(name: "LocusKit", package: "LocusKit"),
         .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
     ]),
 ]
@@ -56,6 +57,7 @@ targets: [
 ```toml
 [dependencies]
 genius-locus-kit = { path = "../packages/kits/GeniusLocusKit/rust" }
+locus-kit        = { path = "../packages/kits/LocusKit/rust" }       # estate verbs + frames
 persistence-kit  = { path = "../packages/kits/PersistenceKit/rust" }
 ```
 

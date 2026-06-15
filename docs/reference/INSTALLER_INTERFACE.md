@@ -295,7 +295,7 @@ let estate = DatabaseManager.estateURL(for: "default", in: dataDir)
 Corrected the moot-mgr platform claim: `moot-mgr` is not macOS-only. `apps/moot-mgr/rust` is a complete headless Linux vertical serving the same loopback web dashboard / read-API / control channel; only the macOS SwiftUI GUI is unported.
 
 ### 1.0.1 -- 2026-06-15
-Corrected: the `mootx01` installer is **not** Swift-only. The Rust vertical (Linux/Windows) reimplements the same install/uninstall CLI natively and wires the same 12 MCP clients; `languages` is now `[swift, rust]`. Documented the split — CLI surface (both ports) vs `MootInstallerCore` library (Swift-only, reimplemented in Rust `core/`) vs `moot-mgr` (macOS-only).
+Corrected: the `mootx01` installer is **not** Swift-only. The Rust vertical (Linux/Windows) reimplements the same install/uninstall CLI natively and wires the same 12 MCP clients; `languages` is now `[swift, rust]`. Documented the split — CLI surface (both ports) vs `MootInstallerCore` library (Swift-only, reimplemented in Rust `core/`) vs `moot-mgr` (both ports; only its macOS SwiftUI GUI is unported — corrected in 1.0.2).
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
