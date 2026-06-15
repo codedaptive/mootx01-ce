@@ -37,9 +37,25 @@ path = "src/lib.rs"
 name = "conformance"
 path = "tests/conformance.rs"
 
+# await_drain await-empty latch + pending_count depth probe parity
+# (Dual-Path Intake P5 / G7). Mirrors AwaitDrainTests.swift over the
+# FilesystemBackend.
+[[test]]
+name = "await_drain"
+path = "tests/await_drain.rs"
+
 # Tests for ToolName + allowlist, QueueKitSchema, PersistenceKitBackend
 # round-trip, and QueueError variants. Requires the "persistencekit" feature.
 [[test]]
 name = "parity"
 path = "tests/parity.rs"
 required-features = ["persistencekit"]
+
+# Parity tests for the default-build (no `watch` feature) polling implementation
+# of FilesystemBackend::watch(). Confirms watch() works out of the box (no
+# external dependency) and delivers jobs near-realtime via 200 ms polling.
+# These tests are explicitly NOT run with --features watch (they target the
+# polling path; the event-driven path requires a separate CI step).
+[[test]]
+name = "watch_polling"
+path = "tests/watch_polling.rs"

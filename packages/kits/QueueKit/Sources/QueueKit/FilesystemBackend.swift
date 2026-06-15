@@ -11,7 +11,7 @@ import Foundation
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -183,6 +183,16 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
             _ = fsync(dfd)
             close(dfd)
         }
+    }
+
+    // MARK: - pendingCount (telemetry depth probe)
+
+    public func pendingCount() async throws -> Int {
+        // Count files in `new/` — each file is one pending job not yet claimed.
+        // Non-existent directory means zero pending.
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: newDir.path) else { return 0 }
+        return (try? fm.contentsOfDirectory(atPath: newDir.path).count) ?? 0
     }
 
     // MARK: - drainAvailable (spec §9)

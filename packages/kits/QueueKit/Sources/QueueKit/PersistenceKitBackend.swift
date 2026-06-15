@@ -21,7 +21,7 @@ import Foundation
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -121,6 +121,16 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
         }
     }
 
+    // MARK: - pendingCount (telemetry depth probe)
+
+    public func pendingCount() async throws -> Int {
+        // COUNT(*) WHERE status = 'new' — single read, no claim. Used by
+        // QueueKitTelemetry to snapshot queue depth without advancing the cursor.
+        try await storage.rowStore.count(
+            table: queueKitTableName,
+            where: .eq(Self.col("status"), .text("new")))
+    }
+
     // MARK: - drainAvailable (spec §10 / .serializable guarded claim)
 
     public func drainAvailable() async throws -> [(job: Job, sessionID: SessionID)] {
@@ -169,11 +179,43 @@ public final class PersistenceKitBackend: QueueBackend, @unchecked Sendable {
     ) async throws {
         let stream = storage.observer.observe(
             table: queueKitTableName, events: [.insert])
+        // Drain anything already present BEFORE awaiting events, so a job
+        // enqueued between mount and this subscription is not stranded in `new/`
+        // (its insert event predates the observe() above and would otherwise be
+        // lost). Parity with the Rust PersistenceKitBackend.watch and the Swift
+        // FilesystemBackend.watch, both of which drain-first.
+        try await Self.drainUntilEmpty(self, handler)
         for await _ in stream {
-            // Event payload is wake-only per spec §10 "Observer
-            // timing". Re-read through drainAvailable() so we see
-            // only durably committed rows.
-            let batch = (try? await drainAvailable()) ?? []
+            // Event payload is wake-only per spec §10 "Observer timing".
+            // Re-read through drainAvailable() — and keep draining until the
+            // queue is empty. Draining-until-empty (not once-per-event) is what
+            // makes watch LOAD-robust: under a burst the observer may coalesce
+            // inserts (fewer events than rows) or a wake may be dropped while a
+            // serializable claim contends with concurrent inserts; a once-per-
+            // event drain would then strand the rows whose wake was coalesced
+            // away. Re-draining until empty on every wake guarantees no
+            // committed job is left behind.
+            try await Self.drainUntilEmpty(self, handler)
+        }
+    }
+
+    /// Drain the queue repeatedly until a pass claims nothing, handing every
+    /// claimed job to `handler`. The loop absorbs coalesced/dropped observer
+    /// wakes (see `watch`). A claim error ends the pass (the next wake retries).
+    private static func drainUntilEmpty(
+        _ backend: PersistenceKitBackend,
+        _ handler: @escaping @Sendable (Job, SessionID) async throws -> Void
+    ) async throws {
+        while true {
+            // A claim/read failure must PROPAGATE, not collapse to an empty
+            // batch: `(try? ...) ?? []` would make a backend fault look like
+            // "queue empty" and end the drain pass silently, stranding any
+            // committed jobs until — or past — the next wake. Throwing ends the
+            // pass loudly so the caller (watch) surfaces the fault and the next
+            // wake retries against a live backend. Parity with the Rust
+            // drain_until_empty, which already uses `self.drain_available()?`.
+            let batch = try await backend.drainAvailable()
+            if batch.isEmpty { return }
             for pair in batch {
                 try await handler(pair.0, pair.1)
             }

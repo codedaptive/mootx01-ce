@@ -15,4 +15,10 @@ public enum QueueError: Error, Sendable {
     case staleTmpFile(path: String, age: TimeInterval)
     case backendUnavailable(detail: String)
     case invalidTerminalStatus(ObservationStatus)
+    /// `awaitDrain(...)` exceeded its timeout with work still on either
+    /// frontier. Carries the last-observed depths so a caller can log how
+    /// far the queue was from empty when it gave up (a non-zero `inFlight`
+    /// points at a stalled drain worker; a non-zero `pending` at a worker
+    /// that never claimed).
+    case drainTimeout(pending: Int, inFlight: Int)
 }
