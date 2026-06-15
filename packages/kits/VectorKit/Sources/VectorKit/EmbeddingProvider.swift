@@ -36,6 +36,33 @@ public protocol EmbeddingProvider: Sendable {
     ///   `VectorKitError.modelUnavailable` if the model is not loaded.
     func embed(_ text: String) async throws -> Engram
 
+    /// Generate the pooled dense float vector for the given text — the
+    /// float lane's source (Lane D).
+    ///
+    /// This is the SAME vector the provider's `embed(_:)` already computes
+    /// on the way to the SimHash projection. Providers that run a real
+    /// inference pass (MiniLM, mpnet, EmbeddingGemma) override this to
+    /// return the pooled vector they would otherwise discard inside
+    /// `FloatSimHash.project(...)` — the two outputs come from one
+    /// inference pass, so no model is loaded twice and no extra projection
+    /// runs. The returned vector is host-endian `[Float]`; the storage
+    /// layer serialises it to IEEE-754 little-endian via
+    /// `VectorPayload(floats:)`.
+    ///
+    /// - Parameter text: Input text. Empty input returns an empty array
+    ///   (`[]`): there is no dense direction for the empty string, and the
+    ///   binary lane already collapses empty input to `Engram.zero`. A
+    ///   float lane that returned a zero-filled vector here would surface
+    ///   every empty row as a cosine-distance-1 spurious neighbour.
+    /// - Returns: the pooled float embedding, or `[]` for empty input.
+    /// - Throws: `VectorKitError.embeddingFailed` by default — float
+    ///   embeddings are opt-in. Providers that do not produce a dense
+    ///   float vector (the default implementation below) throw so callers
+    ///   must handle the unsupported case explicitly rather than receiving
+    ///   a silently-wrong projection of the binary fingerprint. The Rust
+    ///   `EmbeddingProvider` trait carries the identical opt-out rule.
+    func embedFloat(_ text: String) async throws -> [Float]
+
     /// Generate engrams for a batch of texts.
     ///
     /// The default implementation (below) calls `embed` sequentially;
@@ -50,6 +77,19 @@ public protocol EmbeddingProvider: Sendable {
 }
 
 public extension EmbeddingProvider {
+    /// Default opt-out for the float lane: a provider that does not
+    /// produce a dense float vector throws `embeddingFailed`. Float
+    /// embeddings are opt-in — only providers that override this method
+    /// (returning the pooled vector from their inference pass) support
+    /// the float lane. Throwing rather than synthesising a vector keeps
+    /// the contract explicit: a caller that asks for `embedFloat` on an
+    /// unsupporting provider learns so immediately instead of recalling
+    /// against meaningless coordinates.
+    func embedFloat(_ text: String) async throws -> [Float] {
+        throw VectorKitError.embeddingFailed(
+            "embedFloat is not supported by this provider (modelID=\(modelID)); the float lane is opt-in")
+    }
+
     /// Default sequential implementation of `embedBatch`. Providers
     /// with batched inference paths should override.
     func embedBatch(_ texts: [String]) async throws -> [Engram] {

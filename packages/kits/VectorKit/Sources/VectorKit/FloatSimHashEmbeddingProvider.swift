@@ -12,7 +12,7 @@
 // VectorKit does not own tokenization, model bundles, or model
 // identity. Concrete text providers that carry a tokenizer and a
 // model-specific projection seed (MiniLM, mpnet, EmbeddingGemma)
-// live in CorpusKitProviders and conform to CorpusKit.TextEmbeddingProvider.
+// live in CorpusKitProviders and conform to VectorKit.EmbeddingProvider.
 // This provider is the low-level "host supplies inference, kit
 // supplies the canonical projection" building block.
 
@@ -23,7 +23,7 @@ import Foundation
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -74,5 +74,19 @@ public struct FloatSimHashEmbeddingProvider: EmbeddingProvider {
         // type alias for Fingerprint256. The canonical projection IS
         // the engram, so there is no reconstruction step.
         return FloatSimHash.project(vector: floats, seed: projectionSeed)
+    }
+
+    /// Return the pooled dense float vector — the float lane source.
+    ///
+    /// This is exactly the vector `embed(_:)` feeds into
+    /// `FloatSimHash.project`; the inference closure is the model pass
+    /// MiniLM/mpnet/EmbeddingGemma run. Returning it directly is the
+    /// "retain, don't recompute" path: the float lane and the binary
+    /// SimHash lane are two reads of one inference output. Empty input
+    /// returns `[]` per the protocol contract (no dense direction for the
+    /// empty string).
+    public func embedFloat(_ text: String) async throws -> [Float] {
+        guard !text.isEmpty else { return [] }
+        return try await inference(text)
     }
 }

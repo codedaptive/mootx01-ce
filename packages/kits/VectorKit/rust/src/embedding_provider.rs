@@ -44,6 +44,39 @@ pub trait EmbeddingProvider: Send + Sync {
     /// rule (`Engram.zero` for empty input).
     fn embed(&self, text: &str) -> Result<Engram, VectorKitError>;
 
+    /// Generate the pooled dense float vector for the given text — the
+    /// float lane's source (Lane D).
+    ///
+    /// This is the SAME vector `embed` already computes on the way to the
+    /// SimHash projection. Providers that run a real inference pass
+    /// (MiniLM, mpnet, EmbeddingGemma) override this to return the pooled
+    /// vector they would otherwise discard inside the SimHash projection —
+    /// the two outputs come from one inference pass, so no model loads
+    /// twice and no extra projection runs.
+    ///
+    /// # Empty input
+    ///
+    /// Empty input returns an empty `Vec` (`vec![]`): there is no dense
+    /// direction for the empty string, and the binary lane already
+    /// collapses empty input to `Engram::ZERO`. A float lane that returned
+    /// a zero-filled vector here would surface every empty row as a
+    /// cosine-distance-1 spurious neighbour.
+    ///
+    /// # Opt-out
+    ///
+    /// The default implementation returns `Err(EmbeddingFailed(..))`:
+    /// float embeddings are opt-in. A provider that does not produce a
+    /// dense float vector throws so callers must handle the unsupported
+    /// case explicitly rather than recalling against a silently-wrong
+    /// projection of the binary fingerprint. The Swift `EmbeddingProvider`
+    /// protocol carries the identical opt-out rule.
+    fn embed_float(&self, _text: &str) -> Result<Vec<f32>, VectorKitError> {
+        Err(VectorKitError::EmbeddingFailed(format!(
+            "embed_float is not supported by this provider (model_id={}); the float lane is opt-in",
+            self.model_id()
+        )))
+    }
+
     /// Batched embedding. Default sequential implementation;
     /// providers with batched inference (e.g. ONNX graphs with a
     /// batch dimension) can override for throughput. Order of

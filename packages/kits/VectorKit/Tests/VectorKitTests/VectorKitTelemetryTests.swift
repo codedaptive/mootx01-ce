@@ -42,7 +42,6 @@ import Foundation
 import Testing
 import EngramLib
 import PersistenceKit
-import PersistenceKitInMemory
 @testable import VectorKit
 import IntellectusLib
 
@@ -92,10 +91,7 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
 
 /// Creates a fresh InMemory-backed VectorStore for each test.
 private func makeFreshStore() async throws -> VectorStore {
-    let storage = InMemoryStorage(configuration: EstateConfiguration(
-        estateID: UUID(),
-        backend: .inMemory
-    ))
+    let storage = try makeScratchStorage()
     try await storage.open(schema: VectorStore.schemaDeclaration)
     return VectorStore(storage: storage)
 }
@@ -126,7 +122,7 @@ struct VectorKitTelemetryDisabledTests {
 
             let store = try await makeFreshStore()
             try await store.addVector(
-                drawerID: "d1",
+                itemID: "d1",
                 engram: testEngram,
                 modelID: "minilm",
                 modelVersion: "1.0",
@@ -151,7 +147,7 @@ struct VectorKitTelemetryDisabledTests {
 
             let store = try await makeFreshStore()
             try await store.addVector(
-                drawerID: "d1",
+                itemID: "d1",
                 engram: testEngram,
                 modelID: "minilm",
                 modelVersion: "1.0",
@@ -204,7 +200,7 @@ struct VectorKitTelemetryEnabledTests {
 
             let store = try await makeFreshStore()
             try await store.addVector(
-                drawerID: "d1",
+                itemID: "d1",
                 engram: testEngram,
                 modelID: "minilm",
                 modelVersion: "1.0",
@@ -233,7 +229,7 @@ struct VectorKitTelemetryEnabledTests {
             // the findNearest count assertion.
             Intellectus.setEnabled(false)
             try await store.addVector(
-                drawerID: "d1",
+                itemID: "d1",
                 engram: testEngram,
                 modelID: "minilm",
                 modelVersion: "1.0",
@@ -300,7 +296,7 @@ struct VectorKitTelemetryShapeTests {
 
             let store = try await makeFreshStore()
             try await store.addVector(
-                drawerID: "d1",
+                itemID: "d1",
                 engram: testEngram,
                 modelID: "minilm",
                 modelVersion: "1.0",
@@ -341,7 +337,7 @@ struct VectorKitTelemetryShapeTests {
             let store = try await makeFreshStore()
             Intellectus.setEnabled(false)
             try await store.addVector(
-                drawerID: "d1",
+                itemID: "d1",
                 engram: testEngram,
                 modelID: "minilm",
                 modelVersion: "1.0",
@@ -400,7 +396,7 @@ struct VectorKitTelemetryShapeTests {
             Intellectus.setEnabled(false)
             for i in 1...3 {
                 try await store.addVector(
-                    drawerID: "drawer-\(i)",
+                    itemID: "drawer-\(i)",
                     engram: testEngram,
                     modelID: "minilm",
                     modelVersion: "1.0",
@@ -469,7 +465,7 @@ struct VectorKitTelemetryConformanceTests {
             Intellectus.setEnabled(false)
             let storeOff = try await makeFreshStore()
             for (id, eng) in engrams {
-                try await storeOff.addVector(drawerID: id, engram: eng,
+                try await storeOff.addVector(itemID: id, engram: eng,
                                              modelID: "m", modelVersion: "1",
                                              filedAt: now)
             }
@@ -481,7 +477,7 @@ struct VectorKitTelemetryConformanceTests {
             Intellectus.setEnabled(true)
             let storeOn = try await makeFreshStore()
             for (id, eng) in engrams {
-                try await storeOn.addVector(drawerID: id, engram: eng,
+                try await storeOn.addVector(itemID: id, engram: eng,
                                             modelID: "m", modelVersion: "1",
                                             filedAt: now)
             }
@@ -491,8 +487,8 @@ struct VectorKitTelemetryConformanceTests {
             #expect(resultsOff.count == resultsOn.count,
                 "findNearest must return same count with monitoring off and on")
             for i in 0..<resultsOff.count {
-                #expect(resultsOff[i].drawerID == resultsOn[i].drawerID,
-                    "result[\(i)].drawerID must match; off=\(resultsOff[i].drawerID) on=\(resultsOn[i].drawerID)")
+                #expect(resultsOff[i].itemID == resultsOn[i].itemID,
+                    "result[\(i)].itemID must match; off=\(resultsOff[i].itemID) on=\(resultsOn[i].itemID)")
                 #expect(resultsOff[i].distance == resultsOn[i].distance,
                     "result[\(i)].distance must match; off=\(resultsOff[i].distance) on=\(resultsOn[i].distance)")
             }
@@ -516,20 +512,20 @@ struct VectorKitTelemetryConformanceTests {
             // With monitoring OFF.
             Intellectus.setEnabled(false)
             let storeOff = try await makeFreshStore()
-            try await storeOff.addVector(drawerID: "d1", engram: testEngram,
+            try await storeOff.addVector(itemID: "d1", engram: testEngram,
                                          modelID: "m", modelVersion: "1",
                                          filedAt: now)
-            let fetchedOff = try await storeOff.getVector(drawerID: "d1", modelID: "m")
+            let fetchedOff = try await storeOff.getVector(itemID: "d1", modelID: "m")
 
             // With monitoring ON.
             let sink = CapturingSink()
             Intellectus.install(sink: sink)
             Intellectus.setEnabled(true)
             let storeOn = try await makeFreshStore()
-            try await storeOn.addVector(drawerID: "d1", engram: testEngram,
+            try await storeOn.addVector(itemID: "d1", engram: testEngram,
                                         modelID: "m", modelVersion: "1",
                                         filedAt: now)
-            let fetchedOn = try await storeOn.getVector(drawerID: "d1", modelID: "m")
+            let fetchedOn = try await storeOn.getVector(itemID: "d1", modelID: "m")
 
             #expect(fetchedOff == testEngram,
                 "getVector must return the exact engram with monitoring off")
