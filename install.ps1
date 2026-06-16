@@ -177,6 +177,21 @@ if (-not (Test-Path (Join-Path $tmpDir "mootx01.exe"))) {
 }
 
 New-Item -ItemType Directory -Force $INSTALL_DIR | Out-Null
+
+# Stop any running mootx01 / moot-mgr before overwriting their binaries. Windows
+# locks a running .exe, so reinstalling over a live install — or after an
+# uninstall that left a detached/orphaned moot-mgr running — would fail the
+# Copy-Item below with a sharing violation. Stop the scheduled tasks first (the
+# clean path), then force-kill any surviving process by image name (covers
+# orphaned/manually-started instances), then let the file handles release.
+foreach ($task in @("mootx01", "mootx01-mgr")) {
+    Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null
+}
+foreach ($proc in @("mootx01", "moot-mgr")) {
+    Get-Process -Name $proc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 400
+
 Copy-Item -Force (Join-Path $tmpDir "mootx01.exe") $BINARY
 Write-Host "  Installed $BINARY"
 

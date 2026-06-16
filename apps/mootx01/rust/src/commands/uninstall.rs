@@ -107,6 +107,10 @@ pub fn run(target: Option<Vec<String>>, yes: bool, purge: bool) -> ExitCode {
                     Err(e) => eprintln!("  ✗ task {task}: {e}"),
                 }
             }
+            // Force-kill any daemon/console the task-stop missed (detached or
+            // manually-started), so the binaries are unlocked for a reinstall and
+            // nothing is left orphaned. Excludes this uninstall process itself.
+            service::stop_processes();
         }
     }
 
