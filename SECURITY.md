@@ -118,7 +118,7 @@ bug bounty and no response-time guarantee.
 
 ## Current posture
 
-This project is pre-1.0. The security review gate in the
+This project is in beta (pre-1.0). The security review gate in the
 [README](README.md) status tables has not yet run on any kit: build
 status reflects functionality only, and nothing here has been hardened
 or audited. The invariants above describe what the substrate is built
@@ -127,7 +127,7 @@ claimed, not as certified.
 
 ## Supported versions
 
-Only the tip of `main` is supported. There are no maintained release
-branches before 1.0.
+Only the tip of `stable/1.0.x` (the default branch) is supported. There
+are no other maintained release branches during the beta.
 
 
