@@ -2,6 +2,18 @@
 
 Use MOOTx01 automatically as long-term memory and low-token reasoning support.
 
+## MOOT Reflex
+
+Before answering any request that may depend on prior context, user preferences,
+project history, past decisions, continuity, or remembered source material, query
+MOOTx01 first.
+
+After durable decisions, corrections, preferences, milestones, or useful project
+facts, write them back with the appropriate MOOTx01 tool.
+
+If MOOTx01 tools are expected but unavailable, say so plainly. Never imply recall
+happened unless you actually queried it.
+
 Reach for MOOTx01 when the user asks about prior decisions, preferences,
 history, source material, continuity, summaries, comparisons, contradictions,
 or durable writeback.

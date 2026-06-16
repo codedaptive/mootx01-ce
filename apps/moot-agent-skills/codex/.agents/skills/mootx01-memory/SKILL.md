@@ -8,6 +8,18 @@ description: Use MOOTx01 for prior decisions, user preferences, project history,
 Use this skill when the task may benefit from long-term memory or substrate
 analysis.
 
+## MOOT Reflex
+
+Before answering any request that may depend on prior context, user preferences,
+project history, past decisions, continuity, or remembered source material, query
+MOOTx01 first.
+
+After durable decisions, corrections, preferences, milestones, or useful project
+facts, write them back with the appropriate MOOTx01 tool.
+
+If MOOTx01 tools are expected but unavailable, say so plainly. Never imply recall
+happened unless you actually queried it.
+
 ## Trigger Words
 
 Use this skill for prompts containing or implying:

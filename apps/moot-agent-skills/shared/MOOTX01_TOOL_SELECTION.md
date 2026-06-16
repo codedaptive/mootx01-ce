@@ -3,6 +3,15 @@
 Use this table to choose the cheapest useful substrate action before spending
 LLM context tokens.
 
+## Tool Names, Namespacing, and Availability
+
+- Prefer the visible MOOTx01 tool names below when the harness exposes them directly.
+- If the harness namespaces MCP tools (e.g. `mcp__mootx01__moot_memory_search`,
+  `mootx01.moot_memory_search`, or another server-prefixed variant), use the
+  equivalent namespaced tool — preserve the intent, not the literal string.
+- If MOOTx01 tools are expected but unavailable, say so plainly and answer only from
+  current context. Never claim memory recall happened unless a MOOTx01 query actually ran.
+
 ## Orientation
 
 - `moot_estate_ping` - check server and estate reachability.
