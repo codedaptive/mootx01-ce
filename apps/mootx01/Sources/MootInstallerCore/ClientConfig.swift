@@ -193,7 +193,9 @@ public struct MCPClient: Sendable, Equatable {
 
         switch configURL.pathExtension.lowercased() {
         case "json", "jsonc":
-            guard let data = try? Data(contentsOf: configURL),
+            // Strip a possible leading UTF-8 BOM before parsing — a BOM'd config
+            // would otherwise read as "not wired" and trigger a redundant re-wire.
+            guard let data = (try? Data(contentsOf: configURL))?.strippingLeadingUTF8BOM,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let servers = obj[jsonServersKey] as? [String: Any] else { return false }
             return servers[serverName] != nil

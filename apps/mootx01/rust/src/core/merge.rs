@@ -186,16 +186,26 @@ pub fn remove_from_json_config(
     Ok(removed)
 }
 
+/// Strip a leading UTF-8 BOM (`\u{FEFF}`) if present. Some editors and Windows
+/// tools — notably Windows PowerShell 5.1's `Set-Content -Encoding UTF8` —
+/// prepend a BOM. serde_json, toml, and the YAML line probes all treat it as a
+/// stray leading character (`str::trim` does NOT remove it — U+FEFF is not
+/// Unicode White_Space), so every config reader strips it before parsing.
+pub(crate) fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 fn read_json_root(path: &Path) -> Result<serde_json::Value, MergeError> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
     }
     let bytes = std::fs::read(path)?;
-    let text = String::from_utf8_lossy(&bytes);
+    let lossy = String::from_utf8_lossy(&bytes);
+    let text = strip_bom(&lossy);
     if text.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
-    match serde_json::from_str::<serde_json::Value>(&text) {
+    match serde_json::from_str::<serde_json::Value>(text) {
         Ok(v) if v.is_object() => Ok(v),
         _ => Err(MergeError::MalformedConfig {
             path: path.to_path_buf(),
@@ -275,7 +285,7 @@ fn read_toml_text(path: &Path) -> Result<String, MergeError> {
         return Ok(String::new());
     }
     let bytes = std::fs::read(path)?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = strip_bom(&String::from_utf8_lossy(&bytes)).to_owned();
     // A config.toml whose content is a JSON object is the fingerprint of a
     // prior broken install (JSON written into the TOML file). Refuse and tell
     // the user how to recover rather than compounding the corruption.
@@ -459,7 +469,7 @@ fn read_hermes_text(path: &Path) -> Result<String, MergeError> {
         return Ok(String::new());
     }
     let bytes = std::fs::read(path)?;
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = strip_bom(&String::from_utf8_lossy(&bytes)).to_owned();
     let trimmed = text.trim();
     if trimmed.starts_with('{') && serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
         return Err(MergeError::MalformedConfig {
@@ -684,6 +694,26 @@ mod tests {
         assert_eq!(v["mcpServers"]["other"]["command"], "x");
         assert_eq!(v["mcpServers"]["mootx01"]["url"], "http://u");
         assert!(v["mcpServers"]["mootx01"].get("type").is_none()); // cursor: bare url
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn json_merge_tolerates_leading_utf8_bom() {
+        // A BOM'd JSON config (Windows PowerShell 5.1 `Set-Content -Encoding
+        // UTF8`) must merge, not get rejected as malformed. The rewrite also
+        // drops the BOM so the file is clean afterward.
+        let dir = tmp("json-bom");
+        let p = dir.join("c.json");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(br#"{"theme":"dark","mcpServers":{"other":{"command":"x"}}}"#);
+        std::fs::write(&p, &bytes).unwrap();
+        merge_into_json_config(&p, "mcpServers", "mootx01", entry_for(&client("cursor"), "/b", "http://u")).unwrap();
+        let written = std::fs::read(&p).unwrap();
+        assert_ne!(&written[..3], b"\xEF\xBB\xBF", "BOM should be gone after rewrite");
+        let v: serde_json::Value = serde_json::from_slice(&written).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert_eq!(v["mcpServers"]["mootx01"]["url"], "http://u");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

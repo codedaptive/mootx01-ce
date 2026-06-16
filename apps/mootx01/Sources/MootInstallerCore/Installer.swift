@@ -547,7 +547,7 @@ public enum Installer {
 
         var root: [String: Any]
         if FileManager.default.fileExists(atPath: configURL.path) {
-            let data = try Data(contentsOf: configURL)
+            let data = try Data(contentsOf: configURL).strippingLeadingUTF8BOM
             let isBlank = data.isEmpty ||
                 String(decoding: data, as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -629,7 +629,7 @@ public enum Installer {
 
         var existingText = ""
         if FileManager.default.fileExists(atPath: configURL.path) {
-            let data = try Data(contentsOf: configURL)
+            let data = try Data(contentsOf: configURL).strippingLeadingUTF8BOM
             existingText = String(decoding: data, as: UTF8.self)
             // A config.toml whose content is a JSON object is the fingerprint of
             // a prior broken install (JSON written into the TOML file). Appending
@@ -767,7 +767,7 @@ public enum Installer {
     ) throws {
         let existing: String
         if FileManager.default.fileExists(atPath: configURL.path) {
-            let data = try Data(contentsOf: configURL)
+            let data = try Data(contentsOf: configURL).strippingLeadingUTF8BOM
             existing = String(decoding: data, as: UTF8.self)
             let trimmed = existing.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("{"),
@@ -934,7 +934,7 @@ public enum Installer {
     }
 
     private static func uninstallJSON(configURL: URL, serversKey: String, serverName: String) throws {
-        let data = try Data(contentsOf: configURL)
+        let data = try Data(contentsOf: configURL).strippingLeadingUTF8BOM
         guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }

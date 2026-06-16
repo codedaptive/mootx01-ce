@@ -82,7 +82,7 @@ public enum PermissionsWriter {
     public static func merge(into settingsURL: URL) throws {
         var root: [String: Any]
         if FileManager.default.fileExists(atPath: settingsURL.path) {
-            let data = try Data(contentsOf: settingsURL)
+            let data = try Data(contentsOf: settingsURL).strippingLeadingUTF8BOM
             root = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         } else {
             root = [:]
@@ -121,7 +121,7 @@ public enum PermissionsWriter {
     ///   but cannot be read or written.
     public static func remove(from settingsURL: URL) throws {
         guard FileManager.default.fileExists(atPath: settingsURL.path) else { return }
-        let data = try Data(contentsOf: settingsURL)
+        let data = try Data(contentsOf: settingsURL).strippingLeadingUTF8BOM
         guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }

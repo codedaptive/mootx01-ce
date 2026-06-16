@@ -209,7 +209,13 @@ impl McpClient {
         match self.format {
             ConfigFormat::Json => {
                 let Ok(bytes) = std::fs::read(&path) else { return false };
-                let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                // Strip a possible leading UTF-8 BOM before parsing — a BOM'd
+                // config (Windows PowerShell 5.1 writes one) would otherwise
+                // read as "not wired" and trigger a redundant re-wire.
+                let lossy = String::from_utf8_lossy(&bytes);
+                let Ok(v) =
+                    serde_json::from_str::<serde_json::Value>(crate::core::merge::strip_bom(&lossy))
+                else {
                     return false;
                 };
                 v.get(self.json_servers_key())
