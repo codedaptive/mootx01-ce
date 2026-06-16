@@ -19,7 +19,7 @@
   "platforms": {
     "macos": { "build": "swift", "products": ["mootx01", "moot-mgr"], "hosts_estate": true, "service_manager": "launchd" },
     "linux": { "build": "rust", "products": ["mootx01", "moot-mgr"], "hosts_estate": true, "service_manager": "systemd-user", "note": "x86_64/arm64 archives include the headless Rust moot-mgr dashboard" },
-    "windows": { "build": "rust", "products": ["mootx01.exe", "moot-mgr.exe"], "hosts_estate": true, "service_manager": "task-scheduler", "note": "install.ps1 downloads the binary and wires clients over stdio (no resident daemon); run 'mootx01 install' afterward to register the Task Scheduler daemon and rewire clients to the HTTP daemon. moot-mgr (dashboard) ships as the headless Rust build; its admin control channel is a named pipe on Windows (a Unix-domain socket on Linux/macOS)" }
+    "windows": { "build": "rust", "products": ["mootx01.exe", "moot-mgr.exe"], "hosts_estate": true, "service_manager": "task-scheduler", "note": "install.ps1 only places the binaries and adds them to PATH; client wiring is the 'mootx01 install' step (same cross-platform CLI and client roster as macOS/Linux), which also registers the Task Scheduler daemon. moot-mgr (dashboard) ships as the headless Rust build; its admin control channel is a named pipe on Windows (a Unix-domain socket on Linux/macOS)" }
   },
   "install": {
     "download_unix": "curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh",

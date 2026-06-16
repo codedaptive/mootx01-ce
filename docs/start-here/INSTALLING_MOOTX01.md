@@ -191,15 +191,14 @@ background-service mechanism differ.
   `[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"`.
   The `Tls12` prefix is required on Windows PowerShell 5.1 (the default shell), which otherwise
   negotiates TLS 1.0/1.1 and is refused by GitHub's CDN.
-  Note: on Windows `install.ps1` both downloads the binary **and** wires clients over **stdio**
-  (each spawns its own instance — no shared daemon). To get the resident HTTP daemon shared across
-  clients, run `mootx01 install` afterward — it registers the Task Scheduler service and rewires
-  clients to the daemon.
+  `install.ps1` places `mootx01.exe` + `moot-mgr.exe` and adds them to your PATH — nothing more.
+  Client wiring is the `mootx01 install` step below, exactly as on macOS and Linux.
 
-**Wire your AI clients.** `mootx01 install` detects and wires the same supported clients as on
-macOS — the Rust CLI writes the identical MCP entries (Claude Desktop still uses the stdio path).
-On Linux/macOS the download script tells you to run this next; on Windows it's the step that turns
-the stdio install into the resident-daemon install.
+**Wire your AI clients.** `mootx01 install` detects and wires your clients from one cross-platform
+roster — the Rust CLI writes the identical MCP entries on every platform — and registers the
+resident daemon (launchd on macOS, systemd-user on Linux, Task Scheduler on Windows). All three
+shell installers place the binary and then hand off to this one command; it is the single source
+of truth for which clients are supported and how each is wired.
 
 **Background service** — registered automatically by `mootx01 install`, with no admin elevation:
 
