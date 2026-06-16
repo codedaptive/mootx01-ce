@@ -41,7 +41,7 @@ jobs:
 
   swift-build-test:
     name: Swift harness — build, unit tests, generate
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -128,7 +128,7 @@ jobs:
   cross-language-validation:
     name: Four-way conformance matrix
     needs: [swift-build-test, rust-build-test]
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
