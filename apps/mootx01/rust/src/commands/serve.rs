@@ -179,8 +179,19 @@ mod tests {
     fn port_free_reflects_occupancy() {
         let holder = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let busy = holder.local_addr().unwrap().port();
-        assert!(!port_free(busy));
+        assert!(!port_free(busy), "an occupied port must report not-free");
         drop(holder);
-        assert!(port_free(busy));
+        // The OS may not release the listener's port synchronously on drop
+        // (notably on Windows), so poll briefly for it to become rebindable
+        // rather than asserting it instantly.
+        let mut freed = false;
+        for _ in 0..100 {
+            if port_free(busy) {
+                freed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(freed, "a released port must become free");
     }
 }
