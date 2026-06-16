@@ -66,14 +66,14 @@ mootx01 install        # wire it into Claude, Claude Code, or any MCP client (in
 
 Downloads the latest mootx01 release to `~/.mootx01/bin`. Upgrade by re-running; uninstall with `… | sh -s -- --uninstall`.
 
-**Management console (macOS)** — the same install drops `moot-mgr`, the management & monitoring console, and `mootx01 install` registers it as a background **launchd** service (starts immediately, restarts at login):
+**Management console** — the same install drops `moot-mgr`, the management & monitoring console, and `mootx01 install` registers it as a background service (**launchd** on macOS, **systemd-user** on Linux, **Task Scheduler** on Windows — starts immediately, restarts at login):
 
 ```bash
 mootx01 install        # also starts the console in the background
 # dashboard → http://127.0.0.1:4200      manual control → moot-mgr serve
 ```
 
-A read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface for estate provisioning and lifecycle. macOS only at 1.0.0-beta. Opt out with `mootx01 install --no-manager`.
+A read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface for estate provisioning and lifecycle — on **every platform** at `http://127.0.0.1:4200`. macOS ships the SwiftUI build (with a menu-bar agent); Linux and Windows ship the headless Rust build. Opt out with `mootx01 install --no-manager`.
 
 *Prefer source?* `swift build -c release --package-path apps/aria-mcp-server` (macOS 26+), or `cargo build --release` in `apps/aria-mcp-server/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
 

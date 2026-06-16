@@ -26,33 +26,33 @@ INSTALL_DIR="${MOOTX01_INSTALL_DIR:-$HOME/.mootx01/bin}"
 BIN_DIR="${MOOTX01_BIN_DIR:-$HOME/.local/bin}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-echo "Building mootx01 (release) from $ROOT/apps/mootx01 ..."
-swift build -c release --package-path "$ROOT/apps/mootx01" --product mootx01
-BIN="$ROOT/apps/mootx01/.build/release/mootx01"
-[ -x "$BIN" ] || { echo "mootx01: build did not produce $BIN" >&2; exit 1; }
+mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
-mkdir -p "$INSTALL_DIR"
-install -m 0755 "$BIN" "$INSTALL_DIR/mootx01"
-mkdir -p "$BIN_DIR"
-ln -sf "$INSTALL_DIR/mootx01" "$BIN_DIR/mootx01"
+# Place a freshly built binary and symlink it onto PATH.
+place() {  # $1 = product name, $2 = built binary path
+  [ -x "$2" ] || { echo "$1: build did not produce $2" >&2; exit 1; }
+  install -m 0755 "$2" "$INSTALL_DIR/$1"
+  ln -sf "$INSTALL_DIR/$1" "$BIN_DIR/$1"
+  echo "Installed  $INSTALL_DIR/$1   (local build)"
+  echo "Linked     $BIN_DIR/$1"
+}
 
-echo "Installed  $INSTALL_DIR/mootx01   (local build)"
-echo "Linked     $BIN_DIR/mootx01"
-
-# moot-mgr (the management & monitoring console) — macOS only (.macOS(.v26),
-# GeniusLocusKit-backed). Build and place it alongside mootx01 on Darwin.
-mgr_installed=0
+# Platform contract (same split the release lane uses): the Swift port on macOS
+# (Apple Silicon), the Rust port off-Apple. Both produce `mootx01` (the CLI) and
+# `moot-mgr` (the management console).
+mgr_installed=1
 if [ "$(uname -s)" = "Darwin" ]; then
-  echo "Building moot-mgr (release) from $ROOT/apps/moot-mgr ..."
+  echo "Building mootx01 + moot-mgr (Swift, release) ..."
+  swift build -c release --package-path "$ROOT/apps/mootx01"  --product mootx01
   swift build -c release --package-path "$ROOT/apps/moot-mgr" --product moot-mgr
-  MGR="$ROOT/apps/moot-mgr/.build/release/moot-mgr"
-  if [ -x "$MGR" ]; then
-    install -m 0755 "$MGR" "$INSTALL_DIR/moot-mgr"
-    ln -sf "$INSTALL_DIR/moot-mgr" "$BIN_DIR/moot-mgr"
-    echo "Installed  $INSTALL_DIR/moot-mgr   (local build)"
-    echo "Linked     $BIN_DIR/moot-mgr"
-    mgr_installed=1
-  fi
+  place mootx01  "$ROOT/apps/mootx01/.build/release/mootx01"
+  place moot-mgr "$ROOT/apps/moot-mgr/.build/release/moot-mgr"
+else
+  echo "Building mootx01 + moot-mgr (Rust, release) ..."
+  cargo build --release --locked --manifest-path "$ROOT/apps/mootx01/rust/Cargo.toml"
+  cargo build --release --locked --manifest-path "$ROOT/apps/moot-mgr/rust/Cargo.toml"
+  place mootx01  "$ROOT/apps/mootx01/rust/target/release/mootx01"
+  place moot-mgr "$ROOT/apps/moot-mgr/rust/target/release/moot-mgr"
 fi
 
 case ":$PATH:" in

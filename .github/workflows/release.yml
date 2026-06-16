@@ -114,8 +114,8 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml
-          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml
+          cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml
+          cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml
 
       - name: Package binaries
         run: |
@@ -155,8 +155,8 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml
-          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml
+          cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml
+          cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml
 
       - name: Package binaries
         run: |
@@ -203,8 +203,8 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml --target x86_64-pc-windows-msvc
-          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml --target x86_64-pc-windows-msvc
+          cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target x86_64-pc-windows-msvc
+          cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Package binaries
         shell: pwsh
@@ -250,8 +250,8 @@ jobs:
 
       - name: Build release binaries
         run: |
-          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml --target aarch64-pc-windows-msvc
-          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml --target aarch64-pc-windows-msvc
+          cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target aarch64-pc-windows-msvc
+          cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target aarch64-pc-windows-msvc
 
       - name: Package binaries
         shell: pwsh
