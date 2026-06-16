@@ -16,6 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Select newest Xcode (Swift 6.2 toolchain)
+        run: |
+          # macos-15's default Xcode ships Swift 6.1; the packages declare
+          # swift-tools-version:6.2. Select the highest installed Xcode, which
+          # carries the 6.2 toolchain, rather than pinning a version that may
+          # shift on the runner image.
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          swift --version
+
       - name: Build release binaries
         run: |
           # mootx01 = MCP server + management CLI; moot-mgr = the management
@@ -46,6 +55,12 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select newest Xcode (Swift 6.2 toolchain)
+        run: |
+          # See arm64 job: macos-15 default Xcode is Swift 6.1; packages need 6.2.
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          swift --version
 
       - name: Build release binaries (cross-compile to x86_64)
         run: |
