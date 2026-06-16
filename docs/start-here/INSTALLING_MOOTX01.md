@@ -83,16 +83,15 @@ what each client's config format supports:
 | **Cursor** | HTTP | Same daemon URL |
 | **Cline** | HTTP | Same daemon URL |
 | **Continue** | HTTP | Same daemon URL (YAML format: `streamable-http`) |
-| **Claude Desktop** | stdio | Spawns a local `mootx01` process; does not share the resident daemon |
+| **Claude Desktop** | stdio → proxy bridge | `mootx01 proxy --http` into the resident daemon |
 
-**Claude Desktop is the exception.** Its config format does not support
-connecting directly to a local HTTP MCP server without a bridge tool. The
-installer uses the stdio path for it instead, which is reliable but means
-Claude Desktop spawns its own short-lived MCP instance per conversation.
-That instance has access to your estate but does not run the background
-maintenance work. If you want continuous maintenance, run Claude Code, Cursor,
-Cline, or Continue alongside — the daemon runs as long as those clients
-are active.
+**Claude Desktop is wired differently, but still shares the daemon.** Its config
+format can't take a raw local HTTP MCP URL, so the installer wires it through the
+native proxy bridge — `mootx01 proxy --http <daemonURL>`, a stdio↔HTTP shim —
+instead of a bare stdio entry. Claude Desktop's calls still route into the one
+resident daemon, so it shares the same single-writer estate and telemetry and is
+visible to `moot-mgr`, exactly like the HTTP clients. The difference is only the
+transport hop, not a separate estate instance.
 
 If you use Claude Code and want the MCP entry scoped to a single project
 rather than your global config, pass `--location local` to the installer.
