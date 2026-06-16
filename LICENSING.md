@@ -30,3 +30,7 @@ A lifetime tier covers every point release within a major version. The next majo
 ## The mechanism
 
 A dual license on a source-available core. The public license, the FSL above, states the free-to-build, no-selling grant that everyone receives. The paid tiers are separate agreements alongside it, not changes to the public license.
+
+---
+
+_Current as of MOOTx01 stable/1.0.0._
