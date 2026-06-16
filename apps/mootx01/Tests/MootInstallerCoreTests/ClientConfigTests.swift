@@ -27,23 +27,23 @@ final class ClientConfigTests: XCTestCase {
 
     func testEntryUsesAbsoluteBinaryPath() {
         let entry = MCPServerEntryBuilder.entry(
-            binaryPath: "/Users/test/.local/share/MOOTx01/bin/mootx01-mcp"
+            binaryPath: "/Users/test/.mootx01/bin/mootx01"
         )
-        XCTAssertEqual(entry.command, "/Users/test/.local/share/MOOTx01/bin/mootx01-mcp")
+        XCTAssertEqual(entry.command, "/Users/test/.mootx01/bin/mootx01")
         XCTAssertTrue(entry.args.isEmpty)
         XCTAssertTrue(entry.env.isEmpty)
     }
 
     func testEntryJSONIsStableSortedKeys() throws {
         let json = try MCPServerEntryBuilder.entryJSON(
-            binaryPath: "/abs/path/mootx01-mcp"
+            binaryPath: "/abs/path/mootx01"
         )
         // Sorted-keys formatting is what makes the Python merge in
         // install.sh produce stable diffs across runs. If JSONEncoder
         // ever loses the option the diff churn returns; lock it in.
         XCTAssertEqual(
             json,
-            "{\"args\":[],\"command\":\"/abs/path/mootx01-mcp\",\"env\":{}}"
+            "{\"args\":[],\"command\":\"/abs/path/mootx01\",\"env\":{}}"
         )
     }
 
