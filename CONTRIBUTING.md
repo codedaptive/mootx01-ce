@@ -87,10 +87,11 @@ data integrity, the federation trust boundary, the access perimeter, or
 the chain-of-custody guarantees — report it privately rather than opening
 a public issue.
 
-> **Security contact:** _to be published._ Until a dedicated security
-> contact is listed here, send security reports through the private
-> channel noted in the repository's security policy, or contact the
-> maintainers directly rather than filing a public issue.
+> **Security contact:** report privately via GitHub's
+> [Report a vulnerability](https://github.com/codedaptive/mootx01-ce/security/advisories/new)
+> form, or email <security@codedaptive.com>. Please do not file a public
+> issue for a security problem. See [`SECURITY.md`](SECURITY.md) for the
+> full policy.
 
 We will acknowledge a security report, work the problem privately, and
 coordinate disclosure once a fix has tested out and shipped to the
