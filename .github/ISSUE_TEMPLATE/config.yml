@@ -1,0 +1,8 @@
+# Issues are the contribution channel during the beta (see CONTRIBUTING.md).
+# Blank issues stay enabled so anyone can tell us anything — a structured
+# template should never be a barrier to surfacing a problem or an idea.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability (privately)
+    url: https://github.com/codedaptive/mootx01-ce/security/advisories/new
+    about: Do not file security issues in public. Report them privately here — see SECURITY.md.

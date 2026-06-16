@@ -3,22 +3,22 @@
 Thank you for your interest in MOOTx01. This document explains how to
 contribute, and how that changes at the 1.0 release.
 
-The short version: **before 1.0, contribute by opening an issue. After
-1.0, contribute by opening a pull request.** The reason for the split
+The short version: **during the beta, contribute by opening an issue.
+Pull requests open as soon as we clear beta.** The reason for the split
 is below.
 
 ---
 
-## Where we are: before 1.0
+## Where we are: the beta
 
-MOOTx01 has not reached 1.0. The substrate is under active, rapid
-development, and a great deal of the underlying mathematics is still
-being tied out and validated. Development happens in our enterprise
-codebase and lands in this community edition as soon as each change
-tests out. The community edition is downstream of that work: it moves
-when a change has been validated, not before.
+MOOTx01 is in beta. The point of the beta is to get people test-driving
+it and surface the launch bugs before 1.0 ships. Development happens in
+our enterprise codebase and lands in this community edition as soon as
+each change tests out. The community edition is downstream of that work:
+it moves when a change has been validated, not before — and it is still
+moving while we are in beta.
 
-While the substrate is moving this fast, **we are not accepting pull
+While beta code is still moving this fast, **we are not accepting pull
 requests.** A pull request written against today's code would often be
 stale against a moving target before it could be reviewed and merged,
 which is frustrating for a contributor and unfair to the work they put
@@ -42,19 +42,19 @@ fix in hand. Surfacing the right question is a real contribution.
 
 ---
 
-## At 1.0: pull requests open
+## When we clear beta: pull requests open
 
-When MOOTx01 reaches 1.0, the substrate stabilizes against a published
-conformance contract, and the calculus changes. At that point pull
-requests open, and people who want to contribute code are more than
+When we clear beta and 1.0 ships, the substrate stabilizes against a
+published conformance contract, and the calculus changes. At that point
+pull requests open, and people who want to contribute code are more than
 welcome. We expect to say more about review process, coding standards,
 and conformance expectations as 1.0 approaches; this document will be
 updated then.
 
 ### Contributor License Agreement
 
-When pull requests open at 1.0, contributions will require a signed
-**Contributor License Agreement (CLA)** before they can be merged.
+When pull requests open as we clear beta, contributions will require a
+signed **Contributor License Agreement (CLA)** before they can be merged.
 
 This is not a formality we are imposing for its own sake. The community
 edition is source-available under the Functional Source License
@@ -105,6 +105,6 @@ focused on the work. That covers it.
 
 ---
 
-*This document describes the contribution process before 1.0. It will be
-revised at the 1.0 release to cover the pull-request workflow, the CLA,
-and the security contact in full.*
+*This document describes the contribution process during the beta. It
+will be revised as we clear beta and 1.0 ships, to cover the pull-request
+workflow, the CLA, and the security contact in full.*
