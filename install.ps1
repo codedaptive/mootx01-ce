@@ -225,7 +225,9 @@ function Remove-Permissions($settingsPath) {
 # ── PATH helper ─────────────────────────────────────────────────────────────
 
 function Add-ToUserPath($dir) {
-    $current = [Environment]::GetEnvironmentVariable("PATH", "User") ?? ""
+    # [string] casts a missing ($null) value to "" — works in Windows PowerShell
+    # 5.1 (the default shell) as well as PowerShell 7+. The `??` operator is 7+ only.
+    $current = [string][Environment]::GetEnvironmentVariable("PATH", "User")
     $parts = $current -split ";" | Where-Object { $_ -ne "" }
     if ($parts -notcontains $dir) {
         $newPath = ($parts + $dir) -join ";"
@@ -235,7 +237,9 @@ function Add-ToUserPath($dir) {
 }
 
 function Remove-FromUserPath($dir) {
-    $current = [Environment]::GetEnvironmentVariable("PATH", "User") ?? ""
+    # [string] casts a missing ($null) value to "" — works in Windows PowerShell
+    # 5.1 (the default shell) as well as PowerShell 7+. The `??` operator is 7+ only.
+    $current = [string][Environment]::GetEnvironmentVariable("PATH", "User")
     $parts = $current -split ";" | Where-Object { $_ -ne "" -and $_ -ne $dir }
     [Environment]::SetEnvironmentVariable("PATH", ($parts -join ";"), "User")
 }
