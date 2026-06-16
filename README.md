@@ -55,29 +55,35 @@ A **moot** was the old assembly where a community brought its memory together �
 
 ## Quickstart (1.0.0-beta)
 
-> **Status:** 1.0.0-beta early access — installable now, **not yet security-hardened**. The full security sweep (Roadmap §4) precedes the general-availability binary; this beta is for early adopters and builders.
+> **1.0.0-beta — early access.** Installable now, **not yet security-hardened**. The full security sweep (Roadmap §4) precedes the general-availability binary. For early adopters and builders.
 
-**Install** — prebuilt binary, no toolchain, no clone:
+### 1 · Install the binary
 
+Prebuilt, no toolchain, no clone.
+
+**macOS / Linux**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
-mootx01 install        # wire it into Claude, Claude Code, or any MCP client (interactive)
 ```
 
-Downloads the latest mootx01 release to `~/.mootx01/bin`. Upgrade by re-running; uninstall with `… | sh -s -- --uninstall`.
+**Windows** (PowerShell)
+```powershell
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"
+```
 
-**Management console** — the same install drops `moot-mgr`, the management & monitoring console, and `mootx01 install` registers it as a background service (**launchd** on macOS, **systemd-user** on Linux, **Task Scheduler** on Windows — starts immediately, restarts at login):
+Installs to `~/.mootx01/bin`. Re-run to upgrade.
+
+### 2 · Wire it in
 
 ```bash
-mootx01 install        # also starts the console in the background
-# dashboard → http://127.0.0.1:4200      manual control → moot-mgr serve
+mootx01 install        # interactive — registers MOOTx01 with Claude, Claude Code, or any MCP client
 ```
 
-A read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface for estate provisioning and lifecycle — on **every platform** at `http://127.0.0.1:4200`. macOS ships the SwiftUI build (with a menu-bar agent); Linux and Windows ship the headless Rust build. Opt out with `mootx01 install --no-manager`.
+This also starts **`moot-mgr`**, the management console, as a background service (launchd · systemd-user · Task Scheduler). It opens a read-only dashboard at **http://127.0.0.1:4200** — health, per-estate state, the write pipeline, an activity log, and a live **Topology** view — plus a gated admin surface. Opt out with `--no-manager`.
 
-*Prefer source?* `swift build -c release --package-path apps/aria-mcp-server` (macOS 26+), or `cargo build --release` in `apps/aria-mcp-server/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
+### 3 · Use it
 
-Then, from your agent — the ARIA grammar, one verb on a noun:
+From your agent, the ARIA grammar is one verb on a noun:
 
 ```jsonc
 // file a memory — captured verbatim into your MOOT
@@ -87,7 +93,7 @@ moot_file_memory { "content": "We decided to ship the importer behind a flag.", 
 moot_memory_search { "query": "what did we decide about the importer?" }
 ```
 
-Same vocabulary whether you embed MOOTx01 as a library, query it through MCP, or call it through a native API.
+*Prefer source?* `swift build -c release --package-path apps/aria-mcp-server` (macOS 26+), or `cargo build --release` in `apps/aria-mcp-server/rust` (PC/Linux). The console builds from `apps/moot-mgr` the same way.
 
 ## How it works
 

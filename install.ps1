@@ -3,8 +3,9 @@
 # Downloads a prebuilt mootx01.exe from GitHub Releases and wires it into
 # every MCP client found on this machine. No compiler or build tools required.
 #
-# Standard one-liner install:
-#   iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"
+# Standard one-liner install (the TLS 1.2 set is required on Windows PowerShell
+# 5.1, which otherwise negotiates TLS 1.0/1.1 and is refused by GitHub's CDN):
+#   [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"
 #
 # With options:
 #   iex "& { $(irm https://...) } -Uninstall"
@@ -29,6 +30,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Windows PowerShell 5.1 (the default shell) negotiates TLS 1.0/1.1 out of the
+# box on older .NET; GitHub's raw + release CDNs require TLS 1.2 and reset the
+# connection otherwise. -bor adds 1.2 to whatever is already enabled rather than
+# replacing it, so a machine already on 1.3 keeps it.
+[Net.ServicePointManager]::SecurityProtocol = `
+    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $REPO        = if ($env:MOOTX01_REPO)        { $env:MOOTX01_REPO }        else { "codedaptive/mootx01-ce" }
 $MOOTX01_ROOT        = Join-Path $HOME ".mootx01"
