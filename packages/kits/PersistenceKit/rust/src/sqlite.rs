@@ -445,6 +445,20 @@ impl SqliteStorage {
                 })
             }
         };
+        // Create the parent directory before opening. SQLite (via rusqlite's
+        // SQLITE_OPEN_CREATE) creates the database FILE if absent but never its
+        // parent directories; a path whose folder hasn't been provisioned (e.g.
+        // the moot-mgr stats store on a fresh Windows install) would fail with
+        // "unable to open database file". Mirrors Swift `SQLiteConnection.init`,
+        // which calls `createDirectory(withIntermediateDirectories: true)` here.
+        // A parent-less or empty path (e.g. ":memory:") is left untouched.
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| StorageError::BackendError {
+                    underlying: format!("sqlite open: create parent dir {parent:?}: {e}"),
+                })?;
+            }
+        }
         let conn = Connection::open(&path).map_err(|e| StorageError::BackendError {
             underlying: format!("sqlite open: {e}"),
         })?;
@@ -1592,6 +1606,38 @@ mod hlc_roundtrip_tests {
         );
         rs.query("events", Some(&pred), &[], None, None)
             .expect("query")
+    }
+
+    #[test]
+    fn open_creates_missing_parent_directory() {
+        // Regression: SQLite creates the file but not its parent dirs. On a fresh
+        // Windows install the moot-mgr stats store path (%LOCALAPPDATA%\…\moot-mgr\)
+        // does not exist yet, so the open failed with "unable to open database
+        // file". SqliteStorage::new must create the parent, matching Swift.
+        let base = std::env::temp_dir().join(format!("pk_mkparent_{}", Uuid::new_v4()));
+        let nested = base.join("a").join("b");
+        assert!(!nested.exists(), "precondition: nested dir must not exist yet");
+        let path = nested.join("estate.sqlite");
+        let config = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path.to_string_lossy().into_owned(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(config).expect("new must create parent dir and open");
+        let schema = SchemaDeclaration::new(
+            "mkparent-test",
+            1,
+            vec![TableDeclaration::new(
+                "t",
+                vec![ColumnDeclaration::text("id")],
+                vec!["id".to_string()],
+            )],
+        );
+        storage.open(&schema).expect("schema open");
+        assert!(path.exists(), "database file should exist after open");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -276,8 +276,8 @@ pub fn stats_store_path_from_env(use_default: bool) -> Option<String> {
     //   macOS:   ~/Library/Application Support
     //   Windows: %LOCALAPPDATA%  (USERPROFILE\AppData\Local as fallback)
     //
-    // The store file and parent directories are created by StatsStore::open()
-    // (via SQLiteStorage) — no pre-creation needed.
+    // The store file and its parent directories are created by SqliteStorage
+    // when StatsStore::new opens the connection — no pre-creation needed here.
     #[cfg(target_os = "macos")]
     let base = {
         // macOS: $HOME/Library/Application Support
