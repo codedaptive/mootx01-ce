@@ -34,10 +34,14 @@ use crate::novel_token_cache::{PoolSubmission, Submitter};
 
 /// Resolves the pool directory from environment or platform default:
 ///   1. `LATTICE_POOL_DIR` env var, if set and non-empty.
-///   2. `$XDG_DATA_HOME/mootx01/lattice/pool/`
-///   3. `~/.local/share/mootx01/lattice/pool/`
+///   2. POSIX: `$XDG_DATA_HOME/mootx01/lattice/pool/`, else
+///      `~/.local/share/mootx01/lattice/pool/`.
+///   3. Windows: `%LOCALAPPDATA%\mootx01\lattice\pool\` (XDG does not exist
+///      there; falling back to a relative `.` path is what produced the
+///      "Access is denied" failure when the daemon's CWD is a system dir).
 ///
-/// Mirrors Swift `NovelPoolSubmitter.resolvePoolDirectory()`.
+/// Mirrors Swift `NovelPoolSubmitter.resolvePoolDirectory()` (Apple-only;
+/// the Windows branch is Rust-only since Swift has no Windows target).
 pub fn default_pool_dir() -> PathBuf {
     // Priority 1: explicit env var.
     if let Ok(dir) = env::var("LATTICE_POOL_DIR") {
@@ -45,15 +49,15 @@ pub fn default_pool_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
-    // Priority 2: XDG_DATA_HOME.
+    // Priority 2: XDG_DATA_HOME (POSIX only; never set on Windows).
     let base = if let Ok(xdg) = env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
             PathBuf::from(xdg)
         } else {
-            home_local_share()
+            platform_data_base()
         }
     } else {
-        home_local_share()
+        platform_data_base()
     };
     base.join("mootx01/lattice/pool")
 }
@@ -77,19 +81,43 @@ pub fn default_table_artifact() -> PathBuf {
     parent.join("WordClassTable.json")
 }
 
-/// Returns `$HOME/.local/share` as a fallback base data directory (XDG spec
-/// default when XDG_DATA_HOME is unset). If HOME is also unavailable,
+/// Returns the platform per-user data base directory used when no env override
+/// applies. POSIX: `$HOME/.local/share` (the XDG default when XDG_DATA_HOME is
+/// unset). Windows: `%LOCALAPPDATA%` (e.g. `C:\Users\X\AppData\Local`), matching
+/// the app's `core::paths::data_dir()`. If the relevant base var is unavailable,
 /// falls back to the current directory (a last resort that avoids panicking).
-fn home_local_share() -> PathBuf {
-    dirs_home()
-        .map(|h| h.join(".local/share"))
-        .unwrap_or_else(|| PathBuf::from("."))
+fn platform_data_base() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        // Windows has no XDG; %LOCALAPPDATA% is the per-user data root.
+        // USERPROFILE\AppData\Local is the fallback when LOCALAPPDATA is unset.
+        if let Some(local) = env::var("LOCALAPPDATA").ok().filter(|v| !v.is_empty()) {
+            return PathBuf::from(local);
+        }
+        return dirs_home()
+            .map(|h| h.join("AppData").join("Local"))
+            .unwrap_or_else(|| PathBuf::from("."));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs_home()
+            .map(|h| h.join(".local/share"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
 }
 
-/// Portable HOME directory lookup — mirrors what the `dirs` crate does
-/// without introducing an external dependency (prohibited by C-1 doctrine).
+/// Portable home-directory lookup — mirrors what the `dirs` crate does without
+/// introducing an external dependency (prohibited by C-1 doctrine). Windows
+/// exposes the home as `%USERPROFILE%`, not `$HOME`.
 fn dirs_home() -> Option<PathBuf> {
-    env::var("HOME").ok().map(PathBuf::from)
+    #[cfg(target_os = "windows")]
+    {
+        env::var("USERPROFILE").ok().map(PathBuf::from)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        env::var("HOME").ok().map(PathBuf::from)
+    }
 }
 
 // ─── Submitter factory ────────────────────────────────────────────────────────
@@ -191,6 +219,44 @@ mod tests {
         // directory resolution logic is observable through LATTICE_POOL_DIR
         // in integration, not here.
         let _ = local_dir_submitter(path);
+    }
+
+    #[test]
+    fn default_pool_dir_is_absolute_with_expected_suffix() {
+        // Regression guard: on Windows the home var is %USERPROFILE% (not $HOME)
+        // and there is no XDG, so the old resolver fell back to a relative "."
+        // path and `pool_reduce` failed with "Access is denied" against the
+        // daemon's system-dir CWD. A correctly resolved default is always an
+        // absolute path ending in the lattice pool segments. (CI always has a
+        // home var set, so the relative fallback never applies here.)
+        let dir = default_pool_dir();
+        assert!(
+            dir.is_absolute(),
+            "default pool dir must be absolute, got {dir:?}"
+        );
+        assert!(
+            dir.ends_with("mootx01/lattice/pool"),
+            "default pool dir must end with mootx01/lattice/pool, got {dir:?}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn default_pool_dir_roots_at_localappdata_on_windows() {
+        // Windows must resolve under %LOCALAPPDATA%, never /tmp or a relative ".".
+        if let Ok(local) = std::env::var("LATTICE_POOL_DIR") {
+            if !local.is_empty() {
+                return; // an override is in effect; the default path is bypassed.
+            }
+        }
+        let dir = default_pool_dir();
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        if !local.is_empty() {
+            assert!(
+                dir.starts_with(&local),
+                "expected pool dir under %LOCALAPPDATA% ({local}), got {dir:?}"
+            );
+        }
     }
 
     #[test]
