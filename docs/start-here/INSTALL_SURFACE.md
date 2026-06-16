@@ -70,7 +70,7 @@ AI assistants should check the current repository scripts and release notes befo
 
 Normal product install, if the repository still publishes this route:
 
-    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
     mootx01 install
 
 Status check:
@@ -181,7 +181,7 @@ Typical shapes may include:
 
 or:
 
-    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh -s -- --uninstall
+    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh -s -- --uninstall
 
 Before uninstalling, tell the user whether the command removes only binaries, configs, and services, or whether it also removes local estate data.
 

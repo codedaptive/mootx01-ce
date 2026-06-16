@@ -60,7 +60,7 @@ A **moot** was the old assembly where a community brought its memory together â€
 **Install** â€” prebuilt binary, no toolchain, no clone:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
 mootx01 install        # wire it into Claude, Claude Code, or any MCP client (interactive)
 ```
 

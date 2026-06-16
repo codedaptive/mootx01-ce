@@ -5,7 +5,7 @@
 # Downloads a prebuilt mootx01 binary from GitHub Releases and places it on
 # your PATH. No Swift toolchain, no build tools, no clone required.
 #
-#   curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
 #
 # Then wire it into your AI clients (interactive menu):
 #   mootx01 install

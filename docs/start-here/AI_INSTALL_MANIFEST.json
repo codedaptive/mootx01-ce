@@ -22,8 +22,8 @@
     "windows": { "build": "rust", "products": ["mootx01.exe", "moot-mgr.exe"], "hosts_estate": true, "service_manager": "task-scheduler", "note": "install.ps1 downloads the binary and wires clients over stdio (no resident daemon); run 'mootx01 install' afterward to register the Task Scheduler daemon and rewire clients to the HTTP daemon. moot-mgr (dashboard) ships as the headless Rust build; its admin control channel is a named pipe on Windows (a Unix-domain socket on Linux/macOS)" }
   },
   "install": {
-    "download_unix": "curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh",
-    "download_windows": "iex \"& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.ps1) }\"",
+    "download_unix": "curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh",
+    "download_windows": "iex \"& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }\"",
     "wire_clients": "mootx01 install",
     "local_build": "./install-local.sh",
     "uninstall": "mootx01 uninstall"

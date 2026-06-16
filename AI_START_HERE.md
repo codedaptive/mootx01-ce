@@ -138,7 +138,7 @@ Use the current install instructions from the repository.
 
 Typical Unix-style product install shape:
 
-    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
     mootx01 install
 
 On Windows, use the repository's PowerShell installer if present.

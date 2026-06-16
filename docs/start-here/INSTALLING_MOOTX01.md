@@ -185,11 +185,11 @@ background-service mechanism differ.
 
 **Install the binary.**
 
-- *Linux:* `curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh`
+- *Linux:* `curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh`
   downloads the Linux `mootx01`, places it at `~/.mootx01/bin/mootx01`, and symlinks
   `~/.local/bin/mootx01` — the same layout as macOS.
 - *Windows:* run the PowerShell installer:
-  `iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.ps1) }"`.
+  `iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"`.
   Note: on Windows `install.ps1` both downloads the binary **and** wires clients over **stdio**
   (each spawns its own instance — no shared daemon). To get the resident HTTP daemon shared across
   clients, run `mootx01 install` afterward — it registers the Task Scheduler service and rewires
