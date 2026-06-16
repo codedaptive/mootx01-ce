@@ -129,6 +129,27 @@ pub fn unregister_task(task_name: &str) -> Result<bool, String> {
     powershell(&cmd).map(|out| out.contains("EXISTED"))
 }
 
+/// Force-stop any running mootx01 / moot-mgr processes by image name.
+///
+/// Unregistering a scheduled task only stops instances Task Scheduler is still
+/// tracking; a detached or manually-started `moot-mgr serve` (or `mootx01 serve`)
+/// survives and keeps its .exe locked, which then fails a later reinstall's
+/// binary copy with a sharing violation. Killing by image name unlocks them.
+///
+/// EXCLUDES the current process: the `mootx01 uninstall` CLI is itself a
+/// `mootx01.exe`, so an unguarded kill-by-name would terminate this very process
+/// mid-uninstall. The `$_.Id -ne <self-pid>` guard skips it.
+#[cfg(target_os = "windows")]
+pub fn stop_processes() {
+    let self_pid = std::process::id();
+    let cmd = format!(
+        "Get-Process -Name mootx01,moot-mgr -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.Id -ne {self_pid} }} | \
+         Stop-Process -Force -ErrorAction SilentlyContinue",
+    );
+    let _ = powershell(&cmd);
+}
+
 /// Stop + start a registered task (upgrade restart path).
 #[cfg(target_os = "windows")]
 pub fn restart_task(task_name: &str) -> Result<(), String> {
