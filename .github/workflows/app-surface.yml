@@ -1,0 +1,80 @@
+# App & installer surface CI
+#
+# The conformance workflows gate the substrate (the kits/libs). This workflow
+# gates the consumer-facing surface — the `mootx01` CLI/installer, the `moot-mgr`
+# console, the install scripts, and the start-here docs — so a change there
+# can't silently break the thing outsiders actually install.
+#
+# Platform contract: Swift builds on macos-26 (the OS Swift 6.2 runtime the
+# packages require); Rust on Linux. The pull_request trigger is wired now so the
+# gate is ready the moment pull requests open post-beta (see CONTRIBUTING.md);
+# until then it runs as push CI on the two live branches.
+
+name: App & installer surface
+
+on:
+  push:
+    branches: [stable/1.0.x, develop/1.0.x]
+    paths: &surface
+      - 'apps/mootx01/**'
+      - 'apps/moot-mgr/**'
+      - 'install*.sh'
+      - 'install.ps1'
+      - 'docs/start-here/**'
+      - '*.md'
+      - '.github/workflows/app-surface.yml'
+  pull_request:
+    paths: *surface
+  workflow_dispatch:
+
+jobs:
+  swift-apps:
+    name: Swift apps — build + test (macOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Swift 6.2 toolchain (latest stable Xcode)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: mootx01 (CLI / installer) test
+        working-directory: apps/mootx01
+        run: swift test
+
+      - name: moot-mgr (console) test
+        working-directory: apps/moot-mgr
+        run: swift test
+
+  rust-apps:
+    name: Rust apps — build + test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: mootx01 rust test
+        working-directory: apps/mootx01/rust
+        run: cargo test --release
+
+      - name: moot-mgr rust test
+        working-directory: apps/moot-mgr/rust
+        run: cargo test --release
+
+  guards:
+    name: Edition boundary + static assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Edition boundary (no SHARED → EE-only references)
+        run: make check-edition-boundary
+
+      - name: moot-mgr static assets in sync
+        run: make check-static-assets
