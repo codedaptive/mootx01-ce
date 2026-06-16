@@ -270,6 +270,22 @@ impl HttpReadApi {
             ("GET", "/api/events") => {
                 self.json_response(|m| m.events_payload(100).map_err(err_string))
             }
+            // GET /api/lexicon — ARIA grammar vocabulary + LatticeLib metadata.
+            // Built from aria-lexicon-lib compile-time enums and lattice-lib runtime
+            // state; infallible (no store I/O). Matches the Swift host's lexiconPayload().
+            ("GET", "/api/lexicon") => {
+                let payload = self.manager.lock().unwrap().lexicon_payload();
+                self.encode_ok(&payload)
+            }
+            // GET /api/lattice — lattice address snapshot.
+            // The Rust host has no HTTP client and returns the honest degraded state
+            // (pending: true, addresses: []) — identical to Swift's fallback when
+            // ARIA_MCP is unreachable. See MootManager::lattice_payload for the full
+            // rationale. Infallible (no store I/O).
+            ("GET", "/api/lattice") => {
+                let payload = self.manager.lock().unwrap().lattice_payload();
+                self.encode_ok(&payload)
+            }
             ("POST", path) if path.starts_with("/api/control/") => self.handle_control(request),
             ("GET", path) => {
                 // Static-asset allow-list (fixed map — no directory traversal).

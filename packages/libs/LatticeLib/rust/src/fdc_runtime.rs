@@ -147,6 +147,16 @@ impl Fdc {
             .unwrap_or("0.0.0-unavailable")
     }
 
+    /// The LatticeLib library version string — mirrors Swift `LatticeLib.version`
+    /// (`"1.0.0"` pinned at the same value as the Swift constant in LatticeLib.swift).
+    ///
+    /// Distinct from `data_version()` (the pinned FDC signatures artifact version):
+    /// this is the kit's own semantic release version, surfaced in the
+    /// `/api/lexicon` `latticeVersion` field of the read-API.
+    pub fn version() -> &'static str {
+        "1.0.0"
+    }
+
     /// Return the human-readable heading for an FDC code, or None when
     /// the code is absent from the frame or the artifacts are unavailable.
     ///

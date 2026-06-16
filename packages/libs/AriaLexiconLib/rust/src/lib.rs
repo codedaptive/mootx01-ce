@@ -53,6 +53,25 @@ impl Noun {
     /// The one noun of the language.
     pub const PRIMARY: Noun = Noun::Drawer;
 
+    /// The wire string for this noun — matches the Swift `Noun.rawValue` exactly.
+    ///
+    /// Swift `Noun` is a `String` enum whose case names ARE the raw values (no
+    /// explicit `= "…"` needed in Swift). The Rust variants use PascalCase by
+    /// convention; this method maps them back to the camelCase wire strings so
+    /// the JSON lexicon payload is byte-identical to the Swift port.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Noun::Drawer          => "drawer",
+            Noun::Tunnel          => "tunnel",
+            Noun::KgFact          => "kgFact",
+            Noun::Vector          => "vector",
+            Noun::DiaryEntry      => "diaryEntry",
+            Noun::Proposal        => "proposal",
+            Noun::Association     => "association",
+            Noun::LearnedReference => "learnedReference",
+        }
+    }
+
     /// How this shape relates to the drawer in the language.
     pub fn role(self) -> NounRole {
         match self {
@@ -93,6 +112,25 @@ impl Verb {
         Verb::Recall, Verb::Propose, Verb::Associate, Verb::Learn,
     ];
 
+    /// The wire string for this verb — matches the Swift `Verb.rawValue` exactly.
+    ///
+    /// Swift `Verb` case names ARE the raw values. The Rust PascalCase variants
+    /// map to lowercase camelCase wire strings here so the JSON lexicon payload
+    /// is byte-identical to the Swift port.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verb::Capture   => "capture",
+            Verb::Reanchor  => "reanchor",
+            Verb::Mutate    => "mutate",
+            Verb::Withdraw  => "withdraw",
+            Verb::Expunge   => "expunge",
+            Verb::Recall    => "recall",
+            Verb::Propose   => "propose",
+            Verb::Associate => "associate",
+            Verb::Learn     => "learn",
+        }
+    }
+
     /// Who initiates the verb.
     pub fn flow(self) -> Flow {
         match self {
@@ -121,6 +159,18 @@ impl Adjective {
     pub const ALL: [Adjective; 4] = [
         Adjective::State, Adjective::Trust, Adjective::Sensitivity, Adjective::Exportability,
     ];
+
+    /// The wire string for this adjective category — matches the Swift
+    /// `Adjective.rawValue` exactly. Swift case names ARE the raw values;
+    /// this method maps the PascalCase Rust variants back to lowercase.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Adjective::State         => "state",
+            Adjective::Trust         => "trust",
+            Adjective::Sensitivity   => "sensitivity",
+            Adjective::Exportability => "exportability",
+        }
+    }
 }
 
 /// The verbs a shape accepts (architecture spec section 7.2). The
@@ -253,5 +303,58 @@ mod tests {
     #[test]
     fn grammar_stated() {
         assert!(GRAMMAR.contains("one verb applied to a noun"));
+    }
+
+    // Conformance gate: `as_str()` on every variant must match the Swift rawValue
+    // wire strings exactly. These are foundational — a mismatch silently mis-labels
+    // every noun/verb/adjective in the JSON lexicon served to the dashboard.
+    #[test]
+    fn noun_as_str_wire_conformance() {
+        assert_eq!(Noun::Drawer.as_str(),           "drawer");
+        assert_eq!(Noun::Tunnel.as_str(),           "tunnel");
+        assert_eq!(Noun::KgFact.as_str(),           "kgFact");
+        assert_eq!(Noun::Vector.as_str(),           "vector");
+        assert_eq!(Noun::DiaryEntry.as_str(),       "diaryEntry");
+        assert_eq!(Noun::Proposal.as_str(),         "proposal");
+        assert_eq!(Noun::Association.as_str(),      "association");
+        assert_eq!(Noun::LearnedReference.as_str(), "learnedReference");
+        // Ensure ALL is complete — every variant must be covered.
+        assert_eq!(Noun::ALL.len(), 8);
+        let all_strs: Vec<&str> = Noun::ALL.iter().map(|n| n.as_str()).collect();
+        let expected = ["drawer", "tunnel", "kgFact", "vector",
+                        "diaryEntry", "proposal", "association", "learnedReference"];
+        assert_eq!(all_strs, expected);
+    }
+
+    #[test]
+    fn verb_as_str_wire_conformance() {
+        assert_eq!(Verb::Capture.as_str(),   "capture");
+        assert_eq!(Verb::Reanchor.as_str(),  "reanchor");
+        assert_eq!(Verb::Mutate.as_str(),    "mutate");
+        assert_eq!(Verb::Withdraw.as_str(),  "withdraw");
+        assert_eq!(Verb::Expunge.as_str(),   "expunge");
+        assert_eq!(Verb::Recall.as_str(),    "recall");
+        assert_eq!(Verb::Propose.as_str(),   "propose");
+        assert_eq!(Verb::Associate.as_str(), "associate");
+        assert_eq!(Verb::Learn.as_str(),     "learn");
+        // Ensure ALL is complete.
+        assert_eq!(Verb::ALL.len(), 9);
+        let all_strs: Vec<&str> = Verb::ALL.iter().map(|v| v.as_str()).collect();
+        let expected = ["capture", "reanchor", "mutate", "withdraw", "expunge",
+                        "recall", "propose", "associate", "learn"];
+        assert_eq!(all_strs, expected);
+    }
+
+    #[test]
+    fn adjective_as_str_wire_conformance() {
+        assert_eq!(Adjective::State.as_str(),         "state");
+        assert_eq!(Adjective::Trust.as_str(),         "trust");
+        assert_eq!(Adjective::Sensitivity.as_str(),   "sensitivity");
+        assert_eq!(Adjective::Exportability.as_str(), "exportability");
+        // Ensure ALL is complete.
+        assert_eq!(Adjective::ALL.len(), 4);
+        let all_strs: Vec<&str> = Adjective::ALL.iter().map(|a| a.as_str()).collect();
+        let expected = ["state", "trust", "sensitivity", "exportability"];
+        assert_eq!(all_strs, expected);
     }
 }

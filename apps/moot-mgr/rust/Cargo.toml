@@ -59,3 +59,12 @@ corpus-kit       = { path = "../../../packages/kits/CorpusKit/rust" }
 # + lifecycle (quiesce/drain/destroy) + capture_with_mode/recall_scored for the
 # BM25 proof. This is the composition surface the admin plane drives.
 genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
+# aria-lexicon-lib: the ARIA grammar vocabulary (Noun, Verb, Adjective, accepted_verbs)
+# used to build the /api/lexicon read-surface payload. The host is the composition
+# layer for the read-API; sourcing the lexicon from the canonical lib gives byte-
+# identical JSON to the Swift host. Permitted per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+aria-lexicon-lib = { path = "../../../packages/libs/AriaLexiconLib/rust" }
+# lattice-lib: Fdc::is_available(), Fdc::data_version(), and Fdc::version() for
+# the /api/lexicon fdcAvailable / fdcDataVersion / latticeVersion fields. Same
+# composition-layer justification as aria-lexicon-lib above.
+lattice-lib      = { path = "../../../packages/libs/LatticeLib/rust" }

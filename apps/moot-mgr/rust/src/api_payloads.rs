@@ -272,6 +272,83 @@ impl ControlResult {
     }
 }
 
+// MARK: - LexiconPayload (GET /api/lexicon)
+
+/// The ARIA grammar as static JSON — one call, zero runtime cost. Mirrors Swift
+/// `LexiconPayload`.
+///
+/// All fields are derived at startup from `aria-lexicon-lib`'s compile-time enum
+/// definitions. The acceptance matrix is the full cross-product condensed to a
+/// per-noun sorted array of the verb strings that apply.
+///
+/// LatticeLib metadata (FDC availability, data version, library version) is
+/// included here because the dashboard's Configuration view renders it alongside
+/// the lexicon.
+///
+/// CONTENT-SAFETY INVARIANT: this payload contains only grammar vocabulary and
+/// library version strings — never any estate or content data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LexiconPayload {
+    /// All noun wire strings from `Noun::ALL` in declaration order.
+    pub nouns: Vec<String>,
+    /// All verb wire strings from `Verb::ALL` in declaration order.
+    pub verbs: Vec<String>,
+    /// All adjective wire strings from `Adjective::ALL` in declaration order.
+    pub adjectives: Vec<String>,
+    /// Per-noun acceptance map: noun wire string → sorted vec of accepted verb
+    /// wire strings. Empty vec for nouns that accept nothing (e.g. "vector").
+    /// `BTreeMap` gives sorted JSON key order — matches Swift's `.sortedKeys`.
+    pub acceptance: std::collections::BTreeMap<String, Vec<String>>,
+    /// Whether the FDC index is loaded. Sourced from `Fdc::is_available()`.
+    #[serde(rename = "fdcAvailable")]
+    pub fdc_available: bool,
+    /// FDC data version string. Sourced from `Fdc::data_version()`.
+    #[serde(rename = "fdcDataVersion")]
+    pub fdc_data_version: String,
+    /// LatticeLib library version string. Sourced from `Fdc::version()`.
+    #[serde(rename = "latticeVersion")]
+    pub lattice_version: String,
+}
+
+// MARK: - LatticeSnapshotPayload (GET /api/lattice)
+
+/// One active lattice address and its drawer count. Mirrors Swift
+/// `LatticeAddressPayload`.
+///
+/// CONTENT-SAFETY INVARIANT: only classification codes (decimal strings from the
+/// FDC/MDCC taxonomy), bundled heading labels, and counts cross this surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LatticeAddressPayload {
+    /// The UDC/MDCC classification code, e.g. "540", "006.6".
+    pub code: String,
+    /// The FDC frame heading label for this code, or null when not in the
+    /// bundled frame or when LatticeLib is unavailable.
+    pub label: Option<String>,
+    /// Number of live (non-tombstoned) drawers anchored to this code.
+    pub count: i64,
+}
+
+/// The lattice address snapshot returned by `GET /api/lattice`. Mirrors Swift
+/// `LatticeSnapshotPayload`.
+///
+/// The zero-dependency Rust host carries no HTTP client and therefore cannot
+/// proxy the live ARIA daemon's `/api/lattice` endpoint. The honest degraded
+/// state — empty address list with `pending: true` — is returned instead.
+/// This exactly mirrors the Swift host's behaviour when the daemon is
+/// unreachable (see `manager.rs` module header). Do NOT add an HTTP client;
+/// the no-external-dep constraint applies.
+///
+/// CONTENT-SAFETY INVARIANT: classification metadata and counts only — never
+/// estate content or rung text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LatticeSnapshotPayload {
+    /// Active lattice addresses, sorted by count descending when live data is
+    /// available. Empty in the honest degraded state (`pending: true`).
+    pub addresses: Vec<LatticeAddressPayload>,
+    /// True when ARIA_MCP was unreachable and the address list is empty.
+    pub pending: bool,
+}
+
 // ───────────────────────── JSON encoding helper ─────────────────────────────
 
 /// Encode a payload to compact JSON bytes with SORTED object keys (byte-stable,

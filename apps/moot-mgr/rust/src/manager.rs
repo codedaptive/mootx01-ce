@@ -16,16 +16,25 @@
 //      HTTP read-API payload builders that project the store into the GUI wire
 //      shapes (metadata only — content-safety invariant enforced at the boundary).
 //
-// ── Necessary differences from the Swift host (documented, not faked) ─────────
+// ── Proxy behaviour (documented, not faked) ─────────────────────────────────
 // The Swift MootManager proxies an ARIA_MCP resident daemon over URLSession for
 // two surfaces: the admin/hosted-estate list merged into /api/estates, and the
-// /api/lattice address snapshot. The zero-dependency Rust port carries no HTTP
-// client (the Rust app tree's no-new-external-dep preference), so those proxy
-// reads degrade to the HONEST pending/absent state — exactly the Swift fallback
-// when the daemon is unreachable: `admin: null` for /api/estates (the host's own
-// EstateAdmin section is merged in by HttpReadApi instead) and `pending: true`
-// for /api/lattice. The observable contract is identical; only the live-proxy
-// enrichment is unavailable. See `lattice_payload`.
+// /api/lattice address snapshot.
+//
+// The Rust port now matches this proxy behaviour using a raw std::net HTTP GET
+// (daemon_client module) with a 3-second connect+read timeout so the console
+// degrades gracefully when the daemon is down:
+//
+//   /api/lattice      — proxied from `{base}/api/lattice` → LatticeSnapshotPayload
+//                       with FDC heading labels from the bundled frame. On any
+//                       failure (connect/timeout/non-200/parse): {addresses:[],pending:true}.
+//   /api/admin/estates — proxied from `{base}/api/admin/estates` → merged into
+//                        EstatesPayload.admin. On failure: None (honest degrade;
+//                        the host's own EstateAdmin section is still merged in by
+//                        HttpReadApi).
+//
+// Daemon address: ARIA_MCP_API_BASE env var, default http://127.0.0.1:4242.
+// Mirrors Swift `MootManager.ariaAPIBase`. See `daemon_client` for the raw GET.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -374,9 +383,14 @@ impl MootManager {
     }
 
     /// Build the GET /api/estates payload: per-estate event rollups with queue
-    /// stats. The `admin` section is `None` here (the host's own EstateAdmin
-    /// section is merged in by HttpReadApi; the Swift ARIA proxy is unavailable
-    /// — see the module header). Mirrors Swift `MootManager.estatesPayload()`.
+    /// stats, plus the admin section sourced by proxying the ARIA daemon's
+    /// `GET /api/admin/estates` endpoint.
+    ///
+    /// The `admin` section is `None` here when the daemon is unreachable (the
+    /// host's own EstateAdmin section is then the only source, merged in by
+    /// HttpReadApi). When the daemon IS reachable, the daemon's hosted-estate
+    /// list is decoded into `admin` so the console's Estates page shows the
+    /// running daemon's estate. Mirrors Swift `MootManager.estatesPayload()`.
     pub fn estates_payload(&self) -> Result<EstatesPayload, ManagerError> {
         let store = self.require_store()?;
         let events = store.query_events(None)?;
@@ -454,11 +468,16 @@ impl MootManager {
             })
             .collect();
 
+        // Proxy the daemon's admin/hosted-estate section. On any failure (daemon
+        // down, decode error, timeout) admin is None — the host's own EstateAdmin
+        // section is still merged in by HttpReadApi, so the console degrades
+        // gracefully rather than fabricating data. Matches Swift's equivalent
+        // `ariaAdmin` block in MootManager.estatesPayload().
+        let aria_admin = proxy_admin_estates();
+
         Ok(EstatesPayload {
             estates: rollups,
-            // The Swift ARIA_MCP admin proxy is unavailable in the zero-dep Rust
-            // host; the host's own EstateAdmin section is merged in by HttpReadApi.
-            admin: None,
+            admin: aria_admin,
         })
     }
 
@@ -614,11 +633,150 @@ impl MootManager {
         })
     }
 
+    // MARK: - Lexicon payload (GET /api/lexicon)
+
+    /// Build the `GET /api/lexicon` payload: the ARIA grammar vocabulary and
+    /// LatticeLib metadata as a static JSON document.
+    ///
+    /// Sourced entirely from `aria-lexicon-lib` compile-time enum definitions and
+    /// `lattice-lib` runtime state — this builder is infallible and requires no
+    /// store access. Mirrors Swift `MootManager.lexiconPayload()`.
+    pub fn lexicon_payload(&self) -> crate::api_payloads::LexiconPayload {
+        use aria_lexicon_lib::{Noun, Verb, Adjective, accepted_verbs};
+
+        let nouns: Vec<String> = Noun::ALL.iter().map(|n| n.as_str().to_string()).collect();
+        let verbs: Vec<String> = Verb::ALL.iter().map(|v| v.as_str().to_string()).collect();
+        let adjectives: Vec<String> = Adjective::ALL.iter().map(|a| a.as_str().to_string()).collect();
+
+        // Build the acceptance matrix: noun wire string → sorted accepted verb strings.
+        // BTreeMap gives sorted JSON key order, matching Swift's .sortedKeys output.
+        let mut acceptance: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for noun in Noun::ALL.iter() {
+            let mut verb_strs: Vec<String> = accepted_verbs(*noun)
+                .iter()
+                .map(|v| v.as_str().to_string())
+                .collect();
+            verb_strs.sort();
+            acceptance.insert(noun.as_str().to_string(), verb_strs);
+        }
+
+        crate::api_payloads::LexiconPayload {
+            nouns,
+            verbs,
+            adjectives,
+            acceptance,
+            fdc_available: lattice_lib::Fdc::is_available(),
+            fdc_data_version: lattice_lib::Fdc::data_version().to_string(),
+            lattice_version: lattice_lib::Fdc::version().to_string(),
+        }
+    }
+
+    // MARK: - Lattice snapshot (GET /api/lattice)
+
+    /// Build the `GET /api/lattice` payload: active lattice addresses with FDC
+    /// heading labels, proxied from the ARIA daemon.
+    ///
+    /// Proxies the daemon's `GET /api/lattice` endpoint (which groups
+    /// non-tombstoned drawers by their UDC code and returns code + count pairs).
+    /// Each code is annotated with its FDC heading label from the bundled frame
+    /// via `Fdc::label`. On any failure — daemon unreachable, timeout, non-200,
+    /// decode error — returns `{addresses:[], pending:true}`, exactly mirroring
+    /// the Swift host's fallback when the daemon is unreachable.
+    ///
+    /// CONTENT-SAFETY INVARIANT: only classification codes, FDC heading labels
+    /// (bundled taxonomy, NOT estate content), and integer counts cross this
+    /// surface — matching Swift `MootManager.latticePayload()`.
+    pub fn lattice_payload(&self) -> crate::api_payloads::LatticeSnapshotPayload {
+        proxy_lattice_snapshot()
+    }
+
     // MARK: - Internals
 
     fn require_store(&self) -> Result<&StatsStore, ManagerError> {
         self.store.as_ref().ok_or(ManagerError::NotStarted)
     }
+}
+
+// ─────────────────────── Daemon proxy helpers ────────────────────────────────
+//
+// These are module-level free functions so they can be unit-tested without a
+// live MootManager, and to keep the MootManager impl block focused on its
+// public surface.
+
+/// The raw lattice proxy response shape from the ARIA daemon's `/api/lattice`
+/// endpoint. Code + count only — labels are resolved from the bundled FDC frame
+/// here (not stored in the daemon's response). Mirrors Swift `ARIALatticeAddress`.
+#[derive(serde::Deserialize)]
+struct DaemonLatticeAddress {
+    code: String,
+    count: i64,
+}
+
+/// The outer wrapper the daemon returns for `/api/lattice`.
+#[derive(serde::Deserialize)]
+struct DaemonLatticePayload {
+    addresses: Vec<DaemonLatticeAddress>,
+}
+
+/// Proxy `GET {base}/api/lattice` from the ARIA daemon and annotate with FDC
+/// labels. Returns the honest pending stub on any failure.
+///
+/// Only called from `MootManager::lattice_payload`. Extracted to allow
+/// parse-path unit tests without spinning up a MootManager.
+pub fn proxy_lattice_snapshot() -> crate::api_payloads::LatticeSnapshotPayload {
+    use crate::api_payloads::{LatticeAddressPayload, LatticeSnapshotPayload};
+
+    // Honest degraded state — returned on any failure.
+    let degraded = LatticeSnapshotPayload {
+        addresses: vec![],
+        pending: true,
+    };
+
+    let (host, port) = crate::daemon_client::resolved_addr();
+    let body = match crate::daemon_client::get(&host, port, "/api/lattice") {
+        Some(b) => b,
+        None => return degraded,
+    };
+
+    let daemon_payload: DaemonLatticePayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(_) => return degraded,
+    };
+
+    let addresses: Vec<LatticeAddressPayload> = daemon_payload
+        .addresses
+        .into_iter()
+        .map(|entry| LatticeAddressPayload {
+            // FDC heading label from the bundled frame — never estate content.
+            // None for MDCC codes, unknown codes, or when LatticeLib is
+            // unavailable. Mirrors Swift `FDC.label(for: entry.code)`.
+            label: lattice_lib::Fdc::label(&entry.code),
+            code: entry.code,
+            count: entry.count,
+        })
+        .collect();
+
+    LatticeSnapshotPayload {
+        addresses,
+        pending: false,
+    }
+}
+
+/// The raw admin/estates proxy response shape from the ARIA daemon's
+/// `/api/admin/estates` endpoint. The `hosted` array matches `EstateAdminEntry`
+/// field-for-field; we decode through `EstateAdminPayload` directly since the
+/// JSON shape is identical.
+///
+/// Proxy `GET {base}/api/admin/estates` from the ARIA daemon and return the
+/// decoded `EstateAdminPayload`, or `None` on any failure. The caller
+/// (MootManager::estates_payload) assigns this to `admin` in the EstatesPayload
+/// envelope. On failure the host's own local EstateAdmin section is the fallback
+/// (merged in by HttpReadApi), so degradation is honest: the console shows the
+/// locally-provisioned estates rather than fabricating data.
+pub fn proxy_admin_estates() -> Option<crate::admin_payloads::EstateAdminPayload> {
+    let (host, port) = crate::daemon_client::resolved_addr();
+    let body = crate::daemon_client::get(&host, port, "/api/admin/estates")?;
+    serde_json::from_slice::<crate::admin_payloads::EstateAdminPayload>(&body).ok()
 }
 
 /// Take the newest `limit` events (input is oldest-first) and reverse them so
