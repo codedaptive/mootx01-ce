@@ -178,14 +178,16 @@ The engineering cookbook lives in [`docs/engineering/`](docs/engineering/); the 
 
 ## Roadmap
 
-Intended sequence, not committed dates:
+Intended sequence, not committed dates. Items 1–3 shipped in the 1.0.0-beta; 4–8 are ahead.
 
-1. **Finish the Brain layer** — complete NeuronKit (hybrid recall, the dreaming daemon, Bradley-Terry, SolverBandit) and CognitionKit (the behaviour recipes). Everything below them is built.
-2. **Ship the ARIA MCP reference server** — so anyone can compile it and use their MOOT from an agentic chat or coding harness.
-3. **Ship the management & monitoring console (`moot-mgr`)** — the resident host that creates and manages multiple estates (stepped provisioning, per-estate backend, full lifecycle) with a flow-down self-report layer surfaced as a read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface. One cross-platform codebase: a loopback web dashboard plus a macOS menu-bar agent.
+1. **Finish the Brain layer** — complete NeuronKit (hybrid recall, the dreaming daemon, Bradley-Terry, SolverBandit) and CognitionKit (the behaviour recipes). Everything below them is built. **✅ Shipped (1.0.0-beta).**
+2. **Ship the ARIA MCP reference server** — so anyone can compile it and use their MOOT from an agentic chat or coding harness. **✅ Shipped (1.0.0-beta).**
+3. **Ship the management & monitoring console (`moot-mgr`)** — the resident host that creates and manages multiple estates (stepped provisioning, per-estate backend, full lifecycle) with a flow-down self-report layer surfaced as a read-only dashboard (health, per-estate state, the write pipeline, an activity log, and a live node-link **Topology** view) plus a gated admin surface. One cross-platform codebase: a loopback web dashboard plus a macOS menu-bar agent. **✅ Shipped (1.0.0-beta).**
 4. **Full security sweep** — a complete security, quality-control, and hardening pass across the substrate, the MCP server, and the console. No kit has cleared this gate yet.
 5. **Hardened GA binary** — the curl-installable binary ships at 1.0.0-beta for early adopters (see Quickstart); the *general-availability, security-hardened* binary of the MCP server and the console follows the full security sweep (§4) — the first artifact aimed at the wider, non-developer audience is the first one hardened.
 6. **Sidecar & embedded examples** — a reference set of apps showing the sidecar and embedding patterns.
+7. **Federation** — bounded cross-estate sharing: grant-scoped handshakes that share only what a grant names, with formally bounded noise on aggregate queries. Federation is an access-surface capability (ARIA), not a change to the substrate.
+8. **Apple Intelligence integration** — surface a MOOT through Apple's on-device intelligence and App Intents, so capture and recall work natively across the Apple ecosystem.
 
 ## Repository structure
 
