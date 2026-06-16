@@ -121,9 +121,9 @@ enum RecipeTools {
             description: "Synthesize memories into a grounded context document: hybrid-recall and summarise into patterns, success rate, recommendations, and key insights.",
             inputSchema: objectSchema(
                 properties: [
-                    "filter": stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve."),
-                    "limit": integerSchema("Max drawers to recall."),
-                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary recall across any confirmation state. null is invalid."),
+                    "limit": integerSchema("Max drawers to recall. Omit for no explicit cap; null is invalid."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: []),
             provenance: .recipe)
@@ -143,11 +143,11 @@ enum RecipeTools {
             inputSchema: objectSchema(
                 properties: [
                     "query": stringSchema("The search query text — drives BM25 + vector recall and the precision re-rank."),
-                    "limit": integerSchema("Max ranked matches to return. Default 20."),
-                    "pool": integerSchema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit."),
-                    "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names are rejected."),
-                    "filter": stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve."),
-                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate."),
+                    "limit": integerSchema("Max ranked matches to return. Default 20. Omit to use the default; null is invalid."),
+                    "pool": integerSchema("Coarse candidate-pool size grabbed before the precision re-rank. Default 30; clamped to be at least limit. Omit to use the default; null is invalid."),
+                    "composition": stringSchema("Named reduction composition selecting how the coarse pool is re-ranked (the ablation selector). E.g. text (default), hamming, matrix, lattice, tokenExact, hamming+tokenExact, hamming+text, text+matrix, lattice+hamming, text+tokenExact, text+mmr, weighted-all. Omit for the default (text). Unknown names and null are rejected."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
                 ],
                 required: ["query"]),
             provenance: .recipe)
@@ -339,10 +339,10 @@ enum RecipeTools {
         kit: GeniusLocusKit,
         handle: EstateHandle
     ) async throws -> JSONValue {
-        let filter = decodeFilter(args["filter"]?.stringValue)
-        let limit = args["limit"]?.integerValue.map(Int.init)
+        let filterChain = try decodeFilterChain(args["filter"])
+        let limit = try optionalInt(args["limit"], argument: "limit")
         let frame = LocusKit.RecallFrame(
-            filterChain: [filter],
+            filterChain: filterChain,
             hydrationLevel: .structured,
             limit: limit,
             ordering: .byCaptureTimeDesc)
@@ -387,11 +387,11 @@ enum RecipeTools {
     ) async throws -> JSONValue {
         let query = try requireString(args, "query")
         // 20 is moot_memory_search's own default limit; keep parity.
-        let limit = args["limit"]?.integerValue.map(Int.init) ?? 20
+        let limit = try optionalInt(args["limit"], argument: "limit") ?? 20
         // Default coarse pool is CognitionKit's own default (30); honour an
         // explicit override. The recipe clamps pool >= limit internally.
-        let pool = args["pool"]?.integerValue.map(Int.init) ?? CognitionKit.PreciseRecall.defaultPool
-        let filter = decodeFilter(args["filter"]?.stringValue)
+        let pool = try optionalInt(args["pool"], argument: "pool") ?? CognitionKit.PreciseRecall.defaultPool
+        let filter = try decodeSingleFilter(args["filter"])
         // The ablation selector: a named reduction composition.
         //   Absent  → nil → the recipe's default (`text`); absence ≠ unknown.
         //   Present → validated against the grid; unknown name → fail closed
@@ -399,7 +399,7 @@ enum RecipeTools {
         //             authoritative name set; callers that supply a bad name
         //             receive an explicit error rather than opaque text results.
         let composition: String?
-        if let rawComposition = args["composition"]?.stringValue {
+        if let rawComposition = try optionalString(args["composition"], argument: "composition") {
             guard NeuronKit.CompositionGrid.names.contains(rawComposition) else {
                 let valid = NeuronKit.CompositionGrid.names.joined(separator: ", ")
                 return ToolDispatcher.errorResult(
@@ -547,7 +547,7 @@ enum RecipeTools {
         // Deterministic `now` when supplied; otherwise the wall clock. A
         // malformed instant is an out-of-band client error.
         let now: Date
-        if let raw = args["now"]?.stringValue {
+        if let raw = try optionalString(args["now"], argument: "now") {
             guard let parsed = ISO8601DateFormatter().date(from: raw) else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,
@@ -604,6 +604,26 @@ enum RecipeTools {
         return uuid
     }
 
+    private static func optionalString(_ value: JSONValue?, argument: String) throws -> String? {
+        guard let value else { return nil }
+        guard let string = value.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be a string; omit it to use the default")
+        }
+        return string
+    }
+
+    private static func optionalInt(_ value: JSONValue?, argument: String) throws -> Int? {
+        guard let value else { return nil }
+        guard let integer = value.integerValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be an integer; omit it to use the default")
+        }
+        return Int(integer)
+    }
+
     private static func decodeUUIDArray(_ value: JSONValue?) throws -> [UUID] {
         guard let arr = value?.arrayValue else { return [] }
         var out: [UUID] = []
@@ -636,33 +656,60 @@ enum RecipeTools {
                     code: JSONRPCErrorCode.invalidParams,
                     message: "each plan needs name, room, latticeCode, embeddingModelID")
             }
-            let sensitivity = decodeSensitivity(obj["sensitivity"]?.stringValue)
+            let sensitivity = try decodeSensitivity(obj["sensitivity"])
             return MigrationPlan(
                 name: name, room: room, latticeCode: code,
                 embeddingModelID: model, sensitivity: sensitivity)
         }
     }
 
-    /// Recall filter decode for grounded_synthesis. Defaults to
-    /// `.unconfirmed` so freshly-captured rows (provenance == 0) are
-    /// visible — the default recall prepend would otherwise prune them
-    /// behind `.userConfirmed`.
-    private static func decodeFilter(_ name: String?) -> LocusKit.Filter {
+    /// Recall filter-chain decode for grounded_synthesis. Omitted filter means
+    /// ordinary recall: LocusKit inserts state/trust/sensitivity defaults, but
+    /// no confirmation constraint.
+    private static func decodeFilterChain(_ value: JSONValue?) throws -> [LocusKit.Filter] {
+        guard let name = try optionalString(value, argument: "filter") else { return [] }
         switch name {
+        case "unconfirmed": return [.unconfirmed]
+        case "userConfirmed": return [.userConfirmed]
+        case "exportable": return [.exportable]
+        case "contained": return [.contained]
+        case "currentlyBelieve": return [.currentlyBelieve]
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown filter: \(name)")
+        }
+    }
+
+    /// PreciseRecall's current public API accepts one filter entry. Omitted
+    /// filter uses the same active-recall default as an empty chain without
+    /// adding a confirmation constraint.
+    private static func decodeSingleFilter(_ value: JSONValue?) throws -> LocusKit.Filter {
+        guard let name = try optionalString(value, argument: "filter") else { return .currentlyBelieve }
+        switch name {
+        case "unconfirmed": return .unconfirmed
         case "userConfirmed": return .userConfirmed
         case "exportable": return .exportable
         case "contained": return .contained
         case "currentlyBelieve": return .currentlyBelieve
-        default: return .unconfirmed
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown filter: \(name)")
         }
     }
 
-    private static func decodeSensitivity(_ name: String?) -> AdjectiveSensitivity {
+    private static func decodeSensitivity(_ value: JSONValue?) throws -> AdjectiveSensitivity {
+        guard let name = try optionalString(value, argument: "sensitivity") else { return .normal }
         switch name {
         case "elevated": return .elevated
         case "restricted": return .restricted
         case "secret": return .secret
-        default: return .normal
+        case "normal": return .normal
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown sensitivity: \(name)")
         }
     }
 

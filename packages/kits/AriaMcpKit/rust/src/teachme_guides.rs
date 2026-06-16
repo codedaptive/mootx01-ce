@@ -365,7 +365,7 @@ Required args:
   requesterEstateID (string) UUID of the calling estate — used for grant evaluation
 
 Optional args:
-  filter         (string)  userConfirmed | unconfirmed | all (default: all)
+  filter         (string)  userConfirmed | unconfirmed | exportable | contained; omit for ordinary recall
   hydrationLevel (string)  full | structured | bitmapOnly (default: full)
   limit          (integer) max memories per estate (default: 20)
 

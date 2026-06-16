@@ -343,10 +343,8 @@ actor VectorRunner {
             try await estate.withdraw(rowID: rowID, reason: reason)
             consumeWithdrew(&pendingObs, caseID: caseID)
         case .recallAll(let room):
-            // `.unconfirmed` is included so the evaluator's prepended
-            // default `.userConfirmed` (provenance filter) is not
-            // applied — drawers from `capture` have provenance == 0
-            // which is `.unconfirmed`, matching existing recall tests.
+            // `.unconfirmed` keeps the vector fixture focused on rows
+            // produced by bare `capture`, whose provenance remains 0.
             // `.full` hydration is required because the vector observations
             // check `expectFirstContent` — per spec § 7.3, `.structured`
             // returns content = "" (no blob reads), so only `.full` loads

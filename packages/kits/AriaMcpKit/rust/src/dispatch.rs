@@ -69,8 +69,10 @@ pub fn dispatch_tool_with_vault_ledger(
 ) -> Result<serde_json::Value, JSONRPCError> {
     // 0. Teachme interception — intercepts BEFORE any runner fires.
     //    Returns guide text; estate is never touched.
-    if args.get("teachme").and_then(|v| v.as_bool()) == Some(true) {
-        return Ok(text_result(crate::teachme_guides::guide(name)));
+    match optional_bool(args, "teachme") {
+        Ok(Some(true)) => return Ok(text_result(crate::teachme_guides::guide(name))),
+        Ok(_) => {}
+        Err(error) => return Err(error),
     }
 
     // 1. Federation tool — moot_federated_search: grant-authorized federated
@@ -135,7 +137,7 @@ pub fn dispatch_tool_with_vault_ledger(
 /// the expected "not granted" signal and is skipped. If no estate authorizes
 /// the caller, returns an error result (isError:true), not a thrown error.
 ///
-/// The filter defaults to `Unconfirmed`; hydration defaults to `Full` so
+/// Omitted filter uses ordinary recall defaults; hydration defaults to `Full` so
 /// content blobs are present in the assembled response text. Ordering
 /// defaults to `ByCaptureTimeDesc`. Candidate sources are sorted by UUID
 /// string for deterministic output independent of map iteration order.
@@ -151,9 +153,12 @@ fn run_federated_search(
     // Resolve the requester estate from requesterEstateID. This is a required
     // argument; a missing or malformed UUID returns isError:true (not a thrown
     // JSONRPCError) so the caller sees a refusal, not a transport fault.
-    let raw_requester_id = match args.get("requesterEstateID").and_then(|v| v.as_str()) {
-        Some(s) => s,
+    let raw_requester_id = match args.get("requesterEstateID") {
+        Some(JsonValue::String(s)) => s.as_str(),
         None => return error_result("federated_search: missing required argument: requesterEstateID"),
+        Some(_) => return error_result(
+            "federated_search: requesterEstateID must be a UUID string"
+        ),
     };
     let requester_uuid = match Uuid::parse_str(raw_requester_id) {
         Ok(u) => u,
@@ -189,8 +194,11 @@ fn run_federated_search(
     // likewise fail-CLOSED. Mirrors Swift `decodeHydration` which throws
     // invalidParams for both cases. Both verticals must be identical:
     // absent→Full, valid-string→honored, non-string→error, unknown-string→error.
-    let filter = decode_filter(args);
-    let mut frame = RecallFrame::new(vec![filter]);
+    let filter_chain = match decode_filter_chain(args) {
+        Ok(chain) => chain,
+        Err(error) => return error_result(&format!("federated_search: {}", error.message)),
+    };
+    let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = match args.get("hydrationLevel") {
         None => HydrationLevel::Full,
         Some(v) => match v.as_str() {
@@ -343,34 +351,119 @@ pub fn require_string<'a>(
     })
 }
 
+/// Extract an optional string argument. Absent means `None`; present null or
+/// wrong type is invalidParams so clients cannot accidentally ask the server to
+/// guess which default they intended.
+pub fn optional_string<'a>(
+    args: &'a BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<&'a str>, JSONRPCError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(JsonValue::String(value)) => Ok(Some(value.as_str())),
+        Some(_) => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("{key} must be a string; omit it to use the default"),
+        )),
+    }
+}
+
+/// Extract an optional boolean argument. Absent means `None`; present null or
+/// wrong type is invalidParams.
+pub fn optional_bool(
+    args: &BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<bool>, JSONRPCError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(JsonValue::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("{key} must be a boolean; omit it to use the default"),
+        )),
+    }
+}
+
+/// Extract an optional integer argument. Absent means `None`; present null or
+/// wrong type is invalidParams.
+pub fn optional_integer(
+    args: &BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<i64>, JSONRPCError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(value) => value.as_i64().map(Some).ok_or_else(|| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("{key} must be an integer; omit it to use the default"),
+            )
+        }),
+    }
+}
+
+/// Extract an optional float argument. Absent means `None`; present null or
+/// wrong type is invalidParams.
+pub fn optional_float(
+    args: &BTreeMap<String, JsonValue>,
+    key: &str,
+) -> Result<Option<f64>, JSONRPCError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(value) => value.as_f64().map(Some).ok_or_else(|| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                format!("{key} must be a number; omit it to use the default"),
+            )
+        }),
+    }
+}
+
 /// Extract an optional integer argument with a fallback.
-pub fn opt_integer(args: &BTreeMap<String, JsonValue>, key: &str, fallback: i64) -> i64 {
-    args.get(key).and_then(|v| v.as_i64()).unwrap_or(fallback)
+pub fn opt_integer(
+    args: &BTreeMap<String, JsonValue>,
+    key: &str,
+    fallback: i64,
+) -> Result<i64, JSONRPCError> {
+    Ok(optional_integer(args, key)?.unwrap_or(fallback))
 }
 
 /// Extract an optional float argument with a fallback.
-pub fn opt_float(args: &BTreeMap<String, JsonValue>, key: &str, fallback: f64) -> f64 {
-    args.get(key).and_then(|v| v.as_f64()).unwrap_or(fallback)
+pub fn opt_float(
+    args: &BTreeMap<String, JsonValue>,
+    key: &str,
+    fallback: f64,
+) -> Result<f64, JSONRPCError> {
+    Ok(optional_float(args, key)?.unwrap_or(fallback))
 }
 
 /// Decode the recall filter from an optional `filter` argument.
-/// Default: `Unconfirmed`. Mirrors Swift `RecipeTools.decodeFilter` and
+/// Omitted filter means ordinary recall: LocusKit inserts state/trust/sensitivity
+/// defaults, but no confirmation constraint. Mirrors Swift `decodeFilterChain`.
 /// `LensTools.frame(_:)`.
-pub fn decode_filter(args: &BTreeMap<String, JsonValue>) -> locus_kit::filter::Filter {
+pub fn decode_filter_chain(
+    args: &BTreeMap<String, JsonValue>,
+) -> Result<Vec<locus_kit::filter::Filter>, JSONRPCError> {
     use locus_kit::filter::Filter;
-    match args.get("filter").and_then(|v| v.as_str()) {
-        Some("userConfirmed") => Filter::UserConfirmed,
-        Some("exportable") => Filter::Exportable,
-        Some("contained") => Filter::Contained,
-        Some("currentlyBelieve") => Filter::CurrentlyBelieve,
-        _ => Filter::Unconfirmed,
+    match optional_string(args, "filter")? {
+        None => Ok(vec![]),
+        Some("unconfirmed") => Ok(vec![Filter::Unconfirmed]),
+        Some("userConfirmed") => Ok(vec![Filter::UserConfirmed]),
+        Some("exportable") => Ok(vec![Filter::Exportable]),
+        Some("contained") => Ok(vec![Filter::Contained]),
+        Some("currentlyBelieve") => Ok(vec![Filter::CurrentlyBelieve]),
+        Some(unknown) => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Unknown filter: {unknown}"),
+        )),
     }
 }
 
 /// Build a recall frame from the filter in `args`. Used by the lenses
 /// that accept an optional filter. Mirrors `LensTools.frame(_:)`.
-pub fn recall_frame(args: &BTreeMap<String, JsonValue>) -> locus_kit::filter::RecallFrame {
-    locus_kit::filter::RecallFrame::new(vec![decode_filter(args)])
+pub fn recall_frame(
+    args: &BTreeMap<String, JsonValue>,
+) -> Result<locus_kit::filter::RecallFrame, JSONRPCError> {
+    Ok(locus_kit::filter::RecallFrame::new(decode_filter_chain(args)?))
 }
 
 /// Wall-clock seconds at the time of dispatch. Lenses that take `now: i64`

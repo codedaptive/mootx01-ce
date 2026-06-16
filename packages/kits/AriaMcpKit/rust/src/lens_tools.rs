@@ -39,7 +39,8 @@ use substrate_ml::temporal_causality_fold::TemporalFieldCoord;
 use substrate_types::fingerprint256::Fingerprint256;
 
 use crate::dispatch::{
-    error_result, opt_float, opt_integer, recall_frame, require_string, text_result, wall_now,
+    error_result, opt_float, opt_integer, optional_string, recall_frame, require_string,
+    text_result, wall_now,
 };
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
@@ -92,7 +93,7 @@ pub fn dispatch(
     match name {
         "moot_lens_keystones" => {
             let wing = require_string(args, "wing")?;
-            let top_k = opt_integer(args, "topK", 5) as usize;
+            let top_k = opt_integer(args, "topK", 5)? as usize;
             let ranked = run_keystones(&coord, &estate.handle, wing, top_k).map_err(lens_error)?;
             Ok(list(
                 "keystones",
@@ -115,8 +116,8 @@ pub fn dispatch(
         "moot_lens_free_association" => {
             let wing = require_string(args, "wing")?;
             let seed = require_string(args, "seedDrawerID")?;
-            let walk_length = opt_integer(args, "walkLength", 10_000) as usize;
-            let k = opt_integer(args, "k", 10) as usize;
+            let walk_length = opt_integer(args, "walkLength", 10_000)? as usize;
+            let k = opt_integer(args, "k", 10)? as usize;
             let out = run_free_association(&coord, &estate.handle, wing, seed, walk_length, k)
                 .map_err(lens_error)?;
             Ok(list(
@@ -128,8 +129,8 @@ pub fn dispatch(
         }
 
         "moot_lens_theme_weather" => {
-            let frame = recall_frame(args);
-            let half_life = opt_float(args, "halfLifeSeconds", 604_800.0);
+            let frame = recall_frame(args)?;
+            let half_life = opt_float(args, "halfLifeSeconds", 604_800.0)?;
             let weather = run_theme_weather(&coord, &estate.handle, frame, half_life, now)
                 .map_err(lens_error)?;
             Ok(list(
@@ -142,8 +143,8 @@ pub fn dispatch(
         }
 
         "moot_lens_latent_themes" => {
-            let frame = recall_frame(args);
-            let k = opt_integer(args, "k", 3) as usize;
+            let frame = recall_frame(args)?;
+            let k = opt_integer(args, "k", 3)? as usize;
             let themes =
                 run_latent_themes(&coord, &estate.handle, frame, k, now).map_err(lens_error)?;
             Ok(list(
@@ -192,7 +193,7 @@ pub fn dispatch(
         }
 
         "moot_lens_drift" => {
-            let frame = recall_frame(args);
+            let frame = recall_frame(args)?;
             let split_at = require_iso8601(args, "splitAt")?;
             let out =
                 run_drift(&coord, &estate.handle, frame, split_at, now).map_err(lens_error)?;
@@ -206,8 +207,8 @@ pub fn dispatch(
         }
 
         "moot_lens_contradiction" => {
-            let frame = recall_frame(args);
-            let threshold = opt_float(args, "threshold", 1.5) as f32;
+            let frame = recall_frame(args)?;
+            let threshold = opt_float(args, "threshold", 1.5)? as f32;
             let out = run_contradiction(&coord, &estate.handle, frame, threshold, now)
                 .map_err(lens_error)?;
             Ok(list(
@@ -217,7 +218,7 @@ pub fn dispatch(
         }
 
         "moot_lens_trust_synthesis" => {
-            let frame = recall_frame(args);
+            let frame = recall_frame(args)?;
             // calibration_curve: None — v1.1.0 optional calibrated confidence
             // pass (MatrixCalibrationCurve); MCP surface does not yet expose it.
             let out = run_trust_grounded_synthesis(&coord, &estate.handle, frame, None, now)
@@ -233,9 +234,9 @@ pub fn dispatch(
 
         "moot_lens_partial_cue" => {
             let anchor_id = require_string(args, "anchorID")?;
-            let mode = decode_cue_mode(args.get("mode").and_then(|v| v.as_str()));
-            let k = opt_integer(args, "k", 5) as usize;
-            let frame = recall_frame(args);
+            let mode = decode_cue_mode(optional_string(args, "mode")?)?;
+            let k = opt_integer(args, "k", 5)? as usize;
+            let frame = recall_frame(args)?;
             match run_partial_cue_recall(&coord, &estate.handle, frame, anchor_id, mode, k, now) {
                 Ok(matches) => Ok(list(
                     "partial_cue_recall",
@@ -264,9 +265,9 @@ pub fn dispatch(
                     "targetKind is not a content kind name",
                 )
             })?;
-            let k = opt_integer(args, "k", 5) as usize;
-            let min_obs = opt_integer(args, "minObservations", 1) as u32;
-            let frame = recall_frame(args);
+            let k = opt_integer(args, "k", 5)? as usize;
+            let min_obs = opt_integer(args, "minObservations", 1)? as u32;
+            let frame = recall_frame(args)?;
             let predictions = run_anticipate(
                 &coord,
                 &estate.handle,
@@ -295,7 +296,7 @@ pub fn dispatch(
         "moot_lens_successors" => {
             let wing = require_string(args, "wing")?;
             let anchor_id = require_string(args, "anchorID")?;
-            let k = opt_integer(args, "k", 5) as usize;
+            let k = opt_integer(args, "k", 5)? as usize;
             let out = run_tunnel_successor(&coord, &estate.handle, wing, anchor_id, k)
                 .map_err(lens_error)?;
             Ok(list(
@@ -311,7 +312,8 @@ pub fn dispatch(
             // Both estates share the same coordinator Arc (single coordinator per
             // server); we call through coord already locked above with both handles.
             let estate_b = registry.resolve(args, "estateIDB")?;
-            let make_frame = || recall_frame(args);
+            let frame = recall_frame(args)?;
+            let make_frame = || frame.clone();
             let out = run_mind_overlap(&coord, &estate.handle, &estate_b.handle, make_frame, now)
                 .map_err(lens_error)?;
             Ok(text_result(&format!(
@@ -324,7 +326,8 @@ pub fn dispatch(
             // Both estates share the same coordinator — coord (already locked
             // above) covers both handles. No need to re-lock.
             let estate_b = registry.resolve(args, "estateIDB")?;
-            let make_frame = || recall_frame(args);
+            let frame = recall_frame(args)?;
+            let make_frame = || frame.clone();
             let out =
                 run_estate_divergence(&coord, &estate.handle, &estate_b.handle, make_frame, now)
                     .map_err(lens_error)?;
@@ -338,9 +341,9 @@ pub fn dispatch(
         "moot_lens_associations" => {
             // Analytics lens: recall drawers, project categorical facets into
             // a co-occurrence matrix, mine pairwise association rules.
-            let frame = recall_frame(args);
-            let min_support = opt_float(args, "minSupport", 0.0);
-            let min_confidence = opt_float(args, "minConfidence", 0.0);
+            let frame = recall_frame(args)?;
+            let min_support = opt_float(args, "minSupport", 0.0)?;
+            let min_confidence = opt_float(args, "minConfidence", 0.0)?;
             let thresholds = MiningThresholds {
                 min_support,
                 min_confidence,
@@ -369,10 +372,10 @@ pub fn dispatch(
         "moot_lens_concepts" => {
             // Analytics lens: recall drawers, build a formal context, mine
             // bounded formal concepts.
-            let frame = recall_frame(args);
-            let min_support = opt_integer(args, "minSupport", 1) as usize;
-            let max_intent_size = opt_integer(args, "maxIntentSize", 8) as usize;
-            let max_concepts = opt_integer(args, "maxConcepts", 20) as usize;
+            let frame = recall_frame(args)?;
+            let min_support = opt_integer(args, "minSupport", 1)? as usize;
+            let max_intent_size = opt_integer(args, "maxIntentSize", 8)? as usize;
+            let max_concepts = opt_integer(args, "maxConcepts", 20)? as usize;
             let miner = BoundedConceptMiner::new(min_support, max_intent_size, max_concepts);
             let out = run_formal_concepts(&coord, &estate.handle, frame, miner, now)
                 .map_err(lens_error)?;
@@ -393,10 +396,10 @@ pub fn dispatch(
         }
 
         "moot_lens_apriori" => {
-            let min_support = opt_float(args, "minSupport", 0.0);
-            let min_confidence = opt_float(args, "minConfidence", 0.0);
-            let min_lift = opt_float(args, "minLift", 1.0);
-            let max_k = opt_integer(args, "maxK", 3) as usize;
+            let min_support = opt_float(args, "minSupport", 0.0)?;
+            let min_confidence = opt_float(args, "minConfidence", 0.0)?;
+            let min_lift = opt_float(args, "minLift", 1.0)?;
+            let max_k = opt_integer(args, "maxK", 3)? as usize;
             let thresholds = AprioriThresholds::new(min_support, min_confidence, min_lift, max_k);
             let out = run_apriori_rules(&coord, &estate.handle, thresholds).map_err(lens_error)?;
             let mut lines = vec![format!("apriori_rules: {} rule(s)", out.rules.len())];
@@ -492,11 +495,11 @@ pub fn dispatch(
         }
 
         "moot_lens_rhythm" => {
-            let bit = opt_integer(args, "bit", 0) as usize;
-            let bucket_seconds = opt_integer(args, "bucketSeconds", 86400) as i64;
-            let bucket_count = opt_integer(args, "bucketCount", 32) as usize;
+            let bit = opt_integer(args, "bit", 0)? as usize;
+            let bucket_seconds = opt_integer(args, "bucketSeconds", 86400)? as i64;
+            let bucket_count = opt_integer(args, "bucketCount", 32)? as usize;
             let ending_at = require_iso8601(args, "endingAt")?;
-            let top_k = opt_integer(args, "topK", 3) as usize;
+            let top_k = opt_integer(args, "topK", 3)? as usize;
             let buckets: Vec<bool> = estate
                 .store
                 .fingerprint_bit_series(bit, bucket_seconds, bucket_count, ending_at)
@@ -524,7 +527,7 @@ pub fn dispatch(
             let upper_ms = end_epoch * 1000;
             let target_field = require_string(args, "targetField")?;
             let target_value = require_string(args, "targetValue")?;
-            let k = opt_integer(args, "k", 5) as usize;
+            let k = opt_integer(args, "k", 5)? as usize;
             // Fold the audit trail: collect all drawers, gather their audit events,
             // bridge to UnifiedAuditEntry, and filter to the window.
             let drawers = estate.store.all_drawers().map_err(|e| {
@@ -569,8 +572,8 @@ pub fn dispatch(
 
         "moot_lens_complexity" => {
             let field_a = require_string(args, "fieldA")?;
-            let field_b = args.get("fieldB").and_then(|v| v.as_str());
-            let frame = recall_frame(args);
+            let field_b = optional_string(args, "fieldB")?;
+            let frame = recall_frame(args)?;
             let out =
                 run_complexity(&coord, &estate.handle, frame, field_a, field_b, now)
                     .map_err(lens_error)?;
@@ -598,11 +601,15 @@ pub fn dispatch(
 // Argument decoders
 // ---------------------------------------------------------------------------
 
-fn decode_cue_mode(name: Option<&str>) -> CueMode {
+fn decode_cue_mode(name: Option<&str>) -> Result<CueMode, JSONRPCError> {
     match name {
-        Some("aboutThis") => CueMode::AboutThis,
-        Some("fromThen") => CueMode::FromThen,
-        _ => CueMode::FeelsLike,
+        None | Some("feelsLike") => Ok(CueMode::FeelsLike),
+        Some("aboutThis") => Ok(CueMode::AboutThis),
+        Some("fromThen") => Ok(CueMode::FromThen),
+        Some(unknown) => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Unknown mode: {unknown}"),
+        )),
     }
 }
 

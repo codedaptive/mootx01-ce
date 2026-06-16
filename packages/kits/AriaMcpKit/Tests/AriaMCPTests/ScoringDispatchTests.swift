@@ -77,6 +77,38 @@ struct ScoringDispatchTests {
         }
     }
 
+    @Test func nullScoringThrowsInvalidParams() async throws {
+        let dispatcher = try await makeDispatcher()
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_memory_search",
+                arguments: .object([
+                    "query": .string("test"),
+                    "scoring": .null,
+                ])
+            )
+            Issue.record("scoring:null must throw invalidParams, but did not throw")
+        } catch let error as JSONRPCError {
+            #expect(error.code == JSONRPCErrorCode.invalidParams)
+        }
+    }
+
+    @Test func nullFilterThrowsInvalidParams() async throws {
+        let dispatcher = try await makeDispatcher()
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_memory_search",
+                arguments: .object([
+                    "query": .string("test"),
+                    "filter": .null,
+                ])
+            )
+            Issue.record("filter:null must throw invalidParams, but did not throw")
+        } catch let error as JSONRPCError {
+            #expect(error.code == JSONRPCErrorCode.invalidParams)
+        }
+    }
+
     // MARK: - B. Known scoring still succeeds
 
     @Test func knownScoringRawSucceeds() async throws {
@@ -106,5 +138,17 @@ struct ScoringDispatchTests {
         )
         let isError = result.objectValue?["isError"]?.boolValue ?? true
         #expect(!isError, "absent scoring must default to matrixAware and succeed")
+    }
+
+    @Test func omittedFilterFindsFreshUnconfirmedMemory() async throws {
+        let dispatcher = try await makeDispatcher()
+        try await fileMemory(content: "omitted-filter-unconfirmed-test", location: "test", dispatcher: dispatcher)
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object(["query": .string("omitted-filter-unconfirmed-test")])
+        )
+        let text = result.objectValue?["content"]?
+            .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        #expect(text.contains("found 1 memory(s)"), "omitted filter must find fresh captures; got: \(text)")
     }
 }

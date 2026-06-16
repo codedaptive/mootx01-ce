@@ -444,10 +444,16 @@ impl EstateRegistry {
         args: &std::collections::BTreeMap<String, crate::jsonrpc::JsonValue>,
         key: &str,
     ) -> Result<&OpenEstate, crate::jsonrpc::JSONRPCError> {
-        use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode};
-        let raw = match args.get(key).and_then(|v| v.as_str()) {
+        use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
+        let raw = match args.get(key) {
             None => return Ok(&self.default),
-            Some(s) => s.to_owned(),
+            Some(JsonValue::String(s)) => s.to_owned(),
+            Some(_) => {
+                return Err(JSONRPCError::new(
+                    JSONRPCErrorCode::INVALID_PARAMS,
+                    format!("{key} must be a UUID string; omit it to use the default estate"),
+                ))
+            }
         };
         let uuid = Uuid::parse_str(&raw).map_err(|_| {
             JSONRPCError::new(

@@ -8,12 +8,13 @@
 //! caller hands it (today that is `DrawerStore::all_drawers`; the
 //! Estate verb surface in LP-1F selects the slice):
 //!
-//! 1. **Default insertion** (§ 7.9.5) — prepend the four implicit
-//!    filters (`SensitivityAtMost(Elevated)`, `Trustworthy`,
-//!    `UserConfirmed`, `CurrentlyBelieve`) for any concern the caller
-//!    did not constrain. Tombstone exclusion is always enforced and
-//!    is independent of the chain (`state == 9` rejected at the
-//!    bitmap tier).
+//! 1. **Default insertion** (§ 7.9.5) — prepend implicit filters for
+//!    state (`CurrentlyBelieve`), trust (`Trustworthy`), and sensitivity
+//!    (`SensitivityAtMost(Elevated)`) when the caller did not constrain
+//!    those concerns. Confirmation is not defaulted: unconfirmed captures
+//!    are recallable unless the caller explicitly asks for `UserConfirmed`.
+//!    Tombstone exclusion is always enforced and is independent of the
+//!    chain (`state == 9` rejected at the bitmap tier).
 //! 2. **Bitmap-tier evaluation** (§ 7.9.2 / § 7.9.3) — each `Filter`
 //!    case compiles to a predicate over `(adjective_bitmap,
 //!    operational_bitmap, provenance)` and is applied via the
@@ -219,18 +220,22 @@ impl BitmapEvaluator {
     // Default insertion (§ 7.9.5)
     // -----------------------------------------------------------------
 
-    /// Prepend the four default filters for any concern the caller did
+    /// Prepend default filters for any concern the caller did
     /// not constrain. Insertion is order-stable but the precise
     /// position is not observable — `evaluate_bitmap_tier` ANDs the
     /// entire chain.
     ///
     /// Each default has a classifier that recognises any `Filter` case
     /// covering that concern; this includes the named-defaults
-    /// (`CurrentlyBelieve`, `Trustworthy`, `UserConfirmed`) and the
+    /// (`CurrentlyBelieve`, `Trustworthy`) and the
     /// general cases that constrain the same axis (`State`,
     /// `TrustAtMost`, `Sensitivity`, etc.), so a caller saying "give
     /// me only `Contested` state" suppresses the `CurrentlyBelieve`
     /// default rather than ANDing both.
+    ///
+    /// No confirmation default is inserted. Freshly captured drawers are
+    /// unconfirmed by design; callers that need the aging/retention-vouched
+    /// subset must ask for `UserConfirmed` explicitly.
     fn insert_defaults(chain: &[Filter]) -> Vec<Filter> {
         let mut result: Vec<Filter> = chain.to_vec();
         if !chain.iter().any(Self::is_bitmap_state_filter) {
@@ -238,9 +243,6 @@ impl BitmapEvaluator {
         }
         if !chain.iter().any(Self::is_bitmap_trust_filter) {
             result.insert(0, Filter::Trustworthy);
-        }
-        if !chain.iter().any(Self::is_bitmap_prov_filter) {
-            result.insert(0, Filter::UserConfirmed);
         }
         if !chain.iter().any(Self::is_bitmap_sensitivity_filter) {
             // Sensitivity default — ceiling is `Elevated`, the Normal-tier
@@ -781,15 +783,14 @@ mod tests {
 
     fn base_drawer(id: &str) -> Drawer {
         let mut d = Drawer::new(id, "content", "w", "kitchen", "alice", NOW, "test-v1");
-        // Default the four-axis defaults so the evaluator's
+        // Default the state/trust/sensitivity axes so the evaluator's
         // implicit-default filters do not eliminate the sample row:
         //
         // - state = Active (raw 0, in know-now cluster < 3) ✓
         // - sensitivity ≤ Normal (raw 0) ✓
         // - trust = Verbatim (raw 0, < 4) ✓
-        // - confirmation = UserConfirmed (raw 2, >= 2) — must be set
-        //   explicitly because the default `Unconfirmed = 0` would
-        //   fail the implicit `UserConfirmed` filter.
+        // - confirmation = UserConfirmed for tests that exercise the
+        //   confirmation axis explicitly. Confirmation is not a default.
         d.provenance = Confirmation::UserConfirmed.raw_value() << 18;
         d
     }
@@ -1059,12 +1060,22 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn user_confirmed_default_excludes_unconfirmed() {
+    fn ordinary_default_recall_includes_unconfirmed() {
         let store = make_store();
         let mut unconfirmed = base_drawer("u");
         // Override the helper's default — leave confirmation at 0.
         unconfirmed.provenance = 0;
         let frame = make_frame(vec![]);
+        let result = BitmapEvaluator::evaluate(&frame, &[unconfirmed], store.as_ref()).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn explicit_user_confirmed_filter_excludes_unconfirmed() {
+        let store = make_store();
+        let mut unconfirmed = base_drawer("u");
+        unconfirmed.provenance = 0;
+        let frame = make_frame(vec![Filter::UserConfirmed]);
         let result = BitmapEvaluator::evaluate(&frame, &[unconfirmed], store.as_ref()).unwrap();
         assert!(result.is_empty());
     }

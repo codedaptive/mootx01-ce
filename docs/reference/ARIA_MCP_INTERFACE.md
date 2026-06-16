@@ -187,6 +187,13 @@ not `content` — mirrors the `DiaryEntry.entry` substrate field); optional `que
 for `moot_fact_search` (substring match across subject, predicate, and object;
 omit to return all active facts).
 
+Optional MCP arguments use an omit-to-default contract. If a caller wants the
+default, it omits the key entirely. A present key with JSON `null` is invalid
+for semantic knobs such as `estateID`, `teachme`, `filter`, `limit`, `scoring`,
+`ordering`, `sensitivity`, `exportability`, `kind`, `impatient`, `agent`, and
+similar optional primitive fields. This keeps AI clients from forcing the server
+to guess whether `null` meant "default", "unset", or a bug in the caller.
+
 `moot_file_memory` also accepts an optional `impatient: bool` (default `false`)
 — the Dual-Path Intake write-mode execution option. It is an option on the
 write verb (threaded MCP arg → GLK verb param `mode`), NOT a `CaptureFrame`
@@ -228,11 +235,23 @@ and Rust dispatch ports.
 
 `moot_memory_search` accepts an optional `scoring` argument with valid values
 `raw`, `rrf`, and `matrixAware`. **Decode is fail-closed:** an absent
-`scoring` keeps the documented default `matrixAware`; an unknown NON-EMPTY value
-returns `invalidParams` rather than silently coercing to `matrixAware` (which
-would run a different scoring mode than the caller asked and hide a typo). This
-mirrors the strict `ordering` decode. Identical in both ports (`runMemorySearch`
-/ `decode in run_memory_search`).
+`scoring` keeps the documented default `matrixAware`; `scoring: null`, a
+non-string value, or an unknown string returns `invalidParams` rather than
+silently coercing to `matrixAware` (which would run a different scoring mode
+than the caller asked and hide a typo). This mirrors the strict `ordering`
+decode. Identical in both ports (`runMemorySearch` / `decode in
+run_memory_search`).
+
+`moot_memory_search` accepts an optional `filter` argument with valid values
+`unconfirmed`, `userConfirmed`, `exportable`, and `contained` (lenses/recipes
+also accept `currentlyBelieve`). Omitting `filter` means ordinary recall:
+LocusKit applies the state/trust/sensitivity defaults (`currentlyBelieve`,
+`trustworthy`, `sensitivityAtMost(.elevated)`) but does **not** add a
+confirmation filter. Fresh unconfirmed captures are therefore recallable by
+default. Callers that want only retention/user-vouched rows must explicitly send
+`filter: "userConfirmed"`; callers that want only public/exportable rows must
+explicitly send `filter: "exportable"`. `filter: null`, non-string filters, and
+unknown strings return `invalidParams`.
 
 `moot_file_fact` also accepts optional `source_id` — the row identifier of the
 drawer this fact was extracted from; omit for agent-asserted freestanding triples.

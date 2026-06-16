@@ -45,6 +45,20 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
     }
 }
 
+private enum IntellectusTestIsolation {
+    private static let lock = NSLock()
+
+    static func run(_ body: () throws -> Void) rethrows {
+        lock.lock()
+        defer {
+            Intellectus.setEnabled(false)
+            Intellectus.install(sink: NoOpSink.shared)
+            lock.unlock()
+        }
+        try body()
+    }
+}
+
 // MARK: - §1 Disabled gate
 
 @Suite("§1 KernelTelemetry — disabled gate")
@@ -55,33 +69,34 @@ struct KernelTelemetryDisabledTests {
     /// install a monitoring sink.
     @Test("no metric emitted when monitoring is disabled")
     func noMetricEmittedWhenDisabled() {
-        let sink = CapturingSink()
-        Intellectus.install(sink: sink)
-        // Explicitly disabled — the default state.
-        Intellectus.setEnabled(false)
+        IntellectusTestIsolation.run {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            // Explicitly disabled — the default state.
+            Intellectus.setEnabled(false)
 
-        _ = PortableKernel.kernelForCurrentPlatform()
+            _ = PortableKernel.kernelForCurrentPlatform()
 
-        #expect(sink.count == 0,
-            "kernelForCurrentPlatform() must not emit when monitoring is disabled")
-
-        // Restore defaults so subsequent tests are not polluted.
-        Intellectus.install(sink: NoOpSink.shared)
+            #expect(sink.count == 0,
+                "kernelForCurrentPlatform() must not emit when monitoring is disabled")
+        }
     }
 
     @Test("factory still returns the correct kernel when disabled")
     func factoryReturnsCorrectKernelWhenDisabled() {
-        Intellectus.setEnabled(false)
-        let kernel = PortableKernel.kernelForCurrentPlatform()
+        IntellectusTestIsolation.run {
+            Intellectus.setEnabled(false)
+            let kernel = PortableKernel.kernelForCurrentPlatform()
 
-        #if arch(arm64)
-        // On arm64 the SIMD kernel is selected regardless of monitoring state.
-        #expect(kernel.kind == .simd,
-            "arm64 must select the SIMD kernel even when monitoring is disabled")
-        #else
-        #expect(kernel.kind == .scalar,
-            "non-arm64 must select the scalar kernel even when monitoring is disabled")
-        #endif
+            #if arch(arm64)
+            // On arm64 the SIMD kernel is selected regardless of monitoring state.
+            #expect(kernel.kind == .simd,
+                "arm64 must select the SIMD kernel even when monitoring is disabled")
+            #else
+            #expect(kernel.kind == .scalar,
+                "non-arm64 must select the scalar kernel even when monitoring is disabled")
+            #endif
+        }
     }
 }
 
@@ -94,70 +109,64 @@ struct KernelTelemetryEnabledTests {
     /// metric must be received by the sink per factory call.
     @Test("backend_selected metric is emitted when monitoring is enabled")
     func backendSelectedMetricEmittedWhenEnabled() {
-        let sink = CapturingSink()
-        Intellectus.install(sink: sink)
-        Intellectus.setEnabled(true)
+        IntellectusTestIsolation.run {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            Intellectus.setEnabled(true)
 
-        _ = PortableKernel.kernelForCurrentPlatform()
+            _ = PortableKernel.kernelForCurrentPlatform()
 
-        #expect(sink.count == 1,
-            "exactly one metric must be emitted per kernelForCurrentPlatform() call")
+            #expect(sink.count == 1,
+                "exactly one metric must be emitted per kernelForCurrentPlatform() call")
 
-        if case let .metric(name, value, tags, _) = sink.samples.first {
-            #expect(name == "substrate.kernel.backend_selected")
-            #expect(value == 1.0)
-            #expect(tags["backend"] != nil, "metric must carry a 'backend' tag")
-            #expect(tags["arch"] != nil, "metric must carry an 'arch' tag")
-        } else {
-            Issue.record("expected a .metric sample; got \(String(describing: sink.samples.first))")
+            if case let .metric(name, value, tags, _) = sink.samples.first {
+                #expect(name == "substrate.kernel.backend_selected")
+                #expect(value == 1.0)
+                #expect(tags["backend"] != nil, "metric must carry a 'backend' tag")
+                #expect(tags["arch"] != nil, "metric must carry an 'arch' tag")
+            } else {
+                Issue.record("expected a .metric sample; got \(String(describing: sink.samples.first))")
+            }
         }
-
-        // Restore defaults.
-        Intellectus.setEnabled(false)
-        Intellectus.install(sink: NoOpSink.shared)
     }
 
     /// The `backend` tag must match the kind the factory actually
     /// returns. Verified against the KernelKind.rawValue contract.
     @Test("backend tag matches the selected kernel kind")
     func backendTagMatchesSelectedKernelKind() {
-        let sink = CapturingSink()
-        Intellectus.install(sink: sink)
-        Intellectus.setEnabled(true)
+        IntellectusTestIsolation.run {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            Intellectus.setEnabled(true)
 
-        let kernel = PortableKernel.kernelForCurrentPlatform()
+            let kernel = PortableKernel.kernelForCurrentPlatform()
 
-        guard let sample = sink.samples.first,
-              case let .metric(_, _, tags, _) = sample else {
-            Issue.record("no metric emitted")
-            Intellectus.setEnabled(false)
-            Intellectus.install(sink: NoOpSink.shared)
-            return
+            guard let sample = sink.samples.first,
+                  case let .metric(_, _, tags, _) = sample else {
+                Issue.record("no metric emitted")
+                return
+            }
+
+            #expect(tags["backend"] == kernel.kind.rawValue,
+                "backend tag '\(tags["backend"] ?? "nil")' must equal kernel kind rawValue '\(kernel.kind.rawValue)'")
         }
-
-        #expect(tags["backend"] == kernel.kind.rawValue,
-            "backend tag '\(tags["backend"] ?? "nil")' must equal kernel kind rawValue '\(kernel.kind.rawValue)'")
-
-        Intellectus.setEnabled(false)
-        Intellectus.install(sink: NoOpSink.shared)
     }
 
     /// Multiple factory calls each emit one metric.
     @Test("each factory call emits exactly one metric")
     func eachFactoryCallEmitsOneMetric() {
-        let sink = CapturingSink()
-        Intellectus.install(sink: sink)
-        Intellectus.setEnabled(true)
+        IntellectusTestIsolation.run {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            Intellectus.setEnabled(true)
 
-        _ = PortableKernel.kernelForCurrentPlatform()
-        _ = PortableKernel.kernelForCurrentPlatform()
-        _ = PortableKernel.kernelForCurrentPlatform()
+            _ = PortableKernel.kernelForCurrentPlatform()
+            _ = PortableKernel.kernelForCurrentPlatform()
+            _ = PortableKernel.kernelForCurrentPlatform()
 
-        #expect(sink.count == 3,
-            "3 factory calls must produce 3 metrics; got \(sink.count)")
-
-        Intellectus.setEnabled(false)
-        Intellectus.install(sink: NoOpSink.shared)
+            #expect(sink.count == 3,
+                "3 factory calls must produce 3 metrics; got \(sink.count)")
+        }
     }
 }
 
@@ -170,25 +179,22 @@ struct KernelTelemetryArchTagTests {
     /// PortableKernel.currentArchTag.
     @Test("arch tag matches PortableKernel.currentArchTag")
     func archTagMatchesCurrentArchTag() {
-        let sink = CapturingSink()
-        Intellectus.install(sink: sink)
-        Intellectus.setEnabled(true)
+        IntellectusTestIsolation.run {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            Intellectus.setEnabled(true)
 
-        _ = PortableKernel.kernelForCurrentPlatform()
+            _ = PortableKernel.kernelForCurrentPlatform()
 
-        guard let sample = sink.samples.first,
-              case let .metric(_, _, tags, _) = sample else {
-            Issue.record("no metric emitted")
-            Intellectus.setEnabled(false)
-            Intellectus.install(sink: NoOpSink.shared)
-            return
+            guard let sample = sink.samples.first,
+                  case let .metric(_, _, tags, _) = sample else {
+                Issue.record("no metric emitted")
+                return
+            }
+
+            #expect(tags["arch"] == PortableKernel.currentArchTag,
+                "arch tag must match PortableKernel.currentArchTag")
         }
-
-        #expect(tags["arch"] == PortableKernel.currentArchTag,
-            "arch tag must match PortableKernel.currentArchTag")
-
-        Intellectus.setEnabled(false)
-        Intellectus.install(sink: NoOpSink.shared)
     }
 
     /// currentArchTag must be one of the known values — never empty.
@@ -221,63 +227,66 @@ struct KernelTelemetryConformanceTests {
     /// the kernel's mathematical behavior.
     @Test("factory kernel produces scalar-identical Hamming distance")
     func factoryKernelHammingDistanceMatchesScalar() {
-        // Monitoring off — no side effects, no clock read.
-        Intellectus.setEnabled(false)
+        IntellectusTestIsolation.run {
+            // Monitoring off — no side effects, no clock read.
+            Intellectus.setEnabled(false)
 
-        let factory = PortableKernel.kernelForCurrentPlatform()
-        let scalar = ScalarKernel()
+            let factory = PortableKernel.kernelForCurrentPlatform()
+            let scalar = ScalarKernel()
 
-        let a = Fingerprint256(block0: 0xCAFE_BABE, block1: 0xDEAD_BEEF,
-                               block2: 0x0123_4567_89AB_CDEF, block3: 0xFEDC_BA98_7654_3210)
-        let b = Fingerprint256(block0: 0x1234_5678, block1: 0x9ABC_DEF0,
-                               block2: 0x0F0F_0F0F_0F0F_0F0F, block3: 0xF0F0_F0F0_F0F0_F0F0)
+            let a = Fingerprint256(block0: 0xCAFE_BABE, block1: 0xDEAD_BEEF,
+                                   block2: 0x0123_4567_89AB_CDEF, block3: 0xFEDC_BA98_7654_3210)
+            let b = Fingerprint256(block0: 0x1234_5678, block1: 0x9ABC_DEF0,
+                                   block2: 0x0F0F_0F0F_0F0F_0F0F, block3: 0xF0F0_F0F0_F0F0_F0F0)
 
-        #expect(factory.hammingDistance256(a, b) == scalar.hammingDistance256(a, b),
-            "factory kernel must produce scalar-identical Hamming distance")
+            #expect(factory.hammingDistance256(a, b) == scalar.hammingDistance256(a, b),
+                "factory kernel must produce scalar-identical Hamming distance")
+        }
     }
 
     /// OR-reduce conformance with telemetry disabled.
     @Test("factory kernel produces scalar-identical OR-reduce")
     func factoryKernelOrReduceMatchesScalar() {
-        Intellectus.setEnabled(false)
+        IntellectusTestIsolation.run {
+            Intellectus.setEnabled(false)
 
-        let factory = PortableKernel.kernelForCurrentPlatform()
-        let scalar = ScalarKernel()
+            let factory = PortableKernel.kernelForCurrentPlatform()
+            let scalar = ScalarKernel()
 
-        let fps: [Fingerprint256] = (0..<32).map { n in
-            let i = UInt64(n)
-            return Fingerprint256(block0: i,
-                                  block1: i &* 0x9E3779B97F4A7C15,
-                                  block2: i &* 0xBF58476D1CE4E5B9,
-                                  block3: i &* 0x94D049BB133111EB)
+            let fps: [Fingerprint256] = (0..<32).map { n in
+                let i = UInt64(n)
+                return Fingerprint256(block0: i,
+                                      block1: i &* 0x9E3779B97F4A7C15,
+                                      block2: i &* 0xBF58476D1CE4E5B9,
+                                      block3: i &* 0x94D049BB133111EB)
+            }
+
+            #expect(factory.orReduce256(fps) == scalar.orReduce256(fps),
+                "factory kernel must produce scalar-identical OR-reduce")
         }
-
-        #expect(factory.orReduce256(fps) == scalar.orReduce256(fps),
-            "factory kernel must produce scalar-identical OR-reduce")
     }
 
     /// Telemetry enabled, then conformance check. Proves that even
     /// with monitoring on the math output is unaffected.
     @Test("conformance holds when monitoring is enabled")
     func conformanceHoldsWhenMonitoringEnabled() {
-        let sink = CapturingSink()
-        Intellectus.install(sink: sink)
-        Intellectus.setEnabled(true)
+        IntellectusTestIsolation.run {
+            let sink = CapturingSink()
+            Intellectus.install(sink: sink)
+            Intellectus.setEnabled(true)
 
-        let factory = PortableKernel.kernelForCurrentPlatform()
-        let scalar = ScalarKernel()
+            let factory = PortableKernel.kernelForCurrentPlatform()
+            let scalar = ScalarKernel()
 
-        let a = Fingerprint256(block0: 0xDEAD, block1: 0xBEEF, block2: 0xCAFE, block3: 0xBABE)
-        let b = Fingerprint256(block0: 0xFACE, block1: 0xFEED, block2: 0xC0DE, block3: 0xD00D)
+            let a = Fingerprint256(block0: 0xDEAD, block1: 0xBEEF, block2: 0xCAFE, block3: 0xBABE)
+            let b = Fingerprint256(block0: 0xFACE, block1: 0xFEED, block2: 0xC0DE, block3: 0xD00D)
 
-        // Math output must be identical to scalar.
-        #expect(factory.hammingDistance256(a, b) == scalar.hammingDistance256(a, b),
-            "math must be unaffected by telemetry being enabled")
+            // Math output must be identical to scalar.
+            #expect(factory.hammingDistance256(a, b) == scalar.hammingDistance256(a, b),
+                "math must be unaffected by telemetry being enabled")
 
-        // One metric was emitted (proves the monitoring path ran).
-        #expect(sink.count == 1, "telemetry must still emit when enabled during conformance test")
-
-        Intellectus.setEnabled(false)
-        Intellectus.install(sink: NoOpSink.shared)
+            // One metric was emitted (proves the monitoring path ran).
+            #expect(sink.count == 1, "telemetry must still emit when enabled during conformance test")
+        }
     }
 }
