@@ -51,8 +51,12 @@ jobs:
         run: swift test
 
   rust-apps:
-    name: Rust apps — build + test (Linux)
-    runs-on: ubuntu-latest
+    name: Rust apps — build + test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v4
 
