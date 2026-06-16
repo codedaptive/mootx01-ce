@@ -130,7 +130,9 @@ jobs:
 
   build-linux-arm64:
     name: Build Linux arm64
-    runs-on: ubuntu-22.04-arm64
+    # GitHub-hosted arm64 Linux label is `ubuntu-22.04-arm` (no `-arm64` suffix);
+    # the old `ubuntu-22.04-arm64` matched no runner and queued forever.
+    runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
 
