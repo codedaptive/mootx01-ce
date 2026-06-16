@@ -56,10 +56,24 @@ impl McpClient {
                 }
                 #[cfg(target_os = "windows")]
                 {
-                    // Presence of the Claude config dir (APPDATA-resolved).
-                    self.config_path(home)
+                    // Detect via EITHER the app install marker OR the config dir.
+                    // Claude Desktop's installer creates %LOCALAPPDATA%\AnthropicClaude
+                    // (the app), but the Roaming %APPDATA%\Claude config dir often
+                    // does not exist until first launch / first MCP config — so the
+                    // config-dir-only check missed installed-but-unconfigured copies.
+                    // The install marker is what the original install.ps1 used.
+                    // Wiring creates the config dir if absent (merge create_dir_all).
+                    let install_marker = std::env::var("LOCALAPPDATA")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| home.join("AppData").join("Local"))
+                        .join("AnthropicClaude");
+                    let config_dir_exists = self
+                        .config_path(home)
                         .and_then(|p| p.parent().map(|d| d.exists()))
-                        .unwrap_or(false)
+                        .unwrap_or(false);
+                    install_marker.exists() || config_dir_exists
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
