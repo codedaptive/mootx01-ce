@@ -85,8 +85,15 @@ struct MootManagerIntegrationTests {
         ))
 
         // STEP 3: rows land in the store. The sink dispatches async I/O; poll.
-        try await waitForCounts(store: store, dropboxID: dropboxID, metrics: 1, events: 1)
+        // The manager's background autonomic-governor duties emit telemetry
+        // through the same global Intellectus sink (stamped with this dropbox),
+        // so total metric counts are non-deterministic. Scope every metric
+        // assertion to this test's own `e2e.*` rows. The governor emits no
+        // events, so event counts stay exact.
+        try await waitForCounts(store: store, dropboxID: dropboxID, metrics: 1, events: 1,
+                                metricPrefix: "e2e.")
         let metricsAfterEmit = try await store.queryMetrics(dropboxID: dropboxID)
+            .filter { $0.name.hasPrefix("e2e.") }
         let eventsAfterEmit = try await store.queryEvents(dropboxID: dropboxID)
         #expect(metricsAfterEmit.count == 1)
         #expect(eventsAfterEmit.count == 1)
@@ -97,7 +104,8 @@ struct MootManagerIntegrationTests {
                                      ts: 100.0, dropboxID: dropboxID)
         try await store.insertEvent(kind: "think", nounType: 1, rowID: UUID().uuidString,
                                     estate: estateID, ts: 100.0, dropboxID: dropboxID)
-        #expect(try await store.queryMetrics(dropboxID: dropboxID).count == 2)
+        #expect(try await store.queryMetrics(dropboxID: dropboxID)
+            .filter { $0.name.hasPrefix("e2e.") }.count == 2)
         #expect(try await store.queryEvents(dropboxID: dropboxID).count == 2)
 
         // STEP 4: retention. now = 5000, window = 1000 → cutoff = 4000.
@@ -107,6 +115,7 @@ struct MootManagerIntegrationTests {
         #expect(deleted == 2, "Expected the two ts=100 rows rolled off")
 
         let metricsAfterRetention = try await store.queryMetrics(dropboxID: dropboxID)
+            .filter { $0.name.hasPrefix("e2e.") }
         let eventsAfterRetention = try await store.queryEvents(dropboxID: dropboxID)
         #expect(metricsAfterRetention.count == 1, "new metric kept")
         #expect(eventsAfterRetention.count == 1, "new event kept")
@@ -123,7 +132,8 @@ struct MootManagerIntegrationTests {
 
         // Give the discarded dispatch time to (not) write, then assert no growth.
         try await Task.sleep(nanoseconds: 200_000_000)
-        #expect(try await store.queryMetrics(dropboxID: dropboxID).count == 1,
+        #expect(try await store.queryMetrics(dropboxID: dropboxID)
+            .filter { $0.name.hasPrefix("e2e.") }.count == 1,
                 "no new metric after monitoring OFF")
         #expect(try await store.queryEvents(dropboxID: dropboxID).count == 1,
                 "no new event after monitoring OFF")
@@ -138,11 +148,17 @@ struct MootManagerIntegrationTests {
         dropboxID: String,
         metrics: Int,
         events: Int,
+        // When set, only metrics whose name starts with this prefix are counted —
+        // lets a test ignore unrelated telemetry (e.g. the manager's background
+        // governor duties) landing in the same store. Events are unaffected.
+        metricPrefix: String? = nil,
         timeoutMS: Int = 2000
     ) async throws {
         let deadline = Date().addingTimeInterval(Double(timeoutMS) / 1000.0)
         while Date() < deadline {
-            let m = try await store.queryMetrics(dropboxID: dropboxID).count
+            let allMetrics = try await store.queryMetrics(dropboxID: dropboxID)
+            let m = metricPrefix.map { p in allMetrics.filter { $0.name.hasPrefix(p) }.count }
+                ?? allMetrics.count
             let e = try await store.queryEvents(dropboxID: dropboxID).count
             if m >= metrics && e >= events { return }
             try await Task.sleep(nanoseconds: 25_000_000)   // 25 ms
