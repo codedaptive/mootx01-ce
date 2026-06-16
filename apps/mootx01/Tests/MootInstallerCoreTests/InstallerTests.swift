@@ -839,7 +839,7 @@ struct InstallerTests {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
-        let client = MCPClients.supported.first { $0.id == "codex-desktop" }!
+        let client = MCPClients.supported.first { $0.id == "codex" }!
         let configURL = home.appendingPathComponent("config.toml")
         try Installer.mergeIntoTOMLConfig(
             at: configURL, client: client,
@@ -858,7 +858,7 @@ struct InstallerTests {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
-        let client = MCPClients.supported.first { $0.id == "codex-desktop" }!
+        let client = MCPClients.supported.first { $0.id == "codex" }!
         let configURL = home.appendingPathComponent("config.toml")
         // Seed a realistic Codex config: a top-level key and an unrelated server.
         let seed = """
@@ -888,7 +888,7 @@ struct InstallerTests {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
-        let client = MCPClients.supported.first { $0.id == "codex-desktop" }!
+        let client = MCPClients.supported.first { $0.id == "codex" }!
         let configURL = home.appendingPathComponent("config.toml")
         let seed = """
         [mcp_servers.mootx01]
@@ -921,7 +921,7 @@ struct InstallerTests {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
-        let client = MCPClients.supported.first { $0.id == "codex-desktop" }!
+        let client = MCPClients.supported.first { $0.id == "codex" }!
         let configURL = home.appendingPathComponent("config.toml")
         // The exact failure mode that broke Codex: JSON written into config.toml.
         let corrupted = "{\n  \"mcpServers\" : {\n    \"mootx01\" : {\n      \"url\" : \"http://127.0.0.1:4242\"\n    }\n  }\n}"
@@ -938,12 +938,12 @@ struct InstallerTests {
         #expect(after == corrupted, "a JSON-corrupted file must be left untouched for the user to recover")
     }
 
-    @Test("install routes a Codex (.toml) client to the TOML writer, not JSON")
+    @Test("install routes the Codex entry (.toml) to the TOML writer, not JSON")
     func installRoutesCodexToTOML() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
 
-        let client = MCPClients.supported.first { $0.id == "codex-desktop" }!
+        let client = MCPClients.supported.first { $0.id == "codex" }!
         try Installer.install(
             client: client,
             binaryPath: "/usr/local/bin/mootx01",
@@ -1047,8 +1047,6 @@ struct InstallerTests {
         #expect(content == "{}", "Headless client config must remain untouched by the scan guard")
     }
 
-    // MARK: - Helpers
-
     // MARK: - §4.2 backups
 
     @Test("install backs up an existing config; fresh files are exempt")
@@ -1086,7 +1084,7 @@ struct InstallerTests {
     func codexTOMLUninstallRoundTrip() throws {
         let home = try makeSandboxHome()
         defer { cleanupSandbox(home) }
-        let client = MCPClients.supported.first { $0.id == "codex-cli" }!
+        let client = MCPClients.supported.first { $0.id == "codex" }!
         let configURL = home.appendingPathComponent(client.configPath)
         try FileManager.default.createDirectory(
             at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)

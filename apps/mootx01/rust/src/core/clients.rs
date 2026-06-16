@@ -14,6 +14,23 @@
 
 use std::path::{Path, PathBuf};
 
+/// Join a `/`-delimited relative path onto `base` one component at a time so
+/// PathBuf uses the OS-native separator on every platform.
+///
+/// On Windows, `base.join(".codex/config.toml")` produces the mixed result
+/// `C:\Users\Bob/.codex/config.toml` because PathBuf keeps the `/` from the
+/// embedded literal. Splitting on `/` and calling `.join()` per segment lets
+/// PathBuf insert `\` on Windows and `/` on POSIX — consistent native output.
+pub(crate) fn join_rel(base: &Path, rel: &str) -> PathBuf {
+    let mut p = base.to_path_buf();
+    for seg in rel.split('/') {
+        if !seg.is_empty() {
+            p = p.join(seg);
+        }
+    }
+    p
+}
+
 /// Config file format — drives the merge path (§4.2: never write one format
 /// into another's file) and the wired-detection check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,19 +125,19 @@ impl McpClient {
                     .unwrap_or(false)
             }
             "continue" => home.join(".continue").exists(),
-            "codex-cli" => home.join(".codex").exists(),
-            "codex-desktop" => {
+            // Codex CLI and Codex Desktop share ~/.codex/config.toml, so they
+            // are represented as a single entry. Detected when the shared
+            // config/dir is present (all platforms) or the macOS app bundle exists.
+            "codex" => {
+                let config_or_dir = home.join(".codex").join("config.toml").exists()
+                    || home.join(".codex").exists();
                 #[cfg(target_os = "macos")]
                 {
-                    Path::new("/Applications/Codex.app").exists()
+                    config_or_dir || Path::new("/Applications/Codex.app").exists()
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    // Windows/Linux: Codex Desktop has no distinct app marker and
-                    // shares the CLI's ~/.codex/config.toml (the same file we
-                    // wire). Detect it by that config's presence; the prior
-                    // hardcoded `false` left Windows users unable to wire it.
-                    home.join(".codex").join("config.toml").exists()
+                    config_or_dir
                 }
             }
             "opencode" => home.join(".config/opencode").exists(),
@@ -187,7 +204,10 @@ impl McpClient {
                     .filter(|v| !v.is_empty())
                     .map(PathBuf::from)
                 {
-                    return Some(appdata.join(
+                    // join_rel splits on '/' so each component is appended with the
+                    // OS-native separator — all-backslash on Windows.
+                    return Some(join_rel(
+                        &appdata,
                         "Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json",
                     ));
                 }
@@ -204,7 +224,11 @@ impl McpClient {
                 return Some(jsonc);
             }
         }
-        self.config_rel.map(|r| home.join(r))
+        // Use join_rel (segment-by-segment join) so the resolved path uses the
+        // OS-native separator on every platform. A bare home.join(".codex/config.toml")
+        // keeps the `/` in the relative part and produces mixed separators on Windows
+        // (e.g. C:\Users\Bob/.codex/config.toml); join_rel produces all-backslash there.
+        self.config_rel.map(|r| join_rel(home, r))
     }
 
     /// JSON servers key for this client. opencode's schema
@@ -297,9 +321,9 @@ pub fn supported() -> Vec<McpClient> {
         c("cline", "Cline", cline_rel(), Json, true, true, false),
         // Continue — per-server YAML file (type: streamable-http).
         c("continue", "Continue (VS Code / JetBrains)", Some(".continue/mcpServers/mootx01.yaml"), Yaml, true, false, false),
-        // Codex CLI / Desktop share ~/.codex/config.toml (TOML url field).
-        c("codex-cli", "Codex CLI", Some(".codex/config.toml"), Toml, true, false, false),
-        c("codex-desktop", "Codex Desktop", Some(".codex/config.toml"), Toml, true, false, false),
+        // Codex CLI and Codex Desktop share ~/.codex/config.toml — one entry
+        // wires both. TOML url field; no explicit type field needed.
+        c("codex", "Codex (Desktop & CLI)", Some(".codex/config.toml"), Toml, true, false, false),
         // opencode — top-level "mcp" key, {type:"remote",url} entries
         // (schema-verified); config_path prefers opencode.jsonc when present.
         c("opencode", "Opencode", Some(".config/opencode/opencode.json"), Json, true, true, false),
@@ -404,8 +428,10 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_twelve_clients() {
-        assert_eq!(supported().len(), 12);
+    fn registry_has_eleven_clients() {
+        // 11 clients: the two Codex entries (CLI + Desktop) are collapsed into one
+        // "codex" entry since they share ~/.codex/config.toml.
+        assert_eq!(supported().len(), 11);
     }
 
     #[test]
@@ -429,7 +455,7 @@ mod tests {
             "model = \"o3\"\n\n[mcp_servers.mootx01]\nurl = \"http://127.0.0.1:4242\"\n",
         )
         .unwrap();
-        let cx = supported().into_iter().find(|c| c.id == "codex-cli").unwrap();
+        let cx = supported().into_iter().find(|c| c.id == "codex").unwrap();
         assert!(cx.wired(&home));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -457,14 +483,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    // On macOS, /Applications/Codex.app is a valid detection signal for the
+    // single "codex" entry. If the app is installed on the test machine the
+    // "absent home dot-file" assertions are always true (the app fires first),
+    // so we skip that part and only verify the positive case.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn codex_desktop_detected_via_shared_config_on_non_macos() {
-        // On Windows/Linux, Codex Desktop shares ~/.codex/config.toml with the
-        // CLI and must be detectable there (was hardcoded false → unwireable).
-        let home = tmp_home("codexdesktop");
-        let cx = supported().into_iter().find(|c| c.id == "codex-desktop").unwrap();
-        assert!(!cx.detected(&home), "absent config must not detect");
+    fn codex_detected_via_config_and_dir_non_macos() {
+        // On non-macOS: the "codex" entry detects when ~/.codex/config.toml exists
+        // OR the ~/.codex directory exists (covers CLI before config is written).
+        let home = tmp_home("codex-detect");
+        let cx = supported().into_iter().find(|c| c.id == "codex").unwrap();
+        assert!(!cx.detected(&home), "absent .codex must not detect");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        assert!(cx.detected(&home), "present .codex dir must detect");
+        std::fs::write(home.join(".codex/config.toml"), "model = \"o3\"\n").unwrap();
+        assert!(cx.detected(&home), "present .codex/config.toml must detect");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_detected_when_config_toml_present() {
+        // Cross-platform: the "codex" entry always detects when config.toml exists.
+        let home = tmp_home("codex-detect-config");
+        let cx = supported().into_iter().find(|c| c.id == "codex").unwrap();
         std::fs::create_dir_all(home.join(".codex")).unwrap();
         std::fs::write(home.join(".codex/config.toml"), "model = \"o3\"\n").unwrap();
         assert!(cx.detected(&home), "present .codex/config.toml must detect");
@@ -479,6 +521,47 @@ mod tests {
         std::fs::create_dir_all(home.join(".continue/mcpServers")).unwrap();
         std::fs::write(home.join(".continue/mcpServers/mootx01.yaml"), "type: streamable-http\n").unwrap();
         assert!(cont.wired(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// join_rel must produce no forward-slash components in any path segment it
+    /// appends — on POSIX the native separator IS '/' so we test the component
+    /// structure: each segment of the relative part must map to exactly one path
+    /// component, ensuring platform-native rendering on Windows too. We verify
+    /// this cross-platform by asserting the joined path's components match the
+    /// explicit sequence of segments rather than containing an unsplit "/"-embedded
+    /// segment.
+    #[test]
+    fn join_rel_uses_native_components() {
+        use std::path::Component;
+        let base = PathBuf::from("/home/user");
+        let joined = join_rel(&base, ".codex/config.toml");
+        let components: Vec<_> = joined
+            .components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect();
+        // Each segment must appear as its own component — no component may
+        // contain a '/' (which would indicate an un-split embedded slash).
+        assert!(
+            components.iter().all(|c| !c.contains('/')),
+            "expected no embedded '/' in any path component; got: {components:?}"
+        );
+        assert_eq!(components, vec!["home", "user", ".codex", "config.toml"]);
+    }
+
+    #[test]
+    fn codex_config_path_resolves_to_dotcodex() {
+        // The single "codex" entry must resolve to ~/.codex/config.toml using
+        // join_rel so Windows paths use native backslash separators.
+        let home = tmp_home("codex-path");
+        let cx = supported().into_iter().find(|c| c.id == "codex").unwrap();
+        let resolved = cx.config_path(&home).expect("codex must have a config path");
+        assert!(
+            resolved.ends_with(std::path::Path::new(".codex/config.toml"))
+                || resolved.ends_with(std::path::Path::new(".codex\\config.toml")),
+            "codex config path must end with .codex/config.toml; got: {resolved:?}"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 }

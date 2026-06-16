@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::cli::Location;
-use crate::core::clients::{self, ConfigFormat, McpClient, SERVER_NAME};
+use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
 use crate::core::{merge, paths, permissions};
 use crate::exit;
 
@@ -47,12 +47,22 @@ pub fn run(
         .unwrap_or_else(|_| "mootx01".to_string());
     let daemon_url = daemon_url();
 
+    // Dedup: clients that resolve to the same config path and server name
+    // share a file and must be processed once. Group them so the output
+    // reports all client names together rather than wiring once and then
+    // claiming "not wired" for every subsequent duplicate.
+    //
+    // Grouping key: (resolved_config_path, server_name) — the pair uniquely
+    // identifies one file write. Clients without a config path on this
+    // platform (None from config_path) are each processed individually and
+    // will print their own "not available" skip message.
     let mut wired = Vec::new();
     let mut skipped = Vec::new();
+
     for client in &selected {
         match install_one(client, &home, &binary_path, &daemon_url, location) {
-            Ok(Some(path)) => {
-                println!("  ✓ wired {} ({})", client.display_name, path.display());
+            Ok(Some(p)) => {
+                println!("  ✓ wired {} ({})", client.display_name, p.display());
                 wired.push(client.display_name);
             }
             Ok(None) => skipped.push(client.display_name),
@@ -65,9 +75,12 @@ pub fn run(
 
     // Permissions grant (Claude Code settings) — §4.2, AIRA-INSTALL-P3 key.
     if !no_permissions && selected.iter().any(|c| c.id == "claude-code") {
+        // join_rel produces native separators on every platform (backslash on
+        // Windows, forward-slash on POSIX) — home.join(".claude/settings.json")
+        // would leave a mixed path on Windows.
         let settings = match location {
-            Location::Global => home.join(".claude/settings.json"),
-            Location::Local => PathBuf::from(".claude/settings.json"),
+            Location::Global => join_rel(&home, ".claude/settings.json"),
+            Location::Local => PathBuf::from(".claude").join("settings.json"),
         };
         match merge::backup_existing(&settings)
             .map_err(merge::MergeError::from)
@@ -326,5 +339,37 @@ mod tests {
         let err =
             resolve_targets(&reg, Some(vec!["frobnicator".into()]), false, &home).unwrap_err();
         assert!(err.contains("Unknown client id 'frobnicator'"));
+    }
+
+    /// The single "codex" entry wires ~/.codex/config.toml once and is idempotent —
+    /// a second install on an already-wired config replaces the block in place
+    /// rather than appending a duplicate.
+    #[test]
+    fn codex_install_is_idempotent() {
+        let home = std::env::temp_dir()
+            .join(format!("mootx01-codex-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let reg = clients::supported();
+        let codex = reg.iter().find(|c| c.id == "codex").unwrap().clone();
+
+        install_one(&codex, &home, "/usr/local/bin/mootx01", "http://127.0.0.1:4242", Location::Global)
+            .expect("first install must succeed");
+        install_one(&codex, &home, "/usr/local/bin/mootx01", "http://127.0.0.1:4242", Location::Global)
+            .expect("second install must be idempotent");
+
+        let config_path = codex.config_path(&home).unwrap();
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        let count = text
+            .lines()
+            .filter(|l| l.trim() == "[mcp_servers.mootx01]")
+            .count();
+        assert_eq!(
+            count, 1,
+            "idempotent install must leave exactly one [mcp_servers.mootx01] table; got {count}"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

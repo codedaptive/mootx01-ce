@@ -14,8 +14,9 @@
 //   The YAML is a simple two-key object; we write it directly rather than
 //   round-tripping a full YAML parser.
 //
-// Codex CLI / Codex Desktop (TOML):
-//   These share ~/.codex/config.toml. The installer merges the
+// Codex (Desktop & CLI) (TOML):
+//   ~/.codex/config.toml is shared by Codex CLI and Codex Desktop, so a
+//   single "codex" entry covers both. The installer merges the
 //   `[mcp_servers.mootx01]` table with a line-based pass that preserves all
 //   unrelated content (other tables, top-level keys), rather than writing JSON
 //   into a TOML file — which silently corrupted the file in earlier builds.
@@ -987,6 +988,7 @@ public enum Installer {
         return client.resolvedConfigURL(homeDirectory: homeDirectory)
     }
 }
+
 
 /// Errors raised while wiring a client's MCP config.
 public enum InstallerError: Error, CustomStringConvertible {
