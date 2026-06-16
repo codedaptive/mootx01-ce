@@ -25,7 +25,7 @@ on:
       - 'docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_*.md'
       - '.github/workflows/geniuslocus-conformance.yml'
   push:
-    branches: [main]
+    branches: [stable/1.0.x, develop/1.0.x]
     paths:
       - 'docs/validation/substrate_math_performance/test-harness/**'
   workflow_dispatch:
@@ -41,9 +41,14 @@ jobs:
 
   swift-build-test:
     name: Swift harness — build, unit tests, generate
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select newest Xcode (Swift 6.2 toolchain)
+        run: |
+          # macos default Xcode lags Swift 6.2; select the newest installed.
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
 
       - name: Show Swift version
         run: swift --version
@@ -75,7 +80,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
 
@@ -115,9 +120,14 @@ jobs:
   cross-language-validation:
     name: Four-way conformance matrix
     needs: [swift-build-test, rust-build-test]
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select newest Xcode (Swift 6.2 toolchain)
+        run: |
+          # Builds the Swift validator below; needs the 6.2 toolchain.
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -131,7 +141,7 @@ jobs:
       - name: Download Rust-generated vectors (macos)
         uses: actions/download-artifact@v4
         with:
-          name: rust-vectors-macos-14
+          name: rust-vectors-macos-15
           path: ${{ env.HARNESS_ROOT }}/rust-generated
 
       - name: Compute CRCs and confirm cross-language equality
@@ -185,32 +195,22 @@ jobs:
           done
 
   rust-aarch64-linux:
-    name: Rust harness — Linux aarch64 cross-check (optional)
-    runs-on: ubuntu-latest
-    continue-on-error: true   # informational until aarch64 runners stabilize
+    name: Rust harness — Linux aarch64 (native)
+    # Native aarch64 runner (GitHub-hosted, free for public repos). Replaces the
+    # former x86 cross-compile + QEMU path, which failed to resolve the target
+    # std; a native build needs no cross linker, no QEMU, and is a real gate.
+    runs-on: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain with aarch64 target
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
 
-      - name: Install cross-compile linker
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
-
-      - name: Build for aarch64-unknown-linux-gnu
+      - name: Build + test (native aarch64)
         working-directory: ${{ env.HARNESS_ROOT }}/rust
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --target aarch64-unknown-linux-gnu
-
-      - name: Run tests under QEMU
-        working-directory: ${{ env.HARNESS_ROOT }}/rust
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -L /usr/aarch64-linux-gnu
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo test --target aarch64-unknown-linux-gnu
+        run: |
+          cargo build --release
+          cargo test --release
 
   notify-completion:
     name: Conformance matrix complete
