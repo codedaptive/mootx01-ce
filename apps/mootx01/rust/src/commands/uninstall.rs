@@ -9,7 +9,7 @@ use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::core::clients::{self, ConfigFormat, McpClient, SERVER_NAME};
+use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
 use crate::core::{merge, paths, permissions};
 use crate::exit;
 
@@ -52,7 +52,10 @@ pub fn run(target: Option<Vec<String>>, yes: bool, purge: bool) -> ExitCode {
 
     for client in &selected {
         match remove_one(client, &home) {
-            Ok(true) => println!("  ✓ removed from {}", client.display_name),
+            Ok(true) => println!("  ✓ removed from {} ({})",
+                client.display_name,
+                client.config_path(&home).map(|p| p.display().to_string()).unwrap_or_default()
+            ),
             Ok(false) => println!("  - {} was not wired", client.display_name),
             Err(e) => eprintln!("  ✗ {}: {e}", client.display_name),
         }
@@ -60,7 +63,9 @@ pub fn run(target: Option<Vec<String>>, yes: bool, purge: bool) -> ExitCode {
 
     // Revoke Claude Code permissions when it was in scope.
     if selected.iter().any(|c| c.id == "claude-code") {
-        let settings = home.join(".claude/settings.json");
+        // join_rel produces native separators on every platform — backslash on
+        // Windows, forward-slash on POSIX.
+        let settings = join_rel(&home, ".claude/settings.json");
         match merge::backup_existing(&settings)
             .map_err(merge::MergeError::from)
             .and_then(|_| permissions::revoke(&settings))
@@ -178,4 +183,50 @@ fn purge_data(yes: bool) -> ExitCode {
     let _ = std::fs::remove_file(paths::config_json_path(&data));
     println!("Estate databases deleted.");
     ExitCode::from(exit::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::clients;
+    use crate::core::merge;
+
+    /// The single "codex" entry: remove_one returns true when the table
+    /// is present and false when already gone (idempotent / safe second call).
+    #[test]
+    fn codex_remove_one_round_trip() {
+        let home = std::env::temp_dir()
+            .join(format!("mootx01-codex-remove-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let reg = clients::supported();
+        let codex = reg.iter().find(|c| c.id == "codex").unwrap().clone();
+
+        let config_path = codex.config_path(&home).unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        merge::merge_into_toml_config(
+            &config_path,
+            &codex,
+            SERVER_NAME,
+            "/usr/local/bin/mootx01",
+            "http://127.0.0.1:4242",
+        )
+        .unwrap();
+
+        // First removal: entry is present → Ok(true).
+        assert_eq!(
+            remove_one(&codex, &home).unwrap(),
+            true,
+            "first remove must find and remove the entry"
+        );
+        // Second removal on the now-empty file: Ok(false) — already gone.
+        assert_eq!(
+            remove_one(&codex, &home).unwrap(),
+            false,
+            "second remove on already-cleaned file must return false"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

@@ -647,7 +647,7 @@ mod tests {
         let dir = tmp("toml-json");
         let p = dir.join("config.toml");
         std::fs::write(&p, br#"{"mcpServers":{"mootx01":{}}}"#).unwrap();
-        let err = merge_into_toml_config(&p, &client("codex-cli"), "mootx01", "/b", "http://u")
+        let err = merge_into_toml_config(&p, &client("codex"), "mootx01", "/b", "http://u")
             .unwrap_err();
         assert!(matches!(err, MergeError::MalformedConfig { .. }));
         let _ = std::fs::remove_dir_all(&dir);
@@ -658,7 +658,7 @@ mod tests {
         let dir = tmp("toml-rm");
         let p = dir.join("config.toml");
         std::fs::write(&p, "model = \"o3\"\n").unwrap();
-        merge_into_toml_config(&p, &client("codex-cli"), "mootx01", "/b", "http://u").unwrap();
+        merge_into_toml_config(&p, &client("codex"), "mootx01", "/b", "http://u").unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("[mcp_servers.mootx01]"));
         assert!(remove_from_toml_config(&p, "mootx01").unwrap());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "model = \"o3\"\n");

@@ -6,8 +6,8 @@
 // itself is Installer.swift (the earlier bash + Python install.sh path is
 // retired).
 //
-// Supported clients (12): Claude Desktop, Claude Code, Cursor, Cline, Continue,
-// Codex CLI, Codex Desktop, Opencode, Hermes, Gemini CLI, Antigravity, Kiro.
+// Supported clients (11): Claude Desktop, Claude Code, Cursor, Cline, Continue,
+// Codex (Desktop & CLI), Opencode, Hermes, Gemini CLI, Antigravity, Kiro.
 //
 // Transport: every client uses native HTTP (supportsLocalHTTP: true) where
 // their config schema accepts a local HTTP url, or the proxy bridge
@@ -239,8 +239,7 @@ public enum MCPClients {
     ///   Cline           → .vscode/extensions (VS Code extensions dir; isPresent
     ///                     scans for saoudrizwan.claude-dev-* prefix)
     ///   Continue        → .continue (config directory written on first launch)
-    ///   Codex CLI       → .codex (config directory created on first run)
-    ///   Codex Desktop   → /Applications/Codex.app (macOS app bundle)
+    ///   Codex (Desk&CLI)→ .codex (shared config dir; macOS also /Applications/Codex.app)
     ///   Opencode        → .config/opencode (config directory)
     ///   Hermes          → .hermes (config directory created on install)
     ///   Gemini CLI      → .gemini (config directory created on first run)
@@ -306,31 +305,19 @@ public enum MCPClients {
             supportsLocalHTTP: true  // YAML: type: streamable-http (installContinue)
         ),
 
-        // Codex CLI — OpenAI's terminal coding agent.
-        // Config: ~/.codex/config.toml (TOML; [mcp_servers.<name>] with url = "http://..."
-        // for HTTP transport). Detection: ~/.codex directory created on first run.
+        // Codex (Desktop & CLI) — Codex CLI and Codex Desktop share
+        // ~/.codex/config.toml, so a single entry wires both.
+        // Detection: ~/.codex directory created on first CLI run; macOS also
+        // accepts /Applications/Codex.app for the standalone Desktop app.
         // Source: developers.openai.com/codex/mcp
         MCPClient(
-            id: "codex-cli",
-            displayName: "Codex CLI",
+            id: "codex",
+            displayName: "Codex (Desktop & CLI)",
             configPath: ".codex/config.toml",
             serverName: serverName,
             detectPath: ".codex",
             supportsLocalHTTP: true,
             httpEntryIncludesType: false  // TOML url field; no explicit type needed
-        ),
-
-        // Codex Desktop — OpenAI's standalone macOS coding app.
-        // Shares ~/.codex/config.toml with Codex CLI; detected via app bundle.
-        // Source: OpenAI docs — Desktop App shares the same config/skills/MCP setup as CLI
-        MCPClient(
-            id: "codex-desktop",
-            displayName: "Codex Desktop",
-            configPath: ".codex/config.toml",
-            serverName: serverName,
-            detectPath: "/Applications/Codex.app",
-            supportsLocalHTTP: true,
-            httpEntryIncludesType: false  // TOML config shared with CLI; no type field
         ),
 
         // Opencode — open-source terminal coding assistant (sst/opencode).
