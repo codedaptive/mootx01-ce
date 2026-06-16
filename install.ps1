@@ -48,14 +48,26 @@ $MGR_BINARY  = Join-Path $INSTALL_DIR "moot-mgr.exe"
 # ── PATH helper ─────────────────────────────────────────────────────────────
 
 function Add-ToUserPath($dir) {
-    # [string] casts a missing ($null) value to "" — works in Windows PowerShell
-    # 5.1 (the default shell) as well as PowerShell 7+. The `??` operator is 7+ only.
+    # Persist the dir on the *user* PATH so mootx01 is callable by name in every
+    # future terminal. [string] casts a missing ($null) value to "" — works in
+    # Windows PowerShell 5.1 (the default shell) as well as 7+; the `??` operator
+    # is 7+ only.
     $current = [string][Environment]::GetEnvironmentVariable("PATH", "User")
     $parts = $current -split ";" | Where-Object { $_ -ne "" }
     if ($parts -notcontains $dir) {
         $newPath = ($parts + $dir) -join ";"
         [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
-        Write-Host "  Added $dir to user PATH (open a new terminal to use mootx01)"
+        Write-Host "  Added $dir to your user PATH (persists for new terminals)"
+    } else {
+        Write-Host "  $dir already on your user PATH"
+    }
+
+    # Persisting the user PATH does NOT update the running process — a setx-style
+    # write is only picked up by terminals started afterward. Mirror the dir into
+    # this session's $env:PATH too so the `mootx01 install` hand-off below works
+    # immediately, in the same window, without a restart.
+    if (($env:PATH -split ";") -notcontains $dir) {
+        $env:PATH = "$env:PATH;$dir"
     }
 }
 
@@ -199,5 +211,19 @@ Write-Host ""
 Write-Host "That step also registers moot-mgr, the management console, as a Task"
 Write-Host "Scheduler service (starts now, restarts at login) — dashboard at"
 Write-Host "http://127.0.0.1:4200. Or run it yourself any time with 'moot-mgr serve'."
+
+# mootx01 is on the persisted user PATH (every new terminal) and on THIS
+# session's PATH (Add-ToUserPath mirrored it into $env:PATH), so `mootx01`
+# should resolve right here. Verify, and if some environment policy stopped the
+# PATH update from taking, tell the user exactly how to fix it rather than
+# leaving them with a "command not found".
 Write-Host ""
-Write-Host "(mootx01 was added to your PATH; open a new terminal so 'mootx01' resolves.)"
+if (Get-Command mootx01 -ErrorAction SilentlyContinue) {
+    Write-Host "'mootx01' is on your PATH and ready to use in this terminal."
+} else {
+    # The dir was already persisted to the user PATH above, so a fresh terminal
+    # will pick it up; the full-path call works right now without waiting.
+    Write-Host "'mootx01' isn't resolving in this terminal yet. To use it:"
+    Write-Host "  - open a NEW terminal ($INSTALL_DIR was added to your user PATH), or"
+    Write-Host "  - run it by full path right now:  $BINARY install"
+}
