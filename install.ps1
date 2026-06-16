@@ -4,7 +4,7 @@
 # every MCP client found on this machine. No compiler or build tools required.
 #
 # Standard one-liner install:
-#   iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.ps1) }"
+#   iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"
 #
 # With options:
 #   iex "& { $(irm https://...) } -Uninstall"
