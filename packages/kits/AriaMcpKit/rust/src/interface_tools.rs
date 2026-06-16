@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use locus_kit::{
     adjectives::AdjectiveExportability,
     estate_types::LatticeAnchor,
-    filter::{Filter, RecallFrame},
+    filter::RecallFrame,
     frames::{CaptureFrame, MutationKind, TunnelCaptureFrame},
     tunnel_operational::TunnelKind,
     drawer_operational::CaptureChannel,
@@ -42,7 +42,10 @@ use genius_locus_kit::WriteMode;
 
 use substrate_types::{RowState, RowStateCluster};
 
-use crate::dispatch::{error_result, require_string, text_result, wall_now};
+use crate::dispatch::{
+    decode_filter_chain, error_result, optional_bool, optional_integer, optional_string,
+    require_string, text_result, wall_now,
+};
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 use crate::session_protocol::ARIA_SESSION_PROTOCOL;
@@ -172,7 +175,7 @@ fn run_file_memory(
     // Intake), mirroring the Swift ARIA_MCP threading. When true the memory is
     // encoded for semantic search inline before the write returns; when false
     // (default) the write returns immediately and the encode drain ingests it.
-    let impatient = args.get("impatient").and_then(|v| v.as_bool()).unwrap_or(false);
+    let impatient = optional_bool(args, "impatient")?.unwrap_or(false);
     let mode = if impatient { WriteMode::Impatient } else { WriteMode::Regular };
 
     let now = wall_now();
@@ -228,7 +231,7 @@ fn run_memory_search(
     // to matrixAware would run a different scoring mode than the caller asked
     // for and hide the typo. This mirrors the `ordering` decode below, which
     // is already strict. Mirrors Swift runMemorySearch.
-    let scoring = match args.get("scoring").and_then(|v| v.as_str()) {
+    let scoring = match optional_string(args, "scoring")? {
         None | Some("matrixAware") => GLKRecallScoring::MatrixAware,
         Some("raw") => GLKRecallScoring::Raw,
         Some("rrf") => GLKRecallScoring::Rrf,
@@ -241,9 +244,7 @@ fn run_memory_search(
     };
 
     // Decode optional `limit` argument. Defaults to 20.
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_i64())
+    let limit = optional_integer(args, "limit")?
         .map(|n| n.max(1) as usize)
         .unwrap_or(20_usize);
 
@@ -254,7 +255,7 @@ fn run_memory_search(
     // results ARE relevance-ordered. The RecallFrame ordering field is set to
     // ByCaptureTimeDesc as a stable tie-break; final order is driven by scores.
     // Unknown spellings return invalidParams. Mirrors Swift decodeOrdering.
-    if let Some(ord) = args.get("ordering").and_then(|v| v.as_str()) {
+    if let Some(ord) = optional_string(args, "ordering")? {
         match ord {
             "byCaptureTimeDesc" | "byCaptureTimeAsc" | "byRoomAsc" | "byRelevanceDesc" => {
                 // All accepted spellings proceed to recall_scored. The RecallFrame
@@ -270,12 +271,14 @@ fn run_memory_search(
         }
     }
 
-    // Decode optional `filter` for the recall frame; default to Unconfirmed.
+    // Decode optional `filter` for the recall frame. Omitted filter uses
+    // ordinary recall defaults: state/trust/sensitivity constraints are
+    // inserted by LocusKit, but no confirmation constraint is added.
     // Full hydration: the caller is a human-facing AI client; the content
     // preview in the search result requires the content blob. Structured
     // hydration (the RecallFrame default) strips content blobs and would
     // render every result as an empty-content preview.
-    let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+    let mut frame = RecallFrame::new(decode_filter_chain(args)?);
     frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
 
     // B-10a: mark as external so the coordinator writes recall-trace rows for
@@ -453,7 +456,7 @@ fn run_withdraw_memory(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
     let id = require_string(args, "id")?;
-    let reason = args.get("reason").and_then(|v| v.as_str());
+    let reason = optional_string(args, "reason")?;
 
     // Note usage: if this drawer was surfaced by moot_memory_search, mark its
     // recall-trace rows used so the reward sweep assigns reward 1.0.
@@ -476,10 +479,7 @@ fn run_erase_memory(
     let estate = registry.resolve(args, "estateID")?;
     let id = require_string(args, "id")?;
     let reason = require_string(args, "reason")?;
-    let confirmed = args
-        .get("confirmed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let confirmed = optional_bool(args, "confirmed")?.unwrap_or(false);
 
     if !confirmed {
         return Ok(error_result(
@@ -560,7 +560,7 @@ fn run_link_memories(
 
     // Recall all drawers to resolve wing+room for source and target.
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .recall(&estate.handle, RecallFrame::new(vec![]), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     let source = all.iter().find(|d| d.id == from_id).ok_or_else(|| {
@@ -623,7 +623,7 @@ fn run_connection_search(
 
     // Recall all drawers to find the source drawer's wing.
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .recall(&estate.handle, RecallFrame::new(vec![]), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     let source = all.iter().find(|d| d.id == from_id).ok_or_else(|| {
@@ -667,7 +667,7 @@ fn run_connection_map(
 
     // Recall all drawers to discover all wings in the estate.
     let all = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .recall(&estate.handle, RecallFrame::new(vec![]), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     let wings: std::collections::HashSet<&str> =
@@ -710,7 +710,7 @@ fn run_file_fact(
     let subject = require_string(args, "subject")?;
     let predicate = require_string(args, "predicate")?;
     let object = require_string(args, "object")?;
-    let source_id = args.get("source_id").and_then(|v| v.as_str()).unwrap_or("");
+    let source_id = optional_string(args, "source_id")?.unwrap_or("");
 
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
@@ -732,7 +732,7 @@ fn run_fact_search(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
-    let query = args.get("query").and_then(|v| v.as_str());
+    let query = optional_string(args, "query")?;
 
     let coord = estate.coord.lock().unwrap();
     let facts = coord
@@ -849,7 +849,7 @@ fn run_fact_timeline(
     let estate = registry.resolve(args, "estateID")?;
     // Lower the entity filter for case-insensitive matching — coordinator
     // receives a lowered entity and applies a simple String::contains check.
-    let entity_raw = args.get("entity").and_then(|v| v.as_str());
+    let entity_raw = optional_string(args, "entity")?;
     let entity_lower: Option<String> = entity_raw.map(|e| e.to_lowercase());
     let entity_ref: Option<&str> = entity_lower.as_deref();
 
@@ -896,10 +896,7 @@ fn run_write_journal(
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
     let entry = require_string(args, "entry")?;
-    let agent = args
-        .get("agent")
-        .and_then(|v| v.as_str())
-        .unwrap_or("mcp-agent");
+    let agent = optional_string(args, "agent")?.unwrap_or("mcp-agent");
 
     let now = wall_now();
     let coord = estate.coord.lock().unwrap();
@@ -926,13 +923,8 @@ fn run_read_journal(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
-    let agent = args
-        .get("agent")
-        .and_then(|v| v.as_str())
-        .unwrap_or("mcp-agent");
-    let last_n = args
-        .get("last_n")
-        .and_then(|v| v.as_i64())
+    let agent = optional_string(args, "agent")?.unwrap_or("mcp-agent");
+    let last_n = optional_integer(args, "last_n")?
         .map(|n| n as usize)
         .unwrap_or(10);
 
@@ -975,7 +967,7 @@ fn run_estate_status(
     let coord = estate.coord.lock().unwrap();
 
     let drawers = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .recall(&estate.handle, RecallFrame::new(vec![]), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     let kg_facts = coord
@@ -1036,7 +1028,7 @@ fn run_estate_map(
     let coord = estate.coord.lock().unwrap();
 
     let drawers = coord
-        .recall(&estate.handle, RecallFrame::new(vec![Filter::Unconfirmed]), now)
+        .recall(&estate.handle, RecallFrame::new(vec![]), now)
         .map_err(|e| JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}")))?;
 
     // Group by wing then room.
@@ -1129,7 +1121,7 @@ fn decode_mutation_kind(s: &str) -> Result<MutationKind, JSONRPCError> {
 /// Accepted string values: `"private"` → `Private`, `"public"` → `Public`.
 /// Mirrors Swift `ToolDispatch.decodeExportability(_:)`.
 fn decode_exportability(args: &BTreeMap<String, JsonValue>) -> Result<AdjectiveExportability, JSONRPCError> {
-    match args.get("exportability").and_then(|v| v.as_str()) {
+    match optional_string(args, "exportability")? {
         None | Some("private") => Ok(AdjectiveExportability::Private),
         Some("public") => Ok(AdjectiveExportability::Public),
         Some(other) => Err(JSONRPCError::new(

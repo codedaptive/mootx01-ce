@@ -345,7 +345,7 @@ enum LensTools {
             let ranked = try await Keystones.run(
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
-                topK: integer(args, "topK", default: 5))
+                topK: try integer(args, "topK", default: 5))
             return list("keystones", ranked.map { "\($0.id) centrality=\($0.centrality)" })
 
         case "moot_lens_constellation":
@@ -358,21 +358,21 @@ enum LensTools {
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
                 seedDrawerID: try requireString(args, "seedDrawerID"),
-                walkLength: integer(args, "walkLength", default: 10_000),
-                k: integer(args, "k", default: 10))
+                walkLength: try integer(args, "walkLength", default: 10_000),
+                k: try integer(args, "k", default: 10))
             return list("free_association", out.map { "\($0.drawerID) activation=\($0.activation)" })
 
         case "moot_lens_theme_weather":
             let weather = try await ThemeWeather.run(
-                kit: kit, handle: handle, frame: frame(args),
-                halfLifeSeconds: number(args, "halfLifeSeconds", default: 604_800),
+                kit: kit, handle: handle, frame: try frame(args),
+                halfLifeSeconds: try number(args, "halfLifeSeconds", default: 604_800),
                 now: Date())
             return list("theme_weather", weather.map { "\($0.category) momentum=\($0.momentum)" })
 
         case "moot_lens_latent_themes":
             let themes = try await LatentThemesLens.run(
-                kit: kit, handle: handle, frame: frame(args),
-                k: integer(args, "k", default: 3))
+                kit: kit, handle: handle, frame: try frame(args),
+                k: try integer(args, "k", default: 3))
             return list(
                 "latent_themes (k=\(themes.k))",
                 themes.loadings.map { "\($0.label) → theme \($0.dominantTheme)" })
@@ -395,7 +395,7 @@ enum LensTools {
 
         case "moot_lens_drift":
             let out = try await Drift.run(
-                kit: kit, handle: handle, frame: frame(args),
+                kit: kit, handle: handle, frame: try frame(args),
                 splitAt: try requireDate(args, "splitAt"))
             return ToolDispatcher.textResult("""
             drift: before=\(out.beforeCount) after=\(out.afterCount)
@@ -405,15 +405,15 @@ enum LensTools {
 
         case "moot_lens_contradiction":
             let out = try await Contradiction.run(
-                kit: kit, handle: handle, frame: frame(args),
-                threshold: Float(number(args, "threshold", default: 1.5)))
+                kit: kit, handle: handle, frame: try frame(args),
+                threshold: Float(try number(args, "threshold", default: 1.5)))
             return list(
                 "contradiction (considered \(out.considered))",
                 out.outliers)
 
         case "moot_lens_trust_synthesis":
             let out = try await TrustLens.run(
-                kit: kit, handle: handle, frame: frame(args))
+                kit: kit, handle: handle, frame: try frame(args))
             return ToolDispatcher.textResult("""
             trust_grounded_synthesis: \(out.rankedIDs.count) drawer(s), \(out.highTrustCount) high-trust
             ranked: \(out.rankedIDs.joined(separator: ", "))
@@ -423,10 +423,10 @@ enum LensTools {
         case "moot_lens_partial_cue":
             do {
                 let out = try await PartialCueRecall.run(
-                    kit: kit, handle: handle, frame: frame(args),
+                    kit: kit, handle: handle, frame: try frame(args),
                     anchorID: try requireString(args, "anchorID"),
-                    mode: decodeCueMode(args["mode"]?.stringValue),
-                    k: integer(args, "k", default: 5))
+                    mode: try decodeCueMode(args["mode"]),
+                    k: try integer(args, "k", default: 5))
                 return list("partial_cue_recall", out.map { "\($0.id) score=\($0.score)" })
             } catch let error as AnchorNotInRecalledSetError {
                 // The cue pointed at nothing — a lens-level refusal, not
@@ -442,10 +442,10 @@ enum LensTools {
                     message: "targetKind is not a content kind name")
             }
             let predictions = try await Anticipate.run(
-                kit: kit, handle: handle, frame: frame(args),
+                kit: kit, handle: handle, frame: try frame(args),
                 targetOutcome: UInt8(kind.rawValue),
-                k: integer(args, "k", default: 5),
-                minObservations: UInt32(integer(args, "minObservations", default: 1)))
+                k: try integer(args, "k", default: 5),
+                minObservations: UInt32(try integer(args, "minObservations", default: 1)))
             return list("anticipate", predictions.map {
                 "action=\(channelName($0.action)) successRate=\($0.successRate) n=\($0.count)"
             })
@@ -455,14 +455,14 @@ enum LensTools {
                 kit: kit, handle: handle,
                 wing: try requireString(args, "wing"),
                 anchorID: try requireString(args, "anchorID"),
-                k: integer(args, "k", default: 5))
+                k: try integer(args, "k", default: 5))
             return list("tunnel_successor", out.map { "\($0.id) weight=\($0.weight)" })
 
         case "moot_lens_overlap":
             let out = try await MindOverlapLens.run(
                 kit: kit, handleA: handle,
                 handleB: try resolveHandle(secondEstateArgs(args)),
-                frame: frame(args))
+                frame: try frame(args))
             return ToolDispatcher.textResult(
                 "mind_overlap: \(out.overlap) (a=\(out.aCount), b=\(out.bCount) drawer(s))")
 
@@ -470,19 +470,19 @@ enum LensTools {
             let out = try await EstateDivergenceLens.run(
                 kit: kit, handleA: handle,
                 handleB: try resolveHandle(secondEstateArgs(args)),
-                frame: frame(args))
+                frame: try frame(args))
             return ToolDispatcher.textResult("""
             estate_divergence: jensenShannon=\(out.divergence.jensenShannon) klDivergence=\(out.divergence.klDivergence)
             a=\(out.aCount) drawer(s), b=\(out.bCount) drawer(s)
             """)
 
         case "moot_lens_associations":
-            let filter = decodeFilter(args["filter"]?.stringValue)
-            let limit = args["limit"]?.integerValue.map(Int.init)
-            let minSupport = doubleArg(args["minSupport"]) ?? 0.0
-            let minConfidence = doubleArg(args["minConfidence"]) ?? 0.0
+            let filterChain = try decodeFilterChain(args["filter"])
+            let limit = try optionalInt(args["limit"], argument: "limit")
+            let minSupport = try doubleArg(args["minSupport"], argument: "minSupport") ?? 0.0
+            let minConfidence = try doubleArg(args["minConfidence"], argument: "minConfidence") ?? 0.0
             let arFrame = LocusKit.RecallFrame(
-                filterChain: [filter],
+                filterChain: filterChain,
                 hydrationLevel: .structured,
                 limit: limit,
                 ordering: .byCaptureTimeDesc)
@@ -525,11 +525,11 @@ enum LensTools {
             return ToolDispatcher.textResult(momentLines.joined(separator: "\n"))
 
         case "moot_lens_rhythm":
-            let bit = integer(args, "bit", default: 0)
-            let bucketSeconds = integer(args, "bucketSeconds", default: 86400)
-            let bucketCount = integer(args, "bucketCount", default: 32)
+            let bit = try integer(args, "bit", default: 0)
+            let bucketSeconds = try integer(args, "bucketSeconds", default: 86400)
+            let bucketCount = try integer(args, "bucketCount", default: 32)
             let endingAt = try requireDate(args, "endingAt")
-            let topK = integer(args, "topK", default: 3)
+            let topK = try integer(args, "topK", default: 3)
             let out = try await Rhythm.run(
                 kit: kit, handle: handle,
                 bit: bit,
@@ -549,7 +549,7 @@ enum LensTools {
             let windowEnd = try requireDate(args, "windowEnd")
             let targetField = try requireString(args, "targetField")
             let targetValue = try requireString(args, "targetValue")
-            let k = integer(args, "k", default: 5)
+            let k = try integer(args, "k", default: 5)
             let out = try await Precedence.run(
                 kit: kit, handle: handle,
                 window: windowStart...windowEnd,
@@ -565,10 +565,10 @@ enum LensTools {
 
         case "moot_lens_complexity":
             let fieldA = try requireString(args, "fieldA")
-            let fieldB = args["fieldB"]?.stringValue
+            let fieldB = try optionalString(args["fieldB"], argument: "fieldB")
             let out = try await Complexity.run(
                 kit: kit, handle: handle,
-                frame: frame(args),
+                frame: try frame(args),
                 fieldA: fieldA,
                 fieldB: fieldB,
                 now: Date())
@@ -585,13 +585,13 @@ enum LensTools {
             return ToolDispatcher.textResult(complexityLines.joined(separator: "\n"))
 
         case "moot_lens_concepts":
-            let fcFilter = decodeFilter(args["filter"]?.stringValue)
-            let fcLimit = args["limit"]?.integerValue.map(Int.init)
-            let minSupport = args["minSupport"]?.integerValue.map(Int.init) ?? 1
-            let maxIntentSize = args["maxIntentSize"]?.integerValue.map(Int.init) ?? 8
-            let maxConcepts = args["maxConcepts"]?.integerValue.map(Int.init) ?? 20
+            let fcFilterChain = try decodeFilterChain(args["filter"])
+            let fcLimit = try optionalInt(args["limit"], argument: "limit")
+            let minSupport = try integer(args, "minSupport", default: 1)
+            let maxIntentSize = try integer(args, "maxIntentSize", default: 8)
+            let maxConcepts = try integer(args, "maxConcepts", default: 20)
             let fcFrame = LocusKit.RecallFrame(
-                filterChain: [fcFilter],
+                filterChain: fcFilterChain,
                 hydrationLevel: .structured,
                 limit: fcLimit,
                 ordering: .byCaptureTimeDesc)
@@ -614,10 +614,10 @@ enum LensTools {
             return ToolDispatcher.textResult(fcLines.joined(separator: "\n"))
 
         case "moot_lens_apriori":
-            let minSupport = doubleArg(args["minSupport"]) ?? 0.0
-            let minConfidence = doubleArg(args["minConfidence"]) ?? 0.0
-            let minLift = doubleArg(args["minLift"]) ?? 1.0
-            let maxK = integer(args, "maxK", default: 3)
+            let minSupport = try doubleArg(args["minSupport"], argument: "minSupport") ?? 0.0
+            let minConfidence = try doubleArg(args["minConfidence"], argument: "minConfidence") ?? 0.0
+            let minLift = try doubleArg(args["minLift"], argument: "minLift") ?? 1.0
+            let maxK = try integer(args, "maxK", default: 3)
             let aprioriOut = try await AprioriRules().run(
                 input: .init(
                     thresholds: AprioriThresholds(
@@ -678,19 +678,43 @@ enum LensTools {
         return date
     }
 
+    private static func optionalString(_ value: JSONValue?, argument: String) throws -> String? {
+        guard let value else { return nil }
+        guard let string = value.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be a string; omit it to use the default")
+        }
+        return string
+    }
+
+    private static func optionalInt(_ value: JSONValue?, argument: String) throws -> Int? {
+        guard let value else { return nil }
+        guard let integer = value.integerValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be an integer; omit it to use the default")
+        }
+        return Int(integer)
+    }
+
     private static func integer(
         _ args: [String: JSONValue], _ key: String, default fallback: Int
-    ) -> Int {
-        args[key]?.integerValue.map(Int.init) ?? fallback
+    ) throws -> Int {
+        try optionalInt(args[key], argument: key) ?? fallback
     }
 
     private static func number(
         _ args: [String: JSONValue], _ key: String, default fallback: Double
-    ) -> Double {
-        switch args[key] {
+    ) throws -> Double {
+        guard let value = args[key] else { return fallback }
+        switch value {
         case .double(let d): return d
         case .integer(let i): return Double(i)
-        default: return fallback
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(key) must be a number; omit it to use the default")
         }
     }
 
@@ -741,11 +765,16 @@ enum LensTools {
         }
     }
 
-    private static func decodeCueMode(_ name: String?) -> CueMode {
+    private static func decodeCueMode(_ value: JSONValue?) throws -> CueMode {
+        guard let name = try optionalString(value, argument: "mode") else { return .feelsLike }
         switch name {
         case "aboutThis": return .aboutThis
         case "fromThen": return .fromThen
-        default: return .feelsLike
+        case "feelsLike": return .feelsLike
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown mode: \(name)")
         }
     }
 
@@ -770,38 +799,38 @@ enum LensTools {
     /// Recall frame for the recall-scoped lenses. Same filter vocabulary
     /// as `RecipeTools.decodeFilter` (a deliberate small copy — the
     /// helpers there are private; same precedent as the schema helpers).
-    private static func frame(_ args: [String: JSONValue]) -> LocusKit.RecallFrame {
-        let filter: LocusKit.Filter
-        switch args["filter"]?.stringValue {
-        case "userConfirmed": filter = .userConfirmed
-        case "exportable": filter = .exportable
-        case "contained": filter = .contained
-        case "currentlyBelieve": filter = .currentlyBelieve
-        default: filter = .unconfirmed
-        }
-        return LocusKit.RecallFrame(filterChain: [filter])
+    private static func frame(_ args: [String: JSONValue]) throws -> LocusKit.RecallFrame {
+        LocusKit.RecallFrame(filterChain: try decodeFilterChain(args["filter"]))
     }
 
-    /// Decode a filter kind string to a `LocusKit.Filter`. Used by the
+    /// Decode a filter kind string to a `LocusKit.Filter` chain. Used by the
     /// analytics lenses that take an explicit filter + limit frame.
-    private static func decodeFilter(_ name: String?) -> LocusKit.Filter {
+    private static func decodeFilterChain(_ value: JSONValue?) throws -> [LocusKit.Filter] {
+        guard let name = try optionalString(value, argument: "filter") else { return [] }
         switch name {
-        case "userConfirmed": return .userConfirmed
-        case "exportable": return .exportable
-        case "contained": return .contained
-        case "currentlyBelieve": return .currentlyBelieve
-        default: return .unconfirmed
+        case "unconfirmed": return [.unconfirmed]
+        case "userConfirmed": return [.userConfirmed]
+        case "exportable": return [.exportable]
+        case "contained": return [.contained]
+        case "currentlyBelieve": return [.currentlyBelieve]
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "Unknown filter: \(name)")
         }
     }
 
     /// Extract a `Double` from a `.double` or `.integer` JSON value.
     /// Returns `nil` for absent or non-numeric values.
-    private static func doubleArg(_ value: JSONValue?) -> Double? {
+    private static func doubleArg(_ value: JSONValue?, argument: String) throws -> Double? {
         guard let value else { return nil }
         switch value {
         case .double(let d): return d
         case .integer(let i): return Double(i)
-        default: return nil
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be a number; omit it to use the default")
         }
     }
 
@@ -816,11 +845,11 @@ enum LensTools {
     // MARK: - JSON schema helpers (same small copies as RecipeTools)
 
     private static var estateIDSchema: JSONValue {
-        stringSchema("Optional UUID of the open estate to target. Omit for the default estate.")
+        stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid.")
     }
 
     private static var filterSchema: JSONValue {
-        stringSchema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve.")
+        stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary recall across any confirmation state. null is invalid.")
     }
 
     private static func objectSchema(

@@ -82,7 +82,10 @@ use locus_kit::{
 use neuron_kit::RecallFrameTuning;
 use uuid::Uuid;
 
-use crate::dispatch::{error_result, require_string, text_result};
+use crate::dispatch::{
+    decode_filter_chain, error_result, optional_integer, optional_string, require_string,
+    text_result,
+};
 use crate::estate_registry::EstateRegistry;
 use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JsonValue};
 
@@ -196,13 +199,10 @@ fn run_grounded_synthesis_tool(
     registry: &EstateRegistry,
 ) -> Result<serde_json::Value, JSONRPCError> {
     let estate = registry.resolve(args, "estateID")?;
-    let filter = decode_recipe_filter(args);
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_i64())
-        .map(|i| i as usize);
+    let filter_chain = decode_filter_chain(args)?;
+    let limit = optional_integer(args, "limit")?.map(|i| i as usize);
 
-    let mut frame = RecallFrame::new(vec![filter]);
+    let mut frame = RecallFrame::new(filter_chain);
     frame.hydration_level = HydrationLevel::Structured;
     frame.ordering = Ordering::ByCaptureTimeDesc;
     if let Some(l) = limit {
@@ -255,25 +255,21 @@ fn run_precise_recall_tool(
     let estate = registry.resolve(args, "estateID")?;
     let query = require_string(args, "query")?;
     // 20 is moot_memory_search's own default limit; keep parity.
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_i64())
+    let limit = optional_integer(args, "limit")?
         .map(|i| i as usize)
         .unwrap_or(20);
     // Default coarse pool is CognitionKit's own default (30); honour an explicit
     // override. The recipe clamps pool >= limit internally.
-    let pool = args
-        .get("pool")
-        .and_then(|v| v.as_i64())
+    let pool = optional_integer(args, "pool")?
         .map(|i| i as usize)
         .unwrap_or(PRECISE_DEFAULT_POOL);
-    let filter = decode_recipe_filter(args);
+    let filter = decode_precise_filter(args)?;
 
     // The ablation selector: a named reduction composition. Absent ⇒ None ⇒ the
     // recipe's default (`text`). Present-but-unknown ⇒ fail closed at the
     // boundary (the grid is the authoritative name set; an unknown name is a
     // caller error, not a silent fall-through).
-    let composition = match args.get("composition").and_then(|v| v.as_str()) {
+    let composition = match optional_string(args, "composition")? {
         Some(name) if neuron_kit::composition_grid::is_known(name) => Some(name.to_string()),
         Some(name) => {
             return Ok(error_result(&format!(
@@ -529,7 +525,7 @@ fn run_dream_tool(
     // Deterministic `now` when supplied; otherwise the wall clock. A malformed
     // ISO8601 instant is an out-of-band client error (invalidParams), NOT a
     // silent fallback — mirroring Swift's identical check.
-    let now_epoch_secs: i64 = if let Some(raw) = args.get("now").and_then(|v| v.as_str()) {
+    let now_epoch_secs: i64 = if let Some(raw) = optional_string(args, "now")? {
         parse_iso8601_to_epoch(raw).ok_or_else(|| {
             JSONRPCError::new(
                 JSONRPCErrorCode::INVALID_PARAMS,
@@ -740,7 +736,7 @@ fn decode_plans(args: &BTreeMap<String, JsonValue>) -> Result<Vec<PlanInput>, JS
                         "each plan needs embeddingModelID",
                     )
                 })?;
-            let sensitivity = decode_sensitivity(obj.get("sensitivity").and_then(|v| v.as_str()));
+            let sensitivity = decode_sensitivity(obj.get("sensitivity"))?;
             Ok(PlanInput {
                 name: name.to_owned(),
                 room: room.to_owned(),
@@ -752,25 +748,48 @@ fn decode_plans(args: &BTreeMap<String, JsonValue>) -> Result<Vec<PlanInput>, JS
         .collect()
 }
 
-fn decode_sensitivity(name: Option<&str>) -> i64 {
-    match name {
-        Some("elevated") => AdjectiveSensitivity::Elevated.raw_value(),
-        Some("restricted") => AdjectiveSensitivity::Restricted.raw_value(),
-        Some("secret") => AdjectiveSensitivity::Secret.raw_value(),
-        _ => AdjectiveSensitivity::Normal.raw_value(),
+fn optional_string_value<'a>(
+    value: Option<&'a JsonValue>,
+    key: &str,
+) -> Result<Option<&'a str>, JSONRPCError> {
+    match value {
+        None => Ok(None),
+        Some(JsonValue::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("{key} must be a string; omit it to use the default"),
+        )),
     }
 }
 
-/// Decode the recall filter for recipe tools. Mirrors Swift
-/// `RecipeTools.decodeFilter(_:)` — defaults to Unconfirmed so freshly-
-/// captured rows are visible.
-fn decode_recipe_filter(args: &BTreeMap<String, JsonValue>) -> Filter {
-    match args.get("filter").and_then(|v| v.as_str()) {
-        Some("userConfirmed") => Filter::UserConfirmed,
-        Some("exportable") => Filter::Exportable,
-        Some("contained") => Filter::Contained,
-        Some("currentlyBelieve") => Filter::CurrentlyBelieve,
-        _ => Filter::Unconfirmed,
+fn decode_sensitivity(value: Option<&JsonValue>) -> Result<i64, JSONRPCError> {
+    match optional_string_value(value, "sensitivity")? {
+        None | Some("normal") => Ok(AdjectiveSensitivity::Normal.raw_value()),
+        Some("elevated") => Ok(AdjectiveSensitivity::Elevated.raw_value()),
+        Some("restricted") => Ok(AdjectiveSensitivity::Restricted.raw_value()),
+        Some("secret") => Ok(AdjectiveSensitivity::Secret.raw_value()),
+        Some(unknown) => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Unknown sensitivity: {unknown}"),
+        )),
+    }
+}
+
+/// `run_precise_recall` currently accepts a single filter entry. Omitted
+/// filter uses the same active-recall default as an empty chain without adding
+/// a confirmation constraint.
+fn decode_precise_filter(args: &BTreeMap<String, JsonValue>) -> Result<Filter, JSONRPCError> {
+    match optional_string(args, "filter")? {
+        None => Ok(Filter::CurrentlyBelieve),
+        Some("unconfirmed") => Ok(Filter::Unconfirmed),
+        Some("userConfirmed") => Ok(Filter::UserConfirmed),
+        Some("exportable") => Ok(Filter::Exportable),
+        Some("contained") => Ok(Filter::Contained),
+        Some("currentlyBelieve") => Ok(Filter::CurrentlyBelieve),
+        Some(unknown) => Err(JSONRPCError::new(
+            JSONRPCErrorCode::INVALID_PARAMS,
+            format!("Unknown filter: {unknown}"),
+        )),
     }
 }
 
@@ -781,4 +800,3 @@ fn decode_recipe_filter(args: &BTreeMap<String, JsonValue>) -> Filter {
 fn error_from_recipe(e: cognition_kit::RecipeRunError) -> JSONRPCError {
     JSONRPCError::new(JSONRPCErrorCode::TOOL_DISPATCH_FAILURE, format!("{e:?}"))
 }
-

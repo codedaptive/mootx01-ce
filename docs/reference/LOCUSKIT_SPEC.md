@@ -217,14 +217,15 @@ read `degradedStages`.
 **B-4 (filter chain is conjunction):** a `RecallFrame.filterChain` is `[Filter]`
 interpreted as implicit AND (equivalent to `Filter.all(chain)`). When the
 chain carries no state filter the evaluator prepends `currentlyBelieve`; no
-trust filter prepends `trustworthy`; no provenance filter prepends
-`userConfirmed`; no sensitivity filter prepends
-`.sensitivityAtMost(.elevated)`. "No filter" therefore defaults to
-currently-believed, action-trustworthy, user-confirmed content within the
-Normal tier.
+trust filter prepends `trustworthy`; no sensitivity filter prepends
+`.sensitivityAtMost(.elevated)`. No confirmation filter is inserted by
+default; callers request `.userConfirmed`, `.unconfirmed`, or other
+provenance filters explicitly. "No filter" therefore defaults to
+currently-believed, action-trustworthy content across any confirmation state
+within the Normal tier.
 
-**B-4.1 (recall defaults — tier-aligned sensitivity ceiling):** the four
-default insertions described in B-4 are the no-claims posture for a caller
+**B-4.1 (recall defaults — tier-aligned sensitivity ceiling):** the default
+insertions described in B-4 are the no-claims posture for a caller
 that has not asserted access entitlements. The sensitivity default
 `.sensitivityAtMost(.elevated)` is the Normal-tier ceiling per ADR-007
 Decision 2 and the normative tier mapping: Normal tier encompasses

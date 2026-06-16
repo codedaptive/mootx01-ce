@@ -98,11 +98,11 @@ public enum ToolProjection {
                     properties: [
                         "content": stringSchema("The text content to remember."),
                         "location": stringSchema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Used for retrieval organisation."),
-                        "sensitivity": stringSchema("Optional sensitivity: normal (default), elevated, restricted, secret."),
-                        "exportability": stringSchema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Use moot_update_memory with mutation=correctExportability(public) to promote an existing private memory. Drawers born public are immediately returned by filter:exportable searches."),
-                        "kind": stringSchema("Optional content kind: prose (default), code, transcript, list, structuredJSON, imageCaption."),
-                        "event_time": stringSchema("Optional ISO8601 event time for historical ingestion. Omit for streaming capture (defaults to now)."),
-                        "impatient": booleanSchema("Optional. When true, the memory is encoded for semantic search INLINE before the write returns, so it is immediately recallable by BM25/vector search at the cost of a slower write. When false (default), the write returns immediately and encoding happens in the background."),
+                        "sensitivity": stringSchema("Optional sensitivity: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
+                        "exportability": stringSchema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Use moot_update_memory with mutation=correctExportability(public) to promote an existing private memory. Drawers born public are immediately returned by filter:exportable searches. Omit to use the default; null is invalid."),
+                        "kind": stringSchema("Optional content kind: prose (default), code, transcript, list, structuredJSON, imageCaption. Omit to use the default; null is invalid."),
+                        "event_time": stringSchema("Optional ISO8601 event time for historical ingestion. Omit for streaming capture (defaults to now); null is invalid."),
+                        "impatient": booleanSchema("Optional. When true, the memory is encoded for semantic search INLINE before the write returns, so it is immediately recallable by BM25/vector search at the cost of a slower write. When false (default), the write returns immediately and encoding happens in the background. Omit to use the default; null is invalid."),
                     ],
                     required: ["content", "location"]
                 )),
@@ -114,11 +114,11 @@ public enum ToolProjection {
                 inputSchema: withEstateID(objectSchema(
                     properties: [
                         "query": stringSchema("Natural-language search query."),
-                        "limit": integerSchema("Max results to return (default 20)."),
-                        "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained."),
-                        "explain": booleanSchema("Return per-hit explanation blocks when true."),
-                        "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default)."),
-                        "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters."),
+                        "limit": integerSchema("Max results to return (default 20). Omit to use the default; null is invalid."),
+                        "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. null is invalid."),
+                        "explain": booleanSchema("Return per-hit explanation blocks when true. Omit to use the default; null is invalid."),
+                        "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
+                        "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
                     ],
                     required: ["query"]
                 )),
@@ -363,10 +363,10 @@ public enum ToolProjection {
             inputSchema: objectSchema(
                 properties: [
                     "requesterEstateID": stringSchema("UUID of the requesting (caller) estate; the grant gate is evaluated against it. Must name an open estate."),
-                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained."),
-                    "limit": integerSchema("Max rows per estate to return."),
-                    "ordering": stringSchema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc."),
-                    "hydrationLevel": stringSchema("Hydration: structured (default), full, bitmapOnly."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained. Omit for ordinary recall across any confirmation state. null is invalid."),
+                    "limit": integerSchema("Max rows per estate to return. Omit for no explicit cap; null is invalid."),
+                    "ordering": stringSchema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc. Omit to use the default; null is invalid."),
+                    "hydrationLevel": stringSchema("Hydration: structured (default), full, bitmapOnly. Omit to use the default; null is invalid."),
                 ],
                 required: ["requesterEstateID"]
             ),

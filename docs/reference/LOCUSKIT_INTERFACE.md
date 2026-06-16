@@ -397,7 +397,10 @@ by an explicit sensitivity constraint in the caller's chain, e.g.
 `.sensitivity(.secret)` or `.sensitivityAtMost(.secret)`. An explicit
 sensitivity constraint suppresses the default entirely (classifier-suppressed
 pattern). § 9.2 access-claims plumbing (future aria-mcp) can LOWER this
-ceiling; the default is the conservative no-claims posture.
+ceiling; the default is the conservative no-claims posture. Confirmation is
+not defaulted: fresh unconfirmed captures remain recallable by ordinary recall.
+Callers that need only aging/retention-vouched rows must add
+`.userConfirmed` explicitly.
 
 ```swift
 public indirect enum Filter: Sendable {
@@ -773,9 +776,11 @@ let drawer = try await estate.capture(CaptureFrame(
     embeddingModelID: "text-embedding-3-small"))           // required (I-4)
 
 // Recall — implicit-AND filter chain; defaults to currently-believed,
-// trustworthy, user-confirmed, and within the Normal tier (≤ .elevated)
-// when those axes are unspecified (B-4, B-4.1). Restricted and secret
-// drawers require an explicit sensitivity constraint to surface.
+// trustworthy, and within the Normal tier (≤ .elevated) when those axes
+// are unspecified (B-4, B-4.1). Confirmation is explicit: add
+// `.userConfirmed` when the caller wants only user-vouched rows.
+// Restricted and secret drawers require an explicit sensitivity
+// constraint to surface.
 let stream = await estate.recall(RecallFrame(
     filterChain: [.inRoom("chemistry"), .latticeUnder(udcPrefix: "54")],
     hydrationLevel: .structured,

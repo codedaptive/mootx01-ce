@@ -134,8 +134,8 @@ pub enum Filter {
     Contained,
 
     // ---------- Provenance queries ----------
-    /// Rows where confirmation ≥ UserConfirmed. Prepended as the
-    /// default when no provenance filter is present.
+    /// Rows where confirmation ≥ UserConfirmed. This is explicit; ordinary
+    /// recall does not add a confirmation gate.
     UserConfirmed,
     /// Rows where confirmation == AutomatedConfirmed only (not user/peer/actuator).
     /// Mirrors Swift `automatedConfirmedOnly`; was `ModelConfirmedOnly` in v0.35 (F13 rename).

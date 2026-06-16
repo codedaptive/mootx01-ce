@@ -25,9 +25,8 @@ import SubstrateLib
 /// optional historical reconstruction at `frame.asOf`.
 ///
 /// Tests use `captureAndConfirm` to file drawers that satisfy the
-/// default-insertion gates (`.userConfirmed`, `.trustworthy`,
-/// `.sensitivityAtMost(.elevated)`, `.currentlyBelieve`) unless a test
-/// is specifically probing one of those defaults.
+/// trust/sensitivity/state default-insertion gates unless a test is
+/// specifically probing one of those defaults.
 @Suite("BitmapEvaluator — filter compilation, evaluation, ordering (spec § 7.9)")
 struct EvaluatorTests {
 
@@ -65,7 +64,7 @@ struct EvaluatorTests {
     }
 
     /// Capture a drawer and flip its confirmation to `.userConfirmed`
-    /// so the default `.userConfirmed` insertion does not exclude it.
+    /// for tests that explicitly exercise the confirmation axis.
     /// Provenance bit layout: confirmation bits 4–6,
     /// Cookbook §2.5: `.userConfirmed.rawValue = 1` at bits 18–23, so `1 << 18 = 0x40000`.
     private func captureAndConfirm(
@@ -87,15 +86,15 @@ struct EvaluatorTests {
 
     // MARK: - Default filter insertion (§ 7.9.5)
 
-    @Test("Default insertion: unconfirmed drawer excluded by default .userConfirmed")
-    func defaults_excludeUnconfirmed() async throws {
+    @Test("Default insertion: unconfirmed drawer included by ordinary recall")
+    func defaults_includeUnconfirmed() async throws {
         let estate = try await makeEstate()
         _ = try await estate.capture(frame(room: "r1"))  // provenance stays at 0
         let stream = await estate.recall(
             RecallFrame(filterChain: [.inRoom("r1")])
         )
         let rows = await drain(stream)
-        #expect(rows.isEmpty)
+        #expect(rows.count == 1)
     }
 
     @Test("Default insertion: confirmed drawer included")
@@ -107,6 +106,17 @@ struct EvaluatorTests {
         )
         let rows = await drain(stream)
         #expect(rows.count == 1)
+    }
+
+    @Test("Explicit .userConfirmed filter excludes unconfirmed drawer")
+    func userConfirmed_excludesUnconfirmed() async throws {
+        let estate = try await makeEstate()
+        _ = try await estate.capture(frame(room: "r1"))  // provenance stays at 0
+        let stream = await estate.recall(
+            RecallFrame(filterChain: [.inRoom("r1"), .userConfirmed])
+        )
+        let rows = await drain(stream)
+        #expect(rows.isEmpty)
     }
 
     // MARK: - Bitmap-tier filters

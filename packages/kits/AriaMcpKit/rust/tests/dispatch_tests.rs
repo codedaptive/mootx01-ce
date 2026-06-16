@@ -404,6 +404,38 @@ fn memory_search_unknown_scoring_returns_invalid_params() {
     );
 }
 
+#[test]
+fn memory_search_null_scoring_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let mut args = args!["query" => "null-scoring-test"];
+    args.insert("scoring".to_string(), JsonValue::Null);
+
+    let err = dispatch_tool(
+        "moot_memory_search",
+        &args,
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("scoring:null must produce a transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
+#[test]
+fn memory_search_null_filter_returns_invalid_params() {
+    let registry = EstateRegistry::new_inmemory();
+    let mut args = args!["query" => "null-filter-test"];
+    args.insert("filter".to_string(), JsonValue::Null);
+
+    let err = dispatch_tool(
+        "moot_memory_search",
+        &args,
+        &registry,
+        &SurfacedRecallLedger::new(),
+    )
+    .expect_err("filter:null must produce a transport fault");
+    assert_eq!(err.code, JSONRPCErrorCode::INVALID_PARAMS);
+}
+
 // P0-4 control: a KNOWN scoring string still succeeds (the fix did not break
 // the happy path).
 #[test]

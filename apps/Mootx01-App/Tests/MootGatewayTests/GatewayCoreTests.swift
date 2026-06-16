@@ -25,7 +25,8 @@ struct GatewayCoreTests {
             "query": .string("native Apple surface"),
         ])
         #expect(found.isError == false)
-        #expect(found.text.contains("memory"))
+        #expect(found.text.contains("found 1 memory(s)"))
+        #expect(found.text.contains("MOOTx01 wires ARIA to a native Apple surface."))
     }
 
     @Test("tools/list exposes the moot_* surface")
@@ -63,7 +64,8 @@ struct GatewayCoreTests {
             "filter": .string("exportable"),
         ])
         #expect(found.isError == false)
-        #expect(found.text.contains("memory"))
+        #expect(found.text.contains("found 1 memory(s)"))
+        #expect(found.text.contains("exportable-force-test-marker"))
     }
 
     @Test("MootEstateClient.fetch throws outboundFederationNotInThisVersion in beta")

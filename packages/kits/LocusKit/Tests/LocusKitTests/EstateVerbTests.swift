@@ -98,11 +98,9 @@ struct EstateVerbTests {
     @Test("recall yields a single page from an empty estate without throwing")
     func recall_emptyEstateSinglePage() async throws {
         let (estate, _) = try await makeEstate()
-        // `.unconfirmed` suppresses the evaluator's default `.userConfirmed`
-        // insertion (§ 7.9.5); this test predates the provenance-aware
-        // evaluator and operates on the empty corpus that the default
-        // would still admit zero rows from, so the override keeps the
-        // page-shape contract observable rather than masking it.
+        // The explicit state/provenance filters keep this old page-shape
+        // fixture focused on an empty unconfirmed inbox. Ordinary recall
+        // would also return zero rows here.
         let stream = await estate.recall(
             RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed])
         )

@@ -2,14 +2,14 @@
 //
 // `fdc_conformance_all_vectors_match` asserts that the Rust `Fdc::encode`
 // produces the values recorded in `fdc_conformance.json` for every fixture
-// vector. The baseline in that fixture is the Rust-HMM path (deterministic,
-// non-Apple): novel tokens are classified via the integer-Viterbi HMM
-// (`word_class::hmm_tag`), byte-identical to Swift's `HMMTagger.tag` on
-// non-Apple platforms. Apple's NLTagger is a different engine (platform-bound
-// to Swift on Apple) and is NOT used to gate this test.
+// vector. The baseline in that fixture is the deterministic HMM path: novel
+// tokens are classified via the integer-Viterbi HMM (`word_class::hmm_tag`),
+// byte-identical to Swift's explicit HMM path on every platform. Apple's
+// optional NLTagger path is outside this conformance gate and is NOT exercised
+// or treated as an alternate baseline here.
 //
 // Conformance scope:
-//   Rust-HMM scalar (self-consistent) + byte-identity with Swift-non-Apple-HMM.
+//   Rust-HMM scalar (self-consistent) + byte-identity with Swift-HMM.
 //
 // The four-way conformance matrix (Swift-scalar, Swift-Metal, Rust-scalar,
 // Rust-BLAS/NEON) does NOT apply here: FDC is a pure string/bag computation

@@ -98,6 +98,10 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 # test). The production [dependencies] entry above carries no features so the
 # seams are absent from the shipped binary. Dev-dep only; no inversion.
 corpus-kit = { path = "../../CorpusKit/rust", features = ["test-seams"] }
+# test-seams exposes LocusKit's test-only orphan-seal failure hook used by
+# tests/expunge_vector_orphan.rs E8. The production dependency above carries
+# no features, so this remains test-only wiring.
+locus-kit = { path = "../../LocusKit/rust", features = ["test-seams"] }
 
 # These integration-test binaries call EstateCoordinator seams gated behind
 # `#[cfg(any(test, feature = "test-seams"))]`: recall_scored_parity uses

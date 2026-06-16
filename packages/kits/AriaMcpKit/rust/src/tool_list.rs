@@ -111,10 +111,11 @@ fn file_memory_tool() -> serde_json::Value {
             json!({
                 "content": string_schema("Verbatim content to file."),
                 "location": string_schema("Location path: wing/room or just room. Wing defaults to 'memories'."),
-                "sensitivity": string_schema("Sensitivity tier: normal (default), elevated, restricted, secret."),
-                "kind": string_schema("Content kind: prose (default), code, transcript, list, structuredJSON, imageCaption, fingerprintOnly."),
-                "event_time": string_schema("Optional ISO8601 event timestamp to attach."),
-                "impatient": boolean_schema("Optional. When true, the memory is encoded for semantic search INLINE before the write returns, so it is immediately recallable by BM25/vector search at the cost of a slower write. When false (default), the write returns immediately and encoding happens on the encode drain.")
+                "sensitivity": string_schema("Sensitivity tier: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
+                "exportability": string_schema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Omit to use the default; null is invalid."),
+                "kind": string_schema("Content kind: prose (default), code, transcript, list, structuredJSON, imageCaption, fingerprintOnly. Omit to use the default; null is invalid."),
+                "event_time": string_schema("Optional ISO8601 event timestamp to attach. Omit for capture time; null is invalid."),
+                "impatient": boolean_schema("Optional. When true, the memory is encoded for semantic search INLINE before the write returns, so it is immediately recallable by BM25/vector search at the cost of a slower write. When false (default), the write returns immediately and encoding happens on the encode drain. Omit to use the default; null is invalid.")
             }),
             json!(["content", "location"])
         )))
@@ -128,11 +129,11 @@ fn memory_search_tool() -> serde_json::Value {
         "inputSchema": with_teachme(with_estate_id(object_schema(
             json!({
                 "query": string_schema("Natural-language search query."),
-                "limit": integer_schema("Max results to return (default 10)."),
+                "limit": integer_schema("Max results to return (default 20). Omit to use the default; null is invalid."),
                 "filter": filter_schema(),
-                "explain": boolean_schema("Include scoring explanation (default false)."),
-                "scoring": string_schema("Scoring mode: matrixAware (default), hybrid, vector."),
-                "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters.")
+                "explain": boolean_schema("Include scoring explanation (default false). Omit to use the default; null is invalid."),
+                "scoring": string_schema("Scoring mode: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
+                "ordering": string_schema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid.")
             }),
             json!(["query"])
         )))
@@ -389,9 +390,9 @@ fn federated_search_tool() -> serde_json::Value {
             json!({
                 "requesterEstateID": string_schema("UUID of the requesting estate. Must name an open estate."),
                 "filter": filter_schema(),
-                "limit": integer_schema("Max rows per estate."),
-                "ordering": string_schema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc."),
-                "hydrationLevel": string_schema("Hydration: structured (default), full, bitmapOnly.")
+                "limit": integer_schema("Max rows per estate. Omit for no explicit cap; null is invalid."),
+                "ordering": string_schema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc. Omit to use the default; null is invalid."),
+                "hydrationLevel": string_schema("Hydration: structured (default), full, bitmapOnly. Omit to use the default; null is invalid.")
             }),
             json!(["requesterEstateID"])
         ))
@@ -959,11 +960,11 @@ fn boolean_schema(description: &str) -> serde_json::Value {
 }
 
 fn filter_schema() -> serde_json::Value {
-    string_schema("Filter kind: unconfirmed (default), userConfirmed, exportable, contained, currentlyBelieve.")
+    string_schema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. null is invalid.")
 }
 
 fn estate_id_schema() -> serde_json::Value {
-    string_schema("Optional UUID of the open estate to target. Omit for the default estate.")
+    string_schema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid.")
 }
 
 fn teachme_schema() -> serde_json::Value {

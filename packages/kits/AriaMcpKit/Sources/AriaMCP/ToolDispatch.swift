@@ -119,9 +119,7 @@ public struct ToolDispatcher: Sendable {
     /// out-of-band client error (`invalidParams`), consistent with the
     /// other enum decoders in this file.
     private func resolveHandle(_ args: [String: JSONValue]) throws -> EstateHandle {
-        guard let raw = args["estateID"]?.stringValue else {
-            return handle
-        }
+        guard let raw = try optionalString(args["estateID"], argument: "estateID") else { return handle }
         guard let uuid = UUID(uuidString: raw) else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
@@ -153,7 +151,7 @@ public struct ToolDispatcher: Sendable {
         do {
             // teachme: true — return the usage guide without touching the estate.
             // Intercepted before any runner fires so no side effects occur.
-            if args["teachme"]?.boolValue == true {
+            if try optionalBool(args["teachme"], argument: "teachme") == true {
                 return Self.textResult(TeachmeGuides.guide(for: name))
             }
             // Route to the appropriate runner and capture the result so
@@ -245,7 +243,7 @@ public struct ToolDispatcher: Sendable {
     /// call is refused cleanly with an `errorResult`.
     private func runFederatedSearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let requester = try resolveRequester(args)
-        let filter = try decodeFilter(args["filter"])
+        let filterChain = try decodeFilterChain(args["filter"])
         // Absent `hydrationLevel` defaults to .full so content blobs are present
         // in the assembled response text — federated search renders drawer content
         // as a preview and the caller cannot evaluate relevance on empty strings.
@@ -264,9 +262,9 @@ public struct ToolDispatcher: Sendable {
             hydration = try decodeHydration(args["hydrationLevel"])
         }
         let ordering = try decodeOrdering(args["ordering"])
-        let limit = args["limit"]?.integerValue.map(Int.init)
+        let limit = try optionalInt(args["limit"], argument: "limit")
         let frame = RecallFrame(
-            filterChain: [filter],
+            filterChain: filterChain,
             hydrationLevel: hydration,
             limit: limit,
             ordering: ordering
@@ -366,8 +364,41 @@ public struct ToolDispatcher: Sendable {
         return value
     }
 
+    private func optionalString(_ value: JSONValue?, argument: String) throws -> String? {
+        guard let value else { return nil }
+        guard let name = value.stringValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be a string; omit it to use the default"
+            )
+        }
+        return name
+    }
+
+    private func optionalBool(_ value: JSONValue?, argument: String) throws -> Bool? {
+        guard let value else { return nil }
+        guard let flag = value.boolValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be a boolean; omit it to use the default"
+            )
+        }
+        return flag
+    }
+
+    private func optionalInt(_ value: JSONValue?, argument: String) throws -> Int? {
+        guard let value else { return nil }
+        guard let raw = value.integerValue else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "\(argument) must be an integer; omit it to use the default"
+            )
+        }
+        return Int(raw)
+    }
+
     func decodeChannel(_ value: JSONValue?) throws -> CaptureChannel {
-        guard let name = value?.stringValue else { return .importedFile }
+        guard let name = try optionalString(value, argument: "channel") else { return .importedFile }
         switch name {
         case "typed": return .typed
         case "voiced": return .voiced
@@ -383,7 +414,7 @@ public struct ToolDispatcher: Sendable {
     }
 
     func decodeSensitivity(_ value: JSONValue?) throws -> AdjectiveSensitivity {
-        guard let name = value?.stringValue else { return .normal }
+        guard let name = try optionalString(value, argument: "sensitivity") else { return .normal }
         switch name {
         case "normal": return .normal
         case "elevated": return .elevated
@@ -404,7 +435,7 @@ public struct ToolDispatcher: Sendable {
     /// Accepted string values mirror the `AdjectiveExportability` case names:
     /// `"private"` → `.private_`, `"public"` → `.public_`.
     func decodeExportability(_ value: JSONValue?) throws -> AdjectiveExportability {
-        guard let name = value?.stringValue else { return .private_ }
+        guard let name = try optionalString(value, argument: "exportability") else { return .private_ }
         switch name {
         case "private": return .private_
         case "public": return .public_
@@ -419,7 +450,7 @@ public struct ToolDispatcher: Sendable {
     /// Decode the optional `classificationScheme` arg for a capture.
     /// Absent defaults to `.udc`, preserving the prior bare-UDC behavior.
     func decodeClassificationScheme(_ value: JSONValue?) throws -> ClassificationScheme {
-        guard let name = value?.stringValue else { return .udc }
+        guard let name = try optionalString(value, argument: "classificationScheme") else { return .udc }
         guard let scheme = ClassificationScheme(rawValue: name) else {
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
@@ -430,7 +461,7 @@ public struct ToolDispatcher: Sendable {
     }
 
     func decodeContentKind(_ value: JSONValue?) throws -> ContentKind {
-        guard let name = value?.stringValue else { return .prose }
+        guard let name = try optionalString(value, argument: "kind") else { return .prose }
         switch name {
         case "prose": return .prose
         case "code": return .code
@@ -446,13 +477,13 @@ public struct ToolDispatcher: Sendable {
         }
     }
 
-    func decodeFilter(_ value: JSONValue?) throws -> Filter {
-        guard let name = value?.stringValue else { return .unconfirmed }
+    func decodeFilterChain(_ value: JSONValue?) throws -> [Filter] {
+        guard let name = try optionalString(value, argument: "filter") else { return [] }
         switch name {
-        case "unconfirmed": return .unconfirmed
-        case "userConfirmed": return .userConfirmed
-        case "exportable": return .exportable
-        case "contained": return .contained
+        case "unconfirmed": return [.unconfirmed]
+        case "userConfirmed": return [.userConfirmed]
+        case "exportable": return [.exportable]
+        case "contained": return [.contained]
         default:
             throw JSONRPCError(
                 code: JSONRPCErrorCode.invalidParams,
@@ -468,13 +499,7 @@ public struct ToolDispatcher: Sendable {
         // accepting malformed input as the default. Mirrors the established
         // idiom for decodeFilter, decodeOrdering, and decodeMutationKind in
         // this file, and the Rust decode_hydration_level fix in dispatch.rs.
-        guard let value else { return .structured }
-        guard let name = value.stringValue else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "hydrationLevel must be a string (structured, full, bitmapOnly); got non-string value"
-            )
-        }
+        guard let name = try optionalString(value, argument: "hydrationLevel") else { return .structured }
         switch name {
         case "structured": return .structured
         case "full": return .full
@@ -488,7 +513,7 @@ public struct ToolDispatcher: Sendable {
     }
 
     func decodeOrdering(_ value: JSONValue?) throws -> Ordering {
-        guard let name = value?.stringValue else { return .byCaptureTimeDesc }
+        guard let name = try optionalString(value, argument: "ordering") else { return .byCaptureTimeDesc }
         switch name {
         case "byCaptureTimeDesc": return .byCaptureTimeDesc
         case "byCaptureTimeAsc": return .byCaptureTimeAsc
@@ -705,15 +730,24 @@ extension ToolDispatcher {
         let sensitivity = try decodeSensitivity(args["sensitivity"])
         let exportability = try decodeExportability(args["exportability"])
         let kind = try decodeContentKind(args["kind"])
-        let eventTime: Date? = args["event_time"]?.stringValue.flatMap {
-            ISO8601DateFormatter().date(from: $0)
+        let eventTime: Date?
+        if let rawEventTime = try optionalString(args["event_time"], argument: "event_time") {
+            guard let parsed = ISO8601DateFormatter().date(from: rawEventTime) else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.invalidParams,
+                    message: "event_time is not a valid ISO8601 instant: \(rawEventTime)"
+                )
+            }
+            eventTime = parsed
+        } else {
+            eventTime = nil
         }
         // D-A: `impatient` is an execution option on the write verb, mirroring
         // how `scoring` is an option on the recall verb — it is threaded to the
         // GLK verb param, NOT stamped onto the CaptureFrame schema. Default
         // false = regular mode (write returns immediately; encoding is
         // background). True = inline-encode before returning.
-        let impatient = args["impatient"]?.boolValue ?? false
+        let impatient = try optionalBool(args["impatient"], argument: "impatient") ?? false
         let mode: WriteMode = impatient ? .impatient : .regular
         // location is a caller-facing subject-matter hint; map it to the
         // room field (structural coordinate). Wing defaults to "memories";
@@ -758,16 +792,16 @@ extension ToolDispatcher {
     func runMemorySearch(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let query = try requireString(args, "query")
-        let rawLimit = args["limit"]?.integerValue.map(Int.init) ?? 20
-        let filter = try decodeFilter(args["filter"])
-        let explain = args["explain"]?.boolValue ?? false
+        let rawLimit = try optionalInt(args["limit"], argument: "limit") ?? 20
+        let filterChain = try decodeFilterChain(args["filter"])
+        let explain = try optionalBool(args["explain"], argument: "explain") ?? false
         // Decode optional `scoring`. Absent keeps the documented default
         // (matrixAware). An unknown NON-EMPTY string is a client error and
         // fails CLOSED with invalidParams — coercing it to matrixAware would
         // silently run a different scoring mode than asked and hide the typo.
         // Mirrors decodeOrdering (strict) and the Rust run_memory_search.
         let scoring: GLKRecallScoring
-        if let scoringStr = args["scoring"]?.stringValue {
+        if let scoringStr = try optionalString(args["scoring"], argument: "scoring") {
             guard let decoded = GLKRecallScoring(rawValue: scoringStr) else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,
@@ -790,7 +824,7 @@ extension ToolDispatcher {
         // empty-content preview.
         let ordering = try decodeOrdering(args["ordering"])
         let frame = RecallFrame(
-            filterChain: [filter],
+            filterChain: filterChain,
             hydrationLevel: .full,
             limit: rawLimit,
             // ordering: decoded above. byCaptureTimeDesc is the default and the
@@ -900,7 +934,7 @@ extension ToolDispatcher {
         let rowID = try requireString(args, "id")
         let mutationName = try requireString(args, "mutation")
         let kind = try decodeMutationKind(mutationName)
-        let payload = args["note"]?.stringValue
+        let payload = try optionalString(args["note"], argument: "note")
         // Note usage before the primary verb so reward marking is attempted even
         // if the primary verb fails (surfaced id was found, user tried to act on it).
         await noteUsage(rowID, handle: handle)
@@ -913,7 +947,7 @@ extension ToolDispatcher {
     func runWithdrawMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let rowID = try requireString(args, "id")
-        let reason = args["reason"]?.stringValue
+        let reason = try optionalString(args["reason"], argument: "reason")
         // Note usage: withdrawing a surfaced drawer means the user acted on it.
         await noteUsage(rowID, handle: handle)
         try await kit.withdraw(handle, WithdrawFrame(rowID: rowID, reason: reason))
@@ -927,7 +961,7 @@ extension ToolDispatcher {
         let reason = try requireString(args, "reason")
         // Surface the caller-facing field name "confirmed" but map it to
         // the substrate's ExpungeFrame "confirmation" field.
-        let confirmed = args["confirmed"]?.boolValue ?? false
+        let confirmed = try optionalBool(args["confirmed"], argument: "confirmed") ?? false
         try await kit.expunge(handle, ExpungeFrame(rowID: rowID, reason: reason, confirmation: confirmed))
         return Self.textResult("erased memory \(rowID)")
     }
@@ -936,7 +970,7 @@ extension ToolDispatcher {
     func runConfirmMemory(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let rowID = try requireString(args, "id")
-        let payload = args["note"]?.stringValue
+        let payload = try optionalString(args["note"], argument: "note")
         // Note usage: confirming a surfaced drawer means the user acted on it.
         await noteUsage(rowID, handle: handle)
         let frame = MutateFrame(rowID: rowID, kind: .confirm, payload: payload)
@@ -1004,7 +1038,7 @@ extension ToolDispatcher {
         let fromID = try requireString(args, "from_id")
         let toID = try requireString(args, "to_id")
         let kindString = try requireString(args, "kind")
-        let label = args["label"]?.stringValue ?? kindString
+        let label = try optionalString(args["label"], argument: "label") ?? kindString
         let kind = Self.tunnelKind(for: kindString)
         // Resolve wing/room by looking up both drawers. `estate.allDrawers()`
         // is public on LocusKit.Estate; GLK has no direct getDrawer(id:) call.
@@ -1090,7 +1124,7 @@ extension ToolDispatcher {
         let subject = try requireString(args, "subject")
         let predicate = try requireString(args, "predicate")
         let object = try requireString(args, "object")
-        let sourceDrawerID = args["source_id"]?.stringValue ?? ""
+        let sourceDrawerID = try optionalString(args["source_id"], argument: "source_id") ?? ""
         let fact = try await kit.captureKGFact(
             handle,
             subject: subject,
@@ -1108,7 +1142,8 @@ extension ToolDispatcher {
         let allFacts = try await kit.recallKGFacts(handle)
         // Optional query: substring match across subject, predicate, and object.
         // Omitting query returns all active facts (the unfiltered case).
-        let query = args["query"]?.stringValue?.lowercased()
+        let queryRaw = try optionalString(args["query"], argument: "query")
+        let query = queryRaw?.lowercased()
         let facts = query.map { q in
             allFacts.filter {
                 $0.subject.lowercased().contains(q) ||
@@ -1120,7 +1155,7 @@ extension ToolDispatcher {
             "\(f.id)  [\(f.subject)] \(f.predicate) [\(f.object)]"
         }
         let header = query != nil
-            ? "facts matching \"\(args["query"]?.stringValue ?? "")\": \(facts.count)"
+            ? "facts matching \"\(queryRaw ?? "")\": \(facts.count)"
             : "facts: \(facts.count)"
         return Self.textResult(([header] + lines).joined(separator: "\n"))
     }
@@ -1193,7 +1228,7 @@ extension ToolDispatcher {
 
     func runFactTimeline(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        let entity = args["entity"]?.stringValue
+        let entity = try optionalString(args["entity"], argument: "entity")
         let facts = try await kit.recallKGFactTimeline(handle, entity: entity)
         let formatter = ISO8601DateFormatter()
         let lines = facts.prefix(200).map { f -> String in
@@ -1228,7 +1263,7 @@ extension ToolDispatcher {
     func runWriteJournal(_ args: [String: JSONValue], now: Date) async throws -> JSONValue {
         let handle = try resolveHandle(args)
         let entry = try requireString(args, "entry")
-        let agentName = args["agent"]?.stringValue ?? Self.mcpAgentName
+        let agentName = try optionalString(args["agent"], argument: "agent") ?? Self.mcpAgentName
         // Encode DiaryActorClass.mcpAgent (raw 2) at bits 7–9 (3-bit field).
         let actorBits = Int64(DiaryActorClass.mcpAgent.rawValue) << 7
         let diaryEntry = DiaryEntry(
@@ -1248,8 +1283,8 @@ extension ToolDispatcher {
     /// `moot_read_journal` — read recent journal entries for an agent.
     func runReadJournal(_ args: [String: JSONValue]) async throws -> JSONValue {
         let handle = try resolveHandle(args)
-        let agentName = args["agent"]?.stringValue ?? Self.mcpAgentName
-        let lastN = args["last_n"]?.integerValue.map(Int.init) ?? 10
+        let agentName = try optionalString(args["agent"], argument: "agent") ?? Self.mcpAgentName
+        let lastN = try optionalInt(args["last_n"], argument: "last_n") ?? 10
         let entries = try await kit.readDiaryEntries(in: handle, agentName: agentName, lastN: lastN)
         let lines = entries.map { e -> String in
             let filed = ISO8601DateFormatter().string(from: e.filedAt)

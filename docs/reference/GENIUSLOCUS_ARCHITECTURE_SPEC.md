@@ -1128,11 +1128,13 @@ When `RecallFrame.filterChain` does not include a filter for the listed concern,
 
 - **Trust.** If no trust-related filter is present, prepend `.trustworthy`.
 - **State.** If no state-related filter is present, prepend `.currentlyBelieve`.
-- **Provenance.** If no provenance-confirmation filter is present, prepend `.userConfirmed`.
+- **Provenance.** No confirmation filter is inserted by default. Callers that
+  need confirmed-only, unconfirmed-only, or exportable-only recall supply the
+  explicit provenance/access filter.
 - **Access.** The evaluator prepends `.sensitivityAtMost(callerMaximum)`, where `callerMaximum` is determined by the caller's access claim (§ 9.2).
 - **Tombstone exclusion.** Always: tombstoned rows are excluded. (Compiles to `(adj & 0xF) < 9` internally; the caller never writes this.)
 
-Default insertion is part of the contract: an evaluator that does not insert these defaults is non-conforming. Callers that want to override defaults supply explicit filters for the relevant concern.
+Default insertion is part of the contract for trust, state, access, and tombstone exclusion: an evaluator that does not insert these defaults is non-conforming. Confirmation is intentionally not defaulted; callers supply explicit filters for that concern.
 
 #### 7.9.6 Historical reconstruction
 
@@ -1161,10 +1163,11 @@ A conforming evaluator processes this internally as follows. The evaluator's bit
 ```
 [Evaluator default insertion]
   filterChain += [
-    .userConfirmed,                                  // § 9.4 default
     .sensitivityAtMost(callerMaximum)                // § 9.2 default
     // tombstone exclusion happens silently in the compiler
   ]
+  // confirmation is explicit; add .userConfirmed only when the caller
+  // asks for the user-vouched subset
 
 [Evaluator filter compilation]
   Per § 7.9.2, each named filter compiles to a bitmap operation
@@ -1309,7 +1312,11 @@ Every row's provenance bitmap is set at write time by the verb that creates it:
 
 Subsequent provenance changes go through `mutate_bitmap`, which writes an audit row.
 
-Retrieval-layer code (in agents and in aria-mcp) must filter by provenance before treating any drawer as instruction. The substrate publishes a default filter `confirmation ≥ user_confirmed` for action-relevant content; agents may override but should record the override.
+Retrieval-layer code (in agents and in aria-mcp) must choose provenance policy
+deliberately before treating any drawer as instruction. The substrate does not
+publish a default confirmation gate; action-relevant surfaces that require
+human-confirmed content must request `confirmation >= user_confirmed`
+explicitly and record that policy.
 
 ### 9.5 The `secret + public` exclusion
 
@@ -1530,7 +1537,7 @@ A conforming implementation passes a test demonstrating that:
 
 1. Every row created by `capture`, `propose`, `learn`, or `associate` has its provenance bitmap set per § 9.4.
 2. Provenance mutations through `mutate_bitmap` produce audit rows.
-3. The default retrieval filter `confirmation ≥ user_confirmed` excludes unconfirmed content from action-relevant queries.
+3. An explicit `confirmation >= user_confirmed` retrieval filter excludes unconfirmed content from action-relevant queries.
 
 ---
 

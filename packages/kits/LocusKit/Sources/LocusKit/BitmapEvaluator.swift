@@ -22,10 +22,12 @@ import SubstrateTypes
 /// The evaluator runs a four-stage pipeline against the row set
 /// `Estate.recall` hands it:
 ///
-/// 1. Default insertion (§ 7.9.5) — prepend the four implicit
-///    filters (`.sensitivityAtMost(.elevated)`, `.trustworthy`,
-///    `.userConfirmed`, `.currentlyBelieve`) for any concern the
-///    caller did not constrain. Tombstone exclusion is always
+/// 1. Default insertion (§ 7.9.5) — prepend implicit filters for
+///    state (`.currentlyBelieve`), trust (`.trustworthy`), and
+///    sensitivity (`.sensitivityAtMost(.elevated)`) when the caller
+///    did not constrain those concerns. Confirmation is not defaulted:
+///    unconfirmed captures are recallable unless the caller explicitly
+///    asks for `.userConfirmed`. Tombstone exclusion is always
 ///    enforced and is independent of the chain (state == 9 rejected
 ///    at the bitmap tier).
 /// 2. Bitmap-tier evaluation (§ 7.9.2 / § 7.9.3) — each Filter case
@@ -200,17 +202,21 @@ struct BitmapEvaluator {
 
     // MARK: - Default insertion (§ 7.9.5)
 
-    /// Prepend the four default filters for any concern the caller did
+    /// Prepend default filters for any concern the caller did
     /// not constrain. Insertion is order-stable but the precise position
     /// is not observable — `evaluateBitmapTier` ANDs the entire chain.
     ///
     /// Each default has a classifier that recognises any Filter case
     /// covering that concern; this includes the named-defaults
-    /// (`.currentlyBelieve`, `.trustworthy`, `.userConfirmed`) and the
+    /// (`.currentlyBelieve`, `.trustworthy`) and the
     /// general cases that constrain the same axis (`.state`,
     /// `.trustAtMost`, `.sensitivity`, etc.), so a caller saying
     /// "give me only `.contested` state" suppresses the
     /// `.currentlyBelieve` default rather than ANDing both.
+    ///
+    /// No confirmation default is inserted. Freshly captured drawers are
+    /// unconfirmed by design; callers that need the aging/retention-vouched
+    /// subset must ask for `.userConfirmed` explicitly.
     private static func insertDefaults(_ chain: [Filter]) -> [Filter] {
         var result = chain
         if !chain.contains(where: isBitmapStateFilter) {
@@ -218,9 +224,6 @@ struct BitmapEvaluator {
         }
         if !chain.contains(where: isBitmapTrustFilter) {
             result.insert(.trustworthy, at: 0)
-        }
-        if !chain.contains(where: isBitmapProvFilter) {
-            result.insert(.userConfirmed, at: 0)
         }
         if !chain.contains(where: isBitmapSensitivityFilter) {
             // Sensitivity default — ceiling is `.elevated`, the Normal-tier
