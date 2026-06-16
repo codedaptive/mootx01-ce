@@ -48,7 +48,11 @@ jobs:
 
       - name: moot-mgr (console) test
         working-directory: apps/moot-mgr
-        run: swift test
+        # Serial: this target's integration suites share the process-global
+        # Intellectus telemetry sink; running them in parallel lets one suite's
+        # emissions land in another's store (the cross-suite race the in-test
+        # lock only partially covers). Serial execution removes the race.
+        run: swift test --no-parallel
 
   rust-apps:
     name: Rust apps — build + test

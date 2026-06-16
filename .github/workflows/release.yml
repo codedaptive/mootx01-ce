@@ -222,6 +222,53 @@ jobs:
           name: windows-x86_64
           path: ${{ env.ASSET }}
 
+  # ── Windows build (arm64) ─────────────────────────────────────────────────
+  # Native arm64 Windows build on the windows-11-arm runner — the same Rust CLI
+  # (apps/mootx01/rust) + Rust console (apps/moot-mgr/rust) as the x86_64 job,
+  # for Snapdragon-class Windows-on-ARM machines.
+  build-windows-arm64:
+    name: Build Windows arm64
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/mootx01/rust/target
+            apps/moot-mgr/rust/target
+          key: release-rust-windows-arm64-${{ hashFiles('apps/mootx01/rust/Cargo.toml', 'apps/moot-mgr/rust/Cargo.toml') }}
+          restore-keys: release-rust-windows-arm64-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml --target aarch64-pc-windows-msvc
+          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml --target aarch64-pc-windows-msvc
+
+      - name: Package binaries
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $asset = "mootx01-${version}-windows-arm64.zip"
+          Copy-Item "apps/mootx01/rust/target/aarch64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
+          Copy-Item "apps/moot-mgr/rust/target/aarch64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
+          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
+          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-arm64
+          path: ${{ env.ASSET }}
+
   # ── Create GitHub release + attach assets ──────────────────────────────────
   release:
     name: Create Release
@@ -231,6 +278,7 @@ jobs:
       - build-linux-x86_64
       - build-linux-arm64
       - build-windows-x86_64
+      - build-windows-arm64
     runs-on: ubuntu-22.04
     steps:
       - name: Download all assets

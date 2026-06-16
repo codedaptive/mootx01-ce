@@ -4,6 +4,12 @@
 // control channel, static asset serving, and the admin-plane gate end-to-end
 // against a real bound listener. SCRATCH stores / temp dirs only.
 
+// This suite binds a Unix-domain-socket control channel via `started_host()`,
+// so the whole file is Unix-only. The HTTP read-API it also exercises is
+// cross-platform, but the shared harness is UDS-coupled; the Windows control
+// channel is a named pipe, whose coverage is a separate future suite.
+#![cfg(unix)]
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;

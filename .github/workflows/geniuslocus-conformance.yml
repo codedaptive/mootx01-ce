@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, windows-11-arm]
     # The vector-generation steps are bash for-loops; Windows defaults to
     # PowerShell, so force bash (Git Bash ships on the Windows runner).
     defaults:
