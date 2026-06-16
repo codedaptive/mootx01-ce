@@ -251,13 +251,15 @@ pub fn run(banner: &str) {
 /// 1. `ARIA_MCP_STATS_STORE` set and non-empty → use that exact path.
 /// 2. `use_default` is `true` (resident HTTP mode) → fall back to
 ///    `<data-dir>/com.mootx01.ce/moot-mgr/stats.sqlite`:
-///    - Linux: `~/.local/share/com.mootx01.ce/moot-mgr/stats.sqlite`
-///    - macOS:  `~/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite`
-///    - Fallback (HOME absent): `/tmp/com.mootx01.ce/moot-mgr/stats.sqlite`
+///    - Linux:   `~/.local/share/com.mootx01.ce/moot-mgr/stats.sqlite`
+///    - macOS:   `~/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite`
+///    - Windows: `%LOCALAPPDATA%\com.mootx01.ce\moot-mgr\stats.sqlite`
+///    - Fallback (home var absent): `/tmp/...` on POSIX, `.\...` on Windows.
 ///    This is the same file the `moot-mgr` manager process owns.
 /// 3. `use_default` is `false` (stdio mode) → return `None` (telemetry off).
 ///
-/// Mirrors Swift `AriaResident.statsStorePathFromEnv(env:useDefault:)`.
+/// Mirrors Swift `AriaResident.statsStorePathFromEnv(env:useDefault:)` (Apple-
+/// only; the Windows branch is Rust-only since Swift has no Windows target).
 pub fn stats_store_path_from_env(use_default: bool) -> Option<String> {
     let raw = std::env::var("ARIA_MCP_STATS_STORE").unwrap_or_default();
     if !raw.is_empty() {
@@ -270,9 +272,9 @@ pub fn stats_store_path_from_env(use_default: bool) -> Option<String> {
     // Resident HTTP mode: compute the moot-mgr default path.
     //
     // Path: <data-dir>/com.mootx01.ce/moot-mgr/stats.sqlite
-    //   Linux:  ~/.local/share  (XDG_DATA_HOME, or ~/.local/share as fallback)
-    //   macOS:  ~/Library/Application Support
-    //   Fallback: /tmp
+    //   Linux:   ~/.local/share  (XDG_DATA_HOME, or ~/.local/share as fallback)
+    //   macOS:   ~/Library/Application Support
+    //   Windows: %LOCALAPPDATA%  (USERPROFILE\AppData\Local as fallback)
     //
     // The store file and parent directories are created by StatsStore::open()
     // (via SQLiteStorage) — no pre-creation needed.
@@ -283,7 +285,18 @@ pub fn stats_store_path_from_env(use_default: bool) -> Option<String> {
             .map(|h| format!("{h}/Library/Application Support"))
             .unwrap_or_else(|_| "/tmp".to_string())
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    let base = {
+        // Windows: %LOCALAPPDATA% — there is no XDG and no /tmp. USERPROFILE\
+        // AppData\Local is the fallback when LOCALAPPDATA is unset; "." is the
+        // last resort (avoids the bare "/tmp" that does not exist on Windows).
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("USERPROFILE").ok().map(|h| format!("{h}\\AppData\\Local")))
+            .unwrap_or_else(|| ".".to_string())
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let base = {
         // Linux / other: XDG_DATA_HOME if set, else ~/.local/share
         std::env::var("XDG_DATA_HOME")
