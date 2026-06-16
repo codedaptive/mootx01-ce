@@ -94,3 +94,6 @@ venv/
 coverage.out
 coverage.html
 .codegraph/
+
+# EE dev-tooling — never ship to CE
+.worktreeinclude
