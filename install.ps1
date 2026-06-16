@@ -143,10 +143,37 @@ function Test-ClientPresent($client) {
 
 # ── JSON helpers ────────────────────────────────────────────────────────────
 
+# Recursively turn the PSCustomObject tree that ConvertFrom-Json returns into
+# nested hashtables. Windows PowerShell 5.1 (the default shell) has no
+# `-AsHashtable` switch — it is PowerShell 6+ only — and the rest of this script
+# manipulates configs through hashtable semantics (.ContainsKey, indexer
+# assignment, .Remove, .Count). The `,` (unary comma) on the array branches stops
+# PowerShell from unrolling single-element and empty arrays, so `args: []` and
+# the like round-trip back through ConvertTo-Json unchanged.
+function ConvertTo-HashtableTree($obj) {
+    if ($null -eq $obj) { return $null }
+    if ($obj -is [System.Collections.IEnumerable] -and $obj -isnot [string]) {
+        $list = @()
+        foreach ($item in $obj) { $list += ,(ConvertTo-HashtableTree $item) }
+        return ,$list
+    }
+    if ($obj.GetType().Name -eq 'PSCustomObject') {
+        $ht = @{}
+        foreach ($prop in $obj.PSObject.Properties) {
+            $ht[$prop.Name] = ConvertTo-HashtableTree $prop.Value
+        }
+        return $ht
+    }
+    return $obj
+}
+
 function Read-JsonFile($path) {
     if (Test-Path $path) {
         $raw = Get-Content $path -Raw -Encoding UTF8
-        return $raw | ConvertFrom-Json -AsHashtable
+        # ConvertFrom-Json without -AsHashtable yields a PSCustomObject tree in
+        # every PowerShell version; ConvertTo-HashtableTree gives us the
+        # hashtable contract the callers expect.
+        return ConvertTo-HashtableTree ($raw | ConvertFrom-Json)
     }
     return @{}
 }
