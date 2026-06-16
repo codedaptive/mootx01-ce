@@ -336,13 +336,16 @@ if (-not $Version) {
 }
 if (-not $Version.StartsWith("v")) { $Version = "v$Version" }
 
-# 2. Download
-$asset   = "mootx01-${Version}-windows-x86_64.zip"
+# 2. Download (arch-aware: a real arm64 artifact ships alongside x86_64).
+#    PROCESSOR_ARCHITEW6432 catches an x86-emulated shell on an ARM64 machine.
+$machineArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$arch    = if ($machineArch -eq "ARM64") { "arm64" } else { "x86_64" }
+$asset   = "mootx01-${Version}-windows-${arch}.zip"
 $url     = "https://github.com/$REPO/releases/download/$Version/$asset"
 $tmpDir  = Join-Path $env:TEMP "mootx01-install-$([System.IO.Path]::GetRandomFileName())"
 New-Item -ItemType Directory -Force $tmpDir | Out-Null
 
-Write-Host "Installing mootx01 $Version (windows-x86_64)..."
+Write-Host "Installing mootx01 $Version (windows-$arch)..."
 try {
     Invoke-WebRequest $url -OutFile (Join-Path $tmpDir $asset)
 } catch {

@@ -120,7 +120,12 @@ echo "Next: wire mootx01 into your AI clients (interactive menu):"
 echo "  mootx01 install"
 if [ "$mgr_installed" = "1" ]; then
   echo ""
-  echo "Management console: \`mootx01 install\` registers moot-mgr as a background"
-  echo "launchd service (starts now, restarts at login) — dashboard at"
-  echo "http://127.0.0.1:4200. Or run it yourself any time with \`moot-mgr serve\`."
+  if [ "$os" = "macos" ]; then
+    svc="a launchd service"
+  else
+    svc="a systemd-user service"
+  fi
+  echo "Management console: \`mootx01 install\` registers moot-mgr as $svc"
+  echo "(starts now, restarts at login) — dashboard at http://127.0.0.1:4200."
+  echo "Or run it yourself any time with \`moot-mgr serve\`."
 fi
