@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use interprocess::local_socket::prelude::*;
-use interprocess::local_socket::{Listener, ListenerOptions, Stream};
+use interprocess::local_socket::{Listener, ListenerNonblockingMode, ListenerOptions, Stream};
 
 use crate::http_read_api::HttpReadApi;
 
@@ -83,6 +83,12 @@ impl ControlChannel {
     /// Swift `ControlChannel.start()`.
     pub fn start(&self) -> std::io::Result<()> {
         let listener = bind_listener(&self.socket_path)?;
+        // Nonblocking accept: the loop polls `running` between accepts instead of
+        // blocking indefinitely. This makes shutdown deterministic on BOTH
+        // platforms without a wakeup connection — critical on Windows, where a
+        // named-pipe "poke" races the accept and can leave it blocked forever
+        // (see the platform note on `Listener::accept`).
+        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
         self.running.store(true, Ordering::SeqCst);
 
         let api = Arc::clone(&self.api);
@@ -97,6 +103,12 @@ impl ControlChannel {
                     }
                     match stream {
                         Ok(s) => serve(&api, s),
+                        // No client waiting (nonblocking). Sleep briefly, then
+                        // loop — re-checking `running` so stop() takes effect
+                        // within one tick.
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
                         Err(_) => {
                             if !running.load(Ordering::SeqCst) {
                                 break;
@@ -116,12 +128,11 @@ impl ControlChannel {
     /// Stop accepting and remove the socket file. Idempotent. Mirrors Swift
     /// `ControlChannel.stop()`.
     ///
-    /// The accept loop is woken by flipping `running` and poking the listener with
-    /// a throwaway connection so `incoming()` observes the flag.
+    /// The accept loop polls `running` between nonblocking accepts, so flipping
+    /// the flag is enough — it exits within one poll tick on its own. No wakeup
+    /// connection is needed (and none would be reliable on Windows named pipes).
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
-        // Poke the listener so the blocking accept wakes and observes !running.
-        poke(&self.socket_path);
         if let Some(handle) = self.accept_thread.lock().unwrap().take() {
             let _ = handle.join();
         }
@@ -157,26 +168,6 @@ fn bind_listener(socket_path: &str) -> std::io::Result<Listener> {
         let pipe = windows_pipe_name(socket_path);
         let name = pipe.to_ns_name::<GenericNamespaced>()?;
         ListenerOptions::new().name(name).create_sync()
-    }
-}
-
-/// Connect once to the listener to wake its blocking accept (used by `stop()`).
-/// Errors are ignored — the only goal is to unblock the accept loop.
-fn poke(socket_path: &str) {
-    #[cfg(unix)]
-    {
-        use interprocess::local_socket::GenericFilePath;
-        if let Ok(name) = socket_path.to_fs_name::<GenericFilePath>() {
-            let _ = Stream::connect(name);
-        }
-    }
-    #[cfg(windows)]
-    {
-        use interprocess::local_socket::GenericNamespaced;
-        let pipe = windows_pipe_name(socket_path);
-        if let Ok(name) = pipe.to_ns_name::<GenericNamespaced>() {
-            let _ = Stream::connect(name);
-        }
     }
 }
 
