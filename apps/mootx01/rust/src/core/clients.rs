@@ -98,7 +98,11 @@ impl McpClient {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    false // macOS-only app today
+                    // Windows/Linux: Codex Desktop has no distinct app marker and
+                    // shares the CLI's ~/.codex/config.toml (the same file we
+                    // wire). Detect it by that config's presence; the prior
+                    // hardcoded `false` left Windows users unable to wire it.
+                    home.join(".codex").join("config.toml").exists()
                 }
             }
             "opencode" => home.join(".config/opencode").exists(),
@@ -360,6 +364,20 @@ mod tests {
         .unwrap();
         let cx = supported().into_iter().find(|c| c.id == "codex-cli").unwrap();
         assert!(cx.wired(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn codex_desktop_detected_via_shared_config_on_non_macos() {
+        // On Windows/Linux, Codex Desktop shares ~/.codex/config.toml with the
+        // CLI and must be detectable there (was hardcoded false → unwireable).
+        let home = tmp_home("codexdesktop");
+        let cx = supported().into_iter().find(|c| c.id == "codex-desktop").unwrap();
+        assert!(!cx.detected(&home), "absent config must not detect");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/config.toml"), "model = \"o3\"\n").unwrap();
+        assert!(cx.detected(&home), "present .codex/config.toml must detect");
         let _ = std::fs::remove_dir_all(&home);
     }
 
