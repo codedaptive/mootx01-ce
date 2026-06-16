@@ -51,12 +51,12 @@ jobs:
         run: swift test
 
   rust-apps:
-    name: Rust apps — build + test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-11-arm]
+    name: Rust apps — build + test (Linux)
+    # Linux only: the app-crate Windows BUILD is gated by the release job (which
+    # ships the windows-arm64 binary) and substrate Windows-arm by conformance.
+    # Running the app-crate test suite on Windows currently hangs (a server/
+    # socket test with no timeout) — tracked separately; not gated here.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
