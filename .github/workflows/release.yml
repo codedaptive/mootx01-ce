@@ -12,18 +12,19 @@ jobs:
   # ── macOS builds (arm64 + x86_64) ─────────────────────────────────────────
   build-macos-arm64:
     name: Build macOS arm64
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select newest Xcode (Swift 6.2 toolchain)
-        run: |
-          # macos-15's default Xcode ships Swift 6.1; the packages declare
-          # swift-tools-version:6.2. Select the highest installed Xcode, which
-          # carries the 6.2 toolchain, rather than pinning a version that may
-          # shift on the runner image.
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
-          swift --version
+      - name: Select Swift 6.2 toolchain (latest stable Xcode)
+        # macos-26 carries the Swift 6.2 OS runtime the packages require; pair it
+        # with the latest stable Xcode so the build toolchain and runtime match.
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show Swift version
+        run: swift --version
 
       - name: Build release binaries
         run: |
@@ -52,15 +53,18 @@ jobs:
 
   build-macos-x86_64:
     name: Build macOS x86_64
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select newest Xcode (Swift 6.2 toolchain)
-        run: |
-          # See arm64 job: macos-15 default Xcode is Swift 6.1; packages need 6.2.
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
-          swift --version
+      - name: Select Swift 6.2 toolchain (latest stable Xcode)
+        # See arm64 job: macos-26 ships the 6.2 runtime; latest-stable Xcode matches it.
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show Swift version
+        run: swift --version
 
       - name: Build release binaries (cross-compile to x86_64)
         run: |
