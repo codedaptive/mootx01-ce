@@ -36,6 +36,7 @@
 pub mod admin_payloads;
 pub mod api_payloads;
 pub mod control_channel;
+pub mod daemon_client;
 pub mod estate_admin;
 pub mod http_read_api;
 pub mod manager;

@@ -284,3 +284,174 @@ fn cli_run_dispatches_against_manager() {
     assert!(out.contains("moot-mgr status"));
     m.stop();
 }
+
+// ─────────────────────── lexicon + lattice payloads ───────────────────────
+
+#[test]
+fn lexicon_payload_has_correct_counts() {
+    // The payload builder is infallible and requires no store, but the manager
+    // still needs to be started (started_manager) to satisfy the type — the
+    // builder ignores the store. We use a started manager for consistency.
+    let m = started_manager();
+    let lex = m.lexicon_payload();
+
+    // 8 nouns, 9 verbs, 4 adjectives — spec invariants I-7, I-8.
+    assert_eq!(lex.nouns.len(), 8, "noun count must be 8");
+    assert_eq!(lex.verbs.len(), 9, "verb count must be 9");
+    assert_eq!(lex.adjectives.len(), 4, "adjective count must be 4");
+
+    // Wire strings match Swift rawValues.
+    assert_eq!(lex.nouns[0], "drawer");
+    assert_eq!(lex.verbs[0], "capture");
+    assert_eq!(lex.adjectives[0], "state");
+
+    // Acceptance map has one entry per noun.
+    assert_eq!(lex.acceptance.len(), 8);
+
+    // vector accepts nothing (substrate-managed, not verb-addressable).
+    let vector_accepts = lex.acceptance.get("vector").expect("vector key must be present");
+    assert!(vector_accepts.is_empty(), "vector acceptance must be empty");
+
+    // drawer accepts 6 verbs, sorted alphabetically.
+    let drawer_accepts = lex.acceptance.get("drawer").expect("drawer key must be present");
+    assert_eq!(drawer_accepts.len(), 6, "drawer must accept 6 verbs");
+    // Sorted: capture, expunge, mutate, reanchor, recall, withdraw.
+    let mut expected_drawer = drawer_accepts.clone();
+    expected_drawer.sort();
+    assert_eq!(*drawer_accepts, expected_drawer, "acceptance values must be sorted");
+}
+
+#[test]
+fn lattice_payload_degrades_when_daemon_unreachable() {
+    // When the ARIA daemon is not running, lattice_payload must return the
+    // honest degraded state: empty addresses, pending=true. This mirrors the
+    // Swift host's fallback when ARIA_MCP is unreachable.
+    //
+    // The proxy tries ARIA_MCP_API_BASE (default 127.0.0.1:4242). In CI there
+    // is no live daemon, so the connect fails within the 3-second timeout and
+    // the fallback fires. If a daemon IS running on 4242 in the test environment
+    // the test still passes: live data → pending=false is the CORRECT behaviour.
+    // We therefore only assert the shape is valid, not the `pending` value.
+    let m = started_manager();
+    let snap = m.lattice_payload();
+    // addresses is always a Vec (never null); pending is a bool.
+    // If pending=false the proxy succeeded — that is valid too.
+    if snap.pending {
+        assert!(snap.addresses.is_empty(), "degraded state must have empty addresses");
+    } else {
+        // Live data: every address must have a non-empty code and positive count.
+        for addr in &snap.addresses {
+            assert!(!addr.code.is_empty(), "live address must have a non-empty code");
+            assert!(addr.count >= 0, "live address count must be non-negative");
+        }
+    }
+}
+
+// ──────────────────── daemon proxy parse-path unit tests ──────────────────
+//
+// Feed sample daemon JSON directly into the public parse helpers in manager.rs
+// so we test the decode + label-annotation path without a live daemon.
+
+#[test]
+fn proxy_lattice_parse_valid_daemon_response() {
+    use std::io::{Read, Write};
+
+    // Spin up a one-shot HTTP/1.0 server that returns a sample daemon lattice
+    // response (two UDC codes, no labels required from the frame in the assertion).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body: &'static [u8] = br#"{"addresses":[{"code":"540","count":12},{"code":"006.6","count":3}]}"#;
+    let listener_clone = listener.try_clone().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener_clone.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let header = format!(
+                "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = s.write_all(header.as_bytes());
+            let _ = s.write_all(body);
+        }
+    });
+
+    // Point the daemon_client at our echo server via the env var.
+    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
+    let snap = moot_mgr::manager::proxy_lattice_snapshot();
+    // Reset env so other tests aren't affected.
+    std::env::remove_var("ARIA_MCP_API_BASE");
+
+    handle.join().unwrap();
+
+    assert!(!snap.pending, "successfully decoded response must not be pending");
+    assert_eq!(snap.addresses.len(), 2);
+    assert_eq!(snap.addresses[0].code, "540");
+    assert_eq!(snap.addresses[0].count, 12);
+    assert_eq!(snap.addresses[1].code, "006.6");
+    assert_eq!(snap.addresses[1].count, 3);
+    // Labels may be Some or None depending on artifact availability — both are valid.
+}
+
+#[test]
+fn proxy_lattice_degrades_on_closed_port() {
+    // Find a guaranteed-closed port.
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = l.local_addr().unwrap().port();
+    drop(l);
+
+    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
+    let snap = moot_mgr::manager::proxy_lattice_snapshot();
+    std::env::remove_var("ARIA_MCP_API_BASE");
+
+    assert!(snap.pending, "closed port must degrade to pending=true");
+    assert!(snap.addresses.is_empty(), "degraded state must have empty addresses");
+}
+
+#[test]
+fn proxy_admin_estates_parse_valid_daemon_response() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Sample daemon /api/admin/estates response (matches AriaMcpKit http_server shape).
+    let body: &'static [u8] = br#"{"hosted":[{"estateUUID":"dead-beef","estateName":"dead-beef","kind":"GLK","backend":"SQLite","mountState":"mounted"}]}"#;
+    let listener_clone = listener.try_clone().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener_clone.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let header = format!(
+                "HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = s.write_all(header.as_bytes());
+            let _ = s.write_all(body);
+        }
+    });
+
+    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{port}"));
+    let result = moot_mgr::manager::proxy_admin_estates();
+    std::env::remove_var("ARIA_MCP_API_BASE");
+
+    handle.join().unwrap();
+
+    let payload = result.expect("valid daemon response must decode to Some");
+    assert_eq!(payload.hosted.len(), 1);
+    assert_eq!(payload.hosted[0].estate_uuid, "dead-beef");
+    assert_eq!(payload.hosted[0].kind, "GLK");
+    assert_eq!(payload.hosted[0].backend, "SQLite");
+    assert_eq!(payload.hosted[0].mount_state, "mounted");
+}
+
+#[test]
+fn proxy_admin_estates_returns_none_on_closed_port() {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_port = l.local_addr().unwrap().port();
+    drop(l);
+
+    std::env::set_var("ARIA_MCP_API_BASE", format!("http://127.0.0.1:{closed_port}"));
+    let result = moot_mgr::manager::proxy_admin_estates();
+    std::env::remove_var("ARIA_MCP_API_BASE");
+
+    assert!(result.is_none(), "closed port must degrade to None");
+}
