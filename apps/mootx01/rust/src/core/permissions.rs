@@ -108,11 +108,14 @@ fn read_settings(path: &Path) -> Result<serde_json::Value, MergeError> {
         return Ok(serde_json::json!({}));
     }
     let bytes = std::fs::read(path)?;
-    let text = String::from_utf8_lossy(&bytes);
+    let lossy = String::from_utf8_lossy(&bytes);
+    // Tolerate a leading UTF-8 BOM (e.g. a settings.json written by Windows
+    // PowerShell 5.1's `Set-Content -Encoding UTF8`) — serde_json rejects it.
+    let text = crate::core::merge::strip_bom(&lossy);
     if text.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
-    match serde_json::from_str::<serde_json::Value>(&text) {
+    match serde_json::from_str::<serde_json::Value>(text) {
         Ok(v) if v.is_object() => Ok(v),
         _ => Err(MergeError::MalformedConfig {
             path: path.to_path_buf(),
@@ -164,6 +167,28 @@ mod tests {
         assert_eq!(v["theme"], "dark");
         let allow = v["permissions"]["allow"].as_array().unwrap();
         assert_eq!(allow[0], "Bash(ls:*)"); // preserved, in place
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grant_tolerates_leading_utf8_bom() {
+        // Regression: Windows PowerShell 5.1's `Set-Content -Encoding UTF8`
+        // writes a UTF-8 BOM. serde_json rejected the resulting settings.json
+        // as "not valid JSON", so `mootx01 install` refused to merge the
+        // Claude Code permission allow-list. read_settings now strips the BOM.
+        let dir = tmp("bom");
+        let p = dir.join("settings.json");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
+        bytes.extend_from_slice(br#"{"permissions":{"allow":["Bash(ls:*)"]},"theme":"dark"}"#);
+        std::fs::write(&p, &bytes).unwrap();
+
+        let added = grant(&p).unwrap();
+        assert!(added >= 50, "BOM'd settings must still merge, got {added}");
+        // The rewrite drops the BOM, and the foreign data survives.
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["permissions"]["allow"][0], "Bash(ls:*)");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

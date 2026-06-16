@@ -108,6 +108,32 @@ struct PermissionsWriterTests {
         #expect(obj?["fontSize"] as? Int == 14)
     }
 
+    @Test("merge tolerates a leading UTF-8 BOM and preserves existing settings")
+    func mergeToleratesUTF8BOM() throws {
+        let dir = try makeSandboxDir()
+        defer { cleanupSandbox(dir) }
+
+        // A settings.json written by Windows PowerShell 5.1's
+        // `Set-Content -Encoding UTF8` carries a UTF-8 BOM. JSONSerialization
+        // rejects it; without BOM stripping the merge would parse to an empty
+        // object and silently overwrite the user's existing settings.
+        let settingsURL = dir.appendingPathComponent("settings.json")
+        let body: [String: Any] = ["theme": "dark", "permissions": ["allow": ["mcp__other__tool"]]]
+        var bytes = Data([0xEF, 0xBB, 0xBF]) // UTF-8 BOM
+        bytes.append(try JSONSerialization.data(withJSONObject: body, options: []))
+        try bytes.write(to: settingsURL)
+
+        try PermissionsWriter.merge(into: settingsURL)
+
+        let updated = try Data(contentsOf: settingsURL)
+        #expect(Array(updated.prefix(3)) != [0xEF, 0xBB, 0xBF], "BOM should be gone after rewrite")
+        let obj = try JSONSerialization.jsonObject(with: updated) as? [String: Any]
+        #expect(obj?["theme"] as? String == "dark", "existing top-level keys must survive")
+        let allow = (obj?["permissions"] as? [String: Any])?["allow"] as? [String] ?? []
+        #expect(allow.contains("mcp__other__tool"), "existing allow entry must survive")
+        #expect(allow.count == 54) // 53 new + 1 existing
+    }
+
     // MARK: - remove
 
     @Test("remove eliminates ARIA permission entries from allow list")
