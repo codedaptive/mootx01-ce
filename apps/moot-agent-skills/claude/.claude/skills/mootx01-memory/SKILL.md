@@ -1,11 +1,23 @@
 ---
 name: mootx01-memory
-description: Use when a task depends on memory, prior decisions, user preferences, source material, project continuity, grounded synthesis, contradiction checks, corpus import, or durable writeback through MOOTx01.
+description: Use proactively before answering when a task involves memory, "last time", "remember", prior decisions, user preferences, project history, source material, continuity/resume, grounded synthesis, contradiction checks, corpus import, durable writeback, or post-import dreaming through MOOTx01.
 ---
 
 # MOOTx01 Memory Skill
 
 Use MOOTx01 as an active memory and reasoning layer, not as a passive wiki.
+
+## MOOT Reflex
+
+Before answering any request that may depend on prior context, user preferences,
+project history, past decisions, continuity, or remembered source material, query
+MOOTx01 first.
+
+After durable decisions, corrections, preferences, milestones, or useful project
+facts, write them back with the appropriate MOOTx01 tool.
+
+If MOOTx01 tools are expected but unavailable, say so plainly. Never imply recall
+happened unless you actually queried it.
 
 ## Workflow
 

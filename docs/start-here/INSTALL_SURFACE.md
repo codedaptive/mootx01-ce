@@ -51,8 +51,10 @@ tools are installed but whose AI does not instinctively reach for them.
 8. Install the matching harness adapter from `apps/moot-agent-skills/<client>/` into the
    client's rules/skills config — **only after** Phase 1 verifies. This is what teaches the
    AI to reach for MOOTx01 automatically (memory, recall, facts, links, grounded synthesis)
-   instead of waiting to be told. Keep `apps/moot-agent-skills/shared/` nearby as reference;
-   do not load all of it into context.
+   instead of waiting to be told. **Merge, don't overwrite** — append the MOOTx01 blocks to
+   any existing config rather than replacing it, and **get the user's explicit approval before
+   changing an existing instruction file.** Keep `apps/moot-agent-skills/shared/` nearby as
+   reference; do not load all of it into context.
 9. Confirm with the three prompts in `apps/moot-agent-skills/README.md`.
 
 ## Platform Matrix

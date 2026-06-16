@@ -3,6 +3,18 @@
 Use MOOTx01 automatically as this repository's long-term memory and reasoning
 substrate.
 
+## MOOT Reflex
+
+Before answering any request that may depend on prior context, user preferences,
+project history, past decisions, continuity, or remembered source material, query
+MOOTx01 first.
+
+After durable decisions, corrections, preferences, milestones, or useful project
+facts, write them back with the appropriate MOOTx01 tool.
+
+If MOOTx01 tools are expected but unavailable, say so plainly. Never imply recall
+happened unless you actually queried it.
+
 ## When To Use
 
 Reach for MOOTx01 when the user asks about:

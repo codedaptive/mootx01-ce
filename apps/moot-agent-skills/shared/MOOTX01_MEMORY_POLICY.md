@@ -24,7 +24,8 @@ Do not write:
 
 - Throwaway chain-of-thought or speculative reasoning.
 - Guesses that have not been labeled as guesses.
-- Sensitive private material unless retention is appropriate and expected.
+- Secrets, credentials, tokens, API keys, or raw private data — ever. Other
+  sensitive private material only when retention is clearly appropriate and expected.
 - Huge undifferentiated blobs when smaller memories would recall better.
 - Generated summaries as if they were original source material.
 - Tool failures with no durable lesson.
@@ -77,5 +78,6 @@ Prefer correction over deletion:
 - Contest uncertain memories.
 - Withdraw stale memories.
 - Retire false facts.
-- Erase only when explicit permanent deletion is required.
+- Erase only when explicit permanent deletion is required — and ask the user for
+  approval first when the tool's semantics are destructive (e.g. `moot_erase_memory`).
 
