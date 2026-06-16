@@ -424,8 +424,8 @@ public struct MCPServerEntry: Sendable, Equatable, Codable {
 public enum MCPServerEntryBuilder {
 
     /// Build the entry the installer writes into each client's
-    /// JSON config. `binaryPath` is the absolute path install.sh
-    /// places the `mootx01-mcp` executable at.
+    /// JSON config. `binaryPath` is the absolute path the installer
+    /// places the `mootx01` executable at.
     public static func entry(binaryPath: String) -> MCPServerEntry {
         MCPServerEntry(command: binaryPath, args: [], env: [:])
     }

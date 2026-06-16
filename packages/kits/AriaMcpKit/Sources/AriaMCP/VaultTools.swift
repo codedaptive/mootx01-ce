@@ -9,8 +9,8 @@
 //
 // ## Shipped MCP binary
 //
-// The shipped MCP binary is the Swift port (apps/mootx01/install.sh builds
-// `mootx01-mcp` via `swift build`). The Rust `aria-mcp` bin (`apps/aria-mcp-server/rust/`)
+// The shipped MCP binary is the Swift port (`mootx01`, built from
+// `apps/mootx01` via `swift build`). The Rust `aria-mcp` bin (`apps/aria-mcp-server/rust/`)
 // is a parity sibling; both ports are live and in sync (see ADR-VAULTKIT-002,
 // and the new ADR recorded in cp-vault-bidir which documents that the Rust
 // mirror has landed). The `moot_vault_*` tools are wired in both dispatch
