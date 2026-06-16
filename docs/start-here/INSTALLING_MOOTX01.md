@@ -2,7 +2,7 @@
 title: "Installing MOOTx01"
 subtitle: "What install does, how the resident daemon works, and how to verify your setup"
 author: "MOOTx01 maintainers"
-date: "2026-06-07"
+date: "2026-06-16"
 ---
 
 > This guide covers `mootx01 install` on **macOS, Linux, and Windows**. The detailed walkthrough
@@ -188,7 +188,9 @@ background-service mechanism differ.
   downloads the Linux `mootx01`, places it at `~/.mootx01/bin/mootx01`, and symlinks
   `~/.local/bin/mootx01` — the same layout as macOS.
 - *Windows:* run the PowerShell installer:
-  `iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"`.
+  `[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }"`.
+  The `Tls12` prefix is required on Windows PowerShell 5.1 (the default shell), which otherwise
+  negotiates TLS 1.0/1.1 and is refused by GitHub's CDN.
   Note: on Windows `install.ps1` both downloads the binary **and** wires clients over **stdio**
   (each spawns its own instance — no shared daemon). To get the resident HTTP daemon shared across
   clients, run `mootx01 install` afterward — it registers the Task Scheduler service and rewires

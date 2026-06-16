@@ -23,7 +23,8 @@
   },
   "install": {
     "download_unix": "curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh",
-    "download_windows": "iex \"& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }\"",
+    "download_windows": "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex \"& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1) }\"",
+    "download_windows_note": "the TLS 1.2 prefix is required on Windows PowerShell 5.1 (the default shell), which otherwise negotiates TLS 1.0/1.1 and is refused by GitHub's CDN",
     "wire_clients": "mootx01 install",
     "local_build": "./install-local.sh",
     "uninstall": "mootx01 uninstall"
