@@ -46,6 +46,7 @@ writer.
 
 ## Removing it
 
-`… | sh -s -- --uninstall` removes the binary and the client config entries. By
-design it does **not** delete your estate database — your substrate data is
-yours, not the installer's to discard.
+`… | sh -s -- --uninstall` removes the binaries and `~/.mootx01`. It **leaves
+your MCP-client config entries intact** — run `mootx01 uninstall` first if you
+want those removed too. It does **not** touch your estate database; your
+substrate data is yours, not the installer's to discard.
