@@ -139,12 +139,6 @@ pub struct StorageStats {
     /// None for SQLite / PostgreSQL.
     pub blob_count: Option<usize>,
 
-    /// Total vector entry count.
-    ///
-    /// InMemory: count of entries in the vector store.
-    /// None for SQLite / PostgreSQL.
-    pub vector_count: Option<usize>,
-
     // ── Metadata ─────────────────────────────────────────────────────────
 
     /// Unix timestamp (seconds) at which the snapshot was captured.
@@ -194,7 +188,6 @@ mod tests {
             lock_contention: Some(false),
             row_count: Some(5),
             blob_count: Some(2),
-            vector_count: Some(3),
             captured_at_secs: 1_700_000_000,
         };
         assert_eq!(s.logical_size_bytes, 4096);
@@ -209,7 +202,6 @@ mod tests {
         assert_eq!(s.lock_contention, Some(false));
         assert_eq!(s.row_count, Some(5));
         assert_eq!(s.blob_count, Some(2));
-        assert_eq!(s.vector_count, Some(3));
         assert_eq!(s.captured_at_secs, 1_700_000_000);
     }
 
@@ -228,7 +220,6 @@ mod tests {
             lock_contention: None,
             row_count: None,
             blob_count: None,
-            vector_count: None,
             captured_at_secs: 0,
         };
         let s2 = s.clone();

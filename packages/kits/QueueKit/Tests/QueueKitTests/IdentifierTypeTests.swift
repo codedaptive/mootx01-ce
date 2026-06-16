@@ -73,7 +73,7 @@ struct IdentifierTypeTests {
 
     @Test func missionContextFullRoundTrip() throws {
         let ctx = MissionContext(
-            missionPath: "docs/missions/inflight/MISSION_QK_TEST_01.md",
+            missionPath: "missions/example-mission.md",
             worktree: "/tmp/worktrees/qk-queuekit-test-leg",
             branch: "stream/qk-queuekit-test-leg",
             autonomyProfile: "supervised",

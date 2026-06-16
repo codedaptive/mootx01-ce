@@ -15,11 +15,20 @@
 //!
 //! ## Crate layout
 //!
-//! - `note_ir` — `NoteIR`, `Block`, `WikiLink`, `SourceRef`, `OccurredAt`
-//!   (the language-neutral IR boundary contract).
+//! - `note_ir` — `NoteIR`, `Block`, `WikiLink`, `SourceRef`, `OccurredAt`,
+//!   `FactIR` (the language-neutral IR boundary contract, full-fidelity
+//!   per ADR-007 Decision 1).
+//! - `corpus_document` — `CorpusDocument` (the versioned canonical JSON
+//!   interchange envelope; deterministic encode, strict versioned decode).
 //! - `vault_adapter` — `VaultAdapter` trait (format ⇄ `NoteIR`).
 //! - `obsidian_adapter` — `ObsidianAdapter: VaultAdapter` (Markdown/YAML/
 //!   wikilink/tag ⇄ `NoteIR`; one `.md` file = one `NoteIR`).
+//! - `exchange_adapter` — `ExchangeAdapter: VaultAdapter` (external
+//!   memory-tool JSON export ⇄ `NoteIR`; read side per VK-ADAPT-01,
+//!   write side per VK-EXPORT-01).
+//! - `corpus_projection` — `Vec<NoteIR>` → `ExternalCorpus` so migration
+//!   verification and the fidelity benchmark are fed from the adapter
+//!   pipeline (ADR-007 Decision 1).
 //! - `drawer_mapping` — `DrawerMapping` + `ImportOutcome` (`NoteIR` ⇄
 //!   substrate `Drawer`/`Tunnel` via the GLK verb surface).
 //! - `vault_bridge` — `VaultBridge` + `ImportReport` (the public facade).
@@ -35,18 +44,55 @@
 
 #![deny(rust_2018_idioms)]
 
+pub mod corpus_document;
+pub mod corpus_projection;
 pub mod drawer_mapping;
 pub mod error;
+pub mod exchange_adapter;
+pub mod mcp_stdio_client;
+pub mod mem_palace_chroma_adapter;
 pub mod note_ir;
 pub mod obsidian_adapter;
+pub mod palace_drift_detector;
+pub mod palace_item;
+pub mod palace_payload_envelope;
+pub mod palace_pump;
+pub mod palace_pump_mapping;
+pub mod palace_response_parsing;
 pub mod vault_adapter;
 pub mod vault_bridge;
 pub mod vault_export_scope;
 
-pub use drawer_mapping::{DrawerMapping, ImportOutcome};
+pub use corpus_document::{CorpusDocument, CURRENT_FORMAT_VERSION};
+pub use drawer_mapping::{DrawerMapping, ExportProjection, ImportOutcome};
 pub use error::VaultKitError;
-pub use note_ir::{Block, NoteIR, OccurredAt, SourceRef, WikiLink};
+pub use exchange_adapter::{ExchangeAdapter, ExchangeExport};
+pub use mcp_stdio_client::{McpCallResult, McpClientError, McpStdioClient};
+pub use mem_palace_chroma_adapter::MemPalaceChromaAdapter;
+pub use note_ir::{Block, FactIR, NoteIR, OccurredAt, SourceRef, WikiLink};
 pub use obsidian_adapter::ObsidianAdapter;
+pub use palace_drift_detector::{
+    diff as palace_drift_diff, expected_manifest as palace_expected_manifest, PalaceDriftFinding,
+    PalaceExpectedTool, PalaceLiveTool,
+};
+pub use palace_item::{PalaceItem, PalaceNoun};
+pub use palace_payload_envelope::{
+    decode as palace_envelope_decode, decode_fields as palace_envelope_decode_fields,
+    encode as palace_envelope_encode, encode_fields as palace_envelope_encode_fields,
+    reconstruct_note as palace_reconstruct_note, DecodedFields, EnvelopeDecodeError,
+    PalaceEnvelopePayload,
+};
+pub use palace_pump::{
+    CheckpointQueue, PalaceItemJobPayload, PalacePump, PalacePumpError, PalacePumpItemResult,
+    PalacePumpResult, PumpJobPayload,
+};
+pub use palace_pump_mapping::{
+    call as palace_item_call, make_args as palace_make_args, PalaceCall, PalaceDrawerArgs,
+};
+pub use palace_response_parsing::{
+    assigned_id_key, parse_add_drawer_id, parse_assigned_id, parse_get_drawer, PalaceFetchedDrawer,
+    PalaceResponseError,
+};
 pub use vault_adapter::VaultAdapter;
-pub use vault_bridge::{ImportReport, VaultBridge};
+pub use vault_bridge::{ExportReport, ImportReport, VaultBridge};
 pub use vault_export_scope::VaultExportScope;

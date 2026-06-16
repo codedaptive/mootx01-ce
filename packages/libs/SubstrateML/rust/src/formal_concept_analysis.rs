@@ -1,6 +1,6 @@
 //! Bounded Formal Concept Analysis over a materialized `FormalContext`
 //! — Rust parity for `FormalConceptAnalysis.swift`. See
-//! SUBSTRATEML_SPEC_v0.8.md § 5.21 for the authoritative contract.
+//! SUBSTRATEML_SPEC.md § 5.21 for the authoritative contract.
 //! Per CLAUDE.md neither leg leads; both run identical math and are
 //! gated against the shared hand-computed fixtures in the inline tests
 //! below (the same cases the Swift `FormalConceptAnalysisTests` encode).
@@ -8,7 +8,8 @@
 //! The engine is pure data-in / data-out: it takes a fully
 //! materialized context (rows × attributes) and reads no estate, no
 //! `MatrixO`, no clocks, no randomness. Building a context from the
-//! estate is deferred to a Brain-layer seam/wrapper — NOT this file.
+//! estate lives in the cognition tier (CognitionKit `FormalConcepts`),
+//! NOT this pure engine.
 //!
 //! Bounding contract (the reason this is "bounded" FCA):
 //!   - NO full concept-lattice enumeration anywhere. Concepts are

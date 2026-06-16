@@ -21,8 +21,9 @@ public enum VerbError: Error, Sendable, CustomStringConvertible {
     /// The verb is part of the nine-verb vocabulary but the underlying
     /// estate does not implement it. All nine verbs — and every `mutate`
     /// kind (`.confirm`, `.reject`, `.contest`, `.resolve`, `.accept`,
-    /// `.supersede`, `.revive`, `.correctSensitivity`, `.correctTrust`) —
-    /// reach a live Estate today, so no current path raises this. It is
+    /// `.supersede`, `.revive`, `.correctSensitivity`,
+    /// `.correctExportability`, `.correctTrust`) — reach a live Estate
+    /// today, so no current path raises this. It is
     /// the generic dispatch error reserved for an estate type that omits
     /// a verb: the GLK boundary remaps a LocusKit "not yet implemented"
     /// stub error to this case so callers branch on a single case rather
@@ -48,6 +49,19 @@ public enum VerbError: Error, Sendable, CustomStringConvertible {
     /// confirmation is a deliberate two-step protocol.
     case expungeNotConfirmed(rowID: RowID)
 
+    /// GLK's post-storage cross-kit vector-delete step failed after the
+    /// LocusKit storage expunge succeeded. Raised by `expunge` when
+    /// `Corpus.remove` or `VectorStore.deleteAllVectors` throws.
+    ///
+    /// Privacy contract (fail-closed): the LocusKit row is already tombstoned
+    /// and its verbatim content is gone, but the vector embedding survived.
+    /// The caller MUST treat this as an incomplete expunge and must NOT
+    /// report the row as fully deleted. Retrying the expunge or surfacing
+    /// an error to the user are the only correct responses; silently
+    /// swallowing this error leaves a semantic orphan (a recoverable
+    /// embedding of content the user believed was irreversibly destroyed).
+    case crossKitVectorDeleteFailed(rowID: RowID, reason: String)
+
     public var description: String {
         switch self {
         case let .underlyingEstateFailure(verb, reason):
@@ -60,6 +74,8 @@ public enum VerbError: Error, Sendable, CustomStringConvertible {
             return "reanchor on row '\(rowID)' supplied neither toRoom nor toLattice"
         case let .expungeNotConfirmed(rowID):
             return "expunge on row '\(rowID)' requires confirmation=true"
+        case let .crossKitVectorDeleteFailed(rowID, reason):
+            return "expunge on row '\(rowID)' succeeded in storage but cross-kit vector delete failed: \(reason)"
         }
     }
 }

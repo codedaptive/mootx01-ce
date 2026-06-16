@@ -1,0 +1,237 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── macOS builds (arm64 + x86_64) ─────────────────────────────────────────
+  build-macos-arm64:
+    name: Build macOS arm64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binaries
+        run: |
+          # mootx01 = MCP server + management CLI; moot-mgr = the management
+          # console (resident host + loopback dashboard). The macOS moot-mgr is a
+          # SwiftUI app (built here and on x86_64); Linux and Windows ship the
+          # headless Rust moot-mgr (built in their respective jobs) — its control
+          # channel is a Unix-domain socket on Unix and a named pipe on Windows.
+          swift build -c release --package-path apps/mootx01 --product mootx01
+          swift build -c release --package-path apps/moot-mgr --product moot-mgr
+
+      - name: Package binaries
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ASSET="mootx01-${VERSION}-macos-arm64.tar.gz"
+          cp apps/mootx01/.build/release/mootx01 mootx01
+          cp apps/moot-mgr/.build/release/moot-mgr moot-mgr
+          tar -czf "${ASSET}" mootx01 moot-mgr
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: ${{ env.ASSET }}
+
+  build-macos-x86_64:
+    name: Build macOS x86_64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binaries (cross-compile to x86_64)
+        run: |
+          # Both binaries cross-compiled to x86_64; see the arm64 job for the
+          # mootx01/moot-mgr split rationale (macOS moot-mgr = SwiftUI app).
+          swift build -c release --package-path apps/mootx01 --product mootx01 --arch x86_64
+          swift build -c release --package-path apps/moot-mgr --product moot-mgr --arch x86_64
+
+      - name: Package binaries
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ASSET="mootx01-${VERSION}-macos-x86_64.tar.gz"
+          cp apps/mootx01/.build/release/mootx01 mootx01
+          cp apps/moot-mgr/.build/release/moot-mgr moot-mgr
+          tar -czf "${ASSET}" mootx01 moot-mgr
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64
+          path: ${{ env.ASSET }}
+
+  # ── Linux builds (x86_64 + arm64) ─────────────────────────────────────────
+  # Linux ships the Rust CLI from apps/mootx01/rust (NOT the Swift installer —
+  # Swift has no Linux GUI, and the Swift package's non-macOS branch omits
+  # `serve`). The Rust binary is the complete CLI: install, db, status, query,
+  # proxy, serve, uninstall, upgrade. Verified green by rust-cli.yml.
+  build-linux-x86_64:
+    name: Build Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/mootx01/rust/target
+          key: release-rust-linux-x86_64-${{ hashFiles('apps/mootx01/rust/Cargo.toml') }}
+          restore-keys: release-rust-linux-x86_64-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml
+          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml
+
+      - name: Package binaries
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ASSET="mootx01-${VERSION}-linux-x86_64.tar.gz"
+          cp apps/mootx01/rust/target/release/mootx01 mootx01
+          cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
+          tar -czf "${ASSET}" mootx01 moot-mgr
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: ${{ env.ASSET }}
+
+  build-linux-arm64:
+    name: Build Linux arm64
+    runs-on: ubuntu-22.04-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/mootx01/rust/target
+          key: release-rust-linux-arm64-${{ hashFiles('apps/mootx01/rust/Cargo.toml') }}
+          restore-keys: release-rust-linux-arm64-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml
+          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml
+
+      - name: Package binaries
+        run: |
+          VERSION="${{ github.ref_name }}"
+          ASSET="mootx01-${VERSION}-linux-arm64.tar.gz"
+          cp apps/mootx01/rust/target/release/mootx01 mootx01
+          cp apps/moot-mgr/rust/target/release/moot-mgr moot-mgr
+          tar -czf "${ASSET}" mootx01 moot-mgr
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: ${{ env.ASSET }}
+
+  # ── Windows build (x86_64) ────────────────────────────────────────────────
+  # Windows ships the Rust CLI from apps/mootx01/rust — the complete install/db/
+  # status/query/proxy/serve/uninstall/upgrade surface — AND the Rust moot-mgr
+  # console (apps/moot-mgr/rust), whose control channel is a named pipe on Windows.
+  # NOT the ARIA MCP server (packages/kits/AriaMcpKit/rust) which is an internal
+  # library, not the user-facing CLI.
+  build-windows-x86_64:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/mootx01/rust/target
+            apps/moot-mgr/rust/target
+          key: release-rust-windows-x86_64-${{ hashFiles('apps/mootx01/rust/Cargo.toml', 'apps/moot-mgr/rust/Cargo.toml') }}
+          restore-keys: release-rust-windows-x86_64-
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --manifest-path apps/mootx01/rust/Cargo.toml --target x86_64-pc-windows-msvc
+          cargo build --release --manifest-path apps/moot-mgr/rust/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Package binaries
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $asset = "mootx01-${version}-windows-x86_64.zip"
+          Copy-Item "apps/mootx01/rust/target/x86_64-pc-windows-msvc/release/mootx01.exe" "mootx01.exe"
+          Copy-Item "apps/moot-mgr/rust/target/x86_64-pc-windows-msvc/release/moot-mgr.exe" "moot-mgr.exe"
+          Compress-Archive -Path "mootx01.exe", "moot-mgr.exe" -DestinationPath $asset
+          "ASSET=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: ${{ env.ASSET }}
+
+  # ── Create GitHub release + attach assets ──────────────────────────────────
+  release:
+    name: Create Release
+    needs:
+      - build-macos-arm64
+      - build-macos-x86_64
+      - build-linux-x86_64
+      - build-linux-arm64
+      - build-windows-x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all assets
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+
+      - name: Generate checksums.txt
+        working-directory: assets
+        run: |
+          # Collect all release archives from subdirs into one flat dir.
+          mkdir -p flat
+          find . -name '*.tar.gz' -o -name '*.zip' | xargs -I{} cp {} flat/
+          cd flat
+          sha256sum * > ../checksums.txt
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            assets/checksums.txt
+            assets/flat/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

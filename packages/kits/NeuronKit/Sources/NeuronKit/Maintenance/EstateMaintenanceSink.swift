@@ -78,4 +78,31 @@ public struct EstateMaintenanceSink: MaintenanceProposalSink {
     public func recordCycleDiary(_ entry: DiaryEntry) async throws {
         try await kit.addDiaryEntry(in: handle, entry)
     }
+
+    /// Update a drawer's provenance bitmap after a QID-pending retry
+    /// (Board item 14, NEURONKIT_SPEC § 3.2).
+    ///
+    /// Delegates to `GeniusLocusKit.updateEnrichmentStatus(in:rowID:…)`,
+    /// which calls `Estate.mutateProvenance` and atomically appends an
+    /// audit row. The caller (the maintenance daemon's retry batch)
+    /// constructs `newProvenance` with the enrichment-status field
+    /// (bits 36-41) set to the retry outcome.
+    ///
+    /// The `changedBy` value is the maintenance daemon's stable agent name,
+    /// matching the diary entry agent name for audit traceability.
+    public func updateEnrichmentStatus(
+        rowID: RowID,
+        newProvenance: Int64,
+        now: Date
+    ) async throws {
+        try await kit.updateEnrichmentStatus(
+            in: handle,
+            rowID: rowID,
+            newProvenance: newProvenance,
+            // Use the daemon's stable agent name for audit traceability —
+            // the same name the cycle diary entries are filed under.
+            changedBy: "maintenance-daemon",
+            now: now
+        )
+    }
 }

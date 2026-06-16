@@ -15,6 +15,5 @@ public enum IsolationLevel: Sendable {
 public protocol StorageTransaction: Sendable {
     var rowStore: any RowStore { get }
     var blobStore: any BlobStore { get }
-    var vectorIndex: any VectorIndex { get }
     var auditLog: any AuditLog { get }
 }

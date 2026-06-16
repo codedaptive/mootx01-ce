@@ -12,7 +12,7 @@ import SubstrateTypes
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -111,5 +111,35 @@ struct PersistenceKitBackendTests {
         #expect(names.contains("idx_queuekit_status"))
         #expect(names.contains("idx_queuekit_claim_order"))
         #expect(names.contains("idx_queuekit_stream"))
+    }
+
+    // MARK: - pendingCount() (TELEMETRY_QT)
+
+    @Test func pendingCountOnEmptyQueue() async throws {
+        let backend = try await makeBackend()
+        #expect(try await backend.pendingCount() == 0)
+    }
+
+    @Test func pendingCountReflectsWrittenJobs() async throws {
+        let backend = try await makeBackend()
+        let hlc = HLC(physicalTime: 1, logicalCount: 0, nodeID: 1)
+        let j1 = Job(id: JobID.generate(), streamID: StreamID(rawValue: "s"),
+                     submittedAt: hlc, priority: 50, payload: Data(), extensions: [:])
+        let j2 = Job(id: JobID.generate(), streamID: StreamID(rawValue: "s"),
+                     submittedAt: hlc, priority: 50, payload: Data(), extensions: [:])
+        try await backend.write(j1)
+        try await backend.write(j2)
+        #expect(try await backend.pendingCount() == 2)
+    }
+
+    @Test func pendingCountDropsToZeroAfterDrain() async throws {
+        let backend = try await makeBackend()
+        let hlc = HLC(physicalTime: 1, logicalCount: 0, nodeID: 1)
+        let job = Job(id: JobID.generate(), streamID: StreamID(rawValue: "s"),
+                      submittedAt: hlc, priority: 50, payload: Data(), extensions: [:])
+        try await backend.write(job)
+        #expect(try await backend.pendingCount() == 1)
+        _ = try await backend.drainAvailable()
+        #expect(try await backend.pendingCount() == 0)
     }
 }

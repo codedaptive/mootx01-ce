@@ -164,16 +164,4 @@ enum SQLiteSchema {
       "bytes" BLOB NOT NULL
     )
     """
-
-    /// Vector storage table. Uses vec0 virtual table from sqlite-vec
-    /// when first vector is added (deferred to give the schema
-    /// caller control over dimensionality). This base table holds
-    /// metadata and a key→vector_rowid mapping.
-    static let vectorMetadataTableSQL = """
-    CREATE TABLE IF NOT EXISTS "_storagekit_vector_meta" (
-      "key" TEXT PRIMARY KEY NOT NULL,
-      "vec_rowid" INTEGER NOT NULL,
-      "metadata_json" TEXT NOT NULL DEFAULT '{}'
-    )
-    """
 }

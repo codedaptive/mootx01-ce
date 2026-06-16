@@ -20,11 +20,13 @@
 //!     RowHandle.key (which is a random UUID differing between runs).
 //!   - Audit copy: _storagekit_audit is NOT in schema.tables. It is copied
 //!     via a separate audit_log().iterate() → append_batch() path.
-//!   - Blob copy: not implemented. No GLK kit uses blobStore for content as
-//!     of 2026-06-05 (confirmed by REPLICATION_GROUND_TRUTH.md). BlobStore
-//!     also lacks a list_keys() method; enumeration is impossible without it.
-//!     A future mission adding GLK blob usage must also add BlobStore::list_keys()
-//!     and a blob copy step here.
+//!   - Blob copy: full-snapshot enumerates all keys via BlobStore::list_keys(),
+//!     reads each blob, and writes it to the destination inside the same
+//!     serializable transaction as rows and audit events. Fail-loud: if a key
+//!     present in list_keys() returns None from get() (TOCTOU gap — concurrent
+//!     delete between enumeration and read), the entire flush aborts with
+//!     ReplicationError::StorageFailure. The caller may retry. An empty blob
+//!     (zero bytes) is a valid blob and is preserved correctly.
 //!   - TypedValue is copied verbatim (no coercion).
 //!   - HLC watermark: the max HLC seen across all row HLC columns and audit
 //!     events is returned in ReplicationCursor.
@@ -33,7 +35,7 @@
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -50,26 +52,6 @@ use crate::types::TypedValue;
 use std::collections::BTreeMap;
 use substrate_types::hlc::HLC;
 
-// MARK: - ReplicationMode
-
-/// Controls the scope of a single replicate() call.
-///
-/// Only `Full` is implemented (§5). `Incremental` throws
-/// `ReplicationError::NotImplemented` — §6 is a separate track.
-///
-/// NOTE: The §6 incremental path MUST drive its dirty-set off
-/// `StorageObserver.observe`, NOT `AuditLog::iterate`. The GLK
-/// AuditGate is drawer-only today; several noun inserts bypass it,
-/// so an audit-driven incremental flush would silently miss them.
-#[derive(Debug, Clone)]
-pub enum ReplicationMode {
-    /// Full snapshot: copy all rows, all audit events. Atomic.
-    Full,
-    /// Incremental delta driven by a StorageObserver dirty-set.
-    /// NOT YET IMPLEMENTED — returns `ReplicationError::NotImplemented`.
-    Incremental { cursor: ReplicationCursor },
-}
-
 // MARK: - ReplicationCursor
 
 /// Watermark returned from `replicate()`. Records the maximum HLC
@@ -82,6 +64,11 @@ pub struct ReplicationCursor {
     pub rows_written: usize,
     /// Total audit events copied.
     pub audit_events_written: usize,
+    /// Number of blobs written during this run.
+    /// Full-snapshot: count of blobs copied from source.
+    /// Incremental: count of blob put/delete operations applied.
+    /// Zero for an empty source or a run that touched no blobs.
+    pub blobs_written: usize,
 }
 
 // MARK: - ReplicationError
@@ -96,8 +83,6 @@ pub enum ReplicationError {
         destination_version: i32,
         kit_id: String,
     },
-    /// The requested mode is not yet implemented.
-    NotImplemented { reason: String },
     /// A storage error surfaced during source reads or destination writes.
     StorageFailure { detail: String },
 }
@@ -114,51 +99,50 @@ impl From<StorageError> for ReplicationError {
 
 /// Copy the full projected state of `source` into `destination`.
 ///
+/// Always performs a full snapshot: every row in every schema-declared table,
+/// all audit events, and all blobs are copied atomically in a serializable
+/// transaction. The operation is idempotent — a second call with no source
+/// changes writes zero new rows (upsert on primary key is a no-op for
+/// identical values).
+///
 /// - `source`: Storage to read from (must be open).
 /// - `destination`: Storage to write to (must be open).
 /// - `schema`: Schema declaration governing which tables to copy.
-/// - `mode`: `Full` copies all rows and audit events atomically.
-///   `Incremental` returns `ReplicationError::NotImplemented`.
+///   Must be the same schema applied to both backends.
 ///
 /// Returns a `ReplicationCursor` with HLC watermark and row/event counts.
+/// For session-oriented incremental replication use `IncrementalReplicationSession`.
 pub fn replicate(
     source: &dyn Storage,
     destination: &dyn Storage,
     schema: &SchemaDeclaration,
-    mode: ReplicationMode,
 ) -> Result<ReplicationCursor, ReplicationError> {
-    match mode {
-        ReplicationMode::Full => replicate_full(source, destination, schema),
-        ReplicationMode::Incremental { .. } => Err(ReplicationError::NotImplemented {
-            reason: "§6 incremental replication is not yet implemented. \
-                     The dirty-set must be driven by StorageObserver.observe, \
-                     not AuditLog::iterate — several noun inserts bypass the AuditGate."
-                .to_string(),
-        }),
-    }
+    replicate_full(source, destination, schema)
 }
 
-/// Flush a source storage into a destination storage (full mode).
+/// Flush a source storage into a destination storage.
 ///
-/// Convenience wrapper: `replicate(source, destination, schema, Full)`.
+/// Convenience wrapper around `replicate(source, destination, schema)`.
+/// Names the direction explicitly: the source is the in-memory working state;
+/// the destination is the durable backend that receives the full snapshot.
 pub fn flush(
     source: &dyn Storage,
     destination: &dyn Storage,
     schema: &SchemaDeclaration,
 ) -> Result<ReplicationCursor, ReplicationError> {
-    replicate(source, destination, schema, ReplicationMode::Full)
+    replicate(source, destination, schema)
 }
 
 /// Hydrate a fresh storage from a durable source.
 ///
-/// Convenience wrapper: `replicate(durable, in_memory, schema, Full)`.
+/// Convenience wrapper around `replicate(durable, in_memory, schema)`.
 /// Call on a freshly-opened InMemoryStorage instance.
 pub fn hydrate(
     in_memory: &dyn Storage,
     durable: &dyn Storage,
     schema: &SchemaDeclaration,
 ) -> Result<ReplicationCursor, ReplicationError> {
-    replicate(durable, in_memory, schema, ReplicationMode::Full)
+    replicate(durable, in_memory, schema)
 }
 
 // MARK: - Full-snapshot implementation
@@ -200,11 +184,13 @@ fn replicate_full(
     // through the closure environment.
     let mut rows_written: usize = 0;
     let mut audit_events_written: usize = 0;
+    let mut blobs_written: usize = 0;
     let mut max_hlc: Option<HLC> = None;
 
     let payload_ref = &payload;
     let rows_written_ref = &mut rows_written;
     let audit_events_written_ref = &mut audit_events_written;
+    let blobs_written_ref = &mut blobs_written;
     let max_hlc_ref = &mut max_hlc;
 
     destination
@@ -213,6 +199,7 @@ fn replicate_full(
             &mut |txn| -> StorageResult<()> {
                 let row_store = txn.row_store();
                 let audit_log = txn.audit_log();
+                let blob_store = txn.blob_store();
 
                 // 3a. Row copy: upsert each table's snapshot.
                 for snapshot in &payload_ref.table_snapshots {
@@ -256,6 +243,15 @@ fn replicate_full(
                     }
                 }
 
+                // 3c. Blob copy: write every blob from the snapshot into the
+                // destination. put() is idempotent on key — a repeated full
+                // flush with the same blobs writes zero new blobs (all keys
+                // already exist). Empty blobs (zero bytes) are written correctly.
+                for (key, bytes) in &payload_ref.blobs {
+                    blob_store.put(key, bytes)?;
+                    *blobs_written_ref += 1;
+                }
+
                 Ok(())
             },
         )
@@ -265,6 +261,7 @@ fn replicate_full(
         hlc_watermark: max_hlc,
         rows_written,
         audit_events_written,
+        blobs_written,
     })
 }
 
@@ -278,6 +275,11 @@ struct ReplicationPayload {
     table_snapshots: Vec<TableSnapshot>,
     /// All audit events from _storagekit_audit (via AuditLog::iterate).
     audit_events: Vec<AuditEvent>,
+    /// All blob (key, bytes) pairs from the source's _storagekit_blobs store.
+    /// Keys are sorted for deterministic ordering across runs.
+    /// Captured before the destination transaction opens so snapshot I/O
+    /// does not inflate transaction duration.
+    blobs: Vec<(String, Vec<u8>)>,
 }
 
 struct TableSnapshot {
@@ -294,6 +296,7 @@ fn snapshot_source(
 ) -> Result<ReplicationPayload, ReplicationError> {
     let row_store = source.row_store();
     let audit_log = source.audit_log();
+    let blob_store = source.blob_store();
 
     let mut table_snapshots: Vec<TableSnapshot> = Vec::new();
 
@@ -334,9 +337,35 @@ fn snapshot_source(
         .iterate(None, None, usize::MAX)
         .map_err(ReplicationError::from)?;
 
+    // Blob snapshot: enumerate all keys, then read each blob.
+    //
+    // TOCTOU race: a concurrent delete between list_keys() and get() can make
+    // a key disappear. We treat this as a transient failure — fail-loud.
+    // The destination must never receive a partial blob set.
+    // An empty Vec<u8> (zero-byte blob) is valid and is preserved correctly.
+    let mut blob_keys = blob_store
+        .list_keys()
+        .map_err(ReplicationError::from)?;
+    blob_keys.sort(); // deterministic ordering
+    let mut blobs: Vec<(String, Vec<u8>)> = Vec::with_capacity(blob_keys.len());
+    for key in blob_keys {
+        let bytes = blob_store
+            .get(&key)
+            .map_err(ReplicationError::from)?
+            .ok_or_else(|| ReplicationError::StorageFailure {
+                detail: format!(
+                    "blob key '{}' was present in list_keys() but absent in get() — \
+                     concurrent delete during snapshot; retry the flush",
+                    key
+                ),
+            })?;
+        blobs.push((key, bytes));
+    }
+
     Ok(ReplicationPayload {
         table_snapshots,
         audit_events,
+        blobs,
     })
 }
 
@@ -782,26 +811,6 @@ mod replication_tests {
         );
     }
 
-    /// Incremental mode returns NotImplemented.
-    #[test]
-    fn incremental_mode_not_implemented() {
-        let schema = synthetic_schema();
-        let source = make_storage(&schema);
-        let dest = make_storage(&schema);
-        let cursor = ReplicationCursor {
-            hlc_watermark: None,
-            rows_written: 0,
-            audit_events_written: 0,
-        };
-        let result = replicate(
-            &source,
-            &dest,
-            &schema,
-            ReplicationMode::Incremental { cursor },
-        );
-        assert!(matches!(result, Err(ReplicationError::NotImplemented { .. })));
-    }
-
     // ── Empty source ──────────────────────────────────────────────────────
 
     /// Empty source produces zero counts and nil watermark.
@@ -872,5 +881,75 @@ mod replication_tests {
         let cursor = flush(&source, &dest, &schema).unwrap();
 
         assert_eq!(cursor.hlc_watermark, Some(hlc_audit_max));
+    }
+
+    // ── §9.B Blob copy — full snapshot ────────────────────────────────────
+
+    /// §9.B1 — Full snapshot with N blobs: all N arrive at destination byte-identical.
+    #[test]
+    fn full_snapshot_copies_all_blobs_byte_identical() {
+        let schema = synthetic_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+
+        // Write 4 blobs with distinct keys and payloads (including zero-length).
+        let blob_payloads: Vec<(&str, Vec<u8>)> = vec![
+            ("blob:alpha",   vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            ("blob:beta",    vec![0x01, 0x02, 0x03]),
+            ("blob:gamma",   vec![0xFF; 64]),
+            ("blob:delta",   vec![]),  // zero-length blob
+        ];
+        for (key, bytes) in &blob_payloads {
+            source.blob_store().put(key, bytes).expect("put failed");
+        }
+
+        let cursor = flush(&source, &destination, &schema).expect("flush failed");
+        assert_eq!(cursor.blobs_written, blob_payloads.len(),
+            "Flush cursor must report {} blobs written", blob_payloads.len());
+
+        // All blobs must be present at destination and byte-identical.
+        for (key, expected_bytes) in &blob_payloads {
+            let actual = destination
+                .blob_store()
+                .get(key)
+                .expect("get failed")
+                .unwrap_or_else(|| panic!("blob '{}' absent from destination", key));
+            assert_eq!(&actual, expected_bytes,
+                "Blob '{}' must be byte-identical at destination", key);
+        }
+    }
+
+    /// §9.B2 — Idempotent second flush: no duplicate blobs created.
+    #[test]
+    fn full_snapshot_blob_copy_is_idempotent() {
+        let schema = synthetic_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+
+        source.blob_store().put("idempotent-blob", &[0xAA, 0xBB]).expect("put");
+
+        // First flush.
+        let c1 = flush(&source, &destination, &schema).expect("flush 1");
+        assert_eq!(c1.blobs_written, 1);
+
+        // Second flush — same blob key, same bytes.
+        let c2 = flush(&source, &destination, &schema).expect("flush 2");
+        assert_eq!(c2.blobs_written, 1); // still touches the 1 blob
+
+        // Destination must have exactly 1 blob key.
+        let keys = destination.blob_store().list_keys().expect("list_keys");
+        assert_eq!(keys.len(), 1, "Second flush must not duplicate blobs");
+    }
+
+    /// §9.B3 — Full snapshot with zero blobs: blobs_written is 0, no error.
+    #[test]
+    fn full_snapshot_zero_blobs_produces_zero_count() {
+        let schema = synthetic_schema();
+        let source = make_storage(&schema);
+        let destination = make_storage(&schema);
+
+        let cursor = flush(&source, &destination, &schema).expect("flush failed");
+        assert_eq!(cursor.blobs_written, 0,
+            "Empty source must produce blobs_written == 0");
     }
 }

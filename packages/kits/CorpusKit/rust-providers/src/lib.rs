@@ -1,21 +1,35 @@
 //! corpus-kit-providers -- Rust port of Swift's `CorpusKitProviders`
-//! target. Hosts concrete `Tokenizer` implementations and (in a
-//! follow-on R-mission) concrete `vectorkit::EmbeddingProvider`
-//! implementations whose presence implies a model bundle or a
-//! deliberately documented test stub.
+//! target. Hosts concrete `Tokenizer` implementations and concrete
+//! `vectorkit::EmbeddingProvider` implementations (the named text
+//! providers) over a host-supplied inference seam.
 //!
-//! `DeterministicTokenizer` ships at v1.0 as the test fixture
-//! mirror of Swift's same-named type. Real WordPiece /
-//! SentencePiece tokenizers and ONNX-backed providers land in a
-//! follow-on R-mission once model bundles are wired in.
+//! The crate ships:
+//! - `DeterministicTokenizer` -- the no-host fallback tokenizer,
+//!   bit-identical to Swift's same-named type (both fold token
+//!   strings through `substrate_types::fnv`).
+//! - `MiniLMTextProvider`, `MPNetTextProvider`,
+//!   `EmbeddingGemmaProvider` -- the named text providers, mirrors
+//!   of the Swift trio. Each conforms to `vectorkit::EmbeddingProvider`,
+//!   holds a tokenizer and a model-specific projection seed, and
+//!   takes a host-supplied inference seam (token IDs -> pooled
+//!   vector). The kit bundles no model weights and links no
+//!   ML-runtime crate; the host injects inference on every platform.
+//!
+//! The real WordPiece / SentencePiece tokenizers are owned by
+//! NEITHER port -- Swift's named providers default to
+//! `DeterministicTokenizer` too, and the real tokenizers land with
+//! the host's model bundle (see `text_providers` for the full
+//! parity reasoning).
 //!
 //! Core `corpus-kit` (the sibling crate) is intentionally
 //! provider-free -- only the `Tokenizer` trait lives there. The
 //! `EmbeddingProvider` trait lives in `vectorkit` (consolidation
-//! 2026-05-27); concrete text providers in this crate will conform
+//! 2026-05-27); the concrete text providers in this crate conform
 //! to it directly. This layout matches Swift's split between
 //! `CorpusKit` and `CorpusKitProviders`.
 
 pub mod deterministic_tokenizer;
+pub mod text_providers;
 
 pub use deterministic_tokenizer::DeterministicTokenizer;
+pub use text_providers::{EmbeddingGemmaProvider, MPNetTextProvider, MiniLMTextProvider};

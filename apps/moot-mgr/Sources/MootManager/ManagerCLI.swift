@@ -102,7 +102,7 @@ public enum ManagerCLI {
       MOOT_MGR_STORE                      Override the stats-store path
       MOOT_MGR_RETENTION_SECONDS          Retention window in seconds (default 604800 = 7d)
       MOOT_MGR_RETENTION_CADENCE_SECONDS  Resident retention-loop cadence (default 3600 = 1h)
-      MOOT_MGR_HTTP_PORT                  Loopback HTTP read-API port (serve; default 7077)
+      MOOT_MGR_HTTP_PORT                  Loopback HTTP read-API port (serve; default 4200)
       MOOT_MGR_CONTROL_TOKEN             Bearer token gating HTTP control (serve; required, >=16 chars)
       MOOT_MGR_CONTROL_SOCKET            UDS path for the gated control channel (serve)
     """

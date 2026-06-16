@@ -1,0 +1,25 @@
+[package]
+name = "moot-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "moot-bridge Rust twin — the Rust vertical's counterpart to the Swift moot-bridge bridging MCP memory server. An AI client launches this as its single memory MCP server; every WRITE fans out to BOTH configured backends (e.g. MemPalace AND mootx01), every READ is served from the current PRIMARY, and the AI flips the primary mid-session via the bridge_set_primary tool. Wire-contract peer of the Swift server; internal architecture is idiomatic Rust. Per the no-FFI law this binary is a COMPLETE Rust vertical — it never calls Swift, Swift never calls it."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# lib + bin: the lib is the bridge logic (testable), the bin wires stdin/stdout.
+[lib]
+name = "moot_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "moot-bridge"
+path = "src/main.rs"
+
+[dependencies]
+# JSON-RPC parse/serialize. serde_json's Value is the Rust analogue of the
+# Swift JSONValue enum — the bridge is engine-agnostic and parses only enough of
+# each message to classify + translate it. No other external deps: the bridge is
+# a pure stdio JSON-RPC forwarder and tracks its own stats in-process.
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }

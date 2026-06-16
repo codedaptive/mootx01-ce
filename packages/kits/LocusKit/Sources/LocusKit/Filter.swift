@@ -110,8 +110,8 @@ public indirect enum Filter: Sendable {
 
     // MARK: Provenance queries
 
-    /// Rows where confirmation ≥ user_confirmed. The evaluator prepends
-    /// this filter when no provenance filter is present.
+    /// Rows where confirmation ≥ user_confirmed. This is explicit; ordinary
+    /// recall does not add a confirmation gate.
     case userConfirmed
     /// Rows where confirmation == automated_confirmed only (not user/peer/actuator).
     /// F13: was `modelConfirmedOnly` in v0.35; cookbook §2.5 vocab.

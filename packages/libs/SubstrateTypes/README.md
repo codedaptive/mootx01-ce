@@ -14,7 +14,7 @@ compiling until consumers re-point precisely.
 
 Pure shape: structs, enums, layout constants. Zero compute, zero transcendentals, zero I/O. Any kit that just needs to talk substrate-shape (e.g. ConvergenceKit) depends only on this.
 
-See `docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md` §6 for
+See `docs/engineering/HARNESS_REFERENCE.md` §6 for
 the canonical breakdown of where each substrate primitive lives,
 and cookbook v1.0 §20 for the rationale.
 

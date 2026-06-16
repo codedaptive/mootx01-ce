@@ -159,6 +159,24 @@ struct VerbSurfaceTests {
                 "withdrawn drawer should not appear in active-only recall")
     }
 
+    /// `capture` → `withdraw` → `mutate(.revive)`: the revive verb reaches
+    /// LocusKit through the GLK dispatch surface (the layer ARIA calls) and
+    /// a withdrawn row returns to active-recall. Exercises a newly-legal
+    /// revive transition end to end across the composition boundary.
+    @Test
+    func mutateReviveFromWithdrawn_roundTrip() async throws {
+        let (kit, handle) = try await openOneEstate()
+        let stored = try await kit.capture(handle, captureFrame(content: "revive target"))
+        try await kit.withdraw(handle, WithdrawFrame(rowID: stored.id, reason: "verb tests"))
+        #expect(!(try await kit.recall(handle, recallAllActive())).contains { $0.id == stored.id })
+
+        // revive: withdrawn → active through the GLK verb surface.
+        try await kit.mutate(handle, MutateFrame(rowID: stored.id, kind: .revive))
+        let activeRows = try await kit.recall(handle, recallAllActive())
+        #expect(activeRows.contains { $0.id == stored.id },
+                "revived drawer should reappear in active-only recall")
+    }
+
     // MARK: - expunge round-trip
 
     /// Confirmation gate fires before dispatch — an expunge without
@@ -232,12 +250,49 @@ struct VerbSurfaceTests {
 
     // MARK: - learn round-trip
 
-    /// `learn` is now live — delegates to LocusKit and returns a `LearnedReference`.
+    /// `learn` is live: it derives the reference's genuine lattice anchor from
+    /// its `SourceCatalogEntry` (never a sentinel) and persists it, recallable
+    /// through `recallLearnedReferences`. P1 mandate satisfied — a real anchor,
+    /// not a fabricated identity.
     @Test
-    func learnRoundTripSucceeds() async throws {
+    func learnWritesGenuineReference() async throws {
         let (kit, handle) = try await openOneEstate()
-        let ref = try await kit.learn(handle, LearnFrame(handle: "test-source"))
-        #expect(ref.handle == "test-source")
+        let source = SourceCatalogEntry(
+            id: "src-1",
+            kind: .user,
+            handle: "https://example.com",
+            latticeAnchor: .udc("004"),
+            firstSeen: Date(timeIntervalSince1970: 1_700_000_000),
+            addedBy: "cataloger"
+        )
+        let reference = try await kit.learn(
+            handle, LearnFrame(source: source, handle: "https://example.com/page"))
+        #expect(reference.latticeAnchor.udcCode == "004")
+        #expect(!reference.latticeAnchor.udcCode.isEmpty)
+        #expect(reference.sourceCatalogID == "src-1")
+
+        // Recallable through the live recall surface.
+        let refs = try await kit.recallLearnedReferences(handle)
+        #expect(refs.count == 1)
+        #expect(refs.first?.handle == "https://example.com/page")
+    }
+
+    /// `learn` fails loud only on genuinely invalid input — an empty reference
+    /// handle maps to a typed `VerbError`.
+    @Test
+    func learnFailsLoudOnEmptyHandle() async throws {
+        let (kit, handle) = try await openOneEstate()
+        let source = SourceCatalogEntry(
+            id: "src-1",
+            kind: .user,
+            handle: "https://example.com",
+            latticeAnchor: .udc("004"),
+            firstSeen: Date(timeIntervalSince1970: 1_700_000_000),
+            addedBy: "cataloger"
+        )
+        await #expect(throws: VerbError.self) {
+            _ = try await kit.learn(handle, LearnFrame(source: source, handle: ""))
+        }
     }
 
     // MARK: - propose round-trip

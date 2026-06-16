@@ -65,6 +65,18 @@ pub struct RecallStream {
     page_index: usize,
     /// Set to true once a page with `is_last = true` has been emitted.
     exhausted: bool,
+    /// Named internal-read failures that occurred while `Estate::recall`
+    /// produced this stream. EMPTY for a genuine result (every internal read
+    /// succeeded — including the genuine-empty estate, where the reads
+    /// succeeded and matched no rows). NON-EMPTY only when an internal read
+    /// (`live_rows`, room-fingerprints, room-drawer-read, or the bitmap
+    /// evaluator) FAILED and its rows were dropped: in that case `rows` may be
+    /// empty for a reason OTHER than "no matches", and this names which stage
+    /// failed so a consumer can tell a FAILED recall from a GENUINE-EMPTY
+    /// estate. `recall` is non-throwing per spec § 7.8.1, so this field — not
+    /// an `Err` — is the channel. Mirrors Swift `RecallStream.degradedStages`.
+    /// The GLK coordinator merges these into `GLKRecallResult.degraded_stages`.
+    degraded_stages: Vec<String>,
 }
 
 impl RecallStream {
@@ -86,7 +98,25 @@ impl RecallStream {
             offset: 0,
             page_index: 0,
             exhausted: false,
+            degraded_stages: Vec::new(),
         }
+    }
+
+    /// Attach named internal-read failure stages to this stream (builder
+    /// style). Used by `Estate::recall` to thread a failed-read signal to the
+    /// consumer without changing `new`'s signature — every existing
+    /// `RecallStream::new(rows, page_size, hydration_level)` call site (incl.
+    /// the in-crate tests) compiles unchanged and carries an empty
+    /// `degraded_stages`.
+    pub fn with_degraded_stages(mut self, stages: Vec<String>) -> Self {
+        self.degraded_stages = stages;
+        self
+    }
+
+    /// The named internal-read failures recorded while producing this stream.
+    /// Empty for a genuine (including genuine-empty) result. See the field doc.
+    pub fn degraded_stages(&self) -> &[String] {
+        &self.degraded_stages
     }
 
     /// Emit the next page. Returns `None` when the stream is exhausted
@@ -128,6 +158,18 @@ impl RecallStream {
             all.extend(page.rows);
         }
         all
+    }
+
+    /// Drain all pages AND return the stream's named internal-read failures.
+    /// The GLK RecallDirector lanes use this (rather than `collect_all`) so a
+    /// FAILED locus recall surfaces its `locus.*` stage in
+    /// `GLKRecallResult.degraded_stages`, distinguishable from a GENUINE-EMPTY
+    /// estate (empty stages). Mirrors the Swift director reading
+    /// `stream.degradedStages` after the `for await page in stream` drain.
+    pub fn collect_all_with_degraded(self) -> (Vec<Drawer>, Vec<String>) {
+        // Capture stages before `collect_all` consumes `self`.
+        let stages = self.degraded_stages.clone();
+        (self.collect_all(), stages)
     }
 }
 

@@ -25,11 +25,24 @@
 //! the same determinism but real Hamming geometry.
 
 pub mod embedding_provider;
+pub mod engine;
 pub mod error;
 pub mod simhash_embedding_provider;
 pub mod vector_store;
 
 pub use embedding_provider::EmbeddingProvider;
+pub use engine::{
+    // Lane F shared foundation types.
+    BinaryMetric, DenseHit, DenseIndex, DenseMetric, FloatMetric, IndexKind, LaneTag,
+    MetadataFilter, ModelPartitionEntry, ResidentVectorArray, VectorKind, VectorPayload,
+    VectorRecordKey,
+    // Lane A binary oracle + persistence.
+    BruteForceIndex, ResidentArrayStore,
+    // Lane C float implementations.
+    FloatBruteForceIndex,
+    // Lane E1 binary ColBERT MaxSim scorer (Exact-A exhaustive).
+    MaxSimHit, MaxSimScorer,
+};
 pub use error::VectorKitError;
 pub use simhash_embedding_provider::FloatSimHashEmbeddingProvider;
-pub use vector_store::{StoredVector, VectorMatch, VectorStore};
+pub use vector_store::{StoredVector, VectorMatch, VectorPayloadInput, VectorStore};

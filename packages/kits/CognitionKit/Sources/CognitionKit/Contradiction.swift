@@ -32,13 +32,27 @@ public enum Contradiction {
     /// whose cohesion is a negative-z outlier (below the set, beyond
     /// `threshold`) is in tension. Needs at least 3 drawers to define
     /// "fit". Read-only; a recall failure propagates.
+    ///
+    /// Per spec § 7.3, `.structured` hydration returns `content = ""`
+    /// (blob loading is skipped unless the filter chain has a content
+    /// predicate or hydration is `.full`). This recipe requires the
+    /// content body to compute shingle similarity, so the caller's
+    /// hydration level is overridden to `.full` unconditionally. The
+    /// rest of the frame (filter chain, limit, ordering, asOf) is
+    /// preserved exactly as supplied.
     public static func run(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         frame: LocusKit.RecallFrame,
         threshold: Float
     ) async throws -> ContradictionOutput {
-        let drawers = try await kit.recall(handle, frame)
+        // Override hydration to .full: shingleSimilarity operates on
+        // drawer.content, which is always "" under .structured (spec § 7.3).
+        // Without .full the pairwise similarity is uniformly 0 and the
+        // outlier detector runs on a flat cohesion vector — silent garbage.
+        var fullFrame = frame
+        fullFrame.hydrationLevel = .full
+        let drawers = try await kit.recall(handle, fullFrame)
         let count = drawers.count
         guard count >= 3 else {
             return ContradictionOutput(outliers: [], considered: count)

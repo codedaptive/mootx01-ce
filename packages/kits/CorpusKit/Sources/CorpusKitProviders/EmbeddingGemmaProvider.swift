@@ -5,7 +5,8 @@
 // vocabulary structure from BERT WordPiece). For v1.0 this
 // provider holds a DeterministicTokenizer stand-in matching
 // the EmbeddingGemma vocab size; the real SentencePiece port
-// lands when the model assets ship in the host bundle.
+// lands in the v1.1 model-bundle mission
+// (DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12).
 //
 // Conforms to VectorKit.EmbeddingProvider. Tokenizer held as a
 // private impl detail (see MiniLMTextProvider for the rationale).
@@ -20,7 +21,7 @@ import VectorKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -62,5 +63,16 @@ public struct EmbeddingGemmaProvider: EmbeddingProvider {
         let tokens = tokenizer.tokenize(text)
         let pooled = try await inference(tokens)
         return FloatSimHash.project(vector: pooled, seed: projectionSeed)
+    }
+
+    /// Float lane source (Lane D): the pooled 768-d vector this provider's
+    /// `embed(_:)` computes before projecting it to the 256-bit engram.
+    /// Returning it here feeds the dense float lane's cosine ranking. Empty
+    /// input returns `[]` per the `EmbeddingProvider.embedFloat` contract.
+    /// One inference pass feeds both the binary engram and this float vector.
+    public func embedFloat(_ text: String) async throws -> [Float] {
+        guard !text.isEmpty else { return [] }
+        let tokens = tokenizer.tokenize(text)
+        return try await inference(tokens)
     }
 }

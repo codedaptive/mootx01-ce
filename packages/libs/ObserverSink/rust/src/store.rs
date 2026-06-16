@@ -19,7 +19,7 @@ use std::sync::Arc;
 use chrono::{DateTime, TimeZone, Utc};
 use persistence_kit::{
     BackendConfiguration, ColumnDeclaration, ColumnType, EstateConfiguration, IndexDeclaration,
-    OrderDirection, SchemaDeclaration, SqliteStorage, Storage,
+    Migration, OrderDirection, SchemaDeclaration, SchemaOperation, SqliteStorage, Storage,
     StoragePredicate, StorageRow, TableDeclaration, TypedValue, Column,
     OrderClause as PkOrderClause,
 };
@@ -95,6 +95,17 @@ impl StatsStoreSchema {
 
     /// Key for the ISO-8601 timestamp of the last retention pass cutoff.
     pub const RETENTION_CUTOFF_KEY: &'static str = "retention_cutoff";
+
+    // topology_snapshots table (v2)
+
+    /// One row per estate. Latest-wins upsert via estate PRIMARY KEY.
+    pub const TOPOLOGY_SNAPSHOTS_TABLE: &'static str = "topology_snapshots";
+
+    /// TEXT NOT NULL — ISO-8601 UTC timestamp of when the governor produced the snapshot.
+    pub const GENERATED_AT_COLUMN: &'static str = "generated_at";
+
+    /// TEXT NOT NULL — JSON-encoded ARIAGraphPayload bytes. Served verbatim by /api/graph.
+    pub const PAYLOAD_COLUMN: &'static str = "payload";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,6 +214,31 @@ fn make_schema() -> SchemaDeclaration {
                 generated_columns: vec![],
                 append_only: false,
             },
+
+            // MARK: topology_snapshots (v2)
+            //
+            // One row per estate. The autonomic governor upserts here after each
+            // topology-recompute duty cycle. `estate` is the PRIMARY KEY so each
+            // write overwrites the previous row — no history accumulation.
+            // `generated_at` is TEXT (ISO-8601 UTC) per the schema timestamp invariant.
+            // `payload` is TEXT storing JSON-encoded ARIAGraphPayload bytes served verbatim.
+            //
+            // Added by v1→v2 migration.
+            TableDeclaration {
+                name: StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE.to_string(),
+                columns: vec![
+                    // Estate identifier — one row per estate, primary key.
+                    col_text(StatsStoreSchema::ESTATE_COLUMN),
+                    // ISO-8601 TEXT timestamp when the governor produced this snapshot.
+                    col_timestamp(StatsStoreSchema::GENERATED_AT_COLUMN),
+                    // JSON payload bytes (TEXT). Served verbatim; no decode on read path.
+                    col_text(StatsStoreSchema::PAYLOAD_COLUMN),
+                ],
+                primary_key: vec![StatsStoreSchema::ESTATE_COLUMN.to_string()],
+                unique_constraints: vec![],
+                generated_columns: vec![],
+                append_only: false,
+            },
         ],
         indices: vec![
             // Index on metric_samples.ts for fast retention deletes.
@@ -220,7 +256,29 @@ fn make_schema() -> SchemaDeclaration {
                 unique: false,
             },
         ],
-        migrations: vec![],
+        migrations: vec![
+            // v1 → v2: add topology_snapshots table.
+            // Additive migration — no existing rows are touched. The new table
+            // starts empty; the governor populates it on its first duty cycle.
+            Migration {
+                from_version: 1,
+                to_version: 2,
+                operations: vec![
+                    SchemaOperation::CreateTable(TableDeclaration {
+                        name: StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE.to_string(),
+                        columns: vec![
+                            col_text(StatsStoreSchema::ESTATE_COLUMN),
+                            col_timestamp(StatsStoreSchema::GENERATED_AT_COLUMN),
+                            col_text(StatsStoreSchema::PAYLOAD_COLUMN),
+                        ],
+                        primary_key: vec![StatsStoreSchema::ESTATE_COLUMN.to_string()],
+                        unique_constraints: vec![],
+                        generated_columns: vec![],
+                        append_only: false,
+                    }),
+                ],
+            },
+        ],
     }
 }
 
@@ -289,7 +347,9 @@ pub struct StatsStore {
 impl StatsStore {
     /// Current schema version for ObserverSink.
     /// Mirrors `StatsStore.schemaVersion` in Swift.
-    pub const SCHEMA_VERSION: i32 = 1;
+    /// v1: initial schema (metric_samples, event_samples, control).
+    /// v2: added topology_snapshots table (one row per estate, latest-wins upsert).
+    pub const SCHEMA_VERSION: i32 = 2;
 
     // MARK: - Initialisation
 
@@ -701,8 +761,10 @@ impl StatsStore {
     ///   lockContention (Bool?)       | lock_contention: Option<bool>
     ///   rowCount (Int?)              | row_count: Option<usize>
     ///   blobCount (Int?)             | blob_count: Option<usize>
-    ///   vectorCount (Int?)           | vector_count: Option<usize>
     ///   capturedAt (Date → epoch)    | captured_at_secs: i64
+    ///
+    /// Note: vectorCount / vector_count was removed from StorageStats in ADR-008.
+    /// The field no longer exists on either the Swift or Rust struct.
     ///
     /// Returns `Some(StorageStats)` on success, or `None` if the backend does not
     /// implement `StorageIntrospection` (cannot occur for the `SqliteStorage` backend,
@@ -718,6 +780,101 @@ impl StatsStore {
         use persistence_kit::StorageIntrospection;
         let stats = self.storage.stats(now_secs)?;
         Ok(Some(stats))
+    }
+
+    // MARK: - Topology snapshot (v2)
+
+    /// Write or replace the topology snapshot for `estate`.
+    ///
+    /// The autonomic governor calls this after each topology-recompute duty cycle.
+    /// Uses `estate` as the PRIMARY KEY upsert conflict target — only one row per
+    /// estate exists at any time (latest-wins, no history).
+    ///
+    /// `generated_at_secs` is the Unix timestamp (seconds) of when the governor
+    /// produced the snapshot. Stored as ISO-8601 TEXT (schema timestamp invariant).
+    /// No `SystemTime::now()` call inside the store (determinism rule).
+    ///
+    /// `payload` is the JSON-encoded ARIAGraphPayload bytes (UTF-8 string slice).
+    /// Mirrors Swift `StatsStore.writeTopologySnapshot(estate:generatedAt:payload:)`.
+    pub fn write_topology_snapshot(
+        &self,
+        estate: &str,
+        generated_at_secs: f64,
+        payload: &str,
+    ) -> Result<(), persistence_kit::StorageError> {
+        let rs = self.storage.row_store();
+        let generated_at_iso = epoch_to_iso8601(generated_at_secs);
+        let mut row = BTreeMap::new();
+        row.insert(
+            StatsStoreSchema::ESTATE_COLUMN.to_string(),
+            TypedValue::Text(estate.to_string()),
+        );
+        // ISO-8601 TEXT per schema timestamp invariant.
+        row.insert(
+            StatsStoreSchema::GENERATED_AT_COLUMN.to_string(),
+            TypedValue::Text(generated_at_iso),
+        );
+        row.insert(
+            StatsStoreSchema::PAYLOAD_COLUMN.to_string(),
+            TypedValue::Text(payload.to_string()),
+        );
+        rs.upsert(
+            StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE,
+            row,
+            &[StatsStoreSchema::ESTATE_COLUMN.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Read the latest topology snapshot bytes for `estate`, or — with
+    /// `None` — the newest snapshot across ALL estates (the moot-mgr
+    /// dashboard's default "all estates" view reads without an estate key;
+    /// the governor writes one row per estate and the newest `generated_at`
+    /// wins).
+    ///
+    /// Returns `None` when no snapshot has been written yet (governor has
+    /// not completed its first duty cycle). The caller should return a
+    /// `structurePending: true` response in this case.
+    ///
+    /// Mirrors Swift `StatsStore.latestTopologySnapshot(estate:) -> Data?`.
+    pub fn latest_topology_snapshot(
+        &self,
+        estate: Option<&str>,
+    ) -> Result<Option<String>, persistence_kit::StorageError> {
+        let rs = self.storage.row_store();
+        let predicate = estate.map(|est| {
+            StoragePredicate::Eq(
+                Column {
+                    table: StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE.to_string(),
+                    name: StatsStoreSchema::ESTATE_COLUMN.to_string(),
+                },
+                TypedValue::Text(est.to_string()),
+            )
+        });
+        let rows = rs.query(
+            StatsStoreSchema::TOPOLOGY_SNAPSHOTS_TABLE,
+            predicate.as_ref(),
+            &[],
+            None,
+            None,
+        )?;
+        // PRIMARY KEY lookup yields ≤1 row; the None-estate path picks the
+        // newest generated_at across estates. Absent values sort oldest.
+        fn generated_at(row: &persistence_kit::StorageRow) -> i64 {
+            match row.values.get(StatsStoreSchema::GENERATED_AT_COLUMN) {
+                Some(TypedValue::Timestamp(t)) => *t,
+                _ => i64::MIN,
+            }
+        }
+        let newest = rows.iter().max_by_key(|row| generated_at(row));
+        if let Some(row) = newest {
+            if let Some(TypedValue::Text(payload)) =
+                row.values.get(StatsStoreSchema::PAYLOAD_COLUMN)
+            {
+                return Ok(Some(payload.clone()));
+            }
+        }
+        Ok(None)
     }
 
     // MARK: - Internal helpers

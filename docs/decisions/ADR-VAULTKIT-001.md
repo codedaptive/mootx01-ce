@@ -5,8 +5,8 @@ authors: MOOTx01 maintainers
 date: 2026-06-03
 relates_to:
   - docs/reference/VAULTKIT_INTERFACE.md
-  - docs/reference/GENIUSLOCUSKIT_INTERFACE_v0.8.md
-  - docs/reference/LOCUSKIT_INTERFACE_v0.8.md
+  - docs/reference/GENIUSLOCUSKIT_INTERFACE.md
+  - docs/reference/LOCUSKIT_INTERFACE.md
 supersedes: none
 context:
   - Net-new Tier-3 implementation task; zero edits to existing code.
@@ -43,9 +43,8 @@ it behind a second estate boundary would defeat recall and cross-linking.
 `byteSize`), never the bytes. VaultKit does not copy attachment blobs into
 the substrate. Rationale: vaults can hold large binaries; the substrate's
 verbatim-content pillar is about text, and blob custody is a separate
-concern. Promotion of `SourceRef` to a substrate primitive is a future
-Tier-1 mission (Stream bp); here it is a kit-level value type that rides
-frontmatter.
+concern. Promotion of `SourceRef` to a substrate primitive is future
+work; here it is a kit-level value type that rides frontmatter.
 
 ## Decision (c) — A modular `VaultAdapter` seam
 
@@ -67,26 +66,25 @@ introduced.
 
 ## Decision (e) — Swift-first V1
 
-V1 ships Swift only (Bob-confirmed). The bridge's heavy lifting is
+V1 ships Swift only (maintainer-confirmed). The bridge's heavy lifting is
 filesystem traversal and Markdown/YAML parsing, and the only V1 consumers
-are the macOS app and the ARIA_MCP Swift side. No Rust `VaultKit` target
+are the macOS app and the AriaMcpKit Swift side. No Rust `VaultKit` target
 is added in this implementation task.
 
 > **Superseded (2026-06-06).** This decision no longer holds. A subsequent
 > workstream ported the entire VaultKit crate to Rust
 > (`packages/kits/VaultKit/rust/` — NoteIR, VaultBridge, DrawerMapping,
 > ObsidianAdapter, VaultAdapter) and wired the Rust `moot_vault_*` tools
-> (`apps/ARIA_MCP/rust/src/vault_tools.rs`), conformance-gated
-> (PARITY_WAVE_PROGRESS, 2026-06-05). VaultKit ships **Swift + Rust at
-> parity**. Per the parity-is-absolute standing rule (Bob, 2026-06-06 —
-> "we wouldn't do a swift-only version"), Swift-only is not a shippable
-> end state.
+> (`packages/kits/AriaMcpKit/rust/src/vault_tools.rs`), conformance-gated
+> (2026-06-05). VaultKit ships **Swift + Rust at
+> parity**. The project's Swift/Rust parity requirement means a
+> Swift-only kit is not a shippable end state.
 
 ## Decision (f) — Language-neutral `NoteIR` boundary
 
 `NoteIR` (and `Block`, `WikiLink`, `SourceRef`, `OccurredAt`) is the
-contract a future non-Swift producer — the Feature-B archive/email engine,
-which may be Rust or Python-via-Rust — will also emit. Its shape is
+contract a future non-Swift producer — for example an archive/email
+ingestion engine, which may be Rust or Python-via-Rust — will also emit. Its shape is
 therefore serializable JSON: every type is `Codable`, fields are flat, and
 no boundary type uses a Swift-only enum with associated values. `Block.kind`
 is an **open string vocabulary** rather than a closed enum precisely so an
@@ -135,7 +133,7 @@ endpoint+label signature** (`sourceWing`, `sourceRoom`, `targetRoom`,
 insert. This is read-check-before-insert over the substrate's own read
 API, not a second dedup store. Known V1 limitation: two notes in the same
 room linking the same target with the same label collapse to one tunnel;
-disambiguation is deferred to A2 (Stream va), which owns drift detection.
+disambiguation is deferred to the drift-detection work.
 
 ## Disposition
 

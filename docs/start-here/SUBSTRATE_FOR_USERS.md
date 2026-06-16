@@ -1,7 +1,7 @@
 ---
 title: "What MOOTx01 Is Built On"
 subtitle: "A plain-language tour of the machine behind your memory"
-author: "Bob Pankratz"
+author: "MOOTx01 maintainers"
 date: "2026-05-21"
 ---
 

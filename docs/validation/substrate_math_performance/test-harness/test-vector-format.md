@@ -1,7 +1,13 @@
-# GeniusLocus Test Vector Format Specification
+---
+status: in_progress
+created: 2026-05-16
+last_updated: 2026-06-14
+---
+
+# Substrate Test Vector Format Specification
 
 Format for cross-language conformance test vectors used by the
-GeniusLocus reference implementations. Both the Swift and Rust
+mootx01 substrate reference implementations. Both the Swift and Rust
 ports generate vectors in this format and validate against
 vectors in this format. CRC bit-identity between languages is
 the conformance gate.
@@ -37,7 +43,9 @@ substrate_math_performance/
 │   ├── swift/      Swift generator + validator sources
 │   ├── rust/       Rust generator + validator sources
 │   ├── vectors/    Generated vector files; one per primitive
-│   └── docs/       This spec and the primitive-walkthrough guide
+│   ├── test-vector-format.md       This spec
+│   ├── primitive-walkthrough-SimHash.md   Worked example
+│   └── primitive-catalog.md        Live catalog with CRCs
 └── ...
 ```
 
@@ -127,7 +135,7 @@ see `primitive-catalog.md`.
 Each primitive defines its own `inputs` and `expected_output`
 schema. The schemas are documented inline with the primitive's
 reference implementation and in
-`docs/primitive-walkthrough-SimHash.md` (worked example).
+`primitive-walkthrough-SimHash.md` (worked example).
 
 ## Type encodings
 
@@ -244,7 +252,9 @@ and fails on any mismatch. The four-way matrix is:
 | Swift generator | must PASS | must PASS |
 | Rust generator | must PASS | must PASS |
 
-All four cells green ⇒ the primitive is conformant. Any cell
+The two data rows × two validator columns encode the four named
+cells: Swift-gen/Swift-validate, Swift-gen/Rust-validate,
+Rust-gen/Swift-validate, Rust-gen/Rust-validate. All four cells green ⇒ the primitive is conformant. Any cell
 red ⇒ either the spec is ambiguous (both generators disagree on
 expected output) or one of the implementations has a bug.
 
@@ -268,17 +278,16 @@ This section records events that legitimately invalidate
 previously-published vector CRCs. Each entry names the
 primitive, the date, the reason, and the old and new CRC.
 
-### 2026-05-17 - simhash - Path 2 wire-up
+### 2026-05-17 - simhash - real reference wire-up
 
 The initial simhash vector file (CRC `0xcafd725b`) was generated
-against a Path 1 byte-identical stub reference (`reference_simhash`
-in both `Sources/Harness/Primitives/SimHashPrimitive.swift` and
-`src/primitives/simhash.rs`), used to validate the harness
-conformance machinery before the real Block 1 reference
-implementations were assembled as Swift Package and Rust crate.
+against a byte-identical stub reference (`reference_simhash`),
+used to validate the harness conformance machinery before the
+real reference implementations were assembled as a Swift package
+and Rust crate.
 
-With both `GeniusLocusReference` (Swift package, macOS 14+) and
-`geniuslocus-reference` (Rust crate) now building cleanly and
+With both the Swift reference package (macOS 14+) and the Rust
+reference crate now building cleanly and
 publishing their `SimHash.block(over:family:)` /
 `simhash::block(v, family)` entry points, the harness primitives
 were rewired to delegate to the real impls. The harness still
@@ -309,11 +318,10 @@ This is the only legitimate way the simhash CRC may change.
 A future CRC change requires another entry in this log and the
 reason it does not violate the stability promise.
 
-### 2026-05-17 - hamming - Phase 1 batched-case extension
+### 2026-05-17 - hamming - batched-case extension
 
 The `SubstrateKernel` trait (Rust) and protocol (Swift) gained
-three batched op signatures with loop-based default impls, per
-`DECISION_KERNEL_LEARNED_DISPATCH_2026-05-17`:
+three batched op signatures with loop-based default impls:
 `hamming_distance_batch`, `simhash_block_batch`, `or_reduce_batch`.
 Default impls preserve byte-for-byte equivalence with sequential
 pair-at-a-time loops, so the trait extension is non-breaking and
@@ -342,11 +350,11 @@ Rust reference unit tests: 142/142 pass.
 - Vector cases: 32 → 40 (32 pair + 8 batched)
 - Seed: `0xCAFEBABEDEADBEEF` (unchanged)
 
-The `simhash` and `or_reduce` primitives are scheduled for the
-same extension in the next sub-step of Phase 1. Their CRCs will
-change when that lands and are logged in their own entries below.
+The `simhash` and `or_reduce` primitives receive the same
+extension; their CRCs change when that lands and are logged in
+their own entries below.
 
-### 2026-05-17 - simhash - Phase 1 batched-case extension
+### 2026-05-17 - simhash - batched-case extension
 
 The `simhash` primitive vector was extended to cover the batched
 path, mirroring the prior `hamming` extension. Eight new cases
@@ -383,12 +391,12 @@ Corrected to match.
 - Vector cases: 32 → 40 (32 pair + 8 batched)
 - Seed: `0xCAFEBABEDEADBEEF` (unchanged)
 
-The `or_reduce` primitive is scheduled next.
+The `or_reduce` primitive receives the same extension next.
 
-### 2026-05-17 - or_reduce - Phase 1 batched-case extension
+### 2026-05-17 - or_reduce - batched-case extension
 
 The `or_reduce` primitive vector was extended to cover the
-batched path, completing Phase 1 sub-step 2. Eight new cases
+batched path, completing the batched-kernel rollout. Eight new cases
 were appended after the existing 32 pair-at-a-time cases, one
 per `batch_size` in `{0, 1, 2, 4, 8, 16, 32, 64}`.
 
@@ -412,22 +420,21 @@ passes. Rust reference unit tests: 142/142 pass.
 - Vector cases: 32 → 40 (32 pair + 8 batched)
 - Seed: `0xCAFEBABEDEADBEEF` (unchanged)
 
-Phase 1 sub-step 2 is complete. The trait extension landed in
-sub-step 1; the conformance harness now exercises the batched
+The conformance harness now exercises the batched
 path of all three batched kernel ops (`hamming_distance_batch`,
-`simhash_block_batch`, `or_reduce_batch`). Sub-step 3 is the
-stress-test binary that produces per-(op, batch_size) latency
-tables, feeding the learned dispatcher.
+`simhash_block_batch`, `or_reduce_batch`). A stress-test binary
+produces per-(op, batch_size) latency tables that feed the
+learned dispatcher.
 
-### 2026-05-17 - stress-test binary (Phase 1 sub-step 3)
+### 2026-05-17 - stress-test binary
 
 New `stress-test` binary in both ports (`rust/src/bin/stress_test.rs`
 and `swift/Sources/StressTest/main.swift`). Measures per-(op,
 batch_size, mode) latency for the three batched kernel ops
 against the scalar kernel. Two modes per (op, batch_size):
 
-- `batched`: the trait/protocol's batched method (default impl
-  at Phase 1, since no override exists yet).
+- `batched`: the trait/protocol's batched method (currently the
+  default impl, since no override exists yet).
 - `sequential`: explicit caller-side loop calling the
   pair-at-a-time op once per item.
 
@@ -442,7 +449,7 @@ The stress-test does NOT participate in the conformance gate
 and its results are NOT committed to the repo (they are
 hardware-specific and stale on first compile on a different
 machine). The JSON schema IS committed so consumers (the future
-learned-dispatcher in Phase 2+) have a stable contract.
+learned dispatcher) have a stable contract.
 
 Usage:
 ```
@@ -451,23 +458,23 @@ cargo run --release --bin stress-test -- --out /tmp/stress-rust.json
 ```
 
 Observation on first run (Apple M-series, scalar kernel):
-batched and sequential modes are within measurement noise at
-Phase 1, which matches expectation since the default batched
-impl IS a loop. The infrastructure is in place to detect the
-gap once Phase 2+ backends override the batched methods.
+batched and sequential modes are within measurement noise while
+the default batched impl IS a loop. The infrastructure is in
+place to detect the gap once specialized backends override the
+batched methods.
 
 Full 18-primitive conformance sweep still passes. Rust
 reference unit tests: 142/142 pass. Both Swift and Rust ports
 build clean.
 
-Phase 1 is complete. The batched trait extension is shipped,
-the conformance harness validates it across language and across
-the 18 existing primitives, and the measurement infrastructure
-is ready to consume Phase 2+ backends.
+The batched trait extension is shipped, the conformance harness
+validates it across language and across the 18 existing
+primitives, and the measurement infrastructure is ready to
+consume specialized backends.
 
-### 2026-05-17 - Path 2 multi-primitive buildout
+### 2026-05-17 - multi-primitive buildout
 
-During the multi-session Path 2 buildout (Tier 1 through Tier 3
+During the multi-primitive buildout (Tier 1 through Tier 3
 primitives), the test harness expanded from 4 primitives to 18,
 and the cross-language conformance gate surfaced nine real
 correctness bugs in the Swift reference implementation. Each is
@@ -494,8 +501,8 @@ landed.
 3. **CommunityDetection triangle merge (Rust test only).** The
    triangle test for Louvain phase 1 asserted an unreachable
    merge; phase 2 graph aggregation is intentionally deferred to
-   v0.37 per cookbook §7.3. The Rust test now asserts the
-   canonical labeling invariant only.
+   a later release per cookbook §7.3. The Rust test now asserts
+   the canonical labeling invariant only.
 
 4. **BradleyTerry observe multi-loser update.** Swift's
    `observe()` overwrote `theta[obs.winnerID]` on each loser
@@ -582,8 +589,8 @@ The `matrix_decay` primitive (cookbook §6.8) is promoted from the
 "Pending future work" list in `primitive-catalog.md` into the
 conformance gate. The Swift reference at
 `SubstrateLib/Sources/SubstrateLib/MatrixDecay.swift` and the Rust
-reference at `SubstrateLib/rust/glref-rust-decay.rs` (in the substrate-lib crate)
-expose the canonical `apply(to:nowSeconds:)` entry point.
+reference at `SubstrateLib/rust/src/matrix_decay.rs` expose the
+canonical `apply(to:nowSeconds:)` entry point.
 
 The harness uses 32 test cases:
 - Cases 0..23: arbitrary dt sampled from the SplitMix64 stream,
@@ -627,12 +634,12 @@ The `eigenvalue_centrality` primitive (cookbook §7.2) is promoted
 from the "Pending future work" list in `primitive-catalog.md` into
 the conformance gate. The Swift reference at
 `SubstrateML/Sources/SubstrateML/EigenvalueCentrality.swift` and
-the Rust reference at `SubstrateML/rust/src/eigenvalue_centrality.rs` (in
-the substrate-lib crate) implement power iteration with a
+the Rust reference at `SubstrateML/rust/src/eigenvalue_centrality.rs`
+implement power iteration with a
 Perron-Frobenius shift (`xNext += SHIFT * x`, SHIFT = 1.0) that
 breaks the ±λ oscillation bipartite graphs exhibit under raw
 power iteration. The bipartite-shift fix was applied during the
-Path 2 multi-primitive buildout on 2026-05-17 (see the bug list
+multi-primitive buildout on 2026-05-17 (see the bug list
 in the earlier multi-primitive entry).
 
 The harness uses 32 test cases:
@@ -684,13 +691,13 @@ The `moment_summary` primitive (cookbook §8.7) is promoted from
 the "Pending future work" list in `primitive-catalog.md` into
 the conformance gate. The Swift reference at
 `SubstrateML/Sources/SubstrateML/MomentSummary.swift` and the
-Rust reference at `SubstrateML/rust/src/moment_summary.rs` (in the
-substrate-lib crate) implement moment-summary as the OR-reduction
+Rust reference at `SubstrateML/rust/src/moment_summary.rs`
+implement moment-summary as the OR-reduction
 of fingerprints whose rows pass an `active_during(row, window)`
 predicate.
 
 A note on the catalog's prior "Swift Row / Rust RowLite type
-mismatch" entry: this is NOT a substrate-lib bug. It is a
+mismatch" entry: this is NOT a substrate bug. It is a
 deliberate API asymmetry — Swift's reference takes the full
 production `Row` from SubstrateTypes/Sources/SubstrateTypes/Row.swift (which lacks a
 capture_hlc field; that lives in the audit log in production),
@@ -750,8 +757,8 @@ The `field_presence_matrix_f` primitive (cookbook §6.1) is
 promoted from the "Pending future work" list in
 `primitive-catalog.md` into the conformance gate. The Swift
 reference at `SubstrateTypes/Sources/SubstrateTypes/MatrixF.swift` and
-the Rust reference at `SubstrateTypes/rust/src/matrix_f.rs` (in the substrate-
-lib crate) implement F, the 36 × 6 = 216-cell population
+the Rust reference at `SubstrateTypes/rust/src/matrix_f.rs`
+implement F, the 36 × 6 = 216-cell population
 statistic over (field, bit_position) presence. The `apply_row`
 operation walks the 216 positions and adds `delta` to each cell
 where `bit_presence(field, bit)` is true.
@@ -808,13 +815,13 @@ iterator extended to 22 primitives.
 
 With this promotion the pending list now contains ONLY
 `community_detection` phase 2, which is explicitly deferred to
-v0.37 per cookbook §7.3 (Louvain phase 2 graph aggregation).
-All other previously-pending primitives are now conformance-
-gated.
+a later release per cookbook §7.3 (Louvain phase 2 graph
+aggregation). All other previously-pending primitives are now
+conformance-gated.
 
 ### 2026-05-28 - audit_log_fold - Rust harness AuditEvent constructor fix
 
-Background: substrate-lib's `AuditEvent` struct gained a new
+The substrate's `AuditEvent` struct gained a new
 `event_id: u128` field for federation idempotence (deterministic
 content-ID over the wire fields, set by `audit_gate::content_id`).
 The Rust harness's two `AuditEvent { ... }` struct-literal
@@ -822,19 +829,11 @@ constructions in `audit_log_fold.rs` (one in `generate`, one in
 `validate_case`) did not supply this field, causing Rust harness
 builds to fail with "missing field `event_id` in initializer".
 
-This blocked every Rust harness build for the entire 2026-05-28
-session. Each of the four new primitive promotions worked around
-the breakage by temporarily commenting out `audit_log_fold` from
-`mod.rs` and `registry.rs` for the duration of validation, then
-restoring after. The workaround was applied and reverted four
-times.
-
-Fix (this entry): added `event_id: 0` to both `AuditEvent`
+Fix: added `event_id: 0` to both `AuditEvent`
 constructions in `test-harness/rust/src/primitives/audit_log_fold.rs`.
 
-CRC IMPACT: NONE. Verified by inspection that
-`SubstrateLib/rust/glref-rust-audit_log_fold.rs` (the fold algorithm) does not
-reference the `event_id` field — it consumes only verb,
+CRC IMPACT: NONE. Verified by inspection that the fold algorithm
+does not reference the `event_id` field — it consumes only verb,
 before_bitmaps, after_bitmaps, hlc, and lattice anchors. The
 fold's output state is therefore independent of event_id's
 value. Confirmed empirically:
@@ -844,24 +843,22 @@ value. Confirmed empirically:
   - Rust  validate of disk vector: PASS (now works, previously
     failed at build time)
 
-A Swift-side gap previously documented here (Swift's `AuditEvent`
-not yet having `eventID`) has been RESOLVED in Phase 6.6
-(2026-05-29). AuditEvent moved out of Verbs.swift into its own
-type at `SubstrateTypes/Sources/SubstrateTypes/AuditEvent.swift`
+On the Swift side, `AuditEvent` now lives in its own type at
+`SubstrateTypes/Sources/SubstrateTypes/AuditEvent.swift`
 with `public let eventID: UUID`; the Rust mirror at
-`SubstrateTypes/rust/src/audit_event.rs` continues to use
+`SubstrateTypes/rust/src/audit_event.rs` uses
 `event_id: u128`. The `audit_log_fold` CRC (`0xa747722e`) is
 unaffected because the fold algorithm does not consume the field
 in either port.
 
-### 2026-05-28 - fnv - promotion to 23rd gated primitive (F5b)
+### 2026-05-28 - fnv - promotion to 23rd gated primitive
 
 Fowler-Noll-Vo 1a was previously an internal helper inside
 `SubstrateLib/.../FeatureExtractors.swift` (Swift `internal func
 fnv64`) and `SubstrateML/rust/src/feature_extractors.rs` (Rust `pub fn
 fnv64`). LocusKit, CorpusKit and substrate-internal callers each
-rolled their own copy of the same algorithm, violating I-25. F5b
-promoted FNV-1a to a public substrate atomic (`FNV.swift` /
+rolled their own copy of the same algorithm. FNV-1a was
+promoted to a public substrate atomic (`FNV.swift` /
 `SubstrateTypes/rust/src/fnv.rs`) covering all three substrate-consumed entry
 points: 64-bit, 32-bit, and 16-bit fold. Every kit-local FNV-1a
 implementation was retired and redirected to the new public API.
@@ -875,7 +872,7 @@ Output is a u64 hex-encoded in HexCoding.u64 (little-endian byte
 order), zero-extended for hash32/hash16 cases.
 
 A minor encoding gotcha surfaced and was fixed during initial
-four-way validation: my first cut of `parse_u64` (both legs)
+four-way validation: the first cut of `parse_u64` (both ports)
 treated the hex as big-endian numeric, but the existing
 `HexCoding.u64` convention is little-endian byte hex (byte 0 =
 LSB), matching how every other gated primitive encodes u64. The
@@ -890,18 +887,15 @@ new `encode_u64_le` helper on the Rust side mirrors
 - Four-way conformance: Swift gen + Swift validate, Swift gen +
   Rust validate, Rust gen + Swift validate, Rust gen + Rust
   validate. All four PASS at `0x275fd2bf`.
-- New tier-1 entry — `HARNESS_REFERENCE_v1.0_2026-05-28.md` §2.1,
-  `primitive-catalog.md`, cookbook v1.0 §18.2 all updated.
-- CI matrix in `.github/workflows/geniuslocus-conformance.yml`
-  updated in all 7 places.
+- New tier-1 entry — the primitive catalog and the cookbook
+  (§18.2) were updated, and the primitive was added to the CI
+  conformance matrix.
 
 Reference paths:
-- Swift reference: `SubstrateTypes/Sources/SubstrateTypes/FNV.swift` (new file in
-  `GeniusLocusReference/`)
-- Rust reference: `SubstrateTypes/rust/src/fnv.rs` (new file in
-  `packages/libs/SubstrateLib/rust/`)
-- Harness Swift: `FNVPrimitive.swift` (new file)
-- Harness Rust: `src/primitives/fnv.rs` (new file)
+- Swift reference: `SubstrateTypes/Sources/SubstrateTypes/FNV.swift`
+- Rust reference: `SubstrateTypes/rust/src/fnv.rs`
+- Harness Swift: `FNVPrimitive.swift`
+- Harness Rust: `src/primitives/fnv.rs`
 
 ## Per-primitive registration
 
@@ -909,9 +903,9 @@ The harness ships a registry mapping primitive name → generator
 function + validator function in each language. Adding a new
 primitive requires:
 
-1. Land Swift + Rust reference implementations: Swift under
-   `substrate_math_performance/GeniusLocusReference/`, Rust under the four
-   substrate crates `packages/libs/Substrate{Types,Kernel,ML,Lib}/rust/`.
+1. Land Swift + Rust reference implementations under the
+   appropriate substrate package: `Substrate{Types,Kernel,ML,Lib}`
+   (Swift `Sources/`, Rust `rust/src/`).
 2. Register the primitive in
    `test-harness/swift/Sources/Harness/Primitives/PrimitiveRegistry.swift`
    and `test-harness/rust/src/primitives/registry.rs`.
@@ -923,10 +917,9 @@ primitive requires:
 5. Commit the Swift-generated vector file (canonical;
    Rust-generated is a CI artifact). The Swift-generated file
    is the on-disk source of truth.
-6. Add the primitive to the CI matrix in
-   `.github/workflows/geniuslocus-conformance.yml` (seven
-   places: one in each of the matrix steps).
-7. Update `docs/primitive-catalog.md` with the new entry,
+6. Add the primitive to the CI conformance matrix (one entry per
+   matrix step).
+7. Update `primitive-catalog.md` with the new entry,
    including its CRC, cookbook section, and source-file paths.
 
 See `primitive-walkthrough-SimHash.md` for the worked example.

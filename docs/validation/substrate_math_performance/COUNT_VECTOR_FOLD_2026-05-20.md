@@ -1,26 +1,26 @@
 ---
 title: Count-Vector and the Count-Fold Primitive
-status: implemented
+status: accepted
 created: 2026-05-20
-author: Bob Pankratz
-implements: docs/analysis/bundle_algebra/SCOPE_MAJORITY_VOTE_TREE_FOLD_2026-05-20.md
-decision: docs/decisions/DECISION_BUNDLE_ALGEBRA_AND_ERASURE_2026-05-20.md
+last_updated: 2026-06-14
+authors: MOOTx01 maintainers
 sources:
-  - SubstrateLib/Sources/SubstrateLib/CountVector256.swift
-  - SubstrateLib/Sources/SubstrateLib/PortableKernel.swift
-  - SubstrateLib/Sources/SubstrateLib/PortableKernel-SIMD.swift
-  - SubstrateLib/rust/glref-rust-count_vector.rs
-  - SubstrateLib/rust/glref-rust-kernel.rs
-  - SubstrateLib/rust/glref-rust-kernel_simd.rs
+  - packages/libs/SubstrateTypes/Sources/SubstrateTypes/CountVector256.swift
+  - packages/libs/SubstrateKernel/Sources/SubstrateKernel/PortableKernel.swift
+  - packages/libs/SubstrateKernel/Sources/SubstrateKernel/PortableKernel-SIMD.swift
+  - packages/libs/SubstrateTypes/rust/src/count_vector.rs
+  - packages/libs/SubstrateKernel/rust/src/kernel.rs
+  - packages/libs/SubstrateKernel/rust/src/kernel_simd.rs
 ---
 
 # Count-Vector and the Count-Fold Primitive
 
 This documents the first primitive of the bundle-algebra and erasure
-build, the count-vector and its fold. It is implemented in SubstrateLib
-in both the Swift and Rust ports and is conformance-gated across the
-kernel backends. It is the foundation the two-bundle materialization
-and the erasure verbs build on.
+build, the count-vector and its fold. The `CountVector256` type lives in
+the SubstrateTypes package and the `countFold256` kernel op in
+SubstrateKernel, in both the Swift and Rust ports, and is
+conformance-gated across the kernel backends. It is the foundation the
+two-bundle materialization and the erasure verbs build on.
 
 ## What it is
 
@@ -113,11 +113,12 @@ same xorshift generator and the same seeds, so identical fingerprint
 sequences produce identical count-vectors. The strict-tie case is
 asserted with the same literal membership in both ports.
 
-Test counts: Swift SubstrateLib 30, of which 13 are the count-vector
-suite (10 for the type and the cross-backend gate, 3 for the SIMD
-counter). Rust SubstrateLib lib 159 on stable; 161 under the
-simd-nightly feature, which adds the two SIMD count-fold tests and
-exercises the SIMD override in the conformance test.
+Tests: the count-vector suite lives in SubstrateTypes (the type and
+the cross-backend gate) with the SIMD vertical-counter tests gated in
+SubstrateKernel, in both ports. The SIMD count-fold tests run only
+under the Rust `simd-nightly` feature, which exercises the SIMD
+override in the conformance test; on stable Rust the backend inherits
+the scalar reference.
 
 ## The SIMD vertical counter
 

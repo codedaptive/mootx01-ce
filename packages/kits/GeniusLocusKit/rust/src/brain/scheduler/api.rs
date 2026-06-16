@@ -195,6 +195,7 @@ impl MutationKind {
 ///   `MiningPattern`       ↔ "mining_pattern"
 ///   `DisciplineViolation` ↔ "discipline_violation"
 ///   `MutateCandidate`     ↔ "mutate_candidate"
+///   `Enrichment`          ↔ "enrichment"
 ///
 /// Test labels promoted to named cases:
 ///   `Amend`               ↔ "amend"
@@ -209,6 +210,10 @@ pub enum ProposalKind {
     MiningPattern,
     DisciplineViolation,
     MutateCandidate,
+    /// Enrichment / Q-ID-assignment proposal. Filed by the maintenance
+    /// daemon when deterministic re-inference cannot resolve a drawer's
+    /// Wikidata Q-ID (cookbook §2.5; Q-ID-completion terminal workflow).
+    Enrichment,
     Amend,
     TestPropose,
     Other(String),
@@ -224,6 +229,7 @@ impl ProposalKind {
             ProposalKind::MiningPattern => "mining_pattern",
             ProposalKind::DisciplineViolation => "discipline_violation",
             ProposalKind::MutateCandidate => "mutate_candidate",
+            ProposalKind::Enrichment => "enrichment",
             ProposalKind::Amend => "amend",
             ProposalKind::TestPropose => "test_propose",
             ProposalKind::Other(s) => s.as_str(),
@@ -241,6 +247,7 @@ impl ProposalKind {
             "mining_pattern" => ProposalKind::MiningPattern,
             "discipline_violation" => ProposalKind::DisciplineViolation,
             "mutate_candidate" => ProposalKind::MutateCandidate,
+            "enrichment" => ProposalKind::Enrichment,
             "amend" => ProposalKind::Amend,
             "test_propose" => ProposalKind::TestPropose,
             other => ProposalKind::Other(other.to_string()),

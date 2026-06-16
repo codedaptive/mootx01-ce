@@ -5,7 +5,7 @@ import OSLog
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -603,33 +603,45 @@ internal struct MutationKindPayload: Sendable, Codable {
     let tag: String
     let sensitivity: String?
     let trust: String?
+    // Exportability axis — DEBT-1 write path. Encodes the AdjectiveExportability
+    // associated value as a string for JSON round-trip through the Brain scheduler.
+    let exportability: String?
 
     static func encode(_ kind: MutationKind) -> MutationKindPayload {
         switch kind {
-        case .confirm: return MutationKindPayload(tag: "confirm", sensitivity: nil, trust: nil)
-        case .reject: return MutationKindPayload(tag: "reject", sensitivity: nil, trust: nil)
-        case .contest: return MutationKindPayload(tag: "contest", sensitivity: nil, trust: nil)
-        case .resolve: return MutationKindPayload(tag: "resolve", sensitivity: nil, trust: nil)
-        case .supersede: return MutationKindPayload(tag: "supersede", sensitivity: nil, trust: nil)
-        case .revive: return MutationKindPayload(tag: "revive", sensitivity: nil, trust: nil)
-        case .accept: return MutationKindPayload(tag: "accept", sensitivity: nil, trust: nil)
+        case .confirm:
+            return MutationKindPayload(tag: "confirm", sensitivity: nil, trust: nil, exportability: nil)
+        case .reject:
+            return MutationKindPayload(tag: "reject", sensitivity: nil, trust: nil, exportability: nil)
+        case .contest:
+            return MutationKindPayload(tag: "contest", sensitivity: nil, trust: nil, exportability: nil)
+        case .resolve:
+            return MutationKindPayload(tag: "resolve", sensitivity: nil, trust: nil, exportability: nil)
+        case .supersede:
+            return MutationKindPayload(tag: "supersede", sensitivity: nil, trust: nil, exportability: nil)
+        case .revive:
+            return MutationKindPayload(tag: "revive", sensitivity: nil, trust: nil, exportability: nil)
+        case .accept:
+            return MutationKindPayload(tag: "accept", sensitivity: nil, trust: nil, exportability: nil)
         case .correctSensitivity(let s):
             return MutationKindPayload(
                 tag: "correct_sensitivity",
-                sensitivity: "\(s)", trust: nil)
+                sensitivity: "\(s)", trust: nil, exportability: nil)
+        case .correctExportability(let e):
+            return MutationKindPayload(
+                tag: "correct_exportability",
+                sensitivity: nil, trust: nil, exportability: "\(e)")
         case .correctTrust(let t):
             return MutationKindPayload(
                 tag: "correct_trust",
-                sensitivity: nil, trust: "\(t)")
+                sensitivity: nil, trust: "\(t)", exportability: nil)
         }
     }
 
-    /// Reconstruct a `MutationKind` from the wire shape. For the two
-    /// associated-value cases the wire-decoded form rebuilds the
-    /// default value because the substrate-level mutation today is
-    /// stubbed; the wire-encoded string is preserved in the outcome
-    /// log for diagnostic visibility. When the Brain layer's verb
-    /// bodies land they will tighten this round-trip.
+    /// Reconstruct a `MutationKind` from the wire shape. For the associated-value
+    /// cases the wire-decoded form rebuilds a default value because the Brain
+    /// scheduler does not forward live substrate calls today; the encoded string
+    /// is preserved in the outcome log for diagnostic visibility.
     func materialise() -> MutationKind {
         switch tag {
         case "confirm": return .confirm
@@ -641,6 +653,17 @@ internal struct MutationKindPayload: Sendable, Codable {
         case "accept": return .accept
         case "correct_sensitivity":
             return .correctSensitivity(.normal)
+        case "correct_exportability":
+            // Reconstruct from the stored string; default to .private_ (safe
+            // fallback) when the wire value is absent or unrecognised.
+            let exp = exportability.flatMap { s -> AdjectiveExportability? in
+                switch s {
+                case "public_": return .public_
+                case "private_": return .private_
+                default: return nil
+                }
+            } ?? .private_
+            return .correctExportability(exp)
         case "correct_trust":
             return .correctTrust(.proposed)
         default:

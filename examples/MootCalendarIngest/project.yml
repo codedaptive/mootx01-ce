@@ -20,9 +20,9 @@ options:
   createIntermediateGroups: true
 
 packages:
-  # The MootGateway Swift package. `../../apps/Mootx01` is the package root;
+  # The MootGateway Swift package. `../../apps/Mootx01-App` is the package root;
   # the product we depend on is "MootGateway" (see the target's dependencies).
-  Mootx01: { path: ../../apps/Mootx01 }
+  Mootx01: { path: ../../apps/Mootx01-App }
 
 targets:
   MootCalendarIngest:

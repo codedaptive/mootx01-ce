@@ -147,6 +147,7 @@ impl DreamingProposalSink for RecordingSink {
         self.proposals.push(frame);
     }
     fn record_cycle_diary(&mut self, _entry: neuron_kit::dreaming_cycle::DreamingDiaryEntry) {}
+    fn prune_recall_traces(&mut self, _cutoff_iso: &str) {}
 }
 
 // MARK: - Strongly-connected 3-competitor circular graph

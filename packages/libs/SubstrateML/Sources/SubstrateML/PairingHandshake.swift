@@ -97,6 +97,40 @@ public struct PairingRecord: Sendable, Equatable {
     }
 }
 
+/// Audit event recording a pairing or unpairing mutation.
+///
+/// Moved to top-level to match the Rust port's top-level
+/// `pub struct PairingAuditPayload` in pairing.rs. The substrate
+/// appends this to the G-Set audit log so the pairing is
+/// reconstructible.
+///
+/// Field shape parity with Rust: `peerEstate: UUID` in Swift mirrors
+/// `peer_estate: [u8; 16]` in Rust. Both are byte-equivalent: UUID's
+/// 16-byte storage is identical to a `[u8; 16]` big-endian
+/// representation. No data conversion is needed at the serde
+/// boundary; the row_id_uuid helpers in substrate-types handle
+/// UUID ↔ u128 on wire.
+public struct PairingAuditPayload: Sendable, Equatable {
+    /// "pair" | "unpair" — mirrors Rust `mutation_kind: String`.
+    public let mutationKind: String
+    /// Peer estate identifier — mirrors Rust `peer_estate: [u8; 16]`.
+    /// UUID and [u8; 16] are byte-equivalent representations.
+    public let peerEstate: UUID
+    public let federationCase: FederationCase
+    public let sharedFamilyHash: UInt64
+    public let hlc: HLC
+
+    public init(mutationKind: String, peerEstate: UUID,
+                federationCase: FederationCase,
+                sharedFamilyHash: UInt64, hlc: HLC) {
+        self.mutationKind = mutationKind
+        self.peerEstate = peerEstate
+        self.federationCase = federationCase
+        self.sharedFamilyHash = sharedFamilyHash
+        self.hlc = hlc
+    }
+}
+
 public enum PairingHandshake {
 
     /// Generate the shared four-block hyperplane family set
@@ -130,26 +164,6 @@ public enum PairingHandshake {
         }
         let peerShort = String(peerEstate.uuidString.prefix(8))
         return "H_shared_\(caseName)_\(peerShort)"
-    }
-
-    /// Build the audit event recording a new pairing. The substrate
-    /// appends this to the G-Set so the pairing is reconstructible.
-    public struct PairingAuditPayload: Sendable, Equatable {
-        public let mutationKind: String          // "pair" | "unpair"
-        public let peerEstate: UUID
-        public let federationCase: FederationCase
-        public let sharedFamilyHash: UInt64
-        public let hlc: HLC
-
-        public init(mutationKind: String, peerEstate: UUID,
-                    federationCase: FederationCase,
-                    sharedFamilyHash: UInt64, hlc: HLC) {
-            self.mutationKind = mutationKind
-            self.peerEstate = peerEstate
-            self.federationCase = federationCase
-            self.sharedFamilyHash = sharedFamilyHash
-            self.hlc = hlc
-        }
     }
 
     public static func buildPairEvent(peerEstate: UUID,

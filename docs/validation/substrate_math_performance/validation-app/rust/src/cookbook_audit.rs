@@ -40,9 +40,9 @@ use std::path::{Path, PathBuf};
 // performance -> validation -> docs -> <root>). main.rs's drift_check() uses
 // the same five-up hop for packages/libs, so we mirror it here.
 const COOKBOOK_REL: &str =
-    "../../../../../docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md";
+    "../../../../../docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md";
 const HARNESS_REF_REL: &str =
-    "../../../../../docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md";
+    "../../../../../docs/engineering/HARNESS_REFERENCE.md";
 const LIBS_REL: &str = "../../../../../packages/libs";
 
 // ── token model ─────────────────────────────────────────────────────────────

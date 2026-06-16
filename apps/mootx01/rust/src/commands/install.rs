@@ -1,0 +1,330 @@
+//! commands/install.rs — §4.2: wire mootx01 into MCP clients.
+//!
+//! Pipeline per selected client: backup existing config (§4.2 backups) →
+//! format-dispatched merge (JSON / TOML / Continue-YAML; a shared YAML like
+//! Hermes is refused rather than risk corrupting it) → permissions grant for
+//! Claude Code → summary.
+//!
+//! Target selection: `--target ids` explicit, `--yes` all detected, else an
+//! interactive numbered prompt (the arrow-key checkbox picker is §8 work;
+//! the numbered prompt is the spec'd ANSI fallback and the v1 interactive
+//! mode on Rust platforms).
+
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use crate::cli::Location;
+use crate::core::clients::{self, ConfigFormat, McpClient, SERVER_NAME};
+use crate::core::{merge, paths, permissions};
+use crate::exit;
+
+pub fn run(
+    target: Option<Vec<String>>,
+    location: Location,
+    yes: bool,
+    no_permissions: bool,
+    no_mgr: bool,
+    no_daemon: bool,
+) -> ExitCode {
+    let home = home_dir();
+    let registry = clients::supported();
+
+    let selected = match resolve_targets(&registry, target, yes, &home) {
+        Ok(s) => s,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::from(exit::FAILURE);
+        }
+    };
+    if selected.is_empty() {
+        println!("Nothing selected.");
+        return ExitCode::from(exit::OK);
+    }
+
+    let binary_path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "mootx01".to_string());
+    let daemon_url = daemon_url();
+
+    let mut wired = Vec::new();
+    let mut skipped = Vec::new();
+    for client in &selected {
+        match install_one(client, &home, &binary_path, &daemon_url, location) {
+            Ok(Some(path)) => {
+                println!("  ✓ wired {} ({})", client.display_name, path.display());
+                wired.push(client.display_name);
+            }
+            Ok(None) => skipped.push(client.display_name),
+            Err(e) => {
+                eprintln!("  ✗ {}: {e}", client.display_name);
+                skipped.push(client.display_name);
+            }
+        }
+    }
+
+    // Permissions grant (Claude Code settings) — §4.2, AIRA-INSTALL-P3 key.
+    if !no_permissions && selected.iter().any(|c| c.id == "claude-code") {
+        let settings = match location {
+            Location::Global => home.join(".claude/settings.json"),
+            Location::Local => PathBuf::from(".claude/settings.json"),
+        };
+        match merge::backup_existing(&settings)
+            .map_err(merge::MergeError::from)
+            .and_then(|_| permissions::grant(&settings))
+        {
+            Ok(added) if added > 0 => {
+                println!("  ✓ granted {added} tool permissions ({})", settings.display())
+            }
+            Ok(_) => println!("  ✓ tool permissions already granted"),
+            Err(e) => eprintln!("  ✗ permissions: {e}"),
+        }
+    }
+
+    // Service registration (§6). Linux: systemd user units. Windows: Task
+    // Scheduler lands next. macOS: Swift/launchd territory — the Rust binary
+    // is a dev build there.
+    #[cfg(target_os = "linux")]
+    {
+        use crate::core::service;
+        let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
+        if !no_daemon {
+            let unit = service::daemon_unit(&binary_path, data_override.as_deref());
+            report_registration("daemon", service::register(&home, service::DAEMON_UNIT, &unit));
+        }
+        if !no_mgr {
+            let mgr_binary = std::path::Path::new(&binary_path)
+                .parent()
+                .map(|d| d.join("moot-mgr"))
+                .filter(|p| p.exists());
+            match mgr_binary {
+                Some(mgr) => {
+                    let token = service::random_token();
+                    let unit = service::mgr_unit(
+                        &mgr.display().to_string(),
+                        &token,
+                        data_override.as_deref(),
+                    );
+                    report_registration("moot-mgr", service::register(&home, service::MGR_UNIT, &unit));
+                }
+                None => println!(
+                    "  skipping moot-mgr service (no moot-mgr binary beside mootx01)"
+                ),
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use crate::core::service;
+        let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
+        if !no_daemon {
+            let (exe, arg) = service::daemon_task_command(&binary_path, data_override.as_deref());
+            report_registration("daemon", service::register_task(service::DAEMON_TASK, &exe, &arg));
+        }
+        if !no_mgr {
+            let mgr_binary = std::path::Path::new(&binary_path)
+                .parent()
+                .map(|d| d.join("moot-mgr.exe"))
+                .filter(|p| p.exists());
+            match mgr_binary {
+                Some(mgr) => {
+                    let token = service::random_token();
+                    let (exe, arg) = service::mgr_task_command(
+                        &mgr.display().to_string(),
+                        &token,
+                        data_override.as_deref(),
+                    );
+                    report_registration("moot-mgr", service::register_task(service::MGR_TASK, &exe, &arg));
+                }
+                None => println!(
+                    "  skipping moot-mgr service (no moot-mgr binary beside mootx01)"
+                ),
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    if !no_daemon || !no_mgr {
+        println!(
+            "  (service registration pending on this platform — run \
+             `mootx01 serve --http auto` to start the daemon manually)"
+        );
+    }
+
+    if !skipped.is_empty() {
+        println!("Skipped: {}.", skipped.join(", "));
+    }
+    if !wired.is_empty() {
+        println!("Done. Restart your clients to pick up the new server.");
+    }
+    ExitCode::from(exit::OK)
+}
+
+/// Wire one client. Ok(Some(path)) = wired at path; Ok(None) = skipped with
+/// its own message already printed.
+fn install_one(
+    client: &McpClient,
+    home: &Path,
+    binary_path: &str,
+    daemon_url: &str,
+    location: Location,
+) -> Result<Option<PathBuf>, merge::MergeError> {
+    let Some(mut config) = client.config_path(home) else {
+        println!(
+            "  skipping {} (not available on this platform)",
+            client.display_name
+        );
+        return Ok(None);
+    };
+    // §4.2 --location local: project-scoped .mcp.json for Claude Code.
+    if location == Location::Local && client.id == "claude-code" {
+        config = PathBuf::from(".mcp.json");
+    }
+
+    match client.format {
+        ConfigFormat::Json => {
+            merge::backup_existing(&config)?;
+            let entry = merge::entry_for(client, binary_path, daemon_url);
+            merge::merge_into_json_config(&config, client.json_servers_key(), SERVER_NAME, entry)?;
+            Ok(Some(config))
+        }
+        ConfigFormat::Toml => {
+            merge::backup_existing(&config)?;
+            merge::merge_into_toml_config(&config, client, SERVER_NAME, binary_path, daemon_url)?;
+            Ok(Some(config))
+        }
+        ConfigFormat::Yaml => {
+            if client.id == "continue" {
+                merge::backup_existing(&config)?;
+                merge::write_continue_yaml(&config, binary_path, Some(daemon_url))?;
+                Ok(Some(config))
+            } else {
+                // Hermes' shared config.yaml: line-based block merge under
+                // `mcp_servers:` (schema verified against the real
+                // hermes-agent example).
+                merge::backup_existing(&config)?;
+                merge::merge_into_hermes_yaml(&config, SERVER_NAME, daemon_url)?;
+                Ok(Some(config))
+            }
+        }
+    }
+}
+
+/// §3: clients are pointed at the resident daemon; resolve its URL from the
+/// port file, falling back to the default 4242.
+fn daemon_url() -> String {
+    let port = paths::read_port_file(&paths::daemon_port_file(&paths::data_dir())).unwrap_or(4242);
+    format!("http://127.0.0.1:{port}")
+}
+
+pub(crate) fn resolve_targets(
+    registry: &[McpClient],
+    target: Option<Vec<String>>,
+    yes: bool,
+    home: &Path,
+) -> Result<Vec<McpClient>, String> {
+    if let Some(ids) = target {
+        let mut out = Vec::new();
+        for id in &ids {
+            match registry.iter().find(|c| c.id == id) {
+                Some(c) => out.push(c.clone()),
+                None => {
+                    let known: Vec<&str> = registry.iter().map(|c| c.id).collect();
+                    return Err(format!(
+                        "Unknown client id '{id}'. Known ids: {}.",
+                        known.join(", ")
+                    ));
+                }
+            }
+        }
+        return Ok(out);
+    }
+    if yes {
+        return Ok(registry.iter().filter(|c| c.detected(home)).cloned().collect());
+    }
+    Ok(prompt_select(registry, home))
+}
+
+/// Numbered-prompt selection (the spec'd fallback interactive mode).
+/// Detected clients start selected; numbers toggle; 'a' selects all; empty
+/// line confirms.
+fn prompt_select(registry: &[McpClient], home: &Path) -> Vec<McpClient> {
+    let mut selected: Vec<bool> = registry.iter().map(|c| c.detected(home)).collect();
+    let stdin = io::stdin();
+    loop {
+        println!("Select agents to configure (numbers toggle, 'a' all, enter confirms):");
+        for (i, c) in registry.iter().enumerate() {
+            let mark = if selected[i] { "x" } else { " " };
+            let det = if c.detected(home) { " (detected)" } else { "" };
+            println!("  {:2}. [{mark}] {}{det}", i + 1, c.display_name);
+        }
+        print!("> ");
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line).is_err() {
+            return Vec::new();
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            return registry
+                .iter()
+                .zip(&selected)
+                .filter(|(_, s)| **s)
+                .map(|(c, _)| c.clone())
+                .collect();
+        }
+        if line.eq_ignore_ascii_case("a") {
+            selected.iter_mut().for_each(|s| *s = true);
+            continue;
+        }
+        for tok in line.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+            if let Ok(n) = tok.parse::<usize>() {
+                if (1..=registry.len()).contains(&n) {
+                    selected[n - 1] = !selected[n - 1];
+                }
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn report_registration(label: &str, outcome: crate::core::service::RegisterOutcome) {
+    use crate::core::service::RegisterOutcome::*;
+    match outcome {
+        Registered(path) => println!("  ✓ {label} service registered ({})", path.display()),
+        ManualInstructions(text) => println!("  {text}"),
+        SkippedNoBinary(msg) => println!("  skipping {label} service ({msg})"),
+        Failed(msg) => eprintln!("  ✗ {label} service: {msg}"),
+    }
+}
+
+pub(crate) fn home_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("USERPROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_targets_validate_ids() {
+        let reg = clients::supported();
+        let home = std::env::temp_dir();
+        let ok = resolve_targets(&reg, Some(vec!["claude-code".into(), "cursor".into()]), false, &home)
+            .unwrap();
+        assert_eq!(ok.len(), 2);
+        let err =
+            resolve_targets(&reg, Some(vec!["frobnicator".into()]), false, &home).unwrap_err();
+        assert!(err.contains("Unknown client id 'frobnicator'"));
+    }
+}

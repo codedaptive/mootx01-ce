@@ -27,6 +27,8 @@ use crate::primitives::nmf::NMFPrimitive;
 use crate::primitives::or_reduce::ORReducePrimitive;
 use crate::primitives::pairing_handshake::PairingHandshakePrimitive;
 use crate::primitives::partial_state_recall::PartialStateRecallPrimitive;
+use crate::primitives::sampling::SamplingPrimitive;
+use crate::primitives::shingle_similarity::ShingleSimilarityPrimitive;
 use crate::primitives::simhash::SimHashPrimitive;
 use crate::primitives::temporal_compression::TemporalCompressionPrimitive;
 use crate::primitives::tier_contribution::TierContributionPrimitive;
@@ -80,6 +82,8 @@ pub fn all_primitives() -> Vec<PrimitiveDescriptor> {
         PairingHandshakePrimitive::descriptor(),
         NMFPrimitive::descriptor(),
         AuditLogFoldPrimitive::descriptor(),
+        SamplingPrimitive::descriptor(),
+        ShingleSimilarityPrimitive::descriptor(),
     ]
 }
 

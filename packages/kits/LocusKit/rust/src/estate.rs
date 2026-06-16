@@ -63,6 +63,56 @@ pub struct Estate {
     /// the backing store (the manifest's `estate_uuid` is set once at
     /// create time and treated as immutable per spec §7.7).
     estate_uuid: Uuid,
+
+    /// TEST-ONLY single-use fault seam for `recall` internal reads.
+    /// Encoded as an `AtomicU8` (a `RecallInternalRead` discriminant, or
+    /// `0` for "no fault") so `recall(&self, ...)` can consume it through
+    /// a shared reference and clear it for the next call without needing
+    /// `&mut self`. `AtomicU8` keeps `Estate: Send + Sync`. Compiled out
+    /// entirely unless the `test-seams` feature (or a test build) is
+    /// active — zero production footprint. Mirrors the Swift
+    /// `Estate._testForceInternalReadError` seam. Spec § 7.8.1 fault path.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub(crate) test_force_internal_read_error: std::sync::Arc<std::sync::atomic::AtomicU8>,
+
+    /// TEST-ONLY single-use fault seam for `seal_expunge_orphan_audit`.
+    /// When `true`, the next call to `seal_expunge_orphan_audit` returns
+    /// `LocusKitError::InvalidContent("forced orphan-seal failure")` and
+    /// clears the flag. This drives the double-failure path in GLK's
+    /// `expunge` coordinator: step-2 vector delete fails AND the orphan
+    /// audit cannot be recorded. Used to verify the coordinator folds
+    /// both failure reasons into the returned error without swallowing
+    /// the seal error. Wrapped in `Arc<AtomicBool>` so `Estate: Clone`
+    /// is preserved — clones share the same seam instance. Compiled out
+    /// in production builds.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub(crate) test_force_orphan_seal_error: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Which internal read inside `recall`/`live_rows` a forced fault targets.
+/// Each variant maps 1:1 to a degraded-stage string so a force-test can
+/// drive each internal-read failure path independently. The `u8`
+/// discriminants are the values stored in the `AtomicU8` seam (0 is
+/// reserved for "no fault").
+#[cfg(any(test, feature = "test-seams"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RecallInternalRead {
+    /// The bounded corpus scan (`all_drawers_bounded*`) — non-pruning path.
+    LiveRows = 1,
+    /// The room-fingerprint enumeration (`room_level_fingerprints`) —
+    /// fingerprint-pruning path.
+    RoomFingerprints = 2,
+    /// A surviving room's drawer read (`drawers_in_wing_room`) —
+    /// fingerprint-pruning path.
+    RoomDrawerRead = 3,
+    /// `BitmapEvaluator::evaluate`.
+    BitmapEval = 4,
+    /// The opt-in recall-trace WRITE (`store.insert_recall_traces`). Unlike the
+    /// read variants, this fault fires AFTER reads + eval succeed, so a forced
+    /// `TraceWrite` yields a populated result WITH the `recall.trace_write_failed`
+    /// stage — proving recall stays non-throwing while a lost trace is observable.
+    TraceWrite = 5,
 }
 
 impl std::fmt::Debug for Estate {
@@ -237,10 +287,80 @@ impl Estate {
                 found: manifest.estate_uuid.clone(),
                 expected: "<valid UUID string>".to_string(),
             })?;
+        // Backfill the per-container OR aggregate from the active drawer set
+        // so it covers every active row and is therefore sound to prune
+        // against (spec § 11.5). One full scan at open. Mirrors Swift
+        // `Estate.open`/`create`'s `containerFP.rebuildAll(activeDrawers:)`.
+        // On a fresh estate (create) this is a cheap no-op — no drawers yet.
+        // `now` is sourced from the manifest's `last_modified` row rather than
+        // a system clock, honouring the deterministic-engine rule: the
+        // aggregate's `updatedAt` stamp is reproducible from on-disk state.
+        store
+            .rebuild_container_fingerprints(manifest.last_modified)
+            .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
         Ok(Estate {
             store,
             estate_uuid: uuid,
+            #[cfg(any(test, feature = "test-seams"))]
+            test_force_internal_read_error: std::sync::Arc::new(
+                std::sync::atomic::AtomicU8::new(0),
+            ),
+            #[cfg(any(test, feature = "test-seams"))]
+            test_force_orphan_seal_error: std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
         })
+    }
+
+    /// TEST-ONLY: arm the single-use `recall` internal-read fault seam so the
+    /// next `recall` forces `read` to fail, surfacing its named degraded
+    /// stage without a genuinely-broken store. `recall` consumes and clears
+    /// the seam, so a subsequent recall behaves normally. Mirrors Swift
+    /// `Estate._setTestForceInternalReadError`. Never call in production code.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn set_test_force_internal_read_error(&self, read: Option<RecallInternalRead>) {
+        let v = read.map(|r| r as u8).unwrap_or(0);
+        self.test_force_internal_read_error
+            .store(v, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// TEST-ONLY: arm the single-use `seal_expunge_orphan_audit` fault seam.
+    ///
+    /// When armed, the next call to `seal_expunge_orphan_audit` on this estate
+    /// returns `LocusKitError::InvalidContent("forced orphan-seal failure")` and
+    /// clears the flag. This drives the double-failure path in GLK's `expunge`
+    /// coordinator: a step-2 vector delete failure followed by an orphan-seal
+    /// failure. Never call in production code.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn set_test_force_orphan_seal_error(&self, should_fail: bool) {
+        self.test_force_orphan_seal_error
+            .store(should_fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// TEST-ONLY: consume the orphan-seal fault seam — returns `true` if a
+    /// fault was armed (and clears it), `false` otherwise. Called once at the
+    /// start of `seal_expunge_orphan_audit` in `estate_verbs.rs`.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub(crate) fn take_test_force_orphan_seal_error(&self) -> bool {
+        self.test_force_orphan_seal_error
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// TEST-ONLY: consume the seam — return the armed fault (if any) and clear
+    /// it. Called once at the top of `recall`.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub(crate) fn take_test_force_internal_read_error(&self) -> Option<RecallInternalRead> {
+        let v = self
+            .test_force_internal_read_error
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
+        match v {
+            1 => Some(RecallInternalRead::LiveRows),
+            2 => Some(RecallInternalRead::RoomFingerprints),
+            3 => Some(RecallInternalRead::RoomDrawerRead),
+            4 => Some(RecallInternalRead::BitmapEval),
+            5 => Some(RecallInternalRead::TraceWrite),
+            _ => None,
+        }
     }
 }
 
@@ -327,6 +447,409 @@ mod tests {
             Ok(Vec::new())
         }
     }
+
+    /// Force-test: a minimal store that does NOT override
+    /// `all_kg_facts_including_retired` must receive a `DatabaseUnavailable`
+    /// error rather than a silent empty-vec. This guards the math-provenance
+    /// gate (FINDING-3): a missing impl must fail loud, not hide silently.
+    ///
+    /// `FakeStore` overrides only `read_manifest`, `set_meta`, and
+    /// `drawer_ids` — it intentionally does NOT override
+    /// `all_kg_facts_including_retired`, so it exercises the trait default.
+    #[test]
+    fn all_kg_facts_including_retired_default_fails_loud_on_non_overriding_store() {
+        let store = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        let err = store
+            .all_kg_facts_including_retired()
+            .expect_err("expected DatabaseUnavailable, got Ok");
+        match err {
+            LocusKitError::DatabaseUnavailable(msg) => {
+                assert!(
+                    msg.contains("all_kg_facts_including_retired"),
+                    "error message should name the method; got: {msg}"
+                );
+            }
+            other => panic!("expected DatabaseUnavailable, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Force-tests: every newly-gated read method must return
+    // DatabaseUnavailable on a non-overriding store.
+    //
+    // FakeStore overrides only `read_manifest`, `set_meta`, and
+    // `drawer_ids`; it intentionally does NOT override any of the
+    // methods below so each test exercises the trait default in isolation.
+    // Concrete stores (InMemory/SQLite/Postgres) all override every method
+    // and are covered by their own integration tests.
+    // -----------------------------------------------------------------
+
+    /// Helper: assert a result is DatabaseUnavailable and that the message
+    /// names the expected method. Parameterized over any T.
+    fn assert_fail_loud<T: std::fmt::Debug>(
+        result: Result<T, LocusKitError>,
+        method: &str,
+    ) {
+        let err = result.unwrap_err_or_else_panic(
+            &format!("expected DatabaseUnavailable for {method}, got Ok"),
+        );
+        match &err {
+            LocusKitError::DatabaseUnavailable(msg) => {
+                assert!(
+                    msg.contains(method),
+                    "error for {method} should name the method; got: {msg}"
+                );
+            }
+            other => panic!("expected DatabaseUnavailable for {method}, got {:?}", other),
+        }
+    }
+
+    // Extend Result<T,E> with an inline unwrap-or-panic to avoid
+    // unwrap_err() being the only option (it panics but we want a
+    // custom message).
+    trait UnwrapErrOrPanic<T, E> {
+        fn unwrap_err_or_else_panic(self, msg: &str) -> E;
+    }
+    impl<T: std::fmt::Debug, E> UnwrapErrOrPanic<T, E> for Result<T, E> {
+        fn unwrap_err_or_else_panic(self, msg: &str) -> E {
+            match self {
+                Err(e) => e,
+                Ok(v) => panic!("{msg}: got Ok({v:?})"),
+            }
+        }
+    }
+
+    #[test]
+    fn get_meta_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_meta("any-key"), "get_meta");
+    }
+
+    #[test]
+    fn get_drawer_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_drawer("any-id"), "get_drawer");
+    }
+
+    #[test]
+    fn living_successor_in_lineage_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.living_successor_in_lineage("lineage-id", "excluding-id"),
+            "living_successor_in_lineage",
+        );
+    }
+
+    #[test]
+    fn drawers_in_wing_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.drawers_in_wing("wing-a"), "drawers_in_wing");
+    }
+
+    #[test]
+    fn drawers_in_wing_room_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.drawers_in_wing_room("wing-a", "room-b"),
+            "drawers_in_wing_room",
+        );
+    }
+
+    #[test]
+    fn drawers_by_source_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.drawers_by_source("file.txt"), "drawers_by_source");
+    }
+
+    #[test]
+    fn all_drawers_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.all_drawers(), "all_drawers");
+    }
+
+    #[test]
+    fn get_tunnel_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_tunnel("t-id"), "get_tunnel");
+    }
+
+    #[test]
+    fn tunnels_from_wing_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.tunnels_from_wing("wing-a"), "tunnels_from_wing");
+    }
+
+    #[test]
+    fn tunnels_from_wing_room_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.tunnels_from_wing_room("wing-a", "room-b"),
+            "tunnels_from_wing_room",
+        );
+    }
+
+    #[test]
+    fn tunnels_to_wing_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.tunnels_to_wing("wing-a"), "tunnels_to_wing");
+    }
+
+    #[test]
+    fn all_tunnels_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.all_tunnels(), "all_tunnels");
+    }
+
+    #[test]
+    fn get_kg_fact_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_kg_fact("kg-id"), "get_kg_fact");
+    }
+
+    #[test]
+    fn kg_facts_for_drawer_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.kg_facts_for_drawer("d-id"), "kg_facts_for_drawer");
+    }
+
+    #[test]
+    fn get_proposal_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_proposal("p-id"), "get_proposal");
+    }
+
+    #[test]
+    fn proposals_for_target_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.proposals_for_target("row-id"), "proposals_for_target");
+    }
+
+    #[test]
+    fn get_association_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_association("a-id"), "get_association");
+    }
+
+    #[test]
+    fn associations_from_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.associations_from("wing-a", "room-b"), "associations_from");
+    }
+
+    #[test]
+    fn associations_to_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.associations_to("wing-a", "room-b"), "associations_to");
+    }
+
+    #[test]
+    fn get_learned_reference_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_learned_reference("lr-id"), "get_learned_reference");
+    }
+
+    #[test]
+    fn learned_references_from_source_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.learned_references_from_source("cat-id"),
+            "learned_references_from_source",
+        );
+    }
+
+    #[test]
+    fn get_source_catalog_entry_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.get_source_catalog_entry("sce-id"),
+            "get_source_catalog_entry",
+        );
+    }
+
+    #[test]
+    fn source_catalog_entry_for_handle_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.source_catalog_entry_for_handle("handle"),
+            "source_catalog_entry_for_handle",
+        );
+    }
+
+    #[test]
+    fn get_diary_entry_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_diary_entry("de-id"), "get_diary_entry");
+    }
+
+    #[test]
+    fn read_diary_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.read_diary("agent", 10), "read_diary");
+    }
+
+    #[test]
+    fn read_diary_in_wing_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.read_diary_in_wing("agent", "wing-a", 10),
+            "read_diary_in_wing",
+        );
+    }
+
+    #[test]
+    fn get_recall_trace_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.get_recall_trace("rt-id"), "get_recall_trace");
+    }
+
+    #[test]
+    fn recall_trace_since_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.recall_trace_since("2024-01-01T00:00:00.000Z"),
+            "recall_trace_since",
+        );
+    }
+
+    #[test]
+    fn recent_recall_traces_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.recent_recall_traces("2024-01-01T00:00:00.000Z", "2024-12-31T00:00:00.000Z"),
+            "recent_recall_traces",
+        );
+    }
+
+    #[test]
+    fn count_recall_traces_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.count_recall_traces(), "count_recall_traces");
+    }
+
+    #[test]
+    fn audit_events_for_row_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.audit_events_for_row("row-id"), "audit_events_for_row");
+    }
+
+    #[test]
+    fn list_wings_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.list_wings(), "list_wings");
+    }
+
+    #[test]
+    fn list_rooms_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.list_rooms(None), "list_rooms");
+    }
+
+    #[test]
+    fn all_proposals_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.all_proposals(), "all_proposals");
+    }
+
+    #[test]
+    fn all_associations_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.all_associations(), "all_associations");
+    }
+
+    #[test]
+    fn all_learned_references_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.all_learned_references(), "all_learned_references");
+    }
+
+    #[test]
+    fn all_kg_facts_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.all_kg_facts(), "all_kg_facts");
+    }
+
+    #[test]
+    fn all_diary_entries_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.all_diary_entries(), "all_diary_entries");
+    }
+
+    #[test]
+    fn fingerprints_captured_in_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.fingerprints_captured_in(0, 9_999_999_999),
+            "fingerprints_captured_in",
+        );
+    }
+
+    #[test]
+    fn fingerprint_bit_series_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(
+            s.fingerprint_bit_series(0, 86400, 7, 9_999_999_999),
+            "fingerprint_bit_series",
+        );
+    }
+
+    #[test]
+    fn room_level_fingerprints_default_fails_loud() {
+        let s = FakeStore::new("v1.0", "11111111-1111-1111-1111-111111111111");
+        assert_fail_loud(s.room_level_fingerprints(), "room_level_fingerprints");
+    }
+
+    // -----------------------------------------------------------------
+    // Regression guard: concrete InMemoryDrawerStore (wrapping DrawerStoreCore)
+    // still returns correct results on an empty estate — empty is a valid
+    // result from a real store, distinct from "not implemented".
+    // Uses epoch 1_700_000_000 as the deterministic now parameter.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn concrete_inmemory_store_all_drawers_returns_empty_on_empty_estate() {
+        use crate::drawer_store_inmemory::InMemoryDrawerStore;
+        let store = InMemoryDrawerStore::new(1_700_000_000, None).unwrap();
+        let result = store.all_drawers().expect("all_drawers on empty InMemory store");
+        assert!(result.is_empty(), "empty estate has no drawers");
+    }
+
+    #[test]
+    fn concrete_inmemory_store_all_tunnels_returns_empty_on_empty_estate() {
+        use crate::drawer_store_inmemory::InMemoryDrawerStore;
+        let store = InMemoryDrawerStore::new(1_700_000_000, None).unwrap();
+        let result = store.all_tunnels().expect("all_tunnels on empty InMemory store");
+        assert!(result.is_empty(), "empty estate has no tunnels");
+    }
+
+    #[test]
+    fn concrete_inmemory_store_all_kg_facts_returns_empty_on_empty_estate() {
+        use crate::drawer_store_inmemory::InMemoryDrawerStore;
+        let store = InMemoryDrawerStore::new(1_700_000_000, None).unwrap();
+        let result = store.all_kg_facts().expect("all_kg_facts on empty InMemory store");
+        assert!(result.is_empty(), "empty estate has no KG facts");
+    }
+
+    #[test]
+    fn concrete_inmemory_store_count_recall_traces_returns_zero_on_empty_estate() {
+        use crate::drawer_store_inmemory::InMemoryDrawerStore;
+        let store = InMemoryDrawerStore::new(1_700_000_000, None).unwrap();
+        let count = store
+            .count_recall_traces()
+            .expect("count_recall_traces on empty InMemory store");
+        assert_eq!(count, 0, "empty estate has zero trace rows");
+    }
+
+    #[test]
+    fn concrete_inmemory_store_list_wings_returns_empty_on_empty_estate() {
+        use crate::drawer_store_inmemory::InMemoryDrawerStore;
+        let store = InMemoryDrawerStore::new(1_700_000_000, None).unwrap();
+        let result = store.list_wings().expect("list_wings on empty InMemory store");
+        assert!(result.is_empty(), "empty estate has no wings");
+    }
+
+    // -----------------------------------------------------------------
+    // End force-tests
+    // -----------------------------------------------------------------
 
     /// The expected bitmap layout version is the value the spec fixes;
     /// changing it is a coordinated cross-leg event.

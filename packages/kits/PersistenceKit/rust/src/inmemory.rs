@@ -2,18 +2,19 @@
 //!
 //! Stored in a single Mutex<State> for simplicity; the Swift
 //! side uses an actor for the same purpose. RowStore, BlobStore,
-//! VectorIndex, AuditLog, and StorageObserver views are thin
+//! AuditLog, and StorageObserver views are thin
 //! Arc<InMemoryStorage> wrappers that lock the same state.
 //!
 //! No persistence between process runs; this backend exists for
-//! tests and rapid iteration. The SQLite backend (deferred to a
-//! follow-on R-mission) shares the same trait surface.
+//! tests and rapid iteration. The SQLite and PostgreSQL backends
+//! (sqlite.rs, postgres.rs) share the same trait surface and are
+//! fully shipped alongside InMemory.
 
 use crate::audit_log::{AuditEvent, AuditLog};
 use crate::blob_store::BlobStore;
 use crate::error::{StorageError, StorageResult};
 use crate::generated_column::GeneratedColumn;
-use crate::observer::{ObserverHub, StorageEvent, StorageObserver, TableChange};
+use crate::observer::{BlobChange, BlobEvent, BlobObserverHub, ObserverHub, StorageEvent, StorageObserver, TableChange};
 use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use crate::caching_row_store::CachingRowStore;
 use crate::row_store::RowStore;
@@ -22,9 +23,6 @@ use crate::storage::{
     BackendConfiguration, EstateConfiguration, IsolationLevel, Storage, StorageTransaction,
 };
 use crate::types::{Column, RowHandle, RowKey, StorageRow, TypedValue};
-use crate::vector_index::{
-    DistanceMetric, IndexParameters, SearchParameters, VectorIndex, VectorSearchResult,
-};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 // ─────────────────────────────────────────────────────────────────
@@ -32,7 +30,7 @@ use std::sync::{Arc, Mutex};
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -49,7 +47,6 @@ struct State {
     schema_version: i32,
     tables: BTreeMap<String, Table>,
     blobs: BTreeMap<String, Vec<u8>>,
-    vectors: BTreeMap<RowKey, VectorEntry>,
     audit_events: Vec<AuditEvent>,
 }
 
@@ -59,18 +56,17 @@ struct Table {
     rows: BTreeMap<RowKey, BTreeMap<String, TypedValue>>,
 }
 
-#[derive(Clone)]
-struct VectorEntry {
-    vector: Vec<f32>,
-    metadata: BTreeMap<String, TypedValue>,
-}
-
 // ----- public storage type -----
 
 pub struct InMemoryStorage {
     configuration: EstateConfiguration,
     state: Arc<Mutex<State>>,
     hub: Arc<ObserverHub>,
+    /// Blob observer hub: fans out blob put/delete events to all active
+    /// incremental replication sessions. Separate from the row hub because
+    /// blob changes do not filter by table name — every subscriber gets every
+    /// blob event (same pattern as Swift's `ObserverRegistry.notifyBlob`).
+    blob_hub: Arc<BlobObserverHub>,
     /// Monotone counter of transaction rollbacks. Stored separately from
     /// `state` because `state` is snapshot/restored on rollback — putting the
     /// counter there would reset it on every rollback, losing the history.
@@ -87,6 +83,7 @@ impl InMemoryStorage {
             configuration,
             state: Arc::new(Mutex::new(State::default())),
             hub: Arc::new(ObserverHub::new()),
+            blob_hub: Arc::new(BlobObserverHub::new()),
             rollback_count: Arc::new(Mutex::new(0)),
         }
     }
@@ -126,12 +123,7 @@ impl Storage for InMemoryStorage {
     fn blob_store(&self) -> Arc<dyn BlobStore> {
         Arc::new(InMemoryBlobStore {
             state: self.state.clone(),
-        })
-    }
-
-    fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Arc::new(InMemoryVectorIndex {
-            state: self.state.clone(),
+            blob_hub: self.blob_hub.clone(),
         })
     }
 
@@ -144,6 +136,7 @@ impl Storage for InMemoryStorage {
     fn observer(&self) -> Arc<dyn StorageObserver> {
         Arc::new(InMemoryObserver {
             hub: self.hub.clone(),
+            blob_hub: self.blob_hub.clone(),
         })
     }
 
@@ -196,9 +189,6 @@ impl StorageTransaction for InMemoryStorage {
     fn blob_store(&self) -> Arc<dyn BlobStore> {
         Storage::blob_store(self)
     }
-    fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Storage::vector_index(self)
-    }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
         Storage::audit_log(self)
     }
@@ -218,7 +208,6 @@ impl crate::introspection::StorageIntrospection for InMemoryStorage {
     ///
     /// row_count: sum of all row counts across all tables.
     /// blob_count: number of blob entries.
-    /// vector_count: number of vector entries.
     /// transaction_rollback_count: incremented by `transaction()` on error.
     ///
     /// All SQLite- and PostgreSQL-specific fields are None.
@@ -229,7 +218,6 @@ impl crate::introspection::StorageIntrospection for InMemoryStorage {
 
         let row_count: usize = state.tables.values().map(|t| t.rows.len()).sum();
         let blob_count: usize = state.blobs.len();
-        let vector_count: usize = state.vectors.len();
 
         // Approximate size: 256 B average per row + exact blob bytes.
         let blob_bytes: i64 = state.blobs.values().map(|b| b.len() as i64).sum();
@@ -250,7 +238,6 @@ impl crate::introspection::StorageIntrospection for InMemoryStorage {
             lock_contention: None,
             row_count: Some(row_count),
             blob_count: Some(blob_count),
-            vector_count: Some(vector_count),
             captured_at_secs: now_secs,
         })
     }
@@ -613,15 +600,25 @@ impl RowStore for InMemoryRowStore {
 
 struct InMemoryBlobStore {
     state: Arc<Mutex<State>>,
+    /// Blob observer hub for emitting put/delete events to incremental
+    /// replication sessions. Mirrors Swift's `ObserverRegistry.notifyBlob`.
+    blob_hub: Arc<BlobObserverHub>,
 }
 
 impl BlobStore for InMemoryBlobStore {
     fn put(&self, key: &str, bytes: &[u8]) -> StorageResult<()> {
+        let bytes_vec = bytes.to_vec();
         self.state
             .lock()
             .unwrap()
             .blobs
-            .insert(key.to_string(), bytes.to_vec());
+            .insert(key.to_string(), bytes_vec.clone());
+        // Emit put event AFTER successful write so subscribers see the committed state.
+        self.blob_hub.emit(BlobChange {
+            key: key.to_string(),
+            event: BlobEvent::Put,
+            bytes: Some(bytes_vec),
+        });
         Ok(())
     }
     fn get(&self, key: &str) -> StorageResult<Option<Vec<u8>>> {
@@ -629,6 +626,12 @@ impl BlobStore for InMemoryBlobStore {
     }
     fn delete(&self, key: &str) -> StorageResult<()> {
         self.state.lock().unwrap().blobs.remove(key);
+        // Emit delete event AFTER successful removal.
+        self.blob_hub.emit(BlobChange {
+            key: key.to_string(),
+            event: BlobEvent::Delete,
+            bytes: None,
+        });
         Ok(())
     }
     fn exists(&self, key: &str) -> StorageResult<bool> {
@@ -637,117 +640,8 @@ impl BlobStore for InMemoryBlobStore {
     fn size(&self, key: &str) -> StorageResult<Option<usize>> {
         Ok(self.state.lock().unwrap().blobs.get(key).map(|b| b.len()))
     }
-}
-
-// ----- VectorIndex -----
-
-struct InMemoryVectorIndex {
-    state: Arc<Mutex<State>>,
-}
-
-impl VectorIndex for InMemoryVectorIndex {
-    fn add(
-        &self,
-        key: RowKey,
-        vector: &[f32],
-        metadata: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<()> {
-        self.state.lock().unwrap().vectors.insert(
-            key,
-            VectorEntry {
-                vector: vector.to_vec(),
-                metadata,
-            },
-        );
-        Ok(())
-    }
-
-    fn update(
-        &self,
-        key: RowKey,
-        vector: &[f32],
-        metadata: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<()> {
-        self.add(key, vector, metadata)
-    }
-
-    fn delete(&self, key: RowKey) -> StorageResult<()> {
-        self.state.lock().unwrap().vectors.remove(&key);
-        Ok(())
-    }
-
-    fn knn(
-        &self,
-        query: &[f32],
-        k: usize,
-        metric: DistanceMetric,
-        _filter: Option<&StoragePredicate>,
-        _search_parameters: Option<SearchParameters>,
-    ) -> StorageResult<Vec<VectorSearchResult>> {
-        let state = self.state.lock().unwrap();
-        let mut scored: Vec<VectorSearchResult> = state
-            .vectors
-            .iter()
-            .map(|(key, entry)| {
-                let distance = compute_distance(query, &entry.vector, metric);
-                VectorSearchResult {
-                    key: *key,
-                    distance,
-                    metadata: entry.metadata.clone(),
-                }
-            })
-            .collect();
-        scored.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(k);
-        Ok(scored)
-    }
-
-    fn reindex(&self, _parameters: IndexParameters) -> StorageResult<()> {
-        Ok(())
-    }
-
-    fn count(&self) -> StorageResult<usize> {
-        Ok(self.state.lock().unwrap().vectors.len())
-    }
-}
-
-fn compute_distance(a: &[f32], b: &[f32], metric: DistanceMetric) -> f32 {
-    match metric {
-        DistanceMetric::L2 => {
-            let mut sum = 0.0_f32;
-            for i in 0..a.len().min(b.len()) {
-                let d = a[i] - b[i];
-                sum += d * d;
-            }
-            sum.sqrt()
-        }
-        DistanceMetric::Dot => {
-            let mut sum = 0.0_f32;
-            for i in 0..a.len().min(b.len()) {
-                sum += a[i] * b[i];
-            }
-            -sum // smaller = closer; negate so larger dot products win
-        }
-        DistanceMetric::Cosine => {
-            let mut dot = 0.0_f32;
-            let mut norm_a = 0.0_f32;
-            let mut norm_b = 0.0_f32;
-            for i in 0..a.len().min(b.len()) {
-                dot += a[i] * b[i];
-                norm_a += a[i] * a[i];
-                norm_b += b[i] * b[i];
-            }
-            let denom = norm_a.sqrt() * norm_b.sqrt();
-            if denom < f32::EPSILON {
-                1.0
-            } else {
-                1.0 - dot / denom
-            }
-        }
+    fn list_keys(&self) -> StorageResult<Vec<String>> {
+        Ok(self.state.lock().unwrap().blobs.keys().cloned().collect())
     }
 }
 
@@ -840,6 +734,10 @@ fn hlc_gt(a: &HLC, b: &HLC) -> bool {
 
 struct InMemoryObserver {
     hub: Arc<ObserverHub>,
+    /// Blob change hub: delivers put/delete events to incremental replication
+    /// sessions via `observe_blobs()`. Mirrors Swift's `InMemoryObserver`
+    /// calling `registry.registerBlobs()`.
+    blob_hub: Arc<BlobObserverHub>,
 }
 
 impl StorageObserver for InMemoryObserver {
@@ -849,6 +747,10 @@ impl StorageObserver for InMemoryObserver {
         events: BTreeSet<StorageEvent>,
     ) -> StorageResult<std::sync::mpsc::Receiver<TableChange>> {
         Ok(self.hub.subscribe(table.to_string(), events))
+    }
+
+    fn observe_blobs(&self) -> std::sync::mpsc::Receiver<BlobChange> {
+        self.blob_hub.subscribe()
     }
 }
 

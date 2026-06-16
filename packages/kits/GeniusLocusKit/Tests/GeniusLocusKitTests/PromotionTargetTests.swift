@@ -51,9 +51,13 @@ struct PromotionTargetTests {
     }
 
     private func recallAll(kit: GeniusLocusKit, handle: EstateHandle) async throws -> [Drawer] {
+        // `.full` hydration required: callers check `row.content` to verify
+        // which rows landed in the estate after promotion/merge. Per spec § 7.3,
+        // `.structured` returns `content = ""` (no blob reads), so only `.full`
+        // loads content bodies for content-equality assertions.
         let frame = RecallFrame(
             filterChain: [.unconfirmed],
-            hydrationLevel: .structured,
+            hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
         return try await kit.recall(handle, frame)

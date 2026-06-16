@@ -5,13 +5,14 @@ author: "MOOTx01 maintainers"
 date: "2026-06-07"
 ---
 
-> This guide covers `mootx01 install` on macOS. It explains what the installer
-> sets up, how your AI clients connect, and what to do when something isn't
-> right. Read this before filing a bug — most first-run questions are answered here.
+> This guide covers `mootx01 install` on **macOS, Linux, and Windows**. The detailed walkthrough
+> below is written for macOS, the most full-featured path; the **[Linux and Windows](#linux-and-windows)**
+> section near the end covers what differs on those platforms. Read this before filing a bug —
+> most first-run questions are answered here.
 
 ## Before you begin
 
-- macOS 15 or later (the MCP server and the background daemon require it)
+- One of: **macOS 15+** (Swift build), **Linux** x86_64/arm64, or **Windows** x86_64 (both Rust builds) — all host a local estate; see [Linux and Windows](#linux-and-windows) for those paths
 - At least one supported AI client installed: **Claude Desktop**, **Claude Code**,
   **Cursor**, **Cline**, or **Continue**
 - The `mootx01` binary built or downloaded from the release archive and
@@ -40,7 +41,7 @@ Running `mootx01 install` performs four things, in order:
 
 4. **Starts the management console.** `moot-mgr` is registered as a separate
    background service under `com.mootx01.mgr`. It runs a local dashboard at
-   `http://127.0.0.1:7077` where you can observe what the daemon is doing.
+   `http://127.0.0.1:4200` where you can observe what the daemon is doing.
    This requires the `moot-mgr` binary to be present alongside `mootx01` in
    the release archive — if you built only `mootx01`, the console step is
    skipped with a note.
@@ -89,7 +90,7 @@ connecting directly to a local HTTP MCP server without a bridge tool. The
 installer uses the stdio path for it instead, which is reliable but means
 Claude Desktop spawns its own short-lived MCP instance per conversation.
 That instance has access to your estate but does not run the background
-brain work. If you want continuous maintenance, run Claude Code, Cursor,
+maintenance work. If you want continuous maintenance, run Claude Code, Cursor,
 Cline, or Continue alongside — the daemon runs as long as those clients
 are active.
 
@@ -146,7 +147,7 @@ moot-mgr monitoring status
 
 The on/off switch takes effect on the running daemon immediately — no restart
 required. When monitoring is on, the daemon's activity (including its
-background work) appears in the dashboard at `http://127.0.0.1:7077`.
+background work) appears in the dashboard at `http://127.0.0.1:4200`.
 
 Monitoring state is stored in the management console's own database, not in
 your estate. Turning it off does not affect your memory data.
@@ -170,8 +171,61 @@ To see the management console's view of the daemon:
 moot-mgr status
 ```
 
-Or open `http://127.0.0.1:7077` in a browser (when monitoring is on, this
+Or open `http://127.0.0.1:4200` in a browser (when monitoring is on, this
 shows live activity).
+
+---
+
+## Linux and Windows
+
+MOOTx01 runs a full local estate on Linux and Windows too: the **Rust** build of `mootx01` hosts
+the same MCP server as the Swift build on macOS (CI smoke-tests `mootx01 serve` on Linux). The flow
+mirrors the macOS walkthrough above — only the install command, the binary set, and the
+background-service mechanism differ.
+
+**Install the binary.**
+
+- *Linux:* `curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh`
+  downloads the Linux `mootx01`, places it at `~/.mootx01/bin/mootx01`, and symlinks
+  `~/.local/bin/mootx01` — the same layout as macOS.
+- *Windows:* run the PowerShell installer:
+  `iex "& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.ps1) }"`.
+  Note: on Windows `install.ps1` both downloads the binary **and** wires clients over **stdio**
+  (each spawns its own instance — no shared daemon). To get the resident HTTP daemon shared across
+  clients, run `mootx01 install` afterward — it registers the Task Scheduler service and rewires
+  clients to the daemon.
+
+**Wire your AI clients.** `mootx01 install` detects and wires the same supported clients as on
+macOS — the Rust CLI writes the identical MCP entries (Claude Desktop still uses the stdio path).
+On Linux/macOS the download script tells you to run this next; on Windows it's the step that turns
+the stdio install into the resident-daemon install.
+
+**Background service** — registered automatically by `mootx01 install`, with no admin elevation:
+
+- *Linux:* a per-user **systemd** unit at `~/.config/systemd/user/mootx01.service`, enabled via
+  `systemctl --user enable --now` with `loginctl enable-linger` so the daemon runs without an open
+  login session. A `mootx01-mgr.service` is added when a `moot-mgr` binary sits beside `mootx01`;
+  the Linux x86_64/arm64 archives include `moot-mgr`, so the mgr service registers automatically.
+  On hosts without systemd, the installer prints the unit text and manual start instructions
+  instead (sysvinit/openrc are not auto-registered in v1).
+- *Windows:* a per-user **Task Scheduler** logon task named `mootx01`, created with
+  `schtasks /SC ONLOGON` and started immediately. A `mootx01-mgr` task is registered alongside it,
+  since the Windows archive ships `moot-mgr.exe` beside `mootx01`.
+
+**The dashboard.** The macOS `moot-mgr` is a SwiftUI app; on **Linux and Windows** `moot-mgr` is a
+**headless** server (the Rust build) that serves the same web dashboard at `http://127.0.0.1:4200`.
+It ships in the Linux x86_64/arm64 and Windows release archives, so `mootx01 install` registers its
+service automatically on every platform. Its admin control channel is a Unix-domain socket on
+Linux/macOS and a named pipe on Windows — both owner-only, never on the network.
+
+**Verify** the same way everywhere:
+
+```
+mootx01 status
+```
+
+plus `http://127.0.0.1:4200` when the manager is running. Everything stays on loopback
+(`127.0.0.1`) — nothing leaves your machine.
 
 ---
 
@@ -220,7 +274,7 @@ normal installed case.
 |---|---|---|
 | `MOOTX01_HTTP_PORT` | `4242` | Loopback port the daemon listens on |
 | `MOOTX01_HTTP_MAX_BODY_BYTES` | `4194304` (4 MiB) | Maximum MCP request body the daemon accepts |
-| `MOOTX01_BRAIN_TICK_MS` | `5000` | Background brain-pump sampling resolution in milliseconds |
+| `MOOTX01_BRAIN_TICK_MS` | `5000` | How often the background maintenance loop (the autonomic governor) samples, in milliseconds |
 | `MOOTX01_MONITORING_POLL_MS` | `5000` | How often the daemon checks whether monitoring is enabled |
 
 Setting `MOOTX01_HTTP_PORT` switches `mootx01 serve` into resident HTTP mode.
@@ -234,9 +288,18 @@ Without it, `mootx01 serve` runs over stdio (the per-client ephemeral mode).
 mootx01 uninstall
 ```
 
-This stops and removes both launchd services, removes the binaries from
-`~/.mootx01/bin/` and the convenience symlinks from `~/.local/bin/`, and
-removes the MCP entries from all client configs.
-Your estate data (`~/Library/Application Support/com.mootx01.ce/`) is not
-deleted — your memory is preserved. Delete that directory manually if you
-want a complete removal.
+This removes the MCP entries from all client configs, removes the binaries from
+`~/.mootx01/bin/` and the symlinks from `~/.local/bin/`, and removes the background service for
+your platform:
+
+- **macOS** — the launchd services (`com.mootx01.daemon`, `com.mootx01.mgr`)
+- **Linux** — the systemd-user units (`mootx01.service`, and `mootx01-mgr.service` if it was installed)
+- **Windows** — the Task Scheduler logon task `mootx01` (and `mootx01-mgr` only if it was installed)
+
+Your estate data is **not** deleted — your memory is preserved. It lives at:
+
+- **macOS** — `~/Library/Application Support/com.mootx01.ce/`
+- **Linux** — `~/.local/share/mootx01/` (or `$XDG_DATA_HOME/mootx01/`)
+- **Windows** — `%LOCALAPPDATA%\MOOTx01\`
+
+Delete that directory manually if you want a complete removal.

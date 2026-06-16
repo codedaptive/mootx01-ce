@@ -10,7 +10,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -37,7 +37,13 @@ final class SQLiteRowStore: RowStore, Sendable {
         try await backend.deleteRows(table: table, where: predicate)
     }
     func query(table: String, where predicate: StoragePredicate?, orderBy: [OrderClause], limit: Int?, offset: Int?) async throws -> [StorageRow] {
-        try await backend.queryRows(table: table, where: predicate, orderBy: orderBy, limit: limit, offset: offset, tableSchema: nil)
+        try await backend.queryRows(table: table, where: predicate, orderBy: orderBy, limit: limit, offset: offset, tableSchema: nil, columns: nil)
+    }
+    // No-blob projection: thread the requested column list to the backend so
+    // the generated SELECT names only those columns. Omitting "content" means
+    // the blob is never read from SQLite — the dense-first candidate-pool load.
+    func query(table: String, where predicate: StoragePredicate?, orderBy: [OrderClause], limit: Int?, offset: Int?, columns: [String]?) async throws -> [StorageRow] {
+        try await backend.queryRows(table: table, where: predicate, orderBy: orderBy, limit: limit, offset: offset, tableSchema: nil, columns: columns)
     }
     func count(table: String, where predicate: StoragePredicate?) async throws -> Int {
         try await backend.countRows(table: table, where: predicate)
@@ -53,6 +59,7 @@ final class SQLiteBlobStore: BlobStore, Sendable {
     func delete(key: BlobKey) async throws { try await backend.deleteBlob(key) }
     func exists(key: BlobKey) async throws -> Bool { try await backend.blobExists(key) }
     func size(key: BlobKey) async throws -> Int? { try await backend.blobSize(key) }
+    func listKeys() async throws -> [BlobKey] { try await backend.listBlobKeys() }
 }
 
 final class SQLiteAuditLog: AuditLog, Sendable {
@@ -75,13 +82,11 @@ final class SQLiteAuditLog: AuditLog, Sendable {
 final class SQLiteTransaction: StorageTransaction, Sendable {
     let rowStore: any RowStore
     let blobStore: any BlobStore
-    let vectorIndex: any VectorIndex
     let auditLog: any AuditLog
 
     init(backend: SQLiteBackend) {
         self.rowStore = SQLiteRowStore(backend: backend)
         self.blobStore = SQLiteBlobStore(backend: backend)
-        self.vectorIndex = SQLiteVectorIndex(backend: backend)
         self.auditLog = SQLiteAuditLog(backend: backend)
     }
 }

@@ -39,19 +39,31 @@ public struct ResidentHostConfig: Sendable {
     /// MOOTs here through GLK. Defaults beside the stats store
     /// (<store-dir>/estates). InMemory estates do not touch it.
     public let estatesDirectory: URL
+    /// Whether `httpPort` was explicitly requested (env/flag). Explicit means
+    /// exact — a busy port fails. When false (the built-in default), `start`
+    /// hunts upward from `httpPort` to the first bindable port (spec §3).
+    public let httpPortExplicit: Bool
+    /// Whether to maintain the §3 `mgr.port` file. True for the production
+    /// `fromEnvironment` path; false for memberwise (test/embedded) hosts so
+    /// parallel tests never touch the live machine's port file.
+    public let writePortFile: Bool
 
     public init(
         manager: ManagerConfig,
         httpPort: UInt16,
         controlToken: String,
         controlSocketPath: String,
-        estatesDirectory: URL
+        estatesDirectory: URL,
+        httpPortExplicit: Bool = true,
+        writePortFile: Bool = false
     ) {
         self.manager = manager
         self.httpPort = httpPort
         self.controlToken = controlToken
         self.controlSocketPath = controlSocketPath
         self.estatesDirectory = estatesDirectory
+        self.httpPortExplicit = httpPortExplicit
+        self.writePortFile = writePortFile
     }
 
     // MARK: - Environment variable names / defaults
@@ -65,8 +77,13 @@ public struct ResidentHostConfig: Sendable {
     /// Env var overriding the admin-plane estates directory.
     public static let estatesDirEnvKey = "MOOT_MGR_ESTATES_DIR"
 
+    /// How many ports above the default the host will try when the port was
+    /// not explicitly requested (spec §3: default hunts upward; explicit is
+    /// exact). Mirrors Rust `HUNT_RANGE`.
+    public static let huntRange: UInt16 = 100
+
     /// Default loopback HTTP port for the read-API.
-    public static let defaultHTTPPort: UInt16 = 7077
+    public static let defaultHTTPPort: UInt16 = 4200
 
     /// Resolve a resident-host config from the environment, reusing
     /// `ManagerConfig.fromEnvironment()` for the store/retention parts.
@@ -82,6 +99,7 @@ public struct ResidentHostConfig: Sendable {
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> ResidentHostConfig {
         let manager = ManagerConfig.fromEnvironment(environment)
+        let portExplicit = !(environment[httpPortEnvKey] ?? "").isEmpty
         let port = environment[httpPortEnvKey].flatMap { UInt16($0) } ?? defaultHTTPPort
         let token = environment[controlTokenEnvKey] ?? ""
         let socket = environment[controlSocketEnvKey]
@@ -97,7 +115,9 @@ public struct ResidentHostConfig: Sendable {
             httpPort: port,
             controlToken: token,
             controlSocketPath: socket,
-            estatesDirectory: estatesDir
+            estatesDirectory: estatesDir,
+            httpPortExplicit: portExplicit,
+            writePortFile: true
         )
     }
 }
@@ -141,19 +161,46 @@ public actor ResidentHost {
     /// Start the host: open the store, bring up the read-API and control
     /// channel, and launch the retention loop.
     ///
+    /// Port selection (spec §3): an explicitly requested port binds exactly —
+    /// busy fails. The built-in default hunts upward from `httpPort` by
+    /// retrying the bind on the next candidate (no probe race) up to
+    /// `ResidentHostConfig.huntRange` ports. Whatever port binds is written
+    /// to the §3 `mgr.port` file (production hosts) and removed on `stop()`.
+    ///
     /// - Throws: Any error from opening the store or binding the surfaces.
     public func start() async throws {
         try await manager.start()
 
-        let api = HTTPReadAPI(
-            manager: manager,
-            port: config.httpPort,
-            controlToken: config.controlToken,
-            startInstant: startInstant,
-            clock: clock,
-            admin: admin
-        )
-        try await api.start()
+        let candidates: [UInt16] = config.httpPortExplicit
+            ? [config.httpPort]
+            : (0...ResidentHostConfig.huntRange).map { config.httpPort &+ $0 }
+        var startedAPI: HTTPReadAPI?
+        var lastError: Error?
+        for port in candidates {
+            let api = HTTPReadAPI(
+                manager: manager,
+                port: port,
+                controlToken: config.controlToken,
+                startInstant: startInstant,
+                clock: clock,
+                admin: admin
+            )
+            do {
+                try await api.start()
+                if port != config.httpPort {
+                    logger.info("port \(self.config.httpPort) busy; hunted to \(port)")
+                }
+                startedAPI = api
+                break
+            } catch {
+                lastError = error
+            }
+        }
+        guard let api = startedAPI else {
+            // candidates is never empty, so lastError is always populated here;
+            // notStarted is an unreachable fallback to satisfy the type.
+            throw lastError ?? ManagerError.notStarted
+        }
         self.httpAPI = api
 
         let control = ControlChannel(api: api, socketPath: config.controlSocketPath)
@@ -161,6 +208,22 @@ public actor ResidentHost {
         self.control = control
         // (api.start()/control.start() are synchronous throwing actor methods;
         // `await` here is the actor hop, not an async operation.)
+
+        // §3 port file: record the BOUND port for status/dashboard discovery
+        // (production hosts only — see `writePortFile`).
+        if config.writePortFile {
+            let bound = await api.boundPort()
+            let portFile = Self.mgrPortFileURL()
+            try? FileManager.default.createDirectory(
+                at: portFile.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            do {
+                try "\(bound)\n".write(to: portFile, atomically: true, encoding: .utf8)
+            } catch {
+                logger.warning("cannot write port file \(portFile.path): \(error) (continuing)")
+            }
+        }
 
         startRetentionLoop()
         logger.info("ResidentHost started (HTTP :\(self.config.httpPort), UDS \(self.config.controlSocketPath))")
@@ -173,9 +236,30 @@ public actor ResidentHost {
         retentionTask = nil
         await control?.stop()
         control = nil
+        if httpAPI != nil, config.writePortFile {
+            // Clean-shutdown removal of the §3 port file (only when we wrote it).
+            try? FileManager.default.removeItem(at: Self.mgrPortFileURL())
+        }
         await httpAPI?.stop()
         httpAPI = nil
         await manager.stop()
+    }
+
+    /// §3 `mgr.port` location: the mootx01 data dir, honoring
+    /// `MOOTX01_DATA_DIR`. macOS default:
+    /// `~/Library/Application Support/ai.mootx01.ce/mgr.port`. Mirrors the
+    /// Rust `mgr_port_file_path`.
+    public static func mgrPortFileURL(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        if let override = environment["MOOTX01_DATA_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+                .appendingPathComponent("mgr.port", isDirectory: false)
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home
+            .appendingPathComponent("Library/Application Support/ai.mootx01.ce", isDirectory: true)
+            .appendingPathComponent("mgr.port", isDirectory: false)
     }
 
     /// The HTTP port actually bound (resolves an OS-assigned port when 0 was given).

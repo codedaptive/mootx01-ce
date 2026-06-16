@@ -6,7 +6,7 @@ import SubstrateKernel
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -196,5 +196,26 @@ public extension Proposal {
     var confidenceBucket: ProposalConfidenceBucket {
         // Cookbook §2.4: confidence_bucket at bits 24–29.
         ProposalConfidenceBucket(rawValue: Int(BitField.extractField(operationalBitmap, shift: 24, width: 6))) ?? .null
+    }
+
+    /// Compose a proposal `operationalBitmap` from its four typed axes per
+    /// cookbook §2.4 (kind 0–5, target object type 6–11, generated-by class
+    /// 18–23, confidence bucket 24–29; confirmation source 12–17 is left at
+    /// its zero case `.human` until a confirmation step runs). Field
+    /// placement goes through the conformance-gated `BitField.writeField`
+    /// primitive — never hand-rolled shift/mask math. Used by the autonomic
+    /// daemon sinks to stamp genuine provenance on the proposals they emit.
+    static func composeOperational(
+        kind: ProposalKind,
+        targetObjectType: ProposalTargetObjectType,
+        generatedBy: ProposalGeneratedByClass,
+        confidence: ProposalConfidenceBucket
+    ) -> Int64 {
+        var bits: Int64 = 0
+        bits = BitField.writeField(Int64(kind.rawValue), into: bits, shift: 0, width: 6)
+        bits = BitField.writeField(Int64(targetObjectType.rawValue), into: bits, shift: 6, width: 6)
+        bits = BitField.writeField(Int64(generatedBy.rawValue), into: bits, shift: 18, width: 6)
+        bits = BitField.writeField(Int64(confidence.rawValue), into: bits, shift: 24, width: 6)
+        return bits
     }
 }

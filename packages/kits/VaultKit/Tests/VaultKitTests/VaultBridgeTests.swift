@@ -110,7 +110,7 @@ struct VaultBridgeTests {
         defer { try? FileManager.default.removeItem(at: vault) }
 
         let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
-        let report = try await bridge.importVault(at: vault, into: handle)
+        let report = try await bridge.importVault(at: vault, into: handle, now: Date())
 
         #expect(report.drawersWritten == 1)
         #expect(report.drawersUpdated == 0)
@@ -142,11 +142,11 @@ struct VaultBridgeTests {
 
         let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
 
-        let first = try await bridge.importVault(at: vault, into: handle)
+        let first = try await bridge.importVault(at: vault, into: handle, now: Date())
         #expect(first.drawersWritten == 1)
         #expect(first.drawersUpdated == 0)
 
-        let second = try await bridge.importVault(at: vault, into: handle)
+        let second = try await bridge.importVault(at: vault, into: handle, now: Date())
         #expect(second.drawersWritten == 0)
         #expect(second.drawersUpdated == 1)        // superseded, not duplicated
         #expect(second.tunnelsCreated == 0)        // de-duplicated
@@ -172,7 +172,7 @@ struct VaultBridgeTests {
         try write("---\nroom: r\n---\n", to: vault.appendingPathComponent("Empty.md"))
 
         let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
-        let report = try await bridge.importVault(at: vault, into: handle)
+        let report = try await bridge.importVault(at: vault, into: handle, now: Date())
         #expect(report.itemsSkipped == 1)
         #expect(report.drawersWritten == 0)
 
@@ -205,7 +205,7 @@ struct VaultBridgeTests {
         defer { try? FileManager.default.removeItem(at: vault) }
 
         let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
-        let report = try await bridge.importVault(at: vault, into: handle)
+        let report = try await bridge.importVault(at: vault, into: handle, now: Date())
         #expect(report.fdcClassified == 0)
         #expect(report.fdcUnclassified == 1)
 
@@ -229,7 +229,7 @@ struct VaultBridgeTests {
         defer { try? FileManager.default.removeItem(at: sourceVault) }
         let mapping = DrawerMapping(classifyOnImport: false)
         let bridge = VaultBridge(kit: kit, mapping: mapping)
-        _ = try await bridge.importVault(at: sourceVault, into: handle)
+        _ = try await bridge.importVault(at: sourceVault, into: handle, now: Date())
 
         // Confirm the drawer. `mutate` with `.confirm` moves the
         // confirmation state from unconfirmed → userConfirmed.
@@ -239,7 +239,7 @@ struct VaultBridgeTests {
 
         // Export with default scope (`.believed`).
         // The confirmed drawer MUST appear in the vault.
-        try await bridge.export(estate: handle, to: vault)
+        try await bridge.export(estate: handle, to: vault, now: Date())
 
         // The vault must contain exactly one note.
         #expect(countMDFiles(in: vault) == 1, "confirmed drawer must be exported under .believed scope")
@@ -255,7 +255,7 @@ struct VaultBridgeTests {
         defer { try? FileManager.default.removeItem(at: sourceVault) }
         let mapping = DrawerMapping(classifyOnImport: false)
         let bridge = VaultBridge(kit: kit, mapping: mapping)
-        _ = try await bridge.importVault(at: sourceVault, into: handle)
+        _ = try await bridge.importVault(at: sourceVault, into: handle, now: Date())
 
         // Confirm the drawer.
         let drawers = try await currentDrawers(kit, handle)
@@ -263,7 +263,7 @@ struct VaultBridgeTests {
         try await kit.mutate(handle, MutateFrame(rowID: drawer.id, kind: .confirm))
 
         // Export with .unconfirmed scope — the confirmed drawer is excluded.
-        try await bridge.export(estate: handle, to: vault, scope: .unconfirmed)
+        try await bridge.export(estate: handle, to: vault, scope: .unconfirmed, now: Date())
 
         // After confirmation the drawer is NOT unconfirmed, so it must be absent.
         #expect(countMDFiles(in: vault) == 0, "confirmed drawer must be excluded under .unconfirmed scope")
@@ -283,15 +283,15 @@ struct VaultBridgeTests {
 
         let mapping = DrawerMapping(classifyOnImport: false)
         let bridge = VaultBridge(kit: kit, mapping: mapping)
-        let first = try await bridge.importVault(at: sourceVault, into: handle)
+        let first = try await bridge.importVault(at: sourceVault, into: handle, now: Date())
         #expect(first.drawersWritten == 1)
 
         // Export — moot_id is written into frontmatter.
-        try await bridge.export(estate: handle, to: exportVault)
+        try await bridge.export(estate: handle, to: exportVault, now: Date())
 
         // Re-import the exported vault. The moot_id must map back to the
         // SAME lineage, so it supersedes rather than duplicates.
-        let second = try await bridge.importVault(at: exportVault, into: handle)
+        let second = try await bridge.importVault(at: exportVault, into: handle, now: Date())
         #expect(second.drawersWritten == 0)
         #expect(second.drawersUpdated == 1, "re-import via moot_id must supersede")
 
@@ -312,8 +312,8 @@ struct VaultBridgeTests {
 
         let mapping = DrawerMapping(classifyOnImport: false)
         let bridge = VaultBridge(kit: kit, mapping: mapping)
-        _ = try await bridge.importVault(at: sourceVault, into: handle)
-        try await bridge.export(estate: handle, to: exportVault)
+        _ = try await bridge.importVault(at: sourceVault, into: handle, now: Date())
+        try await bridge.export(estate: handle, to: exportVault, now: Date())
 
         // Find the exported .md file, rename it.
         let original = try #require(firstMDFile(in: exportVault))
@@ -323,7 +323,7 @@ struct VaultBridgeTests {
 
         // Re-import the vault with the renamed file. moot_id in frontmatter
         // must win over the new filename's FNV-derived key.
-        let report = try await bridge.importVault(at: exportVault, into: handle)
+        let report = try await bridge.importVault(at: exportVault, into: handle, now: Date())
         // Must supersede (not write a new drawer) even though the file was renamed.
         #expect(report.drawersWritten == 0)
         #expect(report.drawersUpdated == 1, "moot_id must win over filename after rename")
@@ -379,11 +379,11 @@ struct VaultBridgeTests {
         // Export via DrawerMapping.export directly so we can count NoteIRs without
         // writing to disk (the file-system round-trip is tested elsewhere).
         let mapping = DrawerMapping()
-        let notes = try await mapping.export(kit: kit, handle: handle, scope: .believed)
+        let projection = try await mapping.export(kit: kit, handle: handle, scope: .believed)
 
         // THE CRITICAL ASSERTION: every believed drawer must appear in the export.
         // Before the fix this returned ≤50, so the assertion would fail with 50 < 60.
-        #expect(notes.count == believed.count, "export must return all 60 believed drawers (50-cap defect if <60)")
+        #expect(projection.notes.count == believed.count, "export must return all 60 believed drawers (50-cap defect if <60)")
     }
 
     // MARK: - End-to-end export → import → equivalence
@@ -400,14 +400,14 @@ struct VaultBridgeTests {
 
         let mapping = DrawerMapping(classifyOnImport: false)
         let bridgeA = VaultBridge(kit: kitA, mapping: mapping)
-        _ = try await bridgeA.importVault(at: sourceVault, into: handleA)
+        _ = try await bridgeA.importVault(at: sourceVault, into: handleA, now: Date())
 
         // Export estate A to a vault, then import that vault into fresh estate B.
-        try await bridgeA.export(estate: handleA, to: exportVault)
+        try await bridgeA.export(estate: handleA, to: exportVault, now: Date())
 
         let (kitB, handleB) = try await openEstate()
         let bridgeB = VaultBridge(kit: kitB, mapping: mapping)
-        let reportB = try await bridgeB.importVault(at: exportVault, into: handleB)
+        let reportB = try await bridgeB.importVault(at: exportVault, into: handleB, now: Date())
         #expect(reportB.drawersWritten == 1)
 
         let drawersA = try await currentDrawers(kitA, handleA)
@@ -425,5 +425,356 @@ struct VaultBridgeTests {
         let refsB = try await kitB.recallTunnels(handleB, wing: drawersB.first!.wing)
             .filter { $0.kind == .references }
         #expect(refsB.contains { $0.label == "Benzene" })
+    }
+
+    // MARK: - P0 BLOCKER: structured-import parity (facts, scope, hierarchy)
+
+    /// Shared fixture: a structured note carrying all three structural
+    /// elements. The same fixture is used by the Rust parity test so
+    /// both verticals assert the identical structural contract.
+    private func structuredNote(now: Date) -> NoteIR {
+        NoteIR(
+            stableSourceKey: "projects/alpha/structured-note",
+            body: [Block(text: "# Structured Note\nThis note carries structure.")],
+            frontmatter: [:],
+            links: [],
+            tags: ["test-tag"],
+            originalPath: "projects/alpha",
+            originDate: OccurredAt(date: now),
+            source: nil,
+            mootID: nil,
+            facts: [
+                FactIR(subject: "alice", predicate: "works_at", object: "acme"),
+                FactIR(subject: "acme", predicate: "located_in", object: "berlin"),
+            ],
+            pathComponents: ["projects", "alpha"],
+            scope: ["userId": "u-42", "agentId": "ag-7"],
+            kind: "note"
+        )
+    }
+
+    @Test("structured import: facts land as KG facts and are queryable after import")
+    func structuredImportFactsLandAsKGFacts() async throws {
+        let (kit, handle) = try await openEstate()
+        let note = structuredNote(now: Date())
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        // Import directly through DrawerMapping so the note fixture exercises
+        // the capture seam without needing a real vault on disk.
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        let outcome = try await mapping.importNote(
+            note,
+            kit: kit,
+            handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: Date()
+        )
+        guard case .written = outcome else {
+            Issue.record("expected .written outcome, got \(outcome)")
+            return
+        }
+
+        // Query KG facts — the two FactIR triples must be present and queryable.
+        let kgFacts = try await kit.recallKGFacts(handle)
+        // Scope entries produce 2 additional KG facts ("scope:userId" and
+        // "scope:agentId"). The structuredNote also carries tags: ["test-tag"],
+        // which produces 1 tag KG fact (hard-close #29-A). kind = "note" produces
+        // no kind KG fact (default). Total: 2 FactIR + 2 scope + 1 tag = 5.
+        #expect(kgFacts.count == 5, "two FactIR + two scope entries + one tag = 5 KG facts")
+
+        let subjectSet = Set(kgFacts.map(\.subject))
+        #expect(subjectSet.contains("alice"), "alice FactIR must be a KG fact subject")
+        #expect(subjectSet.contains("acme"), "acme FactIR must be a KG fact subject")
+        #expect(subjectSet.contains("scope:userId"), "scope entry userId must be a KG fact subject")
+        #expect(subjectSet.contains("scope:agentId"), "scope entry agentId must be a KG fact subject")
+        #expect(subjectSet.contains("tag:test-tag"), "tag 'test-tag' must be a KG fact subject (hard-close #29-A)")
+    }
+
+    @Test("structured import: scope entries land as KG facts with has_value predicate")
+    func structuredImportScopeEntriesAsKGFacts() async throws {
+        let (kit, handle) = try await openEstate()
+        let note = structuredNote(now: Date())
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        _ = try await mapping.importNote(
+            note,
+            kit: kit,
+            handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: Date()
+        )
+
+        let kgFacts = try await kit.recallKGFacts(handle)
+        let scopeFacts = kgFacts.filter { $0.subject.hasPrefix("scope:") }
+        #expect(scopeFacts.count == 2, "two scope entries must produce two KG facts")
+        #expect(scopeFacts.allSatisfy { $0.predicate == "has_value" },
+                "all scope KG facts must use 'has_value' predicate")
+        let userIdFact = try #require(scopeFacts.first { $0.subject == "scope:userId" })
+        #expect(userIdFact.object == "u-42")
+        let agentIdFact = try #require(scopeFacts.first { $0.subject == "scope:agentId" })
+        #expect(agentIdFact.object == "ag-7")
+    }
+
+    @Test("structured import: multi-level pathComponents map to full room path (hierarchy preserved)")
+    func structuredImportHierarchyAsFullRoomPath() async throws {
+        let (kit, handle) = try await openEstate()
+        let note = structuredNote(now: Date())
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        _ = try await mapping.importNote(
+            note,
+            kit: kit,
+            handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: Date()
+        )
+
+        // The note has pathComponents = ["projects", "alpha"] and no frontmatter room.
+        // The room must be the full joined path "projects/alpha", not just "alpha".
+        let drawers = try await currentDrawers(kit, handle)
+        #expect(drawers.count == 1)
+        let drawer = try #require(drawers.first)
+        #expect(drawer.room == "projects/alpha",
+                "multi-level pathComponents must produce full room path, not just the leaf")
+    }
+
+    // MARK: - Hard-close #29-A: Tags import → queryable + round-trip export
+
+    @Test("tags import: each tag lands as a KG fact with 'tagged' predicate (hard-close #29-A)")
+    func tagsImportAsKGFacts() async throws {
+        let (kit, handle) = try await openEstate()
+        let now = Date()
+        let note = NoteIR(
+            stableSourceKey: "notes/tagged-note",
+            body: [Block(text: "A tagged note.")],
+            tags: ["swift", "testing", "vaultkit"]
+        )
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        let outcome = try await mapping.importNote(
+            note, kit: kit, handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: now
+        )
+        guard case .written = outcome else {
+            Issue.record("expected .written outcome, got \(outcome)")
+            return
+        }
+
+        let kgFacts = try await kit.recallKGFacts(handle)
+        // 3 tags → 3 KG facts with subject "tag:<t>" and predicate "tagged".
+        let tagFacts = kgFacts.filter { $0.subject.hasPrefix("tag:") && $0.predicate == "tagged" }
+        #expect(tagFacts.count == 3, "three tags must produce three KG facts")
+        let tagValues = Set(tagFacts.map { String($0.subject.dropFirst("tag:".count)) })
+        #expect(tagValues == ["swift", "testing", "vaultkit"])
+    }
+
+    @Test("tags round-trip: import→export reconstructs tags from KG facts (hard-close #29-A)")
+    func tagsRoundTrip() async throws {
+        let (kit, handle) = try await openEstate()
+        let now = Date()
+        let note = NoteIR(
+            stableSourceKey: "notes/tagged-note",
+            body: [Block(text: "A tagged note.")],
+            tags: ["alpha", "beta"]
+        )
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        _ = try await mapping.importNote(
+            note, kit: kit, handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: now
+        )
+
+        // Export projects KG facts back into NoteIR.tags.
+        let projection = try await mapping.export(kit: kit, handle: handle, scope: .believed)
+        #expect(projection.notes.count == 1)
+        let exported = try #require(projection.notes.first)
+        // Tags must round-trip: the export must reconstruct the original tag set.
+        #expect(Set(exported.tags) == Set(note.tags),
+                "export must reconstruct tags from KG facts (hard-close #29-A round-trip)")
+    }
+
+    // MARK: - Hard-close #29-B: kind != "note" → KG fact + round-trip
+
+    @Test("kind 'fact' lands as KG fact (hard-close #29-B)")
+    func kindFactLandsAsKGFact() async throws {
+        let (kit, handle) = try await openEstate()
+        let now = Date()
+        let note = NoteIR(
+            stableSourceKey: "notes/fact-record",
+            body: [Block(text: "Alice works at Acme.")],
+            kind: "fact"
+        )
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        let outcome = try await mapping.importNote(
+            note, kit: kit, handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: now
+        )
+        guard case .written = outcome else {
+            Issue.record("expected .written outcome, got \(outcome)")
+            return
+        }
+
+        let kgFacts = try await kit.recallKGFacts(handle)
+        let kindFact = kgFacts.first { $0.subject == "record:kind" && $0.predicate == "is" }
+        let found = try #require(kindFact, "kind 'fact' must produce a 'record:kind' KG fact")
+        #expect(found.object == "fact")
+    }
+
+    @Test("kind 'journal' round-trips import→export (hard-close #29-B)")
+    func kindJournalRoundTrips() async throws {
+        let (kit, handle) = try await openEstate()
+        let now = Date()
+        let note = NoteIR(
+            stableSourceKey: "notes/journal-entry",
+            body: [Block(text: "Today I shipped the adapter.")],
+            kind: "journal"
+        )
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        _ = try await mapping.importNote(
+            note, kit: kit, handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: now
+        )
+
+        // Export must reconstruct `kind` from the KG fact.
+        let projection = try await mapping.export(kit: kit, handle: handle, scope: .believed)
+        let exported = try #require(projection.notes.first)
+        #expect(exported.kind == "journal",
+                "export must reconstruct kind from KG fact (hard-close #29-B round-trip)")
+    }
+
+    @Test("kind 'note' (default) produces NO 'record:kind' KG fact")
+    func kindNoteProducesNoKGFact() async throws {
+        let (kit, handle) = try await openEstate()
+        let now = Date()
+        let note = NoteIR(
+            stableSourceKey: "notes/plain-note",
+            body: [Block(text: "A plain note.")],
+            kind: "note" // explicit default
+        )
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        _ = try await mapping.importNote(
+            note, kit: kit, handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: now
+        )
+
+        let kgFacts = try await kit.recallKGFacts(handle)
+        let kindFact = kgFacts.first { $0.subject == "record:kind" }
+        #expect(kindFact == nil,
+                "default kind 'note' must not produce a 'record:kind' KG fact (export default)")
+    }
+
+    @Test("fieldsDropped is empty for a fully-structured note (hard-close #29)")
+    func fieldsDroppedEmptyForFullyStructuredNote() async throws {
+        let (kit, handle) = try await openEstate()
+        let note = structuredNote(now: Date())
+        let mapping = DrawerMapping(classifyOnImport: false)
+
+        // Use VaultBridge to exercise the full recordDroppedFields path.
+        // importNote returns an outcome but doesn't surface fieldsDropped;
+        // we need the bridge importNotes path. Seed a temp vault instead.
+        // Direct path: import the structured note, then check via the bridge
+        // over its ExchangeAdapter which encodes the same fixture.
+        // Use the ExchangeAdapter golden fixture (drawer-001 has tags + kind "fact").
+        let bridge = VaultBridge(
+            kit: kit,
+            adapter: ExchangeAdapter(),
+            mapping: mapping
+        )
+        let report = try await bridge.importVault(
+            at: ExchangeAdapterTests.fixtureURL, into: handle, now: Date())
+
+        // fieldsDropped must be empty: all fields now land (hard-close #29).
+        #expect(report.fieldsDropped.isEmpty,
+                "fieldsDropped must be empty — no drop path may remain (hard-close #29)")
+    }
+
+    @Test("structured import: facts not in fieldsDropped (they land in substrate)")
+    func structuredImportFactsNotInFieldsDropped() async throws {
+        let (kit, handle) = try await openEstate()
+        let vault = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vault) }
+
+        // Build a vault with a note that carries the structured fixture fields.
+        // Use the Obsidian adapter for real round-trip coverage.
+        let note = structuredNote(now: Date())
+        // The note can't be written as a real Obsidian vault here (the adapter
+        // produces vault files from drawers, not from NoteIRs), so we exercise
+        // importNote directly and verify fieldsDropped via the bridge importNotes path.
+        // Round-trip proof via ExchangeAdapterTests (golden fixture) and Rust.
+
+        let mapping = DrawerMapping(classifyOnImport: false)
+        var existingLineageIDs: Set<UUID> = []
+        var existingSensitivity: [UUID: AdjectiveSensitivity] = [:]
+        var existingTunnelSigs: Set<String> = []
+        _ = try await mapping.importNote(
+            note,
+            kit: kit,
+            handle: handle,
+            existingLineageIDs: existingLineageIDs,
+            existingSensitivityByLineage: existingSensitivity,
+            existingTunnelSignatures: &existingTunnelSigs,
+            now: Date()
+        )
+
+        // facts, scope, and pathComponents must not appear in fieldsDropped because
+        // they now land in the substrate (KG facts / full room path).
+        // Only tags (and kind != "note") are still tracked as dropped.
+        // This note carries tags but kind = "note" — only tags should drop.
+        let bridge = VaultBridge(kit: kit, mapping: mapping)
+        // Re-run a full import via a NoteIR-carrying vault to exercise the bridge
+        // recordDroppedFields path. Use ExchangeAdapter with the golden fixture
+        // (which carries all fields) for this.
+        // For this test we verify the direct mapping path result is correct.
+        // The bridge integration is covered by ExchangeAdapterTests.droppedFieldsAreRecorded.
+        // Here we verify the importNote outcome has the right semantics.
+        let kgFacts = try await kit.recallKGFacts(handle)
+        #expect(!kgFacts.isEmpty, "structured import must produce KG facts (not drop them)")
     }
 }

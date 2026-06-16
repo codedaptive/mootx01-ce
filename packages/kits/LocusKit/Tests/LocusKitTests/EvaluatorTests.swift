@@ -7,7 +7,7 @@ import Foundation
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -25,9 +25,8 @@ import SubstrateLib
 /// optional historical reconstruction at `frame.asOf`.
 ///
 /// Tests use `captureAndConfirm` to file drawers that satisfy the
-/// default-insertion gates (`.userConfirmed`, `.trustworthy`,
-/// `.sensitivityAtMost(.normal)`, `.currentlyBelieve`) unless a test
-/// is specifically probing one of those defaults.
+/// trust/sensitivity/state default-insertion gates unless a test is
+/// specifically probing one of those defaults.
 @Suite("BitmapEvaluator — filter compilation, evaluation, ordering (spec § 7.9)")
 struct EvaluatorTests {
 
@@ -65,7 +64,7 @@ struct EvaluatorTests {
     }
 
     /// Capture a drawer and flip its confirmation to `.userConfirmed`
-    /// so the default `.userConfirmed` insertion does not exclude it.
+    /// for tests that explicitly exercise the confirmation axis.
     /// Provenance bit layout: confirmation bits 4–6,
     /// Cookbook §2.5: `.userConfirmed.rawValue = 1` at bits 18–23, so `1 << 18 = 0x40000`.
     private func captureAndConfirm(
@@ -87,15 +86,15 @@ struct EvaluatorTests {
 
     // MARK: - Default filter insertion (§ 7.9.5)
 
-    @Test("Default insertion: unconfirmed drawer excluded by default .userConfirmed")
-    func defaults_excludeUnconfirmed() async throws {
+    @Test("Default insertion: unconfirmed drawer included by ordinary recall")
+    func defaults_includeUnconfirmed() async throws {
         let estate = try await makeEstate()
         _ = try await estate.capture(frame(room: "r1"))  // provenance stays at 0
         let stream = await estate.recall(
             RecallFrame(filterChain: [.inRoom("r1")])
         )
         let rows = await drain(stream)
-        #expect(rows.isEmpty)
+        #expect(rows.count == 1)
     }
 
     @Test("Default insertion: confirmed drawer included")
@@ -107,6 +106,17 @@ struct EvaluatorTests {
         )
         let rows = await drain(stream)
         #expect(rows.count == 1)
+    }
+
+    @Test("Explicit .userConfirmed filter excludes unconfirmed drawer")
+    func userConfirmed_excludesUnconfirmed() async throws {
+        let estate = try await makeEstate()
+        _ = try await estate.capture(frame(room: "r1"))  // provenance stays at 0
+        let stream = await estate.recall(
+            RecallFrame(filterChain: [.inRoom("r1"), .userConfirmed])
+        )
+        let rows = await drain(stream)
+        #expect(rows.isEmpty)
     }
 
     // MARK: - Bitmap-tier filters
@@ -161,18 +171,25 @@ struct EvaluatorTests {
         #expect(rows.count == 1)
     }
 
-    @Test(".sensitivityAtMost(.normal) excludes elevated drawer")
-    func sensitivityAtMost_excludesElevated() async throws {
+    @Test("Tier boundary: elevated included in DEFAULT recall; restricted excluded")
+    func tierBoundary_defaultCeiling_elevatedIncluded_restrictedExcluded() async throws {
+        // Per ADR-007 Decision 2 / VK-TIER-01: the Normal-tier ceiling is
+        // `.elevated`. `restricted` is Private tier and must be absent from
+        // default (no-claims) recall.
         let estate = try await makeEstate()
-        _ = try await captureAndConfirm(
-            frame(sensitivity: .elevated), into: estate
+        let dElevated = try await captureAndConfirm(
+            frame(content: "elevated-row", sensitivity: .elevated), into: estate
         )
-        let stream = await estate.recall(
-            RecallFrame(filterChain: [.sensitivityAtMost(.normal),
-                                      .currentlyBelieve, .userConfirmed])
+        let dRestricted = try await captureAndConfirm(
+            frame(content: "restricted-row", sensitivity: .restricted), into: estate
         )
+        // Unconstrained recall — default ceiling is `.elevated`.
+        let stream = await estate.recall(RecallFrame(filterChain: []))
         let rows = await drain(stream)
-        #expect(rows.isEmpty)
+        #expect(rows.contains(where: { $0.id == dElevated.id }),
+            "elevated drawer must appear in default (no-claims) recall after tier alignment")
+        #expect(!rows.contains(where: { $0.id == dRestricted.id }),
+            "restricted drawer must be absent from default recall (Private tier)")
     }
 
     @Test(".sensitivityAtMost(.elevated) includes elevated drawer")
@@ -187,6 +204,99 @@ struct EvaluatorTests {
         )
         let rows = await drain(stream)
         #expect(rows.count == 1)
+    }
+
+    // MARK: - Secret-exclusion proofs (ADR-007 Decision 2)
+
+    @Test("Secret exclusion: secret drawer absent from unconstrained recall")
+    func secretExclusion_unconstrainedRecall() async throws {
+        // A `secret`-sensitivity drawer must never appear when the caller
+        // supplies no sensitivity filter. The default ceiling (.elevated) is
+        // below secret, so no claims are required to enforce this exclusion.
+        let estate = try await makeEstate()
+        let dSecret = try await captureAndConfirm(
+            frame(content: "secret-row", sensitivity: .secret), into: estate
+        )
+        let dNormal = try await captureAndConfirm(
+            frame(content: "normal-row", sensitivity: .normal), into: estate
+        )
+        let stream = await estate.recall(RecallFrame(filterChain: []))
+        let rows = await drain(stream)
+        #expect(!rows.contains(where: { $0.id == dSecret.id }),
+            "secret drawer must be absent from unconstrained recall")
+        #expect(rows.contains(where: { $0.id == dNormal.id }),
+            "normal drawer must appear in unconstrained recall")
+    }
+
+    @Test("Secret exclusion: secret drawer absent under other-axis filter chains")
+    func secretExclusion_otherAxisChains() async throws {
+        // A shipped-surface chain that constrains other axes but NOT sensitivity
+        // must still exclude secret-sensitivity drawers via the default ceiling.
+        // Representative chains: [.unconfirmed], [.contentMatches(...)].
+        let estate = try await makeEstate()
+        // unconfirmed drawer with secret sensitivity (provenance not yet confirmed)
+        let secretCapture = frame(content: "secret-unconfirmed", sensitivity: .secret)
+        let dSecret = try await estate.capture(secretCapture)
+        // confirmed drawer with normal sensitivity for comparison
+        let dNormal = try await captureAndConfirm(
+            frame(content: "normal-content", sensitivity: .normal), into: estate
+        )
+        // Chain that constrains provenance axis (not sensitivity) — default ceiling applies.
+        let stream1 = await estate.recall(
+            RecallFrame(filterChain: [.unconfirmed])
+        )
+        let rows1 = await drain(stream1)
+        #expect(!rows1.contains(where: { $0.id == dSecret.id }),
+            "secret drawer must be excluded even under .unconfirmed chain")
+
+        // Chain that constrains content axis — default sensitivity ceiling applies.
+        let stream2 = await estate.recall(
+            RecallFrame(filterChain: [.contentMatches("normal-content")])
+        )
+        let rows2 = await drain(stream2)
+        #expect(rows2.contains(where: { $0.id == dNormal.id }),
+            "normal drawer must appear under .contentMatches chain")
+        // The secret+unconfirmed drawer would not match the content filter anyway,
+        // but verify no secret drawer leaks through any content-matching path
+        // by adding one with matching content.
+        let dSecretMatching = try await estate.capture(
+            frame(content: "normal-content", sensitivity: .secret)
+        )
+        let stream3 = await estate.recall(
+            RecallFrame(filterChain: [.contentMatches("normal-content")])
+        )
+        let rows3 = await drain(stream3)
+        #expect(!rows3.contains(where: { $0.id == dSecretMatching.id }),
+            "secret drawer must be absent even when content matches, sensitivity axis unconstraining")
+    }
+
+    @Test("Secret reachable only by explicit sensitivity constraint")
+    func secretReachable_withExplicitSensitivityConstraint() async throws {
+        // A secret-sensitivity drawer IS returned when the caller explicitly
+        // constrains the sensitivity axis to include secret — both `.sensitivity(.secret)`
+        // (exact match) and `.sensitivityAtMost(.secret)` (ceiling at secret).
+        let estate = try await makeEstate()
+        let dSecret = try await captureAndConfirm(
+            frame(content: "secret-row", sensitivity: .secret), into: estate
+        )
+
+        // Exact-match form: `.sensitivity(.secret)` — includes only drawers at exactly secret.
+        let stream1 = await estate.recall(
+            RecallFrame(filterChain: [.sensitivity(.secret),
+                                      .currentlyBelieve, .userConfirmed])
+        )
+        let rows1 = await drain(stream1)
+        #expect(rows1.contains(where: { $0.id == dSecret.id }),
+            "secret drawer must be present under explicit .sensitivity(.secret) constraint")
+
+        // Ceiling form: `.sensitivityAtMost(.secret)` — includes all tiers up to secret.
+        let stream2 = await estate.recall(
+            RecallFrame(filterChain: [.sensitivityAtMost(.secret),
+                                      .currentlyBelieve, .userConfirmed])
+        )
+        let rows2 = await drain(stream2)
+        #expect(rows2.contains(where: { $0.id == dSecret.id }),
+            "secret drawer must be present under explicit .sensitivityAtMost(.secret) constraint")
     }
 
     // MARK: - Structured-tier filters (§ 7.9.4 step 3)

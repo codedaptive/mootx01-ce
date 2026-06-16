@@ -11,8 +11,9 @@ import PersistenceKitInMemory
 /// Eight tests against the federation grant surface per
 /// DECISION_FEDERATION_SHARING_MODEL_2026-05-21 §6 and Appendix B.1/B.2.
 /// Custody modes 1 (mediated) and 2 (handed-over) are production at
-/// v1.0; modes 3 (decay-derived) and 4 (physical decay) are gated and
-/// raise at issue time.
+/// v1.0; mode 3 (decay-derived) is gated behind IP clearance; mode 4
+/// (time-aging) is a shippable software decay policy enforced on the
+/// recall path. Mode-4 coverage lives in `GRT04_TimeAgingCustodyTests`.
 ///
 /// Each test opens one estate through `GeniusLocusKit`, issues or
 /// revokes grants through the unified verb surface, and asserts on the
@@ -153,10 +154,10 @@ struct GRT01_GrantTests {
         #expect(row?.revokedAt != nil, "mode 2 revocation writes a revocation record")
     }
 
-    // MARK: - 6. Custody modes 3 and 4 gate at issue
+    // MARK: - 6. Custody mode 3 gates at issue without clearance
 
     @Test
-    func experimentalModesGateUnlessClearanceConfirmed() async throws {
+    func decayDerivedGatesUnlessClearanceConfirmed() async throws {
         let (kit, handle, _) = try await openOneEstate()
 
         let mode3 = CustodyMode.decayDerived(
@@ -166,17 +167,6 @@ struct GRT01_GrantTests {
         do {
             _ = try await kit.issueGrant(handle, options(mode3))
             Issue.record("mode 3 without clearance must throw")
-        } catch let error as GrantError {
-            guard case .experimentalModeNotActivated = error else {
-                Issue.record("expected experimentalModeNotActivated, got \(error)")
-                return
-            }
-        }
-
-        let mode4 = CustodyMode.physicalDecay(experimentalIPClearanceConfirmed: false)
-        do {
-            _ = try await kit.issueGrant(handle, options(mode4))
-            Issue.record("mode 4 without clearance must throw")
         } catch let error as GrantError {
             guard case .experimentalModeNotActivated = error else {
                 Issue.record("expected experimentalModeNotActivated, got \(error)")

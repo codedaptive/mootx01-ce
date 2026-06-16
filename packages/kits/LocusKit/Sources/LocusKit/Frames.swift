@@ -4,7 +4,7 @@ import Foundation
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -81,6 +81,15 @@ public struct CaptureFrame: Sendable {
     /// in `DrawerOperational.swift`. Defaults to `[]` (no flags set) so
     /// all existing callers continue to produce zero feature-flag bits.
     public var featureFlags: DrawerFeatureFlags
+    /// Exportability of the resulting drawer at capture time.
+    /// Encodes into bits 12–17 of the drawer's `adjectiveBitmap`
+    /// (cookbook §2.3, 6-bit scale-gapped field; raw 0 = private_,
+    /// raw 32 = public_). Defaults to `.private_` (non-exportable) so
+    /// all existing callers continue to produce private drawers — the
+    /// privacy-preserving default. Supply `.public_` to birth a drawer
+    /// that is immediately visible to `filter:exportable` recall
+    /// (DEBT-1 write-side fix).
+    public var exportability: AdjectiveExportability
 
     public init(
         content: String,
@@ -96,7 +105,8 @@ public struct CaptureFrame: Sendable {
         provenanceSensitivity: Sensitivity = .normal,
         lineageID: LineageID? = nil,
         eventTime: Date? = nil,
-        featureFlags: DrawerFeatureFlags = []
+        featureFlags: DrawerFeatureFlags = [],
+        exportability: AdjectiveExportability = .private_
     ) {
         self.content = content
         self.channel = channel
@@ -112,6 +122,7 @@ public struct CaptureFrame: Sendable {
         self.lineageID = lineageID
         self.eventTime = eventTime
         self.featureFlags = featureFlags
+        self.exportability = exportability
     }
 }
 
@@ -209,19 +220,29 @@ public struct RecallFrame: Sendable {
     /// Historical reconstruction — return rows as they were at
     /// this timestamp. nil = current state. Per spec § 6.8.
     public var asOf: HLC?
+    /// How many of the surfaced rows to write as recall-trace rows.
+    /// nil = write NO trace rows (the default). n = write at most the
+    /// first n rows that were returned to the caller. Only the
+    /// GLK RecallDirector primary locus call sets this; all other
+    /// estate.recall calls leave it nil to avoid silent write amplification.
+    /// Zero trace rows is correct for internal or VaultBridge-style scans
+    /// that do not participate in the reward cycle.
+    public var traceLimit: Int?
 
     public init(
         filterChain: [Filter],
         hydrationLevel: HydrationLevel = .structured,
         limit: Int? = nil,
         ordering: Ordering = .byCaptureTimeDesc,
-        asOf: HLC? = nil
+        asOf: HLC? = nil,
+        traceLimit: Int? = nil
     ) {
         self.filterChain = filterChain
         self.hydrationLevel = hydrationLevel
         self.limit = limit
         self.ordering = ordering
         self.asOf = asOf
+        self.traceLimit = traceLimit
     }
 }
 
@@ -248,7 +269,12 @@ public enum MutationKind: Sendable {
     /// version's lineageID does not match, but the semantic
     /// supersession relationship should still be recorded).
     case supersede
-    /// Move a withdrawn / expired row back to `.active`.
+    /// Restore a historical (Cluster-B) row to `.active`. Legal from
+    /// `.decayed`, `.withdrawn`, and `.expired` unconditionally; legal
+    /// from `.superseded` only when no living successor holds the
+    /// lineage head (otherwise it raises `disciplineViolation` naming
+    /// the lineage conflict). Refused from live (Cluster-A) and terminal
+    /// (`.rejected` / `.tombstoned`) states. See `Estate.mutate`.
     case revive
     /// Move the row's state to `.accepted` (terminal cluster — the
     /// row is canonical and will not move again).
@@ -257,19 +283,60 @@ public enum MutationKind: Sendable {
     case correctSensitivity(AdjectiveSensitivity)
     /// Set the row's trust axis to the supplied value.
     case correctTrust(Trust)
+    /// Set the row's exportability axis to the supplied value.
+    ///
+    /// Exportability lives in adjectiveBitmap bits 12–17 (cookbook §2.3,
+    /// 6-bit scale-gapped field; raw 0 = private_, raw 32 = public_).
+    /// Default is `.private_` (non-exportable) — this mutation is the
+    /// only path to mark a drawer public after capture, completing the
+    /// exportability write side (DEBT-1).
+    case correctExportability(AdjectiveExportability)
 }
 
-// MARK: - LearnFrame (scaffolded — body in LOCI_V035_19)
+// MARK: - LearnFrame
 
-/// Slots for the `learn` verb. Scaffold only — full slot set
-/// (`SourceCatalogEntry`, `LearnMode`, `RefreshPolicy`) is declared
-/// in the standing-signals mission LOCI_V035_19.
+/// Slots for the `learn` verb. Per spec § 7.8.2
+/// (`LearnFrame { source, handle, mode, refreshPolicy }`).
+///
+/// `learn` brings an authoritative external reference into the estate. The
+/// reference's genuine lattice anchor comes from `source` — a
+/// `SourceCatalogEntry` carries the source's classified lattice position,
+/// which every reference learned from it inherits. This is how `learn`
+/// derives a real anchor instead of fabricating a sentinel from a bare
+/// handle (P1 mandate). The verb catalogs `source` durably (if not already
+/// present) and writes a `LearnedReference` anchored to it.
 public struct LearnFrame: Sendable {
-    /// Caller-supplied handle naming the source to learn.
+    /// The source this reference is learned from. Carries the genuine
+    /// lattice anchor the learned reference inherits. `Estate.learn`
+    /// catalogs it (keyed by `source.handle`) if no entry exists yet.
+    public var source: SourceCatalogEntry
+
+    /// The reference handle — the URI / locator the learned reference
+    /// points at. Distinct from `source.handle` (the source's own
+    /// locator). Must be non-empty; `Estate.learn` rejects an empty handle
+    /// with `LocusKitError.invalidContent`.
     public var handle: String
 
-    public init(handle: String) {
+    /// Whether the reference is held by pointer (`.byReference`) or its
+    /// content was ingested (`.byIngestion`). Encoded into the learned
+    /// reference's operational bitmap (cookbook § 2.4 bit 12).
+    public var mode: LearnMode
+
+    /// How often the reference is re-grounded against its source. Encoded
+    /// into the learned reference's operational bitmap (cookbook § 2.4
+    /// bits 0–5).
+    public var refreshPolicy: RefreshPolicy
+
+    public init(
+        source: SourceCatalogEntry,
+        handle: String,
+        mode: LearnMode = .byReference,
+        refreshPolicy: RefreshPolicy = .weekly
+    ) {
+        self.source = source
         self.handle = handle
+        self.mode = mode
+        self.refreshPolicy = refreshPolicy
     }
 }
 
@@ -334,15 +401,20 @@ public enum HydrationLevel: Sendable {
 // MARK: - Ordering
 
 /// Result ordering for recall. Per spec § 7.8.3.
+///
+/// Relevance ordering (`byRelevanceDesc`) is not present on this enum.
+/// Relevance requires the vector index from VectorKit; LocusKit is a
+/// bitmap-filter engine with no scoring signal. Callers that need
+/// relevance-ranked results must go through GLK RecallDirector's scored
+/// lane (NeuronKit/HybridRecall), which composes VectorKit on top of
+/// LocusKit. Exposing a relevance case here produced input-order results
+/// advertised as relevance-ordered — an honest API must either implement
+/// the behaviour or remove the case. It was removed.
 public enum Ordering: Sendable {
     /// Newest captured first.
     case byCaptureTimeDesc
     /// Oldest captured first.
     case byCaptureTimeAsc
-    /// Evaluator-determined relevance score, descending. Requires
-    /// the vector tier and the embedding model declared at capture
-    /// time; unavailable until VectorKit ships.
-    case byRelevanceDesc
     /// Lexicographic ascending by `room`.
     case byRoomAsc
 }

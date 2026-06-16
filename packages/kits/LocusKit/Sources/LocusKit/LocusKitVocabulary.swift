@@ -14,7 +14,7 @@
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -53,7 +53,7 @@ public enum LocusKitVocabulary {
         FieldSlot(column: .provenance, shift: 30, width: 6, label: "sensitivity_at_capture",
                   legalValues: [0, 16, 32, 48]),
         FieldSlot(column: .provenance, shift: 36, width: 6, label: "enrichment_status",
-                  legalValues: [0, 1, 2, 3]),
+                  legalValues: [0, 1, 2, 3, 4]),
     ]
 
     /// Freeze the union into a `Vocabulary` for arming the gate. Static and

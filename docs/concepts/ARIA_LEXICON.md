@@ -1,3 +1,12 @@
+---
+title: ARIA Lexicon
+status: canon
+authors: MOOTx01 maintainers
+date: 2026-06-14
+version: 1.0.0
+description: The grammar of MOOTx01 — one noun, nine verbs, four adjectives, and the verb-noun acceptance matrix that compose every ARIA call.
+---
+
 # ARIA_LEXICON
 
 *The grammar of MOOTx01: one noun, nine verbs, four adjectives.*
@@ -16,7 +25,7 @@ That sentence is the whole contract. A consumer names an action, names the data 
 
 ## Provenance
 
-This grammar is not new. It was set in the action-vocabulary design session of 2026-05-09 and written into the v0.20 architecture as Part 10, "The action vocabulary," in exactly these words: every kit-API call is one of these verbs applied to a noun, optionally with adjectives that constrain the result. The v0.35 spec kept the tables that enumerate the verbs and the adjectives but dropped the sentence that names the grammar, so the spine went implicit. This document restores it and makes it first-class. The verb count and the adjective count are part of the contract, fixed by invariants I-7 and I-8.
+This grammar is not new. It was set with the substrate's action vocabulary and written into the architecture spec as "The action vocabulary," in exactly these words: every kit-API call is one of these verbs applied to a noun, optionally with adjectives that constrain the result. Earlier revisions of the spec kept the tables that enumerate the verbs and the adjectives but dropped the sentence that names the grammar, so the spine went implicit. This document restores it and makes it first-class. The verb count and the adjective count are part of the contract, fixed by invariants I-7 and I-8 of the architecture spec.
 
 ---
 
@@ -86,7 +95,7 @@ The lexicon is a contract, and a contract that is not a first-class object canno
 
 The module carries no behavior. It is the vocabulary, nothing more, so that everything above it can conform to one definition and a harness can check the Swift and Rust ports against each other.
 
-The lexicon sits at the foundation, above SubstrateLib and PersistenceKit and below LocusKit, VectorKit, and CorpusKit, because every one of them and every ARIA surface conforms to it. GeniusLocusKit implements the unified nine-verb surface against this lexicon at its composition mission. The lexicon defines the words; GeniusLocusKit performs them.
+The lexicon sits at the foundation, above SubstrateLib and PersistenceKit and below LocusKit, VectorKit, and CorpusKit, because every one of them and every ARIA surface conforms to it. GeniusLocusKit implements the unified nine-verb surface against this lexicon as the composition layer. The lexicon defines the words; GeniusLocusKit performs them.
 
 ---
 

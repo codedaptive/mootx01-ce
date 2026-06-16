@@ -174,38 +174,33 @@ struct StateTransitionTests {
         try DrawerStateValidator.validate(from: .active, to: .expired, via: .expire)
     }
 
-    @Test("legal: decayed → active via mutateRevive")
+    // revive surface (cookbook §9.3): all four Cluster-B historical
+    // states restore to active via .observe. The automaton legalizes
+    // every one; the superseded lineage-conflict rule is enforced one
+    // layer up at Estate.mutate, not in this pure transition check.
+
+    @Test("legal: decayed → active via revive (.observe)")
     func legalDecayedToActiveRevive() throws {
         try DrawerStateValidator.validate(from: .decayed, to: .active, via: .observe)
     }
 
-    @Test("illegal (F14): withdrawn → active — cookbook §9.2 has no revive verb from withdrawn")
-    func illegalWithdrawnToActiveRevive() {
-        // F14 cascade: LocusKit's v0.35 permitted withdrawn → active via
-        // .observe, but cookbook §9.2 has no such transition. Only
-        // decayed → active (via .observe) revives a past-cluster row.
-        #expect(throws: LocusKitError.self) {
-            try DrawerStateValidator.validate(from: .withdrawn, to: .active, via: .observe)
-        }
+    @Test("legal: withdrawn → active via revive (.observe) — unwithdraw")
+    func legalWithdrawnToActiveRevive() throws {
+        try DrawerStateValidator.validate(from: .withdrawn, to: .active, via: .observe)
     }
 
-    @Test("illegal (F14): expired → active — cookbook §9.2 has no revive verb from expired")
-    func illegalExpiredToActiveRevive() {
-        // F14 cascade: same pattern as withdrawn → active. Cookbook §9.2
-        // only permits decayed → active via .observe; expired is terminal-ish.
-        #expect(throws: LocusKitError.self) {
-            try DrawerStateValidator.validate(from: .expired, to: .active, via: .observe)
-        }
+    @Test("legal: expired → active via revive (.observe) — TTL revive")
+    func legalExpiredToActiveRevive() throws {
+        try DrawerStateValidator.validate(from: .expired, to: .active, via: .observe)
     }
 
-    @Test("illegal (F14): superseded → active — cookbook §9.2 has no revive verb from superseded")
-    func illegalSupersededToActiveRevive() {
-        // F14 cascade: superseded rows are kept for lineage per cookbook §9
-        // and do not revive. The only way to "re-anchor" is to capture a new
-        // row with the same lineageID (which triggers the cascade).
-        #expect(throws: LocusKitError.self) {
-            try DrawerStateValidator.validate(from: .superseded, to: .active, via: .observe)
-        }
+    @Test("legal: superseded → active via revive (.observe) — lineage rule is enforced at Estate.mutate")
+    func legalSupersededToActiveRevive() throws {
+        // The automaton admits superseded → active; it is stateless and
+        // cannot see lineage. The "living successor" contradiction is a
+        // store-level domain rule checked in Estate.mutate's revive guard
+        // (see EstateMutateRevive tests), not here.
+        try DrawerStateValidator.validate(from: .superseded, to: .active, via: .observe)
     }
 
     @Test("legal: active → accepted via mutateAccept (any → accepted)")

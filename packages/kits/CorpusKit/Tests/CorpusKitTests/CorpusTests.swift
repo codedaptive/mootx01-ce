@@ -1,9 +1,12 @@
 // CorpusTests.swift
 //
 // Integration tests for the Corpus actor — the unified RAG entry point.
-// Tests use PersistenceKitInMemory for the storage backend (no disk
-// required) and EmbeddingModel.deterministic for the provider (no
-// CoreML required). All assertions are behavioral, not implementation:
+// Tests run on the REAL on-disk SQLite backend (makeScratchStorage) — the
+// backend production and the gauntlet use, and the on-disk equivalent of
+// MemPalace's Chroma — never the in-RAM backend (whose divergent type
+// round-trip hid real reopen bugs). EmbeddingModel.deterministic is used for
+// the provider (no CoreML required). All assertions are behavioral, not
+// implementation:
 // they verify the public surface (ingest / recall / remove / count)
 // and the sealed-vector principle (no VectorKit type imported here).
 //
@@ -16,7 +19,7 @@
 
 import Foundation
 import PersistenceKit
-import PersistenceKitInMemory
+import PersistenceKitSQLite
 import Testing
 
 @testable import CorpusKit
@@ -24,12 +27,7 @@ import Testing
 // MARK: - Helpers
 
 private func makeCorpus() async throws -> Corpus {
-    let storage = InMemoryStorage(
-        configuration: EstateConfiguration(
-            estateID: UUID(),
-            backend: .inMemory
-        )
-    )
+    let storage = try makeScratchStorage()
     return try await Corpus(storage: storage)
 }
 
@@ -194,9 +192,7 @@ struct CorpusTests {
     @Test func noVectorTypesRequiredByPublicSurface() async throws {
         try await GlobalTestLock.shared.withLock {
             // Corpus and EmbeddingModel are named from CorpusKit; no VectorKit import.
-            let storage = InMemoryStorage(
-                configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
-            )
+            let storage = try makeScratchStorage()
             let corpus = try await Corpus(storage: storage, model: .deterministic)
             try await corpus.ingest("hello world", sourceID: "test", now: fixedNow)
             let results: [ScoredChunk] = try await corpus.recall("hello", limit: 1, now: fixedNow)
@@ -254,12 +250,7 @@ struct CorpusTests {
     /// of whether vector hits were present.
     @Test func bm25RestartRebuildRoundTrip() async throws {
         try await GlobalTestLock.shared.withLock {
-            let storage = InMemoryStorage(
-                configuration: EstateConfiguration(
-                    estateID: UUID(),
-                    backend: .inMemory
-                )
-            )
+            let storage = try makeScratchStorage()
             // First "session": ingest a document with distinctive keyword content.
             let first = try await Corpus(storage: storage)
             try await first.ingest(
@@ -277,6 +268,52 @@ struct CorpusTests {
             // Results must be non-empty and must carry BM25 signal. Without the
             // fix, the second instance's BM25 index is empty and keywordScore is
             // nil on every result even when vector hits are present.
+            #expect(!results.isEmpty)
+            #expect(results.contains { $0.keywordScore != nil })
+        }
+    }
+
+    /// The SQLite-backed twin of `bm25RestartRebuildRoundTrip`. This is the test
+    /// that would have caught the dark-recall-on-reopen bug: the InMemory backend
+    /// preserves the inserted `.uuid`/`.hlc` TypedValues on read, so the InMemory
+    /// version above passed even while `decodeChunk` rejected the PRIMITIVE forms
+    /// (`.text` id, `.int` hlc) that the SQLite backend actually returns. With a
+    /// real on-disk SQLite estate, `allChunks()` returned empty on reopen, the
+    /// BM25 rebuild indexed nothing, and keyword recall was dark — exactly the
+    /// production failure where a fresh process serving a persisted estate fell
+    /// back to query-blind storage-order recall.
+    @Test func bm25RestartRebuildRoundTripSQLite() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("corpuskit-reopen-\(UUID().uuidString).sqlite3")
+            defer { try? FileManager.default.removeItem(at: url) }
+
+            // First session: ingest over a real SQLite estate, then drop the
+            // Corpus so nothing stays resident in memory.
+            do {
+                let storage = try SQLiteStorage(configuration: EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: url, busyTimeout: 5.0)
+                ))
+                let first = try await Corpus(storage: storage)
+                try await first.ingest(
+                    "Keyword recall must survive a process restart in CorpusKit.",
+                    sourceID: "doc-restart-sqlite",
+                    now: fixedNow
+                )
+            }
+
+            // Second session: a brand-new Corpus over the SAME on-disk estate,
+            // simulating a process restart. Its BM25 index is rebuilt purely from
+            // the persisted chunks via allChunks() — which only works if the chunk
+            // decoder accepts the SQLite read-back primitives.
+            let storage = try SQLiteStorage(configuration: EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: url, busyTimeout: 5.0)
+            ))
+            let second = try await Corpus(storage: storage)
+            let results = try await second.recall("keyword recall", limit: 5, now: fixedNow)
+
             #expect(!results.isEmpty)
             #expect(results.contains { $0.keywordScore != nil })
         }

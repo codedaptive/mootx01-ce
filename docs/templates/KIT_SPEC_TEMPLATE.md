@@ -1,17 +1,15 @@
 ---
-status: stub
-authors: Bob Pankratz (via/ claude)
+title: <PackageName> Specification
+version: MAJOR.MINOR.PATCH
+status: draft | review | active | deprecated | superseded
 date: <YYYY-MM-DD>
-version: v0.1
-package: <PackageName>
-kind: <Kit | Lib>
+description: One-sentence statement of what <PackageName> is and the contract this spec defines.
+spec_type: kit | protocol | encoder
+authors: MOOTx01 maintainers
 relates_to:
-  - <PACKAGE>_INTERFACE_v0.1.md  (the API surface this spec contracts)
-  # add ADRs that govern this package, and sibling kit specs as needed
-purpose: |
-  One-paragraph statement of what <PackageName> is and why it
-  exists. The companion INTERFACE document carries the API
-  signatures that satisfy this contract.
+  - docs/reference/<PACKAGE>_INTERFACE.md   # the API surface this spec contracts
+  - docs/decisions/DECISION_*.md            # ADRs that govern this package
+superseded_by: docs/reference/<replacement>.md   # only when status: superseded
 ---
 
 # <PackageName> Specification
@@ -40,7 +38,7 @@ Filling this stub:
    document is itself part of the contract.
 
 Source of truth at fill time:
-  Packages/<kits|libs>/<PackageName>/Sources/<PackageName>/
+  packages/<kits|libs>/<PackageName>/Sources/<PackageName>/
 -->
 
 ## § 1 — What this package is
@@ -59,7 +57,7 @@ This specification defines:
 
 This specification does NOT define:
 
-- API signatures — those live in `<PACKAGE>_INTERFACE_v0.1.md`
+- API signatures — those live in `<PACKAGE>_INTERFACE.md`
 - <other excluded concerns, with pointers to where they live>
 
 ## § 3 — Position in the kit family
@@ -133,4 +131,4 @@ open questions. -->
 
 ---
 
-*End of <PackageName> Specification v0.1.*
+*End of <PackageName> Specification.*

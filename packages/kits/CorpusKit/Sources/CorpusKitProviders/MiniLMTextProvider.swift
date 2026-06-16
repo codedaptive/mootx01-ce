@@ -1,9 +1,10 @@
 // MiniLMTextProvider.swift
 //
 // MiniLM-L6 v2 text embedding provider. Pulls tokenization from
-// the DeterministicTokenizer (the BERT WordPiece tokenizer
-// shipped as a follow-on once the CoreML model bundle includes
-// the vocab metadata). Projection uses SubstrateML.FloatSimHash
+// the DeterministicTokenizer (the BERT WordPiece tokenizer ships
+// in the v1.1 model-bundle mission per
+// DECISION_EMBEDDING_INFERENCE_SEAM_2026-06-12). Projection uses
+// SubstrateML.FloatSimHash
 // with a stable projection seed owned here in CorpusKitProviders so
 // the two providers produce bit-identical engrams for the same
 // pooled float vector.
@@ -28,7 +29,7 @@ import VectorKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -68,5 +69,19 @@ public struct MiniLMTextProvider: EmbeddingProvider {
         let tokens = tokenizer.tokenize(text)
         let pooled = try await inference(tokens)
         return FloatSimHash.project(vector: pooled, seed: projectionSeed)
+    }
+
+    /// Float lane source (Lane D): the pooled 384-d vector this provider's
+    /// `embed(_:)` already computes before throwing it away inside
+    /// `FloatSimHash.project`. Returning it here lets the dense float lane
+    /// rank by cosine over the true embedding — the answer-vs-question-echo
+    /// case the 256-bit SimHash projection cannot separate. Empty input
+    /// returns `[]` (no dense direction for the empty string), matching the
+    /// `EmbeddingProvider.embedFloat` contract. One inference pass feeds both
+    /// the binary engram and this float vector.
+    public func embedFloat(_ text: String) async throws -> [Float] {
+        guard !text.isEmpty else { return [] }
+        let tokens = tokenizer.tokenize(text)
+        return try await inference(tokens)
     }
 }

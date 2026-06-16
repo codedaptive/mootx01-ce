@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>moot-mgr · Read Console</title>
 <!--
-  moot-mgr read-plane dashboard (P4). Vanilla HTML/CSS/JS — NO frameworks, NO
+  moot-mgr read-plane dashboard. Vanilla HTML/CSS/JS — NO frameworks, NO
   CDN dependencies (loopback-only). Served by the resident host's HTTPReadAPI
   from 127.0.0.1 only. Read-only: every panel binds to a GET /api/* endpoint;
   there are no control forms here (privileged writes travel the native/gated
@@ -18,7 +18,14 @@
   vs mono).
 -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%2306070e'/%3E%3Cg fill='none' stroke='%23ff8c00' stroke-width='6' stroke-linejoin='round'%3E%3Cpath d='M30 14 L40 30 L50 16 L60 30 L70 14'/%3E%3Cpath d='M86 30 L70 40 L84 50 L70 60 L86 70'/%3E%3Cpath d='M70 86 L60 70 L50 84 L40 70 L30 86'/%3E%3Cpath d='M14 70 L30 60 L16 50 L30 40 L14 30'/%3E%3C/g%3E%3Ccircle cx='50' cy='50' r='9' fill='%23ff8c00'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/app.css?v=24">
+<script>
+/* Apply the persisted theme BEFORE first paint (default: dark). */
+try {
+  var t = localStorage.getItem("mootmgr-theme");
+  if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+} catch (e) { /* storage unavailable: stay dark */ }
+</script>
 </head>
 <body>
 <div class="app">
@@ -39,11 +46,13 @@
     </div>
     <div class="sep"></div>
     <div class="meta-strip">
-      <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">CONNECTING</span></span>
+      <span class="pill" id="statusPill"><span class="dot" aria-hidden="true"></span><span id="statusText">CONNECTING</span></span>
       <span class="tag">monitoring <b id="monIndicator">—</b></span>
       <span class="tag">uptime <b id="uptimeTag">—</b></span>
+      <span class="tag">estates <b id="estateCountTag">—</b></span>
     </div>
     <div class="right">
+      <button class="btn btn-theme" id="themeToggle" aria-label="Toggle light/dark theme">◐</button>
       <span class="tag" id="lastUpdated">—</span>
     </div>
   </header>
@@ -51,44 +60,121 @@
   <!-- LEFT NAV (GUI SPEC §2.2 — read views; admin/native views excluded) -->
   <nav class="sidenav" id="nav" aria-label="Views">
     <button class="navitem on" data-view="overview">Overview</button>
+    <button class="navitem" data-view="resources">Resources</button>
+    <button class="navitem" data-view="connects">Connects</button>
     <button class="navitem" data-view="estates">Estates</button>
     <button class="navitem" data-view="pipeline">Pipeline</button>
-    <button class="navitem" data-view="activity">Activity</button>
     <button class="navitem" data-view="topology">Topology</button>
+    <button class="navitem" data-view="activity">Activity</button>
+    <button class="navitem" data-view="lexicon">Lexicon</button>
+    <button class="navitem" data-view="lattice">Lattice</button>
     <button class="navitem" data-view="configuration">Configuration</button>
+    <!-- activity-temp: hidden from nav, preserved as a parts drawer for reuse.
+         Contains the original Overview elements (metric cards, feeds, health,
+         capabilities, busiest estates) while the new Overview is being built
+         out. Not user-visible. -->
   </nav>
 
   <!-- MAIN -->
   <main class="main" id="main">
 
-    <!-- OVERVIEW -->
+    <!-- OVERVIEW (concept-faithful rebuild) -->
     <section class="view on" data-view="overview">
       <h1 class="title">Overview</h1>
-      <p class="sub">Whole-server health and fleet aggregate — estate-agnostic.</p>
-      <div class="cards" id="overviewCards"></div>
-      <div class="panel">
-        <h2 class="phead">Pending server probes</h2>
-        <p class="note">
-          Process RSS/CPU, RPC rate, kernel backend + fallback rate, protocol
-          version, and the per-connection panel are not in the Phase-1 stats
-          store. They render as <em>n/a — pending</em> until those substrate
-          probes land (HTTP API §5).
-        </p>
-        <div class="naprow" id="overviewPending"></div>
+      <p class="sub">Server health, observer activity, and substrate capabilities.</p>
+
+      <!-- Row 1: 6 metric cards -->
+      <div class="cards" id="ovCards"></div>
+
+      <!-- Row 2: activity volume bars (2fr) + top observers ranked list (1fr) -->
+      <div class="panels-3col" id="ovPanels">
+        <div class="panel panel-2col" id="ovVolume">
+          <div class="phead-row">
+            <h2 class="phead">Activity Volume</h2>
+            <span class="phint">events over time · Y=count · X=time</span>
+          </div>
+          <div class="vol" id="ovVolBars"></div>
+          <div class="vol-axis" id="ovVolAxis"></div>
+        </div>
+        <div class="panel" id="ovTopObs">
+          <div class="phead-row">
+            <h2 class="phead">Top Observers</h2>
+            <span class="phint">by calls</span>
+          </div>
+          <div class="rank" id="ovTopObsList"></div>
+        </div>
       </div>
+
+      <!-- Row 3: capabilities (1fr) + health (1fr) + live feed (1fr) -->
+      <div class="panels-3equal" id="ovRow3">
+        <div class="panel" id="ovCaps">
+          <h2 class="phead">Capabilities</h2>
+          <div class="caps" id="ovCapList"></div>
+        </div>
+        <div class="panel" id="ovHealth">
+          <h2 class="phead">Health</h2>
+          <ul class="health" id="ovHealthList"></ul>
+        </div>
+        <div class="panel" id="ovFeed">
+          <div class="phead-row">
+            <h2 class="phead">Live Activity</h2>
+            <span class="phint" id="ovFeedState">● streaming</span>
+          </div>
+          <div class="feed" id="ovMiniFeeed"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RESOURCES (estate content surfaces) -->
+    <section class="view" data-view="resources">
+      <h1 class="title">Resources</h1>
+      <p class="sub">Observable estate content surfaces — noun counts per estate. Requires admin plane for content breakdown.</p>
+      <table class="dtable" id="resourcesTable">
+        <thead><tr>
+          <th>Estate</th>
+          <th>Wings</th>
+          <th>Drawers</th>
+          <th>KG Facts</th>
+          <th>Diary Entries</th>
+          <th>Proposals</th>
+          <th>Events</th>
+        </tr></thead>
+        <tbody id="resourcesBody"></tbody>
+      </table>
+    </section>
+
+    <!-- CONNECTS (observer dropbox connections) -->
+    <section class="view" data-view="connects">
+      <h1 class="title">Connects</h1>
+      <p class="sub">Observer dropboxes emitting to this stats store — local process-internal connections.</p>
+      <table class="dtable" id="connectsTable">
+        <thead><tr>
+          <th>Observer</th>
+          <th>Transport</th>
+          <th>Metrics</th>
+          <th>Events</th>
+          <th>Total</th>
+          <th>Last Seen</th>
+        </tr></thead>
+        <tbody id="connectsBody"></tbody>
+      </table>
     </section>
 
     <!-- ESTATES -->
     <section class="view" data-view="estates">
       <h1 class="title">Estates</h1>
-      <p class="sub">Per-estate event rollups. Kind/backend/queue/rung metrics are pending substrate work.</p>
+      <p class="sub">Per-estate event rollups and queue backpressure metrics.</p>
       <div id="estatesList" class="estates"></div>
     </section>
 
     <!-- PIPELINE -->
     <section class="view" data-view="pipeline">
       <h1 class="title">Pipeline</h1>
-      <p class="sub">Recent intake flow, derived from events. Queue/backpressure metrics are pending the per-estate queue subtree (HTTP API §5).</p>
+      <p class="sub">Recent intake flow and queue backpressure metrics. Real values appear when monitoring is ON and the estate has queue activity.</p>
+      <div class="pipe-header">
+        <label class="topo-label" for="pipelineEstate">estate</label>
+        <select class="topo-select" id="pipelineEstate" aria-label="Pipeline estate filter"></select>
+      </div>
       <div class="strip" id="pipelineStrip"></div>
       <div class="panel">
         <h2 class="phead">Recent flow (last events)</h2>
@@ -96,23 +182,8 @@
       </div>
       <div class="panel">
         <h2 class="phead">Backpressure metrics</h2>
-        <div class="naprow" id="pipelinePending"></div>
+        <div class="bprow" id="pipelineBackpressure"></div>
       </div>
-    </section>
-
-    <!-- ACTIVITY -->
-    <section class="view" data-view="activity">
-      <h1 class="title">Activity</h1>
-      <p class="sub">Recorded events from the stats store. Metadata only — never memory content. Live tail via SSE.</p>
-      <div class="actbar">
-        <button class="btn" id="ssePauseBtn">Pause live tail</button>
-        <span class="tag">live tail <b id="sseState">off</b></span>
-        <input class="filter" id="activityFilter" type="text" placeholder="filter by estate / kind / dropbox…" aria-label="Filter activity">
-      </div>
-      <table class="dtable" id="activityTable">
-        <thead><tr><th>Timestamp</th><th>Kind</th><th>Noun</th><th>Estate</th><th>Dropbox</th></tr></thead>
-        <tbody id="activityBody"></tbody>
-      </table>
     </section>
 
     <!-- TOPOLOGY (P5) — Sigma-style node-link renderer over /api/graph.
@@ -129,41 +200,148 @@
           <label class="topo-label" for="topoEstate">estate</label>
           <select class="topo-select" id="topoEstate" aria-label="Estate filter"></select>
           <button class="btn" id="topoReset">Reset layout</button>
+          <!-- L4 strata view: perspective projection with age-derived depth. Off = classic 2D. -->
+          <button class="btn" id="topoDimToggle" aria-pressed="false">3D</button>
           <span class="tag">structure <b id="topoStructure">—</b></span>
         </div>
       </div>
       <div class="topo-stage" id="topoStage">
-        <!-- Sigma.js canvas mounts here (full remaining height). -->
+        <!-- Canvas2D brain renderer mounts here (full remaining height). -->
         <div class="topo-canvas" id="topoCanvas"></div>
-        <!-- Honest pending overlay, shown when /api/graph has no structure. -->
+        <!-- Node count (top-left) and watermark (top-right): shown on synthetic path.
+             Overlay (#topoPending) is only shown when VizGraph analytics are present. -->
+        <div class="topo-nodecnt" id="topoNodeCnt" hidden></div>
+        <div class="topo-watermark" id="topoWatermark" hidden></div>
+        <!-- Pending overlay: shown only when analytics are present (analytics-grid mode).
+             Hidden on the no-analytics synthetic path so the brain canvas is the hero. -->
         <div class="topo-pending" id="topoPending" hidden>
-          <div class="stubmark">◊</div>
-          <h2>Structure pending</h2>
-          <p id="topoPendingText"></p>
+          <div class="topo-pending-header" id="topoPendingHeader">
+            <span class="stubmark-sm" aria-hidden="true">◊</span>
+            <div>
+              <h2 id="topoPendingTitle">Topology structure</h2>
+              <p id="topoPendingText"></p>
+            </div>
+          </div>
+          <!-- aria-live="polite": announces analytics updates when the estate filter changes
+               while the overlay is already visible (WCAG 4.1.3). aria-atomic="false"
+               lets AT announce additions rather than the full container. -->
+          <div class="topo-analytics" id="topoAnalytics" aria-live="polite" aria-atomic="false"></div>
         </div>
+        <!-- Content picker: check/uncheck the estate's knowledge domains
+             (community labels). Real-data path only; hidden on synthetic. -->
+        <div class="topo-commpicker" id="topoCommPicker" hidden aria-label="Content filter"></div>
         <!-- Activity feed overlay (3 lines, auto-fade) — PoC spec §6.4. -->
         <div class="topo-feed" id="topoFeed" aria-live="polite"></div>
         <!-- Legend: VizGraph analytic signals available from the observer host. -->
         <div class="topo-legend" id="topoLegend"></div>
       </div>
+      <!-- L5 radar-loop playback bar — event-indexed playhead over the recorded
+           /api/events history. Default state is NOT playing (live view). -->
+      <div class="topo-playbar">
+        <button class="btn" id="topoPlayBtn" aria-pressed="false">Play</button>
+        <label class="topo-label" for="topoPlayWindow">window</label>
+        <select class="topo-select" id="topoPlayWindow" aria-label="Playback window">
+          <option value="100">100 events</option>
+          <option value="500" selected>500 events</option>
+          <option value="all">all events</option>
+        </select>
+        <span class="tag" id="topoPlaySpan">—</span>
+        <span class="tag" id="topoPlayClock">—</span>
+      </div>
+    </section>
+
+    <!-- ACTIVITY — Inspector-style event log with filter chips and live SSE tail. -->
+    <section class="view" data-view="activity">
+      <h1 class="title">Activity</h1>
+      <p class="sub">Recorded events from the stats store. Metadata only — never memory content. Live tail via SSE.</p>
+      <div class="actbar">
+        <button class="btn" id="ssePauseBtn">Pause live tail</button>
+        <span class="tag">live tail <b id="sseState">off</b></span>
+        <div class="chiprow" id="activityChips">
+          <button class="active" data-kind="">All</button>
+          <button data-kind="capture">Capture</button>
+          <button data-kind="think">Think</button>
+        </div>
+        <input class="filter" id="activityFilter" type="text" placeholder="filter by estate / kind / dropbox…" aria-label="Filter activity">
+      </div>
+      <table class="dtable" id="activityTable">
+        <thead><tr>
+          <th>Time</th>
+          <th>Method</th>
+          <th>Session</th>
+          <th>Dropbox</th>
+          <th style="width:80px">Status</th>
+        </tr></thead>
+        <tbody id="activityBody"></tbody>
+      </table>
+    </section>
+
+    <!-- LEXICON — ARIA grammar explorer -->
+    <section class="view" data-view="lexicon">
+      <h1 class="title">Lexicon</h1>
+      <p class="sub">The ARIA grammar — one verb applied to a noun, constrained by adjectives. Tool names are verb·noun projections of this grammar.</p>
+      <div id="lexiconContent"></div>
+    </section>
+
+    <!-- LATTICE — LatticeLib / FDC knowledge framework -->
+    <section class="view" data-view="lattice">
+      <h1 class="title">Lattice</h1>
+      <p class="sub">LatticeLib knowledge framework — Frame Decimal Classification substrate and semantic indexing.</p>
+      <div id="latticeContent"></div>
     </section>
 
     <!-- CONFIGURATION -->
     <section class="view" data-view="configuration">
       <h1 class="title">Configuration</h1>
       <p class="sub">Effective monitoring configuration (read-only — edit from the native menu).</p>
-      <div class="cards" id="configCards"></div>
-      <div class="panel">
-        <h2 class="phead">Pending configuration fields</h2>
-        <div class="naprow" id="configPending"></div>
+
+      <!-- Top row: two-column Transport + Estate grid (concept two-column layout) -->
+      <div class="cfg-2col">
+        <div class="panel" id="configTransport">
+          <h2 class="phead">Transport &amp; Protocol</h2>
+          <div class="cfg-kvgrid" id="configTransportGrid"></div>
+        </div>
+        <div class="panel" id="configEstate">
+          <h2 class="phead">Estate &amp; Naming</h2>
+          <div class="cfg-kvgrid" id="configEstateGrid"></div>
+        </div>
+      </div>
+
+      <!-- Monitoring strip -->
+      <div class="panel" id="configMon">
+        <h2 class="phead">Monitoring</h2>
+        <div class="cards" id="configCards"></div>
+      </div>
+
+      <!-- ARIA Grammar collapsible panel -->
+      <details class="panel">
+        <summary class="phead">ARIA Grammar</summary>
+        <div id="configLexicon" class="cfg-kvgrid"></div>
+      </details>
+
+      <!-- Capabilities grid -->
+      <div class="panel" id="configCaps">
+        <h2 class="phead">Capabilities</h2>
+        <div class="caps-grid" id="configCapsGrid"></div>
+      </div>
+    </section>
+
+    <!-- ACTIVITY-TEMP: hidden parts drawer — old Overview elements preserved for
+         component reuse while the new Overview is being built out. Not linked
+         from nav; not user-visible. -->
+    <section class="view" data-view="activity-temp" style="display:none" aria-hidden="true">
+      <h1 class="title">Overview (legacy)</h1>
+      <div class="cards" id="overviewCards"></div>
+      <div class="panels-2col" id="overviewPanels">
+        <div class="panel" id="overviewFeed"></div>
+        <div class="panel" id="overviewCaps"></div>
+        <div class="panel" id="overviewHealth"></div>
+        <div class="panel" id="overviewBusiest"></div>
       </div>
     </section>
 
   </main>
 </div>
-<!-- Vendored, self-contained Sigma-style renderer (no CDN). Loaded before
-     app.js so the Topology driver can `new Sigma(...)`. -->
-<script src="/sigma.js"></script>
-<script src="/app.js"></script>
+<script src="/app.js?v=24"></script>
 </body>
 </html>

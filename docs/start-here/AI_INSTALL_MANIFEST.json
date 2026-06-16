@@ -1,0 +1,78 @@
+{
+  "schema_version": "1.0.0",
+  "_about": "Machine-readable companion to docs/start-here/INSTALL_SURFACE.md — facts an AI agent can parse before touching a user's machine. INSTALL_SURFACE.md is the authoritative human source; keep this in sync with it. Always confirm against the live repository (install scripts + release notes) before running commands.",
+  "repo": "codedaptive/mootx01-ce",
+  "ports": {
+    "daemon": {
+      "default": 4242,
+      "explicit": "an explicit port (--http <port> or MOOTX01_HTTP_PORT) binds exactly and fails if busy — never hunts",
+      "auto": "--http auto hunts upward from 4242 to the first free port",
+      "bound_port_file": "<data_dir>/daemon.port"
+    },
+    "dashboard": {
+      "default": 4200,
+      "behavior": "the built-in default hunts upward from 4200; an explicitly requested port binds exactly and fails if busy",
+      "bound_port_file": "<data_dir>/mgr.port"
+    },
+    "retired": [7077]
+  },
+  "platforms": {
+    "macos": { "build": "swift", "products": ["mootx01", "moot-mgr"], "hosts_estate": true, "service_manager": "launchd" },
+    "linux": { "build": "rust", "products": ["mootx01", "moot-mgr"], "hosts_estate": true, "service_manager": "systemd-user", "note": "x86_64/arm64 archives include the headless Rust moot-mgr dashboard" },
+    "windows": { "build": "rust", "products": ["mootx01.exe", "moot-mgr.exe"], "hosts_estate": true, "service_manager": "task-scheduler", "note": "install.ps1 downloads the binary and wires clients over stdio (no resident daemon); run 'mootx01 install' afterward to register the Task Scheduler daemon and rewire clients to the HTTP daemon. moot-mgr (dashboard) ships as the headless Rust build; its admin control channel is a named pipe on Windows (a Unix-domain socket on Linux/macOS)" }
+  },
+  "install": {
+    "download_unix": "curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.sh | sh",
+    "download_windows": "iex \"& { $(irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/main/install.ps1) }\"",
+    "wire_clients": "mootx01 install",
+    "local_build": "./install-local.sh",
+    "uninstall": "mootx01 uninstall"
+  },
+  "verify": {
+    "binary_status": "mootx01 status",
+    "manager_status": "moot-mgr status",
+    "dashboard_url": "http://127.0.0.1:4200",
+    "mcp_tools": ["moot_estate_ping", "moot_estate_status", "moot_estate_map", "moot_read_journal", "moot_list_lenses"],
+    "smoke_test": ["file a harmless memory", "search for the same phrase", "confirm it is recalled"]
+  },
+  "env": {
+    "MOOTX01_HTTP_PORT": "resident daemon HTTP port (default 4242)",
+    "MOOTX01_DATA_DIR": "data directory override",
+    "MOOTX01_HTTP_MAX_BODY_BYTES": "maximum MCP request body in bytes (default 4194304)",
+    "MOOTX01_BRAIN_TICK_MS": "background maintenance cadence in ms (default 5000)",
+    "MOOTX01_MONITORING_POLL_MS": "how often the daemon checks if monitoring is enabled, in ms (default 5000)",
+    "MOOT_MGR_HTTP_PORT": "dashboard / read-API port (default 4200)"
+  },
+  "files_may_modify": [
+    "~/.mootx01/bin/ (binary install directory)",
+    "~/.local/bin/ (PATH symlink directory)",
+    "AI client MCP configs (per client — see adapters.clients)",
+    "local data directory (MOOTX01_DATA_DIR or the platform default)",
+    "background-service registration (launchd / systemd-user / Task Scheduler)",
+    "moot-mgr service registration",
+    "dashboard static assets"
+  ],
+  "adapters": {
+    "dir": "apps/moot-agent-skills",
+    "rules": ["merge_dont_overwrite", "back_up_existing_first", "get_approval_before_changing_existing_instructions"],
+    "clients": {
+      "claude": ["CLAUDE.md", ".claude/rules/*.md", ".claude/skills/mootx01-memory/SKILL.md", ".claude/commands/mootx01-start.md"],
+      "codex": ["AGENTS.md", ".agents/skills/mootx01-memory/SKILL.md", ".agents/skills/mootx01-memory/agents/openai.yaml", ".codex/hooks.json"],
+      "cursor": [".cursor/rules/*.mdc", ".cursorrules (legacy)"],
+      "cline": [".clinerules/*.md"],
+      "roo": [".roo/rules/*.md", ".roorules (legacy)"],
+      "windsurf": [".windsurf/rules/*.md", ".devin/rules/*.md", ".windsurfrules (legacy)"],
+      "continue": [".continue/rules/*.md"],
+      "openai-agents": ["system-prompt.md", "developer-message.md", "tool-contract.md"],
+      "generic": ["custom-instructions.md"]
+    }
+  },
+  "rules": {
+    "loopback_only": true,
+    "single_writer_per_estate": true,
+    "do_not_use_retired_port_7077": true,
+    "verify_after_install": true,
+    "no_public_network_exposure": true,
+    "approval_before_changing_existing_instructions": true
+  }
+}

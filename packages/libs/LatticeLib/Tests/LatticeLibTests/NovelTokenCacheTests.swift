@@ -90,10 +90,13 @@ struct PoolSubmissionTests {
         // The CodingKeys enum maps tableVersion -> table_version,
         // taggerVersion -> tagger_version. Verify the wire format matches.
         let entries = [PoolEntry(token: "run", tag: "VERB")]
+        // Arbitrary fixture string — this test checks key names only, not the
+        // version value. "test-old-version-0" is intentionally fictional to
+        // make clear it is not a production version identifier.
         let sub = PoolSubmission(
             tableVersion: "v2.0",
             platform: "other",
-            taggerVersion: "hmm-viterbi-stub-0",
+            taggerVersion: "test-old-version-0",
             entries: entries
         )
         let data = try JSONEncoder().encode(sub)

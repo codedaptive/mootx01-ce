@@ -8,8 +8,9 @@
 //! NOTE: this backend is **unverified locally** — its conformance test only
 //! runs when `PERSISTENCEKIT_PG_URL` points at a live PostgreSQL server;
 //! without one it is skipped. Implements RowStore, BlobStore, AuditLog,
-//! StorageObserver + schema/generated-STORED-columns/append-only, and a
-//! pgvector-backed VectorIndex (see PgVectorIndex).
+//! StorageObserver + schema/generated-STORED-columns/append-only. The
+//! backend owns no vector-search engine; it accommodates vector workloads'
+//! storage needs through RowStore/BlobStore (ADR-008).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -24,11 +25,10 @@ use uuid::Uuid;
 
 use crate::{
     AuditEvent, AuditLog, BackendConfiguration, BlobStore, CachingRowStore, ColumnType,
-    DistanceMetric, EstateConfiguration, IndexDeclaration, IndexParameters, IsolationLevel,
-    OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration, SearchParameters,
+    EstateConfiguration, IndexDeclaration, IsolationLevel,
+    OrderClause, OrderDirection, RowHandle, RowKey, RowStore, SchemaDeclaration,
     Storage, StorageError, StorageEvent, StorageObserver, StoragePredicate, StorageResult,
-    StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue, VectorIndex,
-    VectorSearchResult,
+    StorageRow, StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -835,11 +835,6 @@ impl Storage for PostgresStorage {
             pool: self.pool.clone(),
         })
     }
-    fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Arc::new(PgVectorIndex {
-            pool: self.pool.clone(),
-        })
-    }
     fn audit_log(&self) -> Arc<dyn AuditLog> {
         Arc::new(PgAuditLog {
             pool: self.pool.clone(),
@@ -870,11 +865,27 @@ impl Storage for PostgresStorage {
             .map_err(|e| StorageError::BackendError {
                 underlying: format!("schema version: {e}"),
             })?;
-        Ok(rows
-            .first()
-            .and_then(|r| r.try_get::<_, String>(0).ok())
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0))
+        // An absent row means the meta table exists but no schema_version has been
+        // written yet — this is the correct fresh-estate state and 0 is the right
+        // sentinel (no migrations have been applied). That case is distinct from a
+        // row being present but its value not parsing as i32, which is data
+        // corruption: returning 0 there would trigger a spurious re-migration from
+        // version 0 (backlog #22). Fail-loud instead.
+        match rows.first() {
+            None => Ok(0),
+            Some(r) => {
+                let s: String = r.try_get::<_, String>(0).map_err(|e| {
+                    StorageError::BackendError {
+                        underlying: format!("schema version decode: {e}"),
+                    }
+                })?;
+                s.parse::<i32>().map_err(|_| StorageError::CorruptStoredValue {
+                    table: "_storagekit_meta".to_string(),
+                    column: "value".to_string(),
+                    stored_text: s.clone(),
+                })
+            }
+        }
     }
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         let mut conn = self.checkout()?;
@@ -1053,7 +1064,6 @@ impl crate::introspection::StorageIntrospection for PostgresStorage {
             lock_contention: Some(lock_contention),
             row_count: None,
             blob_count: None,
-            vector_count: None,
             captured_at_secs: now_secs,
         })
     }
@@ -1064,7 +1074,7 @@ impl crate::introspection::StorageIntrospection for PostgresStorage {
 //
 // PgTransactionContext wraps the single PooledClient checked out for the
 // transaction bracket. Every sub-store (TxRowStore, TxBlobStore,
-// TxAuditLog, TxVectorIndex) holds Arc<Mutex<PooledClient>> and locks it
+// TxAuditLog) holds Arc<Mutex<PooledClient>> and locks it
 // per operation to execute SQL on that connection. BEGIN was issued before
 // this context is constructed; COMMIT or ROLLBACK follows after block()
 // returns. All DML therefore participates in the same PG transaction.
@@ -1092,11 +1102,6 @@ impl StorageTransaction for PgTransactionContext {
     }
     fn blob_store(&self) -> Arc<dyn BlobStore> {
         Arc::new(TxBlobStore {
-            conn: self.conn.clone(),
-        })
-    }
-    fn vector_index(&self) -> Arc<dyn VectorIndex> {
-        Arc::new(TxVectorIndex {
             conn: self.conn.clone(),
         })
     }
@@ -1321,6 +1326,72 @@ impl RowStore for TxRowStore {
         Ok(out)
     }
 
+    fn query_projected(
+        &self,
+        table: &str,
+        columns: &[&str],
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        // Empty projection means "no projection" — fall back to SELECT *.
+        if columns.is_empty() {
+            return self.query(table, predicate, order_by, limit, offset);
+        }
+        let mut guard = self.conn.lock().unwrap();
+        // Explicit column list so the omitted columns (notably the content
+        // blob) are never read off disk — the no-blob recall path's I/O win.
+        let select_list = columns
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!("SELECT {select_list} FROM \"{table}\"");
+        let mut binds: Vec<TypedValue> = Vec::new();
+        if let Some(p) = predicate {
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+        }
+        if !order_by.is_empty() {
+            let parts: Vec<String> = order_by
+                .iter()
+                .map(|c| {
+                    let dir = match c.direction {
+                        OrderDirection::Ascending => "ASC",
+                        OrderDirection::Descending => "DESC",
+                    };
+                    format!("\"{}\" {dir}", c.column.name)
+                })
+                .collect();
+            sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
+        }
+        if let Some(l) = limit {
+            sql.push_str(&format!(" LIMIT {l}"));
+        }
+        if let Some(o) = offset {
+            if o > 0 {
+                sql.push_str(&format!(" OFFSET {o}"));
+            }
+        }
+        let params: Vec<PgParam> = binds.iter().map(to_param).collect();
+        let schema = self.schema.lock().unwrap().schema.clone();
+        let rows = guard
+            .get_mut()
+            .query(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+            for (i, col) in row.columns().iter().enumerate() {
+                let name = col.name().to_string();
+                let kit = table_column_type(schema.as_ref(), table, &name);
+                values.insert(name, read_value(row, i, kit));
+            }
+            out.push(StorageRow::new(values));
+        }
+        Ok(out)
+    }
+
     fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize> {
         let mut guard = self.conn.lock().unwrap();
         let mut sql = format!("SELECT COUNT(*) FROM \"{table}\"");
@@ -1393,6 +1464,16 @@ impl BlobStore for TxBlobStore {
             .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
         Ok(rows.first().map(|r| r.get::<_, i32>(0) as usize))
     }
+    fn list_keys(&self) -> StorageResult<Vec<String>> {
+        // Enumerate all blob keys stored in the Postgres transaction backend.
+        // Required by the full-snapshot replication primitive (blob-replication worker).
+        let mut guard = self.conn.lock().unwrap();
+        let rows = guard
+            .get_mut()
+            .query(r#"SELECT "key" FROM "_storagekit_blobs""#, &[])
+            .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    }
 }
 
 // ── Transaction-scoped AuditLog ──────────────────────────────────────
@@ -1459,7 +1540,12 @@ impl AuditLog for TxAuditLog {
             .get_mut()
             .query(&sql, &param_refs(&binds))
             .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
-        Ok(rows.iter().map(decode_audit).collect())
+        // Collect through decode_audit's Result so a corrupt UUID cell in any
+        // audit row propagates as CorruptStoredValue rather than silently becoming
+        // Uuid::nil(). A single bad row aborts the entire iterate call.
+        rows.iter()
+            .map(decode_audit)
+            .collect::<StorageResult<Vec<_>>>()
     }
     fn events_for_row(&self, row_id: RowKey) -> StorageResult<Vec<AuditEvent>> {
         self.iterate(None, Some(row_id), usize::MAX)
@@ -1471,126 +1557,6 @@ impl AuditLog for TxAuditLog {
             .query_one(r#"SELECT COUNT(*) FROM "_storagekit_audit""#, &[])
             .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
         Ok(row.get::<_, i64>(0) as usize)
-    }
-}
-
-// ── Transaction-scoped VectorIndex ──────────────────────────────────
-
-struct TxVectorIndex {
-    conn: TxConn,
-}
-
-impl VectorIndex for TxVectorIndex {
-    fn add(
-        &self,
-        key: RowKey,
-        vector: &[f32],
-        _metadata: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<()> {
-        let mut guard = self.conn.lock().unwrap();
-        let dim = vector.len();
-        guard.get_mut().batch_execute(&format!(
-            "CREATE TABLE IF NOT EXISTS \"{VEC_TABLE}\" (\"key\" TEXT PRIMARY KEY, \"embedding\" vector({dim}) NOT NULL, \"metadata_json\" TEXT NOT NULL DEFAULT '{{}}')"
-        )).map_err(|e| map_pg_err(e, VEC_TABLE))?;
-        guard
-            .get_mut()
-            .execute(
-                &format!(
-                "INSERT INTO \"{VEC_TABLE}\" (\"key\", \"embedding\") VALUES ($1, '{}'::vector) \
-                 ON CONFLICT (\"key\") DO UPDATE SET \"embedding\" = excluded.embedding",
-                vector_literal(vector)
-            ),
-                &[&key.to_string().to_uppercase()],
-            )
-            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
-        Ok(())
-    }
-    fn update(
-        &self,
-        key: RowKey,
-        vector: &[f32],
-        metadata: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<()> {
-        self.add(key, vector, metadata)
-    }
-    fn delete(&self, key: RowKey) -> StorageResult<()> {
-        let mut guard = self.conn.lock().unwrap();
-        // Check table existence via the same transaction connection.
-        let exists: bool = guard
-            .get_mut()
-            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&VEC_TABLE])
-            .ok()
-            .and_then(|r| r.try_get::<_, bool>(0).ok())
-            .unwrap_or(false);
-        if !exists {
-            return Ok(());
-        }
-        guard
-            .get_mut()
-            .execute(
-                &format!("DELETE FROM \"{VEC_TABLE}\" WHERE \"key\" = $1"),
-                &[&key.to_string().to_uppercase()],
-            )
-            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
-        Ok(())
-    }
-    fn knn(
-        &self,
-        query: &[f32],
-        k: usize,
-        metric: DistanceMetric,
-        _filter: Option<&StoragePredicate>,
-        _search_parameters: Option<SearchParameters>,
-    ) -> StorageResult<Vec<VectorSearchResult>> {
-        let mut guard = self.conn.lock().unwrap();
-        let exists: bool = guard
-            .get_mut()
-            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&VEC_TABLE])
-            .ok()
-            .and_then(|r| r.try_get::<_, bool>(0).ok())
-            .unwrap_or(false);
-        if !exists {
-            return Ok(Vec::new());
-        }
-        let op = metric_op(metric);
-        let lit = vector_literal(query);
-        let sql = format!(
-            "SELECT \"key\", (\"embedding\" {op} '{lit}'::vector) AS distance FROM \"{VEC_TABLE}\" \
-             ORDER BY \"embedding\" {op} '{lit}'::vector LIMIT {k}"
-        );
-        let rows = guard
-            .get_mut()
-            .query(&sql, &[])
-            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
-        Ok(rows
-            .iter()
-            .map(|r| VectorSearchResult {
-                key: Uuid::parse_str(&r.get::<_, String>(0)).unwrap_or(Uuid::nil()),
-                distance: r.get::<_, f64>(1) as f32,
-                metadata: BTreeMap::new(),
-            })
-            .collect())
-    }
-    fn reindex(&self, _parameters: IndexParameters) -> StorageResult<()> {
-        Ok(())
-    }
-    fn count(&self) -> StorageResult<usize> {
-        let mut guard = self.conn.lock().unwrap();
-        let exists: bool = guard
-            .get_mut()
-            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&VEC_TABLE])
-            .ok()
-            .and_then(|r| r.try_get::<_, bool>(0).ok())
-            .unwrap_or(false);
-        if !exists {
-            return Ok(0);
-        }
-        let n: i64 = guard
-            .get_mut()
-            .query_one(&format!("SELECT COUNT(*) FROM \"{VEC_TABLE}\""), &[])
-            .map_err(|e| map_pg_err(e, VEC_TABLE))?
-            .get(0);
-        Ok(n as usize)
     }
 }
 
@@ -1840,6 +1806,72 @@ impl RowStore for PgRowStore {
         Ok(out)
     }
 
+    fn query_projected(
+        &self,
+        table: &str,
+        columns: &[&str],
+        predicate: Option<&StoragePredicate>,
+        order_by: &[OrderClause],
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> StorageResult<Vec<StorageRow>> {
+        // Empty projection means "no projection" — fall back to SELECT *.
+        if columns.is_empty() {
+            return self.query(table, predicate, order_by, limit, offset);
+        }
+        let mut conn = self.pool.checkout()?;
+        // Explicit column list so the omitted columns (notably the content
+        // blob) are never read off disk — the no-blob recall path's I/O win.
+        let select_list = columns
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!("SELECT {select_list} FROM \"{table}\"");
+        let mut binds: Vec<TypedValue> = Vec::new();
+        if let Some(p) = predicate {
+            sql.push_str(&format!(" WHERE {}", compile_predicate(p, &mut binds)));
+        }
+        if !order_by.is_empty() {
+            let parts: Vec<String> = order_by
+                .iter()
+                .map(|c| {
+                    let dir = match c.direction {
+                        OrderDirection::Ascending => "ASC",
+                        OrderDirection::Descending => "DESC",
+                    };
+                    format!("\"{}\" {dir}", c.column.name)
+                })
+                .collect();
+            sql.push_str(&format!(" ORDER BY {}", parts.join(", ")));
+        }
+        if let Some(l) = limit {
+            sql.push_str(&format!(" LIMIT {l}"));
+        }
+        if let Some(o) = offset {
+            if o > 0 {
+                sql.push_str(&format!(" OFFSET {o}"));
+            }
+        }
+        let params: Vec<PgParam> = binds.iter().map(to_param).collect();
+        let schema = self.schema.lock().unwrap().schema.clone();
+        let rows = conn
+            .get_mut()
+            .query(&sql, &param_refs(&params))
+            .map_err(|e| map_pg_err(e, table))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut values: BTreeMap<String, TypedValue> = BTreeMap::new();
+            for (i, col) in row.columns().iter().enumerate() {
+                let name = col.name().to_string();
+                let kit = table_column_type(schema.as_ref(), table, &name);
+                values.insert(name, read_value(row, i, kit));
+            }
+            out.push(StorageRow::new(values));
+        }
+        Ok(out)
+    }
+
     fn count(&self, table: &str, predicate: Option<&StoragePredicate>) -> StorageResult<usize> {
         let mut conn = self.pool.checkout()?;
         let mut sql = format!("SELECT COUNT(*) FROM \"{table}\"");
@@ -1912,6 +1944,16 @@ impl BlobStore for PgBlobStore {
             .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
         Ok(rows.first().map(|r| r.get::<_, i32>(0) as usize))
     }
+    fn list_keys(&self) -> StorageResult<Vec<String>> {
+        // Enumerate all blob keys stored in the Postgres pool backend.
+        // Required by the full-snapshot replication primitive (blob-replication worker).
+        let mut conn = self.pool.checkout()?;
+        let rows = conn
+            .get_mut()
+            .query(r#"SELECT "key" FROM "_storagekit_blobs""#, &[])
+            .map_err(|e| map_pg_err(e, "_storagekit_blobs"))?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1946,17 +1988,40 @@ fn audit_params(e: &AuditEvent) -> Vec<PgParam> {
     ]
 }
 
-fn decode_audit(row: &postgres::Row) -> AuditEvent {
-    let parse_uuid = |s: String| Uuid::parse_str(&s).unwrap_or(Uuid::nil());
-    AuditEvent {
-        event_id: parse_uuid(row.get::<_, String>(0)),
+/// Parse a UUID string from the audit table.
+///
+/// Returns `CorruptStoredValue` rather than `Uuid::nil()` so that a corrupt
+/// cell in `_storagekit_audit` surfaces as an error instead of silently
+/// propagating an all-zeros identity through chain verification and replication.
+/// Extracted from the `decode_audit` closure to enable direct unit-testing.
+fn parse_audit_uuid(s: String, col_name: &str) -> StorageResult<Uuid> {
+    Uuid::parse_str(&s).map_err(|_| StorageError::CorruptStoredValue {
+        table: "_storagekit_audit".to_string(),
+        column: col_name.to_string(),
+        stored_text: s,
+    })
+}
+
+/// Decode one row from `_storagekit_audit` into an `AuditEvent`.
+///
+/// Fail-loud: an unparseable UUID string in `event_id`, `estate_uuid`, or
+/// `row_id` returns `Err(StorageError::CorruptStoredValue)` rather than
+/// silently substituting `Uuid::nil()`. Mirrors the SQLite backend's
+/// `decode_audit` (fixed in gate-2 / 0ff08d93).
+///
+/// A nil UUID in the audit log would propagate a fabricated identity through
+/// chain verification and replication under the audit seal — exactly the
+/// failure mode the gate-2 fix eliminated for SQLite.
+fn decode_audit(row: &postgres::Row) -> StorageResult<AuditEvent> {
+    Ok(AuditEvent {
+        event_id: parse_audit_uuid(row.get::<_, String>(0), "event_id")?,
         hlc: HLC {
             physical_time: row.get::<_, i64>(2),
             logical_count: row.get::<_, i64>(3) as i32,
             node_id: row.get::<_, i64>(4) as i32,
         },
-        estate_uuid: parse_uuid(row.get::<_, String>(5)),
-        row_id: parse_uuid(row.get::<_, String>(6)),
+        estate_uuid: parse_audit_uuid(row.get::<_, String>(5), "estate_uuid")?,
+        row_id: parse_audit_uuid(row.get::<_, String>(6), "row_id")?,
         verb: row.get(7),
         before_adjective: row.get(8),
         before_operational: row.get(9),
@@ -1967,7 +2032,7 @@ fn decode_audit(row: &postgres::Row) -> AuditEvent {
         before_lattice_anchor: row.get::<_, Option<i64>>(14).map(|v| v as u64),
         after_lattice_anchor: row.get::<_, i64>(15) as u64,
         actor: row.get(16),
-    }
+    })
 }
 
 impl AuditLog for PgAuditLog {
@@ -2027,7 +2092,11 @@ impl AuditLog for PgAuditLog {
             .get_mut()
             .query(&sql, &param_refs(&binds))
             .map_err(|e| map_pg_err(e, "_storagekit_audit"))?;
-        Ok(rows.iter().map(decode_audit).collect())
+        // Collect through decode_audit's Result — same fail-loud contract as
+        // TxAuditLog::iterate above and the SQLite AuditLog::iterate.
+        rows.iter()
+            .map(decode_audit)
+            .collect::<StorageResult<Vec<_>>>()
     }
     fn events_for_row(&self, row_id: RowKey) -> StorageResult<Vec<AuditEvent>> {
         self.iterate(None, Some(row_id), usize::MAX)
@@ -2057,147 +2126,6 @@ impl StorageObserver for PgObserver {
         events: BTreeSet<StorageEvent>,
     ) -> StorageResult<Receiver<TableChange>> {
         Ok(self.observers.observe(table, events))
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// VectorIndex — pgvector-backed. Lazily creates "_storagekit_vectors" on
-// first add (dimension fixed from the first vector), mirroring the Swift
-// PostgreSQLVectorIndex. Vectors bind as text cast to `::vector`, so no
-// pgvector client crate is needed. The `vector` extension must already be
-// installed in the database (a DB-admin step; not created per-call since a
-// least-privilege role may lack CREATE EXTENSION). Lives in the estate's
-// schema via the connection search_path. Per-operation pool checkout.
-// ─────────────────────────────────────────────────────────────────────
-
-struct PgVectorIndex {
-    pool: Arc<Pool>,
-}
-
-const VEC_TABLE: &str = "_storagekit_vectors";
-
-fn vector_literal(v: &[f32]) -> String {
-    format!(
-        "[{}]",
-        v.iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn metric_op(m: DistanceMetric) -> &'static str {
-    match m {
-        DistanceMetric::Cosine => "<=>",
-        DistanceMetric::L2 => "<->",
-        DistanceMetric::Dot => "<#>",
-    }
-}
-
-impl PgVectorIndex {
-    fn table_exists(client: &mut Client) -> bool {
-        client
-            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&VEC_TABLE])
-            .ok()
-            .and_then(|r| r.try_get::<_, bool>(0).ok())
-            .unwrap_or(false)
-    }
-}
-
-impl VectorIndex for PgVectorIndex {
-    fn add(
-        &self,
-        key: RowKey,
-        vector: &[f32],
-        _metadata: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<()> {
-        let mut conn = self.pool.checkout()?;
-        let dim = vector.len();
-        conn.get_mut().batch_execute(&format!(
-            "CREATE TABLE IF NOT EXISTS \"{VEC_TABLE}\" (\"key\" TEXT PRIMARY KEY, \"embedding\" vector({dim}) NOT NULL, \"metadata_json\" TEXT NOT NULL DEFAULT '{{}}')"
-        )).map_err(|e| map_pg_err(e, VEC_TABLE))?;
-        // Inline the vector literal (digits/dots/commas only — safe): a bound
-        // `$n::vector` makes PG infer the param as type `vector`, which the
-        // text-based client can't serialize.
-        conn.get_mut()
-            .execute(
-                &format!(
-                "INSERT INTO \"{VEC_TABLE}\" (\"key\", \"embedding\") VALUES ($1, '{}'::vector) \
-                 ON CONFLICT (\"key\") DO UPDATE SET \"embedding\" = excluded.embedding",
-                vector_literal(vector)
-            ),
-                &[&key.to_string().to_uppercase()],
-            )
-            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
-        Ok(())
-    }
-    fn update(
-        &self,
-        key: RowKey,
-        vector: &[f32],
-        metadata: BTreeMap<String, TypedValue>,
-    ) -> StorageResult<()> {
-        self.add(key, vector, metadata)
-    }
-    fn delete(&self, key: RowKey) -> StorageResult<()> {
-        let mut conn = self.pool.checkout()?;
-        if !Self::table_exists(conn.get_mut()) {
-            return Ok(());
-        }
-        conn.get_mut()
-            .execute(
-                &format!("DELETE FROM \"{VEC_TABLE}\" WHERE \"key\" = $1"),
-                &[&key.to_string().to_uppercase()],
-            )
-            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
-        Ok(())
-    }
-    fn knn(
-        &self,
-        query: &[f32],
-        k: usize,
-        metric: DistanceMetric,
-        _filter: Option<&StoragePredicate>,
-        _search_parameters: Option<SearchParameters>,
-    ) -> StorageResult<Vec<VectorSearchResult>> {
-        let mut conn = self.pool.checkout()?;
-        if !Self::table_exists(conn.get_mut()) {
-            return Ok(Vec::new());
-        }
-        let op = metric_op(metric);
-        let lit = vector_literal(query);
-        let sql = format!(
-            "SELECT \"key\", (\"embedding\" {op} '{lit}'::vector) AS distance FROM \"{VEC_TABLE}\" \
-             ORDER BY \"embedding\" {op} '{lit}'::vector LIMIT {k}"
-        );
-        let rows = conn
-            .get_mut()
-            .query(&sql, &[])
-            .map_err(|e| map_pg_err(e, VEC_TABLE))?;
-        Ok(rows
-            .iter()
-            .map(|r| VectorSearchResult {
-                key: Uuid::parse_str(&r.get::<_, String>(0)).unwrap_or(Uuid::nil()),
-                distance: r.get::<_, f64>(1) as f32,
-                metadata: BTreeMap::new(),
-            })
-            .collect())
-    }
-    fn reindex(&self, _parameters: IndexParameters) -> StorageResult<()> {
-        // Flat/sequential scan — no secondary index built at Phase 1.
-        Ok(())
-    }
-    fn count(&self) -> StorageResult<usize> {
-        let mut conn = self.pool.checkout()?;
-        if !Self::table_exists(conn.get_mut()) {
-            return Ok(0);
-        }
-        let n: i64 = conn
-            .get_mut()
-            .query_one(&format!("SELECT COUNT(*) FROM \"{VEC_TABLE}\""), &[])
-            .map_err(|e| map_pg_err(e, VEC_TABLE))?
-            .get(0);
-        Ok(n as usize)
     }
 }
 
@@ -2418,8 +2346,7 @@ mod transaction_context_tests {
     /// Every sub-store vended by PgTransactionContext holds a pointer-equal
     /// Arc<Mutex<PooledClient>> to the context's TxConn. This proves that
     /// no pool checkout occurs when the block calls row_store(), blob_store(),
-    /// audit_log(), or vector_index() — all DML routes through the single
-    /// bracket connection.
+    /// or audit_log() — all DML routes through the single bracket connection.
     ///
     /// We access the private `conn` field of each sub-store directly
     /// (allowed here because this module is a child of postgres.rs and sees
@@ -2440,9 +2367,8 @@ mod transaction_context_tests {
         };
         let blob_store = TxBlobStore { conn: conn.clone() };
         let audit_log = TxAuditLog { conn: conn.clone() };
-        let vector_index = TxVectorIndex { conn: conn.clone() };
 
-        // All four sub-store conn fields must be pointer-equal to the
+        // All three sub-store conn fields must be pointer-equal to the
         // original TxConn — the bracket connection is the only connection.
         assert!(
             Arc::ptr_eq(&row_store.conn, &conn),
@@ -2456,15 +2382,11 @@ mod transaction_context_tests {
             Arc::ptr_eq(&audit_log.conn, &conn),
             "TxAuditLog must use the bracket connection"
         );
-        assert!(
-            Arc::ptr_eq(&vector_index.conn, &conn),
-            "TxVectorIndex must use the bracket connection"
-        );
     }
 
-    /// PgTransactionContext::row_store() / blob_store() / audit_log() /
-    /// vector_index() all return sub-stores whose conn Arc is pointer-equal
-    /// to the context's bracket connection. Tests the full trait-path
+    /// PgTransactionContext::row_store() / blob_store() / audit_log()
+    /// all return sub-stores whose conn Arc is pointer-equal to the
+    /// context's bracket connection. Tests the full trait-path
     /// (StorageTransaction accessors) rather than direct construction.
     /// We verify via Arc::ptr_eq on the Mutex pointer, which is stable
     /// across Arc::clone.
@@ -2483,21 +2405,149 @@ mod transaction_context_tests {
         // Arc<dyn Trait> backed by a Tx*Store. We verify the routing invariant
         // by checking the Arc reference count: the bracket conn starts at 1
         // (from `conn`); each sub-store accessor should clone it. After all
-        // four calls the strong count must be 5 (original + 4 clones held in
-        // the returned Arc<dyn Trait> values).
+        // three calls the strong count must be 5 (original + ctx + 3 clones
+        // held in the returned Arc<dyn Trait> values).
         let _rs = ctx.row_store();
         let _bs = ctx.blob_store();
         let _al = ctx.audit_log();
-        let _vi = ctx.vector_index();
 
-        // 1 (conn) + 1 (ctx.conn) + 4 (one per sub-store) = 6.
+        // 1 (conn) + 1 (ctx.conn) + 3 (one per sub-store) = 5.
         // If any sub-store had checked out from the pool instead of cloning
         // conn, the strong_count would differ.
         assert_eq!(
             Arc::strong_count(&conn),
-            6,
+            5,
             "each sub-store must hold one clone of the bracket conn Arc \
-             (count should be 6: original + ctx + 4 sub-stores)"
+             (count should be 5: original + ctx + 3 sub-stores)"
         );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// decode_audit / parse_audit_uuid unit tests — no live server required.
+//
+// parse_audit_uuid is the extracted helper that backs decode_audit. These
+// tests verify the fail-loud contract: a corrupt UUID string returns
+// CorruptStoredValue (not Uuid::nil()), a valid UUID round-trips correctly,
+// and the column-name field in the error identifies the offending field.
+//
+// decode_audit itself requires a postgres::Row which cannot be constructed
+// without a live server; end-to-end audit corrupt-UUID coverage for Postgres
+// lives in tests/postgres_conformance.rs (gated on PERSISTENCEKIT_PG_URL).
+//
+// current_schema_version parsing logic is also exercised here: the absence
+// of a row must return 0 (fresh estate) while a row that fails i32 parsing
+// must return CorruptStoredValue (backlog #22 fix).
+// ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod decode_audit_tests {
+    use super::*;
+
+    /// A well-formed UUID string must parse successfully and round-trip
+    /// back to the same Uuid value.
+    #[test]
+    fn parse_audit_uuid_valid_returns_ok() {
+        let id = Uuid::new_v4();
+        let s = id.to_string().to_uppercase();
+        let result = parse_audit_uuid(s, "event_id");
+        assert!(result.is_ok(), "valid UUID must parse: {:?}", result.err());
+        assert_eq!(result.unwrap(), id);
+    }
+
+    /// A garbage string must return CorruptStoredValue, not Uuid::nil().
+    /// Uuid::nil() (all-zeros) would be a valid Uuid that silently propagates
+    /// through chain verification; the error is the correct outcome.
+    #[test]
+    fn parse_audit_uuid_corrupt_returns_corrupt_stored_value_not_nil() {
+        let result = parse_audit_uuid("NOT-A-UUID".to_string(), "event_id");
+        match result {
+            Err(StorageError::CorruptStoredValue { table, column, stored_text }) => {
+                assert_eq!(table, "_storagekit_audit");
+                assert_eq!(column, "event_id");
+                assert_eq!(stored_text, "NOT-A-UUID");
+            }
+            Err(other) => panic!("expected CorruptStoredValue, got: {:?}", other),
+            Ok(u) => panic!(
+                "expected Err(CorruptStoredValue) but got Ok({u}); \
+                 must not silently substitute Uuid::nil()"
+            ),
+        }
+    }
+
+    /// An all-zeros UUID string is a valid UUID — it must parse, not error.
+    /// This distinguishes the old `unwrap_or(Uuid::nil())` behaviour (which
+    /// could substitute nil silently) from the new fail-loud path.
+    #[test]
+    fn parse_audit_uuid_nil_string_is_valid_and_round_trips() {
+        let s = Uuid::nil().to_string().to_uppercase();
+        let result = parse_audit_uuid(s, "event_id");
+        assert!(result.is_ok(), "nil UUID string is syntactically valid: {:?}", result.err());
+        assert_eq!(result.unwrap(), Uuid::nil());
+    }
+
+    /// The column_name parameter populates the error's column field so
+    /// callers can identify which audit field was corrupt.
+    #[test]
+    fn parse_audit_uuid_error_carries_correct_column_name() {
+        for col in &["event_id", "estate_uuid", "row_id"] {
+            let result = parse_audit_uuid("BAD".to_string(), col);
+            match result {
+                Err(StorageError::CorruptStoredValue { column, .. }) => {
+                    assert_eq!(&column, col, "column name mismatch for {col}");
+                }
+                other => panic!("expected CorruptStoredValue for {col}, got: {:?}", other),
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // schema_version parse logic — tests the fresh-estate vs. corrupt-row
+    // distinction that was the backlog #22 fix.
+    //
+    // The full function requires a live PG connection. These tests verify
+    // the parse branch in isolation using the same i32::parse() logic.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// A numeric string must parse successfully as an i32 schema version.
+    /// This is the normal steady-state read from `_storagekit_meta`.
+    #[test]
+    fn schema_version_string_parse_valid() {
+        let s = "42";
+        let result: Result<i32, _> = s.parse();
+        assert_eq!(result.unwrap(), 42_i32);
+    }
+
+    /// A non-numeric string in the schema version column must not silently
+    /// return 0 (which would trigger re-migration from version 0). The
+    /// current_schema_version fix returns CorruptStoredValue instead;
+    /// this test exercises the parse-failure path that drives that error.
+    #[test]
+    fn schema_version_string_parse_corrupt_fails() {
+        let s = "not-a-number";
+        let result: Result<i32, _> = s.parse();
+        assert!(
+            result.is_err(),
+            "corrupt schema version string must not parse as i32; returning 0 \
+             would trigger spurious re-migration from version 0 (backlog #22)"
+        );
+    }
+
+    /// An absent row (fresh estate, no schema_version key yet) is represented
+    /// by `rows.first()` returning None. The correct result is 0, not an error.
+    /// Verified here symbolically: None.is_none() guards the 0 branch.
+    #[test]
+    fn schema_version_absent_row_yields_zero_not_error() {
+        // Simulate the None branch from current_schema_version: no row returned.
+        let rows: Vec<String> = vec![];
+        let version = match rows.first() {
+            None => Ok(0_i32),
+            Some(s) => s.parse::<i32>().map_err(|_| StorageError::CorruptStoredValue {
+                table: "_storagekit_meta".to_string(),
+                column: "value".to_string(),
+                stored_text: s.clone(),
+            }),
+        };
+        assert_eq!(version.unwrap(), 0, "absent row must yield version 0 (fresh estate)");
     }
 }

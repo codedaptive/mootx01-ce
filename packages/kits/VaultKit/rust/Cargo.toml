@@ -18,10 +18,29 @@ path = "src/lib.rs"
 #     TunnelKind, TunnelOriginClass — value types DrawerMapping produces.
 #   uuid: FNV-1a 128-bit lineageID is packed into a uuid::Uuid (byte-identical
 #     to the Swift UUID produced by DrawerMapping.lineageID(forStableSourceKey:)).
+#     The "serde" feature decodes the `mootID` key of the canonical corpus
+#     JSON; encoding is custom (uppercase, matching Foundation's UUID).
+#   serde / serde_json: the versioned canonical JSON corpus document per
+#     ADR-007 Decision 1 ("the JSON is the payload"). Both crates were
+#     already in vault-kit's transitive graph (via genius-locus-kit →
+#     corpus-kit); declared explicitly here per the mission's Blast Radius
+#     Report (VK_IR_01) and DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
 #
 # Layering: vault-kit (above GLK) → genius-locus-kit → locus-kit.
 # No inversion. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+#   rusqlite: read-only access to MemPalace's foreign SQLite stores
+#     (ChromaDB `chroma.sqlite3` + `knowledge_graph.sqlite3`) in
+#     MemPalaceChromaAdapter. Version and `bundled` feature match
+#     persistence-kit's existing declaration so one SQLite build rides the
+#     workspace. PersistenceKit's public surface cannot open a foreign
+#     third-party schema; reading an external tool's file format is codec
+#     territory and belongs to the adapter (same boundary as
+#     ExchangeAdapter's JSON parsing). Recorded in the lane's field-mapping
+#     contract (docs/reference/VAULTKIT_INTERFACE.md, MemPalace adapter).
 [dependencies]
 genius-locus-kit = { path = "../../GeniusLocusKit/rust" }
+rusqlite = { version = "0.31", features = ["bundled"] }
 locus-kit = { path = "../../LocusKit/rust" }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

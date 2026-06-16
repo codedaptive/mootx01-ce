@@ -96,6 +96,7 @@ public enum LocusKitSchema {
                 proposalsTable,
                 associationsTable,
                 learnedReferencesTable,
+                sourceCatalogTable,
                 nodeBundlesTable,
                 containerFingerprintsTable,
                 recallTraceTable,
@@ -233,6 +234,16 @@ public enum LocusKitSchema {
     // operationalBitmap default 0 = eventClass .capture, severity
     // .trace, actorClass .user, batch .standalone,
     // requiresFollowup false. Same headroom convention.
+    //
+    // reward (REAL nullable): explicit quality signal written at
+    // diary-entry time. Present from v1; nil = no explicit reward
+    // (daemon falls back to RecallTraceItem.used). Populated by
+    // callers that have a quality signal (user rating, model confidence,
+    // etc.). See DiaryEntry.reward and NEURONKIT_SPEC § 3.1 step 1a.
+    //
+    // rewardProvenance (TEXT nullable): human-readable tag for how
+    // `reward` was derived (e.g. "user-rating", "model-confidence").
+    // Nil when reward is nil.
     static let diaryTable = TableDeclaration(
         name: "diary",
         columns: [
@@ -247,6 +258,11 @@ public enum LocusKitSchema {
             .timestamp("tombstonedAt", nullable: true),
             .text("removedByBatch", nullable: true),
             .bitmap("operationalBitmap"),
+            // Explicit reward channel (NEURONKIT_SPEC § 3.1 step 1a).
+            // REAL nullable: 0.0–1.0 quality score or nil.
+            .float("reward", nullable: true),
+            // Provenance tag for the reward value. TEXT nullable.
+            .text("rewardProvenance", nullable: true),
             .json("ext", nullable: true)
         ],
         primaryKey: ["id"]
@@ -334,16 +350,15 @@ public enum LocusKitSchema {
         ],
         primaryKey: ["id"],
         generatedColumns: [
-            // (adjectiveBitmap & 0x3F), the state field. kgFacts
-            // reads filter facts via the per-cluster predicate
-            // `(state >> 4) & 0x3`; the field extract is indexed
-            // here as on drawers. Cookbook §2.3 6-bit field.
-            //
-            // F11 cascade (2026-05-27): the "cluster < 7" filter no
-            // longer makes sense — cookbook scale-gapped raws place
-            // rejected at 32 and tombstoned at 33, not in the 0–9
-            // contiguous range that "< 7" addressed. Callers should
-            // use the cluster predicate instead.
+            // (adjectiveBitmap & 0x3F), the raw 6-bit RowState. Active
+            // kgFact recall filters to the RowState Cluster-A set via
+            // `g_state_cluster < RowState.activeClusterUpperBoundRaw`
+            // (the cluster-B floor, 16) — active/pending/contested/accepted
+            // kept, retired B/C states (16+/32+) excluded; the field
+            // extract is indexed here as on drawers. Cookbook §2.3 6-bit
+            // field. The boundary is sourced from the RowState automaton,
+            // never a bare literal — equivalent to RowState Cluster-A for
+            // every defined raw.
             GeneratedColumn(
                 name: "g_state_cluster",
                 type: .int,
@@ -481,6 +496,37 @@ public enum LocusKitSchema {
         primaryKey: ["id"]
     )
 
+    // MARK: - source_catalog
+    //
+    // SourceCatalogEntry persistence per arch spec §7.8.2. The durable,
+    // queryable record of an external source from which references are
+    // learned — the `source` slot of the grounding-driven `learn` verb.
+    // The learn verb derives every LearnedReference's genuine lattice
+    // anchor from the matching catalog entry (never a sentinel), so the
+    // anchor lives here as the same four columns every anchored noun uses
+    // (udcCode TEXT NOT NULL DEFAULT '' + udcFacets + wikidataQID +
+    // wikidataQidsSecondary; addSourceCatalogEntry rejects an empty
+    // anchor). `kind` is the SourceKind raw (Int). `handle` is the
+    // source's own canonical locator, indexed for the learn verb's
+    // source-resolution probe.
+    static let sourceCatalogTable = TableDeclaration(
+        name: "source_catalog",
+        columns: [
+            .text("id"),
+            .int("kind"),
+            .text("handle"),
+            .text("addedBy"),
+            .timestamp("firstSeen"),
+            ColumnDeclaration(name: "udcCode", type: .text,
+                              nullable: false, defaultValue: .text("")),
+            .text("udcFacets", nullable: true),
+            .text("wikidataQID", nullable: true),
+            .text("wikidataQidsSecondary", nullable: true),
+            .json("ext", nullable: true)
+        ],
+        primaryKey: ["id"]
+    )
+
     // MARK: - recall_trace
     //
     // RecallTraceItem persistence per NEURONKIT_SPEC §3.1. One row per
@@ -587,6 +633,9 @@ public enum LocusKitSchema {
         IndexDeclaration(name: "idx_learned_references_handle", table: "learned_references", columns: ["handle"]),
         IndexDeclaration(name: "idx_learned_references_source", table: "learned_references", columns: ["sourceCatalogID"]),
         IndexDeclaration(name: "idx_learned_references_udcCode", table: "learned_references", columns: ["udcCode"]),
+        // source_catalog — query path: by handle (does this source already
+        // have a catalog entry? — the learn verb's source-resolution probe).
+        IndexDeclaration(name: "idx_source_catalog_handle", table: "source_catalog", columns: ["handle"]),
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration(name: "idx_recall_trace_target", table: "recall_trace", columns: ["target"]),

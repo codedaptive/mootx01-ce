@@ -11,7 +11,7 @@ import SubstrateTypes
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -181,6 +181,37 @@ final class FilesystemBackendTests {
         #expect(claimed.count == 2)
         #expect(claimed[0].job.submittedAt.physicalTime == 100)
         #expect(claimed[1].job.submittedAt.physicalTime == 200)
+    }
+
+    // MARK: - pendingCount() (TELEMETRY_QT)
+
+    @Test func pendingCountOnEmptyQueue() async throws {
+        let kit = try makeKit()
+        #expect(try await kit.backend.pendingCount() == 0)
+    }
+
+    @Test func pendingCountReflectsSentJobs() async throws {
+        let kit = try makeKit()
+        let j1 = Job(id: JobID.generate(), streamID: StreamID(rawValue: "s"),
+                     submittedAt: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1),
+                     priority: 50, payload: Data(), extensions: [:])
+        let j2 = Job(id: JobID.generate(), streamID: StreamID(rawValue: "s"),
+                     submittedAt: HLC(physicalTime: 2, logicalCount: 0, nodeID: 1),
+                     priority: 50, payload: Data(), extensions: [:])
+        try await kit.send(j1)
+        try await kit.send(j2)
+        #expect(try await kit.backend.pendingCount() == 2)
+    }
+
+    @Test func pendingCountDropsToZeroAfterDrain() async throws {
+        let kit = try makeKit()
+        let job = Job(id: JobID.generate(), streamID: StreamID(rawValue: "s"),
+                      submittedAt: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1),
+                      priority: 50, payload: Data(), extensions: [:])
+        try await kit.send(job)
+        #expect(try await kit.backend.pendingCount() == 1)
+        _ = try await kit.drain()
+        #expect(try await kit.backend.pendingCount() == 0)
     }
 
     // MARK: - helpers

@@ -71,6 +71,7 @@ fn recall_all_believed(coord: &EstateCoordinator, handle: &EstateHandle) -> usiz
         limit: None,
         ordering: Ordering::ByCaptureTimeDesc,
         as_of: None,
+        trace_limit: None,
     };
     coord
         .recall(handle, frame, NOW)
@@ -110,7 +111,8 @@ fn export_returns_all_drawers_exceeding_default_cap() {
     let mapping = DrawerMapping::default();
     let notes = mapping
         .export(&coord, &handle, NOW, VaultExportScope::Believed)
-        .expect("export");
+        .expect("export")
+        .notes;
 
     // THE CRITICAL ASSERTION: every believed drawer must appear in the export.
     // In the Rust port this should always pass (no 50-cap). In a hypothetical

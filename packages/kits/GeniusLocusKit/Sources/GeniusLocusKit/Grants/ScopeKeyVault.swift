@@ -4,7 +4,7 @@ import SubstrateKernel
 
 /// Custody of scope keys for one estate's issued grants.
 ///
-/// Implements the two production custody modes from Appendix B:
+/// Implements the three custody modes:
 ///
 /// - **Mode 1 (mediated):** the scope key is derived at issue and held
 ///   inside the vault. It is never returned to the caller. Every read
@@ -21,10 +21,14 @@ import SubstrateKernel
 ///   (`LagrangeDecayKey`) and returned to the caller at issue; the vault
 ///   retains NOTHING (Appendix B.3 no-vault posture). Subsequent reads
 ///   reconstruct from shares until they drift past threshold K.
+/// - **Mode 4 (time-aging):** the scope key is derived once and handed to
+///   the recipient (same derivation as mode 2); the vault retains nothing.
+///   The decay is a recall-path *content-level* attenuation, not a key
+///   mechanic — the key stays valid while the grant's effective content
+///   level halves over time toward its floor (`DecayPolicy`).
 ///
-/// Mode 4 (physical decay) never reaches the vault: the verb surface
-/// gates it at issue time. Scope keys live only in memory (per the
-/// mediated-custody contract); they are not written to disk by this type.
+/// Scope keys live only in memory (per the mediated-custody contract);
+/// they are not written to disk by this type.
 public actor ScopeKeyVault {
 
     private static let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
@@ -52,9 +56,6 @@ public actor ScopeKeyVault {
     ///   provider, return it to the caller, retain NOTHING — the no-vault
     ///   guarantee. Reconstruction runs at the grant's issue instant, when
     ///   every share is still valid, so it always succeeds at issue.
-    /// - Mode 4 (physical decay): unreachable here (gated at the verb
-    ///   surface); a defensive `experimentalModeNotActivated` is raised if
-    ///   reached.
     ///
     /// Modes 1 and 2 derive with HKDF-SHA256 (in-repo `GrantHKDF`) over the
     /// estate's Ed25519 identity key's raw bytes as input keying material,
@@ -94,8 +95,14 @@ public actor ScopeKeyVault {
             // Retain nothing: no entry in mediatedKeys. Reads reconstruct
             // from shares until they drift past threshold K.
             return Data(keyBytes)
-        case .physicalDecay:
-            throw GrantError.experimentalModeNotActivated
+        case .timeAging:
+            // Mode 4: the scope key is derived once and handed to the recipient
+            // exactly as mode 2 — the time-aging policy attenuates the
+            // *content level* on the recall path, not the key itself. Binding
+            // the key to the grantee (like mode 2) keeps a mode-4 key from
+            // being usable by any other estate. The vault retains nothing.
+            let key = Self.deriveKey(ikm: identityKeyRawBytes, info: Self.info(grantID: grant.id, grantee: grant.granteeEstateID))
+            return Data(key)
         }
     }
 

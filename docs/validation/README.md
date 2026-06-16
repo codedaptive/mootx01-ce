@@ -1,3 +1,9 @@
+---
+status: in_progress
+created: 2026-06-08
+last_updated: 2026-06-15
+---
+
 # Validation
 
 The evidence layer. Claims made elsewhere in `docs/` are not
@@ -29,7 +35,7 @@ counts as evidence.
 
 ## Subdirectories
 
-**[`audits/`](audits/)** — recorded audit reports. Each audit is
+**`audits/`** — recorded audit reports (this subdirectory is created when the first audit is recorded). Each audit is
 a moment-in-time investigation that produces a finding. The
 naming pattern is `AUDIT_<topic>_<date>.md`. Audits cite the
 ledger row they update and the commit they were run against.

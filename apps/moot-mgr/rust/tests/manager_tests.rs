@@ -1,0 +1,286 @@
+// manager_tests.rs — Rust twin of the Swift MootManagerTests.swift +
+// ManagerConfig + CLI coverage. Exercises the manager core (store ownership,
+// the monitoring switch, retention, the status surface, and the read-API payload
+// builders) and the CLI parse→dispatch path. All against SCRATCH stores in a
+// temp dir; the real estate and ~/.mempalace are never touched.
+
+use std::collections::BTreeMap;
+
+use moot_mgr::manager::{epoch_to_iso8601, ManagerError, MootManager};
+use moot_mgr::manager_cli::{self, ManagerCommand};
+use moot_mgr::manager_config::ManagerConfig;
+
+/// A fresh, unique scratch store path.
+fn scratch_store() -> String {
+    std::env::temp_dir()
+        .join(format!("moot-mgr-rs-store-{}.sqlite", uuid::Uuid::new_v4()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn started_manager() -> MootManager {
+    let cfg = ManagerConfig::new(scratch_store(), 7 * 24 * 60 * 60, 3600);
+    let mut m = MootManager::new(cfg);
+    m.start().expect("store must open");
+    m
+}
+
+const NOW: f64 = 1_700_000_000.0;
+
+// ───────────────────────────── lifecycle / store ───────────────────────────
+
+#[test]
+fn operations_before_start_error() {
+    let cfg = ManagerConfig::new(scratch_store(), 100, 100);
+    let m = MootManager::new(cfg);
+    assert!(matches!(m.is_monitoring(), Err(ManagerError::NotStarted)));
+}
+
+#[test]
+fn monitoring_switch_round_trips() {
+    let mut m = started_manager();
+    assert!(!m.is_monitoring().unwrap()); // off by default (seed)
+    m.set_monitoring(true).unwrap();
+    assert!(m.is_monitoring().unwrap());
+    m.set_monitoring(false).unwrap();
+    assert!(!m.is_monitoring().unwrap());
+    m.stop();
+}
+
+#[test]
+fn start_is_idempotent() {
+    let cfg = ManagerConfig::new(scratch_store(), 100, 100);
+    let mut m = MootManager::new(cfg);
+    m.start().unwrap();
+    // Re-open cleanly (StatsStore::open is forward-only).
+    m.start().unwrap();
+    m.stop();
+}
+
+// ───────────────────────────── retention ───────────────────────────────────
+
+#[test]
+fn retention_window_override_takes_effect() {
+    let mut m = started_manager();
+    assert_eq!(m.effective_retention_window_secs(), 7 * 24 * 60 * 60);
+    m.set_retention(3600).unwrap();
+    assert_eq!(m.effective_retention_window_secs(), 3600);
+    // Non-positive window rejected.
+    assert!(matches!(
+        m.set_retention(0),
+        Err(ManagerError::InvalidRetention)
+    ));
+    m.stop();
+}
+
+#[test]
+fn retention_pass_rolls_off_old_samples() {
+    let mut m = started_manager();
+    m.set_retention(100).unwrap(); // 100-second window
+    let store = m.stats_store().unwrap();
+    // One old event (well before cutoff) and one fresh.
+    store
+        .insert_event("capture", 0, "row-old", "estate-a", NOW - 1000.0, "dropbox-x")
+        .unwrap();
+    store
+        .insert_event("capture", 0, "row-new", "estate-a", NOW - 1.0, "dropbox-x")
+        .unwrap();
+    // cutoff = NOW - 100 → the old event (NOW-1000) is rolled off, the fresh kept.
+    let deleted = m.run_retention(NOW).unwrap();
+    assert!(deleted >= 1, "the stale event must be rolled off");
+    let remaining = m.stats_store().unwrap().query_events(None).unwrap();
+    assert!(remaining.iter().all(|e| e.estate_row_id != "row-old"));
+    assert!(remaining.iter().any(|e| e.estate_row_id == "row-new"));
+    m.stop();
+}
+
+// ───────────────────────────── status surface ──────────────────────────────
+
+#[test]
+fn status_groups_by_dropbox_and_estate() {
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        store.insert_metric("server.rss_mb", 12.0, &BTreeMap::new(), NOW, "dropbox-a").unwrap();
+        store.insert_event("capture", 0, "r1", "estate-a", NOW, "dropbox-a").unwrap();
+        store.insert_event("think", 1, "r2", "estate-b", NOW, "dropbox-b").unwrap();
+    }
+    let report = m.status(NOW, 20).unwrap();
+    assert_eq!(report.total_events, 2);
+    // By-dropbox: dropbox-a has 1 metric + 1 event; dropbox-b has 1 event.
+    assert_eq!(report.by_dropbox.len(), 2);
+    // By-estate: estate-a and estate-b each have 1 event.
+    assert_eq!(report.by_estate.len(), 2);
+    // renderText is deterministic and human-readable.
+    let text = report.render_text();
+    assert!(text.contains("moot-mgr status"));
+    assert!(text.contains("by dropbox:"));
+    assert!(text.contains("by estate:"));
+    m.stop();
+}
+
+// ───────────────────────────── read-API payloads ───────────────────────────
+
+#[test]
+fn server_payload_reports_totals_and_dropboxes() {
+    let mut m = started_manager();
+    m.set_monitoring(true).unwrap();
+    {
+        let store = m.stats_store().unwrap();
+        store.insert_metric("server.rss_mb", 42.0, &BTreeMap::new(), NOW, "dropbox-a").unwrap();
+        store.insert_event("capture", 0, "r1", "estate-a", NOW, "dropbox-a").unwrap();
+    }
+    let p = m.server_payload(NOW, 123).unwrap();
+    assert!(p.monitoring_enabled);
+    assert_eq!(p.uptime_seconds, 123);
+    assert_eq!(p.estate_count, 1);
+    assert_eq!(p.total_events, 1);
+    assert_eq!(p.total_metrics, 1);
+    // The latest server.rss_mb sample is surfaced.
+    assert_eq!(p.rss_mb, Some(42.0));
+    assert!(p.by_dropbox.iter().any(|d| d.name == "dropbox-a"));
+    m.stop();
+}
+
+#[test]
+fn estates_payload_rolls_up_events_per_estate() {
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        store.insert_event("capture", 0, "r1", "estate-a", NOW - 5.0, "dropbox-a").unwrap();
+        store.insert_event("capture", 0, "r2", "estate-a", NOW, "dropbox-a").unwrap();
+        store.insert_event("capture", 0, "r3", "estate-b", NOW, "dropbox-a").unwrap();
+    }
+    let p = m.estates_payload().unwrap();
+    let a = p.estates.iter().find(|e| e.id == "estate-a").unwrap();
+    assert_eq!(a.event_count, 2);
+    assert!(a.last_event_ts.is_some());
+    // The manager's own estates_payload carries no admin section (HttpReadApi
+    // merges the host's EstateAdmin section in).
+    assert!(p.admin.is_none());
+    m.stop();
+}
+
+#[test]
+fn events_payload_is_newest_first() {
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        store.insert_event("capture", 0, "old", "e", NOW - 100.0, "d").unwrap();
+        store.insert_event("capture", 0, "new", "e", NOW, "d").unwrap();
+    }
+    let p = m.events_payload(100).unwrap();
+    assert_eq!(p.events.len(), 2);
+    // Newest first: the NOW event leads.
+    assert_eq!(p.events[0].drawer_id.as_deref(), Some("new"));
+    m.stop();
+}
+
+#[test]
+fn config_payload_reflects_monitoring_and_retention() {
+    let mut m = started_manager();
+    m.set_monitoring(true).unwrap();
+    m.set_retention(3600).unwrap();
+    let p = m.config_payload().unwrap();
+    assert!(p.monitoring_enabled);
+    assert_eq!(p.retention_seconds, 3600);
+    // No retention pass run yet → epoch-zero sentinel.
+    assert_eq!(p.retention_cutoff, "1970-01-01T00:00:00.000Z");
+    m.stop();
+}
+
+#[test]
+fn graph_payload_is_pending_without_snapshot() {
+    let mut m = started_manager();
+    let p = m.graph_payload(NOW, None).unwrap();
+    assert!(p.structure_pending);
+    assert!(p.nodes.is_empty());
+    assert_eq!(p.estate, "all");
+    assert!(!p.pending.is_empty());
+    m.stop();
+}
+
+#[test]
+fn graph_payload_serves_stored_snapshot() {
+    let mut m = started_manager();
+    {
+        let store = m.stats_store().unwrap();
+        // A minimal stored snapshot the governor would write.
+        let snapshot = r#"{"nodes":[{"id":"n1","nounType":0,"communityId":0,"centrality":0.5,"anomaly":false}],"edges":[],"structurePending":false,"generatedTs":"2023-11-14T22:13:20.000Z"}"#;
+        store.write_topology_snapshot("estate-a", NOW, snapshot).unwrap();
+    }
+    let p = m.graph_payload(NOW, Some("estate-a")).unwrap();
+    assert!(!p.structure_pending);
+    assert_eq!(p.nodes.len(), 1);
+    assert_eq!(p.nodes[0].id, "n1");
+    assert_eq!(p.estate, "estate-a");
+    m.stop();
+}
+
+// ───────────────────────────── ISO-8601 formatting ─────────────────────────
+
+#[test]
+fn epoch_to_iso8601_is_stable_utc() {
+    // 2023-11-14T22:13:20.500Z = 1700000000.5 epoch seconds.
+    assert_eq!(epoch_to_iso8601(1_700_000_000.5), "2023-11-14T22:13:20.500Z");
+    assert_eq!(epoch_to_iso8601(0.0), "1970-01-01T00:00:00.000Z");
+}
+
+// ───────────────────────────── ManagerConfig env ───────────────────────────
+
+#[test]
+fn config_from_env_applies_overrides_and_defaults() {
+    let mut env = std::collections::HashMap::new();
+    env.insert("MOOT_MGR_STORE".to_string(), "/tmp/explicit.sqlite".to_string());
+    env.insert("MOOT_MGR_RETENTION_SECONDS".to_string(), "1800".to_string());
+    // Cadence absent → default 1 hour.
+    let cfg = ManagerConfig::from_environment_map(&env);
+    assert_eq!(cfg.store_path, "/tmp/explicit.sqlite");
+    assert_eq!(cfg.retention_window_secs, 1800);
+    assert_eq!(cfg.retention_cadence_secs, 3600);
+}
+
+#[test]
+fn config_rejects_non_positive_retention() {
+    let mut env = std::collections::HashMap::new();
+    env.insert("MOOT_MGR_STORE".to_string(), "/tmp/x.sqlite".to_string());
+    env.insert("MOOT_MGR_RETENTION_SECONDS".to_string(), "0".to_string());
+    env.insert("MOOT_MGR_RETENTION_CADENCE_SECONDS".to_string(), "-5".to_string());
+    let cfg = ManagerConfig::from_environment_map(&env);
+    // Zero/negative fall back to defaults (no silent instant-roll-off window).
+    assert_eq!(cfg.retention_window_secs, 7 * 24 * 60 * 60);
+    assert_eq!(cfg.retention_cadence_secs, 3600);
+}
+
+// ───────────────────────────── CLI parse / dispatch ────────────────────────
+
+#[test]
+fn cli_parse_recognises_commands() {
+    let s = |a: &[&str]| manager_cli::parse(&a.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+    assert_eq!(s(&[]), Some(ManagerCommand::Help));
+    assert_eq!(s(&["help"]), Some(ManagerCommand::Help));
+    assert_eq!(s(&["status"]), Some(ManagerCommand::Status));
+    assert_eq!(s(&["serve"]), Some(ManagerCommand::Serve));
+    assert_eq!(s(&["monitoring", "on"]), Some(ManagerCommand::MonitoringOn));
+    assert_eq!(s(&["monitoring", "off"]), Some(ManagerCommand::MonitoringOff));
+    assert_eq!(s(&["monitoring", "status"]), Some(ManagerCommand::MonitoringStatus));
+    assert_eq!(s(&["retention", "run"]), Some(ManagerCommand::RetentionRun));
+    // Unknown forms → None.
+    assert_eq!(s(&["monitoring"]), None);
+    assert_eq!(s(&["retention"]), None);
+    assert_eq!(s(&["bogus"]), None);
+}
+
+#[test]
+fn cli_run_dispatches_against_manager() {
+    let mut m = started_manager();
+    let out = manager_cli::run(&ManagerCommand::MonitoringOn, &mut m, NOW).unwrap();
+    assert_eq!(out, "monitoring: ON");
+    let out = manager_cli::run(&ManagerCommand::MonitoringStatus, &mut m, NOW).unwrap();
+    assert_eq!(out, "monitoring: ON");
+    let out = manager_cli::run(&ManagerCommand::RetentionRun, &mut m, NOW).unwrap();
+    assert!(out.starts_with("retention: rolled off"));
+    let out = manager_cli::run(&ManagerCommand::Status, &mut m, NOW).unwrap();
+    assert!(out.contains("moot-mgr status"));
+    m.stop();
+}

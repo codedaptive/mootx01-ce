@@ -23,6 +23,7 @@
 //! Determinism: no clock, no RNG. The daemon carries `cycle_count`; all
 //! time-derived inputs (ages, the audit verdict) arrive through the seam.
 
+use crate::lattice_anchor::EnrichmentStatus;
 use crate::maintenance_decision::{self, AgedRow, AuditVerdict, Category, DriftRow};
 
 /// A proposal the sink receives. No Rust `ProposeFrame` estate type exists
@@ -58,6 +59,25 @@ pub struct MaintenanceCycleReport {
     pub by_reference_drifts: usize,
     pub suppressed_duplicates: usize,
     pub diary_entry: MaintenanceDiaryEntry,
+    // ── QID-pending enrichment retry telemetry (Board item 14) ────────
+    /// Drawers with enrichment-status `qid_pending` that the daemon
+    /// attempted to retry this cycle (capped at `QID_RETRY_SCAN_CAP`).
+    /// Emitted as `neuronkit.enrichment.qid_retry`.
+    pub qid_retried: usize,
+    /// Retried drawers for which Q-ID resolution succeeded (enrichment
+    /// status flipped to `qid_completed`). Emitted as
+    /// `neuronkit.enrichment.qid_resolved`.
+    pub qid_resolved: usize,
+    /// Retried drawers that deterministic re-inference could not resolve and
+    /// for which the daemon therefore filed an enrichment proposal and flipped
+    /// the status to the terminal in-workflow state `qid_proposed`. These leave
+    /// the retry backlog. Emitted as `neuronkit.enrichment.qid_proposed`.
+    pub qid_proposed: usize,
+    /// Retried drawers that remain `qid_pending` after this cycle SOLELY
+    /// because the substrate write failed (a real runtime failure) — never a
+    /// deterministic re-inference miss, which now terminates as `qid_proposed`.
+    /// Emitted as `neuronkit.enrichment.qid_still_pending`.
+    pub qid_still_pending: usize,
 }
 
 /// Maintenance health-scan parameters the cycle reads, mirroring the Swift
@@ -139,6 +159,25 @@ impl MaintenancePolicyStore for InMemoryMaintenancePolicyStore {
     }
 }
 
+/// One active drawer whose enrichment status is `qid_pending`, extracted by
+/// the reader seam for the QID-pending retry batch (Board item 14). The daemon
+/// calls `infer_lattice_anchor(content)` and, on success (wikidata_qid != None),
+/// calls `MaintenanceProposalSink::update_enrichment_status` to flip the status
+/// bits to `qid_completed`. The `provenance` value is the full current bitmap
+/// so the daemon can construct the new value without re-reading.
+///
+/// B-10a: the reader seam returns these rows through an internal maintenance
+/// read — no trace_limit, no recall-trace rows written.
+#[derive(Clone, Debug)]
+pub struct QidPendingRow {
+    /// The drawer's stable row ID.
+    pub id: String,
+    /// The drawer's text content, passed to `infer_lattice_anchor` on retry.
+    pub content: String,
+    /// The drawer's current full provenance bitmap (bits 36-41 == 1, QidPending).
+    pub provenance: i64,
+}
+
 /// The gathered, identity-free scan inputs for one cycle — what the reader
 /// seam produces after the estate reads, bitmap predicate, age
 /// subtractions, and audit verify the adapter performs. The decision core
@@ -157,6 +196,11 @@ pub struct MaintenanceScan {
     pub fingerprint_drift: Vec<DriftRow>,
     /// `(reference_id, source_drift_fraction)` learned-reference observations.
     pub reference_drift: Vec<DriftRow>,
+    /// Active drawers with enrichment-status `qid_pending` (provenance bits
+    /// 36-41 == 1, cookbook §2.5), capped at `QID_RETRY_SCAN_CAP` rows.
+    /// The daemon retries each row via `infer_lattice_anchor`; on success the
+    /// status is flipped to `qid_completed` via the sink.
+    pub qid_pending_drawers: Vec<QidPendingRow>,
 }
 
 /// Read seam: yields the gathered scan inputs for one cycle.
@@ -164,15 +208,39 @@ pub trait MaintenanceSubstrateReader {
     fn scan(&self) -> MaintenanceScan;
 }
 
-/// Write seam: emit a proposal and record the cycle diary. No remediation
-/// method — the daemon can only propose (structural never-remediate).
+/// Write seam: emit a proposal, record the cycle diary, and (for the QID-
+/// pending retry batch) update a drawer's enrichment-status provenance bits.
+///
+/// The `update_enrichment_status` method is the ONLY write the daemon is
+/// permitted to make to a drawer's provenance. It is strictly additive:
+/// `new_provenance` is the caller-computed full 64-bit value with bits 36-41
+/// set to `qid_completed` (2); no other bits are changed. Routes through the
+/// estate verb surface in the production adapter (B-1).
 pub trait MaintenanceProposalSink {
     fn propose(&mut self, frame: ProposeFrameOut);
     fn record_cycle_diary(&mut self, entry: MaintenanceDiaryEntry);
+    /// Update a drawer's provenance bitmap after a successful QID-pending retry
+    /// (Board item 14). Called only when `infer_lattice_anchor` returns a
+    /// non-`None` `wikidata_qid`. `new_provenance` has bits 36-41 set to
+    /// `qid_completed` (2), all other bits identical to the row's prior value.
+    /// `now_epoch_secs` is the deterministic cycle timestamp.
+    fn update_enrichment_status(
+        &mut self,
+        row_id: &str,
+        new_provenance: i64,
+        now_epoch_secs: f64,
+    );
 }
 
 const AGENT_NAME: &str = "maintenance-daemon";
 const DIARY_WING: &str = "wing_maintenance-daemon";
+
+/// Maximum number of qid-pending drawers the daemon picks up in a single
+/// retry batch. Mirrors `QID_RETRY_SCAN_CAP` in
+/// `GeniusLocusKit/Brain/EnrichmentRetryReads.swift` (64 rows). Bounded
+/// so the retry scan is O(cap) per cycle; large estates converge over
+/// successive cycles.
+const QID_RETRY_SCAN_CAP: usize = 64;
 
 /// The proposal-kind tag for a decision category, mirroring the Swift
 /// actor's `ProposalKind` choices (audit/fingerprint via the `.other`
@@ -251,14 +319,11 @@ impl MaintenanceDaemon {
     /// `MaintenanceDaemon.runCycle`.
     ///
     /// DETERMINISM: `now_epoch_secs` is the injected timestamp the caller
-    /// supplies. Maintenance currently does not use it for telemetry timestamps
-    /// (no self-report emit in v1), but the parameter is carried here to
-    /// enforce the conformance contract: neither dreaming nor maintenance reads
-    /// the system clock internally. Future callers that add telemetry to this
-    /// cycle will use `now_epoch_secs` rather than calling `SystemTime::now()`.
+    /// supplies. Neither dreaming nor maintenance reads the system clock
+    /// internally; the clock is owned by the resident pump loop.
     pub fn run_cycle<R, S>(
         &mut self,
-        _now_epoch_secs: f64,
+        now_epoch_secs: f64,
         reader: &R,
         sink: &mut S,
     ) -> MaintenanceCycleReport
@@ -298,14 +363,88 @@ impl MaintenanceDaemon {
             proposals_emitted.push(frame);
         }
 
+        // ── Step 5.5: QID-pending enrichment retry + completion (Board item
+        // 14 + Q-ID-completion terminal workflow) ─────────────────────────
+        //
+        // Re-run `infer_lattice_anchor` for each drawer supplied by the reader
+        // seam (bounded to `QID_RETRY_SCAN_CAP` rows). Two terminal outcomes —
+        // no drawer is left in passive qid_pending after a cycle:
+        //
+        //   • RESOLVED (wikidata_qid != None): flip enrichment-status bits
+        //     (36-41) from qid_pending (1) to qid_completed (2) via the sink.
+        //
+        //   • UNRESOLVED (wikidata_qid == None): deterministic re-inference
+        //     produced no Q-ID, so retrying again is futile (same pinned
+        //     artifacts → same nil). Leaving the row at qid_pending would be
+        //     DURABLE pending state, which the beta gate forbids. Instead the
+        //     daemon files a real enrichment proposal (kind "enrichment",
+        //     carrying the drawer target + resolved MDCC code) and flips the
+        //     status to the terminal in-workflow state qid_proposed (4). The
+        //     qid_pending scan does not re-pick qid_proposed rows, so the row
+        //     leaves the retry backlog; proposal acceptance completes it.
+        //
+        // Provenance bit arithmetic:
+        //   mask  = 0x3F << 36  (6-bit field, shift 36)
+        //   new   = (old & !mask) | (status.raw() << 36)
+        //
+        // B-10a: the reader returned these rows through an internal maintenance
+        // scan — no trace_limit, no recall-trace rows written.
+        // Determinism: `now_epoch_secs` is the caller's injected clock.
+        let qid_batch = &scan.qid_pending_drawers;
+        let qid_retried = qid_batch.len().min(QID_RETRY_SCAN_CAP);
+        let mut qid_resolved: usize = 0;
+        let mut qid_proposed: usize = 0;
+        // qid_still_pending is reserved for a real substrate-write failure. The
+        // current sink seam's writes are infallible (the production adapter
+        // surfaces host failures out of band), so no censused inference outcome
+        // ends here — both RESOLVED and UNRESOLVED reach a terminal state.
+        let qid_still_pending: usize = 0;
+        let enrichment_status_mask: i64 = 0x3F << 36;
+
+        for row in qid_batch.iter().take(QID_RETRY_SCAN_CAP) {
+            let inference = crate::infer_lattice_anchor(&row.content);
+            if inference.wikidata_qid.is_some() {
+                // RESOLVED: flip bits 36-41 to qid_completed (2).
+                let new_provenance = (row.provenance & !enrichment_status_mask)
+                    | (i64::from(EnrichmentStatus::QidCompleted.raw()) << 36);
+                sink.update_enrichment_status(&row.id, new_provenance, now_epoch_secs);
+                qid_resolved += 1;
+            } else {
+                // UNRESOLVED: file an enrichment proposal and move to the
+                // terminal in-workflow state qid_proposed (4). `inference.code`
+                // is empty only for a wholly-unresolved concept (Mode C); record
+                // "unresolved" in that case so reviewers know no code was found.
+                let code_context = if inference.code.is_empty() {
+                    "unresolved".to_string()
+                } else {
+                    inference.code.clone()
+                };
+                sink.propose(ProposeFrameOut {
+                    target: row.id.clone(),
+                    kind: "enrichment".to_string(),
+                    justification: format!(
+                        "maintenance: Q-ID unresolved by deterministic inference for \
+drawer {} (mdcc: {}); enrichment proposal filed for human/agent Q-ID assignment",
+                        row.id, code_context
+                    ),
+                });
+                let new_provenance = (row.provenance & !enrichment_status_mask)
+                    | (i64::from(EnrichmentStatus::QidProposed.raw()) << 36);
+                sink.update_enrichment_status(&row.id, new_provenance, now_epoch_secs);
+                qid_proposed += 1;
+            }
+        }
+
         // Step 6: exactly one diary entry; the summary is byte-identical to
-        // the Swift actor's.
+        // the Swift actor's (diary text includes QID telemetry per Board
+        // item 14).
         self.cycle_count += 1;
         let entry = MaintenanceDiaryEntry {
             agent_name: AGENT_NAME.to_string(),
             entry: format!(
                 "maintenance cycle {}: audit-checked {}, forbidden {}, decay {}, \
-tombstone {}, fingerprint-drift {}, byReference-drift {}, proposed {}, suppressed {}",
+tombstone {}, fingerprint-drift {}, byReference-drift {}, proposed {}, suppressed {}, \
+qid-retried {}, qid-resolved {}, qid-proposed {}, qid-pending {}",
                 self.cycle_count,
                 audit_checked,
                 outcome.forbidden_combinations,
@@ -314,7 +453,11 @@ tombstone {}, fingerprint-drift {}, byReference-drift {}, proposed {}, suppresse
                 outcome.fingerprint_drifts,
                 outcome.by_reference_drifts,
                 proposals_emitted.len(),
-                outcome.suppressed_duplicates
+                outcome.suppressed_duplicates,
+                qid_retried,
+                qid_resolved,
+                qid_proposed,
+                qid_still_pending
             ),
             topic: "maintenance-cycle".to_string(),
             wing: DIARY_WING.to_string(),
@@ -332,6 +475,10 @@ tombstone {}, fingerprint-drift {}, byReference-drift {}, proposed {}, suppresse
             by_reference_drifts: outcome.by_reference_drifts,
             suppressed_duplicates: outcome.suppressed_duplicates,
             diary_entry: entry,
+            qid_retried,
+            qid_resolved,
+            qid_proposed,
+            qid_still_pending,
         }
     }
 }
@@ -353,6 +500,8 @@ mod tests {
     struct RecordingSink {
         proposals: Vec<ProposeFrameOut>,
         diaries: Vec<MaintenanceDiaryEntry>,
+        /// (row_id, new_provenance) pairs from QID-pending retry writes.
+        enrichment_updates: Vec<(String, i64)>,
     }
     impl MaintenanceProposalSink for RecordingSink {
         fn propose(&mut self, frame: ProposeFrameOut) {
@@ -360,6 +509,14 @@ mod tests {
         }
         fn record_cycle_diary(&mut self, entry: MaintenanceDiaryEntry) {
             self.diaries.push(entry);
+        }
+        fn update_enrichment_status(
+            &mut self,
+            row_id: &str,
+            new_provenance: i64,
+            _now_epoch_secs: f64,
+        ) {
+            self.enrichment_updates.push((row_id.to_string(), new_provenance));
         }
     }
 
@@ -387,6 +544,7 @@ mod tests {
             aged_tombstoned: vec![aged("d-tomb", 700_000.0)],
             fingerprint_drift: vec![drift("wing_a/room_b", 0.5)],
             reference_drift: vec![drift("ref-1", 0.5)],
+            qid_pending_drawers: vec![],
         }
     }
 
@@ -418,8 +576,13 @@ mod tests {
         assert_eq!(
             sink.diaries[0].entry,
             "maintenance cycle 1: audit-checked true, forbidden 1, decay 1, \
-tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0"
+tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0, \
+qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0"
         );
+        // No pending drawers were seeded — QID telemetry all zero.
+        assert_eq!(report.qid_retried, 0);
+        assert_eq!(report.qid_resolved, 0);
+        assert_eq!(report.qid_still_pending, 0);
     }
 
     // MC-2: a tampered audit chain emits exactly the audit-integrity
@@ -460,6 +623,7 @@ tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0"
         assert_eq!(second.decay_candidates, 1, "counts still report crossers");
         assert!(sink.diaries[1].entry.starts_with("maintenance cycle 2:"));
         assert!(sink.diaries[1].entry.contains("proposed 0, suppressed 5"));
+        assert!(sink.diaries[1].entry.contains("qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0"));
     }
 
     // MPS-1: InMemoryMaintenancePolicyStore starts empty; save then load
@@ -542,5 +706,253 @@ tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0"
         // Call at t=300 s — exactly at the interval boundary.
         let at_boundary = d.pump(300.0, &reader, &mut sink);
         assert!(at_boundary.is_some(), "call at interval boundary must fire");
+    }
+
+    // ─── Board item 14: QID-pending enrichment retry batch ───────────────
+
+    fn pending_row(id: &str, content: &str, provenance: i64) -> QidPendingRow {
+        QidPendingRow {
+            id: id.to_string(),
+            content: content.to_string(),
+            provenance,
+        }
+    }
+
+    // Board-14-R1: no pending drawers → all QID counters are zero.
+    #[test]
+    fn board14_r1_zero_pending_all_counters_zero() {
+        let reader = FakeReader { scan: MaintenanceScan::default() };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        assert_eq!(report.qid_retried, 0);
+        assert_eq!(report.qid_resolved, 0);
+        assert_eq!(report.qid_still_pending, 0);
+        assert!(sink.enrichment_updates.is_empty(), "no writes when no pending drawers");
+    }
+
+    // Board-14-R2 (completion): unresolved pending drawers do NOT stay pending —
+    // empty content → infer_lattice_anchor returns wikidata_qid = None → the
+    // daemon files an enrichment proposal and flips the status to qid_proposed
+    // (4). No drawer ends at the durable-pending assertion the beta gate forbids.
+    #[test]
+    fn board14_r2_unresolved_reaches_qid_proposed_terminal() {
+        let qid_pending_bit: i64 = 1 << 36; // enrichment-status qid_pending (1)
+        let qid_proposed_bit: i64 = 4 << 36; // enrichment-status qid_proposed (4)
+        let scan = MaintenanceScan {
+            qid_pending_drawers: vec![
+                pending_row("row-a", "", qid_pending_bit),
+                pending_row("row-b", "", qid_pending_bit),
+            ],
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        assert_eq!(report.qid_retried, 2);
+        assert_eq!(report.qid_resolved, 0);
+        // Terminal: both reached qid_proposed, none durable-pending.
+        assert_eq!(report.qid_proposed, 2);
+        assert_eq!(report.qid_still_pending, 0);
+        // One enrichment proposal AND one status write per unresolved drawer.
+        let enrichment_proposals = sink
+            .proposals
+            .iter()
+            .filter(|f| f.kind == "enrichment")
+            .count();
+        assert_eq!(enrichment_proposals, 2);
+        assert_eq!(sink.enrichment_updates.len(), 2);
+        for (_, prov) in &sink.enrichment_updates {
+            assert_eq!(prov & (0x3F << 36), qid_proposed_bit,
+                "status must be flipped to qid_proposed (4)");
+        }
+        // Counter invariant: retried == resolved + proposed + still_pending.
+        assert_eq!(
+            report.qid_retried,
+            report.qid_resolved + report.qid_proposed + report.qid_still_pending
+        );
+    }
+
+    // Board-14-R3: counter integrity holds across outcomes — retried == resolved
+    // + still-pending. Uses real infer_lattice_anchor; exact resolution depends
+    // on FDC artifacts, so we only assert the structural invariant.
+    #[test]
+    fn board14_r3_counter_integrity_holds() {
+        let qid_pending_bit: i64 = 1 << 36;
+        let scan = MaintenanceScan {
+            qid_pending_drawers: vec![
+                pending_row("row-0", "content zero", qid_pending_bit),
+                pending_row("row-1", "content one", qid_pending_bit),
+                pending_row("row-2", "content two", qid_pending_bit),
+            ],
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        assert_eq!(report.qid_retried, 3);
+        assert_eq!(
+            report.qid_retried,
+            report.qid_resolved + report.qid_proposed + report.qid_still_pending,
+            "retried == resolved + proposed + still_pending"
+        );
+        // No drawer ends durable-pending: every retried drawer reaches a
+        // terminal (resolved or proposed).
+        assert_eq!(report.qid_still_pending, 0);
+        // One enrichment-status write per resolved drawer AND per proposed
+        // drawer (both flip the status field).
+        assert_eq!(
+            sink.enrichment_updates.len(),
+            report.qid_resolved + report.qid_proposed
+        );
+    }
+
+    // Board-14-R4: resolved drawers get provenance bits flipped to
+    // qid_completed. Conditional on at least one resolving — uses
+    // the same content as the Swift success-path test ("mathematics").
+    #[test]
+    fn board14_r4_resolved_provenance_bits_flipped() {
+        let qid_pending_bit: i64 = 1 << 36; // bits 36-41 == 1
+        let qid_completed_bit: i64 = 2 << 36; // bits 36-41 == 2
+
+        let scan = MaintenanceScan {
+            qid_pending_drawers: vec![
+                pending_row("row-math", "mathematics", qid_pending_bit),
+            ],
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        assert_eq!(report.qid_retried, 1);
+        assert_eq!(
+            report.qid_retried,
+            report.qid_resolved + report.qid_proposed + report.qid_still_pending
+        );
+        // Either way the row reaches a terminal — never durable-pending.
+        assert_eq!(report.qid_still_pending, 0);
+
+        let qid_proposed_bit: i64 = 4 << 36; // bits 36-41 == 4
+        if report.qid_resolved == 1 {
+            // Resolved path: status flipped to qid_completed (2).
+            assert_eq!(sink.enrichment_updates.len(), 1);
+            let (written_id, written_prov) = &sink.enrichment_updates[0];
+            assert_eq!(written_id, "row-math");
+            let written_bits = written_prov & (0x3F << 36);
+            assert_eq!(written_bits, qid_completed_bit,
+                "bits 36-41 must be flipped to qid_completed (2)");
+        } else {
+            // Unresolved path: an enrichment proposal was filed and the status
+            // flipped to qid_proposed (4) — the terminal in-workflow state.
+            assert_eq!(report.qid_proposed, 1);
+            assert_eq!(sink.enrichment_updates.len(), 1);
+            let (_, written_prov) = &sink.enrichment_updates[0];
+            assert_eq!(written_prov & (0x3F << 36), qid_proposed_bit,
+                "bits 36-41 must be flipped to qid_proposed (4)");
+            let enrichment_proposals = sink
+                .proposals
+                .iter()
+                .filter(|f| f.kind == "enrichment")
+                .count();
+            assert_eq!(enrichment_proposals, 1);
+        }
+    }
+
+    // Board-14-R5: bounded scan cap is honoured — more than QID_RETRY_SCAN_CAP
+    // rows in the scan input → daemon processes at most QID_RETRY_SCAN_CAP.
+    #[test]
+    fn board14_r5_bounded_scan_cap_honoured() {
+        let qid_pending_bit: i64 = 1 << 36;
+        // Supply 100 pending drawers — more than the 64-row cap.
+        let rows: Vec<QidPendingRow> = (0..100)
+            .map(|i| pending_row(&format!("row-cap-{i}"), "", qid_pending_bit))
+            .collect();
+        let scan = MaintenanceScan {
+            qid_pending_drawers: rows,
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        assert_eq!(
+            report.qid_retried, QID_RETRY_SCAN_CAP,
+            "daemon must not process more than QID_RETRY_SCAN_CAP rows; got {}",
+            report.qid_retried
+        );
+        assert_eq!(
+            report.qid_retried,
+            report.qid_resolved + report.qid_proposed + report.qid_still_pending
+        );
+        // Bounded cap honoured AND every processed row reached a terminal —
+        // none durable-pending.
+        assert_eq!(report.qid_still_pending, 0);
+        assert_eq!(report.qid_proposed, QID_RETRY_SCAN_CAP);
+    }
+
+    // Board-14-R6: diary entry includes QID telemetry fields.
+    #[test]
+    fn board14_r6_diary_entry_includes_qid_telemetry() {
+        let qid_pending_bit: i64 = 1 << 36;
+        let scan = MaintenanceScan {
+            qid_pending_drawers: vec![
+                pending_row("row-diary", "", qid_pending_bit),
+            ],
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        let text = &report.diary_entry.entry;
+        assert!(text.contains("qid-retried"), "diary must include qid-retried count");
+        assert!(text.contains("qid-resolved"), "diary must include qid-resolved count");
+        assert!(text.contains("qid-proposed"), "diary must include qid-proposed count");
+        assert!(text.contains("qid-pending"), "diary must include qid-pending count");
+    }
+
+    // Board-14-R7 (completion gate): no censused inference outcome ends at a
+    // durable-pending assertion. A mixed batch (one resolvable + several
+    // unresolvable) drains entirely to terminals: resolved → qid_completed,
+    // unresolved → qid_proposed (proposal filed). qid_still_pending stays 0.
+    #[test]
+    fn board14_r7_no_durable_pending_after_cycle() {
+        let qid_pending_bit: i64 = 1 << 36;
+        let scan = MaintenanceScan {
+            qid_pending_drawers: vec![
+                pending_row("row-resolvable", "mathematics", qid_pending_bit),
+                pending_row("row-unknown-1", "", qid_pending_bit),
+                pending_row("row-unknown-2", "zzzqxx novel token", qid_pending_bit),
+            ],
+            ..MaintenanceScan::default()
+        };
+        let reader = FakeReader { scan };
+        let mut sink = RecordingSink::default();
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        assert_eq!(report.qid_retried, 3);
+        // THE GATE: nothing left durable-pending.
+        assert_eq!(report.qid_still_pending, 0, "no durable pending state allowed");
+        // Every retried drawer reached a terminal.
+        assert_eq!(report.qid_resolved + report.qid_proposed, 3);
+        // Every drawer got exactly one enrichment-status write (to completed or
+        // proposed); unresolved ones additionally got an enrichment proposal.
+        assert_eq!(sink.enrichment_updates.len(), 3);
+        let enrichment_proposals = sink
+            .proposals
+            .iter()
+            .filter(|f| f.kind == "enrichment")
+            .count();
+        assert_eq!(enrichment_proposals, report.qid_proposed);
     }
 }

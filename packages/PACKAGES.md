@@ -72,7 +72,7 @@ sink is installed by a host in a later mission.
 
 **Dependencies:** None (zero-dependency foundation leaf).
 **Languages:** Swift + Rust (conformance-gated, 17+3 tests each)
-**Spec:** `docs/reference/INTELLECTUSLIB_SPEC_v0.1.md`
+**Spec:** `docs/reference/INTELLECTUSLIB_SPEC.md`
 
 ---
 
@@ -218,7 +218,7 @@ and validates the FDC label space; it does not manage that space at runtime.
 
 **Dependencies:** None  
 **Languages:** Swift + Rust (conformance-gated)  
-**Spec:** `docs/specs/MDCC_ANNEX_SPEC_v0.1.md`, `docs/specs/LATTICE_CITATION_UDC_WIKIDATA.md`
+**Spec:** `docs/specs/MDCC_ANNEX_SPEC.md`, `docs/specs/LATTICE_CITATION_UDC_WIKIDATA.md`
 
 ---
 
@@ -241,7 +241,7 @@ bundled gazetteer. Give it a term, get an Anchor back.
 
 **Dependencies:** LatticeLib (for canon + code grammar)  
 **Languages:** Swift + Rust (conformance-gated)  
-**Spec:** `docs/specs/FDC_ENCODER_CANONICAL_v1.0.md`
+**Spec:** `docs/specs/FDC_ENCODER_CANONICAL.md`
 
 ---
 
@@ -350,11 +350,12 @@ The structured storage tier of the substrate.
 - `DiaryEntry` — temporal event log entry
 - `Tunnel` — typed cross-reference between drawers
 - `Estate` (actor) — the estate orchestrator
-- Nine verbs on Estate (readiness mirrors the GeniusLocusKit surface above):
-  `capture`, `recall`, `withdraw`, `expunge`, `reanchor`, and `mutate`'s
-  `.confirm` kind dispatch live; `learn` and `mutate`'s state-axis kinds are
-  stubs; `propose` and `associate` are substrate-driven Brain-layer verbs with
-  no Estate method yet
+- Nine verbs on Estate: `capture`, `recall`, `withdraw`, `expunge`, `reanchor`,
+  `mutate` (all six kinds — `.confirm`, `.reject`, `.contest`, `.resolve`,
+  `.supersede`, `.revive` — live through the RowStateAutomaton gate), and
+  `learn` (live, persists `LearnedReference` rows) are fully implemented.
+  `propose` and `associate` have no Estate method — they are substrate-driven
+  Brain-layer verbs dispatched by the Standing Signal Scheduler, not by callers.
 - `RecallFrame` — spatial query with bitmap filters
 - `RecallStream` — paginated result iterator
 - `Manifest`, `LocusKitSchema` — self-describing estate metadata
@@ -382,7 +383,7 @@ The vector storage tier of the substrate.
 - `EmbeddingProvider` protocol — pluggable embedding model interface
 - `EmbeddingModel`, `EmbeddingResult`
 - `StoredVector` — model-tagged vector (embedding + model identity)
-- `VectorStore` — queryable vector store (linear scan; ANN/HNSW migration pending)
+- `VectorStore` — queryable vector store (exact linear scan; ANN/HNSW is a separate decision, not yet adopted)
 - `VectorMatch` — result with similarity score
 - `VectorKit.embed(_:using:)` — text → embedding
 - `VectorKit.findNearest(query:in:k:)` — nearest-neighbour search (linear scan)
@@ -401,13 +402,15 @@ corpora remain filterable — the maintenance daemon detects version drift.
 
 ### CorpusKit
 
-**Role:** Content-plus-vector RAG bundles. The RAG tier of the substrate.
-A private, local-first body of retrievable knowledge.
+**Role:** Vector recall techniques — content-plus-vector bundles for
+vector-based retrieval. A private, local-first body of retrievable
+knowledge. CorpusKit is the vector recall tier; LocusKit is the semantic
+recall tier (structured knowledge, KG facts, diary, associations).
 
 **Provides:**
 - `BundleStore` (actor) — content bundle management
 - `BM25Index` — inverted text index for keyword retrieval
-- `Chunker` — semantic content splitting
+- `Chunker` — content splitting into chunks
 - `Chunk` — the stored content unit
 - `HybridRecall` — combined BM25 + vector retrieval
 - `EmbeddingProvider` protocol + `CorpusKitProviders` (MiniLM, MPNet, Gemma)
@@ -435,16 +438,20 @@ the Brain layer — the autonomous intelligence beneath the reasoning layers.
 - `open(storage:owner:)` → `EstateHandle`
 - `close(_:)`, `estate(for:)`, `openEstateCount`
 
-*Nine verbs (unified surface)* — every verb is a legal lexicon target, but
-readiness reflects the live dispatch behavior asserted by
-`GeniusLocusKitTests/VerbSurfaceTests.swift`, not the grammar surface:
+*Nine verbs (unified surface)* — every verb is a legal lexicon target; status
+reflects the live dispatch behavior asserted by
+`GeniusLocusKitTests/VerbSurfaceTests.swift`:
 - Live round-trip: `capture`, `recall`, `withdraw`, `expunge`, `reanchor`
-- `mutate`: the `.confirm` kind is live; the state-axis kinds (`.reject`,
-  `.contest`, `.resolve`, `.supersede`, `.revive`) surface
-  `VerbError.notSupportedByEstate` until they are wired
-- `learn`: surfaces `notSupportedByEstate` (reaches LocusKit's `learn` stub)
-- `propose`, `associate`: surface `notSupportedByEstate` — substrate-driven
-  verbs owned by the Brain layer, which is not present in this build
+- `mutate`: all six kinds live — `.confirm` (provenance axis), `.reject`,
+  `.contest`, `.resolve`, `.supersede`, `.revive` (state-axis, each guarded
+  by the RowStateAutomaton). An illegal source state throws
+  `VerbError.underlyingEstateFailure`, not `notSupportedByEstate`.
+- `learn`: live — persists `LearnedReference` rows via `Estate.learn` in both
+  Swift and Rust ports.
+- `propose`, `associate`: surface `VerbError.notSupportedByEstate` — these are
+  substrate-driven Brain-layer verbs with no caller-facing Estate method.
+  `notSupportedByEstate` here is a permanent runtime channel, not a work item:
+  estates that genuinely do not expose these verbs return this error by design.
 
 *Brain layer (the autonomous system):*
 - `StandingSignalScheduler` — serial-dispatch scheduler per estate via QueueKit
@@ -463,8 +470,8 @@ readiness reflects the live dispatch behavior asserted by
 *Grants and scope:*
 - `GrantStore`, `ScopeKeyVault`, `LagrangeDecayKey`
 
-*Migration:*
-- `importFromMemPalace`, `ExternalCorpus`, `MigrationAPI`
+*Migration (orchestration only — mass ingestion lives in VaultKit per ADR-007):*
+- `runParallel`, `verifyMigration` (`MigrationAPI`), `ExternalCorpus`
 
 **Critical invariants:**
 
@@ -556,7 +563,7 @@ passed GeniusLocusKit estate handle.
 types), SubstrateTypes  
 **Languages:** Swift + Rust (conformance-gated; `rust/src/catalog.rs` is the
 recipe-descriptor conformance anchor)  
-**Spec:** `docs/reference/COGNITIONKIT_SPEC_v0.85.md`
+**Spec:** `docs/reference/COGNITIONKIT_SPEC.md`
 
 ---
 

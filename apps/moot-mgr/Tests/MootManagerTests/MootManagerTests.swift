@@ -336,6 +336,84 @@ struct ManagerConfigTests {
     }
 }
 
+// MARK: - estatesPayload queue stats (TELEMETRY_QT)
+
+struct EstatesPayloadQueueTests {
+
+    @Test("estatesPayload returns nil queue when no queue metrics exist for the estate")
+    func queueNilWhenNoSamples() async throws {
+        let manager = try await makeStartedManager()
+        defer { Task { await manager.stop() } }
+        let store = try await manager.statsStore()
+        let estateID = "estate-q-nil"
+
+        // Insert only an event — no queue.* metrics for this estate.
+        try await store.insertEvent(kind: "capture", nounType: 1,
+                                    rowID: UUID().uuidString,
+                                    estate: estateID, ts: 100, dropboxID: "d")
+
+        let payload = try await manager.estatesPayload()
+        let ep = payload.estates.first { $0.id == estateID }
+        #expect(ep != nil, "estate '\(estateID)' must appear in payload")
+        #expect(ep?.queue == nil,
+                "queue must be nil when no queue metric samples exist for the estate")
+    }
+
+    @Test("estatesPayload populates queue struct from latest queue metrics")
+    func queuePopulatedFromMetrics() async throws {
+        let manager = try await makeStartedManager()
+        defer { Task { await manager.stop() } }
+        let store = try await manager.statsStore()
+        let estateID = "estate-q-data"
+        let tags = ["estate": estateID, "kit": "QueueKit"]
+
+        // Insert queue.* metrics and an event so the estate appears in the payload.
+        try await store.insertMetric(name: "queue.depth", value: 7.0, tags: tags,
+                                     ts: 200, dropboxID: "d")
+        try await store.insertMetric(name: "queue.drain_count", value: 3.0, tags: tags,
+                                     ts: 200, dropboxID: "d")
+        try await store.insertMetric(name: "queue.idle_nonempty", value: 1.0, tags: tags,
+                                     ts: 200, dropboxID: "d")
+        try await store.insertEvent(kind: "capture", nounType: 1,
+                                    rowID: UUID().uuidString,
+                                    estate: estateID, ts: 200, dropboxID: "d")
+
+        let payload = try await manager.estatesPayload()
+        guard let ep = payload.estates.first(where: { $0.id == estateID }) else {
+            Issue.record("estate '\(estateID)' missing from payload")
+            return
+        }
+        guard let q = ep.queue else {
+            Issue.record("queue must be non-nil for estate with queue metric samples")
+            return
+        }
+        #expect(q.depth == 7.0, "queue.depth must be 7.0; got \(q.depth as Any)")
+        #expect(q.drainCount == 3.0, "queue.drain_count must be 3.0; got \(q.drainCount as Any)")
+        // idle_nonempty 1.0 projects to true
+        #expect(q.idleNonempty == true,
+                "idle_nonempty 1.0 must project to true; got \(q.idleNonempty as Any)")
+    }
+
+    @Test("estatesPayload maps idle_nonempty 0.0 to false")
+    func idleNonemptyZeroIsFalse() async throws {
+        let manager = try await makeStartedManager()
+        defer { Task { await manager.stop() } }
+        let store = try await manager.statsStore()
+        let estateID = "estate-q-idle-false"
+        let tags = ["estate": estateID, "kit": "QueueKit"]
+
+        try await store.insertMetric(name: "queue.idle_nonempty", value: 0.0, tags: tags,
+                                     ts: 100, dropboxID: "d")
+        try await store.insertEvent(kind: "capture", nounType: 1,
+                                    rowID: UUID().uuidString,
+                                    estate: estateID, ts: 100, dropboxID: "d")
+
+        let payload = try await manager.estatesPayload()
+        let q = payload.estates.first { $0.id == estateID }?.queue
+        #expect(q?.idleNonempty == false, "idle_nonempty 0.0 must project to false")
+    }
+}
+
 // MARK: - CLI parsing + dispatch
 
 struct ManagerCLITests {

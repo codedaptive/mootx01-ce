@@ -343,3 +343,128 @@ fn disabled_report_throughput() {
         elapsed.as_millis()
     );
 }
+
+// MARK: - §8 RecentWindowSink — bounded recent window
+//
+// Mirrors the Swift §8 RecentWindowSink suite.
+
+use intellectus_lib::RecentWindowSink;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A sink that just counts every receive — for forward-sink fidelity tests.
+struct CounterSink {
+    n: AtomicUsize,
+}
+impl CounterSink {
+    fn new() -> Self {
+        CounterSink { n: AtomicUsize::new(0) }
+    }
+    fn count(&self) -> usize {
+        self.n.load(Ordering::SeqCst)
+    }
+}
+impl StatsSink for CounterSink {
+    fn receive(&self, _sample: StatSample) {
+        self.n.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn window_records_and_snapshots_oldest_first() {
+    let window = RecentWindowSink::new(4, None);
+    window.receive(StatSample::metric("a".into(), 1.0, HashMap::new(), 1.0));
+    window.receive(StatSample::metric("b".into(), 2.0, HashMap::new(), 2.0));
+    assert_eq!(window.count(), 2);
+    assert_eq!(window.total_received(), 2);
+    let snap = window.snapshot();
+    assert_eq!(snap.len(), 2);
+    assert_eq!(snap[0].ts(), 1.0);
+    assert_eq!(snap[1].ts(), 2.0);
+}
+
+#[test]
+fn bounded_window_evicts_oldest_on_overflow() {
+    let window = RecentWindowSink::new(3, None);
+    // Push 5 into a 3-slot window: 0 and 1 must be evicted.
+    for i in 0..5 {
+        window.receive(StatSample::metric("m".into(), i as f64, HashMap::new(), i as f64));
+    }
+    // Bound holds: never more than capacity retained.
+    assert_eq!(window.count(), 3);
+    // total_received counts every sample, ignoring eviction.
+    assert_eq!(window.total_received(), 5);
+    let snap = window.snapshot();
+    assert_eq!(snap.len(), 3);
+    assert_eq!(snap.first().unwrap().ts(), 2.0); // oldest retained
+    assert_eq!(snap.last().unwrap().ts(), 4.0);  // newest
+}
+
+#[test]
+fn capacity_clamps_to_one() {
+    let window = RecentWindowSink::new(0, None);
+    assert_eq!(window.capacity(), 1);
+    window.receive(StatSample::metric("x".into(), 1.0, HashMap::new(), 1.0));
+    window.receive(StatSample::metric("y".into(), 2.0, HashMap::new(), 2.0));
+    assert_eq!(window.count(), 1);
+    assert_eq!(window.snapshot().first().unwrap().ts(), 2.0);
+}
+
+#[test]
+fn forward_sink_receives_every_sample() {
+    let downstream = Arc::new(CounterSink::new());
+    let window = RecentWindowSink::new(2, Some(downstream.clone()));
+    // Overflow the window — the forward sink still sees ALL samples.
+    for i in 0..5 {
+        window.receive(StatSample::metric("f".into(), i as f64, HashMap::new(), i as f64));
+    }
+    assert_eq!(window.count(), 2);          // bounded
+    assert_eq!(downstream.count(), 5);      // all forwarded
+}
+
+#[test]
+fn empty_window_is_empty() {
+    let window = RecentWindowSink::new(8, None);
+    assert_eq!(window.count(), 0);
+    assert_eq!(window.total_received(), 0);
+    assert!(window.snapshot().is_empty());
+}
+
+#[test]
+fn window_via_gate_enabled_records_disabled_does_not() {
+    // Use a fresh holder for deterministic gate state (the global singleton is
+    // shared across tests; the per-instance holder isolates this assertion).
+    let holder = IntellectusHolder::new();
+    let window = Arc::new(RecentWindowSink::new(16, None));
+    holder.install(window.clone());
+
+    // FORCE: disabled → no sample recorded.
+    holder.set_enabled(false);
+    holder.report(|| StatSample::metric("off".into(), 1.0, HashMap::new(), 0.0));
+    assert_eq!(window.count(), 0);
+
+    // FORCE: enabled → sample recorded.
+    holder.set_enabled(true);
+    holder.report(|| StatSample::metric("on".into(), 1.0, HashMap::new(), 1.0));
+    assert_eq!(window.count(), 1);
+    assert_eq!(window.snapshot().first().unwrap().ts(), 1.0);
+}
+
+#[test]
+fn concurrent_receive_is_bounded() {
+    let window = Arc::new(RecentWindowSink::new(32, None));
+    let mut handles = Vec::new();
+    for t in 0..8 {
+        let w = window.clone();
+        handles.push(std::thread::spawn(move || {
+            for i in 0..100 {
+                w.receive(StatSample::metric(
+                    "c".into(), (t * 100 + i) as f64, HashMap::new(), 0.0));
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert_eq!(window.count(), 32);          // bound holds under concurrency
+    assert_eq!(window.total_received(), 800);
+}

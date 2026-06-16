@@ -89,4 +89,33 @@ public enum FederatedReadRefusalReason: Sendable, Equatable {
     /// reserved for a store that ever hands back a revoked row. Modeled
     /// explicitly so the refusal vocabulary is complete per §13.
     case grantRevoked
+
+    /// The grant's `inferenceRemainingBudget` has reached zero. Every
+    /// federated recall that reads from the source estate debits the
+    /// budget by `FederatedRecallGate.budgetDebitPerRead` (0.01 per read,
+    /// representing ~100 reads on a fresh 1.0 allotment). When the budget
+    /// falls to zero or below, all further reads are refused regardless
+    /// of expiry or scope. The debit is persisted atomically with the
+    /// read so concurrent calls cannot double-spend below zero.
+    ///
+    /// Chosen rule (spec §6 is silent on debit quantum; fail-closed wins):
+    /// the debit is 0.01 per read (100 reads per full budget). A grant
+    /// whose `inferenceRemainingBudget <= 0` refuses all reads.
+    case budgetExhausted
+
+    /// The grant's `custodyMode` refused the recall at the cryptographic
+    /// gate. Specific sub-reasons:
+    ///   - `.mediated` (mode 1): the scope-key vault no longer holds the
+    ///     key for this grant — it was dropped by a revoke or the estate
+    ///     restarted without reloading the vault. A live request cannot be
+    ///     served. The requester must re-request the grant.
+    ///   - `.decayDerived` (mode 3): the xi shares drifted past threshold
+    ///     K and the decay-derived key is permanently unrecoverable.
+    ///   - `.handedOver` (mode 2): never raises this reason — the key was
+    ///     handed to the recipient and reads proceed offline within the
+    ///     grant window; the existing expiry check covers mode-2 lifetime.
+    ///   - `.timeAging` (mode 4): the grant's effective content level decayed
+    ///     to 0 (only reachable with a floor of 0) — the capability has aged
+    ///     out of all access. A grant with a positive floor never raises this.
+    case custodyRefused
 }

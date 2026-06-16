@@ -19,11 +19,11 @@
 //!
 //! - Swift `materializeRoom(wing:room:now:)` reaches into
 //!   `DrawerStore.drawersIn(wing:room:)` to fetch the active set. The
-//!   Rust `DrawerStore` trait does not yet carry that method (concrete
-//!   stores arrive in a follow-on mission), so the Rust signature
-//!   accepts the active drawer slice directly. When the concrete store
-//!   lands, callers compose
-//!   `materialize_room(wing, room, &store.drawers_in(wing, room)?, now)`.
+//!   Rust `DrawerStore` trait carries `drawers_in_wing` and
+//!   `drawers_in_wing_room` on all concrete stores (`InMemoryDrawerStore`,
+//!   `SqliteDrawerStore`, `PostgresDrawerStore`). The Rust signature
+//!   accepts the active drawer slice directly so callers compose
+//!   `materialize_room(wing, room, &store.drawers_in_wing_room(wing, room)?, now)`.
 //! - Swift's default kernel `PortableKernel.kernelForCurrentPlatform()`
 //!   is replaced by `substrate_kernel::kernel::ScalarKernel` — the
 //!   scalar reference is the cross-leg bit-identity baseline; SIMD
@@ -43,7 +43,7 @@ use crate::node_bundle_store::{BundleKind, NodeBundleStore};
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,

@@ -1,160 +1,138 @@
 // BM25Index.swift
 //
-// In-memory BM25 inverted index over chunk text. Pure value
-// type semantics; the index is rebuilt on demand from the
-// underlying bundle store. For an estate with hundreds of
-// thousands of chunks this lives in memory at startup; for
-// larger estates a persistent IDF/posting-list backed by
-// PersistenceKit replaces it (deferred to v1.x).
+// BM25 inverted index — actor wrapper over the Engine layer.
 //
-// Parameters match the Robertson-Sparck Jones BM25 defaults:
-// k1 = 1.5, b = 0.75. Documented as tunable per estate when
-// the substrate's parameter sensitivity work lands.
+// REFACTORED (Lane D): this actor now delegates to BM25Weighting (which
+// builds an InvertedIndex with quantized per-posting impacts) and queries
+// via WAND / Block-Max WAND. The original float-at-query-time path is
+// replaced by the integer-only path mandated by retrieval algorithms
+// reference §2.6.
+//
+// Public API is unchanged:
+//   - init(tokenizer:parameters:)
+//   - index(_:)          — index a batch of Chunks
+//   - remove(_:)         — remove by UUID
+//   - documentCount()    — total indexed docs
+//   - topK(_:for:)       — top-k (id: UUID, score: Float), descending
+//
+// Internally the UUID primary keys are stored as their lowercased UUID string
+// representation (UUID.uuidString). The UUID string sort order matches the
+// spec's universal tie-break rule: "smaller id wins" (§0.3). UUID strings are
+// uppercase hexadecimal with dashes; lexicographic order on the string is NOT
+// the same as numeric order on the UUID. Both the old and new implementations
+// used UUID.uuidString ascending as the tie-break — the refactored version
+// preserves this by using String itemIDs consistently.
+//
+// Parameters: Robertson-Sparck Jones defaults k1=1.5, b=0.75. Tunable per estate.
 
 import Foundation
 
-public struct BM25Parameters: Sendable {
-    public var k1: Double
-    public var b: Double
-    public init(k1: Double = 1.5, b: Double = 0.75) {
-        self.k1 = k1
-        self.b = b
-    }
-}
+// BM25Parameters is defined in Engine/BM25Weighting.swift (same module).
+// Re-export here for callers that only import CorpusKit and know BM25Parameters
+// as the top-level name (no source break).
 
 public actor BM25Index {
     private let tokenizer: any Tokenizer
     private let parameters: BM25Parameters
-    private var totalDocs: Int = 0
-    private var totalLengthSum: Int = 0
-    // term -> (docID -> term frequency)
-    private var postings: [String: [UUID: Int]] = [:]
-    private var docLengths: [UUID: Int] = [:]
+
+    // MARK: - In-memory index state
+
+    // term → (itemID string → term frequency)
+    private var termFreqs: BM25Weighting.TermFreqTable = [:]
+    // itemID string → document length in tokens
+    private var docLengths: [String: Int] = [:]
+    // Cached InvertedIndex + term mapping; invalidated on every write.
+    private var cachedIndexPair: (index: InvertedIndex, termMapping: [String: UInt32])? = nil
+
+    // MARK: - Init
 
     public init(tokenizer: any Tokenizer, parameters: BM25Parameters = BM25Parameters()) {
         self.tokenizer = tokenizer
         self.parameters = parameters
     }
 
+    // MARK: - Indexing
+
+    /// Index a batch of Chunks. Re-indexing an already-indexed chunk is safe
+    /// (the old entry is replaced).
     public func index(_ chunks: [Chunk]) {
-        for c in chunks {
-            let tokens = tokenizer.keywordTokens(c.text)
-            docLengths[c.id] = tokens.count
-            totalLengthSum += tokens.count
-            totalDocs += 1
-            var tf: [String: Int] = [:]
+        for chunk in chunks {
+            let itemID = chunk.id.uuidString
+            // Remove existing state before re-indexing.
+            removeMem(itemID: itemID)
+
+            let tokens = tokenizer.keywordTokens(chunk.text)
+            let docLen = tokens.count
+            docLengths[itemID] = docLen
+
+            var tf = [String: Int]()
             for t in tokens { tf[t, default: 0] += 1 }
             for (term, freq) in tf {
-                postings[term, default: [:]][c.id] = freq
+                termFreqs[term, default: [:]][itemID] = freq
             }
         }
+        cachedIndexPair = nil
     }
 
+    /// Remove a document by UUID.
     public func remove(_ chunkID: UUID) {
-        guard let len = docLengths.removeValue(forKey: chunkID) else { return }
-        totalLengthSum -= len
-        totalDocs -= 1
-        for term in Array(postings.keys) {
-            postings[term]?.removeValue(forKey: chunkID)
-            if postings[term]?.isEmpty == true { postings.removeValue(forKey: term) }
+        let itemID = chunkID.uuidString
+        removeMem(itemID: itemID)
+        cachedIndexPair = nil
+    }
+
+    private func removeMem(itemID: String) {
+        docLengths.removeValue(forKey: itemID)
+        for term in Array(termFreqs.keys) {
+            termFreqs[term]?.removeValue(forKey: itemID)
+            if termFreqs[term]?.isEmpty == true { termFreqs.removeValue(forKey: term) }
         }
     }
 
-    public func documentCount() -> Int { totalDocs }
+    // MARK: - Query
 
-    /// Top-k BM25 scoring over pre-tokenised keyword tokens using a bounded min-heap.
+    /// Total indexed documents.
+    public func documentCount() -> Int { docLengths.count }
+
+    /// Top-k BM25 scoring over pre-tokenised keyword tokens.
     ///
-    /// The caller is responsible for tokenising the query with the same tokenizer
-    /// vocabulary used when documents were indexed. This method:
-    /// 1. Accepts pre-tokenised tokens so the caller controls tokenisation and can
-    ///    reuse tokens across multiple calls.
-    /// 2. Maintains a min-heap of capacity `k` — O(M log k) — so the candidate set
-    ///    is bounded at every stage; no unbounded intermediate sort.
-    ///
-    /// The heap root is the weakest survivor (lowest score; latest UUID on tie,
-    /// since tie-break is ascending UUID). Candidates enter only when they outrank
-    /// the current root.
+    /// Routes through the new InvertedIndex (WAND / Block-Max WAND) engine.
+    /// Integer-only on the query path; BM25 float math happens once at build.
     ///
     /// - Parameters:
     ///   - k: Maximum results to return.
-    ///   - tokens: Pre-tokenised keyword strings. Must use the same tokeniser
-    ///     vocabulary as the indexed chunks (i.e. `tokenizer.keywordTokens(text)`
-    ///     from the same tokeniser type). The caller is responsible for producing
-    ///     compatible tokens.
-    /// - Returns: Up to `k` `(id, score)` pairs, descending by score.
+    ///   - tokens: Pre-tokenised keyword strings compatible with indexed chunks.
+    /// - Returns: Up to k (id: UUID, score: Float) pairs, score descending,
+    ///   UUID.uuidString ascending on ties.
     public func topK(_ k: Int, for tokens: [String]) -> [(id: UUID, score: Float)] {
-        guard totalDocs > 0, k > 0, !tokens.isEmpty else { return [] }
-        let avgDocLen = Double(totalLengthSum) / Double(totalDocs)
+        guard docLengths.count > 0, k > 0, !tokens.isEmpty else { return [] }
 
-        // Score only documents that appear in postings for the supplied tokens.
-        // Documents absent from all posting lists never enter the heap — the
-        // candidate set is implicitly bounded by the posting lists, not by N.
-        var rawScores: [UUID: Double] = [:]
-        for term in tokens {
-            guard let posting = postings[term], !posting.isEmpty else { continue }
-            let n = Double(posting.count)
-            // IDF with +1 smoothing for non-negative scores (same formula as search).
-            let idf = log(1 + (Double(totalDocs) - n + 0.5) / (n + 0.5))
-            for (docID, tf) in posting {
-                let dl = Double(docLengths[docID] ?? 0)
-                let denom = Double(tf) + parameters.k1 * (1 - parameters.b + parameters.b * dl / max(avgDocLen, 1))
-                let contribution = idf * (Double(tf) * (parameters.k1 + 1)) / max(denom, 0.0001)
-                rawScores[docID, default: 0] += contribution
-            }
+        // Build or reuse the cached InvertedIndex.
+        let (index, termMapping) = buildIndex()
+        let query = BM25Weighting.queryPairs(queryTerms: tokens, termMapping: termMapping)
+        guard !query.isEmpty else { return [] }
+
+        let hits = index.topK(query: query, k: k, algorithm: .blockMaxWand)
+
+        // Convert String itemID back to UUID and Float score.
+        // Items with un-parseable UUIDs are silently dropped (should not occur
+        // in normal operation since BM25Index only ingests Chunk.id.uuidString).
+        return hits.compactMap { hit -> (id: UUID, score: Float)? in
+            guard let uuid = UUID(uuidString: hit.itemID) else { return nil }
+            return (id: uuid, score: hit.impact)
         }
-        guard !rawScores.isEmpty else { return [] }
+    }
 
-        // Min-heap of capacity k. "Weaker" = lower score; on equal scores,
-        // later UUID string (ascending UUID wins ties, so later = weaker).
-        // The root is always the weakest of the current top-k survivors.
-        typealias Pair = (id: UUID, score: Double)
+    // MARK: - Internal index build (with caching)
 
-        func isWeaker(_ a: Pair, _ b: Pair) -> Bool {
-            if a.score != b.score { return a.score < b.score }
-            return a.id.uuidString > b.id.uuidString
-        }
-
-        func siftUp(_ h: inout [Pair], _ i: Int) {
-            var idx = i
-            while idx > 0 {
-                let parent = (idx - 1) / 2
-                if isWeaker(h[idx], h[parent]) { h.swapAt(idx, parent); idx = parent }
-                else { break }
-            }
-        }
-
-        func siftDown(_ h: inout [Pair]) {
-            let n = h.count
-            var i = 0
-            while true {
-                let l = 2 * i + 1, r = 2 * i + 2
-                var w = i
-                if l < n && isWeaker(h[l], h[w]) { w = l }
-                if r < n && isWeaker(h[r], h[w]) { w = r }
-                guard w != i else { break }
-                h.swapAt(i, w); i = w
-            }
-        }
-
-        var heap = [Pair]()
-        heap.reserveCapacity(k + 1)
-        for (id, score) in rawScores {
-            let candidate = Pair(id: id, score: score)
-            if heap.count < k {
-                heap.append(candidate)
-                siftUp(&heap, heap.count - 1)
-            } else if !heap.isEmpty && isWeaker(heap[0], candidate) {
-                // candidate outranks the current weakest in the heap — displace.
-                heap[0] = candidate
-                siftDown(&heap)
-            }
-        }
-
-        // Final ascending-sort on the small heap (at most k elements), then convert.
-        heap.sort { a, b in
-            if a.score != b.score { return a.score > b.score }
-            return a.id.uuidString < b.id.uuidString
-        }
-        return heap.map { (id: $0.id, score: Float($0.score)) }
+    private func buildIndex() -> (index: InvertedIndex, termMapping: [String: UInt32]) {
+        if let cached = cachedIndexPair { return cached }
+        let pair = BM25Weighting.build(
+            termFreqs: termFreqs,
+            docLengths: docLengths,
+            parameters: parameters
+        )
+        cachedIndexPair = pair
+        return pair
     }
 }

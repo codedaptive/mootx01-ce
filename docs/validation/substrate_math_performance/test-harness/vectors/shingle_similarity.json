@@ -1,0 +1,368 @@
+{
+  "case_count": 32,
+  "cases": [
+    {
+      "description": "|a|=11, |b|=11, sim=1.0",
+      "expected_output": {
+        "similarity": "0x0000803f"
+      },
+      "id": "case_000",
+      "inputs": {
+        "a": "yjziurso nx",
+        "b": "yjziurso nx"
+      }
+    },
+    {
+      "description": "|a|=21, |b|=7, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_001",
+      "inputs": {
+        "a": "njedhn lylqkji ttgbfa",
+        "b": "bhdzdyd"
+      }
+    },
+    {
+      "description": "|a|=25, |b|=42, sim=0.575",
+      "expected_output": {
+        "similarity": "0x3333133f"
+      },
+      "id": "case_002",
+      "inputs": {
+        "a": "zhtth dbvbqwyo sullquzr t",
+        "b": "zhtth dbvbqwyo sullquzr t joljykwv jrozmwn"
+      }
+    },
+    {
+      "description": "|a|=15, |b|=27, sim=0.22580644",
+      "expected_output": {
+        "similarity": "0xce39673e"
+      },
+      "id": "case_003",
+      "inputs": {
+        "a": "mnkiyhxy hdq ci",
+        "b": "mnkiyhxy kae twwwn n rjhlvp"
+      }
+    },
+    {
+      "description": "|a|=5, |b|=5, sim=1.0",
+      "expected_output": {
+        "similarity": "0x0000803f"
+      },
+      "id": "case_004",
+      "inputs": {
+        "a": "zwsfg",
+        "b": "zwsfg"
+      }
+    },
+    {
+      "description": "|a|=21, |b|=25, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_005",
+      "inputs": {
+        "a": "a qobyir tilfljr cy p",
+        "b": "uanpwl vzs musoe a gxpoym"
+      }
+    },
+    {
+      "description": "|a|=4, |b|=11, sim=0.22222222",
+      "expected_output": {
+        "similarity": "0x398e633e"
+      },
+      "id": "case_006",
+      "inputs": {
+        "a": "auiu",
+        "b": "auiu iggzvj"
+      }
+    },
+    {
+      "description": "|a|=22, |b|=13, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_007",
+      "inputs": {
+        "a": "v wcmmkfy cx iyoaoh rl",
+        "b": "v vpslu vxahf"
+      }
+    },
+    {
+      "description": "|a|=20, |b|=20, sim=1.0",
+      "expected_output": {
+        "similarity": "0x0000803f"
+      },
+      "id": "case_008",
+      "inputs": {
+        "a": "nnjtvli aofzfbxs evy",
+        "b": "nnjtvli aofzfbxs evy"
+      }
+    },
+    {
+      "description": "|a|=3, |b|=14, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_009",
+      "inputs": {
+        "a": "hmz",
+        "b": "orniawe ir olo"
+      }
+    },
+    {
+      "description": "|a|=9, |b|=20, sim=0.3888889",
+      "expected_output": {
+        "similarity": "0x721cc73e"
+      },
+      "id": "case_010",
+      "inputs": {
+        "a": "rznh eazt",
+        "b": "rznh eazt mdsir trkd"
+      }
+    },
+    {
+      "description": "|a|=24, |b|=28, sim=0.06666667",
+      "expected_output": {
+        "similarity": "0x8988883d"
+      },
+      "id": "case_011",
+      "inputs": {
+        "a": "cit othszns j hgjp dkaei",
+        "b": "cit o aggnhmda ajegice rzkuz"
+      }
+    },
+    {
+      "description": "|a|=33, |b|=33, sim=1.0",
+      "expected_output": {
+        "similarity": "0x0000803f"
+      },
+      "id": "case_012",
+      "inputs": {
+        "a": "srpofzig qbwxpp vsjk uhyerwx gdlb",
+        "b": "srpofzig qbwxpp vsjk uhyerwx gdlb"
+      }
+    },
+    {
+      "description": "|a|=13, |b|=21, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_013",
+      "inputs": {
+        "a": "yck hfezrff y",
+        "b": "rbiz iztiyli locsw zj"
+      }
+    },
+    {
+      "description": "|a|=20, |b|=31, sim=0.62068963",
+      "expected_output": {
+        "similarity": "0x84e51e3f"
+      },
+      "id": "case_014",
+      "inputs": {
+        "a": "xgfw lisbxd sqelct q",
+        "b": "xgfw lisbxd sqelct q avmnhsov l"
+      }
+    },
+    {
+      "description": "|a|=12, |b|=9, sim=0.13333334",
+      "expected_output": {
+        "similarity": "0x8988083e"
+      },
+      "id": "case_015",
+      "inputs": {
+        "a": "zsb bqbgmixb",
+        "b": "zsb pai l"
+      }
+    },
+    {
+      "description": "|a|=23, |b|=23, sim=1.0",
+      "expected_output": {
+        "similarity": "0x0000803f"
+      },
+      "id": "case_016",
+      "inputs": {
+        "a": "oz thhddacm og cttnxzts",
+        "b": "oz thhddacm og cttnxzts"
+      }
+    },
+    {
+      "description": "|a|=10, |b|=18, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_017",
+      "inputs": {
+        "a": "yobcel iwx",
+        "b": "bwhdlejp uynxn ddc"
+      }
+    },
+    {
+      "description": "|a|=41, |b|=59, sim=0.68421054",
+      "expected_output": {
+        "similarity": "0x6c282f3f"
+      },
+      "id": "case_018",
+      "inputs": {
+        "a": "xpcmdvno yhqlta ndyqlvbb hcecitu ullrsout",
+        "b": "xpcmdvno yhqlta ndyqlvbb hcecitu ullrsout fcv nismvjpx nali"
+      }
+    },
+    {
+      "description": "|a|=19, |b|=12, sim=0.35",
+      "expected_output": {
+        "similarity": "0x3333b33e"
+      },
+      "id": "case_019",
+      "inputs": {
+        "a": "mzmamwci rydk wqpxj",
+        "b": "mzmamwci ypb"
+      }
+    },
+    {
+      "description": "|a|=18, |b|=18, sim=1.0",
+      "expected_output": {
+        "similarity": "0x0000803f"
+      },
+      "id": "case_020",
+      "inputs": {
+        "a": "tofef rkfscny zceb",
+        "b": "tofef rkfscny zceb"
+      }
+    },
+    {
+      "description": "|a|=19, |b|=1, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_021",
+      "inputs": {
+        "a": "dkrfq hqtxit z pwlx",
+        "b": "b"
+      }
+    },
+    {
+      "description": "|a|=4, |b|=20, sim=0.11111111",
+      "expected_output": {
+        "similarity": "0x398ee33d"
+      },
+      "id": "case_022",
+      "inputs": {
+        "a": "bjdh",
+        "b": "bjdh soxmnna mvszspk"
+      }
+    },
+    {
+      "description": "|a|=22, |b|=15, sim=0.03125",
+      "expected_output": {
+        "similarity": "0x0000003d"
+      },
+      "id": "case_023",
+      "inputs": {
+        "a": "fl hbprxul zd mnxavlbb",
+        "b": "fl konult ktnrp"
+      }
+    },
+    {
+      "description": "|a|=21, |b|=21, sim=1.0",
+      "expected_output": {
+        "similarity": "0x0000803f"
+      },
+      "id": "case_024",
+      "inputs": {
+        "a": "nbfzxbdj eejmp zzrzaw",
+        "b": "nbfzxbdj eejmp zzrzaw"
+      }
+    },
+    {
+      "description": "|a|=12, |b|=12, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_025",
+      "inputs": {
+        "a": "aggwuh q ewk",
+        "b": "tgufp jwf mu"
+      }
+    },
+    {
+      "description": "|a|=5, |b|=17, sim=0.2",
+      "expected_output": {
+        "similarity": "0xcdcc4c3e"
+      },
+      "id": "case_026",
+      "inputs": {
+        "a": "tmitg",
+        "b": "tmitg cge gebwfxk"
+      }
+    },
+    {
+      "description": "|a|=4, |b|=15, sim=0.15384616",
+      "expected_output": {
+        "similarity": "0xd9891d3e"
+      },
+      "id": "case_027",
+      "inputs": {
+        "a": "sqwb",
+        "b": "sqwb vc taqtjdx"
+      }
+    },
+    {
+      "description": "|a|=21, |b|=21, sim=1.0",
+      "expected_output": {
+        "similarity": "0x0000803f"
+      },
+      "id": "case_028",
+      "inputs": {
+        "a": "voju lk asglz edrnzzd",
+        "b": "voju lk asglz edrnzzd"
+      }
+    },
+    {
+      "description": "|a|=3, |b|=9, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_029",
+      "inputs": {
+        "a": "cpw",
+        "b": "pwiej nei"
+      }
+    },
+    {
+      "description": "|a|=15, |b|=33, sim=0.41935483",
+      "expected_output": {
+        "similarity": "0xadb5d63e"
+      },
+      "id": "case_030",
+      "inputs": {
+        "a": "efvr dtk qmyaxp",
+        "b": "efvr dtk qmyaxp klyk pdlxdj zeycl"
+      }
+    },
+    {
+      "description": "|a|=1, |b|=23, sim=0.0",
+      "expected_output": {
+        "similarity": "0x00000000"
+      },
+      "id": "case_031",
+      "inputs": {
+        "a": "s",
+        "b": "s oncpt wmmmugf akmwphb"
+      }
+    }
+  ],
+  "cookbook_section": "§8.20",
+  "format_version": "1",
+  "generated_at": "2026-06-13T19:10:35Z",
+  "generator": {
+    "harness_version": "1.0.0",
+    "language": "swift",
+    "reference_file": "ShingleSimilarity.swift"
+  },
+  "output_crc32": "0x8a5d8888",
+  "primitive": "shingle_similarity",
+  "seed": "0xcafebabedeadbeef"
+}

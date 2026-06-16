@@ -152,6 +152,10 @@ fn transition(from: RowState, verb: &str) -> Option<RowState> {
         (Superseded, "withdraw") => Some(Withdrawn),
         (Superseded, "expunge") => Some(Tombstoned),
         (Superseded, "lineage_advance") => Some(Decayed),
+        // revive surface (§9.3): every Cluster-B state confirms back to
+        // active. The superseded lineage-conflict rule is enforced in
+        // LocusKit's revive guard, not here (this table is stateless).
+        (Superseded, "confirm") => Some(Active),
         // From decayed:
         (Decayed, "withdraw") => Some(Withdrawn),
         (Decayed, "expunge") => Some(Tombstoned),
@@ -162,6 +166,7 @@ fn transition(from: RowState, verb: &str) -> Option<RowState> {
         // From expired:
         (Expired, "withdraw") => Some(Withdrawn),
         (Expired, "expunge") => Some(Tombstoned),
+        (Expired, "confirm") => Some(Active),
         // From rejected:
         (Rejected, "confirm") => Some(Accepted),
         (Rejected, "expunge") => Some(Tombstoned),

@@ -1,12 +1,13 @@
 ---
 status: decided
 question: How should VaultKit export/import preserve identity across round-trips, and how should export scope be selected?
-authors: Bob Pankratz, MOOTx01 maintainers
+authors: MOOTx01 maintainers
 date: 2026-06-05
+description: Records how VaultKit export/import preserves identity across round-trips and how export scope is selected.
 relates_to:
   - docs/reference/VAULTKIT_INTERFACE.md
-  - docs/decisions/DECISION_VAULTKIT_001.md
-  - docs/decisions/DECISION_VAULTKIT_002.md
+  - docs/decisions/ADR-VAULTKIT-001.md
+  - docs/decisions/ADR-VAULTKIT-002.md
 supersedes: none
 context:
   - Export hard-coded the recall filter to `.unconfirmed`, silently dropping user-confirmed drawers from every export.
@@ -16,7 +17,7 @@ context:
 
 ## Context
 
-A seam-walk of VaultKit (2026-06-05) surfaced two correctness/design gaps in the
+A review of VaultKit (2026-06-05) surfaced two correctness/design gaps in the
 export/import bridge, both confirmed against source:
 
 1. **Export scope.** `DrawerMapping.export` recalled with `filterChain: [.unconfirmed]`,
@@ -73,24 +74,15 @@ recall evaluator's per-axis default-insertion treats as "axis addressed" (so its
 - **`drawer.id` as the identity key** — rejected: re-minted by the supersession cascade, so
   it cannot be a stable round-trip identity.
 
-## Parity note — CLOSED (2026-06-06)
+## Parity note — closed
 
 The work surfaced a pre-existing LocusKit-Rust drift: Rust `Filter::ModelConfirmedOnly`
-versus Swift `Filter.automatedConfirmedOnly` (Swift renamed it per cookbook §2.5 vocab,
-F13; Rust had kept the old name). **This is now closed in both ports** (verified
-2026-06-06): Rust `Filter::AutomatedConfirmedOnly` (`packages/kits/LocusKit/rust/src/filter.rs`,
-"Mirrors Swift `automatedConfirmedOnly`; was `ModelConfirmedOnly` in v0.35 (F13 rename)")
-matches Swift `Filter.automatedConfirmedOnly` (`Filter.swift`); the `bitmap_evaluator.rs`
-call sites and tests use the renamed variant.
-
-Correction to the original framing: this note previously read "being closed in a
-follow-on LocusKit-Rust pass." Deferring a parity drift to a "follow-on pass" is the
-prohibited pattern under parity-is-absolute, regardless of intent — a drift is closed
-in-edition, not parked. The rename was in fact completed; this note is corrected to
-record the closure rather than a deferral.
+versus the renamed Swift `Filter.automatedConfirmedOnly` (the Rust port had kept the old
+name). This is now closed in both ports: Rust `Filter::AutomatedConfirmedOnly` mirrors
+Swift `Filter.automatedConfirmedOnly`, and the `bitmap_evaluator` call sites and tests use
+the renamed variant. The drift was found and closed in both ports together.
 
 ## Status
 
-Decided and implemented on both ports (Swift `4c353d67`, Rust `fb21eb0d`, interface doc
-`b34a6520`). All four suites green (Swift VaultKit 24 / ARIA_MCP 112; Rust VaultKit 22 /
-ARIA_MCP 84). Concordance audit clean.
+Decided and implemented on both ports; all four test suites green (Swift VaultKit and
+aria-mcp; Rust VaultKit and aria-mcp).

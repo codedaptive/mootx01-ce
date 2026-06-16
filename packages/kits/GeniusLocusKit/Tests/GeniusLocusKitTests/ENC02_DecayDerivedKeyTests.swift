@@ -172,7 +172,7 @@ struct ENC02_DecayDerivedKeyTests {
     @Test
     func clearanceTrueIssuesAndReturnsScopeKey() async throws {
         let (kit, handle) = try await openOneEstate()
-        // Must not throw hardwareNotSupported: the gate now permits mode 3.
+        // Clearance confirmed: issuance proceeds without error.
         let result = try await kit.issueGrant(
             handle, options(decayMode()), now: issuedAt
         )

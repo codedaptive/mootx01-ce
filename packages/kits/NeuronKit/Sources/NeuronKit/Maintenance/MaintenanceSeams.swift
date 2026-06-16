@@ -105,6 +105,14 @@ public protocol MaintenanceSubstrateReader: Sendable {
     /// The current unified audit log, fed to `AuditChainVerifier.verify`
     /// for the audit-chain integrity monitor (NEURONKIT_SPEC § 3.5).
     func currentAuditLog() async throws -> UnifiedAuditLog
+
+    /// Drawers with enrichment status `qid_pending` (provenance bits 36-41 == 1,
+    /// cookbook §2.5), bounded to `limit` rows for O(cap) scan cost. The
+    /// maintenance daemon uses these as input to the QID-pending retry batch
+    /// (Board item 14). The adapter returns active (non-tombstoned, Cluster-A)
+    /// drawers only, in `filedAt` ascending order. B-10a: internal read,
+    /// no trace_limit, no recall-trace rows written.
+    func qidPendingDrawers(limit: Int) async throws -> [Drawer]
 }
 
 // MARK: - Write seam
@@ -120,8 +128,9 @@ public protocol MaintenanceSubstrateReader: Sendable {
 ///
 /// `EstateMaintenanceSink` is the production adapter; it implements
 /// `propose(_:)` by forwarding to the estate handle's `propose` verb
-/// (the legal B-1 write path) and `recordCycleDiary(_:)` by forwarding
-/// to `addDiaryEntry`.
+/// (the legal B-1 write path), `recordCycleDiary(_:)` by forwarding
+/// to `addDiaryEntry`, and `updateEnrichmentStatus(_:newProvenance:now:)` by
+/// forwarding to `GeniusLocusKit.updateEnrichmentStatus(in:rowID:…)`.
 public protocol MaintenanceProposalSink: Sendable {
 
     /// Emit a remediation proposal. Maps to the estate `propose` verb in
@@ -131,6 +140,21 @@ public protocol MaintenanceProposalSink: Sendable {
 
     /// Record exactly one diary entry summarising the cycle (§ 3.2).
     func recordCycleDiary(_ entry: DiaryEntry) async throws
+
+    /// Update a drawer's provenance bitmap after a QID-pending retry
+    /// (Board item 14, NEURONKIT_SPEC § 3.2). The caller supplies the
+    /// new full provenance value with the enrichment-status field
+    /// (bits 36-41) set to the result of the retry (qid_completed on
+    /// success, qid_pending unchanged on failure). Routes through
+    /// `GeniusLocusKit.updateEnrichmentStatus(in:rowID:…)`, which calls
+    /// `Estate.mutateProvenance` and writes an audit row atomically.
+    ///
+    /// Determinism: `now` is the caller-supplied timestamp.
+    func updateEnrichmentStatus(
+        rowID: RowID,
+        newProvenance: Int64,
+        now: Date
+    ) async throws
 }
 
 // MARK: - Cycle report
@@ -177,4 +201,31 @@ public struct MaintenanceCycleReport: Sendable, Equatable {
 
     /// The single diary entry written this cycle.
     public let diaryEntry: DiaryEntry
+
+    // MARK: - QID-pending retry telemetry (Board item 14)
+
+    /// Number of drawers with enrichment-status `qid_pending` that the
+    /// daemon attempted to retry this cycle (the retry batch size, capped
+    /// at `QID_RETRY_SCAN_CAP`). Emitted as the
+    /// `neuronkit.enrichment.qid_retry` counter.
+    public let qidRetried: Int
+
+    /// Number of retried drawers for which Q-ID resolution succeeded this
+    /// cycle (enrichment status flipped to `qid_completed`). Emitted as
+    /// the `neuronkit.enrichment.qid_resolved` counter.
+    public let qidResolved: Int
+
+    /// Number of retried drawers that deterministic re-inference could not
+    /// resolve this cycle and for which the daemon therefore filed an
+    /// enrichment proposal and flipped the status to the terminal
+    /// in-workflow state `qid_proposed`. These leave the retry backlog.
+    /// Emitted as the `neuronkit.enrichment.qid_proposed` counter.
+    public let qidProposed: Int
+
+    /// Number of retried drawers that remain `qid_pending` after this cycle
+    /// SOLELY because the substrate write failed (a real runtime failure) —
+    /// never a deterministic re-inference miss, which now terminates as
+    /// `qid_proposed`. Emitted as the
+    /// `neuronkit.enrichment.qid_still_pending` counter.
+    public let qidStillPending: Int
 }

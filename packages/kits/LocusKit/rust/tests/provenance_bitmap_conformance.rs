@@ -276,6 +276,7 @@ const ENRICHMENT_TABLE: &[(EnrichmentStatus, i64)] = &[
     (EnrichmentStatus::QidPending, 1),
     (EnrichmentStatus::QidCompleted, 2),
     (EnrichmentStatus::ClosureCached, 3),
+    (EnrichmentStatus::QidProposed, 4),
 ];
 
 #[test]

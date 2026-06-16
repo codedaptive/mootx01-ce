@@ -3,14 +3,14 @@
 // Persisted preference signal carried alongside a tournament outcome,
 // per NEURONKIT_SPEC § 4.6.
 //
-// Mission-scope deviation from the spec signature, recorded in
-// MISSION_NK_1A_REASONING_SURFACE Known Ambiguity 2: the spec's
-// `tournamentReport: TournamentReport` field is intentionally absent
-// in this v0.1 shape. `TournamentReport` references `BranchHandle`,
-// which does not exist in either version today. The tournament mission
-// adds the field once branching ships; no placeholder type is
-// invented here. ScenarioProfile is otherwise complete and round-trips
-// the rest of § 4.6 verbatim.
+// `tournamentReport: TournamentReport?` is a runtime-only field.
+// `TournamentReport` carries `any BranchHandle`, which is not `Codable`,
+// so the field is excluded from JSON persistence via custom `CodingKeys`.
+// The JSON wire shape therefore never contains a `tournamentReport` key.
+// Callers that receive a `ScenarioProfile` via the NeuronKit verb layer
+// may inspect `tournamentReport` in memory; it is not reconstructed on
+// decode. This matches the spec § 4.6 intent: the report is advisory,
+// not part of the durable preference signal.
 //
 // Bool-storage note (CLAUDE.md hard rule): the schema-invariants rule
 // forbids `public var x: Bool` *stored* properties on entities whose
@@ -29,8 +29,8 @@ import Foundation
 /// a tournament outcome. Stored in the estate manifest under
 /// `scenario_profiles`; survives migration per spec § 4.6.
 ///
-/// The `tournamentReport` field defined in spec § 4.6 is deferred to
-/// the tournament mission (see Mission Known Ambiguity 2).
+/// `tournamentReport` is a runtime-only field (not serialised to JSON):
+/// see the file header for the Codable exclusion rationale.
 public struct ScenarioProfile: Sendable, Equatable, Codable {
 
     /// Stable identifier — caller-supplied or generated at save time.
@@ -68,6 +68,59 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
     /// the file header for the Bool-storage rule discussion.
     public let trainingEligible: Bool
 
+    /// Advisory tournament outcome attached at profile-save time
+    /// (NEURONKIT_SPEC § 4.6). Runtime-only: not serialised to JSON
+    /// (see the file header). `nil` on profiles decoded from persisted
+    /// storage; populated by `saveScenarioProfile` at the moment of
+    /// creation.
+    public let tournamentReport: TournamentReport?
+
+    // MARK: - Codable
+
+    /// CodingKeys excludes `tournamentReport` because `TournamentReport`
+    /// carries `any BranchHandle`, which is not `Codable`. The JSON wire
+    /// shape is stable and does not contain that key.
+    private enum CodingKeys: String, CodingKey {
+        case profileID
+        case name
+        case framingParameters
+        case scoringBreakdown
+        case preferenceWeights
+        case createdAt
+        case trainingEligible
+    }
+
+    /// Decode from JSON. `tournamentReport` is always `nil` after decode —
+    /// it is a runtime-only advisory value that is not part of the wire shape.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        profileID = try c.decode(UUID.self, forKey: .profileID)
+        name = try c.decode(String.self, forKey: .name)
+        framingParameters = try c.decode([String: String].self, forKey: .framingParameters)
+        scoringBreakdown = try c.decode([String: Double].self, forKey: .scoringBreakdown)
+        preferenceWeights = try c.decode([String: Double].self, forKey: .preferenceWeights)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        trainingEligible = try c.decode(Bool.self, forKey: .trainingEligible)
+        // Never decoded — runtime-only advisory value, not part of wire shape.
+        tournamentReport = nil
+    }
+
+    // MARK: - Equatable
+
+    /// Custom `Equatable` because `TournamentReport` embeds
+    /// `any BranchHandle`, which is not `Equatable`. Two profiles are
+    /// equal when all their persisted fields are equal; `tournamentReport`
+    /// is excluded from equality (runtime-only, advisory).
+    public static func == (lhs: ScenarioProfile, rhs: ScenarioProfile) -> Bool {
+        lhs.profileID == rhs.profileID
+            && lhs.name == rhs.name
+            && lhs.framingParameters == rhs.framingParameters
+            && lhs.scoringBreakdown == rhs.scoringBreakdown
+            && lhs.preferenceWeights == rhs.preferenceWeights
+            && lhs.createdAt == rhs.createdAt
+            && lhs.trainingEligible == rhs.trainingEligible
+    }
+
     public init(
         profileID: UUID = UUID(),
         name: String,
@@ -75,7 +128,8 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
         scoringBreakdown: [String: Double],
         preferenceWeights: [String: Double],
         createdAt: Date,
-        trainingEligible: Bool = false
+        trainingEligible: Bool = false,
+        tournamentReport: TournamentReport? = nil
     ) {
         self.profileID = profileID
         self.name = name
@@ -84,5 +138,6 @@ public struct ScenarioProfile: Sendable, Equatable, Codable {
         self.preferenceWeights = preferenceWeights
         self.createdAt = createdAt
         self.trainingEligible = trainingEligible
+        self.tournamentReport = tournamentReport
     }
 }

@@ -54,12 +54,11 @@ case "$arch" in
 esac
 target="${os}-${arch}"
 
-# The MCP server (`mootx01 serve`) is macOS-only; Linux builds carry the
-# install/uninstall/db/status/query subcommands but not the server.
-if [ "$os" = "linux" ]; then
-  echo "Note: the mootx01 MCP server (\`serve\`) is macOS-only; the Linux build" >&2
-  echo "      provides the management subcommands but cannot host an estate." >&2
-fi
+# Linux/Windows ship the Rust `mootx01` vertical, which hosts the estate via
+# `mootx01 serve` exactly like macOS (CI smoke-tests `serve` on Linux). The
+# `moot-mgr` console ships on every platform: the Swift build on macOS and the
+# headless Rust build on Linux (x86_64/arm64) and Windows. Its admin control
+# channel is a Unix-domain socket on Unix and a named pipe on Windows.
 
 # 2. Resolve the version. Use the releases/latest *web* redirect (no API rate
 #    limit) and fall back to the API. Matches codegraph's approach.
@@ -75,9 +74,10 @@ fi
 [ -n "$version" ] || { echo "mootx01: could not resolve latest version; set MOOTX01_VERSION (e.g. MOOTX01_VERSION=v1.0.0)." >&2; exit 1; }
 case "$version" in v*) ;; *) version="v$version" ;; esac
 
-# 3. Download + extract. The macOS release tarball contains two bare binaries
-#    at its root — `mootx01` and `moot-mgr` (the management console); Linux
-#    archives carry `mootx01` only (release.yml: `tar -czf ASSET mootx01 [moot-mgr]`).
+# 3. Download + extract. Every archive carries two bare binaries at the root —
+#    `mootx01` and `moot-mgr` (the management console). This script handles the
+#    macOS/Linux tarballs; the Windows .zip is the PowerShell installer's domain
+#    (release.yml).
 asset="mootx01-${version}-${target}.tar.gz"
 url="https://github.com/$REPO/releases/download/$version/$asset"
 echo "Installing mootx01 $version ($target)..."
@@ -96,8 +96,8 @@ ln -sf "$INSTALL_DIR/mootx01" "$BIN_DIR/mootx01"
 echo "Installed  $INSTALL_DIR/mootx01"
 echo "Linked     $BIN_DIR/mootx01"
 
-# moot-mgr (the management & monitoring console) ships only in the macOS
-# archive; place it the same way when the extracted tree carries it.
+# moot-mgr (the management & monitoring console) ships in the macOS and Linux
+# archives; place it the same way whenever the extracted tree carries it.
 mgr_installed=0
 if [ -f "$tmp/moot-mgr" ]; then
   install -m 0755 "$tmp/moot-mgr" "$INSTALL_DIR/moot-mgr"
@@ -122,5 +122,5 @@ if [ "$mgr_installed" = "1" ]; then
   echo ""
   echo "Management console: \`mootx01 install\` registers moot-mgr as a background"
   echo "launchd service (starts now, restarts at login) — dashboard at"
-  echo "http://127.0.0.1:7077. Or run it yourself any time with \`moot-mgr serve\`."
+  echo "http://127.0.0.1:4200. Or run it yourself any time with \`moot-mgr serve\`."
 fi

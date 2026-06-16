@@ -26,9 +26,9 @@ INSTALL_DIR="${MOOTX01_INSTALL_DIR:-$HOME/.mootx01/bin}"
 BIN_DIR="${MOOTX01_BIN_DIR:-$HOME/.local/bin}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-echo "Building mootx01 (release) from $ROOT/installer ..."
-swift build -c release --package-path "$ROOT/installer" --product mootx01
-BIN="$ROOT/installer/.build/release/mootx01"
+echo "Building mootx01 (release) from $ROOT/apps/mootx01 ..."
+swift build -c release --package-path "$ROOT/apps/mootx01" --product mootx01
+BIN="$ROOT/apps/mootx01/.build/release/mootx01"
 [ -x "$BIN" ] || { echo "mootx01: build did not produce $BIN" >&2; exit 1; }
 
 mkdir -p "$INSTALL_DIR"
@@ -74,5 +74,5 @@ echo ""
 echo "Binary refreshed. Restart your MCP client to pick it up."
 echo "First time? Wire clients with:  mootx01 install   (or re-run with --wire)"
 if [ "$mgr_installed" = "1" ]; then
-  echo "Management console:  moot-mgr serve   (http://127.0.0.1:7077)"
+  echo "Management console:  moot-mgr serve   (http://127.0.0.1:4200)"
 fi

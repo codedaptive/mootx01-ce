@@ -17,7 +17,7 @@
 //! bits 18–23  confirmation           (contiguous, 5 cases at raw 0..4)
 //! bits 24–29  confidence             (scale-gapped, 0/16/32/48/56)
 //! bits 30–35  sensitivity_at_capture (scale-gapped, mirrors adjective sensitivity)
-//! bits 36–41  enrichment_status      (contiguous, 4 cases at raw 0..3)
+//! bits 36–41  enrichment_status      (contiguous, 5 cases at raw 0..4)
 //! bits 42–63  reserved
 //! ```
 //!
@@ -280,7 +280,14 @@ pub enum EnrichmentStatus {
     QidPending = 1,
     QidCompleted = 2,
     ClosureCached = 3,
-    // raws 4–63 reserved
+    /// Q-ID could not be resolved by deterministic re-inference and an
+    /// enrichment proposal has been filed for human/agent review. A
+    /// terminal "in workflow" state, NOT passive pending: the maintenance
+    /// daemon's `qid_pending` scan does not re-pick these rows. Proposal
+    /// acceptance moves the row to `QidCompleted` (cookbook §2.5;
+    /// Q-ID-completion terminal workflow).
+    QidProposed = 4,
+    // raws 5–63 reserved
 }
 
 impl EnrichmentStatus {
@@ -296,6 +303,7 @@ impl EnrichmentStatus {
             1 => EnrichmentStatus::QidPending,
             2 => EnrichmentStatus::QidCompleted,
             3 => EnrichmentStatus::ClosureCached,
+            4 => EnrichmentStatus::QidProposed,
             _ => EnrichmentStatus::None,
         }
     }
@@ -468,18 +476,19 @@ mod tests {
         assert_eq!(EnrichmentStatus::QidPending.raw_value(), 1);
         assert_eq!(EnrichmentStatus::QidCompleted.raw_value(), 2);
         assert_eq!(EnrichmentStatus::ClosureCached.raw_value(), 3);
+        assert_eq!(EnrichmentStatus::QidProposed.raw_value(), 4);
     }
 
     #[test]
-    fn enrichment_status_roundtrip_4_cases() {
-        for v in 0i64..=3 {
+    fn enrichment_status_roundtrip_5_cases() {
+        for v in 0i64..=4 {
             assert_eq!(EnrichmentStatus::from_raw(v).raw_value(), v);
         }
     }
 
     #[test]
     fn enrichment_status_reserved_falls_back() {
-        assert_eq!(EnrichmentStatus::from_raw(4), EnrichmentStatus::None);
+        assert_eq!(EnrichmentStatus::from_raw(5), EnrichmentStatus::None);
         assert_eq!(EnrichmentStatus::from_raw(63), EnrichmentStatus::None);
     }
 }

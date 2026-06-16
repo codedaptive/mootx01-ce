@@ -103,9 +103,9 @@ public enum RecipeCatalog {
             name: "contradiction", version: "1.0.0",
             description: "Reasoning lens: flag the recalled memories whose content cohesion with their peers is anomalously low — the odd-ones-out.",
             requiredCapabilities: []),
-        // Grounding / trust lens.
+        // Grounding / trust lens (v1.1.0: adds optional calibrated confidences).
         RecipeDescriptor(
-            name: "trust_grounded_synthesis", version: "1.0.0",
+            name: "trust_grounded_synthesis", version: "1.1.0",
             description: "Reasoning lens: recall, rank by provenance trust (canonical and user above derived), and synthesize the trust-ordered set.",
             requiredCapabilities: [.synthesize]),
         // Associative lens.
@@ -134,6 +134,25 @@ public enum RecipeCatalog {
         // Analytics lenses.
         RecipeDescriptor(AssociationRules()),
         RecipeDescriptor(FormalConcepts()),
+        RecipeDescriptor(AprioriRules()),
+        // Temporal lenses (Lenses 1–3, Time+Prediction).
+        RecipeDescriptor(
+            name: "moment", version: "1.0.0",
+            description: "Reasoning lens: OR-reduce the primary window's fingerprints into a temporal signature and rank comparison windows by Hamming proximity.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "rhythm", version: "1.0.0",
+            description: "Reasoning lens: FFT over a time-bucketed fingerprint bit series to surface the dominant periodic activity patterns.",
+            requiredCapabilities: []),
+        RecipeDescriptor(
+            name: "precedence", version: "1.0.0",
+            description: "Reasoning lens: fold the estate's audit trail into T-matrix deltas and rank the antecedents most predictive of a target field-value coordinate.",
+            requiredCapabilities: []),
+        // Information-theoretic lens (Lens 4, Topics).
+        RecipeDescriptor(
+            name: "complexity", version: "1.0.0",
+            description: "Reasoning lens: Shannon entropy (and optional mutual information) over the distribution of a label field across the recalled set.",
+            requiredCapabilities: []),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

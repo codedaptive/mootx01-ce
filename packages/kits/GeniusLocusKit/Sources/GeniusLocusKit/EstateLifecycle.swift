@@ -183,16 +183,23 @@ public extension GeniusLocusKit {
                 // internal vector store.
                 let vectorStore = VectorStore(storage: backingStorage)
                 registerVectorStore(vectorStore, for: handle)
+                // Dual-Path Intake D-B: mount the estate's dedicated encode queue
+                // and start its drain worker alongside the corpus/vector wiring.
+                // The regular capture path enqueues here; the worker ingests into
+                // the Corpus above, lighting the semantic recall lanes.
+                try await mountEncodeQueue(for: handle)
                 Self.lifecycleLog.info(
-                    "provisioned GLK estate \(handle.estateUUID, privacy: .public) (Corpus + VectorStore wired)"
+                    "provisioned GLK estate \(handle.estateUUID, privacy: .public) (Corpus + VectorStore + encode queue wired)"
                 )
 
             case .corpusOnly:
                 // LocusKit core + Corpus. No standalone VectorStore registration.
                 let corpus = try await Corpus(storage: backingStorage, model: embeddingModel)
                 registerCorpus(corpus, for: handle)
+                // D-B: a CorpusOnly estate also feeds its Corpus from capture.
+                try await mountEncodeQueue(for: handle)
                 Self.lifecycleLog.info(
-                    "provisioned CorpusOnly estate \(handle.estateUUID, privacy: .public) (Corpus wired)"
+                    "provisioned CorpusOnly estate \(handle.estateUUID, privacy: .public) (Corpus + encode queue wired)"
                 )
 
             case .locusOnly:
@@ -348,12 +355,15 @@ public extension GeniusLocusKit {
     /// no sub-store data is accessible or reachable through any GLK handle.
     ///
     /// Teardown sequence:
-    ///   1. If the handle is still in the registry, calls `close(_:)` to flush
-    ///      LocusKit and drop registry entries. If the handle is already closed
-    ///      (`.estateNotOpen`), proceeds with sub-store teardown.
-    ///   2. Calls `Corpus.destroyRecallIndex()` on the registered corpus (if any).
-    ///   3. Calls `VectorStore.destroyAllVectors()` on the registered vector store
-    ///      (if any and not already destroyed by the corpus teardown).
+    ///   1. Calls `Corpus.destroyRecallIndex()` on the registered corpus (if any).
+    ///      Must happen BEFORE `close(_:)` because `close` calls `storage.close()`
+    ///      to release the SQLite connection, and the corpus teardown needs the
+    ///      connection open to execute its SQL DELETE operations.
+    ///   2. Calls `VectorStore.destroyAllVectors()` on the registered vector store
+    ///      (if any), for the same reason — before the storage connection is closed.
+    ///   3. Calls `close(_:)` to flush LocusKit, drop all registry entries, and
+    ///      release the SQLite connection. If the handle is already closed
+    ///      (`.estateNotOpen`), this step is skipped.
     ///
     /// Note: the BundleStore's `chunks` table is append-only (PersistenceKit schema
     /// invariant). Chunk rows are NOT deleted by this call — they remain in the
@@ -381,14 +391,15 @@ public extension GeniusLocusKit {
         let corpus = corpusKits[handle]
         let vectorStore = vectorStores[handle]
 
-        // Step 1: Close the estate through the standard coordinator path.
-        // close() flushes LocusKit, drops registry entries (including
-        // corpusKits[handle] and vectorStores[handle]).
-        if registry[handle] != nil {
-            try await close(handle)
-        }
-
-        // Step 2: Destroy the Corpus recall index (BM25 + internal vectors).
+        // Step 1: Destroy the Corpus recall index (BM25 + internal vectors) BEFORE
+        // calling close(). close() now calls storage.close(), which releases the
+        // SQLite connection. Sub-store teardown must happen while the connection is
+        // still open so the corpus and vector store SQL writes (DELETE rows, clear
+        // BM25 index) can complete. Order matters:
+        //   sub-store teardown → close() → storage connection released
+        //
+        // The corpus and vector store are removed from the registry by close() (step 2),
+        // but we captured them above so we still hold live references for teardown.
         if let corpus = corpus {
             do {
                 try await corpus.destroyRecallIndex()
@@ -396,7 +407,8 @@ public extension GeniusLocusKit {
                     "destroy: Corpus recall index cleared for \(handle.estateUUID, privacy: .public)"
                 )
             } catch {
-                // Log and continue — we still want to attempt the VectorStore teardown.
+                // Log and continue with close() and VectorStore teardown so the estate
+                // is removed from the registry even when the corpus teardown fails.
                 Self.lifecycleLog.error(
                     "destroy: Corpus recall index teardown failed for \(handle.estateUUID, privacy: .public): \(error, privacy: .public)"
                 )
@@ -406,7 +418,7 @@ public extension GeniusLocusKit {
             }
         }
 
-        // Step 3: Destroy the standalone VectorStore vectors.
+        // Step 2: Destroy the standalone VectorStore vectors.
         // If the estate used corpusStorage for its Corpus (which owns an internal
         // VectorStore), the primary storage's VectorStore is a separate instance.
         // We clear it here so no vectors linger in the primary storage.
@@ -424,6 +436,15 @@ public extension GeniusLocusKit {
                     reason: "VectorStore destroy failed: \(error)"
                 )
             }
+        }
+
+        // Step 3: Close the estate through the standard coordinator path.
+        // This flushes LocusKit, drops all registry entries (registry, auditLogs,
+        // corpusKits, vectorStores, mountStates, storages, etc.), and calls
+        // storage.close() to release the SQLite connection.
+        // Sub-store teardown (steps 1–2) must complete before this call.
+        if registry[handle] != nil {
+            try await close(handle)
         }
 
         Self.lifecycleLog.info("destroyed estate \(handle.estateUUID, privacy: .public)")

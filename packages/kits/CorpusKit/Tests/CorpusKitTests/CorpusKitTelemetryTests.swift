@@ -41,7 +41,6 @@ import Foundation
 import Testing
 import EngramLib
 import PersistenceKit
-import PersistenceKitInMemory
 @testable import CorpusKit
 import IntellectusLib
 import VectorKit
@@ -92,10 +91,7 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
 
 /// Creates fresh InMemory-backed storage for each test.
 private func makeFreshStorage() async throws -> any Storage {
-    let storage = InMemoryStorage(configuration: EstateConfiguration(
-        estateID: UUID(),
-        backend: .inMemory
-    ))
+    let storage = try makeScratchStorage()
     return storage
 }
 
@@ -369,7 +365,7 @@ struct CorpusKitTelemetryShapeTests {
                         0xDDDD_DDDD_DDDD_DDDD
             )
             try await vectorStore.addVector(
-                drawerID: chunkID.uuidString,
+                itemID: chunkID.uuidString,
                 engram: probe,
                 modelID: "test-model",
                 modelVersion: "1.0",
@@ -484,7 +480,7 @@ struct CorpusKitTelemetryConformanceTests {
                 try await bundleStore.insert([chunk])
                 await bm25.index([chunk])
                 try await vectorStore.addVector(
-                    drawerID: chunkID.uuidString,
+                    itemID: chunkID.uuidString,
                     engram: eng,
                     modelID: "m",
                     modelVersion: "1",

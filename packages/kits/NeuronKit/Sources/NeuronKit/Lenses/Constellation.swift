@@ -26,7 +26,13 @@ extension NeuronKit {
         guard !nodeIDs.isEmpty else { return Constellation(communities: []) }
 
         let adjacency = StructureGraph.build(nodeIDs: nodeIDs, edges: edges)
-        let labels = SubstrateML.CommunityDetection.detect(adjacency: adjacency, maxPasses: maxPasses)
+        // Full Louvain at the shared lens resolution (see
+        // NeuronKit.topologyResolution for the derivation): §7.3's
+        // auto-rooming consumer is this lens, and phase-1-only results
+        // fragment pair-bonded clusters.
+        let labels = SubstrateML.CommunityDetection.detectFull(
+            adjacency: adjacency, maxLevels: topologyMaxLevels,
+            maxPasses: maxPasses, resolution: topologyResolution)
 
         // Group ids by their assigned label, then impose an id-derived canonical
         // ordering so the result does not depend on the label integers.

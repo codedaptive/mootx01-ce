@@ -2,9 +2,11 @@
 //
 // Slot sets and field names match the Swift `Frames.swift` in
 // `Sources/GeniusLocusKit/Verbs/`. These GLK-level frames use
-// string-typed ids and i64 raw enum values; downstream missions
-// wiring the GLK verb bodies through to locus_kit::Estate can tighten
-// to the LocusKit nominal types at that point.
+// string-typed ids and i64 raw enum values by design: the GLK boundary
+// layer is intentionally decoupled from locus_kit nominal types so the
+// coordinator can translate at the boundary (see coordinator.rs verb
+// dispatch methods). All nine verbs are wired through to
+// locus_kit::Estate in coordinator.rs.
 
 /// A row's stable identifier. Mirrors `LocusKit.RowID = String` in
 /// Swift.
@@ -39,7 +41,8 @@ impl LatticeAnchor {
 /// `LocusKit.MutationKind`. The Swift variant carries associated
 /// values for `correctSensitivity` and `correctTrust`; this GLK
 /// frame keeps them as raw i64 values to stay independent of the
-/// locus_kit adjective enum types until verb dispatch is wired.
+/// locus_kit adjective enum types — the coordinator maps these to
+/// the LocusKit `MutationKind` enum at the dispatch boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutationKind {
     Confirm,
@@ -62,9 +65,9 @@ pub enum MutationKind {
 pub struct CaptureFrame {
     pub content: String,
     /// Capture channel raw value (typed=0, voiced=1, ocr=2,
-    /// imported_file=3, sensor=4). Kept as i64 raw value here so
-    /// this GLK frame stays independent of locus_kit::CaptureChannel;
-    /// verb-wiring missions can reference the locus_kit type directly.
+    /// imported_file=3, sensor=4). Kept as i64 raw value at the GLK
+    /// boundary; the coordinator maps it to locus_kit::CaptureChannel
+    /// at dispatch.
     pub channel: i64,
     /// Content kind raw value (prose=0, code=1, transcript=2, list=3,
     /// structured_json=4, image_caption=5).
@@ -79,14 +82,14 @@ pub struct CaptureFrame {
 }
 
 /// Recall frame. Slot names mirror Swift `RecallFrame`. The filter
-/// chain is a free-form string list at this GLK scaffold tier;
-/// downstream missions wiring GLK verb dispatch through locus_kit
-/// replace this with the typed `locus_kit::filter::Filter` sum-type.
+/// chain is a free-form string list at the GLK boundary layer; the
+/// coordinator maps these tokens to `locus_kit::filter::Filter` values
+/// at dispatch (see `coordinator.rs recall` dispatch method).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecallFrame {
-    /// Filter chain — opaque string tokens at this GLK scaffold tier;
-    /// verb-wiring missions swap this for `locus_kit::filter::Filter`
-    /// values. Empty chain is illegal per spec § 7.9.1.
+    /// Filter chain — opaque string tokens at the GLK boundary;
+    /// the coordinator maps these to `locus_kit::filter::Filter`
+    /// values at dispatch. Empty chain is illegal per spec § 7.9.1.
     pub filter_chain: Vec<String>,
     pub hydration_level: HydrationLevel,
     pub limit: Option<i64>,
@@ -106,16 +109,20 @@ pub enum HydrationLevel {
 }
 
 /// Result ordering for recall. Mirrors `LocusKit.Ordering`.
+///
+/// `ByRelevanceDesc` is not present on this enum — LocusKit is a bitmap
+/// filter engine with no scoring signal. Relevance ranking is provided by
+/// the GLK RecallDirector's scoring mode (UnionBest + query_text), not by
+/// the LocusKit page order. The case was removed to match the Swift removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ordering {
     ByCaptureTimeDesc,
     ByCaptureTimeAsc,
-    ByRelevanceDesc,
     ByRoomAsc,
 }
 
-/// Learn frame. Mirrors `LocusKit.LearnFrame`. Full slot set is
-/// wired when the GLK learn verb body is connected to locus_kit.
+/// Learn frame. Mirrors `LocusKit.LearnFrame`. The GLK learn verb
+/// body is wired through to locus_kit in coordinator.rs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnFrame {
     pub handle: String,

@@ -23,9 +23,9 @@ Documents checked:
   1. primitive-catalog.md
        (test-harness/primitive-catalog.md)
   2. HARNESS_REFERENCE_v1.0
-       (docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md)
+       (docs/engineering/HARNESS_REFERENCE.md)
   3. GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0 §18.2
-       (docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md)
+       (docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md)
 
 Exit status:
   0 — all CRCs in all three documents match vector files
@@ -50,8 +50,8 @@ REPO_ROOT   = HARNESS_DIR.parents[3]   # …/test-harness → …/substrate_math
 
 VECTORS_DIR = HARNESS_DIR / "vectors"
 CATALOG     = HARNESS_DIR / "primitive-catalog.md"
-HARNESS_REF = REPO_ROOT / "docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md"
-COOKBOOK    = REPO_ROOT / "docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md"
+HARNESS_REF = REPO_ROOT / "docs/engineering/HARNESS_REFERENCE.md"
+COOKBOOK    = REPO_ROOT / "docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md"
 VALIDATE    = HARNESS_DIR / "swift/.build/debug/validate-vectors"
 
 # ---------- pretty output (color iff tty and NO_COLOR unset) ----------

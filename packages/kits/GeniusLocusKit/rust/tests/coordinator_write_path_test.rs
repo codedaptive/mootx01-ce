@@ -40,7 +40,7 @@ fn open_one() -> (EstateCoordinator, EstateHandle) {
 
 // MARK: - add_kg_fact
 
-/// A newly added kg-fact appears in recall_kg_facts (state cluster 0 < 7).
+/// A newly added kg-fact appears in recall_kg_facts (raw state 0, RowState Cluster A).
 #[test]
 fn add_kg_fact_appears_in_recall() {
     let (coord, handle) = open_one();
@@ -89,7 +89,8 @@ fn add_kg_fact_unknown_handle_returns_estate_not_open() {
 
 // MARK: - withdraw_kg_fact
 
-/// A withdrawn kg-fact is excluded from active-recall (g_state_cluster >= 7).
+/// A withdrawn kg-fact (RowState Cluster B, raw 18) is excluded from
+/// active-recall (g_state_cluster >= RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW, 16).
 #[test]
 fn withdraw_kg_fact_excluded_from_active_recall() {
     let (coord, handle) = open_one();
@@ -102,6 +103,54 @@ fn withdraw_kg_fact_excluded_from_active_recall() {
     assert!(
         facts.is_empty(),
         "withdrawn fact must not appear in active recall"
+    );
+}
+
+// MARK: - revive round-trip through the GLK dispatch surface
+
+/// capture → withdraw → mutate(Revive): the revive verb reaches LocusKit
+/// through the GLK coordinator (the layer ARIA dispatches into) and a
+/// withdrawn drawer returns to active. Re-reviving the now-active row
+/// fails with the "already live" domain rule, proving the first revive
+/// flipped the state to active. Mirrors the Swift VerbSurface round-trip.
+#[test]
+fn mutate_revive_from_withdrawn_round_trip() {
+    use locus_kit::frames::MutationKind;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::frames::CaptureFrame;
+
+    let (coord, handle) = open_one();
+    let frame = CaptureFrame::new(
+        "revive target",
+        CaptureChannel::Typed,
+        "test-room",
+        LatticeAnchor::udc("0"),
+        "test-agent",
+        "test-embed-v1",
+    );
+    let drawer = coord.capture(&handle, frame, NOW).expect("capture");
+
+    coord
+        .withdraw(&handle, &drawer.id, Some("verb tests"), NOW)
+        .expect("withdraw");
+
+    // revive: withdrawn → active through the GLK verb surface.
+    coord
+        .mutate(&handle, &drawer.id, MutationKind::Revive, None)
+        .expect("revive should succeed from withdrawn");
+
+    // The row is now active; a second revive must refuse with the
+    // already-live domain rule (proves the state actually flipped).
+    let err = coord
+        .mutate(&handle, &drawer.id, MutationKind::Revive, None)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure { .. })
+        ),
+        "re-revive of an active row must fail by domain rule: got {err:?}"
     );
 }
 

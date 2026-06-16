@@ -54,8 +54,8 @@ struct RecallPruningTests {
     private func drawer(id: String, room: String, op: Int64) -> Drawer {
         let content = "c-" + id
         // provenance confirmation = userConfirmed (raw 1 at bits 18-23
-        // per cookbook §2.5) so the default .userConfirmed filter
-        // admits the row; adjective 0 is active and trustworthy.
+        // per cookbook §2.5) for explicit confirmation-axis checks;
+        // adjective 0 is active and trustworthy.
         return Drawer(id: TestStorage.tid(id), content: content, wing: "w", room: room, addedBy: "t",
                       filedAt: Date(timeIntervalSince1970: 1_700_000_000),
                       embeddingModelID: "m",

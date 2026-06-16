@@ -8,6 +8,7 @@
 
 use crate::coordinator::{EstateCoordinator, GeniusLocusKitError};
 use crate::handle::EstateHandle;
+use locus_kit::filter::RecallFrame;
 
 /// A closed integer interval `[low, high]` over the lattice axis.
 /// Closed on both ends so a single-point region `[k, k]` is
@@ -25,12 +26,17 @@ impl LatticeRegion {
     }
 }
 
-/// One estate's contribution to a fan-out recall. The GLK fan-out
-/// returns drawer-id strings (not full `Drawer` values) because the
-/// GLK verb bodies have not yet been wired to dispatch through a
-/// live `locus_kit::Estate`; the parity test verifies the routing
-/// decision (which estates are selected) rather than the per-drawer
-/// payload.
+/// One estate's contribution to a fan-out recall.
+///
+/// The contribution carries the recalled drawer ids (`drawer_ids`),
+/// the id projection of the `Drawer` values the Swift contribution
+/// returns in `EstateRecallContribution.drawers` — the conformance
+/// unit here is the per-estate id SET (which drawers each overlapping
+/// estate recalled), so the Rust port carries ids rather than full
+/// `Drawer` payloads. The fan-out routes the supplied `RecallFrame`
+/// through each overlapping estate's live `locus_kit::Estate.recall`
+/// (the same surface a caller reaches through `estate_for`), so the
+/// ids are real recalled rows, not a routing placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EstateRecallContribution {
     pub handle: EstateHandle,
@@ -68,23 +74,47 @@ impl EstateCoordinator {
         Ok(out)
     }
 
-    /// Fan-out recall scaffold. The GLK verb bodies have not yet been
-    /// wired to dispatch through a live `locus_kit::Estate`, so the
-    /// coordinator returns a contribution per overlapping handle with
-    /// an empty `drawer_ids` list, which the parity test asserts
-    /// against the per-handle expectation. The function exists so the
-    /// live recall delegation lands behind a stable signature.
+    /// Route `frame` to every open estate whose zoom window overlaps
+    /// `region`, then return one contribution per contributing estate
+    /// carrying that estate's recalled drawer ids.
+    ///
+    /// Mirrors the Swift `GeniusLocusKit.fanOutRecall(_:region:)`: each
+    /// overlapping handle runs the supplied `RecallFrame` through its
+    /// live `locus_kit::Estate.recall` (via the coordinator's internal
+    /// `recall`, which leaves `trace_limit` None — fan-out is an
+    /// internal read, B-10a compliant), and the resulting drawer ids
+    /// are bundled into an `EstateRecallContribution` tagged with the
+    /// originating handle. Estates disjoint from `region` are not
+    /// consulted, so no work is done in them and they are absent from
+    /// the result.
+    ///
+    /// `now` is explicit per the Rust substrate's determinism
+    /// convention (the Swift estate reads its own clock).
+    ///
+    /// - Errors: `InvalidLatticeRegion` if `region.low > region.high`.
     pub fn fan_out_recall(
         &self,
+        frame: RecallFrame,
         region: LatticeRegion,
+        now: i64,
     ) -> Result<Vec<EstateRecallContribution>, GeniusLocusKitError> {
         let targets = self.estates_overlapping(region)?;
-        Ok(targets
-            .into_iter()
-            .map(|handle| EstateRecallContribution {
-                handle,
-                drawer_ids: Vec::new(),
-            })
-            .collect())
+        let mut contributions: Vec<EstateRecallContribution> =
+            Vec::with_capacity(targets.len());
+        for handle in targets {
+            // `recall` returns EstateNotOpen only if the handle is not in
+            // the registry; `estates_overlapping` sourced these handles
+            // from that same registry, so a miss means the registry was
+            // mutated mid-fan-out (a close raced an in-flight fan-out).
+            // Skip the missing entry rather than fail — parity with the
+            // Swift `guard let estate = registry[handle] else { continue }`.
+            let drawers = match self.recall(&handle, frame.clone(), now) {
+                Ok(drawers) => drawers,
+                Err(_) => continue,
+            };
+            let drawer_ids = drawers.into_iter().map(|d| d.id).collect();
+            contributions.push(EstateRecallContribution { handle, drawer_ids });
+        }
+        Ok(contributions)
     }
 }

@@ -4,9 +4,24 @@
 //! applied by `DrawerMapping::export`. The recall evaluator supplies
 //! per-axis defaults for any axis not addressed by the chain.
 //!
-//! Sensitivity is intentionally left unaddressed in all scopes so the
-//! evaluator applies its `.normal`-or-below default — export must never
-//! surface elevated/restricted/secret content to a plaintext vault.
+//! ## Privacy-tier enforcement (ADR-007 Decision 2)
+//!
+//! Sensitivity is NOT part of `filter_chain()` — the bulk channel enforces
+//! the tier rules itself so exclusions are counted, never silent:
+//!
+//! - **Secret tier** (`Secret`) NEVER rides bulk export, under every scope.
+//! - **Private tier** (`Restricted`) is excluded by default; only the
+//!   explicit `BelievedIncludingPrivate` scope includes it
+//!   (`includes_private_tier()`). The owner-key ceremony that authorizes
+//!   selecting that scope is v1.0-gold access-surface work; this scope is
+//!   the enforcement hook it will gate.
+//! - **Normal tier** (`Normal` + `Elevated`) exports freely.
+//!
+//! `DrawerMapping::export` recalls with an explicit
+//! `Filter::SensitivityAtMost(Secret)` appended (suppressing the
+//! evaluator's implicit `Elevated` ceiling so every tier is visible), then
+//! partitions by the ADR-007 tier predicates and reports per-tier
+//! exclusion counts.
 
 use locus_kit::filter::Filter;
 
@@ -14,7 +29,7 @@ use locus_kit::filter::Filter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VaultExportScope {
     /// Currently-believed drawers with any confirmation state and any trust
-    /// level (sensitivity stays at the evaluator's `.normal` default).
+    /// level. Normal tier only (tier rules in the module doc).
     ///
     /// Filter chain:
     ///   `[CurrentlyBelieve, Any([UserConfirmed, Unconfirmed, AutomatedConfirmedOnly]),
@@ -25,6 +40,15 @@ pub enum VaultExportScope {
     /// includes confirmed drawers — fixing the confirmed-drop bug.
     #[default]
     Believed,
+
+    /// `Believed` selection plus Private-tier (`Restricted`) drawers — the
+    /// explicit scope option ADR-007 Decision 2 requires for private-tier
+    /// bulk export. Secret tier is still never included.
+    ///
+    /// Filter chain: identical to `Believed`; the tier widening happens in
+    /// the bulk channel's partition (`includes_private_tier()`), not the
+    /// chain.
+    BelievedIncludingPrivate,
 
     /// Currently-believed drawers that are marked exportable (exportability
     /// == public_), with any confirmation state.
@@ -48,17 +72,31 @@ pub enum VaultExportScope {
 }
 
 impl VaultExportScope {
+    /// Whether this scope includes Private-tier (`Restricted`) drawers in
+    /// bulk export. True only for the explicit `BelievedIncludingPrivate`
+    /// opt-in (ADR-007 Decision 2: Private tier is excluded from bulk
+    /// channels by default). Secret tier is excluded regardless of scope.
+    /// Mirrors Swift `VaultExportScope.includesPrivateTier`.
+    pub fn includes_private_tier(&self) -> bool {
+        matches!(self, Self::BelievedIncludingPrivate)
+    }
+
     /// The `Filter` chain this scope maps to.
     ///
-    /// The chain is passed directly to `RecallFrame::filter_chain`; the recall
-    /// evaluator interprets it as an implicit AND. Per-axis defaults (trust,
-    /// provenance) are supplied by the evaluator when the chain does not address
-    /// an axis. Mirrors Swift `VaultExportScope.filterChain`.
+    /// The chain is passed to `RecallFrame::filter_chain` by
+    /// `DrawerMapping::export` with `Filter::SensitivityAtMost(Secret)`
+    /// appended; the recall evaluator interprets the chain as an implicit
+    /// AND. Per-axis defaults (trust, provenance) are supplied by the
+    /// evaluator when the chain does not address an axis. Sensitivity is
+    /// deliberately unaddressed here — the bulk channel enforces the
+    /// ADR-007 tier rules after recall so per-tier exclusion counts are
+    /// reported, never silent. Mirrors Swift `VaultExportScope.filterChain`.
     pub fn filter_chain(&self) -> Vec<Filter> {
         match self {
-            VaultExportScope::Believed => vec![
-                // currently-believed ∧ ANY confirmation state ∧ ANY trust.
-                // Sensitivity ≤ normal comes from the evaluator default.
+            // currently-believed ∧ ANY confirmation state ∧ ANY trust.
+            // The two scopes differ only in the tier partition
+            // (`includes_private_tier`), not in the chain.
+            VaultExportScope::Believed | VaultExportScope::BelievedIncludingPrivate => vec![
                 Filter::CurrentlyBelieve,
                 Filter::Any(vec![
                     Filter::UserConfirmed,
@@ -69,7 +107,7 @@ impl VaultExportScope {
             ],
             VaultExportScope::Exportable => vec![
                 // exportability==public ∧ currently-believed ∧ ANY confirmation.
-                // Trust and sensitivity from evaluator defaults.
+                // Trust from evaluator default.
                 Filter::Exportable,
                 Filter::CurrentlyBelieve,
                 Filter::Any(vec![
@@ -80,13 +118,13 @@ impl VaultExportScope {
             ],
             VaultExportScope::Confirmed => vec![
                 // user-confirmed ∧ currently-believed.
-                // Trust and sensitivity from evaluator defaults.
+                // Trust from evaluator default.
                 Filter::UserConfirmed,
                 Filter::CurrentlyBelieve,
             ],
             VaultExportScope::Unconfirmed => vec![
                 // unconfirmed ∧ currently-believed (the legacy capture-inbox behavior).
-                // Trust and sensitivity from evaluator defaults.
+                // Trust from evaluator default.
                 Filter::Unconfirmed,
                 Filter::CurrentlyBelieve,
             ],
@@ -100,6 +138,7 @@ impl VaultExportScope {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "believed" => Some(Self::Believed),
+            "believed-including-private" => Some(Self::BelievedIncludingPrivate),
             "exportable" => Some(Self::Exportable),
             "confirmed" => Some(Self::Confirmed),
             "unconfirmed" => Some(Self::Unconfirmed),
@@ -111,6 +150,7 @@ impl VaultExportScope {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Believed => "believed",
+            Self::BelievedIncludingPrivate => "believed-including-private",
             Self::Exportable => "exportable",
             Self::Confirmed => "confirmed",
             Self::Unconfirmed => "unconfirmed",
@@ -119,7 +159,25 @@ impl VaultExportScope {
 
     /// All valid scope strings, for error message generation.
     pub fn all_strs() -> &'static [&'static str] {
-        &["believed", "exportable", "confirmed", "unconfirmed"]
+        &[
+            "believed",
+            "believed-including-private",
+            "exportable",
+            "confirmed",
+            "unconfirmed",
+        ]
+    }
+
+    /// Every scope value, for exhaustive iteration in tests. Mirrors Swift
+    /// `VaultExportScope.allCases`.
+    pub fn all_cases() -> &'static [VaultExportScope] {
+        &[
+            Self::Believed,
+            Self::BelievedIncludingPrivate,
+            Self::Exportable,
+            Self::Confirmed,
+            Self::Unconfirmed,
+        ]
     }
 }
 
@@ -134,15 +192,10 @@ mod tests {
 
     #[test]
     fn from_str_round_trips() {
-        for scope in [
-            VaultExportScope::Believed,
-            VaultExportScope::Exportable,
-            VaultExportScope::Confirmed,
-            VaultExportScope::Unconfirmed,
-        ] {
+        for scope in VaultExportScope::all_cases() {
             let s = scope.as_str();
             let parsed = VaultExportScope::from_str(s).expect("must parse back");
-            assert_eq!(parsed, scope);
+            assert_eq!(parsed, *scope);
         }
     }
 
@@ -158,8 +211,27 @@ mod tests {
     }
 
     #[test]
+    fn believed_including_private_chain_matches_believed() {
+        // The opt-in scope differs only in the tier partition, not the chain.
+        assert_eq!(
+            VaultExportScope::BelievedIncludingPrivate.filter_chain(),
+            VaultExportScope::Believed.filter_chain()
+        );
+    }
+
+    #[test]
     fn unconfirmed_chain_has_correct_length() {
         // [Unconfirmed, CurrentlyBelieve] = 2 elements.
         assert_eq!(VaultExportScope::Unconfirmed.filter_chain().len(), 2);
+    }
+
+    #[test]
+    fn only_the_explicit_scope_includes_private_tier() {
+        for scope in VaultExportScope::all_cases() {
+            assert_eq!(
+                scope.includes_private_tier(),
+                *scope == VaultExportScope::BelievedIncludingPrivate
+            );
+        }
     }
 }

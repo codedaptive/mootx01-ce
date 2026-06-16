@@ -88,16 +88,81 @@ public actor EstateAdmin {
     /// it at a data dir beside the stats store; tests point it at a scratch dir.
     private let estatesDirectory: URL
 
+    /// Cache configuration applied to every estate this engine provisions
+    /// (Dual-Path Intake P1). Resolved once at init from the environment so the
+    /// live resident host runs the hot cache (the tested `CachingRowStore` LRU
+    /// tier) ON by default, while a test or operator can override it. Threaded
+    /// into every `EstateConfiguration` built by `makeStorage` for both the
+    /// SQLite and InMemory backends — `SQLiteStorage.init` decodes
+    /// `cacheConfig.enabled` to wrap the bare row store in `CachingRowStore`.
+    private let cacheConfig: EstateCacheConfig
+
     private let logger = Logger(subsystem: "com.mootx01.kit", category: "EstateAdmin")
 
     /// Create an admin engine.
     ///
-    /// - Parameter estatesDirectory: Filesystem directory for SQLite-backed
-    ///   estate stores. Created on demand at provision time. InMemory estates
-    ///   do not touch it.
-    public init(estatesDirectory: URL) {
+    /// - Parameters:
+    ///   - estatesDirectory: Filesystem directory for SQLite-backed
+    ///     estate stores. Created on demand at provision time. InMemory estates
+    ///     do not touch it.
+    ///   - cacheConfig: Per-estate cache configuration applied to every estate
+    ///     this engine provisions. Defaults to `Self.resolveCacheConfig()`,
+    ///     which reads the environment and otherwise returns the cache-ON
+    ///     default. Tests pass an explicit value (e.g. `.disabled`) to pin
+    ///     behaviour.
+    public init(
+        estatesDirectory: URL,
+        cacheConfig: EstateCacheConfig = EstateAdmin.resolveCacheConfig()
+    ) {
         self.kit = GeniusLocusKit()
         self.estatesDirectory = estatesDirectory
+        self.cacheConfig = cacheConfig
+    }
+
+    /// The default cache ceiling for a live estate when the environment does
+    /// not override it: 64 MiB of hot-tier LRU. Sized as a sane working-set
+    /// ceiling for an interactive single-estate resident host — large enough
+    /// that the recall hot path stays in-cache, small enough to bound RSS.
+    private static let defaultCacheCeilingBytes = 64 * 1024 * 1024
+
+    /// Highest sensitivity level eligible for the cache. Level 2 is the maximum
+    /// the cache contract permits — `EstateCacheConfig` hard-clamps Secret
+    /// (level 3) out regardless. Caching levels 0–2 covers all non-Secret
+    /// content; Secret rows always read through to storage.
+    private static let defaultCacheSensitivityThreshold = 2
+
+    /// Resolve the cache configuration from the process environment.
+    ///
+    /// The hot cache is ON by default for the live resident host (P1 turns on
+    /// the previously-dark `CachingRowStore` path). The environment can override:
+    ///
+    ///   - `MOOTX01_ESTATE_CACHE=0` (or `false`/`off`/`disabled`) → cache OFF,
+    ///     equivalent to the prior `.disabled` default. Any other value (or an
+    ///     unset variable) leaves the cache ON.
+    ///   - `MOOTX01_ESTATE_CACHE_BYTES=<int>` → override the byte ceiling.
+    ///     Non-integer or absent values fall back to `defaultCacheCeilingBytes`.
+    ///
+    /// Reading `ProcessInfo.environment` here is a one-shot configuration read
+    /// at engine construction, not a per-operation clock call — it does not
+    /// violate the determinism rule (no `Date()`; the value is frozen at init).
+    public static func resolveCacheConfig() -> EstateCacheConfig {
+        let env = ProcessInfo.processInfo.environment
+        let toggle = env["MOOTX01_ESTATE_CACHE"]?.lowercased()
+        let enabled: Bool
+        switch toggle {
+        case "0", "false", "off", "disabled", "no":
+            enabled = false
+        default:
+            // Unset or any other value → cache ON (the P1 default).
+            enabled = true
+        }
+        let ceiling = env["MOOTX01_ESTATE_CACHE_BYTES"]
+            .flatMap(Int.init) ?? defaultCacheCeilingBytes
+        return EstateCacheConfig(
+            enabled: enabled,
+            ceilingBytes: ceiling,
+            sensitivityThreshold: defaultCacheSensitivityThreshold
+        )
     }
 
     // MARK: - Provision
@@ -252,6 +317,27 @@ public actor EstateAdmin {
         return prov
     }
 
+    /// Whether a hosted estate's backing storage is running the hot cache —
+    /// i.e. its `rowStore` is a `CachingRowStore` (P1). Returns nil for an
+    /// unknown UUID. Internal: the P1 verify line asserts the live estate now
+    /// wraps `CachingRowStore`, but `Provenance.storage` is private, so this is
+    /// the introspection seam tests reach through `@testable import`.
+    func backingStorageIsCaching(for uuid: String) -> Bool? {
+        guard let prov = hosted[uuid] else { return nil }
+        if let sqlite = prov.storage as? SQLiteStorage {
+            return sqlite.rowStore is CachingRowStore
+        }
+        if let mem = prov.storage as? InMemoryStorage {
+            return mem.rowStore is CachingRowStore
+        }
+        return false
+    }
+
+    /// The cache configuration this engine applies to every estate it
+    /// provisions (P1). Internal so the verify line can assert the resolved
+    /// default is enabled with the expected ceiling.
+    var resolvedCacheConfig: EstateCacheConfig { cacheConfig }
+
     /// Construct the backing `Storage` for the requested backend.
     ///
     /// - SQLite: a file at `<estatesDirectory>/<uuid>.sqlite`. The directory is
@@ -264,7 +350,8 @@ public actor EstateAdmin {
         case .inMemory:
             return InMemoryStorage(configuration: EstateConfiguration(
                 estateID: estateID,
-                backend: .inMemory
+                backend: .inMemory,
+                cacheConfig: cacheConfig
             ))
         case .sqlite:
             try FileManager.default.createDirectory(
@@ -273,9 +360,13 @@ public actor EstateAdmin {
                 attributes: nil
             )
             let url = estatesDirectory.appendingPathComponent("\(estateID.uuidString).sqlite", isDirectory: false)
+            // P1: pass the resolved cacheConfig so SQLiteStorage.init wraps the
+            // bare SQLiteRowStore in the tested CachingRowStore hot tier when
+            // enabled. The live resident host now runs with the cache ON.
             return try SQLiteStorage(configuration: EstateConfiguration(
                 estateID: estateID,
-                backend: .sqlite(url: url)
+                backend: .sqlite(url: url),
+                cacheConfig: cacheConfig
             ))
         }
     }
