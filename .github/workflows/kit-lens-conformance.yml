@@ -20,7 +20,7 @@ on:
       - 'packages/kits/CognitionKit/**'
       - '.github/workflows/kit-lens-conformance.yml'
   push:
-    branches: [main]
+    branches: [stable/1.0.x, develop/1.0.x]
     paths:
       - 'packages/kits/NeuronKit/**'
       - 'packages/kits/CognitionKit/**'
@@ -43,9 +43,14 @@ jobs:
 
   swift-kits:
     name: Swift legs — NeuronKit + CognitionKit
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select newest Xcode (Swift 6.2 toolchain)
+        run: |
+          # macos default Xcode lags Swift 6.2; select the newest installed.
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
 
       - name: Show Swift version
         run: swift --version
@@ -64,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v4
 
