@@ -56,24 +56,28 @@ impl McpClient {
                 }
                 #[cfg(target_os = "windows")]
                 {
-                    // Detect via EITHER the app install marker OR the config dir.
-                    // Claude Desktop's installer creates %LOCALAPPDATA%\AnthropicClaude
-                    // (the app), but the Roaming %APPDATA%\Claude config dir often
-                    // does not exist until first launch / first MCP config — so the
-                    // config-dir-only check missed installed-but-unconfigured copies.
-                    // The install marker is what the original install.ps1 used.
-                    // Wiring creates the config dir if absent (merge create_dir_all).
-                    let install_marker = std::env::var("LOCALAPPDATA")
+                    // Three shapes count as "installed":
+                    //  - Win32 install marker %LOCALAPPDATA%\AnthropicClaude (the
+                    //    app dir — what the original install.ps1 checked);
+                    //  - MSIX/Store package %LOCALAPPDATA%\Packages\Claude_* (the
+                    //    Store build, whose config lives in a virtualized Roaming);
+                    //  - an existing config dir (covers a configured Win32 copy).
+                    // The Win32 %APPDATA%\Claude config dir often does not exist
+                    // until first launch, so the config-dir-only check missed
+                    // installed-but-unconfigured copies. Wiring creates the config
+                    // dir if absent (merge create_dir_all).
+                    let localappdata = std::env::var("LOCALAPPDATA")
                         .ok()
                         .filter(|v| !v.trim().is_empty())
                         .map(PathBuf::from)
-                        .unwrap_or_else(|| home.join("AppData").join("Local"))
-                        .join("AnthropicClaude");
+                        .unwrap_or_else(|| home.join("AppData").join("Local"));
+                    let win32_marker = localappdata.join("AnthropicClaude").exists();
+                    let msix = windows_claude_msix_package(&localappdata).is_some();
                     let config_dir_exists = self
                         .config_path(home)
                         .and_then(|p| p.parent().map(|d| d.exists()))
                         .unwrap_or(false);
-                    install_marker.exists() || config_dir_exists
+                    win32_marker || msix || config_dir_exists
                 }
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
@@ -173,21 +177,19 @@ impl McpClient {
         }
         #[cfg(target_os = "windows")]
         {
-            if matches!(self.id, "claude-desktop" | "cline") {
+            // Claude Desktop is MSIX-aware (Store vs Win32 config locations).
+            if self.id == "claude-desktop" {
+                return Some(windows_claude_desktop_config(home));
+            }
+            if self.id == "cline" {
                 if let Some(appdata) = std::env::var("APPDATA")
                     .ok()
                     .filter(|v| !v.is_empty())
                     .map(PathBuf::from)
                 {
-                    return match self.id {
-                        "claude-desktop" => {
-                            Some(appdata.join("Claude").join("claude_desktop_config.json"))
-                        }
-                        _ => Some(
-                            appdata
-                                .join("Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"),
-                        ),
-                    };
+                    return Some(appdata.join(
+                        "Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json",
+                    ));
                 }
             }
         }
@@ -326,6 +328,57 @@ fn claude_desktop_rel() -> Option<&'static str> {
     None // No Linux build of Claude Desktop.
 }
 
+/// Find the Claude Desktop MSIX (Microsoft Store) package directory under
+/// `<localappdata>\Packages`, if the Store version is installed.
+///
+/// The Store build virtualizes its Roaming AppData into
+/// `%LOCALAPPDATA%\Packages\Claude_<publisherHash>\LocalCache\Roaming\Claude\`,
+/// so neither the Win32 install dir (`%LOCALAPPDATA%\AnthropicClaude`) nor the
+/// Win32 config dir (`%APPDATA%\Claude`) exists for it. The `Claude_` prefix is
+/// the MSIX package-family name; the publisher-hash suffix is stable per
+/// publisher but matched by prefix so a re-publish under the same name still
+/// resolves. Kept un-gated so the directory-scan logic is unit-testable on any
+/// host; only the Windows call sites use it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_claude_msix_package(localappdata: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(localappdata.join("Packages"))
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("Claude_"))
+                .unwrap_or(false)
+        })
+}
+
+/// Resolve the Claude Desktop `claude_desktop_config.json` path on Windows,
+/// preferring the MSIX/Store package's virtualized Roaming location when that
+/// package is installed, else the Win32 `%APPDATA%\Claude` location. Both
+/// distributions read their config from the returned file.
+#[cfg(target_os = "windows")]
+fn windows_claude_desktop_config(home: &Path) -> PathBuf {
+    let localappdata = std::env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("AppData").join("Local"));
+    if let Some(pkg) = windows_claude_msix_package(&localappdata) {
+        return pkg
+            .join("LocalCache")
+            .join("Roaming")
+            .join("Claude")
+            .join("claude_desktop_config.json");
+    }
+    let appdata = std::env::var("APPDATA")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("AppData").join("Roaming"));
+    appdata.join("Claude").join("claude_desktop_config.json")
+}
+
 #[cfg(target_os = "macos")]
 fn cline_rel() -> Option<&'static str> {
     Some("Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json")
@@ -378,6 +431,29 @@ mod tests {
         .unwrap();
         let cx = supported().into_iter().find(|c| c.id == "codex-cli").unwrap();
         assert!(cx.wired(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn msix_package_finder_matches_claude_prefix() {
+        // The Microsoft Store build lives at
+        // %LOCALAPPDATA%\Packages\Claude_<publisherHash>\... — the finder must
+        // match by the `Claude_` package-family prefix and ignore unrelated
+        // packages. (Portable: exercises the dir-scan logic on any host.)
+        let home = tmp_home("msix");
+        let localappdata = home.join("AppData").join("Local");
+        std::fs::create_dir_all(localappdata.join("Packages").join("Other_abc")).unwrap();
+        assert!(
+            windows_claude_msix_package(&localappdata).is_none(),
+            "no Claude_* package → None"
+        );
+        let pkg = localappdata.join("Packages").join("Claude_pzs8sxrjxfjjc");
+        std::fs::create_dir_all(&pkg).unwrap();
+        assert_eq!(
+            windows_claude_msix_package(&localappdata).as_deref(),
+            Some(pkg.as_path()),
+            "Claude_* package must be found"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
