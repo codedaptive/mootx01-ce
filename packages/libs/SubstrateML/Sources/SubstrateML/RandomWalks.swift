@@ -7,8 +7,9 @@
 // next row from the current row's weighted out-edges (or restarts
 // to the start row with probability `restartProb`), and records
 // the visited sequence. The result is consumed by CognitionKit's
-// exploratory recall primitives (deferred to v0.37 per cookbook
-// § 19.1).
+// exploratory recall primitives (cookbook § 19.1) — a future
+// cognition-tier mission not yet built; until that consumer lands
+// this engine is reference-only (harness/conformance).
 //
 // The substrate uses SplitMix64 as the random number generator
 // (mirroring the test harness's deterministic PRNG); calls with
@@ -31,7 +32,7 @@
 //   § 7.4   Random walks (the spec)
 //   § 8.5   OR-reduction (downstream consumer for walk-aggregate
 //           fingerprints)
-//   § 19.1  v0.37 deferred: recall_exploratory primitive
+//   § 19.1  recall_exploratory primitive (future cognition-tier consumer, not yet built)
 
 import Foundation
 import SubstrateTypes
@@ -134,10 +135,11 @@ public enum RandomWalks {
         return Double(bits) * (1.0 / Double(1 << 53))
     }
 
-    /// Random walk with restart aggregating visits by row. Used
-    /// by CognitionKit's recall_exploratory (cookbook § 19.1
-    /// deferred-to-v0.37; reference here returns a usable result
-    /// for harness tests). Takes a `[RowId: [RowId]]` adjacency
+    /// Random walk with restart aggregating visits by row. The
+    /// CognitionKit `recall_exploratory` consumer (cookbook § 19.1)
+    /// is a future cognition-tier mission not yet built; the
+    /// reference here returns a usable result for harness tests.
+    /// Takes a `[RowId: [RowId]]` adjacency
     /// rather than the indexed form because the cognition tier
     /// works in RowId space, not in densely-numbered graph nodes.
     ///

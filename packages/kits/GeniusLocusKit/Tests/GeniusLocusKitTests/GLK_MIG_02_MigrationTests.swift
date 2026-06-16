@@ -2,20 +2,16 @@
 //
 // Conformance tests for the GeniusLocusKit migration API (GLK-MIG-02).
 //
-// Tests are written RED-first: they compile against the type
-// declarations introduced in Parts 2-4. All nine test cases document
-// the API contract before any production code lands.
+// Coverage note (VK-ADAPT-01 Part 3): decode + zero-loss + provenance
+// + idempotency coverage for the adapter → bridge import path lives in
+// VaultKit's ExchangeAdapterTests per ADR-007 Decision 1.
 //
-// The nine tests cover:
-//   1. importFromMemPalace creates drawers for each entry
-//   2. importFromMemPalace never silently drops entries (C-13 zero-loss)
-//   3. importFromMemPalace empty corpus returns empty report
-//   4. runParallel writes to target in .writeToTarget mode
-//   5. runParallel stop() prevents further captures
-//   6. verifyMigration returns .identical for fully migrated corpus
-//   7. verifyMigration returns .diverged for missing entry
-//   8. MigrationReport is fully Sendable (compile-time check)
-//   9. ExternalCorpus round-trip encode/decode via URL
+// The remaining five tests cover:
+//   1. runParallel writes to target in .writeToTarget mode
+//   2. runParallel stop() prevents further captures
+//   3. verifyMigration returns .identical for fully migrated corpus
+//   4. verifyMigration returns .diverged for missing entry
+//   5. MigrationReport is fully Sendable (compile-time check)
 
 import Testing
 import Foundation
@@ -59,90 +55,38 @@ struct GLK_MIG_02_MigrationTests {
         return ExternalCorpus(name: "\(prefix)-corpus", entries: entries)
     }
 
-    // MARK: - Test 1: importFromMemPalace creates drawers for each entry
-
-    @Test
-    func importFromMemPalaceCreatesDrawersForEachEntry() async throws {
-        let kit = makeKit()
-        let corpus = makeCorpus(count: 3)
-        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
-
-        let (handle, report) = try await kit.importFromMemPalace(
-            corpus,
-            targetStorage: makeStorage(),
-            owner: makeOwner(),
-            now: now
-        )
-
-        // The report must record exactly 3 drawer rows.
-        #expect(report.rowsByNoun["drawer"] == 3,
-            "importFromMemPalace must create one drawer per corpus entry")
-
-        // The opened estate must contain the captured drawers.
-        let frame = RecallFrame(
-            filterChain: [.unconfirmed],
-            hydrationLevel: .structured,
-            ordering: .byCaptureTimeDesc
-        )
-        let rows = try await kit.recall(handle, frame)
-        #expect(rows.count == 3,
-            "Three drawers must be present in the target estate")
+    /// Open a fresh estate and populate it with one captured drawer per
+    /// corpus entry, using the consolidated import-path provenance
+    /// (channel: .importedFile, sourceType: .imported, provenanceChannel:
+    /// .fileImport). This is the sanctioned corpus-construction helper
+    /// for verifyMigration tests (VK-ADAPT-01 Part 3, ADR-007 Decision 1).
+    private func populateEstate(
+        kit: GeniusLocusKit,
+        corpus: ExternalCorpus,
+        now: Date
+    ) async throws -> EstateHandle {
+        let handle = try await kit.open(storage: makeStorage(), owner: makeOwner())
+        for entry in corpus.entries {
+            guard !entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+            let frame = CaptureFrame(
+                content: entry.content,
+                channel: .importedFile,
+                room: "migration",
+                latticeAnchor: .udc("000"),
+                addedBy: "migration-import",
+                embeddingModelID: "migration-v1",
+                provenanceChannel: .fileImport,
+                sourceType: .imported,
+                eventTime: now
+            )
+            _ = try await kit.capture(handle, frame)
+        }
+        return handle
     }
 
-    // MARK: - Test 2: importFromMemPalace never silently drops entries (C-13)
-
-    @Test
-    func importFromMemPalaceNeverSilentlyDropsEntries() async throws {
-        let kit = makeKit()
-        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
-
-        // Mix of valid and empty-content entries. Empty entries are
-        // unmappable but must still appear in the report as unmapped,
-        // not silently discarded (spec conformance C-13 zero-loss invariant).
-        let entries = [
-            ExternalEntry(id: "e1", content: "Real content alpha", tags: []),
-            ExternalEntry(id: "e2", content: "", tags: []),   // empty — unmappable
-            ExternalEntry(id: "e3", content: "Real content beta", tags: []),
-        ]
-        let corpus = ExternalCorpus(name: "partial", entries: entries)
-
-        let (_, report) = try await kit.importFromMemPalace(
-            corpus,
-            targetStorage: makeStorage(),
-            owner: makeOwner(),
-            now: now
-        )
-
-        let totalAccounted = (report.rowsByNoun["drawer"] ?? 0)
-            + report.unmappedConcepts.count
-        #expect(totalAccounted == 3,
-            "Every entry must appear in drawers or unmappedConcepts — none dropped")
-    }
-
-    // MARK: - Test 3: importFromMemPalace empty corpus returns empty report
-
-    @Test
-    func importFromMemPalaceEmptyCorpusReturnsEmptyReport() async throws {
-        let kit = makeKit()
-        let corpus = ExternalCorpus(name: "empty", entries: [])
-        let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
-
-        let (_, report) = try await kit.importFromMemPalace(
-            corpus,
-            targetStorage: makeStorage(),
-            owner: makeOwner(),
-            now: now
-        )
-
-        #expect(report.rowsByNoun["drawer"] == nil,
-            "No drawers should be created for an empty corpus")
-        #expect(report.unmappedConcepts.isEmpty,
-            "No unmapped concepts for an empty corpus")
-        #expect(report.warnings.isEmpty,
-            "No warnings for an empty corpus")
-    }
-
-    // MARK: - Test 4: runParallel writes to target in .writeToTarget mode
+    // MARK: - Test 1: runParallel writes to target in .writeToTarget mode
 
     @Test
     func runParallelWritesToTargetInWriteToTargetMode() async throws {
@@ -178,7 +122,7 @@ struct GLK_MIG_02_MigrationTests {
         let _ = now // suppress unused-var warning — now is part of the test's fixture intent
     }
 
-    // MARK: - Test 5: runParallel stop() prevents further captures
+    // MARK: - Test 2: runParallel stop() prevents further captures
 
     @Test
     func runParallelStopPreventsFurtherCaptures() async throws {
@@ -207,26 +151,22 @@ struct GLK_MIG_02_MigrationTests {
         }
     }
 
-    // MARK: - Test 6: verifyMigration returns .identical for fully migrated corpus
+    // MARK: - Test 3: verifyMigration returns .identical for fully migrated corpus
 
     @Test
     func verifyMigrationReturnIdenticalForFullyMigratedCorpus() async throws {
         let kit = makeKit()
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
 
-        // Import a corpus so all entries are present in the estate.
+        // Populate the estate via the consolidated import-path provenance
+        // (importedFile channel, imported sourceType) so all entries are
+        // present. verifyMigration uses content-match recall with the
+        // .unconfirmed filter, which matches this capture state.
         let corpus = makeCorpus(count: 2, prefix: "verify-identical")
-        let (handle, _) = try await kit.importFromMemPalace(
-            corpus,
-            targetStorage: makeStorage(),
-            owner: makeOwner(),
-            now: now
-        )
+        let handle = try await populateEstate(kit: kit, corpus: corpus, now: now)
 
         let result = try await kit.verifyMigration(estate: handle, against: corpus, now: now)
 
-        // importFromMemPalace captured all entries by content; verifyMigration
-        // uses content-match recall so every entry should be found.
         switch result {
         case .identical:
             break // expected
@@ -235,21 +175,17 @@ struct GLK_MIG_02_MigrationTests {
         }
     }
 
-    // MARK: - Test 7: verifyMigration returns .diverged for missing entry
+    // MARK: - Test 4: verifyMigration returns .diverged for missing entry
 
     @Test
     func verifyMigrationReturnsDivergedForMissingEntry() async throws {
         let kit = makeKit()
         let now = Date(timeIntervalSinceReferenceDate: 1_000_000)
 
-        // Import only one entry, then verify against a two-entry corpus.
+        // Populate the estate with only the first entry of the corpus,
+        // then verify against a two-entry corpus — the second entry is absent.
         let partialCorpus = makeCorpus(count: 1, prefix: "verify-diverged")
-        let (handle, _) = try await kit.importFromMemPalace(
-            partialCorpus,
-            targetStorage: makeStorage(),
-            owner: makeOwner(),
-            now: now
-        )
+        let handle = try await populateEstate(kit: kit, corpus: partialCorpus, now: now)
 
         // Build a larger corpus that includes an entry the estate does not have.
         let fullCorpus = makeCorpus(count: 2, prefix: "verify-diverged")
@@ -267,7 +203,7 @@ struct GLK_MIG_02_MigrationTests {
         }
     }
 
-    // MARK: - Test 8: MigrationReport is fully Sendable (compile-time check)
+    // MARK: - Test 5: MigrationReport is fully Sendable (compile-time check)
 
     /// This test validates the compile-time `Sendable` conformance of
     /// `MigrationReport`. If the struct or any of its fields is not
@@ -288,32 +224,5 @@ struct GLK_MIG_02_MigrationTests {
         #expect(captured.rowsByNoun["drawer"] == 1)
         #expect(captured.unmappedConcepts.count == 1)
         #expect(captured.warnings.count == 1)
-    }
-
-    // MARK: - Test 9: ExternalCorpus round-trip encode/decode via URL
-
-    @Test
-    func externalCorpusLoadFromURL() throws {
-        let original = ExternalCorpus(
-            name: "round-trip-test",
-            entries: [
-                ExternalEntry(id: "rt-1", content: "Content one", tags: ["a", "b"]),
-                ExternalEntry(id: "rt-2", content: "Content two", tags: []),
-            ]
-        )
-
-        // Encode to a temp file, then decode via ExternalCorpus.load(from:).
-        let encoded = try JSONEncoder().encode(original)
-        let url = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("GLK_MIG_02_roundtrip_\(UUID().uuidString).json")
-        try encoded.write(to: url)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let decoded = try ExternalCorpus.load(from: url)
-        #expect(decoded == original,
-            "ExternalCorpus must round-trip through JSON encode/decode")
-        #expect(decoded.entries.count == 2)
-        #expect(decoded.entries[0].id == "rt-1")
-        #expect(decoded.entries[1].tags == [])
     }
 }

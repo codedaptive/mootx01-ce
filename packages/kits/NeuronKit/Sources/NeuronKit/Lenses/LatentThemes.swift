@@ -6,11 +6,17 @@ import GeniusLocusKit
 // not a hard bucket. Surfaces the GeniusLocusKit matrix-tier MatrixNMF; owns no
 // math (I-17). Deterministic for a fixed seed (B-5); total over edge inputs
 // (I-18, B-8).
+//
+// Type boundary note: MatrixNMF (GLK) delegates to the canonical substrate
+// NMFAlternatingLeastSquares and returns Float32 factors. NeuronKit's public
+// ThemeLoading.loadings and LatentThemes.reconstructionError are Double for
+// API stability; f32 values are widened to f64 at this boundary. Widening
+// preserves the substrate's bit-exact values with no additional rounding.
 
 /// One label's soft membership across the latent themes.
 public struct ThemeLoading: Sendable, Equatable, Codable {
     public let label: String
-    public let loadings: [Double]      // soft membership over k themes
+    public let loadings: [Double]      // soft membership over k themes (widened from f32)
     public let dominantTheme: Int      // argmax index into loadings
     public init(label: String, loadings: [Double], dominantTheme: Int) {
         self.label = label
@@ -23,7 +29,7 @@ public struct ThemeLoading: Sendable, Equatable, Codable {
 public struct LatentThemes: Sendable, Equatable, Codable {
     public let k: Int                       // effective theme count (clamped to label count)
     public let loadings: [ThemeLoading]
-    public let reconstructionError: Double  // Frobenius residual of the NMF factorisation
+    public let reconstructionError: Double  // RMS residual of the NMF factorisation (widened from f32)
     public init(k: Int, loadings: [ThemeLoading], reconstructionError: Double) {
         self.k = k
         self.loadings = loadings
@@ -58,16 +64,21 @@ extension NeuronKit {
             if i != j { matrix[j * n + i] += weight }   // symmetric
         }
 
+        // MatrixNMF delegates to the canonical substrate NMFAlternatingLeastSquares
+        // (f32, RMS error). Loadings and reconstruction error are Float32; widened
+        // to Double here at the NeuronKit public-API boundary.
         let factorization = MatrixNMF.factorize(
             o: matrix, rows: n, cols: n, k: effectiveK, seed: seed)
 
         let loadings = labels.enumerated().map { (row, label) -> ThemeLoading in
-            let vector = factorization.loadings(forRow: row)
+            // Widen Float32 loadings to Double at the NeuronKit boundary.
+            let vector = factorization.loadings(forRow: row).map { Double($0) }
             let dominant = vector.indices.max { vector[$0] < vector[$1] } ?? 0
             return ThemeLoading(label: label, loadings: vector, dominantTheme: dominant)
         }
 
+        // Widen Float32 RMS error to Double at the NeuronKit boundary.
         return LatentThemes(k: effectiveK, loadings: loadings,
-                            reconstructionError: factorization.reconstructionError)
+                            reconstructionError: Double(factorization.reconstructionError))
     }
 }

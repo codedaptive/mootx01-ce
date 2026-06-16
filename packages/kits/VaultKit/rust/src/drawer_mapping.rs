@@ -33,16 +33,38 @@ use crate::note_ir::{NoteIR, OccurredAt, WikiLink};
 use crate::vault_export_scope::VaultExportScope;
 use genius_locus_kit::{coordinator::EstateCoordinator, handle::EstateHandle};
 use locus_kit::{
+    adjectives::AdjectiveSensitivity,
     drawer::Drawer,
     drawer_operational::{CaptureChannel, DrawerFeatureFlags},
     estate_types::LatticeAnchor,
-    filter::{HydrationLevel, Ordering, RecallFrame},
+    filter::{Filter, HydrationLevel, Ordering, RecallFrame},
     frames::{CaptureFrame, TunnelCaptureFrame},
+    kg_fact::KGFact,
     provenance::{Channel, SourceType},
     tunnel::Tunnel,
     tunnel_operational::{TunnelKind, TunnelOriginClass},
 };
 use uuid::Uuid;
+
+// MARK: - ExportProjection
+
+/// The notes an export projects plus the per-tier exclusion counts the
+/// ADR-007 Decision 2 bulk-channel rules produced. Exclusions are reported,
+/// never silent (zero-loss reporting symmetry with C-13). Mirrors Swift
+/// `DrawerMapping.ExportProjection`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportProjection {
+    /// Drawers that passed the scope filters AND the tier rules, projected
+    /// to `NoteIR`.
+    pub notes: Vec<NoteIR>,
+    /// Secret-tier drawers the scope filters admitted but the bulk channel
+    /// excluded. Secret never rides bulk export, under any scope.
+    pub excluded_secret_tier: usize,
+    /// Private-tier (`Restricted`) drawers the scope filters admitted but
+    /// the bulk channel excluded because the scope does not carry the
+    /// explicit private-tier opt-in (`includes_private_tier`).
+    pub excluded_private_tier: usize,
+}
 
 // MARK: - ImportOutcome
 
@@ -107,12 +129,17 @@ impl DrawerMapping {
     // MARK: - Export: estate → IR
 
     /// Read an estate's drawers and outgoing `.references` tunnels and project
-    /// each drawer to a `NoteIR`. Mirrors Swift `DrawerMapping.export(kit:handle:scope:)`.
+    /// each drawer to a `NoteIR`, enforcing the ADR-007 Decision 2 privacy-tier
+    /// rules and counting what they excluded. Mirrors Swift
+    /// `DrawerMapping.export(kit:handle:scope:)`.
     ///
-    /// `scope` controls which drawers are included. Defaults to `.believed`
-    /// when called via `export(coordinator, handle, now)` (through
-    /// `VaultBridge::export`). Passing an explicit scope lets callers limit
-    /// the export to confirmed, unconfirmed, or publicly-exportable drawers.
+    /// Drawers are recalled using the `scope` parameter's filter chain plus an
+    /// explicit `Filter::SensitivityAtMost(Secret)`. The explicit filter
+    /// suppresses the recall evaluator's implicit `SensitivityAtMost(Elevated)`
+    /// default and raises the ceiling to secret so all tiers are visible here.
+    /// This makes secret/private exclusions countable: the tier rules are then
+    /// enforced by partition — secret is always excluded, restricted is excluded
+    /// unless `scope.includes_private_tier()`, and each exclusion is counted.
     ///
     /// `now` is the snapshot instant in milliseconds-since-epoch, passed by the
     /// caller so this function is deterministic (no internal wall-clock access).
@@ -122,12 +149,7 @@ impl DrawerMapping {
         handle: &EstateHandle,
         now: i64,
         scope: VaultExportScope,
-    ) -> Result<Vec<NoteIR>, VaultKitError> {
-        // Build the recall frame from the scope's filter chain. The recall
-        // evaluator supplies per-axis defaults (sensitivity, trust) for any
-        // axis not addressed by the chain — sensitivity stays at normal so
-        // export never surfaces elevated/restricted/secret content.
-        //
+    ) -> Result<ExportProjection, VaultKitError> {
         // VK-EXPORT-FIX parity note: `limit: None` is correct here and does NOT
         // apply a 50-cap in the Rust port. The coordinator's `recall` delegates to
         // `estate.recall(frame, now).collect_all()`, which drains all pages
@@ -136,16 +158,46 @@ impl DrawerMapping {
         // `GLKRecallRequest.limit` to 50 when `frame.limit` is `None`; the Swift
         // fix is to set `frame.limit = 10_000_000`. No such default exists in the
         // Rust coordinator path, so `limit: None` is the correct unbounded form.
+        let mut filter_chain = scope.filter_chain();
+        filter_chain.push(Filter::SensitivityAtMost(AdjectiveSensitivity::Secret));
+        // VK-EXPORT-FIX: pass an explicit limit so the recall scan is a full
+        // projection of all believed drawers, not capped at the recall
+        // candidate floor (256). Export is a pure filter scan (no query, no
+        // scoring); returning the complete set in stable order is correct.
+        // 10_000_000 (not usize::MAX) matches the Swift leg and is unreachable
+        // by any realistic estate. trace_limit None: export does not
+        // participate in the reward cycle.
         let recall_frame = RecallFrame {
-            filter_chain: scope.filter_chain(),
+            filter_chain,
             hydration_level: HydrationLevel::Full,
-            limit: None,
+            limit: Some(10_000_000),
             ordering: Ordering::ByCaptureTimeDesc,
             as_of: None,
+            trace_limit: None,
         };
-        let drawers = coordinator
+        let recalled = coordinator
             .recall(handle, recall_frame, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+
+        // ADR-007 Decision 2 tier partition. The predicates encode the
+        // normative 4→3 mapping (Normal → normal+elevated, Private →
+        // restricted, Secret → secret) — see `AdjectiveSensitivity` in
+        // LocusKit's `adjectives.rs`.
+        let mut drawers: Vec<Drawer> = Vec::with_capacity(recalled.len());
+        let mut excluded_secret = 0usize;
+        let mut excluded_private = 0usize;
+        for drawer in recalled {
+            let tier = drawer.adjective_sensitivity();
+            if tier.is_excluded_from_bulk() {
+                // Secret never rides bulk channels, under any scope.
+                excluded_secret += 1;
+            } else if tier.requires_owner_key_for_bulk() && !scope.includes_private_tier() {
+                // Private tier rides bulk only under the explicit opt-in scope.
+                excluded_private += 1;
+            } else {
+                drawers.push(drawer);
+            }
+        }
 
         // Fetch tunnels once per distinct source wing, not once per drawer.
         let wings: std::collections::HashSet<&str> =
@@ -157,6 +209,24 @@ impl DrawerMapping {
                 .recall_tunnels(handle, wing)
                 .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
             tunnels_by_wing.insert(wing.to_owned(), tunnels);
+        }
+
+        // Query all KG facts once for the estate, then group by source_drawer_id
+        // so each drawer's tags and kind can be reconstructed without an N-per-drawer
+        // round-trip. Drawers with no KG facts get an empty slice.
+        // Mirrors Swift DrawerMapping.export kgFactsByDrawerID grouping.
+        let all_kg_facts = coordinator
+            .recall_kg_facts(handle)
+            .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        let mut kg_facts_by_drawer_id: std::collections::HashMap<String, Vec<&KGFact>> =
+            std::collections::HashMap::new();
+        for fact in &all_kg_facts {
+            if !fact.source_drawer_id.is_empty() {
+                kg_facts_by_drawer_id
+                    .entry(fact.source_drawer_id.clone())
+                    .or_default()
+                    .push(fact);
+            }
         }
 
         let notes: Vec<NoteIR> = drawers
@@ -173,16 +243,34 @@ impl DrawerMapping {
                             .collect()
                     })
                     .unwrap_or_default();
-                Self::note_ir_from(drawer, &refs)
+                let drawer_facts: Vec<KGFact> = kg_facts_by_drawer_id
+                    .get(&drawer.id)
+                    .map(|fs| fs.iter().map(|f| (*f).clone()).collect())
+                    .unwrap_or_default();
+                Self::note_ir_from(drawer, &refs, &drawer_facts)
             })
             .collect();
 
-        Ok(notes)
+        Ok(ExportProjection {
+            notes,
+            excluded_secret_tier: excluded_secret,
+            excluded_private_tier: excluded_private,
+        })
     }
 
-    /// Pure projection of one drawer + its outgoing `.references` tunnels to a
-    /// `NoteIR`. No substrate access — testable in isolation. Mirrors Swift
-    /// `DrawerMapping.noteIR(from:references:)`.
+    /// Pure projection of one drawer + its outgoing `.references` tunnels +
+    /// its anchored KG facts to a `NoteIR`. Mirrors Swift
+    /// `DrawerMapping.noteIR(from:references:kgFacts:)`.
+    ///
+    /// `kg_facts` is the subset of KG facts whose `source_drawer_id` matches
+    /// `drawer.id`. The export path pre-fetches all facts once and groups by
+    /// drawer id; this function reconstructs `NoteIR.tags` and `NoteIR.kind`
+    /// from the facts:
+    ///
+    ///   - Facts with `subject.starts_with("tag:")` and `predicate == "tagged"`
+    ///     become the drawer's tag list (hard-close #29-A round-trip).
+    ///   - A fact with `subject == "record:kind"` and `predicate == "is"`
+    ///     becomes the drawer's kind discriminator (hard-close #29-B round-trip).
     ///
     /// Decision B1 changes vs the V1 shape:
     ///   - stable_source_key: `"<room>/<slug>"` — no wing prefix, slug from content.
@@ -190,7 +278,7 @@ impl DrawerMapping {
     ///     (the STABLE UUID, not `drawer.id` which the supersession cascade re-mints).
     ///   - original_path: the room only — no wing prefix (one vault, one owner).
     ///   - NoteIR.moot_id: set to `drawer.lineage_id` for identity pass-through.
-    pub fn note_ir_from(drawer: &Drawer, references: &[&Tunnel]) -> NoteIR {
+    pub fn note_ir_from(drawer: &Drawer, references: &[&Tunnel], kg_facts: &[KGFact]) -> NoteIR {
         // Human-readable slug from the drawer's content. Collision-safe via UUID suffix.
         let slug = Self::slug(&drawer.content, &drawer.id);
         // Path: room/slug — no wing prefix (wing rides frontmatter).
@@ -219,6 +307,15 @@ impl DrawerMapping {
                 frontmatter.insert("wikidataQID".to_owned(), qid.clone());
             }
         }
+        // Sensitivity rides frontmatter so a round-trip preserves the tier
+        // (ADR-007 Decision 2; import reads the key back into
+        // `CaptureFrame.sensitivity`). `Normal` is omitted — it is the
+        // capture default, so absence round-trips to the same value and
+        // pre-existing exports stay byte-identical.
+        let tier = drawer.adjective_sensitivity();
+        if tier != AdjectiveSensitivity::Normal {
+            frontmatter.insert("sensitivity".to_owned(), Self::sensitivity_label(tier).to_owned());
+        }
 
         // Each `.references` tunnel's label carries the raw wikilink text that
         // produced it on import, so export renders it back verbatim.
@@ -227,17 +324,39 @@ impl DrawerMapping {
             .map(|t| WikiLink::new(t.label.clone(), None, t.label.clone()))
             .collect();
 
-        NoteIR::with_moot_id(
+        // Reconstruct tags from KG facts (hard-close #29-A round-trip).
+        // Facts with subject "tag:<t>" and predicate "tagged" were filed on
+        // import; the tag value is the suffix after the "tag:" prefix.
+        // Sorted for stable, deterministic output matching the Swift port.
+        let mut tags: Vec<String> = kg_facts
+            .iter()
+            .filter(|f| f.subject.starts_with("tag:") && f.predicate == "tagged")
+            .map(|f| f.subject["tag:".len()..].to_owned())
+            .collect();
+        tags.sort();
+
+        // Reconstruct kind from KG facts (hard-close #29-B round-trip).
+        // A fact with subject "record:kind" and predicate "is" was filed on
+        // import when kind != "note"; absence means the default "note" kind.
+        let kind = kg_facts
+            .iter()
+            .find(|f| f.subject == "record:kind" && f.predicate == "is")
+            .map(|f| f.object.clone())
+            .unwrap_or_else(|| "note".to_owned());
+
+        let mut note = NoteIR::with_moot_id(
             stable_key,
             vec![crate::note_ir::Block::markdown(drawer.content.clone())],
             frontmatter,
             links,
-            vec![],
+            tags,
             drawer.room.clone(), // original_path: room only — no wing prefix
             Some(OccurredAt::new(event_iso)),
             None,
             Some(drawer.lineage_id), // moot_id: the stable lineage UUID
-        )
+        );
+        note.kind = kind;
+        note
     }
 
     // MARK: - Slug derivation (Decision B1)
@@ -324,6 +443,7 @@ impl DrawerMapping {
         coordinator: &EstateCoordinator,
         handle: &EstateHandle,
         existing_lineage_ids: &std::collections::HashSet<Uuid>,
+        existing_sensitivity_by_lineage: &std::collections::HashMap<Uuid, AdjectiveSensitivity>,
         existing_tunnel_signatures: &mut std::collections::HashSet<String>,
         now: i64,
     ) -> Result<ImportOutcome, VaultKitError> {
@@ -336,13 +456,99 @@ impl DrawerMapping {
             });
         }
 
-        let (frame, classified) = self.make_capture_frame(note, &content);
+        let (mut frame, classified) = self.make_capture_frame(note, &content);
         let lineage = frame.lineage_id.unwrap_or_else(|| Self::lineage_id(note.stable_source_key.as_str()));
         let is_update = existing_lineage_ids.contains(&lineage);
+
+        // Sensitivity floor: a re-import never lowers an existing drawer's
+        // tier (supersession-downgrade defense — a hostile vault file carrying
+        // a victim's exposed `moot_id` plus `sensitivity: normal` must not be
+        // able to declassify the drawer). Raw values are tier-ordered
+        // (normal 0 < elevated 16 < restricted 32 < secret 48), so a numeric
+        // max is the floor. Mirrors Swift `DrawerMapping.importNote`.
+        if let Some(existing_tier) = existing_sensitivity_by_lineage.get(&lineage) {
+            if existing_tier.raw_value() > frame.sensitivity.raw_value() {
+                frame.sensitivity = *existing_tier;
+            }
+        }
 
         let drawer = coordinator
             .capture(handle, frame, now)
             .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+
+        // Apply KG facts from the note (ADR-007 Decision 1 / P0 BLOCKER
+        // resolution: facts must land as substrate KG facts, not report-only).
+        // Each FactIR triple becomes one KGFact anchored to the captured drawer.
+        // Mirrors Swift DrawerMapping.importNote facts loop.
+        for fact in &note.facts {
+            coordinator
+                .add_kg_fact(
+                    handle,
+                    &fact.subject,
+                    &fact.predicate,
+                    &fact.object,
+                    &drawer.id,
+                    now / 1000, // coordinator expects epoch-seconds
+                )
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        }
+
+        // Apply scope entries as KG facts (P0 BLOCKER resolution: scope must land
+        // in the substrate, not as report-only drops). Each (key, value) pair
+        // becomes a KGFact: subject = "scope:<key>", predicate = "has_value",
+        // object = value, anchored to the captured drawer.
+        // Mirrors Swift DrawerMapping.importNote scope loop.
+        for (key, value) in &note.scope {
+            coordinator
+                .add_kg_fact(
+                    handle,
+                    &format!("scope:{key}"),
+                    "has_value",
+                    value,
+                    &drawer.id,
+                    now / 1000, // coordinator expects epoch-seconds
+                )
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        }
+
+        // Apply tags as KG facts (hard-close #29-A: user-authored tags must land
+        // in a queryable/exportable durable form so they round-trip import→export).
+        // Each tag t becomes a KGFact: subject = "tag:<t>", predicate = "tagged",
+        // object = drawer.id (the stable drawer identifier), anchored to the drawer.
+        // The export path reconstructs NoteIR.tags by querying for KG facts whose
+        // subject has the "tag:" prefix. Mirrors Swift DrawerMapping.importNote tag loop.
+        for tag in &note.tags {
+            coordinator
+                .add_kg_fact(
+                    handle,
+                    &format!("tag:{tag}"),
+                    "tagged",
+                    &drawer.id,
+                    &drawer.id,
+                    now / 1000,
+                )
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        }
+
+        // Apply kind discriminator as a KG fact when the note is not the default
+        // "note" kind (hard-close #29-B: non-"note" kind must land in a typed
+        // durable record, not as a report-only drop). The kind field carries the
+        // exchange format's open discriminator vocabulary ("fact", "journal", …).
+        // subject = "record:kind", predicate = "is", object = the kind string.
+        // The export path reads this fact back to reconstruct NoteIR.kind.
+        // Mirrors Swift DrawerMapping.importNote kind branch.
+        if note.kind != "note" {
+            coordinator
+                .add_kg_fact(
+                    handle,
+                    "record:kind",
+                    "is",
+                    &note.kind,
+                    &drawer.id,
+                    now / 1000,
+                )
+                .map_err(|e| VaultKitError::VerbError(format!("{e:?}")))?;
+        }
 
         // Create tunnels for each wikilink, skipping any whose stable
         // endpoint+label signature already exists.
@@ -400,20 +606,29 @@ impl DrawerMapping {
     /// feature-flag-off path in Swift), so only the frontmatter `udc` can
     /// produce `classified = true`. Mirrors Swift `DrawerMapping.makeCaptureFrame(for:content:)`.
     pub fn make_capture_frame(&self, note: &NoteIR, content: &str) -> (CaptureFrame, bool) {
-        // Room: explicit frontmatter wins; else the note's last path component;
-        // else a non-empty default so I-5's room guard holds.
-        let room_candidate = note
-            .frontmatter
-            .get("room")
-            .cloned()
-            .unwrap_or_else(|| {
-                note.original_path
-                    .split('/')
-                    .filter(|s| !s.is_empty())
-                    .last()
-                    .unwrap_or("")
-                    .to_owned()
-            });
+        // Room resolution — priority order (mirrors Swift DrawerMapping.makeCaptureFrame):
+        //   1. Explicit frontmatter `room` (round-trip identity; always wins).
+        //   2. Full hierarchy from `path_components` joined with "/" when more than
+        //      one component is present (e.g. ["projects","alpha","notes"] →
+        //      "projects/alpha/notes"). Maps vault hierarchy to room depth without
+        //      loss.
+        //   3. The leaf of `original_path` (back-compat for callers that supply
+        //      only original_path).
+        //   4. Hard default "imported" so I-5's non-empty room guard always holds.
+        let room_candidate = if let Some(explicit) = non_empty(note.frontmatter.get("room")) {
+            explicit
+        } else if note.path_components.len() > 1 {
+            note.path_components.join("/")
+        } else if let Some(first) = note.path_components.first() {
+            first.clone()
+        } else {
+            note.original_path
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .last()
+                .unwrap_or("")
+                .to_owned()
+        };
         let room = if room_candidate.is_empty() { "imported".to_owned() } else { room_candidate };
 
         let added_by_value = non_empty(note.frontmatter.get("addedBy"))
@@ -458,6 +673,15 @@ impl DrawerMapping {
         // Provenance: SourceType::Imported + Channel::FileImport record the import origin.
         frame.source_type = SourceType::Imported;
         frame.provenance_channel = Channel::FileImport;
+        // Sensitivity preserved from the IR when the adapter supplies it
+        // (ADR-007 Decision 2 — import is ungated, but the tier rides in).
+        // Absent or unrecognised labels land at the `Normal` capture default
+        // rather than failing the import.
+        if let Some(label) = non_empty(note.frontmatter.get("sensitivity")) {
+            if let Some(tier) = Self::sensitivity_from_label(&label) {
+                frame.sensitivity = tier;
+            }
+        }
         // Identity resolution priority (Decision B1):
         //   1. note.moot_id — explicit UUID from frontmatter `moot_id` (rename-safe).
         //   2. frontmatter["moot_id"] string → parse as UUID (fallback when adapter
@@ -551,6 +775,33 @@ impl DrawerMapping {
         ])
     }
 
+    // MARK: - Sensitivity frontmatter labels
+
+    /// Canonical frontmatter label for each sensitivity tier. The labels are
+    /// shared verbatim with the Swift port (`DrawerMapping.sensitivityLabel`)
+    /// so vaults round-trip across implementations.
+    pub fn sensitivity_label(s: AdjectiveSensitivity) -> &'static str {
+        match s {
+            AdjectiveSensitivity::Normal => "normal",
+            AdjectiveSensitivity::Elevated => "elevated",
+            AdjectiveSensitivity::Restricted => "restricted",
+            AdjectiveSensitivity::Secret => "secret",
+        }
+    }
+
+    /// Inverse of `sensitivity_label`. Returns `None` for unrecognised
+    /// labels; the caller falls back to the `Normal` capture default.
+    /// Mirrors Swift `DrawerMapping.sensitivity(fromLabel:)`.
+    pub fn sensitivity_from_label(label: &str) -> Option<AdjectiveSensitivity> {
+        match label {
+            "normal" => Some(AdjectiveSensitivity::Normal),
+            "elevated" => Some(AdjectiveSensitivity::Elevated),
+            "restricted" => Some(AdjectiveSensitivity::Restricted),
+            "secret" => Some(AdjectiveSensitivity::Secret),
+            _ => None,
+        }
+    }
+
     /// Stable signature for tunnel de-duplication. Keyed on the endpoint
     /// wing/room, the target room, the raw label, and the kind — all stable
     /// across re-imports (unlike the source drawer id, which the supersession
@@ -580,7 +831,7 @@ fn non_empty(s: Option<&String>) -> Option<String> {
 /// Convert milliseconds-since-epoch to a LocusKit-compatible ISO8601 string
 /// with fractional seconds, matching `OccurredAt(date:)` in Swift.
 /// Format: `YYYY-MM-DDTHH:MM:SS.mmmZ`.
-fn ms_to_iso8601(ms: i64) -> String {
+pub(crate) fn ms_to_iso8601(ms: i64) -> String {
     let secs = ms / 1000;
     let millis = (ms.unsigned_abs() % 1000) as u64;
     let (year, month, day, hour, min, sec) = secs_to_ymdhms(secs);

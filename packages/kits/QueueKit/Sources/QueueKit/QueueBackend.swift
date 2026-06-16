@@ -11,6 +11,11 @@ public protocol QueueBackend: Sendable {
 
     func drainAvailable() async throws -> [(job: Job, sessionID: SessionID)]
 
+    /// Returns the number of jobs currently waiting to be claimed (status = "new"
+    /// for PersistenceKitBackend; files in `new/` for FilesystemBackend).
+    /// Used by QueueKitTelemetry to compute depth and idle_nonempty.
+    func pendingCount() async throws -> Int
+
     func watch(
         handler: @escaping @Sendable (Job, SessionID) async throws -> Void
     ) async throws

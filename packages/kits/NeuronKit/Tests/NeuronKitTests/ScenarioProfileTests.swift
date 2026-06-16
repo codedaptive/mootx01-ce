@@ -1,7 +1,6 @@
 // ScenarioProfileTests.swift
 //
-// Round-trip conformance for the ScenarioProfile value type minus the
-// tournamentReport field per Known Ambiguity 2 in the mission.
+// Round-trip conformance for the ScenarioProfile value type.
 
 import Testing
 import Foundation
@@ -48,14 +47,16 @@ struct ScenarioProfileTests {
         #expect(p.preferenceWeights == [:])
         #expect(p.createdAt == now)
         #expect(!p.trainingEligible)
+        // tournamentReport defaults to nil when not supplied.
+        #expect(p.tournamentReport == nil)
     }
 
-    @Test("tournamentReport field is deferred (absent from v0.1 JSON)")
-    func tournamentReportFieldDeferred() {
-        // The struct intentionally lacks `tournamentReport` (Known
-        // Ambiguity 2). This test pins the v0.1 shape by encoding to
-        // JSON and confirming the key is absent — so a future addition
-        // of the field is recognised as a versioned change.
+    @Test("tournamentReport is runtime-only — absent from JSON wire shape")
+    func tournamentReportNotSerialised() throws {
+        // `tournamentReport` carries `any BranchHandle`, which is not
+        // Codable. ScenarioProfile excludes it via custom CodingKeys so
+        // the JSON wire shape is stable and backwards-compatible with
+        // persisted profiles that were saved before the field existed.
         let p = ScenarioProfile(
             name: "y",
             framingParameters: [:],
@@ -65,9 +66,40 @@ struct ScenarioProfileTests {
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let data = try! encoder.encode(p)
+        let data = try encoder.encode(p)
         let json = String(data: data, encoding: .utf8) ?? ""
+        // Key must not appear in JSON — it is a runtime-only advisory value.
         #expect(!json.contains("tournamentReport"))
         #expect(!json.contains("TournamentReport"))
+    }
+
+    @Test("tournamentReport field is present and populated at init time")
+    func tournamentReportFieldPresent() throws {
+        // The field is live on the type — callers can attach the report
+        // from saveScenarioProfile; it survives in memory for the session.
+        let report = TournamentReport(
+            winner: nil,
+            ranking: [],
+            disqualified: [],
+            evaluatedAt: Date(timeIntervalSince1970: 0),
+            interval: DateInterval(
+                start: Date(timeIntervalSince1970: 0),
+                end: Date(timeIntervalSince1970: 1)
+            )
+        )
+        let p = ScenarioProfile(
+            name: "z",
+            framingParameters: [:],
+            scoringBreakdown: [:],
+            preferenceWeights: [:],
+            createdAt: Date(timeIntervalSince1970: 0),
+            tournamentReport: report
+        )
+        #expect(p.tournamentReport != nil)
+        // JSON still omits the field — wire shape is unchanged.
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(p)
+        let json = String(data: data, encoding: .utf8) ?? ""
+        #expect(!json.contains("tournamentReport"))
     }
 }

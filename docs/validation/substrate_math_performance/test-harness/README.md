@@ -1,6 +1,13 @@
+---
+status: accepted
+created: 2026-05-22
+last_updated: 2026-06-14
+phase: B
+---
+
 # Test Harness
 
-Cross-language conformance test harness for the GeniusLocus substrate
+Cross-language conformance test harness for the GeniusLocusKit substrate
 reference implementation. The harness generates and validates test
 vectors against the scalar reference in both Swift and Rust, with
 byte-equality (CRC32) as the conformance gate.
@@ -92,8 +99,8 @@ four-way matrix across all 24 primitives on every push and PR.
 ## Stress test
 
 A third binary, `stress-test`, measures per-(op, batch_size, mode)
-latency for the three batched kernel ops introduced in Phase 1 of
-the kernel-learned-dispatch architecture. It is independent of
+latency for the three batched kernel ops in the
+kernel-learned-dispatch architecture. It is independent of
 the conformance gate.
 
 ```sh
@@ -111,25 +118,24 @@ The stress-test output is hardware-specific and is NOT committed
 to the repo. The schema is documented in `test-vector-format.md`
 under the stress-test entry.
 
-## Top-K benchmark (historical Phase 2.delta-1 instrument)
+## Top-K benchmark (historical instrument)
 
 A fourth binary, `topk-bench`, sweeps `hamming_top_k` latency
 across K and N for every kernel in the registry. It is the
-instrument that produced the Phase 2.delta-1 measurement cited
-in row 5 of `docs/decisions/DECISION_PHASE_2_FINAL_SELECTION_2026-05-18.md`.
+instrument that produced the kernel-dispatch selection
+measurement recorded in the baselines table below.
 It is independent of the conformance gate, of the stress-test
 sweep, and of the recurring CI matrix. It exists in both
 languages so the cookbook section 17.1 hot-path budget for
 `hamming_top_k` (K=10 over 1M rows under 100 microseconds) is
 re-checkable from either side.
 
-The Phase 2 dispatch question is closed (SimdKernel strictly
-dominates on aarch64; see the final selection doc). The binaries
-are retained as historical instruments rather than active sweep
-participants: they are not invoked by CI, they do not contribute
-to the recurring stress-test output, and the schema they emit
-(`topk-1`) is parallel to but distinct from the stress-test
-schema (`2`).
+The kernel-dispatch question is closed: SimdKernel strictly
+dominates on aarch64. The binaries are retained as historical
+instruments rather than active sweep participants: they are not
+invoked by CI, they do not contribute to the recurring stress-test
+output, and the schema they emit (`topk-1`) is parallel to but
+distinct from the stress-test schema (`2`).
 
 ```sh
 # Swift
@@ -152,10 +158,10 @@ production answer.
 
 | Run                       | Hardware     | Commit  | K=10 N=1M (microseconds) | Kernel               |
 |---------------------------|--------------|---------|--------------------------|----------------------|
-| Phase 2.delta-1           | apple-m5-max | 8e7916d | 604                      | Swift SimdKernel     |
+| kernel-dispatch selection | apple-m5-max | 8e7916d | 604                      | Swift SimdKernel     |
 | 2026-05-22                | apple-m5-max | 7e9efb9 | 594                      | Swift SimdKernel     |
 | 2026-05-22 (pre-ladder)   | apple-m5-max | 7e9efb9 | 16,804                   | Rust SimdKernel      |
-| 2026-05-22 (post-ladder)  | apple-m5-max | (this)  | 631                      | Rust SimdKernel      |
+| 2026-05-22 (post-ladder)  | apple-m5-max | 6e9ac29 | 631                      | Rust SimdKernel      |
 | 2026-05-22                | apple-m5-max | 7e9efb9 | 16,374                   | Rust ScalarKernel    |
 | 2026-05-22                | apple-m5-max | 7e9efb9 | 29,044                   | Swift ScalarKernel   |
 | 2026-05-22                | apple-m5-max | 7e9efb9 | 32,517                   | Swift MetalKernel    |
@@ -165,28 +171,23 @@ production answer.
 Notes on the 2026-05-22 reading:
 
 The Swift SimdKernel at 594 microseconds replicates the
-Phase 2.delta-1 number (604 microseconds) within measurement
-noise. No regression from the Mission 8 GeniusLocusKit work,
-which is consistent with the harness having no transitive
+kernel-dispatch selection number (604 microseconds) within
+measurement noise. There is no regression from the GeniusLocusKit
+work, which is consistent with the harness having no transitive
 dependency on the kit graph.
 
 The Rust SimdKernel `hamming_top_k` initially measured at 16,804
 microseconds: a 28x gap to the Swift counterpart. Inspection
 showed the Rust implementation was score-then-sort with SIMD
 distance, not the branchless-on-update ladder per cookbook
-section 11.2. The source comment at the time labeled the ladder
-as "Future work (Phase 2.beta-2)" but Phase 2 closed without it
-landing. For a substrate intended as cross-system AI deep memory,
-a 28x recall-path penalty on aarch64 Linux deployment targets
-(Graviton, Ampere) was not viable. The ladder was ported from
-the Swift implementation at
-`packages/libs/SubstrateKernel/Sources/SubstrateKernel/PortableKernel.swift`
-lines 113-211 into the Rust kernel at
-`packages/libs/SubstrateKernel/rust/src/kernel_simd.rs` line 188. Post-port the Rust
-SimdKernel measures 631 microseconds, sitting 18% above the
-section 17.5 bandwidth floor of 533 microseconds and within 6%
-of Swift. The conformance gate (byte-equality against
-ScalarKernel) passes for both languages.
+section 11.2. For a substrate intended as cross-system AI deep
+memory, a 28x recall-path penalty on aarch64 Linux deployment
+targets (Graviton, Ampere) was not viable. The ladder was ported
+from the Swift `PortableKernel` implementation into the Rust
+`SimdKernel`. Post-port the Rust SimdKernel measures 631
+microseconds, sitting 18% above the section 17.5 bandwidth floor
+of 533 microseconds and within 6% of Swift. The conformance gate
+(byte-equality against ScalarKernel) passes for both languages.
 
 ## Adding a primitive
 

@@ -38,7 +38,7 @@ pub struct LatticeAnchorInference {
     /// The value to OR into bits 36-41 of the provenance column
     /// to record the enrichment status. Values per cookbook
     /// section 2.5: 0=none, 1=qid_pending, 2=qid_completed,
-    /// 3=closure_cached, 4-63 reserved.
+    /// 3=closure_cached, 4=qid_proposed, 5-63 reserved.
     pub enrichment_status_bits: u8,
 
     /// The pipeline mode that produced this inference. The Rust
@@ -105,6 +105,14 @@ pub enum EnrichmentStatus {
     /// Q-ID resolved and the Wikidata subclass closure has been
     /// cached for graph-distance queries.
     ClosureCached = 3,
+
+    /// Deterministic re-inference could not resolve the Q-ID and the
+    /// maintenance daemon filed an enrichment proposal for human/agent
+    /// review. A terminal "in workflow" state, NOT passive pending: the
+    /// daemon's `qid_pending` retry scan does not re-pick these rows.
+    /// Proposal acceptance flips the row to `QidCompleted` (cookbook
+    /// §2.5; Q-ID-completion terminal workflow).
+    QidProposed = 4,
 }
 
 impl EnrichmentStatus {
@@ -146,6 +154,7 @@ mod tests {
         assert_eq!(EnrichmentStatus::QidPending.raw(), 1);
         assert_eq!(EnrichmentStatus::QidCompleted.raw(), 2);
         assert_eq!(EnrichmentStatus::ClosureCached.raw(), 3);
+        assert_eq!(EnrichmentStatus::QidProposed.raw(), 4);
     }
 
     #[test]

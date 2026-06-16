@@ -75,8 +75,21 @@ impl GrantLifetime {
     }
 }
 
-/// The four custody modes from Appendix B.
+/// The four custody modes (Appendix B). Modes 1 and 2 are production; mode 3
+/// is experimental gated behind `experimental_ip_clearance_confirmed`; mode 4
+/// is the time-aging decay policy.
 ///
+/// Mode 4 — time-aging decay (`TimeAging`). The original Appendix B mode 4
+/// modelled physical SRAM decay (the TARDIS technique, USENIX 2012): an estate
+/// handed a grant whose effective capability attenuates over time the way data
+/// retention in an unpowered SRAM cell decays. SRAM hardware is unavailable on
+/// every beta surface, so the shipped policy is a deterministic SOFTWARE
+/// time-aging model with the same semantics: the grant's effective content
+/// level decays as a half-life function of elapsed time since `started_at`,
+/// floored at `floor`. The attenuation is computed against an injected `now`
+/// (no wall-clock read), so it is reproducible and bit-comparable with Swift.
+///
+/// The legacy `"physicalDecay"` discriminant token decodes INTO this variant.
 /// Mirror of Swift `CustodyMode`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CustodyMode {
@@ -92,22 +105,99 @@ pub enum CustodyMode {
         drift_rate: DriftRate,
         experimental_ip_clearance_confirmed: bool,
     },
-    /// Mode 4: physical SRAM decay. Not implemented in v1.0.
-    PhysicalDecay {
-        experimental_ip_clearance_confirmed: bool,
-    },
+    /// Mode 4: time-aging decay. The grant's effective content level
+    /// attenuates as a half-life function of elapsed time, floored at the
+    /// policy floor. Software analogue of the original SRAM physical-decay
+    /// model (TARDIS); decay is deterministic in injected `now`.
+    TimeAging(DecayPolicy),
 }
 
 impl CustodyMode {
-    /// Discriminant token for the signing payload and the `custody_mode` column.
-    /// Byte-identical to Swift `CustodyMode.signingToken`.
-    pub fn signing_token(&self) -> &'static str {
+    /// Signing token: identity, grantee, scope, and all custody parameters the
+    /// signature must cover. For `TimeAging` the decay-policy fields ride in the
+    /// token so a tampered half-life, start instant, or floor breaks signature
+    /// verification. Byte-identical to Swift `CustodyMode.signingToken`.
+    pub fn signing_token(&self) -> String {
+        match self {
+            CustodyMode::Mediated => "mediated".to_string(),
+            CustodyMode::HandedOver => "handedOver".to_string(),
+            CustodyMode::DecayDerived { .. } => "decayDerived".to_string(),
+            CustodyMode::TimeAging(policy) => format!("timeAging|{}", policy.signing_token()),
+        }
+    }
+
+    /// The bare `custody_mode` column discriminant — the persisted token without
+    /// associated values. Mode 3's parameters (GRT-01 non-persistence) and mode
+    /// 4's decay policy (the `decay_*` columns) live outside the token, so the
+    /// column stores only the discriminant. Byte-identical to Swift
+    /// `CustodyMode.columnToken`.
+    pub fn column_token(&self) -> &'static str {
         match self {
             CustodyMode::Mediated => "mediated",
             CustodyMode::HandedOver => "handedOver",
             CustodyMode::DecayDerived { .. } => "decayDerived",
-            CustodyMode::PhysicalDecay { .. } => "physicalDecay",
+            CustodyMode::TimeAging(_) => "timeAging",
         }
+    }
+}
+
+/// Parameters of the mode-4 time-aging custody policy. Mirror of Swift
+/// `DecayPolicy`.
+///
+/// The effective content level at instant `now` (Apple reference seconds) is
+/// `max(floor, round(base_level * 0.5^(elapsed / half_life_seconds)))`
+/// where `elapsed = max(0, now - started_at)`. The half-life form mirrors the
+/// matrix-calibration decay (math treatise §8). The fraction is computed in
+/// `f64` and rounded to an integer so both ports produce identical discrete
+/// values from identical fixtures. `floor` is the residual capability that
+/// never ages away; a grant whose effective level reaches 0 (only when
+/// `floor == 0`) is treated as fully decayed and refused on the recall path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecayPolicy {
+    /// Half-life of the capability in whole seconds. Every `half_life_seconds`
+    /// of elapsed time halves the surviving (above-floor) content level. A
+    /// non-positive value is clamped to 1 by `effective_level` so the formula
+    /// never divides by zero.
+    pub half_life_seconds: i64,
+    /// The instant decay is measured from, in Apple reference seconds. Persisted
+    /// explicitly so the decay clock is independent of `issued_at`; a legacy row
+    /// with no decay fields documents `started_at = issued_at`.
+    pub started_at: f64,
+    /// The minimum content level the grant decays toward. `0` means the grant
+    /// can decay to no access (and is refused once it reaches the floor); a
+    /// positive value is a permanent residual capability.
+    pub floor: i64,
+}
+
+impl DecayPolicy {
+    /// Default half-life for a legacy mode-4 row with no persisted decay
+    /// fields: 30 days in seconds. Matches the matrix-calibration decay default
+    /// (`half_life_days = 30.0`) and Swift `DecayPolicy.defaultHalfLifeSeconds`.
+    pub const DEFAULT_HALF_LIFE_SECONDS: i64 = 30 * 24 * 60 * 60;
+
+    /// Deterministic token fragment for the signing payload. The instant is
+    /// rendered as the same `f64` Apple-reference-seconds form the grant uses
+    /// for `issued_at`. Byte-identical to Swift `DecayPolicy.signingToken`.
+    pub fn signing_token(&self) -> String {
+        format!(
+            "halfLife:{}|start:{}|floor:{}",
+            self.half_life_seconds, self.started_at, self.floor
+        )
+    }
+
+    /// The effective content level of a `base_level` capability at `now`.
+    ///
+    /// Deterministic in `now`: `elapsed` is clamped to non-negative so a `now`
+    /// before `started_at` yields the undecayed `base_level`, and a non-positive
+    /// `half_life_seconds` is clamped to 1. The surviving level is
+    /// `base_level * 0.5^(elapsed/half_life)`, rounded to the nearest integer
+    /// (`f64::round`, matching Swift's `.toNearestOrAwayFromZero`), then floored.
+    pub fn effective_level(&self, base_level: i64, now: f64) -> i64 {
+        let elapsed = (now - self.started_at).max(0.0);
+        let half_life = self.half_life_seconds.max(1) as f64;
+        let surviving = base_level as f64 * 0.5_f64.powf(elapsed / half_life);
+        let rounded = surviving.round() as i64;
+        rounded.max(self.floor)
     }
 }
 
@@ -247,6 +337,7 @@ impl std::fmt::Debug for IssueGrantResult {
 
 /// A grant as held in the store, paired with its revocation instant.
 /// Mirror of Swift `StoredGrant`.
+#[derive(Debug)]
 pub struct StoredGrant {
     pub grant: Grant,
     /// `None` while active; seconds since Apple reference date when revoked.
@@ -259,7 +350,6 @@ pub enum GrantError {
     GrantRevoked(Uuid),
     GrantExpired(Uuid),
     ExperimentalModeNotActivated,
-    HardwareNotSupported,
     GrantNotFound(Uuid),
     ScopeKeyUnavailable(Uuid),
     KeyDecayed,

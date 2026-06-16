@@ -1,3 +1,10 @@
+---
+title: "Start Here"
+subtitle: "Orientation guides for getting into MOOTx01"
+author: "MOOTx01 maintainers"
+date: "2026-06-14"
+---
+
 # Start Here
 
 Three orientation guides at three depths. Pick the one that matches
@@ -26,12 +33,39 @@ Names the technique and points at the kit. Roughly two minutes per
 section. Reading this is enough to build on top of MOOTx01 with
 confidence; it is not enough to maintain the substrate itself.
 
+**[`SDK_QUICKSTART.md`](SDK_QUICKSTART.md)** — the hands-on companion to the
+developer guide: add the substrate to a project and run the core write→read
+loop (open an estate, capture a memory, recall it), in Swift and Rust, with the
+modular module map. The example is lifted from the kit tests, so it works as
+written. Read this when you're ready to integrate, not just evaluate.
+
 **[`SUBSTRATE_FOR_MAINTAINERS.md`](SUBSTRATE_FOR_MAINTAINERS.md)** —
 for port maintainers, contributors, and engineers reading the kit
 code. Same thirteen layers as the developer guide, but each section
 answers three questions: what it is, why we chose it, where it
 lives in the code. Adds failure modes, performance numbers, and
 conformance notes the developer guide omits.
+
+## Quick onboarding & AI-assisted install
+
+**[`END_USER_EXPLAINER.md`](END_USER_EXPLAINER.md)** — the shortest
+plain-language explanation for a non-technical end user: what MOOTx01 is
+(local memory for AI), what gets installed, and what the ports and
+dashboard are. Read this first if you just want to understand it.
+
+**[`INSTALL_SURFACE.md`](INSTALL_SURFACE.md)** — the install fact sheet for
+humans and AI assistants: default addresses, the product-install flow, the
+platform matrix, expected commands, environment variables, verification,
+and uninstall. The source of truth for what a product install does.
+
+**[`AI_START_HERE.md`](../../AI_START_HERE.md)** — at the repo root, for an
+AI assistant a user asks to "explain and install this." Mission, safety
+rules, a platform-aware install flow, verification, and troubleshooting, so
+an assistant gives a good first experience without improvising.
+
+**[`AI_INSTALL_MANIFEST.json`](AI_INSTALL_MANIFEST.json)** — the machine-readable companion to the
+install fact sheet: install commands, ports, verification, adapter locations, and the files an
+install may touch, as structured JSON for an AI agent to parse before acting.
 
 ## Reading order
 
@@ -43,8 +77,9 @@ in shape.
 After reading the guide that matches your role, the next step
 depends on what you came for:
 
-- **Build on top of MOOTx01** → [`../reference/`](../reference/)
-  for the kit-level specs you will integrate against.
+- **Build on top of MOOTx01** → [`SDK_QUICKSTART.md`](SDK_QUICKSTART.md) for the
+  hands-on open→capture→recall loop, then [`../reference/`](../reference/) for the
+  kit-level specs you integrate against.
 - **Maintain or port the substrate** → [`../engineering/`](../engineering/)
   for the cookbook and methodology, then [`../decisions/`](../decisions/)
   for the record of every kernel and architecture selection.

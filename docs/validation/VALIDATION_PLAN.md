@@ -1,8 +1,9 @@
 ---
-status: accepted
+status: in_progress
 created: 2026-05-22
-ratified: 2026-05-22
-last_updated: 2026-05-22
+last_updated: 2026-06-14
+phase: A
+description: The phased validation plan for GeniusLocusKit, closing from spec-level claims down to application-level validation.
 ---
 
 # GeniusLocusKit Validation Plan
@@ -19,44 +20,44 @@ artifacts each phase produces, most importantly `CLAIMS_LEDGER.md`.
 
 ## Status header
 
-| Phase | Title                              | Status       | Routing       | Depends on |
-|-------|------------------------------------|--------------|---------------|------------|
-| A     | Claims ledger                      | in_progress  | direct        | (none)     |
-| B     | Invariant negative-test suite      | not_started  | direct        | A          |
-| C     | Theorem demonstrations             | not_started  | direct        | A          |
-| D     | MemPalace migration benchmark      | not_started  | direct (+pipeline bounded) | A, B, C |
-| E     | Adversarial harness                | not_started  | automated pipeline | B, C  |
-| F     | Continuous performance gates       | not_started  | automated pipeline | B, C  |
+| Phase | Title                              | Status       | Depends on |
+|-------|------------------------------------|--------------|------------|
+| A     | Claims ledger                      | in_progress  | (none)     |
+| B     | Invariant negative-test suite      | not_started  | A          |
+| C     | Theorem demonstrations             | not_started  | A          |
+| D     | Migration benchmark                | not_started  | A, B, C    |
+| E     | Adversarial harness                | not_started  | B, C       |
+| F     | Continuous performance gates       | not_started  | B, C       |
 
 ## Phases
 
 ### Phase A: Claims ledger
 
 Enumerate every empirical claim the substrate makes, in one
-flat ledger row per claim. Claims come from the cookbook v0.36
-(invariants, theorems, hot-path budgets, protocol contracts),
-the committed decision records, the eight Mission 8 mission
-specs, and the KG facts on `GeniusLocusKit`. Each row carries
-its claim type, spec citation, current validation status, and
-an evidence pointer (commit SHA, test path, or "pending").
+flat ledger row per claim. Claims come from the substrate
+cookbook (invariants, theorems, hot-path budgets, protocol
+contracts), the committed decision records, the GeniusLocusKit
+specifications, and the recorded validation status of
+`GeniusLocusKit`. Each row carries its claim type, spec
+citation, current validation status, and an evidence pointer
+(commit SHA, test path, or "pending").
 
 Entry criteria: this plan committed (skeleton sufficient;
 ratification not required to start).
 
 Exit criteria: every claim in scope appears as a ledger row,
 each row has `claim_evidenced_by` or `claim_evidence_pending`
-recorded both in the ledger and as a KG fact.
+recorded in the ledger.
 
 Output: `docs/validation/CLAIMS_LEDGER.md` committed, the gap
-list extracted into a "Pending Evidence" section, KG facts
-filed.
+list extracted into a "Pending Evidence" section.
 
 ### Phase B: Invariant negative-test suite
 
 For each I-1 through I-14 (plus any new invariants introduced
 by accepted decision records), confirm a negative test exists
 that attempts to violate the invariant and fails appropriately.
-Many already exist in Mission 8 test files under operation
+Many already exist in the existing test suite under operation
 names; the work is mapping them to the numbered invariant
 surface and authoring tests for gaps.
 
@@ -64,35 +65,36 @@ Entry criteria: Phase A's invariant rows complete, including
 each invariant's evidence status.
 
 Exit criteria: every invariant row in the ledger points to a
-negative test that runs and passes, KG fact
-`claim_evidenced_by` recorded per invariant.
+negative test that runs and passes, with `claim_evidenced_by`
+recorded per invariant.
 
 Output: new tests under existing Swift test targets, committed.
 
 ### Phase C: Theorem demonstrations
 
 Each of the 8 theorems gets a runnable demonstration as code,
-not just a proof in the manuscript. Mission 8's GLK-08 covered
-Thms 4, 6, 7, 8 and met the Thm 5 hot-path budget. Phase C
-fills in Thms 1, 2, 3 (and verifies the existing four still
-hold post-Mission-8).
+not just a proof in the manuscript. Earlier performance-gate
+work covered Thms 4, 6, 7, 8 and met the Thm 5 hot-path budget.
+Phase C fills in Thms 1, 2, 3 (and verifies the existing four
+still hold).
 
 Entry criteria: Phase A's theorem rows complete with evidence
 status per theorem.
 
 Exit criteria: every theorem has a runnable demonstration that
-passes, KG fact `claim_evidenced_by` recorded.
+passes, with `claim_evidenced_by` recorded.
 
 Output: theorem demonstration code, committed.
 
-### Phase D: MemPalace migration benchmark
+### Phase D: Migration benchmark
 
-The load-bearing validation. Migrates the existing MemPalace
-corpus (Bob's working memory substrate, several months of
-content) into a GeniusLocus estate via the four-branch
-parallel-run methodology already KG-recorded. Compares each
+The load-bearing validation. Migrates a real-world reference
+corpus (a multi-month accumulation of working-memory content)
+into a GeniusLocus estate via a four-branch parallel-run
+methodology: the corpus is migrated under several distinct
+configurations and the branches are compared. Compares each
 branch's recall quality, structural fidelity, and behavioral
-parity against the MemPalace baseline.
+parity against the source-corpus baseline.
 
 This is the work that proves GLK does what it was designed to
 do as a deep memory substrate, not just as a spec implementation.
@@ -103,12 +105,12 @@ and theorem has either evidenced status or a recorded waiver).
 
 Exit criteria: migration produces zero silent concept loss
 under at least one branch, recall quality of the winning branch
-meets or exceeds the MemPalace baseline on a curated query set,
-benchmark report committed.
+meets or exceeds the source-corpus baseline on a curated query
+set, benchmark report committed.
 
-The winning branch promotion is a separate decision that gates
-MemPalace retirement. Phase D ends when the report commits; the
-promotion gate is a subsequent decision.
+The winning branch promotion is a separate decision. Phase D
+ends when the report commits; the promotion gate is a
+subsequent decision.
 
 Output: `docs/validation/MIGRATION_BENCHMARK_REPORT.md` plus
 estate snapshot, committed.
@@ -131,9 +133,10 @@ committed; CI workflow wires it in.
 
 ### Phase F: Continuous performance gates
 
-Extends GLK-08's perf gate pattern to recall, dreaming tick,
-federation handshake, and standing-signals dispatch latency.
-CI-gated so regressions get caught at PR time.
+Extends the existing performance-gate pattern to recall,
+dreaming tick, federation handshake, and standing-signals
+dispatch latency. CI-gated so regressions get caught at PR
+time.
 
 Entry criteria: Phases B and C complete.
 
@@ -158,56 +161,35 @@ and recall parity → NeuronKit and CognitionKit work can begin.
 Those layers compose on actual learned behavior from a real
 corpus; threshold-3 validation is the trigger.
 
-Phase D winning branch promoted → MemPalace retired, and all
-AI tooling reads from GeniusLocus on the next session. This is
-a separate decision, not part of Phase D itself.
+Phase D winning branch promoted → the GeniusLocus estate
+becomes the primary store, with the source corpus retained as a
+backstop. This is a separate decision, not part of Phase D
+itself.
 
-## Routing policy
+## Validation status vocabulary
 
-Default: direct work in this chat for richer context curation
-and authenticity of the record. The recursive insight is that
-the validation work is also the corpus-building work for
-Phase D, so dense diary entries and KG facts during Phases A
-through C make Phase D's migration benchmark more substantive.
-
-The automated pipeline is an escape valve for bounded mechanical
-missions only, flagged per-item in the ledger. Phase E and F
-default to the automated pipeline because the work is largely
-template-fitting (fuzz harness pattern, CI gate pattern); the
-rest default to direct.
-
-Once GLK passes Phase D and the winning branch promotes,
-implementation tooling gains substrate-grade memory (GLK as
-primary, MemPalace as backstop) and the routing default inverts
-for NeuronKit and CognitionKit: automated pipeline primary,
-direct work for architecture and analysis. The validation work
-bootstraps the tooling for the work that follows it.
-
-## KG predicate vocabulary
-
-Declared for cross-session structured validation querying.
-Sessions writing validation KG facts use these predicates
-exclusively (extend the vocabulary by appending to this list).
+The ledger and phase tracking use a fixed set of status
+predicates so that progress is queryable across the plan and
+its artifacts. Extend the vocabulary by appending to this list.
 
 - `validation_phase_status`: phase_id → not_started | in_progress | blocked | done
 - `claim_evidenced_by`: claim_id → commit SHA or test path or runnable demonstration path
 - `claim_evidence_pending`: claim_id → short reason
 - `claim_violation_found_in`: claim_id → commit SHA or test path describing the violation
 - `claim_waived_with_rationale`: claim_id → short rationale (used when a claim is deferred or deemed out of scope; Phase D entry criterion accepts waivers)
-- `migration_branch_recall_parity_against_mempalace`: branch_id → numeric score plus methodology pointer
-- `validation_session_checkpoint`: session date → short summary plus commit SHA
+- `migration_branch_recall_parity`: branch_id → numeric score plus methodology pointer
+- `validation_checkpoint`: date → short summary plus commit SHA
 
 ## Phase D prerequisites: anchor extractor work
 
-A design conversation on 2026-05-22 surfaced a substrate-level
-gap and a design constraint that together gate Phase D more
-tightly than the original plan recorded.
+A substrate-level gap and a design constraint together gate
+Phase D more tightly than the original plan recorded.
 
 The gap: the substrate has the slot for lattice anchors
 (`Drawer.udcCode`, `Drawer.wikidataConcept`) and the recall
 scoring depends on them, but no in-tree code populates them
-from text content. Phase D's MemPalace migration benchmark
-needs anchors on every migrated drawer.
+from text content. Phase D's migration benchmark needs anchors
+on every migrated drawer.
 
 The constraint, articulated in `DESIGN_CONSTRAINTS.md` C-1:
 the substrate cannot depend on external ML runtimes, LLM API
@@ -215,10 +197,10 @@ calls, or neural inference engines. Anchor extraction must be
 implemented in-tree, deterministic, in both languages, and
 conformance-gated.
 
-Three bounded missions sit between the current state and
+Three bounded pieces of work sit between the current state and
 Phase D entry:
 
-### M1: Deterministic in-tree linguistic pipeline
+### Deterministic in-tree linguistic pipeline
 
 Build a Unicode-aware tokenizer, Snowball stemmer integration,
 gazetteer matcher, and UDC + Wikidata classifier. Pure Swift
@@ -227,10 +209,7 @@ schedule top 3 levels, curated Wikidata subset of common
 entities). Conformance-gated against shared vectors in the
 existing test-harness pattern.
 
-Routing: direct work in chat. Context-dense, design-sensitive,
-in-tree implementation.
-
-### M2: Apple NaturalLanguage compile-time acceleration
+### Apple NaturalLanguage compile-time acceleration
 
 Add a Swift-only `apple-nlp-accel` compile-time flag that
 delegates the linguistic pipeline to Apple's NaturalLanguage
@@ -240,12 +219,10 @@ the flag is enabled. Same pattern as the kernel layer's
 is mutually exclusive with cross-language conformance and is
 declared federation-disabled in the build configuration.
 
-Routing: direct work in chat.
-
-### M3: Anchor agreement test
+### Anchor agreement test
 
 Measures how closely the deterministic in-tree extractor and
-the Apple-accelerated path agree on the MemPalace corpus.
+the Apple-accelerated path agree on the reference corpus.
 Three levels:
 
 - Level 1: direct anchor agreement (UDC equality at depths 3,
@@ -270,91 +247,40 @@ Decision matrix from the data:
   provenance bitmap tracks which extractor produced each
   anchor and queries can filter or reconcile.
 
-Routing: direct work in chat. Day-sized once M1 and M2 land.
-
 ### Phase D entry criteria amendment
 
-M1 and M2 must land before Phase D can begin. M3 runs as part
-of Phase D's opening pass and informs whether MemPalace data
-gets one canonical anchor set or two parallel ones during the
-migration benchmark.
+The deterministic in-tree linguistic pipeline and the Apple
+NaturalLanguage acceleration must land before Phase D can begin.
+The anchor agreement test runs as part of Phase D's opening pass
+and informs whether the source corpus gets one canonical anchor
+set or two parallel ones during the migration benchmark.
 
-## Session protocol
+## Design notes
 
-Every session that touches validation work follows the same
-opening and closing sequence so cross-session continuity holds.
+These notes record the rationale behind the constraints that
+shape the anchor extractor and Phase D.
 
-Opening, before any work:
+The substrate's text-to-anchor story is governed by a hard
+constraint: the substrate has no external runtime dependencies.
+An LLM API call and an ONNX Runtime model runtime were both
+considered as deployment options and rejected on determinism
+and supply-chain grounds. `DESIGN_CONSTRAINTS.md` records the
+four constitutional constraints (C-1 through C-4) that follow
+from this rule.
 
-1. Read the diary for `mootx01`, last 3 entries.
-2. Query the KG for `validation_phase_status` and for the
-   active phase's relevant entities.
-3. Run `mempalace_search` on the active phase's topic.
-4. Read `VALIDATION_PLAN.md`, `DESIGN_CONSTRAINTS.md`, and
-   `CLAIMS_LEDGER.md` to confirm phase status, constitutional
-   constraints, entry criteria, and the next step.
+Accordingly, the anchor extractor is deterministic, in-tree, in
+both languages, and conformance-gated. The vector tier's third
+rung is TF-IDF over framework-profile vocabulary; no embedding
+model is the production default at this tier.
 
-Closing, after the work:
-
-5. Update this plan's Session log subsection with what landed.
-6. Update KG facts using the declared vocabulary above.
-7. Write a diary entry tagged `validation-phase-X-checkpoint`.
-8. Commit any deliverable that landed.
-
-## Session log
-
-Append-only. Most recent at the top.
-
-### 2026-05-22 (late): Design conversation; constraints doc opened; Phase D prerequisites recorded
-
-Design conversation surfaced two corrections that materially
-revise the substrate's text-to-anchor story. First, an LLM API
-call was proposed as a deployment option; Bob rejected it on
-determinism and supply-chain grounds. Second, ONNX Runtime was
-proposed as a model runtime; Bob rejected it on the same grounds
-and articulated the broader constitutional rule that the substrate
-has no external runtime dependencies, period.
-
-`DESIGN_CONSTRAINTS.md` opened to record the four constitutional
-constraints (C-1 through C-4). The session protocol in this
-plan is amended to read the constraints doc at the opening of
-every session.
-
-Anchor extractor is now deterministic in-tree, both languages,
-conformance-gated. Vector tier rung 3 is TF-IDF over
-framework-profile vocabulary; the prior KG fact recording
-EmbeddingGemma_300M as production default is superseded.
-
-Three bounded missions (M1, M2, M3) sit between the current
-state and Phase D entry. They are recorded in the new Phase D
-prerequisites section above.
-
-MemPalace's role clarified: test and profile corpus, not
-generative classification map. Its code and techniques (AAAK
-encoding, cross-tunnel mechanism, KG triple temporal validity,
-search heuristics) compose with LocusKit; the MemPalace
-framework profile becomes Phase D's first concrete artifact
-showing how a domain-specific classification maps onto
-LocusKit primitives.
+The reference corpus serves as a test and profile corpus, not a
+generative classification map. Its techniques (AAAK encoding,
+cross-tunnel mechanism, KG-triple temporal validity, search
+heuristics) compose with LocusKit; the framework profile derived
+from it becomes Phase D's first concrete artifact, showing how a
+domain-specific classification maps onto LocusKit primitives.
 
 The Apple NaturalLanguage compile-time acceleration follows the
-kernel-ladder architectural pattern: deterministic reference
-always available, acceleration opt-in for self-contained
+kernel-ladder architectural pattern: a deterministic reference
+path always available, acceleration opt-in for self-contained
 deployments that disable federation.
-
-### 2026-05-22: Plan skeleton committed; Phase A started
-
-Plan committed in skeleton form, status `proposed`. KG predicate
-vocabulary declared. `CLAIMS_LEDGER.md` stub committed.
-First batch of claims (the 14 numbered invariants from cookbook
-section 3) enumerated as ledger rows. Phase A continues next
-session with theorems, hot-path budgets, protocol contracts,
-and decision-record claims.
-
-Initial routing decision: Phases A through D run direct from
-this chat per Bob's directive on curation and context
-authenticity. Phases E and F default to the automated pipeline when they
-arrive. The directive's deeper rationale: the validation work
-is also the corpus-building work for Phase D, and direct work
-produces richer KG facts and diary entries that the migration
-benchmark will then have to preserve and recall correctly.

@@ -68,6 +68,13 @@ packages/.audit-flagged
 _sandbox*/
 .claude*/
 
+# Maintainer dev-bootstrap drop-ins (EE agent system reached via symlink for
+# v1.0.x bug-fix work — see ee-edition/tools/ce-dev-setup.sh). Never committed to
+# the public repo; a public clone gets none of these.
+.claude
+docs_internal
+CLAUDE.md
+
 # Python test/build artifacts
 __pycache__/
 *.pyc

@@ -4,9 +4,11 @@
 // Source of truth for the vocabulary is the AriaLexicon Swift module
 // at `AriaLexicon/Sources/AriaLexicon/`. The Rust port duplicates the
 // names and the §7.2 acceptance matrix as data so the parity test in
-// `tests/verb_parity.rs` can assert agreement across ports. AriaLexicon
-// has its own Rust port in a later mission; until then this minimal
-// mirror keeps the GLK conformance gate honored.
+// `tests/verb_parity.rs` can assert agreement across ports.
+// `AriaLexiconLib/rust/` is a fully implemented Rust crate; GLK
+// deliberately keeps this internal vocabulary mirror rather than taking
+// a crate dependency on it, so the GLK conformance gate has no external
+// coupling and the parity test remains the only contract point.
 //
 // `VerbError` and `VERB_NAMES` live here rather than in a separate
 // module: both are pure vocabulary — error-case taxonomy and the
@@ -63,6 +65,19 @@ pub enum VerbError {
 
     /// An expunge frame had `confirmation = false`.
     ExpungeNotConfirmed { row_id: RowId },
+
+    /// GLK's post-storage cross-kit vector-delete step failed after the
+    /// LocusKit storage expunge succeeded. Raised by `expunge` when
+    /// `Corpus::remove` or `VectorStore::delete_all_vectors` fails.
+    ///
+    /// Privacy contract (fail-closed): the LocusKit row is already tombstoned
+    /// and its verbatim content is gone, but the vector embedding survived.
+    /// The caller MUST treat this as an incomplete expunge and must NOT report
+    /// the row as fully deleted. Silently swallowing this error leaves a
+    /// semantic orphan (a recoverable embedding of content the user believed
+    /// was irreversibly destroyed). Parity of the Swift
+    /// `VerbError.crossKitVectorDeleteFailed`.
+    CrossKitVectorDeleteFailed { row_id: RowId, reason: String },
 }
 
 /// The nine verbs of the ARIA grammar. Names and order mirror

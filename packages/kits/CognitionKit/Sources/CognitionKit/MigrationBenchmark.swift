@@ -32,14 +32,17 @@
 //    the benchmark metrics are NeuronKit's; the recipe only gates and
 //    orders).
 //
-// ── Documented limitation (not a deferral) ──
-// The shipped recall path is content-match (BM25/substring) only; the
-// vector tier is deferred until VectorKit ships. The plan parameters that
-// differ between candidate plans (room, lattice anchor, embedding model)
-// do NOT affect content-match recall, so two non-lossy plans score
-// identically and the ranking tie-breaks deterministically by plan name.
-// Differential ranking becomes meaningful when structure-aware recall
-// lands; the gate, correlation, and ranking machinery are correct today.
+// ── Intentional benchmark contract ──
+// The benchmark recall path is LocusKit content-match (BM25/substring) via
+// `asRecallFrames()` — this is deliberate. VectorKit and CorpusKit have shipped
+// and their vector recall lane (Lane D) is live at runtime, but the benchmark
+// intentionally measures structural recall fidelity: whether a migration plan
+// preserves content recallability, independent of embedding-space ranking.
+// The plan parameters that differ between candidate plans (room, lattice anchor,
+// embedding model) do NOT affect content-match recall, so two non-lossy plans
+// score identically and the ranking tie-breaks deterministically by plan name.
+// Differential ranking by vector score is possible but is a separate recipe
+// concern; the gate (C-13), correlation, and ranking machinery are correct today.
 //
 // Boundary discipline (B-1/B-2): the recipe holds no substrate state.
 // Branch derivation, capture, benchmark, promote, and discard all flow

@@ -11,8 +11,14 @@
 //! against shared test vectors. The day the substrate gains a Rust
 //! verb surface, the public entry point lands here as a thin wrapper
 //! over the same engine.
+//!
+//! `shingles` and `shingle_similarity` are thin public wrappers that
+//! delegate to `substrate_ml::shingle_similarity` — the substrate-owned
+//! kernel (I-25). NeuronKit re-exports them unchanged so callers and the
+//! public surface are unaffected.
 
 use serde::{Deserialize, Serialize};
+use substrate_ml::shingle_similarity as substrate_shingle;
 
 /// Mirror of `LocusKit.Drawer` reduced to the fields the reranking
 /// engine consumes. The Rust version is conformance-gated against the
@@ -173,40 +179,25 @@ pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning) -> Vec<DrawerRo
     selected.into_iter().map(|i| drawers[i].clone()).collect()
 }
 
-/// 3-character lowercase shingle set. ASCII-folded via
-/// `to_lowercase()` — locale-free for the ASCII-only conformance
-/// vectors used in tests and identical to Swift's `String.lowercased()`
-/// for the same vectors.
+/// 3-character lowercase shingle set.
+///
+/// Delegates to `substrate_ml::shingle_similarity::shingles` — the
+/// substrate-owned kernel (I-25). One implementation per substrate
+/// atomic; NeuronKit re-exports this function for callers that already
+/// import `neuron_kit` directly.
 pub fn shingles(s: &str) -> std::collections::BTreeSet<String> {
-    let lower = s.to_lowercase();
-    let chars: Vec<char> = lower.chars().collect();
-    let mut out = std::collections::BTreeSet::new();
-    if chars.len() < 3 {
-        if !chars.is_empty() {
-            out.insert(chars.iter().collect::<String>());
-        }
-        return out;
-    }
-    for i in 0..=(chars.len() - 3) {
-        out.insert(chars[i..(i + 3)].iter().collect::<String>());
-    }
-    out
+    substrate_shingle::shingles(s)
 }
 
-/// Deterministic Jaccard similarity over 3-character shingles.
-/// Identical math to Swift's `HybridRecallEngine.shingleSimilarity`.
+/// Deterministic Jaccard similarity over 3-character lowercase shingles.
+///
+/// Delegates to `substrate_ml::shingle_similarity::similarity` — the
+/// substrate-owned kernel (I-25). Bit-identical to the Swift
+/// `HybridRecallEngine.shingleSimilarity` via the shared conformance gate
+/// (CRC 0x8a5d8888, 32-case cross-port vector). NeuronKit re-exports this
+/// function so callers are unaffected.
 pub fn shingle_similarity(a: &str, b: &str) -> f32 {
-    let sa = shingles(a);
-    let sb = shingles(b);
-    if sa.is_empty() && sb.is_empty() {
-        return 0.0;
-    }
-    let inter = sa.intersection(&sb).count();
-    let union = sa.union(&sb).count();
-    if union == 0 {
-        return 0.0;
-    }
-    inter as f32 / union as f32
+    substrate_shingle::similarity(a, b)
 }
 
 #[cfg(test)]
@@ -246,6 +237,29 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(shingles("catdog"), expected);
+    }
+
+    // delegation assertion — shingles and shingle_similarity are thin
+    // wrappers; the substrate provider must produce identical results.
+
+    #[test]
+    fn shingle_similarity_delegates_to_substrate() {
+        let pairs: &[(&str, &str)] = &[
+            ("organic chemistry", "organic chemistry"),
+            ("abcdef", "ghijkl"),
+            ("the quick brown fox", "the quick brown foxx"),
+            ("", "catdog"),
+            ("ab", "bc"),
+        ];
+        for &(a, b) in pairs {
+            let engine = shingle_similarity(a, b);
+            let substrate = substrate_shingle::similarity(a, b);
+            assert!(
+                (engine - substrate).abs() < 1e-9,
+                "mismatch for ({}, {}): engine={} substrate={}",
+                a, b, engine, substrate
+            );
+        }
     }
 
     // shingle_similarity

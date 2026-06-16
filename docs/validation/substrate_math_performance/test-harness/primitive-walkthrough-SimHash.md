@@ -1,8 +1,14 @@
+---
+status: in_progress
+created: 2026-05-17
+last_updated: 2026-06-14
+---
+
 # Primitive Walkthrough — SimHash
 
-End-to-end worked example of adding a primitive to the GeniusLocus
-reference test harness, using SimHash (cookbook § 3.6) as the
-example. Read this once before adding your second primitive.
+End-to-end worked example of adding a primitive to the substrate
+reference test harness, using SimHash as the example. Read this
+once before adding your second primitive.
 
 ## What "done" looks like
 
@@ -16,24 +22,18 @@ matrix pass:
 
 The CRC32 over the canonical binary serialization of outputs is
 identical between the Swift-generated and Rust-generated vector
-files for the same seed. This is the "bit-identity gate" the
-companion decision records talk about.
+files for the same seed. This is the "bit-identity gate".
 
 ## Worked example: SimHash
 
-The SimHash primitive in this harness now calls the real Swift
-and Rust reference impls at
+The SimHash primitive in this harness calls the real Swift and
+Rust reference impls at
 `packages/libs/SubstrateTypes/Sources/SubstrateTypes/SimHash.swift`
 and `packages/libs/SubstrateTypes/rust/src/simhash.rs` via the
 `SubstrateTypes` Swift package and the `substrate-types` Rust
-crate respectively (Phase 6.9a moved SimHash from SubstrateLib
-to SubstrateTypes — algebra-with-types belong with the data
-types, not the orchestration layer). Until 2026-05-17
-the harness used a Path 1 byte-identical stub (deterministic
-`SplitMix64` XOR mix) to validate the harness machinery; that
-stub is retained in the source as a historical comment block.
-The wire-up event and the resulting CRC change is recorded in
-`test-vector-format.md` under "Vector regeneration log".
+crate respectively. SimHash lives in SubstrateTypes because
+algebra-with-types belong with the data types, not the
+orchestration layer.
 
 ### Step 1 — Decide the input and output schemas
 
@@ -50,10 +50,10 @@ For SimHash:
 - `block_value` (u64) — the 64-bit SimHash output
 
 These are the minimum fields needed to make a SimHash invocation
-reproducible. The cookbook § 3.6 algorithm is deterministic given
-these inputs.
+reproducible. The SimHash algorithm is deterministic given these
+inputs.
 
-### Step 2 - Implement the reference (now live, not stub)
+### Step 2 — Implement the reference
 
 The reference function takes the input fields and returns the
 output fields. It must be DETERMINISTIC: same inputs produce the
@@ -102,10 +102,10 @@ Both ports expand the u64 `hyperplane_seed` to a 32-byte byte
 array via the canonical SplitMix64-avalanche expansion (matching
 `pairing.rs::expand_seed_to_32` and
 `PairingHandshake.swift::expandSeedTo32`) before constructing
-the family. This shim exists because the real `HyperplaneFamily`
-takes a 32-byte seed while the harness still parameterizes cases
-by a u64; bumping the harness to a 32-byte seed parameter is a
-future change.
+the family. The expansion bridges the case schema to the family
+constructor: the real `HyperplaneFamily` takes a 32-byte seed
+while the harness parameterizes cases by a u64. This is a recorded
+limitation of the case schema.
 
 ### Step 3 — Write the case generator
 
@@ -231,10 +231,10 @@ same seed, one of three things is true:
    section to remove the ambiguity, then re-run both
    implementations.
 
-The decision records call out case 3 as the parallel-sub-agent
-authoring workflow's main payoff. Single-language workflows
-silently paper over ambiguities; this workflow surfaces them as
-CRC divergence in CI.
+Case 3 is the main payoff of authoring both ports against shared
+test vectors: a single-language implementation silently papers
+over spec ambiguities, while two independent ports surface them
+as CRC divergence in CI.
 
 ## Adding a new primitive — checklist
 
@@ -247,10 +247,9 @@ CRC divergence in CI.
       (dreaming algorithms), or
       `packages/libs/SubstrateLib/Sources/SubstrateLib/<Name>.swift`
       (orchestration). See `primitive-catalog.md` for the
-      per-primitive mapping.
+      per-primitive package mapping.
 - [ ] Land Rust reference at the matching `rust/src/<name>.rs`
-      under the same package (or `rust/glref-rust-<name>.rs`
-      under SubstrateLib for legacy SubstrateLib primitives).
+      under the same package.
 - [ ] Decide input and output schema; document inline at top of
       the primitive harness file
 - [ ] Implement `<Name>Primitive.swift` under
@@ -261,11 +260,11 @@ CRC divergence in CI.
 - [ ] Run the four-way conformance check (see § 6 above)
 - [ ] Commit the Swift-generated vector file under
       `test-harness/vectors/<name>.json`
-- [ ] Update the CI matrix in
-      `.github/workflows/geniuslocus-conformance.yml` (seven
-      places: matrix iterator lives in seven steps)
-- [ ] Add the primitive to `docs/primitive-catalog.md` with its
-      CRC, cookbook section, and source-file paths
+- [ ] Update the CI matrix in the substrate conformance workflow
+      under `.github/workflows/` (add the primitive to every step
+      whose matrix iterates over primitives)
+- [ ] Add the primitive to `primitive-catalog.md` with its CRC,
+      reference section, and source-file paths
 
 ## Cross-language fixtures available to the harness
 

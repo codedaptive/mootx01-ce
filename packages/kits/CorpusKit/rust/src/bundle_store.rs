@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -241,8 +241,18 @@ impl BundleStore {
 }
 
 fn decode_chunk(row: &StorageRow) -> Option<Chunk> {
+    // The `id` column is TEXT in SQLite (no native UUID column type), so the
+    // SQLite backend hands it back as `Text` on read, while the InMemory backend
+    // preserves the inserted `Uuid`. Accept BOTH: decoding `Uuid` only silently
+    // dropped every persisted chunk on reopen, so the BM25 rebuild indexed
+    // nothing and semantic recall went dark on any restored estate. Mirrors the
+    // Swift BundleStore.decodeRowUUID fix (parity-is-absolute).
     let id = match row.get("id") {
         Some(TypedValue::Uuid(u)) => *u,
+        Some(TypedValue::Text(s)) => match Uuid::parse_str(s) {
+            Ok(u) => u,
+            Err(_) => return None,
+        },
         _ => return None,
     };
     let source_id = match row.get("source_id") {
@@ -261,12 +271,21 @@ fn decode_chunk(row: &StorageRow) -> Option<Chunk> {
         Some(TypedValue::Text(s)) => s.clone(),
         _ => return None,
     };
+    // hlc: an HLC column stores the packed u64; SQLite has no native HLC type so
+    // it round-trips as `Int`, while the InMemory backend preserves `Hlc`. Accept
+    // both — decoding only `Hlc` dropped every persisted chunk on reopen (see the
+    // Swift BundleStore.decodeRowHLC fix, parity-is-absolute).
     let hlc: HLC = match row.get("hlc") {
         Some(TypedValue::Hlc(h)) => *h,
+        Some(TypedValue::Int(i)) => HLC::from_packed(*i as u64),
         _ => return None,
     };
+    // metadata: a JSON column reads back as `Json` on InMemory and `Blob` (raw
+    // JSON bytes) on SQLite. Accept both; absent/unparseable is an empty map.
     let metadata: BTreeMap<String, String> = match row.get("metadata") {
-        Some(TypedValue::Json(bytes)) => serde_json::from_slice(bytes).unwrap_or_default(),
+        Some(TypedValue::Json(bytes)) | Some(TypedValue::Blob(bytes)) => {
+            serde_json::from_slice(bytes).unwrap_or_default()
+        }
         _ => BTreeMap::new(),
     };
     Some(Chunk::new(

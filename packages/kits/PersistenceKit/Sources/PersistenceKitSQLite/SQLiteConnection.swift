@@ -2,19 +2,17 @@
 //
 // Thin Swift wrapper around the C sqlite3 API. Per-estate single
 // connection (SQLite WAL mode handles multi-reader concurrency).
-// Loads the vendored sqlite-vec extension on every connection.
 
 import Foundation
 import SubstrateTypes
 import SQLite3
-import CSQLiteVec
 import PersistenceKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -43,7 +41,7 @@ final class SQLiteConnection: @unchecked Sendable {
             throw StorageError.backendError(underlying: "sqlite open: \(msg)")
         }
 
-        // WAL mode, busy timeout, sqlite-vec extension.
+        // WAL mode and busy timeout.
         // Durability pragmas per SQLiteDurabilityTail (cookbook § 4.3.3):
         // WAL for crash-safe concurrent reads, NORMAL fsync,
         // wal_autocheckpoint truncates the WAL every 1000 frames.
@@ -52,15 +50,6 @@ final class SQLiteConnection: @unchecked Sendable {
         try exec("PRAGMA wal_autocheckpoint = 1000;")
         try exec("PRAGMA busy_timeout = \(Int(busyTimeout * 1000));")
         try exec("PRAGMA foreign_keys = ON;")
-
-        // Load sqlite-vec via direct init function.
-        var errMsg: UnsafeMutablePointer<CChar>? = nil
-        let vecRC = sqlite3_vec_init(handle, &errMsg, nil)
-        if vecRC != SQLITE_OK {
-            let msg = errMsg.map { String(cString: $0) } ?? "sqlite-vec init failed"
-            if let errMsg { sqlite3_free(errMsg) }
-            throw StorageError.backendError(underlying: "sqlite-vec init: \(msg)")
-        }
     }
 
     deinit {
@@ -221,9 +210,13 @@ final class SQLiteStatement {
 
     func columnBlob(_ index: Int32) -> Data? {
         guard let stmt else { return nil }
+        // sqlite3_column_type SQLITE_NULL means the column IS NULL (key absent).
+        // An empty blob (zero bytes) has type SQLITE_BLOB with count 0 — return
+        // Data() rather than nil so callers can distinguish "absent" from "empty".
+        guard sqlite3_column_type(stmt, index) != SQLITE_NULL else { return nil }
         let bytes = sqlite3_column_blob(stmt, index)
         let count = sqlite3_column_bytes(stmt, index)
-        guard let bytes, count > 0 else { return nil }
+        guard count > 0, let bytes else { return Data() }
         return Data(bytes: bytes, count: Int(count))
     }
 }
@@ -232,15 +225,42 @@ final class SQLiteStatement {
 let SQLITE_TRANSIENT = unsafeBitCast(OpaquePointer(bitPattern: -1), to: sqlite3_destructor_type.self)
 
 enum ISO8601 {
+    // Cached formatters — initialised once at first use, never mutated after.
+    // ISO8601DateFormatter is thread-safe for concurrent reads after
+    // configuration (Apple documentation). Creating a new instance per call
+    // triggers udat_open (ICU date format init) every time — prohibitively
+    // expensive at scale (pegs the process when reading thousands of rows).
+    // nonisolated(unsafe): options are set once at declaration time; the
+    // instance is thereafter read-only, making concurrent access safe.
+    //
+    // Two parsers cover the two valid ISO-8601 shapes written by this kit
+    // and by external tools:
+    //   (1) withFractionalSeconds: "2026-06-12T18:02:48.000Z"  ← kit-canonical
+    //   (2) withoutFractionalSeconds: "2026-06-12T18:02:48Z"   ← valid ISO-8601
+    // Writing always uses shape (1) so stored values are canonical; reading
+    // accepts both so rows written by other tools or older kit versions parse.
+    nonisolated(unsafe) private static let formatterWithFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    nonisolated(unsafe) private static let formatterWithoutFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
     static func string(from date: Date) -> String {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.string(from: date)
+        formatterWithFraction.string(from: date)
     }
+
+    /// Parse an ISO-8601 string, accepting both fractional-second and
+    /// whole-second forms. Returns `nil` only when neither form succeeds,
+    /// which means the string is not a valid ISO-8601 timestamp at all.
     static func date(from string: String) -> Date? {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.date(from: string)
+        formatterWithFraction.date(from: string)
+            ?? formatterWithoutFraction.date(from: string)
     }
 }
 

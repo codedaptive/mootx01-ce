@@ -10,7 +10,7 @@ import VectorKit
 ///
 /// How pairs are found: the emit closure scans up to 50 stored drawer
 /// IDs via `VectorStore.findByKeyword("", limit:)`, retrieves each row's
-/// engram via `getVector(drawerID:modelID:)`, and calls
+/// engram via `getVector(itemID:modelID:)`, and calls
 /// `VectorStore.findNearest(probe:modelID:limit:)` to locate nearby
 /// vectors. Pairs within `proximityThreshold` Hamming distance (default
 /// 64 — 25% of 256 bits) are deduplicated and emitted as
@@ -65,7 +65,7 @@ public enum VectorSimilaritySignal {
     ///     owned by the caller.
     ///   - modelID: The embedding model whose stored vectors are scanned.
     ///     Must match the `modelID` used when filing embeddings via
-    ///     `VectorStore.addVector`.
+    ///     `VectorStore.addVector(itemID:engram:modelID:modelVersion:filedAt:)`.
     ///   - proximityThreshold: Maximum Hamming distance (0-256) for a
     ///     pair to qualify as an association candidate. Default 64.
     public static func spec(
@@ -99,12 +99,12 @@ public enum VectorSimilaritySignal {
     ) async -> [SignalEmission] {
         var emissions: [SignalEmission] = []
 
-        // Sample candidate drawer IDs. An empty-string keyword query
+        // Sample candidate item IDs. An empty-string keyword query
         // matches all rows (LIKE '%%' = all strings), returning up to
-        // maxProbeCount drawer IDs ordered by drawer_id ascending.
-        let drawerIDs: [String]
+        // maxProbeCount item IDs ordered by item_id ascending.
+        let itemIDs: [String]
         do {
-            drawerIDs = try await vectorStore.findByKeyword("", limit: maxProbeCount)
+            itemIDs = try await vectorStore.findByKeyword("", limit: maxProbeCount)
         } catch {
             emissions.append(.diagnostic(DiagnosticReport(
                 title: "vector_similarity.scan.summary",
@@ -118,11 +118,11 @@ public enum VectorSimilaritySignal {
         // to deduplicate (A,B) vs (B,A) from symmetric findNearest results.
         var seenPairs: Set<String> = []
 
-        for drawerID in drawerIDs {
+        for itemID in itemIDs {
             // getVector returns Engram? — try? flattens to Engram? in Swift 5.7+,
             // so guard let gives Engram (non-optional). Skip rows with no vector.
             guard let probeEngram = try? await vectorStore.getVector(
-                drawerID: drawerID, modelID: modelID) else { continue }
+                itemID: itemID, modelID: modelID) else { continue }
 
             let matches: [VectorMatch]
             do {
@@ -135,14 +135,14 @@ public enum VectorSimilaritySignal {
             }
 
             for match in matches {
-                guard match.drawerID != drawerID else { continue }
+                guard match.itemID != itemID else { continue }
                 guard match.distance <= proximityThreshold else { continue }
 
                 // Canonical pair key: lexicographically smaller ID first
                 // so (A,B) and (B,A) map to the same set element.
-                let pairKey = drawerID < match.drawerID
-                    ? "\(drawerID)||\(match.drawerID)"
-                    : "\(match.drawerID)||\(drawerID)"
+                let pairKey = itemID < match.itemID
+                    ? "\(itemID)||\(match.itemID)"
+                    : "\(match.itemID)||\(itemID)"
 
                 guard seenPairs.insert(pairKey).inserted else { continue }
 
@@ -150,8 +150,8 @@ public enum VectorSimilaritySignal {
                 // distance=0 → weight=1.0 (identical), distance=256 → weight=0.0.
                 let weight = 1.0 - Double(match.distance) / 256.0
                 candidatePairs.append(
-                    (a: min(drawerID, match.drawerID),
-                     b: max(drawerID, match.drawerID),
+                    (a: min(itemID, match.itemID),
+                     b: max(itemID, match.itemID),
                      weight: weight))
             }
         }

@@ -26,21 +26,40 @@
 //! `RecipeRunError::Substrate`, alongside the recipe's own
 //! `RecipeRunError::Recipe` guard failures — the Rust encoding of the Swift
 //! recipe's heterogeneous untyped `throws`.
+//!
+//! ## Production entry point
+//!
+//! `run_migration_benchmark_sqlite` is the production entry point that wires a
+//! SQLite-backed `EstateCoordinator` into `run_migration_benchmark`. It mirrors
+//! the Swift `MigrationBenchmark.run(input:estate:kit:)` entry shape: same
+//! config surface (origin corpus, plans, `now` passed in for determinism),
+//! same call sequence (derive → capture → benchmark per plan). The function
+//! opens the estate over `SqliteDrawerStore::from_path`, opens the coordinator
+//! with it, then drives `LiveRecipeSubstrate` — the same path exercised by
+//! `migration_live`'s `#[cfg(test)]` over `InMemoryDrawerStore`, now with a
+//! durable WAL-mode SQLite backend.
 
 use std::collections::HashMap;
+
+use std::sync::Arc;
 
 use genius_locus_kit::branches::BranchId;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::EstateCoordinator;
 use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer_operational::CaptureChannel;
-use locus_kit::estate_types::LatticeAnchor;
+use locus_kit::drawer_store::DrawerStore;
+use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
 use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use uuid::Uuid;
 
 use crate::error::{RecipeError, RecipeRunError, SubstrateError};
-use crate::migration_orchestration::{BenchmarkOutcome, CoreReport, CorpusEntry, RecipeSubstrate};
+use crate::migration_orchestration::{
+    BenchmarkOutcome, CoreReport, CorpusEntry, OriginEntry, PlanInput, RecipeSubstrate,
+    run_migration_benchmark,
+};
 
 /// A live `RecipeSubstrate` over a real `EstateCoordinator` + parent estate.
 /// Branches are minted in the coordinator's registry (the Swift model); the
@@ -283,15 +302,70 @@ pub fn confirm_migration_promotion(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Production entry point — SQLite-backed estate
+// ---------------------------------------------------------------------------
+
+/// Open a WAL-mode SQLite estate at `db_path` and run the migration-benchmark
+/// recipe against it, returning the assembled `CoreReport`.
+///
+/// This is the production entry point that wires a SQLite-backed
+/// `EstateCoordinator` into `run_migration_benchmark`, closing the gap the
+/// prior orchestration header noted. It mirrors the Swift
+/// `MigrationBenchmark.run(input:estate:kit:)` entry shape:
+///
+/// - `db_path`   — filesystem path for the SQLite database file (created if
+///                 absent); WAL-mode, `busy_timeout_secs = 5.0`.
+/// - `owner_id`  — owner identifier forwarded to `OwnerCredentials::new`,
+///                 matching the Swift `OwnerCredentials(ownerIdentifier:)` call.
+/// - `now`       — deterministic timestamp (Unix seconds, i64). Passed into
+///                 every operation so no clock is read inside the function.
+///                 Mirrors Swift's `Date()` capture at recipe entry.
+/// - `plans`     — candidate migration plans (`PlanInput` slice); parity of
+///                 `MigrationBenchmark.Input.plans`.
+/// - `origin`    — origin corpus entries (`OriginEntry` slice); parity of
+///                 `MigrationBenchmark.Input.origin`.
+///
+/// The call sequence is: `SqliteDrawerStore::from_path` →
+/// `EstateCoordinator::open(Arc<dyn DrawerStore>, ...)` →
+/// `LiveRecipeSubstrate::new` → `run_migration_benchmark`. Errors from any
+/// step propagate as `RecipeRunError`.
+///
+/// `confirm_migration_promotion` / `confirm_migration_promotion_by_id` accept
+/// the same `coord` and `report` to execute the human-gated second step (B-3).
+pub fn run_migration_benchmark_sqlite(
+    db_path: &str,
+    owner_id: &str,
+    now: i64,
+    plans: &[PlanInput],
+    origin: &[OriginEntry],
+) -> Result<(CoreReport, EstateCoordinator, EstateHandle), RecipeRunError> {
+    // Open the durable WAL-mode SQLite store.  `busy_timeout_secs = 5.0` is
+    // a reasonable default for single-process estates; the store is durable
+    // across process restarts.
+    let store = SqliteDrawerStore::from_path(db_path, now, None, 5.0)
+        .map_err(|e| SubstrateError::new("open_sqlite", format!("{e:?}")))?;
+    // Erase the concrete backend type behind the protocol pointer; the
+    // coordinator's `open` takes `Arc<dyn DrawerStore>` (same as Swift
+    // `InMemoryStorage` behind `StorageProtocol`).
+    let store_arc: Arc<dyn DrawerStore> = Arc::new(store);
+    let mut coord = EstateCoordinator::new();
+    let owner = OwnerCredentials::new(owner_id);
+    // zoom_window_low=0, zoom_window_high=i64::MAX mirrors the no-zoom default
+    // used in test helpers and ARIA_MCP's estate open path.
+    let handle = coord
+        .open(store_arc, owner, 0, i64::MAX)
+        .map_err(|e| SubstrateError::new("open_estate", format!("{e:?}")))?;
+    let mut sub = LiveRecipeSubstrate::new(&mut coord, handle, now);
+    let report = run_migration_benchmark(&mut sub, plans, origin)?;
+    Ok((report, coord, handle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
-    use crate::migration_orchestration::{run_migration_benchmark, OriginEntry, PlanInput};
-    use locus_kit::drawer_store::DrawerStore;
     use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
-    use locus_kit::estate_types::OwnerCredentials;
     use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
     use uuid::Uuid;
 
@@ -634,5 +708,243 @@ mod tests {
 
         // Promotion still happened.
         assert_eq!(coord.recall(&h, all_frame(), NOW).unwrap().len(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // SQLite-backed end-to-end tests
+    // -------------------------------------------------------------------------
+    // These tests run the production entry point `run_migration_benchmark_sqlite`
+    // over a real WAL-mode SQLite estate. They cover:
+    //   - CK-SQLITE-1: scratch SQLite — provision, seed, run benchmark, assert results
+    //   - CK-SQLITE-2: reopen round-trip — after a migration run, drop and reopen
+    //     the store, recall rows by re-opening coordinator; exercises the known
+    //     SQLite primitive-decode path (TEXT/INT on read rather than Uuid/Timestamp
+    //     for in-memory). The `string_value_of` / `i64_value_of` decode functions
+    //     in DrawerStoreCore handle both variants, so recall must not go dark.
+    //   - CK-SQLITE-3: dropped concept (empty content) — C-13 gate fires on SQLite
+    //     estate identically to in-memory; production entry propagates it.
+    //
+    // Isolation: each test mints a unique temp path via `Uuid::new_v4()` and
+    // cleans up via `TempDb`. No external `tempfile` crate needed.
+
+    /// RAII guard: deletes the SQLite file + WAL/SHM siblings on drop.
+    /// Pattern taken from LocusKit `tests/drawer_store_sqlite.rs`.
+    struct TempDb {
+        path: String,
+    }
+
+    impl TempDb {
+        fn new(label: &str) -> Self {
+            let name = format!("ck_sqlite_{label}_{}.db", Uuid::new_v4().simple());
+            let path = std::env::temp_dir()
+                .join(name)
+                .to_string_lossy()
+                .into_owned();
+            TempDb { path }
+        }
+
+        fn path(&self) -> &str {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in &["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{}", self.path, suffix));
+            }
+        }
+    }
+
+    fn sqlite_plan(name: &str) -> PlanInput {
+        PlanInput {
+            name: name.to_string(),
+            room: "study".to_string(),
+            lattice_code: "0".to_string(),
+            embedding_model_id: "test-v1".to_string(),
+            sensitivity: 0,
+        }
+    }
+
+    fn sqlite_origin(entries: &[(&str, &str)]) -> Vec<OriginEntry> {
+        entries
+            .iter()
+            .map(|(id, c)| OriginEntry {
+                id: id.to_string(),
+                content: c.to_string(),
+            })
+            .collect()
+    }
+
+    // CK-SQLITE-1: scratch SQLite estate — production entry point runs the full
+    // benchmark pipeline (derive → capture → benchmark → rank) end-to-end.
+    // A clean plan with non-empty origin concepts must survive the C-13 gate,
+    // rank, and win. Confirms the production `run_migration_benchmark_sqlite`
+    // wiring is correct (no silent wiring bug).
+    #[test]
+    fn ck_sqlite1_production_entry_runs_end_to_end() {
+        let db = TempDb::new("ck1");
+        let plans = vec![sqlite_plan("flat")];
+        let origin = sqlite_origin(&[("e1", "alpha concept"), ("e2", "beta concept")]);
+
+        let (report, _coord, _handle) =
+            run_migration_benchmark_sqlite(db.path(), "test-owner", NOW, &plans, &origin)
+                .expect("production entry point must succeed on clean input");
+
+        assert_eq!(
+            report.winner.as_deref(),
+            Some("flat"),
+            "clean plan must win"
+        );
+        assert!(
+            report.disqualified.is_empty(),
+            "no dropped concepts ⇒ not disqualified"
+        );
+        assert_eq!(report.plan_results.len(), 1);
+        let pr = &report.plan_results[0];
+        assert!(pr.lost.is_empty(), "no concept lost on a clean run");
+        assert_eq!(
+            pr.recall_overlap, 1.0,
+            "every migrated concept is recalled on SQLite"
+        );
+    }
+
+    // CK-SQLITE-2: SQLite primitive-decode reopen round-trip.
+    // Run the benchmark, then drop and reopen the same SQLite file under a fresh
+    // coordinator. Recall directly from the reopened estate confirms that rows
+    // written by `capture` (drawer.id stored as UUID TEXT, adjective_bitmap stored
+    // as INTEGER) decode correctly on read-back: `string_value_of` handles both
+    // `TypedValue::Uuid` and `TypedValue::Text` so the id round-trips; `i64_value_of`
+    // handles `TypedValue::Int | Bitmap | Timestamp`. If this path is broken the
+    // drawer recall returns an empty vec and the count assertion fails.
+    //
+    // Two recall passes verify distinct parts of the decode chain:
+    //   - Structured (HydrationLevel::Structured): asserts id decode — each drawer
+    //     must have a non-empty id (uuid column: TypedValue::Uuid or Text(uuid-str)).
+    //   - Full (HydrationLevel::Full): asserts content decode — content column is
+    //     a TEXT blob projected only by the full-body recall path. Structured recall
+    //     intentionally omits content (no-blob lane, §7.3); content is always ""
+    //     in a structured result. Only the full path reads content off disk.
+    #[test]
+    fn ck_sqlite2_rows_survive_close_reopen_decode_trap_clean() {
+        let db = TempDb::new("ck2");
+        let plans = vec![sqlite_plan("flat")];
+        let origin = sqlite_origin(&[("e1", "alpha concept"), ("e2", "beta concept")]);
+
+        // First open: run the benchmark. Captures land in the derived branch.
+        let (_report, mut coord, handle) =
+            run_migration_benchmark_sqlite(db.path(), "test-owner", NOW, &plans, &origin)
+                .expect("first run");
+
+        // Promote the winner so the two migrated rows are committed to the parent
+        // estate (the `open` path; non-promoted branch rows are isolated in the
+        // COW estate and would not appear in a fresh store open). Promotion copies
+        // the branch's rows into the parent via `glk_promote_branch`.
+        let winner_plan = _report.winner.as_deref().expect("winner");
+        confirm_migration_promotion(&mut coord, &_report, winner_plan, &handle, NOW)
+            .expect("promotion");
+
+        // The parent estate now holds the two promoted rows.
+        assert_eq!(
+            coord.recall(&handle, all_frame(), NOW).unwrap().len(),
+            2,
+            "two migrated rows must be in the parent before reopen"
+        );
+
+        // Second open: drop the coordinator (all in-process state) and reopen the
+        // same SQLite file. This forces a cold read from the WAL-mode database,
+        // exercising the TypedValue decode path: UUID columns come back as
+        // TypedValue::Text (schema has ColumnType::Uuid → SQLite path decodes to
+        // TypedValue::Uuid, but the raw fallback for non-schema-hinted TEXT is
+        // TypedValue::Text). Either way `string_value_of` must produce the
+        // original id string.
+        drop(coord);
+        let store2 =
+            locus_kit::drawer_store_sqlite::SqliteDrawerStore::from_path(db.path(), NOW, None, 5.0)
+                .expect("reopen store");
+        let store2_arc: Arc<dyn DrawerStore> = Arc::new(store2);
+        let mut coord2 = EstateCoordinator::new();
+        let h2 = coord2
+            .open(store2_arc, OwnerCredentials::new("test-owner"), 0, i64::MAX)
+            .expect("reopen coordinator");
+
+        // Pass 1 — Structured recall: count + id decode.
+        // Structured recall projects every column EXCEPT content (no-blob lane).
+        // `string_value_of(row.get("id"))` must round-trip via the UUID TEXT column.
+        // Zero rows here means the estate/row read path trapped on the primitive type.
+        let recalled_structured = coord2
+            .recall(&h2, all_frame(), NOW)
+            .expect("structured recall after reopen");
+        assert_eq!(
+            recalled_structured.len(),
+            2,
+            "both rows must be recalled from the reopened SQLite estate (structured); \
+             zero means the primitive-decode trap fired on the id/bitmap columns"
+        );
+        // Every drawer id must be non-empty (uuid TEXT decoded via string_value_of).
+        for d in &recalled_structured {
+            assert!(
+                !d.id.is_empty(),
+                "drawer.id must not be empty after SQLite reopen decode (structured)"
+            );
+        }
+
+        // Pass 2 — Full recall: content decode.
+        // Full recall (`HydrationLevel::Full`) reads the content blob from disk.
+        // If the content TEXT column is not decoded correctly the strings are empty.
+        let mut full_frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+        full_frame.hydration_level = HydrationLevel::Full;
+        full_frame.ordering = Ordering::ByCaptureTimeDesc;
+        let recalled_full = coord2
+            .recall(&h2, full_frame, NOW)
+            .expect("full recall after reopen");
+        assert_eq!(
+            recalled_full.len(),
+            2,
+            "both rows must be recalled from the reopened SQLite estate (full)"
+        );
+        let contents: Vec<String> = recalled_full.iter().map(|d| d.content.clone()).collect();
+        assert!(
+            contents.iter().any(|c| c.contains("alpha")),
+            "alpha content must survive reopen and full decode: {:?}",
+            contents
+        );
+        assert!(
+            contents.iter().any(|c| c.contains("beta")),
+            "beta content must survive reopen and full decode: {:?}",
+            contents
+        );
+    }
+
+    // CK-SQLITE-3: C-13 zero-silent-loss gate fires on the SQLite production entry
+    // point. An origin entry with empty content is dropped (never captured), so
+    // the plan's `lost` set is non-empty and C-13 disqualifies it — no winner.
+    // This mirrors CK-LIVE-2 but through the SQLite production entry point,
+    // confirming the gate is active on the durable path as well as in-memory.
+    #[test]
+    fn ck_sqlite3_c13_gate_fires_on_sqlite_production_path() {
+        let db = TempDb::new("ck3");
+        let plans = vec![sqlite_plan("flat")];
+        // e3 has empty content ⇒ dropped (never migratable), C-13 disqualifies.
+        let origin = sqlite_origin(&[("e1", "alpha concept"), ("e3", "")]);
+
+        let (report, _coord, _handle) =
+            run_migration_benchmark_sqlite(db.path(), "test-owner", NOW, &plans, &origin)
+                .expect("run succeeds even when the plan is disqualified");
+
+        assert!(
+            report.winner.is_none(),
+            "a lossy plan cannot win; got winner: {:?}",
+            report.winner
+        );
+        assert_eq!(report.disqualified.len(), 1, "one plan must be disqualified");
+        assert_eq!(report.disqualified[0].name, "flat");
+        assert!(
+            report.disqualified[0]
+                .lost_concepts
+                .contains(&"e3".to_string()),
+            "e3 (empty content) must appear in lost_concepts: {:?}",
+            report.disqualified[0].lost_concepts
+        );
     }
 }

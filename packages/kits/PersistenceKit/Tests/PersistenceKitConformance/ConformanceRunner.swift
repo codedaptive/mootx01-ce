@@ -13,7 +13,7 @@ import SubstrateTypes
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -358,36 +358,121 @@ public struct ConformanceRunner {
         #expect(missing == nil, "\(backendName): missing blob returns nil")
     }
 
-    // MARK: - Vector fixtures
+    // MARK: - Vector accommodation schema
 
+    /// Schema that mirrors how VectorKit stores embeddings on a backend: a
+    /// keyed row carrying an opaque binary vector payload (`payload_binary`,
+    /// e.g. a 32-byte packed Engram/fingerprint) and a float32 payload
+    /// (`payload_float32`, e.g. a 384-d MiniLM embedding serialized to bytes).
+    /// PersistenceKit owns no vector engine — these are plain BLOB columns.
+    /// The fixtures below assert the ACCOMMODATION contract (ADR-008): every
+    /// backend round-trips, bulk-hydrates, counts, and deletes vector-payload
+    /// rows through the general RowStore surface.
+    static let vectorAccommodationSchema = SchemaDeclaration(
+        kitID: "ConformanceVectorAccommodationKit",
+        version: 1,
+        tables: [
+            TableDeclaration(
+                name: "vector_rows",
+                columns: [
+                    .uuid("id"),
+                    .blob("payload_binary"),
+                    .blob("payload_float32"),
+                    .text("model_id"),
+                    .int("dim")
+                ],
+                primaryKey: ["id"]
+            )
+        ]
+    )
+
+    // MARK: - Vector accommodation fixtures
+
+    /// The vector-storage accommodation guarantee (ADR-008 / PERSISTENCEKIT_SPEC
+    /// "Vector accommodation contract"). PersistenceKit does NOT own a k-NN
+    /// engine; dense-embedding search lives in VectorKit. What every backend
+    /// MUST guarantee is that it accommodates a vector workload's STORAGE needs:
+    ///   1. vector-payload row round-trip — a 32-byte binary payload and a
+    ///      384-d float32 payload survive insert→query byte-for-byte;
+    ///   2. bulk hydration at scale — ≥1k vector rows load back fully;
+    ///   3. count and delete over those rows.
+    /// All exercised through RowStore/BlobStore, no vector-specific surface.
     func vectorFixtures() async throws {
         let storage = try await factory()
-        try await storage.open(schema: Self.testSchema)
+        try await storage.open(schema: Self.vectorAccommodationSchema)
         defer { Task { await storage.close() } }
 
-        let k1 = UUID(), k2 = UUID(), k3 = UUID(), k4 = UUID()
-        try await storage.vectorIndex.add(key: k1, vector: [1, 0, 0], metadata: [:])
-        try await storage.vectorIndex.add(key: k2, vector: [0, 1, 0], metadata: [:])
-        try await storage.vectorIndex.add(key: k3, vector: [0.95, 0.05, 0], metadata: [:])
-        try await storage.vectorIndex.add(key: k4, vector: [0, 0, 1], metadata: [:])
+        // (1) Vector-payload row round-trip.
+        // Binary lane: a 32-byte packed payload (Engram/fingerprint width).
+        let binaryPayload = Data((0..<32).map { UInt8($0 & 0xFF) })
+        // Float lane: a 384-d float32 embedding serialized little-endian.
+        let floats: [Float] = (0..<384).map { Float($0) * 0.001 - 0.19 }
+        var floatBytes = Data(capacity: 384 * 4)
+        for f in floats { withUnsafeBytes(of: f.bitPattern.littleEndian) { floatBytes.append(contentsOf: $0) } }
 
-        let count = try await storage.vectorIndex.count()
-        #expect(count == 4, "\(backendName): vector count")
-
-        let topK = try await storage.vectorIndex.knn(
-            query: [1, 0, 0],
-            k: 2,
-            metric: .cosine,
-            filter: nil,
-            searchParameters: nil
+        let roundTripID = UUID()
+        _ = try await storage.rowStore.insert(
+            table: "vector_rows",
+            values: [
+                "id": .uuid(roundTripID),
+                "payload_binary": .blob(binaryPayload),
+                "payload_float32": .blob(floatBytes),
+                "model_id": .text("MiniLM-L6-v2"),
+                "dim": .int(384)
+            ]
         )
-        #expect(topK.count == 2, "\(backendName): kNN returns k results")
-        #expect(topK[0].key == k1, "\(backendName): exact match first")
-        #expect(topK[1].key == k3, "\(backendName): near match second")
 
-        try await storage.vectorIndex.delete(key: k1)
-        let afterDelete = try await storage.vectorIndex.count()
-        #expect(afterDelete == 3, "\(backendName): count after delete")
+        let fetched = try await storage.rowStore.query(
+            table: "vector_rows",
+            where: .eq(Column(table: "vector_rows", name: "id"), .uuid(roundTripID))
+        )
+        #expect(fetched.count == 1, "\(backendName): vector-payload row present")
+        #expect(fetched[0]["payload_binary"] == .blob(binaryPayload),
+                "\(backendName): 32-byte binary vector payload round-trips byte-for-byte")
+        #expect(fetched[0]["payload_float32"] == .blob(floatBytes),
+                "\(backendName): 384-d float32 vector payload round-trips byte-for-byte")
+        #expect(fetched[0]["dim"] == .int(384), "\(backendName): vector dimensionality preserved")
+
+        // (2) Bulk hydration at scale: ≥1k vector rows load back fully.
+        let bulkCount = 1_000
+        for i in 0..<bulkCount {
+            // Distinct 32-byte payload per row so a decode bug can't alias rows.
+            let payload = Data((0..<32).map { UInt8((i + Int($0)) & 0xFF) })
+            _ = try await storage.rowStore.insert(
+                table: "vector_rows",
+                values: [
+                    "id": .uuid(UUID()),
+                    "payload_binary": .blob(payload),
+                    "payload_float32": .blob(floatBytes),
+                    "model_id": .text("MiniLM-L6-v2"),
+                    "dim": .int(384)
+                ]
+            )
+        }
+
+        let hydrated = try await storage.rowStore.query(table: "vector_rows", where: nil)
+        #expect(hydrated.count == bulkCount + 1,
+                "\(backendName): bulk hydration returns all \(bulkCount + 1) vector rows")
+        // Every hydrated row must carry a 32-byte binary payload and a 384*4-byte float payload.
+        let widthsOK = hydrated.allSatisfy { row in
+            if case let .blob(b) = row["payload_binary"], b.count == 32,
+               case let .blob(f) = row["payload_float32"], f.count == 384 * 4 {
+                return true
+            }
+            return false
+        }
+        #expect(widthsOK, "\(backendName): every hydrated vector row preserves payload widths")
+
+        // (3) Count and delete.
+        let total = try await storage.rowStore.count(table: "vector_rows", where: nil)
+        #expect(total == bulkCount + 1, "\(backendName): vector-row count")
+
+        _ = try await storage.rowStore.delete(
+            table: "vector_rows",
+            where: .eq(Column(table: "vector_rows", name: "id"), .uuid(roundTripID))
+        )
+        let afterDelete = try await storage.rowStore.count(table: "vector_rows", where: nil)
+        #expect(afterDelete == bulkCount, "\(backendName): vector-row count after delete")
     }
 
     // MARK: - Audit fixtures

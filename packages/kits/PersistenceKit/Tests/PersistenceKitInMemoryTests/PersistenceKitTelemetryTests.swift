@@ -4,7 +4,7 @@
 // PersistenceKit in cp-persistencekit-report.
 //
 // These tests cover the InMemory backend, which populates:
-//   rowCount, blobCount, vectorCount, transactionRollbackCount,
+//   rowCount, blobCount, transactionRollbackCount,
 //   logicalSizeBytes, capturedAt.
 //
 // Test sections:
@@ -132,7 +132,7 @@ struct PKTelemetryInMemoryDisabledTests {
             Intellectus.setEnabled(false)
 
             let now = Date(timeIntervalSince1970: 1_700_000_000)
-            let stats = try await storage.stats(now: now)
+            let stats = await storage.stats(now: now)
 
             #expect(stats.capturedAt == now, "capturedAt must match the injected timestamp")
             #expect(stats.rowCount == 0, "rowCount must be 0 on empty storage")
@@ -392,7 +392,7 @@ struct PKTelemetryInMemoryConformanceTests {
             )
             try await storageOff.blobStore.put(key: "b1", bytes: Data("data".utf8))
             await reportStorageStats(storageOff, estateID: "off-estate", now: now)
-            let statsOff = try await storageOff.stats(now: now)
+            let statsOff = await storageOff.stats(now: now)
 
             // --- With monitoring ON ---
             let sink = CapturingSink()
@@ -407,7 +407,7 @@ struct PKTelemetryInMemoryConformanceTests {
             )
             try await storageOn.blobStore.put(key: "b1", bytes: Data("data".utf8))
             await reportStorageStats(storageOn, estateID: "on-estate", now: now)
-            let statsOn = try await storageOn.stats(now: now)
+            let statsOn = await storageOn.stats(now: now)
 
             // Stats must be structurally equivalent for the same operations.
             #expect(statsOff.rowCount == statsOn.rowCount,
@@ -436,7 +436,7 @@ struct PKTelemetryInMemoryConformanceTests {
 
             // Capture stats before calling reportStorageStats.
             let now = Date(timeIntervalSince1970: 1_700_000_000)
-            let before = try await storage.stats(now: now)
+            let before = await storage.stats(now: now)
 
             let sink = CapturingSink()
             Intellectus.install(sink: sink)
@@ -445,14 +445,12 @@ struct PKTelemetryInMemoryConformanceTests {
             Intellectus.setEnabled(false)
 
             // Capture stats after — row/blob counts must be unchanged.
-            let after = try await storage.stats(now: now)
+            let after = await storage.stats(now: now)
 
             #expect(before.rowCount == after.rowCount,
                 "rowCount must be unchanged by reportStorageStats")
             #expect(before.blobCount == after.blobCount,
                 "blobCount must be unchanged by reportStorageStats")
-            #expect(before.vectorCount == after.vectorCount,
-                "vectorCount must be unchanged by reportStorageStats")
 
             Intellectus.install(sink: NoOpSink.shared)
         }

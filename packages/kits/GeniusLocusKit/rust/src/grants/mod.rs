@@ -26,9 +26,9 @@ pub mod lagrange;
 pub mod scope_key_vault;
 
 pub use grant::{
-    CustodyMode, DriftRate, Grant, GrantError, GrantLifetime, GrantOptions, GrantScope,
+    CustodyMode, DecayPolicy, DriftRate, Grant, GrantError, GrantLifetime, GrantOptions, GrantScope,
     IssueGrantResult, ReSharePermission, StoredGrant,
 };
-pub use grant_store::GrantStore;
+pub use grant_store::{GrantStore, GrantStoreError};
 pub use lagrange::{DecayFieldElement, DecayShareProvider, LagrangeDecayKey, ReferenceDecayShareProvider};
 pub use scope_key_vault::ScopeKeyVault;

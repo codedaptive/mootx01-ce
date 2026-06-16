@@ -3,7 +3,7 @@ name = "persistence-kit"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Storage abstraction layer for the GeniusLocus substrate kits. Closed-enum predicate algebra, Storage + RowStore + BlobStore + VectorIndex + AuditLog + StorageObserver traits. InMemory backend ships at v1.0; SQLite backend is a follow-on."
+description = "Storage abstraction layer for the GeniusLocus substrate kits. Closed-enum predicate algebra, Storage + RowStore + BlobStore + AuditLog + StorageObserver traits. InMemory, SQLite (WAL-mode rusqlite, with AES-GCM-256 at-rest content encryption), and PostgreSQL backends all ship."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -22,9 +22,6 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Layering: intellectus-lib has no repo deps; this is downstream→upstream.
 # Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
 intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
-# sqlite-vec extension (vec0 virtual table) for the SQLite VectorIndex,
-# registered against rusqlite's bundled SQLite via auto-extension.
-sqlite-vec = "0.1"
 # ISO-8601 timestamp formatting for TEXT date columns (schema invariant).
 chrono = "0.4"
 # PostgreSQL backend: synchronous client (matches the sync Storage trait).

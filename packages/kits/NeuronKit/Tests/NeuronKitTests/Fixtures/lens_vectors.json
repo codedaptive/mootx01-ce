@@ -330,6 +330,74 @@
       "tolerance" : "1e-6"
     }
   ],
+  "calibration" : [
+    {
+      "calibrated" : [
+        {
+          "calibratedHex" : "0x3ecccccd",
+          "claimedHex" : "0x3ecccccd",
+          "isCalibrated" : false
+        }
+      ],
+      "claimed" : [
+        "0x3ecccccd"
+      ],
+      "records" : [
+
+      ]
+    },
+    {
+      "calibrated" : [
+        {
+          "calibratedHex" : "0x3f000000",
+          "claimedHex" : "0x3f4ccccd",
+          "isCalibrated" : true
+        },
+        {
+          "calibratedHex" : "0x3ecccccd",
+          "claimedHex" : "0x3ecccccd",
+          "isCalibrated" : false
+        }
+      ],
+      "claimed" : [
+        "0x3f4ccccd",
+        "0x3ecccccd"
+      ],
+      "records" : [
+        {
+          "outcome" : "success",
+          "value" : "0x3f4ccccd"
+        },
+        {
+          "outcome" : "failure",
+          "value" : "0x3f4ccccd"
+        }
+      ]
+    }
+  ],
+  "complexity" : [
+    {
+      "countsA" : [
+        "0x3f800000",
+        "0x3f800000",
+        "0x3f800000",
+        "0x3f800000"
+      ],
+      "entropyA" : "0x40000000"
+    },
+    {
+      "countsA" : [
+        "0x3f800000",
+        "0x3f800000"
+      ],
+      "countsB" : [
+        "0x3f800000",
+        "0x3f800000"
+      ],
+      "entropyA" : "0x3f800000",
+      "entropyB" : "0x3f800000"
+    }
+  ],
   "constellations" : [
     {
       "communities" : [
@@ -952,55 +1020,55 @@
       ],
       "loadings" : [
         {
-          "dominantTheme" : 0,
+          "dominantTheme" : 1,
           "label" : "a1",
           "loadings" : [
-            "0x3feabf13d47ab78d",
-            "0x3ee4af3464c0bab1"
+            "0x3f50d1e720000000",
+            "0x3ff2990b60000000"
           ]
         },
         {
-          "dominantTheme" : 0,
+          "dominantTheme" : 1,
           "label" : "a2",
           "loadings" : [
-            "0x3feabf11b9c5b39b",
-            "0x3eec09d4ba9c6a03"
+            "0x3f55fee2e0000000",
+            "0x3ff2974240000000"
+          ]
+        },
+        {
+          "dominantTheme" : 1,
+          "label" : "a3",
+          "loadings" : [
+            "0x3f3d715ea0000000",
+            "0x3ff29bd8e0000000"
           ]
         },
         {
           "dominantTheme" : 0,
-          "label" : "a3",
-          "loadings" : [
-            "0x3feabf095cb6b412",
-            "0x3ef8549fbf0ed01c"
-          ]
-        },
-        {
-          "dominantTheme" : 1,
           "label" : "b1",
           "loadings" : [
-            "0x04c87080e04b4a84",
-            "0x3ff09bfd1b9f8c94"
+            "0x3feeffd7e0000000",
+            "0x3db4f975e0000000"
           ]
         },
         {
-          "dominantTheme" : 1,
+          "dominantTheme" : 0,
           "label" : "b2",
           "loadings" : [
-            "0x0616f13cb4c1b2df",
-            "0x3ff09bfaf7ab5cdf"
+            "0x3feef57540000000",
+            "0x3e7fc45fc0000000"
           ]
         },
         {
-          "dominantTheme" : 1,
+          "dominantTheme" : 0,
           "label" : "b3",
           "loadings" : [
-            "0x05e89806275258e3",
-            "0x3ff09bfbeb8cb9e5"
+            "0x3feef681e0000000",
+            "0x3e73d02ea0000000"
           ]
         }
       ],
-      "reconstructionError" : "0x405900000060aded",
+      "reconstructionError" : "0x3ffaaaaf60000000",
       "resultK" : 2,
       "seed" : 42
     }
@@ -1267,6 +1335,99 @@
       "lambda" : 0
     }
   ],
+  "momentSignature" : [
+    {
+      "candidates" : [
+        [
+          "0x000000000000ff00",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0x000000000000ffff",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ],
+      "ranking" : [
+        {
+          "candidate" : [
+            "0x000000000000ff00",
+            "0x0000000000000000",
+            "0x0000000000000000",
+            "0x0000000000000000"
+          ],
+          "hammingDistance" : 0
+        },
+        {
+          "candidate" : [
+            "0x000000000000ffff",
+            "0x0000000000000000",
+            "0x0000000000000000",
+            "0x0000000000000000"
+          ],
+          "hammingDistance" : 8
+        }
+      ],
+      "rows" : [
+        [
+          "0x000000000000ff00",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ],
+      "signatureBlocks" : [
+        "0x000000000000ff00",
+        "0x0000000000000000",
+        "0x0000000000000000",
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "candidates" : [
+        [
+          "0x000000000000ffff",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ],
+      "ranking" : [
+        {
+          "candidate" : [
+            "0x000000000000ffff",
+            "0x0000000000000000",
+            "0x0000000000000000",
+            "0x0000000000000000"
+          ],
+          "hammingDistance" : 0
+        }
+      ],
+      "rows" : [
+        [
+          "0x000000000000ff00",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0x00000000000000ff",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ]
+      ],
+      "signatureBlocks" : [
+        "0x000000000000ffff",
+        "0x0000000000000000",
+        "0x0000000000000000",
+        "0x0000000000000000"
+      ]
+    }
+  ],
   "partialRecall" : [
     {
       "anchor" : [
@@ -1343,6 +1504,63 @@
       ]
     }
   ],
+  "precedence" : [
+    {
+      "k" : 3,
+      "pairs" : [
+        {
+          "count" : 42,
+          "lagBucket" : 1,
+          "sourceField" : "type",
+          "sourceValue" : "string:note",
+          "targetField" : "status",
+          "targetValue" : "string:active"
+        },
+        {
+          "count" : 15,
+          "lagBucket" : 4,
+          "sourceField" : "priority",
+          "sourceValue" : "string:high",
+          "targetField" : "status",
+          "targetValue" : "string:active"
+        }
+      ],
+      "ranked" : [
+        {
+          "count" : 42,
+          "lagBucket" : 1,
+          "sourceField" : "type",
+          "sourceValue" : "string:note"
+        },
+        {
+          "count" : 15,
+          "lagBucket" : 4,
+          "sourceField" : "priority",
+          "sourceValue" : "string:high"
+        }
+      ],
+      "targetField" : "status",
+      "targetValue" : "string:active"
+    },
+    {
+      "k" : 5,
+      "pairs" : [
+        {
+          "count" : 7,
+          "lagBucket" : 8,
+          "sourceField" : "type",
+          "sourceValue" : "string:note",
+          "targetField" : "status",
+          "targetValue" : "string:archived"
+        }
+      ],
+      "ranked" : [
+
+      ],
+      "targetField" : "status",
+      "targetValue" : "string:active"
+    }
+  ],
   "representationBias" : [
     {
       "biases" : [
@@ -1389,6 +1607,60 @@
           "mass" : "0x3ff0000000000000"
         }
       ]
+    }
+  ],
+  "rhythm" : [
+    {
+      "bucketDurationSeconds" : "0x3ff0000000000000",
+      "buckets" : [
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false
+      ],
+      "periods" : [
+        {
+          "periodSeconds" : "0x4000000000000000",
+          "relativeMagnitude" : "0x3ff0000000000000"
+        }
+      ],
+      "topK" : 1
+    },
+    {
+      "bucketDurationSeconds" : "0x3ff0000000000000",
+      "buckets" : [
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false
+      ],
+      "periods" : [
+        {
+          "periodSeconds" : "0x4010000000000000",
+          "relativeMagnitude" : "0x3ff0000000000000"
+        },
+        {
+          "periodSeconds" : "0x4030000000000000",
+          "relativeMagnitude" : "0x0000000000000000"
+        }
+      ],
+      "topK" : 2
     }
   ],
   "scenarioProfile" : [

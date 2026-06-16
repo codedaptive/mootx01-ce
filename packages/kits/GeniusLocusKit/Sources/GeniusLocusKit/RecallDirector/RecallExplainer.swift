@@ -39,6 +39,7 @@ struct RecallExplainer {
         if sv.locus        > 0 { scoreTokens.append(String(format: "locus=%.2f",        sv.locus))        }
         if sv.bm25         > 0 { scoreTokens.append(String(format: "bm25=%.2f",         sv.bm25))         }
         if sv.vector       > 0 { scoreTokens.append(String(format: "vector=%.2f",        sv.vector))       }
+        if sv.dense        > 0 { scoreTokens.append(String(format: "dense=%.2f",         sv.dense))        }
         if sv.fieldFit     > 0 { scoreTokens.append(String(format: "fieldFit=%.2f",      sv.fieldFit))     }
         if sv.coOccurrence > 0 { scoreTokens.append(String(format: "coOccurrence=%.2f",  sv.coOccurrence)) }
         if sv.temporal     > 0 { scoreTokens.append(String(format: "temporal=%.2f",      sv.temporal))     }
@@ -68,6 +69,9 @@ struct RecallExplainer {
         }
         if hit.score.bm25 > 0 || hit.score.vector > 0 {
             reasons.append("BM25 and vector weighted high")
+        }
+        if hit.score.dense > 0 {
+            reasons.append("dense float cosine match")
         }
         if hit.score.coOccurrence > 0 {
             reasons.append("MatrixO cluster preserved")

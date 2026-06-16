@@ -73,6 +73,99 @@ enum GLKMetricName {
     /// A verb error crossing the GLK estate boundary in `remap()`.
     /// Tagged: `estate_id`, `verb`.
     static let verbError = "geniuslocus.estate.verb_error"
+
+    /// The dense float lane (Lane D) was dark for a recall query.
+    ///
+    /// Emitted by Step 4.5 of the RecallDirector when `floatNearest` returns
+    /// any outcome other than `.hits`. The `reason` tag carries the dark-lane
+    /// classification: `providerOptOut`, `noFloatRows`, or `storeError`. Use
+    /// this counter to detect misconfigured estates where the dense lane is
+    /// expected but consistently dark (e.g. provider not wired up after ingest).
+    /// Tagged: `estate_id`, `reason`.
+    static let denseLaneDark = "glk.recall.dense_lane_dark"
+
+    // MARK: — Stage-degradation counters (P1 fail-loud degradation contract)
+
+    /// The Hamming vector lane's `findNearest` call threw.
+    ///
+    /// Emitted by the RecallDirector when `VectorStore.findNearest` fails
+    /// (corpusOnly, hybrid, or unionBest lane). The query survives; the
+    /// vector column is absent from hit scores. Tagged: `estate_id`, `lane`
+    /// (corpusOnly | hybrid | unionBest).
+    static let vectorHammingDegraded = "glk.recall.vectorHamming.findNearest_degraded"
+
+    /// The embedding call inside `compileSketch` threw.
+    ///
+    /// Emitted when `corpus.embed` fails during query-sketch compilation.
+    /// The vector lane is dark for this query — same downstream effect as
+    /// `vectorHammingDegraded`. Tagged: `estate_id`, `lane`.
+    static let corpusEmbedDegraded = "glk.recall.corpus.embed_degraded"
+
+    /// The structured pool load (`estate.getDrawers`) threw in `unionBest`.
+    ///
+    /// Emitted when the body-free wide-pool load (step 5.5) fails. All
+    /// matrix/graph/preference scoring columns are zero for this query.
+    /// Tagged: `estate_id`.
+    static let poolGetDrawersDegraded = "glk.recall.pool.getDrawers_degraded"
+
+    /// The MMR content-hydration step threw in `unionBest`.
+    ///
+    /// Emitted when `estate.hydrateBodies` fails at step 9.5 (MMR content
+    /// for `.full` recall). MMR ran on sourceMask Jaccard proxy instead of
+    /// content shingles. Tagged: `estate_id`.
+    static let poolHydrateBodiesMMRDegraded = "glk.recall.pool.hydrateBodies.mmr_degraded"
+
+    /// The late-hydration step for returned hits threw in `unionBest`.
+    ///
+    /// Emitted when `estate.hydrateBodies` fails at step 10.5. Returned
+    /// hits carry empty `content` fields for `.structured` recall.
+    /// Tagged: `estate_id`.
+    static let poolHydrateBodiesReturnDegraded = "glk.recall.pool.hydrateBodies.return_degraded"
+
+    /// The frontier candidate `getDrawers` call threw in the `hybrid` lane.
+    ///
+    /// Emitted when `estate.getDrawers` fails while hydrating BM25/vector
+    /// frontier candidates. BM25/vector hits not in the locus index are absent.
+    /// Tagged: `estate_id`.
+    static let hybridGetDrawersDegraded = "glk.recall.hybrid.getDrawers_degraded"
+
+    /// The frontier candidate `getDrawers` call threw in the `corpusOnly` lane.
+    ///
+    /// Emitted when `estate.getDrawers` fails while loading fused candidates
+    /// for the corpusOnly lane. Returned hits may be empty even with BM25/vector
+    /// candidates present. Tagged: `estate_id`.
+    static let corpusOnlyGetDrawersDegraded = "glk.recall.corpusOnly.getDrawers_degraded"
+
+    // MARK: — Scoring-fallback degradation counters
+    //
+    // These name a REQUESTED-SCORING fallback (not an exceptional stage
+    // failure): the caller asked for a scoring strategy that is not yet a
+    // distinct implementation in that lane, so the director fell back to a
+    // simpler combiner. The query succeeds; the result envelope names the
+    // fallback in `degradedStages` so the caller knows the requested scoring
+    // was not the one applied — replacing the previously-silent downgrade.
+    // The genuinely-implemented combos (unionBest+matrixAware, the full
+    // weighted pipeline; hybrid/corpusOnly+rrf, real RRF fusion) do NOT emit.
+
+    /// `matrixAware` was requested for the `locusOnly` lane, which has no
+    /// matrix scoring pass; the lane returned raw bitmap-evaluator ordering.
+    /// Tagged: `estate_id`.
+    static let locusOnlyMatrixAwareFallback = "glk.recall.locusOnly.matrixAware_degraded"
+
+    /// `matrixAware` was requested for the `corpusOnly` lane, which has no
+    /// matrix scoring pass; the lane fell back to RRF fusion of BM25 + vector.
+    /// Tagged: `estate_id`.
+    static let corpusOnlyMatrixAwareFallback = "glk.recall.corpusOnly.matrixAware_degraded"
+
+    /// `matrixAware` was requested for the `hybrid` lane, which has no matrix
+    /// scoring pass; the lane fell back to three-way RRF fusion. Tagged: `estate_id`.
+    static let hybridMatrixAwareFallback = "glk.recall.hybrid.matrixAware_degraded"
+
+    /// `rrf` was requested for the `unionBest` lane, which implements the
+    /// weighted matrix-aware pipeline and a raw pass but not a distinct
+    /// equal-weight RRF fusion across lane scores; it fell back to the raw
+    /// (`buffer.final`) lane-normalised score. Tagged: `estate_id`.
+    static let unionBestRRFFallback = "glk.recall.unionBest.rrf_degraded"
 }
 
 // MARK: - Shared emit helper

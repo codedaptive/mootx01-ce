@@ -39,10 +39,21 @@ pub fn constellations(
     }
 
     let adjacency = structure_graph::build(node_ids, edges);
+    // Full Louvain at the shared lens resolution (see
+    // topology_analysis::TOPOLOGY_RESOLUTION for the derivation):
+    // SPEC § 7.3's auto-rooming consumer is this lens, and phase-1-only
+    // results fragment pair-bonded clusters.
     // estate and ts are empty/0: callers that want VizGraph telemetry
     // should pass the estate id and a caller-supplied timestamp. The
     // default empty values produce a no-op emit when monitoring is off.
-    let labels = CommunityDetection::detect(&adjacency, max_passes, "", 0.0);
+    let labels = CommunityDetection::detect_full(
+        &adjacency,
+        crate::topology_analysis::TOPOLOGY_MAX_LEVELS,
+        max_passes,
+        crate::topology_analysis::TOPOLOGY_RESOLUTION,
+        "",
+        0.0,
+    );
 
     // Group ids by their assigned label, then impose an id-derived canonical
     // ordering so the result is independent of the label integers.

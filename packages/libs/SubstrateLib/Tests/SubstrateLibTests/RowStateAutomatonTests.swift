@@ -44,6 +44,25 @@ struct RowStateAutomatonTests {
         #expect(RowStateAutomaton.transition(from: .decayed, on: .observe) == .active)
     }
 
+    @Test func testAllClusterBStatesReviveOnObserve() {
+        // revive surface (cookbook §9.3): every Cluster-B historical state
+        // restores to active via .observe. Superseded is admitted here; the
+        // lineage-conflict rule is enforced at LocusKit's revive guard.
+        for from: RowState in [.decayed, .withdrawn, .expired, .superseded] {
+            #expect(RowStateAutomaton.transition(from: from, on: .observe) == .active,
+                    "\(from) should revive to .active via .observe")
+        }
+    }
+
+    @Test func testTerminalClusterCStatesDoNotRevive() {
+        // Rejected/tombstoned have no .observe → .active edge; revive is
+        // refused at the automaton. Accepted is live audit-grade, not
+        // historical — also no revive edge.
+        #expect(RowStateAutomaton.transition(from: .rejected, on: .observe) == nil)
+        #expect(RowStateAutomaton.transition(from: .tombstoned, on: .observe) == nil)
+        #expect(RowStateAutomaton.transition(from: .accepted, on: .observe) == nil)
+    }
+
     @Test func testValidateRejectsIllegalTransitions() {
         // Pending --promote--> is illegal (must observe first).
         do {

@@ -1,0 +1,64 @@
+{
+  "_comment": "SHARED cross-language reduction conformance fixture. The Swift ReductionConformanceTests and the Rust tests/reduction_conformance.rs BOTH read this file and assert that NeuronKit's reduction composition produces the RANK-IDENTICAL ordered id list for each case. The reduction fold is integer/fixed-point deterministic; for compositions whose only signals are content/structural (text, text+temporal) the result is bit-identical across languages, and for compositions that read a float lane (dense-fused) the result is rank-identical (the float column participates but the ORDER is stable). Each case supplies the full candidate inputs so both languages build identical ReductionCandidates without a live estate; the expected_order is the precise ranked id list the reduce() returns for that composition at the given limit.",
+  "candidates": [
+    {
+      "id": "d_exact",
+      "content": "the Versailles indemnity was 46 million marks, current as of 1921",
+      "room": "history",
+      "udc_code": "94",
+      "dense": 0.95,
+      "vector": 0.80,
+      "co_occurrence": 0.10,
+      "bm25": 2.0,
+      "is_currently_believed": true,
+      "coarse_rank": 0
+    },
+    {
+      "id": "d_near",
+      "content": "the Versailles indemnity was 11 million marks, superseded; recorded 1919",
+      "room": "history",
+      "udc_code": "94",
+      "dense": 0.70,
+      "vector": 0.78,
+      "co_occurrence": 0.10,
+      "bm25": 1.9,
+      "is_currently_believed": false,
+      "coarse_rank": 1
+    },
+    {
+      "id": "d_offtopic",
+      "content": "the Vienna congress redrew the map of Europe in 1815",
+      "room": "history",
+      "udc_code": "94",
+      "dense": 0.20,
+      "vector": 0.30,
+      "co_occurrence": 0.05,
+      "bm25": 0.5,
+      "is_currently_believed": true,
+      "coarse_rank": 2
+    }
+  ],
+  "cases": [
+    {
+      "name": "text",
+      "composition": "text",
+      "query": "what was the Versailles indemnity of 46 million marks",
+      "limit": 3,
+      "expected_order": ["d_exact", "d_near", "d_offtopic"]
+    },
+    {
+      "name": "text+temporal",
+      "composition": "text+temporal",
+      "query": "what was the Versailles indemnity of 46 million marks",
+      "limit": 3,
+      "expected_order": ["d_exact", "d_near", "d_offtopic"]
+    },
+    {
+      "name": "dense-fused",
+      "composition": "dense-fused",
+      "query": "what was the Versailles indemnity",
+      "limit": 3,
+      "expected_order": ["d_exact", "d_near", "d_offtopic"]
+    }
+  ]
+}

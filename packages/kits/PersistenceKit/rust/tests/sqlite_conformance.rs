@@ -133,7 +133,6 @@ fn sqlite_introspection_inmemory_fields_are_none() {
     let stats = storage.stats(0).unwrap();
     assert_eq!(stats.row_count, None, "row_count must be None for SQLite");
     assert_eq!(stats.blob_count, None, "blob_count must be None for SQLite");
-    assert_eq!(stats.vector_count, None, "vector_count must be None for SQLite");
 }
 
 #[test]

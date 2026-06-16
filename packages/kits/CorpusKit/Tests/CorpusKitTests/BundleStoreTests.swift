@@ -17,13 +17,12 @@ import Foundation
 import SubstrateTypes
 import CorpusKit
 import PersistenceKit
-import PersistenceKitInMemory
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -36,10 +35,7 @@ import PersistenceKitInMemory
 struct BundleStoreTests {
 
     func makeStore() async throws -> BundleStore {
-        let storage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: UUID(),
-            backend: .inMemory
-        ))
+        let storage = try makeScratchStorage()
         try await storage.open(schema: BundleStore.schemaDeclaration)
         return BundleStore(storage: storage)
     }

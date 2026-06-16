@@ -66,6 +66,13 @@ public enum NeuronKit {
     }
 }
 
+// MARK: - Autonomic surface: SolverBandit (§ 3.4)
+
+// SolverBandit is a value type defined in SolverBandit.swift. It is
+// exported as part of the NeuronKit public surface and referenced by
+// DreamingDaemon. No facade method is required — callers construct it
+// directly via SolverBandit() or restore it from Codable persistence.
+
 // MARK: - Autonomic surface: dreaming daemon (§ 3.1)
 
 public extension NeuronKit {
@@ -79,33 +86,35 @@ public extension NeuronKit {
     /// The daemon talks to the substrate only through these seams (B-1):
     /// `reader` for the reads it mines, `sink` for its two writes
     /// (proposal + cycle diary), `policyStore` for the manifest-resident
-    /// policy, and `rewardSource` for the reward signal. Production
-    /// adapters that bind the seams to live estate verbs are implemented
-    /// by `EstateDreamingReader` (read seam) and `EstateDreamingSink`
-    /// (write seam) in NeuronKit/Dreaming/.
+    /// policy, `rewardSource` for the reward signal, and `bandit` for the
+    /// Thompson-Sampling Beta trigger-mode selector (NEURONKIT_SPEC § 3.4).
     ///
     /// - Parameters:
     ///   - reader: substrate read seam.
     ///   - sink: proposal + diary write seam.
-    ///   - policyStore: manifest-resident policy persistence seam.
+    ///   - policyStore: manifest-resident policy + bandit persistence seam.
     ///   - rewardSource: reward-signal seam. Defaults to the v1
     ///     single-source `RecallTraceRewardSource` (`RecallTraceItem.used`).
-    ///   - triggerMode: trigger seam. Defaults to `.timer` (no
-    ///     SolverBandit dependency).
+    ///   - triggerMode: initial trigger mode before the bandit learns.
+    ///     Defaults to `.timer`.
+    ///   - bandit: Thompson-Sampling Beta bandit that selects the trigger
+    ///     mode each cycle. Defaults to a fresh uniform-prior bandit.
     /// - Returns: a configured `DreamingDaemon`.
     static func dreamingDaemon(
         reader: DreamingSubstrateReader,
         sink: DreamingProposalSink,
         policyStore: DreamingPolicyStore,
         rewardSource: RewardSource = RecallTraceRewardSource(),
-        triggerMode: DreamingTriggerMode = .default
+        triggerMode: DreamingTriggerMode = .default,
+        bandit: SolverBandit = SolverBandit()
     ) -> DreamingDaemon {
         DreamingDaemon(
             reader: reader,
             sink: sink,
             rewardSource: rewardSource,
             policyStore: policyStore,
-            triggerMode: triggerMode
+            triggerMode: triggerMode,
+            bandit: bandit
         )
     }
 }
@@ -126,7 +135,7 @@ public extension NeuronKit {
 //   `notFoundInBranch` is the zero-tolerance migration-loss signal
 //   (C-13). The benchmark is read-only — it drives only
 //   `BranchHandle.recall(_:)` and issues no estate write verb.
-//   `ExternalCorpus` / `ExternalEntry` (the MemPalace-export reference
+//   `ExternalCorpus` / `ExternalEntry` (the exchange-format reference
 //   set the benchmark scores against) is defined in GeniusLocusKit and
 //   imported here via the established GLK dependency.
 

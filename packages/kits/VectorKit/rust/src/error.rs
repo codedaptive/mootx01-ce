@@ -22,4 +22,23 @@ pub enum VectorKitError {
     /// reads; included here so the error surface is complete from the
     /// scaffold.
     NotFound,
+
+    /// A `VectorPayload` was constructed with an inconsistent or
+    /// unsupported kind/dim/bytes combination. Payload describes the
+    /// violation.
+    InvalidPayload(String),
+
+    /// Raw bytes in the store could not be decoded into a valid typed
+    /// vector. Payload describes the failure.
+    DecodingFailure(String),
+
+    /// An `Int8` `VectorPayload` was submitted for persistence, but the
+    /// int8 quantization policy (symmetric vs asymmetric, per-vector vs
+    /// per-dim scale) has not been ratified. Writing an int8 payload now
+    /// would lock in undefined dequantization semantics. Use `Float32`
+    /// (float32 lane) or the `Binary` Engram lane instead. See
+    /// VECTORKIT_SPEC §I-4a and arch spec §10.3. When a quantization
+    /// policy is ratified, remove this error case and the guards that
+    /// return it.
+    Int8QuantizationPolicyUndefined(String),
 }

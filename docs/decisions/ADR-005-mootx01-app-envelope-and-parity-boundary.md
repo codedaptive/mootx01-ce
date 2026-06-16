@@ -8,18 +8,17 @@ relates_to:
 supersedes: none
 context:
   - Refines the architecture mandate (mootx01 = headless daemon; moot-mgr = its GUI)
-  - Downstream of "parity is absolute" — Swift↔Rust engine mirror must stay clean
-  - Reviewed by an architecture review (ACCEPT WITH CONDITIONS), conditions addressed inline
+  - The Swift↔Rust engine mirror must stay clean; Apple-only surfaces cannot live in it
 ---
 
 # ADR-005 — The Mootx01 App as Envelope; the Engine/App Parity Boundary
 
 | | |
 |---|---|
-| **Status** | Accepted (2026-06-07) |
-| **Deciders** | Bob (architecture), MOOTx01 maintainers |
+| **Status** | Decided (2026-06-07) |
+| **Deciders** | MOOTx01 maintainers |
 | **Supersedes** | nothing; refines the architecture mandate (mootx01 = headless daemon, moot-mgr = GUI) |
-| **Related** | ADR-004 (event-time), the parity workstream (Swift↔Rust), ARIA_MCP_SPEC §5 (always the server) |
+| **Related** | ADR-004 (event-time), the Swift↔Rust engine mirror, the aria-mcp server (always the server) |
 
 ## Context
 
@@ -27,8 +26,8 @@ We are building an Apple-ecosystem presentation layer for MOOTx01 (App Intents,
 Shortcuts, Siri, EventKit, SwiftUI) across macOS, iOS, and iPadOS, plus developer
 example apps. The question is how that Apple layer relates to the **standalone
 `mootx01` server**, which is a *clean, headless, platform-neutral binary that
-mirrors a Rust implementation on Windows/Linux* — parity that is treated as
-absolute (the real code is training data; drift teaches bad habits).
+mirrors a Rust implementation on Windows/Linux* — a mirror that must stay exact, so
+the two ports never drift apart.
 
 The naive move — fuse the GUI + Apple surfaces *into* the server for "one codebase"
 — is wrong: SwiftUI / App Intents / EventKit cannot exist on Windows/Linux, so the
@@ -45,7 +44,7 @@ server; it never absorbs it.**
    Owns estate hosting, serving, and sourcing. **Zero Apple types.** Deployable
    independently. Unchanged by any of this work. (This is today's `mootx01` /
    `aria-mcp` server + the substrate kits.)
-2. **Apple presentation layer** — `apps/Mootx01` (SwiftUI + App Intents + Shortcuts +
+2. **Apple presentation layer** — `apps/Mootx01-App` (SwiftUI + App Intents + Shortcuts +
    EventKit). Swift-only, Apple-only, **explicitly not in the parity mirror** (it
    *can't* be — there is no Rust SwiftUI). A **superset and technology demonstration**:
    the envelope around the server *plus* the advanced Siri-facing work. Whatever of
@@ -59,17 +58,17 @@ blend across it.
 
 An estate should have exactly **one** owning host process. Everyone else reaches it
 through a transport — never by co-opening the database file. The owner — and only the
-owner — runs the Brain pump for its estates. (The SQLite-file-sharing used in early
+owner — runs the autonomic governor for its estates. (The SQLite-file-sharing used in early
 demos violates this and is a demo trick, not a topology.)
 
 **This is a discipline, not a mechanical invariant — there is no enforcement primitive
 today.** Nothing prevents a second process from opening the same SQLite file; in fact
 `MootBridge.databasePath` exists precisely so an operator *can* point an external
-`aria-mcp` at the estate. Two writers with WAL + the Brain pump on both is a real
+`aria-mcp` at the estate. Two writers with WAL + the autonomic governor on both is a real
 hazard. Before any live handoff ships, the engine needs an **estate owner-lease /
 lockfile** (or the handoff must be a strict close-then-spawn with positive
-acknowledgment — see below). Until one of those lands, treat "one host" as an operator
-responsibility, not a guarantee. (Architecture review condition 4, 2026-06-07.)
+acknowledgment — described in the handoff section below). Until one of those lands, treat
+"one host" as an operator responsibility, not a guarantee.
 
 ### Two kinds of host
 
@@ -93,7 +92,7 @@ release-and-launch leaves a WAL race (uncheckpointed frames + two openers). The 
 trip (the app re-attaching to that now-standalone daemon as a *client*) lands when the
 loopback-HTTP transport ships.
 
-**Correction (architecture review, 2026-06-07):** a clean in-app estate `close()` is **not** a missing
+A clean in-app estate `close()` is **not** a missing
 engine feature — the capability already exists at the kit layer (`EstateCoordinator.close`
 → `Estate.close` → `SQLiteStorage.close`/`sqlite3_close_v2`). The follow-up is **exposing**
 it through `MootBridge` (and making `GeniusLocusKit.close` public, currently
@@ -125,13 +124,13 @@ parity boundary.
 
 - The clean server stays clean and Rust-mirrored. We do not touch it. No Apple-flavored
   daemon is forked.
-- `apps/Mootx01` is Swift-only Apple presentation over the existing engine: embedded
+- `apps/Mootx01-App` is Swift-only Apple presentation over the existing engine: embedded
   server-in-app (all platforms) + managed-subprocess + handoff (macOS only) + the App
   Intents / Shortcuts / Siri superset + an enumerate-what-we-publish surface.
 - Examples demonstrate the SDK on the same seam (build-on-MOOT, sidecar-your-own-app,
   leverage-a-legacy-app-unchanged).
 - `Mootx01` is positioned as the convergence point for the **Apple-native console**.
-  *Plane distinction (architecture review condition 2):* `moot-mgr` does **not** embed the MCP dispatcher —
+  *Plane distinction:* `moot-mgr` does **not** embed the MCP dispatcher —
   it is an observer/admin plane (ObserverSink + EstateAdmin) and cannot serve the live tool
   surface. So what converges into `Mootx01` is the *console* (the Apple-native control GUI),
   **not** moot-mgr's admin engine, which stays below the parity seam and is consumed, not
@@ -145,25 +144,10 @@ parity boundary.
 The loopback-HTTP transport (a separate transport workstream); a Rust GUI app (no Rust SwiftUI; and
 no Rust server binary is present in this product to control); iCloud sync; device code-signing.
 
-## Review conditions (architecture review, 2026-06-07)
+## Boundary discipline
 
-An architecture review of this ADR concluded: **ACCEPT WITH CONDITIONS**. The seam, the parity
-reasoning, and the EE/CE handling are sound and already embodied in the code. Conditions,
-addressed:
-
-1. **`close()` claim corrected** — kit-level close exists; the follow-up is exposing it
-   through `MootBridge` + making `GeniusLocusKit.close` public. *(Fixed in the handoff section.)*
-2. **Convergence plane named** — Apple console converges, not moot-mgr's admin engine;
-   headless+web-console stays the PC/Linux path. *(Fixed above.)*
-3. **Doctrine note** — engine-shaped logic (estate-lifecycle policy, Brain-pump
-   decisions) appearing **above** the dispatcher seam in `apps/Mootx01` is a **CRITICAL**
-   finding. The boundary is enforced by convention; pre-flight and post-flight reviews
-   enforce against it. The `HTTPTransportSeam` must keep *throwing* (not no-op) — a silent
-   no-op to "pass the build" is a prohibited pattern.
-4. **One-host enforcement gap** — downgraded "invariant" to "operating discipline (unenforced)"
-   and gated the live handoff on close-then-spawn (or an owner-lease primitive). *(Fixed in the
-   one-host section.)*
-
-**Edition pre-commit (for when the HTTP transport lands):** an iOS app reaching a *remote/LAN*
-(non-loopback) daemon is an **EE** surface by the edition split (OAuth/remote = EE; loopback
-embedded = both editions). Recorded here so it isn't relitigated later.
+Engine-shaped logic — estate-lifecycle policy, autonomic-governor decisions — must not
+appear **above** the dispatcher seam in `apps/Mootx01-App`. The boundary is enforced by
+convention. The `HTTPTransportSeam` must keep *throwing* until the transport is built, never
+silently no-op; a no-op would let the seam compile while masking that the capability is not
+yet present.

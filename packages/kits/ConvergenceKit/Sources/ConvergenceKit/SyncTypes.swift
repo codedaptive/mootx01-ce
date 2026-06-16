@@ -9,7 +9,7 @@ import SubstrateTypes
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -131,4 +131,10 @@ public enum SyncError: Error, Sendable, Equatable {
     case peerUnreachable(identity: String)
     case authenticationFailed(detail: String)
     case unsupportedTable(name: String)
+    /// A remote record's `recordName` could not be parsed as a UUID.
+    /// Fabricating a fresh UUID from a corrupt `recordName` would create a
+    /// phantom local row that desynchronises on every subsequent sync round.
+    /// The record is quarantined: the pull loop counts it as a conflict,
+    /// logs it, and continues to the next record rather than aborting the batch.
+    case corruptRemoteIdentity(recordName: String)
 }

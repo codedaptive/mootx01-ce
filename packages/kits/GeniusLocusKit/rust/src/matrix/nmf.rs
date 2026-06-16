@@ -1,22 +1,45 @@
-// matrix/nmf.rs — multiplicative-update NMF over O.
+// matrix/nmf.rs — GLK matrix-tier NMF, delegates to canonical substrate primitive.
 //
-// Cookbook §6.9 / substrate-mathematics §8. Mirrors the Swift
-// `MatrixNMF` reference dense-matrix implementation; deterministic
-// SplitMix64 seeding keeps the initial W and H fills bit-identical
-// across replicas.
+// Cookbook §6.9 / substrate-mathematics §8. Delegates to
+// `substrate_ml::nmf::NMFAlternatingLeastSquares` (f32, RMS error). The
+// substrate owns the algorithm; GLK owns the estate-tier wiring.
+//
+// Input: flat row-major f64 matrix (for backward compatibility with callers
+// that build the co-occurrence matrix in f64, e.g. NeuronKit label
+// co-occurrence). Conversion to f32 happens here before delegation.
+//
+// Output: `MatrixNMFFactorization` with f32 factors and RMS reconstruction
+// error. Callers that inspect numeric values observe f32-precision results.
+//
+// The parked f64/Frobenius² algorithm is preserved in the substrate as
+// `substrate_ml::nmf_double_frobenius_squared::NMFDoubleFrobeniusSquared`
+// (NOT for production; see SUBSTRATEML_SPEC.md § 5.4b).
 
+use substrate_ml::nmf::NMFAlternatingLeastSquares;
+
+/// Output of one GLK NMF factorization pass.
+///
+/// Factor matrices hold f32 values from the canonical substrate
+/// `NMFAlternatingLeastSquares`. Reconstruction error is the RMS metric:
+/// `sqrt(||O - W·H||² / (m·n))`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatrixNMFFactorization {
-    pub w: Vec<f64>,
-    pub h: Vec<f64>,
+    /// W matrix, row-major, shape `rows × rank`. f32.
+    pub w: Vec<f32>,
+    /// H matrix, row-major, shape `rank × cols`. f32.
+    pub h: Vec<f32>,
     pub rows: usize,
     pub cols: usize,
     pub k: usize,
-    pub reconstruction_error: f64,
+    /// RMS reconstruction error `sqrt(||O - W·H||² / (rows·cols))`.
+    /// Normalized RMS (the substrate canonical metric), distinct from the
+    /// raw Frobenius² of the parked f64 variant.
+    pub reconstruction_error: f32,
 }
 
 impl MatrixNMFFactorization {
-    pub fn loadings_for_row(&self, row: usize) -> Vec<f64> {
+    /// Loading for one row: the k-dimensional latent factor vector (f32).
+    pub fn loadings_for_row(&self, row: usize) -> Vec<f32> {
         assert!(row < self.rows, "row out of range");
         (0..self.k).map(|j| self.w[row * self.k + j]).collect()
     }
@@ -26,9 +49,18 @@ pub struct MatrixNMF;
 
 impl MatrixNMF {
     pub const DEFAULT_MAX_ITERATIONS: usize = 100;
-    pub const DEFAULT_TOLERANCE: f64 = 1e-6;
-    const EPSILON: f64 = 1e-9;
+    /// Tolerance on the RMS reconstruction error delta (substrate canonical).
+    pub const DEFAULT_TOLERANCE: f32 = 1e-4;
 
+    /// Factorize a flat row-major f64 matrix `o` (shape `rows × cols`)
+    /// into W and H factors via the canonical substrate f32 NMF.
+    ///
+    /// The input `o` is accepted as f64 for compatibility with callers that
+    /// build co-occurrence matrices in f64 precision. Values are converted to
+    /// f32 before delegation to `NMFAlternatingLeastSquares`.
+    ///
+    /// The parked f64/Frobenius² algorithm is available in the substrate as
+    /// `NMFDoubleFrobeniusSquared` (NOT for production).
     pub fn factorize(
         o: &[f64],
         rows: usize,
@@ -36,41 +68,33 @@ impl MatrixNMF {
         k: usize,
         seed: u64,
         max_iterations: usize,
-        tolerance: f64,
+        tolerance: f32,
     ) -> MatrixNMFFactorization {
         assert_eq!(o.len(), rows * cols, "o shape mismatch");
         assert!(k > 0, "k must be positive");
 
-        let mut rng = SplitMix64 { state: seed };
-        let mut w: Vec<f64> = (0..rows * k).map(|_| rng.next_unit_nonneg()).collect();
-        let mut h: Vec<f64> = (0..k * cols).map(|_| rng.next_unit_nonneg()).collect();
+        // Convert flat f64 row-major to nested Vec<Vec<f32>> for the substrate.
+        let v: Vec<Vec<f32>> = (0..rows)
+            .map(|row| {
+                (0..cols)
+                    .map(|col| o[row * cols + col] as f32)
+                    .collect()
+            })
+            .collect();
 
-        let mut last_error = f64::INFINITY;
+        let result = NMFAlternatingLeastSquares::factorize(
+            &v,
+            k,
+            max_iterations,
+            tolerance,
+            seed,
+            "",    // estate tag — GLK matrix-tier calls do not emit telemetry from this layer
+            0.0,
+        );
 
-        for _ in 0..max_iterations {
-            // H ← H ⊙ (Wᵀ·O) / (Wᵀ·W·H + ε)
-            let wt_o = mat_mul_transpose_left(&w, rows, k, o, rows, cols);
-            let wt_w = mat_mul_transpose_left(&w, rows, k, &w, rows, k);
-            let wt_w_h = mat_mul(&wt_w, k, k, &h, k, cols);
-            for i in 0..h.len() {
-                h[i] = h[i] * wt_o[i] / (wt_w_h[i] + Self::EPSILON);
-            }
-
-            // W ← W ⊙ (O·Hᵀ) / (W·H·Hᵀ + ε)
-            let o_ht = mat_mul_transpose_right(o, rows, cols, &h, k, cols);
-            let h_ht = mat_mul_transpose_right(&h, k, cols, &h, k, cols);
-            let w_h_ht = mat_mul(&w, rows, k, &h_ht, k, k);
-            for i in 0..w.len() {
-                w[i] = w[i] * o_ht[i] / (w_h_ht[i] + Self::EPSILON);
-            }
-
-            let err = frobenius_squared(o, rows, cols, &w, &h, k);
-            if (last_error - err).abs() < tolerance {
-                last_error = err;
-                break;
-            }
-            last_error = err;
-        }
+        // Flatten substrate nested W and H to flat row-major f32.
+        let w: Vec<f32> = result.w.iter().flat_map(|row| row.iter().copied()).collect();
+        let h: Vec<f32> = result.h.iter().flat_map(|row| row.iter().copied()).collect();
 
         MatrixNMFFactorization {
             w,
@@ -78,115 +102,7 @@ impl MatrixNMF {
             rows,
             cols,
             k,
-            reconstruction_error: last_error,
+            reconstruction_error: result.final_error,
         }
-    }
-}
-
-// MARK: - Dense linear-algebra helpers
-
-fn mat_mul_transpose_left(
-    a: &[f64],
-    arows: usize,
-    acols: usize,
-    b: &[f64],
-    brows: usize,
-    bcols: usize,
-) -> Vec<f64> {
-    assert_eq!(arows, brows, "mat_mul_transpose_left inner-dim mismatch");
-    let mut out = vec![0.0; acols * bcols];
-    for i in 0..acols {
-        for j in 0..bcols {
-            let mut sum = 0.0;
-            for r in 0..arows {
-                sum += a[r * acols + i] * b[r * bcols + j];
-            }
-            out[i * bcols + j] = sum;
-        }
-    }
-    out
-}
-
-fn mat_mul_transpose_right(
-    a: &[f64],
-    arows: usize,
-    acols: usize,
-    b: &[f64],
-    brows: usize,
-    bcols: usize,
-) -> Vec<f64> {
-    assert_eq!(acols, bcols, "mat_mul_transpose_right inner-dim mismatch");
-    let mut out = vec![0.0; arows * brows];
-    for i in 0..arows {
-        for j in 0..brows {
-            let mut sum = 0.0;
-            for c in 0..acols {
-                sum += a[i * acols + c] * b[j * bcols + c];
-            }
-            out[i * brows + j] = sum;
-        }
-    }
-    out
-}
-
-fn mat_mul(
-    a: &[f64],
-    arows: usize,
-    acols: usize,
-    b: &[f64],
-    brows: usize,
-    bcols: usize,
-) -> Vec<f64> {
-    assert_eq!(acols, brows, "mat_mul inner-dim mismatch");
-    let mut out = vec![0.0; arows * bcols];
-    for i in 0..arows {
-        for j in 0..bcols {
-            let mut sum = 0.0;
-            for c in 0..acols {
-                sum += a[i * acols + c] * b[c * bcols + j];
-            }
-            out[i * bcols + j] = sum;
-        }
-    }
-    out
-}
-
-fn frobenius_squared(o: &[f64], rows: usize, cols: usize, w: &[f64], h: &[f64], k: usize) -> f64 {
-    let mut err = 0.0;
-    for i in 0..rows {
-        for j in 0..cols {
-            let mut prod = 0.0;
-            for kk in 0..k {
-                prod += w[i * k + kk] * h[kk * cols + j];
-            }
-            let d = o[i * cols + j] - prod;
-            err += d * d;
-        }
-    }
-    err
-}
-
-// MARK: - SplitMix64
-
-/// Deterministic seedable PRNG. Same constants as the Swift reference
-/// so two replicas starting from the same seed produce identical
-/// initial W and H fills.
-struct SplitMix64 {
-    state: u64,
-}
-
-impl SplitMix64 {
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
-    }
-
-    fn next_unit_nonneg(&mut self) -> f64 {
-        let bits = self.next_u64() >> 11;
-        let raw = bits as f64 / (1u64 << 53) as f64;
-        raw.max(1e-3)
     }
 }

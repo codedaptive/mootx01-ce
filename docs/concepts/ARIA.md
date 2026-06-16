@@ -1,3 +1,12 @@
+---
+title: ARIA
+status: canon
+authors: MOOTx01 maintainers
+date: 2026-06-14
+version: 1.0.0
+description: Overview of ARIA — the interface specification (Augmented Recall and Inference Architecture) every consumer uses to reach a MOOTx01 estate.
+---
+
 # ARIA
 
 *The interface specification for MOOTx01.*
@@ -26,7 +35,7 @@ This is the architectural commitment that makes everything else work. If ARIA we
 
 ARIA is reached three ways.
 
-**ARIA_MCP** — an MCP server that wraps a MOOTx01 estate and exposes the ARIA surface over the Model Context Protocol. Any AI client that speaks MCP — Claude, ChatGPT, Claude Code, OB1, a local model with an MCP runtime — can reach the estate through this server. The MCP wrapper does not add or change semantics; it carries ARIA over the wire.
+**aria-mcp** — an MCP server that wraps a MOOTx01 estate and exposes the ARIA surface over the Model Context Protocol. Any AI client that speaks MCP — Claude, ChatGPT, Claude Code, a local model with an MCP runtime — can reach the estate through this server. The MCP wrapper does not add or change semantics; it carries ARIA over the wire.
 
 **Native API** — a callable library API that exposes the ARIA surface for compiled applications. A Swift application calls the Swift implementation directly. A Rust application calls the Rust implementation directly. Same ARIA, same operations, same semantics. No protocol overhead, no server, no wire.
 
@@ -71,9 +80,9 @@ ARIA does not define:
 
 ## Where the formal specification lives
 
-The full ARIA specification is in `docs/reference/`. The architecture spec (`GENIUSLOCUS_ARCHITECTURE_SPEC_v0.8*.md`) is the authoritative source for the substrate's behavior, and ARIA is the surface of that substrate.
+The full ARIA specification is in `docs/reference/`. The architecture spec (`GENIUSLOCUS_ARCHITECTURE_SPEC.md`) is the authoritative source for the substrate's behavior, and ARIA is the surface of that substrate.
 
-The engineering cookbook (`docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md`) is the reference for how the algorithms behind ARIA actually work.
+The engineering cookbook (`docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md`) is the reference for how the algorithms behind ARIA actually work.
 
 The conformance test vectors are in `docs/validation/substrate_math_performance/test-harness/`.
 

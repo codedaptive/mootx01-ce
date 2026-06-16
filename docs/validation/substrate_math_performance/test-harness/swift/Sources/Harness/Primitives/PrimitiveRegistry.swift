@@ -96,6 +96,8 @@ public enum PrimitiveRegistry {
         BitFieldMaskedEqualsPrimitive.descriptor,
         AssociationRuleMiningPrimitive.descriptor,
         FormalConceptAnalysisPrimitive.descriptor,
+        SamplingPrimitive.descriptor,
+        ShingleSimilarityPrimitive.descriptor,
     ]
 
     public static func find(_ name: String) -> PrimitiveDescriptor? {

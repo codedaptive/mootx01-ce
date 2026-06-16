@@ -1,10 +1,10 @@
 // In-memory backend tests for persistence-kit. Mirror of the Swift
 // InMemoryStorage test surface: schema management, row CRUD,
-// predicates, ordering, pagination, blob round-trip, vector
-// kNN, audit log idempotence, observer notifications.
+// predicates, ordering, pagination, blob round-trip,
+// audit log idempotence, observer notifications.
 
 use persistence_kit::{
-    inmemory::InMemoryStorage, AuditEvent, Column, ColumnDeclaration, DistanceMetric,
+    inmemory::InMemoryStorage, AuditEvent, Column, ColumnDeclaration,
     IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration, Storage, StorageEvent,
     StoragePredicate, TableDeclaration, TypedValue,
 };
@@ -15,7 +15,7 @@ use std::sync::mpsc::TryRecvError;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -262,27 +262,6 @@ fn blob_store_roundtrip() {
     assert_eq!(blobs.size("blob-1").unwrap(), Some(256));
     blobs.delete("blob-1").unwrap();
     assert!(!blobs.exists("blob-1").unwrap());
-}
-
-#[test]
-fn vector_knn_returns_nearest() {
-    let s = make_storage();
-    let idx = s.vector_index();
-    let v1 = vec![1.0_f32, 0.0, 0.0];
-    let v2 = vec![0.0_f32, 1.0, 0.0];
-    let v3 = vec![0.9_f32, 0.1, 0.0];
-    let k1 = Uuid::new_v4();
-    let k2 = Uuid::new_v4();
-    let k3 = Uuid::new_v4();
-    idx.add(k1, &v1, BTreeMap::new()).unwrap();
-    idx.add(k2, &v2, BTreeMap::new()).unwrap();
-    idx.add(k3, &v3, BTreeMap::new()).unwrap();
-    let query = vec![1.0_f32, 0.0, 0.0];
-    let results = idx.knn(&query, 2, DistanceMetric::L2, None, None).unwrap();
-    assert_eq!(results.len(), 2);
-    // First match should be k1 (identical), second should be k3 (closer than k2).
-    assert_eq!(results[0].key, k1);
-    assert_eq!(results[1].key, k3);
 }
 
 #[test]
@@ -691,7 +670,7 @@ fn append_only_allows_insert_rejects_update_and_delete() {
 // StorageIntrospection tests for InMemoryStorage.
 // ─────────────────────────────────────────────────────────────────────
 
-use persistence_kit::{StorageIntrospection, StorageStats};
+use persistence_kit::StorageIntrospection;
 
 #[test]
 fn inmemory_introspection_row_count_zero_on_empty() {

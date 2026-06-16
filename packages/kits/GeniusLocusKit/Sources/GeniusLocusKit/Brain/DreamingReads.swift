@@ -52,4 +52,37 @@ public extension GeniusLocusKit {
         let estate = try estate(for: handle)
         return try await estate.allDrawers()
     }
+
+    /// Up to `limit` drawers in the addressed estate (including tombstoned
+    /// rows), in `filedAt`-ascending order, fully hydrated.
+    ///
+    /// The bounded counterpart to `allDrawers(in:)`. The maintenance reader
+    /// uses this so the health scan reads O(min(N_estate, limit)) rows at the
+    /// storage tier rather than pulling the full corpus and truncating in
+    /// process — the Swift parity of the Rust coordinator's
+    /// `all_drawers_bounded`. Passing `nil` reads the full corpus, identical
+    /// to `allDrawers(in:)`. Delegates to `Estate.allDrawers(limit:)`.
+    ///
+    /// B-10a: internal read — no `traceLimit` is set, so no recall-trace rows
+    /// are written.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale.
+    func allDrawers(in handle: EstateHandle, limit: Int?) async throws -> [Drawer] {
+        let estate = try estate(for: handle)
+        return try await estate.allDrawers(limit: limit)
+    }
+
+    /// Delete recall-trace rows whose `recalledAt` is strictly before
+    /// `cutoff` in the addressed estate. Returns the number of rows deleted.
+    ///
+    /// Called after the dreaming daemon reward sweep to keep the
+    /// recall_trace table bounded. The cutoff must be derived from the
+    /// caller's deterministic `now`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale.
+    @discardableResult
+    func pruneRecallTraces(in handle: EstateHandle, olderThan cutoff: Date) async throws -> Int {
+        let estate = try estate(for: handle)
+        return try await estate.pruneRecallTraces(olderThan: cutoff)
+    }
 }

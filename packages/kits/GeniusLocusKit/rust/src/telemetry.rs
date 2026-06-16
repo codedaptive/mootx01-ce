@@ -38,6 +38,67 @@ pub mod metric_names {
     /// A verb error crossing the GLK estate boundary in `remap`.
     /// Tagged: `estate_id`, `verb`.
     pub const VERB_ERROR: &str = "geniuslocus.estate.verb_error";
+
+    /// The dense float lane (Lane D) was dark for a recall query.
+    ///
+    /// Emitted by `recall_scored_multi_lane` (Step 4.5) when
+    /// `float_nearest` returns any outcome other than `Hits`. The
+    /// `reason` tag carries the dark-lane classification:
+    /// `providerOptOut`, `noFloatRows`, or `storeError`. Use this
+    /// counter to detect misconfigured estates where the dense lane
+    /// is expected but consistently dark. Mirrors Swift
+    /// `GLKMetricName.denseLaneDark`. Tagged: `estate_id`, `reason`.
+    pub const DENSE_LANE_DARK: &str = "glk.recall.dense_lane_dark";
+
+    // ── Stage-degradation counters (P1 fail-loud degradation contract) ──
+    //
+    // Each counter mirrors the corresponding Swift `GLKMetricName.*Degraded`
+    // constant. Names are identical across ports so cross-fleet dashboards
+    // can aggregate Swift and Rust estate counters without aliasing.
+
+    /// The Hamming vector lane's `find_nearest` call threw.
+    ///
+    /// Emitted by `recall_scored_multi_lane` when `VectorStore::find_nearest`
+    /// fails (hybrid or unionBest lane with a registered vector store). The
+    /// query survives on locus and BM25 signals; the vector column is absent
+    /// from hit scores. Mirrors Swift `GLKMetricName.vectorHammingDegraded`.
+    /// Tagged: `estate_id`, `lane` (hybrid | unionBest).
+    pub const VECTOR_HAMMING_DEGRADED: &str = "glk.recall.vectorHamming.findNearest_degraded";
+
+    /// The embedding call inside `recall_scored_multi_lane` threw.
+    ///
+    /// Emitted when `Corpus::embed` fails during query-sketch preparation.
+    /// The vector lane is dark for this query — same downstream effect as
+    /// `VECTOR_HAMMING_DEGRADED`, but the failure happened one step earlier
+    /// (before `find_nearest` was called). Mirrors Swift
+    /// `GLKMetricName.corpusEmbedDegraded`. Tagged: `estate_id`, `lane`.
+    pub const CORPUS_EMBED_DEGRADED: &str = "glk.recall.corpus.embed_degraded";
+
+    // ── Scoring-fallback degradation counters ──
+    //
+    // These name a REQUESTED-SCORING fallback (not an exceptional stage
+    // failure): the requested scoring strategy is not a distinct implementation
+    // in that lane, so a simpler combiner was applied. The query succeeds; the
+    // result envelope names the fallback in `degraded_stages` so the caller
+    // knows the requested scoring was not the one applied. Names are identical
+    // across ports. The genuinely-implemented combos (UnionBest+MatrixAware;
+    // Hybrid/CorpusOnly+Rrf) do NOT emit. Mirror Swift `GLKMetricName`.
+
+    /// `MatrixAware` requested on `LocusOnly` (no matrix pass) → raw ordering.
+    /// Mirrors Swift `GLKMetricName.locusOnlyMatrixAwareFallback`. Tagged: `estate_id`.
+    pub const LOCUS_ONLY_MATRIX_AWARE_FALLBACK: &str = "glk.recall.locusOnly.matrixAware_degraded";
+
+    /// `MatrixAware` requested on `CorpusOnly` (no matrix pass) → RRF fusion.
+    /// Mirrors Swift `GLKMetricName.corpusOnlyMatrixAwareFallback`. Tagged: `estate_id`.
+    pub const CORPUS_ONLY_MATRIX_AWARE_FALLBACK: &str = "glk.recall.corpusOnly.matrixAware_degraded";
+
+    /// `MatrixAware` requested on `Hybrid` (no matrix pass) → three-way RRF.
+    /// Mirrors Swift `GLKMetricName.hybridMatrixAwareFallback`. Tagged: `estate_id`.
+    pub const HYBRID_MATRIX_AWARE_FALLBACK: &str = "glk.recall.hybrid.matrixAware_degraded";
+
+    /// `Rrf` requested on `UnionBest` (no distinct RRF fusion) → raw lane score.
+    /// Mirrors Swift `GLKMetricName.unionBestRRFFallback`. Tagged: `estate_id`.
+    pub const UNION_BEST_RRF_FALLBACK: &str = "glk.recall.unionBest.rrf_degraded";
 }
 
 /// Produce the current time as epoch seconds (f64) for telemetry timestamps.

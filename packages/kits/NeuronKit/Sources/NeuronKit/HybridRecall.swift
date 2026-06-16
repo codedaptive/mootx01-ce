@@ -44,6 +44,7 @@ import Foundation
 import GeniusLocusKit
 import IntellectusLib
 import LocusKit
+import SubstrateML
 
 // Re-export the substrate's `Drawer` value type through NeuronKit so
 // callers and tests reference one canonical name. The aliasing is
@@ -269,9 +270,9 @@ internal enum HybridRecallEngine {
         // Sim(d, Q) is the normalised RRF score (already encodes "how
         // relevant the verb considered this drawer to the query frame").
         // Sim(d, dⱼ) is the deterministic shingle-overlap similarity
-        // between two drawers' verbatim content — vector-free because
-        // the wrapper has no embedding access under B-1, but stable
-        // and conformance-testable across versions.
+        // between two drawers' verbatim content — delegates to
+        // SubstrateML.ShingleSimilarity (the substrate-owned kernel, I-25).
+        // Vector-free; stable and conformance-gated across versions.
         let lambda = tuning.mmrLambda
         let maxRRF = rrfScore.values.max() ?? 1.0
         let minRRF = rrfScore.values.min() ?? 0.0
@@ -320,45 +321,24 @@ internal enum HybridRecallEngine {
         return selected.map { drawers[$0] }
     }
 
-    /// Deterministic Jaccard similarity over 3-character lowercase
-    /// shingles. Pure text math — no locale-sensitive transforms, no
-    /// stemming, no tokeniser. The Rust version computes the same value
-    /// for every shared test vector.
+    /// Deterministic Jaccard similarity over 3-character lowercase shingles.
+    ///
+    /// Delegates to `SubstrateML.ShingleSimilarity.similarity`, the
+    /// substrate-owned kernel. Pure text math — no locale-sensitive
+    /// transforms, no stemming, no tokeniser. Bit-identical across the
+    /// Swift and Rust ports via the shared conformance gate (CRC 0x8a5d8888,
+    /// 32-case cross-port vector). I-25: one implementation per substrate
+    /// atomic; the substrate owns it.
     static func shingleSimilarity(_ a: String, _ b: String) -> Float {
-        let sa = shingles(a)
-        let sb = shingles(b)
-        if sa.isEmpty && sb.isEmpty { return 0 }
-        let inter = sa.intersection(sb).count
-        let union = sa.union(sb).count
-        guard union > 0 else { return 0 }
-        return Float(inter) / Float(union)
-    }
-
-    /// 3-character lowercase shingle set. ASCII-folded via
-    /// `lowercased()` — locale-free in Swift's default behaviour and
-    /// matches Rust's `to_lowercase()` for the ASCII-only conformance
-    /// vectors used in tests.
-    static func shingles(_ s: String) -> Set<String> {
-        let lower = s.lowercased()
-        let chars = Array(lower)
-        guard chars.count >= 3 else {
-            return chars.isEmpty ? [] : [String(chars)]
-        }
-        var out = Set<String>()
-        out.reserveCapacity(chars.count - 2)
-        for i in 0...(chars.count - 3) {
-            out.insert(String(chars[i..<(i + 3)]))
-        }
-        return out
+        ShingleSimilarity.similarity(a, b)
     }
 }
 
 extension NeuronKit {
-    /// Deterministic Jaccard similarity over 3-character lowercase
-    /// shingles — the engine's `shingleSimilarity`, surfaced publicly.
-    /// Pure text math; bit-identical across versions on shared vectors.
-    /// (The Rust version's `shingle_similarity` has always been `pub`;
-    /// the contradiction recipe is the named Swift consumer.)
+    /// Deterministic Jaccard similarity over 3-character lowercase shingles,
+    /// surfaced on the NeuronKit namespace. Delegates through
+    /// `HybridRecallEngine.shingleSimilarity` → `SubstrateML.ShingleSimilarity`.
+    /// Pure text math; bit-identical across ports on shared conformance vectors.
     public static func shingleSimilarity(_ a: String, _ b: String) -> Float {
         HybridRecallEngine.shingleSimilarity(a, b)
     }

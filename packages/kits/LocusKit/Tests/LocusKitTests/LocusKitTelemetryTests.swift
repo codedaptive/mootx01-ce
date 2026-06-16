@@ -13,6 +13,9 @@
 //    emit query_result_count.
 // §5 Tunnel emissions: addTunnel emits tunnel.add_count.
 // §6 Conformance: functional results are identical with monitoring ON and OFF.
+// §7 Verb-layer event emissions: Estate.capture(CaptureFrame/TunnelCaptureFrame)
+//    emit StatSample.event with kind=.capture, correct nounType, rowID, and estate.
+// §8 Write-gate telemetry: emitGateAdmit/emitGateReject from DrawerStore.gatedCapture.
 //
 // ISOLATION STRATEGY
 // These tests install a capturing sink and flip the global Intellectus
@@ -108,6 +111,15 @@ private final class CapturingSink: StatsSink, @unchecked Sendable {
     func count(named name: String, forEstate estateTag: String) -> Int {
         metrics(named: name, forEstate: estateTag).count
     }
+
+    /// All event samples whose estate field matches the given UUID string.
+    func events(forEstate estateTag: String) -> [StatSample] {
+        lock.lock(); defer { lock.unlock() }
+        return _samples.filter {
+            if case let .event(_, _, _, estate, _) = $0 { return estate == estateTag }
+            return false
+        }
+    }
 }
 
 // MARK: - Shared cleanup helper
@@ -129,6 +141,16 @@ private func makeInMemoryStore() async throws -> DrawerStore {
     let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
     let storage = InMemoryStorage(configuration: config)
     return try await DrawerStore(storage: storage)
+}
+
+/// Build a fresh SQLite-backed Estate for verb-layer event-emission tests.
+/// Uses a unique temp file per call so tests do not share state.
+private func makeEstate() async throws -> Estate {
+    let url = TestStorage.tempURL()
+    return try await Estate.create(
+        storage: TestStorage.sqlite(url),
+        owner: OwnerCredentials(ownerIdentifier: "tel-test-owner")
+    )
 }
 
 // MARK: - Sample drawer / tunnel / fact builders
@@ -684,6 +706,191 @@ struct LocusKitTelemetrySuite {
                 #expect(Set(rowsOff.map(\.id)) == Set(rowsOn.map(\.id)),
                     "drawersIn ids must be identical regardless of monitoring state")
                 #expect(sink.count > 0, "monitoring-on path must emit at least one metric")
+            }
+        }
+    }
+
+    // MARK: - §7 Verb-layer event emissions
+
+    @Suite("§7 LocusKitTelemetry — verb-layer event emissions")
+    struct EventEmissionTests {
+
+        /// Drawer capture emits exactly one StatSample.event with kind=.capture,
+        /// nounType=0 (drawer), matching rowID and estate UUID.
+        @Test("capture(CaptureFrame) emits StatSample.event with kind=.capture")
+        func capture_drawer_emits_capture_event() async throws {
+            try await withIntellectusLock {
+                let estate = try await makeEstate()
+                let estateTag = await estate.estateUUID.uuidString
+
+                let sink = CapturingSink()
+                Intellectus.install(sink: sink)
+                Intellectus.setEnabled(true)
+                defer { resetIntellectus() }
+
+                let frame = CaptureFrame(
+                    content: "tel-test-content",
+                    channel: .typed,
+                    room: "tel-room",
+                    latticeAnchor: LatticeAnchor(udcCode: "004"),
+                    addedBy: "tel-test",
+                    embeddingModelID: "test-model-v1"
+                )
+                let drawer = try await estate.capture(frame)
+
+                let receivedEvents = sink.events(forEstate: estateTag)
+                #expect(receivedEvents.count == 1,
+                    "capture(CaptureFrame) must emit exactly 1 .event sample; got \(receivedEvents.count)")
+
+                guard let firstEvent = receivedEvents.first else {
+                    Issue.record("no .event sample was emitted for estate \(estateTag)")
+                    return
+                }
+                guard case let .event(kind, nounType, rowID, estateStr, ts) = firstEvent else {
+                    Issue.record("received sample is not an .event variant: \(firstEvent)")
+                    return
+                }
+                #expect(kind == .capture,
+                    "event kind must be .capture; got \(kind)")
+                #expect(nounType == Int(NounType.drawer.rawValue),
+                    "nounType must be \(Int(NounType.drawer.rawValue)) (drawer); got \(nounType)")
+                #expect(rowID == drawer.id,
+                    "rowID must match drawer.id; got \(rowID), expected \(drawer.id)")
+                #expect(estateStr == estateTag,
+                    "estate must match estate UUID; got \(estateStr)")
+                #expect(abs(ts - Date().timeIntervalSince1970) < 2.0,
+                    "ts must be within 2 seconds of now")
+            }
+        }
+
+        /// Tunnel capture emits exactly one StatSample.event with kind=.capture,
+        /// nounType=1 (tunnel), matching rowID and estate UUID.
+        @Test("capture(TunnelCaptureFrame) emits StatSample.event with kind=.capture")
+        func capture_tunnel_emits_capture_event() async throws {
+            try await withIntellectusLock {
+                let estate = try await makeEstate()
+                let estateTag = await estate.estateUUID.uuidString
+
+                let sink = CapturingSink()
+                Intellectus.install(sink: sink)
+                Intellectus.setEnabled(true)
+                defer { resetIntellectus() }
+
+                let frame = TunnelCaptureFrame(
+                    sourceWing: "wing_a", sourceRoom: "room_1",
+                    targetWing: "wing_b", targetRoom: "room_2",
+                    label: "relates_to",
+                    addedBy: "tel-test"
+                )
+                let tunnel = try await estate.capture(frame)
+
+                let receivedEvents = sink.events(forEstate: estateTag)
+                #expect(receivedEvents.count == 1,
+                    "capture(TunnelCaptureFrame) must emit exactly 1 .event sample; got \(receivedEvents.count)")
+
+                guard let firstEvent = receivedEvents.first else {
+                    Issue.record("no .event sample was emitted for estate \(estateTag)")
+                    return
+                }
+                guard case let .event(kind, nounType, rowID, estateStr, _) = firstEvent else {
+                    Issue.record("received sample is not an .event variant: \(firstEvent)")
+                    return
+                }
+                #expect(kind == .capture,
+                    "event kind must be .capture; got \(kind)")
+                #expect(nounType == Int(NounType.tunnel.rawValue),
+                    "nounType must be \(Int(NounType.tunnel.rawValue)) (tunnel); got \(nounType)")
+                #expect(rowID == tunnel.id,
+                    "rowID must match tunnel.id; got \(rowID), expected \(tunnel.id)")
+                #expect(estateStr == estateTag,
+                    "estate must match estate UUID; got \(estateStr)")
+            }
+        }
+    }
+
+    // MARK: - §8 Write-gate telemetry
+
+    @Suite("§8 LocusKitTelemetry — write-gate emit")
+    struct WriteGateTelemetryTests {
+
+        // Forbidden adjective bitmap: secret (48 << 6 = 0xC00) | exportable (32 << 12 = 0x20000).
+        // AuditGate.admit() returns .failure for this combination per I-22.
+        private static let forbiddenBitmap: Int64 = 0x20C00
+
+        /// Successful addDrawer emits exactly one gate.admit_count metric when monitoring is ON.
+        @Test("gateAdmit emitted on successful addDrawer when monitoring ON")
+        func gateAdmitEmittedOnSuccess() async throws {
+            try await withIntellectusLock {
+                let sink = CapturingSink()
+                Intellectus.install(sink: sink)
+                Intellectus.setEnabled(true)
+                defer { resetIntellectus() }
+
+                let store = try await makeInMemoryStore()
+                let estateTag = await store.estateUuid.uuidString
+                try await store.addDrawer(sampleDrawer(), now: Date(timeIntervalSince1970: 1_000_000))
+
+                let admits = sink.count(named: "locuskit.gate.admit_count", forEstate: estateTag)
+                #expect(admits == 1,
+                    "addDrawer must emit 1 gate.admit_count for estate \(estateTag); got \(admits)")
+            }
+        }
+
+        /// When monitoring is OFF, gate.admit_count is not emitted.
+        @Test("gateAdmit NOT emitted when monitoring OFF")
+        func gateAdmitSilentWhenDisabled() async throws {
+            try await withIntellectusLock {
+                let sink = CapturingSink()
+                Intellectus.install(sink: sink)
+                Intellectus.setEnabled(false)
+                defer { resetIntellectus() }
+
+                let store = try await makeInMemoryStore()
+                let estateTag = await store.estateUuid.uuidString
+                try await store.addDrawer(sampleDrawer(), now: Date(timeIntervalSince1970: 1_000_000))
+
+                let admits = sink.count(named: "locuskit.gate.admit_count", forEstate: estateTag)
+                #expect(admits == 0,
+                    "gate.admit_count must not emit when monitoring is disabled; got \(admits)")
+            }
+        }
+
+        /// A drawer with the I-22-violating bitmap causes AuditGate to reject it;
+        /// gate.reject_count is emitted before the throw when monitoring is ON.
+        @Test("gateReject emitted on forbidden-bitmap addDrawer when monitoring ON")
+        func gateRejectEmittedOnForbiddenCapture() async throws {
+            try await withIntellectusLock {
+                let sink = CapturingSink()
+                Intellectus.install(sink: sink)
+                Intellectus.setEnabled(true)
+                defer { resetIntellectus() }
+
+                let store = try await makeInMemoryStore()
+                let estateTag = await store.estateUuid.uuidString
+
+                // secret (48 << 6) | exportable (32 << 12): rejected by AuditGate I-22.
+                let forbidden = Drawer(
+                    id: TestStorage.tid("forbidden-gate-tel"),
+                    content: "gate reject telemetry test",
+                    wing: "wing-tel",
+                    room: "room-tel",
+                    addedBy: "newton",
+                    filedAt: Date(timeIntervalSince1970: 1_000_000),
+                    embeddingModelID: "test-model-v1",
+                    provenance: 0,
+                    adjectiveBitmap: Self.forbiddenBitmap,
+                    operationalBitmap: 0
+                )
+                do {
+                    try await store.addDrawer(forbidden, now: Date(timeIntervalSince1970: 1_000_000))
+                    Issue.record("expected LocusKitError.invalidContent for forbidden bitmap")
+                } catch LocusKitError.invalidContent {
+                    // expected — gate rejected the write
+                }
+
+                let rejects = sink.count(named: "locuskit.gate.reject_count", forEstate: estateTag)
+                #expect(rejects == 1,
+                    "gate.reject_count must fire after AuditGate rejection; got \(rejects)")
             }
         }
     }

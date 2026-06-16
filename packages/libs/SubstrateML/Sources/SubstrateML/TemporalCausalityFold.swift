@@ -113,6 +113,26 @@ public struct TemporalAuditEntry: Sendable {
 
 // MARK: - Output types
 
+/// Result of a `TemporalCausalityFold.fold` pass.
+///
+/// Mirrors Rust's `FoldResult` struct in temporal_causality_fold.rs
+/// exactly. Previously Swift returned a tuple; this named struct
+/// matches the Rust port and is required for Swift/Rust lockstep
+/// conformance.
+public struct FoldResult: Sendable {
+    /// Aggregated per-key deltas in stable emission order (source
+    /// HLC ascending). Caller adds each delta to the T matrix.
+    public let deltas: [(TemporalCausalityKey, Int64)]
+    /// HLC of the last new entry processed, or `startWatermark`
+    /// when no new entries were found. Mirrors Rust `new_watermark`.
+    public let newWatermark: HLC
+
+    public init(deltas: [(TemporalCausalityKey, Int64)], newWatermark: HLC) {
+        self.deltas = deltas
+        self.newWatermark = newWatermark
+    }
+}
+
 /// A directional lag-bucketed key for the T matrix, as produced by
 /// TemporalCausalityFold.
 ///
@@ -200,7 +220,7 @@ public enum TemporalCausalityFold {
     ///     are within windowMinutes of a new entry still serve as
     ///     sources for pair-matching.
     ///
-    /// - Returns: A tuple of:
+    /// - Returns: A `FoldResult` containing:
     ///   - `deltas`: [(TemporalCausalityKey, Int64)] — aggregated
     ///     per-key deltas in stable emission order (source HLC ascending).
     ///     Caller adds each delta to the MatrixTier's T matrix.
@@ -214,7 +234,7 @@ public enum TemporalCausalityFold {
         entries: [TemporalAuditEntry],
         windowMinutes: Int = defaultWindowMinutes,
         startWatermark: HLC
-    ) -> (deltas: [(TemporalCausalityKey, Int64)], newWatermark: HLC) {
+    ) -> FoldResult {
         // Rolling buffer of earlier entries whose HLC is within
         // windowMinutes of the current entry. Buffer is maintained in
         // ascending HLC order so the eviction check is a prefix scan.
@@ -297,6 +317,6 @@ public enum TemporalCausalityFold {
                 return (key, count)
             }
 
-        return (deltas: orderedDeltas, newWatermark: newWatermark)
+        return FoldResult(deltas: orderedDeltas, newWatermark: newWatermark)
     }
 }

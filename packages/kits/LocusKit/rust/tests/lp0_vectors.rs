@@ -33,7 +33,7 @@ use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::estate::Estate;
 use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
-use locus_kit::filter::{Filter, RecallFrame};
+use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use locus_kit::kg_fact::KGFact;
 use locus_kit::tunnel::Tunnel;
@@ -262,11 +262,16 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
 
             "recallAll" => {
                 let room = str_field(op_val, "room", case_id);
-                let frame = RecallFrame::new(vec![
+                // `.full` hydration is required because the vector observations
+                // check `expectFirstContent` — per spec § 7.3, `.structured`
+                // returns content = "" (no blob reads), so only `.full` loads
+                // the content body. Mirrors the Swift LP-0 harness exactly.
+                let mut frame = RecallFrame::new(vec![
                     Filter::InRoom(room.to_string()),
                     Filter::CurrentlyBelieve,
                     Filter::Unconfirmed,
                 ]);
+                frame.hydration_level = HydrationLevel::Full;
                 let stream = estate.recall(frame, now);
                 let rows = stream.collect_all();
 
@@ -305,12 +310,16 @@ fn run_case(case_id: &str, description: &str, ops: &Value, observations: &Value)
             "recallPaged" => {
                 let room = str_field(op_val, "room", case_id);
                 let page_size = usize_field(op_val, "pageSize", case_id);
+                // `.full` hydration: same reason as recallAll above — the vector
+                // observations check `expectContents`, which `.structured`
+                // would return as empty strings (spec § 7.3). Mirrors Swift.
                 let mut frame = RecallFrame::new(vec![
                     Filter::InRoom(room.to_string()),
                     Filter::CurrentlyBelieve,
                     Filter::Unconfirmed,
                 ]);
                 frame.limit = Some(page_size);
+                frame.hydration_level = HydrationLevel::Full;
                 let stream = estate.recall(frame, now);
                 // Drain all pages and concatenate into one flat list.
                 let rows = stream.collect_all();

@@ -57,6 +57,46 @@ public actor Estate {
     /// time and treated as immutable per spec section 7.7).
     private let _estateUUID: UUID
 
+    // MARK: - Test seam (fault injection)
+
+    /// Identifies which internal read in `recall`/`liveRows` a forced
+    /// fault should target. Each case maps 1:1 to a degraded-stage string
+    /// so a force-test can drive each internal-read failure path
+    /// independently and assert the precise stage the stream surfaces.
+    public enum RecallInternalRead: Sendable, Equatable {
+        /// The bounded corpus scan (`store.allDrawers`) — non-pruning path.
+        case liveRows
+        /// The room-fingerprint enumeration (`containerFP.roomLevelEntries`)
+        /// — fingerprint-pruning path.
+        case roomFingerprints
+        /// A surviving room's drawer read (`store.drawersIn(wing:room:)`)
+        /// — fingerprint-pruning path.
+        case roomDrawerRead
+        /// `BitmapEvaluator.evaluate`.
+        case bitmapEval
+        /// The opt-in recall-trace WRITE (`store.insertRecallTraces`). Unlike
+        /// the read variants, this fault fires AFTER reads + eval succeed, so a
+        /// forced `.traceWrite` yields a populated result WITH the
+        /// `recall.trace_write_failed` stage — proving recall stays non-throwing
+        /// while a lost trace is observable.
+        case traceWrite
+    }
+
+    /// TEST-ONLY fault seam: when non-nil, the next `recall` forces the
+    /// named internal read to fail, exercising the degraded-stage path
+    /// without needing a genuinely-broken store. SINGLE-USE — `recall`
+    /// reads and clears it so a subsequent recall behaves normally. Never
+    /// set in production code; it has no production caller. Mirrors the
+    /// GLK `_testForce*` seam pattern. The Rust port gates the equivalent
+    /// seam behind the `test-seams` Cargo feature; Swift kits gate by the
+    /// `_test`-prefix convention and this documented contract.
+    var _testForceInternalReadError: RecallInternalRead?
+
+    /// Arm the `_testForceInternalReadError` seam. TEST-ONLY.
+    func _setTestForceInternalReadError(_ read: RecallInternalRead?) {
+        _testForceInternalReadError = read
+    }
+
     // MARK: - Private init
 
     /// Construct an Estate around an already-opened store and a
@@ -273,6 +313,117 @@ public actor Estate {
         try await store.allDrawers()
     }
 
+    /// Up to `limit` drawers in the estate (including tombstoned rows), in
+    /// `filedAt`-ascending order, fully hydrated. Delegates to the store's
+    /// bounded scan `allDrawers(hydrationLevel: .full, limit:)`, which applies
+    /// the `LIMIT` at the storage tier so the I/O is O(min(N_estate, limit)),
+    /// not O(N_estate)-then-truncate.
+    ///
+    /// `.full` hydration is deliberate: the maintenance reader inspects each
+    /// drawer's state and tombstone fields, so the content blob is read too —
+    /// no projection that could drop a field the scan needs. Passing `nil`
+    /// reads the full corpus, identical to `allDrawers()`.
+    ///
+    /// Used by GLK to give the maintenance reader a bounded scan without
+    /// NeuronKit reaching the store directly (B-1).
+    public func allDrawers(limit: Int?) async throws -> [Drawer] {
+        try await store.allDrawers(hydrationLevel: .full, limit: limit)
+    }
+
+    /// Every room-level container fingerprint (room non-empty) with its
+    /// bitwise-OR aggregate over the container's active drawers. Delegates to
+    /// the estate's `ContainerFingerprintStore.roomLevelEntries()`.
+    ///
+    /// The maintenance daemon's fingerprint-drift signal reads these through
+    /// GLK as the live per-scope fingerprint (B-1 — NeuronKit never touches
+    /// the store). No drawer scan happens: the OR aggregates are read straight
+    /// from the `container_fingerprints` table the recall pruner maintains.
+    public func roomLevelFingerprints() async throws
+        -> [(wing: String, room: String, fingerprint: ContainerFingerprint)] {
+        try await containerFP.roomLevelEntries()
+    }
+
+    /// Batch by-id drawer load. Returns the drawers matching `ids` in
+    /// unspecified order, omitting ids with no row, via a single indexed
+    /// `IN` query per chunk rather than a full-estate scan. The O(candidates)
+    /// hydration path for recall's BM25/vector frontier. Tombstoned rows are
+    /// returned unfiltered; callers apply their own liveness guard. Delegates
+    /// to the underlying store's `getDrawers(ids:)`.
+    public func getDrawers(ids: [String]) async throws -> [Drawer] {
+        try await store.getDrawers(ids: ids)
+    }
+
+    /// Batch by-id drawer load at a chosen hydration level — the dense-first
+    /// candidate-pool path. At `.structured`/`.bitmapOnly` the content blob is
+    /// projected away and never read from storage (the returned drawers carry
+    /// `content == ""`); at `.full` it reads every column. Delegates to the
+    /// store's `getDrawers(ids:hydrationLevel:)`.
+    public func getDrawers(ids: [String], hydrationLevel: HydrationLevel) async throws -> [Drawer] {
+        try await store.getDrawers(ids: ids, hydrationLevel: hydrationLevel)
+    }
+
+    /// FRAME-AWARE by-id load. Loads `ids` by row, then applies the frame's
+    /// bitmap/structured/content filter chain (via `BitmapEvaluator`, the exact
+    /// pipeline `recall(_:)` runs) so the returned `admissible` set is precisely
+    /// the frame-filtered subset of `ids` — identical semantics to running a
+    /// `recall(frame)` scan and intersecting with `ids`, but as an O(candidates)
+    /// by-id load rather than an O(estate) scan.
+    ///
+    /// This is the capability GLK's RecallDirector needs to build its
+    /// `drawerIndex` honoring the actual recall frame, so that the BM25/vector
+    /// corpus lanes drop exactly the candidates the frame state filter excludes
+    /// (e.g. `.withdrawn` under the default `.currentlyBelieve`) — and STILL
+    /// surface them when the frame overrides to `.usedToBelieve`. It is the
+    /// frame-faithful parity of the Rust recall path, whose `drawer_index` is
+    /// derived from `estate.recall(frame)` (frame-filtered) for any frame.
+    ///
+    /// The returned `loadedIDs` set reports every id whose row was physically
+    /// returned by storage, REGARDLESS of whether it passed the frame filter.
+    /// Callers use the distinction to gate a drop: an id that loaded but is
+    /// absent from `admissible` failed the frame filter (drop it); an id absent
+    /// from BOTH `admissible` and `loadedIDs` did not load (e.g. a transient
+    /// partial read) and must be DEGRADED gracefully, never dropped. Tombstone
+    /// exclusion is always enforced by `BitmapEvaluator` independent of the
+    /// chain, so a tombstoned row never appears in `admissible`.
+    ///
+    /// `hydrationLevel` controls the body read. When the frame's chain carries a
+    /// `.contentMatches` predicate the load is forced to `.full` so the substring
+    /// match has the body; otherwise the caller's level is honored (`.structured`
+    /// keeps the body-free fast path). Peer of the Rust
+    /// `Estate::get_drawers_matching_frame`.
+    public func getDrawers(
+        ids: [String],
+        matchingFrame frame: RecallFrame,
+        hydrationLevel: HydrationLevel
+    ) async throws -> FrameFilteredDrawers {
+        // Content-tier predicates need the body for the substring match; force
+        // .full in that case so the frame is evaluated faithfully. Otherwise the
+        // caller's chosen level stands (the dense-first lanes load .structured).
+        let needsContent = BitmapEvaluator.chainHasContentPredicate(frame.filterChain)
+        let loadLevel: HydrationLevel = needsContent ? .full : hydrationLevel
+        let loaded = try await store.getDrawers(ids: ids, hydrationLevel: loadLevel)
+        let loadedIDs = Set(loaded.map(\.id))
+        // Run the exact recall filter pipeline over the loaded rows. asOf-based
+        // historical reconstruction is honored too (BitmapEvaluator reads the
+        // audit log via `store`), so a frame's `asOf` projects the same state
+        // it would on the full recall path.
+        let admissible = try await BitmapEvaluator.evaluate(
+            frame: frame, drawers: loaded, store: store)
+        return FrameFilteredDrawers(admissible: admissible, loadedIDs: loadedIDs)
+    }
+
+    /// LATE BODY HYDRATION — read the full content blob for a specific id set.
+    /// This is the dense-first hydration capability: the candidate pool is
+    /// loaded body-free (`.structured`), selection runs on the dense signal,
+    /// and only the survivor/returned ids are passed here to materialize their
+    /// bodies. A thin alias of the `.full` by-id load, named for intent so
+    /// callers (RecallDirector, and via a GLK-owned closure the higher lanes)
+    /// read as "hydrate these bodies now." Tombstoned rows are returned
+    /// unfiltered; callers apply their own liveness guard.
+    public func hydrateBodies(ids: [String]) async throws -> [Drawer] {
+        try await store.getDrawers(ids: ids, hydrationLevel: .full)
+    }
+
     // MARK: - Association graph
 
     /// Every non-tombstoned tunnel whose source is `wing`, in stable
@@ -301,6 +452,42 @@ public actor Estate {
         try await store.allTunnels()
     }
 
+    /// Delete recall-trace rows whose `recalledAt` is strictly before
+    /// `cutoff`. Returns the number of rows deleted.
+    ///
+    /// Called by the dreaming daemon after each reward sweep to keep the
+    /// recall_trace table bounded. The cutoff must be derived from the
+    /// caller's deterministic `now` — never from `Date()` inside an engine.
+    ///
+    /// - Parameter cutoff: rows with `recalledAt < cutoff` are deleted.
+    /// - Returns: the number of rows deleted.
+    @discardableResult
+    public func pruneRecallTraces(olderThan cutoff: Date) async throws -> Int {
+        try await store.pruneRecallTraces(olderThan: cutoff)
+    }
+
+    /// Bulk-mark trace rows for a drawer target within a time window.
+    ///
+    /// Delegates to `DrawerStore.markRecallTracesUsed(target:since:now:)`.
+    /// Called by the GLK `markRecallUsed` verb on behalf of ARIA — ARIA
+    /// decides "drawer D was used", GLK routes it here. Returns the number
+    /// of rows whose `used` bit was flipped.
+    ///
+    /// - Parameters:
+    ///   - target: drawer id whose live trace rows to mark.
+    ///   - since:  lower bound (inclusive) of the time window.
+    ///   - now:    upper bound (inclusive) of the time window.
+    @discardableResult
+    public func markRecallTracesUsed(target: String, since: Date, now: Date) async throws -> Int {
+        try await store.markRecallTracesUsed(target: target, since: since, now: now)
+    }
+
+    /// Count all rows in the recall_trace table. Delegates to
+    /// `DrawerStore.countRecallTraces`. Used by estate-status reporting.
+    public func countRecallTraces() async throws -> Int {
+        try await store.countRecallTraces()
+    }
+
     // MARK: - Unfiltered full-corpus reads (recall surface)
 
     /// All proposals estate-wide, ordered by `filedAt` ascending.
@@ -325,12 +512,21 @@ public actor Estate {
         try await store.allLearnedReferences()
     }
 
-    /// All kg-facts estate-wide where state cluster < 7, ordered by
-    /// `filedAt` ascending. Estate-level pass-through over
+    /// All kg-facts estate-wide in the RowState Cluster-A (active) set —
+    /// `g_state_cluster < RowState.activeClusterUpperBoundRaw` (16) —
+    /// ordered by `filedAt` ascending. Estate-level pass-through over
     /// `DrawerStore.allKGFacts`.
     /// Peer of the Rust `Estate::all_kg_facts`.
     public func allKGFacts() async throws -> [KGFact] {
         try await store.allKGFacts()
+    }
+
+    /// All kg-facts estate-wide regardless of lifecycle state — active AND
+    /// retired — ordered by `filedAt` ascending. Estate-level pass-through
+    /// over `DrawerStore.allKGFactsIncludingRetired`.
+    /// Peer of the Rust `Estate::all_kg_facts_including_retired`.
+    public func allKGFactsIncludingRetired() async throws -> [KGFact] {
+        try await store.allKGFactsIncludingRetired()
     }
 
     /// All non-tombstoned diary entries estate-wide, ordered by `filedAt`

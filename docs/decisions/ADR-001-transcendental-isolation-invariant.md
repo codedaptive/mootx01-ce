@@ -1,12 +1,20 @@
+---
+status: decided
+question: How should the bit-identity conformance gate treat transcendental functions across platforms, given that libm implementations diverge?
+authors: MOOTx01 maintainers
+date: 2026-05-30
+relates_to:
+  - docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
+supersedes: none
+context:
+  - Integer/SimHash core reproduces byte-identical across all language ports.
+  - BLAS/array-library float kernels diverge by up to ~1 ULP across platforms.
+  - The identity/federation path is transcendental-free by construction.
+---
+
 # ADR-001 — Transcendental-Isolation Invariant and Cross-Platform Gate Policy
 
-- Status: Proposed
-- Date: 2026-05-30
-- Deciders: Bob (Commander)
-- Scope: SubstrateML, SubstrateKernel, the conformance harness, the porting charter
-- Evidence: HAIKU_FLOOR_PROBE_2026-05-30.md findings F8 (5-language integer
-  byte-identity), F9/F10 (BLAS/array-lib float divergence), F11 (this ADR's
-  isolation proof, `port/harness/transcendental_isolation_proof.py`)
+**Scope:** SubstrateML, SubstrateKernel, the conformance harness, the porting standard.
 
 ## Context
 
@@ -17,7 +25,7 @@ is uniform across primitives — integer and floating-point alike.
 Bit-identity on floating point is achievable **only for the operations IEEE-754
 *mandates* to be correctly-rounded**: `+`, `−`, `*`, `/`, and `sqrt`. These
 produce the same bits on every conformant FPU, on any hardware, in any language
-(proven for the integer/SimHash core at five-language byte-identity — F8 — and
+(proven for the integer/SimHash core at five-language byte-identity, and
 for `eigenvalue_centrality`/`nmf`, which use only `sqrt`).
 
 **Transcendental functions are different.** `exp`, `log`, `log2`, `ln`, `sin`,
@@ -47,10 +55,10 @@ Largely no, and by design:
   `info_theory`, `lattice_distance`, `dp_or_reduce`).
 - **The two with footprint feed soft consumers.** `bradley_terry` → preference
   ranking; `matrix_decay` → matrix-tier weights decayed locally by the dreaming
-  daemon for recall scoring. F11 shows a 2-ULP `exp` divergence flips the CRC
-  but leaves the ranking identical — the product never observes it.
+  daemon for recall scoring. A measured 2-ULP `exp` divergence flips the
+  bit-exact CRC but leaves the ranking identical — the product never observes it.
 
-This matches the charter's existing **federation-critical vs local-only** split:
+This matches the substrate's existing **federation-critical vs local-only** split:
 the federation-critical list is already transcendental-free; the transcendental
 primitives are local-only.
 
@@ -80,7 +88,7 @@ primitives are local-only.
 
 ## Consequences
 
-- The port-doc standard (PORTING_CHARTER.md §"Bit-identity on floating point")
+- The port-doc standard's "bit-identity on floating point" rule
   is corrected to distinguish correctly-rounded ops (portable bit-identity) from
   transcendentals (same-platform bit-identity only), and names the invariant.
 - The portability contract for ports (mootlib, Go, Python) shrinks: only the
@@ -88,8 +96,9 @@ primitives are local-only.
   vectors cross-platform. A native-`libm` port will diverge on the transcendental
   seven and that is acceptable per policy (2).
 - A latent trap is removed: the `FFT.swift` header claims production `vDSP_fft`
-  "MUST produce bit-identical output." Per F9/F10, an Accelerate-class kernel will
-  not. Because FFT is local-only and isolated from identity, this is a gate-policy
+  "MUST produce bit-identical output." A measured BLAS/array-library float
+  divergence shows an Accelerate-class kernel will not. Because FFT is local-only
+  and isolated from identity, this is a gate-policy
   issue (over-strict), not a correctness bug; the comment should be corrected to
   "ULP-equivalent" when that primitive is wired in.
 - New review check: any change that routes a transcendental-derived value toward

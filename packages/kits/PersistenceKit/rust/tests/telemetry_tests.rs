@@ -362,7 +362,7 @@ fn stats_identical_with_monitoring_off_and_on() {
 }
 
 /// report_storage_stats must not modify storage state.
-/// Row/blob/vector counts must be identical before and after the call.
+/// Row/blob counts must be identical before and after the call.
 #[test]
 fn report_storage_stats_does_not_modify_storage() {
     let _guard = global_lock();
@@ -384,8 +384,6 @@ fn report_storage_stats_does_not_modify_storage() {
         "row_count must be unchanged by report_storage_stats");
     assert_eq!(before.blob_count, after.blob_count,
         "blob_count must be unchanged by report_storage_stats");
-    assert_eq!(before.vector_count, after.vector_count,
-        "vector_count must be unchanged by report_storage_stats");
 
     Intellectus::install(Arc::new(NoOpSink));
 }

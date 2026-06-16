@@ -8,6 +8,9 @@ public enum RecallEvidencePath: String, Sendable, Codable, CaseIterable {
     case corpusBM25
     /// Hamming-distance vector match.
     case vectorHamming
+    /// Dense float-embedding cosine match (Lane D) — the TRUE float vector
+    /// lane, distinct from the 256-bit SimHash-Hamming `vectorHamming` lane.
+    case vectorDense
     /// Matrix field-presence signal. Reserved for a future mission.
     case matrixFieldPresence
     /// Matrix co-occurrence signal. Reserved for a future mission.

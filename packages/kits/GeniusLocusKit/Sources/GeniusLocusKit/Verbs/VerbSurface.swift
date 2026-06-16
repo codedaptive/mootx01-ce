@@ -2,14 +2,16 @@ import Foundation
 import IntellectusLib
 import OSLog
 import CryptoKit
+import CorpusKit
 import LocusKit
 import PersistenceKit
+import VectorKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -18,6 +20,30 @@ import PersistenceKit
 // Kernel,ML}/AGENTS.md.
 // ─────────────────────────────────────────────────────────────────
 import SubstrateTypes
+
+/// Result from `GeniusLocusKit.runExpungeIntegritySweep(_:now:)`.
+///
+/// Aggregates per-row outcomes from the crash-window sweep without
+/// aborting on per-row errors. A non-empty `perRowErrors` signals that
+/// at least one row could not be sealed after the re-delete attempt;
+/// those rows are not in `remediatedCount` or `orphanedCount`.
+public struct ExpungeIntegritySweepResult: Sendable, Equatable {
+    /// Rows where the cross-kit re-delete succeeded AND the sweep
+    /// audit-seal succeeded. These rows are fully remediated.
+    public var remediatedCount: Int = 0
+
+    /// Rows where the cross-kit re-delete failed but the sweep
+    /// audit-seal succeeded. The vector embedding may still be
+    /// present; the audit trail records the orphaned state.
+    public var orphanedCount: Int = 0
+
+    /// Per-row error strings where the audit seal also failed.
+    /// These rows could not be remediated or documented in the audit
+    /// trail; manual intervention may be required.
+    public var perRowErrors: [String] = []
+
+    public init() {}
+}
 
 /// The unified nine-verb surface on `GeniusLocusKit`.
 ///
@@ -37,12 +63,12 @@ import SubstrateTypes
 /// standing-signals scheduler via GLK-04.
 ///
 /// Error mapping: all nine verbs dispatch to live LocusKit estate
-/// methods except `mutate`'s non-confirm state-axis kinds (`.reject`,
-/// `.contest`, `.resolve`, `.supersede`, `.revive`), which throw
-/// `LocusKitError.invalidContent("…not yet implemented")`. The GLK
-/// boundary recognises this pattern and re-raises it as
+/// methods. A verb whose dependency is genuinely unavailable surfaces
+/// `LocusKitError.notSupported` (or an `.invalidContent` carrying
+/// "not yet implemented"); the GLK boundary re-raises that as
 /// `VerbError.notSupportedByEstate(verb:)` so callers see a single
-/// case. Other LocusKit failures flow through as
+/// case. State-axis mutations rejected by the lifecycle automaton (an
+/// illegal source state) and other LocusKit failures flow through as
 /// `VerbError.underlyingEstateFailure(verb:reason:)`.
 public extension GeniusLocusKit {
 
@@ -191,14 +217,52 @@ public extension GeniusLocusKit {
 
     /// Recall all active kg-fact rows from the estate addressed by `handle`.
     ///
-    /// Returns kg-facts where state cluster < 7 (active, pre-resolution
-    /// states), ordered by `filedAt` ascending. Delegates to
-    /// `Estate.allKGFacts`. Peer of the Rust `EstateCoordinator::recall_kg_facts`.
+    /// Returns the kg-facts in the RowState Cluster-A (active) set —
+    /// `g_state_cluster < RowState.activeClusterUpperBoundRaw` (16) —
+    /// ordered by `filedAt` ascending. Delegates to `Estate.allKGFacts`.
+    /// Peer of the Rust `EstateCoordinator::recall_kg_facts`.
     ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     func recallKGFacts(_ handle: EstateHandle) async throws -> [KGFact] {
         let estate = try estate(for: handle)
         return try await estate.allKGFacts()
+    }
+
+    // MARK: - recallKGFactTimeline
+
+    /// Recall ALL kg-fact rows from the estate — active and retired — in
+    /// chronological order, suitable for powering the `moot_fact_timeline` tool.
+    ///
+    /// Unlike `recallKGFacts`, which applies the RowState Cluster-A active-only
+    /// filter (`g_state_cluster < RowState.activeClusterUpperBoundRaw`, 16),
+    /// this method reads every row that was ever filed, including facts
+    /// in `withdrawn`, `expired`, `decayed`, `superseded`, `rejected`, and
+    /// `tombstoned` states.  The full lifecycle history lets callers trace how
+    /// structured knowledge in the estate evolved over time.
+    ///
+    /// Optional `entity` filter: when non-nil, only facts whose `subject` or
+    /// `object` contains the given string (case-insensitive) are returned.
+    /// Matching is done in Swift after the SQL fetch — entity vocabulary is
+    /// free-form and no SQL index covers substring containment.
+    ///
+    /// Delegates to `Estate.allKGFactsIncludingRetired`.
+    /// Peer of the Rust `EstateCoordinator::recall_kg_fact_timeline`.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func recallKGFactTimeline(
+        _ handle: EstateHandle,
+        entity: String? = nil
+    ) async throws -> [KGFact] {
+        let estate = try estate(for: handle)
+        var facts = try await estate.allKGFactsIncludingRetired()
+        if let entity = entity, !entity.isEmpty {
+            let lower = entity.lowercased()
+            facts = facts.filter {
+                $0.subject.lowercased().contains(lower) ||
+                $0.object.lowercased().contains(lower)
+            }
+        }
+        return facts
     }
 
     // MARK: - captureKGFact
@@ -240,9 +304,11 @@ public extension GeniusLocusKit {
     /// Retire a KGFact by transitioning its state to withdrawn.
     ///
     /// Retirement is a state transition (not a delete): the row remains in the
-    /// estate for audit purposes. `State.withdrawn` (rawValue 18) sets
-    /// `g_state_cluster` >= 7, which exits the active-recall filter in
-    /// `allKGFacts`. Routes through `DrawerStore.withdrawKGFact` directly —
+    /// estate for audit purposes. `State.withdrawn` (rawValue 18) lands in
+    /// RowState Cluster B (at/above the active upper bound
+    /// `RowState.activeClusterUpperBoundRaw`, 16), which exits the
+    /// active-recall filter in `allKGFacts`. Routes through
+    /// `DrawerStore.withdrawKGFact` directly —
     /// `Estate.withdraw` is Drawer-specific and does not handle KGFact rowIDs.
     ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen`, or
@@ -320,13 +386,25 @@ public extension GeniusLocusKit {
     /// Apply a named mutation to a drawer in the estate addressed by
     /// `handle`.
     ///
-    /// Dispatches to `LocusKit.Estate.mutate(rowID:kind:payload:)`. The
-    /// `.confirm` kind is live — it moves the row's confirmation axis to
-    /// `.userConfirmed` and returns normally. The state-axis kinds
-    /// (`.reject` / `.contest` / `.resolve` / `.supersede` / `.revive`)
-    /// are not yet wired and throw `LocusKitError.invalidContent`; the GLK
-    /// boundary re-raises those as `VerbError.notSupportedByEstate(verb:
-    /// "mutate")` so callers branch on a single case.
+    /// Dispatches to `LocusKit.Estate.mutate(rowID:kind:payload:)`, which
+    /// implements every `MutationKind` as a real transition through the
+    /// established mutate machinery (bitmap mutation + one sealed audit row):
+    ///   - `.confirm` moves the confirmation axis (provenance bits 18–23)
+    ///     to `.userConfirmed`.
+    ///   - `.reject` / `.contest` / `.resolve` / `.supersede` / `.revive`
+    ///     (and `.accept`) move the row's `State` axis through the canonical
+    ///     lifecycle automaton (cookbook §9.2), each guarded by its legal
+    ///     source state.
+    ///
+    /// An illegal source state fails loud: the automaton gate raises a
+    /// `LocusKitError.invalidContent` (guard pre-check) or
+    /// `.disciplineViolation` (automaton table miss), which the GLK boundary
+    /// re-raises as `VerbError.underlyingEstateFailure(verb: "mutate", …)`.
+    ///
+    /// `.revive` accepts any Cluster B source (decayed / withdrawn / expired /
+    /// superseded); only `decayed → active` is in the automaton table today,
+    /// so a withdrawn/expired/superseded source fails loud per the validator
+    /// (see `LocusKit.Estate.mutate`).
     func mutate(_ handle: EstateHandle, _ frame: MutateFrame) async throws {
         let estate = try estate(for: handle)
         do {
@@ -352,28 +430,291 @@ public extension GeniusLocusKit {
 
     // MARK: - expunge
 
-    /// Tombstone a drawer in the estate addressed by `handle` and
-    /// zeroize its content blob.
+    /// Tombstone a drawer in the estate addressed by `handle`, zeroize its
+    /// content blob, and purge its vector embedding(s) from VectorKit/CorpusKit.
     ///
-    /// Raises `VerbError.expungeNotConfirmed` at the GLK boundary
-    /// when `frame.confirmation` is false; the substrate is not
-    /// reached. With confirmation, dispatches to LocusKit's implemented
-    /// `expunge` (cookbook §10.5); any real failure is remapped to
-    /// `VerbError` via `remap`.
-    func expunge(_ handle: EstateHandle, _ frame: ExpungeFrame) async throws {
+    /// Raises `VerbError.expungeNotConfirmed` at the GLK boundary when
+    /// `frame.confirmation` is false; the substrate is not reached.
+    ///
+    /// With confirmation, dispatches in two steps followed by an audit seal.
+    /// The audit seal ordering satisfies §B-2a: the success audit event is
+    /// appended ONLY after both steps complete, so the audit log never
+    /// records success when the cross-kit vector delete failed.
+    ///
+    /// **Step 1 — Storage expunge (LocusKit, sealAudit:false):** tombstones
+    /// the drawer row and zeroes its content blob atomically. The audit event
+    /// is NOT sealed here; it is returned for the deferred seal in step 3.
+    /// Failure raises `VerbError` via `remap` and the cross-kit step is not
+    /// attempted. Validation (confirmation flag, S-3 gate, row existence) runs
+    /// inside LocusKit before any mutation — the vector is not touched until
+    /// step 2 confirms the storage half completed.
+    ///
+    /// **Step 2 — Cross-kit vector delete (GLK orchestration, fail-closed):**
+    /// when a `Corpus` is registered, calls `corpus.remove(sourceID:)` to purge
+    /// BM25 index entries and all vector embeddings. When a standalone
+    /// `VectorStore` is also registered (`.glk` estate), additionally calls
+    /// `vectorStore.deleteAllVectors` to invalidate the standalone store's
+    /// resident array (the corpus and the standalone store share backing storage
+    /// but maintain separate in-memory indexes; both must be updated). Failure
+    /// here seals an `"expungeOrphan"` audit event (honest record of partial
+    /// completion) and then raises `VerbError.crossKitVectorDeleteFailed`.
+    ///
+    /// **Step 3 — Audit seal:** on success, seals the gate-produced `"tombstone"`
+    /// event from step 1. On step-2 failure, seals an `"expungeOrphan"` event
+    /// that bridges to `UnifiedAuditVerb.expunge` in the GLK unified log, making
+    /// the partial outcome detectable via the substrate audit trail.
+    ///
+    /// When no Corpus or VectorStore is registered (`.locusOnly`), Step 2 is a
+    /// no-op and the success audit seals immediately after step 1.
+    ///
+    /// **`now` threading:** the same `Date` value flows through all three steps
+    /// so HLC stamps are monotone and deterministic — `Date()` is never called
+    /// inside the engine (spec I-6).
+    func expunge(_ handle: EstateHandle, _ frame: ExpungeFrame, now: Date = Date()) async throws {
         guard frame.confirmation else {
             throw VerbError.expungeNotConfirmed(rowID: frame.rowID)
         }
         let estate = try estate(for: handle)
+
+        // Step 1 — LocusKit storage expunge (sealAudit:false).
+        //
+        // The audit event is NOT sealed here. It is returned for the deferred
+        // seal in step 3 so the audit log only records success after the
+        // cross-kit delete (§B-2a ordering). Storage failure remaps via remap
+        // and aborts; the cross-kit step is never reached.
+        // sealAudit:false always returns the gate-produced event (nil is
+        // only returned on the sealAudit:true direct-caller path).
+        let unsealedEvent: AuditEvent
         do {
-            try await estate.expunge(
+            // Force-unwrap is a deliberate programmer-error trap: sealAudit:false
+            // guarantees a non-nil return; nil here means a contract violation
+            // in DrawerStore that must not be silently swallowed.
+            unsealedEvent = try await estate.expunge(
                 rowID: frame.rowID,
                 reason: frame.reason,
-                confirmation: frame.confirmation
-            )
+                confirmation: frame.confirmation,
+                now: now,
+                sealAudit: false
+            )!
+        } catch let e as LocusKitError {
+            throw remap(verb: "expunge", estateID: handle.estateUUID.uuidString, error: e)
         } catch {
             throw remap(verb: "expunge", estateID: handle.estateUUID.uuidString, error: error)
         }
+
+        // Step 2 — Cross-kit vector delete (fail-closed; must not be silent).
+        //
+        // GLK is the composition layer responsible for coordinating the cross-kit
+        // vector delete on expunge (GENIUSLOCUSKIT_SPEC_v0.8 §B-2a). The audit
+        // seal moves to step 3 so the audit log reflects the true outcome of the
+        // full two-step delete.
+        //
+        // When a Corpus is registered, `corpus.remove(sourceID:)` handles both
+        // BM25 and the corpus's internal VectorStore (the sourceID at ingest time
+        // is the drawer id, established by EncodeIntake G4). For `.glk` estates
+        // the standalone VectorStore shares the same backing storage as the corpus;
+        // its in-memory resident array must also be invalidated so future
+        // findNearest calls do not surface the tombstoned vector.
+        let corpus = corpusKits[handle]
+        let vectorStore = vectorStores[handle]
+
+        if corpus != nil || vectorStore != nil {
+            do {
+                if let corpus {
+                    // Remove BM25 entries and all vector embeddings for this drawer
+                    // from the corpus's internal vector index. sourceID == drawer.id
+                    // is the ingest convention (EncodeIntake G4).
+                    try await corpus.remove(sourceID: frame.rowID)
+                }
+                if let vectorStore, let corpus {
+                    // For .glk estates: the standalone VectorStore's in-memory
+                    // resident array holds a separate live/tombstone bitmap from the
+                    // corpus's internal VectorStore, even though both share the
+                    // same backing SQLite table. Invalidate the standalone store's
+                    // resident slot so findNearest does not surface the deleted vector.
+                    let modelID = await corpus.modelID
+                    try await vectorStore.deleteAllVectors(
+                        itemID: frame.rowID,
+                        modelID: modelID
+                    )
+                } else if let vectorStore {
+                    // Standalone VectorStore registered without a Corpus (not a
+                    // standard provisioning path, but handled defensively). The
+                    // modelID is not available here; deleteAllVectors requires it.
+                    // Raise a clear error rather than silently leaving an orphan.
+                    throw VerbError.crossKitVectorDeleteFailed(
+                        rowID: frame.rowID,
+                        reason: "standalone VectorStore registered without a Corpus — modelID unavailable for deleteAllVectors; manual cleanup required for estate \(handle.estateUUID.uuidString)"
+                    )
+                }
+            } catch let e as VerbError {
+                // Step 2 failed: seal an "expungeOrphan" audit event (honest record
+                // that storage succeeded but cross-kit delete did not), then rethrow.
+                // The row is tombstoned and its content is zeroed; the caller must not
+                // report it as fully deleted because the vector embedding survived.
+                do {
+                    try await estate.sealExpungeOrphanAudit(
+                        rowID: frame.rowID,
+                        successEvent: unsealedEvent,
+                        now: now
+                    )
+                } catch {
+                    // Orphan-seal failure: the storage expunge is committed and the
+                    // vector delete failed, but the audit trail also could not record
+                    // the orphan state. Log at fault level so operators can identify
+                    // and remediate dangling vectors via the row ID + estate.
+                    Self.verbLog.fault(
+                        "expunge orphan-audit seal failed — rowID=\(frame.rowID, privacy: .public) estate=\(handle.estateUUID.uuidString, privacy: .public) sealError=\(error.localizedDescription, privacy: .public)"
+                    )
+                }
+                throw e
+            } catch {
+                // Wrap unknown cross-kit errors, seal the orphan audit, then rethrow.
+                do {
+                    try await estate.sealExpungeOrphanAudit(
+                        rowID: frame.rowID,
+                        successEvent: unsealedEvent,
+                        now: now
+                    )
+                } catch let sealError {
+                    // Same as the VerbError path above: log at fault level so operators
+                    // can scrape the log for dangling-vector remediation.
+                    Self.verbLog.fault(
+                        "expunge orphan-audit seal failed — rowID=\(frame.rowID, privacy: .public) estate=\(handle.estateUUID.uuidString, privacy: .public) sealError=\(sealError.localizedDescription, privacy: .public)"
+                    )
+                }
+                throw VerbError.crossKitVectorDeleteFailed(
+                    rowID: frame.rowID,
+                    reason: error.localizedDescription
+                )
+            }
+        }
+
+        // Step 3 — Seal the success audit event.
+        //
+        // Both the storage expunge (step 1) and the cross-kit vector delete
+        // (step 2) succeeded. Seal the gate-produced "tombstone" event now so
+        // the audit log truthfully records a complete expunge. This ordering
+        // satisfies §B-2a: success audit only after the full two-step delete.
+        try await estate.sealExpungeAudit(unsealedEvent)
+    }
+
+    // MARK: - Expunge integrity sweep
+
+    /// Run the expunge integrity sweep for a single estate.
+    ///
+    /// The sweep detects tombstoned rows that have no sealed "tombstone" or
+    /// "expungeOrphan" audit event — the crash-window scenario where step 1
+    /// of the §B-2a expunge (LocusKit storage tombstone+scrub) ran, but the
+    /// process crashed before step 3 (the audit seal) completed.
+    ///
+    /// For each crash-window row, the sweep:
+    ///   1. Re-attempts the cross-kit vector+corpus delete (same logic as the
+    ///      normal expunge step 2).
+    ///   2. Seals a synthetic "expungeOrphan" audit event via
+    ///      `sealExpungeOrphanAuditSynthetic` to close the audit gap.
+    ///      Both the success and failure paths seal the orphan event — the
+    ///      original gate event was lost in the crash and cannot be recovered.
+    ///
+    /// Returns a partial-success result: per-row errors are collected rather
+    /// than propagated, so a single-row failure does not abort the sweep.
+    /// A fatal error (the orphan query itself fails) propagates directly.
+    ///
+    /// This is a maintenance function, not a verb. Callers should invoke it
+    /// at application startup or on a periodic maintenance timer, AFTER all
+    /// per-estate Corpus and VectorStore instances have been registered (they
+    /// are registered after `open`, not during it).
+    ///
+    /// Deterministic: `now` is the caller's wall-clock snapshot; the sweep
+    /// does not call `Date()` internally.
+    ///
+    /// - Parameters:
+    ///   - handle: the open estate to sweep.
+    ///   - now: sweep wall-clock snapshot.
+    /// - Returns: a `ExpungeIntegritySweepResult` with counts and any
+    ///   per-row seal errors.
+    /// - Throws: `GeniusLocusKitError.underlyingEstateFailure` when the
+    ///   orphan-set query itself fails (estate is unusable for sweep).
+    public func runExpungeIntegritySweep(
+        _ handle: EstateHandle,
+        now: Date = Date()
+    ) async throws -> ExpungeIntegritySweepResult {
+        let estate = try estate(for: handle)
+
+        // Query for tombstoned rows without an expunge audit. Fatal on error:
+        // we cannot enumerate the orphan set to sweep it.
+        let orphanedRows: [LocusKit.Drawer]
+        do {
+            orphanedRows = try await estate.tombstonedRowsWithoutExpungeAudit()
+        } catch {
+            throw GeniusLocusKitError.underlyingEstateFailure(
+                reason: "expunge integrity sweep: orphan-query failed for estate \(handle.estateUUID.uuidString): \(error)"
+            )
+        }
+
+        guard !orphanedRows.isEmpty else {
+            // No-op: every tombstoned row already has an audit. Common case
+            // on a healthy estate; zero work done.
+            return ExpungeIntegritySweepResult()
+        }
+
+        let corpus = corpusKits[handle]
+        let vectorStore = vectorStores[handle]
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+        var result = ExpungeIntegritySweepResult()
+
+        for drawer in orphanedRows {
+            let rowID = drawer.id
+
+            // Re-attempt the cross-kit vector+corpus delete (step 2 of the
+            // original §B-2a expunge). Mirrors the normal expunge step 2.
+            var deleteError: Error? = nil
+            do {
+                if let corpus {
+                    try await corpus.remove(sourceID: rowID)
+                }
+                if let vectorStore {
+                    if let corpus {
+                        let modelID = await corpus.modelID
+                        try await vectorStore.deleteAllVectors(itemID: rowID, modelID: modelID)
+                    } else {
+                        // Standalone VectorStore without Corpus: modelID unavailable.
+                        // The delete cannot complete; this row remains orphaned.
+                        // Mirrors the live expunge path (§B-2a), which raises
+                        // crossKitVectorDeleteFailed in the same scenario.
+                        throw VerbError.crossKitVectorDeleteFailed(
+                            rowID: rowID,
+                            reason: "standalone VectorStore registered without a Corpus — modelID unavailable for deleteAllVectors; manual cleanup required"
+                        )
+                    }
+                }
+            } catch {
+                deleteError = error
+            }
+
+            // Seal a synthetic "expungeOrphan" audit in both cases.
+            // The original gate event was lost in the crash window; the
+            // "expungeOrphan" verb closes the audit gap honestly.
+            do {
+                try await estate.sealExpungeOrphanAuditSynthetic(rowID: rowID, now: nowMillis)
+                if deleteError == nil {
+                    result.remediatedCount += 1
+                } else {
+                    result.orphanedCount += 1
+                }
+            } catch {
+                // Seal also failed: note the per-row error; do not abort the sweep.
+                let desc: String
+                if let de = deleteError {
+                    desc = "\(rowID): re-delete failed (\(de)); sweep audit-seal also failed: \(error)"
+                } else {
+                    desc = "\(rowID): re-delete succeeded but sweep audit-seal failed: \(error)"
+                }
+                result.perRowErrors.append(desc)
+            }
+        }
+
+        return result
     }
 
     // MARK: - reanchor
@@ -404,12 +745,15 @@ public extension GeniusLocusKit {
     ///
     /// `learn` is grounding-driven per AriaLexicon's flow taxonomy: it
     /// pulls authoritative external reference content into the substrate.
-    /// Delegates to `Estate.learn` and returns the stored `LearnedReference`.
-    /// Per cookbook §10.9 / spec § 7.8.2.
+    /// Delegates to `Estate.learn`, which derives the reference's genuine
+    /// lattice anchor from `frame.source` (a `SourceCatalogEntry`) — never a
+    /// sentinel — and persists a `LearnedReference`. Per cookbook §10.9 /
+    /// spec § 7.8.2.
     ///
-    /// - Returns: the stored `LearnedReference`.
+    /// - Returns: the persisted `LearnedReference`.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale;
-    ///   `VerbError.underlyingEstateFailure` on any LocusKit failure.
+    ///   `VerbError` mapped from `LocusKitError.invalidContent` when
+    ///   `frame.handle` is empty (the only fail-loud path on a valid call).
     @discardableResult
     func learn(_ handle: EstateHandle, _ frame: LearnFrame) async throws -> LocusKit.LearnedReference {
         let estate = try estate(for: handle)
@@ -493,6 +837,9 @@ public extension GeniusLocusKit {
         case .miningPattern:       return .miningPatternAdjustment
         case .disciplineViolation: return .recordObservation
         case .mutateCandidate:     return .mutateDrawer
+        // Enrichment / Q-ID assignment mutates the target drawer's anchor,
+        // so it maps to the substrate's drawer-mutation axis.
+        case .enrichment:          return .mutateDrawer
         case .amend:               return .mutateDrawer
         case .testPropose:         return .newTunnel
         case .other:               return .newTunnel
@@ -620,10 +967,14 @@ public extension GeniusLocusKit {
         try await assertPromotionTarget(concreteBranch, into: handle)
 
         // Recall all current branch rows and identify those added after
-        // derivation (not in snapshotIDs).
+        // derivation (not in snapshotIDs). `.full` hydration is required
+        // because the rows are immediately re-captured into the parent estate
+        // via `Estate.capture`, which requires non-empty content. Per spec § 7.3,
+        // `.structured` returns `content = ""` (no blob reads), so using
+        // `.structured` here would fail the capture guard for every promoted row.
         let frame = RecallFrame(
             filterChain: [.unconfirmed],
-            hydrationLevel: .structured,
+            hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
         let branchRows = try await concreteBranch.recall(frame)
@@ -690,10 +1041,15 @@ public extension GeniusLocusKit {
         // surfaces as .estateNotOpen first.
         try await assertPromotionTarget(concreteBranch, into: handle)
 
-        // Recall all branch rows to find the requested ones.
+        // Recall all branch rows to find the requested ones. `.full` hydration
+        // is required because each selected row is immediately re-captured into
+        // the parent estate via `Estate.capture`, which requires non-empty content.
+        // Per spec § 7.3, `.structured` returns `content = ""` (no blob reads),
+        // so using `.structured` here would fail the capture guard for every
+        // cherry-picked row.
         let frame = RecallFrame(
             filterChain: [.unconfirmed],
-            hydrationLevel: .structured,
+            hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
         let branchRows = try await concreteBranch.recall(frame)
@@ -755,6 +1111,59 @@ public extension GeniusLocusKit {
         branches[branchID]
     }
 
+    // MARK: - markRecallUsed
+
+    /// Mark recall-trace rows for a drawer target as used within the trace
+    /// retention window ending at `now`.
+    ///
+    /// Per the trace-reward design (DESIGN_TRACE_REWARD_2026-06-12):
+    /// ARIA observes that a surfaced drawer was subsequently dereferenced by
+    /// the external consumer (a later `withdraw`, `mutate`, `confirm`, `move`,
+    /// `link`, or `connection_map` tool call referencing the same id). ARIA
+    /// calls this GLK verb to record that experience. The window is
+    /// `[now - traceRetention, now]` so any live trace row for that drawer
+    /// is caught regardless of which tick it was written on.
+    ///
+    /// Layer discipline (Interface Rule): ARIA must NOT reach around GLK into
+    /// LocusKit. This pass-through is the correct boundary: ARIA → GLK →
+    /// LocusKit.
+    ///
+    /// - Parameters:
+    ///   - handle: the estate the drawer lives in. Must be open in this kit.
+    ///   - target: the drawer id whose live trace rows to mark used.
+    ///   - now:    the current wall time, supplied deterministically by the caller.
+    /// - Returns: number of rows whose `used` bit was flipped (0 if none
+    ///            or all already marked).
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    @discardableResult
+    func markRecallUsed(_ handle: EstateHandle, target: RowID, now: Date) async throws -> Int {
+        let estate = try estate(for: handle)
+        // Window: [now - traceRetention, now]. traceRetention mirrors the
+        // 30-day prune window in the dreaming daemon so any still-live trace
+        // row for that drawer is within scope. Using the full retention window
+        // is simpler and matches the design memo § 3 recommendation.
+        let since = now.addingTimeInterval(-GeniusLocusKit.traceRetentionSeconds)
+        do {
+            return try await estate.markRecallTracesUsed(target: target, since: since, now: now)
+        } catch {
+            throw remap(verb: "markRecallUsed", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Count all rows in the recall_trace table for the estate addressed by
+    /// `handle`. Used by estate-status reporting so trace-table growth is
+    /// observable. Returns 0 on an empty table or for a stale handle.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func countRecallTraces(_ handle: EstateHandle) async throws -> Int {
+        let estate = try estate(for: handle)
+        do {
+            return try await estate.countRecallTraces()
+        } catch {
+            throw remap(verb: "countRecallTraces", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
     // MARK: - Internal helpers
 
     /// Return the cached `DrawerStore` for KGFact writes against `handle`,
@@ -777,10 +1186,17 @@ public extension GeniusLocusKit {
     /// Drain all unconfirmed rows from a LocusKit estate into an array.
     /// Used by `glkDeriveBranch` to snapshot the parent or parent-branch
     /// estate at derivation time.
+    ///
+    /// `.full` hydration is required because the snapshot rows are immediately
+    /// re-captured into the branch estate via `Estate.capture`, which requires
+    /// non-empty content. Per spec § 7.3, `.structured` returns `content = ""`
+    /// (no blob reads), so a `.structured` snapshot would fail the capture
+    /// guard. This is an internal, bounded read: the rows are not returned to
+    /// callers, so loading blobs here is O(estate) and intentional.
     private func recallRows(from estate: LocusKit.Estate) async throws -> [Drawer] {
         let frame = RecallFrame(
             filterChain: [.unconfirmed],
-            hydrationLevel: .structured,
+            hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
         let stream = await estate.recall(frame)
@@ -813,12 +1229,13 @@ public extension GeniusLocusKit {
     // MARK: - Error remapping
 
     /// Translate an error caught from a LocusKit verb dispatch into a
-    /// `VerbError`. LocusKit's stubs for mutate/expunge/reanchor/learn
-    /// throw `LocusKitError.invalidContent` with a message containing
-    /// "not yet implemented"; that pattern is normalised to
-    /// `VerbError.notSupportedByEstate(verb:)` so callers see one case
-    /// across all stubbed dispatches. Every other LocusKit error
-    /// becomes `VerbError.underlyingEstateFailure(verb:reason:)`.
+    /// `VerbError`. A `LocusKitError.notSupported` (or an
+    /// `.invalidContent` whose message contains "not yet implemented")
+    /// is normalised to `VerbError.notSupportedByEstate(verb:)` so callers
+    /// see one case for any genuinely-unsupported dispatch. All nine ARIA
+    /// verbs are live; this path remains the generic fallback for any verb
+    /// whose dependency is unavailable. Every other LocusKit error becomes
+    /// `VerbError.underlyingEstateFailure(verb:reason:)`.
     ///
     /// `GeniusLocusKitError` cases (notably `.estateNotOpen` raised by
     /// `estate(for:)`) are passed through unchanged so callers can
@@ -844,6 +1261,14 @@ public extension GeniusLocusKit {
         }
         if let glkError = error as? GeniusLocusKitError {
             return glkError
+        }
+        // LocusKitError.notSupported is the canonical fail-loud path for
+        // verbs whose dependencies are not yet implemented. Maps to
+        // notSupportedByEstate so ARIA callers receive a typed, structured
+        // error rather than an opaque underlyingEstateFailure.
+        if let locusError = error as? LocusKitError,
+           case .notSupported = locusError {
+            return VerbError.notSupportedByEstate(verb: verb)
         }
         if let locusError = error as? LocusKitError,
            case .invalidContent(let detail) = locusError,
@@ -876,11 +1301,9 @@ public extension GeniusLocusKit {
     /// handled per custody mode: mode 1 retains it in the vault and
     /// returns nil; mode 2 returns it to the caller and retains nothing;
     /// mode 3 (decay-derived) reconstructs and returns it to the caller
-    /// and retains nothing (no-vault posture). Either experimental mode
-    /// raises `experimentalModeNotActivated` before any key work unless
-    /// its `experimentalIPClearanceConfirmed` flag is set; mode 4
-    /// (physical decay) then raises `hardwareNotSupported`, its key
-    /// mechanic being unimplemented.
+    /// and retains nothing (no-vault posture). Mode 3 requires confirmed
+    /// IP clearance (`experimentalIPClearanceConfirmed: true`) and raises
+    /// `experimentalModeNotActivated` without it.
     ///
     /// - Parameters:
     ///   - handle: the issuing estate. Must be open in this kit.
@@ -939,13 +1362,13 @@ public extension GeniusLocusKit {
         appendGrantAuditEntry(
             verb: .grantIssued,
             grantID: grant.id,
-            custodyToken: grant.custodyMode.signingToken,
+            custodyToken: grant.custodyMode.columnToken,
             before: .null,
             after: .bitmap(Self.grantActiveBit),
             handle: handle,
             now: now
         )
-        Self.verbLog.debug("issueGrant \(id, privacy: .public) custody=\(grant.custodyMode.signingToken, privacy: .public)")
+        Self.verbLog.debug("issueGrant \(id, privacy: .public) custody=\(grant.custodyMode.columnToken, privacy: .public)")
         return IssueGrantResult(grant: grant, scopeKey: scopeKey)
     }
 
@@ -978,7 +1401,7 @@ public extension GeniusLocusKit {
         appendGrantAuditEntry(
             verb: .grantRevoked,
             grantID: grantID,
-            custodyToken: stored.grant.custodyMode.signingToken,
+            custodyToken: stored.grant.custodyMode.columnToken,
             before: .bitmap(Self.grantActiveBit),
             after: .bitmap(0),
             handle: handle,
@@ -1093,25 +1516,21 @@ extension GeniusLocusKit {
     }
 
     /// Gate the experimental custody modes at the verb boundary. Modes 1
-    /// and 2 pass through. Either experimental mode without confirmed IP
-    /// clearance raises `experimentalModeNotActivated`. With clearance:
-    /// custody mode 3 (decay-derived) now passes through — the Lagrange
-    /// key mechanics are implemented (ENC-02), so issuance proceeds and
-    /// the scope key is reconstructed in `ScopeKeyVault.issue`. Custody
-    /// mode 4 (physical SRAM decay) still raises `hardwareNotSupported`:
-    /// its key mechanic is not implemented.
+    /// and 2 pass through. Mode 3 (decay-derived) requires confirmed IP
+    /// clearance (`experimentalIPClearanceConfirmed: true`) and raises
+    /// `experimentalModeNotActivated` without it; with clearance it passes
+    /// through — the Lagrange key mechanics are implemented (ENC-02). Mode 4
+    /// (time-aging) is a shippable software policy with no IP-clearance gate;
+    /// it passes through and its decay is enforced on the recall path.
     private static func gateCustody(_ mode: CustodyMode) throws {
         switch mode {
-        case .mediated, .handedOver:
+        case .mediated, .handedOver, .timeAging:
             return
         case .decayDerived(_, _, _, let confirmed):
             guard confirmed else { throw GrantError.experimentalModeNotActivated }
             // Clearance confirmed: permit issuance. The decay-derived key
             // is reconstructed in the vault's issue path (ENC-02).
             return
-        case .physicalDecay(let confirmed):
-            guard confirmed else { throw GrantError.experimentalModeNotActivated }
-            throw GrantError.hardwareNotSupported
         }
     }
 }

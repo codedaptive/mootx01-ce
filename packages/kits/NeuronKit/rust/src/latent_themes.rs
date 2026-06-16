@@ -3,6 +3,12 @@
 //! soft loading vector → mixed-membership reasoning, not a hard bucket.
 //! Surfaces the GeniusLocusKit matrix-tier MatrixNMF; owns no math (I-17).
 //! Deterministic for a fixed seed (B-5); total over edge inputs (I-18, B-8).
+//!
+//! Type boundary note: MatrixNMF (GLK) delegates to the canonical substrate
+//! NMFAlternatingLeastSquares and returns f32 factors. NeuronKit's public
+//! ThemeLoading.loadings and LatentThemes.reconstruction_error are f64 for
+//! API stability; f32 values are widened to f64 at this boundary. Widening
+//! preserves the substrate's bit-exact values with no additional rounding.
 
 use std::collections::HashMap;
 
@@ -12,7 +18,7 @@ use genius_locus_kit::MatrixNMF;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeLoading {
     pub label: String,
-    pub loadings: Vec<f64>,
+    pub loadings: Vec<f64>,   // widened from f32 at the NeuronKit boundary
     pub dominant_theme: usize,
 }
 
@@ -21,7 +27,7 @@ pub struct ThemeLoading {
 pub struct LatentThemes {
     pub k: usize,
     pub loadings: Vec<ThemeLoading>,
-    pub reconstruction_error: f64,
+    pub reconstruction_error: f64,  // widened from f32 at the NeuronKit boundary
 }
 
 /// Factor the symmetric co-occurrence over `labels` into `k` latent themes.
@@ -65,6 +71,9 @@ pub fn latent_themes(
         }
     }
 
+    // MatrixNMF delegates to the canonical substrate NMFAlternatingLeastSquares
+    // (f32, RMS error). Loadings and reconstruction error are f32; widened to f64
+    // here at the NeuronKit public-API boundary.
     let factorization = MatrixNMF::factorize(
         &matrix,
         n,
@@ -79,7 +88,12 @@ pub fn latent_themes(
         .iter()
         .enumerate()
         .map(|(row, label)| {
-            let vector = factorization.loadings_for_row(row);
+            // Widen f32 loadings to f64 at the NeuronKit boundary.
+            let vector: Vec<f64> = factorization
+                .loadings_for_row(row)
+                .iter()
+                .map(|&v| v as f64)
+                .collect();
             let dominant = vector
                 .iter()
                 .enumerate()
@@ -97,7 +111,8 @@ pub fn latent_themes(
     LatentThemes {
         k: effective_k,
         loadings,
-        reconstruction_error: factorization.reconstruction_error,
+        // Widen f32 RMS error to f64 at the NeuronKit boundary.
+        reconstruction_error: factorization.reconstruction_error as f64,
     }
 }
 

@@ -1,14 +1,15 @@
 ---
-title: Kit Interface Specification
+title: Kit Interface Design
 status: canon
-authors: Bob Pankratz (via/ claude)
-date: 2026-05-26
-version: 1.0
+authors: MOOTx01 maintainers
+date: 2026-06-14
+version: 1.0.0
+description: The cross-kit rollup of how each kit's public interface composes into the MOOTx01 substrate, grounding, composition, reasoning, and access layers.
 ---
 
-# Kit Interface Specification
+# Kit Interface Design
 
-**Purpose:** Authoritative public interface for each Kit derived from canonical specifications, architectural decisions, and completed mission deliverables.
+**Purpose:** Authoritative rollup of how each Kit's public interface composes with the others, derived from canonical specifications and architectural decisions.
 
 **Use this to:**
 - Verify that a Kit's public API matches its spec
@@ -19,14 +20,11 @@ version: 1.0
 **Source of truth hierarchy:**
 1. `docs/concepts/TOPOLOGY.md` and `docs/concepts/MOOTX01_AND_ARIA_CANON.md` — Kit role and composition
 2. `docs/decisions/DECISION_*.md` — Architectural decisions that shaped interfaces
-3. `docs/_internal/missions/MISSION_*.md` — Completed mission deliverables with defined done
-4. Source code public interfaces — actual implementation
+3. Source code public interfaces — actual implementation
 
 ---
 
-## Foundation Layer (Missions 1–4)
-
-All foundation kits are **built, green, and review-pending**.
+## Foundation Layer
 
 ### AriaLexiconLib (Zero Dependencies)
 
@@ -34,7 +32,7 @@ All foundation kits are **built, green, and review-pending**.
 
 **Spec:** ARIA_LEXICON.md + TOPOLOGY.md § The grammar is reified in `AriaLexiconLib`
 
-**Invariants (design-time, spec I-7 and I-8):**
+**Invariants (design-time, per ARIA_LEXICON.md and the architecture spec):**
 - One noun: the drawer
 - Nine verbs: fixed count
 - Four adjective categories: fixed count
@@ -46,27 +44,25 @@ All foundation kits are **built, green, and review-pending**.
 
 **Dependencies:** None
 
-**Completion:** ✅ Mission 1 (promoted from GeniusLocusReference)
-
 ---
 
 ### SubstrateLib (Zero Dependencies)
 
 **Canonical Role:** Math primitives, kernel dispatch, audit CRDT.
 
-**Atomic-centralization rule (cookbook I-25):** Every substrate atomic
+**Atomic-centralization rule (the substrate engineering cookbook):** Every substrate atomic
 — bitfield extract/write, mask, shift, AND / OR / XOR, popcount,
 Hamming distance, fold / reduce, the SHA-256 content hash, and the
 Hybrid Logical Clock — lives here and is consumed by name. No kit
-reimplements the math, not one line. This is M1 in its full strength:
-SubstrateLib *executes* the math, it does not merely specify it. It is
+reimplements the math, not one line. SubstrateLib *executes* the math,
+it does not merely specify it. It is
 also the basis of the portability contract — SubstrateLib is the one
 hard port, and once its conformance corpus passes on a new platform
 every kit works there without per-kit re-verification. Reference
 primitives: `BitField`, `SHA256`, `HLC`, plus the distance and
 aggregation families listed below.
 
-**Spec:** docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md + engineering cookbook
+**Spec:** docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md + engineering cookbook
 
 **Architectural decisions:**
 - DECISION_HAMMING_BACKENDS_2026-05-17.md
@@ -95,8 +91,6 @@ aggregation families listed below.
 - `PortableKernel` — Dispatcher (SIMD, Metal, NEON, BNNS)
 
 **Dependencies:** None
-
-**Completion:** ✅ Mission 1
 
 ---
 
@@ -134,8 +128,6 @@ aggregation families listed below.
 - `PersistenceKitInMemory` (tests)
 
 **Dependencies:** SubstrateLib
-
-**Completion:** ✅ Mission 2
 
 ---
 
@@ -178,8 +170,6 @@ aggregation families listed below.
 
 **Dependencies:** SubstrateLib
 
-**Completion:** ✅ Mission 4 (relocated from Forge)
-
 ---
 
 ### ConvergenceKit (SubstrateLib, PersistenceKit)
@@ -210,8 +200,6 @@ aggregation families listed below.
 - `ConvergenceKitNone` (offline-only)
 
 **Dependencies:** SubstrateLib, PersistenceKit
-
-**Completion:** ✅ Mission 3
 
 ---
 
@@ -249,8 +237,6 @@ aggregation families listed below.
 
 **Dependencies:** SubstrateLib
 
-**Completion:** ✅ Mission 4
-
 ---
 
 ## Grounding Layer (Standalone, Parallel to Substrate)
@@ -259,7 +245,7 @@ aggregation families listed below.
 
 **Canonical Role:** Free Decimal Correspondence (FDC) engine — the encoder, the FDC frame (code tree), and the FDC signatures it scores against.
 
-**Spec:** TOPOLOGY.md § FDC, the classification spine; FDC_ENCODER_CANONICAL_v1.0.md
+**Spec:** TOPOLOGY.md § FDC, the classification spine; FDC_ENCODER_CANONICAL.md
 
 **Core Types:**
 - `FDCFrame` / `FDCEntry` — The FDC code tree
@@ -274,15 +260,13 @@ aggregation families listed below.
 
 **Dependencies:** None
 
-**Completion:** ✅ FDC engine shipped (MDCC→FDC migration, A2)
-
 ---
 
 ### EideticLib (LatticeLib)
 
 **Canonical Role:** Deterministic text-to-anchor lookup, FDC-backed. `lookup` delegates to LatticeLib's `FDC.encodeAnchor` (canonicalize term to a concept bag → match against pinned FDC signatures → FDC code + dominant Wikidata Q-ID).
 
-**Spec:** TOPOLOGY.md § Grounding, EIDETICLIB_SPEC_v0.8.md
+**Spec:** TOPOLOGY.md § Grounding, EIDETICLIB_SPEC.md
 
 **Core Type:**
 - `Anchor` — Result of lookup
@@ -308,17 +292,15 @@ aggregation families listed below.
 
 **Dependencies:** LatticeLib
 
-**Completion:** ✅ FDC-backed lookup shipped (Phase B)
-
 ---
 
-## Main Substrate Layer (Missions 5–8)
+## Main Substrate Layer
 
 ### LocusKit (SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit)
 
 **Canonical Role:** Spatial memory system with knowledge graph. One estate per instance.
 
-**Spec:** docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md
+**Spec:** docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md
 
 **Decisions:**
 - DECISION_LOCUSKIT_BUNDLE_HIERARCHY_2026-05-20.md
@@ -364,8 +346,6 @@ aggregation families listed below.
 
 **Dependencies:** SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit, EideticLib
 
-**Completion:** ✅ Mission 5
-
 ---
 
 ### VectorKit (SubstrateLib, EngramLib, PersistenceKit)
@@ -394,13 +374,11 @@ aggregation families listed below.
 - `EmbeddingGemma`
 - `mpnet`
 
-**Key Invariant (spec I-12):**
+**Key Invariant (substrate architecture spec):**
 - Every vector tagged with model ID and version
 - Cross-model comparisons forbidden
 
 **Dependencies:** SubstrateLib, EngramLib, PersistenceKit
-
-**Completion:** ✅ Mission 6
 
 ---
 
@@ -432,14 +410,12 @@ aggregation families listed below.
 - `CorpusKit` — Core: tokenizer, chunker, BM25, storage, sync
 - `CorpusKitProviders` — Providers with CoreML models (MiniLM, mpnet, Gemma)
 
-**Key Design (Mission 7):**
+**Key Design:**
 - Tokenization in CorpusKit, not VectorKit
 - Providers (with weights) in CorpusKitProviders to keep weights out of core
 - Hybrid retrieval fuses BM25 + vector signals
 
 **Dependencies:** VectorKit, PersistenceKit, ConvergenceKit, EngramLib
-
-**Completion:** ✅ Mission 7
 
 ---
 
@@ -448,16 +424,6 @@ aggregation families listed below.
 **Canonical Role:** Composition layer. Unifies LocusKit and CorpusKit into one estate, runs Brain layer, coordinates persistence.
 
 **Spec:** TOPOLOGY.md § Composition, MOOTX01_AND_ARIA_CANON.md § Instance mode
-
-**Missions:**
-- MISSION_GLK_01_COMPOSITION_SCAFFOLD.md ✅
-- MISSION_GLK_02_VERB_SURFACE.md ✅
-- MISSION_GLK_03_UNIFIED_AUDIT_LOG.md ✅
-- MISSION_GLK_04_STANDING_SIGNALS_SCHEDULER.md ✅
-- MISSION_GLK_05_SIX_STANDING_SIGNALS.md ✅
-- MISSION_GLK_06_MATRIX_TIER.md ✅
-- MISSION_GLK_07_TRAINING_DAEMON.md ✅
-- MISSION_GLK_08_THEOREMS_PERF_GATE.md ✅
 
 **Main Actor:**
 - `GeniusLocusKit` — Serialized coordinator (actor model)
@@ -469,11 +435,7 @@ aggregation families listed below.
 - `openEstateCount: Int`
 - `estate(for: EstateHandle) async throws -> LocusKit.Estate`
 
-**Per-Handle Registry:**
-- `registry: [EstateHandle: LocusKit.Estate]` (internal)
-- `storages: [EstateHandle: any Storage]` (internal)
-
-**Unified Audit Log (GLK-03):**
+**Unified Audit Log:**
 - `auditLog(for: EstateHandle) async throws -> UnifiedAuditLog`
 - `feedAuditLog(for: EstateHandle) async throws`
 - `verifyAuditChain` (async)
@@ -485,20 +447,12 @@ aggregation families listed below.
 - `glkDeriveBranch(from: EstateHandle) -> BranchHandle`
 - `glkPromoteBranch(_ branch: BranchHandle) async throws -> PromotionResult`
 - `glkMergeDrawers(from: BranchHandle, to: EstateHandle) async throws`
-- `branches: [BranchID: EstateBranch]` (internal, retained through all lifecycle states)
 
-**Standing Signals (Brain layer, GLK-04+):**
-- `schedulers: [EstateHandle: StandingSignalScheduler]` (internal)
+**Standing Signals (Brain layer):**
 - `registerStandingSignal(...) async`
 - `triggerSignal(for: EstateHandle) async`
 
-**Scope & Grants (access control, GRT-01):**
-- `grantStores: [EstateHandle: GrantStore]` (internal)
-- `scopeVaults: [EstateHandle: ScopeKeyVault]` (internal)
-
 **Dependencies:** LocusKit, CorpusKit, VectorKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib
-
-**Completion:** ✅ Mission 8 (all sub-missions done as of 2026-05-22)
 
 ---
 
@@ -510,36 +464,30 @@ aggregation families listed below.
 
 **Spec:** TOPOLOGY.md § Behaviour, MOOTX01_AND_ARIA_CANON.md
 
-**Missions:**
-- MISSION_NK_1A_REASONING_SURFACE.md ✅
-- MISSION_NK_DREAM_DAEMON.md ✅
-- MISSION_NK_BR_01_BRANCH_BENCHMARK.md ✅
-- MISSION_NK_MIG_01_ESTATE_MIGRATION_API.md (in progress)
-
 **Reasoning Surface:**
 - `NeuronKit.inferLatticeAnchor(_ content: String) -> LatticeAnchorInference`
 
 **Supporting Type:**
 - `LatticeAnchorInference`
 
-**Autonomic Daemons (§ 3.1):**
+**Autonomic Daemons (NeuronKit spec):**
 - `NeuronKit.dreamingDaemon(reader:, sink:, policyStore:, rewardSource:, triggerMode:) -> DreamingDaemon`
 - `DreamingDaemon.registerDreamingPolicy(...) async`
 - `DreamingDaemon.triggerDreamingCycle(now:) async`
 
-**Daemon Seams (B-1):**
+**Daemon Seams (NeuronKit spec):**
 - `DreamingSubstrateReader` — Read seam
 - `DreamingProposalSink` — Write seam
 - `DreamingPolicyStore` — Policy persistence
 - `RewardSource` protocol
 - `DreamingTriggerMode`
 
-**Branch Operations (§ 4.3, thin forwards over GeniusLocusKit):**
+**Branch Operations (NeuronKit spec; thin forwards over GeniusLocusKit):**
 - `deriveBranch(from: EstateHandle) -> BranchHandle`
 - `promoteBranch(_ branch: BranchHandle) async throws -> PromotionResult`
 - `mergeDrawers(from: BranchHandle, to: EstateHandle) async throws`
 
-**Migration Benchmark (§ 4.7):**
+**Migration Benchmark (NeuronKit spec):**
 - `benchmark(branch: BranchHandle, against: ExternalCorpus, queries: [Query], now: Date) async throws -> BenchmarkReport`
 - `BenchmarkReport` (includes `notFoundInBranch` zero-tolerance signal)
 - `ExternalCorpus` / `ExternalEntry`
@@ -553,13 +501,13 @@ aggregation families listed below.
 
 **Dependencies:** EideticLib, SubstrateLib, EngramLib, GeniusLocusKit
 
-**Completion:** 🔧 Mission 9 (reasoning + dreaming done; branch ops + migration API in progress)
+**Maturity:** In progress (reasoning and dreaming surfaces built; branch ops and migration API in progress).
 
 ---
 
 ### CognitionKit (NeuronKit, GeniusLocusKit)
 
-**Canonical Role:** Behaviour BrainKit. Named, composable workflows and recipes.
+**Canonical Role:** Behaviour layer. Named, composable workflows and recipes.
 
 **Spec:** TOPOLOGY.md § Behaviour, MOOTX01_AND_ARIA_CANON.md
 
@@ -572,19 +520,17 @@ aggregation families listed below.
 
 **Dependencies:** NeuronKit, GeniusLocusKit
 
-**Completion:** 🔲 Mission 10 (planned, after NeuronKit complete)
+**Maturity:** Planned (after NeuronKit complete).
 
 ---
 
 ## Access Layer
 
-### ARIA_MCP (GeniusLocusKit + NeuronKit)
+### aria-mcp (GeniusLocusKit + NeuronKit)
 
-**Canonical Role:** MCP server exposing any MOOTx01 estate to Claude, Claude Code, OB1, and other MCP clients.
+**Canonical Role:** MCP server exposing any MOOTx01 estate to Claude, Claude Code, and other MCP clients.
 
 **Spec:** MOOTX01_AND_ARIA_CANON.md § Consumption surfaces, ARIA.md, ARIA_LEXICON.md
-
-**Mission:** LAUNCH-04 (pending NeuronKit completion)
 
 **Expected Resources (MCP model):**
 - `mootx01://estate/{estateHandle}/*` (browsable)
@@ -600,63 +546,49 @@ aggregation families listed below.
 **Subscriptions (live notifications):**
 - Estate changes as real-time events
 
-**Completion:** 🔧 LAUNCH-04 (in progress)
+**Maturity:** In progress.
 
 ---
 
-### ARIA_MacOS (GeniusLocusKit)
+### AriaMcpKit (GeniusLocusKit + NeuronKit)
 
-**Canonical Role:** macOS demonstration app showing sidecar pattern and SDK usage.
+**Canonical Role:** The library form of the ARIA MCP surface — the reusable Swift/Rust target that `aria-mcp` is built from, embeddable by host apps.
+
+**Spec:** MOOTX01_AND_ARIA_CANON.md § Consumption surfaces
+
+**Maturity:** In progress.
+
+---
+
+### Mootx01-App (GeniusLocusKit)
+
+**Canonical Role:** The MOOTx01 host application (macOS and iOS/iPadOS), demonstrating the sidecar pattern and exercising the SDK and the ARIA verb surface natively.
 
 **Spec:** MOOTX01_AND_ARIA_CANON.md § Demonstration apps
 
 **Purpose:** Worked example for developers; teaches sidecar integration and basic SDK usage.
 
-**Completion:** 🔲 Planned after ARIA_MCP
+**Maturity:** Planned after aria-mcp.
 
 ---
 
-### ARIA_iOS (GeniusLocusKit)
+### aria-mcp Rust port (GeniusLocusKit Rust version)
 
-**Canonical Role:** iOS demonstration app (Rev 3.0).
-
-**Completion:** 🔲 Planned after ARIA_MacOS
-
----
-
-### ARIA_Rust (GeniusLocusKit Rust version)
-
-**Canonical Role:** Rust demonstration app. **Required** for conformance parity between Swift and Rust ports.
+**Canonical Role:** Rust port of the ARIA MCP surface. **Required** for conformance parity between the Swift and Rust ports.
 
 **Spec:** MOOTX01_AND_ARIA_CANON.md § Demonstration apps (required, not optional)
 
-**Completion:** 🔲 Planned after ARIA_MacOS
+**Maturity:** Planned.
 
 ---
 
 ## Special Kits
 
-### Installer
+### mootx01 CLI (apps/mootx01)
 
-**Role:** First-run, system integration, app updater.
+**Role:** First-run setup, system integration, and app updates via the mootx01 command-line tool.
 
-**Mission:** LAUNCH-01
-
-**Completion:** 🔲 Planned
-
----
-
-### Sidecar_Demo_macOS
-
-**Role:** Prototype demonstration of sidecar pattern.
-
-**Completion:** ✅ (proto, not shipped)
-
----
-
-### tools/
-
-**Role:** Build utilities, test harness, reference implementations. Not shipped.
+**Maturity:** Planned.
 
 ---
 
@@ -671,7 +603,7 @@ aggregation families listed below.
 | **Composition** | GeniusLocusKit |
 | **Reasoning** | NeuronKit (in progress) |
 | **Behaviour** | CognitionKit (planned) |
-| **Access** | ARIA_MCP (in progress), ARIA_MacOS (planned), ARIA_iOS (planned), ARIA_Rust (planned) |
+| **Access** | aria-mcp (in progress), AriaMcpKit (in progress), Mootx01-App (planned), aria-mcp Rust port (planned) |
 
 ---
 
@@ -692,21 +624,20 @@ VectorKit            (SubstrateLib, EngramLib, PersistenceKit)
 GeniusLocusKit       (LocusKit, CorpusKit, VectorKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
 NeuronKit            (EideticLib, SubstrateLib, EngramLib, GeniusLocusKit)
 CognitionKit         (NeuronKit, GeniusLocusKit)
-ARIA_MCP             (GeniusLocusKit, NeuronKit)
-ARIA_MacOS           (GeniusLocusKit)
-ARIA_iOS             (GeniusLocusKit)
-ARIA_Rust            (GeniusLocusKit Rust version)
+aria-mcp / AriaMcpKit (GeniusLocusKit, NeuronKit)
+Mootx01-App          (GeniusLocusKit)
+aria-mcp Rust port   (GeniusLocusKit Rust version)
 ```
 
 ---
 
-## Completion Status Legend
+## Maturity Legend
 
-| Symbol | Meaning |
-|--------|---------|
-| ✅ | Built, green tests, review pending |
-| 🔧 | In progress (active mission stream) |
-| 🔲 | Planned (gating dependency shown) |
+| Maturity | Meaning |
+|----------|---------|
+| Built | Public interface implemented and test-covered |
+| In progress | Interface partially built; some surface still landing |
+| Planned | Not yet built; gating dependency shown |
 
 ---
 
@@ -781,14 +712,13 @@ When reviewing for placement and shape correctness:
 
 **NeuronKit:**
 - [ ] Reasoning surface thin wrapper over EideticLib
-- [ ] Dreaming daemon seams (B-1) correct
+- [ ] Dreaming daemon seams correct
 - [ ] Branch ops thin forwards (no state stored locally)
 - [ ] Benchmark read-only
 
 ---
 
-**Last Updated:** 2026-05-26  
+**Last Updated:** 2026-06-14  
 **Canonical Source:** docs/concepts/TOPOLOGY.md, docs/concepts/MOOTX01_AND_ARIA_CANON.md  
-**Mission Status Source:** docs/_internal/missions/  
 **Decisions Source:** docs/decisions/  
 **Code Source:** Actual public interfaces

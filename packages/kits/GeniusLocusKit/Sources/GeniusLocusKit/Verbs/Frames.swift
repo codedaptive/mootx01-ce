@@ -76,8 +76,9 @@ public struct WithdrawFrame: Sendable, Equatable {
 ///
 /// `mutate` updates the row's adjective bitmap per the supplied
 /// `MutationKind` (confirm, reject, contest, supersede, revive,
-/// accept, correctSensitivity, correctTrust). The substrate writes
-/// a bitmap-audit row atomically with the update (cookbook §10.3).
+/// accept, correctSensitivity, correctExportability, correctTrust).
+/// The substrate writes a bitmap-audit row atomically with the update
+/// (cookbook §10.3).
 public struct MutateFrame: Sendable {
     /// The drawer to mutate.
     public let rowID: RowID

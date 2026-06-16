@@ -1,17 +1,18 @@
 ---
 title: LoopbackHTTP Specification
-version: 1.0
+version: 1.0.1
 status: active
+description: Specifies the shared loopback-pinned HTTP/1.1 server primitive (POSIXSocket, HTTPRequest, HTTPResponse, SSEStream) used by the MOOTx01 resident daemons.
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-07
+date: 2026-06-15
 relates_to:
   - docs/decisions/ADR-LOOPBACKHTTP-001.md
   - docs/reference/MOOT_MGR_SPEC.md
-  - docs/reference/ARIA_MCP_SPEC_v0.2.md
+  - docs/reference/ARIA_MCP_SPEC.md
 ---
 
-# LoopbackHTTP Specification v1.0
+# LoopbackHTTP Specification
 
 ## 1. Purpose
 
@@ -30,7 +31,7 @@ primitive for the MOOTx01 resident daemons. It provides:
    connection lifetime.
 
 It was extracted from moot-mgr (ADR-LOOPBACKHTTP-001) so the moot-mgr monitor
-daemon (port 7077) and the resident mootx01 MCP daemon (port 4242) share ONE
+daemon (default port 4200) and the resident mootx01 MCP daemon (default port 4242) share ONE
 audited loopback-bind implementation rather than two hand-rolled copies that
 drift. moot-mgr consumes it today; the mootx01 HTTP MCP transport consumes it
 next.
@@ -103,9 +104,9 @@ truncated, or rejects an over-large `Content-Length` before reading.
 `LoopbackHTTP` ships **Swift only**. The Swift+Rust parity discipline governs
 deterministic substrate compute conformance-gated at shared test vectors; it does
 not extend to OS-transport glue (there is nothing to conformance-gate in a socket
-bind). The only Rust-needing consumer, ARIA_MCP-rust, is a complete Rust vertical
+bind). The only Rust-needing consumer, the aria-mcp Rust port, is a complete Rust vertical
 that under the no-FFI law hand-rolls its own `std::net` HTTP transport, with
-parity between the ARIA_MCP verticals enforced at the JSON-RPC wire. moot-mgr has
+parity between the aria-mcp verticals enforced at the JSON-RPC wire. moot-mgr has
 no Rust port. **Re-review trigger:** a roadmapped Rust moot-mgr build would
 introduce a Rust consumer without a wire-conformance gate and reopen this
 carve-out (ADR-LOOPBACKHTTP-001).
@@ -134,3 +135,11 @@ live in moot-mgr's own suite.
   source and lifetime are owned by the consumer.
 - **I-4**: Request size caps are per-listener parameters, not hardcoded.
 - **I-5**: Zero external dependencies; Swift + platform socket module only.
+
+## Changelog
+
+### 1.0.1 -- 2026-06-15
+Corrected the moot-mgr daemon port from the retired debug port `7077` to its current default `4200` (the mootx01 daemon default is `4242`). Both are defaults that hunt upward to the next free port if the base is already bound.
+
+### 1.0.0 -- 2026-06-14
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

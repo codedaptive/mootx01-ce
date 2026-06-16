@@ -4,8 +4,10 @@
 //! The durable record of an external reference brought into the estate by
 //! the grounding-driven `learn` verb (`learnedReference` is the only noun
 //! that accepts `learn`). A *product* noun in the language taxonomy. This
-//! mission ships only the value type, its operational accessors, the
-//! `learned_references` table, and store persistence — no verb behaviour.
+//! module ships the value type, its operational accessors, the
+//! `learned_references` table, and store persistence — the noun/persistence
+//! layer. The `learn` verb that derives a `LearnedReference` and writes it
+//! through this layer is implemented in `estate_verbs.rs` (`Estate::learn`).
 //!
 //! ## Field shape — source-grounded
 //!
@@ -67,6 +69,19 @@ impl RefreshPolicy {
             48 => RefreshPolicy::OnDemand,
             56 => RefreshPolicy::Realtime,
             _ => RefreshPolicy::None,
+        }
+    }
+
+    /// The scale-gapped raw value persisted in the operational bitmap
+    /// (cookbook § 2.4 bits 0–5). Mirrors the Swift `RefreshPolicy` raw.
+    pub fn raw_value(self) -> i64 {
+        match self {
+            RefreshPolicy::None => 0,
+            RefreshPolicy::Monthly => 16,
+            RefreshPolicy::Weekly => 24,
+            RefreshPolicy::Daily => 32,
+            RefreshPolicy::OnDemand => 48,
+            RefreshPolicy::Realtime => 56,
         }
     }
 }

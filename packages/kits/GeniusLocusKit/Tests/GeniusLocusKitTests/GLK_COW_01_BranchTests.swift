@@ -38,10 +38,14 @@ struct GLK_COW_01_BranchTests {
     }
 
     /// Recall all active drawers from an estate through the GLK verb surface.
+    ///
+    /// Uses `.full` hydration so callers can check `content` values directly.
+    /// Per spec § 7.3, `.structured` returns `content = ""` (no blob reads),
+    /// which would break tests 7 and 8 that match by content after promotion/merge.
     private func recallAll(kit: GeniusLocusKit, handle: EstateHandle) async throws -> [Drawer] {
         let frame = RecallFrame(
             filterChain: [.unconfirmed],
-            hydrationLevel: .structured,
+            hydrationLevel: .full,
             ordering: .byCaptureTimeDesc
         )
         return try await kit.recall(handle, frame)

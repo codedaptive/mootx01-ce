@@ -22,7 +22,7 @@ use std::sync::Mutex;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -48,6 +48,29 @@ pub struct TableChange {
     pub hlc: Option<HLC>,
 }
 
+// MARK: - BlobEvent / BlobChange
+
+/// Type of blob mutation. Mirrors Swift's `BlobEvent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlobEvent {
+    Put,
+    Delete,
+}
+
+/// A single blob change notification. Mirrors Swift's `BlobChange`.
+///
+/// `bytes` carries the payload for `Put` events (last-write-wins semantics
+/// in the incremental dirty accumulator). For `Delete` events `bytes` is `None`.
+#[derive(Debug, Clone)]
+pub struct BlobChange {
+    pub key: String,
+    pub event: BlobEvent,
+    /// Payload on `Put`; `None` on `Delete`.
+    pub bytes: Option<Vec<u8>>,
+}
+
+// MARK: - StorageObserver trait
+
 pub trait StorageObserver: Send + Sync {
     /// Subscribe to changes on `table` for the listed events.
     /// Multiple observers on the same table coexist.
@@ -56,6 +79,20 @@ pub trait StorageObserver: Send + Sync {
         table: &str,
         events: BTreeSet<StorageEvent>,
     ) -> StorageResult<Receiver<TableChange>>;
+
+    /// Subscribe to blob put/delete events.
+    ///
+    /// Returns a channel that delivers one `BlobChange` per put or delete
+    /// on the blob store. The `NoOpObserver` and the SQLite observer return
+    /// a disconnected (already-closed) receiver because `sqlite3_update_hook`
+    /// does not fire for `_storagekit_blobs` (a virtual-table hook limitation).
+    /// The InMemory observer delivers live events.
+    fn observe_blobs(&self) -> Receiver<BlobChange> {
+        // Default implementation: return a disconnected receiver.
+        // Backends that support blob observation override this method.
+        let (_tx, rx) = channel::<BlobChange>();
+        rx
+    }
 }
 
 /// A no-op observer that produces empty receivers. Mirror of
@@ -87,7 +124,41 @@ impl StorageObserver for NoOpObserver {
         // immediate `continuation.finish()`.
         Ok(rx)
     }
+    // observe_blobs() uses the default (disconnected) implementation.
 }
+
+// MARK: - BlobObserverHub
+
+/// Channel multiplexer for blob events. Parallel to `ObserverHub` but
+/// for `BlobChange` notifications. Used by `InMemoryStorage` to fan out
+/// blob put/delete events to all active incremental replication sessions.
+pub(crate) struct BlobObserverHub {
+    subscribers: Mutex<Vec<Sender<BlobChange>>>,
+}
+
+impl BlobObserverHub {
+    pub fn new() -> Self {
+        BlobObserverHub {
+            subscribers: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Register a new subscriber and return its receiver.
+    pub fn subscribe(&self) -> Receiver<BlobChange> {
+        let (tx, rx) = channel();
+        self.subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    /// Emit a blob change to all active subscribers. Closed channels are
+    /// pruned on each emit (same pattern as `ObserverHub::emit`).
+    pub fn emit(&self, change: BlobChange) {
+        let mut subs = self.subscribers.lock().unwrap();
+        subs.retain(|tx| tx.send(change.clone()).is_ok());
+    }
+}
+
+// MARK: - ObserverHub (row changes)
 
 /// Channel multiplexer used by InMemoryStorage. Maintains a list
 /// of (table, events_filter, sender) tuples; `emit` fans out to

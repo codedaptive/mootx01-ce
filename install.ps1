@@ -31,9 +31,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $REPO        = if ($env:MOOTX01_REPO)        { $env:MOOTX01_REPO }        else { "codedaptive/mootx01-ce" }
-$INSTALL_DIR = if ($env:MOOTX01_INSTALL_DIR) { $env:MOOTX01_INSTALL_DIR } else { Join-Path $HOME ".mootx01\bin" }
+$MOOTX01_ROOT        = Join-Path $HOME ".mootx01"
+$DEFAULT_INSTALL_DIR = Join-Path $MOOTX01_ROOT "bin"
+$INSTALL_DIR = if ($env:MOOTX01_INSTALL_DIR) { $env:MOOTX01_INSTALL_DIR } else { $DEFAULT_INSTALL_DIR }
 $BIN_DIR     = if ($env:MOOTX01_BIN_DIR)     { $env:MOOTX01_BIN_DIR }     else { Join-Path $HOME ".local\bin" }
 $BINARY      = Join-Path $INSTALL_DIR "mootx01.exe"
+$MGR_BINARY  = Join-Path $INSTALL_DIR "moot-mgr.exe"
 $SERVER_NAME = "mootx01"
 $RESIDENT_URL = "http://127.0.0.1:4242"
 
@@ -244,12 +247,48 @@ function Remove-FromUserPath($dir) {
 if ($Uninstall) {
     Write-Host "Uninstalling mootx01..."
 
-    # Remove binary
-    if (Test-Path $INSTALL_DIR) {
-        Remove-Item -Recurse -Force (Split-Path $INSTALL_DIR)   # removes ~/.mootx01
-        Write-Host "  Removed $INSTALL_DIR"
+    # Unregister the background services (the mootx01 / mootx01-mgr Task Scheduler
+    # logon tasks) via the Rust CLI BEFORE the binary is deleted — `mootx01
+    # uninstall` is what knows the task names (commands/uninstall.rs). Skipping
+    # this would leave logon tasks pointing at a deleted binary. Scheduled tasks
+    # are global, so this only applies to a global uninstall; -Local removals are
+    # project-scoped and register no tasks.
+    if (-not $Local) {
+        if (Test-Path $BINARY) {
+            try {
+                & $BINARY uninstall --yes | Out-Null
+            } catch {
+                Write-Warning "Could not run '$BINARY uninstall' to unregister scheduled tasks: $_"
+            }
+        } else {
+            Write-Warning "mootx01.exe not found; the mootx01 / mootx01-mgr scheduled tasks may remain. Run 'mootx01 uninstall' if it is still on PATH."
+        }
     }
-    Remove-FromUserPath $BIN_DIR
+
+    # Remove the binaries we installed. NEVER blindly delete the install dir's
+    # parent — with a custom MOOTX01_INSTALL_DIR (e.g. C:\Tools or C:\Users\bob\bin)
+    # that would take an unrelated user directory with it.
+    foreach ($exe in @($BINARY, $MGR_BINARY)) {
+        if (Test-Path $exe) {
+            Remove-Item -Force $exe
+            Write-Host "  Removed $exe"
+        }
+    }
+    # Default layout ($HOME\.mootx01\bin): remove the whole ~/.mootx01 root, which
+    # we own. Custom layout: remove the install dir only if our binaries left it
+    # empty, and never touch its parent.
+    if ($INSTALL_DIR -eq $DEFAULT_INSTALL_DIR) {
+        if (Test-Path $MOOTX01_ROOT) {
+            Remove-Item -Recurse -Force $MOOTX01_ROOT
+            Write-Host "  Removed $MOOTX01_ROOT"
+        }
+    } elseif ((Test-Path $INSTALL_DIR) -and -not (Get-ChildItem -Force $INSTALL_DIR)) {
+        Remove-Item -Force $INSTALL_DIR
+        Write-Host "  Removed $INSTALL_DIR"
+    } elseif (Test-Path $INSTALL_DIR) {
+        Write-Host "  Left $INSTALL_DIR in place (not empty; removed only MOOTx01 binaries)"
+    }
+    Remove-FromUserPath $INSTALL_DIR
 
     # Remove MCP client entries
     $clients = Get-Clients
@@ -274,7 +313,8 @@ if ($Uninstall) {
     Remove-Permissions $settingsPath
 
     Write-Host ""
-    Write-Host "mootx01 removed. Your estate data at $env:APPDATA\com.mootx01.ce was not touched."
+    $dataDir = if ($env:MOOTX01_DATA_DIR) { $env:MOOTX01_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "MOOTx01" }
+    Write-Host "mootx01 removed. Your estate data at $dataDir was not touched."
     Write-Host "Delete that directory manually if you want to remove your data."
     exit 0
 }
@@ -311,7 +351,7 @@ try {
     exit 1
 }
 
-# 3. Extract + place binary
+# 3. Extract + place binaries
 Expand-Archive (Join-Path $tmpDir $asset) -DestinationPath $tmpDir -Force
 if (-not (Test-Path (Join-Path $tmpDir "mootx01.exe"))) {
     Write-Error "Archive did not contain mootx01.exe"
@@ -321,13 +361,25 @@ if (-not (Test-Path (Join-Path $tmpDir "mootx01.exe"))) {
 
 New-Item -ItemType Directory -Force $INSTALL_DIR | Out-Null
 Copy-Item -Force (Join-Path $tmpDir "mootx01.exe") $BINARY
-Remove-Item -Recurse -Force $tmpDir
-
 Write-Host "  Installed $BINARY"
 
-# 4. Add to PATH
-New-Item -ItemType Directory -Force $BIN_DIR | Out-Null
-Add-ToUserPath $BIN_DIR
+# moot-mgr.exe (the management & monitoring console) ships in the Windows
+# archive alongside mootx01.exe. Place it beside mootx01.exe so the
+# `mootx01 install` follow-up registers the mgr Task Scheduler task (it keys
+# off moot-mgr.exe sitting next to mootx01.exe — see commands/install.rs).
+$mgrSrc = Join-Path $tmpDir "moot-mgr.exe"
+if (Test-Path $mgrSrc) {
+    Copy-Item -Force $mgrSrc $MGR_BINARY
+    Write-Host "  Installed $MGR_BINARY"
+}
+
+Remove-Item -Recurse -Force $tmpDir
+
+# 4. Add the install dir (which holds mootx01.exe) to the user PATH so `mootx01`
+#    is callable by name, including the `mootx01 install` follow-up below. Windows
+#    has no convenient unprivileged symlink, so we PATH the real dir rather than
+#    shim into $BIN_DIR.
+Add-ToUserPath $INSTALL_DIR
 
 # 5. Wire MCP clients
 Write-Host ""

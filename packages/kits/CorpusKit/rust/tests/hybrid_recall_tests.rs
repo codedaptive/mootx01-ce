@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -65,8 +65,8 @@ fn hybrid_recall_merges_vector_and_keyword_hits() {
     Intellectus::set_enabled(false);
 
     // Two storages with shared chunk ids: one for vector store,
-    // one for bundle store. The drawer_id in vectorstore is the
-    // chunk's UUID string.
+    // one for bundle store. The item_id in vectorstore is the
+    // chunk's UUID string (Lane F rename: drawer_id → item_id).
     let vector_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
     let vector_store = VectorStore::open(vector_storage).expect("vector store");
     let bundle_storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));

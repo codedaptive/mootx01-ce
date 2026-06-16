@@ -2,12 +2,10 @@
 // composition fixtures. The Swift reference is
 // `Tests/GeniusLocusKitTests/CompositionConformanceTests.swift`.
 //
-// The `EstateCoordinator` carries `EstateState` with manifest fields
-// for fan-out routing, but verb dispatch has not yet been wired
-// through to a live locus_kit::Estate (LocusKit Rust is fully shipped
-// at 503 tests; the verb-wiring layer is the remaining gap). The
-// composition fixtures therefore exercise the surfaces GLK owns
-// end-to-end today:
+// The `EstateCoordinator` dispatches all nine verbs through to a live
+// `locus_kit::Estate` (verb bodies wired; see coordinator.rs MARK: propose,
+// associate, learn, mutate, capture, recall, etc.). These composition
+// fixtures exercise the surfaces beyond direct verb dispatch:
 //
 //   - Multi-estate coordinator open/close, handle issuance,
 //     fan-out routing by lattice overlap (GLK-01 surface).
@@ -16,10 +14,9 @@
 //   - Training daemon composes with the enrichment pipeline +
 //     threshold gate (GLK-07).
 //
-// The verb-surface composition slice from the Swift fixture has no
-// Rust analogue today because the GLK verb bodies have not yet been
-// wired to dispatch through a live locus_kit::Estate; that wiring
-// is the next downstream mission and will complete the slice.
+// Verb-surface composition tests live in the Swift fixture
+// (CompositionConformanceTests.swift); the Rust coordinator's verb
+// dispatch is exercised directly in coordinator integration tests.
 
 use genius_locus_kit::audit::{
     AuditProjectionFold, AuditTier, EntryUUID, UnifiedAuditEntry, UnifiedAuditLog,
@@ -39,7 +36,7 @@ use uuid::Uuid;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,

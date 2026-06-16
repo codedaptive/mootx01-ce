@@ -1,11 +1,15 @@
 // MigrationAPI.swift
 //
-// The three migration verbs on GeniusLocusKit (GLK-MIG-02):
-//   - importFromMemPalace: batch-import an ExternalCorpus into a new estate
+// The two migration verbs on GeniusLocusKit (VK-ADAPT-01):
 //   - runParallel: open a dual-estate parallel capture window
 //   - verifyMigration: verify every corpus entry is recallable from the estate
 //
-// All three verbs take an explicit `now: Date` parameter per the fleet
+// Mass data ingestion (decoding an external tool export and capturing
+// its content into an estate) lives in VaultKit behind the adapter →
+// bridge path per ADR-007 Decision 1: ExchangeAdapter → VaultBridge.importVault
+// with CaptureChannel.importedFile and SourceType.imported provenance.
+//
+// All verbs take an explicit `now: Date` parameter per the fleet
 // determinism rule (CLAUDE.md): never call `Date()` inside an engine.
 // Callers supply the observation timestamp so the operation is fully
 // deterministic and testable.
@@ -21,96 +25,6 @@ public extension GeniusLocusKit {
     /// Logger reused across migration verb dispatch.
     private static var migrationLog: Logger {
         Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
-    }
-
-    // MARK: - importFromMemPalace
-
-    /// Import a MemPalace export into a new GeniusLocus estate.
-    ///
-    /// Opens a fresh estate against `targetStorage`, then iterates over
-    /// every entry in `corpus`. Each entry with non-empty content is
-    /// filed as a `Drawer` via the `capture` verb. Entries with empty
-    /// content are recorded in `MigrationReport.unmappedConcepts` rather
-    /// than silently dropped — satisfying spec conformance C-13
-    /// (zero-loss invariant).
-    ///
-    /// The `CaptureFrame` for each entry uses `entry.content` as the
-    /// content, `.typed` as the capture channel, `"migration"` as the
-    /// room, and `LatticeAnchor.udc("000")` as the lattice anchor.
-    /// These are reasonable defaults for imported MemPalace content;
-    /// the caller may adjust the estate's drawers after import via
-    /// the `mutate` and `reanchor` verbs.
-    ///
-    /// - Parameters:
-    ///   - corpus: The MemPalace export to import.
-    ///   - targetStorage: The storage backend for the new estate. The
-    ///     caller supplies an already-constructed storage instance; the
-    ///     kit opens the estate and the caller is responsible for the
-    ///     storage's lifecycle.
-    ///   - owner: Credentials for the estate's owner. Forwarded to
-    ///     `open(storage:owner:)` unchanged.
-    ///   - now: The observation timestamp. Passed as `eventTime` on
-    ///     each `CaptureFrame` so all imported drawers carry the same
-    ///     import instant — deterministic and testable per fleet rule.
-    ///
-    /// - Returns: A tuple of the opened `EstateHandle` and a
-    ///   `MigrationReport` summarising what was written and what was
-    ///   unmappable.
-    ///
-    /// - Throws: `GeniusLocusKitError` if `open` fails; `VerbError` if
-    ///   any individual `capture` fails. Partial success is not possible:
-    ///   if a capture throws, the operation propagates the error and the
-    ///   partially-populated estate remains open (the caller decides
-    ///   whether to close it or retry).
-    func importFromMemPalace(
-        _ corpus: ExternalCorpus,
-        targetStorage: any Storage,
-        owner: OwnerCredentials,
-        now: Date
-    ) async throws -> (EstateHandle, MigrationReport) {
-        let handle = try await open(storage: targetStorage, owner: owner)
-        var rowsByNoun: [String: Int] = [:]
-        var unmappedConcepts: [UnmappedConcept] = []
-
-        for entry in corpus.entries {
-            // The zero-loss invariant (C-13) requires that every entry
-            // ends up either as a captured drawer or as an unmapped
-            // concept — no silent drops. Empty content is the only
-            // condition we classify as unmappable in v1; future
-            // validators may add size or format checks.
-            guard !entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                unmappedConcepts.append(UnmappedConcept(
-                    entryID: entry.id,
-                    reason: "empty content"
-                ))
-                continue
-            }
-            let frame = CaptureFrame(
-                content: entry.content,
-                channel: .typed,
-                room: "migration",
-                latticeAnchor: .udc("000"),
-                addedBy: "migration-import",
-                embeddingModelID: "migration-v1",
-                // eventTime carries `now` so every imported drawer has a
-                // deterministic capture timestamp matching the import
-                // instant — satisfies the fleet determinism rule and
-                // ensures consistent ordering in recall results.
-                eventTime: now
-            )
-            _ = try await capture(handle, frame)
-            rowsByNoun["drawer", default: 0] += 1
-        }
-
-        let report = MigrationReport(
-            rowsByNoun: rowsByNoun,
-            unmappedConcepts: unmappedConcepts,
-            warnings: []
-        )
-        Self.migrationLog.info(
-            "importFromMemPalace: \(rowsByNoun["drawer"] ?? 0) drawers, \(unmappedConcepts.count) unmapped"
-        )
-        return (handle, report)
     }
 
     // MARK: - runParallel
@@ -166,8 +80,9 @@ public extension GeniusLocusKit {
     ///
     /// The verification uses content-match recall (`.contentMatches`)
     /// filtered to `.unconfirmed` rows. This matches the state of
-    /// drawers produced by `importFromMemPalace` — they are captured
-    /// (unconfirmed by default) and queryable by content substring.
+    /// drawers that entered the estate through the capture verb (via
+    /// VaultKit's adapter → bridge path): imported drawers are
+    /// unconfirmed by default and queryable by content substring.
     /// See the `ExternalCorpus.asRecallFrames()` doc-comment for the
     /// full rationale including the `.unconfirmed` requirement and the
     /// vector-tier deferral.
@@ -178,7 +93,7 @@ public extension GeniusLocusKit {
     ///     recallable from the estate.
     ///   - now: The observation timestamp. Unused by the current
     ///     verification logic (which is read-only) but present for
-    ///     consistency with `importFromMemPalace` and to give future
+    ///     deterministic-time consistency and to give future
     ///     time-bounded verification a slot without a signature change.
     ///
     /// - Returns: `.identical` if all entries are found; `.diverged`

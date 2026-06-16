@@ -31,7 +31,10 @@
 /// A first-person record written by an agent.
 ///
 /// Mirrors `DiaryEntry.swift` field-for-field.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// `Eq` and `Hash` cannot be derived because `reward: Option<f64>` does not
+// implement them (f64 is not Hash). `PartialEq` is sufficient for test
+// assertions and is retained.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiaryEntry {
     /// Stable identifier supplied by the caller.
     pub id: String,
@@ -77,12 +80,25 @@ pub struct DiaryEntry {
     /// (capture / trace / user / standalone / informational). Decoded
     /// via the accessors in `diary_operational.rs`.
     pub operational_bitmap: i64,
+
+    /// Explicit quality signal assigned at write time — the
+    /// `DiaryEntry.reward` field that satisfies NEURONKIT_SPEC § 3.1
+    /// step 1a. When `Some(v)`, `v` is a score in `[0, 1]` supplied by
+    /// the caller (user rating, model confidence, etc.). When `None` the
+    /// dreaming daemon falls back to the implicit `RecallTraceItem.used`
+    /// source (step 1b). Stored as REAL nullable in SQLite.
+    pub reward: Option<f64>,
+
+    /// Human-readable provenance tag for how `reward` was derived.
+    /// Examples: `"user-rating"`, `"model-confidence"`. `None` when
+    /// `reward` is `None`. Stored as TEXT nullable.
+    pub reward_provenance: Option<String>,
 }
 
 impl DiaryEntry {
-    /// Construct an entry with `operational_bitmap = 0` and no
-    /// tombstone fields. Mirrors the Swift designated initializer's
-    /// defaulting behavior.
+    /// Construct an entry with `operational_bitmap = 0`, no tombstone
+    /// fields, and no explicit reward. Mirrors the Swift designated
+    /// initializer's defaulting behaviour.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
@@ -106,6 +122,8 @@ impl DiaryEntry {
             tombstoned_at: None,
             removed_by_batch: None,
             operational_bitmap: 0,
+            reward: None,
+            reward_provenance: None,
         }
     }
 }

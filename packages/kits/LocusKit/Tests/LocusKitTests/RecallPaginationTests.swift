@@ -101,8 +101,38 @@ struct RecallPaginationTests {
         #expect(rows[0].content == "")
     }
 
-    @Test("HydrationLevel.structured preserves content")
+    /// Per spec § 7.3, `.structured` is "bitmap columns + structured-row fields
+    /// only, no blob reads". The no-blob SQL projection returns `content = ""`
+    /// for `.structured` callers — empty content is the correct result, not a
+    /// deficiency. Use `.full` when content bodies are required.
+    @Test("HydrationLevel.structured returns content-stripped rows (no blob reads per § 7.3)")
     func hydrationStructured() async throws {
+        let estate = try await makeEstate()
+        let frame = CaptureFrame(
+            content: "hello",
+            channel: .typed,
+            room: "test-room",
+            latticeAnchor: LatticeAnchor(udcCode: "004"),
+            addedBy: "test-agent",
+            embeddingModelID: "minilm-v6"
+        )
+        let captured = try await estate.capture(frame)
+        let stream = await estate.recall(
+            RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed],
+                        hydrationLevel: .structured)
+        )
+        var rows: [Drawer] = []
+        for await page in stream { rows.append(contentsOf: page.rows) }
+        #expect(rows.count == 1)
+        // .structured = no blob reads: content is empty string (correct per § 7.3).
+        #expect(rows[0].content == "", "structured recall must return content-stripped row")
+        // Structured fields (room, id, bitmaps) must be intact.
+        #expect(rows[0].room == "test-room")
+        #expect(rows[0].id == captured.id)
+    }
+
+    @Test("HydrationLevel.full returns content body")
+    func hydrationFull() async throws {
         let estate = try await makeEstate()
         let frame = CaptureFrame(
             content: "hello",
@@ -115,12 +145,13 @@ struct RecallPaginationTests {
         _ = try await estate.capture(frame)
         let stream = await estate.recall(
             RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed],
-                        hydrationLevel: .structured)
+                        hydrationLevel: .full)
         )
         var rows: [Drawer] = []
         for await page in stream { rows.append(contentsOf: page.rows) }
         #expect(rows.count == 1)
-        #expect(rows[0].content == "hello")
+        // .full loads the blob: content must be the captured body.
+        #expect(rows[0].content == "hello", "full recall must return the content body")
     }
 
     @Test("limit nil uses RecallStream.defaultPageSize")

@@ -110,6 +110,76 @@ extension CKRecordMappingTests {
     }
 }
 
+// MARK: - Corrupt remote identity tests
+
+@Suite("Corrupt remote identity rejection")
+struct CorruptRemoteIdentityTests {
+
+    // Helper: build a CKRecord whose recordName is not a valid UUID string.
+    // CKRecord.ID accepts arbitrary strings so this is reachable from
+    // a corrupt or tampered CloudKit row.
+    private func makeRecordWithCorruptName(_ name: String) -> CKRecord {
+        let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
+        let id = CKRecord.ID(recordName: name, zoneID: zoneID)
+        let record = CKRecord(recordType: "TestKit_items", recordID: id)
+        record["_syncHLC"] = NSNumber(value: Int64(1000))
+        record["_syncSchemaVersion"] = NSNumber(value: 1)
+        record["_syncKitID"] = "TestKit" as NSString
+        record["note"] = "test-value" as NSString
+        return record
+    }
+
+    @Test("corrupt recordName throws corruptRemoteIdentity, not a fresh UUID")
+    func corruptRecordNameThrowsNotFabricates() throws {
+        let record = makeRecordWithCorruptName("not-a-uuid-at-all")
+        #expect(throws: SyncError.corruptRemoteIdentity(recordName: "not-a-uuid-at-all")) {
+            try CKRecordMapping.decode(record)
+        }
+    }
+
+    @Test("partial UUID string throws corruptRemoteIdentity")
+    func partialUUIDStringThrows() throws {
+        // A UUID that is truncated mid-string — plausible corruption.
+        let partialUUID = "550E8400-E29B-41D4-A716"
+        let record = makeRecordWithCorruptName(partialUUID)
+        #expect(throws: SyncError.corruptRemoteIdentity(recordName: partialUUID)) {
+            try CKRecordMapping.decode(record)
+        }
+    }
+
+    @Test("valid UUID recordName still decodes correctly after the guard fix")
+    func validRecordNameDecodesUnchanged() throws {
+        let zoneID = CKRecordZone.ID(zoneName: "z", ownerName: CKCurrentUserDefaultName)
+        let rowKey = UUID()
+        let hlc = HLC(physicalTime: 500, logicalCount: 1, nodeID: 2)
+        let record = try CKRecordMapping.record(
+            from: ["note": .text("intact")],
+            table: "items",
+            rowKey: rowKey,
+            hlc: hlc,
+            schemaVersion: 1,
+            kitID: "TestKit",
+            zone: zoneID
+        )
+        let decoded = try CKRecordMapping.decode(record)
+        // The guard must not interfere with the legitimate path.
+        #expect(decoded.rowKey == rowKey)
+        #expect(decoded.values["note"] == .text("intact"))
+    }
+
+    @Test("corruptRemoteIdentity case carries the corrupt recordName string")
+    func errorCarriesCorruptRecordName() {
+        // Verify the associated value is threaded correctly through the error.
+        let name = "garbage-record-name-XYZ"
+        let error = SyncError.corruptRemoteIdentity(recordName: name)
+        if case .corruptRemoteIdentity(let r) = error {
+            #expect(r == name)
+        } else {
+            Issue.record("wrong error case")
+        }
+    }
+}
+
 // MARK: - LWW durable HLC tests
 
 @Suite("LWW durable HLC persistence")

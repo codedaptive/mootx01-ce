@@ -15,4 +15,10 @@ public final class NoOpObserver: StorageObserver, Sendable {
             continuation.finish()
         }
     }
+
+    public func observeBlobs() -> AsyncStream<BlobChange> {
+        AsyncStream<BlobChange> { continuation in
+            continuation.finish()
+        }
+    }
 }

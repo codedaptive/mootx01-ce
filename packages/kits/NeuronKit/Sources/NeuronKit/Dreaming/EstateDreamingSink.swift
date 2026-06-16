@@ -28,6 +28,8 @@
 
 import Foundation
 import GeniusLocusKit
+import IntellectusLib
+import SubstrateTypes
 
 /// Production adapter that binds `DreamingProposalSink` to a live estate.
 ///
@@ -64,10 +66,21 @@ public struct EstateDreamingSink: DreamingProposalSink {
     /// Delegates to `GeniusLocusKit.propose(_:_:)`, which maps the
     /// Brain-layer `ProposeFrame.kind` to the substrate ProposalKind
     /// via `mapBrainKindToSubstrate` and dispatches to `Estate.propose`.
-    /// The return value (the stored `Proposal`) is discarded; the daemon
-    /// only needs the write to succeed.
+    /// After a successful write, notifies the topology worker via
+    /// `Intellectus.report(.event(kind: .think, ...))`. `Date()` is called
+    /// here at the adapter boundary — this is an I/O adapter, not an
+    /// algorithm engine; the deterministic-engine rule applies to algorithm
+    /// cores. This mirrors `EstateCoordinator.swift` lines 104 and 197,
+    /// which also call `Date().timeIntervalSince1970` in `Intellectus.report`.
     public func propose(_ frame: ProposeFrame) async throws {
-        _ = try await kit.propose(handle, frame)
+        let proposal = try await kit.propose(handle, frame)
+        Intellectus.report(.event(
+            kind: .think,
+            nounType: Int(NounType.proposal.rawValue),
+            rowID: proposal.id,
+            estate: handle.estateUUID.uuidString,
+            ts: Date().timeIntervalSince1970
+        ))
     }
 
     /// Record exactly one diary entry summarising the cycle (step 7).
@@ -77,5 +90,16 @@ public struct EstateDreamingSink: DreamingProposalSink {
     /// `DrawerStore.addDiaryEntry`.
     public func recordCycleDiary(_ entry: DiaryEntry) async throws {
         try await kit.addDiaryEntry(in: handle, entry)
+    }
+
+    /// Delete recall-trace rows whose `recalledAt` is strictly before
+    /// `cutoff`. Called after the reward sweep to keep the table bounded.
+    /// Delegates to `GeniusLocusKit.pruneRecallTraces(in:olderThan:)`.
+    ///
+    /// - Parameter cutoff: rows with `recalledAt < cutoff` are deleted.
+    /// - Returns: the number of rows deleted.
+    @discardableResult
+    public func pruneRecallTraces(olderThan cutoff: Date) async throws -> Int {
+        try await kit.pruneRecallTraces(in: handle, olderThan: cutoff)
     }
 }

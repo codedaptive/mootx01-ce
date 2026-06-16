@@ -14,6 +14,29 @@ import SubstrateTypes
 /// dance on every bind/column without semantic gain.
 public typealias RowID = String
 
+// MARK: - FrameFilteredDrawers
+
+/// Result of `Estate.getDrawers(ids:matchingFrame:hydrationLevel:)`: the
+/// frame-admissible drawers plus the set of ids whose rows physically loaded.
+///
+/// `loadedIDs` is reported independently of the frame filter so a caller can
+/// gate a drop on load success: an id that loaded (`loadedIDs.contains(id)`)
+/// but is absent from `admissible` failed the frame's state/structured/content
+/// filter and may be dropped; an id absent from `loadedIDs` did not load (a
+/// transient/partial read) and must be DEGRADED gracefully, never dropped.
+public struct FrameFilteredDrawers: Sendable {
+    /// Drawers from the requested ids that passed the frame's filter chain
+    /// (tombstone exclusion always enforced). Ordered per the frame's ordering.
+    public let admissible: [Drawer]
+    /// Every id whose row was returned by storage, regardless of frame filter.
+    public let loadedIDs: Set<String>
+
+    public init(admissible: [Drawer], loadedIDs: Set<String>) {
+        self.admissible = admissible
+        self.loadedIDs = loadedIDs
+    }
+}
+
 // MARK: - OwnerCredentials
 
 /// Credentials identifying the owner of an estate. The substrate layer

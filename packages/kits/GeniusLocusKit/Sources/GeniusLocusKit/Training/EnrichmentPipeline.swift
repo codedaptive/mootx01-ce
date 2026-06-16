@@ -41,7 +41,7 @@ import Foundation
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -307,14 +307,17 @@ public struct EnrichmentPipeline: Sendable, Equatable {
     /// co-occurrence matrix. Out-of-band by design — the daemon's
     /// tick path does not call this; consumers that want refreshed
     /// loadings call it on their own schedule (cookbook says weekly).
-    /// Wrapping `MatrixNMF.factorize` here keeps every training-daemon
-    /// caller pointed at one entry-point.
+    ///
+    /// Delegates to `MatrixNMF.factorize`, which delegates to the
+    /// canonical substrate `NMFAlternatingLeastSquares` (Float32, RMS
+    /// error). Keeping callers pointed at this entry-point isolates them
+    /// from substrate delegation details.
     public func refactorize(
         oDense: [Double],
         rows: Int,
         cols: Int,
         k: Int,
-        seed: UInt64 = 0xC0FFEE_BABE_BEEF
+        seed: UInt64 = 0xDEADBEEFCAFEBABE
     ) -> MatrixNMFFactorization {
         MatrixNMF.factorize(
             o: oDense, rows: rows, cols: cols, k: k, seed: seed

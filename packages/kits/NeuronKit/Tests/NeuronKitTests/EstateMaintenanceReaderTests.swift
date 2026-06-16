@@ -12,8 +12,9 @@ import PersistenceKitInMemory
 /// Coverage plan:
 ///   §1  activeDrawers: returns only non-tombstoned Cluster-A drawers
 ///   §2  tombstonedDrawers: returns only tombstoned drawers (expunged via GLK)
-///   §3  currentAuditLog: returns a non-nil UnifiedAuditLog from the estate
-///   §4  v1 stubs: learnedReferences and fingerprintBaselines return []
+///   §3  currentAuditLog: returns a UnifiedAuditLog whose chain verifies
+///   §4  signal reads: learnedReferences, and fingerprintBaselines returning
+///       real per-room drift observations once content is captured
 ///   §5  Integration: MaintenanceDaemon with production adapters triggers a
 ///       cycle, emits decay proposals, and writes a diary entry
 ///   §6  Protocol conformance: EstateMaintenanceReader constructs cleanly
@@ -114,22 +115,76 @@ struct EstateMaintenanceReaderTests {
         _ = log
     }
 
-    // MARK: - § 4  v1 stubs
+    // MARK: - § 4  Signal reads and v1 stubs
 
-    @Test("learnedReferences returns [] in v1")
-    func learnedReferencesV1ReturnsEmpty() async throws {
+    @Test("learnedReferences returns [] for estate with no references")
+    func learnedReferencesEmptyForEstateWithNoReferences() async throws {
+        // No references filed in the estate → learnedReferences returns [].
+        // The implementation reads from recallLearnedReferences; an estate
+        // with zero references yields zero observations.
         let (kit, handle) = try await makeKit()
         let reader = EstateMaintenanceReader(handle: handle, kit: kit)
         let refs = try await reader.learnedReferences()
-        #expect(refs.isEmpty, "v1: learnedReferences must return []")
+        #expect(refs.isEmpty, "no references in estate → learnedReferences returns []")
     }
 
-    @Test("fingerprintBaselines returns [] in v1")
-    func fingerprintBaselinesV1ReturnsEmpty() async throws {
+    @Test("fingerprintBaselines is empty for a fresh estate (no container aggregate yet)")
+    func fingerprintBaselinesEmptyForFreshEstate() async throws {
+        // No drawers captured → the container-fingerprint aggregate is empty →
+        // no room-level observations. The read path is exercised (no throw).
         let (kit, handle) = try await makeKit()
         let reader = EstateMaintenanceReader(handle: handle, kit: kit)
         let baselines = try await reader.fingerprintBaselines()
-        #expect(baselines.isEmpty, "v1: fingerprintBaselines must return []")
+        #expect(baselines.isEmpty, "fresh estate → no room-level fingerprints")
+    }
+
+    @Test("fingerprintBaselines returns a real per-room drift observation after capture")
+    func fingerprintBaselinesReturnsRealObservationAfterCapture() async throws {
+        // Swift capture ORs the drawer's bitmaps into the container aggregate
+        // (Estate.capture → containerFP.orIn). After a capture in one room the
+        // reader returns one observation for that room with a real, non-negative
+        // drift fraction — the dark signal is now lit on the Swift port.
+        let (kit, handle) = try await makeKit()
+        _ = try await kit.capture(handle, captureFrame(content: "alpha", room: "study"))
+
+        let reader = EstateMaintenanceReader(handle: handle, kit: kit)
+        let baselines = try await reader.fingerprintBaselines()
+        #expect(!baselines.isEmpty, "a captured drawer populates a room-level fingerprint")
+        // scopeKey is "wing/room"; the captured room is the suffix.
+        let study = baselines.first { $0.scopeKey.hasSuffix("/study") }
+        #expect(study != nil, "the captured room appears as a scope (\(baselines.map(\.scopeKey)))")
+        if let study {
+            // Drift is a real bit-density fraction in [0, 1].
+            #expect(study.driftFraction >= 0.0 && study.driftFraction <= 1.0)
+        }
+    }
+
+    @Test("currentAuditLog feeds a verifiable, intact chain after capture")
+    func currentAuditLogYieldsVerifiableChain() async throws {
+        // The audit-integrity signal: a captured drawer produces a non-empty
+        // audit log whose chain verifies clean through AuditChainVerifier.
+        let (kit, handle) = try await makeKit()
+        _ = try await kit.capture(handle, captureFrame(content: "audit alpha"))
+
+        let reader = EstateMaintenanceReader(handle: handle, kit: kit)
+        let log = try await reader.currentAuditLog()
+        let report = AuditChainVerifier.verify(log)
+        #expect(report.valid, "a freshly captured chain is intact")
+        #expect(report.firstBrokenAt == nil)
+        #expect(report.entryCount == log.orderedEntries.count)
+    }
+
+    @Test("activeDrawers/tombstonedDrawers use the bounded scan and return seeded rows")
+    func boundedScanReturnsSeededRows() async throws {
+        let (kit, handle) = try await makeKit()
+        for i in 0..<3 {
+            _ = try await kit.capture(handle, captureFrame(content: "row \(i)"))
+        }
+        let reader = EstateMaintenanceReader(handle: handle, kit: kit)
+        let active = try await reader.activeDrawers()
+        #expect(active.count == 3, "all three live rows are read via the bounded scan")
+        let tombstoned = try await reader.tombstonedDrawers()
+        #expect(tombstoned.isEmpty, "nothing tombstoned yet")
     }
 
     // MARK: - § 5  Integration: MaintenanceDaemon with production adapters

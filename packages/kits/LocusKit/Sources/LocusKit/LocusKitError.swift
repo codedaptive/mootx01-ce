@@ -58,4 +58,26 @@ public enum LocusKitError: Error, Sendable, Equatable {
     /// `State` to be in `LocusKitError`'s dependency set. Callers that
     /// need the typed cases convert via `State(rawValue:)`.
     case disciplineViolation(from: Int, to: Int, reason: String)
+
+    /// A stored TEXT value in a required column could not be parsed
+    /// to its declared type (UUID or ISO 8601 timestamp). Parity with
+    /// `PersistenceKit.StorageError.corruptStoredValue` (commit
+    /// 0ff08d93). Thrown instead of silently substituting a default
+    /// (random UUID, epoch-0 date) so callers know their stored data
+    /// is corrupt and cannot be trusted.
+    ///
+    /// - `table`: the LocusKit table name (e.g. "drawers").
+    /// - `column`: the column whose stored text was unparseable.
+    /// - `storedText`: the raw string that failed to parse,
+    ///   reproduced verbatim for log diagnosis.
+    case corruptStoredValue(table: String, column: String, storedText: String)
+
+    /// A verb call targets a feature that is not yet implemented in
+    /// this version of LocusKit. The associated message names the
+    /// feature so callers can distinguish clearly between "not found"
+    /// (data missing) and "not supported" (code missing). Thrown
+    /// instead of silently producing a sentinel or stub result per
+    /// the P1 mandate: fail-loud unsupported is required when the
+    /// producing data does not exist.
+    case notSupported(String)
 }

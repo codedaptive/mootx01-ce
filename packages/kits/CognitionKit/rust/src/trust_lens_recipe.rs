@@ -15,12 +15,18 @@
 //! the confirm/mutate verb, which is Brain-layer (`NotSupportedByEstate`)
 //! until that layer ships. When confirmation goes live, a user-confirmed boost
 //! folds into `trust_rank` the same way.
+//!
+//! v1.1.0 extension: if a `MatrixCalibrationCurve` is supplied, the ranked
+//! confidences are calibrated via `neuron_kit::calibrate` and attached as
+//! `calibrated_confidences`. Passing `None` restores v1.0.0 behaviour.
+//! `Confidence.raw_value()` / 56 maps the 5-point ordinal to [0, 1] (matches
+//! Swift `Float($0.confidence.rawValue) / 56.0`; max raw = 56).
 
 use genius_locus_kit::handle::EstateHandle;
-use genius_locus_kit::EstateCoordinator;
+use genius_locus_kit::{EstateCoordinator, MatrixCalibrationCurve};
 use locus_kit::filter::RecallFrame;
 use locus_kit::provenance::SourceType;
-use neuron_kit::{synthesize, ContextDocument, DrawerRow, DrawerRowMeta, RecallPage};
+use neuron_kit::{calibrate, synthesize, CalibratedValue, ContextDocument, DrawerRow, DrawerRowMeta, RecallPage};
 
 use crate::capability::{shipped_capabilities, verify_capabilities, NeuronKitCapability};
 use crate::error::{RecipeRunError, SubstrateError};
@@ -34,6 +40,9 @@ pub struct TrustGroundedOutput {
     pub ranked_ids: Vec<String>,
     /// Count of high-trust rows (Canonical or User source type).
     pub high_trust_count: usize,
+    /// v1.1.0: calibrated confidences in ranked order, one per recalled
+    /// drawer. Present only when a `MatrixCalibrationCurve` was supplied.
+    pub calibrated_confidences: Option<Vec<CalibratedValue>>,
 }
 
 /// Authority score for a source type (higher = more trustworthy). Canonical
@@ -59,14 +68,26 @@ fn is_high_trust(st: SourceType) -> bool {
 /// Recall via `frame`, rank by provenance trust, and synthesize the
 /// trust-ordered set. Read-only; a recall failure propagates as
 /// `RecipeRunError::Substrate`.
+///
+/// `calibration_curve`: pass `Some(&curve)` to attach calibrated confidences
+/// to the output (v1.1.0). Pass `None` for v1.0.0 behaviour.
 pub fn run_trust_grounded_synthesis(
     coord: &EstateCoordinator,
     handle: &EstateHandle,
-    frame: RecallFrame,
+    mut frame: RecallFrame,
+    calibration_curve: Option<&MatrixCalibrationCurve>,
     now: i64,
 ) -> Result<TrustGroundedOutput, RecipeRunError> {
     // B-5: capability gate before any substrate touch.
     verify_capabilities(&[NeuronKitCapability::Synthesize], &shipped_capabilities())?;
+
+    // Force .full hydration: synthesize operates on drawer content bodies.
+    // Per LocusKit spec § 7.3, .structured / .bitmap_only recall returns
+    // content == "" (no blob reads), which would produce an empty-pattern
+    // context document. The override preserves all other frame fields and
+    // cannot be left to the caller — mirrors contradiction_recipe.rs:47.
+    // Same failure class as the H-BROKEN content-stripping family.
+    frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
 
     let mut drawers = coord
         .recall(handle, frame, now)
@@ -110,10 +131,21 @@ pub fn run_trust_grounded_synthesis(
     };
     let context = synthesize(&page, &meta);
 
+    // v1.1.0: if a calibration curve was supplied, map each drawer's
+    // confidence ordinal to [0, 1] (raw_value max = 56) and calibrate.
+    let calibrated_confidences = calibration_curve.map(|curve| {
+        let claimed: Vec<f32> = drawers
+            .iter()
+            .map(|d| d.confidence().raw_value() as f32 / 56.0)
+            .collect();
+        calibrate(curve, &claimed)
+    });
+
     Ok(TrustGroundedOutput {
         context,
         ranked_ids,
         high_trust_count,
+        calibrated_confidences,
     })
 }
 
@@ -179,7 +211,7 @@ mod tests {
         let _d1 = capture(&coord, &h, "derived-a", SourceType::Derived);
         let _d2 = capture(&coord, &h, "derived-b", SourceType::Derived);
 
-        let out = run_trust_grounded_synthesis(&coord, &h, unconfirmed(), NOW).expect("trust");
+        let out = run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW).expect("trust");
         assert_eq!(out.ranked_ids.len(), 4);
         // The two highest-ranked memories are the canonical ones.
         let top2: HashSet<&String> = out.ranked_ids[0..2].iter().collect();
@@ -199,8 +231,102 @@ mod tests {
     #[test]
     fn ck_tr2_empty_estate_guarded() {
         let (coord, h) = coord_with_parent();
-        let out = run_trust_grounded_synthesis(&coord, &h, unconfirmed(), NOW).expect("trust");
+        let out = run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW).expect("trust");
         assert!(out.ranked_ids.is_empty());
         assert_eq!(out.high_trust_count, 0);
+    }
+
+    // CK-TR-4: SQLite-backed estate — proves the .full hydration override is
+    // exercised against the real blob-gated storage path.
+    //
+    // InMemory returns content regardless of hydration_level, masking the bug
+    // in H-BROKEN-1/2. SQLite enforces spec § 7.3 strictly: .structured recall
+    // returns content == "" for every drawer. Without the .full override in
+    // run_trust_grounded_synthesis, synthesize operates on empty content bodies
+    // and produces an empty-pattern context — same failure class as
+    // run_contradiction (H-BROKEN content-stripping family).
+    //
+    // Setup: 3-drawer estate — two Canonical drawers with substantive prose,
+    // one Derived drawer. Frame is .structured at the call site; the fix
+    // upgrades it to .full before recall. Assertions mirror CK-CN-4 in
+    // contradiction_recipe.rs.
+    #[test]
+    fn ck_tr4_sqlite_synthesis_non_empty() {
+        use locus_kit::drawer_store::DrawerStore;
+        use locus_kit::drawer_store_sqlite::SqliteDrawerStore;
+        use std::collections::HashSet;
+
+        let path = std::env::temp_dir().join(format!(
+            "cognitionkit-trustlens-test-{}.sqlite",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let path_str = path.to_string_lossy().to_string();
+
+        // Build a SQLite-backed estate.
+        let store: Arc<dyn DrawerStore> = Arc::new(
+            SqliteDrawerStore::from_path(&path_str, NOW, None, 5.0)
+                .expect("SqliteDrawerStore::from_path"),
+        );
+        let mut coord = EstateCoordinator::new();
+        let h = coord
+            .open(store, OwnerCredentials::new("trust-lens-sqlite-test"), 0, 100)
+            .unwrap();
+
+        // Two canonical drawers with substantive content bodies.
+        let c1 = capture(
+            &coord,
+            &h,
+            "the substrate is local-first; sync is optional via ConvergenceKit",
+            SourceType::Canonical,
+        );
+        let c2 = capture(
+            &coord,
+            &h,
+            "vector storage uses sqlite-vec; embeddings live in VectorKit",
+            SourceType::Canonical,
+        );
+        // One derived drawer — lower trust tier.
+        let _d1 = capture(
+            &coord,
+            &h,
+            "observed pattern: recall latency increases with drawer count",
+            SourceType::Derived,
+        );
+
+        // Call with a .structured frame — the fix upgrades to .full before recall.
+        let out =
+            run_trust_grounded_synthesis(&coord, &h, unconfirmed(), None, NOW).expect("trust");
+
+        // a. All three drawers were ranked.
+        assert_eq!(out.ranked_ids.len(), 3, "all three SQLite-backed drawers must be ranked");
+
+        // b. Two high-trust drawers (the canonical pair).
+        assert_eq!(out.high_trust_count, 2, "two canonical drawers must register as high-trust");
+
+        // c. The two canonical drawers must rank first.
+        let top2: HashSet<&String> = out.ranked_ids[0..2].iter().collect();
+        assert!(
+            top2.contains(&c1) && top2.contains(&c2),
+            "canonical drawers must rank ahead of the derived drawer; got {:?}",
+            out.ranked_ids
+        );
+
+        // d. The context summary is non-empty — the key proof that .full
+        //    hydration ran against SQLite (content-bearing drawers were loaded).
+        //    Under .structured hydration, content == "" for every drawer and
+        //    synthesize produces an empty-pattern summary. This assertion fails
+        //    if the .full override is absent.
+        assert!(
+            !out.context.summary.is_empty(),
+            "context summary must be non-empty; empty = .structured hydration bug (H-BROKEN)"
+        );
+
+        // Clean up SQLite sidecar files.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path_str));
+        let _ = std::fs::remove_file(format!("{}-shm", path_str));
     }
 }

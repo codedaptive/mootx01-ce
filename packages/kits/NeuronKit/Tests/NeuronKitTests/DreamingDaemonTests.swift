@@ -33,6 +33,7 @@ private actor RecordingSink: DreamingProposalSink {
 
     func propose(_ frame: ProposeFrame) async throws { proposals.append(frame) }
     func recordCycleDiary(_ entry: DiaryEntry) async throws { diaryEntries.append(entry) }
+    func pruneRecallTraces(olderThan cutoff: Date) async throws -> Int { 0 }
 
     func proposalCount() -> Int { proposals.count }
     func diaryCount() -> Int { diaryEntries.count }
@@ -344,8 +345,9 @@ struct DreamingDaemonTests {
         ))
     }
 
-    // MARK: - Part 2: trigger mode defaults to timer, no SolverBandit
-    // No emitting call — lock not required.
+    // MARK: - Part 2: trigger mode initial default is .timer
+    // The bandit re-selects each cycle; the initial default before any
+    // cycle has run is still .timer. No emitting call — lock not required.
 
     @Test("trigger mode defaults to timer")
     func triggerModeDefaultsToTimer() async throws {
@@ -353,5 +355,137 @@ struct DreamingDaemonTests {
         let mode = await d.currentTriggerMode()
         #expect(mode == .timer)
         #expect(DreamingTriggerMode.default == .timer)
+    }
+
+    // MARK: - Trigger-source tests (Board item 13)
+    // These tests verify the three modes behave as named:
+    //   .timer  — timer path fires; event path inactive
+    //   .event  — event path fires on threshold; timer path inactive
+    //   .hybrid — both paths active independently
+
+    // TS-1: .timer mode — pump fires on cadence; pumpOnEvent returns nil even
+    // when observation count is above threshold.
+    @Test("TS-1: timer mode fires on cadence and NOT on event")
+    func ts1TimerModeFiresOnCadenceNotOnEvent() async throws {
+        try await withIntellectusLock {
+            let reader = FakeReader()
+            let sink = RecordingSink()
+            // Construct a .timer-mode daemon with a short interval.
+            let d = DreamingDaemon(
+                reader: reader,
+                sink: sink,
+                policyStore: InMemoryDreamingPolicyStore(),
+                triggerMode: .timer
+            )
+            // First pump always fires in timer mode (no prior tick).
+            let first = try await d.pump(now: t0)
+            #expect(first != nil, ".timer: first pump must fire")
+
+            // pumpOnEvent must return nil regardless of observation count —
+            // the event path is inactive in timer mode.
+            let eventResult = try await d.pumpOnEvent(observationCount: 100, now: t0.addingTimeInterval(1))
+            #expect(eventResult == nil, ".timer: pumpOnEvent must return nil (event path inactive)")
+
+            // Timer fires after the cadence elapses.
+            let second = try await d.pump(now: t0.addingTimeInterval(30))
+            #expect(second != nil, ".timer: pump fires after interval")
+        }
+    }
+
+    // TS-2: .event mode — pumpOnEvent fires when observation count meets
+    // threshold; pump returns nil (timer path inactive).
+    @Test("TS-2: event mode fires on observation threshold and NOT on timer")
+    func ts2EventModeFiresOnEventNotOnTimer() async throws {
+        try await withIntellectusLock {
+            let reader = FakeReader()
+            let sink = RecordingSink()
+            // Construct a .event-mode daemon with threshold = 2.
+            // The policy is injected directly so the daemon starts with the
+            // configured threshold without requiring a loadPersistedPolicy call.
+            let d = DreamingDaemon(
+                reader: reader,
+                sink: sink,
+                policyStore: InMemoryDreamingPolicyStore(),
+                triggerMode: .event,
+                policy: DreamingPolicy(eventObservationThreshold: 2)
+            )
+
+            // pump must return nil — timer path is inactive in event mode.
+            // The first pump would normally fire (no prior tick), but event
+            // mode overrides that: the timer path is fully inactive.
+            let timerResult = try await d.pump(now: t0)
+            #expect(timerResult == nil, ".event: pump must return nil (timer path inactive)")
+
+            // pumpOnEvent below threshold returns nil.
+            let belowThreshold = try await d.pumpOnEvent(observationCount: 1, now: t0)
+            #expect(belowThreshold == nil, ".event: pumpOnEvent below threshold must return nil")
+
+            // pumpOnEvent at or above threshold fires.
+            let atThreshold = try await d.pumpOnEvent(observationCount: 2, now: t0)
+            #expect(atThreshold != nil, ".event: pumpOnEvent at threshold must fire")
+
+            let aboveThreshold = try await d.pumpOnEvent(observationCount: 5, now: t0.addingTimeInterval(1))
+            #expect(aboveThreshold != nil, ".event: pumpOnEvent above threshold must fire")
+        }
+    }
+
+    // TS-3: .hybrid mode — both pump (timer) AND pumpOnEvent (event) are
+    // active independently. Neither path blocks the other.
+    @Test("TS-3: hybrid mode fires on BOTH timer and event independently")
+    func ts3HybridModeFiresOnBothTimerAndEvent() async throws {
+        try await withIntellectusLock {
+            let reader = FakeReader()
+            let sink = RecordingSink()
+            // Construct a .hybrid-mode daemon with threshold = 1.
+            // The policy is injected directly so the daemon starts with the
+            // configured thresholds without requiring a loadPersistedPolicy call.
+            let d = DreamingDaemon(
+                reader: reader,
+                sink: sink,
+                policyStore: InMemoryDreamingPolicyStore(),
+                triggerMode: .hybrid,
+                policy: DreamingPolicy(tickIntervalMs: 30_000, eventObservationThreshold: 1)
+            )
+
+            // Timer path: first pump fires (no prior tick).
+            let timerFire = try await d.pump(now: t0)
+            #expect(timerFire != nil, ".hybrid: first pump (timer) must fire")
+
+            // Event path fires independently even when timer has not elapsed.
+            // t0 + 1s is before the 30s timer interval — pump would return nil.
+            let timerBlocked = try await d.pump(now: t0.addingTimeInterval(1))
+            #expect(timerBlocked == nil, ".hybrid: pump returns nil before interval elapses")
+
+            // pumpOnEvent fires independently of the timer.
+            let eventFire = try await d.pumpOnEvent(observationCount: 1, now: t0.addingTimeInterval(1))
+            #expect(eventFire != nil, ".hybrid: pumpOnEvent must fire independently of timer")
+
+            // Timer path fires again after cadence elapses.
+            let timerSecond = try await d.pump(now: t0.addingTimeInterval(30))
+            #expect(timerSecond != nil, ".hybrid: pump fires after interval")
+        }
+    }
+
+    // TS-4: event threshold round-trips through the policy seam so the host
+    // can configure it persistently. No emitting call — lock not required.
+    @Test("TS-4: eventObservationThreshold round-trips through policy seam")
+    func ts4EventObservationThresholdRoundTrips() async throws {
+        let store = InMemoryDreamingPolicyStore()
+        let reader = FakeReader()
+        let sink = RecordingSink()
+        let d = daemon(reader: reader, sink: sink, policyStore: store)
+
+        try await d.registerDreamingPolicy(
+            minSuccessRate: 0.5,
+            minConfidence: 0.8,
+            minAttempts: 5,
+            tickIntervalMs: 10_000,
+            eventObservationThreshold: 7
+        )
+
+        let d2 = daemon(reader: reader, sink: sink, policyStore: store)
+        try await d2.loadPersistedPolicy()
+        let loaded = await d2.currentPolicy()
+        #expect(loaded.eventObservationThreshold == 7, "eventObservationThreshold must round-trip")
     }
 }

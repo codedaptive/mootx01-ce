@@ -24,6 +24,8 @@ pub mod or_reduce;
 pub mod pairing_handshake;
 pub mod partial_state_recall;
 pub mod registry;
+pub mod sampling;
+pub mod shingle_similarity;
 pub mod simhash;
 pub mod temporal_compression;
 pub mod tier_contribution;

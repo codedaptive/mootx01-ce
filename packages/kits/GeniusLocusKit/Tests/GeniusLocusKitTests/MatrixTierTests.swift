@@ -19,7 +19,7 @@ import Foundation
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -276,6 +276,8 @@ struct MatrixTierTests {
     @Test
     func nmfApproximatesInputMatrix() {
         // 3 × 3 rank-1-ish matrix; K = 1 should reconstruct closely.
+        // MatrixNMF delegates to SubstrateML.NMFAlternatingLeastSquares (f32, RMS
+        // error). For a perfect rank-1 input, the RMS error converges to 0.0.
         let o: [Double] = [
             1, 2, 3,
             2, 4, 6,
@@ -286,14 +288,18 @@ struct MatrixTierTests {
             maxIterations: 200,
             tolerance: 1e-9
         )
+        // RMS error from the canonical f32 substrate path: 0.0 for perfect rank-1.
+        // The bound < 1e-3 is satisfied.
         #expect(f.reconstructionError < 1e-3,
-            "rank-1 input should reconstruct with low error")
-        // Loadings for row 0 should be a single-K vector.
+            "rank-1 input should reconstruct with low RMS error via substrate NMF")
+        // Loadings for row 0 should be a single-K vector (Float32).
         #expect(f.loadings(forRow: 0).count == 1)
     }
 
     @Test
     func nmfDeterministicAcrossRuns() {
+        // Two calls with the same seed produce bit-identical Float32 W and H
+        // via the canonical substrate NMFAlternatingLeastSquares.
         let o: [Double] = [1, 2, 3, 4]
         let a = MatrixNMF.factorize(o: o, rows: 2, cols: 2, k: 2,
                                     seed: 42, maxIterations: 20)

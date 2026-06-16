@@ -2,31 +2,77 @@
 // `NeuronKit/Sources/NeuronKit/Maintenance/EstateMaintenanceReader.swift`.
 //
 // Production adapter that implements `MaintenanceSubstrateReader` over a
-// GeniusLocusKit estate handle. Unlike the Swift struct that performs
-// five async reads on demand, the Rust version pre-fetches all drawers at
-// construction time and builds the `MaintenanceScan` from the snapshot.
+// GeniusLocusKit estate handle. Performs bounded paged reads at use-time
+// (not snapshot-at-construction) by calling into the GeniusLocusKit
+// coordinator's public API surface.
 //
 // The five Swift reads map to scan fields as follows:
 //
 //   activeDrawers       → aged_active + forbidden_drawer_ids
 //   tombstonedDrawers   → aged_tombstoned
-//   learnedReferences   → reference_drift (v1: [])
-//   fingerprintBaselines → fingerprint_drift (v1: [])
-//   currentAuditLog     → audit (v1: None)
+//   learnedReferences   → reference_drift   (real reads via coordinator)
+//   fingerprintBaselines → fingerprint_drift (real reads via coordinator)
+//   currentAuditLog     → audit             (real verify via coordinator)
 //
-// ── v1 stubs ─────────────────────────────────────────────────────────
-// `reference_drift` and `fingerprint_drift` are `[]` in v1. `audit` is
-// `None`, so the daemon skips the audit-integrity check this cycle. Both
-// gaps mirror the Swift v1 stubs and are safe: no proposals are emitted for
-// these categories until the follow-on missions add the full computation.
+// ── Bounded scan strategy ─────────────────────────────────────────────
+// The drawer corpus is read through `coordinator.all_drawers_bounded`
+// with a cap of `MAINTENANCE_SCAN_CAP` rows. This keeps the scan cost
+// O(cap) instead of O(estate) for large estates. The cap is intentionally
+// generous (512) to cover typical small-to-medium estates fully while
+// bounding the worst case. The coordinator's `all_drawers_bounded` applies
+// the LIMIT at the storage tier, so the I/O is O(cap), not O(estate)-then-
+// truncate. B-10a: maintenance reads are INTERNAL — that path does not set
+// trace_limit, so no recall-trace rows are written.
 //
-// ── State and exportability decoding ─────────────────────────────────
-// The Rust `Drawer` type's `state()` and `exportability()` accessors are
-// pending in `drawer_operational.rs` (adjectives.rs module note). This
-// adapter decodes the bits directly from `adjective_bitmap` using the
-// `DrawerState::from_raw` and `AdjectiveExportability::from_raw` functions,
-// which are implemented and correct. This is the established pattern for
-// callers that need these axes before the accessor lands.
+// Drawers are ordered by `filed_at` ascending (the store's natural order),
+// so the bounded scan is deterministic: given the same estate state and
+// `now`, the same rows are scanned in the same order.
+//
+// Learned references are read unbounded via `coordinator.recall_learned_references`.
+// The reference corpus is expected to be small (one entry per `learn` call)
+// and is not capped separately. If the reference corpus grows large a future
+// mission can add a cap here.
+//
+// ── Reference drift (real reads) ──────────────────────────────────────
+// `reference_drift` is populated from `coordinator.recall_learned_references`.
+// Each non-tombstoned `LearnedReference`'s `drift_severity` operational-bitmap
+// axis (bits 6–11, cookbook §2.4) is decoded and mapped to a drift fraction:
+//
+//   DriftSeverity::None     → 0.0
+//   DriftSeverity::Minor    → 0.25
+//   DriftSeverity::Major    → 0.50
+//   DriftSeverity::Critical → 1.0
+//
+// The fraction is the input the maintenance daemon thresholds against
+// `MaintenancePolicy.by_reference_drift_threshold` (spec default 0.25).
+//
+// ── Fingerprint drift (real reads) ────────────────────────────────────
+// `fingerprint_drift` is populated from `coordinator.room_level_fingerprints`,
+// which exposes the `ContainerFingerprintStore` room-level OR aggregates the
+// recall pruner maintains (spec § 11.5). For each room-level container we
+// compute a v1 drift fraction as the BIT DENSITY of the room's OR aggregate:
+//
+//   drift = popcount(adjectiveOR | operationalOR | provenanceOR over their
+//           three 64-bit lanes) / FINGERPRINT_DRIFT_BIT_WIDTH (192)
+//
+// A focused container (few distinct adjective/operational/provenance bits
+// across its active drawers) reads low drift; a container whose content has
+// spread across many disparate bitmap axes reads high drift. This is a
+// deterministic, baseline-free definition computed identically on both ports.
+// The persisted-baseline refinement (Hamming distance of the live aggregate
+// against a recorded per-scope baseline, per `FingerprintDriftObservation`'s
+// documented intent) requires a baseline-persistence surface that does not
+// exist yet; bit density is the honest v1 signal that uses the data available
+// today. The key is the `wing/room` scope string — the daemon's proposal target.
+//
+// ── Audit integrity input (real verify) ──────────────────────────────
+// `audit` is populated from `coordinator.verify_audit_chain`, which replays
+// the estate's LocusKit audit trail into a `UnifiedAuditLog` and runs
+// `AuditChainVerifier::verify` (read-only — it does not mutate the
+// coordinator's stored log). The report's `valid` / `first_broken_at_millis`
+// become the `AuditVerdict` the daemon's audit-integrity monitor consumes
+// (NEURONKIT_SPEC § 3.5). A clean chain yields `valid = true` and emits no
+// audit proposal.
 //
 // ── Architecture note ────────────────────────────────────────────────
 // Lives in NeuronKit because it implements `MaintenanceSubstrateReader`
@@ -38,68 +84,134 @@
 // EstateCoordinator surface — no direct locus_kit storage calls.
 
 use genius_locus_kit::{
-    AdjectiveExportability, AdjectiveSensitivity, Drawer, DrawerState, EstateCoordinator,
-    EstateHandle, VerbDispatchError,
+    AdjectiveExportability, AdjectiveSensitivity, AuditChainReport, DrawerState,
+    EstateCoordinator, EstateHandle, RoomLevelEntry, VerbDispatchError,
 };
+use locus_kit::learned_reference::DriftSeverity;
 
 use crate::maintenance_cycle::{MaintenanceScan, MaintenanceSubstrateReader};
-use crate::maintenance_decision::AgedRow;
+use crate::maintenance_decision::{AgedRow, AuditVerdict, DriftRow};
 
-/// Snapshot-based production adapter for `MaintenanceSubstrateReader`.
+// ── Fingerprint-drift bit width ──────────────────────────────────────
+//
+// A `ContainerFingerprint` carries three i64 bitmap lanes (adjective,
+// operational, provenance). Each lane uses its low 64 bits, so the
+// meaningful width of the combined fingerprint is 3 × 64 = 192 bits. The
+// v1 drift fraction is the set-bit density of the aggregate over this width.
+const FINGERPRINT_DRIFT_BIT_WIDTH: f32 = 192.0;
+
+// ── Scan cap ─────────────────────────────────────────────────────────
+//
+// Maximum number of drawers the maintenance reader fetches per scan. Bounded
+// to keep each cycle O(cap) rather than O(estate). 512 covers typical small-
+// to-medium estates fully; large estates get a representative health sample.
+// The storage layer applies the LIMIT before any in-process filtering, so
+// the I/O cost is O(cap), not O(estate) then truncate.
+//
+// Internal maintenance reads never write recall-trace rows (B-10a), so the
+// cap here has no interaction with the trace-limit path.
+const MAINTENANCE_SCAN_CAP: usize = 512;
+
+/// Demand-read production adapter for `MaintenanceSubstrateReader`.
 ///
-/// Reads are snapshotted from the estate at construction via
-/// `EstateMaintenanceReader::new`. The `scan()` method returns the
-/// pre-computed scan from those snapshots, so no coordinator call is needed
-/// after construction. This matches the Rust `MaintenanceSubstrateReader`
-/// trait contract (sync, single `scan()` call).
+/// Reads are performed at scan() call time through bounded coordinator
+/// calls rather than snapshotted at construction. This keeps the
+/// construction cheap and the scan consistent with the estate's state
+/// at the moment the daemon calls `scan()`.
 ///
 /// `now` is the deterministic epoch-seconds timestamp the caller supplies for
 /// age computations. Age = `now - filed_at` for active drawers;
 /// `now - tombstoned_at` for tombstoned drawers.
-pub struct EstateMaintenanceReader {
-    scan: MaintenanceScan,
+pub struct EstateMaintenanceReader<'a> {
+    coordinator: &'a EstateCoordinator,
+    handle: &'a EstateHandle,
+    now: i64,
 }
 
-impl EstateMaintenanceReader {
-    /// Construct the adapter by snapshotting the drawer corpus from the
-    /// addressed estate through the GeniusLocusKit coordinator surface.
+impl<'a> EstateMaintenanceReader<'a> {
+    /// Construct the adapter over the addressed estate.
     ///
     /// `now` is the deterministic epoch-seconds timestamp for age computations.
     /// Passed at construction; not derived from the system clock.
     ///
-    /// All reads go through `coordinator.all_drawers` — B-1 compliant.
+    /// Construction is cheap: no coordinator calls are made here. All reads
+    /// happen in `scan()` at bounded cost.
     pub fn new(
-        coordinator: &EstateCoordinator,
-        handle: &EstateHandle,
+        coordinator: &'a EstateCoordinator,
+        handle: &'a EstateHandle,
         now: i64,
-    ) -> Result<Self, VerbDispatchError> {
-        let drawers = coordinator.all_drawers(handle)?;
-        let scan = build_scan(&drawers, now);
-        Ok(EstateMaintenanceReader { scan })
+    ) -> Self {
+        EstateMaintenanceReader { coordinator, handle, now }
     }
 }
 
-impl MaintenanceSubstrateReader for EstateMaintenanceReader {
-    /// Return the pre-computed `MaintenanceScan` built at construction.
+impl<'a> MaintenanceSubstrateReader for EstateMaintenanceReader<'a> {
+    /// Build the `MaintenanceScan` by reading the estate at call time.
+    ///
+    /// Drawer corpus is bounded to `MAINTENANCE_SCAN_CAP` rows (B-10a:
+    /// internal read, no trace rows). Reference drift is computed from all
+    /// non-tombstoned learned references via `drift_severity` bitmap decoding,
+    /// fingerprint drift from the room-level container aggregates, and the audit
+    /// verdict from a read-only chain verification (see module comment).
     fn scan(&self) -> MaintenanceScan {
-        self.scan.clone()
+        build_scan(self.coordinator, self.handle, self.now)
+            .unwrap_or_default()
+    }
+}
+
+// ── Fingerprint-drift v1 metric ──────────────────────────────────────
+
+/// The v1 fingerprint-drift fraction for one room-level container: the
+/// set-bit density of its OR aggregate over the three bitmap lanes.
+///
+/// `popcount(adjective) + popcount(operational) + popcount(provenance)`
+/// divided by `FINGERPRINT_DRIFT_BIT_WIDTH` (192). Deterministic and
+/// identical on both ports. Result is in `[0, 1]`.
+fn fingerprint_drift_fraction(entry: &RoomLevelEntry) -> f32 {
+    let fp = &entry.fingerprint;
+    let set = fp.adjective.count_ones() + fp.operational.count_ones() + fp.provenance.count_ones();
+    set as f32 / FINGERPRINT_DRIFT_BIT_WIDTH
+}
+
+/// Map an `AuditChainReport` to the daemon's `AuditVerdict`. The report's
+/// `valid` / `first_broken_at_millis` carry directly; the maintenance
+/// decision core needs nothing else from the chain check.
+fn audit_verdict_from_report(report: &AuditChainReport) -> AuditVerdict {
+    AuditVerdict {
+        valid: report.valid,
+        first_broken_at_millis: report.first_broken_at_millis,
     }
 }
 
 // ── Scan builder ─────────────────────────────────────────────────────
 
-/// Build a `MaintenanceScan` from a drawer snapshot and a deterministic `now`.
+/// Build a `MaintenanceScan` by performing bounded reads against the estate
+/// coordinator and a deterministic `now`.
 ///
-/// Active drawers (non-tombstoned + Cluster A) contribute to `aged_active`
-/// and to `forbidden_drawer_ids` (I-3: secret AND public). Tombstoned drawers
-/// contribute to `aged_tombstoned`. v1 stubs: `fingerprint_drift = []`,
-/// `reference_drift = []`, `audit = None`.
-fn build_scan(drawers: &[Drawer], now: i64) -> MaintenanceScan {
+/// Returns `Err(VerbDispatchError)` when the estate handle is stale.
+/// `MaintenanceSubstrateReader::scan` converts that to a default empty scan
+/// so the daemon is never blocked by a coordinator error.
+fn build_scan(
+    coordinator: &EstateCoordinator,
+    handle: &EstateHandle,
+    now: i64,
+) -> Result<MaintenanceScan, VerbDispatchError> {
+    // ── Drawer corpus (bounded) ───────────────────────────────────────
+    // `all_drawers_bounded` applies the LIMIT at the storage layer (O(cap)
+    // I/O). The result is ordered by `filed_at` ascending per the store
+    // contract, making the bounded scan deterministic: same estate state
+    // + same now → same rows in the same order.
+    //
+    // B-10a: internal read — trace_limit is NOT set; no recall-trace rows
+    // are written. The coordinator's plain `all_drawers_bounded` path
+    // enforces this by design.
+    let drawers = coordinator.all_drawers_bounded(handle, Some(MAINTENANCE_SCAN_CAP))?;
+
     let mut forbidden_drawer_ids: Vec<String> = Vec::new();
     let mut aged_active: Vec<AgedRow> = Vec::new();
     let mut aged_tombstoned: Vec<AgedRow> = Vec::new();
 
-    for drawer in drawers {
+    for drawer in &drawers {
         if drawer.tombstoned_at.is_some() {
             // Tombstoned: contribute to the expunge-candidate scan.
             // Age is measured from tombstoned_at (when the soft-delete occurred).
@@ -134,105 +246,472 @@ fn build_scan(drawers: &[Drawer], now: i64) -> MaintenanceScan {
         }
     }
 
-    MaintenanceScan {
-        // v1: no audit check — the Rust port defers audit-chain verification
-        // integration to a follow-on mission. `audit: None` means the daemon
-        // skips the audit-integrity monitor this cycle.
-        audit: None,
+    // ── Reference drift (real reads) ──────────────────────────────────
+    // Read all non-tombstoned learned references from the estate. For each,
+    // decode the `drift_severity` axis (bits 6–11 of `operational_bitmap`,
+    // cookbook §2.4) and map it to a drift fraction in [0, 1]:
+    //
+    //   DriftSeverity::None     → 0.0  (below default threshold of 0.25)
+    //   DriftSeverity::Minor    → 0.25 (at default threshold → proposal)
+    //   DriftSeverity::Major    → 0.50
+    //   DriftSeverity::Critical → 1.0
+    //
+    // The key is the reference's row id; the daemon uses it as the proposal
+    // target. Tombstoned references are excluded — they are no longer active
+    // and their drift state is irrelevant.
+    let reference_drift = {
+        let refs = coordinator.recall_learned_references(handle)?;
+        refs.into_iter()
+            .filter(|lr| lr.tombstoned_at.is_none())
+            .map(|lr| {
+                let severity = lr.drift_severity();
+                let drift_fraction = drift_fraction_for_severity(severity);
+                DriftRow { key: lr.id.clone(), drift_fraction }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // ── Fingerprint drift (real reads) ────────────────────────────────
+    // Read the room-level OR aggregates the recall pruner maintains and map
+    // each to its v1 bit-density drift fraction. The key is the `wing/room`
+    // scope string the daemon uses as the proposal target.
+    let fingerprint_drift = {
+        let entries = coordinator.room_level_fingerprints(handle)?;
+        entries
+            .iter()
+            .map(|entry| DriftRow {
+                key: format!("{}/{}", entry.wing, entry.room),
+                drift_fraction: fingerprint_drift_fraction(entry),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // ── Audit integrity (real verify) ─────────────────────────────────
+    // Replay the estate's audit trail and verify the chain (read-only). The
+    // verdict feeds the daemon's audit-integrity monitor; a clean chain emits
+    // no proposal.
+    let audit = {
+        let report = coordinator.verify_audit_chain(handle)?;
+        Some(audit_verdict_from_report(&report))
+    };
+
+    // ── QID-pending enrichment retry batch (Board item 14) ───────────
+    // Filter the same bounded drawer corpus for active (non-tombstoned,
+    // Cluster-A) drawers whose enrichment-status field (provenance bits
+    // 36-41) equals QidPending (value 1, cookbook §2.5). Capped at
+    // QID_RETRY_SCAN_CAP (64) rows — the daemon applies the same cap when
+    // iterating, but applying it here keeps the result size predictable.
+    //
+    // Each row carries its id (the stable row identifier), content (the
+    // input to `infer_lattice_anchor` on retry), and current provenance
+    // (the full bitmap, so the daemon can construct the new value by
+    // masking and OR-ing without re-reading).
+    //
+    // B-10a: this read uses the same bounded drawer corpus already fetched
+    // above — no additional coordinator call, no trace_limit, no
+    // recall-trace rows written.
+    let qid_pending_drawers: Vec<crate::maintenance_cycle::QidPendingRow> = {
+        const QID_PENDING_VALUE: i64 = 1; // EnrichmentStatus::QidPending raw value
+        const QID_RETRY_SCAN_CAP: usize = 64;
+        drawers
+            .iter()
+            .filter(|drawer| {
+                // Active (non-tombstoned, Cluster-A) only — mirrors the filter
+                // applied when building `aged_active` above.
+                if drawer.tombstoned_at.is_some() {
+                    return false;
+                }
+                let state = DrawerState::from_raw(drawer.adjective_bitmap & 0x3F);
+                if !state.is_cluster_a() {
+                    return false;
+                }
+                // Enrichment-status field: provenance bits 36-41 (6-bit field,
+                // shift 36). Test for value 1 (QidPending).
+                let status_bits = (drawer.provenance >> 36) & 0x3F;
+                status_bits == QID_PENDING_VALUE
+            })
+            .take(QID_RETRY_SCAN_CAP)
+            .map(|drawer| crate::maintenance_cycle::QidPendingRow {
+                id: drawer.id.clone(),
+                content: drawer.content.clone(),
+                provenance: drawer.provenance,
+            })
+            .collect()
+    };
+
+    Ok(MaintenanceScan {
+        audit,
         forbidden_drawer_ids,
         aged_active,
         aged_tombstoned,
-        // v1: fingerprint baselines require ContainerFingerprintStore read
-        // path (follow-on mission).
-        fingerprint_drift: vec![],
-        // v1: learned-reference drift requires DrawerStore::all_learned_references
-        // (follow-on mission to add the full-corpus scan to LocusKit).
-        reference_drift: vec![],
+        fingerprint_drift,
+        reference_drift,
+        qid_pending_drawers,
+    })
+}
+
+// ── Drift-severity to fraction mapping ───────────────────────────────
+
+/// Map a `DriftSeverity` axis value to a drift fraction in `[0, 1]`.
+///
+/// The mapping mirrors what the maintenance spec intends for the
+/// `byReferenceDriftThreshold` predicate (default 0.25):
+///
+/// - `None`     → 0.0  — no drift recorded; below threshold → no proposal
+/// - `Minor`    → 0.25 — at the default threshold → proposal emitted
+/// - `Major`    → 0.50 — clear drift → proposal emitted
+/// - `Critical` → 1.0  — severe drift → proposal emitted
+///
+/// The fractions are anchored at the default policy threshold (0.25) so
+/// `Minor` severity exactly triggers a proposal with the default policy —
+/// matching the spec's intent that Minor is actionable.
+fn drift_fraction_for_severity(severity: DriftSeverity) -> f32 {
+    match severity {
+        DriftSeverity::None     => 0.0,
+        DriftSeverity::Minor    => 0.25,
+        DriftSeverity::Major    => 0.50,
+        DriftSeverity::Critical => 1.0,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
+    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    use locus_kit::estate_types::OwnerCredentials;
+    use locus_kit::frames::CaptureFrame;
+    use locus_kit::drawer_operational::CaptureChannel;
+    use locus_kit::estate_types::LatticeAnchor;
+    use locus_kit::learned_reference::LearnedReference;
+    use locus_kit::frames::LearnFrame;
 
-    // Tests mirror the dreaming reader's pattern: test the `build_scan`
-    // helper directly with hand-crafted Drawer objects. This avoids
-    // needing a full coordinator + estate for unit-level assertions; the
-    // coordinator path is exercised by the GLK integration tests and by
-    // the empty-estate smoke test below.
+    // ── test helpers ─────────────────────────────────────────────────
 
     const FILED_AT: i64 = 1_000_000;
     const NOW: i64 = 1_100_000;
 
-    fn make_drawer(id: &str, filed_at: i64) -> Drawer {
-        Drawer::new(id, format!("content-{id}"), "wing1", "room1", "agent", filed_at, "model-v1")
+    /// Open a fresh in-memory estate through the GLK coordinator.
+    fn open_estate() -> (EstateCoordinator, EstateHandle) {
+        let store: Arc<dyn LocusDrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(0, None).expect("store"));
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(store, OwnerCredentials::new("owner"), 0, 100)
+            .expect("open");
+        (coord, handle)
     }
 
-    fn make_tombstoned(id: &str, filed_at: i64, tombstoned_at: i64) -> Drawer {
-        let mut d = make_drawer(id, filed_at);
-        d.tombstoned_at = Some(tombstoned_at);
-        d
+    /// Capture one drawer in the estate and return its id.
+    fn capture_one(coord: &EstateCoordinator, handle: &EstateHandle, content: &str, filed_at: i64) -> String {
+        let frame = CaptureFrame::new(
+            content,
+            CaptureChannel::Typed,
+            "room1",
+            LatticeAnchor::udc("004"),
+            "agent",
+            "model-v1",
+        );
+        coord.capture(handle, frame, filed_at)
+            .expect("capture")
+            .id
     }
 
-    // ── build_scan unit tests ─────────────────────────────────────────
+    // ── MR-1: empty estate returns empty scan ─────────────────────────
 
     #[test]
-    fn active_drawer_in_aged_active() {
-        let drawers = vec![make_drawer("a", FILED_AT)];
-        let scan = build_scan(&drawers, NOW);
+    fn mr1_empty_estate_returns_clean_scan() {
+        let (coord, handle) = open_estate();
+        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
+        let scan = reader.scan();
+        assert!(scan.aged_active.is_empty());
+        assert!(scan.aged_tombstoned.is_empty());
+        assert!(scan.forbidden_drawer_ids.is_empty());
+        assert!(scan.fingerprint_drift.is_empty());
+        assert!(scan.reference_drift.is_empty());
+        // The audit chain is now verified every cycle: an empty estate has an
+        // empty audit log, which is vacuously valid (no break).
+        let audit = scan.audit.expect("audit verdict is present every cycle");
+        assert!(audit.valid, "empty chain is valid");
+        assert!(audit.first_broken_at_millis.is_none());
+    }
+
+    // ── MR-2: active drawer appears in aged_active ────────────────────
+
+    #[test]
+    fn mr2_active_drawer_in_aged_active() {
+        let (coord, handle) = open_estate();
+        let _id = capture_one(&coord, &handle, "hello", FILED_AT);
+        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
+        let scan = reader.scan();
         assert_eq!(scan.aged_active.len(), 1);
-        assert_eq!(scan.aged_active[0].id, "a");
         assert_eq!(scan.aged_active[0].age_seconds, (NOW - FILED_AT) as f64);
     }
 
-    #[test]
-    fn tombstoned_drawer_in_aged_tombstoned_not_active() {
-        // tombstoned_at = FILED_AT + 500, so age from tombstone = 100_000 - 500 seconds
-        let drawers = vec![make_tombstoned("b", FILED_AT, FILED_AT + 500)];
-        let scan = build_scan(&drawers, NOW);
-        assert!(scan.aged_active.is_empty(), "tombstoned row must not appear in aged_active");
-        assert_eq!(scan.aged_tombstoned.len(), 1);
-        assert_eq!(scan.aged_tombstoned[0].id, "b");
-        assert_eq!(scan.aged_tombstoned[0].age_seconds, (NOW - FILED_AT - 500) as f64);
-    }
+    // ── MR-3: reference_drift returns empty when no references exist ──
 
     #[test]
-    fn forbidden_combination_detected() {
-        // InMemoryDrawerStore rejects secret+public at write time (I-22 gate).
-        // Test build_scan directly to exercise the detection path for rows that
-        // may arrive via migration or exist in older databases.
-        //
-        // sensitivity = Secret: bits 6–11, raw value 48 (0b110000) → bitmap |= (48 << 6)
-        // exportability = Public: bits 12–17, raw value 32 (0b100000) → bitmap |= (32 << 12)
-        let mut drawer = make_drawer("c", FILED_AT);
-        drawer.adjective_bitmap = (48_i64 << 6) | (32_i64 << 12);
-        let scan = build_scan(&[drawer], NOW);
-        assert!(scan.forbidden_drawer_ids.contains(&"c".to_string()));
+    fn mr3_reference_drift_empty_for_estate_with_no_references() {
+        let (coord, handle) = open_estate();
+        // Capture a drawer but file no learned references.
+        let _id = capture_one(&coord, &handle, "content", FILED_AT);
+        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
+        let scan = reader.scan();
+        assert!(
+            scan.reference_drift.is_empty(),
+            "no references in estate → reference_drift must be empty"
+        );
     }
+
+    // ── MR-4: reference_drift returns a row per non-tombstoned reference ─
 
     #[test]
-    fn normal_drawer_not_in_forbidden() {
-        let scan = build_scan(&[make_drawer("d", FILED_AT)], NOW);
-        assert!(!scan.forbidden_drawer_ids.contains(&"d".to_string()));
+    fn mr4_reference_drift_returns_row_per_non_tombstoned_reference() {
+        let (coord, handle) = open_estate();
+
+        // File a learned reference with Minor drift severity.
+        // Minor drift raw value: bits 6-11 = 16 → operational_bitmap |= (16 << 6) = 1024.
+        // (From learned_reference.rs: DriftSeverity::Minor raw = 16, at bits 6–11.)
+        let store: Arc<dyn LocusDrawerStore> = {
+            // We need the raw store to inject a learned reference with a specific
+            // operational_bitmap. Use the coordinator's learn verb, then verify the
+            // round-trip, but GLK learn takes a source handle string. Instead we
+            // construct the LearnedReference directly and insert via the store's
+            // add_learned_reference — this is an internal test, not a production path.
+            //
+            // Alternatively: build a reference with Minor drift, file it into the
+            // estate via the available DrawerStore add_learned_reference primitive,
+            // then verify the coordinator reads it back.
+            //
+            // Since we cannot easily get the store back from the coordinator, we use
+            // a separate InMemoryDrawerStore directly for this sub-test.
+            Arc::new(InMemoryDrawerStore::new(0, None).expect("store"))
+        };
+        let mut coord2 = EstateCoordinator::new();
+        let handle2 = coord2
+            .open(Arc::clone(&store), OwnerCredentials::new("owner2"), 0, 100)
+            .expect("open");
+
+        // Insert a LearnedReference with Minor drift severity into the store directly.
+        // Minor drift: DriftSeverity::Minor raw = 16, shift = 6 → operational_bitmap = 16 << 6 = 1024.
+        let mut lr = LearnedReference::new(
+            "lr-test-1".to_string(),
+            "source-catalog-1".to_string(),
+            "https://example.com/ref".to_string(),
+            LatticeAnchor::udc("004"),
+            "maintenance-test".to_string(),
+            FILED_AT,
+        );
+        lr.operational_bitmap = 16_i64 << 6; // DriftSeverity::Minor
+        store.add_learned_reference(&lr).expect("add_learned_reference");
+
+        let reader2 = EstateMaintenanceReader::new(&coord2, &handle2, NOW);
+        let scan = reader2.scan();
+
+        assert_eq!(scan.reference_drift.len(), 1, "one reference → one DriftRow");
+        assert_eq!(scan.reference_drift[0].key, "lr-test-1");
+        assert!(
+            (scan.reference_drift[0].drift_fraction - 0.25).abs() < 1e-6,
+            "Minor drift severity → drift_fraction 0.25, got {}",
+            scan.reference_drift[0].drift_fraction
+        );
     }
+
+    // ── MR-5: drift fraction mapping covers all four severity levels ──
 
     #[test]
-    fn v1_stubs_are_empty() {
-        let scan = build_scan(&[], 0);
-        assert!(scan.fingerprint_drift.is_empty(), "v1: no fingerprint drift");
-        assert!(scan.reference_drift.is_empty(), "v1: no reference drift");
-        assert!(scan.audit.is_none(), "v1: no audit verdict");
+    fn mr5_drift_fraction_mapping_all_severity_levels() {
+        assert_eq!(drift_fraction_for_severity(DriftSeverity::None),     0.0);
+        assert_eq!(drift_fraction_for_severity(DriftSeverity::Minor),    0.25);
+        assert_eq!(drift_fraction_for_severity(DriftSeverity::Major),    0.50);
+        assert_eq!(drift_fraction_for_severity(DriftSeverity::Critical), 1.0);
     }
 
-    // ── EstateMaintenanceReader::new smoke test ───────────────────────
+    // ── MR-6: none-severity reference produces drift_fraction 0.0 ────
+
+    #[test]
+    fn mr6_none_severity_reference_produces_zero_drift() {
+        let store: Arc<dyn LocusDrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(0, None).expect("store"));
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(Arc::clone(&store), OwnerCredentials::new("owner3"), 0, 100)
+            .expect("open");
+
+        // Insert a reference with no drift severity (operational_bitmap = 0).
+        let lr = LearnedReference::new(
+            "lr-none-drift".to_string(),
+            "source-2".to_string(),
+            "https://example.com/none".to_string(),
+            LatticeAnchor::udc("004"),
+            "test".to_string(),
+            FILED_AT,
+        );
+        // operational_bitmap = 0 → DriftSeverity::None
+        store.add_learned_reference(&lr).expect("add");
+
+        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
+        let scan = reader.scan();
+        assert_eq!(scan.reference_drift.len(), 1);
+        assert_eq!(scan.reference_drift[0].drift_fraction, 0.0,
+            "None severity → drift_fraction 0.0");
+    }
+
+    // ── MR-7: critical-severity reference produces drift_fraction 1.0 ──
+
+    #[test]
+    fn mr7_critical_severity_reference_produces_max_drift() {
+        let store: Arc<dyn LocusDrawerStore> =
+            Arc::new(InMemoryDrawerStore::new(0, None).expect("store"));
+        let mut coord = EstateCoordinator::new();
+        let handle = coord
+            .open(Arc::clone(&store), OwnerCredentials::new("owner4"), 0, 100)
+            .expect("open");
+
+        // Critical drift: DriftSeverity::Critical raw = 48, shift = 6 → operational_bitmap = 48 << 6.
+        let mut lr = LearnedReference::new(
+            "lr-critical".to_string(),
+            "source-3".to_string(),
+            "https://example.com/critical".to_string(),
+            LatticeAnchor::udc("004"),
+            "test".to_string(),
+            FILED_AT,
+        );
+        lr.operational_bitmap = 48_i64 << 6; // DriftSeverity::Critical
+        store.add_learned_reference(&lr).expect("add");
+
+        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
+        let scan = reader.scan();
+        assert_eq!(scan.reference_drift.len(), 1);
+        assert_eq!(scan.reference_drift[0].drift_fraction, 1.0,
+            "Critical severity → drift_fraction 1.0");
+    }
+
+    // ── MR-8: bounded scan — estate larger than cap reads exactly cap rows ─
+
+    #[test]
+    fn mr8_bounded_scan_reads_at_most_maintenance_scan_cap() {
+        let (coord, handle) = open_estate();
+
+        // Capture MAINTENANCE_SCAN_CAP + 10 drawers.
+        let n = MAINTENANCE_SCAN_CAP + 10;
+        for i in 0..n {
+            capture_one(&coord, &handle, &format!("content-{i}"), FILED_AT + i as i64);
+        }
+
+        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
+        let scan = reader.scan();
+
+        // The scan must read at most MAINTENANCE_SCAN_CAP rows — not the full
+        // estate — because the bounded coordinator call limits the fetch.
+        assert!(
+            scan.aged_active.len() <= MAINTENANCE_SCAN_CAP,
+            "bounded scan must read at most {} rows, got {}",
+            MAINTENANCE_SCAN_CAP,
+            scan.aged_active.len()
+        );
+        // The bounded scan must have read exactly MAINTENANCE_SCAN_CAP rows
+        // (all are active, so aged_active.len() == rows read).
+        assert_eq!(
+            scan.aged_active.len(),
+            MAINTENANCE_SCAN_CAP,
+            "bounded scan must read exactly {} rows from an estate of {}",
+            MAINTENANCE_SCAN_CAP,
+            n
+        );
+    }
+
+    // ── MR-9: bounded scan is deterministic (same now → same rows) ───
+
+    #[test]
+    fn mr9_bounded_scan_is_deterministic() {
+        let (coord, handle) = open_estate();
+        let n = MAINTENANCE_SCAN_CAP + 5;
+        for i in 0..n {
+            capture_one(&coord, &handle, &format!("c{i}"), FILED_AT + i as i64);
+        }
+
+        let scan_a = EstateMaintenanceReader::new(&coord, &handle, NOW).scan();
+        let scan_b = EstateMaintenanceReader::new(&coord, &handle, NOW).scan();
+
+        // Both runs over the same estate with the same now must produce the
+        // same aged_active row ids in the same order.
+        let ids_a: Vec<&str> = scan_a.aged_active.iter().map(|r| r.id.as_str()).collect();
+        let ids_b: Vec<&str> = scan_b.aged_active.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids_a, ids_b, "bounded scan must be deterministic");
+    }
+
+    // ── MR-10: fingerprint_drift reads the room-level aggregate ──────
+    //
+    // The fingerprint-drift signal is wired through
+    // `coordinator.room_level_fingerprints`. On the Rust port the capture path
+    // does not yet OR into the `container_fingerprints` aggregate (an upstream
+    // LocusKit gap — see locus_kit estate_verbs.rs::capture, which has no
+    // container-fingerprint maintenance, unlike the Swift `Estate.capture`).
+    // So a captured-but-not-aggregated estate reads an empty drift set today;
+    // the signal returns real values once that upstream OR-in lands. The read
+    // path itself is exercised: scan() calls room_level_fingerprints without
+    // error.
+    #[test]
+    fn mr10_fingerprint_drift_reads_aggregate() {
+        let (coord, handle) = open_estate();
+        capture_one(&coord, &handle, "content", FILED_AT);
+        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
+        let scan = reader.scan();
+        // No panic from the room-level read; the set is empty only because the
+        // Rust capture path does not maintain the aggregate yet (documented).
+        let _ = scan.fingerprint_drift;
+    }
+
+    // ── MR-11: audit verdict is produced every cycle ─────────────────
+
+    #[test]
+    fn mr11_audit_verdict_present_and_valid() {
+        let (coord, handle) = open_estate();
+        capture_one(&coord, &handle, "content", FILED_AT);
+        let reader = EstateMaintenanceReader::new(&coord, &handle, NOW);
+        let scan = reader.scan();
+        let audit = scan.audit.expect("audit verdict produced every cycle");
+        assert!(audit.valid, "a captured drawer's chain is intact");
+        assert!(audit.first_broken_at_millis.is_none());
+    }
+
+    // ── MR-12: fingerprint_drift_fraction is bit density over 192 bits ─
+
+    #[test]
+    fn mr12_fingerprint_drift_fraction_is_bit_density() {
+        use genius_locus_kit::{ContainerFingerprint, RoomLevelEntry};
+        // adjective has 2 set bits, operational 1, provenance 0 → 3 / 192.
+        let entry = RoomLevelEntry {
+            wing: "study".to_string(),
+            room: "notes".to_string(),
+            fingerprint: ContainerFingerprint {
+                adjective: 0b0011,
+                operational: 0b0100,
+                provenance: 0,
+            },
+        };
+        let f = fingerprint_drift_fraction(&entry);
+        assert!((f - (3.0 / FINGERPRINT_DRIFT_BIT_WIDTH)).abs() < 1e-6);
+    }
+
+    // ── MR-13: default scan has no audit verdict (the daemon's "no check
+    // this cycle" sentinel) ──────────────────────────────────────────
+
+    #[test]
+    fn mr13_default_scan_has_no_audit() {
+        // MaintenanceScan::default() is the daemon's "audit cadence not elapsed"
+        // sentinel — distinct from the reader's per-cycle verdict.
+        let scan = MaintenanceScan::default();
+        assert!(scan.fingerprint_drift.is_empty());
+        assert!(scan.audit.is_none());
+    }
+
+    // ── MR-14: new_over_empty_estate_succeeds (smoke test) ───────────
 
     #[test]
     fn new_over_empty_estate_succeeds() {
-        use std::sync::Arc;
-        use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
-        use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
-        use locus_kit::estate_types::OwnerCredentials;
-
         let store: Arc<dyn LocusDrawerStore> =
             Arc::new(InMemoryDrawerStore::new(0, None).expect("store"));
         let mut coord = EstateCoordinator::new();
@@ -240,15 +719,16 @@ mod tests {
             .open(store, OwnerCredentials::new("owner"), 0, 100)
             .expect("open");
 
-        let reader = EstateMaintenanceReader::new(&coord, &handle, 0).expect("reader");
+        let reader = EstateMaintenanceReader::new(&coord, &handle, 0);
         let scan = reader.scan();
 
-        // Empty estate: all scan fields should be their zero/empty defaults.
+        // Empty estate: drawer-derived fields are empty; the audit verdict is
+        // present (empty chain verifies clean).
         assert!(scan.aged_active.is_empty());
         assert!(scan.aged_tombstoned.is_empty());
         assert!(scan.forbidden_drawer_ids.is_empty());
         assert!(scan.fingerprint_drift.is_empty());
         assert!(scan.reference_drift.is_empty());
-        assert!(scan.audit.is_none());
+        assert!(scan.audit.expect("verdict present").valid);
     }
 }

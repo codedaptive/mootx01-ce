@@ -136,6 +136,98 @@ fn community_conformance_result_identical() {
         "CommunityDetection result must be bit-identical regardless of monitoring state");
 }
 
+// MARK: - §1b CommunityDetection::detect_full
+//
+// Mirrors the Swift detectFull telemetry boundary tests in
+// CommunityDetectionTests.swift: detect_full emits exactly ONE
+// community.assignment signal at the outer boundary regardless of how
+// many aggregation levels run internally (the per-level cores are
+// non-emitting).
+
+/// V1 star-of-pairs fixture: 4 tunnel-bonded pairs (w = 1.0), node 0
+/// lattice-star-bonded to one member of each other pair (w = 0.2). At
+/// resolution 0.05 detect_full runs level 0 plus at least one
+/// aggregation level and collapses to a single community.
+fn star_of_pairs_adj() -> Vec<Vec<(usize, f64)>> {
+    let edges: [(usize, usize, f64); 7] = [
+        (0, 1, 1.0), (2, 3, 1.0), (4, 5, 1.0), (6, 7, 1.0),
+        (0, 2, 0.2), (0, 4, 0.2), (0, 6, 0.2),
+    ];
+    let mut adj = vec![Vec::new(); 8];
+    for &(a, b, w) in &edges {
+        adj[a].push((b, w));
+        adj[b].push((a, w));
+    }
+    adj
+}
+
+#[test]
+fn detect_full_no_sample_when_disabled() {
+    let _guard = global_lock().lock().unwrap();
+    let sink = Arc::new(CapturingSink::new());
+    Intellectus::install(Arc::clone(&sink) as Arc<dyn StatsSink>);
+    Intellectus::set_enabled(false);
+
+    let _ = CommunityDetection::detect_full(&star_of_pairs_adj(), 10, 20, 0.05, "e", 1.0);
+
+    assert_eq!(sink.count(), 0,
+        "CommunityDetection::detect_full must not emit when monitoring is disabled");
+
+    Intellectus::install(Arc::new(intellectus_lib::NoOpSink));
+}
+
+#[test]
+fn detect_full_one_sample_when_enabled() {
+    let _guard = global_lock().lock().unwrap();
+    let sink = Arc::new(CapturingSink::new());
+    Intellectus::install(Arc::clone(&sink) as Arc<dyn StatsSink>);
+    Intellectus::set_enabled(true);
+
+    let result = CommunityDetection::detect_full(
+        &star_of_pairs_adj(), 10, 20, 0.05, "full-estate", 9.0);
+
+    assert_eq!(sink.count(), 1,
+        "detect_full must emit exactly one sample at the outer boundary, \
+         even when multiple aggregation levels run internally");
+
+    if let Some(StatSample::Metric { name, value, tags, ts }) = sink.first() {
+        assert_eq!(name, VizGraphSignals::COMMUNITY_ASSIGNMENT);
+        let community_count = {
+            let mut seen = std::collections::HashSet::new();
+            for &label in &result { seen.insert(label); }
+            seen.len()
+        };
+        assert_eq!(value, community_count as f64);
+        assert_eq!(tags.get("estate").map(|s| s.as_str()), Some("full-estate"));
+        assert_eq!(tags.get("node_count").map(|s| s.as_str()), Some("8"));
+        assert_eq!(tags.get("community_count").map(|s| s.as_str()), Some("1"));
+        assert_eq!(ts, 9.0);
+    } else {
+        panic!("expected Metric sample");
+    }
+
+    Intellectus::set_enabled(false);
+    Intellectus::install(Arc::new(intellectus_lib::NoOpSink));
+}
+
+#[test]
+fn detect_full_conformance_result_identical() {
+    let _guard = global_lock().lock().unwrap();
+    Intellectus::set_enabled(false);
+    let result_off = CommunityDetection::detect_full(&star_of_pairs_adj(), 10, 20, 0.05, "", 0.0);
+
+    let sink = Arc::new(CapturingSink::new());
+    Intellectus::install(Arc::clone(&sink) as Arc<dyn StatsSink>);
+    Intellectus::set_enabled(true);
+    let result_on = CommunityDetection::detect_full(&star_of_pairs_adj(), 10, 20, 0.05, "", 0.0);
+
+    Intellectus::set_enabled(false);
+    Intellectus::install(Arc::new(intellectus_lib::NoOpSink));
+
+    assert_eq!(result_off, result_on,
+        "detect_full result must be bit-identical regardless of monitoring state");
+}
+
 // MARK: - §2 EigenvalueCentrality
 
 fn star_adj() -> Vec<Vec<(usize, f64)>> {

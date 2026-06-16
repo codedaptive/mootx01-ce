@@ -98,11 +98,9 @@ struct EstateVerbTests {
     @Test("recall yields a single page from an empty estate without throwing")
     func recall_emptyEstateSinglePage() async throws {
         let (estate, _) = try await makeEstate()
-        // `.unconfirmed` suppresses the evaluator's default `.userConfirmed`
-        // insertion (§ 7.9.5); this test predates the provenance-aware
-        // evaluator and operates on the empty corpus that the default
-        // would still admit zero rows from, so the override keeps the
-        // page-shape contract observable rather than masking it.
+        // The explicit state/provenance filters keep this old page-shape
+        // fixture focused on an empty unconfirmed inbox. Ordinary recall
+        // would also return zero rows here.
         let stream = await estate.recall(
             RecallFrame(filterChain: [.currentlyBelieve, .unconfirmed])
         )
@@ -164,6 +162,89 @@ struct EstateVerbTests {
         // Active rows raise a gate discipline violation.
         await #expect(throws: LocusKitError.self) {
             try await estate.mutate(rowID: drawer.id, kind: .reject, payload: String?.none)
+        }
+    }
+
+    // MARK: - learn
+
+    /// A genuine source catalog entry with a real (non-empty) anchor.
+    private func sampleSource(
+        id: String = "src-1",
+        handle: String = "https://example.com",
+        udc: String = "004"
+    ) -> SourceCatalogEntry {
+        SourceCatalogEntry(
+            id: id,
+            kind: .user,
+            handle: handle,
+            latticeAnchor: LatticeAnchor(udcCode: udc),
+            firstSeen: Date(timeIntervalSince1970: 1_700_000_000),
+            addedBy: "cataloger"
+        )
+    }
+
+    @Test("learn writes a genuine reference anchored to its source — no sentinel")
+    func learn_writesGenuineAnchor() async throws {
+        let (estate, _) = try await makeEstate()
+        let now = Date(timeIntervalSince1970: 1_700_000_100)
+        let frame = LearnFrame(source: sampleSource(), handle: "https://example.com/page")
+        let reference = try await estate.learn(frame, now: now)
+
+        // Anchor is the source's genuine anchor, never a sentinel.
+        #expect(reference.latticeAnchor.udcCode == "004")
+        #expect(!reference.latticeAnchor.udcCode.isEmpty)
+        #expect(reference.sourceCatalogID == "src-1")
+        #expect(reference.handle == "https://example.com/page")
+        #expect(reference.addedBy == "learn")
+        // Operational axes decode back: defaults are byReference + weekly,
+        // source = user (from the catalog kind).
+        #expect(reference.mode == .byReference)
+        #expect(reference.refreshPolicy == .weekly)
+        #expect(reference.acquisitionSource == .user)
+
+        // Durable + queryable.
+        let fetched = try await estate.store.getLearnedReference(id: reference.id)
+        #expect(fetched?.latticeAnchor.udcCode == "004")
+        // The source was cataloged durably.
+        let cataloged = try await estate.store.sourceCatalogEntry(forHandle: "https://example.com")
+        #expect(cataloged?.id == "src-1")
+    }
+
+    @Test("learn encodes mode and refresh policy into the operational bitmap")
+    func learn_encodesModeAndRefresh() async throws {
+        let (estate, _) = try await makeEstate()
+        let frame = LearnFrame(
+            source: sampleSource(),
+            handle: "https://example.com/doc",
+            mode: .byIngestion,
+            refreshPolicy: .daily
+        )
+        let reference = try await estate.learn(frame, now: Date(timeIntervalSince1970: 1_700_000_200))
+        #expect(reference.mode == .byIngestion)
+        #expect(reference.refreshPolicy == .daily)
+    }
+
+    @Test("learn reuses an existing catalog entry keyed by source handle")
+    func learn_reusesCatalogEntry() async throws {
+        let (estate, _) = try await makeEstate()
+        let r1 = try await estate.learn(
+            LearnFrame(source: sampleSource(), handle: "https://example.com/a"),
+            now: Date(timeIntervalSince1970: 1_700_000_300))
+        // Same source handle, different id — the existing entry must be reused.
+        let r2 = try await estate.learn(
+            LearnFrame(source: sampleSource(id: "src-2"), handle: "https://example.com/b"),
+            now: Date(timeIntervalSince1970: 1_700_000_400))
+        #expect(r1.sourceCatalogID == "src-1")
+        #expect(r2.sourceCatalogID == "src-1")
+    }
+
+    @Test("learn fails loud only on a genuinely invalid (empty) handle")
+    func learn_failsLoudOnEmptyHandle() async throws {
+        let (estate, _) = try await makeEstate()
+        await #expect(throws: LocusKitError.self) {
+            _ = try await estate.learn(
+                LearnFrame(source: self.sampleSource(), handle: ""),
+                now: Date(timeIntervalSince1970: 1_700_000_500))
         }
     }
 }

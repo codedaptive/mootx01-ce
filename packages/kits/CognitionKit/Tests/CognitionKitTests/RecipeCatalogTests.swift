@@ -15,12 +15,16 @@ struct RecipeCatalogTests {
     @Test("catalog lists all shipped recipes")
     func catalogListsAllShippedRecipes() {
         // Both versions of every recipe ship, so every recipe registers
-        // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational
-        // recipes plus the 14 reasoning lenses plus the 2 analytics lenses.
+        // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
+        // plus the 14 reasoning lenses plus the 3 analytics lenses plus
+        // the 4 new temporal/entropy lenses (moment, rhythm, precedence,
+        // complexity) = 23 total.
         #expect(RecipeCatalog.names.sorted() == [
             "anticipate",
+            "apriori_rules",
             "association_rules",
             "bias",
+            "complexity",
             "constellation",
             "contradiction",
             "drift",
@@ -32,7 +36,10 @@ struct RecipeCatalogTests {
             "latent_themes",
             "migration_benchmark",
             "mind_overlap",
+            "moment",
             "partial_cue_recall",
+            "precedence",
+            "rhythm",
             "theme_weather",
             "trust_grounded_synthesis",
             "tunnel_successor",
@@ -72,6 +79,50 @@ struct RecipeCatalogTests {
         let descriptor = RecipeDescriptor(mb)
         #expect(descriptor.name == "migration_benchmark")
         #expect(descriptor.requiredCapabilities == [.deriveBranch, .benchmark, .promoteBranch])
+    }
+
+    @Test("catalog names match catalog.rs declaration order — 23 entries")
+    func catalogNamesMatchRustDeclarationOrder() {
+        // Literal ordered list mirroring `recipe_catalog()` in catalog.rs.
+        // Any reordering on either side, or a recipe added on one side but not
+        // the other, breaks this test — that is its purpose.
+        #expect(RecipeCatalog.names == [
+            "grounded_synthesis",
+            "migration_benchmark",
+            "keystones",
+            "constellation",
+            "free_association",
+            "theme_weather",
+            "latent_themes",
+            "bias",
+            "drift",
+            "contradiction",
+            "trust_grounded_synthesis",
+            "partial_cue_recall",
+            "anticipate",
+            "tunnel_successor",
+            "mind_overlap",
+            "estate_divergence",
+            "association_rules",
+            "formal_concepts",
+            "apriori_rules",
+            "moment",
+            "rhythm",
+            "precedence",
+            "complexity",
+        ])
+    }
+
+    @Test("apriori_rules descriptor matches catalog.rs byte-for-byte")
+    func aprioriRulesDescriptorMatchesCatalogRS() throws {
+        // Byte-for-byte parity anchor with the Rust apriori_rules descriptor
+        // in catalog.rs. The Rust test `apriori_rules_descriptor_matches_swift`
+        // mirrors this test — both must stay in sync.
+        let d = try #require(RecipeCatalog.descriptor(named: "apriori_rules"))
+        #expect(d.version == "1.0.0")
+        #expect(d.description ==
+            "Read the estate's audit log and mine multi-antecedent association rules via the Apriori algorithm.")
+        #expect(d.requiredCapabilities == [.associationRuleMining])
     }
 
     @Test("unknown name yields nil descriptor")

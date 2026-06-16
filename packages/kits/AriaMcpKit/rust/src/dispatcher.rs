@@ -1,0 +1,175 @@
+//! The method router — dispatches JSON-RPC requests to handlers.
+//!
+//! Mirrors the Swift `ARIA_MCPDispatcher.route(_:)` method: handles
+//! `initialize`, `ping`, `tools/list`, and `tools/call`. All other method
+//! names return a `methodNotFound` error.
+//!
+//! `tools/call` delegates to `crate::dispatch::dispatch_tool` which holds
+//! the full tool dispatch table (recipe tools, lens tools, lexicon tools).
+//!
+//! # Session ledger
+//!
+//! The `Dispatcher` owns a `SurfacedRecallLedger` that tracks which drawer ids
+//! have been returned to the AI client by `moot_memory_search` in this session.
+//! When a dereference verb (`moot_withdraw_memory`, `moot_update_memory`,
+//! `moot_confirm_memory`, `moot_move_memory`) targets an id that is present in
+//! the ledger, the tool runner calls `coordinator.mark_recall_used` to flip the
+//! trace-row reward bit to 1.0 (B-10a / DESIGN_TRACE_REWARD_2026-06-12.md).
+//!
+//! Interior mutability: the ledger uses `Mutex` internally so `Dispatcher` stays
+//! `&self` on `handle` (required by the single-threaded stdio loop).
+//!
+//! # Vault job ledger
+//!
+//! The `Dispatcher` also owns a `VaultJobLedger` that records completed vault
+//! export/import jobs. `moot_vault_export` and `moot_vault_import` record a
+//! completed `VaultJobRecord` in the ledger (Rust backend is synchronous).
+//! `moot_vault_job` looks up the record by job ID. The ledger is bounded to
+//! 100 entries to prevent unbounded memory growth in long-running servers.
+
+use crate::estate_registry::EstateRegistry;
+use crate::jsonrpc::{JSONRPCError, JSONRPCErrorCode, JSONRPCRequest, JSONRPCResponse, JsonValue};
+use crate::surfaced_recall_ledger::SurfacedRecallLedger;
+use crate::tool_list::build_tool_list;
+use crate::vault_tools::VaultJobLedger;
+
+/// The complete set of MCP protocol versions this server implements, most
+/// recent first. The first entry is returned to any client that requests an
+/// unsupported or absent version.
+///
+/// Sources:
+/// - "2025-11-25": Claude Desktop's current protocol version; backward-
+///   compatible wire shape. The server responds with the same capabilities
+///   shape for all three revisions.
+/// - "2025-03-26": the MCP stable revision following 2024-11-05; adds
+///   elicitation + audio content type; capabilities shape is unchanged.
+/// - "2024-11-05": the initial stable MCP revision implemented by the ARIA_MCP
+///   surface (tools, resources, prompts, logging).
+///
+/// Per the MCP specification §3 (Initialization):
+///   "If the server does not support the client's requested version, it SHOULD
+///    respond with its latest supported version. The client MUST then decide
+///    whether to proceed or abort."
+///
+/// Parity: mirrors Swift `ARIA_MCPDispatcher.supportedProtocolVersions` exactly.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-03-26", "2024-11-05"];
+
+/// The method router and tool registry. Owns the estate registry and
+/// the tool list; dispatches each inbound request to the right handler.
+pub struct Dispatcher {
+    pub(crate) registry: EstateRegistry,
+    server_name: String,
+    server_version: String,
+    tools: serde_json::Value,
+    /// Session-scoped ledger of drawer ids surfaced by `moot_memory_search`.
+    /// Consulted by dereference verbs to trigger reward-trace marking (B-10a).
+    pub(crate) ledger: SurfacedRecallLedger,
+    /// Process-scoped ledger of completed vault export/import jobs.
+    /// `moot_vault_export` / `moot_vault_import` write here on completion;
+    /// `moot_vault_job` reads by job ID. Bounded to 100 entries.
+    vault_ledger: VaultJobLedger,
+}
+
+impl Dispatcher {
+    /// Construct from an estate registry and server identity.
+    pub fn new(registry: EstateRegistry, name: &str, version: &str) -> Self {
+        let tools = build_tool_list();
+        Dispatcher {
+            registry,
+            server_name: name.to_owned(),
+            server_version: version.to_owned(),
+            tools,
+            ledger: SurfacedRecallLedger::new(),
+            vault_ledger: VaultJobLedger::new(),
+        }
+    }
+
+    /// Handle one parsed inbound request. Returns the response.
+    /// (Notifications are already filtered out by the stdio loop before
+    /// reaching this method.)
+    pub fn handle(&self, request: &JSONRPCRequest) -> JSONRPCResponse {
+        let id = request.id.clone().unwrap_or(JsonValue::Null);
+        match self.route(request) {
+            Ok(result) => JSONRPCResponse::ok(id, result),
+            Err(e) => JSONRPCResponse::failure(id, e),
+        }
+    }
+
+    fn route(&self, request: &JSONRPCRequest) -> Result<serde_json::Value, JSONRPCError> {
+        match request.method.as_str() {
+            "initialize" => self.initialize(request.params.as_ref()),
+            "ping" => Ok(serde_json::json!({})),
+            "tools/list" => Ok(serde_json::json!({ "tools": self.tools })),
+            "tools/call" => self.tools_call(request.params.as_ref()),
+            _ => Err(JSONRPCError::new(
+                JSONRPCErrorCode::METHOD_NOT_FOUND,
+                format!("Method not found: {}", request.method),
+            )),
+        }
+    }
+
+    fn initialize(&self, params: Option<&JsonValue>) -> Result<serde_json::Value, JSONRPCError> {
+        // MCP spec §3 (Initialization) — explicit protocol-version negotiation.
+        //
+        // Rule: if the client requests a version this server supports, echo it
+        // back exactly. If the client requests an unsupported version, respond
+        // with the server's latest supported version; the client then decides
+        // whether to proceed or abort.
+        //
+        // This replaces the previous stub that echoed any version unconditionally,
+        // which silently claimed support for contracts the server did not implement.
+        //
+        // If the client omits protocolVersion entirely (non-conforming client),
+        // default to the latest supported version so the handshake still completes.
+        //
+        // Parity: mirrors Swift ARIA_MCPDispatcher.initialize(params:) exactly.
+        let requested = params
+            .and_then(|p| p.as_object())
+            .and_then(|o| o.get("protocolVersion"))
+            .and_then(|v| v.as_str());
+
+        let negotiated = match requested {
+            Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v.to_owned(),
+            // Unsupported or absent version → respond with latest per MCP spec §3.
+            _ => SUPPORTED_PROTOCOL_VERSIONS[0].to_owned(),
+        };
+
+        Ok(serde_json::json!({
+            "protocolVersion": negotiated,
+            "capabilities": {
+                // tools/list and tools/call are the only primitives this
+                // server implements (v1). Resources, prompts, sampling,
+                // elicitation, and tasks are not advertised.
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": self.server_name,
+                "version": self.server_version
+            }
+        }))
+    }
+
+    fn tools_call(&self, params: Option<&JsonValue>) -> Result<serde_json::Value, JSONRPCError> {
+        let obj = params.and_then(|p| p.as_object()).ok_or_else(|| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "tools/call requires a 'name' parameter",
+            )
+        })?;
+        let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            JSONRPCError::new(
+                JSONRPCErrorCode::INVALID_PARAMS,
+                "tools/call requires a 'name' parameter",
+            )
+        })?;
+        let arguments = obj
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Object(Default::default()));
+        let args_map = arguments.as_object().cloned().unwrap_or_default();
+
+        crate::dispatch::dispatch_tool_with_vault_ledger(
+            name, &args_map, &self.registry, &self.ledger, &self.vault_ledger,
+        )
+    }
+}

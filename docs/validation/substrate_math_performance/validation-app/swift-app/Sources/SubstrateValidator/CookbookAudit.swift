@@ -21,11 +21,11 @@
 // the CRC gate, never in place of it.
 //
 // Map source: the primitive→cookbook-§→shipping-Swift-source mapping is read
-// live from docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md:
+// live from docs/engineering/HARNESS_REFERENCE.md:
 //   - the §2.0 four-package table gives "| primitive | package | Swift file | Rust module |"
 //   - the per-primitive "#### `name` — §X.Y — CRC ..." headings give the cookbook §.
 // The algorithm pseudocode is read from
-// docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md.
+// docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md.
 
 import Foundation
 
@@ -70,8 +70,8 @@ enum CookbookAudit {
             .standardizedFileURL
     }
 
-    private static let cookbookName = "GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md"
-    private static let harnessName = "HARNESS_REFERENCE_v1.0_2026-05-28.md"
+    private static let cookbookName = "GENIUSLOCUS_ENGINEERING_COOKBOOK.md"
+    private static let harnessName = "HARNESS_REFERENCE.md"
 
     // MARK: - Map model
 

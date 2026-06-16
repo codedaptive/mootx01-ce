@@ -33,7 +33,7 @@ import Foundation
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -548,13 +548,14 @@ public struct MatrixTier: Sendable, Equatable, Codable {
             }
 
         // Full rebuild: start watermark at .zero so the fold processes
-        // every entry as "new".
-        let (deltas, newWatermark) = TemporalCausalityFold.fold(
+        // every entry as "new". fold() returns a FoldResult (named struct
+        // mirroring Rust); access .deltas and .newWatermark by name.
+        let foldResult = TemporalCausalityFold.fold(
             entries: temporalEntries,
             windowMinutes: Self.temporalWindowMinutes,
             startWatermark: .zero)
 
-        for (foldKey, delta) in deltas {
+        for (foldKey, delta) in foldResult.deltas {
             // Map TemporalCausalityKey → (source, target, deltaMinutes) for
             // applyTemporalEvent. applyTemporalEvent internally calls
             // Self.lagBucket again, so we pass the bucket value directly as
@@ -575,7 +576,7 @@ public struct MatrixTier: Sendable, Equatable, Codable {
                 delta: delta)
         }
 
-        tier.temporalWatermarkHLC = newWatermark
+        tier.temporalWatermarkHLC = foldResult.newWatermark
         return tier
     }
 

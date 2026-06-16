@@ -1,24 +1,29 @@
 // parity.rs — conformance gate for the GeniusLocusKit Rust port.
 //
 // The shared test vectors below encode the same scenarios the Swift
-// reference exercises in CrossEstateOverlapTests.swift. The vector
-// set is small (three estates at fixed zoom windows; queries at four
-// canonical regions) because the conformance unit here is the
-// overlap predicate, not the per-drawer recall payload. Per-drawer
-// parity is out of scope here because the GLK verb bodies have not
-// yet been wired to dispatch through a live locus_kit::Estate
-// (LocusKit Rust is fully shipped at 503 tests; the verb-wiring layer
-// is the remaining gap).
+// reference exercises in CrossEstateOverlapTests.swift. Three estates
+// at fixed zoom windows are queried at the canonical regions. Two
+// conformance units are gated here:
+//   1. the overlap predicate (which estates a region selects), and
+//   2. the per-drawer fan-out PAYLOAD — each contribution carries the
+//      drawer ids that estate actually recalled (parity with the Swift
+//      `fanOutRecallReturnsOverlappingContributionsAndSkipsDisjoint`
+//      test, projected to ids). The fan-out routes the supplied
+//      `RecallFrame` through each overlapping estate's live recall.
 //
-// Whenever the Swift predicate changes, this file must change with
-// it; the parity gate exists precisely to catch drift between ports.
+// Whenever the Swift predicate or fan-out payload changes, this file
+// must change with it; the parity gate exists precisely to catch drift
+// between ports.
 
 use std::sync::Arc;
 
 use genius_locus_kit::{EstateCoordinator, EstateHandle, GeniusLocusKitError, LatticeRegion};
+use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
-use locus_kit::estate_types::OwnerCredentials;
+use locus_kit::estate_types::{LatticeAnchor, OwnerCredentials};
+use locus_kit::filter::{Filter, RecallFrame};
+use locus_kit::frames::CaptureFrame;
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
 
@@ -151,14 +156,83 @@ fn inverted_region_throws() {
     );
 }
 
+/// `now` for the capture + recall in the payload test. After the
+/// `1_700_000_000` store-open epoch so the rows are valid.
+const FAN_OUT_NOW: i64 = 1_700_000_100;
+
+/// Capture one tagged drawer into `handle` and return its id.
+fn capture_one(coord: &EstateCoordinator, handle: &EstateHandle, tag: &str) -> String {
+    let frame = CaptureFrame::new(
+        &format!("content-{tag}"),
+        CaptureChannel::Typed,
+        &format!("room-{tag}"),
+        LatticeAnchor::udc("004"),
+        "test",
+        "minilm-v6",
+    );
+    coord
+        .capture(handle, frame, FAN_OUT_NOW)
+        .expect("capture")
+        .id
+}
+
 #[test]
 fn fan_out_returns_contribution_per_overlapping_estate() {
     let (coord, h_low, h_mid, _h_high) = open_three_estates();
+    // Routing parity: region [4,8] overlaps low and mid, not high.
+    // `.unconfirmed` so the default-prepend (.userConfirmed) does not
+    // prune freshly captured provenance==0 rows — mirrors the Swift
+    // CrossEstateOverlapTests payload test.
+    let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
     let contributions = coord
-        .fan_out_recall(LatticeRegion::new(4, 8))
+        .fan_out_recall(frame, LatticeRegion::new(4, 8), FAN_OUT_NOW)
         .expect("fan-out");
     assert_eq!(contributions.len(), 2);
     let handles: std::collections::HashSet<EstateHandle> =
         contributions.iter().map(|c| c.handle).collect();
     assert_eq!(handles, std::collections::HashSet::from([h_low, h_mid]));
+}
+
+/// PAYLOAD parity (P1-1): each contribution carries the drawer ids the
+/// estate actually recalled — not an empty placeholder. Parity with the
+/// Swift `fanOutRecallReturnsOverlappingContributionsAndSkipsDisjoint`,
+/// projected to ids. Captures one tagged drawer per estate; the [4,8]
+/// fan-out must carry low's and mid's ids in their own contributions and
+/// must not leak high's id (storage isolation), and high (disjoint) must
+/// be absent entirely.
+#[test]
+fn fan_out_carries_real_drawer_ids_per_estate() {
+    let (coord, h_low, h_mid, h_high) = open_three_estates();
+    let id_low = capture_one(&coord, &h_low, "low");
+    let id_mid = capture_one(&coord, &h_mid, "mid");
+    let id_high = capture_one(&coord, &h_high, "high");
+
+    let frame = RecallFrame::new(vec![Filter::Unconfirmed]);
+    let contributions = coord
+        .fan_out_recall(frame, LatticeRegion::new(4, 8), FAN_OUT_NOW)
+        .expect("fan-out");
+
+    let by_handle: std::collections::HashMap<EstateHandle, &Vec<String>> =
+        contributions.iter().map(|c| (c.handle, &c.drawer_ids)).collect();
+
+    // Two overlapping estates present; disjoint high absent.
+    assert_eq!(contributions.len(), 2);
+    assert!(by_handle.contains_key(&h_low));
+    assert!(by_handle.contains_key(&h_mid));
+    assert!(!by_handle.contains_key(&h_high), "disjoint estate must be absent");
+
+    // Each contribution carries ITS OWN recalled drawer id — real payload.
+    assert!(
+        by_handle[&h_low].contains(&id_low),
+        "low contribution must carry its own captured drawer id; got {:?}",
+        by_handle[&h_low]
+    );
+    assert!(
+        by_handle[&h_mid].contains(&id_mid),
+        "mid contribution must carry its own captured drawer id; got {:?}",
+        by_handle[&h_mid]
+    );
+    // Storage isolation: low/mid must not carry high's id.
+    assert!(!by_handle[&h_low].contains(&id_high));
+    assert!(!by_handle[&h_mid].contains(&id_high));
 }

@@ -32,10 +32,19 @@ pub struct ContradictionOutput {
 pub fn run_contradiction(
     coord: &EstateCoordinator,
     handle: &EstateHandle,
-    frame: RecallFrame,
+    mut frame: RecallFrame,
     threshold: f32,
     now: i64,
 ) -> Result<ContradictionOutput, RecipeRunError> {
+    // Force .full hydration: this recipe scores pairwise content shingle
+    // similarity off the recalled drawers' `content`. Per LocusKit spec § 7.3,
+    // .structured / .bitmapOnly recall returns content == "" (no blob reads),
+    // which would make every shingle_similarity zero and silently produce a
+    // flat cohesion vector (no contradiction ever detected). The override
+    // preserves all other frame fields (filter_chain, limit, ordering, as_of,
+    // trace_limit) and cannot be left to the caller. Mirrors the Swift
+    // Contradiction.run .full override (cd4d53f3).
+    frame.hydration_level = locus_kit::filter::HydrationLevel::Full;
     let drawers = coord
         .recall(handle, frame, now)
         .map_err(|e| SubstrateError::new("recall", format!("{e:?}")))?;

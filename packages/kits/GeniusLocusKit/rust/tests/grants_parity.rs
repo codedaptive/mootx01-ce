@@ -1,4 +1,11 @@
 // grants_parity.rs — Cross-port conformance tests for the grant subsystem.
+// Sections:
+//   GRT-01 — GF(p) Lagrange reconstruction
+//   GRT-02 — HKDF scope-key derivation
+//   GRT-03 — Coordinator grant surface integration
+//   GRT-04 — Swift-pinned cross-port vectors
+//   GRT-05 — CustodyMode enforcement on federated_recall (P0 blocker)
+//   GRT-06 — InferenceRemainingBudget enforcement (P0 blocker)
 //
 // PAR-4-GL1 conformance gate. Three assertions must hold bit-identically
 // between the Swift and Rust ports:
@@ -38,8 +45,9 @@
 // matches the Swift test vector exactly).
 
 use genius_locus_kit::{
-    CustodyMode, DecayShareProvider, DriftRate, EstateCoordinator, Grant, GrantLifetime,
-    GrantOptions, GrantScope, IssueGrantResult, LagrangeDecayKey, ReferenceDecayShareProvider,
+    CustodyMode, DecayPolicy, DecayShareProvider, DriftRate, EstateCoordinator,
+    FederatedReadRefusalReason, GeniusLocusKitError, Grant, GrantLifetime, GrantOptions,
+    GrantScope, IssueGrantResult, LagrangeDecayKey, ReferenceDecayShareProvider,
     ReSharePermission, ScopeKeyVault,
 };
 use std::sync::Arc;
@@ -47,6 +55,7 @@ use uuid::Uuid;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::estate_types::OwnerCredentials;
+use locus_kit::filter::{Filter, RecallFrame};
 
 const NOW: i64 = 1_700_000_000;
 const NOW_F64: f64 = 1_700_000_000.0;  // Apple reference date seconds
@@ -331,7 +340,7 @@ fn grt03f_grant_store_populated_after_issue() {
         coord.issue_grant(&h, opts, &[0xEEu8; 32], NOW_F64).expect("issue");
 
     let store = coord.grant_store(&h).expect("store present");
-    let active = store.active(NOW_F64 + 1.0);
+    let active = store.active(NOW_F64 + 1.0).expect("active");
     assert_eq!(active.len(), 1, "one active grant after issue");
     assert_eq!(active[0].grant.id, grant.id, "grant id matches");
 }
@@ -537,6 +546,690 @@ fn grt04d_session_key_matches_swift_vector() {
         "GRT-04d: session key must match Swift-computed vector"
     );
     assert_eq!(session_at_t1.len(), 32, "session key is 32 bytes");
+}
+
+// ---------------------------------------------------------------------------
+// GRT-05 — CustodyMode enforcement on federated_recall
+//
+// Mirrors Swift CrossEstateFederationTests tests 15, 16, 17 (mode-1, mode-2,
+// mode-4). Each test opens two estates, issues a grant with the relevant
+// custody mode, then calls federated_recall and asserts the correct outcome.
+//
+// The Rust coordinator is single-threaded so &mut self serialises all reads.
+// ---------------------------------------------------------------------------
+
+/// Open a two-estate coordinator. Returns (coord, source_handle,
+/// requester_handle). The source has a matching InMemoryDrawerStore; the
+/// requester is an empty estate used only as the identity.
+fn open_two_estate_coord() -> (
+    EstateCoordinator,
+    genius_locus_kit::EstateHandle,
+    genius_locus_kit::EstateHandle,
+) {
+    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    use locus_kit::drawer_store::DrawerStore;
+    use locus_kit::estate_types::OwnerCredentials;
+    use std::sync::Arc;
+
+    let mut coord = EstateCoordinator::new();
+    let src_store: Arc<dyn DrawerStore> =
+        Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+    let req_store: Arc<dyn DrawerStore> =
+        Arc::new(InMemoryDrawerStore::new(NOW, None).unwrap());
+    let src = coord.open(src_store, OwnerCredentials::new("source"), 0, 100).expect("open source");
+    let req = coord.open(req_store, OwnerCredentials::new("requester"), 0, 100).expect("open requester");
+    (coord, src, req)
+}
+
+/// GRT-05a: mode-1 (Mediated) — vault holds key → federated_recall succeeds.
+///
+/// Swift mirror: CrossEstateFederationTests test 15
+/// `mediatedGrantVaultHoldsKeyAllowsRead`
+#[test]
+fn grt05a_mode1_vault_holds_key_allows_recall() {
+    let (mut coord, src, req) = open_two_estate_coord();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::Mediated,
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    // Issue with budget > 0 so the budget gate passes.
+    let identity_key = [0xAAu8; 32];
+    let IssueGrantResult { grant, .. } =
+        coord.issue_grant(&src, opts, &identity_key, NOW_F64).expect("issue");
+    // Set budget to 1.0 directly via the store so the budget gate passes.
+    coord.grant_store_mut(&src)
+        .expect("store")
+        .set_budget(grant.id, 1.0)
+        .expect("set_budget");
+
+    // Vault holds the key (issue_grant loaded it for mode 1).
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        &src,
+        &req,
+        NOW_F64 + 1.0,
+        NOW + 1,
+    );
+    assert!(
+        result.is_ok(),
+        "mode-1 with vault key should succeed; got {:?}", result.err()
+    );
+}
+
+/// GRT-05b: mode-1 (Mediated) — vault key removed → CustodyRefused.
+///
+/// Swift mirror: CrossEstateFederationTests implicit via test 15 / physicalDecay analogy.
+/// Spec Appendix B.1: "every read is a live request to the substrate".
+/// If the vault no longer holds the key the read must refuse.
+#[test]
+fn grt05b_mode1_vault_key_missing_refuses() {
+    let (mut coord, src, req) = open_two_estate_coord();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::Mediated,
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } =
+        coord.issue_grant(&src, opts, &[0xBBu8; 32], NOW_F64).expect("issue");
+    coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 1.0).expect("set_budget");
+
+    // Simulate vault key loss: revoke from vault only (revoke the grant then
+    // re-insert an active copy without the vault key).
+    // Easiest: reload the vault without the key by removing and re-opening.
+    // Instead, use revoke_grant which also removes the vault key, then insert
+    // a fresh store entry manually.
+    // Simpler approach: drop and re-open the estate so the vault is empty,
+    // then reinsert the grant into the store manually.
+    // Actually: the coordinator's `close` + `reopen` is complex in tests.
+    // The clean path: remove the vault key explicitly via `remove_scope_key`.
+    coord.scope_vault_mut(&src)
+        .expect("vault")
+        .remove_scope_key(grant.id);
+
+    // budget is still > 0 but vault key is gone
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        &src,
+        &req,
+        NOW_F64 + 1.0,
+        NOW + 1,
+    );
+    let err = result.expect_err("mode-1 with missing vault key must refuse");
+    assert_eq!(
+        err,
+        GeniusLocusKitError::CrossEstateReadRefused {
+            source: Uuid::from_bytes(src.estate_uuid),
+            requester: Uuid::from_bytes(req.estate_uuid),
+            reason: FederatedReadRefusalReason::CustodyRefused,
+        },
+        "mode-1 with missing vault key must refuse with CustodyRefused"
+    );
+}
+
+/// GRT-05c: mode-2 (HandedOver) — no vault check; succeeds within window.
+///
+/// Swift mirror: CrossEstateFederationTests test 16
+/// `handedOverGrantAllowsReadWithinWindow`
+#[test]
+fn grt05c_mode2_handed_over_allows_recall_within_window() {
+    let (mut coord, src, req) = open_two_estate_coord();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::HandedOver,
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } =
+        coord.issue_grant(&src, opts, &[0xCCu8; 32], NOW_F64).expect("issue");
+    coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 1.0).expect("set_budget");
+
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        &src,
+        &req,
+        NOW_F64 + 1.0,
+        NOW + 1,
+    );
+    assert!(
+        result.is_ok(),
+        "mode-2 within window should succeed; got {:?}", result.err()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GRT-06 — InferenceRemainingBudget enforcement on federated_recall
+//
+// Mirrors Swift CrossEstateFederationTests tests 18, 19, 20.
+// ---------------------------------------------------------------------------
+
+/// GRT-06a: budget debits per read and persists.
+///
+/// Swift mirror: CrossEstateFederationTests test 18
+/// `budgetDebitsPerReadAndPersists`
+///
+/// A grant with full budget (1.0) must have budget reduced by
+/// BUDGET_DEBIT_PER_READ (0.01) after one recall.
+#[test]
+fn grt06a_budget_debits_per_read() {
+    let (mut coord, src, req) = open_two_estate_coord();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::HandedOver,
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } =
+        coord.issue_grant(&src, opts, &[0xDDu8; 32], NOW_F64).expect("issue");
+    coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 1.0).expect("set_budget");
+
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        &src,
+        &req,
+        NOW_F64 + 1.0,
+        NOW + 1,
+    );
+    assert!(result.is_ok(), "first recall should succeed");
+
+    let budget_after = coord.grant_store_mut(&src)
+        .expect("store")
+        .get(grant.id)
+        .expect("get ok")
+        .expect("grant present")
+        .grant
+        .inference_remaining_budget;
+
+    // Budget should be 1.0 - 0.01 = 0.99 (within floating-point tolerance).
+    let expected = 1.0 - EstateCoordinator::BUDGET_DEBIT_PER_READ;
+    assert!(
+        (budget_after - expected).abs() < 1e-9,
+        "budget after one read should be {:.6}, got {:.6}", expected, budget_after
+    );
+}
+
+/// GRT-06b: exhausted budget refuses with BudgetExhausted, no content leak.
+///
+/// Swift mirror: CrossEstateFederationTests test 19
+/// `exhaustedBudgetRefusesWithNoContentLeak`
+#[test]
+fn grt06b_exhausted_budget_refuses() {
+    let (mut coord, src, req) = open_two_estate_coord();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::HandedOver,
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } =
+        coord.issue_grant(&src, opts, &[0xEEu8; 32], NOW_F64).expect("issue");
+    // Set budget to exactly 0.0 — exhausted.
+    coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 0.0).expect("set_budget");
+
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        &src,
+        &req,
+        NOW_F64 + 1.0,
+        NOW + 1,
+    );
+    let err = result.expect_err("exhausted budget must refuse");
+    assert_eq!(
+        err,
+        GeniusLocusKitError::CrossEstateReadRefused {
+            source: Uuid::from_bytes(src.estate_uuid),
+            requester: Uuid::from_bytes(req.estate_uuid),
+            reason: FederatedReadRefusalReason::BudgetExhausted,
+        },
+        "exhausted budget must refuse with BudgetExhausted"
+    );
+}
+
+/// GRT-06c: budget debit clamps at 0.0, never goes negative.
+///
+/// Swift mirror: CrossEstateFederationTests test 20
+/// `budgetDebitClampsAtZero`
+///
+/// Over-debiting (amount > current) must clamp at 0.0, not produce a
+/// negative budget. This is enforced in GrantStore::debit_budget.
+#[test]
+fn grt06c_budget_debit_clamps_at_zero() {
+    use genius_locus_kit::GrantStore;
+    use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
+    use std::sync::Arc;
+    use persistence_kit::inmemory::InMemoryStorage;
+
+    let grant_storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()))
+        as Arc<dyn persistence_kit::storage::Storage>;
+    let store = GrantStore::new(grant_storage).expect("store init");
+    let grant_id = Uuid::new_v4();
+    let grant = Grant {
+        id: grant_id,
+        grantee_estate_id: Uuid::new_v4(),
+        scope: GrantScope::WholeEstate,
+        content_level: 0,
+        lifetime: GrantLifetime::Permanent,
+        custody_mode: CustodyMode::HandedOver,
+        re_share_permission: ReSharePermission::None,
+        inference_remaining_budget: 0.1,
+        issued_at: NOW_F64,
+        signature: vec![],
+    };
+    store.insert(&grant).expect("insert");
+
+    // Debit more than the current balance — should clamp at 0.0.
+    store.debit_budget(grant_id, 5.0).expect("debit");
+
+    let budget_after = store.get(grant_id)
+        .expect("get ok")
+        .expect("grant present after debit")
+        .grant
+        .inference_remaining_budget;
+    assert!(
+        budget_after >= 0.0,
+        "budget must not go negative; got {}", budget_after
+    );
+    assert!(
+        budget_after.abs() < 1e-9,
+        "budget after over-debit should be 0.0, got {}", budget_after
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GRT-07 — Concurrency double-spend force-tests (P0 blocker)
+//
+// Verifies that concurrent federated reads cannot drive the inference budget
+// below zero or double-grant the last quantum.
+//
+// Rust enforcement model:
+//   The `EstateCoordinator` is `!Sync` and must be accessed from a single
+//   thread or behind a `Mutex`. In the MCP server it lives in a `Mutex<_>`.
+//   The `GrantStore` is backed by `InMemoryStorage`, whose `Mutex<State>`
+//   serialises all row operations. These two locks together prevent
+//   double-spending in the same way the Swift actor's single-threaded serial
+//   queue does.
+//
+//   The force-test simulates the failure mode by spawning N threads, each
+//   of which holds a clone of the `Arc<dyn Storage>` (not the
+//   `EstateCoordinator`) and calls `debit_budget` concurrently. Because the
+//   storage backend's internal mutex serialises all writes, only one thread
+//   can win the race to debit the last quantum and the budget must never go
+//   negative.
+//
+// Mirror of Swift CrossEstateFederationTests (concurrent budget tests).
+// ---------------------------------------------------------------------------
+
+/// GRT-07a: Sequential debits against the GrantStore never drive the budget
+/// below zero.
+///
+/// This test verifies the clamp-at-zero invariant through the storage layer:
+/// after N debits each larger than the remaining budget, the final persisted
+/// budget must be exactly 0.0 — never negative.
+///
+/// Rust enforcement model:
+///   The `EstateCoordinator` is `!Sync` and serialises all access behind a
+///   `Mutex<EstateCoordinator>` in the MCP server. The coordinator's
+///   `federated_recall` takes `&mut self` which prevents reentrancy from the
+///   same thread. The test validates the storage-layer clamp; the
+///   coordinator-level serial guarantee is tested in GRT-07b.
+///
+/// Swift mirror: CrossEstateFederationTests concurrent budget gate tests.
+/// The Swift actor enforces the same invariant via its serial executor.
+#[test]
+fn grt07a_sequential_debits_never_go_negative() {
+    use genius_locus_kit::GrantStore;
+    use persistence_kit::inmemory::InMemoryStorage;
+    use persistence_kit::storage::Storage;
+
+    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()))
+        as Arc<dyn Storage>;
+    let store = GrantStore::new(Arc::clone(&storage)).expect("store init");
+
+    // Seed a grant with exactly one quantum of budget.
+    let grant_id = Uuid::new_v4();
+    let grant = Grant {
+        id: grant_id,
+        grantee_estate_id: Uuid::new_v4(),
+        scope: GrantScope::WholeEstate,
+        content_level: 0,
+        lifetime: GrantLifetime::Permanent,
+        custody_mode: CustodyMode::HandedOver,
+        re_share_permission: ReSharePermission::None,
+        inference_remaining_budget: EstateCoordinator::BUDGET_DEBIT_PER_READ,
+        issued_at: NOW_F64,
+        signature: vec![],
+    };
+    store.insert(&grant).expect("insert");
+
+    // Apply 8 sequential debits. Each sees the current budget and clamps.
+    // Only the first debit reduces a positive budget; the rest hit 0.0.
+    let n_debits = 8;
+    let mut positive_count = 0usize;
+    for _ in 0..n_debits {
+        let pre = store.debit_budget(grant_id, EstateCoordinator::BUDGET_DEBIT_PER_READ)
+            .expect("debit");
+        if pre > 0.0 { positive_count += 1; }
+    }
+
+    // Post-condition: final budget must be >= 0.0 (clamped, not negative).
+    let final_budget = store.get(grant_id)
+        .expect("get ok")
+        .expect("grant present")
+        .grant
+        .inference_remaining_budget;
+    assert!(
+        final_budget >= 0.0,
+        "GRT-07a: debits must not produce negative budget; got {final_budget}"
+    );
+    assert!(
+        final_budget.abs() < 1e-9,
+        "GRT-07a: final budget must be 0.0, got {final_budget}"
+    );
+
+    // Post-condition: exactly one debit observed positive pre-budget.
+    assert_eq!(
+        positive_count, 1,
+        "GRT-07a: exactly one debit should observe a positive pre-budget"
+    );
+}
+
+/// GRT-07b: Concurrent federated reads through a `Mutex<EstateCoordinator>`
+/// cannot double-grant the last budget quantum.
+///
+/// N threads each hold a `Arc<Mutex<EstateCoordinator>>` and call
+/// `federated_recall` concurrently. Because every call acquires the mutex
+/// before proceeding, the calls are serialised — only one can run at a time.
+/// The budget gate inside `federated_recall` checks the budget, refuses if
+/// exhausted, and debits atomically (read-then-write inside a storage
+/// transaction). The Mutex ensures no two calls interleave.
+///
+/// Expected result: exactly one call succeeds (the one that sees budget > 0),
+/// and all subsequent calls fail with `BudgetExhausted`.
+///
+/// Rust enforcement model:
+///   `EstateCoordinator` is `!Sync`. The `Mutex<EstateCoordinator>` in
+///   the MCP server is the equivalent of the Swift actor's serial queue.
+///   This test mirrors that pattern directly.
+///
+/// Swift mirror: CrossEstateFederationTests concurrent budget gate tests.
+#[test]
+fn grt07b_concurrent_coordinator_recalls_do_not_double_grant_last_quantum() {
+    use std::sync::{Arc, Mutex};
+
+    // Build a two-estate coordinator behind a Mutex.
+    let mut inner_coord = EstateCoordinator::new();
+    let src_store: Arc<dyn locus_kit::drawer_store::DrawerStore> =
+        Arc::new(locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap());
+    let req_store: Arc<dyn locus_kit::drawer_store::DrawerStore> =
+        Arc::new(locus_kit::drawer_store_inmemory::InMemoryDrawerStore::new(NOW, None).unwrap());
+    let src = inner_coord.open(src_store, locus_kit::estate_types::OwnerCredentials::new("source"), 0, 100).expect("open source");
+    let req = inner_coord.open(req_store, locus_kit::estate_types::OwnerCredentials::new("requester"), 0, 100).expect("open req");
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+
+    // Issue a grant with exactly one quantum of budget.
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::HandedOver,
+        lifetime: GrantLifetime::Permanent,
+        content_level: 0,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } =
+        inner_coord.issue_grant(&src, opts, &[0xFFu8; 32], NOW_F64).expect("issue");
+    // Set budget to exactly one quantum.
+    inner_coord.grant_store_mut(&src).expect("store")
+        .set_budget(grant.id, EstateCoordinator::BUDGET_DEBIT_PER_READ)
+        .expect("set_budget");
+
+    let coord = Arc::new(Mutex::new(inner_coord));
+
+    // Spawn N threads, each competing for the single federated recall quota.
+    let n_threads = 8;
+    let results: Arc<Mutex<Vec<Result<(), ()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::new();
+    for _ in 0..n_threads {
+        let coord_clone = Arc::clone(&coord);
+        let results_clone = Arc::clone(&results);
+        let src_c = src;
+        let req_c = req;
+        handles.push(std::thread::spawn(move || {
+            let mut guard = coord_clone.lock().unwrap();
+            let outcome = guard.federated_recall(
+                RecallFrame::new(vec![]),
+                &src_c,
+                &req_c,
+                NOW_F64 + 1.0,
+                NOW + 1,
+            );
+            let r = if outcome.is_ok() { Ok(()) } else { Err(()) };
+            results_clone.lock().unwrap().push(r);
+        }));
+    }
+    for h in handles { h.join().expect("thread panicked"); }
+
+    // Post-condition: exactly one call succeeded (budget was available).
+    let results = results.lock().unwrap();
+    let success_count = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(
+        success_count, 1,
+        "GRT-07b: exactly one recall should succeed when budget = one quantum; got {success_count}"
+    );
+
+    // Post-condition: the final stored budget is 0.0.
+    let final_budget = coord.lock().unwrap()
+        .grant_store_mut(&src)
+        .expect("store")
+        .get(grant.id)
+        .expect("get ok")
+        .expect("grant present")
+        .grant
+        .inference_remaining_budget;
+    assert!(
+        final_budget.abs() < 1e-9,
+        "GRT-07b: final budget must be 0.0 after one successful recall; got {final_budget}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GRT-07 — mode-4 time-aging custody (restored mode-4 slot)
+//
+// Mode 4 (`CustodyMode::TimeAging`) restores the Appendix B mode-4 slot as a
+// deterministic software decay policy. The effective content level halves every
+// half-life of elapsed time since started_at, floored at floor, computed against
+// an injected `now`. These tests pin the SAME attenuation values the Swift
+// `GRT04_TimeAgingCustodyTests` assert, so the discrete decay schedule is
+// bit-comparable across ports.
+// ---------------------------------------------------------------------------
+
+/// GRT-07a: `DecayPolicy::effective_level` halves each half-life and floors.
+///
+/// Swift mirror: GRT04_TimeAgingCustodyTests.effectiveLevelHalvesEachHalfLifeAndFloors
+/// — identical fixture (base 48, half-life 100s, floor 4) and identical
+/// expected values 48/24/12/6/4, proving the two ports agree on the discrete
+/// attenuation schedule.
+#[test]
+fn grt07a_effective_level_matches_swift_decay_schedule() {
+    let t0 = 1_000_000.0_f64; // Apple reference seconds, decay-clock origin
+    let policy = DecayPolicy { half_life_seconds: 100, started_at: t0, floor: 4 };
+    assert_eq!(policy.effective_level(48, t0), 48, "t0: undecayed");
+    assert_eq!(policy.effective_level(48, t0 + 100.0), 24, "one half-life: 24");
+    assert_eq!(policy.effective_level(48, t0 + 200.0), 12, "two half-lives: 12");
+    assert_eq!(policy.effective_level(48, t0 + 300.0), 6, "three half-lives: 6");
+    assert_eq!(policy.effective_level(48, t0 + 400.0), 4, "floor clamps the residual");
+    assert_eq!(policy.effective_level(48, t0 - 50.0), 48, "pre-start is undecayed");
+}
+
+/// GRT-07b: issuance + persisted read-back round-trips the decay policy.
+///
+/// Swift mirror: GRT04_TimeAgingCustodyTests.issueWithExplicitDecayFieldsPersistsPolicy.
+/// A mode-4 grant issued with explicit decay fields decodes back from the store
+/// carrying the same half-life, started_at, and floor in the dedicated columns.
+#[test]
+fn grt07b_issue_and_readback_round_trips_policy() {
+    let (mut coord, h) = open_coord();
+    let t0 = 1_000_000.0_f64;
+    let opts = GrantOptions {
+        grantee_estate_id: Uuid::new_v4(),
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::TimeAging(DecayPolicy {
+            half_life_seconds: 3600, started_at: t0, floor: 1,
+        }),
+        lifetime: GrantLifetime::Permanent,
+        content_level: 48,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, scope_key } =
+        coord.issue_grant(&h, opts, &[0x4Du8; 32], t0).expect("issue");
+    // Mode 4 hands the scope key to the recipient (mode-2 derivation).
+    assert!(scope_key.is_some(), "mode 4 returns the handed-over scope key");
+
+    let store = coord.grant_store(&h).expect("store present");
+    let stored = store.get(grant.id).expect("get").expect("row present");
+    match &stored.grant.custody_mode {
+        CustodyMode::TimeAging(p) => {
+            assert_eq!(p.half_life_seconds, 3600);
+            assert_eq!(p.floor, 1);
+            assert_eq!(p.started_at, t0, "decay clock round-trips through the column");
+        }
+        other => panic!("decoded custody mode is not TimeAging: {other:?}"),
+    }
+}
+
+/// GRT-07c: legacy `physicalDecay` token decodes (migrates) into TimeAging.
+///
+/// Swift mirror: GRT04_TimeAgingCustodyTests.legacyPhysicalDecayTokenDecodesIntoTimeAgingWithDefaults.
+/// A row carrying the legacy mode-4 token with NO decay columns must decode with
+/// documented defaults (30-day half-life, decay clock = issued_at, floor 0) —
+/// never a CorruptRow.
+#[test]
+fn grt07c_legacy_physical_decay_token_decodes_with_defaults() {
+    use std::collections::HashMap;
+    // issued_at as ISO-8601 for Apple-ref t0 = 1_000_000s. Build a text-dict row
+    // with the legacy token and no decay_* columns, then decode it.
+    let issued_iso = "2001-01-12T13:46:40Z"; // 2001-01-01 + 1_000_000s
+    let mut row: HashMap<&str, &str> = HashMap::new();
+    row.insert("id", "12345678-1234-1234-1234-123456789ABC");
+    row.insert("grantee_id", "ABCDEF01-2345-6789-ABCD-EF0123456789");
+    row.insert("custody_mode", "physicalDecay");
+    row.insert("reshare", "none");
+    row.insert("issued_at", issued_iso);
+
+    let stored = genius_locus_kit::GrantStore::decode_row(&row)
+        .expect("legacy physicalDecay row must decode, never CorruptRow");
+    match &stored.grant.custody_mode {
+        CustodyMode::TimeAging(p) => {
+            assert_eq!(p.half_life_seconds, DecayPolicy::DEFAULT_HALF_LIFE_SECONDS);
+            assert_eq!(p.floor, 0);
+            // started_at defaults to issued_at (Apple-ref 1_000_000, within rounding).
+            assert!((p.started_at - 1_000_000.0).abs() < 1.0,
+                "legacy row defaults the decay clock to issued_at; got {}", p.started_at);
+        }
+        other => panic!("legacy physicalDecay did not decode into TimeAging: {other:?}"),
+    }
+}
+
+/// GRT-07d: federation — a grant decayed to 0 (floor 0) refuses CustodyRefused.
+///
+/// Swift mirror: GRT04_TimeAgingCustodyTests.decayedToZeroFloorZeroRefusesCustody.
+#[test]
+fn grt07d_decayed_to_zero_floor_zero_refuses() {
+    let (mut coord, src, req) = open_two_estate_coord();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+    let t0 = NOW_F64;
+
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::TimeAging(DecayPolicy {
+            half_life_seconds: 100, started_at: t0, floor: 0,
+        }),
+        lifetime: GrantLifetime::Permanent,
+        content_level: 32,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } =
+        coord.issue_grant(&src, opts, &[0x4Eu8; 32], t0).expect("issue");
+    coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 1.0).expect("set_budget");
+
+    // t0 + 1000 (ten half-lives): effective level is 0 → refuse.
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        &src,
+        &req,
+        t0 + 1000.0,
+        NOW + 1000,
+    );
+    match result {
+        Err(GeniusLocusKitError::CrossEstateReadRefused { reason, .. }) => {
+            assert_eq!(reason, FederatedReadRefusalReason::CustodyRefused,
+                "decayed-to-zero grant refuses with CustodyRefused");
+        }
+        other => panic!("expected CustodyRefused, got {other:?}"),
+    }
+}
+
+/// GRT-07e: federation — a mid-decay grant (positive floor) proceeds and the
+/// budget debits, proving decay and budget compose.
+///
+/// Swift mirror: GRT04_TimeAgingCustodyTests.budgetDebitsWhileDecayAttenuates.
+#[test]
+fn grt07e_mid_decay_grant_proceeds_and_budget_debits() {
+    let (mut coord, src, req) = open_two_estate_coord();
+    let requester_uuid = Uuid::from_bytes(req.estate_uuid);
+    let t0 = NOW_F64;
+
+    let opts = GrantOptions {
+        grantee_estate_id: requester_uuid,
+        scope: GrantScope::WholeEstate,
+        custody_mode: CustodyMode::TimeAging(DecayPolicy {
+            half_life_seconds: 100, started_at: t0, floor: 1,
+        }),
+        lifetime: GrantLifetime::Permanent,
+        content_level: 48,
+        re_share_permission: ReSharePermission::None,
+    };
+    let IssueGrantResult { grant, .. } =
+        coord.issue_grant(&src, opts, &[0x4Fu8; 32], t0).expect("issue");
+    coord.grant_store_mut(&src).expect("store").set_budget(grant.id, 1.0).expect("set_budget");
+
+    // Mid-decay read (one half-life) succeeds (floor 1 keeps the grant usable).
+    let result = coord.federated_recall(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        &src,
+        &req,
+        t0 + 100.0,
+        NOW + 100,
+    );
+    assert!(result.is_ok(), "mid-decay grant should proceed; got {:?}", result.err());
+
+    let budget_after = coord.grant_store(&src).expect("store")
+        .get(grant.id).expect("get").expect("row")
+        .grant.inference_remaining_budget;
+    assert!((budget_after - 0.99).abs() < 1e-9,
+        "one read debits 0.01 regardless of decay state; got {budget_after}");
 }
 
 // ---------------------------------------------------------------------------

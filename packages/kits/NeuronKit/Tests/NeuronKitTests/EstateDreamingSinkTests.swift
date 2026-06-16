@@ -4,7 +4,33 @@ import GeniusLocusKit
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
+import IntellectusLib
+import SubstrateTypes
 @testable import NeuronKit
+
+// MARK: - Capturing sink (local to this file, mirrors NeuronKitTelemetryTests pattern)
+
+/// Records every received StatSample. Thread-safe via NSLock.
+private final class CapturingSink: StatsSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _samples: [StatSample] = []
+
+    func receive(_ sample: StatSample) {
+        lock.lock(); defer { lock.unlock() }
+        _samples.append(sample)
+    }
+
+    var samples: [StatSample] {
+        lock.lock(); defer { lock.unlock() }
+        return _samples
+    }
+}
+
+/// Restore global Intellectus state to (disabled, NoOpSink).
+private func resetIntellectus() {
+    Intellectus.setEnabled(false)
+    Intellectus.install(sink: NoOpSink.shared)
+}
 
 /// Tests for EstateDreamingSink — the production adapter that binds
 /// DreamingProposalSink to a live GeniusLocusKit estate.
@@ -16,6 +42,7 @@ import PersistenceKitInMemory
 ///        cycle and lands a proposal + diary entry in the estate
 ///   § 4  Protocol conformance: EstateDreamingSink constructs cleanly and
 ///        conforms to DreamingProposalSink
+///   § 5  Think-event emission: propose() emits StatSample.event(.think) via Intellectus
 @Suite("EstateDreamingSink — production adapter integration")
 struct EstateDreamingSinkTests {
 
@@ -58,17 +85,23 @@ struct EstateDreamingSinkTests {
 
     @Test("propose creates a real Proposal via Estate.propose — BRAIN-PROPOSE is closed")
     func proposeCreatesRealProposal() async throws {
-        let (kit, handle) = try await makeKit()
-        // Capture a row so the proposal has a valid target.
-        let captured = try await kit.capture(handle, captureFrame(content: "dreaming test content"))
-        let frame = ProposeFrame(
-            target: captured.id,
-            kind: .miningPattern,
-            justification: "dreaming test proposal"
-        )
-        let sink = EstateDreamingSink(handle: handle, kit: kit)
-        // propose must not throw — BRAIN-PROPOSE is closed when this succeeds.
-        try await sink.propose(frame)
+        // propose() now emits a telemetry event via Intellectus (TEL-02).
+        // All callers of emitting functions must hold the process-wide lock
+        // to prevent concurrent telemetry tests from observing phantom counts
+        // (matches the pattern in IntellectusTestLock.swift).
+        try await withIntellectusLock {
+            let (kit, handle) = try await makeKit()
+            // Capture a row so the proposal has a valid target.
+            let captured = try await kit.capture(handle, captureFrame(content: "dreaming test content"))
+            let frame = ProposeFrame(
+                target: captured.id,
+                kind: .miningPattern,
+                justification: "dreaming test proposal"
+            )
+            let sink = EstateDreamingSink(handle: handle, kit: kit)
+            // propose must not throw — BRAIN-PROPOSE is closed when this succeeds.
+            try await sink.propose(frame)
+        }
     }
 
     // MARK: - § 2  recordCycleDiary round-trip
@@ -100,6 +133,57 @@ struct EstateDreamingSinkTests {
         #expect(stored.agentName == "dreaming-daemon")
         #expect(stored.topic == "dreaming-cycle")
         #expect(stored.wing == "wing_dreaming-daemon")
+    }
+
+    // MARK: - § 5  Think-event emission (TEL-02)
+
+    // propose() must emit exactly one StatSample.event(.think) via Intellectus
+    // after a successful write. Acquires the process-wide lock to prevent races
+    // with concurrent telemetry tests that share the Intellectus singleton.
+    @Test("propose emits a StatSample.event(.think) via Intellectus — TEL-02")
+    func propose_emits_think_event() async throws {
+        try await withIntellectusLock {
+            let (kit, handle) = try await makeKit()
+            let sink = EstateDreamingSink(handle: handle, kit: kit)
+
+            // Capture a row so the proposal has a valid target.
+            let captured = try await kit.capture(handle, captureFrame(content: "tel-02 emission test"))
+            let frame = ProposeFrame(
+                target: captured.id,
+                kind: .miningPattern,
+                justification: "tel-02 think-event test"
+            )
+
+            let capturingSink = CapturingSink()
+            Intellectus.install(sink: capturingSink)
+            Intellectus.setEnabled(true)
+            defer { resetIntellectus() }
+
+            try await sink.propose(frame)
+
+            // Retrieve the stored proposal to obtain its row ID.
+            let proposals = try await kit.recallProposals(handle)
+            let storedProposal = try #require(proposals.first,
+                "propose must persist a Proposal row")
+
+            let events = capturingSink.samples.filter {
+                if case .event = $0 { return true }
+                return false
+            }
+            #expect(events.count == 1,
+                "propose must emit exactly one .event sample; got \(events.count)")
+            guard let sample = events.first,
+                  case let .event(kind, nounType, rowID, estate, _) = sample else {
+                Issue.record("no .event sample emitted"); return
+            }
+            #expect(kind == .think, "event kind must be .think; got \(kind)")
+            #expect(nounType == Int(NounType.proposal.rawValue),
+                "nounType must be \(Int(NounType.proposal.rawValue)) (NounType.proposal); got \(nounType)")
+            #expect(rowID == storedProposal.id,
+                "rowID must equal stored proposal id \(storedProposal.id); got \(rowID)")
+            #expect(estate == handle.estateUUID.uuidString,
+                "estate must equal handle.estateUUID.uuidString; got \(estate)")
+        }
     }
 
     // MARK: - § 3  Integration: DreamingDaemon with real sink + stub reader

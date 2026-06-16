@@ -27,7 +27,7 @@ import LocusKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -102,11 +102,27 @@ enum AuditBridge {
     /// Map the substrate's free-form verb string onto the unified
     /// log's verb enum. Unknown verbs collapse to `.mutate` (the safe
     /// default for "a bitmap changed").
+    ///
+    /// "tombstone" is the RowVerb the AuditGate seals for an expunge
+    /// (RowVerb.tombstone.rawValue == "tombstone"). It maps to
+    /// `.expunge` because that is the ARIA-level verb the operation
+    /// represents. The substrate uses the lower-level automaton term;
+    /// the unified log uses the ARIA noun–verb vocabulary.
+    ///
+    /// "expungeOrphan" is written by `DrawerStore.sealExpungeOrphanAudit`
+    /// when the storage half of an expunge succeeded but the cross-kit
+    /// vector delete (step 2) failed. It also maps to `.expunge` so
+    /// audit projection consumers see the storage-level expunge in both
+    /// the success and orphan cases. Consumers that need to distinguish
+    /// a clean expunge from a partial one must read the substrate audit
+    /// trail directly (the verb string is preserved there as-is).
     private static func verb(for s: String) -> UnifiedAuditVerb {
         switch s {
         case "capture":           return .capture
         case "withdraw":          return .withdraw
-        case "expunge":           return .expunge
+        case "tombstone":         return .expunge   // AuditGate seals expunge as RowVerb.tombstone
+        case "expungeOrphan":     return .expunge   // cross-kit delete failed; storage half succeeded
+        case "expunge":           return .expunge   // legacy / direct verb string (unused by current gate)
         case "reanchor":          return .reanchor
         case "learn":             return .learn
         case "propose":           return .propose

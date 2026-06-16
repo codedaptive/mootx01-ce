@@ -1,33 +1,69 @@
 //! VectorStore — persistence-kit-backed CRUD over the `vectors` table.
 //!
-//! Refactored 2026-05-19 (Rust mission 6) per
-//! DECISION_KIT_GRAPH_REFACTOR_2026-05-19.md section 4.6: replaced
-//! direct rusqlite + FTS5 I/O with `persistence_kit::RowStore`. The
-//! application picks the PersistenceKit backend (InMemory today,
-//! SQLite + PostgreSQL in follow-on R-missions); the kit does not
-//! see backend selection.
+//! Lane F schema (multi-vector, fresh install — no migration):
 //!
-//! Mirrors the Swift VectorStore actor: same public API surface
-//! (`add_vector`, `get_vector`, `vectors_for_drawer`,
-//! `find_nearest`, `find_by_keyword`, `delete_vector`); `find_nearest`
-//! runs a linear Hamming scan over rows tagged with the matching
-//! `model_id` (sqlite-vec / pgvector ANN is a follow-on);
-//! `find_by_keyword` is a coarse substring LIKE on `drawer_id`
-//! (full BM25 lives in CorpusKit).
+//!   vectors (
+//!     id             UUID PRIMARY KEY,
+//!     item_id        TEXT NOT NULL,        -- replaces drawer_id (Lane F rename)
+//!     vector_index   INTEGER NOT NULL,     -- 0 for single-vector; token index for ColBERT
+//!     model_id       TEXT NOT NULL,
+//!     model_version  TEXT NOT NULL,
+//!     kind           INTEGER NOT NULL,     -- VectorKind raw value
+//!     dim            INTEGER NOT NULL,     -- number of logical elements
+//!     payload        BLOB NOT NULL,        -- raw bytes (Engram wire form for Binary)
+//!     scale          REAL,                 -- dequantisation scale for Int8; NULL otherwise
+//!     filed_at       TIMESTAMP NOT NULL
+//!   )
+//!   UNIQUE(item_id, vector_index, model_id)
 //!
-//! VECTORKIT_REPORT_001 (2026-06-06): added IntellectusLib self-report
-//! telemetry to `add_vector`, `find_nearest`, and `find_by_keyword`.
-//! Emit calls are at operation boundaries, after results are computed,
-//! so mathematical behavior and return values are unchanged.
-//! When monitoring is disabled (the default) the `report!` macro body
-//! is never evaluated — off-path cost is one AtomicBool load + branch.
-//! The start-time `Instant` capture is unconditional per operation;
-//! this is the only overhead added on the normal (non-monitoring) path.
+//! Backward-compatible convenience API:
+//! - `add_vector` / `get_vector` / `vectors_for_item` wrap the binary
+//!   Engram path for callers that don't need multi-vector or float lanes.
+//! - `add_payload` / `get_payload` expose the general typed-payload path.
+//!
+//! The comment about `drawer_id` in the old schema is gone; the rename
+//! is canonical and final.
+//!
+//! HOT-PATH WIRING: `find_nearest` scans a resident `ResidentVectorArray`
+//! via a size-threshold policy:
+//!
+//!   - Below `mih_threshold` live binary vectors (default 50_000): routes
+//!     through `BruteForceIndex` (Lane A, O(N) exact scan, ~sub-ms at
+//!     small estates per §3.2 perf model).
+//!   - At or above threshold: promotes to `MIHIndex` (Lane B, sub-linear
+//!     EXACT Hamming KNN, Norouzi & Fleet CVPR 2012).
+//!
+//! Both indexes are EXACT. `MIHIndex.search == BruteForceIndex.search`
+//! bit-for-bit on identical inputs is the conformance BLOCKER (arch spec
+//! §3.3). Results are identical regardless of which index is active.
+//!
+//! Both indexes are kept coherent on every write. The size-threshold policy
+//! (`select_index`) swaps `is_mih_active` when `live_binary_count` crosses
+//! `mih_threshold`. Default band count M16 (§1.6: m ≈ b/log2(n); at 50k
+//! log2(50000) ≈ 15.6, nearest conformance value is 16).
+//!
+//! I-7 satisfied: all Hamming arithmetic routes through the active index →
+//! EngramLib → SubstrateKernel (four-way conformance-gated). VectorStore
+//! does not reimplement Hamming distance.
+//!
+//! Telemetry: emits `vectorkit.*` metrics via IntellectusLib when
+//! monitoring is enabled. Off by default; off-path cost is one
+//! AtomicBool load.
 
+use crate::engine::brute_force::BruteForceIndex;
+use crate::engine::float_brute_force::FloatBruteForceIndex;
+use crate::engine::key::VectorRecordKey;
+use crate::engine::metric::DenseMetric;
+use crate::engine::mih::{MIHBandCount, MIHIndex};
+use crate::engine::payload::{VectorKind, VectorPayload};
+use crate::engine::resident_store::ResidentArrayStore;
+use crate::engine::seam::{DenseIndex, MetadataFilter};
 use crate::error::VectorKitError;
-use engram_lib::{Engram, EngramLib};
+use engram_lib::Engram;
 use intellectus_lib::{StatSample, report};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::Arc;
 use persistence_kit::{
     Column, ColumnDeclaration, IndexDeclaration, OrderClause, OrderDirection, SchemaDeclaration,
@@ -35,25 +71,29 @@ use persistence_kit::{
 };
 use uuid::Uuid;
 
-/// One row of the `vectors` table. Parallel to the Swift
-/// `StoredVector`. `filed_at` is preserved as the timestamp the
-/// caller supplied so the round-trip is exact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One row of the `vectors` table. Parallel to the Swift `StoredVector`.
+///
+/// `filed_at` is Unix epoch seconds; `vector_index` is 0 for
+/// single-vector models.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredVector {
     pub id: String,
-    pub drawer_id: String,
+    /// Renamed from `drawer_id` (Lane F rename).
+    pub item_id: String,
+    pub vector_index: u32,
     pub model_id: String,
     pub model_version: String,
     pub engram: Engram,
-    /// Unix epoch seconds. Mirrors persistence-kit's
-    /// `TypedValue::Timestamp(i64)`.
+    /// Unix epoch seconds.
     pub filed_at: i64,
 }
 
-/// Result of a `VectorStore::find_nearest` call.
+/// Result of a `VectorStore::find_nearest` call. Parallel to Swift
+/// `VectorMatch`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorMatch {
-    pub drawer_id: String,
+    /// Renamed from `drawer_id` (Lane F rename).
+    pub item_id: String,
     /// Hamming distance over the 256-bit engram. Range 0..=256.
     pub distance: i32,
     pub model_id: String,
@@ -61,9 +101,11 @@ pub struct VectorMatch {
 
 impl Ord for VectorMatch {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Primary: distance ascending. Tiebreak: item_id ascending
+        // (universal tie-break rule, retrieval algorithms reference §0.3).
         self.distance
             .cmp(&other.distance)
-            .then(self.drawer_id.cmp(&other.drawer_id))
+            .then(self.item_id.cmp(&other.item_id))
     }
 }
 
@@ -73,103 +115,339 @@ impl PartialOrd for VectorMatch {
     }
 }
 
+/// One row of input for the bulk `VectorStore::add_payloads` path.
+///
+/// Bundles a `VectorPayload` with the index metadata that a single
+/// `add_payload` call would otherwise take as separate arguments. The
+/// import/migration path builds a slice of these and submits them in one
+/// batch so the resident array, sidecar, and indexes are updated once for
+/// the whole batch rather than once per row (TASK #24). Parallel to the
+/// Swift `VectorPayloadInput`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorPayloadInput {
+    /// The owning item (drawer/chunk) id. Joins to `vectors.item_id`.
+    pub item_id: String,
+    /// 0 for single-vector models; token position for late-interaction.
+    pub vector_index: u32,
+    /// The typed vector payload (binary, float32, or int8).
+    pub payload: VectorPayload,
+    /// The embedding model id.
+    pub model_id: String,
+    /// The embedding model version.
+    pub model_version: String,
+    /// Wall-clock filing time as Unix epoch seconds (determinism discipline:
+    /// passed in, never read from the system clock inside the engine).
+    pub filed_at_unix_secs: i64,
+}
+
+// ── Hot-path inner state ──────────────────────────────────────────────────
+
+/// Mutable hot-path state, protected by a Mutex.
+///
+/// Separate from the immutable `Storage` reference so that read-heavy
+/// `find_nearest` can lock only the index state (not the storage handle).
+struct HotState {
+    /// Sidecar-backed persistent store. Present when the caller supplies
+    /// a sidecar path at construction. When `None`, the resident array is
+    /// held purely in memory (rebuilt from the table on first use).
+    array_store: Option<ResidentArrayStore>,
+
+    /// Binary brute-force index — the Lane A conformance oracle.
+    ///
+    /// Always kept in sync with the resident array. Used directly when
+    /// `live_binary_count < mih_threshold`, and as the backing array
+    /// source for key iteration in all delete paths.
+    brute_force_index: BruteForceIndex,
+
+    /// Multi-Index Hashing index — Lane B, sub-linear EXACT Hamming KNN.
+    ///
+    /// Always kept in sync with `brute_force_index`. Active when
+    /// `live_binary_count >= mih_threshold`.
+    mih_index: MIHIndex,
+
+    /// Count of live (non-tombstoned) binary vectors.
+    ///
+    /// Incremented on successful insert (non-replacement), decremented on
+    /// delete. Drives the threshold policy in `select_index`.
+    live_binary_count: u32,
+
+    /// Below this count use BruteForce; at or above, use MIH.
+    ///
+    /// Set at construction; overridable via `new_with_threshold`.
+    mih_threshold: u32,
+
+    /// True when MIH is the active (hot) index; false when BruteForce is.
+    ///
+    /// Updated by `select_index`. Separate from `live_binary_count >= mih_threshold`
+    /// to avoid recomputing the condition in hot paths.
+    is_mih_active: bool,
+
+    /// True once both indexes have been populated. Set by `ensure_index_built_locked`
+    /// on the first `find_nearest` or write call.
+    index_built: bool,
+
+    /// Lane D: the in-house exact float index over the float32 rows in the
+    /// `vectors` table. Production exact path per Bob's storage amendment
+    /// (2026-06-12): floats live in resident float arrays scanned by
+    /// `FloatBruteForceIndex` — no external engine. Built lazily and updated
+    /// incrementally as float payloads are written.
+    ///
+    /// The float lane is reproducible-within-config, NOT four-way
+    /// bit-identical (arch spec §6), so it is kept on its own index,
+    /// separate from the binary `brute_force_index`/`mih_index` (I-7).
+    float_index: FloatBruteForceIndex,
+
+    /// True once the float index has been populated from the table. Set by
+    /// `ensure_float_index_built_locked` on the first float write or
+    /// `find_nearest_float` call.
+    float_index_built: bool,
+
+    /// Number of times the sidecar was detected as stale and rebuilt from
+    /// the `vectors` table in the lifetime of this `VectorStore` instance.
+    ///
+    /// Incremented by `ensure_index_built_locked` on each stale-sidecar path.
+    /// Zero means the sidecar was current on load (the normal path). Exposed
+    /// for test assertions only — callers should not use this value to drive
+    /// application logic.
+    sidecar_rebuild_count: usize,
+}
+
+// ── VectorStore ───────────────────────────────────────────────────────────
+
 /// persistence-kit-backed CRUD over the `vectors` table.
 ///
-/// Emits `vectorkit.*` metrics via IntellectusLib when monitoring is
-/// enabled. Off by default; off-path cost is one AtomicBool load.
+/// Thread-safety: the hot-path resident array is protected by a `Mutex`.
+/// The `Storage` handle is `Arc<dyn Storage>` and is assumed thread-safe
+/// by the PersistenceKit contract.
+///
+/// The `vectors` table is the durable source of truth. The resident array
+/// is a regenerable cache loaded once per process lifetime (from the .vec
+/// sidecar if a sidecar path is supplied, or from a full table scan). All
+/// writes keep both in sync; `find_nearest` reads only the resident array.
 pub struct VectorStore {
     storage: Arc<dyn Storage>,
+    state: Mutex<HotState>,
 }
 
 impl VectorStore {
-    /// Schema declaration consumed by `Storage::open`. Mirrors the
-    /// Swift `VectorStore.schemaDeclaration` (kit id, table layout,
-    /// indices, unique constraint on (drawer_id, model_id)).
+    /// Schema declaration consumed by `Storage::open`. Lane F
+    /// multi-vector schema: UNIQUE(item_id, vector_index, model_id).
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "VectorKit",
-            1,
+            2,
             vec![TableDeclaration::new(
                 "vectors",
                 vec![
                     ColumnDeclaration::uuid("id"),
-                    ColumnDeclaration::text("drawer_id"),
+                    // Lane F rename: item_id replaces drawer_id.
+                    ColumnDeclaration::text("item_id"),
+                    // vector_index: 0 for single-vector models; token
+                    // position for ColBERT late-interaction.
+                    ColumnDeclaration::int("vector_index"),
                     ColumnDeclaration::text("model_id"),
                     ColumnDeclaration::text("model_version"),
-                    ColumnDeclaration::blob("engram"),
+                    // kind: VectorKind raw integer (0=Binary,1=Float32,2=Int8).
+                    ColumnDeclaration::int("kind"),
+                    // dim: number of logical elements (bits for Binary,
+                    // floats for Float32, int8s for Int8).
+                    ColumnDeclaration::int("dim"),
+                    // payload: raw bytes. For Binary: 32-byte Engram wire form.
+                    ColumnDeclaration::blob("payload"),
+                    // scale: dequantisation multiplier for Int8; NULL for Binary/Float32.
+                    ColumnDeclaration::float("scale").nullable(),
                     ColumnDeclaration::timestamp("filed_at"),
                 ],
                 vec!["id".to_string()],
             )
             .with_unique_constraints(vec![vec![
-                "drawer_id".to_string(),
+                "item_id".to_string(),
+                "vector_index".to_string(),
                 "model_id".to_string(),
             ]])],
         )
         .with_indices(vec![
             IndexDeclaration::new(
-                "idx_vectors_drawer",
+                "idx_vectors_item",
                 "vectors",
-                vec!["drawer_id".to_string()],
+                vec!["item_id".to_string()],
             ),
             IndexDeclaration::new(
-                "idx_vectors_model_drawer",
+                "idx_vectors_model_item",
                 "vectors",
-                vec!["model_id".to_string(), "drawer_id".to_string()],
+                vec!["model_id".to_string(), "item_id".to_string()],
             ),
         ])
     }
 
-    /// Construct against an already-opened `Storage`. The caller is
-    /// responsible for calling `storage.open(&schema_declaration())`
+    /// Construct against an already-opened `Storage`, with optional sidecar
+    /// persistence and default threshold/band-count parameters.
+    ///
+    /// The caller is responsible for calling `Storage::open(schema_declaration())`
     /// before using the store.
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
-        VectorStore { storage }
+    ///
+    /// - `storage`: A PersistenceKit Storage instance.
+    /// - `sidecar_path`: Optional path to a `.vec` packed binary sidecar.
+    ///   When supplied, the resident array is loaded from this file on first
+    ///   use (one OS read, amortised) and kept in sync on every write. A stale
+    ///   or absent sidecar is detected by comparing its slot count to the
+    ///   table binary-row count; if they disagree the array is rebuilt and the
+    ///   sidecar is rewritten. When `None`, the array is built from the table
+    ///   on first use and held in memory only.
+    ///
+    /// Default threshold: 50_000 binary vectors. Default band count: M16
+    /// (m ≈ b/log2(n) at 50k → log2(50000) ≈ 15.6, nearest conformance value).
+    pub fn new(storage: Arc<dyn Storage>, sidecar_path: Option<PathBuf>) -> Self {
+        Self::new_with_threshold(storage, sidecar_path, 50_000, MIHBandCount::M16)
     }
 
-    /// Convenience: open the storage's schema and return the store.
+    /// Construct with an explicit threshold and MIH band count.
+    ///
+    /// Useful for callers with different estate sizes or for tests that need
+    /// to cross the threshold with a small corpus.
+    pub fn new_with_threshold(
+        storage: Arc<dyn Storage>,
+        sidecar_path: Option<PathBuf>,
+        mih_threshold: u32,
+        mih_band_count: MIHBandCount,
+    ) -> Self {
+        let array_store = sidecar_path.map(|p| ResidentArrayStore::new_binary(p));
+        VectorStore {
+            storage,
+            state: Mutex::new(HotState {
+                array_store,
+                brute_force_index: BruteForceIndex::new(),
+                mih_index: MIHIndex::new(mih_band_count),
+                live_binary_count: 0,
+                mih_threshold,
+                is_mih_active: false,
+                index_built: false,
+                float_index: FloatBruteForceIndex::new(),
+                float_index_built: false,
+                sidecar_rebuild_count: 0,
+            }),
+        }
+    }
+
+    /// Convenience: construct with no sidecar (memory-only resident array).
+    ///
+    /// Equivalent to `new(storage, None)`. Used by callers that do not
+    /// have a stable sidecar path (e.g. in-process tests).
+    pub fn new_no_sidecar(storage: Arc<dyn Storage>) -> Self {
+        Self::new(storage, None)
+    }
+
+    /// Open the storage's schema and return the store (no sidecar).
+    ///
+    /// Convenience for callers that want a single `open` call and do not
+    /// need sidecar persistence. Parallel to Swift `VectorStore(storage:)`.
     pub fn open(storage: Arc<dyn Storage>) -> Result<Self, VectorKitError> {
         let schema = Self::schema_declaration();
         storage
             .open(&schema)
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
-        Ok(VectorStore::new(storage))
+        Ok(VectorStore::new(storage, None))
     }
 
-    /// Insert or update the vector for `(drawer_id, model_id)`. The
-    /// row's `id` is generated on first insert and preserved across
-    /// updates (persistence-kit's upsert on the unique constraint
-    /// updates in place).
+    /// Number of times the sidecar was detected as stale and rebuilt in
+    /// the lifetime of this `VectorStore` instance.
     ///
-    /// Telemetry: emits `vectorkit.index.insert_latency_ms` (wall time
-    /// for the upsert) when monitoring is enabled. Emitted at the
-    /// operation boundary, after the upsert completes; does not affect
-    /// the stored value or any error returned.
+    /// Zero is the normal path (sidecar was current on reopen). A non-zero
+    /// value indicates the sidecar was missing, corrupted, or out of sync
+    /// with the `vectors` table at startup. Exposed for test assertions.
+    pub fn sidecar_rebuild_count(&self) -> usize {
+        self.state.lock().unwrap().sidecar_rebuild_count
+    }
+
+    // -----------------------------------------------------------------------
+    // Convenience API — binary Engram path (single-vector, vector_index=0)
+    // -----------------------------------------------------------------------
+
+    /// Insert or update the binary Engram vector for `(item_id, 0, model_id)`.
+    ///
+    /// Keeps the resident hot-path array in sync with the table write.
+    ///
+    /// Telemetry: emits `vectorkit.index.insert_latency_ms` when monitoring
+    /// is enabled. Emitted at the operation boundary.
     pub fn add_vector(
         &self,
-        drawer_id: &str,
+        item_id: &str,
         engram: &Engram,
         model_id: &str,
         model_version: &str,
         filed_at_unix_secs: i64,
     ) -> Result<(), VectorKitError> {
-        // Capture start instant before the I/O. One monotonic clock
-        // read per call; the elapsed is computed inside report! only
-        // when monitoring is enabled.
+        let payload = VectorPayload::from_engram(engram);
+        self.add_payload(item_id, 0, &payload, model_id, model_version, filed_at_unix_secs)
+    }
+
+    /// General write path: insert or update a typed payload for
+    /// `(item_id, vector_index, model_id)`.
+    ///
+    /// For binary payloads: writes the row AND mirrors the vector into the
+    /// resident array, updating both indexes incrementally. Non-binary
+    /// payloads are written to the table only — the binary BruteForceIndex
+    /// handles only Hamming (I-7).
+    ///
+    /// Sidecar persistence is WRITE-BEHIND (TASK #24): the in-memory resident
+    /// array is updated immediately but the `.vec` sidecar is marked dirty,
+    /// not rewritten, per call. Call `flush()` at a quiesce point to persist;
+    /// crash safety is preserved because the `vectors` table is the durable
+    /// source (a stale sidecar is rebuilt from the table on the next open).
+    /// For importing many vectors at once, prefer `add_payloads`, which bounds
+    /// both sidecar writes and index builds to O(batches).
+    ///
+    /// # Errors
+    ///
+    /// Returns `VectorKitError::Int8QuantizationPolicyUndefined` when the
+    /// payload kind is `Int8`. Int8 writes are rejected fail-closed because
+    /// the quantization policy (symmetric vs asymmetric, per-vector vs per-dim
+    /// scale) has not been ratified. Use `Float32` or `Binary` instead.
+    /// See VECTORKIT_SPEC §I-4a.
+    ///
+    /// Telemetry: emits `vectorkit.index.insert_latency_ms` when monitoring
+    /// is enabled. Emitted at the operation boundary.
+    pub fn add_payload(
+        &self,
+        item_id: &str,
+        vector_index: u32,
+        payload: &VectorPayload,
+        model_id: &str,
+        model_version: &str,
+        filed_at_unix_secs: i64,
+    ) -> Result<(), VectorKitError> {
+        // PRECONDITION GUARD: int8 writes are rejected fail-closed.
+        // The quantization policy (symmetric vs asymmetric, per-vector vs
+        // per-dim scale) has not been ratified. Persisting an int8 payload now
+        // would lock in undefined dequantization semantics. Use Float32 or the
+        // Binary Engram lane. See VECTORKIT_SPEC §I-4a and arch spec §10.3.
+        if payload.kind == VectorKind::Int8 {
+            return Err(VectorKitError::Int8QuantizationPolicyUndefined(
+                "int8 writes are rejected: quantization policy is unspecified. \
+                 Use Float32 or the Binary Engram lane. See VECTORKIT_SPEC §I-4a."
+                    .to_string(),
+            ));
+        }
+
         let start = std::time::Instant::now();
 
         let mut values = BTreeMap::new();
         values.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
-        values.insert("drawer_id".to_string(), TypedValue::Text(drawer_id.to_string()));
+        values.insert("item_id".to_string(), TypedValue::Text(item_id.to_string()));
+        values.insert("vector_index".to_string(), TypedValue::Int(vector_index as i64));
         values.insert("model_id".to_string(), TypedValue::Text(model_id.to_string()));
-        values.insert(
-            "model_version".to_string(),
-            TypedValue::Text(model_version.to_string()),
-        );
-        values.insert(
-            "engram".to_string(),
-            TypedValue::Blob(engram.wire_bytes().to_vec()),
-        );
+        values.insert("model_version".to_string(), TypedValue::Text(model_version.to_string()));
+        values.insert("kind".to_string(), TypedValue::Int(payload.kind.raw()));
+        values.insert("dim".to_string(), TypedValue::Int(payload.dim as i64));
+        values.insert("payload".to_string(), TypedValue::Blob(payload.bytes.clone()));
+        match payload.scale {
+            Some(s) => {
+                values.insert("scale".to_string(), TypedValue::Float(s as f64));
+            }
+            None => {
+                values.insert("scale".to_string(), TypedValue::Null);
+            }
+        }
         values.insert("filed_at".to_string(), TypedValue::Timestamp(filed_at_unix_secs));
 
         let row_store = self.storage.row_store();
@@ -177,14 +455,91 @@ impl VectorStore {
             .upsert(
                 "vectors",
                 values,
-                &["drawer_id".to_string(), "model_id".to_string()],
+                &[
+                    "item_id".to_string(),
+                    "vector_index".to_string(),
+                    "model_id".to_string(),
+                ],
             )
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
 
-        // Emit insert latency at the operation boundary.
-        // The model_id tag identifies which embedding model indexed
-        // this vector, so per-model insert cost is queryable.
-        // Off-path: single AtomicBool load when monitoring is disabled.
+        // Mirror binary payloads into the resident hot-path array.
+        // Non-binary lanes remain table-only (I-7 absolute: Hamming is
+        // integer-only and only applies to the binary lane).
+        if payload.kind == VectorKind::Binary {
+            let key = VectorRecordKey::new(
+                item_id.to_string(),
+                vector_index,
+                model_id.to_string(),
+                model_version.to_string(),
+            );
+
+            let mut state = self.state.lock().map_err(|_| {
+                VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+            })?;
+
+            // Ensure both indexes are coherent before mutating.
+            self.ensure_index_built_locked(&mut state)?;
+
+            // Detect replacement (same key already live) before mutating.
+            // BruteForce array is the authoritative slot source.
+            let is_replacement = {
+                let arr = state.brute_force_index.array();
+                arr.keys.iter().enumerate().any(|(i, k)| {
+                    !arr.is_tombstoned(i) && *k == key
+                })
+            };
+
+            if let Some(ref mut store) = state.array_store {
+                // Sidecar path (write-behind): tombstone any prior slot for
+                // this key in memory, append the new slot in memory, mark the
+                // sidecar dirty — NO whole-sidecar rewrite per write (TASK #24).
+                // Both indexes are updated INCREMENTALLY (MIH add is O(m); the
+                // brute-force add appends one slot) so there is no per-write
+                // full-index rebuild either. The sidecar is persisted at the
+                // next quiesce point via `flush()`; crash safety is preserved
+                // by the table-rebuild path (the `vectors` table is durable).
+                let mut single = std::collections::HashSet::new();
+                single.insert(key.clone());
+                store.tombstone_deferred(&single);
+                store.append_deferred(key.clone(), payload.bytes.clone())?;
+                state.brute_force_index.add(key.clone(), payload.clone())?;
+                state.mih_index.add(key, payload.clone())?;
+            } else {
+                // Memory-only path: add to both indexes (upsert semantics).
+                state.brute_force_index.add(key.clone(), payload.clone())?;
+                state.mih_index.add(key, payload.clone())?;
+            }
+
+            if !is_replacement {
+                state.live_binary_count = state.live_binary_count.saturating_add(1);
+            }
+            Self::select_index(&mut state);
+        } else if payload.kind == VectorKind::Float32 {
+            // Mirror float32 payloads into the Lane D float index so
+            // find_nearest_float sees this write without a full table
+            // rescan. Only when the float index is already built — otherwise
+            // the table write is authoritative and the row is picked up when
+            // ensure_float_index_built_locked next runs (lazy first-use build).
+            let mut state = self.state.lock().map_err(|_| {
+                VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+            })?;
+            if state.float_index_built {
+                let key = VectorRecordKey::new(
+                    item_id.to_string(),
+                    vector_index,
+                    model_id.to_string(),
+                    model_version.to_string(),
+                );
+                // The upsert above may have replaced an existing row; tombstone
+                // the prior float slot for this key before appending the new
+                // one, mirroring the table's ON CONFLICT UPDATE so a stale
+                // float vector cannot survive in the scan.
+                state.float_index.remove(&key)?;
+                state.float_index.add(key, payload.clone())?;
+            }
+        }
+
         let model_id_owned = model_id.to_string();
         report!({
             use std::time::{SystemTime, UNIX_EPOCH};
@@ -207,17 +562,296 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Fetch the engram stored under `(drawer_id, model_id)`, or
-    /// `None` if no row exists.
+    /// Bulk-upsert N typed payloads in one call — the import/migration path.
+    ///
+    /// The amortised counterpart to `add_payload` for import, migration, and
+    /// any caller that has many vectors ready at once (TASK #24):
+    ///
+    ///   • Each row is upserted to the `vectors` table (durable source of
+    ///     truth — O(N) table writes, unavoidable and not the disease).
+    ///   • Binary lane: prior slots for replaced keys are tombstoned in ONE
+    ///     pass, all new slots appended in ONE pass, the sidecar written ONCE
+    ///     (via `append_batch`), and both indexes rebuilt ONCE from the final
+    ///     array — not per row. So a batch of N binary vectors costs O(1)
+    ///     sidecar writes and O(1) index builds.
+    ///   • Float32 rows invalidate the Lane D index once for a lazy rebuild.
+    ///
+    /// The memory-only (no-sidecar) path builds the combined array once and
+    /// calls `build` once, so it is bounded too — no per-row array clone.
+    ///
+    /// Search output is identical to inserting the same rows one-by-one (the
+    /// (distance ASC, item_id ASC) total order is applied at query time).
+    pub fn add_payloads(&self, batch: &[VectorPayloadInput]) -> Result<(), VectorKitError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // PRECONDITION GUARD: reject any int8 payload in the batch fail-closed.
+        // The quantization policy has not been ratified; a batch containing even
+        // one int8 payload must be rejected entirely — no partial writes. The
+        // first offending item is reported. See VECTORKIT_SPEC §I-4a.
+        if let Some(bad) = batch.iter().find(|i| i.payload.kind == VectorKind::Int8) {
+            return Err(VectorKitError::Int8QuantizationPolicyUndefined(format!(
+                "int8 writes are rejected: quantization policy is unspecified. \
+                 Offending item: {}. \
+                 Use Float32 or the Binary Engram lane. See VECTORKIT_SPEC §I-4a.",
+                bad.item_id
+            )));
+        }
+
+        let start = std::time::Instant::now();
+
+        // 1. Upsert every row to the table (durable source of truth).
+        let row_store = self.storage.row_store();
+        for input in batch {
+            let mut values = BTreeMap::new();
+            values.insert("id".to_string(), TypedValue::Uuid(Uuid::new_v4()));
+            values.insert("item_id".to_string(), TypedValue::Text(input.item_id.clone()));
+            values.insert("vector_index".to_string(), TypedValue::Int(input.vector_index as i64));
+            values.insert("model_id".to_string(), TypedValue::Text(input.model_id.clone()));
+            values.insert("model_version".to_string(), TypedValue::Text(input.model_version.clone()));
+            values.insert("kind".to_string(), TypedValue::Int(input.payload.kind.raw()));
+            values.insert("dim".to_string(), TypedValue::Int(input.payload.dim as i64));
+            values.insert("payload".to_string(), TypedValue::Blob(input.payload.bytes.clone()));
+            match input.payload.scale {
+                Some(s) => { values.insert("scale".to_string(), TypedValue::Float(s as f64)); }
+                None => { values.insert("scale".to_string(), TypedValue::Null); }
+            }
+            values.insert("filed_at".to_string(), TypedValue::Timestamp(input.filed_at_unix_secs));
+            row_store
+                .upsert(
+                    "vectors",
+                    values,
+                    &[
+                        "item_id".to_string(),
+                        "vector_index".to_string(),
+                        "model_id".to_string(),
+                    ],
+                )
+                .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        }
+
+        // 2. Mirror binary rows into the resident array + both indexes in one
+        //    amortised pass.
+        let binary_records: Vec<(VectorRecordKey, Vec<u8>)> = batch
+            .iter()
+            .filter(|i| i.payload.kind == VectorKind::Binary)
+            .map(|i| {
+                (
+                    VectorRecordKey::new(
+                        i.item_id.clone(),
+                        i.vector_index,
+                        i.model_id.clone(),
+                        i.model_version.clone(),
+                    ),
+                    i.payload.bytes.clone(),
+                )
+            })
+            .collect();
+
+        let has_float = batch.iter().any(|i| i.payload.kind == VectorKind::Float32);
+
+        {
+            let mut state = self.state.lock().map_err(|_| {
+                VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+            })?;
+
+            if !binary_records.is_empty() {
+                self.ensure_index_built_locked(&mut state)?;
+
+                // Live keys currently in the array (for replacement detection).
+                let live_keys: std::collections::HashSet<VectorRecordKey> = {
+                    let arr = state.brute_force_index.array();
+                    (0..arr.count)
+                        .filter(|&i| !arr.is_tombstoned(i))
+                        .map(|i| arr.keys[i].clone())
+                        .collect()
+                };
+
+                // Count genuinely new keys (not live, and not repeated earlier
+                // in this batch) so the live count only grows by new records.
+                let mut seen_in_batch = std::collections::HashSet::new();
+                let mut new_key_count: u32 = 0;
+                for (k, _) in &binary_records {
+                    let is_new = !live_keys.contains(k) && !seen_in_batch.contains(k);
+                    if is_new {
+                        new_key_count += 1;
+                    }
+                    seen_in_batch.insert(k.clone());
+                }
+
+                if state.array_store.is_some() {
+                    // Tombstone replaced keys in one pass, append the whole
+                    // batch in one pass, write the sidecar once.
+                    let replaced: std::collections::HashSet<VectorRecordKey> = binary_records
+                        .iter()
+                        .map(|(k, _)| k.clone())
+                        .filter(|k| live_keys.contains(k))
+                        .collect();
+                    let store = state.array_store.as_mut().unwrap();
+                    store.tombstone_deferred(&replaced);
+                    store.append_batch(&binary_records)?;
+                    let snap = store.snapshot();
+                    let (payloads, keys) = Self::array_to_payloads_keys(&snap);
+                    state.brute_force_index.build(&payloads, &keys)?;
+                    state.mih_index.build(&payloads, &keys)?;
+                } else {
+                    // Memory-only: merge the batch into the current snapshot in
+                    // one pass, then build both indexes once.
+                    let merged = Self::merge_batch_into_snapshot(
+                        state.brute_force_index.array(),
+                        &binary_records,
+                    );
+                    let (payloads, keys) = Self::array_to_payloads_keys(&merged);
+                    state.brute_force_index.build(&payloads, &keys)?;
+                    state.mih_index.build(&payloads, &keys)?;
+                }
+
+                state.live_binary_count = state.live_binary_count.saturating_add(new_key_count);
+                Self::select_index(&mut state);
+            }
+
+            // 3. Float lane: invalidate Lane D so the next find_nearest_float
+            //    rebuilds it once from the table (cheaper than N float adds).
+            if has_float {
+                state.float_index_built = false;
+            }
+        }
+
+        let batch_size = batch.len();
+        report!({
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("kit".to_string(), "VectorKit".to_string());
+            tags.insert("batch_size".to_string(), batch_size.to_string());
+            StatSample::metric(
+                "vectorkit.index.batch_insert_latency_ms".to_string(),
+                elapsed_ms,
+                tags,
+                ts,
+            )
+        });
+
+        Ok(())
+    }
+
+    /// Flush any pending write-behind sidecar mutation to disk.
+    ///
+    /// The single `add_payload` binary path is write-behind (TASK #24): it
+    /// mutates the in-memory resident array and marks the sidecar dirty
+    /// without writing. Callers persist by calling `flush()` at a quiesce
+    /// point. No-op when there is no sidecar or nothing is dirty. Crash safety
+    /// does not depend on flush: the `vectors` table is the durable source and
+    /// the sidecar is rebuilt on the next open if it is stale.
+    pub fn flush(&self) -> Result<(), VectorKitError> {
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        if let Some(ref mut store) = state.array_store {
+            store.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Merge a batch of (key, bytes) records into a snapshot in one pass.
+    ///
+    /// Used by the memory-only `add_payloads` path. Replaced keys (present in
+    /// the snapshot, live) are tombstoned in place; the new slots are appended
+    /// after the existing storage. Produces a single array the indexes build
+    /// from once — no per-row clone.
+    fn merge_batch_into_snapshot(
+        snapshot: &crate::engine::resident::ResidentVectorArray,
+        records: &[(VectorRecordKey, Vec<u8>)],
+    ) -> crate::engine::resident::ResidentVectorArray {
+        use crate::engine::resident::ResidentVectorArray;
+        let replaced: std::collections::HashSet<&VectorRecordKey> =
+            records.iter().map(|(k, _)| k).collect();
+        let mut new_tombstones = snapshot.tombstones.clone();
+        for slot_idx in 0..snapshot.count {
+            if replaced.contains(&snapshot.keys[slot_idx]) {
+                let w = slot_idx / 64;
+                let b = slot_idx % 64;
+                while new_tombstones.len() <= w {
+                    new_tombstones.push(0);
+                }
+                new_tombstones[w] |= 1u64 << b;
+            }
+        }
+
+        let mut new_storage = snapshot.storage.clone();
+        new_storage.reserve(records.len() * snapshot.stride);
+        let mut new_keys = snapshot.keys.clone();
+        new_keys.reserve(records.len());
+        for (k, bytes) in records {
+            new_storage.extend_from_slice(bytes);
+            new_keys.push(k.clone());
+        }
+
+        let new_count = new_keys.len();
+        let words_needed = (new_count + 63) / 64;
+        while new_tombstones.len() < words_needed {
+            new_tombstones.push(0);
+        }
+        let new_partitions = ResidentArrayStore::build_partitions(&new_keys, &new_tombstones);
+        ResidentVectorArray {
+            kind: snapshot.kind,
+            stride: snapshot.stride,
+            count: new_count,
+            storage: new_storage,
+            keys: new_keys,
+            model_partitions: new_partitions,
+            tombstones: new_tombstones,
+        }
+    }
+
+    /// Number of on-disk sidecar writes performed by the resident store.
+    ///
+    /// Test instrumentation for the import-scale regression test. Returns 0
+    /// when there is no sidecar (memory-only store).
+    pub fn sidecar_write_count(&self) -> usize {
+        let state = self.state.lock().unwrap();
+        state
+            .array_store
+            .as_ref()
+            .map(|s| s.sidecar_write_count())
+            .unwrap_or(0)
+    }
+
+    /// Fetch the Engram stored under `(item_id, 0, model_id)`.
     pub fn get_vector(
         &self,
-        drawer_id: &str,
+        item_id: &str,
         model_id: &str,
     ) -> Result<Option<Engram>, VectorKitError> {
+        match self.get_payload(item_id, 0, model_id)? {
+            None => Ok(None),
+            Some(payload) => {
+                let engram = payload.as_engram()?;
+                Ok(Some(engram))
+            }
+        }
+    }
+
+    /// Fetch the typed payload stored under `(item_id, vector_index, model_id)`.
+    pub fn get_payload(
+        &self,
+        item_id: &str,
+        vector_index: u32,
+        model_id: &str,
+    ) -> Result<Option<VectorPayload>, VectorKitError> {
         let predicate = StoragePredicate::all(vec![
             StoragePredicate::Eq(
-                Column::new("vectors", "drawer_id"),
-                TypedValue::Text(drawer_id.to_string()),
+                Column::new("vectors", "item_id"),
+                TypedValue::Text(item_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("vectors", "vector_index"),
+                TypedValue::Int(vector_index as i64),
             ),
             StoragePredicate::Eq(
                 Column::new("vectors", "model_id"),
@@ -231,21 +865,18 @@ impl VectorStore {
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
         match rows.first() {
             None => Ok(None),
-            Some(row) => match row.get("engram") {
-                Some(TypedValue::Blob(bytes)) => Some(decode_engram(bytes)).transpose(),
-                _ => Ok(None),
-            },
+            Some(row) => decode_payload(row).map(Some),
         }
     }
 
-    /// Return every row for `drawer_id`, ordered by `filed_at` ASC.
-    pub fn vectors_for_drawer(
+    /// Return every row for `item_id`, ordered by `filed_at` ASC.
+    pub fn vectors_for_item(
         &self,
-        drawer_id: &str,
+        item_id: &str,
     ) -> Result<Vec<StoredVector>, VectorKitError> {
         let predicate = StoragePredicate::Eq(
-            Column::new("vectors", "drawer_id"),
-            TypedValue::Text(drawer_id.to_string()),
+            Column::new("vectors", "item_id"),
+            TypedValue::Text(item_id.to_string()),
         );
         let order = vec![OrderClause::new(
             Column::new("vectors", "filed_at"),
@@ -265,15 +896,27 @@ impl VectorStore {
         Ok(out)
     }
 
-    /// Hamming-distance nearest-neighbour over rows under `model_id`.
-    /// Returns up to `k` matches sorted by distance ascending. Linear
-    /// scan today; ANN via `persistence_kit::VectorIndex` is a follow-on.
+    // -----------------------------------------------------------------------
+    // Search — resident hot-path (no per-query table fetch)
+    // -----------------------------------------------------------------------
+
+    /// k-nearest-neighbours by Hamming distance, using the resident
+    /// packed array — no per-query SQLite fetch.
     ///
-    /// Telemetry: emits `vectorkit.search.latency_ms` (wall time for
-    /// the full scan + top-K) and `vectorkit.search.result_count`
-    /// (number of matches returned) when monitoring is enabled.
-    /// Both are emitted at the operation boundary, after the result is
-    /// computed; the return value is unchanged.
+    /// On the first call, `ensure_index_built` populates `BruteForceIndex`
+    /// from the .vec sidecar (one OS read, amortised) or from a single
+    /// full-table read (amortised: paid once per process lifetime). Subsequent
+    /// calls scan the in-memory packed array — O(N × stride) bytes walked,
+    /// not O(N) SQLite row fetches + per-row decode.
+    ///
+    /// All Hamming arithmetic routes through BruteForceIndex →
+    /// EngramLib → SubstrateKernel (I-7 absolute, arch spec §3.4).
+    ///
+    /// Returns up to `k` matches sorted by (distance ASC, item_id ASC)
+    /// — the universal tie-break rule (retrieval algorithms reference §0.3).
+    ///
+    /// Telemetry: emits `vectorkit.search.latency_ms` and
+    /// `vectorkit.search.result_count` when monitoring is enabled.
     pub fn find_nearest(
         &self,
         probe: &Engram,
@@ -283,51 +926,43 @@ impl VectorStore {
         if k == 0 {
             return Ok(Vec::new());
         }
-
-        // Capture start instant before the I/O and scan.
         let start = std::time::Instant::now();
 
-        let predicate = StoragePredicate::Eq(
-            Column::new("vectors", "model_id"),
-            TypedValue::Text(model_id.to_string()),
-        );
-        let rows = self
-            .storage
-            .row_store()
-            .query("vectors", Some(&predicate), &[], None, None)
-            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        // Populate the resident index on first call (amortised, not per-query).
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        self.ensure_index_built_locked(&mut state)?;
 
-        let mut drawer_ids: Vec<String> = Vec::new();
-        let mut engrams: Vec<Engram> = Vec::new();
-        for row in rows {
-            let drawer_id = match row.get("drawer_id") {
-                Some(TypedValue::Text(s)) => s.clone(),
-                _ => continue,
-            };
-            let bytes = match row.get("engram") {
-                Some(TypedValue::Blob(b)) => b.clone(),
-                _ => continue,
-            };
-            drawer_ids.push(drawer_id);
-            engrams.push(decode_engram(&bytes)?);
-        }
-        if engrams.is_empty() {
-            return Ok(Vec::new());
-        }
-        let raw = EngramLib::find_nearest(probe, &engrams, k);
-        let out: Vec<VectorMatch> = raw
+        // Convert Engram probe to the typed payload BruteForceIndex expects.
+        let probe_payload = VectorPayload::from_engram(probe);
+
+        // Restrict the scan to this model's partition (O(log m)).
+        let filter = MetadataFilter {
+            model_id: Some(model_id.to_string()),
+            model_version: None,
+        };
+
+        // Delegate all Hamming arithmetic to the active index (I-7).
+        // Both indexes are EXACT and produce bit-identical results.
+        let hits = if state.is_mih_active {
+            state.mih_index.search(&probe_payload, DenseMetric::HAMMING, k, Some(&filter))?
+        } else {
+            state.brute_force_index.search(&probe_payload, DenseMetric::HAMMING, k, Some(&filter))?
+        };
+
+        // Map DenseHit → VectorMatch. BruteForceIndex already enforces
+        // (distance ASC, item_id ASC) per the oracle contract (§0.3).
+        let result: Vec<VectorMatch> = hits
             .into_iter()
-            .map(|m| VectorMatch {
-                drawer_id: drawer_ids[m.index].clone(),
-                distance: m.distance as i32,
+            .map(|h| VectorMatch {
+                item_id: h.key.item_id.clone(),
+                distance: h.raw_distance,
                 model_id: model_id.to_string(),
             })
             .collect();
 
-        // Emit search metrics at the operation boundary.
-        // latency_ms: full operation (row fetch + Hamming top-K).
-        // result_count: final result set size (≤ k).
-        let result_count = out.len();
+        let result_count = result.len();
         let model_id_owned = model_id.to_string();
         report!({
             use std::time::{SystemTime, UNIX_EPOCH};
@@ -339,12 +974,7 @@ impl VectorStore {
             let mut tags = std::collections::HashMap::new();
             tags.insert("kit".to_string(), "VectorKit".to_string());
             tags.insert("model_id".to_string(), model_id_owned.clone());
-            StatSample::metric(
-                "vectorkit.search.latency_ms".to_string(),
-                elapsed_ms,
-                tags.clone(),
-                ts,
-            )
+            StatSample::metric("vectorkit.search.latency_ms".to_string(), elapsed_ms, tags.clone(), ts)
         });
         report!({
             use std::time::{SystemTime, UNIX_EPOCH};
@@ -355,25 +985,83 @@ impl VectorStore {
             let mut tags = std::collections::HashMap::new();
             tags.insert("kit".to_string(), "VectorKit".to_string());
             tags.insert("model_id".to_string(), model_id_owned.clone());
-            StatSample::metric(
-                "vectorkit.search.result_count".to_string(),
-                result_count as f64,
-                tags,
-                ts,
-            )
+            StatSample::metric("vectorkit.search.result_count".to_string(), result_count as f64, tags, ts)
         });
 
-        Ok(out)
+        Ok(result)
     }
 
-    /// Coarse keyword pre-filter: returns distinct drawer IDs whose
-    /// `drawer_id` contains the query as a substring. Mirrors the
-    /// Swift refactor — full BM25 is CorpusKit's responsibility per the
-    /// kit graph.
+    /// k-nearest-neighbours over the float32 (Lane D) vectors by cosine
+    /// distance, using the in-house `FloatBruteForceIndex` — the production
+    /// exact path (Bob's storage amendment 2026-06-12: no external engine).
     ///
-    /// Telemetry: emits `vectorkit.search.keyword_result_count`
-    /// (number of distinct drawer IDs returned) when monitoring is
-    /// enabled. Emitted at the operation boundary, after deduplication.
+    /// On the first call (or after a process restart) the float index is
+    /// built once from the float32 rows in the `vectors` table; subsequent
+    /// calls scan the resident float array. The scan restricts to
+    /// `model_id`'s partition (spec I-4: cross-model comparisons forbidden).
+    ///
+    /// Cosine is the float lane's ranking metric: it is scale-invariant, so
+    /// the answer-vs-question-echo case the SimHash-Hamming lane could not
+    /// separate ranks correctly here. Results are sorted by (cosine distance
+    /// ASC, item_id ASC) — the universal tie-break (retrieval algorithms ref
+    /// §0.3), applied inside `FloatBruteForceIndex`.
+    ///
+    /// Determinism: the float lane is reproducible-within-config, NOT
+    /// four-way bit-identical (arch spec §6). Rank order is stable across
+    /// languages on shared fixtures; raw cosine values are not asserted
+    /// bit-identical.
+    ///
+    /// Returns up to `k` matches, nearest first. Empty if `k` is 0, the
+    /// probe is empty, or no float rows exist.
+    pub fn find_nearest_float(
+        &self,
+        probe: &[f32],
+        model_id: &str,
+        k: usize,
+    ) -> Result<Vec<VectorMatch>, VectorKitError> {
+        if k == 0 || probe.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        self.ensure_float_index_built_locked(&mut state)?;
+
+        let probe_payload = VectorPayload::from_f32(probe);
+        let filter = MetadataFilter {
+            model_id: Some(model_id.to_string()),
+            model_version: None,
+        };
+
+        // FloatBruteForceIndex computes cosine distance and applies the
+        // (distance ASC, item_id ASC) tie-break (retrieval algorithms ref §0.3).
+        let hits = state.float_index.search(
+            &probe_payload,
+            DenseMetric::Float(crate::engine::metric::FloatMetric::Cosine),
+            k,
+            Some(&filter),
+        )?;
+
+        // Map DenseHit → VectorMatch. The float lane's raw_distance is the
+        // cosine distance × 10_000 (DenseHit convention), so it carries
+        // straight into VectorMatch.distance — the same integer scale the
+        // Swift findNearestFloat produces, so the cross-language
+        // rank-identity fixtures compare like-for-like.
+        let result: Vec<VectorMatch> = hits
+            .into_iter()
+            .map(|h| VectorMatch {
+                item_id: h.key.item_id.clone(),
+                distance: h.raw_distance,
+                model_id: model_id.to_string(),
+            })
+            .collect();
+
+        Ok(result)
+    }
+
+    /// Coarse keyword pre-filter: returns distinct item IDs whose
+    /// `item_id` contains the query as a substring. Full BM25 lives in
+    /// CorpusKit.
     pub fn find_by_keyword(
         &self,
         query: &str,
@@ -383,9 +1071,9 @@ impl VectorStore {
             return Ok(Vec::new());
         }
         let pattern = format!("%{}%", query);
-        let predicate = StoragePredicate::Like(Column::new("vectors", "drawer_id"), pattern);
+        let predicate = StoragePredicate::Like(Column::new("vectors", "item_id"), pattern);
         let order = vec![OrderClause::new(
-            Column::new("vectors", "drawer_id"),
+            Column::new("vectors", "item_id"),
             OrderDirection::Ascending,
         )];
         let rows = self
@@ -396,15 +1084,13 @@ impl VectorStore {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for row in rows {
-            if let Some(TypedValue::Text(drawer_id)) = row.get("drawer_id") {
-                if seen.insert(drawer_id.clone()) {
-                    out.push(drawer_id.clone());
+            if let Some(TypedValue::Text(item_id)) = row.get("item_id") {
+                if seen.insert(item_id.clone()) {
+                    out.push(item_id.clone());
                 }
             }
         }
 
-        // Emit keyword search result count at the operation boundary.
-        // Off-path: single AtomicBool load when monitoring is disabled.
         let count = out.len();
         report!({
             use std::time::{SystemTime, UNIX_EPOCH};
@@ -425,40 +1111,74 @@ impl VectorStore {
         Ok(out)
     }
 
-    // Lifecycle (GLK_PROVISION_001)
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
 
-    /// Destroy all vector rows in this store.
+    /// Destroy all vector rows. Called by `EstateCoordinator::destroy`.
     ///
-    /// Deletes every row from the `vectors` table. Called by
-    /// `EstateCoordinator::destroy` as part of the coordinated estate teardown
-    /// path (GLK_PROVISION_001). After this call the backing storage still exists
+    /// Deletes every row from the `vectors` table AND resets the resident
+    /// array to empty. After this call the backing storage still exists
     /// (schema intact) but contains no vector data.
-    ///
-    /// The caller (GLK coordinator) is responsible for closing the estate through
-    /// LocusKit before calling this method. This method does not close or remove
-    /// the backing storage — that is the caller's responsibility.
-    ///
-    /// Mirrors Swift `VectorStore.destroyAllVectors()`.
     pub fn destroy_all_vectors(&self) -> Result<(), VectorKitError> {
-        // StoragePredicate::IsTrue matches every row — used as an always-true
-        // predicate to delete all rows without needing a column-specific condition.
         self.storage
             .row_store()
             .delete("vectors", &StoragePredicate::IsTrue)
             .map_err(|e| VectorKitError::StoreUnavailable(format!("destroy_all_vectors failed: {e}")))?;
+
+        // Reset both indexes and live count to empty. The table is now empty.
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        if let Some(ref mut store) = state.array_store {
+            store.rebuild_from(&[])?;
+            let snap = store.snapshot();
+            let (payloads, keys) = Self::array_to_payloads_keys(&snap);
+            state.brute_force_index.build(&payloads, &keys)?;
+            state.mih_index.build(&payloads, &keys)?;
+        } else {
+            state.brute_force_index.build(&[], &[])?;
+            state.mih_index.build(&[], &[])?;
+        }
+        state.live_binary_count = 0;
+        state.is_mih_active = false;
+        state.index_built = true;
+        // Reset the Lane D float index to empty — every float row was just
+        // deleted, so the resident float array must be cleared.
+        state.float_index.build(&[], &[])?;
+        state.float_index_built = true;
         Ok(())
     }
 
-    /// Remove the row for `(drawer_id, model_id)`. Idempotent.
+    /// Remove the row for `(item_id, 0, model_id)`. Idempotent.
     pub fn delete_vector(
         &self,
-        drawer_id: &str,
+        item_id: &str,
+        model_id: &str,
+    ) -> Result<(), VectorKitError> {
+        self.delete_and_tombstone(item_id, 0, model_id)
+    }
+
+    /// Remove the row for `(item_id, vector_index, model_id)`. Idempotent.
+    pub fn delete_payload(
+        &self,
+        item_id: &str,
+        vector_index: u32,
+        model_id: &str,
+    ) -> Result<(), VectorKitError> {
+        self.delete_and_tombstone(item_id, vector_index, model_id)
+    }
+
+    /// Delete all rows for `(item_id, model_id)` regardless of vector_index.
+    pub fn delete_all_vectors(
+        &self,
+        item_id: &str,
         model_id: &str,
     ) -> Result<(), VectorKitError> {
         let predicate = StoragePredicate::all(vec![
             StoragePredicate::Eq(
-                Column::new("vectors", "drawer_id"),
-                TypedValue::Text(drawer_id.to_string()),
+                Column::new("vectors", "item_id"),
+                TypedValue::Text(item_id.to_string()),
             ),
             StoragePredicate::Eq(
                 Column::new("vectors", "model_id"),
@@ -469,32 +1189,431 @@ impl VectorStore {
             .row_store()
             .delete("vectors", &predicate)
             .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        // The deletion may have removed float32 rows. Invalidate the Lane D
+        // index so the next find_nearest_float rebuilds from the table (the
+        // authoritative source). The delete carries no kind, so a lazy
+        // rebuild is the correct coherence path for the float lane.
+        state.float_index_built = false;
+        if !state.index_built {
+            return Ok(()); // table delete already applied; array not yet built
+        }
+
+        // Collect keys matching (item_id, model_id) from the BruteForce array
+        // (the authoritative slot source), then remove from both indexes.
+        let snap = state.brute_force_index.array().clone();
+        let mut removed_count: u32 = 0;
+        for slot_idx in 0..snap.count {
+            if snap.is_tombstoned(slot_idx) {
+                continue;
+            }
+            let k = &snap.keys[slot_idx];
+            if k.item_id == item_id && k.model_id == model_id {
+                let owned_key = k.clone();
+                if let Some(ref mut store) = state.array_store {
+                    store.tombstone(&owned_key)?;
+                }
+                state.brute_force_index.remove(&owned_key)?;
+                state.mih_index.remove(&owned_key)?;
+                removed_count += 1;
+            }
+        }
+        state.live_binary_count = state.live_binary_count.saturating_sub(removed_count);
+        Self::select_index(&mut state);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Private: resident index lifecycle
+    // -----------------------------------------------------------------------
+
+    /// Ensure both indexes are populated. Idempotent — no-op once built.
+    ///
+    /// Must be called with the state mutex already locked.
+    ///
+    /// After building, `live_binary_count` is set from the loaded array and
+    /// `select_index` is called to initialise the threshold routing.
+    ///
+    /// Build strategy (in priority order):
+    ///   1. Sidecar present and its count matches the table binary-row count:
+    ///      load from sidecar (one OS read, amortised).
+    ///   2. Otherwise: fetch all binary rows once from the table (source of
+    ///      truth), build the resident array, rewrite the sidecar if present.
+    fn ensure_index_built_locked(
+        &self,
+        state: &mut HotState,
+    ) -> Result<(), VectorKitError> {
+        if state.index_built {
+            return Ok(());
+        }
+
+        if let Some(ref mut store) = state.array_store {
+            // Attempt to load from the on-disk sidecar.
+            let _ = store.load(); // non-fatal: empty start on failure
+
+            let snap = store.snapshot();
+            let table_count = self.binary_row_count()?;
+
+            // Compare live-vs-live: snap.live_count() is the number of
+            // non-tombstoned slots in the sidecar (written to the header
+            // at flush time and recomputed here from the bitmap).
+            // table_count is the number of live rows in the `vectors` table.
+            // They agree iff the sidecar is up-to-date (C5 fix: using
+            // snap.count here counts tombstoned slots and spuriously
+            // triggers a full rebuild after every delete).
+            if snap.live_count() == table_count {
+                // Sidecar and table agree on live records — use the sidecar.
+                state.live_binary_count = snap.live_count() as u32;
+                let (payloads, keys) = Self::array_to_payloads_keys(&snap);
+                state.brute_force_index.build(&payloads, &keys)?;
+                state.mih_index.build(&payloads, &keys)?;
+            } else {
+                // Stale sidecar: rebuild from the table.
+                state.sidecar_rebuild_count += 1;
+                let records = self.fetch_all_binary_records()?;
+                state.live_binary_count = records.len() as u32;
+                let store_ref = state.array_store.as_mut().unwrap();
+                store_ref.rebuild_from(&records)?;
+                let rebuilt = store_ref.snapshot();
+                let (payloads, keys) = Self::array_to_payloads_keys(&rebuilt);
+                state.brute_force_index.build(&payloads, &keys)?;
+                state.mih_index.build(&payloads, &keys)?;
+            }
+        } else {
+            // No sidecar: build the array in memory from the table.
+            let records = self.fetch_all_binary_records()?;
+            state.live_binary_count = records.len() as u32;
+            let payloads: Vec<VectorPayload> = records
+                .iter()
+                .map(|(_, bytes)| VectorPayload {
+                    kind: VectorKind::Binary,
+                    dim: 256,
+                    bytes: bytes.clone(),
+                    scale: None,
+                })
+                .collect();
+            let keys: Vec<VectorRecordKey> = records.into_iter().map(|(k, _)| k).collect();
+            state.brute_force_index.build(&payloads, &keys)?;
+            state.mih_index.build(&payloads, &keys)?;
+        }
+
+        state.index_built = true;
+        Self::select_index(state);
+        Ok(())
+    }
+
+    /// Ensure the Lane D float index is populated. Idempotent — no-op once built.
+    ///
+    /// Must be called with the state mutex already locked. Builds the
+    /// `FloatBruteForceIndex` from the float32 rows in the `vectors` table
+    /// (one query, paid once per process lifetime in the normal path).
+    /// Unlike the binary lane there is no sidecar for the float lane yet —
+    /// the float resident array is rebuilt from the table on first use.
+    fn ensure_float_index_built_locked(
+        &self,
+        state: &mut HotState,
+    ) -> Result<(), VectorKitError> {
+        if state.float_index_built {
+            return Ok(());
+        }
+        let records = self.fetch_all_float_records()?;
+        let payloads: Vec<VectorPayload> = records.iter().map(|(_, p)| p.clone()).collect();
+        let keys: Vec<VectorRecordKey> = records.into_iter().map(|(k, _)| k).collect();
+        // FloatBruteForceIndex::build accepts an empty slice (it parks an
+        // empty Float32 array and every search returns no matches).
+        state.float_index.build(&payloads, &keys)?;
+        state.float_index_built = true;
+        Ok(())
+    }
+
+    /// Fetch all float32 rows from the `vectors` table, sorted by
+    /// VectorRecordKey natural order (arch spec §4.2: deterministic
+    /// partition index, so the cross-language scan order matches).
+    fn fetch_all_float_records(
+        &self,
+    ) -> Result<Vec<(VectorRecordKey, VectorPayload)>, VectorKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                "vectors",
+                Some(&StoragePredicate::Eq(
+                    Column::new("vectors", "kind"),
+                    TypedValue::Int(VectorKind::Float32.raw()),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let mut records: Vec<(VectorRecordKey, VectorPayload)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let item_id = match row.get("item_id") {
+                Some(TypedValue::Text(s)) => s.clone(),
+                _ => continue,
+            };
+            let vector_index = match row.get("vector_index") {
+                Some(TypedValue::Int(v)) => *v as u32,
+                _ => continue,
+            };
+            let model_id = match row.get("model_id") {
+                Some(TypedValue::Text(s)) => s.clone(),
+                _ => continue,
+            };
+            let model_version = match row.get("model_version") {
+                Some(TypedValue::Text(s)) => s.clone(),
+                _ => continue,
+            };
+            let payload = match decode_payload(&row) {
+                Ok(p) if p.kind == VectorKind::Float32 => p,
+                _ => continue,
+            };
+            let key = VectorRecordKey::new(item_id, vector_index, model_id, model_version);
+            records.push((key, payload));
+        }
+        records.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(records)
+    }
+
+    /// Count binary rows in the `vectors` table.
+    ///
+    /// Used by `ensure_index_built_locked` to detect a stale sidecar.
+    fn binary_row_count(&self) -> Result<usize, VectorKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                "vectors",
+                Some(&StoragePredicate::Eq(
+                    Column::new("vectors", "kind"),
+                    TypedValue::Int(VectorKind::Binary.raw()),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+        Ok(rows.len())
+    }
+
+    /// Fetch all binary rows from the `vectors` table once, sorted by
+    /// VectorRecordKey natural order.
+    ///
+    /// Called only when the sidecar is absent or stale — once per process
+    /// lifetime in the normal path.
+    fn fetch_all_binary_records(
+        &self,
+    ) -> Result<Vec<(VectorRecordKey, Vec<u8>)>, VectorKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                "vectors",
+                Some(&StoragePredicate::Eq(
+                    Column::new("vectors", "kind"),
+                    TypedValue::Int(VectorKind::Binary.raw()),
+                )),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let mut records: Vec<(VectorRecordKey, Vec<u8>)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(sv) = decode_stored_vector_light(&row)? {
+                records.push(sv);
+            }
+        }
+
+        // Sort by key for deterministic partition index (arch spec §4.2).
+        records.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(records)
+    }
+
+    /// Extract live (non-tombstoned) payloads and keys from a ResidentVectorArray.
+    ///
+    /// Helper for building both indexes from an array snapshot. Returns
+    /// parallel (payloads, keys) vecs suitable for `DenseIndex::build`.
+    fn array_to_payloads_keys(
+        array: &crate::engine::resident::ResidentVectorArray,
+    ) -> (Vec<VectorPayload>, Vec<VectorRecordKey>) {
+        let mut payloads: Vec<VectorPayload> = Vec::new();
+        let mut keys: Vec<VectorRecordKey> = Vec::new();
+        for slot_idx in 0..array.count {
+            if array.is_tombstoned(slot_idx) {
+                continue;
+            }
+            let bytes = array.vector_bytes(slot_idx).to_vec();
+            payloads.push(VectorPayload {
+                kind: VectorKind::Binary,
+                dim: 256,
+                bytes,
+                scale: None,
+            });
+            keys.push(array.keys[slot_idx].clone());
+        }
+        (payloads, keys)
+    }
+
+    /// Update `is_mih_active` based on `live_binary_count` vs `mih_threshold`.
+    ///
+    /// Promotes to MIH when count reaches threshold; demotes when it falls
+    /// below. Parallel to Swift `_selectIndex()`.
+    fn select_index(state: &mut HotState) {
+        let use_mih = state.live_binary_count >= state.mih_threshold;
+        if use_mih && !state.is_mih_active {
+            state.is_mih_active = true;
+        } else if !use_mih && state.is_mih_active {
+            state.is_mih_active = false;
+        }
+    }
+
+    /// Delete one (item_id, vector_index, model_id) row from the table and
+    /// tombstone the matching slot in the resident array.
+    fn delete_and_tombstone(
+        &self,
+        item_id: &str,
+        vector_index: u32,
+        model_id: &str,
+    ) -> Result<(), VectorKitError> {
+        let predicate = StoragePredicate::all(vec![
+            StoragePredicate::Eq(
+                Column::new("vectors", "item_id"),
+                TypedValue::Text(item_id.to_string()),
+            ),
+            StoragePredicate::Eq(
+                Column::new("vectors", "vector_index"),
+                TypedValue::Int(vector_index as i64),
+            ),
+            StoragePredicate::Eq(
+                Column::new("vectors", "model_id"),
+                TypedValue::Text(model_id.to_string()),
+            ),
+        ]);
+        self.storage
+            .row_store()
+            .delete("vectors", &predicate)
+            .map_err(|e| VectorKitError::StoreUnavailable(e.to_string()))?;
+
+        let mut state = self.state.lock().map_err(|_| {
+            VectorKitError::StoreUnavailable("VectorStore: index mutex poisoned".into())
+        })?;
+        // The deleted row may have been a float32 vector. Invalidate the
+        // Lane D index so the next find_nearest_float rebuilds from the table.
+        state.float_index_built = false;
+        if !state.index_built {
+            return Ok(()); // table delete already applied; array not yet built
+        }
+
+        // Scan the BruteForce snapshot to find the exact VectorRecordKey
+        // (which includes model_version — not available at the call site).
+        let snap = state.brute_force_index.array().clone();
+        let mut removed = false;
+        for slot_idx in 0..snap.count {
+            if snap.is_tombstoned(slot_idx) {
+                continue;
+            }
+            let k = &snap.keys[slot_idx];
+            if k.item_id == item_id
+                && k.vector_index == vector_index
+                && k.model_id == model_id
+            {
+                let owned_key = k.clone();
+                if let Some(ref mut store) = state.array_store {
+                    store.tombstone(&owned_key)?;
+                }
+                state.brute_force_index.remove(&owned_key)?;
+                state.mih_index.remove(&owned_key)?;
+                removed = true;
+                break; // UNIQUE(item_id, vector_index, model_id) — one match max
+            }
+        }
+        if removed {
+            state.live_binary_count = state.live_binary_count.saturating_sub(1);
+            Self::select_index(&mut state);
+        }
         Ok(())
     }
 }
 
-// ---- row decode helpers ----
+// ── Row decode helpers ────────────────────────────────────────────────────
 
-fn decode_engram(bytes: &[u8]) -> Result<Engram, VectorKitError> {
-    if bytes.len() != 32 {
-        return Err(VectorKitError::StoreUnavailable(format!(
-            "expected 32-byte engram BLOB, got {} bytes",
-            bytes.len()
-        )));
+/// Decode a `VectorPayload` from a storage row.
+///
+/// Returns `Err(DecodingFailure)` when a required column is missing or malformed.
+///
+/// Int8 payloads return `Err(Int8QuantizationPolicyUndefined)`: the
+/// quantization policy has not been ratified so a decoded int8 payload
+/// cannot be safely used by any consumer. This is a symmetric fail-closed
+/// guard: since writes are rejected (`add_payload` returns
+/// `Int8QuantizationPolicyUndefined`), no int8 rows should be present in
+/// production. The guard defends against hand-crafted rows.
+/// See VECTORKIT_SPEC §I-4a.
+fn decode_payload(
+    row: &persistence_kit::StorageRow,
+) -> Result<VectorPayload, VectorKitError> {
+    let kind_raw = match row.get("kind") {
+        Some(TypedValue::Int(v)) => *v,
+        _ => return Err(VectorKitError::DecodingFailure("missing kind column".to_string())),
+    };
+    let kind = VectorKind::from_raw(kind_raw)
+        .ok_or_else(|| VectorKitError::DecodingFailure(format!("unknown VectorKind {kind_raw}")))?;
+    // Symmetric read-side guard: int8 payloads cannot be decoded until the
+    // quantization policy is ratified. Returning an error here causes calling
+    // read paths (get_payload, vectors_for_item) to surface None or skip the
+    // row — the same safe outcome as a missing row. This prevents silent
+    // consumption of hand-crafted int8 rows.
+    if kind == VectorKind::Int8 {
+        return Err(VectorKitError::Int8QuantizationPolicyUndefined(
+            "int8 rows cannot be decoded: quantization policy is unspecified. \
+             See VECTORKIT_SPEC §I-4a."
+                .to_string(),
+        ));
     }
-    Engram::from_wire_bytes(bytes)
-        .map_err(|e| VectorKitError::StoreUnavailable(format!("engram decode failed: {e}")))
+    let dim = match row.get("dim") {
+        Some(TypedValue::Int(v)) => *v as u32,
+        _ => return Err(VectorKitError::DecodingFailure("missing dim column".to_string())),
+    };
+    let bytes = match row.get("payload") {
+        Some(TypedValue::Blob(b)) => b.clone(),
+        _ => return Err(VectorKitError::DecodingFailure("missing payload column".to_string())),
+    };
+    let scale = match row.get("scale") {
+        Some(TypedValue::Float(f)) => Some(*f as f32),
+        Some(TypedValue::Null) | None => None,
+        _ => None,
+    };
+    Ok(VectorPayload { kind, dim, bytes, scale })
 }
 
 fn decode_stored_vector(
     row: &persistence_kit::StorageRow,
 ) -> Result<Option<StoredVector>, VectorKitError> {
+    // The `id` column is TEXT in SQLite (no native UUID column type), so the
+    // SQLite backend hands it back as `Text` on read, while the InMemory backend
+    // preserves the inserted `Uuid`. Accept BOTH: decoding `Uuid` only silently
+    // dropped every persisted vector on read-back, so `find_nearest` over a
+    // reopened estate returned no matches and the vector recall lane went dark.
+    // Mirrors the Swift VectorStore.decodeRowUUID fix (parity-is-absolute).
     let id = match row.get("id") {
         Some(TypedValue::Uuid(u)) => u.to_string(),
+        Some(TypedValue::Text(s)) => match Uuid::parse_str(s) {
+            Ok(u) => u.to_string(),
+            Err(_) => return Ok(None),
+        },
         _ => return Ok(None),
     };
-    let drawer_id = match row.get("drawer_id") {
+    let item_id = match row.get("item_id") {
         Some(TypedValue::Text(s)) => s.clone(),
+        _ => return Ok(None),
+    };
+    let vector_index = match row.get("vector_index") {
+        Some(TypedValue::Int(v)) => *v as u32,
         _ => return Ok(None),
     };
     let model_id = match row.get("model_id") {
@@ -505,21 +1624,71 @@ fn decode_stored_vector(
         Some(TypedValue::Text(s)) => s.clone(),
         _ => return Ok(None),
     };
-    let bytes = match row.get("engram") {
-        Some(TypedValue::Blob(b)) => b.clone(),
-        _ => return Ok(None),
+    let payload = decode_payload(row)?;
+    // StoredVector still carries an Engram for the convenience API.
+    // Only Binary payloads can produce a StoredVector; other kinds
+    // are accessible via the get_payload path.
+    let engram = match payload.as_engram() {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
     };
+    // filed_at is a unix-seconds i64. A timestamp column reads back as `Timestamp`
+    // on the InMemory backend and as a primitive `Int` on the SQLite backend
+    // (the column stores the integer). Accept both — decoding only `Timestamp`
+    // dropped every persisted vector on reopen, blanking the vector recall lane
+    // (see the Swift VectorStore.decodeRowDate fix, parity-is-absolute).
     let filed_at = match row.get("filed_at") {
         Some(TypedValue::Timestamp(t)) => *t,
+        Some(TypedValue::Int(i)) => *i,
         _ => return Ok(None),
     };
-    let engram = decode_engram(&bytes)?;
     Ok(Some(StoredVector {
         id,
-        drawer_id,
+        item_id,
+        vector_index,
         model_id,
         model_version,
         engram,
         filed_at,
     }))
+}
+
+/// Lightweight decode: extract only (VectorRecordKey, bytes) from a row.
+///
+/// Used by `fetch_all_binary_records` to build the resident array. Does
+/// not attempt to decode the Engram — just extracts the raw bytes from the
+/// `payload` column and the key fields. Only processes Binary rows.
+fn decode_stored_vector_light(
+    row: &persistence_kit::StorageRow,
+) -> Result<Option<(VectorRecordKey, Vec<u8>)>, VectorKitError> {
+    let item_id = match row.get("item_id") {
+        Some(TypedValue::Text(s)) => s.clone(),
+        _ => return Ok(None),
+    };
+    let vector_index = match row.get("vector_index") {
+        Some(TypedValue::Int(v)) => *v as u32,
+        _ => return Ok(None),
+    };
+    let model_id = match row.get("model_id") {
+        Some(TypedValue::Text(s)) => s.clone(),
+        _ => return Ok(None),
+    };
+    let model_version = match row.get("model_version") {
+        Some(TypedValue::Text(s)) => s.clone(),
+        _ => return Ok(None),
+    };
+    let bytes = match row.get("payload") {
+        Some(TypedValue::Blob(b)) => b.clone(),
+        _ => return Ok(None),
+    };
+    // Only include Binary payloads (kind=0) in the resident array.
+    let kind_raw = match row.get("kind") {
+        Some(TypedValue::Int(v)) => *v,
+        _ => return Ok(None),
+    };
+    if kind_raw != VectorKind::Binary.raw() {
+        return Ok(None);
+    }
+    let key = VectorRecordKey::new(item_id, vector_index, model_id, model_version);
+    Ok(Some((key, bytes)))
 }

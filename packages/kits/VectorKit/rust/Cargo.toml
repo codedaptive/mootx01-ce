@@ -26,3 +26,10 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
 uuid = { version = "1", features = ["v4"] }
 intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
+
+# tempfile is used in ResidentArrayStore tests to create temporary .vec
+# files on real disk. This satisfies the mission requirement: "SQLite-backed
+# persistence tests (write → mmap-reopen → identical top-k) on a real
+# on-disk file (NOT InMemory)." Real filesystem I/O exercised in tests.
+[dev-dependencies]
+tempfile = "3"

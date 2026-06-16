@@ -1,15 +1,23 @@
-# Decision: Rust AEAD crate — C-1 per-crate exception for `aes-gcm`
-
-**Date:** 2026-06-05
-**Stream:** w3-pk-encryption (PAR-4-PK / PAR-5-PK)
-**Status:** Accepted
-
 ---
+status: decided
+question: Which Rust AEAD crate to adopt for at-rest row encryption, and under what C-1 per-crate exception
+authors: MOOTx01 maintainers
+date: 2026-06-05
+relates_to:
+  - docs/reference/PERSISTENCEKIT_SPEC.md
+  - docs/reference/PERSISTENCEKIT_INTERFACE.md
+supersedes: none
+context:
+  - At-rest row encryption ships in Swift via CryptoKit AES.GCM; the Rust port needs a matching AES-GCM-256 AEAD.
+  - The C-1 constraint prohibits external crate dependencies without a recorded per-crate exception.
+---
+
+# Decision: Rust AEAD crate — C-1 per-crate exception for `aes-gcm`
 
 ## Context
 
-At-rest row encryption (Mission ENC-01) shipped in Swift via CryptoKit
-`AES.GCM`. The Rust port (PAR-5-PK) requires an AES-GCM-256 implementation
+At-rest row encryption shipped in Swift via CryptoKit
+`AES.GCM`. The Rust port requires an AES-GCM-256 implementation
 to maintain behavioral parity with the Swift side so persisted rows are
 cross-decryptable between Swift and Rust.
 

@@ -1,19 +1,20 @@
 ---
 status: decided
 question: What cadence should the T-matrix (temporal causality) population pass run at?
-authors: Design Council
+authors: MOOTx01 maintainers
 date: 2026-06-04
 relates_to:
-  - docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK_v1.0_2026-05-28.md (§6.4 — superseded)
-  - docs/reference/GENIUSLOCUSKIT_SPEC_v0.8.md (§11.2 standing-signal inventory)
-  - docs/reference/SUBSTRATEML_SPEC_v0.8.md (§5.22 TemporalCausalityFold)
-supersedes: cookbook §6.4 weekly cadence specification
+  - docs/engineering/GENIUSLOCUS_ENGINEERING_COOKBOOK.md (§6.4 — superseded)
+  - docs/reference/GENIUSLOCUSKIT_SPEC.md (§11.2 standing-signal inventory)
+  - docs/reference/SUBSTRATEML_SPEC.md (§5.22 TemporalCausalityFold)
+supersedes: none
+context:
+  - Cookbook §6.4 specified a weekly T-matrix population pass, written before the MatrixT write path and the hourly standing-signal scheduler existed.
+  - The weekly cadence conflated the dreaming daemon's cold-path work with the T-population pass, which has different freshness and performance characteristics.
 ---
 
 # DECISION — MatrixT Hourly Population Cadence
 
-**Date:** 2026-06-04  
-**Status:** Decided (Design Council, 2026-06-04)  
 **Scope:** MatrixTier T-population pass; TemporalCausalitySignal cadence;
           GeniusLocusKit standing-signal inventory §11.2.
 
@@ -26,7 +27,7 @@ the temporal causality matrix T's update rule as a "dreaming daemon pass,
 weekly." The passage was written before the MatrixT write path existed and
 before the hourly standing-signal scheduler was designed.
 
-Design Council reviewed the cadence on 2026-06-04 and concluded that weekly
+A review of the cadence on 2026-06-04 concluded that weekly
 was underspecified — it conflated the dreaming daemon's weekly cold-path work
 (NMF, eigenvalue centrality) with the T-population pass, which has different
 performance characteristics and freshness requirements.

@@ -69,6 +69,13 @@ let package = Package(
         // code. Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28: layering is
         // GeniusLocusKit (composition) → IntellectusLib (floor). No inversion.
         .package(name: "IntellectusLib", path: "../../libs/IntellectusLib"),
+        // ConvergenceKit: sync-backend abstraction. GeniusLocusKit stores the
+        // active sync engine per estate and exposes its state through
+        // syncState(for:) so ARIA surfaces can report honest sync status.
+        // Layering: GeniusLocusKit (composition) → ConvergenceKit (sync tier)
+        // does NOT invert. ConvergenceKit has no dependency on GLK.
+        // Per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28.
+        .package(name: "ConvergenceKit", path: "../ConvergenceKit"),
     ],
     targets: [
         .target(
@@ -95,6 +102,10 @@ let package = Package(
                 // IntellectusLib: per-estate rollup telemetry (GLK_ROLLUPS_001).
                 // Off-path is a single Atomic<Bool> load — zero cost when disabled.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
+                // ConvergenceKit: sync-backend protocol + SyncState. GLK stores the
+                // active SyncEngine per estate handle and exposes syncState(for:)
+                // so honest sync status flows from ConvergenceKit → GLK → ARIA.
+                .product(name: "ConvergenceKit", package: "ConvergenceKit"),
             ],
             path: "Sources/GeniusLocusKit"
         ),
@@ -120,6 +131,10 @@ let package = Package(
                 // IntellectusLib: test suite needs to install capturing sinks
                 // and toggle the enabled flag for telemetry isolation tests.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
+                // ConvergenceKit: sync-engine test types (NoSyncEngine) used by
+                // sync-state force-tests in EstateStatusSyncTests.swift.
+                .product(name: "ConvergenceKit", package: "ConvergenceKit"),
+                .product(name: "ConvergenceKitNone", package: "ConvergenceKit"),
             ],
             path: "Tests/GeniusLocusKitTests"
         ),

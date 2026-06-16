@@ -105,8 +105,17 @@ public struct GroundedSynthesis: Recipe {
 
         // 1. Hybrid recall over the single GLK recall-verb boundary
         //    (NeuronKit B-1). Returns a paged, MMR-reranked stream.
+        //
+        //    Hydration is forced to .full: ContextSynthesizer extracts
+        //    patterns/themes from drawer BODIES, and per spec § 7.3 a
+        //    .structured recall returns content as "" (blob loading is
+        //    skipped). Synthesizing over structured rows would silently
+        //    produce an empty-pattern context — same failure class as the
+        //    Contradiction recipe.
+        var fullFrame = input.frame
+        fullFrame.hydrationLevel = .full
         let stream = try await hybridRecall(
-            input.frame,
+            fullFrame,
             handle: estate,
             on: kit,
             tuning: input.tuning

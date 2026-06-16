@@ -22,7 +22,7 @@ The `AuditGate` write gate is **not** here — it lives in `SubstrateLib`
 `SHA256`. The HLC `HLCGenerator` clock-maker lives in `SubstrateTypes`
 alongside the `HLC` value type.
 
-See `docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md` §6 for
+See `docs/engineering/HARNESS_REFERENCE.md` §6 for
 the canonical breakdown of where each substrate primitive lives,
 and cookbook v1.0 §20 for the rationale.
 

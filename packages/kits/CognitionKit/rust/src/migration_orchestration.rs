@@ -2,14 +2,13 @@
 //! Swift `MigrationOrchestration` in
 //! `CognitionKit/Sources/CognitionKit/MigrationOrchestration.swift`.
 //!
-//! This is CognitionKit's Rust-parity Pass 2. The recipe BODY cannot run
-//! live in Rust — the Rust LocusKit estate does not exist (every Rust GLK
-//! verb is stubbed) and building it is the substrate missions' lane. But
-//! the recipe's *sequencing logic* — the call order (derive → capture-each
-//! → benchmark, per plan) and how it threads minted ids + benchmark
-//! results into the ranked report — IS portable. The three substrate
-//! operations are abstracted behind the `RecipeSubstrate` trait; the
-//! orchestration is a pure function of (substrate, plans, origin).
+//! This is CognitionKit's Rust-parity Pass 2. The recipe BODY is isolated
+//! behind the `RecipeSubstrate` trait so the sequencing logic — the call
+//! order (derive → capture-each → benchmark, per plan) and how it threads
+//! minted ids + benchmark results into the ranked report — can be tested
+//! deterministically without a live estate. The three substrate operations
+//! are abstracted behind the trait; the orchestration is a pure function
+//! of (substrate, plans, origin).
 //!
 //! Every DECISION (C-13 gate, combined-score, ranking, tie-break,
 //! duplicate-plan guard, lost-concept union) is delegated to
@@ -19,8 +18,15 @@
 //! SEAM-1..3 exactly — same inputs, same recorded call sequence, same
 //! assembled report, same deterministic minted ids.
 //!
-//! Live-estate execution still waits on the Rust LocusKit estate; a live
-//! adapter conforming to `RecipeSubstrate` is a future bridge.
+//! Live-estate execution is provided by `crate::migration_live::LiveRecipeSubstrate`,
+//! which wraps an `EstateCoordinator` and implements `RecipeSubstrate` against
+//! the real Rust GLK + LocusKit substrate. The production entry point
+//! `crate::migration_live::run_migration_benchmark_sqlite` wires a durable
+//! WAL-mode `SqliteDrawerStore`-backed `EstateCoordinator` into
+//! `run_migration_benchmark`, closing the in-memory-only gap. Tests in
+//! `migration_live` exercise the full path over both `InMemoryDrawerStore`
+//! (CK-LIVE-1..9) and `SqliteDrawerStore` (CK-SQLITE-1..3), including the
+//! reopen primitive-decode round-trip.
 
 use std::time::SystemTime;
 
@@ -102,10 +108,11 @@ pub struct BenchmarkOutcome {
     pub not_found: Vec<String>,
 }
 
-/// The three substrate operations a migration recipe sequences. A live
-/// adapter (a future bridge over the real estate) and the deterministic
-/// test fake both implement it; the orchestration neither knows nor cares
-/// which. Mirrors the Swift `RecipeSubstrate` protocol.
+/// The three substrate operations a migration recipe sequences.
+/// `crate::migration_live::LiveRecipeSubstrate` provides the real estate
+/// implementation; the deterministic test fake used below exercises the
+/// same seam without I/O. The orchestration neither knows nor cares which
+/// implementor it receives. Mirrors the Swift `RecipeSubstrate` protocol.
 pub trait RecipeSubstrate {
     /// Derive a COW branch for `plan_name`; return its branch id, or a
     /// `SubstrateError` if the substrate write fails.

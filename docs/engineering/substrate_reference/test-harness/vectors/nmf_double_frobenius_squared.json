@@ -1,0 +1,88 @@
+{
+  "description": "Conformance vectors for NMFDoubleFrobeniusSquared — the parked f64/Frobenius² NMF variant. NOT for production use; see SUBSTRATEML_SPEC.md § 5.4b and the module header for the production-gate contract. Cross-port bit-identity (Swift scalar ↔ Rust scalar) is the correctness gate. Generated from Swift scalar reference on 2026-06-13.",
+  "version": "1.0",
+  "engine": "NMFDoubleFrobeniusSquared",
+  "canonical_seed": "0xC0FFEE_BABE_BEEF",
+  "production_gate": "NOT FOR PRODUCTION — must pass substrate_math_performance benchmarking (Bob ruling 2026-06-13) before any consumer wires to this variant",
+  "test_cases": [
+    {
+      "id": "nmf-dfs-001",
+      "name": "2x2_k1_canonical_seed",
+      "description": "2×2 matrix, rank 1, canonical GLK seed 0xC0FFEE_BABE_BEEF. Primary cross-port conformance case.",
+      "input": {
+        "o": [4.0, 1.0, 1.0, 5.0],
+        "rows": 2,
+        "cols": 2,
+        "rank": 1,
+        "seed": "0xC0FFEE_BABE_BEEF",
+        "max_iterations": 100,
+        "tolerance": 1e-6
+      },
+      "expected": {
+        "w_bit_patterns": [4603661257158336504, 4607051107372252721],
+        "h_bit_patterns": [4612924100901497531, 4616330521827979722],
+        "reconstruction_error_bit_pattern": 4622628467456029591,
+        "iterations": 8
+      },
+      "notes": "w[0] = 0.6090725271978945, w[1] = 0.9854215029499241; h[0] = 2.549819067656555, h[1] = 4.125147690629499; err = 11.437694171816288"
+    },
+    {
+      "id": "nmf-dfs-002",
+      "name": "3x3_rank1_canonical_seed",
+      "description": "Perfect rank-1 3×3 matrix, rank 1, canonical seed. Verifies near-zero Frobenius² error.",
+      "input": {
+        "o": [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0],
+        "rows": 3,
+        "cols": 3,
+        "rank": 1,
+        "seed": "0xC0FFEE_BABE_BEEF",
+        "max_iterations": 200,
+        "tolerance": 1e-9
+      },
+      "expected": {
+        "w_bit_patterns": [4601193815539350904, 4605697415166833578, 4608320465888842828],
+        "h_bit_patterns": [4612575102165826494, 4617078701793658225, 4619775043477024004],
+        "reconstruction_error_bit_pattern": 4327796906586673664,
+        "iterations": 2
+      },
+      "invariants": ["reconstruction_error < 1e-6 (Frobenius² of a perfect rank-1 matrix)"]
+    },
+    {
+      "id": "nmf-dfs-003",
+      "name": "2x3_k2_canonical_seed",
+      "description": "2×3 matrix, rank 2, canonical seed. Exercises rank-2 multi-factor path.",
+      "input": {
+        "o": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "rows": 2,
+        "cols": 3,
+        "rank": 2,
+        "seed": "0xC0FFEE_BABE_BEEF",
+        "max_iterations": 100,
+        "tolerance": 1e-6
+      },
+      "expected": {
+        "w_bit_patterns": [4602465361513043642, 4593766770366977732, 4605722911112632657, 4612419604414596566],
+        "h_bit_patterns": [4610627333865788969, 4615981999002032526, 4618482759899252455, 4607560704718651574, 4604853887617463912, 4600969095618859142],
+        "reconstruction_error_bit_pattern": 4531103906867295372,
+        "iterations": 75
+      }
+    },
+    {
+      "id": "nmf-dfs-004",
+      "name": "determinism_check",
+      "description": "Two calls with the same seed must produce bit-identical W and H.",
+      "input": {
+        "o": [4.0, 1.0, 1.0, 5.0],
+        "rows": 2,
+        "cols": 2,
+        "rank": 1,
+        "seed": "0xDEADBEEF_CAFEBABE",
+        "max_iterations": 100,
+        "tolerance": 1e-6
+      },
+      "expected": {
+        "invariants": ["two calls with identical inputs produce bit-identical W, H, reconstruction_error"]
+      }
+    }
+  ]
+}

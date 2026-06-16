@@ -1,6 +1,15 @@
+---
+title: Substrate Performance Gate
+status: methodology
+author: MOOTx01 maintainers
+date: 2026-06-14
+description: Published cross-language performance measurements for the substrate's federation-critical exact core; the citation gate behind every public performance claim.
+relates_to:
+  - docs/decisions/ADR-001-transcendental-isolation-invariant.md
+---
+
 # Substrate Performance Gate
 
-**Version 1.0 — 2026-06-02**
 **Host: Apple silicon (arm64, macOS), Apple M5 Max**
 
 Published cross-language performance measurements for the substrate's
@@ -39,7 +48,7 @@ and scheduler noise. Each language runs the same fixed inputs
 
 ## 2. The tool
 
-`port/harness/bench_crosslang.py` builds and runs each language's
+The cross-language benchmark harness builds and runs each language's
 federation-core port on the host it is invoked on and writes a
 self-describing result file (`bench_crosslang_result.json`) stamped
 with arch, OS, and toolchain versions. Two result files from two

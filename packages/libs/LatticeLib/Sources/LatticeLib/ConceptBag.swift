@@ -29,6 +29,11 @@ public enum BagBuilder {
     /// Build the concept bag for `text` against the pinned `lexicon`
     /// (cookbook §2–§4). `keepClasses` is the set of word classes Step 1
     /// retains; the encoder keeps nouns and verbs.
+    ///
+    /// Novel tokens (absent from the static word-class table) are classified
+    /// via the platform default: Apple uses `NLTagger`; non-Apple uses the
+    /// deterministic HMM. Use the `taggerChoice:` overload to specify the
+    /// tagger explicitly from the estate's `EstateConfiguration.novelTokenTagger`.
     public static func bag(
         _ text: String,
         lexicon: CanonicalizationLexicon,
@@ -49,6 +54,41 @@ public enum BagBuilder {
             let isQID = concept?.hasPrefix("Q") ?? false
             guard keepClasses.contains(LatticeLib.wordClass(token)) || isQID else { continue }
             // Step 3: accumulate (hit -> conceptID; miss kept via POS -> surface).
+            bag[concept ?? key, default: 0] += 1
+        }
+        return bag
+    }
+
+    /// Build the concept bag for `text` with an explicit novel-token tagger
+    /// choice threaded from the estate's configuration.
+    ///
+    /// Identical to `bag(_:lexicon:keep:)` except novel tokens (table misses)
+    /// are classified by the specified `taggerChoice` rather than the platform
+    /// default. Thread this from `EstateConfiguration.novelTokenTagger` (bridged
+    /// from `PersistenceKit.NovelTokenTaggerChoice` to `LatticeLib.NovelTokenTaggerChoice`)
+    /// to ensure the concept bag is built consistently with the estate's indexed
+    /// content.
+    ///
+    /// - Parameters:
+    ///   - text: raw input text to encode.
+    ///   - lexicon: pinned canonicalization lexicon for Step 2.
+    ///   - keepClasses: word classes Step 1 retains (default: nouns + verbs).
+    ///   - taggerChoice: which novel-token tagger to invoke on a table miss.
+    /// - Returns: the weighted concept bag.
+    public static func bag(
+        _ text: String,
+        lexicon: CanonicalizationLexicon,
+        keep keepClasses: Set<WordClass> = [.noun, .verb],
+        taggerChoice: NovelTokenTaggerChoice
+    ) -> ConceptBag {
+        var bag: ConceptBag = [:]
+        for token in Tokenizer.tokenize(text) {
+            let key = Stemmer.stem(Normalizer.normalize(token))
+            guard !key.isEmpty else { continue }
+            let concept = lexicon.entries[key]
+            let isQID = concept?.hasPrefix("Q") ?? false
+            // Use the estate-specified tagger choice for novel-token classification.
+            guard keepClasses.contains(LatticeLib.wordClass(token, tagger: taggerChoice)) || isQID else { continue }
             bag[concept ?? key, default: 0] += 1
         }
         return bag

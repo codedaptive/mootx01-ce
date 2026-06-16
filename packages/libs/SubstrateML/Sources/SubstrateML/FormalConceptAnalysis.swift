@@ -12,7 +12,8 @@
 // (StabilityEstimator uses SplitMix64 seeded from the caller's seed XOR
 // the concept's FNV hash). Building a context from the estate (which
 // rows carry which `(field,value)` attributes) is the coupled part and
-// is deferred to a Brain-layer seam/wrapper — NOT this file. The Swift
+// lives in the cognition tier, NOT this pure engine — CognitionKit's
+// `FormalConcepts` recipe builds the context from recalled drawers. The Swift
 // conformance tests and the Rust version
 // (`packages/libs/SubstrateML/rust/src/formal_concept_analysis.rs`) exercise identical inputs
 // and expected outputs, mirroring the pure-engine + inline-conformance
@@ -241,8 +242,8 @@ public struct FormalConcept: Hashable, Codable, Sendable {
 /// Rows are addressed by a context-local 0-based index. The `RowID`
 /// typealias is nested (not top-level) because consumers that also
 /// import LocusKit would encounter a top-level `RowID = String`
-/// collision; the deferred estate wrapper maps estate row identifiers
-/// to these indices.
+/// collision; the cognition-tier estate wrapper (CognitionKit
+/// `FormalConcepts`) maps estate row identifiers to these indices.
 public struct FormalContext: Sendable {
     /// Context-local 0-based row index. Nested to avoid colliding
     /// with `LocusKit.RowID` (a `String`) on a consumer's import

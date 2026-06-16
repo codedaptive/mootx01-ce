@@ -62,6 +62,34 @@ pub enum LocusKitError {
     /// `from` and `to` are `State` raw values as `i64`. Callers that
     /// need the typed cases convert via `State::try_from(value)`.
     DisciplineViolation { from: i64, to: i64, reason: String },
+
+    /// A stored TEXT value in a required column could not be parsed
+    /// to its declared type (UUID or ISO 8601 timestamp). Parity with
+    /// `StorageError::CorruptStoredValue` in PersistenceKit (commit
+    /// 0ff08d93) and Swift `LocusKitError.corruptStoredValue`.
+    /// Returned instead of silently substituting a default
+    /// (new random UUID, epoch-0 date) so callers know their stored
+    /// data is corrupt and cannot be trusted.
+    ///
+    /// `table`: LocusKit table name (e.g. "drawers").
+    /// `column`: the column whose stored text was unparseable.
+    /// `stored_text`: the raw string that failed to parse, reproduced
+    /// verbatim for log diagnosis.
+    CorruptStoredValue {
+        table: String,
+        column: String,
+        stored_text: String,
+    },
+
+    /// A verb call targets a feature that is not yet implemented in
+    /// this version of LocusKit. The associated message names the
+    /// feature so callers can distinguish clearly between "not found"
+    /// (data missing) and "not supported" (code missing). Returned
+    /// instead of silently producing a sentinel or stub result per
+    /// the P1 mandate: fail-loud unsupported is required when the
+    /// producing data does not exist. Mirrors Swift
+    /// `LocusKitError.notSupported`.
+    NotSupported(String),
 }
 
 impl std::fmt::Display for LocusKitError {
@@ -97,6 +125,18 @@ impl std::fmt::Display for LocusKitError {
                     "DisciplineViolation: from={} to={} reason='{}'",
                     from, to, reason
                 )
+            }
+            LocusKitError::CorruptStoredValue {
+                table,
+                column,
+                stored_text,
+            } => write!(
+                f,
+                "CorruptStoredValue: table='{}' column='{}' stored_text='{}'",
+                table, column, stored_text
+            ),
+            LocusKitError::NotSupported(msg) => {
+                write!(f, "NotSupported: {}", msg)
             }
         }
     }
@@ -203,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn all_nine_cases_are_distinct() {
+    fn all_eleven_cases_are_distinct() {
         // Confirm no two different cases compare equal — basic sanity check.
         let variants: Vec<LocusKitError> = vec![
             LocusKitError::DatabaseUnavailable("x".to_string()),
@@ -230,8 +270,14 @@ mod tests {
                 to: 1,
                 reason: "x".to_string(),
             },
+            LocusKitError::CorruptStoredValue {
+                table: "drawers".to_string(),
+                column: "lineageID".to_string(),
+                stored_text: "NOT-A-UUID".to_string(),
+            },
+            LocusKitError::NotSupported("feature not yet implemented".to_string()),
         ];
-        assert_eq!(variants.len(), 9);
+        assert_eq!(variants.len(), 11);
         for (i, a) in variants.iter().enumerate() {
             for (j, b) in variants.iter().enumerate() {
                 if i == j {

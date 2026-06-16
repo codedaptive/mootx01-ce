@@ -1,18 +1,26 @@
 // Storage.swift
 //
 // Top-level Storage protocol. Every backend conforms.
+//
+// Storage is RowStore + BlobStore + AuditLog + StorageObserver. It does
+// NOT own a vector-search engine: dense-embedding k-NN lives solely in
+// VectorKit (ADR-008 persistencekit-vector-contract-correction). What
+// PersistenceKit guarantees instead is the ACCOMMODATION contract — every
+// backend must support vector workloads' STORAGE needs (vector-payload row
+// round-trip, bulk hydration at scale, count, delete) through the general
+// RowStore / BlobStore surfaces. The accommodation guarantee is machine-
+// enforced by the conformance harness's vector fixtures.
 
 import Foundation
 
 public protocol Storage: Sendable {
     var configuration: EstateConfiguration { get }
 
-    /// The four sub-stores, accessible outside a transaction for
+    /// The three sub-stores, accessible outside a transaction for
     /// auto-committed single operations. For multi-op atomicity,
     /// use `transaction(_:)`.
     var rowStore: any RowStore { get }
     var blobStore: any BlobStore { get }
-    var vectorIndex: any VectorIndex { get }
     var auditLog: any AuditLog { get }
     var observer: any StorageObserver { get }
 

@@ -148,6 +148,12 @@ impl QueueKitSchema {
 /// storage.open(&schema)?;
 /// let backend = PersistenceKitBackend::new(storage);
 /// ```
+/// `Clone` shares the SAME underlying `Arc<dyn Storage>` — both handles read
+/// and write the one queue table. This lets a background drain worker hold its
+/// own backend handle (for `watch`/`drain_available`/`complete`) over the same
+/// storage the enqueue side writes to, without moving the original out of the
+/// coordinator (GLK near-realtime encode drain).
+#[derive(Clone)]
 pub struct PersistenceKitBackend {
     storage: Arc<dyn Storage>,
 }
@@ -163,6 +169,26 @@ impl PersistenceKitBackend {
     pub fn open_schema(storage: &dyn Storage) -> Result<(), QueueError> {
         let schema = QueueKitSchema::declaration();
         storage.open(&schema).map_err(storage_err)
+    }
+
+    /// Drain the queue repeatedly until a pass claims nothing, handing every
+    /// claimed job to `handler`. Used by `watch` (see its body for why
+    /// draining-until-empty per wake — not once per event — is load-robust). A
+    /// claim error ends the pass; the next wake retries. Mirrors the Swift
+    /// `PersistenceKitBackend.drainUntilEmpty`.
+    fn drain_until_empty<F>(&self, handler: &F) -> Result<(), QueueError>
+    where
+        F: Fn(Job, SessionId) -> Result<(), QueueError> + Send + Sync,
+    {
+        loop {
+            let batch = self.drain_available()?;
+            if batch.is_empty() {
+                return Ok(());
+            }
+            for (job, session) in batch {
+                handler(job, session)?;
+            }
+        }
     }
 
     fn col(name: &str) -> Column {
@@ -410,6 +436,20 @@ impl QueueBackend for PersistenceKitBackend {
         self.list_jobs("done", stream_id)
     }
 
+    // pendingCount (telemetry depth probe) — Swift parity.
+    //
+    // COUNT(*) WHERE status = 'new' — a single read, no claim, no cursor
+    // advance. Mirrors Swift's `PersistenceKitBackend.pendingCount()`.
+    fn pending_count(&self) -> Result<usize, QueueError> {
+        let pred = StoragePredicate::Eq(
+            Self::col("status"),
+            TypedValue::Text("new".to_string()),
+        );
+        self.storage.row_store()
+            .count(QUEUE_KIT_TABLE_NAME, Some(&pred))
+            .map_err(storage_err)
+    }
+
     // watch(): subscribe to INSERT events on the jobs table, wake on each
     // event, and re-read through drain_available() (spec §10 invariant 2).
     //
@@ -426,20 +466,22 @@ impl QueueBackend for PersistenceKitBackend {
             .observe(QUEUE_KIT_TABLE_NAME, events)
             .map_err(|e| QueueError::WatcherFailed(e.to_string()))?;
 
-        // Drain any jobs that arrived before we subscribed.
-        for (job, session) in self.drain_available()? {
-            handler(job, session)?;
-        }
+        // Drain anything already present before we subscribed, until empty.
+        self.drain_until_empty(&handler)?;
 
         // Block until the channel closes or handler errors.
         loop {
             match rx.recv() {
                 Ok(_) => {
-                    // Wake signal received. Re-drain through the claim path.
-                    let pairs = self.drain_available()?;
-                    for (job, session) in pairs {
-                        handler(job, session)?;
-                    }
+                    // Wake signal received. Re-drain through the claim path until
+                    // the queue is empty — NOT once per event. Draining-until-
+                    // empty makes watch LOAD-robust: under a burst the observer
+                    // may coalesce inserts (fewer events than rows) or a wake may
+                    // be dropped while a serializable claim contends with
+                    // concurrent inserts; a once-per-event drain would strand the
+                    // rows whose wake was coalesced away. Re-draining until empty
+                    // on every wake guarantees no committed job is left behind.
+                    self.drain_until_empty(&handler)?;
                 }
                 Err(_) => {
                     // Channel closed — storage shut down, exit cleanly.

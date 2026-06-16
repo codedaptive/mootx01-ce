@@ -4,11 +4,11 @@ Two templates that define the canonical shape of per-package
 documentation in `docs/reference/`. Every Kit and Lib in
 `packages/` is documented by a pair of files:
 
-- **`<PACKAGE>_SPEC_v<X.Y>.md`** — the behavioral contract.
+- **`<PACKAGE>_SPEC.md`** — the behavioral contract.
   Invariants, conformance requirements, error categories, the
   *what* and *why*. Language-agnostic. Stable across Swift and
   Rust ports.
-- **`<PACKAGE>_INTERFACE_v<X.Y>.md`** — the API surface. Type
+- **`<PACKAGE>_INTERFACE.md`** — the API surface. Type
   signatures, method shapes, error enums, the *how to call it*.
   Per-language code blocks. Tracks the implementation.
 
@@ -42,20 +42,26 @@ Signatures live in INTERFACE; SPEC may name a function but not
 reproduce its signature. If the two disagree, SPEC wins and
 INTERFACE is fixed in the same edit.
 
-**Version coupling.** SPEC version drives INTERFACE version. When
-SPEC bumps from v0.1 to v0.2, INTERFACE bumps in lockstep even
-if the API surface is unchanged. This keeps the pair readable as
-a unit.
+**Version coupling.** Filenames carry no version (VERSIONING.md
+§3) — the version lives in front matter as `MAJOR.MINOR.PATCH`.
+The SPEC's front-matter `version` drives the INTERFACE's: when the
+SPEC bumps, the INTERFACE bumps in lockstep even if the API
+surface is unchanged, so the pair always reads as a unit. A
+content revision bumps `version` and appends a changelog entry in
+place; it never spawns a new file.
 
 ## Naming conventions
 
+Filenames are bare — no version suffix (VERSIONING.md §3). The
+version lives in front matter only.
+
 | Pattern | Use |
 |---|---|
-| `<PACKAGE>_SPEC_v<X.Y>.md` | SPEC for a package |
-| `<PACKAGE>_INTERFACE_v<X.Y>.md` | INTERFACE for a package |
+| `<PACKAGE>_SPEC.md` | SPEC for a package |
+| `<PACKAGE>_INTERFACE.md` | INTERFACE for a package |
 
 PACKAGE is uppercase, matching the package directory name in
-`packages/` (e.g., `LOCUSKIT_SPEC_v0.1.md`).
+`packages/` (e.g., `LOCUSKIT_SPEC.md`).
 
 Cross-cutting specs that are not per-package (the protocol spec,
 the architecture spec, the encoder spec) keep their existing

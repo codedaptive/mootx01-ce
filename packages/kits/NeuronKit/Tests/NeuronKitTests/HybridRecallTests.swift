@@ -20,6 +20,7 @@
 import Testing
 import Foundation
 import GeniusLocusKit
+import SubstrateML
 @testable import NeuronKit
 
 // `RecallStream` lives in both `LocusKit` and `NeuronKit`. The test
@@ -34,25 +35,28 @@ struct HybridRecallEngineTests {
 
     // MARK: - shingles
     // These tests do not call any emitting function; no lock needed.
+    // HybridRecallEngine.shingles was retired (I-25); the substrate-owned
+    // ShingleSimilarity.shingles is the delegation target. These tests now
+    // exercise the provider directly — proving behavior is preserved.
 
     @Test("shingles is empty for empty input")
     func shinglesIsEmptyForEmptyInput() {
-        #expect(HybridRecallEngine.shingles("") == [])
+        #expect(ShingleSimilarity.shingles("") == [])
     }
 
     @Test("shingles for short input returns the whole string")
     func shinglesForShortInputReturnsWholeString() {
         // Strings shorter than the 3-char window collapse to the
-        // single shingle = the whole string (lowercased). Documented
-        // edge case kept identical between Swift and Rust.
-        #expect(HybridRecallEngine.shingles("ab") == ["ab"])
-        #expect(HybridRecallEngine.shingles("AB") == ["ab"])
+        // single shingle = the whole string (lowercased). Edge case
+        // preserved from the canonical NeuronKit contract.
+        #expect(ShingleSimilarity.shingles("ab") == ["ab"])
+        #expect(ShingleSimilarity.shingles("AB") == ["ab"])
     }
 
     @Test("shingle windows are three-char lowercased")
     func shinglesWindowsAreThreeCharLowercased() {
-        #expect(HybridRecallEngine.shingles("CAT") == ["cat"])
-        #expect(HybridRecallEngine.shingles("catdog") == ["cat", "atd", "tdo", "dog"])
+        #expect(ShingleSimilarity.shingles("CAT") == ["cat"])
+        #expect(ShingleSimilarity.shingles("catdog") == ["cat", "atd", "tdo", "dog"])
     }
 
     // MARK: - shingleSimilarity
@@ -86,6 +90,27 @@ struct HybridRecallEngineTests {
         let b = "carbon-based organic compounds"
         #expect(NeuronKit.shingleSimilarity(a, b) == HybridRecallEngine.shingleSimilarity(a, b))
         #expect(abs(NeuronKit.shingleSimilarity(a, a) - 1.0) <= 1e-6)
+    }
+
+    // MARK: - delegation assertion
+    // Verifies that HybridRecallEngine.shingleSimilarity delegates to the
+    // substrate provider (I-25): the engine result must equal
+    // SubstrateML.ShingleSimilarity.similarity for the same inputs.
+
+    @Test("shingleSimilarity delegates to SubstrateML.ShingleSimilarity")
+    func shingleSimilarityDelegatesToSubstrateML() {
+        let pairs: [(String, String)] = [
+            ("organic chemistry", "organic chemistry"),
+            ("abcdef", "ghijkl"),
+            ("the quick brown fox", "the quick brown foxx"),
+            ("", "catdog"),
+            ("ab", "bc"),
+        ]
+        for (a, b) in pairs {
+            let engine = HybridRecallEngine.shingleSimilarity(a, b)
+            let substrate = ShingleSimilarity.similarity(a, b)
+            #expect(engine == substrate, "mismatch for (\(a), \(b)): engine=\(engine) substrate=\(substrate)")
+        }
     }
 
     // MARK: - rerank

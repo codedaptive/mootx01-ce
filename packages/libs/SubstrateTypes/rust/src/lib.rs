@@ -43,7 +43,7 @@ pub use noun_type::NounType;
 pub use recall_types::{DistanceBreakdown, RecallResult, RecallScore, RowProjection};
 pub use row::{Row, RowId};
 pub use row_bitmaps::{BitVector216, RowBitmaps};
-pub use row_state::{RowState, RowStateError, RowVerb};
+pub use row_state::{RowState, RowStateCluster, RowStateError, RowVerb};
 pub use time_range::TimeRange;
 
 pub const VERSION: &str = "1.0.0-skeleton";

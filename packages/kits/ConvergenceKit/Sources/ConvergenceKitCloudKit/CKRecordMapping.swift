@@ -14,7 +14,7 @@ import PersistenceKit
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need SimHash, Hamming, OR-reduce, Fingerprint256 ops, HammingNN
 // top-K, HLC, AuditGate, MatrixDecay, AuditLogFold, Bradley-Terry,
 // NMF, FFT, eigenvalue centrality, or any other substrate primitive,
@@ -74,7 +74,15 @@ public enum CKRecordMapping {
         let hlc = unpacked(hlcPacked)
         let parts = record.recordType.split(separator: "_", maxSplits: 1)
         let tableName = parts.count > 1 ? String(parts[1]) : record.recordType
-        let rowKey = UUID(uuidString: record.recordID.recordName) ?? UUID()
+        // Reject fabrication: a corrupt recordName must never become a fresh
+        // random UUID. A fabricated identity would create a phantom local row
+        // that desynchronises on every subsequent sync round — each pull would
+        // upsert the same corrupt remote record under a different UUID, growing
+        // the local database unboundedly. The caller (pull loop) quarantines the
+        // record as a conflict and continues to the next one.
+        guard let rowKey = UUID(uuidString: record.recordID.recordName) else {
+            throw SyncError.corruptRemoteIdentity(recordName: record.recordID.recordName)
+        }
 
         var values: [String: TypedValue] = [:]
         for key in record.allKeys() {

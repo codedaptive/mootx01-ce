@@ -2,7 +2,6 @@ import Testing
 import SubstrateML
 import EngramLib
 import PersistenceKit
-import PersistenceKitInMemory
 import IntellectusLib
 import Foundation
 @testable import VectorKit
@@ -87,10 +86,7 @@ import Foundation
 struct CapturePathBenchmarkTests {
 
     private func makeStore() async throws -> VectorStore {
-        let storage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: UUID(),
-            backend: .inMemory
-        ))
+        let storage = try makeScratchStorage()
         try await storage.open(schema: VectorStore.schemaDeclaration)
         return VectorStore(storage: storage)
     }
@@ -135,7 +131,7 @@ struct CapturePathBenchmarkTests {
             let started = ContinuousClock.now
             let engram = try await provider.embed(text)
             try await store.addVector(
-                drawerID: "capture-\(offset)",
+                itemID: "capture-\(offset)",
                 engram: engram,
                 modelID: provider.modelID,
                 modelVersion: provider.modelVersion,
@@ -184,7 +180,7 @@ struct CapturePathBenchmarkTests {
         for index in 0..<sampleCount {
             let started = ContinuousClock.now
             try await store.addVector(
-                drawerID: "store-\(index)",
+                itemID: "store-\(index)",
                 engram: zeroEngram,
                 modelID: "minilm-v6",
                 modelVersion: "1.0.0",
@@ -235,7 +231,7 @@ struct CapturePathBenchmarkTests {
             let b2 = UInt64(truncatingIfNeeded: index &+ 2) &* 0x94D0_49BB_1331_11EB
             let b3 = UInt64(truncatingIfNeeded: index &+ 3) &* 0xC2B2_AE3D_27D4_EB4F
             try await store.addVector(
-                drawerID: "corpus-\(index)",
+                itemID: "corpus-\(index)",
                 engram: Engram(blocks: b0, b1, b2, b3),
                 modelID: "minilm-v6",
                 modelVersion: "1.0.0",
@@ -339,10 +335,7 @@ struct CapturePathBenchmarkTests {
     /// SQLite file; with PersistenceKit's InMemory backend (mission 6)
     /// the benchmark exercises the abstraction without disk I/O.
     private static func freshStore() async throws -> VectorStore {
-        let storage = InMemoryStorage(configuration: EstateConfiguration(
-            estateID: UUID(),
-            backend: .inMemory
-        ))
+        let storage = try makeScratchStorage()
         try await storage.open(schema: VectorStore.schemaDeclaration)
         return VectorStore(storage: storage)
     }

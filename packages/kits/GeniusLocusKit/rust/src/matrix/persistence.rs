@@ -26,7 +26,7 @@ use crate::audit::UnifiedAuditLog;
 //
 // The substrate publishes conformance-gated, byte-identical
 // Swift+Rust implementations of every primitive listed in
-// docs/engineering/HARNESS_REFERENCE_v1.0_2026-05-28.md. If you
+// docs/engineering/HARNESS_REFERENCE.md. If you
 // need a SimHash, Hamming distance, OR-reduce, Fingerprint256 op,
 // HammingNN top-K, HLC tick, AuditGate admit, MatrixDecay, audit-
 // log fold, Bradley-Terry update, NMF, FFT, eigenvalue centrality,
@@ -460,7 +460,11 @@ fn decode_snapshot(bytes: &[u8]) -> Result<MatrixSnapshot, MatrixPersistenceErro
         }
         curves.insert(id, MatrixCalibrationCurve { buckets });
     }
-    let calibration = MatrixCalibrationRegistry { curves };
+    // update_timestamps is not stored in the binary snapshot format (pre-decay-feature
+    // snapshots have no per-model timestamp data). On load, the field starts empty,
+    // meaning the first record_with_decay call will apply no decay — correct because
+    // there is no elapsed time to compute from a missing baseline.
+    let calibration = MatrixCalibrationRegistry { curves, update_timestamps: std::collections::HashMap::new() };
 
     // temporal_watermark_hlc trailer — 16 bytes (i64 + i32 + i32).
     //

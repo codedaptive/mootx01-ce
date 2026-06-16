@@ -13,4 +13,4 @@ pub use api::{
     SubscriptionID, EMISSION_CLASS_TAGS,
 };
 pub use schedule::SchedulerError;
-pub use serial_lane::{Dispatcher, NoopDispatcher, SerialLaneScheduler};
+pub use serial_lane::{CoordinatorDispatcher, Dispatcher, NoopDispatcher, SerialLaneScheduler};

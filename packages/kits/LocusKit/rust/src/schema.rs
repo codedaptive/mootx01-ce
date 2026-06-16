@@ -67,6 +67,7 @@ pub fn schema() -> SchemaDeclaration {
             proposals_table(),
             associations_table(),
             learned_references_table(),
+            source_catalog_table(),
             node_bundles_table(),
             container_fingerprints_table(),
             recall_trace_table(),
@@ -220,6 +221,14 @@ fn tunnels_table() -> TableDeclaration {
 /// operationalBitmap default 0 = eventClass .capture, severity .trace,
 /// actorClass .user, batch .standalone, requiresFollowup false. Same
 /// headroom convention as drawers.
+///
+/// `reward` (REAL nullable): explicit quality signal populated at write
+/// time by callers that have a score (user rating, model confidence,
+/// etc.). `None` = no explicit reward; daemon falls back to
+/// `RecallTraceItem.used`. See NEURONKIT_SPEC § 3.1 step 1a.
+///
+/// `rewardProvenance` (TEXT nullable): human-readable tag for how
+/// `reward` was derived. `None` when `reward` is `None`.
 fn diary_table() -> TableDeclaration {
     TableDeclaration {
         name: "diary".to_string(),
@@ -235,6 +244,10 @@ fn diary_table() -> TableDeclaration {
             ColumnDeclaration::timestamp("tombstonedAt").nullable(),
             ColumnDeclaration::text("removedByBatch").nullable(),
             ColumnDeclaration::bitmap("operationalBitmap"),
+            // Explicit reward channel (NEURONKIT_SPEC § 3.1 step 1a).
+            ColumnDeclaration::float("reward").nullable(),
+            // Provenance tag for the reward value.
+            ColumnDeclaration::text("rewardProvenance").nullable(),
             ColumnDeclaration::json("ext").nullable(),
         ],
         primary_key: vec!["id".to_string()],
@@ -287,11 +300,13 @@ fn kg_facts_table() -> TableDeclaration {
         primary_key: vec!["id".to_string()],
         unique_constraints: Vec::new(),
         generated_columns: vec![
-            // (adjectiveBitmap & 0x3F), the state cluster. kgFacts reads
-            // filter facts with cluster < 7 (excluding the
-            // rejected/accepted/tombstoned post-resolution states), so
-            // the cluster extract is indexed here as on drawers. 6-bit
-            // mask (0x3F) to match the full state field, as on drawers.
+            // (adjectiveBitmap & 0x3F), the raw 6-bit RowState. Active
+            // kgFact recall filters to the RowState Cluster-A set via
+            // `g_state_cluster < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW`
+            // (the cluster-B floor, 16) — active/pending/contested/accepted
+            // kept, retired B/C states (16+/32+) excluded — so the state
+            // extract is indexed here as on drawers. 6-bit mask (0x3F) to
+            // match the full state field, as on drawers.
             GeneratedColumn::new(
                 "g_state_cluster",
                 ColumnType::Int,
@@ -445,6 +460,43 @@ fn learned_references_table() -> TableDeclaration {
             ColumnDeclaration::bitmap("adjectiveBitmap"),
             ColumnDeclaration::bitmap("operationalBitmap"),
             ColumnDeclaration::bitmap("provenanceBitmap"),
+            ColumnDeclaration::json("ext").nullable(),
+        ],
+        primary_key: vec!["id".to_string()],
+        unique_constraints: Vec::new(),
+        generated_columns: Vec::new(),
+        append_only: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// source_catalog
+// ---------------------------------------------------------------------------
+
+/// SourceCatalogEntry persistence per arch spec §7.8.2. The durable,
+/// queryable record of an external source from which references are
+/// learned — the `source` slot of the grounding-driven `learn` verb. The
+/// learn verb derives every `LearnedReference`'s genuine lattice anchor
+/// from the matching catalog entry (never a sentinel), so the anchor lives
+/// here as the same four columns every anchored noun uses (udcCode TEXT NOT
+/// NULL DEFAULT '' + udcFacets + wikidataQID + wikidataQidsSecondary;
+/// `add_source_catalog_entry` rejects an empty anchor). `kind` is the
+/// `SourceKind` raw (Int). `handle` is the source's own canonical locator,
+/// indexed for the learn verb's source-resolution probe.
+fn source_catalog_table() -> TableDeclaration {
+    TableDeclaration {
+        name: "source_catalog".to_string(),
+        columns: vec![
+            ColumnDeclaration::text("id"),
+            ColumnDeclaration::int("kind"),
+            ColumnDeclaration::text("handle"),
+            ColumnDeclaration::text("addedBy"),
+            ColumnDeclaration::timestamp("firstSeen"),
+            ColumnDeclaration::new("udcCode", ColumnType::Text)
+                .with_default(TypedValue::Text(String::new())),
+            ColumnDeclaration::text("udcFacets").nullable(),
+            ColumnDeclaration::text("wikidataQID").nullable(),
+            ColumnDeclaration::text("wikidataQidsSecondary").nullable(),
             ColumnDeclaration::json("ext").nullable(),
         ],
         primary_key: vec!["id".to_string()],
@@ -738,6 +790,13 @@ fn indices() -> Vec<IndexDeclaration> {
             "learned_references",
             vec!["udcCode".to_string()],
         ),
+        // source_catalog — query path: by handle (does this source already
+        // have a catalog entry? — the learn verb's source-resolution probe).
+        IndexDeclaration::new(
+            "idx_source_catalog_handle",
+            "source_catalog",
+            vec!["handle".to_string()],
+        ),
         // recall_trace — query paths: by target (reward lookup) and by
         // recalledAt (chronological reward sweep)
         IndexDeclaration::new(
@@ -793,6 +852,7 @@ mod tests {
                 "proposals",
                 "associations",
                 "learned_references",
+                "source_catalog",
                 "node_bundles",
                 "container_fingerprints",
                 "recall_trace",
@@ -1067,6 +1127,7 @@ mod tests {
                 "idx_learned_references_handle",
                 "idx_learned_references_source",
                 "idx_learned_references_udcCode",
+                "idx_source_catalog_handle",
                 "idx_recall_trace_target",
                 "idx_recall_trace_recalledAt",
             ]

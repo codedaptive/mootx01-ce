@@ -2,10 +2,13 @@
 //!
 //! Storage abstraction layer mirroring the Swift PersistenceKit
 //! package. Closed-enum predicate algebra, typed values, schema
-//! declaration, Storage + RowStore + BlobStore + VectorIndex +
-//! AuditLog + StorageObserver traits. InMemory, SQLite, and
-//! PostgreSQL backends all ship at v1.0. PostgreSQL conformance
-//! requires `PERSISTENCEKIT_PG_URL` to point at a live server.
+//! declaration, Storage + RowStore + BlobStore + AuditLog +
+//! StorageObserver traits. PersistenceKit owns no vector-search
+//! engine — dense-embedding k-NN lives in VectorKit (ADR-008); every
+//! backend instead accommodates vector workloads' storage needs
+//! through the general RowStore / BlobStore surfaces. InMemory,
+//! SQLite, and PostgreSQL backends all ship at v1.0. PostgreSQL
+//! conformance requires `PERSISTENCEKIT_PG_URL` to point at a live server.
 //!
 //! Swift parity:
 //!   - TypedValue mirrors Swift's enum case-for-case
@@ -29,6 +32,7 @@ pub mod introspection;
 pub mod observer;
 pub mod postgres;
 pub mod predicate;
+pub mod incremental_replication;
 pub mod replication;
 pub mod row_store;
 pub mod schema;
@@ -39,7 +43,6 @@ pub mod storage;
 // metrics. Off by default — zero cost when monitoring is disabled.
 pub mod telemetry;
 pub mod types;
-pub mod vector_index;
 
 pub use audit_log::*;
 pub use blob_store::*;
@@ -63,7 +66,6 @@ pub use schema::*;
 pub use sqlite::SqliteStorage;
 pub use storage::*;
 pub use types::*;
-pub use vector_index::*;
 
 #[cfg(test)]
 mod cache_config_tests;

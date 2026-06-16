@@ -40,7 +40,7 @@ public struct LatticeAnchorInference: Equatable, Sendable, Codable {
     /// The value to OR into bits 36-41 of the provenance column
     /// to record the enrichment status. Values per cookbook
     /// section 2.5: 0=none, 1=qid_pending, 2=qid_completed,
-    /// 3=closure_cached, 4-63 reserved.
+    /// 3=closure_cached, 4=qid_proposed, 5-63 reserved.
     public let enrichmentStatusBits: UInt8
 
     /// The pipeline mode that produced this inference. Recorded
@@ -93,4 +93,12 @@ public enum EnrichmentStatus: UInt8 {
     /// Q-ID resolved and the Wikidata subclass closure has been
     /// cached for graph-distance queries.
     case closureCached = 3
+
+    /// Deterministic re-inference could not resolve the Q-ID and the
+    /// maintenance daemon filed an enrichment proposal for human/agent
+    /// review. A terminal "in workflow" state, NOT passive pending: the
+    /// daemon's `qidPending` retry scan does not re-pick these rows, so
+    /// they leave the retry backlog. Proposal acceptance flips the row to
+    /// `qidCompleted` (cookbook §2.5; Q-ID-completion terminal workflow).
+    case qidProposed = 4
 }

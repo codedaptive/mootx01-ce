@@ -1,0 +1,27 @@
+# Concordance-audit ignore-list
+# ------------------------------
+# Format:  <Name> | <reason>
+# One bare top-level type name per line (the audit matches on the bare name,
+# so a name listed here is exempt in EVERY package — keep names specific).
+#
+# POLICY (see README.md): this list is for types that legitimately CANNOT
+# have a Swift<->Rust concordance row because they are platform-bound (an
+# Apple-only framework binding with no Rust counterpart) or are dev/test
+# fixtures, not contract surface. It is NOT a way to silence real drift.
+# A missing concordance row for a genuine cross-port contract type is real
+# work to be done in a per-kit mission, not an ignore-list entry. Keep this
+# list short and justified; every entry states why no row can exist.
+
+# --- Apple-only CloudKit bindings (ConvergenceKitCloudKit target) ---
+# CloudKit is an Apple framework. The CloudKit sync backend is Swift-only by
+# design (ConvergenceKit exposes CloudKit/Federation/None behind one protocol;
+# only Federation/None have Rust ports). These types have no Rust counterpart.
+CloudKitSyncEngine | Apple-only CloudKit backend; no Rust port by design
+CKRecordMapping | Apple-only CKRecord<->row mapping; no Rust port by design
+DecodedRecord | Apple-only CKRecord decode helper in CloudKit target
+SyncMeta | Apple-only CloudKit sync-metadata type in CloudKit target
+
+# --- Apple-only Metal GPU kernel (SubstrateKernel) ---
+# MetalKernel is the Apple Silicon GPU compute path. Metal is a system
+# framework with no Rust equivalent; the Rust port uses scalar/BLAS/NEON.
+MetalKernel | Apple-only Metal GPU kernel; Rust uses scalar/BLAS/NEON path

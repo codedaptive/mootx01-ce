@@ -41,12 +41,12 @@ struct TemporalCausalityFoldTests {
     @Test("empty entry list returns no deltas and unchanged watermark")
     func emptyEntries() {
         let wm = hlc(1_000)
-        let (deltas, newWm) = TemporalCausalityFold.fold(
+        let result = TemporalCausalityFold.fold(
             entries: [],
             windowMinutes: 256,
             startWatermark: wm)
-        #expect(deltas.isEmpty)
-        #expect(newWm == wm)
+        #expect(result.deltas.isEmpty)
+        #expect(result.newWatermark == wm)
     }
 
     // MARK: - 2. Single entry
@@ -55,12 +55,12 @@ struct TemporalCausalityFoldTests {
     func singleEntry() {
         let wm = HLC.zero
         let entries = [entry(60_000, [coord("f", "bitmap:1")])]
-        let (deltas, newWm) = TemporalCausalityFold.fold(
+        let result = TemporalCausalityFold.fold(
             entries: entries,
             windowMinutes: 256,
             startWatermark: wm)
-        #expect(deltas.isEmpty, "no older entry to pair with — T is unchanged")
-        #expect(newWm == hlc(60_000))
+        #expect(result.deltas.isEmpty, "no older entry to pair with — T is unchanged")
+        #expect(result.newWatermark == hlc(60_000))
     }
 
     // MARK: - 3. Two entries within window
@@ -72,17 +72,17 @@ struct TemporalCausalityFoldTests {
             entry(0, [coord("field-a", "bitmap:10")]),
             entry(60_000, [coord("field-b", "bitmap:20")]),  // 1 minute later
         ]
-        let (deltas, newWm) = TemporalCausalityFold.fold(
+        let result = TemporalCausalityFold.fold(
             entries: entries,
             windowMinutes: 256,
             startWatermark: wm)
-        #expect(deltas.count == 1)
-        let (key, count) = try #require(deltas.first)
+        #expect(result.deltas.count == 1)
+        let (key, count) = try #require(result.deltas.first)
         #expect(key.source == coord("field-a", "bitmap:10"))
         #expect(key.target == coord("field-b", "bitmap:20"))
         #expect(key.lagBucket == 1)
         #expect(count == 1)
-        #expect(newWm == hlc(60_000))
+        #expect(result.newWatermark == hlc(60_000))
     }
 
     // MARK: - 4. Two entries outside window
@@ -96,12 +96,12 @@ struct TemporalCausalityFoldTests {
             entry(0, [coord("f", "bitmap:1")]),
             entry(outsideMs, [coord("g", "bitmap:2")]),
         ]
-        let (deltas, newWm) = TemporalCausalityFold.fold(
+        let result = TemporalCausalityFold.fold(
             entries: entries,
             windowMinutes: 256,
             startWatermark: wm)
-        #expect(deltas.isEmpty, "257-minute delta evicts the earlier entry from buffer")
-        #expect(newWm == hlc(outsideMs))
+        #expect(result.deltas.isEmpty, "257-minute delta evicts the earlier entry from buffer")
+        #expect(result.newWatermark == hlc(outsideMs))
     }
 
     // MARK: - 5. Watermark is respected
@@ -116,12 +116,12 @@ struct TemporalCausalityFoldTests {
             entry(0, [coord("src", "bitmap:1")]),     // ≤ watermark
             entry(60_000, [coord("tgt", "bitmap:2")]), // > watermark → new
         ]
-        let (deltas, newWm) = TemporalCausalityFold.fold(
+        let result = TemporalCausalityFold.fold(
             entries: entries,
             windowMinutes: 256,
             startWatermark: wm)
-        #expect(deltas.count == 1, "source-before-watermark still pairs with a new target")
-        #expect(newWm == hlc(60_000))
+        #expect(result.deltas.count == 1, "source-before-watermark still pairs with a new target")
+        #expect(result.newWatermark == hlc(60_000))
     }
 
     // MARK: - 6–13. Lag bucket boundaries
@@ -190,11 +190,11 @@ struct TemporalCausalityFoldTests {
             entry(60_000,    [coord("b", "bitmap:2")]),
             entry(120_000,   [coord("c", "bitmap:3")]),
         ]
-        let (_, newWm) = TemporalCausalityFold.fold(
+        let result = TemporalCausalityFold.fold(
             entries: entries,
             windowMinutes: 256,
             startWatermark: wm)
-        #expect(newWm == hlc(120_000), "watermark must reach the last new entry")
+        #expect(result.newWatermark == hlc(120_000), "watermark must reach the last new entry")
     }
 
     // MARK: - 15. Determinism
@@ -207,13 +207,13 @@ struct TemporalCausalityFoldTests {
             entry(120_000, [coord("g1", "bitmap:5")]),
             entry(240_000, [coord("h1", "integer:99")]),
         ]
-        let (d1, wm1) = TemporalCausalityFold.fold(
+        let r1 = TemporalCausalityFold.fold(
             entries: entries, windowMinutes: 256, startWatermark: wm)
-        let (d2, wm2) = TemporalCausalityFold.fold(
+        let r2 = TemporalCausalityFold.fold(
             entries: entries, windowMinutes: 256, startWatermark: wm)
-        #expect(wm1 == wm2)
-        #expect(d1.count == d2.count)
-        for (i, ((k1, c1), (k2, c2))) in zip(d1, d2).enumerated() {
+        #expect(r1.newWatermark == r2.newWatermark)
+        #expect(r1.deltas.count == r2.deltas.count)
+        for (i, ((k1, c1), (k2, c2))) in zip(r1.deltas, r2.deltas).enumerated() {
             #expect(k1 == k2, "key at position \(i) must be identical across calls")
             #expect(c1 == c2, "count at position \(i) must be identical across calls")
         }
@@ -232,13 +232,13 @@ struct TemporalCausalityFoldTests {
             coord("field-c", "bitmap:3"),
             coord("field-d", "bitmap:4"),
         ])
-        let (deltas, _) = TemporalCausalityFold.fold(
+        let result = TemporalCausalityFold.fold(
             entries: [earlier, newer],
             windowMinutes: 256,
             startWatermark: wm)
         // Cross-product: 2 sources × 2 targets = 4 pairs.
-        #expect(deltas.count == 4, "2×2 cross-product must yield 4 unique keys")
-        let allCounts = deltas.map { $0.1 }
+        #expect(result.deltas.count == 4, "2×2 cross-product must yield 4 unique keys")
+        let allCounts = result.deltas.map { $0.1 }
         #expect(allCounts.allSatisfy { $0 == 1 })
     }
 
@@ -265,12 +265,12 @@ struct TemporalCausalityFoldTests {
             entry(0,  [coord("src", "bitmap:1")]),
             entry(ms, [coord("tgt", "bitmap:2")]),
         ]
-        let (deltas, _) = TemporalCausalityFold.fold(
+        let result = TemporalCausalityFold.fold(
             entries: entries,
             windowMinutes: 256,
             startWatermark: wm)
-        precondition(deltas.count == 1,
-            "twoEntryFold helper expects exactly 1 delta; got \(deltas.count)")
-        return deltas[0]
+        precondition(result.deltas.count == 1,
+            "twoEntryFold helper expects exactly 1 delta; got \(result.deltas.count)")
+        return result.deltas[0]
     }
 }
