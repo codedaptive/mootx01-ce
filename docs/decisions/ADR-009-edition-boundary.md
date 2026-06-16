@@ -110,3 +110,18 @@ never see it.
 
 - None blocking. The `ee-edition/` consolidation and the per-mission fixes that
   remove the existing shared→EE-only couplings are tracked separately.
+
+## Update — 2026-06-15: branch names superseded
+
+The branch names used above (under "splitting the version lines" and in the flow
+diagram) are superseded. The repository now follows the `VERSIONING.md` §2.1
+branch scheme:
+
+- **CE** uses `stable/1.0.x` — the default, permanent 1.0 line, where release
+  tags land — and `develop/1.0.x` for active development. The former CE `main`
+  branch has been retired.
+- **EE** uses `develop`. The former `build` branch has been retired.
+
+The version-line **decision is unchanged**: CE patches (v1.0.x) are cut from the
+published baseline, EE minors (v1.x.0) carry features. Only the branch *names*
+changed. See `VERSIONING.md` for the authoritative branch and tag conventions.
