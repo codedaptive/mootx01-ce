@@ -197,6 +197,86 @@ struct KGFactTests {
         #expect(fact.trust == .canonical)
     }
 
+    @Test
+    func test_adjectiveBitmap_stateAccessor() {
+        // Cookbook §2.3: state at bits 0–5. Contested = raw 2.
+        let fact = KGFact(
+            subject: "s", predicate: "p", object: "o", sourceDrawerID: "d",
+            adjectiveBitmap: 2,
+            filedAt: Date(timeIntervalSince1970: 0)
+        )
+        #expect(fact.state == .contested)
+    }
+
+    @Test
+    func test_adjectiveBitmap_stateUnknownRawFallsBackToActive() {
+        // Reserved per-cluster gap raw 4 fails closed to .active.
+        let fact = KGFact(
+            subject: "s", predicate: "p", object: "o", sourceDrawerID: "d",
+            adjectiveBitmap: 4,
+            filedAt: Date(timeIntervalSince1970: 0)
+        )
+        #expect(fact.state == .active)
+    }
+
+    @Test
+    func test_adjectiveBitmap_sensitivityAccessor() {
+        // Cookbook §2.3: sensitivity at bits 6–11. Secret = raw 48 → 48 << 6.
+        let fact = KGFact(
+            subject: "s", predicate: "p", object: "o", sourceDrawerID: "d",
+            adjectiveBitmap: Int64(48 << 6),
+            filedAt: Date(timeIntervalSince1970: 0)
+        )
+        #expect(fact.adjectiveSensitivity == .secret)
+    }
+
+    @Test
+    func test_adjectiveBitmap_exportabilityAccessor() {
+        // Cookbook §2.3: exportability at bits 12–17. Public = raw 32 → 32 << 12.
+        let fact = KGFact(
+            subject: "s", predicate: "p", object: "o", sourceDrawerID: "d",
+            adjectiveBitmap: Int64(32 << 12),
+            filedAt: Date(timeIntervalSince1970: 0)
+        )
+        #expect(fact.exportability == .public_)
+    }
+
+    @Test
+    func test_adjectiveBitmap_allFourAxesCoexist() {
+        // Shared-bitmap conformance vector — mirrors the Rust
+        // `all_four_axes_coexist_without_cross_talk` test. Each 6-bit axis
+        // carries a distinct non-default value; every accessor must read
+        // only its own field (masks/shifts do not bleed into neighbours).
+        let bitmap: Int64 = 2                // state  = Contested (raw 2,  bits 0–5)
+            | Int64(48 << 6)                 // sens   = Secret    (raw 48, bits 6–11)
+            | Int64(32 << 12)                // export = Public    (raw 32, bits 12–17)
+            | Int64(3 << 18)                 // trust  = Canonical (raw 3,  bits 18–23)
+        let fact = KGFact(
+            subject: "s", predicate: "p", object: "o", sourceDrawerID: "d",
+            adjectiveBitmap: bitmap,
+            filedAt: Date(timeIntervalSince1970: 0)
+        )
+        #expect(fact.state == .contested)
+        #expect(fact.adjectiveSensitivity == .secret)
+        #expect(fact.exportability == .public_)
+        #expect(fact.trust == .canonical)
+    }
+
+    @Test
+    func test_adjectiveBitmap_allAxesDefaultOnZeroBitmap() {
+        // Zero bitmap decodes to the fail-closed baseline on every axis —
+        // parity with the Rust `defaults_match_swift_initializer` test.
+        let fact = KGFact(
+            subject: "s", predicate: "p", object: "o", sourceDrawerID: "d",
+            adjectiveBitmap: 0,
+            filedAt: Date(timeIntervalSince1970: 0)
+        )
+        #expect(fact.state == .active)
+        #expect(fact.adjectiveSensitivity == .normal)
+        #expect(fact.exportability == .private_)
+        #expect(fact.trust == .verbatim)
+    }
+
     // MARK: - Unknown raw value falls back to zero case
 
     @Test
