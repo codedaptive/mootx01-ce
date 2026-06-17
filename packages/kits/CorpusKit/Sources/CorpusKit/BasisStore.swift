@@ -106,9 +106,14 @@ public actor BasisStore {
     /// Mirrors BundleStore/VectorStore's declaration pattern. `appendOnly` is
     /// false: a retrain UPSERTs the existing (modelID, modelVersion) row, so
     /// the table holds at most one basis per provider key.
+    ///
+    /// v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012):
+    /// reserves the slot for future per-basis typed metadata (training
+    /// hyperparameters, provenance) without a migration. 1.0 writes NULL /
+    /// omits it on upsert and never reads it.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitBasis",
-        version: 1,
+        version: 2,
         tables: [
             TableDeclaration(
                 name: "corpus_provider_basis",
@@ -120,7 +125,11 @@ public actor BasisStore {
                     // TIMESTAMP maps to TEXT ISO8601 (schema invariant) — never REAL.
                     .timestamp("trained_at", nullable: false),
                     // INTEGER staleness anchor — NOT a Bool flag.
-                    .int("trained_chunk_count", nullable: false)
+                    .int("trained_chunk_count", nullable: false),
+                    // ADR-012 forward-compat slot. Nullable `.json`, present
+                    // from schema v2. Reserves the slot, not a shape. 1.0 omits
+                    // it on upsert and never reads it.
+                    .json("ext", nullable: true)
                 ],
                 primaryKey: ["model_id", "model_version"]
                 // appendOnly defaults to false: a retrain UPSERTs the row in place.

@@ -1,6 +1,6 @@
 ---
 title: GeniusLocusKit Specification
-version: 1.6.1
+version: 1.7.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for GeniusLocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -249,6 +249,16 @@ the verb vocabulary, the audit log/projection/recovery, the scheduler
 emission ordering, the matrix tier, the training daemon, and the grant,
 federation, branch, and migration surfaces. Value-level results must
 agree; neither version leads.
+
+**I-16 (composite schema version = sum of component versions):** the GLK
+composite schema version is the SUM of its three GLK-composed component
+versions (LocusKit + VectorKit + CorpusKit/BundleStore). It is derived from
+the live component declarations in both ports, so it can never drift from the
+components, and any component bump forces the composite to advance — which the
+replication schema gate relies on (a source/destination version mismatch is
+rejected). After the ADR-012 `ext` pre-provisioning that sum is 7. The `grants`
+table and every persistent entity table across the composed kits carry the
+ADR-012 nullable `.json` `ext` forward-compat slot, inert in 1.0.
 
 ## § 5 — Behavioral contracts
 
@@ -1671,6 +1681,9 @@ force-tests cover the two present stages and the seam-not-applicable
 *End of GeniusLocusKit Specification.*
 
 ## Changelog
+
+### 1.7.0 -- 2026-06-17
+Added invariant I-16 (composite schema version = sum of component versions, derived in both ports): after the ADR-012 `ext` pre-provisioning the composite is 7 (LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2). The `grants` table gained the ADR-012 `ext` forward-compat slot. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.6.1 -- 2026-06-17
 Clarification (parity-sweep-batch #12): noted that the Rust port now mirrors the

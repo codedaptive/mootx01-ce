@@ -1,6 +1,6 @@
 ---
 title: CorpusKit Specification
-version: 1.3.0
+version: 1.4.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -155,6 +155,14 @@ are primitive-tolerant: `trained_at` is read as `Timestamp` on a
 migrate-aware connection and as ISO8601 `Text` on a fresh connection, so
 a persisted basis survives reopen on both ports (the same read-back
 discipline as I-2's chunk decode).
+
+**I-10 (`ext` forward-compat slot, ADR-012):** both persistent entity tables
+carry one nullable `.json` column named `ext` — `chunks` at BundleStore schema
+v2 and `corpus_provider_basis` at BasisStore ("CorpusKitBasis") schema v2. On
+`chunks` it is distinct from the existing per-chunk `metadata` column. In 1.0
+`ext` is inert — written NULL / omitted on insert/upsert and never read; it
+carries no behavior. Provisioned during the 1.0.0 free-migration window. See
+ADR-012.
 
 ## § 5 — Behavioral contracts
 
@@ -453,6 +461,9 @@ from the Corpus's internal VectorStore in the `.glk` / separate-corpusStorage
 case).
 
 ## Changelog
+
+### 1.4.0 -- 2026-06-17
+Added invariant I-10 (the `ext` forward-compat slot, ADR-012): `chunks` (BundleStore v2) and `corpus_provider_basis` (BasisStore v2) each carry a nullable `.json` `ext` column, inert in 1.0; on `chunks` it is distinct from `metadata`. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.3.0 -- 2026-06-17
 Added the per-signal dense float FARTHEST (anti-similarity) contract (mission

@@ -96,7 +96,13 @@ public actor GrantStore {
             // Mode-4 time-aging decay policy. NULL for modes 1–3.
             .int("decay_half_life", nullable: true),
             .timestamp("decay_started_at", nullable: true),
-            .int("decay_floor", nullable: true)
+            .int("decay_floor", nullable: true),
+            // ADR-012 forward-compat slot — the #11 custody-payload slot.
+            // Nullable `.json`; reserves space for future custody metadata
+            // (the federation/encryption track — e.g. mode-3 share-policy
+            // descriptors) without a migration. 1.0 omits it on insert and
+            // never reads it.
+            .json("ext", nullable: true)
         ],
         primaryKey: ["id"]
     )
@@ -292,11 +298,16 @@ public actor GrantStore {
     /// Modes 1, 2, and 3 are persisted — mode 3 (decay-derived) issues
     /// once IP clearance is confirmed (ENC-02).
     ///
-    /// The `grants` schema persists only the discriminant token
-    /// (`custody_mode` column), not the enum's associated values, so mode 3
-    /// decodes with placeholder associated values: the threshold/totalShares/
-    /// driftRate are NOT round-tripped. This is a known GRT-01 schema
-    /// limitation, not a defect introduced here.
+    /// Mode 3 (decay-derived) is no-vault BY DESIGN (Appendix B.3 no-vault
+    /// posture): the issuer derives the scope key, returns it to the caller,
+    /// and retains NOTHING — the caller holds the K-of-N shares. The issuer
+    /// therefore correctly does NOT persist the threshold/totalShares/driftRate;
+    /// there is no issuer-side custody record to round-trip. Mode 3 decodes with
+    /// placeholder associated values precisely because the authoritative copy
+    /// lives with the caller, not the store. This is the intended posture, NOT a
+    /// schema defect. Any future custody metadata the federation/encryption track
+    /// needs to retain (e.g. a share-policy descriptor) has a migration-free home
+    /// in the `ext` forward-compat slot (ADR-012) rather than new typed columns.
     ///
     /// `experimentalIPClearanceConfirmed` decodes as `true` because a
     /// persisted mode-3 grant was, by construction, issued with clearance.

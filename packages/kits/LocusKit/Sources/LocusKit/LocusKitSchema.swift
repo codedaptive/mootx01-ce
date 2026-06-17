@@ -31,16 +31,19 @@
 //     the storage abstraction into backend SQL text. No
 //     SchemaOperation.custom anywhere.
 //
-//   - Reserve-space discipline (DECISION_BUNDLE_ALGEBRA_AND_ERASURE
-//     section 10, fleet-wide). The three Int64 bitmap columns carry
-//     documented bit-range headroom; the reservation map below
-//     records which ranges are assigned and which are free, so a
-//     future flag is a bit that was always allocated rather than a
-//     migration. Each content table also carries one nullable
-//     `.json` extension column from v1 to absorb unforeseeable typed
+//   - Reserve-space discipline (fleet-wide). The three Int64 bitmap
+//     columns carry documented bit-range headroom; the reservation
+//     map below records which ranges are assigned and which are free,
+//     so a future flag is a bit that was always allocated rather than
+//     a migration. Each persistent entity table also carries one
+//     nullable `.json` extension column to absorb unforeseeable typed
 //     attributes without a schema change. No speculative reserved
 //     columns: the json column is the single width-independent
-//     container for the unknown-future case.
+//     container for the unknown-future case. This `ext` slot is the
+//     governing convention recorded in ADR-012 (ext forward-compat
+//     slot); 1.0 writes NULL and never reads it. The `keys` table
+//     gained its `ext` column in schema v2 (ADR-012), completing the
+//     convention across every persistent LocusKit entity table.
 //
 // Bitmap reservation map (low bit = 0). Ranges marked FREE are
 // documented headroom; consuming one is a value change, not a
@@ -76,9 +79,12 @@ public enum LocusKitSchema {
     /// The kit identifier recorded in PersistenceKit's migrations table.
     public static let kitID = "LocusKit"
 
-    /// Current schema version. v1 declares the full column set; there
-    /// is no migration ladder behind it.
-    public static let version = 1
+    /// Current schema version. v2 adds the nullable `.json` `ext`
+    /// forward-compatibility slot to the `keys` table (ADR-012), bringing
+    /// every persistent entity table to the one-`ext`-column convention.
+    /// There is no migration ladder behind v2 — no estate data has
+    /// shipped, so the bump re-declares the full column set fresh.
+    public static let version = 2
 
     /// The complete LocusKit schema as a PersistenceKit declaration.
     /// `Storage.open(schema:)` creates every table, generated column,
@@ -581,7 +587,13 @@ public enum LocusKitSchema {
             .text("key_id"),
             .text("algorithm"),     // e.g. "AES-GCM-256"
             .blob("wrapped"),       // key bytes wrapped by platform keystore
-            .timestamp("created_at")
+            .timestamp("created_at"),
+            // Reserve-space forward-compat slot (ADR-012). Nullable
+            // `.json`, present from schema v2. Reserves the slot, not a
+            // shape: future key-registry metadata (rotation lineage,
+            // KMS provider tags) serializes here migration-free. 1.0
+            // writes NULL and never reads it.
+            .json("ext", nullable: true)
         ],
         primaryKey: ["key_id"]
     )

@@ -1,8 +1,8 @@
 ---
 title: LocusKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -174,6 +174,15 @@ never constructs a concrete backend; the caller owns the connection's
 lifecycle.
 
 **I-11 (cross-port parity):** the Swift and Rust version are conformance-gated against shared behaviour. Where the ports differ in shape (async vs sync, SQLite vs in-memory store), the *value-level results* of capture, recall filtering, bitmap encode/decode, and XOR-fold reconstruction must agree. Neither version leads. See § 8 for the documented surface gap.
+
+**I-12 (`ext` forward-compat slot, ADR-012):** every persistent entity table
+carries exactly one nullable `.json` column named `ext`, reserving migration-free
+space for future per-row typed metadata (federation, encryption, custody). In 1.0
+`ext` is inert — written NULL / omitted on insert and never read; it carries no
+behavior. The slot was provisioned across all persistent entity tables during the
+1.0.0 free-migration window (`keys` gained it at LocusKit schema v2). `ext` is
+excluded from regenerable/cache/bookkeeping tables (manifest, container_fingerprints,
+node_bundles). See ADR-012 for the full inclusion/exclusion list.
 
 ## § 5 — Behavioral contracts
 
@@ -791,6 +800,9 @@ fn count_recall_traces(&self) -> Result<usize, LocusKitError>
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Added invariant I-12 (the `ext` forward-compat slot, ADR-012): every persistent entity table carries one nullable `.json` `ext` column, inert in 1.0; `keys` gained it at schema v2. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

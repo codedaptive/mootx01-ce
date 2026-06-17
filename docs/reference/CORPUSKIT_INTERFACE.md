@@ -4,7 +4,7 @@ status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
 spec_type: kit
-version: 1.6.0
+version: 1.7.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -253,7 +253,7 @@ Swift over a PersistenceKit `Storage`.
 
 ```swift
 public actor BundleStore {
-    public static let schemaDeclaration: SchemaDeclaration   // chunks table, appendOnly
+    public static let schemaDeclaration: SchemaDeclaration   // chunks table (kit-ID "CorpusKit", v2), appendOnly; carries ext JSON nullable (ADR-012, inert in 1.0)
     public init(storage: any Storage)
     public func insert(_ chunks: [Chunk]) async throws        // idempotent (B-5)
     public func get(id: UUID) async throws -> Chunk?
@@ -1008,9 +1008,10 @@ public actor Corpus {
 /// One row per (modelID, modelVersion). Lives in CorpusKit core; never imports
 /// CorpusKitProviders (the blob bytes are opaque here).
 public actor BasisStore {
-    /// Additive schema: corpus_provider_basis(model_id TEXT, model_version TEXT,
-    /// basis BLOB, trained_at TIMESTAMP/ISO8601, trained_chunk_count INTEGER),
-    /// PK (model_id, model_version). NO Bool columns; dates TEXT ISO8601.
+    /// Additive schema (kit-ID "CorpusKitBasis", version 2): corpus_provider_basis(
+    /// model_id TEXT, model_version TEXT, basis BLOB, trained_at TIMESTAMP/ISO8601,
+    /// trained_chunk_count INTEGER, ext JSON nullable — ADR-012 forward-compat slot,
+    /// inert in 1.0), PK (model_id, model_version). NO Bool columns; dates TEXT ISO8601.
     public static let schemaDeclaration: SchemaDeclaration
     public init(storage: any Storage)
     /// UPSERT the basis row (retrain replaces in place — one row per key).
@@ -1068,8 +1069,9 @@ pub struct PersistedBasis {
 }
 impl BasisStore {
     /// corpus_provider_basis(model_id TEXT, model_version TEXT, basis BLOB,
-    /// trained_at TIMESTAMP/ISO8601, trained_chunk_count INTEGER),
-    /// PK (model_id, model_version). No Bool columns; dates TEXT ISO8601.
+    /// trained_at TIMESTAMP/ISO8601, trained_chunk_count INTEGER, ext JSON nullable
+    /// — ADR-012 forward-compat slot, inert in 1.0), PK (model_id, model_version).
+    /// kit-ID "CorpusKitBasis", version 2. No Bool columns; dates TEXT ISO8601.
     pub fn schema_declaration() -> SchemaDeclaration;
     pub fn new(storage: Arc<dyn Storage>) -> Self;
     pub fn upsert(&self, row: &PersistedBasis) -> CorpusKitResult<()>;
@@ -1179,6 +1181,9 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.7.0 -- 2026-06-17
+Schema bumps (ADR-012): `chunks` (BundleStore, kit-ID "CorpusKit") v1 → v2 and `corpus_provider_basis` (BasisStore, kit-ID "CorpusKitBasis") v1 → v2, each gaining a nullable `.json` `ext` forward-compat slot. Both ports; inert in 1.0 (NULL / omitted on insert, never read). `chunks.ext` is distinct from the existing per-chunk `metadata` column. Updated the BundleStore / BasisStore schema concordance.
 
 ### 1.6.0 -- 2026-06-17
 Added `Corpus.floatFarthestPerSignal` / `Corpus::float_farthest_per_signal`

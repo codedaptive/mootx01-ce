@@ -249,7 +249,7 @@ public actor VectorStore {
         get async { await arrayStore?.sidecarWriteCount ?? 0 }
     }
 
-    // MARK: - Schema declaration (version 2, multi-vector, item_id)
+    // MARK: - Schema declaration (version 3, multi-vector, item_id, ext slot)
 
     /// Schema declaration consumed by Storage.open(schema:).
     ///
@@ -262,9 +262,13 @@ public actor VectorStore {
     ///   - Added: `scale` REAL nullable (int8 dequant; NULL otherwise)
     ///   UNIQUE constraint: (item_id, vector_index, model_id) — was
     ///   (drawer_id, model_id).
+    ///
+    /// Column changes from v2 → v3:
+    ///   - Added: `ext` JSON nullable — the ADR-012 forward-compat slot.
+    ///     Reserves the slot, not a shape; 1.0 writes NULL and never reads it.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "VectorKit",
-        version: 2,
+        version: 3,
         tables: [
             TableDeclaration(
                 name: "vectors",
@@ -278,7 +282,13 @@ public actor VectorStore {
                     .int("dim", nullable: false),
                     .blob("payload", nullable: false),
                     .float("scale", nullable: true),
-                    .timestamp("filed_at", nullable: false)
+                    .timestamp("filed_at", nullable: false),
+                    // Reserve-space forward-compat slot (ADR-012). Nullable
+                    // `.json`, present from schema v3. Future per-vector typed
+                    // metadata (quantisation provenance, embedding-run tags)
+                    // serializes here migration-free. 1.0 writes NULL and never
+                    // reads it.
+                    .json("ext", nullable: true)
                 ],
                 primaryKey: ["id"],
                 uniqueConstraints: [["item_id", "vector_index", "model_id"]]

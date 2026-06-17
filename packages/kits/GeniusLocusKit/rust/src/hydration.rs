@@ -7,10 +7,10 @@
 // HYDRATE SEQUENCE (authoritative, from REPLICATION_GROUND_TRUTH.md §7):
 //
 //   1. Schema open    — open both in_memory and durable with the composite
-//                       GLK schema (version 3: LocusKit v1 + VectorKit v1 +
-//                       CorpusKit v1). This advances both storages to version 3
-//                       so the replication schema gate (global version check)
-//                       passes.
+//                       GLK schema (version 7: LocusKit v2 + VectorKit v3 +
+//                       CorpusKit/BundleStore v2, post-ADR-012 `ext` slot).
+//                       This advances both storages to version 7 so the
+//                       replication schema gate (global version check) passes.
 //   2. Row snapshot   — replication::hydrate copies all 14 schema-declared
 //                       tables (including tombstones and append-only rows)
 //                       verbatim from durable into in_memory.
@@ -18,9 +18,10 @@
 //                       events via the AuditLog protocol path.
 //   4. Estate open    — InMemoryDrawerStore::with_storage opens the LocusKit
 //                       schema on the already-populated in_memory storage (the
-//                       open() call is a no-op because schema.version=1 <
-//                       already-applied version=3). Estate::open reads the
-//                       manifest that was copied in step 2.
+//                       open() call is a no-op because the LocusKit per-kit
+//                       schema version is below the already-applied composite
+//                       version 7). Estate::open reads the manifest that was
+//                       copied in step 2.
 //   5. Audit log feed — walk all drawers in the estate; for each drawer call
 //                       estate.audit_trail(id) and bridge each
 //                       substrate_types::AuditEvent → [UnifiedAuditEntry].
@@ -35,8 +36,10 @@
 //
 // Schema gate note: the Rust replication::replicate_full checks the GLOBAL
 // current_schema_version() on both backends (not per-kit). The composite
-// GLK schema (version 3) is opened on BOTH sides so MAX(versions) = 3 on
-// both, satisfying the gate.
+// GLK schema (version 7) is opened on BOTH sides so MAX(versions) = 7 on
+// both, satisfying the gate. Because the composite version is the SUM of the
+// component versions it is always >= every component's per-kit version, so
+// opening the composite always advances the global counter to exactly 7.
 //
 // Reference: REPLICATION_GROUND_TRUTH.md §Required hydrate ordering,
 //            REPLICATION_TRACK_PLAN.md §3 GLK estate-level hydrate integration.
@@ -86,27 +89,36 @@ use crate::matrix::MatrixTier;
 ///
 /// A GeniusLocus estate is a composition of three kits, each with its own
 /// per-kit schema. The composite schema aggregates all 14 user-visible tables
-/// and uses version 3 (LocusKit v1 + VectorKit v1 + CorpusKit v1 = 3).
+/// and uses the SUM of the three component versions — post-ADR-012 `ext` slot
+/// that is LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7.
+/// (BasisStore is the separate "CorpusKitBasis" kit-ID schema, not part of
+/// this composite, so it is not summed.) The version is computed from the live
+/// component declarations below, so a future component bump self-corrects the
+/// composite without a hand-edited literal — matching Swift's sum convention.
 ///
 /// The composite schema is opened on both source and destination storages
 /// before calling `replication::hydrate` or `replication::flush` so the
 /// replication gate (which checks the global current_schema_version against
-/// schema.version) sees version 3 on both sides.
+/// schema.version) sees the same composite version on both sides.
 ///
 /// # Version rationale
 ///
 /// The Rust replication primitive checks the global schema version, not a
-/// per-kit version like Swift. Opening the composite schema (version 3)
-/// advances the global version to max(existing, 3). For durable SQLite
-/// storages that were opened with the component kit schemas (each version 1),
-/// calling `storage.open(composite_schema)` writes version 3 to the
-/// migrations table without touching existing data tables (CREATE TABLE IF
-/// NOT EXISTS). For fresh in-memory storages it creates all 14 tables at
-/// once.
+/// per-kit version like Swift. Opening the composite schema advances the
+/// global version to max(existing, composite). Because the composite is the
+/// SUM of the component versions it is always >= every component version, so
+/// opening it writes exactly the composite version to the migrations table
+/// without touching existing data tables (CREATE TABLE IF NOT EXISTS). For
+/// fresh in-memory storages it creates all 14 tables at once.
 pub fn composite_schema() -> SchemaDeclaration {
     let lk = locus_kit::schema::schema();
     let vk = vectorkit::VectorStore::schema_declaration();
     let ck = corpus_kit::BundleStore::schema_declaration();
+
+    // Composite version = sum of the three GLK-composed component versions
+    // (mirrors Swift `GeniusLocusKitSchema.version`). Derived, not a literal,
+    // so it can never drift from the components again.
+    let composite_version = lk.version + vk.version + ck.version;
 
     let mut tables = Vec::new();
     tables.extend(lk.tables);
@@ -120,13 +132,36 @@ pub fn composite_schema() -> SchemaDeclaration {
 
     SchemaDeclaration {
         kit_id: "GeniusLocusKit".to_string(),
-        version: 3, // LocusKit v1 + VectorKit v1 + CorpusKit v1
+        version: composite_version, // LocusKit v2 + VectorKit v3 + CorpusKit v2 = 7
         tables,
         indices,
         // No cross-kit migrations at the composite level — each component kit
-        // manages its own schema evolution. Composite version bumps by
-        // incrementing this field and adding entries here.
+        // manages its own schema evolution. The composite version is derived
+        // from the component versions above, so a component bump self-corrects
+        // the composite; no hand-edited literal to keep in sync.
         migrations: vec![],
+    }
+}
+
+#[cfg(test)]
+mod composite_version_tests {
+    use super::*;
+
+    /// The composite version is the SUM of the three GLK-composed component
+    /// versions. After the ADR-012 `ext` pre-provisioning that sum is
+    /// LocusKit v2 + VectorKit v3 + CorpusKit/BundleStore v2 = 7. This guards
+    /// the coupling the global-MAX replication gate depends on: a drift between
+    /// composite and components would let a fresh estate open at a version the
+    /// gate rejects. Mirrors Swift `CompositeSchemaVersionTests`.
+    #[test]
+    fn composite_version_equals_component_sum() {
+        let lk = locus_kit::schema::SCHEMA_VERSION;
+        let vk = vectorkit::VectorStore::schema_declaration().version;
+        let ck = corpus_kit::BundleStore::schema_declaration().version;
+        let s = composite_schema();
+        assert_eq!(s.version, lk + vk + ck);
+        assert_eq!(s.version, 7);
+        assert_eq!(s.kit_id, "GeniusLocusKit");
     }
 }
 
@@ -136,9 +171,9 @@ pub fn composite_schema() -> SchemaDeclaration {
 ///
 /// Opens both backends with the composite GLK schema before calling
 /// `replication::flush` so the schema gate passes. For the in-memory backend
-/// this is idempotent if it was already opened at version >= 3. For the
-/// durable backend (SQLite) this writes version 3 to the migrations table
-/// without altering existing data tables.
+/// this is idempotent if it was already opened at the composite version. For
+/// the durable backend (SQLite) this writes the composite version to the
+/// migrations table without altering existing data tables.
 ///
 /// Mirrors `GeniusLocusKit.flush(from:into:)` in Swift.
 pub fn flush(
@@ -208,8 +243,10 @@ pub fn open_hydrating(
         .map_err(|e| HydrateError::Replication(format!("{e:?}")))?;
 
     // Step 4 — Open DrawerStore and Estate over the populated in_memory.
-    // DrawerStoreCore::new calls storage.open(locus_schema) — a no-op since
-    // version 1 < 3 is false, the storage is already at version 3 from step 1.
+    // DrawerStoreCore::new calls storage.open(locus_schema) — a no-op: the
+    // LocusKit per-kit version is below the already-applied composite version
+    // (the storage was advanced to the composite version in step 1), so the
+    // open does not re-create or downgrade anything.
     let store = InMemoryDrawerStore::with_storage(in_memory, now, None)
         .map_err(|e| HydrateError::Estate(format!("{e:?}")))?;
     let store_arc: Arc<dyn DrawerStore> = Arc::new(store);

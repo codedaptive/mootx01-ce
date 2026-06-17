@@ -1,8 +1,8 @@
 ---
 title: LocusKit Interface
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: Public API surface for LocusKit in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -576,7 +576,7 @@ consumed directly by GeniusLocusKit; it is an `actor` in Swift and a `trait`
 in Rust (SPEC § 8).
 
 ```swift
-public enum LocusKitSchema { public static let kitID = "LocusKit"; public static let version = 1
+public enum LocusKitSchema { public static let kitID = "LocusKit"; public static let version = 2
                              public static var schema: SchemaDeclaration { get } }
 public actor DrawerStore {
     public init(storage: any Storage) async throws
@@ -812,16 +812,19 @@ bit-identical DDL. Gaps are tracked until resolved.
 | `node_bundles` table | `LocusKitSchema.nodeBundlesTable` (LocusKitSchema.swift:308) | `node_bundles_table()` (schema.rs:470) | Present | Three-part composite PK matches |
 | `container_fingerprints` table | `LocusKitSchema.containerFingerprintsTable` (LocusKitSchema.swift:283) | `container_fingerprints_table()` (schema.rs:506) | Present | |
 | `recall_trace` table | `LocusKitSchema.recallTraceTable` (LocusKitSchema.swift:499) | `recall_trace_table()` (schema.rs:542) | Present | `score` REAL nullable matches |
-| `keys` table (ENC-01) | `LocusKitSchema.keysTable` (LocusKitSchema.swift:532) | `keys_table()` (schema.rs:559) | Present | key_id TEXT PK, algorithm TEXT, wrapped BLOB, created_at TIMESTAMP (ISO8601); no bitmap columns; no generated columns |
+| `keys` table (ENC-01) | `LocusKitSchema.keysTable` | `keys_table()` | Present | key_id TEXT PK, algorithm TEXT, wrapped BLOB, created_at TIMESTAMP (ISO8601), ext JSON nullable (ADR-012 forward-compat slot, schema v2); no bitmap columns; no generated columns |
 
 **Date storage invariant:** all `timestamp` / `created_at` / `filedAt` columns use
 `ColumnType::Timestamp` in Rust (emitted as TEXT ISO8601 by PersistenceKit backends),
 matching Swift's `.timestamp(...)` — never REAL (Unix timestamp).
 
-**Schema version:** both ports declare `version = 1` with no migration ladder
-(`migrations` list is empty in Rust; no `ALTER TABLE` history in Swift). The ENC-01
-`keys` table was present in the Swift v1 declaration from the outset; this concordance
-row records that the Rust port now matches.
+**Schema version:** both ports declare `version = 2` with no migration ladder
+(`migrations` list is empty in Rust; no `ALTER TABLE` history in Swift — each
+version re-declares the full column set fresh, as no estate data has shipped).
+v2 added the nullable `.json` `ext` forward-compat slot to the `keys` table
+(ADR-012), completing the one-`ext`-column-per-persistent-entity convention;
+1.0 writes NULL and never reads it. The ENC-01 `keys` table was present from v1;
+this concordance row records that both ports carry the v2 `ext` column.
 
 ### Public type surface — concept-level concordance
 
@@ -1147,6 +1150,9 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Schema v1 → v2 (ADR-012): added the nullable `.json` `ext` forward-compat slot to the `keys` table, completing the one-`ext`-column-per-persistent-entity convention. Both ports; 1.0 writes NULL and never reads it. Updated the `LocusKitSchema.version` surface and the `keys`-table concordance row.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

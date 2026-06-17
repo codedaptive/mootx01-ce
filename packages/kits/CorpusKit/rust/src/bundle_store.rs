@@ -43,9 +43,14 @@ impl BundleStore {
     /// Schema declaration consumed by `Storage::open`. Mirrors
     /// the Swift `BundleStore.schemaDeclaration` exactly.
     pub fn schema_declaration() -> SchemaDeclaration {
+        // v2 adds the nullable `.json` `ext` forward-compat slot (ADR-012),
+        // distinct from the existing per-chunk `metadata` column: `ext`
+        // reserves the slot for unforeseeable future typed attributes without
+        // a migration. 1.0 omits it on insert and never reads it. The `chunks`
+        // table is append-only; a nullable column with no read path is inert.
         SchemaDeclaration::new(
             "CorpusKit",
-            1,
+            2,
             vec![TableDeclaration::new(
                 "chunks",
                 vec![
@@ -57,6 +62,9 @@ impl BundleStore {
                     ColumnDeclaration::hlc("hlc"),
                     ColumnDeclaration::json("metadata"),
                     ColumnDeclaration::timestamp("created_at"),
+                    // ADR-012 forward-compat slot (v2). Nullable JSON; distinct
+                    // from `metadata`. 1.0 omits it on insert and never reads it.
+                    ColumnDeclaration::json("ext").nullable(),
                 ],
                 vec!["id".to_string()],
             )

@@ -2,10 +2,13 @@
 //!
 //! Declares the LocusKit schema as a single `SchemaDeclaration` over
 //! `persistence-kit` primitives — tables, columns, generated columns,
-//! append-only flags, indices. There is no migration ladder: v1 declares
-//! the full column set, the same way the Swift port does. The prior
-//! `LOCI_V035_*` migration ladder was development-time scaffolding for a
-//! store that never shipped, collapsed into the v1 CREATE.
+//! append-only flags, indices. There is no migration ladder: each version
+//! re-declares the full column set fresh (no estate data has shipped), the
+//! same way the Swift port does. The prior `LOCI_V035_*` migration ladder was
+//! development-time scaffolding for a store that never shipped, collapsed into
+//! the v1 CREATE. v2 adds the nullable `.json` `ext` forward-compat slot to the
+//! `keys` table (ADR-012), completing the one-`ext`-column-per-persistent-entity
+//! convention; 1.0 writes NULL and never reads it.
 //!
 //! ## Bitmap reservation map (low bit = 0)
 //!
@@ -44,9 +47,12 @@ use persistence_kit::types::{ColumnType, TypedValue};
 /// The kit identifier recorded in PersistenceKit's migrations table.
 pub const KIT_ID: &str = "LocusKit";
 
-/// Current schema version. v1 declares the full column set; there is
-/// no migration ladder behind it.
-pub const SCHEMA_VERSION: i32 = 1;
+/// Current schema version. v2 adds the nullable `.json` `ext`
+/// forward-compatibility slot to the `keys` table (ADR-012), bringing
+/// every persistent entity table to the one-`ext`-column convention.
+/// There is no migration ladder behind v2 — no estate data has shipped,
+/// so the bump re-declares the full column set fresh.
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Build the complete LocusKit schema as a `SchemaDeclaration`.
 ///
@@ -633,6 +639,7 @@ fn recall_trace_table() -> TableDeclaration {
 ///   algorithm TEXT NOT NULL               — e.g. "AES-GCM-256"
 ///   wrapped   BLOB NOT NULL               — key bytes from platform keystore
 ///   created_at TIMESTAMP (TEXT ISO8601)   — creation instant
+///   ext       JSON (nullable)             — forward-compat slot (ADR-012, v2)
 pub fn keys_table() -> TableDeclaration {
     TableDeclaration {
         name: "keys".to_string(),
@@ -641,6 +648,11 @@ pub fn keys_table() -> TableDeclaration {
             ColumnDeclaration::text("algorithm"),
             ColumnDeclaration::blob("wrapped"),
             ColumnDeclaration::timestamp("created_at"),
+            // Reserve-space forward-compat slot (ADR-012). Nullable `.json`,
+            // present from schema v2. Reserves the slot, not a shape: future
+            // key-registry metadata (rotation lineage, KMS provider tags)
+            // serializes here migration-free. 1.0 writes NULL and never reads it.
+            ColumnDeclaration::json("ext").nullable(),
         ],
         primary_key: vec!["key_id".to_string()],
         unique_constraints: Vec::new(),
@@ -826,11 +838,11 @@ mod tests {
         assert_eq!(KIT_ID, "LocusKit");
     }
 
-    /// v1 of the schema, no migrations. Mirrors Swift's
-    /// `LocusKitSchema.version = 1`.
+    /// v2 of the schema, no migrations. Mirrors Swift's
+    /// `LocusKitSchema.version = 2` (ADR-012: `keys.ext` added).
     #[test]
-    fn schema_version_is_one() {
-        assert_eq!(SCHEMA_VERSION, 1);
+    fn schema_version_is_two() {
+        assert_eq!(SCHEMA_VERSION, 2);
         assert!(schema().migrations.is_empty());
     }
 
@@ -1022,7 +1034,8 @@ mod tests {
     }
 
     /// Keys table mirrors the Swift ENC-01 declaration column-for-column:
-    /// key_id (TEXT PK), algorithm (TEXT), wrapped (BLOB), created_at (TIMESTAMP).
+    /// key_id (TEXT PK), algorithm (TEXT), wrapped (BLOB), created_at (TIMESTAMP),
+    /// ext (JSON nullable — ADR-012 forward-compat slot, schema v2).
     /// No generated columns, no bitmap columns — a plain registry. Dates are
     /// TEXT ISO8601 (Timestamp type, fleet date-storage rule). `wrapped` is BLOB
     /// so raw key bytes survive a round-trip without encoding, matching Swift's
@@ -1033,15 +1046,19 @@ mod tests {
         let k = s.tables.iter().find(|t| t.name == "keys").unwrap();
         // Primary key is the stable key identifier
         assert_eq!(k.primary_key, vec!["key_id".to_string()]);
-        // Exactly four columns in the same order as the Swift declaration
+        // Exactly five columns in the same order as the Swift declaration
+        // (key_id, algorithm, wrapped, created_at, ext — ext added in v2).
         let names: Vec<&str> = k.columns.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, vec!["key_id", "algorithm", "wrapped", "created_at"]);
-        // Column types: TEXT, TEXT, BLOB, Timestamp
+        assert_eq!(names, vec!["key_id", "algorithm", "wrapped", "created_at", "ext"]);
+        // Column types: TEXT, TEXT, BLOB, Timestamp, Json
         use persistence_kit::types::ColumnType;
         assert_eq!(k.columns[0].column_type, ColumnType::Text);
         assert_eq!(k.columns[1].column_type, ColumnType::Text);
         assert_eq!(k.columns[2].column_type, ColumnType::Blob);
         assert_eq!(k.columns[3].column_type, ColumnType::Timestamp);
+        // ext is the nullable JSON forward-compat slot (ADR-012).
+        assert_eq!(k.columns[4].column_type, ColumnType::Json);
+        assert!(k.columns[4].nullable, "keys.ext must be nullable");
         // No row-level boolean flags, no bitmaps — the registry is opaque;
         // encryption state lives in drawers.keyID (NULL = plaintext, else encrypted).
         for col in &k.columns {
