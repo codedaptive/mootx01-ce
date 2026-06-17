@@ -86,5 +86,18 @@ let package = Package(
             ],
             path: "Tests/MootGatewayTests"
         ),
+        // A-4: unit tests for AppModel.lastLoggedID() — verifies the capture-log
+        // UUID parse without needing a live bridge (intentRunLog is populated
+        // directly). GatewayUI is a SwiftUI layer so this target is macOS-only;
+        // the function under test has no platform-specific behavior.
+        .testTarget(
+            name: "GatewayUITests",
+            dependencies: [
+                "GatewayUI",
+                "MootGateway",
+                .product(name: "MootIntentKit", package: "MootIntentKit"),
+            ],
+            path: "Tests/GatewayUITests"
+        ),
     ]
 )

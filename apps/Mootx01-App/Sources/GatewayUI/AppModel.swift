@@ -255,7 +255,10 @@ public final class AppModel {
     /// scans `intentRunLog` newest-first (index 0 is newest, inserted at 0)
     /// for a UUID pattern adjacent to that prefix and returns the first match.
     /// Returns nil when no capture has been logged yet.
-    private func lastLoggedID() -> String? {
+    /// Internal (not private) so the `GatewayUITests` target can reach it via
+    /// `@testable import GatewayUI`. The function has no behavior that needs
+    /// external visibility — internal is the minimum required for testability.
+    func lastLoggedID() -> String? {
         // The UUID pattern per RFC 4122: eight-four-four-four-twelve hex digits.
         let uuidPattern = #"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"#
         guard let regex = try? Regex(uuidPattern) else { return nil }
