@@ -127,6 +127,8 @@ enum SQLiteSchema {
     ///   after_udc  INTEGER
     ///   after_qid  INTEGER
     ///   actor      TEXT
+    ///   reason     TEXT NULL   — caller-supplied reason for the mutation;
+    ///                            NULL when no reason was provided
     static let auditTableSQL = """
     CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
       "event_id" TEXT NOT NULL,
@@ -145,6 +147,7 @@ enum SQLiteSchema {
       "after_udc" INTEGER NOT NULL,
       "after_qid" INTEGER NOT NULL,
       "actor" TEXT NOT NULL,
+      "reason" TEXT,
       PRIMARY KEY ("event_id", "hlc")
     )
     """

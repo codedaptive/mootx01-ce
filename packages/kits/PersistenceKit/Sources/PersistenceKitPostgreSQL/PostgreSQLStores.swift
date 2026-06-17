@@ -322,6 +322,7 @@ final class PostgreSQLAuditLog: AuditLog, Sendable {
               "after_udc" BIGINT NOT NULL,
               "after_qid" BIGINT NOT NULL,
               "actor" TEXT NOT NULL,
+              "reason" TEXT,
               PRIMARY KEY ("event_id", "hlc_packed")
             )
             """, logger: Logger(label: "pg.audit"))
@@ -355,7 +356,9 @@ final class PostgreSQLAuditLog: AuditLog, Sendable {
                 event.beforeLatticeAnchor.map { .int(Int64(bitPattern: $0.qidPointer)) } ?? .null,
                 .int(Int64(bitPattern: event.afterLatticeAnchor.udcCode)),
                 .int(Int64(bitPattern: event.afterLatticeAnchor.qidPointer)),
-                .text(event.actor)
+                .text(event.actor),
+                // reason is nullable TEXT; NULL when the caller supplied no reason.
+                event.reason.map { .text($0) } ?? .null
             ]
             _ = try await conn.executeParameterized("""
                 INSERT INTO "_storagekit_audit"
@@ -363,8 +366,8 @@ final class PostgreSQLAuditLog: AuditLog, Sendable {
                    "before_adj", "before_op", "before_prov",
                    "after_adj", "after_op", "after_prov",
                    "before_udc", "before_qid", "after_udc", "after_qid",
-                   "actor")
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                   "actor", "reason")
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                 ON CONFLICT ("event_id", "hlc_packed") DO NOTHING
                 """, bindings: bindings, logger: Logger(label: "pg.audit.append"))
         }
@@ -439,6 +442,8 @@ final class PostgreSQLAuditLog: AuditLog, Sendable {
 /// intended storage value for "no before-state", so a decode failure there is
 /// treated as absent (correct behaviour for NULL; corrupt non-NULL BIGINT would
 /// also be caught by the PostgreSQL wire decoder before reaching this function).
+/// The `reason` column is nullable TEXT; try? on a NULL column returns nil,
+/// which is the correct value for events recorded without a caller reason.
 private func decodeAuditEvent(_ row: PostgresRow) throws -> AuditEvent {
     let access = row.makeRandomAccess()
     let eventID: UUID = try access["event_id"].decode(UUID.self, context: .default)
@@ -473,6 +478,8 @@ private func decodeAuditEvent(_ row: PostgresRow) throws -> AuditEvent {
     } else {
         beforeAnchor = nil
     }
+    // reason is nullable TEXT; nil when the event was recorded without a caller-supplied reason.
+    let reason: String? = try? access["reason"].decode(String.self, context: .default)
 
     let packed = UInt64(bitPattern: hlcPacked)
     let physical = Int64(packed >> 16)
@@ -490,6 +497,7 @@ private func decodeAuditEvent(_ row: PostgresRow) throws -> AuditEvent {
         afterBitmaps: (afterAdj, afterOp, afterProv),
         beforeLatticeAnchor: beforeAnchor,
         afterLatticeAnchor: LatticeAnchor(udcCode: UInt64(bitPattern: afterUdc), qidPointer: UInt64(bitPattern: afterQid)),
-        actor: actor
+        actor: actor,
+        reason: reason
     )
 }

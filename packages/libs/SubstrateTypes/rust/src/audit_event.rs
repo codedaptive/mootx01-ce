@@ -29,4 +29,8 @@ pub struct AuditEvent {
     pub before_lattice_anchor: Option<LatticeAnchor>,
     pub after_lattice_anchor: LatticeAnchor,
     pub actor: String,
+    /// Human-readable reason for the mutation. Threaded from the verb call
+    /// site (e.g. expunge_gated(reason:)) and persisted in the `reason`
+    /// column of the audit table. None when the caller supplied no reason.
+    pub reason: Option<String>,
 }

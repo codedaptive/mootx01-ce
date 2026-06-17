@@ -43,6 +43,10 @@ pub struct AuditEvent {
     pub before_lattice_anchor: Option<u64>,
     pub after_lattice_anchor: u64,
     pub actor: String,
+    /// Human-readable reason for the mutation, persisted in the `reason`
+    /// column of `_storagekit_audit`. None when the caller supplied no
+    /// reason; stored as nullable TEXT.
+    pub reason: Option<String>,
 }
 
 pub trait AuditLog: Send + Sync {

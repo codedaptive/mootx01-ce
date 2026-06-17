@@ -657,10 +657,9 @@ public actor DrawerStore {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(changedBy, label: "changedBy")
 
-        _ = reason
         try await gatedColumnWrite(
             drawerId: drawerId, column: .provenance,
-            newColumnValue: newProvenance, changedBy: changedBy, now: now)
+            newColumnValue: newProvenance, changedBy: changedBy, reason: reason, now: now)
     }
 
     // MARK: - Adjective / Operational / State mutation
@@ -678,13 +677,12 @@ public actor DrawerStore {
     ) async throws {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(changedBy, label: "changedBy")
-        _ = reason
         // I-22 (secret+exportable) is enforced inside the gate's basis
         // check now (SubstrateLib), so no separate validator is needed —
         // the gate refuses it on the merged result, on every write.
         try await gatedColumnWrite(
             drawerId: drawerId, column: .adjective,
-            newColumnValue: newAdjective, changedBy: changedBy, now: now)
+            newColumnValue: newAdjective, changedBy: changedBy, reason: reason, now: now)
     }
 
     /// Mutate a drawer's operational bitmap and write the audit row
@@ -698,10 +696,9 @@ public actor DrawerStore {
     ) async throws {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
         try Self.validateNonEmpty(changedBy, label: "changedBy")
-        _ = reason
         try await gatedColumnWrite(
             drawerId: drawerId, column: .operational,
-            newColumnValue: newOperational, changedBy: changedBy, now: now)
+            newColumnValue: newOperational, changedBy: changedBy, reason: reason, now: now)
     }
 
     /// Mutate a drawer's state (bits 0-3 of adjectiveBitmap),
@@ -835,12 +832,14 @@ public actor DrawerStore {
                 hlc: stamp,
                 actor: changedBy
             )
-            let event: AuditEvent
+            let gateEvent: AuditEvent
             switch result {
-            case .success(let e): event = e
+            case .success(let e): gateEvent = e
             case .failure(let v):
                 throw LocusKitError.invalidContent("state mutation rejected by gate: \(v)")
             }
+            // Thread the caller-supplied reason into the event before persisting.
+            let event = gateEvent.withReason(reason)
 
             // Materialized projection: write the merged snapshot to the
             // live drawers row (the O(1) read target). Append the sealed
@@ -967,12 +966,15 @@ public actor DrawerStore {
                 hlc: stamp,
                 actor: changedBy
             )
-            let event: AuditEvent
+            let gateEvent: AuditEvent
             switch result {
-            case .success(let e): event = e
+            case .success(let e): gateEvent = e
             case .failure(let v):
                 throw LocusKitError.invalidContent("expunge rejected by gate: \(v)")
             }
+            // Thread the caller-supplied reason into the event so it is
+            // persisted in the audit table's `reason` column.
+            let event = gateEvent.withReason(reason)
 
             // Materialized projection: write the merged adjective
             // snapshot, zero the content blob, stamp tombstonedAt — all
@@ -996,11 +998,6 @@ public actor DrawerStore {
                 // this path and get the same atomic guarantee as before.
                 try await txn.auditLog.append(event)
             }
-            _ = reason   // reason is captured in audit verb context; no
-                         // separate audit-row column today, but the
-                         // parameter is retained for future ProvFrame
-                         // composition (cookbook §10.5 names a `reason`
-                         // arg on the verb signature).
             return event
         }
 
@@ -1274,12 +1271,14 @@ public actor DrawerStore {
                 hlc: stamp,
                 actor: changedBy
             )
-            let event: AuditEvent
+            let gateEvent: AuditEvent
             switch result {
-            case .success(let e): event = e
+            case .success(let e): gateEvent = e
             case .failure(let v):
                 throw LocusKitError.invalidContent("reanchor rejected by gate: \(v)")
             }
+            // Thread the caller-supplied reason into the event before persisting.
+            let event = gateEvent.withReason(reason)
 
             // Build the column update dictionary. Always update at least
             // the columns named in the event (bitmaps are unchanged, so the
@@ -1303,7 +1302,6 @@ public actor DrawerStore {
                 )
             }
             try await txn.auditLog.append(event)
-            _ = reason   // retained for future ProvFrame composition
         }
     }
 
@@ -1336,6 +1334,7 @@ public actor DrawerStore {
         column: FieldSlot.Column,
         newColumnValue: Int64,
         changedBy: String,
+        reason: String? = nil,
         now: Date
     ) async throws {
         let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
@@ -1373,12 +1372,14 @@ public actor DrawerStore {
                 estateUuid: estate, rowId: rowUuid, nounType: .drawer, verb: .mutate,
                 prior: prior, priorLatticeAnchor: anchor, writes: writes,
                 afterLatticeAnchor: anchor, vocabulary: vocab, hlc: stamp, actor: changedBy)
-            let event: AuditEvent
+            let gateEvent: AuditEvent
             switch result {
-            case .success(let e): event = e
+            case .success(let e): gateEvent = e
             case .failure(let v):
                 throw LocusKitError.invalidContent("\(column) mutation rejected by gate: \(v)")
             }
+            // Thread the caller-supplied reason into the event before persisting.
+            let event = gateEvent.withReason(reason)
             // Materialized projection: write the merged column back.
             let columnName: String = {
                 switch column {

@@ -497,6 +497,7 @@ mod replication_tests {
             before_lattice_anchor: None,
             after_lattice_anchor: 0,
             actor: "test".into(),
+            reason: None,
         }
     }
 

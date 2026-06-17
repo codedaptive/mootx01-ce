@@ -305,6 +305,7 @@ fn corrupt_audit_event_id_returns_error_not_nil_uuid() {
             before_lattice_anchor: None,
             after_lattice_anchor: 0,
             actor: "test".to_string(),
+            reason: None,
         };
         al.append(event).expect("append");
     }

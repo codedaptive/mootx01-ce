@@ -270,6 +270,10 @@ pub fn admit(
         before_lattice_anchor: prior_lattice_anchor,
         after_lattice_anchor,
         actor: actor.to_string(),
+        // reason is not set at the gate layer; it is threaded from the verb
+        // call site (DrawerStore.expunge_gated / reanchor_gated) and injected
+        // onto the event after the gate returns. None is correct here.
+        reason: None,
     };
     Ok(event)
 }

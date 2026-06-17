@@ -181,6 +181,8 @@ const BLOB_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_blobs" (
   "bytes" BYTEA NOT NULL
 )"#;
 
+// `reason` is nullable TEXT — None persists as NULL; old rows without a
+// reason read back as None (schema not frozen, no migration needed).
 const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   "event_id" TEXT NOT NULL,
   "hlc" BIGINT NOT NULL,
@@ -199,6 +201,7 @@ const AUDIT_TABLE: &str = r#"CREATE TABLE IF NOT EXISTS "_storagekit_audit" (
   "before_lattice_anchor" BIGINT,
   "after_lattice_anchor" BIGINT NOT NULL,
   "actor" TEXT NOT NULL,
+  "reason" TEXT,
   PRIMARY KEY ("event_id", "hlc")
 )"#;
 
@@ -1485,7 +1488,8 @@ struct TxAuditLog {
 impl AuditLog for TxAuditLog {
     fn append(&self, event: AuditEvent) -> StorageResult<()> {
         let mut guard = self.conn.lock().unwrap();
-        let ph = (1..=17)
+        // 18 columns: original 17 + reason
+        let ph = (1..=18)
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1964,7 +1968,7 @@ struct PgAuditLog {
     pool: Arc<Pool>,
 }
 
-const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","actor""#;
+const AUDIT_COLS: &str = r#""event_id","hlc","physical_time","logical_count","node_id","estate_uuid","row_id","verb","before_adjective","before_operational","before_provenance","after_adjective","after_operational","after_provenance","before_lattice_anchor","after_lattice_anchor","actor","reason""#;
 
 fn audit_params(e: &AuditEvent) -> Vec<PgParam> {
     vec![
@@ -1985,6 +1989,8 @@ fn audit_params(e: &AuditEvent) -> Vec<PgParam> {
         Box::new(e.before_lattice_anchor.map(|v| v as i64)),
         Box::new(e.after_lattice_anchor as i64),
         Box::new(e.actor.clone()),
+        // reason: None persists as NULL; Some(s) persists as TEXT.
+        Box::new(e.reason.clone()),
     ]
 }
 
@@ -2032,13 +2038,16 @@ fn decode_audit(row: &postgres::Row) -> StorageResult<AuditEvent> {
         before_lattice_anchor: row.get::<_, Option<i64>>(14).map(|v| v as u64),
         after_lattice_anchor: row.get::<_, i64>(15) as u64,
         actor: row.get(16),
+        // reason at column index 17; NULL reads back as None.
+        reason: row.get(17),
     })
 }
 
 impl AuditLog for PgAuditLog {
     fn append(&self, event: AuditEvent) -> StorageResult<()> {
         let mut conn = self.pool.checkout()?;
-        let ph = (1..=17)
+        // 18 columns: original 17 + reason
+        let ph = (1..=18)
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(", ");

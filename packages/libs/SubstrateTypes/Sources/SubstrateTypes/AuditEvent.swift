@@ -27,6 +27,12 @@ public struct AuditEvent: Sendable {
     public let beforeLatticeAnchor: LatticeAnchor?
     public let afterLatticeAnchor: LatticeAnchor
     public let actor: String   // capture | mcp_agent | dreaming_daemon | actuator | ...
+    /// Human-readable reason for the mutation. Threaded from the verb call
+    /// site (e.g. DrawerStore.expungeGated(reason:)) and persisted in the
+    /// `reason` column of the audit table. Nil when the caller supplied no
+    /// reason (the vast majority of mutations); non-nil for expunge and
+    /// explicit audit annotations. Stored as TEXT, read back as-is.
+    public let reason: String?
 
     public init(eventID: UUID = UUID(),
                 estateUuid: UUID, rowId: UUID, hlc: HLC, verb: String,
@@ -34,7 +40,8 @@ public struct AuditEvent: Sendable {
                 afterBitmaps: (adjective: Int64, operational: Int64, provenance: Int64),
                 beforeLatticeAnchor: LatticeAnchor?,
                 afterLatticeAnchor: LatticeAnchor,
-                actor: String) {
+                actor: String,
+                reason: String? = nil) {
         self.eventID = eventID
         self.estateUuid = estateUuid
         self.rowId = rowId
@@ -45,5 +52,21 @@ public struct AuditEvent: Sendable {
         self.beforeLatticeAnchor = beforeLatticeAnchor
         self.afterLatticeAnchor = afterLatticeAnchor
         self.actor = actor
+        self.reason = reason
+    }
+
+    /// Return a copy of this event with the given reason set.
+    ///
+    /// Used to inject a caller-supplied reason into a gate-produced event,
+    /// since `AuditGate.admit` does not accept a reason parameter (the gate
+    /// is a pure structural validator; reason is a verb-layer annotation).
+    public func withReason(_ reason: String?) -> AuditEvent {
+        AuditEvent(eventID: eventID,
+                   estateUuid: estateUuid, rowId: rowId, hlc: hlc, verb: verb,
+                   beforeBitmaps: beforeBitmaps, afterBitmaps: afterBitmaps,
+                   beforeLatticeAnchor: beforeLatticeAnchor,
+                   afterLatticeAnchor: afterLatticeAnchor,
+                   actor: actor,
+                   reason: reason)
     }
 }
