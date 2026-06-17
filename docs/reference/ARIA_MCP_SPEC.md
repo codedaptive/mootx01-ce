@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -400,21 +400,38 @@ vector indexed). This keeps regular-capture content semantically recallable on
 both ports. `GovernorReport` exposes `encode_drain_fired: bool` (true when drain
 was called; idempotent on an empty queue).
 
-**Standing-signal activation (Swift).** `signalTick` only drives emissions once
-a scheduler exists for the estate; the scheduler is minted by
-`registerStandingSignal`. The resident daemon registers the architecture-spec
-§11.2 default standing signals ONCE at bootstrap —
-`AriaResident.runResidentDaemon` calls
-`kit.registerDefaultStandingSignals(in:vectorStore:now:)` before
-`governor.run()`, reading the estate's already-registered `VectorStore` back via
-`kit.registeredVectorStore(for:)`. Without this, `signalTick` throws
-`schedulerNotStarted` and benign-skips every tick — the propose/associate
-emission loop never runs. The scheduler's weekly `DreamingSignal` is registered
-with the default no-op cycle: the governor's own `dreaming.pump` is the single
-dreaming driver, so the signal does not double-drive it. Rust has no
-standing-signal scheduler by design (the loop is the only scheduler); the Rust
-correlation/co-occurrence structure is rebuilt by the dreaming cycle, not by
-standing signals.
+**Standing-signal activation (Swift + Rust).** The governor ticks the
+estate's standing-signal scheduler each iteration, but `signalTick` only drives
+emissions once a scheduler exists for the estate; the scheduler is minted by the
+first `registerStandingSignal`. Both resident daemons register the
+architecture-spec §11.2 default standing signals ONCE at bootstrap, reading the
+estate's already-registered `VectorStore` back (so the `VectorSimilaritySignal`
+queries real embeddings). Without registration the tick benign-skips
+(`signalsTicked == false` / `signals_ticked == false`) — the propose/associate
+emission loop never runs, but the daemon still serves. The scheduler's weekly
+`DreamingSignal` is registered with the default no-op cycle: the governor's own
+dreaming pump is the single dreaming driver, so the signal does not double-drive
+it.
+
+- **Swift.** `AriaResident.runResidentDaemon` calls
+  `kit.registerDefaultStandingSignals(in:vectorStore:now:)` before
+  `governor.run()`, reading the store via `kit.registeredVectorStore(for:)`. The
+  scheduler registry lives on the `GeniusLocusKit` actor
+  (`schedulers: [EstateHandle: StandingSignalScheduler]`); the governor calls
+  `kit.signalTick`.
+- **Rust.** The `AutonomicGovernor` OWNS the scheduler (a GLK
+  `SerialLaneScheduler<CoordinatorDispatcher>`) and ticks it directly — it
+  cannot live on the coordinator because the dispatcher holds an
+  `Arc<Mutex<EstateCoordinator>>` (a coordinator-owned scheduler would close a
+  reference cycle). The resident HTTP bootstrap (`rust/src/runtime.rs`) calls
+  `governor.register_default_standing_signals(model_id, now)` once before
+  `run_loop`, reading the store via the now-`pub`
+  `EstateCoordinator::vector_store_for`. The serial-lane single-drainer
+  guarantee is identical. The `register_default_standing_signals` /
+  `register_standing_signal` methods are the producer SEAM where the
+  graph-centrality and Bradley-Terry producers plug in (outputs land in GLK
+  `recall::{GraphCache, PreferenceStore}`); the producers are not part of the
+  governor harness itself.
 
 **Pool-reducer activation + LIVE tagger swap (Swift + Rust).** NEAR-REALTIME
 (`MOOTX01_POOL_REDUCE_CADENCE_SECONDS`, default 0 = considered every tick) the
@@ -626,6 +643,17 @@ On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Additive + correction (#8 Track 1 — Brain harness, Rust side). §17.1
+standing-signal activation now specifies BOTH ports: the Rust
+`AutonomicGovernor` owns and ticks the estate's standing-signal scheduler (a GLK
+`SerialLaneScheduler<CoordinatorDispatcher>`) and the resident HTTP bootstrap
+registers the §11.2 default signals once at startup — corrects the prior text
+that claimed "Rust has no standing-signal scheduler by design", which is no
+longer true. Documents WHY the Rust scheduler lives in the governor (dispatcher
+reference-cycle avoidance) and that the registration methods are the producer
+seam for the graph-centrality / Bradley-Terry tracks. Swift behavior unchanged.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
