@@ -1,8 +1,8 @@
 ---
 title: CorpusKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -144,6 +144,17 @@ VectorKit's, consumed directly by `CorpusKitProviders`' concrete
 providers. Concrete providers and
 their tokenizers live in `CorpusKitProviders`, so a consumer that
 needs only bundle storage and BM25 pulls in no CoreML model code.
+
+**I-9 (one basis per provider key):** the `corpus_provider_basis` table
+holds at most ONE persisted basis row per `(model_id, model_version)`.
+A retrain UPSERTs the row in place — the basis is never duplicated and
+never orphaned. The table is owned by CorpusKit core (`BasisStore`),
+never imports `CorpusKitProviders`, and stores `trained_at` as TEXT
+ISO8601 (never REAL) with NO Bool columns (schema invariant). Decoders
+are primitive-tolerant: `trained_at` is read as `Timestamp` on a
+migrate-aware connection and as ISO8601 `Text` on a fresh connection, so
+a persisted basis survives reopen on both ports (the same read-back
+discipline as I-2's chunk decode).
 
 ## § 5 — Behavioral contracts
 
@@ -364,11 +375,33 @@ source's chunks from BM25 and deletes their vectors from VectorStore.
 BundleStore is append-only (I-2); chunk rows are not deleted. `count()`
 therefore does not decrease after `remove`; only recall results change.
 
-**B-12 (dual-schema init):** `Corpus.init` applies both the
-BundleStore schema and the VectorStore schema to the supplied Storage
-via `migrate(to:)`, which bypasses the version gate that would otherwise
-skip the second schema application when both kits share version 1. The
+**B-12 (dual-schema init):** `Corpus.init` applies the BundleStore,
+VectorStore, AND BasisStore schemas to the supplied Storage via
+`migrate(to:)`, which bypasses the version gate that would otherwise skip
+the second/third schema application when the kits share version 1. The
 caller does not need to pre-open schemas.
+
+**B-13 (basis training lifecycle):** for a trainable distributional
+provider (RI/PPMI/LSA/NMF):
+- *Load-on-open:* `Corpus.init`/`open` reconstructs the trained provider
+  from the persisted basis (when present for the provider key), so the
+  dense lane is trained-ready immediately after restart with no retrain.
+- *First-ingest auto-train:* when no basis is yet persisted, the first
+  `ingest` trains a FRESH basis on the current corpus snapshot and
+  persists it; subsequent ingests fold new chunks onto the FROZEN basis
+  with no retrain (LSA/NMF cannot incrementally refactor a basis).
+- *reindex:* `Corpus.reindex(now:)` trains a FRESH basis from scratch on
+  the full corpus (reconstructed from the empty-basis blob, because
+  `trainOnCorpus` is additive), UPSERTs it (I-9), and re-embeds every
+  chunk (binary v0 + float v1) replacing stale vectors with no duplicate
+  rows. A non-trainable provider — or a reopened-from-basis corpus — makes
+  `reindex` a vector refresh with no basis row written.
+- *Lifecycle:* `destroyRecallIndex` additionally deletes all basis rows
+  (no orphans). All paths are deterministic — `now` is the only clock
+  source; the engine never reads the wall clock. Swift and Rust produce
+  the byte-identical basis blob and embedding for a shared corpus (I-7):
+  the ingest → reindex → reopen → embed path reproduces the canonical RI
+  basis blob and embedding bit patterns byte-for-byte on both ports.
 
 ### 9.4 Conformance
 
@@ -402,6 +435,8 @@ Corpus's active recall capability without deleting verbatim content:
 - BM25 index entries (all chunks removed from the in-memory BM25 index)
 - `chunk_source_map` (in-memory reverse map cleared)
 - All vector rows in the internal VectorStore (via `destroyAllVectors`)
+- All persisted basis rows in `corpus_provider_basis` (via `BasisStore.deleteAll`)
+  — no orphaned basis survives a destroyed corpus (I-9, B-13)
 
 **What is preserved:**
 - BundleStore `chunks` rows — the append-only invariant holds. Verbatim
@@ -418,6 +453,15 @@ from the Corpus's internal VectorStore in the `.glk` / separate-corpusStorage
 case).
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Added the basis-persistence + training lifecycle contract (mission 6a-ii-β,
+single provider): invariant I-9 (one basis row per `(model_id, model_version)`,
+core-owned `corpus_provider_basis` table, TEXT-ISO8601 dates, no Bool columns,
+primitive-tolerant decode) and behavior B-13 (load-on-open, first-ingest
+auto-train, `reindex` fresh-basis retrain + re-embed, lifecycle basis wipe; all
+deterministic, byte-identical cross-port). Updated B-12 to note the third
+(BasisStore) schema applied at init. Additive; no existing contract changed.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

@@ -318,7 +318,32 @@ public actor Corpus {
     private let bundleStore: BundleStore
     private let bm25: BM25Index
     private let vectorStore: VectorStore
-    private let provider: any EmbeddingProvider
+    private let basisStore: BasisStore
+    /// `var` (not `let`) because the load-on-open path replaces the fresh
+    /// provider with one reconstructed from a persisted basis. The provider is
+    /// never exposed on the public surface (sealed-vector principle).
+    private var provider: any EmbeddingProvider
+    /// The serialized basis of a FRESH (untrained) trainable provider, captured
+    /// ONLY when the corpus was built from a fresh trainable provider
+    /// (RI/PPMI/LSA/NMF) with no persisted basis — NOT when the provider was
+    /// restored from a persisted basis on open.
+    ///
+    /// Each training pass (`reindex` and the first-ingest auto-train)
+    /// reconstructs a FRESH provider from this empty-basis blob, trains it on the
+    /// full corpus, and installs it as `provider`. This is the only correct
+    /// retrain semantics: `trainOnCorpus` is ADDITIVE (it accumulates over
+    /// calls), so retraining an already-trained provider would double-count the
+    /// first-ingest corpus. Reconstructing from the empty blob guarantees every
+    /// train starts from scratch, so reindex is idempotent and produces the
+    /// canonical from-scratch basis (the cross-port conformance contract).
+    ///
+    /// When the provider was restored from a persisted basis on open, this is
+    /// nil: a reopened corpus is already trained and serving; `reindex` then
+    /// re-embeds under the loaded basis without retraining. This deliberately
+    /// mirrors the Rust port, where the seam's `reconstruct_basis` yields a
+    /// non-trainable boxed provider, so a reopened-from-blob corpus is not
+    /// retrained-in-place on either port.
+    private let freshBasisBlob: Data?
     private var hlcGenerator: HLCGenerator
     /// Maps chunk UUID → sourceID for the `bm25TopKBySource` join.
     ///
@@ -356,6 +381,11 @@ public actor Corpus {
         // schema was applied first.
         try await storage.migrate(to: BundleStore.schemaDeclaration)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
+        // Additive basis-persistence table (mission 6a-ii-β). A separate
+        // schema declaration applied via migrate(to:) so the table is created
+        // regardless of the other schemas' version gates, exactly like the
+        // BundleStore/VectorStore pair above.
+        try await storage.migrate(to: BasisStore.schemaDeclaration)
 
         self.bundleStore = BundleStore(storage: storage)
         // CorpusDefaultTokenizer provides keyword tokenization for the
@@ -363,7 +393,22 @@ public actor Corpus {
         // dependency (CorpusKitProviders depends on CorpusKit).
         self.bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
         self.vectorStore = VectorStore(storage: storage)
-        self.provider = model.makeProvider()
+        self.basisStore = BasisStore(storage: storage)
+
+        // Build the fresh provider, then — if it is a trainable distributional
+        // provider AND a basis was previously persisted for its (modelID,
+        // modelVersion) — reconstruct the trained provider from that blob so
+        // the dense lane is trained-ready immediately after restart, without
+        // re-running training on every open. A non-trainable provider, or a
+        // trainable provider with no persisted basis yet, keeps the fresh one.
+        let freshProvider = model.makeProvider()
+        let resolved = try await Self.resolveProvider(
+            freshProvider: freshProvider,
+            isTrainable: model.isTrainable,
+            basisStore: basisStore
+        )
+        self.provider = resolved.provider
+        self.freshBasisBlob = resolved.freshBasisBlob
         // nodeID 1: Corpus is a standalone actor; HLC ordering is for
         // chunk sequencing within one store, not cross-replica ordering.
         self.hlcGenerator = HLCGenerator(nodeID: 1)
@@ -384,6 +429,49 @@ public actor Corpus {
         }
     }
 
+    /// Resolve the serving provider and the fresh-empty-basis blob on open.
+    ///
+    /// Used by both inits. Three outcomes:
+    ///   - Not trainable: serve `freshProvider`, no fresh-basis blob.
+    ///   - Trainable, no persisted basis: serve `freshProvider` AND capture its
+    ///     EMPTY (untrained) serialized basis so first-ingest/`reindex` can
+    ///     reconstruct a fresh provider from it and train from scratch.
+    ///   - Trainable, basis persisted: reconstruct the trained provider from the
+    ///     persisted blob (so the dense lane is trained-ready without retraining)
+    ///     and serve THAT, with no fresh-basis blob — a reopened-from-blob corpus
+    ///     is already trained; `reindex` then re-embeds under the loaded basis
+    ///     without retraining. This matches the Rust port, whose seam
+    ///     `reconstruct_basis` yields a non-trainable boxed provider.
+    ///
+    /// Reconstruction routes through the carried provider's
+    /// `TrainableEmbeddingBasis.reconstructBasis(from:)` witness — CorpusKit core
+    /// never names the concrete provider type, so layering (providers → core) is
+    /// preserved. A corrupt/version-mismatched blob throws `decodingFailure`
+    /// rather than silently serving an untrained provider.
+    private static func resolveProvider(
+        freshProvider: any EmbeddingProvider,
+        isTrainable: Bool,
+        basisStore: BasisStore
+    ) async throws -> (provider: any EmbeddingProvider, freshBasisBlob: Data?) {
+        guard isTrainable, let trainable = freshProvider as? any TrainableEmbeddingBasis else {
+            return (freshProvider, nil)
+        }
+        guard let persisted = try await basisStore.load(
+            modelID: freshProvider.modelID,
+            modelVersion: freshProvider.modelVersion
+        ) else {
+            // Trainable provider, no basis yet: serve it untrained and capture
+            // its EMPTY serialized basis as the fresh-provider factory for
+            // first-ingest/reindex (which reconstruct fresh and train from
+            // scratch — trainOnCorpus is additive, so a fresh start is required).
+            return (freshProvider, trainable.serializeBasis())
+        }
+        // Basis exists: reconstruct the trained provider for serving; no
+        // fresh-basis blob (already trained, reopened corpus is not retrained).
+        let restored = try trainable.reconstructBasis(from: persisted.basis)
+        return (restored, nil)
+    }
+
     // MARK: - Test seams (internal — not part of the public surface)
 
     /// Test-only init that accepts an `EmbeddingProvider` directly.
@@ -402,11 +490,26 @@ public actor Corpus {
     init(storage: any Storage, provider: any EmbeddingProvider) async throws {
         try await storage.migrate(to: BundleStore.schemaDeclaration)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
+        try await storage.migrate(to: BasisStore.schemaDeclaration)
 
         self.bundleStore = BundleStore(storage: storage)
         self.bm25 = BM25Index(tokenizer: CorpusDefaultTokenizer())
         self.vectorStore = VectorStore(storage: storage)
-        self.provider = provider
+        self.basisStore = BasisStore(storage: storage)
+
+        // This seam receives a directly-built provider rather than an
+        // EmbeddingModel. Trainability is probed via the type-erasure cast
+        // `as? any TrainableEmbeddingBasis`, then the same resolveProvider path
+        // the production init uses applies: load-on-open reconstructs from a
+        // persisted basis (capturing no trainable handle), else the fresh
+        // trainable handle is captured for first-ingest/reindex.
+        let resolved = try await Self.resolveProvider(
+            freshProvider: provider,
+            isTrainable: provider is any TrainableEmbeddingBasis,
+            basisStore: basisStore
+        )
+        self.provider = resolved.provider
+        self.freshBasisBlob = resolved.freshBasisBlob
         self.hlcGenerator = HLCGenerator(nodeID: 1)
 
         let existing = try await bundleStore.allChunks()
@@ -456,6 +559,38 @@ public actor Corpus {
         // Update chunkSourceMap so bm25TopKBySource can resolve these chunks.
         for chunk in chunks { chunkSourceMap[chunk.id] = chunk.sourceID }
 
+        // First-ingest auto-train (mission 6a-ii-β): when a fresh-basis blob is
+        // present (trainable provider) AND no basis has been persisted yet, train
+        // a fresh basis on the CURRENT corpus snapshot (which now includes the
+        // just-inserted chunks) and re-embed every chunk under the trained basis.
+        // This is the ONLY implicit train trigger. Subsequent ingests (once a
+        // basis exists) take the fold-in path below: `embedFloat` projects new
+        // chunks onto the FROZEN basis without retraining — LSA/NMF cannot
+        // incrementally refactor a basis, so a per-ingest retrain would be both
+        // wrong and wasteful. Explicit `reindex(now:)` retrains on growth. A
+        // reopened-from-blob corpus has no fresh-basis blob, so it always takes
+        // the fold-in path here (already trained on open).
+        if freshBasisBlob != nil {
+            let hasBasis = try await basisStore.load(
+                modelID: provider.modelID,
+                modelVersion: provider.modelVersion
+            ) != nil
+            if !hasBasis {
+                let allChunks = try await bundleStore.allChunks()
+                try await trainAndPersistBasis(chunks: allChunks, now: now)
+                // Re-embed the whole corpus under the freshly-trained basis so
+                // the chunks ingested before this first-ingest train (if any)
+                // are embedded on the same basis as the new ones. reembedChunks
+                // is delete-first, so no duplicate rows.
+                try await reembedChunks(allChunks, now: now)
+                return
+            }
+        }
+
+        // Fold-in path: a basis already exists (or the provider is not
+        // trainable). Embed only the NEW chunks; for a trainable provider
+        // `embedFloat` projects them onto the frozen basis (no retrain).
+        //
         // Fan-out: embed each chunk and store the vector. The
         // chunk.id.uuidString == vector.item_id join is maintained here;
         // the caller never sees it (sealed-vector principle). The column
@@ -482,6 +617,142 @@ public actor Corpus {
             // Cosine over this true embedding ranks an answer above a near-
             // duplicate of the question, which the 256-bit SimHash projection
             // cannot (it loses the magnitude signal).
+            if let floats = try? await provider.embedFloat(chunk.text), !floats.isEmpty {
+                try await vectorStore.addPayload(
+                    itemID: chunk.id.uuidString,
+                    vectorIndex: 1,
+                    payload: VectorPayload(floats: floats),
+                    modelID: provider.modelID,
+                    modelVersion: provider.modelVersion,
+                    filedAt: now
+                )
+            }
+        }
+    }
+
+    /// Retrain the embedding basis on the full corpus and re-embed every chunk.
+    ///
+    /// When the configured provider is trainable (RI/PPMI/LSA/NMF), this:
+    ///   1. gathers ALL chunk texts from the BundleStore,
+    ///   2. trains the basis on them through the `TrainableEmbeddingBasis` seam
+    ///      (`trainOnCorpus(texts:)`, which runs the provider's own
+    ///      train+finalize sequence — RI no finalize, PPMI/LSA/NMF finalize),
+    ///   3. persists the serialized basis blob (UPSERT, one row per provider
+    ///      key) with `now` and the trained chunk count, and
+    ///   4. re-embeds every chunk (binary lane v0 + float lane v1) under the
+    ///      provider's modelID, REPLACING stale vectors in place (delete-all
+    ///      then re-add per chunk — no duplicate rows).
+    ///
+    /// When the provider is NOT trainable (deterministic / named-model / FDC),
+    /// no basis is persisted; the chunks are simply (re)embedded so the call is
+    /// still a well-defined "refresh the vectors" operation.
+    ///
+    /// Deterministic: `now` is the only clock source — the engine never calls
+    /// `Date()`. Training itself is a pure function of the corpus texts and the
+    /// provider's fixed seeds (the seam contract), so the persisted basis and
+    /// the resulting vectors are reproducible and cross-port identical.
+    ///
+    /// `reindex` is the EXPLICIT retrain trigger. The only other train trigger
+    /// is the first-ingest auto-train inside `ingest` (when a trainable provider
+    /// has no basis yet). A growth-threshold auto-retrain — retraining once the
+    /// live chunk count grows materially past `trained_chunk_count` — is a
+    /// DOCUMENTED FOLLOW-UP KNOB, deliberately NOT wired here: LSA/NMF cannot
+    /// incrementally refactor a frozen basis, so an automatic mid-stream retrain
+    /// policy needs its own decision. The staleness anchor (`trained_chunk_count`)
+    /// is persisted so that future policy can compute the delta.
+    ///
+    /// - Parameter now: wall-clock time for the basis `trained_at` stamp and the
+    ///   re-embedded vectors' filing timestamps. Pass `now` from the caller;
+    ///   never call `Date()` inside the engine.
+    public func reindex(now: Date) async throws {
+        let chunks = try await bundleStore.allChunks()
+
+        if freshBasisBlob != nil {
+            // Train a FRESH basis on the full corpus snapshot through the seam,
+            // install the trained provider, and persist the basis. Reconstructing
+            // fresh (rather than retraining the live provider in place) is
+            // required because trainOnCorpus is additive — see freshBasisBlob.
+            try await trainAndPersistBasis(chunks: chunks, now: now)
+        }
+
+        // Re-embed every chunk under the (now possibly retrained) provider,
+        // replacing stale vectors. Done whether or not a retrain occurred: for a
+        // non-trainable provider — or a reopened-from-blob corpus with no
+        // fresh-basis blob — reindex is a vector refresh under the current basis,
+        // with no basis row written.
+        try await reembedChunks(chunks, now: now)
+    }
+
+    /// Train a FRESH provider on the given chunks' texts and persist the
+    /// serialized basis. Shared by `reindex` and the first-ingest auto-train.
+    ///
+    /// Reconstructs a fresh (untrained) provider from `freshBasisBlob`, trains it
+    /// on the chunk texts through the seam, installs it as `provider`, and
+    /// UPSERTs the resulting basis keyed by (modelID, modelVersion).
+    /// `trainedChunkCount` is the count the basis was trained on (the staleness
+    /// anchor). Training fresh — not in place — guarantees the additive
+    /// `trainOnCorpus` starts from scratch, so the basis is the canonical
+    /// from-scratch one and reindex is idempotent. Precondition:
+    /// `freshBasisBlob != nil` (the caller checks this).
+    private func trainAndPersistBasis(chunks: [Chunk], now: Date) async throws {
+        guard let freshBlob = freshBasisBlob,
+              let fresh = provider as? any TrainableEmbeddingBasis else {
+            // Defensive: trainAndPersistBasis is only invoked when freshBasisBlob
+            // is non-nil and the provider is trainable. If neither holds there is
+            // nothing to train; return without persisting a basis.
+            return
+        }
+        // Reconstruct a fresh untrained provider from the empty-basis blob, train
+        // it from scratch on the corpus, then install it as the live provider.
+        let trainedProvider = try fresh.reconstructBasis(from: freshBlob)
+        guard let trainable = trainedProvider as? any TrainableEmbeddingBasis else {
+            // The reconstructed provider must itself be trainable (it is the same
+            // concrete type). If not, the seam is broken; surface it rather than
+            // silently persisting an untrained basis.
+            throw CorpusKitError.notTrainable(
+                "reconstructed provider is not trainable — basis seam invariant violated")
+        }
+        // `trainable` and `trainedProvider` are the SAME reference object;
+        // training via the trainable view mutates the provider we install.
+        trainable.trainOnCorpus(texts: chunks.map(\.text))
+        self.provider = trainedProvider
+        try await basisStore.upsert(PersistedBasis(
+            modelID: trainedProvider.modelID,
+            modelVersion: trainedProvider.modelVersion,
+            basis: trainable.serializeBasis(),
+            trainedAt: now,
+            trainedChunkCount: chunks.count
+        ))
+    }
+
+    /// Re-embed every chunk (binary v0 + float v1) under the current provider,
+    /// replacing any stale vectors so no duplicate rows accumulate.
+    ///
+    /// For each chunk the prior vectors (all vector_index rows under that
+    /// item_id for the provider's modelID) are deleted, then the binary engram
+    /// and — when the provider supports it — the float vector are re-added. This
+    /// is the same store-side shape as `ingest`'s fan-out, but delete-first so a
+    /// retrain under a changed basis overwrites rather than duplicates.
+    private func reembedChunks(_ chunks: [Chunk], now: Date) async throws {
+        for chunk in chunks {
+            // Delete-all before re-adding so a chunk that already had vectors
+            // under a previous basis ends up with exactly the new vectors, not
+            // a mix. deleteAllVectors clears both lanes (v0 binary + v1 float).
+            try await vectorStore.deleteAllVectors(
+                itemID: chunk.id.uuidString,
+                modelID: provider.modelID
+            )
+            let engram = try await provider.embed(chunk.text)
+            try await vectorStore.addVector(
+                itemID: chunk.id.uuidString,
+                engram: engram,
+                modelID: provider.modelID,
+                modelVersion: provider.modelVersion,
+                filedAt: now
+            )
+            // Float lane (Lane D): retain the pooled vector the provider's
+            // embed already produced. Written only when the provider supports
+            // embedFloat; a non-float provider stores the binary lane only.
             if let floats = try? await provider.embedFloat(chunk.text), !floats.isEmpty {
                 try await vectorStore.addPayload(
                     itemID: chunk.id.uuidString,
@@ -577,6 +848,13 @@ public actor Corpus {
         //    VectorStore.destroyAllVectors() deletes every row in the vectors
         //    table. Vectors are not append-only so deletion is permitted.
         try await vectorStore.destroyAllVectors()
+
+        // 3. Wipe the persisted trained basis (mission 6a-ii-β). A destroyed
+        //    corpus must leave no orphaned basis row: the next open would
+        //    otherwise reconstruct a trained provider whose basis no longer
+        //    matches any stored vectors. The basis table is not append-only,
+        //    so deletion is permitted.
+        try await basisStore.deleteAll()
     }
 
     /// BM25-only top-k recall at the source granularity, using a bounded min-heap.

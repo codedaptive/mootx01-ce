@@ -94,4 +94,33 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
         &self,
         basis: &[u8],
     ) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError>;
+
+    /// Reconstruct a fresh provider from a serialized basis, returned as a boxed
+    /// `TrainableEmbeddingBasis` (i.e. RETAINING the trainable capability).
+    ///
+    /// ## Why this exists (the Rust-only parity need, mission 6a-ii-β)
+    ///
+    /// `train_on_corpus` is ADDITIVE — it accumulates over calls — so a correct
+    /// `reindex` must train a FRESH provider from scratch, never retrain an
+    /// already-trained one. Swift's `Corpus` gets this for free: it reconstructs
+    /// from the empty-basis blob and the result is the concrete trainable type,
+    /// which Swift recovers with a runtime `as?` cast. Rust has no runtime
+    /// cross-cast between trait objects, and `reconstruct_basis` returns a PLAIN
+    /// `Box<dyn EmbeddingProvider>` whose trainability is unrecoverable. This
+    /// sibling returns the trainable box directly so `Corpus::reindex` /
+    /// first-ingest can rebuild a fresh trainable provider from the empty blob
+    /// and train it from scratch — the byte-for-byte parity with the Swift
+    /// from-scratch basis.
+    ///
+    /// The default implementation is unimplemented because a trait method cannot
+    /// return `Box<Self>` generically; each concrete implementor overrides it to
+    /// delegate to its own `from_serialized_basis` (mission 6a-i). No new math —
+    /// it is the same constructor `reconstruct_basis` uses, boxed as trainable.
+    ///
+    /// Returns `Err(CorpusKitError::DecodingFailure)` on a truncated blob, an
+    /// unknown format version, or a provider-magic mismatch — never panics.
+    fn reconstruct_trainable_basis(
+        &self,
+        basis: &[u8],
+    ) -> Result<Box<dyn TrainableEmbeddingBasis>, CorpusKitError>;
 }

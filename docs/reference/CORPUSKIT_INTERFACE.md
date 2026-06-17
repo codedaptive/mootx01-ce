@@ -2,9 +2,9 @@
 title: CorpusKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-06-16
+date: 2026-06-17
 spec_type: kit
-version: 1.2.0
+version: 1.3.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -885,17 +885,33 @@ signature (SPEC § 8, B-8).
 
 ```swift
 public actor Corpus {
-    /// Construct a Corpus. Opens BundleStore + VectorStore schemas on
-    /// the supplied storage via migrate(to:). The caller owns the
-    /// Storage lifecycle.
+    /// Construct a Corpus. Opens BundleStore + VectorStore + BasisStore schemas
+    /// on the supplied storage via migrate(to:). The caller owns the Storage
+    /// lifecycle. LOAD-ON-OPEN: when the model is a trainable distributional
+    /// provider (RI/PPMI/LSA/NMF) AND a basis was previously persisted for its
+    /// (modelID, modelVersion), the trained provider is reconstructed from that
+    /// basis blob so the dense lane is trained-ready immediately after restart.
     public init(storage: any Storage, model: EmbeddingModel = .default) async throws
 
     /// Chunk, store, index, embed, and vector-store a document.
     /// Idempotent on content-addressed chunk ids (SPEC B-9, I-3).
+    /// FIRST-INGEST AUTO-TRAIN: when the model is trainable and no basis has been
+    /// persisted yet, the first ingest trains a fresh basis on the current corpus
+    /// snapshot and persists it; subsequent ingests fold new chunks onto the
+    /// frozen basis (no retrain — LSA/NMF cannot incrementally refactor).
     public func ingest(_ text: String, sourceID: String, now: Date) async throws
 
     /// Embed the query and return fused kNN + BM25 results (SPEC B-10).
     public func recall(_ query: String, limit: Int = 10, now: Date) async throws -> [ScoredChunk]
+
+    /// Retrain the embedding basis on the full corpus and re-embed every chunk
+    /// (mission 6a-ii-β). For a trainable provider: gathers all chunk texts,
+    /// trains a FRESH basis from scratch through the TrainableEmbeddingBasis seam,
+    /// UPSERTs it into corpus_provider_basis (one row per (modelID, modelVersion)),
+    /// and re-embeds every chunk (binary v0 + float v1) replacing stale vectors.
+    /// For a non-trainable provider — or a reopened-from-basis corpus — it is a
+    /// vector refresh with no basis row written. Deterministic (pass `now`).
+    public func reindex(now: Date) async throws
 
     /// Remove a source from BM25 + VectorStore. BundleStore is
     /// append-only; count() does not decrease (SPEC B-11).
@@ -905,33 +921,94 @@ public actor Corpus {
     public func count() async throws -> Int
 
     // Estate lifecycle primitive:
-    /// Destroy the entire recall index. Clears BM25, chunk_source_map, and all
-    /// vectors. BundleStore rows (chunks) are NOT deleted (append-only invariant).
-    /// Called by GeniusLocusKit.destroy(storage:corpusStorage:handle:).
+    /// Destroy the entire recall index. Clears BM25, chunk_source_map, all
+    /// vectors, AND all persisted basis rows (no orphans). BundleStore rows
+    /// (chunks) are NOT deleted (append-only invariant). Called by
+    /// GeniusLocusKit.destroy(storage:corpusStorage:handle:).
     public func destroyRecallIndex() async throws
+}
+
+/// Persistence for a trained provider's serialized basis blob (mission 6a-ii-β).
+/// One row per (modelID, modelVersion). Lives in CorpusKit core; never imports
+/// CorpusKitProviders (the blob bytes are opaque here).
+public actor BasisStore {
+    /// Additive schema: corpus_provider_basis(model_id TEXT, model_version TEXT,
+    /// basis BLOB, trained_at TIMESTAMP/ISO8601, trained_chunk_count INTEGER),
+    /// PK (model_id, model_version). NO Bool columns; dates TEXT ISO8601.
+    public static let schemaDeclaration: SchemaDeclaration
+    public init(storage: any Storage)
+    /// UPSERT the basis row (retrain replaces in place — one row per key).
+    public func upsert(_ row: PersistedBasis) async throws
+    /// Load the persisted basis for a provider key, or nil.
+    public func load(modelID: String, modelVersion: String) async throws -> PersistedBasis?
+    /// Delete every basis row (used by Corpus.destroyRecallIndex()).
+    public func deleteAll() async throws
 }
 ```
 
 **Rust:**
 
 ```rust
-pub struct Corpus { /* bundle_store, bm25: Mutex<BM25Index>, vector_store, provider */ }
+pub struct Corpus { /* bundle_store, bm25: Mutex<BM25Index>, vector_store,
+                       basis_store, model_id, provider: Mutex<ProviderHandle>,
+                       fresh_basis_blob: Option<Vec<u8>> */ }
 impl Corpus {
-    /// Construct via migrate() to apply both schemas (BundleStore + VectorStore)
-    /// regardless of version gating.
+    /// Construct via migrate() to apply all schemas (BundleStore + VectorStore +
+    /// BasisStore) regardless of version gating. LOAD-ON-OPEN: when the model is
+    /// trainable AND a basis was persisted for its (model_id, model_version), the
+    /// trained provider is reconstructed from that blob (trained-ready on open).
     pub fn open(storage: Arc<dyn Storage>, model: EmbeddingModelConfig) -> CorpusKitResult<Self>;
 
     /// now_millis: Unix epoch in milliseconds (caller-supplied for determinism).
+    /// FIRST-INGEST AUTO-TRAIN: a trainable provider with no persisted basis
+    /// trains a fresh basis on the first ingest; later ingests fold in (no retrain).
     pub fn ingest(&self, text: &str, source_id: &str, now_millis: i64) -> CorpusKitResult<()>;
     pub fn recall(&self, query: &str, limit: usize, now_millis: i64) -> CorpusKitResult<Vec<ScoredChunk>>;
+
+    /// Retrain the embedding basis on the full corpus and re-embed every chunk
+    /// (mission 6a-ii-β). Trainable provider: trains a FRESH basis (reconstructed
+    /// from the empty-basis blob — train_on_corpus is additive), UPSERTs it into
+    /// corpus_provider_basis, re-embeds every chunk replacing stale vectors.
+    /// Non-trainable / reopened-from-basis: vector refresh, no basis row.
+    /// now_millis is the only clock source (deterministic).
+    pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()>;
+
     pub fn remove(&self, source_id: &str) -> CorpusKitResult<()>;
     pub fn count(&self) -> CorpusKitResult<usize>;
 
     // Estate lifecycle primitive:
-    /// Clear BM25 + chunk_source_map + all vectors. BundleStore rows preserved.
+    /// Clear BM25 + chunk_source_map + all vectors + all basis rows (no orphans).
+    /// BundleStore rows preserved (append-only).
     pub fn destroy_recall_index(&self) -> CorpusKitResult<()>;
 }
+
+/// Persistence for a trained provider's serialized basis blob (mission 6a-ii-β).
+/// One row per (model_id, model_version). Core crate; never depends on
+/// corpus-kit-providers (the blob bytes are opaque here).
+pub struct BasisStore { /* storage: Arc<dyn Storage> */ }
+pub struct PersistedBasis {
+    pub model_id: String, pub model_version: String, pub basis: Vec<u8>,
+    pub trained_at_secs: i64, pub trained_chunk_count: usize,
+}
+impl BasisStore {
+    /// corpus_provider_basis(model_id TEXT, model_version TEXT, basis BLOB,
+    /// trained_at TIMESTAMP/ISO8601, trained_chunk_count INTEGER),
+    /// PK (model_id, model_version). No Bool columns; dates TEXT ISO8601.
+    pub fn schema_declaration() -> SchemaDeclaration;
+    pub fn new(storage: Arc<dyn Storage>) -> Self;
+    pub fn upsert(&self, row: &PersistedBasis) -> CorpusKitResult<()>;
+    pub fn load(&self, model_id: &str, model_version: &str) -> CorpusKitResult<Option<PersistedBasis>>;
+    pub fn delete_all(&self) -> CorpusKitResult<()>;
+}
 ```
+
+The Rust `TrainableEmbeddingBasis` trait gains an additive
+`reconstruct_trainable_basis(&self, basis) -> Result<Box<dyn TrainableEmbeddingBasis>>`
+sibling of `reconstruct_basis` (the trainable-returning reconstruct the Corpus
+needs to rebuild a fresh provider for `reindex`/first-ingest, since Rust has no
+runtime trait-object downcast and `train_on_corpus` is additive). Swift gets this
+for free via its runtime `as? TrainableEmbeddingBasis` cast on the reconstructed
+provider, so no Swift protocol change is required.
 
 ---
 
@@ -1026,6 +1103,26 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+Added the basis-persistence table + Corpus training lifecycle (mission 6a-ii-β,
+single provider). New `BasisStore` actor (Swift) / `BasisStore` struct (Rust) in
+CorpusKit core persisting a trained distributional provider's serialized basis
+blob in the additive `corpus_provider_basis` table — columns model_id TEXT,
+model_version TEXT, basis BLOB, trained_at TIMESTAMP (TEXT ISO8601, never REAL),
+trained_chunk_count INTEGER, PK (model_id, model_version); no Bool columns. New
+public `Corpus.reindex(now:)` / `Corpus::reindex(now_millis:)` retrains a FRESH
+basis on the full corpus and re-embeds every chunk. `Corpus.init`/`open` now
+LOAD-ON-OPEN (reconstructs a trained provider from a persisted basis so the dense
+lane is trained-ready after restart); `ingest` FIRST-INGEST auto-trains a fresh
+basis when a trainable provider has no basis yet (later ingests fold in, no
+retrain); `destroyRecallIndex`/`destroy_recall_index` now also wipe basis rows
+(no orphans). The Rust `TrainableEmbeddingBasis` trait gains an additive
+`reconstruct_trainable_basis` (trainable-returning reconstruct the Corpus needs
+to rebuild a fresh provider — train_on_corpus is additive; Swift gets this via
+its runtime `as?` cast). Cross-port conformance: ingest → reindex → reopen →
+embed reproduces the α canonical RI basis blob byte-for-byte and the canonical
+embedding bit patterns on both ports. Additive; no existing API changed.
 
 ### 1.2.0 -- 2026-06-16
 Added the `TrainableEmbeddingBasis` seam (mission 6a-ii-α): a new
