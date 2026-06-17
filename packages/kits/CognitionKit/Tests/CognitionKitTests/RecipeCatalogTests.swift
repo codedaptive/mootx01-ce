@@ -17,8 +17,8 @@ struct RecipeCatalogTests {
         // Both versions of every recipe ship, so every recipe registers
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
         // plus the 14 reasoning lenses plus the 3 analytics lenses plus
-        // the 4 new temporal/entropy lenses (moment, rhythm, precedence,
-        // complexity) = 23 total.
+        // the 4 temporal/entropy lenses (moment, rhythm, precedence,
+        // complexity) plus the steerable-fusion recipe (shaped_recall) = 24 total.
         #expect(RecipeCatalog.names.sorted() == [
             "anticipate",
             "apriori_rules",
@@ -40,6 +40,7 @@ struct RecipeCatalogTests {
             "partial_cue_recall",
             "precedence",
             "rhythm",
+            "shaped_recall",
             "theme_weather",
             "trust_grounded_synthesis",
             "tunnel_successor",
@@ -81,7 +82,7 @@ struct RecipeCatalogTests {
         #expect(descriptor.requiredCapabilities == [.deriveBranch, .benchmark, .promoteBranch])
     }
 
-    @Test("catalog names match catalog.rs declaration order — 23 entries")
+    @Test("catalog names match catalog.rs declaration order — 24 entries")
     func catalogNamesMatchRustDeclarationOrder() {
         // Literal ordered list mirroring `recipe_catalog()` in catalog.rs.
         // Any reordering on either side, or a recipe added on one side but not
@@ -110,6 +111,7 @@ struct RecipeCatalogTests {
             "rhythm",
             "precedence",
             "complexity",
+            "shaped_recall",
         ])
     }
 

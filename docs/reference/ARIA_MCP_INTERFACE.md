@@ -1,8 +1,8 @@
 ---
 title: aria-mcp Interface
-version: 1.0.1
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: Public API surface for aria-mcp in both the Swift and Rust ports.
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -65,7 +65,7 @@ The Rust binary is a parity sibling; the shipped runtime is the Swift binary —
 the `mootx01` executable target in `apps/mootx01/Package.swift`, which links the
 `AriaMCP` library and runs `mootx01 serve` (the default subcommand on macOS).
 The Rust binary
-links the same 53-tool surface backed by the Rust kit stack (genius-locus-kit,
+links the same 55-tool surface backed by the Rust kit stack (genius-locus-kit,
 locus-kit, vault-kit, cognition-kit, neuron-kit). All five
 `moot_vault_*` tools are wired in the Rust dispatch to the vault-kit crate
 (`VaultBridge`, `ObsidianAdapter`, `DrawerMapping`) with a SHA-256 sidecar
@@ -144,13 +144,13 @@ public enum JSONValueError: Error, Equatable { /* unsupported value, etc. */ }
 
 The lexicon-projected surface was replaced with a five-tier
 AI-client-oriented interface. `ToolProjection.tools()` assembles all
-53 tools across four provenance tiers.
+55 tools across four provenance tiers (plus the maintenance tool `moot_reindex`).
 
 ```swift
 public enum ToolProvenance: Sendable, Equatable {
     case interface     // 19 five-tier AI-client tools
     case federation    // 1 federated-search tool (moot_federated_search)
-    case recipe        // 7 recipe + 21 lens tools via CognitionKit/LensTools
+    case recipe        // 8 recipe + 21 lens tools via CognitionKit/LensTools
     case vault         // 5 vault control tools (export, import, status, reconcile, job)
 }
 public struct ProjectedTool: Sendable, Equatable {
@@ -161,7 +161,7 @@ public struct ProjectedTool: Sendable, Equatable {
 }
 public enum ToolProjection {
     public static let toolNamePrefix: String         // "moot_" — product namespace on every tool name
-    public static func tools() -> [ProjectedTool]   // all 53 tools (interface+federation+recipe+lens+vault)
+    public static func tools() -> [ProjectedTool]   // all 55 tools (interface+federation+recipe+lens+vault+maintenance)
     public static func federationTool() -> ProjectedTool
 }
 ```
@@ -289,19 +289,26 @@ ToolDispatcher.federatedSearchToolName   // "moot_federated_search"
 Fans across locally-open estates the requester is authorized to read.
 Required caller field: `requesterEstateID` (UUID string of the requesting estate).
 
-#### Recipe and lens tools (`.recipe` provenance, 28 tools)
+#### Recipe and lens tools (`.recipe` provenance, 29 tools)
 
-The `.recipe` provenance bucket holds 28 tools: 7 CognitionKit recipe tools plus
+The `.recipe` provenance bucket holds 29 tools: 8 CognitionKit recipe tools plus
 the 21 reasoning-lens tools below.
 
 - `moot_list_lenses`, `moot_list_recipes`, `moot_synthesize`, `moot_recall_precise`,
-  `moot_run_migration`, `moot_confirm_migration`, `moot_dream`
-  (7 CognitionKit recipe tools)
+  `moot_recall_shaped`, `moot_run_migration`, `moot_confirm_migration`, `moot_dream`
+  (8 CognitionKit recipe tools)
   - `moot_list_recipes` — browse the full recipe catalog: name, version, description,
     required capabilities per entry. No estate args required.
   - `moot_recall_precise` — coarse-grab a generous candidate pool then re-rank by
     query-specific precision (distinctive number/proper-noun match) to surface the
     exact answer above near-duplicates. Returns the same shape as `moot_memory_search`.
+  - `moot_recall_shaped` — run recall with a named `RecallShape` preset applied
+    (one preset from the GLK roster, picked by name) that forwards, excludes,
+    suppresses, or inverts individual fusion lanes and bounds the candidate
+    frontier. The discoverable `preset` enum lists the roster; `balanced` (or an
+    omitted preset) is the unsteered default; an unknown preset is rejected. The
+    four ARIA filtering adjectives compose orthogonally (the preset ranks, the
+    `filter` arg filters). Returns the same shape as `moot_memory_search`.
   - `moot_dream` — rebuild the co-occurrence/temporal matrix tier (the Brain's
     association layer the matrix recall lane scores against) and run one dreaming
     cycle (latent-alignment proposals + cycle diary). The matrix is built by
@@ -707,7 +714,7 @@ record, unknown id→Swift-identical not-found, missing job_id→INVALID_PARAMS,
 ledger eviction at 100 entries). `jsonrpc_tests`, `persistence_tests`,
 `stdio_framing_tests`, `http_transport_tests` — 4 loopback HTTP round-trips
 (initialize, tools/list, non-POST 405, malformed-body parse error). Total Rust
-suite: 188 tests, 0 failures. Tool census: 53/53 (Rust matches Swift exactly).)
+suite: 188 tests, 0 failures. Tool census: 55/55 (Rust matches Swift exactly).)
 
 ## § 6 — Examples
 
@@ -727,6 +734,21 @@ await StdioServer(dispatcher: dispatcher).run()   // newline-delimited JSON-RPC 
 *End of aria-mcp Interface.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Additive (GLK-RECALL-SHAPE-PRESETS): new `moot_recall_shaped` recipe tool (both
+ports) — a single recall tool with a discoverable `preset` enum selecting a named
+`RecallShape` from the GLK roster (preferable to ~20 tools). The tool description
+embeds the full roster (each preset name + one-line emphasis); the preset enum is
+the GLK `presetNames` list. Validation is fail-CLOSED: an absent preset uses the
+unsteered `balanced` default, a present-but-unknown name is rejected with a tool
+error. Returns the same plain-text shape as `moot_memory_search`. The four ARIA
+filtering adjectives compose orthogonally (the preset ranks, the `filter` arg
+filters). The `.recipe` bucket grows to 29 tools and the whole surface to 55
+(census references updated to the current live count, which prior additions
+— `moot_reindex`, `moot_vault_job` — had left at the stale 53). Conformance:
+`RecipeToolsTests.swift` shaped-recall cases / `dispatch_tests.rs`
+`recall_shaped_*` + the tool-count/name-set gates.
 
 ### 1.0.1 -- 2026-06-14
 Reconciled the `.recipe` provenance tool count: the §`Recipe and lens tools` body enumerated only 5 CognitionKit recipe tools (yielding 26 with the 21 lenses) while the heading, the `ToolProvenance` projection, and the 53-tool census all carry 28. Added the two missing recipe tools (`moot_recall_precise`, `moot_dream`) to the body so it lists all 7 recipe tools + 21 lenses = 28, consistent with the verified Swift/Rust surface (`ToolProjection.tools()` / `tool_list.rs`, both gated at 53).

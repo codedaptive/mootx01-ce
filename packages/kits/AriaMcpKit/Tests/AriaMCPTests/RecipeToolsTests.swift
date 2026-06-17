@@ -77,6 +77,7 @@ struct RecipeToolsTests {
             "moot_list_lenses",
             "moot_list_recipes",
             "moot_recall_precise",
+            "moot_recall_shaped",
             "moot_run_migration",
             "moot_synthesize",
         ])
@@ -100,7 +101,7 @@ struct RecipeToolsTests {
         // Migration tools are Tier 7 and intentionally absent from the cognition menu.
         #expect(!text.contains("moot_run_migration"))
         #expect(!text.contains("moot_confirm_migration"))
-        #expect(text.contains("24 cognition tools"))
+        #expect(text.contains("25 cognition tools"))
     }
 
     @Test func testRecipeToolNamesDoNotCollideWithInterfaceToolNames() {
@@ -280,6 +281,103 @@ struct RecipeToolsTests {
             obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
         #expect(text.hasPrefix("found "),
                 "absent composition must return the mootText header shape")
+    }
+
+    // MARK: - recall_shaped (named RecallShape preset surface)
+
+    /// A known preset dispatches and returns the moot_memory_search plain-text
+    /// shape. Mirrors the Rust dispatch test `recall_shaped_known_preset_*`.
+    @Test func testShapedRecallDispatchReturnsMootTextShape() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "sr"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        for text in [
+            "the river flows north past the old mill",
+            "the mountain trail climbs steeply at dawn",
+        ] {
+            _ = try await dispatcher.dispatch(
+                name: "moot_file_memory", arguments: fileArgs(content: text))
+        }
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_shaped",
+            arguments: .object([
+                "query": .string("river mill"),
+                "preset": .string("conceptual"),
+                "filter": .string("unconfirmed"),
+                "limit": .integer(10),
+            ]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false)
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.hasPrefix("found "))
+        #expect(text.contains("memory(s)"))
+    }
+
+    /// An unknown preset name is a caller error — the boundary rejects it
+    /// fail-CLOSED with a tool error naming the offending preset.
+    @Test func testShapedRecallUnknownPresetFailsClosed() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "sr-unknown"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory", arguments: fileArgs(content: "any content"))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_shaped",
+            arguments: .object([
+                "query": .string("anything"),
+                "preset": .string("no-such-preset"),
+            ]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == true,
+                "unknown preset must return a tool error (fail closed)")
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.contains("unknown preset"))
+        #expect(text.contains("no-such-preset"))
+    }
+
+    /// An absent `preset` arg uses the unsteered balanced default and succeeds.
+    /// Absence ≠ unknown: no preset arg must never produce an error.
+    @Test func testShapedRecallAbsentPresetUsesBalanced() async throws {
+        let kit = GeniusLocusKit()
+        let handle = try await openEstate(
+            in: kit, owner: OwnerCredentials(ownerIdentifier: "sr-absent"))
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        _ = try await dispatcher.dispatch(
+            name: "moot_file_memory",
+            arguments: fileArgs(content: "the harbour lights flicker in the fog"))
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_recall_shaped",
+            arguments: .object(["query": .string("harbour")]))
+
+        let obj = try #require(result.objectValue)
+        #expect(obj["isError"]?.boolValue == false,
+                "absent preset must use balanced and succeed")
+        let text = try #require(
+            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        #expect(text.hasPrefix("found "))
+    }
+
+    /// The shaped-recall tool advertises the full preset roster in its
+    /// description so the AI can pick a preset by intent.
+    @Test func testShapedRecallToolAdvertisesRoster() throws {
+        let tool = try #require(
+            RecipeTools.tools().first { $0.name == "moot_recall_shaped" })
+        // The roster lists every preset name with its one-line description.
+        #expect(tool.description.contains("conceptual"))
+        #expect(tool.description.contains("anti_redundant"))
+        #expect(tool.description.contains("Roster:"))
     }
 
     // MARK: - migration benchmark run → confirm, end to end

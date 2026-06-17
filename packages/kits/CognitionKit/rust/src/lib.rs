@@ -60,6 +60,7 @@ pub mod moment_recipe;
 pub mod precedence_recipe;
 pub mod precise_recall;
 pub mod rhythm_recipe;
+pub mod shaped_recall;
 pub mod theme_weather_recipe;
 pub mod trust_lens_recipe;
 pub mod tunnel_successor_recipe;
@@ -101,6 +102,7 @@ pub use precise_recall::{run as run_precise_recall, PreciseMatch, DEFAULT_POOL a
 pub use moment_recipe::{run_moment, MomentOutput};
 pub use precedence_recipe::{run_precedence, PrecedenceOutput};
 pub use rhythm_recipe::{run_rhythm, RhythmOutput};
+pub use shaped_recall::{run as run_shaped_recall, ShapedRecallOutput};
 pub use theme_weather_recipe::run_theme_weather;
 pub use trust_lens_recipe::{run_trust_grounded_synthesis, TrustGroundedOutput};
 pub use tunnel_successor_recipe::{run_tunnel_successor, Successor};

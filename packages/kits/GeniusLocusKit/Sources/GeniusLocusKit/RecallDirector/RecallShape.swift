@@ -172,4 +172,290 @@ public struct RecallShape: Sendable, Codable, Equatable {
         guard let override = frontierK else { return engineDefault }
         return min(Self.frontierKCeiling, max(Self.frontierKFloor, override))
     }
+
+    // MARK: - Named preset roster
+
+    /// The per-signal DENSE lane key for a held embedding provider, by its
+    /// `modelID`. These are the exact `modelID` strings the CorpusKit providers
+    /// ship (see CorpusKitProviders/*Provider.swift) — the suffix on a
+    /// `dense:<modelID>` lane key. The roster targets them by these constants so
+    /// a typo in a provider id surfaces as a build error, not a silent no-op.
+    public enum DenseSignal {
+        /// Random-Indexing distributional provider — `"random-indexing-v1"`.
+        public static let randomIndexing = "dense:random-indexing-v1"
+        /// Positive-PMI distributional provider — `"ppmi-v1"`.
+        public static let ppmi = "dense:ppmi-v1"
+        /// Latent-Semantic-Analysis provider — `"lsa-v1"`.
+        public static let lsa = "dense:lsa-v1"
+        /// Non-negative-Matrix-Factorisation provider — `"nmf-v1"`.
+        public static let nmf = "dense:nmf-v1"
+        /// Field-Distribution-Coding provider — `"fdc-v1"`.
+        public static let fdc = "dense:fdc-v1"
+
+        /// Every per-signal dense lane key the standard provider stack ships, in
+        /// stable order. Used by the `consensus`/`broad` presets to forward (or
+        /// the leave-one-out pattern to zero) each distributional signal.
+        public static let all: [String] = [randomIndexing, ppmi, lsa, nmf]
+    }
+
+    /// The names of every preset in the roster, in stable declaration order.
+    /// This is the discoverable surface the catalog and the ARIA tool enumerate.
+    ///
+    /// `"balanced"` is included for completeness even though it resolves to a
+    /// `nil` shape (uniform fusion = today's behaviour) — listing it lets a
+    /// caller pick "no steering" by name alongside the steered shapes.
+    public static let presetNames: [String] = [
+        "balanced",
+        "precise",
+        "conceptual",
+        "broad",
+        "lexical",
+        "not_lexical",
+        "associative",
+        "consensus",
+        "ri_forward",
+        "ppmi_forward",
+        "lsa_forward",
+        "nmf_forward",
+        "fast",
+        "structural",
+        "temporal",
+        "connection",
+        "field",
+        "preference",
+        "anti_redundant",
+    ]
+
+    /// Resolve a named preset to its documented signed-weight shape.
+    ///
+    /// Returns the shape for a known preset name, or `nil` when the name is not
+    /// in `presetNames`. `"balanced"` deliberately resolves to `nil` too — the
+    /// uniform, unsteered fusion is the absence of a shape, so a `nil` return for
+    /// `"balanced"` and for an unknown name are the SAME thing at the call site
+    /// (run recall with no steering). Callers that must distinguish "balanced"
+    /// from "unknown" check `presetNames.contains(name)` first.
+    ///
+    /// The weights below are SENSIBLE, DEFENSIBLE starting points — the
+    /// optimizer tunes the exact magnitudes later (recall-architecture: the
+    /// optimizer owns weights). They are NOT canon: the contract a preset honours
+    /// is its DIRECTION (which lanes it forwards, zeroes, suppresses, inverts, and
+    /// how it bounds the frontier), not the literal float. Every key a preset
+    /// sets is a key the engine reads (verified in RecallDirector's unionBest
+    /// weighted path), so no preset is a silent no-op.
+    ///
+    /// Leave-one-out is reachable WITHOUT a dedicated preset: take any forward
+    /// shape and zero one `dense:<modelID>` lane (e.g. set
+    /// `DenseSignal.lsa` to `0`) to ablate exactly that distributional signal.
+    ///
+    /// - Parameter name: a preset name from `presetNames`.
+    /// - Returns: the resolved shape, or `nil` for `"balanced"` / an unknown name.
+    public static func preset(_ name: String) -> RecallShape? {
+        switch name {
+        // Uniform fusion — the absence of steering. `nil` ⇒ every lane at 1.0 ⇒
+        // byte-identical to today's behaviour.
+        case "balanced":
+            return nil
+
+        // Exactness: amplify the keyword (bm25) and field-coding (fdc) lanes and
+        // forward the dense consensus, then NARROW the frontier so suppression
+        // reshapes a tight, high-precision pool. The "find the exact answer" shape.
+        case "precise":
+            return RecallShape(
+                laneWeights: [
+                    "bm25": 1.5,
+                    DenseSignal.fdc: 1.5,
+                    "dense": 1.2,
+                ],
+                frontierK: frontierKFloor)
+
+        // Concepts over keywords: amplify the distributional dense lanes
+        // (RI/PPMI/LSA/NMF) and damp the literal keyword lane so semantically
+        // related — not lexically identical — memories rise.
+        case "conceptual":
+            return RecallShape(
+                laneWeights: [
+                    DenseSignal.randomIndexing: 1.5,
+                    DenseSignal.ppmi: 1.5,
+                    DenseSignal.lsa: 1.5,
+                    DenseSignal.nmf: 1.5,
+                    "bm25": 0.5,
+                ])
+
+        // Cast wide: forward every retrieval lane above neutral and WIDEN the
+        // frontier to the ceiling so the fused set draws from a deep candidate
+        // pool. The "don't miss anything" shape.
+        case "broad":
+            return RecallShape(
+                laneWeights: [
+                    "locus": 1.3,
+                    "bm25": 1.3,
+                    "hamming": 1.3,
+                    "dense": 1.3,
+                ],
+                frontierK: frontierKCeiling)
+
+        // Keyword/field only: amplify bm25 + fdc and ZERO the vector lanes
+        // (dense aggregate and 256-bit Hamming) so only literal/field signals
+        // vote. The pure-lexical lane.
+        case "lexical":
+            return RecallShape(
+                laneWeights: [
+                    "bm25": 1.5,
+                    DenseSignal.fdc: 1.5,
+                    "dense": 0,
+                    "hamming": 0,
+                ])
+
+        // Suppress the literal lanes: ZERO bm25 + fdc so only the distributional
+        // and structural lanes decide. The complement of `lexical`.
+        case "not_lexical":
+            return RecallShape(
+                laneWeights: [
+                    "bm25": 0,
+                    DenseSignal.fdc: 0,
+                ])
+
+        // Loose association: amplify the two most "associative" distributional
+        // signals (RI and NMF) and widen the frontier so loosely-related memories
+        // surface. The free-association shape.
+        case "associative":
+            return RecallShape(
+                laneWeights: [
+                    DenseSignal.randomIndexing: 1.5,
+                    DenseSignal.nmf: 1.5,
+                ],
+                frontierK: frontierKCeiling)
+
+        // Dense consensus: forward EVERY per-signal dense lane at full strength
+        // (so the consensus fold that builds the `dense` column weighs every
+        // distributional provider) and narrow the frontier so the agreed-upon
+        // candidates dominate. The "where all the embedding models agree" shape.
+        case "consensus":
+            var weights: [String: Float] = [:]
+            for key in DenseSignal.all { weights[key] = 1.0 }
+            weights[DenseSignal.fdc] = 1.0
+            return RecallShape(laneWeights: weights, frontierK: frontierKFloor)
+
+        // Single-signal forwarding: amplify ONE distributional dense lane and
+        // ZERO its siblings so only that provider's geometry votes. The four
+        // `*_forward` presets isolate each held provider for ablation/inspection.
+        case "ri_forward":
+            return singleDenseForward(DenseSignal.randomIndexing)
+        case "ppmi_forward":
+            return singleDenseForward(DenseSignal.ppmi)
+        case "lsa_forward":
+            return singleDenseForward(DenseSignal.lsa)
+        case "nmf_forward":
+            return singleDenseForward(DenseSignal.nmf)
+
+        // Cheapest vote: keep ONLY the 256-bit Hamming lane (a bit-parallel
+        // popcount) and ZERO the float-dense lane so the expensive cosine pass is
+        // skipped. The latency-first shape.
+        case "fast":
+            return RecallShape(
+                laneWeights: [
+                    "hamming": 1.5,
+                    "dense": 0,
+                ])
+
+        // Structure-led: amplify the LocusKit bitmap lane so filed structure
+        // (wing/room/facet) drives ranking over content similarity.
+        case "structural":
+            return RecallShape(laneWeights: ["locus": 1.5])
+
+        // Time-led: amplify the MatrixTier temporal-relevance column (a
+        // matrixAware-only column — neutral under raw/rrf). "What's relevant now."
+        case "temporal":
+            return RecallShape(laneWeights: ["temporal": 1.5])
+
+        // Connection-led: amplify the connection-graph column so memories central
+        // in the association graph rank up. matrixAware-only.
+        case "connection":
+            return RecallShape(laneWeights: ["graph": 1.5])
+
+        // Field-led: amplify the co-occurrence column so memories that share
+        // filing facets with the query's neighbourhood rank up. matrixAware-only.
+        case "field":
+            return RecallShape(laneWeights: ["coOccurrence": 1.5])
+
+        // Preference-led: amplify the learned-preference column (Bradley-Terry /
+        // RecallTrace) so memories the user has historically favoured rank up.
+        // matrixAware-only.
+        case "preference":
+            return RecallShape(laneWeights: ["preference": 1.5])
+
+        // Diversity: invert the FDC dense lane's objective to FARTHEST so it
+        // surfaces the most DISSIMILAR sources, pulling the fused set away from
+        // near-duplicates of the query. The anti-redundancy shape (distinct from
+        // a negative weight — it changes WHICH candidates the store returns).
+        case "anti_redundant":
+            return RecallShape(antiSimilarLanes: [DenseSignal.fdc])
+
+        default:
+            return nil
+        }
+    }
+
+    /// A one-line, human-readable description of what a preset emphasises — the
+    /// text the ARIA tool surfaces when it lists the roster. Each line names the
+    /// signals the preset forwards/zeroes/inverts so an AI can pick a preset by
+    /// intent. Returns an empty string for an unknown name (not in `presetNames`).
+    ///
+    /// - Parameter name: a preset name from `presetNames`.
+    /// - Returns: the description, or `""` for an unknown name.
+    public static func presetDescription(_ name: String) -> String {
+        switch name {
+        case "balanced":
+            return "Uniform fusion — every lane votes equally. The unsteered default."
+        case "precise":
+            return "Exactness — amplify keyword (bm25) + field-coding (fdc) + dense consensus over a narrow frontier."
+        case "conceptual":
+            return "Concepts over keywords — amplify the distributional dense lanes (RI/PPMI/LSA/NMF), damp bm25."
+        case "broad":
+            return "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling."
+        case "lexical":
+            return "Keyword/field only — amplify bm25 + fdc, exclude the dense and Hamming vector lanes."
+        case "not_lexical":
+            return "Suppress the literal lanes — exclude bm25 + fdc so distributional and structural signals decide."
+        case "associative":
+            return "Loose association — amplify the RI + NMF distributional lanes over a wide frontier."
+        case "consensus":
+            return "Dense consensus — forward every per-signal dense lane over a narrow frontier; where the embedding models agree."
+        case "ri_forward":
+            return "Isolate Random-Indexing — amplify the RI dense lane, exclude the other distributional signals."
+        case "ppmi_forward":
+            return "Isolate PPMI — amplify the PPMI dense lane, exclude the other distributional signals."
+        case "lsa_forward":
+            return "Isolate LSA — amplify the LSA dense lane, exclude the other distributional signals."
+        case "nmf_forward":
+            return "Isolate NMF — amplify the NMF dense lane, exclude the other distributional signals."
+        case "fast":
+            return "Cheapest vote — keep only the 256-bit Hamming lane, skip the float-dense cosine pass."
+        case "structural":
+            return "Structure-led — amplify the LocusKit bitmap lane so filed structure drives ranking."
+        case "temporal":
+            return "Time-led — amplify the temporal-relevance column (matrixAware scoring only)."
+        case "connection":
+            return "Connection-led — amplify the connection-graph column (matrixAware scoring only)."
+        case "field":
+            return "Field-led — amplify the co-occurrence column (matrixAware scoring only)."
+        case "preference":
+            return "Preference-led — amplify the learned-preference column (matrixAware scoring only)."
+        case "anti_redundant":
+            return "Diversity — invert the FDC dense lane to farthest (anti-similarity) so the set avoids near-duplicates."
+        default:
+            return ""
+        }
+    }
+
+    /// A shape that forwards exactly one dense lane and zeroes the other three
+    /// distributional siblings — the `*_forward` preset body. The named lane is
+    /// amplified; every other `DenseSignal.all` key is excluded.
+    private static func singleDenseForward(_ forwardKey: String) -> RecallShape {
+        var weights: [String: Float] = [:]
+        for key in DenseSignal.all {
+            weights[key] = (key == forwardKey) ? 1.5 : 0
+        }
+        return RecallShape(laneWeights: weights)
+    }
 }

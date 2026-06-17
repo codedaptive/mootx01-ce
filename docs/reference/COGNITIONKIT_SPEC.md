@@ -1,8 +1,8 @@
 ---
 title: CognitionKit Specification
-version: 1.0.0
+version: 1.1.0
 status: active
-date: 2026-06-14
+date: 2026-06-17
 description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -624,6 +624,16 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 *End of CognitionKit Specification.*
 
 ## Changelog
+
+### 1.1.0 -- 2026-06-17
+Additive (GLK-RECALL-SHAPE-PRESETS): added the `shaped_recall` recipe — a single
+parameterized recall recipe over the GLK named `RecallShape` preset roster. It
+SEQUENCES one estate recall verb (`.unionBest`/`.matrixAware`) with a preset-
+resolved signed-weight shape applied; it owns no math and no substrate state
+(B-1/B-2), and `"balanced"` (or an unknown preset) runs unsteered. Registered in
+the catalog as a parity anchor (catalog count → 24). The four ARIA filtering
+adjectives compose ORTHOGONALLY with the preset (the preset ranks; the filter
+filters). Conformance: `ShapedRecallTests.swift` / `shaped_recall.rs`.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.

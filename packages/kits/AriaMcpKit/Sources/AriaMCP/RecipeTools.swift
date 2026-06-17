@@ -52,6 +52,11 @@ enum RecipeTools {
     static let listRecipesCatalogToolName = "moot_list_recipes"
     static let groundedSynthesisToolName = "moot_synthesize"
     static let preciseRecallToolName = "moot_recall_precise"
+    /// Shaped-recall tool: a single recall tool with a discoverable `preset` enum
+    /// param selecting one named RecallShape from the GLK roster. Preferable to ~20
+    /// tools (one per shape) — the AI picks a deterministic recipe by name instead
+    /// of simulating steering.
+    static let shapedRecallToolName = "moot_recall_shaped"
     static let runMigrationBenchmarkToolName = "moot_run_migration"
     static let confirmMigrationPromotionToolName = "moot_confirm_migration"
     /// On-demand dream tool: rebuild the estate's derived accelerators (the
@@ -69,6 +74,7 @@ enum RecipeTools {
             || name == listRecipesCatalogToolName
             || name == groundedSynthesisToolName
             || name == preciseRecallToolName
+            || name == shapedRecallToolName
             || name == runMigrationBenchmarkToolName
             || name == confirmMigrationPromotionToolName
             || name == dreamToolName
@@ -85,10 +91,48 @@ enum RecipeTools {
             listRecipesCatalogTool(),
             groundedSynthesisTool(),
             preciseRecallTool(),
+            shapedRecallTool(),
             runMigrationBenchmarkTool(),
             confirmMigrationPromotionTool(),
             dreamTool(),
         ]
+    }
+
+    /// The roster listing the shaped-recall tool advertises in its description:
+    /// one `name — description` line per preset, built from the GLK roster so a
+    /// new preset is reflected automatically. This is the "AI lists the roster"
+    /// surface — name + one-line description + which signals it emphasizes.
+    private static func presetRosterListing() -> String {
+        RecallShape.presetNames
+            .map { "\($0) — \(RecallShape.presetDescription($0))" }
+            .joined(separator: "; ")
+    }
+
+    /// The shaped-recall tool. Runs the ShapedRecall recipe with a named
+    /// RecallShape preset applied — one tool, a discoverable `preset` enum, the
+    /// full roster in the description. Returns results in the same plain-text
+    /// shape `moot_memory_search` uses so existing mootText parsers work unchanged.
+    /// The four ARIA filtering adjectives compose orthogonally: the preset RANKS,
+    /// the `filter` arg FILTERS.
+    private static func shapedRecallTool() -> ProjectedTool {
+        ProjectedTool(
+            name: shapedRecallToolName,
+            description: "Shaped recall: run recall with a named RecallShape preset that forwards, excludes, suppresses, or inverts individual fusion lanes (and bounds the candidate frontier). Pick ONE preset by name. Roster: \(presetRosterListing()). Returns the same shape as moot_memory_search.",
+            inputSchema: objectSchema(
+                properties: [
+                    "query": stringSchema("The search query text — drives BM25 + vector recall."),
+                    "preset": .object([
+                        "type": .string("string"),
+                        "description": .string("The RecallShape preset to apply (how to steer the fusion). One of the roster names. balanced (or an omitted preset) is the unsteered default. Unknown names are rejected."),
+                        // Discoverable enum: the exact roster the GLK ships.
+                        "enum": .array(RecallShape.presetNames.map { .string($0) }),
+                    ]),
+                    "limit": integerSchema("Max ranked matches to return. Default 20. Omit to use the default; null is invalid."),
+                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained, currentlyBelieve. Omit for ordinary active recall across any confirmation state. null is invalid. Composes orthogonally with the preset — the preset ranks, the filter filters."),
+                    "estateID": stringSchema("Optional UUID of the open estate to target. Omit for the default estate; null is invalid."),
+                ],
+                required: ["query"]),
+            provenance: .recipe)
     }
 
     /// The cognition-discovery tool. At runtime (`runListRecipes`), returns
@@ -264,6 +308,8 @@ enum RecipeTools {
             return try await runGroundedSynthesis(args, kit: kit, handle: handle)
         case preciseRecallToolName:
             return try await runPreciseRecall(args, kit: kit, handle: handle)
+        case shapedRecallToolName:
+            return try await runShapedRecall(args, kit: kit, handle: handle)
         case runMigrationBenchmarkToolName:
             return try await runMigrationBenchmark(args, kit: kit, handle: handle)
         case confirmMigrationPromotionToolName:
@@ -286,10 +332,11 @@ enum RecipeTools {
     /// Migration tools (Tier 7) are intentionally excluded here; they have
     /// their own teachme guides and a separate caller workflow.
     private static func runListRecipes() -> JSONValue {
-        // Tier 6 recipe tools: list-lenses + synthesize + precise recall
-        // (not migration, which is Tier 7).
+        // Tier 6 recipe tools: list-lenses + synthesize + precise recall + shaped
+        // recall (not migration, which is Tier 7).
         let tier6RecipeNames: Set<String> = [
-            listRecipesToolName, groundedSynthesisToolName, preciseRecallToolName,
+            listRecipesToolName, groundedSynthesisToolName,
+            preciseRecallToolName, shapedRecallToolName,
         ]
         let recipeTools = tools().filter { tier6RecipeNames.contains($0.name) }
         // All 21 lens tools from LensTools.
@@ -417,6 +464,60 @@ enum RecipeTools {
         var lines: [String] = ["found \(matches.count) memory(s)"]
         for match in matches.prefix(50) {
             // Match moot_memory_search's preview: first 120 chars of content.
+            let preview = match.content.prefix(120)
+            let room = match.room.isEmpty ? "?" : match.room
+            lines.append("\(match.id)  [\(room)]  \(preview)")
+        }
+        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+    }
+
+    // MARK: - recall_shaped
+
+    /// Run the ShapedRecall recipe with a named RecallShape preset and serialize
+    /// its matches in the SAME plain-text shape `moot_memory_search` emits: a
+    /// `found N memory(s)` header then one `id  [room]  preview` line per match.
+    /// Mirroring that shape keeps every mootText parser working unchanged.
+    ///
+    /// Preset validation is fail-CLOSED: an absent `preset` arg maps to "balanced"
+    /// (the unsteered default). A present-but-unknown name is a caller error — the
+    /// access surface rejects it with a tool error (isError: true) against the GLK
+    /// roster instead of silently degrading to balanced and returning surprising
+    /// results under a name the caller did not realize was ignored. (The recipe
+    /// itself degrades to balanced; the access surface is where fail-closed
+    /// validation lives — the same boundary discipline as the precise-recall
+    /// composition arg.)
+    private static func runShapedRecall(
+        _ args: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let query = try requireString(args, "query")
+        // 20 is moot_memory_search's own default limit; keep parity.
+        let limit = try optionalInt(args["limit"], argument: "limit") ?? 20
+        let filter = try decodeSingleFilter(args["filter"])
+
+        // The steering selector: a named RecallShape preset.
+        //   Absent  → "balanced" → the unsteered default; absence ≠ unknown.
+        //   Present → validated against the GLK roster; unknown name → fail closed
+        //             (tool error, not silent fall-through to balanced).
+        let preset: String
+        if let rawPreset = try optionalString(args["preset"], argument: "preset") {
+            guard RecallShape.presetNames.contains(rawPreset) else {
+                let valid = RecallShape.presetNames.joined(separator: ", ")
+                return ToolDispatcher.errorResult(
+                    "unknown preset '\(rawPreset)'; valid presets: \(valid)")
+            }
+            preset = rawPreset
+        } else {
+            preset = "balanced"
+        }
+
+        let out = try await ShapedRecall().run(
+            input: .init(query: query, preset: preset, filter: filter, limit: limit),
+            estate: handle, kit: kit)
+
+        var lines: [String] = ["found \(out.matches.count) memory(s)"]
+        for match in out.matches.prefix(50) {
             let preview = match.content.prefix(120)
             let room = match.room.isEmpty ? "?" : match.room
             lines.append("\(match.id)  [\(room)]  \(preview)")

@@ -153,6 +153,11 @@ public enum RecipeCatalog {
             name: "complexity", version: "1.0.0",
             description: "Reasoning lens: Shannon entropy (and optional mutual information) over the distribution of a label field across the recalled set.",
             requiredCapabilities: []),
+        // Steerable-fusion recipe (GLK-RECALL-SHAPE-PRESETS): one parameterized
+        // recipe over the named RecallShape preset roster. Declared literally
+        // here (the entry point is the static `ShapedRecall` namespace); the
+        // descriptor strings match `catalog.rs` byte-for-byte.
+        RecipeDescriptor(ShapedRecall()),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

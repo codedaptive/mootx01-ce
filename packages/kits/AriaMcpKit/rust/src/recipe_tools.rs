@@ -71,9 +71,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cognition_kit::{
-    recipe_catalog, run_grounded_synthesis, run_precise_recall, OriginEntry, PlanInput,
-    PRECISE_DEFAULT_POOL,
+    recipe_catalog, run_grounded_synthesis, run_precise_recall, run_shaped_recall, OriginEntry,
+    PlanInput, PRECISE_DEFAULT_POOL,
 };
+use genius_locus_kit::recall::RecallShape;
 use genius_locus_kit::branches::BranchId;
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
@@ -98,6 +99,9 @@ const RUN_MIGRATION: &str = "moot_run_migration";
 const CONFIRM_MIGRATION: &str = "moot_confirm_migration";
 /// Precise-recall tool — mirrors Swift `RecipeTools.preciseRecallToolName`.
 const RECALL_PRECISE: &str = "moot_recall_precise";
+/// Shaped-recall tool (named RecallShape preset) — mirrors Swift
+/// `RecipeTools.shapedRecallToolName`.
+const RECALL_SHAPED: &str = "moot_recall_shaped";
 /// On-demand dream tool — mirrors Swift `RecipeTools.dreamToolName`.
 const DREAM: &str = "moot_dream";
 
@@ -111,6 +115,7 @@ pub fn is_recipe_tool(name: &str) -> bool {
             | RUN_MIGRATION
             | CONFIRM_MIGRATION
             | RECALL_PRECISE
+            | RECALL_SHAPED
             | DREAM
     )
 }
@@ -128,6 +133,7 @@ pub fn dispatch(
         RUN_MIGRATION => run_migration_benchmark_tool(args, registry),
         CONFIRM_MIGRATION => run_confirm_promotion_tool(args, registry),
         RECALL_PRECISE => run_precise_recall_tool(args, registry),
+        RECALL_SHAPED => run_shaped_recall_tool(args, registry),
         DREAM => run_dream_tool(args, registry),
         _ => Err(JSONRPCError::new(
             JSONRPCErrorCode::METHOD_NOT_FOUND,
@@ -296,6 +302,61 @@ fn run_precise_recall_tool(
 
     let mut lines = vec![format!("found {} memory(s)", matches.len())];
     for m in matches.iter().take(50) {
+        // Match moot_memory_search's preview: first 120 chars of content.
+        let preview: String = m.content.chars().take(120).collect();
+        let room = if m.room.is_empty() { "?" } else { &m.room };
+        lines.push(format!("{}  [{}]  {}", m.id, room, preview));
+    }
+    Ok(text_result(&lines.join("\n")))
+}
+
+// ---------------------------------------------------------------------------
+// moot_recall_shaped
+// ---------------------------------------------------------------------------
+
+/// Run the ShapedRecall recipe with a named RecallShape preset and serialize its
+/// matches in the SAME plain-text shape `moot_memory_search` emits. Mirrors Swift
+/// `RecipeTools.runShapedRecall`.
+///
+/// Preset validation is fail-CLOSED: an absent `preset` arg maps to "balanced"
+/// (the unsteered default). A present-but-unknown name is rejected with an
+/// `error_result` against the GLK roster rather than silently degrading — the
+/// same boundary discipline as the precise-recall composition arg. (The recipe
+/// itself degrades to balanced; the access surface is where fail-closed
+/// validation lives.)
+fn run_shaped_recall_tool(
+    args: &BTreeMap<String, JsonValue>,
+    registry: &EstateRegistry,
+) -> Result<serde_json::Value, JSONRPCError> {
+    let estate = registry.resolve(args, "estateID")?;
+    let query = require_string(args, "query")?;
+    // 20 is moot_memory_search's own default limit; keep parity.
+    let limit = optional_integer(args, "limit")?
+        .map(|i| i as usize)
+        .unwrap_or(20);
+    let filter = decode_precise_filter(args)?;
+
+    // The steering selector: a named RecallShape preset. Absent ⇒ "balanced"
+    // (unsteered default). Present-but-unknown ⇒ fail closed at the boundary (the
+    // roster is the authoritative name set).
+    let preset = match optional_string(args, "preset")? {
+        Some(name) if RecallShape::PRESET_NAMES.contains(&name) => name.to_string(),
+        Some(name) => {
+            return Ok(error_result(&format!(
+                "unknown preset '{name}'; valid presets: {}",
+                RecallShape::PRESET_NAMES.join(", ")
+            )));
+        }
+        None => "balanced".to_string(),
+    };
+
+    let now = crate::dispatch::wall_now();
+    let coord = estate.coord.lock().unwrap();
+    let out = run_shaped_recall(&coord, &estate.handle, &query, &preset, filter, limit, now)
+        .map_err(error_from_recipe)?;
+
+    let mut lines = vec![format!("found {} memory(s)", out.matches.len())];
+    for m in out.matches.iter().take(50) {
         // Match moot_memory_search's preview: first 120 chars of content.
         let preview: String = m.content.chars().take(120).collect();
         let room = if m.room.is_empty() { "?" } else { &m.room };

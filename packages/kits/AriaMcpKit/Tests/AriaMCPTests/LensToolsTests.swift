@@ -72,14 +72,18 @@ struct LensToolsTests {
     // MARK: - Projection
 
     @Test func everyCatalogedLensHasATool() {
-        // The lens tool count matches the catalog size minus the two RecipeTool
-        // entries (grounded_synthesis → moot_synthesize; migration_benchmark →
-        // moot_run_migration). All lens tools carry the moot_lens_ prefix.
+        // The lens tool count matches the catalog size minus the recipe-tool
+        // entries that are NOT lens tools: grounded_synthesis → moot_synthesize;
+        // migration_benchmark → moot_run_migration; shaped_recall →
+        // moot_recall_shaped. All lens tools carry the moot_lens_ prefix.
+        let nonLensRecipes: Set<String> = [
+            "grounded_synthesis", "migration_benchmark", "shaped_recall",
+        ]
         let lensToolCount = RecipeCatalog.names
-            .filter { $0 != "grounded_synthesis" && $0 != "migration_benchmark" }
+            .filter { !nonLensRecipes.contains($0) }
             .count
         #expect(LensTools.lensToolNames.count == lensToolCount,
-            "lens tool count must match catalog count minus the two RecipeTool entries")
+            "lens tool count must match catalog count minus the non-lens recipe entries")
         for name in LensTools.lensToolNames {
             #expect(name.hasPrefix("moot_lens_"),
                 "\(name) must carry the moot_lens_ prefix")
