@@ -217,16 +217,31 @@ impl Estate {
         // Provenance bitmap assembly (cookbook §2.5 layout):
         //   bits 0–5   source_type           (SourceType raw)
         //   bits 6–11  channel               (provenance Channel raw)
+        //   bits 18–23 confirmation          (Confirmation raw)
+        //   bits 24–29 confidence            (Confidence raw, scale-gapped)
         //   bits 30–35 sensitivity           (provenance Sensitivity raw)
-        // Other provenance slots (capture_channel mirror, confirmation,
-        // confidence, enrichment_status) are populated by downstream
-        // daemons or held at zero by default. Mirrors EstateVerbs.swift.
+        // confirmation and confidence default to raw 0 (Unconfirmed / Null),
+        // so a caller that omits them produces the same bytes as before these
+        // slots existed; a daemon capturing with known review status or a known
+        // confidence band records it at birth. The remaining provenance slots
+        // (capture_channel mirror, enrichment_status) are populated by
+        // downstream daemons or held at zero by default. Mirrors EstateVerbs.swift.
         let provenance_bitmap = bit_field::write_field(
             frame.provenance_sensitivity.raw_value(),
             bit_field::write_field(
-                frame.provenance_channel.raw_value(),
-                bit_field::write_field(frame.source_type.raw_value(), 0, 0, 6),
-                6,
+                frame.confidence.raw_value(),
+                bit_field::write_field(
+                    frame.confirmation.raw_value(),
+                    bit_field::write_field(
+                        frame.provenance_channel.raw_value(),
+                        bit_field::write_field(frame.source_type.raw_value(), 0, 0, 6),
+                        6,
+                        6,
+                    ),
+                    18,
+                    6,
+                ),
+                24,
                 6,
             ),
             30,
@@ -1996,6 +2011,66 @@ mod tests {
             "test-v1",
         );
         estate.capture(frame, 1_700_000_001).unwrap()
+    }
+
+    // --- capture provenance: confirmation + confidence axes ---
+
+    #[test]
+    fn capture_default_provenance_confirmation_confidence_zero() {
+        // A frame that omits confirmation/confidence must produce the SAME
+        // provenance bytes as before those slots existed: both default to raw
+        // 0 (Unconfirmed / Null), so the confirmation window (bits 18–23) and
+        // confidence window (bits 24–29) are both zero. Byte-identical default.
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "default provenance", "kitchen");
+        assert_eq!(
+            Confirmation::from_raw(bit_field::extract_field(drawer.provenance, 18, 6)),
+            Confirmation::Unconfirmed
+        );
+        assert_eq!(
+            crate::provenance::Confidence::from_raw(bit_field::extract_field(
+                drawer.provenance,
+                24,
+                6
+            )),
+            crate::provenance::Confidence::Null
+        );
+        // Combined confirmation+confidence window (bits 18–29) is zero.
+        assert_eq!(drawer.provenance & 0x3FFC_0000, 0);
+    }
+
+    #[test]
+    fn capture_non_default_provenance_confirmation_confidence_round_trips() {
+        // A daemon capturing with a known review status and confidence band
+        // records them at birth — no separate confirm/enrichment mutation.
+        let estate = make_estate();
+        let mut frame = CaptureFrame::new(
+            "daemon-confirmed",
+            CaptureChannel::Typed,
+            "kitchen",
+            LatticeAnchor::udc("5"),
+            "daemon",
+            "test-v1",
+        );
+        frame.confirmation = Confirmation::AutomatedConfirmed;
+        frame.confidence = crate::provenance::Confidence::High;
+        let drawer = estate.capture(frame, 1_700_000_001).unwrap();
+        assert_eq!(
+            Confirmation::from_raw(bit_field::extract_field(drawer.provenance, 18, 6)),
+            Confirmation::AutomatedConfirmed
+        );
+        assert_eq!(
+            crate::provenance::Confidence::from_raw(bit_field::extract_field(
+                drawer.provenance,
+                24,
+                6
+            )),
+            crate::provenance::Confidence::High
+        );
+        // The two new axes do not disturb source_type (bits 0–5, default User=0)
+        // or provenance sensitivity (bits 30–35, default Normal=0).
+        assert_eq!(bit_field::extract_field(drawer.provenance, 0, 6), 0);
+        assert_eq!(bit_field::extract_field(drawer.provenance, 30, 6), 0);
     }
 
     // --- capture validation ---

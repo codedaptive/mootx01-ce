@@ -4,9 +4,11 @@
 //! bitmap operator primitives (see [`crate::bitmap_ops`]) and evaluates
 //! it against drawer rows. Per spec § 7.9.
 //!
-//! The evaluator runs a four-stage pipeline against the row set the
-//! caller hands it (today that is `DrawerStore::all_drawers`; the
-//! Estate verb surface in LP-1F selects the slice):
+//! The evaluator runs a four-stage pipeline against the pre-pruned
+//! candidate set the caller hands it. The recall path (`Estate`'s
+//! `live_rows`) runs container fingerprint pruning (step 1 below) FIRST
+//! via [`BitmapEvaluator::container_survives`] and passes in the
+//! surviving rows — not the full corpus:
 //!
 //! 1. **Default insertion** (§ 7.9.5) — prepend implicit filters for
 //!    state (`CurrentlyBelieve`), trust (`Trustworthy`), and sensitivity

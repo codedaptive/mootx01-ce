@@ -128,11 +128,12 @@ struct BitmapEvaluator {
 
     /// Evaluate `frame` against `drawers`.
     ///
-    /// `drawers` is the pre-fetched non-tombstoned row set — fingerprint
-    /// pruning (§ 7.9.4 step 1) is deferred to LOCI_V035_18, so today's
-    /// caller (`Estate.recall`) hands in `store.allDrawers()`. The
-    /// evaluator handles tombstone exclusion at the bitmap tier in case
-    /// the caller's pre-filter ever loosens.
+    /// `drawers` is the pre-pruned, non-tombstoned candidate set. The
+    /// caller (`Estate.liveRows`) runs fingerprint pruning (§ 7.9.4 step 1,
+    /// `containerSurvives`) BEFORE this call and hands in the surviving
+    /// rows — not the full corpus. The evaluator still re-checks tombstone
+    /// exclusion at the bitmap tier in case the caller's pre-filter ever
+    /// loosens.
     ///
     /// - Parameters:
     ///   - frame: the caller's recall frame.

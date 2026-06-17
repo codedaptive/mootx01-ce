@@ -48,6 +48,21 @@ public struct CaptureFrame: Sendable {
     /// from the access-control `sensitivity` adjective above (which is
     /// mutable post-capture). Defaults to `.normal` (raw 0).
     public var provenanceSensitivity: Sensitivity
+    /// Provenance Confirmation (cookbook §2.5, provenance bitmap bits
+    /// 18–23). Review status at capture time — a daemon or agent that
+    /// captures already-confirmed content (e.g. `.userConfirmed`,
+    /// `.automatedConfirmed`) records it here rather than relying on a
+    /// later `confirm` mutation. Defaults to `.unconfirmed` (raw 0) so
+    /// existing callers continue to produce zero-confirmation drawers,
+    /// byte-identical to before this slot existed.
+    public var confirmation: Confirmation
+    /// Provenance Confidence (cookbook §2.5, provenance bitmap bits
+    /// 24–29). System posterior at capture time — a daemon capturing
+    /// with a known confidence band (e.g. `.high`, `.verified`) records
+    /// it at birth rather than leaving the field at `.null` for a later
+    /// enrichment pass. Defaults to `.null` (raw 0) so existing callers
+    /// remain byte-identical to before this slot existed.
+    public var confidence: Confidence
     /// Lineage identifier shared with any prior version of this
     /// content. When present and an active predecessor with the
     /// same lineageID exists, `capture` triggers the supersession
@@ -103,6 +118,8 @@ public struct CaptureFrame: Sendable {
         provenanceChannel: Channel = .uiTyped,
         sourceType: SourceType = .user,
         provenanceSensitivity: Sensitivity = .normal,
+        confirmation: Confirmation = .unconfirmed,
+        confidence: Confidence = .null,
         lineageID: LineageID? = nil,
         eventTime: Date? = nil,
         featureFlags: DrawerFeatureFlags = [],
@@ -119,6 +136,8 @@ public struct CaptureFrame: Sendable {
         self.provenanceChannel = provenanceChannel
         self.sourceType = sourceType
         self.provenanceSensitivity = provenanceSensitivity
+        self.confirmation = confirmation
+        self.confidence = confidence
         self.lineageID = lineageID
         self.eventTime = eventTime
         self.featureFlags = featureFlags

@@ -11,7 +11,7 @@ use crate::adjectives::{AdjectiveExportability, AdjectiveSensitivity, Trust};
 use crate::drawer_operational::{CaptureChannel, ContentKind};
 use crate::estate_types::LatticeAnchor;
 use crate::filter::LineageID;
-use crate::provenance::{Channel, Sensitivity, SourceType};
+use crate::provenance::{Channel, Confidence, Confirmation, Sensitivity, SourceType};
 use crate::tunnel_operational::{TunnelKind, TunnelOriginClass};
 
 // MARK: - CaptureFrame
@@ -56,6 +56,23 @@ pub struct CaptureFrame {
     /// from the access-control `sensitivity` adjective above (which is
     /// mutable post-capture). Defaults to `Normal` (raw 0).
     pub provenance_sensitivity: Sensitivity,
+
+    /// Provenance Confirmation (cookbook §2.5, provenance bitmap bits
+    /// 18–23). Review status at capture time — a daemon or agent that
+    /// captures already-confirmed content (e.g. `UserConfirmed`,
+    /// `AutomatedConfirmed`) records it here rather than relying on a
+    /// later `confirm` mutation. Defaults to `Unconfirmed` (raw 0) so
+    /// existing callers stay byte-identical to before this slot existed.
+    /// Mirrors Swift `CaptureFrame.confirmation`.
+    pub confirmation: Confirmation,
+
+    /// Provenance Confidence (cookbook §2.5, provenance bitmap bits
+    /// 24–29). System posterior at capture time — a daemon capturing with
+    /// a known confidence band (e.g. `High`, `Verified`) records it at
+    /// birth rather than leaving the field at `Null` for a later
+    /// enrichment pass. Defaults to `Null` (raw 0) so existing callers
+    /// stay byte-identical. Mirrors Swift `CaptureFrame.confidence`.
+    pub confidence: Confidence,
 
     /// Lineage identifier shared with any prior version of this content.
     /// When `Some` and an active predecessor sharing this lineage exists,
@@ -128,6 +145,8 @@ impl CaptureFrame {
             provenance_channel: Channel::UiTyped,
             source_type: SourceType::User,
             provenance_sensitivity: Sensitivity::Normal,
+            confirmation: Confirmation::Unconfirmed,
+            confidence: Confidence::Null,
             lineage_id: None,
             room: room.into(),
             lattice_anchor,

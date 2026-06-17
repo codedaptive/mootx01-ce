@@ -1,6 +1,6 @@
 ---
 title: LocusKit Interface
-version: 1.4.0
+version: 1.5.0
 status: active
 date: 2026-06-17
 description: Public API surface for LocusKit in both the Swift and Rust ports.
@@ -337,12 +337,21 @@ public struct CaptureFrame: Sendable {
     public var content: String; public var channel: CaptureChannel
     public var sensitivity: AdjectiveSensitivity; public var kind: ContentKind
     public var exportability: AdjectiveExportability  // bits 12–17; default .private_
+    // Provenance axes written at capture time (provenance bitmap, cookbook §2.5):
+    public var provenanceChannel: Channel; public var sourceType: SourceType
+    public var provenanceSensitivity: Sensitivity   // bits 30–35; default .normal
+    public var confirmation: Confirmation            // bits 18–23; default .unconfirmed
+    public var confidence: Confidence                // bits 24–29; default .null
     public var lineageID: LineageID?; public var room: RoomID; public var latticeAnchor: LatticeAnchor
     public var addedBy: String; public var embeddingModelID: String; public var eventTime: Date?
     public init(content: String, channel: CaptureChannel, room: RoomID, latticeAnchor: LatticeAnchor,
                 addedBy: String, embeddingModelID: String, sensitivity: AdjectiveSensitivity = .normal,
-                exportability: AdjectiveExportability = .private_,
-                kind: ContentKind = .prose, lineageID: LineageID? = nil, eventTime: Date? = nil)
+                kind: ContentKind = .prose, provenanceChannel: Channel = .uiTyped,
+                sourceType: SourceType = .user, provenanceSensitivity: Sensitivity = .normal,
+                confirmation: Confirmation = .unconfirmed, confidence: Confidence = .null,
+                lineageID: LineageID? = nil, eventTime: Date? = nil,
+                featureFlags: DrawerFeatureFlags = [],
+                exportability: AdjectiveExportability = .private_)
 }
 public struct RecallFrame: Sendable {
     public var filterChain: [Filter]            // implicit AND (B-4)
@@ -1171,6 +1180,26 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 *End of LocusKit Interface.*
 
 ## Changelog
+
+### 1.5.0 -- 2026-06-17
+`CaptureFrame` now exposes the `confirmation` (`Confirmation`, default
+`.unconfirmed`) and `confidence` (`Confidence`, default `.null`) provenance
+axes in both ports, joining the already-exposed `provenanceChannel`,
+`sourceType`, and `provenanceSensitivity`. The `capture` verb writes them into
+the provenance bitmap at bits 18–23 / 24–29 (cookbook §2.5) — the exact windows
+the drawer's `confirmation` / `confidence` read accessors decode. Additive and
+behaviour-preserving: both defaults are raw 0, so an existing caller that omits
+them produces the same provenance bytes as before the slots existed. A daemon
+or agent capturing already-confirmed content with a known confidence band may
+now record both at birth, instead of relying on a later `confirm` mutation or
+enrichment pass (the test-only `_setProvenance` backdoor's "capture does not yet
+expose this through CaptureFrame" comment is removed). Cross-port round-trip +
+default-byte-identity conformance added (`EstateVerbTests.swift` ↔
+`estate_verbs.rs` capture-provenance tests). Separately, corrected the stale
+`BitmapEvaluator.evaluate` doc comments in both ports that claimed recall hands
+in `allDrawers()` and that fingerprint pruning (§ 7.9.4 step 1) was deferred —
+container OR-fingerprint pruning has shipped in the recall path (`liveRows` /
+`container_survives`); the evaluator already receives the pruned candidate set.
 
 ### 1.4.0 -- 2026-06-17
 `DrawerFingerprint`'s lattice-block `qidClosureHash` facet is now live in both

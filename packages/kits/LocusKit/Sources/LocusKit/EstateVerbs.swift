@@ -126,18 +126,29 @@ public extension Estate {
         // Provenance bitmap assembly (cookbook §2.5 layout):
         //   bits 0–5   sourceType            (SourceType raw)
         //   bits 6–11  channel               (provenance Channel raw)
+        //   bits 18–23 confirmation          (Confirmation raw)
+        //   bits 24–29 confidence            (Confidence raw, scale-gapped)
         //   bits 30–35 sensitivity           (provenance Sensitivity raw)
-        // Other provenance slots (captureChannel mirror, confirmation,
-        // confidence, enrichmentStatus) are populated by downstream
+        // confirmation and confidence default to raw 0 (.unconfirmed / .null),
+        // so a caller that omits them produces the same bytes as before these
+        // slots existed; a daemon capturing with known review status or a known
+        // confidence band records it at birth. The remaining provenance slots
+        // (captureChannel mirror, enrichmentStatus) are populated by downstream
         // daemons or held at zero by default.
         let provenanceBitmap = BitField.writeField(
             Int64(frame.provenanceSensitivity.rawValue),
             into: BitField.writeField(
-                Int64(frame.provenanceChannel.rawValue),
+                Int64(frame.confidence.rawValue),
                 into: BitField.writeField(
-                    Int64(frame.sourceType.rawValue),
-                    into: 0, shift: 0, width: 6),
-                shift: 6, width: 6),
+                    Int64(frame.confirmation.rawValue),
+                    into: BitField.writeField(
+                        Int64(frame.provenanceChannel.rawValue),
+                        into: BitField.writeField(
+                            Int64(frame.sourceType.rawValue),
+                            into: 0, shift: 0, width: 6),
+                        shift: 6, width: 6),
+                    shift: 18, width: 6),
+                shift: 24, width: 6),
             shift: 30, width: 6
         )
 
@@ -1468,9 +1479,11 @@ public extension Estate {
 
     /// Test-only helper. Overwrites a drawer's `provenance` bitmap via
     /// `DrawerStore.mutateProvenance`, writing an audit row for the
-    /// change. Tests use this to stage provenance combinations
-    /// (`.userConfirmed`, `.automatedConfirmedOnly`, etc.) that `capture`
-    /// does not yet expose through `CaptureFrame`. Internal so
+    /// change. `capture` now exposes the full provenance frame through
+    /// `CaptureFrame` (sourceType, channel, sensitivity, confirmation,
+    /// confidence); this backdoor stays for tests that stage an arbitrary
+    /// raw provenance value directly — without re-capturing — to exercise
+    /// reserved-gap or multi-axis combinations. Internal so
     /// `@testable import LocusKit` reaches it; production callers do not.
     internal func _setProvenance(rowID: RowID, newProvenance: Int64) async throws {
         try await store.mutateProvenance(
