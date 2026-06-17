@@ -332,3 +332,159 @@ fn sqlite_round_trip_fresh_schema() {
     // Clean up temp file.
     let _ = std::fs::remove_file(&db_path);
 }
+
+// ---------------------------------------------------------------------------
+// Cross-restart conformance: find_nearest survives a drop-and-reopen over the
+// SAME on-disk SQLite file (A-11). Parallel to the Swift
+// `findNearestSurvivesReopenSQLite` (Tests/VectorKitTests/VectorStoreTests).
+// ---------------------------------------------------------------------------
+// The deliverable the SQLite backend exists for: after the writing store is
+// dropped (nothing stays resident), a NEW VectorStore on the same file must
+// rebuild the resident binary array from the durable `vectors` table on first
+// search, so find_nearest returns the persisted vector at distance 0. This is
+// the test that would have caught the dark-recall-on-reopen bug — the SQLite
+// backend hands `id` back as Text and `filed_at` as Int, which the row
+// decoders must tolerate (decode_stored_vector_light), or find_nearest sees
+// an empty array on reopen.
+
+#[test]
+fn find_nearest_survives_reopen_sqlite() {
+    use std::path::PathBuf;
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
+
+    let dir = std::env::temp_dir();
+    let db_path: PathBuf = dir.join(format!("vk_reopen_find_{}.db", Uuid::new_v4()));
+    let path_str = db_path.to_string_lossy().to_string();
+
+    let make_storage = || -> Arc<dyn Storage> {
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path_str.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        Arc::new(SqliteStorage::new(cfg).expect("open SQLite"))
+    };
+
+    let engram = Engram::new(
+        0xDEAD_BEEF_CAFE_BABE,
+        0x0123_4567_89AB_CDEF,
+        0xFFFF_0000_FFFF_0000,
+        0x0000_FFFF_0000_FFFF,
+    );
+
+    // Session 1: write a vector over a real SQLite estate, then drop the store
+    // so nothing stays resident.
+    {
+        let store = VectorStore::open(make_storage()).expect("open store for write");
+        store
+            .add_vector("drawer-reopen", &engram, "minilm", "1.0.0", FILED_AT_1)
+            .expect("add");
+    }
+
+    // Session 2: a brand-new VectorStore over the SAME on-disk estate. The
+    // persisted vector must decode from the SQLite read-back primitives, or
+    // find_nearest returns nothing.
+    {
+        let store = VectorStore::open(make_storage()).expect("open store for read");
+        let matches = store.find_nearest(&engram, "minilm", 5).expect("find_nearest");
+        // The reopened store rebuilt the resident array from the table and
+        // ranks the identical probe at Hamming distance 0.
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.item_id == "drawer-reopen" && m.distance == 0),
+            "find_nearest over a reopened SQLite estate must surface the persisted vector at distance 0; got {matches:?}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-restart conformance WITH a .vec sidecar (A-11). The resident array is
+// persisted to the sidecar via flush() and reloaded on reopen WITHOUT a full
+// table rescan when the sidecar's live_count matches the table row count
+// (sidecar_rebuild_count stays 0). Either way the reopened find_nearest top-k
+// is identical to the pre-close result.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn find_nearest_survives_reopen_sqlite_with_sidecar() {
+    use std::path::PathBuf;
+    use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage};
+
+    let dir = std::env::temp_dir();
+    let stamp = Uuid::new_v4();
+    let db_path: PathBuf = dir.join(format!("vk_reopen_sidecar_{stamp}.db"));
+    let sidecar_path: PathBuf = dir.join(format!("vk_reopen_sidecar_{stamp}.vec"));
+    let path_str = db_path.to_string_lossy().to_string();
+
+    let make_storage = || -> Arc<dyn Storage> {
+        let cfg = EstateConfiguration::new(
+            Uuid::new_v4(),
+            BackendConfiguration::Sqlite {
+                path: path_str.clone(),
+                busy_timeout_secs: 5.0,
+            },
+        );
+        let storage = SqliteStorage::new(cfg).expect("open SQLite");
+        // `new()` (sidecar path) does not open the schema; do it explicitly so
+        // the `vectors` table exists before the store writes.
+        storage
+            .open(&VectorStore::schema_declaration())
+            .expect("open schema");
+        Arc::new(storage)
+    };
+
+    let e_a = Engram::new(0xAAAA_AAAA_AAAA_AAAA, 0x1, 0x2, 0x3);
+    let e_b = Engram::new(0x0, 0xFFFF_FFFF_FFFF_FFFF, 0x0, 0xBBBB_CCCC_DDDD_EEEE);
+
+    // Pre-close ranking captured from the writing session, to assert the
+    // reopened session is identical.
+    let pre_close: Vec<(String, i32)>;
+
+    // Session 1: write two vectors WITH a sidecar, flush so the sidecar is
+    // persisted, then drop the store.
+    {
+        let store = VectorStore::new(make_storage(), Some(sidecar_path.clone()));
+        store
+            .add_vector("alpha", &e_a, "minilm", "1.0.0", FILED_AT_1)
+            .expect("add alpha");
+        store
+            .add_vector("beta", &e_b, "minilm", "1.0.0", FILED_AT_2)
+            .expect("add beta");
+        store.flush().expect("flush sidecar");
+        let matches = store.find_nearest(&e_a, "minilm", 5).expect("find_nearest");
+        pre_close = matches
+            .iter()
+            .map(|m| (m.item_id.clone(), m.distance))
+            .collect();
+    }
+
+    // Session 2: a new store on the SAME db AND the SAME sidecar. Because the
+    // sidecar live_count matches the table row count, the array loads from the
+    // sidecar with no rebuild (sidecar_rebuild_count stays 0).
+    {
+        let store = VectorStore::new(make_storage(), Some(sidecar_path.clone()));
+        let matches = store.find_nearest(&e_a, "minilm", 5).expect("find_nearest reopen");
+        let post: Vec<(String, i32)> = matches
+            .iter()
+            .map(|m| (m.item_id.clone(), m.distance))
+            .collect();
+        // Resident arrays + nearest results identical to before close.
+        assert_eq!(post, pre_close, "reopened top-k must equal pre-close top-k");
+        // The identical probe ranks at distance 0.
+        assert!(post.iter().any(|(id, d)| id == "alpha" && *d == 0));
+        // Loaded from the current sidecar — no table rebuild was needed.
+        assert_eq!(
+            store.sidecar_rebuild_count(),
+            0,
+            "a current sidecar must load without a table rebuild"
+        );
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(&sidecar_path);
+}
