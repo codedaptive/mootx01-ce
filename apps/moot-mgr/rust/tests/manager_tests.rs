@@ -10,10 +10,18 @@ use moot_mgr::manager::{epoch_to_iso8601, ManagerError, MootManager};
 use moot_mgr::manager_cli::{self, ManagerCommand};
 use moot_mgr::manager_config::ManagerConfig;
 
-/// A fresh, unique scratch store path.
+/// A fresh, unique scratch store path inside its OWN temp directory.
+///
+/// Each store gets a dedicated parent directory (mirrors the Swift
+/// `makeTempStoreURL()` helper) so that the retention sidecar
+/// (`<store-parent>/moot-mgr-prefs.json`) is unique per test. Putting the
+/// store file directly in the shared temp dir would make every test share one
+/// sidecar — leaking persisted overrides between tests and racing under
+/// parallel execution. `start()` create_dir_all's this parent on open.
 fn scratch_store() -> String {
     std::env::temp_dir()
-        .join(format!("moot-mgr-rs-store-{}.sqlite", uuid::Uuid::new_v4()))
+        .join(format!("moot-mgr-rs-{}", uuid::Uuid::new_v4()))
+        .join("stats.sqlite")
         .to_string_lossy()
         .into_owned()
 }
