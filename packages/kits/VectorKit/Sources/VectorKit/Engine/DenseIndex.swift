@@ -42,6 +42,35 @@ public enum IndexKind: String, Sendable, Equatable {
     case mih = "mih"
 }
 
+// MARK: - SearchDirection
+
+/// The ranking direction for a float-lane search.
+///
+/// The float index ranks by cosine distance (`1 − cosineSimilarity`),
+/// "nearer first" meaning smaller distance / larger similarity. Anti-
+/// similarity retrieval ("find things UNLIKE this", mission
+/// 6b-modifiers-antisim) needs the opposite end of the SAME ranking:
+/// the most DISSIMILAR vectors — bottom-K by cosine similarity, i.e.
+/// top-K by cosine distance.
+///
+///   - `.nearest`  — most similar first (smallest cosine distance). The
+///     default; reproduces the pre-antisim ordering byte-for-byte.
+///   - `.farthest` — most DISSIMILAR first (largest cosine distance).
+///     This is NOT a negated nearest-list — the farthest items are not
+///     in the nearest top-K at all, so the store must scan and order by
+///     the opposite end. No new distance math: the same cosine, the
+///     opposite sort order.
+///
+/// Tie-break stays itemID ascending in BOTH directions (the universal
+/// deterministic tie-break, retrieval algorithms ref §0.3), so two items
+/// at the same distance order identically regardless of direction.
+public enum SearchDirection: String, Sendable, Equatable {
+    /// Most similar first (smallest cosine distance). Default behaviour.
+    case nearest = "nearest"
+    /// Most dissimilar first (largest cosine distance). Anti-similarity.
+    case farthest = "farthest"
+}
+
 // MARK: - MetadataFilter
 
 /// An optional pre-filter applied before distance ranking.

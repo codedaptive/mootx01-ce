@@ -43,6 +43,12 @@ enum FloatRankFixture {
     static let modelVersion = "1"
     static let probe: [Float] = [1, 1, 0, 0]
     static let expectedOrder = ["v_ab", "v_a", "v_ad", "v_d", "v_neg"]
+    /// FARTHEST (anti-similarity) order — the most DISSIMILAR first. Distances
+    /// are all distinct (no ties), so this is the exact reverse of
+    /// `expectedOrder`: v_neg (cos −1) → … → v_ab (cos 1). Both languages MUST
+    /// produce this identical order via `findFarthestFloat`. Keep in sync with
+    /// the Rust `RANK_FIXTURE` farthest expectation.
+    static let expectedFarthestOrder = ["v_neg", "v_d", "v_ad", "v_a", "v_ab"]
     static let vectors: [(String, [Float])] = [
         ("v_a",   [1, 0, 0, 0]),
         ("v_ab",  [2, 2, 0, 0]),
@@ -232,6 +238,28 @@ struct FloatLaneStoreTests {
             modelID: FloatRankFixture.modelID,
             limit: FloatRankFixture.vectors.count)
         #expect(matches.map(\.itemID) == FloatRankFixture.expectedOrder)
+      }
+    }
+
+    @Test("farthest rank-identity fixture: Swift produces the canonical anti-similarity order")
+    func farthestRankFixtureSwiftOrder() async throws {
+      try await GlobalTestLock.shared.withLock {
+        let store = try await makeStore()
+        for (id, v) in FloatRankFixture.vectors {
+            try await store.addPayload(
+                itemID: id, vectorIndex: 0,
+                payload: VectorPayload(floats: v),
+                modelID: FloatRankFixture.modelID,
+                modelVersion: FloatRankFixture.modelVersion,
+                filedAt: Self.now)
+        }
+        // findFarthestFloat surfaces the most DISSIMILAR rows first. The
+        // canonical order is the reverse of the nearest fixture (no ties).
+        let matches = try await store.findFarthestFloat(
+            probe: FloatRankFixture.probe,
+            modelID: FloatRankFixture.modelID,
+            limit: FloatRankFixture.vectors.count)
+        #expect(matches.map(\.itemID) == FloatRankFixture.expectedFarthestOrder)
       }
     }
 }

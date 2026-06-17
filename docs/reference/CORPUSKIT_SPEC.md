@@ -1,6 +1,6 @@
 ---
 title: CorpusKit Specification
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -453,6 +453,20 @@ from the Corpus's internal VectorStore in the `.glk` / separate-corpusStorage
 case).
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+Added the per-signal dense float FARTHEST (anti-similarity) contract (mission
+6b-modifiers-antisim), ADDITIVE and back-compatible. `floatFarthestPerSignal` /
+`float_farthest_per_signal` runs the dense lane in the FARTHEST direction for
+every held signal — surfacing the most DISSIMILAR sources ("find things UNLIKE
+this") via VectorKit `findFarthestFloat`. The per-source aggregation inverts
+nearest's max-cosine to MIN-cosine (a source is unlike the query only if even
+its closest chunk is far) and ranks least-similar first, sourceID ascending on
+tie. Same outcome shape, dark-lane observability, telemetry, and slot ordering
+as the nearest seam; floatNearestPerSignal is byte-identical and unchanged.
+Cross-port conformance is RANK IDENTITY on shared fixtures (the float lane is
+reproducible-within-config, not four-way bit-identical — arch spec §6). This is
+the seam GLK's RecallShape `antiSimilarLanes` consumes.
 
 ### 1.2.0 -- 2026-06-17
 Added the N-provider capability + per-signal nearest contract (mission

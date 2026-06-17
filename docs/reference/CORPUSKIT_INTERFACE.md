@@ -4,7 +4,7 @@ status: active
 authors: MOOTx01 maintainers
 date: 2026-06-17
 spec_type: kit
-version: 1.5.0
+version: 1.6.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -966,6 +966,20 @@ public actor Corpus {
     public func floatNearestPerSignal(query: String, limit: Int) async
         -> [(modelID: String, outcome: FloatLaneOutcome)]
 
+    /// PER-SIGNAL dense float FARTHEST — the anti-similarity sibling of
+    /// floatNearestPerSignal (mission 6b-modifiers-antisim). Runs the dense lane
+    /// in the FARTHEST direction for EVERY held provider slot: each signal
+    /// surfaces the most DISSIMILAR sources ("find things UNLIKE this"), ranked
+    /// least-similar first. Same outcome shape, dark-lane observability,
+    /// telemetry, and slot ordering as floatNearestPerSignal; only the objective
+    /// differs (the store returns farthest chunks via VectorStore.findFarthestFloat,
+    /// and a source's score is its WORST chunk cosine — the min-cosine inversion
+    /// of nearest's best-chunk rule). This is the seam GLK's RecallShape
+    /// antiSimilarLanes consumes. Empty query / zero limit → one .emptyQuery per
+    /// signal. Rust mirror: `Corpus::float_farthest_per_signal`.
+    public func floatFarthestPerSignal(query: String, limit: Int) async
+        -> [(modelID: String, outcome: FloatLaneOutcome)]
+
     /// Retrain the embedding basis on the full corpus and re-embed every chunk
     /// (mission 6a-ii-β). For a trainable provider: gathers all chunk texts,
     /// trains a FRESH basis from scratch through the TrainableEmbeddingBasis seam,
@@ -1165,6 +1179,14 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.6.0 -- 2026-06-17
+Added `Corpus.floatFarthestPerSignal` / `Corpus::float_farthest_per_signal`
+(mission 6b-modifiers-antisim) — the per-signal dense float FARTHEST
+(anti-similarity) recall. Each held signal surfaces the most DISSIMILAR sources
+("find things UNLIKE this"), via `VectorStore.findFarthestFloat`, inverting the
+per-source aggregation (max→min cosine) and ranking least-similar first.
+floatNearestPerSignal is byte-identical and unchanged. ADDITIVE (MINOR).
 
 ### 1.5.0 -- 2026-06-17
 Added (6a-iii-wire) the public default-ensemble factory — the single definition

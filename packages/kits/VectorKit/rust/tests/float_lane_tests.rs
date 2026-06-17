@@ -49,6 +49,11 @@ fn add_float(store: &VectorStore, item_id: &str, floats: &[f32], model_id: &str)
 const RANK_MODEL: &str = "rank-model";
 const RANK_PROBE: [f32; 4] = [1.0, 1.0, 0.0, 0.0];
 const RANK_EXPECTED_ORDER: [&str; 5] = ["v_ab", "v_a", "v_ad", "v_d", "v_neg"];
+/// FARTHEST (anti-similarity) order — the most DISSIMILAR first. Distances are
+/// all distinct (no ties), so this is the exact reverse of
+/// `RANK_EXPECTED_ORDER`. Keep in sync with the Swift
+/// `FloatRankFixture.expectedFarthestOrder`.
+const RANK_EXPECTED_FARTHEST_ORDER: [&str; 5] = ["v_neg", "v_d", "v_ad", "v_a", "v_ab"];
 fn rank_vectors() -> Vec<(&'static str, Vec<f32>)> {
     vec![
         ("v_a", vec![1.0, 0.0, 0.0, 0.0]),
@@ -187,4 +192,19 @@ fn rank_fixture_rust_order() {
         .expect("find_nearest_float");
     let ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
     assert_eq!(ids, RANK_EXPECTED_ORDER.to_vec());
+}
+
+#[test]
+fn farthest_rank_fixture_rust_order() {
+    // find_farthest_float surfaces the most DISSIMILAR rows first — the exact
+    // reverse of the nearest fixture (no ties). Both languages MUST agree.
+    let store = fresh_store();
+    for (id, v) in rank_vectors() {
+        add_float(&store, id, &v, RANK_MODEL);
+    }
+    let matches = store
+        .find_farthest_float(&RANK_PROBE, RANK_MODEL, 5)
+        .expect("find_farthest_float");
+    let ids: Vec<&str> = matches.iter().map(|m| m.item_id.as_str()).collect();
+    assert_eq!(ids, RANK_EXPECTED_FARTHEST_ORDER.to_vec());
 }

@@ -40,6 +40,26 @@
 ///     anti-similarity retrieval (which changes which candidates the store
 ///     returns). The two are deliberately distinct.
 ///
+/// ## Anti-similarity (`antiSimilarLanes`)
+///
+/// A DENSE lane key (`"dense:<modelID>"`) listed in `antiSimilarLanes` flips
+/// that lane's OBJECTIVE from nearest to FARTHEST: the lane queries the store
+/// for the most DISSIMILAR sources ("find things UNLIKE this") via CorpusKit's
+/// `floatFarthestPerSignal`, and those dissimilar candidates become the lane's
+/// voters in the same RRF/consensus fold. This is DISTINCT from a negative
+/// weight:
+///
+///   - Anti-similarity (this set) changes WHICH candidates the store returns —
+///     the farthest, not the nearest. The lane then FORWARDS the dissimilar set.
+///   - A negative weight (`laneWeights[key] < 0`) keeps the NEAREST candidates
+///     and SUBTRACTS their rank mass — demoting the similar.
+///
+/// The two compose: a lane can be anti-similar AND weighted (forward the
+/// dissimilar at any strength, or even suppress the dissimilar). An empty set
+/// ⇒ every lane nearest ⇒ byte-identical to today's fusion (the back-compat
+/// contract, proven by test). Only `"dense:<modelID>"` keys are honoured; other
+/// lane keys (locus/bm25/hamming) have no farthest variant and are ignored.
+///
 /// ## frontierK override
 ///
 /// `frontierK` optionally widens or narrows the candidate pool depth each lane
@@ -54,6 +74,14 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// lane; a negative value suppresses (demotes) the lane's high-ranked
     /// candidates.
     public let laneWeights: [String: Float]
+
+    /// Dense lane keys (`"dense:<modelID>"`) whose objective is FARTHEST rather
+    /// than nearest — anti-similarity retrieval. A lane in this set queries the
+    /// store for the most DISSIMILAR sources and forwards them. Empty ⇒ every
+    /// lane nearest ⇒ byte-identical to today's fusion. Distinct from a negative
+    /// weight (which demotes the NEAREST); the two compose. See the type-level
+    /// "Anti-similarity" note.
+    public let antiSimilarLanes: Set<String>
 
     /// Optional candidate-pool depth override. `nil` keeps the RecallDirector's
     /// computed default `min(max(limit * 4, 64), 256)`. When set, the value is
@@ -74,12 +102,31 @@ public struct RecallShape: Sendable, Codable, Equatable {
     /// - Parameters:
     ///   - laneWeights: signed per-lane weights keyed by stable lane id. Defaults
     ///     to empty (every lane at weight `1.0` — uniform, today's behaviour).
+    ///   - antiSimilarLanes: dense lane keys (`"dense:<modelID>"`) that invert
+    ///     their objective to FARTHEST (anti-similarity). Defaults to empty
+    ///     (every lane nearest — today's behaviour). Distinct from a negative
+    ///     weight; the two compose.
     ///   - frontierK: optional candidate-pool depth override, clamped to
     ///     `[frontierKFloor, frontierKCeiling]` when read via `effectiveFrontierK`.
     ///     Defaults to `nil` (the engine's computed default).
-    public init(laneWeights: [String: Float] = [:], frontierK: Int? = nil) {
+    public init(
+        laneWeights: [String: Float] = [:],
+        antiSimilarLanes: Set<String> = [],
+        frontierK: Int? = nil
+    ) {
         self.laneWeights = laneWeights
+        self.antiSimilarLanes = antiSimilarLanes
         self.frontierK = frontierK
+    }
+
+    /// Whether the given dense lane key inverts its objective to FARTHEST
+    /// (anti-similarity). Returns `false` for any key not in `antiSimilarLanes`
+    /// — so an empty set keeps every lane nearest (the back-compat default).
+    ///
+    /// - Parameter laneKey: a dense lane identifier (`"dense:<modelID>"`).
+    /// - Returns: `true` when the lane should query the farthest variant.
+    public func isAntiSimilar(_ laneKey: String) -> Bool {
+        antiSimilarLanes.contains(laneKey)
     }
 
     /// The signed weight for a lane key. Returns `1.0` for any key absent from

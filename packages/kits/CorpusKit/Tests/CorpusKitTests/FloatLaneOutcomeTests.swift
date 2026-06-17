@@ -620,3 +620,94 @@ struct FloatLaneStoreErrorTests {
         }
     }
 }
+
+// MARK: - §7 Farthest (anti-similarity, mission 6b-modifiers-antisim)
+
+/// A direction-discriminating corpus: each ingested text gets a ONE-HOT
+/// 384-d direction chosen by the sum of its FNV-1a token ids mod 384. Distinct
+/// texts therefore get distinct, mostly-orthogonal directions, so the float
+/// lane can be steered toward "similar" or "dissimilar" sources unambiguously.
+private func makeDirectionalCorpus() async throws -> Corpus {
+    let storage = try makeScratchStorage()
+    return try await Corpus(
+        storage: storage,
+        model: .miniLM(inference: { tokens in
+            var v = [Float](repeating: 0, count: 384)
+            let sum = tokens.reduce(Int32(0), &+)
+            let slot = Int((sum % 384 + 384) % 384)
+            v[slot] = 1.0
+            return v
+        })
+    )
+}
+
+@Suite("§7 FloatLaneOutcome — farthest (anti-similarity)", .serialized)
+struct FloatLaneFarthestTests {
+
+    /// floatFarthestPerSignal surfaces the most DISSIMILAR source first. With a
+    /// one-hot direction provider, a query whose direction matches one source
+    /// makes that source the NEAREST and therefore the LAST in the farthest
+    /// list — and the orthogonal source the FIRST. Proves the store actually
+    /// inverts (the farthest source is not in a negated nearest top-1).
+    @Test("floatFarthestPerSignal ranks the most dissimilar source first")
+    func farthestRanksDissimilarFirst() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let corpus = try await makeDirectionalCorpus()
+            // Two sources with distinct one-hot directions.
+            try await corpus.ingest("alpha alpha alpha", sourceID: "src-alpha", now: fixedNow)
+            try await corpus.ingest("omega omega omega different words", sourceID: "src-omega", now: fixedNow)
+
+            let nearest = await corpus.floatNearestPerSignal(query: "alpha alpha alpha", limit: 5)
+            let farthest = await corpus.floatFarthestPerSignal(query: "alpha alpha alpha", limit: 5)
+
+            guard case .hits(let nearHits) = nearest.first?.outcome,
+                  case .hits(let farHits) = farthest.first?.outcome else {
+                Issue.record("expected .hits from both nearest and farthest; got \(nearest) / \(farthest)")
+                return
+            }
+            #expect(nearHits.count == 2)
+            #expect(farHits.count == 2)
+            // The query direction matches src-alpha → nearest first; farthest
+            // must place src-alpha LAST and the dissimilar src-omega FIRST.
+            #expect(nearHits.first?.itemID == "src-alpha")
+            #expect(farHits.first?.itemID == "src-omega")
+            #expect(farHits.last?.itemID == "src-alpha")
+        }
+    }
+
+    /// The nearest path is unchanged: an empty/zero call yields one .emptyQuery
+    /// per signal with no store access — identical to floatNearestPerSignal.
+    @Test("floatFarthestPerSignal empty query yields per-signal emptyQuery")
+    func farthestEmptyQuery() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let corpus = try await makeDirectionalCorpus()
+            let zero = await corpus.floatFarthestPerSignal(query: "x", limit: 0)
+            let empty = await corpus.floatFarthestPerSignal(query: "", limit: 5)
+            #expect(zero.allSatisfy { if case .emptyQuery = $0.outcome { return true } else { return false } })
+            #expect(empty.allSatisfy { if case .emptyQuery = $0.outcome { return true } else { return false } })
+        }
+    }
+
+    /// floatNearestPerSignal must remain byte-identical: the farthest addition
+    /// does not perturb the nearest list (same itemID order both before and
+    /// after a farthest call in between).
+    @Test("nearest list is unchanged by an interleaved farthest call")
+    func nearestUnchangedByFarthest() async throws {
+        try await GlobalTestLock.shared.withLock {
+            let corpus = try await makeDirectionalCorpus()
+            try await corpus.ingest("alpha alpha alpha", sourceID: "src-alpha", now: fixedNow)
+            try await corpus.ingest("omega omega omega different", sourceID: "src-omega", now: fixedNow)
+
+            let near1 = await corpus.floatNearestPerSignal(query: "alpha alpha alpha", limit: 5)
+            _ = await corpus.floatFarthestPerSignal(query: "alpha alpha alpha", limit: 5)
+            let near2 = await corpus.floatNearestPerSignal(query: "alpha alpha alpha", limit: 5)
+
+            guard case .hits(let a) = near1.first?.outcome,
+                  case .hits(let b) = near2.first?.outcome else {
+                Issue.record("expected .hits from both nearest calls")
+                return
+            }
+            #expect(a.map(\.itemID) == b.map(\.itemID))
+        }
+    }
+}

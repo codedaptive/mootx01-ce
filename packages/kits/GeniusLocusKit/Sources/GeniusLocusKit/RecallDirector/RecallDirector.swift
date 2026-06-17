@@ -1046,7 +1046,36 @@ public extension GeniusLocusKit {
         var denseHits: [RecallHit] = []
         var denseLaneExplainerTag: String? = nil
         if let corpus = corpusKits[handle], let text = sketch.queryText, !text.isEmpty {
-            let perSignal = await corpus.floatNearestPerSignal(query: text, limit: plan.frontierK)
+            // ANTI-SIMILARITY (6b-modifiers-antisim): a dense lane whose
+            // `dense:<modelID>` key is in `shape.antiSimilarLanes` inverts its
+            // OBJECTIVE — it surfaces the FARTHEST (most dissimilar) sources
+            // instead of the nearest. This is distinct from a negative weight
+            // (which keeps the nearest and subtracts their mass). When the shape
+            // marks ANY dense lane anti-similar we fetch BOTH the nearest and the
+            // farthest per-signal lists and pick, per signal, by its modelID:
+            // the farthest list for an anti-similar lane, the nearest otherwise.
+            // With no anti-similar lanes (the default) only the nearest pass runs
+            // — byte-identical to the pre-antisim behaviour.
+            let antiSimilarLanes = request.recallShape?.antiSimilarLanes ?? []
+            let nearestPerSignal = await corpus.floatNearestPerSignal(query: text, limit: plan.frontierK)
+            let perSignal: [(modelID: String, outcome: FloatLaneOutcome)]
+            if antiSimilarLanes.isEmpty {
+                perSignal = nearestPerSignal
+            } else {
+                let farthestPerSignal = await corpus.floatFarthestPerSignal(query: text, limit: plan.frontierK)
+                // Index the farthest outcomes by modelID for the per-signal pick.
+                var farthestByModel: [String: FloatLaneOutcome] = [:]
+                for entry in farthestPerSignal { farthestByModel[entry.modelID] = entry.outcome }
+                perSignal = nearestPerSignal.map { entry in
+                    // An anti-similar lane forwards its FARTHEST candidates; all
+                    // other lanes keep their nearest list unchanged.
+                    if antiSimilarLanes.contains("dense:\(entry.modelID)"),
+                       let farthest = farthestByModel[entry.modelID] {
+                        return (modelID: entry.modelID, outcome: farthest)
+                    }
+                    return entry
+                }
+            }
 
             // Per-signal ranked id lists feed the N-way RRF voter set. Each list is
             // tagged with its `modelID` so the dense-steering weight

@@ -950,6 +950,68 @@ public actor VectorStore {
         }
     }
 
+    /// k-FARTHEST neighbours over the float32 (Lane D) vectors by cosine —
+    /// the most DISSIMILAR rows first (anti-similarity retrieval, mission
+    /// 6b-modifiers-antisim). The "find things UNLIKE this" objective.
+    ///
+    /// Identical to `findNearestFloat` in every respect — same lazy per-model
+    /// index build, same modelID partition scope (spec I-4), same cosine
+    /// metric, same VectorMatch quantisation — EXCEPT it ranks by FARTHEST:
+    /// the bottom-K by cosine similarity (largest cosine distance first). It
+    /// is NOT a negated nearest-list; the farthest rows are not in the
+    /// nearest top-K, so the index scans and orders by the opposite end via
+    /// `FloatBruteForceIndex.searchFarthest`. No new distance math.
+    ///
+    /// Determinism: like `findNearestFloat`, the float lane is reproducible-
+    /// within-config, NOT four-way bit-identical (arch spec §6). Rank order
+    /// is stable across languages on shared fixtures; raw cosine values are
+    /// not asserted bit-identical.
+    ///
+    /// - Parameters:
+    ///   - probe: the query's pooled float vector. Its dimension must match
+    ///     the stored float vectors for `modelID`.
+    ///   - modelID: restricts the scan to this model's partition.
+    ///   - limit: maximum number of matches to return.
+    /// - Returns: up to `limit` matches, FARTHEST (most dissimilar) first.
+    ///   Empty if `limit` is non-positive, the probe is empty, or no float
+    ///   rows exist for the model.
+    public func findFarthestFloat(
+        probe: [Float],
+        modelID: String,
+        limit: Int
+    ) async throws -> [VectorMatch] {
+        guard limit > 0, !probe.isEmpty else { return [] }
+
+        // Same lazy per-model build as findNearestFloat: the model's float
+        // index, or nil when the model has no float rows.
+        guard let modelIndex = try await _ensureFloatIndexBuilt(modelID: modelID) else {
+            return []
+        }
+
+        let probePayload = VectorPayload(floats: probe)
+        let filter = MetadataFilter(modelID: modelID)
+
+        // FloatBruteForceIndex.searchFarthest applies the SAME cosine and the
+        // (itemID ASC) tie-break, ordered by distance DESCENDING.
+        let hits = try await modelIndex.searchFarthest(
+            probe: probePayload,
+            metric: .float(.cosine),
+            k: limit,
+            filter: filter
+        )
+
+        // Map DenseHit → VectorMatch exactly as findNearestFloat does so the
+        // cross-language rank-identity fixtures compare like-for-like.
+        return hits.map { hit in
+            let cosineDistance = hit.floatDistance ?? 1.0
+            return VectorMatch(
+                itemID: hit.key.itemID,
+                distance: Int((cosineDistance * 10_000).rounded()),
+                modelID: hit.key.modelID
+            )
+        }
+    }
+
     /// Keyword pre-filter: returns item IDs whose item_id
     /// contains the query as a substring. Full BM25 keyword scoring
     /// is CorpusKit's responsibility; this surface is for hybrid-

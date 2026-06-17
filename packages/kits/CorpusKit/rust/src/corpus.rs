@@ -37,6 +37,7 @@ use substrate_ml::float_simhash;
 use vectorkit::simhash_embedding_provider::FloatSimHashEmbeddingProvider;
 use vectorkit::vector_store::VectorStore;
 use vectorkit::EmbeddingProvider;
+use vectorkit::SearchDirection;
 use vectorkit::VectorKitError;
 use vectorkit::VectorPayload;
 // ─────────────────────────────────────────────────────────────────
@@ -1219,7 +1220,7 @@ impl Corpus {
         // Single-signal entry point: run the dense float lane on the DEFAULT
         // signal. The per-provider mechanics live in `float_nearest_for_slot` so
         // `float_nearest_per_signal` can reuse them unchanged.
-        self.float_nearest_for_slot(self.default_slot(), query, limit)
+        self.float_nearest_for_slot(self.default_slot(), query, limit, SearchDirection::Nearest)
     }
 
     /// Dense float nearest-neighbour recall for ONE slot — the per-signal
@@ -1235,11 +1236,22 @@ impl Corpus {
     /// N=1 (default signal) the behaviour is byte-identical. The caller is
     /// responsible for the empty-query guard and the forced-error test hook (both
     /// live on the `float_nearest` entry point only).
+    ///
+    /// `direction` selects the objective (mission 6b-modifiers-antisim):
+    ///   - `Nearest`  — surface the most SIMILAR sources. The store returns the
+    ///     nearest chunks; a source's score is its BEST (max) chunk cosine;
+    ///     sources rank similarity DESCENDING. Byte-identical to the pre-antisim
+    ///     behaviour.
+    ///   - `Farthest` — surface the most DISSIMILAR sources ("find things UNLIKE
+    ///     this"). The store returns the farthest chunks; a source's score is its
+    ///     WORST (min) chunk cosine (a source is unlike the query only if even
+    ///     its closest chunk is far); sources rank similarity ASCENDING.
     fn float_nearest_for_slot(
         &self,
         slot: &ProviderSlot,
         query: &str,
         limit: usize,
+        direction: SearchDirection,
     ) -> FloatLaneOutcome {
         // Attempt to embed the query via the float lane. A provider without a
         // float lane will error here — this is the expected opt-out path (not a
@@ -1290,11 +1302,22 @@ impl Corpus {
 
         // Over-fetch 4× at CHUNK granularity so after source-level aggregation
         // we still have at least `limit` sources — mirrors bm25_top_k_by_source.
-        let matches = match self.vector_store.find_nearest_float(
-            &probe,
-            &slot.model_id,
-            limit.saturating_mul(4),
-        ) {
+        // Direction selects which end of the cosine ranking the store returns;
+        // farthest is NOT a reordering of nearest (the dissimilar chunks are not
+        // in the nearest top-K), so the store runs the farthest scan.
+        let store_result = match direction {
+            SearchDirection::Nearest => self.vector_store.find_nearest_float(
+                &probe,
+                &slot.model_id,
+                limit.saturating_mul(4),
+            ),
+            SearchDirection::Farthest => self.vector_store.find_farthest_float(
+                &probe,
+                &slot.model_id,
+                limit.saturating_mul(4),
+            ),
+        };
+        let matches = match store_result {
             Ok(m) => m,
             Err(e) => {
                 // Store threw — NOT expected. Print so the error is never
@@ -1337,9 +1360,14 @@ impl Corpus {
         // reverse map: the vector item_id is the chunk uuid string;
         // chunk_source_map resolves it to the sourceID ingested under (the drawer
         // id in the GLK context), exactly as bm25_top_k_by_source does, so float
-        // hits hydrate back to the real Drawer row. A source's similarity is its
-        // best (max) chunk cosine. VectorMatch.distance is the cosine DISTANCE
-        // (1 − sim) ×10_000; recover sim = 1 − dist/10_000.
+        // hits hydrate back to the real Drawer row.
+        //   Nearest  — a source's similarity is its BEST (max) chunk cosine.
+        //   Farthest — a source's anti-similarity is governed by its WORST (min)
+        //              chunk cosine: a source is "unlike the query" only if even
+        //              its closest chunk is far. Picking max here would surface
+        //              sources with one near chunk — the opposite objective.
+        // VectorMatch.distance is the cosine DISTANCE (1 − sim) ×10_000; recover
+        // sim = 1 − dist/10_000.
         let csm = match self.chunk_source_map.lock() {
             Ok(guard) => guard,
             Err(_) => return FloatLaneOutcome::UnavailableNoFloatRows,
@@ -1353,10 +1381,20 @@ impl Corpus {
             };
             if let Some(source_id) = csm.get(&chunk_uuid) {
                 let similarity = 1.0 - m.distance as f32 / 10_000.0;
-                let entry = by_source
-                    .entry(source_id.clone())
-                    .or_insert(f32::NEG_INFINITY);
-                *entry = entry.max(similarity);
+                match direction {
+                    SearchDirection::Nearest => {
+                        let entry = by_source
+                            .entry(source_id.clone())
+                            .or_insert(f32::NEG_INFINITY);
+                        *entry = entry.max(similarity);
+                    }
+                    SearchDirection::Farthest => {
+                        let entry = by_source
+                            .entry(source_id.clone())
+                            .or_insert(f32::INFINITY);
+                        *entry = entry.min(similarity);
+                    }
+                }
             }
         }
         drop(csm);
@@ -1378,13 +1416,19 @@ impl Corpus {
             return FloatLaneOutcome::UnavailableNoFloatRows;
         }
 
-        // Sort by similarity descending, source_id ascending on tie — the
-        // universal deterministic tie-break — and return the top `limit`.
+        // Sort by similarity, source_id ascending on tie — the universal
+        // deterministic tie-break — and return the top `limit`.
+        //   Nearest  — similarity DESCENDING (most similar first).
+        //   Farthest — similarity ASCENDING (most dissimilar first).
+        // The tie-break (source_id ascending) is identical in both directions.
         let mut ranked: Vec<(String, f32)> = by_source.into_iter().collect();
         ranked.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
+            let primary = match direction {
+                SearchDirection::Nearest => b.1.partial_cmp(&a.1),
+                SearchDirection::Farthest => a.1.partial_cmp(&b.1),
+            }
+            .unwrap_or(std::cmp::Ordering::Equal);
+            primary.then_with(|| a.0.cmp(&b.0))
         });
         ranked.truncate(limit);
 
@@ -1485,7 +1529,46 @@ impl Corpus {
                     continue;
                 }
             }
-            let outcome = self.float_nearest_for_slot(slot, query, limit);
+            let outcome = self.float_nearest_for_slot(slot, query, limit, SearchDirection::Nearest);
+            results.push((slot.model_id.clone(), outcome));
+        }
+        results
+    }
+
+    /// Per-signal dense float FARTHEST recall — the anti-similarity sibling of
+    /// `float_nearest_per_signal` (mission 6b-modifiers-antisim). Mirrors Swift
+    /// `Corpus.floatFarthestPerSignal`.
+    ///
+    /// Runs the dense float lane in the FARTHEST direction independently for
+    /// EVERY held provider slot: each signal surfaces the most DISSIMILAR
+    /// sources for its model_id ("find things UNLIKE this"), ranked least-similar
+    /// first. The outcome shape, dark-lane observability, telemetry counters, and
+    /// slot ordering are identical to `float_nearest_per_signal`; only the
+    /// ranking objective differs (the store returns farthest chunks, and a
+    /// source's score is its WORST chunk cosine — see `float_nearest_for_slot`).
+    ///
+    /// This is the seam GLK's RecallShape `anti_similar_lanes` consumes. The
+    /// forced-error test hook is NOT consulted here (it is nearest-path
+    /// infrastructure), so the farthest path always runs the real lane.
+    ///
+    /// An empty query or zero limit returns one `EmptyQuery` outcome per signal
+    /// (no store access), mirroring the nearest no-op guard.
+    pub fn float_farthest_per_signal(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Vec<(String, FloatLaneOutcome)> {
+        if limit == 0 || query.is_empty() {
+            return self
+                .slots
+                .iter()
+                .map(|s| (s.model_id.clone(), FloatLaneOutcome::EmptyQuery))
+                .collect();
+        }
+
+        let mut results: Vec<(String, FloatLaneOutcome)> = Vec::with_capacity(self.slots.len());
+        for slot in self.slots.iter() {
+            let outcome = self.float_nearest_for_slot(slot, query, limit, SearchDirection::Farthest);
             results.push((slot.model_id.clone(), outcome));
         }
         results

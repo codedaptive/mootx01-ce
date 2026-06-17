@@ -25,6 +25,32 @@ pub enum IndexKind {
     Mih,
 }
 
+/// Ranking direction for a float-lane search. Parallel to Swift
+/// `SearchDirection` (DenseIndex.swift).
+///
+/// The float index ranks by cosine distance (`1 − cosineSimilarity`),
+/// "nearer first" meaning smaller distance / larger similarity. Anti-
+/// similarity retrieval ("find things UNLIKE this", mission
+/// 6b-modifiers-antisim) wants the opposite end of the SAME ranking: the
+/// most DISSIMILAR vectors — bottom-K by cosine similarity, i.e. top-K by
+/// cosine distance.
+///
+///   - `Nearest`  — most similar first (smallest cosine distance). The
+///     default; reproduces the pre-antisim ordering byte-for-byte.
+///   - `Farthest` — most dissimilar first (largest cosine distance). NOT a
+///     negated nearest-list (the farthest items are not in the nearest
+///     top-K), so the index orders by the opposite end. No new distance
+///     math — the same cosine, the opposite sort.
+///
+/// Tie-break stays `item_id` ascending in BOTH directions (§0.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchDirection {
+    /// Most similar first (smallest cosine distance). Default behaviour.
+    Nearest,
+    /// Most dissimilar first (largest cosine distance). Anti-similarity.
+    Farthest,
+}
+
 /// Filter applied during search to restrict results to a subset of
 /// the indexed vectors. `None` fields are unconstrained.
 #[derive(Debug, Clone, Default)]

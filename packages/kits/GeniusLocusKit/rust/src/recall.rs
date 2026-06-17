@@ -32,7 +32,7 @@
 // mirrors the NeuronKit policy-store precedent where value-level results agree
 // across both ports despite different async shapes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use locus_kit::drawer::Drawer;
 use locus_kit::filter::RecallFrame;
@@ -508,12 +508,30 @@ impl Default for RecallOrigin {
 ///   - `w < 0`  — SUPPRESS; the lane SUBTRACTS its rank mass, DEMOTING a candidate
 ///     it ranks high. Distinct from anti-similarity retrieval (which changes which
 ///     candidates the store returns).
+///
+/// ## Anti-similarity (`anti_similar_lanes`)
+///
+/// A DENSE lane key (`"dense:<modelID>"`) in `anti_similar_lanes` flips that
+/// lane's OBJECTIVE from nearest to FARTHEST: it surfaces the most DISSIMILAR
+/// sources ("find things UNLIKE this") via CorpusKit's
+/// `float_farthest_per_signal`, and those dissimilar candidates become the
+/// lane's voters in the same RRF/consensus fold. DISTINCT from a negative
+/// weight: anti-similarity changes WHICH candidates the store returns (the
+/// farthest), then FORWARDS them; a negative weight keeps the NEAREST and
+/// SUBTRACTS their mass (demotes the similar). The two compose. An empty set ⇒
+/// every lane nearest ⇒ byte-identical to today's fusion. Only
+/// `"dense:<modelID>"` keys are honoured.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallShape {
     /// Signed per-lane weights keyed by the stable lane identifier. A missing key
     /// defaults to `1.0`. `0` excludes a lane; a negative value suppresses
     /// (demotes) the lane's high-ranked candidates.
     pub lane_weights: HashMap<String, f32>,
+    /// Dense lane keys (`"dense:<modelID>"`) whose objective is FARTHEST rather
+    /// than nearest — anti-similarity retrieval. Empty ⇒ every lane nearest ⇒
+    /// byte-identical to today's fusion. Distinct from a negative weight; the two
+    /// compose. See the type-level "Anti-similarity" note.
+    pub anti_similar_lanes: HashSet<String>,
     /// Optional candidate-pool depth override. `None` keeps the coordinator's
     /// computed default `min(max(limit * 4, 64), 256)`. When set, the value is
     /// clamped to `[FRONTIER_K_FLOOR, FRONTIER_K_CEILING]`.
@@ -529,8 +547,22 @@ impl RecallShape {
     pub const FRONTIER_K_CEILING: usize = 256;
 
     /// Construct a shape from a signed lane-weight map and optional pool override.
+    /// `anti_similar_lanes` defaults to empty (every lane nearest — today's
+    /// behaviour); use `with_anti_similar_lanes` to set it.
     pub fn new(lane_weights: HashMap<String, f32>, frontier_k: Option<usize>) -> Self {
-        Self { lane_weights, frontier_k }
+        Self {
+            lane_weights,
+            anti_similar_lanes: HashSet::new(),
+            frontier_k,
+        }
+    }
+
+    /// Builder: set the dense lane keys (`"dense:<modelID>"`) that invert their
+    /// objective to FARTHEST (anti-similarity). Distinct from a negative weight;
+    /// the two compose. Returns `self` for chaining.
+    pub fn with_anti_similar_lanes(mut self, lanes: HashSet<String>) -> Self {
+        self.anti_similar_lanes = lanes;
+        self
     }
 
     /// The signed weight for a lane key. Returns `1.0` for any key absent from
@@ -538,6 +570,14 @@ impl RecallShape {
     /// full strength.
     pub fn weight(&self, lane_key: &str) -> f32 {
         self.lane_weights.get(lane_key).copied().unwrap_or(1.0)
+    }
+
+    /// Whether the given dense lane key inverts its objective to FARTHEST
+    /// (anti-similarity). Returns `false` for any key not in
+    /// `anti_similar_lanes` — an empty set keeps every lane nearest (the
+    /// back-compat default).
+    pub fn is_anti_similar(&self, lane_key: &str) -> bool {
+        self.anti_similar_lanes.contains(lane_key)
     }
 
     /// Resolve the effective candidate-pool depth for a computed engine default.

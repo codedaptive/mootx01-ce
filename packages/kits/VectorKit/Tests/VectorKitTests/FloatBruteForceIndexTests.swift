@@ -392,4 +392,89 @@ struct FloatBruteForceIndexTests {
             #expect(first[i].rawDistance == second[i].rawDistance)
         }
     }
+
+    // MARK: - Farthest (anti-similarity, mission 6b-modifiers-antisim)
+
+    @Test("searchFarthest returns the most DISSIMILAR vector first")
+    func farthestReturnsMostDissimilarFirst() async throws {
+        let idx = FloatBruteForceIndex()
+        // Probe is [1,0]. "a" identical (most similar), "c" opposite-ish
+        // (most dissimilar). Farthest must rank c first, a last.
+        let arr = buildArray(vectors: [
+            (key("a"), [1.0, 0.0]),    // cosine sim 1.0 → distance 0   (nearest)
+            (key("b"), [1.0, 1.0]),    // cosine sim ~0.707 → distance ~0.293
+            (key("c"), [-1.0, 0.0]),   // cosine sim -1.0 → distance 2.0 (farthest)
+        ])
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])
+
+        let farthest = try await idx.searchFarthest(probe: probe, metric: .cosine, k: 3, filter: nil)
+        #expect(farthest.count == 3)
+        #expect(farthest[0].key.itemID == "c")  // most dissimilar first
+        #expect(farthest[1].key.itemID == "b")
+        #expect(farthest[2].key.itemID == "a")  // most similar last
+    }
+
+    @Test("searchFarthest is the exact reverse of search on distinct distances")
+    func farthestIsReverseOfNearestOnDistinctDistances() async throws {
+        let idx = FloatBruteForceIndex()
+        // All distances distinct, so the only deterministic ordering is by
+        // distance; farthest must be the exact reverse of nearest.
+        let arr = buildArray(vectors: [
+            (key("near"),   [1.0, 0.0]),
+            (key("mid"),    [1.0, 1.0]),
+            (key("far"),    [-1.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let probe = payload([1.0, 0.0])
+
+        let nearest  = try await idx.search(probe: probe, metric: .cosine, k: 3, filter: nil)
+        let farthest = try await idx.searchFarthest(probe: probe, metric: .cosine, k: 3, filter: nil)
+        #expect(nearest.map { $0.key.itemID } == ["near", "mid", "far"])
+        #expect(farthest.map { $0.key.itemID } == ["far", "mid", "near"])
+    }
+
+    @Test("searchFarthest tie-break is itemID ascending (same as nearest)")
+    func farthestTieBreakItemIDAscending() async throws {
+        let idx = FloatBruteForceIndex()
+        // Three identical vectors → identical distance. Tie-break must be
+        // itemID ASCENDING in BOTH directions (the determinism contract).
+        let v: [Float] = [1.0, 0.0]
+        let arr = buildArray(vectors: [
+            (key("zzz"), v),
+            (key("aaa"), v),
+            (key("mmm"), v),
+        ])
+        await idx.build(from: arr)
+        let farthest = try await idx.searchFarthest(probe: payload(v), metric: .cosine, k: 3, filter: nil)
+        #expect(farthest.map { $0.key.itemID } == ["aaa", "mmm", "zzz"])
+    }
+
+    @Test("searchFarthest respects k and the modelID filter")
+    func farthestRespectsKAndFilter() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [
+            (key("a", model: "model-a"), [1.0, 0.0]),
+            (key("b", model: "model-a"), [-1.0, 0.0]),
+            (key("z", model: "model-b"), [-1.0, 0.0]),
+        ])
+        await idx.build(from: arr)
+        let filter = MetadataFilter(modelID: "model-a")
+        let farthest = try await idx.searchFarthest(
+            probe: payload([1.0, 0.0]), metric: .cosine, k: 1, filter: filter)
+        #expect(farthest.count == 1)
+        // Only model-a rows considered; the dissimilar one ("b") ranks first.
+        #expect(farthest[0].key.itemID == "b")
+    }
+
+    @Test("searchFarthest throws on binary probe kind")
+    func farthestThrowsOnBinaryProbe() async throws {
+        let idx = FloatBruteForceIndex()
+        let arr = buildArray(vectors: [(key("a"), [1.0, 0.0])])
+        await idx.build(from: arr)
+        let binaryProbe = VectorPayload(kind: .binary, dim: 256, bytes: [UInt8](repeating: 0, count: 32))
+        await #expect(throws: VectorKitError.self) {
+            _ = try await idx.searchFarthest(probe: binaryProbe, metric: .cosine, k: 1, filter: nil)
+        }
+    }
 }
