@@ -1,6 +1,6 @@
 ---
 title: aria-mcp Specification
-version: 1.2.0
+version: 1.3.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees."
@@ -448,8 +448,30 @@ standing signal because the governor is the only cadence-driver that can registe
 a cache at parity: the Rust scheduler emission model cannot register a cache, and
 the synchronous emit closure has no `&mut EstateCoordinator`. Determinism: `now`
 is injected by the tick; no clock read inside the duty. An empty/edgeless estate
-registers an all-zero cache (correct — identical to no cache registered). The
-Bradley-Terry PREFERENCE producer remains a separate future duty.
+registers an all-zero cache (correct — identical to no cache registered).
+
+**Preference producer duty (Swift + Rust).** The PRODUCER for the recall
+`preference` score column — the SIBLING of the graph-centrality producer. On its
+cadence (default 10 min; `preferenceScan` / `preference_duty`) the governor reads
+the estate's recall-trace reward history (`RecallTraceItem`: per-drawer `target` +
+`used` flag) through the shared coordinator, shapes it into per-drawer
+`(label, endorsements, dismissals)` curation records (surfaced-and-used →
+endorsement, surfaced-and-passed → dismissal — the implicit relevance signal,
+C-15), fits per-drawer Bradley-Terry preference strengths via the NeuronKit
+`learnedPreference` / `learned_preference` anchor-reduction fitter (the `Bias`
+lens — no fitting math reinvented, I-17), wraps the strengths in a
+`PreferenceStore`, and registers it on the kit/coordinator (`registerPreferenceStore`
+/ `register_preference_store`). After it runs the `unionBest` / `matrixAware`
+recall `preference` column is LIVE on both ports — endorsed drawers score non-zero,
+identical Swift↔Rust for the same record set. `GovernorReport` exposes
+`preferenceFired` / `preference_fired` (true when the cadence gate fired). The
+producer is a governor duty for the same parity reason as the graph producer (only
+the governor can register a store at parity). Determinism: `now` is injected by the
+tick; no clock read inside the duty. The window is the full retained trace history
+(`since = distantPast`), bounded upstream by the maintenance prune cycle. An estate
+with no recall traces registers an empty store (correct — identical to no store
+registered). The OUTCOME SOURCE is the existing recall reward cycle; no new
+substrate data was required.
 
 **Pool-reducer activation + LIVE tagger swap (Swift + Rust).** NEAR-REALTIME
 (`MOOTX01_POOL_REDUCE_CADENCE_SECONDS`, default 0 = considered every tick) the
@@ -661,6 +683,22 @@ On any store failure the endpoints return HTTP 200 with an empty-collection body
 (`structurePending: true` for `/api/graph`); they never return HTTP 500.
 
 ## Changelog
+
+### 1.3.0 -- 2026-06-17
+Additive (mission BRAIN-PREF-PRODUCER — Bradley-Terry preference producer, both
+ports). Documents the new preference PRODUCER DUTY on the `AutonomicGovernor`, the
+sibling of the graph-centrality producer: on a cadence (default 10 min) it reads
+the estate's recall-trace reward history (`RecallTraceItem` target+used), shapes it
+into per-drawer `(endorsements, dismissals)` curation records (surfaced-and-used →
+endorsement, surfaced-and-passed → dismissal), fits per-drawer Bradley-Terry
+preference strengths via the NeuronKit `learnedPreference` / `learned_preference`
+anchor-reduction fitter (I-17, no math reinvented), and registers a
+`PreferenceStore` — taking the `unionBest`/`matrixAware` recall `preference` column
+from dark to live on BOTH ports. `GovernorReport` gains `preferenceFired` /
+`preference_fired`. The outcome source is the existing recall reward cycle; no new
+substrate data was required. Both recall-cache producer boundaries (graph +
+preference) are now closed. Swift + Rust at parity; conformance
+`PreferenceProducerTests.swift` / `preference_producer_parity.rs`.
 
 ### 1.2.0 -- 2026-06-17
 Additive (mission BRAIN-GRAPH-PRODUCER — graph-centrality producer, both ports).

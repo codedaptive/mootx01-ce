@@ -96,6 +96,16 @@ public actor AutonomicGovernor {
     /// Nil on first tick so the producer fires immediately at startup (the
     /// `graph` column is live from the first cadence, not after a delay).
     private var lastGraphCentralityFired: Date? = nil
+    /// How often the preference producer (preferenceScan) fires — fits per-drawer
+    /// Bradley-Terry preference strengths from the recall-trace reward history and
+    /// registers the PreferenceStore the recall `preference` column reads. Default
+    /// 10 minutes (same cadence as the graph-centrality producer — both ride
+    /// estate-wide reads); pass 0 in tests to fire on every tick.
+    private let preferenceIntervalMs: Int
+    /// Wall-clock instant of the most recent preferenceScan dispatch. Nil on first
+    /// tick so the producer fires immediately at startup (the `preference` column
+    /// is live from the first cadence, not after a delay).
+    private var lastPreferenceFired: Date? = nil
     /// Cadence for the topology snapshot duty in milliseconds.
     /// Configurable via MOOTX01_TOPOLOGY_CADENCE_SECONDS (default 300 s).
     /// Pass 0 in tests to fire on every tick.
@@ -147,6 +157,7 @@ public actor AutonomicGovernor {
         baseTickMs: Int = 5000,
         graphAnalyticsIntervalMs: Int = 600_000,
         graphCentralityIntervalMs: Int = 600_000,
+        preferenceIntervalMs: Int = 600_000,
         topologyCadenceMs: Int = autonomicGovernorDefaultTopologyCadenceMs(),
         poolReduceCadenceMs: Int = autonomicGovernorDefaultPoolReduceCadenceMs(),
         topologyHandler: (@Sendable (String, Date, Data) async -> Void)? = nil,
@@ -162,6 +173,7 @@ public actor AutonomicGovernor {
         self.baseTickMs = baseTickMs
         self.graphAnalyticsIntervalMs = graphAnalyticsIntervalMs
         self.graphCentralityIntervalMs = graphCentralityIntervalMs
+        self.preferenceIntervalMs = preferenceIntervalMs
         self.topologyCadenceMs = topologyCadenceMs
         self.poolReduceCadenceMs = poolReduceCadenceMs
         self.poolDirectory = poolDirectory
@@ -195,6 +207,11 @@ public actor AutonomicGovernor {
         /// the duty that computes per-drawer eigenvalue centrality and
         /// registers the GraphCache the recall `graph` column reads.
         public let graphCentralityFired: Bool
+        /// True when this tick dispatched a preference producer Task — the duty
+        /// that fits per-drawer Bradley-Terry preference strengths from the
+        /// recall-trace reward history and registers the PreferenceStore the
+        /// recall `preference` column reads.
+        public let preferenceFired: Bool
         /// True when this tick dispatched a topology-snapshot duty Task.
         public let topologySnapshotFired: Bool
         /// True when this tick ran the PoolReducer (novel-token merge-back).
@@ -308,6 +325,28 @@ public actor AutonomicGovernor {
             }
         }
 
+        // Preference producer: fit per-drawer Bradley-Terry preference strengths
+        // from the recall-trace reward history and register the PreferenceStore
+        // the recall `preference` column reads. Same cadence shape as the
+        // graph-centrality producer (default 10 min, 0 = every tick). First tick
+        // fires immediately (lastPreferenceFired is nil) so the `preference`
+        // column is live from startup rather than dark for one cadence. The scan
+        // runs in an unstructured Task (preferenceScan is a nonisolated static
+        // func — the actor executor is released at its first await, so tick()
+        // returns without stalling). Errors are logged and never propagated to
+        // tick().
+        let preferenceElapsed = lastPreferenceFired.map {
+            now.timeIntervalSince($0) * 1000 >= Double(preferenceIntervalMs)
+        } ?? true
+
+        if preferenceElapsed {
+            lastPreferenceFired = now
+            Task { [kit, handle, now] in
+                do { try await AutonomicGovernor.preferenceScan(kit: kit, handle: handle, now: now) }
+                catch { Logging.stderr.log("AutonomicGovernor: preferenceScan error: \(error)") }
+            }
+        }
+
         // Topology snapshot duty: estate-read + NeuronKit.graphTopology + encode + store write.
         // Fires on first tick (lastTopologySnapshotFired is nil) and then on every
         // MOOTX01_TOPOLOGY_CADENCE_SECONDS interval (default 300 s). When no handler
@@ -404,6 +443,7 @@ public actor AutonomicGovernor {
             signalsTicked: signalsTicked,
             graphAnalyticsFired: graphAnalyticsElapsed,
             graphCentralityFired: graphCentralityElapsed,
+            preferenceFired: preferenceElapsed,
             topologySnapshotFired: topologyElapsed,
             poolReduceFired: poolReduceFired,
             tableSwapped: tableSwapped,
@@ -507,6 +547,91 @@ public actor AutonomicGovernor {
         }
 
         await kit.registerGraphCache(GraphCentralityCache(scores: scores), for: handle)
+    }
+
+    // MARK: - Preference producer duty
+
+    /// Fit per-drawer Bradley-Terry preference strengths from the estate's
+    /// recall-trace reward history and register them as a `PreferenceStore`,
+    /// taking the `unionBest` / `matrixAware` recall `preference` score column
+    /// from dark to live.
+    ///
+    /// This is the preference PRODUCER, the sibling of the graph-centrality
+    /// producer (the consumption surface — `GeniusLocusKit.registerPreferenceStore`
+    /// and the recall `preference` column — already shipped; nothing was computing
+    /// strengths to register). It runs on the governor's cadence, reads the
+    /// estate's recall-trace reward outcomes once, shapes them into the per-drawer
+    /// `(label, endorsements, dismissals)` records the `NeuronKit.learnedPreference`
+    /// Bradley-Terry fitter consumes, runs that fitter, and installs the resulting
+    /// per-drawer strengths.
+    ///
+    /// Outcome source (the implicit relevance signal, C-15): each recall trace
+    /// row records a surfaced drawer (`target`) and whether the caller picked it
+    /// (`used`). A drawer surfaced-and-used is one endorsement (a win vs the
+    /// neutral baseline in the fitter's anchor reduction); surfaced-and-passed-over
+    /// is one dismissal (a loss). This is exactly "what users picked vs passed
+    /// over", aggregated per drawer.
+    ///
+    /// Math ownership (I-17): this duty owns NO fitting math. The Bradley-Terry
+    /// preference fit is the conformance-gated SubstrateML primitive surfaced by
+    /// `NeuronKit.learnedPreference` (the `Bias` lens, anchor reduction); the duty
+    /// only shapes the outcomes and caches the strengths. It is a faithful cadence
+    /// wrapper of a direct `learnedPreference` call on the same records — the
+    /// cross-port conformance gate proves exactly that. Its Rust twin
+    /// (`preference_outcomes` + `compute_preference_scores`) builds the identical
+    /// record multiset and calls the identical fitter, so the two ports compute
+    /// identical strengths for the same trace history.
+    ///
+    /// Window: all retained recall traces up to `now` (`since = .distantPast`).
+    /// Retention is bounded by the maintenance prune cycle, so this reads the
+    /// estate's live trace history. Deterministic — a pure function of the
+    /// recorded rows and `now`; never reads `Date()` here.
+    ///
+    /// The duty's only side effect is the store registration (idempotent
+    /// re-registration replaces the prior snapshot). An estate with no recall
+    /// traces (a fresh estate, or one whose traces were all pruned) yields no
+    /// records ⇒ `learnedPreference([]) == []` ⇒ an empty store — every
+    /// `preferenceScore` is 0.0, identical to "no store registered", which is
+    /// correct (C-16).
+    ///
+    /// Reads go through the public GeniusLocusKit verb surface
+    /// (`recentRecallTraces`) — no LocusKit reach-around (B-1).
+    ///
+    /// - Parameters:
+    ///   - kit:    The live GeniusLocusKit actor.
+    ///   - handle: The estate to score.
+    ///   - now:    Injected instant (determinism requirement).
+    static func preferenceScan(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async throws {
+        // All retained traces up to `now`. `.distantPast` lower bound reads the
+        // whole live history; retention is bounded upstream by the prune cycle.
+        let traces = try await kit.recentRecallTraces(
+            in: handle, since: .distantPast, now: now)
+
+        let records = PreferenceOutcomes.build(traces: traces)
+
+        // The conformance-gated Bradley-Terry fitter (I-17). It throws only if a
+        // drawer id literally equals the baseline sentinel — drawer ids are UUIDs,
+        // so this never arises in practice; the throw still propagates (the caller
+        // logs and the loop continues).
+        let strengths = try NeuronKit.learnedPreference(
+            records: records.map {
+                (label: $0.label, endorsements: $0.endorsements, dismissals: $0.dismissals)
+            })
+
+        var scores: [String: Float] = Dictionary(minimumCapacity: strengths.count)
+        for strength in strengths {
+            // PreferenceStrength.strength is Double (the Bradley-Terry log-scale
+            // scalar, re-centred on the neutral baseline); the PreferenceStore
+            // surface is Float. The narrowing is the documented float boundary the
+            // cross-port conformance gate compares at.
+            scores[strength.label] = Float(strength.strength)
+        }
+
+        await kit.registerPreferenceStore(PreferenceCache(scores: scores), for: handle)
     }
 
     // MARK: - Topology snapshot duty

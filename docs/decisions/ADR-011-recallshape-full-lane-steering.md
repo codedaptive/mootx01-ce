@@ -3,7 +3,7 @@ status: decided
 question: Should RecallShape's lane-key surface steer ONLY the retrieval lanes, or ALL recall scoring columns (retrieval + matrix/graph/preference)?
 authors: MOOTx01 maintainers
 date: 2026-06-17
-version: 1.2.0
+version: 1.3.0
 relates_to:
   - docs/reference/GENIUSLOCUSKIT_SPEC.md
   - docs/reference/GENIUSLOCUSKIT_INTERFACE.md
@@ -137,9 +137,23 @@ cannot register a cache and the synchronous `Fn(&SignalContext)` closure has no
 `&mut EstateCoordinator`. The governor already holds the kit/coordinator and runs
 estate-reading duties on a cadence, making it the faithful cross-port home.
 
-The PREFERENCE producer (Bradley-Terry / RecallTrace preference training) remains
-absent on both ports — a separate follow-up mission. The `PreferenceStore`
-consumption surface stays at parity; nothing yet populates it.
+The PREFERENCE producer now EXISTS on both ports (mission BRAIN-PREF-PRODUCER,
+2026-06-17), built as the SIBLING of the graph producer. It is a cadence-driven
+AutonomicGovernor duty (Swift `AutonomicGovernor.preferenceScan` / Rust
+`preference_duty`) that reads the estate's recall-trace reward history
+(`RecallTraceItem`: per-drawer `target` + `used` flag), shapes it into per-drawer
+`(label, endorsements, dismissals)` curation records (surfaced-and-used →
+endorsement, surfaced-and-passed → dismissal — the implicit relevance signal,
+C-15), fits per-drawer Bradley-Terry preference strengths via the existing
+conformance-gated NeuronKit `learnedPreference` / `learned_preference` anchor-
+reduction fitter (the `Bias` lens — no fitting math reinvented, I-17), wraps the
+strengths in a `PreferenceStore`, and registers it on the kit/coordinator. After
+it runs, the `unionBest` / `matrixAware` recall `preference` column is LIVE on
+both ports (non-zero for endorsed drawers, identical Swift↔Rust for the same
+record set). It lives in the AutonomicGovernor for the same parity reason as the
+graph producer: only the governor holds the kit/coordinator on a cadence and can
+register a store at parity. The OUTCOME SOURCE is the recall reward cycle, which
+already records traces; no new substrate data was required.
 
 ## Consequences
 
@@ -164,10 +178,28 @@ mission glk-recall-graphpref-rust (2026-06-17), bringing Rust to parity with the
 Swift recall-side surface. The GRAPH-centrality PRODUCER (D-4 producer boundary)
 was built on both ports in mission BRAIN-GRAPH-PRODUCER (2026-06-17) as an
 AutonomicGovernor duty over the NeuronKit `keystones` oracle; the `graph` column
-is now live in production on both ports. The PREFERENCE producer remains open.
+is now live in production on both ports. The PREFERENCE producer was built on both
+ports in mission BRAIN-PREF-PRODUCER (2026-06-17) as the sibling AutonomicGovernor
+duty over the NeuronKit `learnedPreference` Bradley-Terry fitter, reading the
+recall-trace reward cycle; the `preference` column is now live in production on
+both ports. Both D-4 producer boundaries are now closed.
 
 ## Changelog
 
+- 1.3.0 (2026-06-17) — D-4 producer boundary closed: the PREFERENCE producer now
+  exists on BOTH ports (mission BRAIN-PREF-PRODUCER), built as the sibling of the
+  graph producer. A cadence-driven AutonomicGovernor duty (Swift `preferenceScan`
+  / Rust `preference_duty`) reads the estate's recall-trace reward history
+  (`RecallTraceItem` target+used), shapes it into per-drawer
+  `(endorsements, dismissals)` records (surfaced-and-used → endorsement,
+  surfaced-and-passed → dismissal), fits per-drawer Bradley-Terry strengths via
+  the NeuronKit `learnedPreference` / `learned_preference` anchor-reduction fitter
+  (I-17, no math reinvented), and registers a `PreferenceStore`, taking the recall
+  `preference` column from dark to live in production on both ports. The outcome
+  source is the existing recall reward cycle — no new substrate data was needed.
+  Conformance: `PreferenceProducerTests.swift` / `preference_producer_parity.rs`
+  (faithful-wrapper, endorsed-outranks-dismissed, outcome shaping, C-16 totality,
+  cadence, end-to-end dark→live). Both D-4 producer boundaries are now closed.
 - 1.2.0 (2026-06-17) — D-4 producer boundary updated: the GRAPH-centrality
   PRODUCER now exists on BOTH ports (mission BRAIN-GRAPH-PRODUCER). A
   cadence-driven AutonomicGovernor duty (Swift `graphCentralityScan` / Rust
