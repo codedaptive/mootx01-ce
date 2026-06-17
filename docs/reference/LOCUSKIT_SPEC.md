@@ -1,6 +1,6 @@
 ---
 title: LocusKit Specification
-version: 1.3.0
+version: 1.4.0
 status: active
 date: 2026-06-17
 description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
@@ -276,6 +276,19 @@ fetching rows. The aggregate covers every active container (backfilled on
 open, OR-in per capture) and over-approximates each container's bits, so a
 survivor is never wrongly dropped; an absent fingerprint is treated as
 surviving, never empty.
+
+**B-7a (per-drawer fingerprint lattice block — qidClosureHash live):** the
+per-drawer structural fingerprint (`EstateFingerprintFamilies.fingerprint`)
+populates the lattice block's taxonomic-closure facet, `qidClosureHash`, from
+the drawer's `wikidataQID`: the `FNV.hash16` of the sorted-numeric,
+`"|"`-joined transitive P31/P279 ancestor closure
+(`LatticeLib.QIDClosure.ancestors(of:)`, a pinned offline Wikidata snapshot;
+the runtime never re-queries). A drawer with no QID or whose QID has no
+ancestors takes the deterministic null `0` — identical to the pre-#7b value, so
+fingerprints change only for drawers whose QID carries ancestors. The facet is
+no longer null-by-deferral. Both ports compute the closure and hash identically
+(same edges, BFS, numeric sort, `"|"`-join, `FNV.hash16`); cross-port
+conformance holds.
 
 **B-8 (withdraw preserves upper axes):** `withdraw` clears the state field
 (bits 0–3 of the adjective bitmap) and OR-s in `State.withdrawn`, leaving
@@ -836,6 +849,16 @@ fn count_recall_traces(&self) -> Result<usize, LocusKitError>
 *End of LocusKit Specification.*
 
 ## Changelog
+
+### 1.4.0 -- 2026-06-17
+Added contract B-7a: the per-drawer fingerprint's lattice-block `qidClosureHash`
+facet is now live (mission #7b), hashing `FNV.hash16` of the sorted-numeric,
+`"|"`-joined transitive P31/P279 ancestor closure of the drawer's `wikidataQID`
+(`LatticeLib.QIDClosure`, a pinned offline Wikidata snapshot — runtime never
+re-queries). No-QID / no-ancestor rows keep the deterministic null 0, so only
+drawers whose QID carries ancestors change fingerprint. Both ports compute it
+identically; cross-port conformance preserved. No schema change; no new
+invariant — the facet was previously null-by-deferral and is now populated.
 
 ### 1.3.0 -- 2026-06-17
 Documented that the `propose` verb now stamps genuine proposal provenance. `Estate.propose(_:now:)` wires the three previously hard-zeroed operational axes — `ProposalConfirmationSource` (bits 12–17), `ProposalGeneratedByClass` (bits 18–23), and `ProposalConfidenceBucket` (bits 24–29) — from the new `ProposeFrame.confirmation` / `.generatedBy` / `.confidence` slots into the proposal operational bitmap, alongside the existing kind (0–5) and target-object-type (6–11) axes (cookbook §2.4). The bit windows match the read accessors exactly; the three frame defaults (`.human` / `.dreamingDaemon` / `.null`, all raw 0) reproduce the pre-wiring bitmap byte-for-byte. Additive and behaviour-preserving; round-trip + default-byte-identity conformance-gated in both ports. Added the "propose stamps genuine provenance" contract bullet to § 9.

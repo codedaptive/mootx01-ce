@@ -39,6 +39,12 @@ uuid = { version = "1", features = ["v4"] }
 # which is a no-op when monitoring is disabled (the default).
 # Authority: DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 + MANAGER_1.0_PLAN §4.
 intellectus-lib = { path = "../../../libs/IntellectusLib/rust" }
+# LatticeLib supplies qid_closure::ancestors — the pinned Q-ID taxonomic-closure
+# surface drawer_fingerprint hashes into the lattice-block qid_closure_hash slot
+# (mission #7b). LatticeLib is a libs/ library that imports no substrate kit, so
+# the edge is strictly downstream→upstream (kit → lib), no cycle. Authority:
+# DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28 (the #7 feature requires it).
+lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 
 [dev-dependencies]
 # JSON parsing for LP-0 conformance vectors. Only used in tests/lp0_vectors.rs.

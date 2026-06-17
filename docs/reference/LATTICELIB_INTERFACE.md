@@ -1,11 +1,11 @@
 ---
 title: LatticeLib Interface
-version: 1.1.0
+version: 1.2.0
 description: Public API surface for LatticeLib in both the Swift and Rust ports.
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-06-16
+date: 2026-06-17
 package: LatticeLib
 languages: [swift, rust]
 relates_to:
@@ -142,6 +142,47 @@ frame label. For integer codes (no `.`), the function performs a parent walk via
 `FDC.decimalParent` / `Fdc::FdcFrame::decimal_parent` before looking up in the
 frame, because the bundled frame only stores three-digit integer entries (e.g.
 `"006"`, not `"6"`). Returns `nil`/`None` for unknown codes or empty input.
+
+#### `QIDClosure` / `qid_closure`
+
+The pinned Q-ID taxonomic-closure surface: a process-global static lookup over
+the bundled `QIDClosureEdges.json` direct-edge graph. Loads the edge graph once
+per process (Swift `Bundle.module` resource; Rust `include_bytes!` at compile
+time, mirroring the FDC runtime's artifact embedding) and exposes the
+**transitive** P31/P279 (instance-of / subclass-of) ancestor closure of any
+Wikidata Q-ID.
+
+```swift
+public enum QIDClosure {
+    public static func ancestors(of qid: String) -> [String]
+    public static var isAvailable: Bool
+    public static var dataVersion: String
+}
+```
+```rust
+pub mod qid_closure {
+    pub fn ancestors(qid: &str) -> Vec<String>;
+    pub fn is_available() -> bool;
+    pub fn data_version() -> &'static str;
+}
+// re-exported as qid_ancestors / qid_closure_is_available / qid_closure_data_version
+```
+
+`ancestors(of:)` / `qid_closure::ancestors` returns the full transitive closure —
+every ancestor reachable by a BFS walk over the pinned direct edges to the roots
+— **excluding the queried qid itself**, sorted **numerically** by the integer
+part of the Q-ID (`"Q146" < "Q1084" < "Q25265"`). An empty or unknown qid (or an
+unavailable artifact) → `[]`/`vec![]`. Results are memoized per distinct qid for
+the life of the process. The two ports are byte-identical: same edges, same BFS,
+same numeric sort, same exclusion.
+
+The bundled `QIDClosureEdges.json` is a **pinned Wikidata snapshot** of direct
+P31/P279 edges, built offline by `scripts/build_qid_closure.py` and checked in
+alongside the FDC artifacts. **The runtime never re-queries Wikidata** — the
+transitive closure is computed locally in the loader. This keeps `ancestors`
+pure, deterministic, and conformance-stable. Consumed by LocusKit's
+`DrawerFingerprint` to fill the lattice-block `qidClosureHash` slot (the
+`FNV.hash16` of the sorted, `"|"`-joined closure).
 
 #### `FDCMatcher` / `FdcMatcher`
 
@@ -736,6 +777,18 @@ non-Apple `.other` stub and records into `SHARED_NOVEL_CACHE`.
 *End of LatticeLib Interface.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-17
+Added the `QIDClosure` / `qid_closure` surface (mission #7b): a process-global
+static lookup over the pinned `QIDClosureEdges.json` direct-edge graph exposing
+`ancestors(of:)` — the transitive P31/P279 ancestor closure of a Wikidata Q-ID
+(BFS over the pinned edges, excluding the queried qid, sorted numerically),
+plus `isAvailable` / `dataVersion`. The artifact is a pinned offline Wikidata
+snapshot (38,761 nodes) built by `scripts/build_qid_closure.py`; the runtime
+never re-queries Wikidata — the closure is computed locally. Byte-identical
+across the Swift and Rust ports (same edges, BFS, numeric sort). Consumed by
+LocusKit's `DrawerFingerprint` to fill the lattice-block `qidClosureHash` slot.
+Additive; no existing surface changed.
 
 ### 1.1.0 -- 2026-06-16
 Added `FDC.ancestors(of:)` (Swift) and `Fdc::ancestors` (Rust) to the public

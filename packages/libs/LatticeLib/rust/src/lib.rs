@@ -44,6 +44,7 @@ pub mod code;
 pub mod novel_token_cache;
 pub mod novel_pool_submitter;
 pub mod pool_reducer;
+pub mod qid_closure;
 
 pub use fdc_runtime::Fdc;
 pub use fdc_matcher::FdcMatcher;
@@ -63,3 +64,11 @@ pub use word_class_table::{
     seed_global_table, WordClassTableCache,
 };
 pub use pool_reducer::{reduce as pool_reduce, PoolReduceResult, PoolReducerError};
+// The Q-ID taxonomic-closure surface (mission #7b): transitive P31/P279
+// ancestors over the pinned `QIDClosureEdges.json` snapshot. Mirrors the
+// Swift `QIDClosure` enum. Consumed by LocusKit's DrawerFingerprint to fill
+// the lattice-block `qidClosureHash` slot.
+pub use qid_closure::{
+    ancestors as qid_ancestors, data_version as qid_closure_data_version,
+    is_available as qid_closure_is_available,
+};
