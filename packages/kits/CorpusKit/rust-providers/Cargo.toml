@@ -32,6 +32,13 @@ substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 vectorkit = { path = "../../VectorKit/rust" }
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 engram-lib = { path = "../../../libs/EngramLib/rust" }
+# FDCProvider: text → FDC code via lattice-lib's Fdc::encode (the Rust port
+# of LatticeLib's FDC runtime). eidetic-lib is not needed directly (FDCProvider
+# calls the lattice-lib surface only) but is declared here for structural
+# parity with Swift's CorpusKitProviders depending on EideticLib.
+# Authority: ADR-010 Decision B (FDC co-classification signal).
+lattice-lib = { path = "../../../libs/LatticeLib/rust" }
+eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 
 [dev-dependencies]
 # B2-5: the embedding conformance test deserialises the shared canonical

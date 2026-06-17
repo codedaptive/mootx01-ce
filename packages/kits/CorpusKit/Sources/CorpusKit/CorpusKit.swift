@@ -209,6 +209,27 @@ public enum EmbeddingModel: Sendable {
     /// `CorpusKitProviders` for the full training API.
     case nmf(provider: any EmbeddingProvider & Sendable)
 
+    /// FDC (Frame Decimal Classification) co-classification provider.
+    ///
+    /// The caller constructs an `FDCProvider` from `CorpusKitProviders` and
+    /// passes it here. The provider is stateless — no training step is required.
+    /// It encodes text to a deterministic float vector derived from the text's
+    /// FDC classification code, such that codes sharing a longer prefix (more
+    /// common ancestors in the FDC taxonomy) have higher cosine similarity.
+    ///
+    /// Unlike the distributional providers (RI/PPMI/LSA/NMF), FDCProvider
+    /// requires no corpus training — it is ready to use immediately. Its recall
+    /// signal reflects taxonomic proximity (class co-membership), not
+    /// co-occurrence. The two signal types complement each other: distributional
+    /// methods are strong on topical neighbours; FDC is strong on categorical siblings.
+    ///
+    /// The float lane is dark (returns `[]`) for texts the FDC engine cannot
+    /// classify (UNRESOLVED). This is the expected opt-out, not an error.
+    ///
+    /// See ADR-010 Decision B (FDC lattice co-classification) and `FDCProvider`
+    /// in `CorpusKitProviders` for the encoding details.
+    case fdc(provider: any EmbeddingProvider & Sendable)
+
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
 }
@@ -811,6 +832,12 @@ extension EmbeddingModel {
         case .nmf(let provider):
             // The caller built, trained, and finalized the NmfProvider externally
             // (TF matrix + NMF factorization via SubstrateML). Pass through unchanged.
+            return provider
+
+        case .fdc(let provider):
+            // The caller constructed an FDCProvider externally. FDCProvider is
+            // stateless (no training required) — the caller just passes it through
+            // to register it as the fusion voter. Pass through unchanged.
             return provider
 
         case .deterministic:
