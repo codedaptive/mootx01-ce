@@ -114,7 +114,7 @@ fn t1a_provision_glk_stores_kind_prefixed_profile() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("TestGLK"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("TestGLK"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision(Glk) should succeed");
 
     let estate = coord.estate_for(&handle).expect("estate must be open");
@@ -135,7 +135,7 @@ fn t1b_provision_glk_wires_vector_store() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("TestGLK"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("TestGLK"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision(Glk) should succeed");
 
     // A VectorStore must be wired — its presence activates the vector lane in recall_scored.
@@ -150,7 +150,7 @@ fn t1c_provision_glk_wires_corpus() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("TestGLK"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("TestGLK"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision(Glk) should succeed");
 
     let corpus_present = coord.has_corpus(&handle);
@@ -172,7 +172,7 @@ fn t1d_provision_glk_stores_zoom_window() {
     };
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
         .expect("provision should succeed");
 
     assert_eq!(handle.zoom_window_low, 3, "zoom_window_low must round-trip through the handle");
@@ -188,7 +188,7 @@ fn t2a_provision_corpus_only_stores_kind_prefixed_profile() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), corpus_only_params("TestCorpusOnly"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), corpus_only_params("TestCorpusOnly"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision(CorpusOnly) should succeed");
 
     let estate = coord.estate_for(&handle).expect("estate");
@@ -209,7 +209,7 @@ fn t2b_provision_corpus_only_wires_corpus_not_vector_store() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), corpus_only_params("TestCorpusOnly"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), corpus_only_params("TestCorpusOnly"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision(CorpusOnly) should succeed");
 
     let corpus_present = coord.has_corpus(&handle);
@@ -227,7 +227,7 @@ fn t3a_provision_locus_only_stores_kind_prefixed_profile() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("TestLocusOnly"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("TestLocusOnly"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision(LocusOnly) should succeed");
 
     let estate = coord.estate_for(&handle).expect("estate");
@@ -245,7 +245,7 @@ fn t3b_provision_locus_only_wires_no_sub_stores() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("TestLocusOnly"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("TestLocusOnly"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision(LocusOnly) should succeed");
 
     let corpus_present = coord.has_corpus(&handle);
@@ -276,12 +276,12 @@ fn t4a_reprovision_same_storage_raises_duplicate_estate() {
 
     // First provision succeeds.
     coord
-        .provision(store1, stor1, None, OwnerCredentials::new("owner"), glk_params("DupeTest"), EmbeddingModelConfig::Deterministic)
+        .provision(store1, stor1, None, OwnerCredentials::new("owner"), glk_params("DupeTest"), vec![EmbeddingModelConfig::Deterministic])
         .expect("first provision should succeed");
 
     // Second provision on the same underlying storage must raise DuplicateEstate.
     let err = coord
-        .provision(store2, stor2, None, OwnerCredentials::new("owner"), glk_params("DupeTest"), EmbeddingModelConfig::Deterministic)
+        .provision(store2, stor2, None, OwnerCredentials::new("owner"), glk_params("DupeTest"), vec![EmbeddingModelConfig::Deterministic])
         .expect_err("second provision on same storage must fail");
 
     assert!(
@@ -299,10 +299,10 @@ fn t4b_provisioning_distinct_storages_succeeds() {
     let (s2, stor2) = make_stores();
 
     let h1 = coord
-        .provision(s1, stor1, None, OwnerCredentials::new("owner"), glk_params("Estate1"), EmbeddingModelConfig::Deterministic)
+        .provision(s1, stor1, None, OwnerCredentials::new("owner"), glk_params("Estate1"), vec![EmbeddingModelConfig::Deterministic])
         .expect("first provision");
     let h2 = coord
-        .provision(s2, stor2, None, OwnerCredentials::new("owner"), glk_params("Estate2"), EmbeddingModelConfig::Deterministic)
+        .provision(s2, stor2, None, OwnerCredentials::new("owner"), glk_params("Estate2"), vec![EmbeddingModelConfig::Deterministic])
         .expect("second provision");
 
     assert_ne!(h1.estate_uuid, h2.estate_uuid, "distinct storages produce distinct UUIDs");
@@ -317,7 +317,7 @@ fn t5_fresh_provisioned_estate_is_mounted() {
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("GLK1"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("GLK1"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     assert_eq!(
@@ -335,7 +335,7 @@ fn t6a_quiesce_transitions_mounted_to_quiesced() {
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q1"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q1"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     coord.quiesce(&handle).expect("quiesce must succeed");
@@ -352,7 +352,7 @@ fn t6b_quiesce_is_idempotent_on_already_quiesced_estate() {
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q2"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q2"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     coord.quiesce(&handle).expect("first quiesce");
@@ -368,7 +368,7 @@ fn t7_drain_transitions_to_quiesced() {
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("D1"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("D1"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     coord.drain(&handle).expect("drain must succeed");
@@ -391,7 +391,7 @@ fn t8a_destroy_glk_closes_estate_and_clears_registry() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("DestroyGLK"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("DestroyGLK"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     // Verify estate is open and sub-stores are wired.
@@ -418,7 +418,7 @@ fn t8b_destroy_after_quiesce_and_drain_succeeds() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("QDDestroyGLK"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("QDDestroyGLK"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     // Normal admin-plane sequence.
@@ -439,7 +439,7 @@ fn t9_destroy_locus_only_succeeds_without_sub_stores() {
     let (store, storage) = make_stores();
 
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("DestroyLocusOnly"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("DestroyLocusOnly"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     // No sub-stores wired.
@@ -459,7 +459,7 @@ fn t10_quiesce_on_stale_handle_raises_estate_not_open() {
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("QuiesceStale"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("QuiesceStale"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     coord.close(&handle).expect("close");
@@ -480,7 +480,7 @@ fn t11_drain_on_stale_handle_raises_estate_not_open() {
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("DrainStale"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("DrainStale"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     coord.close(&handle).expect("close");
@@ -515,7 +515,7 @@ fn t12a_provision_glk_with_separate_corpus_storage_wires_both_sub_stores() {
             Some(corpus_storage),
             OwnerCredentials::new("owner"),
             glk_params("SeparateStorageGLK"),
-            EmbeddingModelConfig::Deterministic,
+            vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision with separate corpus_storage must succeed");
 
@@ -539,7 +539,7 @@ fn t12b_destroy_glk_with_separate_storage_succeeds() {
             Some(corpus_storage),
             OwnerCredentials::new("owner"),
             glk_params("SeparateDestroyGLK"),
-            EmbeddingModelConfig::Deterministic,
+            vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision");
 
@@ -556,7 +556,7 @@ fn t12c_destroy_after_manual_close_still_succeeds() {
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), corpus_only_params("CloseFirstCorpus"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), corpus_only_params("CloseFirstCorpus"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     // Manual close first — drops the registry entry and the corpus registration.
@@ -578,7 +578,7 @@ fn sub_stores_remain_registered_after_quiesce_and_drain() {
     let mut coord = EstateCoordinator::new();
     let (store, storage) = make_stores();
     let handle = coord
-        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("LifecycleGLK"), EmbeddingModelConfig::Deterministic)
+        .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("LifecycleGLK"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision");
 
     coord.quiesce(&handle).expect("quiesce");
@@ -604,10 +604,10 @@ fn destroy_one_estate_does_not_orphan_siblings_sub_stores() {
     let (s2, stor2) = make_stores();
 
     let h1 = coord
-        .provision(s1, stor1, None, OwnerCredentials::new("owner"), glk_params("Estate1"), EmbeddingModelConfig::Deterministic)
+        .provision(s1, stor1, None, OwnerCredentials::new("owner"), glk_params("Estate1"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision estate 1");
     let h2 = coord
-        .provision(s2, stor2, None, OwnerCredentials::new("owner"), glk_params("Estate2"), EmbeddingModelConfig::Deterministic)
+        .provision(s2, stor2, None, OwnerCredentials::new("owner"), glk_params("Estate2"), vec![EmbeddingModelConfig::Deterministic])
         .expect("provision estate 2");
 
     coord.destroy(&h1).expect("destroy estate 1");
@@ -697,7 +697,7 @@ fn t13a_provision_glk_on_sqlite_backend_succeeds() {
             Some(corpus_storage),
             OwnerCredentials::new("sqlite-provision-test"),
             glk_params("SQLiteGLKEstate"),
-            EmbeddingModelConfig::Deterministic,
+            vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision(Glk) on SQLite backend must not fail — no such table: chunks regression guard");
 
@@ -738,7 +738,7 @@ fn t13b_provision_corpus_only_on_sqlite_backend_succeeds() {
             Some(corpus_storage),
             OwnerCredentials::new("sqlite-corpus-only-test"),
             corpus_only_params("SQLiteCorpusOnlyEstate"),
-            EmbeddingModelConfig::Deterministic,
+            vec![EmbeddingModelConfig::Deterministic],
         )
         .expect("provision(CorpusOnly) on SQLite backend must succeed");
 

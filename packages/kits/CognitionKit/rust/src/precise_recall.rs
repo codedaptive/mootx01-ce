@@ -138,6 +138,12 @@ pub fn run(
         query_text: Some(query.to_string()),
         trace_limit: Some(limit),
         origin: genius_locus_kit::recall::RecallOrigin::Internal,
+        // No RecallShape steering on this internal coarse-grab recall: the
+        // PreciseRecall recipe drives relevance through its own reduction
+        // composition below, not through GLK's signed-weight fusion. `None`
+        // matches the Swift `GLKRecallRequest` initializer here, which carries
+        // no `recallShape` argument (the field defaults to no shape).
+        recall_shape: None,
     };
     let result = coord
         .recall_scored(handle, request, now)

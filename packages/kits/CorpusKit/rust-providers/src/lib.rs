@@ -54,6 +54,10 @@ pub mod text_providers;
 // The decimal hierarchy math lives in LatticeLib — not reimplemented here.
 // Stateless — no training required.
 pub mod fdc_provider;
+// Mission 6a-iii-wire: the ONE definition of the 1.0 default recall ensemble.
+// Constructs the five honest signals (RI/PPMI/LSA/NMF/FDC) fresh per call.
+// Mirrors Swift's CorpusEnsemble.defaultEnsemble() in CorpusKitProviders.
+pub mod default_ensemble;
 
 pub use basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
 pub use deterministic_tokenizer::DeterministicTokenizer;
@@ -75,3 +79,4 @@ pub use fdc_provider::{
     FDCProvider, FDC_DIMENSION, FDC_PROJECTION_SEED,
     fdc_node_vector, fdc_embedding_vector,
 };
+pub use default_ensemble::default_ensemble;

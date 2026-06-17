@@ -50,7 +50,7 @@ struct EncodeIntakeTests {
         // .deterministic embedding model needs no CoreML and is reproducible.
         let handle = try await kit.provision(
             storage: storage, owner: owner, params: params,
-            embeddingModel: .deterministic)
+            embeddingModels: [.deterministic])
         return (kit, handle)
     }
 

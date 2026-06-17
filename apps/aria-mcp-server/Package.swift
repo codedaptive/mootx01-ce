@@ -48,6 +48,11 @@ let package = Package(
                 .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
                 // Semantic recall wiring for the durable SQLite estate (BM25 + vector).
                 .product(name: "CorpusKit", package: "CorpusKit"),
+                // CorpusKitProviders: the concrete five-signal ensemble
+                // (CorpusEnsemble.defaultEnsemble()) the server wires into Lane D.
+                // Dependency per DECISION_LIFT_PACKAGE_SWIFT_RULE_2026-05-28; the
+                // server is downstream of the providers, no layering inversion.
+                .product(name: "CorpusKitProviders", package: "CorpusKit"),
                 .product(name: "VectorKit", package: "VectorKit"),
             ],
             path: "Sources/aria-mcp"

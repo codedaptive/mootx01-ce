@@ -2683,9 +2683,15 @@ impl EstateCoordinator {
     ///                      any valid `Storage` instance.
     /// - `corpus_storage`:  Optional separate `Storage` for Corpus + VectorStore.
     ///                      When `None`, `storage` is used for all sub-stores.
-    /// - `embedding_model`: Embedding model passed to `Corpus::open`. Use
-    ///                      `EmbeddingModelConfig::Deterministic` (the default) for
-    ///                      tests; no CoreML required.
+    /// - `embedding_models`: The recall ensemble passed to `Corpus::open_many`.
+    ///                       Production callers pass
+    ///                       `corpus_kit_providers::default_ensemble()` (the
+    ///                       canonical 1.0 five-signal default: RI/PPMI/LSA/NMF/FDC).
+    ///                       Rust has no default arguments, so the caller supplies
+    ///                       the Vec explicitly; the app layer owns the default. A
+    ///                       single-element `vec![EmbeddingModelConfig::Deterministic]`
+    ///                       selects one signal (used by focused lifecycle tests).
+    ///                       Must be non-empty.
     pub fn provision(
         &mut self,
         store: Arc<dyn DrawerStore>,
@@ -2693,7 +2699,7 @@ impl EstateCoordinator {
         corpus_storage: Option<Arc<dyn Storage>>,
         owner: OwnerCredentials,
         params: EstateProvisionParams,
-        embedding_model: EmbeddingModelConfig,
+        embedding_models: Vec<EmbeddingModelConfig>,
     ) -> Result<EstateHandle, GeniusLocusKitError> {
         // Validate params before touching storage.
         if params.estate_name.is_empty() {
@@ -2791,12 +2797,15 @@ impl EstateCoordinator {
         let wiring_result = match params.kind {
             EstateKind::Glk => {
                 // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
-                // Both are constructed on backing_storage. Corpus::open applies both
-                // BundleStore and VectorStore schema migrations via `migrate`, matching
-                // the Swift path where Corpus.init applies both schemas.
-                Corpus::open(Arc::clone(&backing_storage), embedding_model)
+                // Both are constructed on backing_storage. Corpus::open_many applies
+                // both BundleStore and VectorStore schema migrations via `migrate`,
+                // matching the Swift path where Corpus.init applies both schemas.
+                // open_many fans every operation across all held signals (the
+                // five-signal ensemble by default); the match arms are mutually
+                // exclusive, so moving `embedding_models` here is sound.
+                Corpus::open_many(Arc::clone(&backing_storage), embedding_models)
                     .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                        reason: format!("Corpus::open failed for GLK estate: {:?}", e),
+                        reason: format!("Corpus::open_many failed for GLK estate: {:?}", e),
                     })
                     .and_then(|corpus| {
                         // Wire a VectorStore pointing at the same backing storage so GLK's
@@ -2811,9 +2820,9 @@ impl EstateCoordinator {
             }
             EstateKind::CorpusOnly => {
                 // LocusKit core + Corpus. No standalone VectorStore registration.
-                Corpus::open(Arc::clone(&backing_storage), embedding_model)
+                Corpus::open_many(Arc::clone(&backing_storage), embedding_models)
                     .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
-                        reason: format!("Corpus::open failed for CorpusOnly estate: {:?}", e),
+                        reason: format!("Corpus::open_many failed for CorpusOnly estate: {:?}", e),
                     })
                     .map(|corpus| (Some(corpus), None))
             }
@@ -4387,6 +4396,14 @@ impl EstateCoordinator {
 }
 
 #[cfg(test)]
+// INTENTIONAL SINGLE-PROVIDER (mission 6a-iii-wire): these coordinator tests
+// assert estate wiring, mount-state, and lifecycle — NOT recall content — so
+// they provision with an explicit `vec![EmbeddingModelConfig::Deterministic]`.
+// A single deterministic signal is sufficient and keeps this crate free of a
+// `corpus-kit-providers` dependency (the five-signal default lives in the app
+// layer, which owns the production default via `default_ensemble()`). The
+// per-signal fusion / recall-un-pinning is proven in the dedicated end-to-end
+// payoff test, not here.
 mod tests {
     use super::*;
     use locus_kit::drawer_operational::CaptureChannel;
@@ -4807,7 +4824,7 @@ mod tests {
         let params = glk_params("TestGLK");
 
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
             .expect("provision should succeed");
 
         assert_eq!(coord.open_estate_count(), 1);
@@ -4829,7 +4846,7 @@ mod tests {
         };
 
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
             .expect("provision should succeed");
 
         let estate = coord.estate_for(&handle).expect("estate must be open");
@@ -4855,7 +4872,7 @@ mod tests {
         };
 
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
             .expect("provision should succeed");
 
         // The handle carries the zoom window from the manifest.
@@ -4882,11 +4899,11 @@ mod tests {
         let params = glk_params("DupeTest");
 
         coord
-            .provision(store1, stor1, None, OwnerCredentials::new("owner"), params.clone(), EmbeddingModelConfig::Deterministic)
+            .provision(store1, stor1, None, OwnerCredentials::new("owner"), params.clone(), vec![EmbeddingModelConfig::Deterministic])
             .expect("first provision should succeed");
 
         let err = coord
-            .provision(store2, stor2, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .provision(store2, stor2, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
             .expect_err("second provision on same store must fail");
 
         assert!(
@@ -4911,7 +4928,7 @@ mod tests {
         };
 
         let err = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
             .expect_err("empty name must fail");
 
         assert!(
@@ -4936,7 +4953,7 @@ mod tests {
         };
 
         let err = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
             .expect_err("inverted zoom window must fail");
 
         assert!(
@@ -4952,7 +4969,7 @@ mod tests {
         let mut coord = EstateCoordinator::new();
         let (store, storage) = make_provision_stores();
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("GLK1"), EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("GLK1"), vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
         assert_eq!(coord.mount_state(&handle), Some(EstateMountState::Mounted));
     }
@@ -4963,7 +4980,7 @@ mod tests {
         let mut coord = EstateCoordinator::new();
         let (store, storage) = make_provision_stores();
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q1"), EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q1"), vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         coord.quiesce(&handle).expect("quiesce must succeed");
@@ -4976,7 +4993,7 @@ mod tests {
         let mut coord = EstateCoordinator::new();
         let (store, storage) = make_provision_stores();
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q2"), EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("Q2"), vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         coord.quiesce(&handle).expect("first quiesce");
@@ -4990,7 +5007,7 @@ mod tests {
         let mut coord = EstateCoordinator::new();
         let (store, storage) = make_provision_stores();
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("D1"), EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), glk_params("D1"), vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         coord.drain(&handle).expect("drain must succeed");
@@ -5004,7 +5021,7 @@ mod tests {
         let mut coord = EstateCoordinator::new();
         let (store, storage) = make_provision_stores();
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L1"), EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L1"), vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         assert_eq!(coord.open_estate_count(), 1);
@@ -5020,7 +5037,7 @@ mod tests {
         let mut coord = EstateCoordinator::new();
         let (store, storage) = make_provision_stores();
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L2"), EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L2"), vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         coord.close(&handle).expect("close");
@@ -5038,7 +5055,7 @@ mod tests {
         let mut coord = EstateCoordinator::new();
         let (store, storage) = make_provision_stores();
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L3"), EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L3"), vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         coord.close(&handle).expect("close");
@@ -5056,7 +5073,7 @@ mod tests {
         let mut coord = EstateCoordinator::new();
         let (store, storage) = make_provision_stores();
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L4"), EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), locus_only_params("L4"), vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         coord.close(&handle).expect("close");
@@ -5080,7 +5097,7 @@ mod tests {
         };
 
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         let estate = coord.estate_for(&handle).expect("estate");
@@ -5099,7 +5116,7 @@ mod tests {
         let params = locus_only_params("LocusOnlyEstate");
 
         let handle = coord
-            .provision(store, storage, None, OwnerCredentials::new("owner"), params, EmbeddingModelConfig::Deterministic)
+            .provision(store, storage, None, OwnerCredentials::new("owner"), params, vec![EmbeddingModelConfig::Deterministic])
             .expect("provision");
 
         let estate = coord.estate_for(&handle).expect("estate");

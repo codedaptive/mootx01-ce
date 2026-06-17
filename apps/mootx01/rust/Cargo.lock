@@ -70,6 +70,7 @@ version = "0.1.0"
 dependencies = [
  "cognition-kit",
  "corpus-kit",
+ "corpus-kit-providers",
  "digest 0.10.7",
  "genius-locus-kit",
  "intellectus-lib",
@@ -276,6 +277,20 @@ dependencies = [
  "substrate-ml",
  "substrate-types",
  "uuid",
+ "vectorkit",
+]
+
+[[package]]
+name = "corpus-kit-providers"
+version = "0.1.0"
+dependencies = [
+ "corpus-kit",
+ "eidetic-lib",
+ "engram-lib",
+ "lattice-lib",
+ "substrate-kernel",
+ "substrate-ml",
+ "substrate-types",
  "vectorkit",
 ]
 

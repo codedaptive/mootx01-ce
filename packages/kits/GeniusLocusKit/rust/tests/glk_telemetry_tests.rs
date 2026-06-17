@@ -159,7 +159,7 @@ fn open_emits_nothing_when_disabled() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     );
 
     assert_eq!(sink.count(), 0,
@@ -181,7 +181,7 @@ fn close_emits_nothing_when_disabled() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
 
     let sink = Arc::new(CapturingSink::new());
@@ -211,7 +211,7 @@ fn provision_emits_nothing_when_disabled() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     );
 
     assert_eq!(sink.count(), 0,
@@ -232,7 +232,7 @@ fn quiesce_emits_nothing_when_disabled() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
 
     let sink = Arc::new(CapturingSink::new());
@@ -287,7 +287,7 @@ fn close_emits_unmounted_transition() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
 
     let sink = Arc::new(CapturingSink::new());
@@ -324,7 +324,7 @@ fn provision_emits_provision_metric_with_kind_tag_locus_only() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     );
 
     let provision_metrics = sink.all_named("geniuslocus.estate.provision");
@@ -358,13 +358,13 @@ fn two_provision_calls_emit_two_metrics() {
         store1, storage1, None,
         test_owner(),
         locus_only_params("estate-1"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     );
     let _ = coord.provision(
         store2, storage2, None,
         test_owner(),
         locus_only_params("estate-2"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     );
 
     assert_eq!(sink.count_named("geniuslocus.estate.provision"), 2,
@@ -388,7 +388,7 @@ fn quiesce_emits_quiesced_transition() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
 
     let sink = Arc::new(CapturingSink::new());
@@ -420,7 +420,7 @@ fn drain_emits_draining_then_quiesced_transitions() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
 
     let sink = Arc::new(CapturingSink::new());
@@ -495,7 +495,7 @@ fn stale_handle_close_does_not_emit_verb_error() {
         store, storage, None,
         test_owner(),
         locus_only_params("test"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
     // First close succeeds.
     coord.close(&handle).unwrap();
@@ -535,7 +535,7 @@ fn estate_state_identical_with_monitoring_on_vs_off() {
         store_off, storage_off, None,
         test_owner(),
         locus_only_params("off-estate"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
     let count_off = coord_off.open_estate_count();
     let mount_off = coord_off.mount_state(&handle_off);
@@ -550,7 +550,7 @@ fn estate_state_identical_with_monitoring_on_vs_off() {
         store_on, storage_on, None,
         test_owner(),
         locus_only_params("on-estate"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
     let count_on = coord_on.open_estate_count();
     let mount_on = coord_on.mount_state(&handle_on);
@@ -584,7 +584,7 @@ fn provision_then_quiesce_is_quiesced_regardless_of_monitoring() {
         store_off, storage_off, None,
         test_owner(),
         locus_only_params("off-quiesce"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
     coord_off.quiesce(&h_off).unwrap();
     let state_off = coord_off.mount_state(&h_off);
@@ -599,7 +599,7 @@ fn provision_then_quiesce_is_quiesced_regardless_of_monitoring() {
         store_on, storage_on, None,
         test_owner(),
         locus_only_params("on-quiesce"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
     coord_on.quiesce(&h_on).unwrap();
     let state_on = coord_on.mount_state(&h_on);
@@ -643,7 +643,7 @@ fn dense_store_error_emits_dark_and_store_error_counters() {
         store, storage, None,
         test_owner(),
         locus_only_params("d6-counters"),
-        EmbeddingModelConfig::Deterministic,
+        vec![EmbeddingModelConfig::Deterministic],
     ).unwrap();
 
     let drawer = coord.capture(

@@ -2,6 +2,7 @@ import Foundation
 import IntellectusLib
 import OSLog
 import CorpusKit
+import CorpusKitProviders
 import LocusKit
 import PersistenceKit
 import VectorKit
@@ -77,8 +78,13 @@ public extension GeniusLocusKit {
     ///     second `Storage` instance here.
     ///   - owner: Credentials for the new estate's owner.
     ///   - params: Provisioning parameters (name, kind, zoom window, profile, sync mode).
-    ///   - embeddingModel: Embedding model for the Corpus. Defaults to `.deterministic`
-    ///     (no CoreML required). Ignored for `.locusOnly` kind.
+    ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
+    ///     canonical 1.0 five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`:
+    ///     RI / PPMI / LSA / NMF / FDC), so every provisioned estate gets the
+    ///     honest multi-signal default. The Corpus lifecycle trains and persists
+    ///     the trainable signals on first ingest / reindex. Pass an explicit
+    ///     single-element list (e.g. `[.deterministic]`) only when a caller
+    ///     specifically wants one signal. Ignored for `.locusOnly` kind.
     /// - Returns: An `EstateHandle` for the newly created and wired estate.
     /// - Throws:
     ///   - `GeniusLocusKitError.underlyingEstateFailure` if LocusKit.Estate.create fails.
@@ -89,7 +95,7 @@ public extension GeniusLocusKit {
         corpusStorage: (any Storage)? = nil,
         owner: OwnerCredentials,
         params: EstateProvisionParams,
-        embeddingModel: EmbeddingModel = .deterministic
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
     ) async throws -> EstateHandle {
         // Validate params before touching storage.
         guard !params.estateName.isEmpty else {
@@ -176,7 +182,7 @@ public extension GeniusLocusKit {
                 // Full composition: Corpus (BM25 + internal vectors) + standalone VectorStore.
                 // Both are created on backingStorage. The Corpus.init call applies both
                 // BundleStore and VectorStore schema declarations to backingStorage.
-                let corpus = try await Corpus(storage: backingStorage, model: embeddingModel)
+                let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
                 registerCorpus(corpus, for: handle)
                 // Wire a VectorStore pointing at the same backing storage so GLK's
                 // scored-recall vector lane can operate independently of Corpus's
@@ -194,7 +200,7 @@ public extension GeniusLocusKit {
 
             case .corpusOnly:
                 // LocusKit core + Corpus. No standalone VectorStore registration.
-                let corpus = try await Corpus(storage: backingStorage, model: embeddingModel)
+                let corpus = try await Corpus(storage: backingStorage, models: embeddingModels)
                 registerCorpus(corpus, for: handle)
                 // D-B: a CorpusOnly estate also feeds its Corpus from capture.
                 try await mountEncodeQueue(for: handle)
