@@ -4,7 +4,7 @@ status: active
 authors: MOOTx01 maintainers
 date: 2026-06-16
 spec_type: kit
-version: 1.1.0
+version: 1.2.0
 description: Public API surface for CorpusKit in both the Swift and Rust ports.
 package: CorpusKit
 languages: [swift, rust]
@@ -541,6 +541,70 @@ pub enum BasisCodecError { Truncated(String), MagicMismatch(String),
 > embed-irrelevant training scratch (PPMI co-occurrence counts; raw
 > per-document TF rows) is intentionally not serialized.
 
+### `TrainableEmbeddingBasis` seam (both ports)
+
+The `TrainableEmbeddingBasis` protocol/trait is the **type-erasure seam** that
+lets a host drive training and basis serialization through a type-erased
+provider without a layering inversion. It is **declared in CorpusKit core**
+(not VectorKit — training-on-corpus is a Corpus concern, and a future
+pre-trained CoreML encoder must be able to NOT conform); the four
+distributional providers (`RandomIndexingProvider`, `PpmiProvider`,
+`LsaProvider`, `NmfProvider`) **conform in `CorpusKitProviders` /
+`corpus-kit-providers`** (layering: providers → core). FDC, the deterministic
+provider, and the named CoreML model cases do NOT conform.
+
+It surfaces three operations:
+- `trainOnCorpus(texts:)` — the conformer tokenizes each raw text with the
+  canonical `defaultKeywordTokens` where its training API consumes term
+  sequences (RI, PPMI), or passes raw text where its API consumes documents
+  (LSA, NMF), and runs its own heterogeneous train+finalize sequence. It is
+  deterministic (no `Date()`/`now`). Driving training through `trainOnCorpus`
+  produces the **same trained state** — and therefore the same
+  `serializeBasis()` blob byte-for-byte — as the direct 6a-i train/finalize
+  API (the seam-honesty conformance gate). Provider construction config (LSA/NMF
+  rank, SVD sweeps, iteration count, seeds) is the caller's choice; the seam
+  governs only the training sequence.
+- `serializeBasis()` / `serialize_basis()` — surfaces the 6a-i basis codec.
+- reconstruction — dispatched by `EmbeddingModel.reconstruct(from:)` (Swift) /
+  `EmbeddingModelConfig::reconstruct(&self, basis:)` (Rust), which routes the
+  blob through the carried provider's conformance to the correct concrete
+  type's deserializing initializer. Non-trainable models return
+  `CorpusKitError.notTrainable` (Swift) / `CorpusKitError::NotTrainable` (Rust)
+  — never a crash/panic. `EmbeddingModel.isTrainable` / `is_trainable()` is the
+  capability-detection helper.
+
+**Swift:**
+
+```swift
+public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
+    func trainOnCorpus(texts: [String])
+    func serializeBasis() -> Data
+    func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable
+}
+
+// On EmbeddingModel:
+public var isTrainable: Bool
+public func reconstruct(from basis: Data) throws -> any EmbeddingProvider & Sendable
+```
+
+**Rust:** `EmbeddingProvider` is a supertrait (the Rust mirror of Swift's
+`as? TrainableEmbeddingBasis` runtime probe), so the trainable
+`EmbeddingModelConfig` cases carry `Box<dyn TrainableEmbeddingBasis>` and upcast
+to `Box<dyn EmbeddingProvider>` for the embed surface.
+
+```rust
+pub trait TrainableEmbeddingBasis: EmbeddingProvider {
+    fn train_on_corpus(&mut self, texts: &[&str]);
+    fn serialize_basis(&self) -> Vec<u8>;
+    fn reconstruct_basis(&self, basis: &[u8])
+        -> Result<Box<dyn EmbeddingProvider>, CorpusKitError>;
+}
+
+// On EmbeddingModelConfig:
+pub fn is_trainable(&self) -> bool;
+pub fn reconstruct(&self, basis: &[u8]) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError>;
+```
+
 ### `Chunker`, `HybridRecall`, `CorpusKitSync`
 
 Stateless namespaces (Swift `enum` / Rust free functions or unit
@@ -653,6 +717,7 @@ public enum CorpusKitError: Error, Sendable, Equatable {
     case modelUnavailable(String)
     case embeddingFailed(String)
     case storeUnavailable(String)
+    case notTrainable(String)  // EmbeddingModel.reconstruct on a non-trainable model
 }
 ```
 
@@ -667,6 +732,7 @@ pub enum CorpusKitError {
     ModelUnavailable(String),
     EmbeddingFailed(String),
     StoreUnavailable(String),
+    NotTrainable(String),  // EmbeddingModelConfig::reconstruct on a non-trainable model
 }
 pub type CorpusKitResult<T> = Result<T, CorpusKitError>;
 // implements std::fmt::Display + std::error::Error
@@ -960,6 +1026,23 @@ both ports — token IDs in, pooled float vector out — so for any shared
 *End of CorpusKit Interface.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-06-16
+Added the `TrainableEmbeddingBasis` seam (mission 6a-ii-α): a new
+protocol/trait declared in CorpusKit core that surfaces `trainOnCorpus(texts:)`,
+`serializeBasis()`, and a reconstruct path for type-erased providers. The four
+distributional providers (`RandomIndexingProvider`, `PpmiProvider`,
+`LsaProvider`, `NmfProvider`) conform in `CorpusKitProviders` /
+`corpus-kit-providers`; FDC and the deterministic/named-model cases do not.
+Added `EmbeddingModel.reconstruct(from:)` + `isTrainable` (Swift) and
+`EmbeddingModelConfig::reconstruct` + `is_trainable()` (Rust), and the
+`CorpusKitError.notTrainable` / `CorpusKitError::NotTrainable` case for the
+non-trainable models. The Rust `TrainableEmbeddingBasis` has `EmbeddingProvider`
+as a supertrait, so the trainable `EmbeddingModelConfig` cases now carry
+`Box<dyn TrainableEmbeddingBasis>` (upcasting to `Box<dyn EmbeddingProvider>`).
+`trainOnCorpus → serializeBasis` reproduces the 6a-i canonical basis blobs
+byte-for-byte on both ports — the seam-honesty conformance gate. No persistence,
+no Corpus lifecycle change, no runtime behaviour change; additive.
 
 ### 1.1.0 -- 2026-06-16
 Added the distributional-provider basis serialization API (mission 6a-i):

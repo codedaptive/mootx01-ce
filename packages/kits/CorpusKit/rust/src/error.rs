@@ -8,6 +8,13 @@ pub enum CorpusKitError {
     ModelUnavailable(String),
     EmbeddingFailed(String),
     StoreUnavailable(String),
+    /// The selected embedding model cannot be reconstructed from a trained
+    /// basis because it does not implement `TrainableEmbeddingBasis` — the
+    /// deterministic provider, the named host-inference model cases, and the
+    /// stateless FDC provider have no trained basis to restore. Returned by
+    /// `EmbeddingModelConfig::reconstruct` for those cases rather than
+    /// panicking or returning a wrong provider.
+    NotTrainable(String),
 }
 
 impl std::fmt::Display for CorpusKitError {
@@ -19,6 +26,7 @@ impl std::fmt::Display for CorpusKitError {
             CorpusKitError::ModelUnavailable(s) => write!(f, "model unavailable: {}", s),
             CorpusKitError::EmbeddingFailed(s) => write!(f, "embedding failed: {}", s),
             CorpusKitError::StoreUnavailable(s) => write!(f, "store unavailable: {}", s),
+            CorpusKitError::NotTrainable(s) => write!(f, "not trainable: {}", s),
         }
     }
 }

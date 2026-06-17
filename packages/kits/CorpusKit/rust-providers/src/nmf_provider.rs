@@ -58,6 +58,7 @@
 // ─────────────────────────────────────────────────────────────────
 
 use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
+use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
 use crate::term_document_counts::TermDocumentCounts;
 use corpus_kit::default_keyword_tokens;
 use engram_lib::Engram;
@@ -470,6 +471,45 @@ impl EmbeddingProvider for NmfProvider {
     /// or all tokens are OOV.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         Ok(NmfProvider::embed_float_nmf(self, text).unwrap_or_default())
+    }
+}
+
+// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+
+impl TrainableEmbeddingBasis for NmfProvider {
+    /// Train the NMF basis on a corpus of raw document texts.
+    ///
+    /// NMF's `train` consumes a raw document per call (it tokenizes internally
+    /// via the shared `TermDocumentCounts` builder, which uses
+    /// `default_keyword_tokens`), so each text is passed through unchanged — one
+    /// document column per text. The `finalize` pass then builds the TF matrix
+    /// and runs the SubstrateML NMF factorization (tolerance=0, fixed iterations,
+    /// deterministic). This reproduces the exact trained+finalized state of
+    /// per-document `train` + `finalize`, so a basis serialized after
+    /// `train_on_corpus` is byte-identical to the 6a-i fixture trained on the
+    /// same texts.
+    fn train_on_corpus(&mut self, texts: &[&str]) {
+        for text in texts {
+            self.train(text);
+        }
+        self.finalize();
+    }
+
+    /// Serialize the finalized NMF basis (6a-i codec), surfaced through the seam.
+    fn serialize_basis(&self) -> Vec<u8> {
+        NmfProvider::serialize_basis(self)
+    }
+
+    /// Reconstruct a fresh `NmfProvider` from a basis blob, boxed. Delegates to
+    /// `from_serialized_basis` (6a-i); a codec error maps to
+    /// `CorpusKitError::DecodingFailure`.
+    fn reconstruct_basis(
+        &self,
+        basis: &[u8],
+    ) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError> {
+        let provider = NmfProvider::from_serialized_basis(basis)
+            .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))?;
+        Ok(Box::new(provider))
     }
 }
 

@@ -28,6 +28,7 @@ use crate::chunker::{chunk_with_default_hlc, ChunkerConfiguration};
 use crate::error::{CorpusKitError, CorpusKitResult};
 use crate::hybrid_recall::{recall as hybrid_recall, HybridRecallConfiguration};
 use crate::tokenizer::{default_keyword_tokens, Tokenizer};
+use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
 use engram_lib::Engram;
 use intellectus_lib::{report, StatSample};
 use std::sync::{Arc, Mutex};
@@ -146,7 +147,13 @@ pub enum EmbeddingModelConfig {
     ///
     /// See ADR-010 Decision B for the rationale and `RandomIndexingProvider`
     /// in `corpus-kit-providers` for the full training API.
-    RandomIndexing { provider: Box<dyn EmbeddingProvider> },
+    ///
+    /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α) rather
+    /// than a bare `Box<dyn EmbeddingProvider>`: a trained distributional
+    /// provider IS an embedding provider (supertrait) and additionally exposes
+    /// the trainable-basis seam, so `reconstruct` can route a basis blob back
+    /// to it with no downcast.
+    RandomIndexing { provider: Box<dyn TrainableEmbeddingBasis> },
 
     /// PPMI distributional-semantics provider.
     ///
@@ -160,7 +167,9 @@ pub enum EmbeddingModelConfig {
     /// down-weighted toward zero; genuinely informative associations dominate.
     ///
     /// See ADR-010 Decision B and `PpmiProvider` in `corpus-kit-providers`.
-    Ppmi { provider: Box<dyn EmbeddingProvider> },
+    ///
+    /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
+    Ppmi { provider: Box<dyn TrainableEmbeddingBasis> },
 
     /// LSA (Latent Semantic Analysis) distributional-semantics provider.
     ///
@@ -168,7 +177,9 @@ pub enum EmbeddingModelConfig {
     /// deterministic Jacobi SVD truncated to k dimensions) and passes it here.
     ///
     /// See ADR-010 Decision B and `LsaProvider` in `corpus-kit-providers`.
-    Lsa { provider: Box<dyn EmbeddingProvider> },
+    ///
+    /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
+    Lsa { provider: Box<dyn TrainableEmbeddingBasis> },
 
     /// NMF (Non-Negative Matrix Factorization) distributional-semantics provider.
     ///
@@ -178,7 +189,9 @@ pub enum EmbeddingModelConfig {
     /// passes it here.
     ///
     /// See ADR-010 Decision B and `NmfProvider` in `corpus-kit-providers`.
-    Nmf { provider: Box<dyn EmbeddingProvider> },
+    ///
+    /// Carries a `Box<dyn TrainableEmbeddingBasis>` (mission 6a-ii-α).
+    Nmf { provider: Box<dyn TrainableEmbeddingBasis> },
 
     /// FDC (Frame Decimal Classification) co-classification provider.
     ///
@@ -211,6 +224,64 @@ pub enum EmbeddingModelConfig {
     /// Embedding-Gemma 300M (768-dim pooled output). FNV-1a tokenization
     /// (vocab 256000, max 2048 tokens), EmbeddingGemma projection seed.
     EmbeddingGemma { inference: NamedInferenceFn },
+}
+
+impl EmbeddingModelConfig {
+    /// Whether this model's provider can be trained on a corpus and
+    /// reconstructed from a serialized basis.
+    ///
+    /// True only for the distributional cases (RI/PPMI/LSA/NMF), which carry a
+    /// `Box<dyn TrainableEmbeddingBasis>`. FDC carries an embedding provider but
+    /// is stateless and is NOT trainable; the deterministic and named-model
+    /// cases carry no trainable basis. Mirrors Swift's `EmbeddingModel.isTrainable`.
+    ///
+    /// Changes no runtime behaviour on its own — it is the capability-detection
+    /// helper the Corpus will use (β mission) before driving the seam.
+    pub fn is_trainable(&self) -> bool {
+        matches!(
+            self,
+            EmbeddingModelConfig::RandomIndexing { .. }
+                | EmbeddingModelConfig::Ppmi { .. }
+                | EmbeddingModelConfig::Lsa { .. }
+                | EmbeddingModelConfig::Nmf { .. }
+        )
+    }
+
+    /// Reconstruct the provider for this model from a serialized basis blob.
+    ///
+    /// Dispatched by the enum case. The distributional cases carry a
+    /// `Box<dyn TrainableEmbeddingBasis>`, so reconstruction routes through that
+    /// trait object's `reconstruct_basis` — which delegates to the right concrete
+    /// type's `from_serialized_basis` (mission 6a-i) without core naming it.
+    ///
+    /// The deterministic and named-model cases, and the stateless FDC case, have
+    /// no trained basis to restore and return `CorpusKitError::NotTrainable`
+    /// rather than panicking or returning a wrong provider. Mirrors Swift's
+    /// `EmbeddingModel.reconstruct(from:)`.
+    ///
+    /// - `basis`: the serialized basis blob (from `serialize_basis`).
+    /// - Returns a reconstructed `Box<dyn EmbeddingProvider>`, or
+    ///   `CorpusKitError::NotTrainable` / `CorpusKitError::DecodingFailure`.
+    pub fn reconstruct(
+        &self,
+        basis: &[u8],
+    ) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError> {
+        match self {
+            EmbeddingModelConfig::RandomIndexing { provider }
+            | EmbeddingModelConfig::Ppmi { provider }
+            | EmbeddingModelConfig::Lsa { provider }
+            | EmbeddingModelConfig::Nmf { provider } => provider.reconstruct_basis(basis),
+            EmbeddingModelConfig::Deterministic
+            | EmbeddingModelConfig::Fdc { .. }
+            | EmbeddingModelConfig::MiniLM { .. }
+            | EmbeddingModelConfig::MPNet { .. }
+            | EmbeddingModelConfig::EmbeddingGemma { .. } => Err(CorpusKitError::NotTrainable(
+                "embedding model is not a trainable-basis provider; reconstruction \
+                 from a serialized basis is only supported for RI/PPMI/LSA/NMF"
+                    .to_string(),
+            )),
+        }
+    }
 }
 
 // Model-specific projection seeds. Byte-identical to the Swift
@@ -333,19 +404,25 @@ impl Corpus {
             // It arrives as a Box<dyn EmbeddingProvider> — no further construction
             // needed here. This differs from the named model cases (which carry a
             // host inference closure) because the RI provider is self-contained.
-            EmbeddingModelConfig::RandomIndexing { provider } => provider,
+            // The distributional cases carry a Box<dyn TrainableEmbeddingBasis>
+            // (mission 6a-ii-α). Upcast to Box<dyn EmbeddingProvider> for the
+            // embed surface — a trained provider IS an embedding provider via
+            // the supertrait. No re-construction needed; the trained state is
+            // already built by the caller.
+            EmbeddingModelConfig::RandomIndexing { provider } => {
+                provider as Box<dyn EmbeddingProvider>
+            }
             // Ppmi: the caller built, trained, and finalized the PpmiProvider
-            // externally. It arrives as a Box<dyn EmbeddingProvider> — no further
-            // construction needed here. The finalization step (count → PPMI vectors)
-            // must already have happened before this Corpus is used for recall.
-            EmbeddingModelConfig::Ppmi { provider } => provider,
+            // externally. The finalization step (count → PPMI vectors) must
+            // already have happened before this Corpus is used for recall.
+            EmbeddingModelConfig::Ppmi { provider } => provider as Box<dyn EmbeddingProvider>,
             // Lsa: the caller built and trained the LsaProvider externally (term-
-            // document matrix + Jacobi SVD). Pass through unchanged.
-            EmbeddingModelConfig::Lsa { provider } => provider,
+            // document matrix + Jacobi SVD). Upcast through.
+            EmbeddingModelConfig::Lsa { provider } => provider as Box<dyn EmbeddingProvider>,
             // Nmf: the caller built, trained, and finalized the NmfProvider externally
             // (TF matrix + NMF factorization via SubstrateML, tolerance=0 for
-            // fixed iteration count / bit-identical output). Pass through unchanged.
-            EmbeddingModelConfig::Nmf { provider } => provider,
+            // fixed iteration count / bit-identical output). Upcast through.
+            EmbeddingModelConfig::Nmf { provider } => provider as Box<dyn EmbeddingProvider>,
             // Fdc: the caller constructed an FDCProvider externally. FDCProvider is
             // stateless (no training required) — the caller just passes it through
             // to register it as the fusion voter. Pass through unchanged.

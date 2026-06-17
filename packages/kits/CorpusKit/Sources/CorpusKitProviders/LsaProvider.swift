@@ -530,3 +530,31 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         }
     }
 }
+
+// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+
+extension LsaProvider: TrainableEmbeddingBasis {
+
+    /// Train the LSA basis on a corpus of raw document texts.
+    ///
+    /// LSA's training API consumes a raw document per call (`train(document:)`
+    /// tokenizes internally via the shared `TermDocumentCounts` builder, which
+    /// uses `defaultKeywordTokens`), so each text is passed through unchanged —
+    /// one document column per text. The `finalize()` pass then computes the
+    /// TF-IDF matrix and runs the deterministic Jacobi SVD. This reproduces the
+    /// exact trained+finalized state of per-document `train` + `finalize`, so a
+    /// basis serialized after `trainOnCorpus` is byte-identical to the 6a-i
+    /// fixture trained on the same texts.
+    public func trainOnCorpus(texts: [String]) {
+        for text in texts {
+            train(document: text)
+        }
+        finalize()
+    }
+
+    /// Reconstruct a fresh `LsaProvider` from a serialized basis, type-erased.
+    /// Delegates to `init(deserializing:)` (6a-i).
+    public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
+        try LsaProvider(deserializing: basis)
+    }
+}

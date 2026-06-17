@@ -449,3 +449,32 @@ public final class PpmiProvider: EmbeddingProvider, @unchecked Sendable {
         self.ppmiVectors = ppmiVectors
     }
 }
+
+// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+
+extension PpmiProvider: TrainableEmbeddingBasis {
+
+    /// Train the PPMI basis on a corpus of raw document texts.
+    ///
+    /// PPMI's training API consumes a term sequence per document, so each text
+    /// is tokenized with the canonical `defaultKeywordTokens` and fed to
+    /// `train(terms:window:)` at the canonical `ppmiWindow`. PPMI requires the
+    /// Phase-2 `finalize()` pass to convert accumulated co-occurrence counts to
+    /// PPMI-weighted context vectors; this method runs it once after all
+    /// documents are counted. This reproduces the exact trained+finalized state
+    /// of `train(terms:)` + `finalize()` driven directly from token arrays, so
+    /// a basis serialized after `trainOnCorpus` is byte-identical to the 6a-i
+    /// fixture whose corpus is the same texts tokenized.
+    public func trainOnCorpus(texts: [String]) {
+        for text in texts {
+            train(terms: defaultKeywordTokens(text), window: ppmiWindow)
+        }
+        finalize()
+    }
+
+    /// Reconstruct a fresh `PpmiProvider` from a serialized basis, type-erased.
+    /// Delegates to `init(deserializing:)` (6a-i).
+    public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
+        try PpmiProvider(deserializing: basis)
+    }
+}

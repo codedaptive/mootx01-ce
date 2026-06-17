@@ -62,6 +62,7 @@
 // ─────────────────────────────────────────────────────────────────
 
 use crate::basis_codec::{BasisCodecError, BasisReader, BasisWriter, BASIS_FORMAT_VERSION};
+use corpus_kit::{CorpusKitError, TrainableEmbeddingBasis};
 use crate::random_indexing::ri_index_vector;
 use engram_lib::Engram;
 use std::collections::HashMap;
@@ -438,6 +439,46 @@ impl EmbeddingProvider for PpmiProvider {
     /// Empty or all-OOV input returns an empty `Vec<f32>`.
     fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
         Ok(self.ppmi_context_vector(text).unwrap_or_default())
+    }
+}
+
+// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+
+impl TrainableEmbeddingBasis for PpmiProvider {
+    /// Train the PPMI basis on a corpus of raw document texts.
+    ///
+    /// PPMI's `train` consumes a term slice per document, so each text is
+    /// tokenized with the canonical `corpus_kit::default_keyword_tokens` and fed
+    /// to `train` at `PPMI_WINDOW`. PPMI requires the Phase-2 `finalize` pass to
+    /// convert co-occurrence counts to PPMI-weighted context vectors; it runs
+    /// once after all documents are counted. This reproduces the exact
+    /// trained+finalized state of `train` + `finalize` driven from token slices,
+    /// so a basis serialized after `train_on_corpus` is byte-identical to the
+    /// 6a-i fixture whose corpus is the same texts tokenized.
+    fn train_on_corpus(&mut self, texts: &[&str]) {
+        for text in texts {
+            let terms = corpus_kit::default_keyword_tokens(text);
+            let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+            self.train(&term_refs, PPMI_WINDOW);
+        }
+        self.finalize();
+    }
+
+    /// Serialize the finalized PPMI basis (6a-i codec), surfaced through the seam.
+    fn serialize_basis(&self) -> Vec<u8> {
+        PpmiProvider::serialize_basis(self)
+    }
+
+    /// Reconstruct a fresh `PpmiProvider` from a basis blob, boxed. Delegates to
+    /// `from_serialized_basis` (6a-i); a codec error maps to
+    /// `CorpusKitError::DecodingFailure`.
+    fn reconstruct_basis(
+        &self,
+        basis: &[u8],
+    ) -> Result<Box<dyn EmbeddingProvider>, CorpusKitError> {
+        let provider = PpmiProvider::from_serialized_basis(basis)
+            .map_err(|e| CorpusKitError::DecodingFailure(e.to_string()))?;
+        Ok(Box::new(provider))
     }
 }
 
