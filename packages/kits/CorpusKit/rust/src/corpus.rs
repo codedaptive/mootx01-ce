@@ -162,6 +162,14 @@ pub enum EmbeddingModelConfig {
     /// See ADR-010 Decision B and `PpmiProvider` in `corpus-kit-providers`.
     Ppmi { provider: Box<dyn EmbeddingProvider> },
 
+    /// LSA (Latent Semantic Analysis) distributional-semantics provider.
+    ///
+    /// The caller constructs and trains an `LsaProvider` (term-document matrix +
+    /// deterministic Jacobi SVD truncated to k dimensions) and passes it here.
+    ///
+    /// See ADR-010 Decision B and `LsaProvider` in `corpus-kit-providers`.
+    Lsa { provider: Box<dyn EmbeddingProvider> },
+
     /// MiniLM v6 text embedding (384-dim pooled output). The kit
     /// tokenizes (FNV-1a, vocab 30522, max 128 tokens) and projects
     /// through FloatSimHash with the canonical MiniLM seed; the host
@@ -303,6 +311,9 @@ impl Corpus {
             // construction needed here. The finalization step (count → PPMI vectors)
             // must already have happened before this Corpus is used for recall.
             EmbeddingModelConfig::Ppmi { provider } => provider,
+            // Lsa: the caller built and trained the LsaProvider externally (term-
+            // document matrix + Jacobi SVD). Pass through unchanged.
+            EmbeddingModelConfig::Lsa { provider } => provider,
             EmbeddingModelConfig::MiniLM { inference } => Box::new(CorpusTextProvider::new(
                 "minilm-v6",
                 "1.0.0",
