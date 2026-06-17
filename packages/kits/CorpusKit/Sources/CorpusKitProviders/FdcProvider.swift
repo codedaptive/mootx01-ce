@@ -83,7 +83,7 @@ import VectorKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
-// FNV hashing: SubstrateTypes.FNV.hash64 (via SplitMix64's seed path)
+// FNV hashing: SubstrateTypes.FNV.hash64 (seeds the SplitMix64 → LCG draw)
 // SplitMix64: SubstrateML.SplitMix64
 // FloatSimHash projection: SubstrateML.FloatSimHash.project
 // Float-vector ops: SubstrateKernel.FloatVecOps.l2Normalize
@@ -135,11 +135,10 @@ private let fdcLcgIncrement: UInt64 = 1_442_695_040_888_963_407
 /// gives cross-provider seed isolation: the FDC node-vector seed space cannot
 /// collide with RI/PPMI seeds because the FDC code strings are a different domain.
 public func fdcNodeVector(code: String) -> [Float] {
-    // FNV-1a 64-bit hash of the code string. Matches SubstrateTypes.FNV.hash64
-    // (same FNV-1a constants: offset 14_695_981_039_346_656_037, prime 1_099_511_628_211).
-    let fnvOffsetBasis: UInt64 = 14_695_981_039_346_656_037
-    let fnvPrime: UInt64 = 1_099_511_628_211
-    let seed = code.utf8.reduce(fnvOffsetBasis) { ($0 ^ UInt64($1)) &* fnvPrime }
+    // FNV-1a 64-bit hash of the code string via the substrate canonical
+    // primitive — the single home for dense/deterministic hash math. The
+    // Rust port calls substrate_types::fnv::hash64 for the same seed.
+    let seed = FNV.hash64(code)
 
     // SplitMix64 to advance one step before the LCG draw (matches RI pattern:
     // the SplitMix64 output IS the LCG state seed for further draws). We use
