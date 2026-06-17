@@ -104,24 +104,24 @@ public actor MootManager {
     /// Runtime override of the retention window, set via the gated control
     /// channel (`set retention`). `nil` means "use `config.retentionWindow`".
     ///
-    /// Held on the actor (in-process) rather than persisted: the Phase-1
-    /// `StatsStore` exposes only typed monitoring/retention-cutoff control
-    /// accessors and no generic control upsert, so a custom window cannot be
-    /// durably written without modifying ObserverSink (out of this mission's
-    /// directory — see the change-impact analysis). The default-window path is
-    /// unaffected; a restart falls back to the configured default. Durable
-    /// custom-window persistence is a noted follow-up.
+    /// Persisted to a JSON sidecar file (`moot-mgr-prefs.json`) next to the
+    /// stats store so the override survives process restart. Loaded in `start()`
+    /// and written in `setRetention(window:)`. The manager owns that directory,
+    /// so it owns the sidecar file.
     private var retentionOverride: TimeInterval?
 
     /// The cutoff the most-recent `runRetention(now:)` pass used, surfaced by
     /// `/api/config` so the dashboard can show when data was last rolled off.
     ///
-    /// Tracked on the actor (not read back from the store's control row): the
-    /// Phase-1 `StatsStore` has no public reader for its `retention_cutoff`
-    /// control row, and adding one would mean editing ObserverSink (outside this
-    /// mission's directory). The host runs the retention loop in-process, so the
-    /// actor is the authoritative owner of "what cutoff did we last apply." It
-    /// holds the epoch-zero sentinel until the first pass runs (matching the
+    /// The cutoff the most-recent `runRetention(now:)` pass used, surfaced by
+    /// `/api/config` so the dashboard can show when data was last rolled off.
+    ///
+    /// Tracked on the actor rather than read back from the store's `retention_cutoff`
+    /// control row because `StatsStore` has no public reader for that row — the
+    /// control row exists as a durable audit record for the governor, not as a
+    /// runtime read-back surface. The host runs the retention loop in-process so
+    /// the actor is the authoritative owner of "what cutoff did we last apply."
+    /// Holds the epoch-zero sentinel until the first pass runs (matching the
     /// store's own seed value, so the API reports the same "never" before the
     /// first roll-off).
     private var lastRetentionCutoff: Date = Date(timeIntervalSince1970: 0)
@@ -191,6 +191,11 @@ public actor MootManager {
         let store = try StatsStore(url: config.storeURL)
         try await store.open()
         self.store = store
+        // Restore any persisted retention override so the window survives restart.
+        // The sidecar is written by setRetention(window:) and lives alongside the
+        // stats store. If absent or unparseable, retentionOverride stays nil and
+        // the configured default applies (the safe, expected behaviour on first start).
+        retentionOverride = loadPersistedRetentionOverride()
         logger.info("MootManager started; store at \(self.config.storeURL.path)")
     }
 
@@ -334,12 +339,59 @@ public actor MootManager {
     /// on the next pass, and negative is meaningless. The new window takes effect
     /// on the next `runRetention(now:)` and is reflected in `/api/config`.
     ///
+    /// The override is persisted to a JSON sidecar file so it survives process
+    /// restart. A write failure is logged but does not surface as an error — the
+    /// in-process override applies immediately regardless of disk state.
+    ///
     /// - Parameter window: The new retention window in seconds (must be > 0).
     /// - Throws: `ManagerError.invalidRetention` if `window <= 0`.
     public func setRetention(window: TimeInterval) throws {
         guard window > 0 else { throw ManagerError.invalidRetention }
         retentionOverride = window
+        persistRetentionOverride(window)
         logger.info("MootManager retention window set to \(window)s")
+    }
+
+    // MARK: - Retention override persistence
+
+    /// Sidecar file path for the persisted retention override, alongside the stats store.
+    ///
+    /// Placing the prefs file in the same directory as the stats store keeps the
+    /// manager's data self-contained — the manager already creates/owns that directory.
+    private var retentionPrefsURL: URL {
+        config.storeURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("moot-mgr-prefs.json", isDirectory: false)
+    }
+
+    /// Persist the retention override to the sidecar JSON file.
+    ///
+    /// A best-effort write: logs on failure but does not throw. The in-process
+    /// value is authoritative for the current run; persistence is for restart
+    /// survival. Format: `{"retentionWindow": <seconds>}`.
+    private func persistRetentionOverride(_ window: TimeInterval) {
+        let payload: [String: Double] = ["retentionWindow": window]
+        do {
+            let data = try JSONEncoder().encode(payload)
+            try data.write(to: retentionPrefsURL, options: .atomic)
+        } catch {
+            logger.error("MootManager: failed to persist retention override: \(error)")
+        }
+    }
+
+    /// Load the persisted retention override from the sidecar JSON file, if present.
+    ///
+    /// Returns nil when the file is absent (first start, or the file was removed)
+    /// or when the stored value is non-positive (guards against a corrupted write).
+    /// Called once in `start()` after the store opens.
+    private func loadPersistedRetentionOverride() -> TimeInterval? {
+        guard let data = try? Data(contentsOf: retentionPrefsURL) else { return nil }
+        guard let payload = try? JSONDecoder().decode([String: Double].self, from: data),
+              let window = payload["retentionWindow"],
+              window > 0
+        else { return nil }
+        logger.info("MootManager: restored retention override from prefs: \(window)s")
+        return window
     }
 
     // MARK: - HTTP read-API payload builders
