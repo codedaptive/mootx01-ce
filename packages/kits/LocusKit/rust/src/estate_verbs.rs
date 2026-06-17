@@ -3726,14 +3726,15 @@ mod tests {
     /// Helper: capture a drawer with an explicit `feature_flags` bitmask so
     /// the test controls which operational bits are present.
     ///
-    /// Note on confirmation: freshly captured drawers are `Unconfirmed` because
-    /// `CaptureFrame` has no confirmation slot (confirmation is set by downstream
-    /// mutation). The pruning test chains below include `Filter::Unconfirmed` to
-    /// suppress the default `UserConfirmed` insertion so these drawers surface —
-    /// matching the Swift test's approach of stamping `provenance: Int64(1) << 18`
-    /// (UserConfirmed) directly on the fixture `Drawer`. Both approaches admit the
-    /// row; the key result under test is the fingerprint-prune decision, which is
-    /// orthogonal to the confirmation axis.
+    /// Note on confirmation: `CaptureFrame` defaults `confirmation` to
+    /// `Unconfirmed` (raw 0) when not explicitly set. The pruning test chains
+    /// below include `Filter::Unconfirmed` to suppress the default
+    /// `UserConfirmed` insertion so these drawers surface. The Swift mirror
+    /// (RecallPruningTests) constructs fixture `Drawer` rows directly with
+    /// `provenance: Int64(1) << 18` (UserConfirmed) to keep the feature-flag
+    /// bits under explicit control; both admit the row. The key result under
+    /// test is the fingerprint-prune decision, which is orthogonal to the
+    /// confirmation axis.
     fn capture_with_flags(
         estate: &Estate,
         content: &str,
