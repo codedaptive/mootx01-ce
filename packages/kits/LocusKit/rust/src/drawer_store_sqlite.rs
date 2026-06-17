@@ -62,6 +62,30 @@ use substrate_types::fingerprint256::Fingerprint256;
 use substrate_types::hlc::HLCGenerator;
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// SqliteDrawerStore — WAL-mode durable backend.
+// ---------------------------------------------------------------------------
+//
+// Two public constructors:
+//
+//   from_path       — opens a SQLite estate with the default EstateConfiguration
+//                     (cache disabled, plaintext, HMM tagger). Used by tests and
+//                     any caller that wants bare SQLite with no cache tier.
+//
+//   from_path_with_config — opens a SQLite estate with a caller-supplied
+//                     EstateConfiguration. The path/busy-timeout fields of the
+//                     supplied config's Sqlite backend are authoritative; the
+//                     cache_config, encryption_config, and novel_token_tagger
+//                     fields are threaded into SqliteStorage, which means
+//                     cache_config.enabled=true wraps row_store() in a
+//                     CachingRowStore LRU hot tier — exactly what the
+//                     InMemory path does. Hosts that want the hot cache ON
+//                     (e.g. the moot-mgr resident host) use this constructor.
+//
+// Both constructors produce an identical DrawerStore verb surface. The only
+// difference is whether the underlying SqliteStorage's row_store() is wrapped
+// in CachingRowStore.
+
 /// WAL-mode SQLite-backed `DrawerStore`. Durable across process restarts.
 /// Constructed from a filesystem path; the database file is created if
 /// absent. Multiple opens of the same path share the physical WAL log; the
@@ -98,6 +122,9 @@ impl SqliteDrawerStore {
         // transient id is used only to satisfy the EstateConfiguration
         // constructor — the core overwrites estate_uuid from the manifest after
         // population.
+        //
+        // Cache is disabled (EstateConfiguration::new default). Callers that
+        // want the CachingRowStore hot tier should use from_path_with_config.
         let config = EstateConfiguration::new(
             Uuid::new_v4(),
             BackendConfiguration::Sqlite {
@@ -105,12 +132,50 @@ impl SqliteDrawerStore {
                 busy_timeout_secs,
             },
         );
-        let storage = SqliteStorage::new(config)
-            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
         // DrawerStoreCore::new is pub(crate) — accessible here because
         // drawer_store_sqlite is in the same LocusKit crate. External crates
-        // must use SqliteDrawerStore::from_path so the backend is always named
-        // at the construction site.
+        // must use SqliteDrawerStore::from_path / from_path_with_config so the
+        // backend is always named at the construction site.
+        let storage = SqliteStorage::new(config)
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        let core = DrawerStoreCore::new(Arc::new(storage), now, hlc)?;
+        Ok(SqliteDrawerStore(core))
+    }
+
+    /// Open (creating if absent) the SQLite estate at `path`, applying a
+    /// caller-supplied `EstateConfiguration`.
+    ///
+    /// The `Sqlite` backend fields of `config` (path, busy_timeout_secs) are
+    /// used to open the database. The `cache_config` field controls whether
+    /// `SqliteStorage::row_store` wraps the backing store in a `CachingRowStore`
+    /// LRU hot tier — identical to how `InMemoryStorage::row_store` applies the
+    /// same predicate (`config.cache_config.enabled`). Pass a config with
+    /// `EstateCacheConfig::new(true, ...)` to enable the hot tier; pass the
+    /// default `EstateConfiguration` (cache disabled) for the bare path.
+    ///
+    /// The `encryption_config` and `novel_token_tagger` fields of `config` are
+    /// forwarded verbatim into `SqliteStorage`.
+    ///
+    /// `now` and `hlc` follow the same conventions as `from_path`.
+    ///
+    /// # Caller responsibility
+    ///
+    /// The caller is responsible for ensuring `config.backend` is a
+    /// `BackendConfiguration::Sqlite` variant whose `path` matches `path`.
+    /// `SqliteStorage::new` will return `StorageError::BackendError` if the
+    /// backend variant is not `Sqlite`.
+    pub fn from_path_with_config(
+        config: EstateConfiguration,
+        now: i64,
+        hlc: Option<HLCGenerator>,
+    ) -> Result<Self, LocusKitError> {
+        // SqliteStorage::new reads the Sqlite { path, busy_timeout_secs } from
+        // config.backend. It also reads config.cache_config — when
+        // cache_config.enabled is true, Storage::row_store() wraps the backing
+        // SqliteRowStore in a CachingRowStore LRU hot tier (sqlite.rs, line ~539).
+        // This mirrors the InMemory path exactly (inmemory.rs, same predicate).
+        let storage = SqliteStorage::new(config)
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
         let core = DrawerStoreCore::new(Arc::new(storage), now, hlc)?;
         Ok(SqliteDrawerStore(core))
     }
